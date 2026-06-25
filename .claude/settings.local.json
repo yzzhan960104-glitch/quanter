@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(timeout 60 tail -f \"C:\\\\Users\\\\yzzhan\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-yzzhan-Desktop-quanter\\\\0c3b678d-5b9a-4ae8-bee5-1e5658772b24\\\\tasks\\\\bnk4gtvea.output\")",
+      "Bash(pip show *)"
+    ]
+  }
+}
