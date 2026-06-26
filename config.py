@@ -1,9 +1,62 @@
 """项目级配置文件
 
 使用纯 Python 字典配置，避免复杂的 YAML/JSON 解析器。
+
+凭证隔离策略：
+- API Key / Token 通过 python-dotenv 从 .env 文件加载
+- 绝对禁止将凭证硬编码在业务代码中
+- 所有数据源模块通过 config 层统一获取凭证，实现单点管控
 """
+import os
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+# 尝试从 .env 文件加载环境变量（开发环境）
+# 生产环境应通过系统环境变量或容器 Secret 注入
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv 未安装时，回退到系统环境变量
+    pass
+
+
+# ============================================================
+# 数据源凭证（从环境变量加载，绝不硬编码）
+# ============================================================
+DATA_SOURCE_CREDENTIALS = {
+    "fred": {
+        # 美联储经济数据 API Key
+        "api_key": os.getenv("FRED_API_KEY", ""),
+    },
+    "tushare": {
+        # Tushare Pro Token（A 股数据源）
+        "token": os.getenv("TUSHARE_TOKEN", ""),
+    },
+}
+
+
+def get_credential(source: str, key: str) -> str:
+    """
+    安全获取数据源凭证
+
+    参数：
+        source: 数据源名称（如 "fred", "tushare"）
+        key: 凭证键名（如 "api_key", "token"）
+
+    返回：
+        凭证字符串
+
+    异常：
+        ValueError: 凭证未配置时抛出，强制开发者显式处理
+    """
+    cred = DATA_SOURCE_CREDENTIALS.get(source, {}).get(key, "")
+    if not cred:
+        raise ValueError(
+            f"数据源凭证缺失：{source}.{key}。"
+            f"请在 .env 文件或系统环境变量中配置 {source.upper()}_{key.upper()}"
+        )
+    return cred
 
 # 交易时段配置（中国 A 股）
 MARKET_HOURS = {
