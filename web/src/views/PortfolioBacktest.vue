@@ -98,7 +98,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, shallowRef, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import ParamForm from '../components/ParamForm.vue'
 import NavChart from '../components/NavChart.vue'
@@ -106,7 +106,16 @@ import MetricCards from '../components/MetricCards.vue'
 import { runPortfolioBacktest, type PortfolioResponse } from '../api/backtest'
 
 const loading = ref(false)
-const result = ref<PortfolioResponse | null>(null)
+
+/**
+ * 回测结果（使用 shallowRef 避免 Vue 深度代理灾难）
+ *
+ * 组合回测的响应体比单资产更大（额外包含 weight_series），
+ * ref() 的深度 Proxy 代理会导致严重的初始化延迟和内存膨胀。
+ * shallowRef 只代理 .value 引用，不递归代理内部属性，
+ * 是海量只读时序数据的正确选择。
+ */
+const result = shallowRef<PortfolioResponse | null>(null)
 
 const currentPage = ref(1)
 const pageSize = 20
@@ -137,11 +146,13 @@ function directionLabel(direction: string): string {
 
 async function onSubmit(params: any) {
   loading.value = true
+  // shallowRef 触发更新：必须整体替换 .value
   result.value = null
   currentPage.value = 1
 
   try {
     const res = await runPortfolioBacktest(params)
+    // 整体替换 .value → shallowRef 自动触发组件更新
     result.value = res
     ElMessage.success('组合回测完成')
   } catch {

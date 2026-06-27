@@ -97,7 +97,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, shallowRef, computed, triggerRef } from 'vue'
 import { ElMessage } from 'element-plus'
 import ParamForm from '../components/ParamForm.vue'
 import NavChart from '../components/NavChart.vue'
@@ -107,8 +107,21 @@ import { runSingleBacktest, type SingleBacktestResponse } from '../api/backtest'
 /** 回测加载状态 */
 const loading = ref(false)
 
-/** 回测结果 */
-const result = ref<SingleBacktestResponse | null>(null)
+/**
+ * 回测结果（使用 shallowRef 避免 Vue 深度代理灾难）
+ *
+ * 为什么不用 ref()？
+ * ref() 会对整个响应对象做深度 Proxy 代理：
+ * - nav_series: 750+ NavPoint → 750+ 独立 Proxy 对象
+ * - drawdown_series: 750+ DrawdownPoint → 750+ 独立 Proxy 对象
+ * - trades: N 个 TradeRecord → N 个独立 Proxy 对象
+ * 初始化耗时可达数百毫秒，且每次属性访问都经 Proxy 拦截。
+ *
+ * shallowRef 只代理 .value 本身的引用，不递归代理内部属性。
+ * 回测结果从后端获取后是只读数据，不需要细粒度响应式追踪，
+ * shallowRef 是海量只读时序数据的正确选择。
+ */
+const result = shallowRef<SingleBacktestResponse | null>(null)
 
 /** 交易记录分页 */
 const currentPage = ref(1)
@@ -144,11 +157,13 @@ function directionLabel(direction: string): string {
 /** 提交回测请求 */
 async function onSubmit(params: any) {
   loading.value = true
+  // shallowRef 触发更新：必须整体替换 .value（不能修改内部属性）
   result.value = null
   currentPage.value = 1
 
   try {
     const res = await runSingleBacktest(params)
+    // 整体替换 .value → shallowRef 自动触发组件更新
     result.value = res
     ElMessage.success('回测完成')
   } catch {

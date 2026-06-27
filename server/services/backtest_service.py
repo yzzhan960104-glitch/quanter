@@ -12,6 +12,11 @@
 - 此层是引擎与 API 的桥梁，负责 DataFrame → JSON 的转化
 - 序列化时必须精简：仅传输绘图必需的字段，丢弃冗余 K 线数据
 - 异常不在此层捕获，由路由层统一处理并转为 HTTPException
+
+性能红线：
+- run_single_backtest() 是 CPU 密集型同步函数
+- 绝对禁止在 async def 路由中直接调用，必须通过 run_in_threadpool 卸载到线程池
+- 每次请求必须实例化全新的 BacktestEngine，绝不允许跨请求复用引擎实例
 """
 from datetime import datetime
 from typing import Dict, Any
@@ -40,7 +45,17 @@ from server.core.config import DATA_DEFAULTS
 
 def run_single_backtest(req: BacktestRequest) -> BacktestResponse:
     """
-    执行单资产回测
+    执行单资产回测（同步 CPU 密集函数）
+
+    ── 事件循环阻塞警告 ──
+    此函数包含 CPU 密集的回测引擎计算（逐日遍历 + 矩阵运算），
+    直接在 async def 路由中调用会阻塞 FastAPI 事件循环，
+    导致所有并发请求排队等待。必须在路由层通过 run_in_threadpool 调用。
+
+    ── 全局状态污染警告 ──
+    BacktestEngine 实例在每次请求中全新创建，绝不允许跨请求复用。
+    原因：引擎内部持有 cash/position/nav 等可变状态，复用会导致
+    请求 A 的持仓状态泄漏到请求 B，产生不可复现的回测结果。
 
     完整流程（与 example.py 对齐）：
     1. MockDataFetcher 获取 OHLCV + 宏观数据
@@ -48,7 +63,7 @@ def run_single_backtest(req: BacktestRequest) -> BacktestResponse:
     3. 计算技术信号（双均线 + VPT → 融合）
     4. 计算宏观信号（M2 锚点）
     5. 信号融合（tech_weights 加权）
-    6. BacktestEngine.run() 执行回测
+    6. 全新 BacktestEngine 实例执行回测
     7. 序列化结果为 BacktestResponse
 
     参数：
@@ -128,7 +143,10 @@ def run_single_backtest(req: BacktestRequest) -> BacktestResponse:
             liquidity_threshold=cost_params.liquidity_threshold,
         )
 
-    # 初始化引擎
+    # 【全局状态污染防御】每次请求实例化全新的 BacktestEngine
+    # 绝不允许跨请求复用引擎实例！
+    # 原因：引擎持有 cash/position/nav 等可变状态，
+    # 复用会导致请求 A 的持仓泄漏到请求 B
     engine = BacktestEngine(
         initial_capital=req.initial_capital,
         cost_model=cost_model,
@@ -152,6 +170,8 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
     - 丢弃 cash / position / position_value / price / signal 等冗余列
     - 单独计算 drawdown_series（前端画回撤填充区需要）
     - 从 trades (DataFrame) 中仅提取 date/direction/shares/price/cost
+    - NaN / Inf 替换为 None（JSON 安全），防范前端 JSON.parse 报错
+    - 使用列式字典结构 (orient='list') 压缩传输体积
 
     参数：
         result: 引擎返回的原始结果字典
@@ -163,40 +183,83 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
     trades_df: pd.DataFrame = result["trades"]
 
     # ============ 提取净值时序（精简 4 字段） ============
+    # 仅保留绘图必需列，丢弃 cash/position/position_value/price/signal
+    nav_cols = ["nav", "return", "cumulative_return"]
+    nav_data = daily_df[nav_cols].copy()
+
+    # ── NaN / Inf → None（JSON 安全） ──
+    # JSON 规范不允许 NaN/Infinity，必须替换为 null
+    # 使用 pd.DataFrame.where + np.isfinite 实现纯向量化替换，
+    # 避免 iterrows 逐行判断的性能灾难
+    nav_data = nav_data.where(np.isfinite(nav_data), None)
+
+    # ── 列式字典结构（orient='list'）──
+    # 对比 orient='records'：1000 行数据 → records 产生 1000 个对象，
+    # list 只产生 3 个数组，体积压缩约 40%
+    nav_dict = nav_data.to_dict(orient="list")
+
+    # 日期序列单独提取（作为 x 轴共享索引）
+    dates = [
+        idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx)
+        for idx in daily_df.index
+    ]
+
+    # 构建精简的 NavPoint 列表（保持与 Pydantic 模型兼容）
     nav_series: list[NavPoint] = []
-    for idx, row in daily_df.iterrows():
+    for i in range(len(dates)):
         nav_series.append(NavPoint(
-            date=idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx),
-            nav=_safe_float(row.get("nav", 0.0)),
-            return_=_safe_float(row.get("return", 0.0)),
-            cumulative_return=_safe_float(row.get("cumulative_return", 0.0)),
+            date=dates[i],
+            nav=nav_dict["nav"][i],
+            return_=nav_dict["return"][i],
+            cumulative_return=nav_dict["cumulative_return"][i],
         ))
 
-    # ============ 计算回撤时序 ============
-    # 引擎已计算 max_drawdown，但前端需要逐日回撤序列画填充区
+    # ============ 计算回撤时序（纯向量化，无 iterrows） ============
     daily_returns = daily_df["nav"].pct_change().fillna(0.0)
     cumulative = (1 + daily_returns).cumprod()
     rolling_max = cumulative.expanding().max()
     drawdown = (cumulative - rolling_max) / rolling_max
 
+    # 向量化 NaN/Inf → None 替换
+    drawdown_safe = drawdown.where(np.isfinite(drawdown), None)
+
     drawdown_series: list[DrawdownPoint] = []
-    for idx, dd_val in drawdown.items():
+    for i, (idx, dd_val) in enumerate(drawdown_safe.items()):
         drawdown_series.append(DrawdownPoint(
-            date=idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx),
-            drawdown=_safe_float(dd_val),
+            date=dates[i],
+            drawdown=dd_val,
         ))
 
     # ============ 提取交易记录（精简 5 字段） ============
     trades: list[TradeRecord] = []
     if len(trades_df) > 0:
-        for _, row in trades_df.iterrows():
+        # 仅保留绘图必需列
+        trade_cols = ["date", "direction", "shares", "price", "cost"]
+        trades_subset = trades_df[trade_cols].copy()
+
+        # 向量化 NaN/Inf → None
+        for col in ["price", "cost"]:
+            trades_subset[col] = trades_subset[col].where(
+                np.isfinite(trades_subset[col]), None
+            )
+
+        # 向量化日期格式化（替代逐行 strftime）
+        trades_subset["date"] = pd.to_datetime(trades_subset["date"]).dt.strftime("%Y-%m-%d")
+
+        # 列式提取，一次性构建列表
+        trade_dates = trades_subset["date"].tolist()
+        trade_dirs = trades_subset["direction"].tolist()
+        trade_shares = trades_subset["shares"].astype(int).tolist()
+        trade_prices = trades_subset["price"].tolist()
+        trade_costs = trades_subset["cost"].tolist()
+
+        for i in range(len(trade_dates)):
             trades.append(TradeRecord(
-                date=row["date"].strftime("%Y-%m-%d")
-                if isinstance(row["date"], pd.Timestamp) else str(row["date"]),
-                direction=str(row["direction"]),
-                shares=int(row["shares"]),
-                price=_safe_float(row["price"]),
-                cost=_safe_float(row["cost"]),
+                date=trade_dates[i],
+                direction=str(trade_dirs[i]),
+                shares=trade_shares[i],
+                price=trade_prices[i],
+                cost=trade_costs[i],
             ))
 
     # ============ 构建响应 ============

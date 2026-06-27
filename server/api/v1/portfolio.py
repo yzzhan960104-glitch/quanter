@@ -16,6 +16,7 @@
 import traceback
 
 from fastapi import APIRouter, HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from server.schemas.portfolio import PortfolioRequest, PortfolioResponse
 from server.services.portfolio_service import run_portfolio_backtest
@@ -38,6 +39,15 @@ async def run_portfolio(req: PortfolioRequest) -> PortfolioResponse:
     """
     执行组合回测
 
+    ── 事件循环保护（与单资产路由一致的性能红线）──
+    run_portfolio_backtest() 包含两段 CPU 密集运算：
+    1. HMM 训练（EM 迭代 + 矩阵求逆，scikit-learn 纯 C/GIL 段）
+    2. 组合逐日调仓回测（pandas/python 层循环）
+    若在 async def 中直接同步调用，会独占 asyncio 事件循环，
+    导致并发请求排队、甚至 /health 探活超时被网关误杀。
+    必须通过 run_in_threadpool 卸载到独立线程，事件循环在
+    线程执行期间可继续调度其他协程。
+
     异常处理策略：
     - Pydantic 校验失败 → 422
     - HMM 训练失败（数据不足/收敛失败）→ 500
@@ -45,7 +55,8 @@ async def run_portfolio(req: PortfolioRequest) -> PortfolioResponse:
     - 超时 → 504
     """
     try:
-        result = run_portfolio_backtest(req)
+        # 【性能红线】CPU 密集任务必须卸载到线程池，绝不可同步调用
+        result = await run_in_threadpool(run_portfolio_backtest, req)
         return result
     except ValueError as e:
         # HMM 训练/映射参数异常

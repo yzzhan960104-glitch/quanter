@@ -10,17 +10,126 @@
 - 第一性原理：返回纯 Pandas DataFrame，无黑盒封装
 - 前视偏差防范：宏观数据返回发布时间，而非数据发生时间
 - 异常值标记：不静默处理缺失值，而是显式标记
+
+缓存策略：
+- FRED/Tushare 的慢车道数据使用 Parquet 本地落盘缓存
+- 相同 (source, key, start, end) 的第二次请求直接毫秒级读取
+- 保护 API Token：减少限频风险，降低积分消耗
+- 缓存文件路径：data/cache/{source}/{key}_{start}_{end}.parquet
 """
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Optional, Dict, List
+import hashlib
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 # 配置模块级日志
 logger = logging.getLogger(__name__)
+
+# ============ 缓存目录常量 ============
+# 相对于项目根目录的缓存路径
+_CACHE_BASE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
+
+
+def _cache_key(source: str, identifier: str, start: datetime, end: datetime) -> str:
+    """
+    生成缓存文件名（确定性哈希）
+
+    参数：
+        source: 数据源名称（如 "fred", "tushare"）
+        identifier: 唯一标识（如指标代码 "DGS10" 或 "600000.SH_pe"）
+        start: 请求起始时间
+        end: 请求结束时间
+
+    返回：
+        缓存文件名（不含目录），格式：{identifier}_{start}_{end}.parquet
+    """
+    start_str = start.strftime("%Y%m%d")
+    end_str = end.strftime("%Y%m%d")
+    # 清理标识符中的特殊字符（如 . /）
+    safe_id = identifier.replace(".", "_").replace("/", "_")
+    return f"{source}_{safe_id}_{start_str}_{end_str}.parquet"
+
+
+def _read_parquet_cache(source: str, identifier: str,
+                        start: datetime, end: datetime) -> Optional[pd.DataFrame]:
+    """
+    从本地 Parquet 缓存读取数据
+
+    参数：
+        source: 数据源名称
+        identifier: 唯一标识
+        start: 请求起始时间
+        end: 请求结束时间
+
+    返回：
+        缓存的 DataFrame，缓存不存在时返回 None
+    """
+    cache_dir = _CACHE_BASE_DIR / source
+    cache_file = cache_dir / _cache_key(source, identifier, start, end)
+
+    if not cache_file.exists():
+        return None
+
+    try:
+        df = pd.read_parquet(cache_file)
+        # Parquet 存储时可能丢失 tz 信息，恢复 Asia/Shanghai
+        if not df.empty and isinstance(df.index, pd.DatetimeIndex):
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("Asia/Shanghai")
+        logger.info(f"缓存命中：{cache_file.name}（跳过 API 请求）")
+        return df
+    except Exception as e:
+        # 缓存文件损坏时不阻塞业务，删除坏缓存继续走 API
+        logger.warning(f"缓存文件损坏，删除并回退到 API：{cache_file.name} - {e}")
+        try:
+            cache_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+
+def _write_parquet_cache(source: str, identifier: str,
+                         start: datetime, end: datetime,
+                         df: pd.DataFrame) -> None:
+    """
+    将数据写入本地 Parquet 缓存
+
+    参数：
+        source: 数据源名称
+        identifier: 唯一标识
+        start: 请求起始时间
+        end: 请求结束时间
+        df: 待缓存的数据
+
+    注意：
+        - 空 DataFrame 不写入缓存（避免后续读取空数据跳过 API）
+        - Parquet 格式不支持 tz-aware DatetimeIndex，
+          写入前先 strip 时区，读取时恢复（见 _read_parquet_cache）
+    """
+    if df.empty:
+        return  # 空数据不缓存
+
+    cache_dir = _CACHE_BASE_DIR / source
+    cache_file = cache_dir / _cache_key(source, identifier, start, end)
+
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Parquet 不支持 tz-aware DatetimeIndex，写入前去除时区
+        df_to_save = df.copy()
+        if isinstance(df_to_save.index, pd.DatetimeIndex) and df_to_save.index.tz is not None:
+            df_to_save.index = df_to_save.index.tz_localize(None)
+
+        df_to_save.to_parquet(cache_file, engine="pyarrow")
+        logger.info(f"缓存写入：{cache_file.name}（{len(df)} 行）")
+    except Exception as e:
+        # 缓存写入失败不阻塞业务，仅记录警告
+        logger.warning(f"缓存写入失败：{cache_file.name} - {e}")
 
 
 class DataFetcher(ABC):
@@ -373,6 +482,13 @@ class FredDataFetcher(DataFetcher):
         │ 季频 (q) │ 滞后 45 个自然日 — 模拟季后 1.5 个月发布    │
         └──────────┴────────────────────────────────────────────┘
         """
+        # ── 本地 Parquet 缓存查询 ──
+        # FRED 数据更新频率低（日/月/季），缓存命中率极高
+        # 同一 (indicator, start, end) 的第二次请求直接毫秒级读取
+        cached = _read_parquet_cache("fred", indicator, start, end)
+        if cached is not None:
+            return cached
+
         try:
             # 拉取原始序列（fredapi 返回 pd.Series）
             series = self._fred.get_series(
@@ -443,8 +559,12 @@ class FredDataFetcher(DataFetcher):
                 f"（可能为周末/假日无数据）。下游需显式 ffill 或丢弃。"
             )
 
-        # 更新缓存
+        # 更新内存缓存
         self._cache[indicator] = df
+
+        # ── 写入本地 Parquet 缓存 ──
+        # 保护 API Token：相同参数的后续请求直接读磁盘
+        _write_parquet_cache("fred", indicator, start, end, df)
 
         return df
 
@@ -571,6 +691,12 @@ class TushareDataFetcher(DataFetcher):
             Tushare 日线接口返回 trade_date 列（格式 YYYYMMDD），
             需要手动转换为 DatetimeIndex 并添加时区。
         """
+        # ── 本地 Parquet 缓存查询 ──
+        cache_id = f"ohlcv_{symbol}"
+        cached = _read_parquet_cache("tushare", cache_id, start, end)
+        if cached is not None:
+            return cached
+
         if freq != "1d":
             logger.warning(
                 f"Tushare 分钟线需要更高积分，当前仅支持日频。"
@@ -636,6 +762,10 @@ class TushareDataFetcher(DataFetcher):
         df = df.loc[mask]
 
         self._request_count += 1
+
+        # ── 写入本地 Parquet 缓存 ──
+        _write_parquet_cache("tushare", cache_id, start, end, df)
+
         return df
 
     def fetch_macro(
@@ -691,21 +821,38 @@ class TushareDataFetcher(DataFetcher):
                 index=pd.DatetimeIndex([], tz="Asia/Shanghai")
             )
 
+        # ── 本地 Parquet 缓存查询 ──
+        # 基本面/财报因子更新频率低（日频估值 / 季频财报），缓存命中率极高。
+        # 相同 (symbol, factor_name, start, end) 的第二次请求直接毫秒级读取，
+        # 既保护 Token 又节省 Tushare 积分（fina_indicator 按调用计费）。
+        cache_id = f"factor_{symbol}_{factor_name}"
+        cached = _read_parquet_cache("tushare", cache_id, start, end)
+        if cached is not None:
+            return cached
+
         api_name, field_name = self.FACTOR_FIELD_MAP[factor_name]
 
         # ── 分支 1：日频估值因子（daily_basic）──
         if api_name == "daily_basic":
-            return self._fetch_daily_basic_factor(symbol, field_name, factor_name, start, end)
+            df = self._fetch_daily_basic_factor(symbol, field_name, factor_name, start, end)
 
         # ── 分支 2：财报类因子（fina_indicator）—— 强制使用 ann_date ──
-        if api_name == "fina_indicator":
-            return self._fetch_report_factor(symbol, field_name, factor_name, start, end)
+        elif api_name == "fina_indicator":
+            df = self._fetch_report_factor(symbol, field_name, factor_name, start, end)
 
-        # 兜底
-        return pd.DataFrame(
-            columns=[factor_name],
-            index=pd.DatetimeIndex([], tz="Asia/Shanghai")
-        )
+        else:
+            # 兜底：未知接口类型
+            df = pd.DataFrame(
+                columns=[factor_name],
+                index=pd.DatetimeIndex([], tz="Asia/Shanghai")
+            )
+
+        # ── 写入本地 Parquet 缓存 ──
+        # 空 DataFrame 不写入（_write_parquet_cache 内部已防御），
+        # 确保拉取失败时下次请求仍重试 API，而非永久缓存空结果。
+        _write_parquet_cache("tushare", cache_id, start, end, df)
+
+        return df
 
     def _fetch_daily_basic_factor(
         self,

@@ -139,11 +139,17 @@ def run_portfolio_backtest(req: PortfolioRequest) -> PortfolioResponse:
 
 def _serialize_portfolio_result(result: Dict[str, Any]) -> PortfolioResponse:
     """
-    将组合回测引擎结果序列化为 PortfolioResponse
+    将组合回测引擎结果序列化为 PortfolioResponse（纯向量化，无 iterrows）
+
+    性能优化对齐 backtest_service._serialize_backtest_result：
+    - nav / drawdown：纯向量化 + 列式提取（orient='list'）
+    - NaN / Inf → None：JSON 规范不允许，用 where(np.isfinite) 向量化替换
+    - weight：含字典类型列（position_values），用 .tolist() 取列后 zip 构建，
+      规避 iterrows（iterrows 会把每行打包成 Series，dtype 推断错乱且慢 N 倍）
+    - trades：向量化日期格式化 + 列式提取
 
     与单资产序列化的差异：
     - 额外提取 weight_series（每日各资产权重快照）
-    - trades 中的 symbol 字段保留（组合模式多标的，symbol 非冗余）
 
     参数：
         result: 引擎返回的原始结果字典
@@ -154,68 +160,111 @@ def _serialize_portfolio_result(result: Dict[str, Any]) -> PortfolioResponse:
     daily_df: pd.DataFrame = result["daily_records"]
     trades_df: pd.DataFrame = result["trades"]
 
-    # ============ 提取净值时序 ============
-    nav_series: List[NavPoint] = []
-    for idx, row in daily_df.iterrows():
-        nav_series.append(NavPoint(
-            date=idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx),
-            nav=_safe_float(row.get("nav", 0.0)),
-            return_=_safe_float(row.get("return", 0.0)),
-            cumulative_return=_safe_float(row.get("cumulative_return", 0.0)),
-        ))
+    # ── 日期序列（向量化 strftime，规避逐行 isinstance 判断）──
+    if isinstance(daily_df.index, pd.DatetimeIndex):
+        dates = daily_df.index.strftime("%Y-%m-%d").tolist()
+    else:
+        dates = [str(idx) for idx in daily_df.index]
 
-    # ============ 计算回撤时序 ============
+    # ============ 净值时序（向量化 + 列式）============
+    nav_cols = ["nav", "return", "cumulative_return"]
+    # reindex 防御列缺失：兼容不同引擎版本返回的 daily_records 结构
+    nav_data = daily_df.reindex(columns=nav_cols)
+
+    # ── NaN / Inf → None（JSON 安全，向量化替换规避逐行判断）──
+    nav_data = nav_data.where(np.isfinite(nav_data), None)
+    nav_dict = nav_data.to_dict(orient="list")
+
+    # 列式 → NavPoint（zip 构建，O(n) 且无 Series 包装开销）
+    nav_series: List[NavPoint] = [
+        NavPoint(
+            date=d,
+            nav=n,
+            return_=r,
+            cumulative_return=c,
+        )
+        for d, n, r, c in zip(
+            dates,
+            nav_dict["nav"],
+            nav_dict["return"],
+            nav_dict["cumulative_return"],
+        )
+    ]
+
+    # ============ 回撤时序（纯向量化，无 iterrows）============
+    # pct_change 首行为 NaN → fillna(0.0)，规避后续 cumprod / 除法产生异常值
     daily_returns = daily_df["nav"].pct_change().fillna(0.0)
-    # 首日收益率为 0
     if len(daily_returns) > 0:
-        daily_returns.iloc[0] = 0.0
+        daily_returns.iloc[0] = 0.0  # 首日无前值，收益率为 0
 
     cumulative = (1 + daily_returns).cumprod()
     rolling_max = cumulative.expanding().max()
     drawdown = (cumulative - rolling_max) / rolling_max
 
-    drawdown_series: List[DrawdownPoint] = []
-    for idx, dd_val in drawdown.items():
-        drawdown_series.append(DrawdownPoint(
-            date=idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx),
-            drawdown=_safe_float(dd_val),
-        ))
+    # 向量化 NaN / Inf → None
+    drawdown_safe = drawdown.where(np.isfinite(drawdown), None)
 
-    # ============ 提取权重时序（组合模式特有） ============
-    # daily_records 中的 positions 字段格式：{symbol: shares}
-    # position_values 字段格式：{symbol: value}
+    drawdown_series: List[DrawdownPoint] = [
+        DrawdownPoint(date=d, drawdown=dd)
+        for d, dd in zip(dates, drawdown_safe.tolist())
+    ]
+
+    # ============ 权重时序（组合模式特有）============
+    # daily_records 的 position_values 列为字典类型 {symbol: 市值}，
+    # .tolist() 一次性取出为 list[dict]，规避 iterrows 的 Series 包装开销。
+    position_values_list = daily_df.get("position_values", pd.Series(dtype=object)).tolist()
+    positions_list = daily_df.get("positions", pd.Series(dtype=object)).tolist()
+    nav_list = daily_df["nav"].tolist()
+
     weight_series: List[WeightPoint] = []
-    for idx, row in daily_df.iterrows():
-        position_values = row.get("position_values", {})
-        nav = row.get("nav", 0.0)
-
-        # 计算各资产权重 = 持仓市值 / 总净值
+    for d, pv, pos, nav in zip(dates, position_values_list, positions_list, nav_list):
         weights: Dict[str, float] = {}
-        if isinstance(position_values, dict) and nav > 0:
-            for symbol, value in position_values.items():
+        # 仅当存在持仓市值字典且净值正常时计算权重；否则该日全空仓。
+        # nav 可能为 NaN/0 → 显式归零，避免前端权重堆叠图出现 NaN 断层。
+        if isinstance(pv, dict) and nav and nav > 0:
+            for symbol, value in pv.items():
                 weights[symbol] = _safe_float(value / nav)
-        else:
-            # 无持仓或净值异常，权重全零
-            for symbol in (row.get("positions", {}).keys() if isinstance(row.get("positions"), dict) else []):
-                weights[symbol] = 0.0
+        elif isinstance(pos, dict):
+            # 退化路径：无市值但有持仓数量 → 权重置零，保持权重堆叠图连续
+            weights = {symbol: 0.0 for symbol in pos.keys()}
 
-        weight_series.append(WeightPoint(
-            date=idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx),
-            weights=weights,
-        ))
+        weight_series.append(WeightPoint(date=d, weights=weights))
 
-    # ============ 提取交易记录（组合模式保留 symbol） ============
+    # ============ 交易记录（向量化提取，无 iterrows）============
     trades: List[TradeRecord] = []
     if len(trades_df) > 0:
-        for _, row in trades_df.iterrows():
-            trades.append(TradeRecord(
-                date=row["date"].strftime("%Y-%m-%d")
-                if isinstance(row["date"], pd.Timestamp) else str(row["date"]),
-                direction=str(row["direction"]),
-                shares=int(row["shares"]),
-                price=_safe_float(row["price"]),
-                cost=_safe_float(row["cost"]),
-            ))
+        # 仅保留绘图必需列
+        trade_cols = ["date", "direction", "shares", "price", "cost"]
+        trades_subset = trades_df.reindex(columns=trade_cols).copy()
+
+        # 向量化 NaN / Inf → None（price / cost 可能为空成交）
+        for col in ["price", "cost"]:
+            trades_subset[col] = trades_subset[col].where(
+                np.isfinite(trades_subset[col]), None
+            )
+
+        # 向量化日期格式化（替代逐行 strftime）
+        trades_subset["date"] = pd.to_datetime(trades_subset["date"]).dt.strftime("%Y-%m-%d")
+
+        # 列式提取，zip 构建
+        trade_dates = trades_subset["date"].tolist()
+        trade_dirs = trades_subset["direction"].astype(str).tolist()
+        trade_shares = trades_subset["shares"].astype(int).tolist()
+        trade_prices = trades_subset["price"].tolist()
+        trade_costs = trades_subset["cost"].tolist()
+
+        trades = [
+            TradeRecord(
+                date=d,
+                direction=direc,
+                shares=shares,
+                price=price,
+                cost=cost,
+            )
+            for d, direc, shares, price, cost in zip(
+                trade_dates, trade_dirs, trade_shares, trade_prices, trade_costs
+            )
+        ]
 
     # ============ 构建响应 ============
     return PortfolioResponse(

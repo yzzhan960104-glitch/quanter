@@ -30,7 +30,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, markRaw } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
@@ -64,13 +64,21 @@ const props = defineProps<{
   weightSeries?: WeightPoint[]
 }>()
 
-/** 净值曲线 + 回撤图配置 */
+/**
+ * 净值曲线 + 回撤图配置
+ *
+ * markRaw 隔离：option 含数百点数值数组 + tooltip 闭包，
+ * 用 markRaw 阻止 Vue 对其做深度响应式代理。
+ * 否则 Vue 会递归代理整棵配置树（含 echarts 内部引用），
+ * 既浪费内存又会污染 echarts.setOption 的纯对象契约。
+ * 数据本体已由父组件 shallowRef 持有（只读），此处无需细粒度追踪。
+ */
 const navChartOption = computed(() => {
   const dates = props.navSeries.map((p) => p.date)
   const navValues = props.navSeries.map((p) => p.nav)
   const ddValues = props.drawdownSeries.map((p) => p.drawdown * 100) // 转为百分比
 
-  return {
+  return markRaw({
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
@@ -159,12 +167,12 @@ const navChartOption = computed(() => {
         },
       },
     ],
-  }
+  })
 })
 
 /** 权重堆叠面积图配置 */
 const weightChartOption = computed(() => {
-  if (!props.weightSeries || props.weightSeries.length === 0) return {}
+  if (!props.weightSeries || props.weightSeries.length === 0) return markRaw({})
 
   const dates = props.weightSeries.map((p) => p.date)
 
@@ -191,7 +199,7 @@ const weightChartOption = computed(() => {
     }
   })
 
-  return {
+  return markRaw({
     tooltip: {
       trigger: 'axis',
       formatter: (params: any[]) => {
@@ -233,7 +241,7 @@ const weightChartOption = computed(() => {
       { type: 'slider', start: 0, end: 100, height: 20 },
     ],
     series,
-  }
+  })
 })
 </script>
 
