@@ -324,3 +324,80 @@ class TestPortfolioCostModel:
         cost_low = self._run_with_commission(commission_rate=0.0001)
         cost_high = self._run_with_commission(commission_rate=0.01)
         assert cost_high > cost_low
+
+
+# ============ Task 7：策略加载器 + /api/v1/strategies ============
+from strategies.loader import StrategyLoader
+from fastapi.testclient import TestClient
+from server.main import app
+
+
+class TestStrategyLoader:
+    """测试策略动态加载器"""
+
+    def test_scan_registers_strategies(self):
+        loader = StrategyLoader()
+        loader.scan()
+        names = set(loader.list_names())
+        assert "ma_cross" in names
+        assert "tech_macro_fusion" in names
+        assert "hmm_macro" in names
+
+    def test_get_returns_class(self):
+        loader = StrategyLoader()
+        loader.scan()
+        cls = loader.get("ma_cross")
+        assert cls.name == "ma_cross"
+
+    def test_get_unknown_raises(self):
+        loader = StrategyLoader()
+        loader.scan()
+        with pytest.raises(KeyError):
+            loader.get("not_exist")
+
+    def test_list_returns_metadata_with_label(self):
+        loader = StrategyLoader()
+        loader.scan()
+        items = loader.list()
+        macross = next(it for it in items if it["name"] == "ma_cross")
+        assert "label" in macross
+        assert "universe" in macross
+
+
+class TestStrategiesAPI:
+    """测试 /api/v1/strategies 接口"""
+
+    def setup_method(self):
+        # 显式触发 lifespan：FastAPI lifespan 只在 TestClient 作为上下文管理器
+        # （with 语句）时才会跑 startup 钩子，从而设置 app.state.strategy_loader。
+        # 裸 TestClient(app) 直接 .get() 不会触发 lifespan，会导致 500。
+        # 这里手动 __enter__ 启动、teardown_method 中 __exit__ 关闭，
+        # 让每个测试方法期间 lifespan startup 都已执行完毕。
+        self.client = TestClient(app)
+        self.client.__enter__()
+
+    def teardown_method(self):
+        # 与 setup_method 的 __enter__ 配对，触发 lifespan shutdown
+        self.client.__exit__(None, None, None)
+
+    def test_list_strategies(self):
+        resp = self.client.get("/api/v1/strategies")
+        assert resp.status_code == 200
+        data = resp.json()
+        names = [it["name"] for it in data]
+        assert "ma_cross" in names
+        assert "tech_macro_fusion" in names
+
+    def test_get_schema_returns_json_schema(self):
+        """schema 端点返回含 ui 提示的 JSON Schema"""
+        resp = self.client.get("/api/v1/strategies/ma_cross/schema")
+        assert resp.status_code == 200
+        schema = resp.json()
+        assert schema["type"] == "object"
+        assert "fast" in schema["properties"]
+        # ui 渲染提示经 json_schema_extra 合并进字段 schema
+        assert schema["properties"]["fast"].get("ui", {}).get("control") == "slider"
+
+    def test_get_schema_unknown_strategy(self):
+        resp = self.client.get("/api/v1/strategies/not_exist/schema")
+        assert resp.status_code in (400, 404, 500)

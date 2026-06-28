@@ -16,12 +16,33 @@ FastAPI 应用入口
 - CORS 配置从 core/config.py 读取，不硬编码
 - 路由版本化 /api/v1/，预留后续版本空间
 """
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from server.core.config import CORS_ORIGINS
 from server.api.v1.backtest import router as backtest_router
 from server.api.v1.portfolio import router as portfolio_router
+from strategies.loader import StrategyLoader
+from server.api.v1.strategies import router as strategies_router
+
+# ============ lifespan：启动/销毁钩子 ============
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期钩子（替代已废弃的 @app.on_event("startup")）
+
+    Why 集中扫描：策略注册表进程内不变，启动期 importlib 一次性扫描写入
+    app.state.strategy_loader，后续 API 路由只读，避免每请求重复扫描。
+    模块④（调度引擎）会在同一 lifespan 追加 scheduler 启动/关闭逻辑。
+    """
+    # 启动：扫描策略注册到 app.state
+    loader = StrategyLoader()
+    loader.scan()
+    app.state.strategy_loader = loader
+    yield
+    # 销毁：模块④在此追加 scheduler.shutdown()
+
 
 # ============ 创建应用 ============
 app = FastAPI(
@@ -30,7 +51,8 @@ app = FastAPI(
         "基于 HMM 宏观状态识别的多资产组合回测 API。"
         "支持单资产信号回测和多资产组合调仓回测两种模式。"
     ),
-    version="1.0.0",
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # ============ 注册 CORS 中间件 ============
@@ -47,6 +69,7 @@ app.add_middleware(
 # API 版本化前缀：/api/v1/
 app.include_router(backtest_router, prefix="/api/v1")
 app.include_router(portfolio_router, prefix="/api/v1")
+app.include_router(strategies_router, prefix="/api/v1")
 
 
 # ============ 健康检查端点 ============
@@ -61,5 +84,5 @@ async def health_check():
     return {
         "status": "ok",
         "service": "quanter-api",
-        "version": "1.0.0",
+        "version": "2.0.0",
     }

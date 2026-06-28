@@ -31,6 +31,10 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 pydantic>=2.0.0
 
+# FastAPI TestClient 的 HTTP 传输层依赖（API 路由测试必需，否则
+# starlette.testclient 无法导入；fastapi 未将其声明为强依赖，故显式列出）
+httpx>=0.27.0
+
 # 开发工具
 pytest>=7.4.0
 black>=23.7.0
