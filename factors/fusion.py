@@ -264,14 +264,22 @@ class TargetWeightSignal:
         初始化后验证
 
         检查项：
-        1. 权重和为 1（允许浮点误差 1e-6）
+        1. 权重和在 [0, 1]（允许浮点误差 1e-8）
         2. 权重范围 [0, 1]（纯多头策略，不做空）
         3. 权重与方向的标的集合一致
+
+        设计理由：
+        - 放宽权重和约束从 =1 到 ≤1，以支持单资产策略的部分仓位场景
+        - 单资产策略 = 单标的组合的退化，如 50% 仓位 = {symbol: 0.5}，权重和为 0.5
+        - 现金（1 - 权重和）作为隐含剩余资产，无需显式标的
+        - 现有组合策略 sum=1 仍合法（满仓），向后兼容
         """
-        # 验证权重和为 1（允许浮点误差）
+        # 验证权重和在 [0, 1]（允许部分仓位，现金为隐含剩余）
         weight_sum = sum(self.weights.values())
-        if not np.isclose(weight_sum, 1.0, atol=1e-6):
-            raise ValueError(f"权重和不等于 1: {weight_sum:.6f}")
+        if weight_sum < -1e-8 or weight_sum > 1.0 + 1e-8:
+            raise ValueError(
+                f"权重和超出 [0,1] 范围（现金为隐含剩余）: {weight_sum:.6f}"
+            )
 
         # 验证权重范围 [0, 1]（纯多头：不允许负权重/做空）
         for symbol, weight in self.weights.items():

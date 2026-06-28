@@ -483,3 +483,40 @@ class TestSignalFilter:
         filtered = signal_filter(sample_signal)
 
         pd.testing.assert_index_equal(filtered.index, sample_signal.index)
+
+
+class TestTargetWeightSignalSum:
+    """测试 TargetWeightSignal 权重和约束放宽（允许 ≤1，现金为隐含剩余）"""
+
+    def _sig(self, weights):
+        from factors.fusion import TargetWeightSignal, SignalDirection
+        return TargetWeightSignal(
+            timestamp=pd.Timestamp("2023-01-01"),
+            weights=weights,
+            directions={k: SignalDirection.BUY for k in weights},
+        )
+
+    def test_sum_equals_one_still_valid(self):
+        """权重和 = 1 仍合法（向后兼容现有组合策略）"""
+        sig = self._sig({"510300.SH": 0.8, "511010.SH": 0.2})
+        assert sig.weights["510300.SH"] == 0.8
+
+    def test_sum_less_than_one_valid(self):
+        """部分仓位（单资产退化场景）合法：现金为隐含剩余"""
+        sig = self._sig({"600000.SH": 0.5})
+        assert sig.weights["600000.SH"] == 0.5
+
+    def test_sum_zero_valid(self):
+        """权重和 = 0 合法（全部空仓）"""
+        sig = self._sig({"600000.SH": 0.0})
+        assert sig.weights["600000.SH"] == 0.0
+
+    def test_sum_above_one_rejected(self):
+        """权重和 > 1 被拒绝（超额敞口，无杠杆约束）"""
+        with pytest.raises(ValueError, match="超出"):
+            self._sig({"600000.SH": 1.5})
+
+    def test_negative_weight_rejected(self):
+        """负权重被拒绝（做空通过 SignalDirection 显式表达）"""
+        with pytest.raises(ValueError, match="超出"):
+            self._sig({"600000.SH": -0.1})
