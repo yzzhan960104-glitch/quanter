@@ -326,6 +326,90 @@ class TestPortfolioCostModel:
         assert cost_high > cost_low
 
 
+class TestWinMetricsInPortfolioResult:
+    """测试 run_portfolio 结果字典包含真实 win_rate / profit_loss_ratio
+
+    Why：Task 8 改造后单资产回测统一走 run_portfolio，但 _calculate_portfolio_result
+    此前只算收益类指标，未算交易类指标（胜率/盈亏比），导致上层 schema 输出恒为 0，
+    严重误导用户。本组测试直接验证两键存在、类型合法，且 buy→sell 配对时非 0。
+    """
+
+    def _run_buy_then_sell(self):
+        """构造一个简单的 buy→sell 场景，返回 run_portfolio 结果字典
+
+        价格序列：第 0 日买入（价格 10），随后上涨至 12 后第 3 日全部卖出（价格 12），
+        形成一笔明确盈利的配对交易，使 win_rate=1.0、profit_loss_ratio>0。
+        """
+        from backtest import BacktestEngine, CostModel
+        from factors.fusion import TargetWeightSignal, SignalDirection
+
+        dates = pd.date_range("2023-01-01", periods=5, freq="D")
+        df = pd.DataFrame({
+            "open": [10.0, 11.0, 11.5, 12.0, 12.0],
+            "high": [10.5, 11.5, 12.0, 12.5, 12.5],
+            "low": [9.5, 10.5, 11.0, 11.5, 11.5],
+            "close": [10.0, 11.0, 11.5, 12.0, 12.0],
+            "volume": [1e6] * 5,
+        }, index=dates)
+        price_data = {"510300.SH": df}
+
+        # 第 0 日满仓买入，第 3 日清仓卖出 —— 形成一笔可配对的盈利交易
+        signals = [
+            TargetWeightSignal(
+                timestamp=dates[0],
+                weights={"510300.SH": 1.0},
+                directions={"510300.SH": SignalDirection.BUY},
+            ),
+            TargetWeightSignal(
+                timestamp=dates[3],
+                weights={"510300.SH": 0.0},
+                directions={"510300.SH": SignalDirection.SELL},
+            ),
+        ]
+
+        engine = BacktestEngine(
+            initial_capital=1_000_000,
+            cost_model=CostModel(commission_rate=0.0003, min_commission=0.0),
+        )
+        return engine.run_portfolio(price_data=price_data, signals=signals)
+
+    def test_result_has_win_metrics_keys(self):
+        """结果字典必须包含 win_rate / profit_loss_ratio 两个键"""
+        result = self._run_buy_then_sell()
+        assert "win_rate" in result, "结果字典缺失 win_rate 键（指标能力未恢复）"
+        assert "profit_loss_ratio" in result, "结果字典缺失 profit_loss_ratio 键"
+
+    def test_win_metrics_types_valid(self):
+        """win_rate / profit_loss_ratio 必须是合法浮点数（非 None/NaN）"""
+        result = self._run_buy_then_sell()
+        assert isinstance(result["win_rate"], float)
+        assert isinstance(result["profit_loss_ratio"], float)
+        assert not pd.isna(result["win_rate"])
+        assert not pd.isna(result["profit_loss_ratio"])
+
+    def test_win_metrics_nonzero_when_paired(self):
+        """存在 buy→sell 配对时 win_rate/profit_loss_ratio 不应恒为 0
+
+        若 _calculate_portfolio_result 未补算，此处两值均为 0，断言失败。
+        """
+        result = self._run_buy_then_sell()
+        # 一笔明确盈利交易：胜率应为 1.0（全胜），盈亏比因无亏损本应为 0，
+        # 但只要 ≠ 此前 bug 的"两键全 0 且 win_rate 也 0"即可证明指标已恢复计算。
+        # 这里用 win_rate>0 作为主断言（盈利配对必然拉高胜率）。
+        assert result["win_rate"] > 0.0, "win_rate 恒为 0，说明指标未被真实计算"
+
+    def test_empty_result_contract(self):
+        """无日记录的早返回路径也必须带 win_rate/profit_loss_ratio 键（契约一致）"""
+        from backtest import BacktestEngine
+        engine = BacktestEngine(initial_capital=1_000_000)
+        # 不喂任何数据直接算结果 → 走早返回分支
+        result = engine._calculate_portfolio_result()
+        assert "win_rate" in result
+        assert "profit_loss_ratio" in result
+        assert result["win_rate"] == 0.0
+        assert result["profit_loss_ratio"] == 0.0
+
+
 # ============ Task 7：策略加载器 + /api/v1/strategies ============
 from strategies.loader import StrategyLoader
 from fastapi.testclient import TestClient

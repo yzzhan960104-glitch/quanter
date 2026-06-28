@@ -24,6 +24,7 @@ import pandas as pd
 from typing import Dict, Any, Optional, List
 
 from .cost_model import CostModel
+from .metrics import MetricsCalculator
 from factors.fusion import TargetWeightSignal, SignalDirection
 
 
@@ -1008,6 +1009,8 @@ class BacktestEngine:
         """
         daily_df = pd.DataFrame(self.daily_records)
         if len(daily_df) == 0:
+            # 早返回兜底：与正常路径结果字典契约保持一致，缺 win_rate/profit_loss_ratio
+            # 会令上层调用方（如 service 的 metrics 解包）误读为 0，故显式补齐为 0.0
             return {
                 "initial_capital": self.initial_capital,
                 "final_nav": self.nav,
@@ -1016,6 +1019,8 @@ class BacktestEngine:
                 "annual_volatility": 0.0,
                 "max_drawdown": 0.0,
                 "sharpe_ratio": 0.0,
+                "win_rate": 0.0,
+                "profit_loss_ratio": 0.0,
                 "n_trades": 0,
                 "daily_records": daily_df,
                 "orders": self.portfolio_orders,
@@ -1067,6 +1072,25 @@ class BacktestEngine:
         n_successful = len(trades_df[trades_df["direction"] != "failed"]) if len(trades_df) > 0 else 0
         n_failed = len(trades_df[trades_df["direction"] == "failed"]) if len(trades_df) > 0 else 0
 
+        # 计算交易类指标（胜率 win_rate / 盈亏比 profit_loss_ratio）
+        # Why：组合回测（含单资产走 run_portfolio 的路径）此前结果字典缺失这两个键，
+        # 导致上层 service/schema 输出恒为 0，严重误导用户对策略盈亏结构的判断。
+        # 反黑盒：直接复用 MetricsCalculator.calculate_trade_metrics，它在内部已显式
+        # 过滤 direction=='failed' 的失败行（metrics.py:104-105），并对无匹配买盘的
+        # 卖单做 continue 跳过（比 _calculate_result 内联逻辑更鲁棒，不会抛 IndexError）。
+        # 空 trades / 异常一律兜底 0.0，保证结果字典契约稳定。
+        win_rate = 0.0
+        profit_loss_ratio = 0.0
+        if len(trades_df) > 0:
+            try:
+                trade_metrics = MetricsCalculator.calculate_trade_metrics(trades_df)
+                win_rate = float(trade_metrics.get("win_rate", 0.0) or 0.0)
+                profit_loss_ratio = float(trade_metrics.get("profit_loss_ratio", 0.0) or 0.0)
+            except Exception:
+                # 极端兜底：trades_df 结构异常或 NaN/Inf 时不应让整个回测崩掉
+                win_rate = 0.0
+                profit_loss_ratio = 0.0
+
         result = {
             "initial_capital": self.initial_capital,
             "final_nav": self.nav,
@@ -1076,6 +1100,8 @@ class BacktestEngine:
             "max_drawdown": max_drawdown,
             "sharpe_ratio": sharpe_ratio,
             "calmar_ratio": calmar_ratio,
+            "win_rate": win_rate,
+            "profit_loss_ratio": profit_loss_ratio,
             "n_trades": n_successful,
             "n_failed_trades": n_failed,
             "trades": trades_df,
