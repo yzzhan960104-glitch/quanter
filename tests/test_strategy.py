@@ -53,6 +53,11 @@ from strategies.tech_macro_fusion_strategy import (
 )
 from strategies.hmm_macro_strategy import HMMMacroStrategy, HmmMacroParams
 
+# Task 6 测试所需依赖：组合回测引擎 + 成本模型 + 目标权重信号
+from backtest.engine import BacktestEngine
+from backtest.cost_model import CostModel
+from factors.fusion import TargetWeightSignal, SignalDirection
+
 
 @pytest.fixture
 def single_price_data():
@@ -270,3 +275,52 @@ class TestHMMMacroStrategy:
         strat = self._make()
         with pytest.raises(ValueError, match="宏观数据"):
             strat.fit(multi_price_data, macro_data=None)
+
+
+class TestPortfolioCostModel:
+    """测试 run_portfolio 路径使用注入的 cost_model（成本可调不退化）
+
+    Why：单资产回测即将统一走 run_portfolio，若 _execute_portfolio_order 仍
+    硬编码佣金率（万三），则请求传入的 cost_model 参数会失效——违背"前端传
+    什么引擎用什么"。本测试通过对比两档佣金率产生的总成本，证明注入生效。
+    """
+
+    def _run_with_commission(self, commission_rate):
+        """用指定佣金率跑一次极简组合回测，返回总成本
+
+        构造一个 510300.SH 的恒定价格序列，第一日满仓 BUY，
+        让引擎真实执行一笔买入订单，并汇总其交易成本。
+        """
+        dates = pd.date_range("2023-01-01", periods=5, freq="D")
+        df = pd.DataFrame({
+            "open": [10.0] * 5, "high": [10.5] * 5, "low": [9.5] * 5,
+            "close": [10.0] * 5, "volume": [1e6] * 5,
+        }, index=dates)
+        price_data = {"510300.SH": df}
+
+        # 第一日满仓买入 510300（同时验证引擎对 BUY 信号的处理路径）
+        signals = [TargetWeightSignal(
+            timestamp=dates[0],
+            weights={"510300.SH": 1.0},
+            directions={"510300.SH": SignalDirection.BUY},
+        )]
+
+        # 显式注入不同佣金率 + 取消最低佣金，使差异仅来自费率本身
+        engine = BacktestEngine(
+            initial_capital=1_000_000,
+            cost_model=CostModel(commission_rate=commission_rate, min_commission=0.0),
+        )
+        result = engine.run_portfolio(price_data=price_data, signals=signals)
+
+        trades_df = result["trades"]
+        # 买入交易的成本列之和
+        return float(trades_df["cost"].sum()) if len(trades_df) > 0 else 0.0
+
+    def test_higher_commission_yields_higher_cost(self):
+        """更高佣金率 → 更高交易成本（证明 cost_model 生效）
+
+        若引擎仍硬编码万三，则两档费率产出的成本会相近/相等，断言失败。
+        """
+        cost_low = self._run_with_commission(commission_rate=0.0001)
+        cost_high = self._run_with_commission(commission_rate=0.01)
+        assert cost_high > cost_low

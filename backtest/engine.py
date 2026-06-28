@@ -828,14 +828,12 @@ class BacktestEngine:
         """
         执行组合调仓订单（更新持仓与现金）
 
-        此方法直接修改账户状态，不经过完整的成本模型计算
-        （组合调仓模式下的成本简化处理，实际生产环境应接入 CostModel）。
+        成本计算走注入的 self.cost_model（佣金/印花税/过户费），使请求传入的
+        cost_model 参数真正生效（消除原硬编码）。默认行为与原硬编码完全一致。
 
         简化假设：
-        - 以订单价格全部成交（无滑点）
-        - 佣金按万三计算，最低 5 元
-        - 卖出印花税按千五计算
-        - 过户费按十万分之一计算（上海市场）
+        - 以订单价格全部成交（无滑点，需逐标的逐日成交量数据，留模块③ BacktestBroker）
+        - 佣金/印花税/过户费均由 self.cost_model 按注入参数显式计算
 
         参数：
             order: 待执行的订单对象
@@ -846,14 +844,17 @@ class BacktestEngine:
         # 计算成交金额
         amount = order.shares * order.price
 
-        # 计算佣金
-        commission = max(amount * 0.0003, 5.0)
-
-        # 计算印花税（仅卖出）
-        stamp_duty = amount * 0.0005 if order.side == OrderSide.SELL else 0.0
-
-        # 计算过户费（仅上海市场，代码以 5 或 6 开头）
-        transfer_fee = amount * 0.00001 if order.symbol.startswith(("5", "6")) else 0.0
+        # 成本走注入的 self.cost_model：使请求传入的 cost_model 参数真正生效，
+        # 消除原硬编码（万三/千五/十万一）。默认值与原硬编码完全一致，故既有
+        # 组合回测/测试无回归（CostModel 默认：佣金万三最低5元、印花千五卖出、
+        # 过户十万一沪市）。
+        # 注意：滑点（slippage）需逐标的逐日成交量数据，组合路径暂不接入，
+        # 留模块③ BacktestBroker 的完整 CostModel（含滑点）。
+        commission = self.cost_model.calculate_commission(amount)
+        stamp_duty = self.cost_model.calculate_stamp_duty(
+            amount, order.side == OrderSide.SELL
+        )
+        transfer_fee = self.cost_model.calculate_transfer_fee(amount, order.symbol)
 
         # 总交易成本
         total_cost = commission + stamp_duty + transfer_fee
