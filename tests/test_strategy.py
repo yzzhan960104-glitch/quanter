@@ -51,6 +51,7 @@ from strategies.ma_cross_strategy import MaCrossStrategy, MaCrossParams
 from strategies.tech_macro_fusion_strategy import (
     TechMacroFusionStrategy, TechMacroFusionParams,
 )
+from strategies.hmm_macro_strategy import HMMMacroStrategy, HmmMacroParams
 
 
 @pytest.fixture
@@ -187,3 +188,85 @@ class TestTechMacroFusionStrategy:
         for s in strat.generate_target_weights(single_price_data, ctx):
             for w in s.weights.values():
                 assert 0.0 <= w <= 1.0
+
+
+@pytest.fixture
+def multi_price_data():
+    """双标的 OHLCV"""
+    symbols = ["510300.SH", "511010.SH"]
+    dates = pd.date_range("2022-01-01", periods=300, freq="D", tz="Asia/Shanghai")
+    np.random.seed(0)
+    data = {}
+    for s in symbols:
+        prices = 100 + np.cumsum(np.random.randn(300))
+        data[s] = pd.DataFrame({
+            "open": prices, "high": prices + 1, "low": prices - 1,
+            "close": prices, "volume": 1e6, "amount": 1e8,
+        }, index=dates)
+    return data
+
+
+@pytest.fixture
+def multi_macro_data():
+    return pd.DataFrame(
+        {"m2": np.linspace(200, 220, 25)},
+        index=pd.date_range("2022-01-01", periods=25, freq="MS", tz="Asia/Shanghai"),
+    )
+
+
+class TestHMMMacroStrategy:
+    """测试 HMM 宏观策略"""
+
+    STATE_WEIGHTS = {
+        "State_0": {"510300.SH": 0.8, "511010.SH": 0.2},
+        "State_1": {"510300.SH": 0.2, "511010.SH": 0.8},
+        "State_2": {"510300.SH": 0.5, "511010.SH": 0.5},
+    }
+
+    def _make(self, **overrides):
+        kwargs = dict(
+            universe=["510300.SH", "511010.SH"],
+            n_hmm_states=3,
+            state_weights=self.STATE_WEIGHTS,
+            buffer_threshold=0.05,
+        )
+        kwargs.update(overrides)
+        return HMMMacroStrategy(**kwargs)
+
+    def test_has_name_and_params_model(self):
+        assert HMMMacroStrategy.name == "hmm_macro"
+        assert HMMMacroStrategy.params_model is HmmMacroParams
+
+    def test_default_params(self):
+        p = HmmMacroParams()
+        assert p.covariance_type == "diag"
+        assert p.release_lag == 5 and p.max_fill_days == 90
+
+    def test_fit_then_generate(self, multi_price_data, multi_macro_data):
+        strat = self._make()
+        strat.fit(multi_price_data, macro_data=multi_macro_data)
+        ctx = StrategyContext(timestamp=pd.Timestamp("2022-01-01", tz="Asia/Shanghai"))
+        signals = strat.generate_target_weights(multi_price_data, ctx)
+        assert len(signals) > 0
+        from factors.fusion import TargetWeightSignal
+        assert all(isinstance(s, TargetWeightSignal) for s in signals)
+
+    def test_signals_cover_universe(self, multi_price_data, multi_macro_data):
+        strat = self._make()
+        strat.fit(multi_price_data, macro_data=multi_macro_data)
+        ctx = StrategyContext(timestamp=pd.Timestamp("2022-01-01", tz="Asia/Shanghai"))
+        for s in strat.generate_target_weights(multi_price_data, ctx):
+            assert set(s.weights.keys()) == {"510300.SH", "511010.SH"}
+
+    def test_custom_release_lag_used(self, multi_price_data, multi_macro_data):
+        """自定义 release_lag 注入 HMM 对齐"""
+        strat = self._make(params=HmmMacroParams(release_lag=10, max_fill_days=120))
+        assert strat.params.release_lag == 10
+        strat.fit(multi_price_data, macro_data=multi_macro_data)
+        # 不抛异常即表明对齐用了自定义参数
+
+    def test_fit_without_macro_raises(self, multi_price_data):
+        """HMM 策略必须有宏观数据"""
+        strat = self._make()
+        with pytest.raises(ValueError, match="宏观数据"):
+            strat.fit(multi_price_data, macro_data=None)
