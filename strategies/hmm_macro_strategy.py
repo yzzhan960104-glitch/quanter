@@ -8,7 +8,7 @@
 - 结构性配置（请求级 ctor 直传，不进 schema）：n_hmm_states / state_weights / buffer_threshold
   原因：state_weights 是 State_N × symbols 矩阵，行列依赖 n_hmm_states 与 universe，无法静态 schema 化。
 """
-from typing import ClassVar, Dict, List, Optional
+from typing import ClassVar, Dict, List, Literal, Optional
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -23,7 +23,10 @@ from .base import BaseStrategy, StrategyContext
 class HmmMacroParams(BaseModel):
     """HMM 宏观策略可调参数（JSON Schema 真相源，仅标量训练参数）"""
 
-    covariance_type: str = Field(
+    # Why Literal（而非 str）：spec §5.3/§4.2 规定协方差类型为四值枚举。用 str 会让
+    # 非法值（如 "banana"）绕过请求层 Pydantic 校验，延迟到 hmm.fit 内部才报 500；
+    # 改 Literal 后非法值在参数解析阶段即抛 ValidationError（路由层转 422），fail-fast。
+    covariance_type: Literal["diag", "full", "tied", "spherical"] = Field(
         "diag",
         description="HMM 协方差类型（diag 稳定 / full 灵活易过拟合 / tied / spherical）",
         json_schema_extra={"ui": {

@@ -153,8 +153,38 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
     返回：
         BacktestResponse（JSON 安全）
     """
-    daily_df: pd.DataFrame = result["daily_records"]
-    trades_df: pd.DataFrame = result["trades"]
+    # ── 缺键防御（与 _serialize_portfolio_result 风格对称）──
+    # Why：BacktestEngine._calculate_portfolio_result 在 daily_records 为空时走
+    # 早返回路径，返回的字典缺 calmar_ratio / n_failed_trades / trades 等键，
+    # 且 daily_records 是完全空（无列）的 DataFrame。若用 result["..."] 硬取键、
+    # 或直接对空 DataFrame 做 nav_cols 列选择，空数据场景会 KeyError 崩；此处统一
+    # .get 兜底 + 空 daily_records 短路，令空数据退化为合法的"全 0 + 空序列"响应，
+    # 而非 500。
+    daily_df: pd.DataFrame = result.get("daily_records", pd.DataFrame())
+    trades_df: pd.DataFrame = result.get("trades", pd.DataFrame())
+
+    # 空 daily_records 短路：早返回路径的 DataFrame 无 nav/return/cumulative_return 列，
+    # 后续列选择会 KeyError。此处直接返回全 0 + 空序列响应（与 metrics 各 .get 兜底一致）。
+    if len(daily_df) == 0:
+        return BacktestResponse(
+            metrics=MetricsResponse(
+                initial_capital=_safe_float(result.get("initial_capital", 0.0)),
+                final_nav=_safe_float(result.get("final_nav", 0.0)),
+                total_return=_safe_float(result.get("total_return", 0.0)),
+                annual_return=_safe_float(result.get("annual_return", 0.0)),
+                annual_volatility=_safe_float(result.get("annual_volatility", 0.0)),
+                max_drawdown=_safe_float(result.get("max_drawdown", 0.0)),
+                sharpe_ratio=_safe_float(result.get("sharpe_ratio", 0.0)),
+                calmar_ratio=_safe_float(result.get("calmar_ratio", 0.0)),
+                win_rate=_safe_float(result.get("win_rate", 0.0)),
+                profit_loss_ratio=_safe_float(result.get("profit_loss_ratio", 0.0)),
+                n_trades=int(result.get("n_trades", 0)),
+                n_failed_trades=int(result.get("n_failed_trades", 0)),
+            ),
+            nav_series=[],
+            drawdown_series=[],
+            trades=[],
+        )
 
     # ============ 提取净值时序（精简 4 字段） ============
     # 仅保留绘图必需列，丢弃 cash/position/position_value/price/signal
@@ -237,22 +267,24 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
             ))
 
     # ============ 构建响应 ============
+    # Why .get 兜底：早返回路径（daily_records 空）返回的字典缺 calmar_ratio /
+    # n_failed_trades / trades 等键，硬取键会 KeyError。此处全部改 .get 与
+    # _serialize_portfolio_result 对称，空数据 → 全 0 兜底，避免 500。
     return BacktestResponse(
         metrics=MetricsResponse(
-            initial_capital=_safe_float(result["initial_capital"]),
-            final_nav=_safe_float(result["final_nav"]),
-            total_return=_safe_float(result["total_return"]),
-            annual_return=_safe_float(result["annual_return"]),
-            annual_volatility=_safe_float(result["annual_volatility"]),
-            max_drawdown=_safe_float(result["max_drawdown"]),
-            sharpe_ratio=_safe_float(result["sharpe_ratio"]),
-            calmar_ratio=_safe_float(result["calmar_ratio"]),
-            # win_rate/profit_loss_ratio 用 .get 容错：run_portfolio 路径不返回这两个
-            # 字段（与 _serialize_portfolio_result 行为对齐，统一取 0.0 兜底）
+            initial_capital=_safe_float(result.get("initial_capital", 0.0)),
+            final_nav=_safe_float(result.get("final_nav", 0.0)),
+            total_return=_safe_float(result.get("total_return", 0.0)),
+            annual_return=_safe_float(result.get("annual_return", 0.0)),
+            annual_volatility=_safe_float(result.get("annual_volatility", 0.0)),
+            max_drawdown=_safe_float(result.get("max_drawdown", 0.0)),
+            sharpe_ratio=_safe_float(result.get("sharpe_ratio", 0.0)),
+            calmar_ratio=_safe_float(result.get("calmar_ratio", 0.0)),
+            # win_rate/profit_loss_ratio：run_portfolio 路径本就不返回这两个字段
             win_rate=_safe_float(result.get("win_rate", 0.0)),
             profit_loss_ratio=_safe_float(result.get("profit_loss_ratio", 0.0)),
-            n_trades=int(result["n_trades"]),
-            n_failed_trades=int(result["n_failed_trades"]),
+            n_trades=int(result.get("n_trades", 0)),
+            n_failed_trades=int(result.get("n_failed_trades", 0)),
         ),
         nav_series=nav_series,
         drawdown_series=drawdown_series,

@@ -593,3 +593,71 @@ class TestPortfolioBacktestViaStrategy:
             strategy_params={"covariance_type": "diag", "n_iter": 50, "release_lag": 3},
         ))
         assert len(resp.nav_series) > 0
+
+
+# ============================================================================
+# 【final-fix】最终审查修复的回归测试
+# ============================================================================
+
+class TestFinalFix:
+    """最终全特征审查发现的 2 项（1 Important + 1 spec 漂移）的回归测试"""
+
+    def test_serialize_single_result_missing_keys_does_not_crash(self):
+        """
+        单资产序列化器对缺键 result 的契约对称化
+
+        背景：BacktestEngine._calculate_portfolio_result 在 daily_records 为空时
+        走早返回路径，结果字典缺 calmar_ratio/n_failed_trades/trades 等键。
+        原 _serialize_backtest_result 用 result["..."] 硬取键会 KeyError 崩，
+        而 _serialize_portfolio_result 已用 .get(..., 0.0) 防御——本测试断言单资产
+        序列化器与之对称：缺键时不崩、metrics 兜底为 0、nav_series/trades 为空列表。
+        """
+        from server.services.backtest_service import _serialize_backtest_result
+        import pandas as pd
+
+        # 模拟早返回路径的 result 字典（刻意缺 calmar_ratio/n_failed_trades/trades）
+        # daily_records 与真实早返回一致：pd.DataFrame([]) 即完全空的 DataFrame
+        # （无任何列），与 engine._calculate_portfolio_result 早返回结构对齐
+        sparse_result = {
+            "initial_capital": 1_000_000,
+            "final_nav": 1_000_000,
+            "total_return": 0.0,
+            "annual_return": 0.0,
+            "annual_volatility": 0.0,
+            "max_drawdown": 0.0,
+            "sharpe_ratio": 0.0,
+            # 故意缺 calmar_ratio / win_rate / profit_loss_ratio / n_failed_trades / trades
+            "n_trades": 0,
+            "daily_records": pd.DataFrame(),
+        }
+
+        # 不应抛 KeyError，返回合法 BacktestResponse
+        resp = _serialize_backtest_result(sparse_result)
+        assert resp is not None
+        # metrics 各缺键字段 0 兜底
+        assert resp.metrics.calmar_ratio == 0.0
+        assert resp.metrics.n_failed_trades == 0
+        assert resp.metrics.n_trades == 0
+        # 空日表 → 空序列
+        assert resp.nav_series == []
+        assert resp.trades == []
+
+    def test_hmm_covariance_type_literal_rejects_invalid(self):
+        """
+        covariance_type 改 Literal 校验
+
+        spec §5.3/§4.2 规定 covariance_type: Literal["diag","full","tied","spherical"]。
+        原实现为 str，非法值 "banana" 绕过请求校验、延迟到 hmm.fit 内部才报 500。
+        本测试断言 Pydantic 在参数解析阶段（422 入口）即拒绝非法值，合法值通过。
+        """
+        from pydantic import ValidationError
+        from strategies.hmm_macro_strategy import HmmMacroParams
+
+        # 非法值：必须抛 ValidationError（请求层转为 422，而非延迟到 fit 内部 500）
+        with pytest.raises(ValidationError):
+            HmmMacroParams(covariance_type="banana")
+
+        # 合法值：四个枚举全部通过
+        for ok in ("diag", "full", "tied", "spherical"):
+            p = HmmMacroParams(covariance_type=ok)
+            assert p.covariance_type == ok
