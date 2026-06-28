@@ -56,3 +56,32 @@ def MA(s: pd.Series, n: int) -> pd.Series:
         n ≥ 1（n=0 会触发 rolling 异常）；输入含 NaN 时结果会传播，建议调用方先清洗
     """
     return s.rolling(window=n).mean()
+
+
+def MACD(s: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """
+    MACD 指标（Moving Average Convergence Divergence，通达信约定）
+
+    物理含义：快慢 EMA 之差（DIF）衡量短期与长期趋势的背离；
+    对 DIF 再求 EMA 得信号线 DEA；柱状图 HIST 放大两者的差。
+
+    通达信约定（区别于部分西方库）：
+    - DEA = EMA(DIF, signal)，即对 DIF 求 EMA，而非对 close
+    - HIST = (DIF - DEA) * 2
+
+    参数：
+        s: 输入序列（通常为 close）
+        fast: 快线周期（默认 12）
+        slow: 慢线周期（默认 26）
+        signal: 信号线周期（默认 9）
+
+    返回：
+        (DIF, DEA, HIST) 三元组，均为与 s 同索引的 pd.Series
+
+    约束说明：
+        fast < slow；signal ≥ 1。前视偏差由调用方用 shift(1) 控制。
+    """
+    dif = EMA(s, fast) - EMA(s, slow)
+    dea = EMA(dif, signal)          # 关键：对 DIF 再求 EMA，非对 close
+    hist = (dif - dea) * 2
+    return dif, dea, hist

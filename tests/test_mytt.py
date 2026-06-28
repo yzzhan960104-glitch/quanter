@@ -120,3 +120,47 @@ class TestMA:
         result = MA(s, n=3)  # 不应抛异常
         assert isinstance(result, pd.Series)
         assert len(result) == 0
+
+
+class TestMacd:
+    """测试 MACD 指标（通达信约定）"""
+
+    def _close(self, n=60, seed=42):
+        np.random.seed(seed)
+        return pd.Series(100 + np.cumsum(np.random.randn(n)))
+
+    def test_returns_three_series(self):
+        """返回 DIF/DEA/HIST 三个同索引序列"""
+        from factors.mytt import MACD
+
+        close = self._close()
+        dif, dea, hist = MACD(close, fast=12, slow=26, signal=9)
+        assert len(dif) == len(close)
+        assert len(dea) == len(close)
+        assert len(hist) == len(close)
+
+    def test_dif_formula(self):
+        """DIF = EMA(close,fast) - EMA(close,slow)"""
+        from factors.mytt import MACD, EMA
+
+        close = self._close()
+        dif, _, _ = MACD(close, 12, 26, 9)
+        expected = EMA(close, 12) - EMA(close, 26)
+        pd.testing.assert_series_equal(dif, expected, check_names=False)
+
+    def test_dea_is_ema_of_dif(self):
+        """DEA = EMA(DIF, signal)——对 DIF 再求 EMA，非对 close"""
+        from factors.mytt import MACD, EMA
+
+        close = self._close()
+        dif, dea, _ = MACD(close, 12, 26, 9)
+        pd.testing.assert_series_equal(dea, EMA(dif, 9), check_names=False)
+
+    def test_hist_double_difference(self):
+        """HIST = (DIF - DEA) * 2（通达信约定）"""
+        from factors.mytt import MACD
+
+        close = self._close()
+        dif, dea, hist = MACD(close, 12, 26, 9)
+        expected = (dif - dea) * 2
+        pd.testing.assert_series_equal(hist, expected, check_names=False)
