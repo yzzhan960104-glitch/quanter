@@ -33,8 +33,10 @@ export interface SingleBacktestParams {
   end_date: string
   initial_capital: number
   signal_freq: '1d' | '1h' | '5m' | '1m'
-  tech_weights: Record<string, number>
   cost_model?: CostModelParams
+  // 策略字段（Task 9：前端驱动调参；tech_weights 已下沉到 strategy_params.tech_weight）
+  strategy_name?: string
+  strategy_params?: Record<string, unknown>
 }
 
 /** 组合回测请求 */
@@ -46,6 +48,8 @@ export interface PortfolioParams {
   n_hmm_states: number
   buffer_threshold: number
   state_weights: Record<string, Record<string, number>>
+  // 组合模式 HMM 标量参数（covariance/n_iter/release_lag/max_fill_days）经此通道下发
+  strategy_params?: Record<string, unknown>
 }
 
 /** 绩效指标 */
@@ -190,4 +194,66 @@ export function runPortfolioBacktest(params: PortfolioParams): Promise<Portfolio
   return apiClient.post('/api/v1/portfolio/run', params, {
     timeout: 120000,
   })
+}
+
+// ============ 策略元数据 / JSON Schema（Task 9） ============
+
+/**
+ * 策略元数据（GET /strategies 返回项）
+ *
+ * - name：策略唯一标识（提交时作为 strategy_name）
+ * - label：中文展示名（下拉框用）
+ * - universe：策略可交易的标的域（用于前端校验提示，不强约束）
+ */
+export interface StrategyMeta {
+  name: string
+  label: string
+  universe: string[]
+}
+
+/**
+ * JSON Schema 单字段描述（含 ui 渲染提示）
+ *
+ * 设计意图（反黑盒）：控件的约束（minimum/maximum/step/enum）全部取自后端 params_model
+ * 生成的 JSON Schema，前端不重复定义，确保单一真相源。
+ */
+export interface JsonSchemaProperty {
+  type?: string
+  description?: string
+  minimum?: number
+  maximum?: number
+  default?: unknown
+  enum?: string[]
+  ui?: {
+    control?: 'slider' | 'input-number' | 'select'
+    group?: string
+    step?: number
+    options?: Array<{ label: string; value: string }>
+  }
+}
+
+/** 策略参数 JSON Schema 整体（properties 为字段字典） */
+export interface StrategyParamSchema {
+  type: string
+  properties: Record<string, JsonSchemaProperty>
+  order?: string[]
+}
+
+/**
+ * 列出已注册策略
+ *
+ * 路由：GET /api/v1/strategies（Task 7 实现）
+ */
+export function getStrategies(): Promise<StrategyMeta[]> {
+  return apiClient.get('/api/v1/strategies')
+}
+
+/**
+ * 获取策略参数 JSON Schema
+ *
+ * 路由：GET /api/v1/strategies/{name}/schema（Task 7 实现）
+ * 前端按返回的 properties[*].ui.control 选择控件类型渲染。
+ */
+export function getStrategySchema(name: string): Promise<StrategyParamSchema> {
+  return apiClient.get(`/api/v1/strategies/${name}/schema`)
 }

@@ -79,24 +79,30 @@
       </el-select>
     </el-form-item>
 
-    <!-- 融合权重（仅单资产） -->
-    <el-form-item v-if="mode === 'single'" label="信号融合权重" prop="tech_weights">
-      <div class="weight-row">
-        <span class="weight-label">技术信号</span>
-        <el-slider
-          v-model="techWeightValue"
-          :min="0"
-          :max="100"
-          :step="5"
-          :show-tooltip="true"
-          :format-tooltip="(val: number) => `${val}%`"
-          style="flex: 1; margin: 0 12px"
+    <!-- 融合权重块已移除：tech_weights 下沉到 StrategyParamForm 动态渲染（tech_weight 滑块） -->
+
+    <!-- 策略选择（仅单资产） -->
+    <el-form-item v-if="mode === 'single'" label="策略" prop="strategy_name">
+      <el-select
+        v-model="formData.strategy_name"
+        placeholder="选择策略"
+        style="width: 100%"
+      >
+        <el-option
+          v-for="s in strategies"
+          :key="s.name"
+          :label="s.label"
+          :value="s.name"
         />
-        <span class="weight-label">宏观信号</span>
-        <el-tag :type="macroWeightValid ? 'success' : 'danger'" size="small">
-          {{ 100 - techWeightValue }}%
-        </el-tag>
-      </div>
+      </el-select>
+    </el-form-item>
+
+    <!-- 策略参数（动态 schema 渲染，仅单资产） -->
+    <el-form-item v-if="mode === 'single'" label="策略参数">
+      <StrategyParamForm
+        :strategy-name="formData.strategy_name"
+        @update="onStrategyParamsUpdate"
+      />
     </el-form-item>
 
     <!-- HMM 状态数（仅组合） -->
@@ -186,6 +192,9 @@
 import { ref, reactive, computed, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
+// Task 9：策略选择 + 动态参数表单（前端驱动调参）
+import StrategyParamForm from './StrategyParamForm.vue'
+import { getStrategies, type StrategyMeta } from '../api/backtest'
 
 const props = defineProps<{
   mode: 'single' | 'portfolio'
@@ -203,7 +212,9 @@ const formData = reactive({
   // 单资产
   symbol: '600000.SH',
   signal_freq: '1d',
-  tech_weights: { tech: 0.7, macro: 0.3 },
+  // 策略选择（前端驱动调参）；tech_weights 已下沉到 strategy_params.tech_weight
+  strategy_name: 'tech_macro_fusion',
+  strategy_params: {} as Record<string, unknown>,
   // 通用
   dateRange: ['2023-01-01', '2024-12-31'] as string[],
   initial_capital: 1000000,
@@ -218,27 +229,30 @@ const formData = reactive({
   } as Record<string, Record<string, number>>,
 })
 
-/** 技术权重滑块值（0-100 映射到 0-1） */
-const techWeightValue = ref(70)
-
-/** 宏观权重是否合法 */
-const macroWeightValid = computed(() => {
-  return techWeightValue.value > 0 && techWeightValue.value < 100
-})
-
 /** 迟滞阈值滑块值（1-50 映射到 0.01-0.50） */
 const bufferSliderValue = ref(5)
 
-// 监听滑块值变化，同步到 formData
-watch(techWeightValue, (val) => {
-  const tech = val / 100
-  const macro = 1 - tech
-  formData.tech_weights = { tech, macro }
-})
-
+// 监听迟滞阈值滑块值变化，同步到 formData
 watch(bufferSliderValue, (val) => {
   formData.buffer_threshold = val / 100
 })
+
+/**
+ * 策略列表（启动时拉取，填充策略下拉框）
+ *
+ * 失败静默（catch）：后端未就绪时下拉框为空，用户可看到错误来源在后端而非前端。
+ */
+const strategies = ref<StrategyMeta[]>([])
+getStrategies().then((list) => { strategies.value = list }).catch(() => {})
+
+/**
+ * StrategyParamForm 子组件回传参数（合并到 formData.strategy_params）
+ *
+ * 子组件按 schema 默认值初始化，故用户即使不操作也携带合法缺省值。
+ */
+function onStrategyParamsUpdate(params: Record<string, unknown>) {
+  formData.strategy_params = params
+}
 
 /** 监听 symbols/n_hmm_states 变化，重建 state_weights 矩阵 */
 watch(
@@ -352,7 +366,8 @@ async function handleSubmit() {
       end_date: formData.dateRange[1],
       initial_capital: formData.initial_capital,
       signal_freq: formData.signal_freq,
-      tech_weights: formData.tech_weights,
+      strategy_name: formData.strategy_name,
+      strategy_params: formData.strategy_params,
     })
   } else {
     emit('submit', {
@@ -363,6 +378,7 @@ async function handleSubmit() {
       n_hmm_states: formData.n_hmm_states,
       buffer_threshold: formData.buffer_threshold,
       state_weights: formData.state_weights,
+      strategy_params: formData.strategy_params,
     })
   }
 }
@@ -376,17 +392,7 @@ async function handleSubmit() {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
 }
 
-.weight-row {
-  display: flex;
-  align-items: center;
-  width: 100%;
-}
-
-.weight-label {
-  font-size: 13px;
-  color: #606266;
-  white-space: nowrap;
-}
+/* tech_weights 相关样式（.weight-row / .weight-label）已随滑块块移除 */
 
 .threshold-hint {
   font-size: 12px;
