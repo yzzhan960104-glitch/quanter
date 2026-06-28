@@ -401,3 +401,111 @@ class TestStrategiesAPI:
     def test_get_schema_unknown_strategy(self):
         resp = self.client.get("/api/v1/strategies/not_exist/schema")
         assert resp.status_code in (400, 404, 500)
+
+
+# ============ Task 8：单资产/组合回测统一走策略路径 ============
+
+
+class TestSingleBacktestViaStrategy:
+    """测试单资产回测走策略路径 + 参数注入
+
+    Why：原 service 层用 req.tech_weights 直接调 signal_fusion，参数硬编码、
+    策略不可换。Task 8 后 BacktestRequest 增 strategy_name/strategy_params，
+    service 用 params_model 校验注入后实例化策略并走 run_portfolio。
+    本组测试验证"前端传什么策略用什么"闭环。
+    """
+
+    def _req(self, **overrides):
+        """构造单资产回测请求（默认缺省策略 = tech_macro_fusion）"""
+        from server.schemas.backtest import BacktestRequest
+        import datetime as dt
+        kwargs = dict(
+            symbol="600000.SH",
+            start_date=dt.date(2023, 1, 1),
+            end_date=dt.date(2023, 6, 30),
+            initial_capital=1_000_000,
+        )
+        kwargs.update(overrides)
+        return BacktestRequest(**kwargs)
+
+    def test_default_strategy_runs(self):
+        """strategy_name 缺省时用默认策略（tech_macro_fusion）"""
+        from server.services.backtest_service import run_single_backtest
+        resp = run_single_backtest(self._req())
+        assert len(resp.nav_series) > 0
+        assert resp.metrics.n_trades >= 0
+
+    def test_explicit_strategy_runs(self):
+        """显式指定 ma_cross 策略可跑通"""
+        from server.services.backtest_service import run_single_backtest
+        resp = run_single_backtest(self._req(strategy_name="ma_cross"))
+        assert len(resp.nav_series) > 0
+
+    def test_strategy_params_injected(self):
+        """自定义 strategy_params 经校验后注入策略"""
+        from server.services.backtest_service import run_single_backtest
+        resp = run_single_backtest(self._req(
+            strategy_name="tech_macro_fusion",
+            strategy_params={"ma_short": 3, "ma_long": 10, "tech_weight": 0.5},
+        ))
+        assert len(resp.nav_series) > 0
+
+    def test_invalid_strategy_params_rejected(self):
+        """非法 strategy_params（超范围）被拒绝"""
+        from server.services.backtest_service import run_single_backtest
+        from server.schemas.backtest import BacktestRequest
+        import datetime as dt
+        # Pydantic 在 service 层 params_model(**...) 校验，超范围抛 ValueError
+        req = BacktestRequest(
+            symbol="600000.SH",
+            start_date=dt.date(2023, 1, 1),
+            end_date=dt.date(2023, 6, 30),
+            strategy_name="ma_cross",
+            strategy_params={"fast": 1},   # ge=2，非法
+        )
+        with pytest.raises(Exception):
+            run_single_backtest(req)
+
+
+class TestPortfolioBacktestViaStrategy:
+    """测试组合回测走 HMMMacroStrategy + 标量参数注入
+
+    Why：原 service 层直接 new MacroRegimeHMM + HMMStateMapper，
+    HMM 标量参数硬编码在 service。Task 8 后 HMM 逻辑迁入 HMMMacroStrategy，
+    协方差/迭代次数等经 strategy_params 注入。
+    """
+
+    def _req(self, **overrides):
+        """构造组合回测请求（双标的 + 三状态权重）"""
+        from server.schemas.portfolio import PortfolioRequest
+        import datetime as dt
+        kwargs = dict(
+            symbols=["510300.SH", "511010.SH"],
+            start_date=dt.date(2022, 1, 1),
+            end_date=dt.date(2023, 6, 30),
+            initial_capital=1_000_000,
+            n_hmm_states=3,
+            buffer_threshold=0.05,
+            state_weights={
+                "State_0": {"510300.SH": 0.8, "511010.SH": 0.2},
+                "State_1": {"510300.SH": 0.2, "511010.SH": 0.8},
+                "State_2": {"510300.SH": 0.5, "511010.SH": 0.5},
+            },
+        )
+        kwargs.update(overrides)
+        return PortfolioRequest(**kwargs)
+
+    def test_portfolio_runs(self):
+        """组合回测默认参数跑通"""
+        from server.services.portfolio_service import run_portfolio_backtest
+        resp = run_portfolio_backtest(self._req())
+        assert len(resp.nav_series) > 0
+        assert len(resp.weight_series) > 0
+
+    def test_hmm_params_injected(self):
+        """自定义 HMM 标量参数注入"""
+        from server.services.portfolio_service import run_portfolio_backtest
+        resp = run_portfolio_backtest(self._req(
+            strategy_params={"covariance_type": "diag", "n_iter": 50, "release_lag": 3},
+        ))
+        assert len(resp.nav_series) > 0

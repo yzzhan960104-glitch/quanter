@@ -12,7 +12,7 @@
 - 与 backtest.py 的共享模型通过 import 复用，不重复定义
 """
 from datetime import date
-from typing import Dict, List
+from typing import Any, Dict, List
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .backtest import MetricsResponse, NavPoint, DrawdownPoint, TradeRecord
@@ -67,6 +67,13 @@ class PortfolioRequest(BaseModel):
             "各状态的基准权重配置。"
             "格式：{ 'State_0': {symbol: weight}, ... }，"
             "每个状态的权重和必须为 1"
+        )
+    )
+    strategy_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "HMM 策略标量参数（covariance_type/n_iter/release_lag/max_fill_days），"
+            "由 HmmMacroParams 在 service 层校验注入"
         )
     )
 

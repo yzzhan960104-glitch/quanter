@@ -12,7 +12,7 @@
 - 日期字符串格式统一为 ISO 8601（YYYY-MM-DD）
 """
 from datetime import date
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -74,7 +74,9 @@ class BacktestRequest(BaseModel):
     - initial_capital 必须为正数
     - start_date 必须早于 end_date
     - signal_freq 仅允许 "1d" / "1h" / "5m" / "1m"
-    - tech_weights 的值之和必须为 1
+    - strategy_name 缺省时由 service 层默认取 tech_macro_fusion
+    - strategy_params 为宽松 dict，键值范围由对应策略的 params_model 在 service 层校验
+      （Why：不同策略参数 schema 不同，请求层无法预知，必须延后到策略侧校验）
     """
     symbol: str = Field(
         ...,
@@ -98,13 +100,17 @@ class BacktestRequest(BaseModel):
         default="1d",
         description="信号频率：1d/1h/5m/1m"
     )
-    tech_weights: Dict[str, float] = Field(
-        default={"tech": 0.7, "macro": 0.3},
-        description="信号融合权重（和必须为 1）"
-    )
     cost_model: Optional[CostModelParams] = Field(
         default=None,
         description="成本模型参数（可选，缺省使用默认值）"
+    )
+    strategy_name: Optional[str] = Field(
+        default=None,
+        description="策略名（对应 /api/v1/strategies 的 name）。缺省用默认策略 tech_macro_fusion"
+    )
+    strategy_params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="策略参数（键值对，由对应策略的 params_model 在 service 层校验注入）"
     )
 
     @field_validator("signal_freq")
@@ -114,19 +120,6 @@ class BacktestRequest(BaseModel):
         allowed = {"1d", "1h", "5m", "1m"}
         if v not in allowed:
             raise ValueError(f"信号频率仅支持 {allowed}，当前: {v}")
-        return v
-
-    @field_validator("tech_weights")
-    @classmethod
-    def validate_tech_weights(cls, v: Dict[str, float]) -> Dict[str, float]:
-        """验证融合权重和为 1（允许浮点误差 1e-6）"""
-        weight_sum = sum(v.values())
-        if abs(weight_sum - 1.0) > 1e-6:
-            raise ValueError(f"融合权重和必须为 1，当前: {weight_sum:.6f}")
-        # 验证无负权重
-        for k, w in v.items():
-            if w < 0:
-                raise ValueError(f"权重 '{k}' 不能为负: {w}")
         return v
 
     @model_validator(mode="after")

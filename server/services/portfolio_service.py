@@ -15,14 +15,12 @@
 - 与 backtest_service.py 共享 _safe_float 工具函数
 """
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
 
 from data.fetcher import MockDataFetcher
-from factors.fusion import HMMStateMapper, AssetWeightConfig, SignalDirection
-from factors.hmm_macro import MacroRegimeHMM
 from backtest.engine import BacktestEngine
 
 from server.schemas.portfolio import (
@@ -34,106 +32,69 @@ from server.schemas.portfolio import (
     WeightPoint,
     TradeRecord,
 )
-from server.core.config import DATA_DEFAULTS, PORTFOLIO_DEFAULTS
+from server.core.config import DATA_DEFAULTS
 
 
 def run_portfolio_backtest(req: PortfolioRequest) -> PortfolioResponse:
     """
-    执行组合回测
+    执行组合回测（HMM 逻辑已迁入 HMMMacroStrategy，标量参数经 strategy_params 注入）
 
-    完整流程：
-    1. MockDataFetcher 获取每个标的的 OHLCV + 宏观数据
-    2. 清洗并合并数据
-    3. 训练 HMM 模型（识别宏观状态）
-    4. HMM 预测状态概率矩阵
-    5. HMMStateMapper 映射为目标权重信号（含迟滞滤波）
-    6. BacktestEngine.run_portfolio() 执行组合回测
-    7. 序列化结果
+    ── 策略驱动架构（Task 8）──
+    原本散落在 service 的 HMM 训练/状态映射/迟滞滤波逻辑，已统一封装进
+    HMMMacroStrategy.fit/generate_target_weights。service 层只负责：
+    1. MockDataFetcher 取各标的 OHLCV + 宏观 M2
+    2. 用 HmmMacroParams 显式校验注入 HMM 标量参数（covariance/n_iter/release_lag/max_fill_days）
+    3. 实例化 HMMMacroStrategy（结构配置：universe/n_hmm_states/state_weights/buffer_threshold）
+    4. fit(price_data, macro) → generate_target_weights
+    5. BacktestEngine.run_portfolio 执行组合回测
+    6. 序列化结果
 
-    参数：
-        req: 已校验的组合回测请求
-
-    返回：
-        PortfolioResponse（JSON 安全）
+    参数说明（反黑盒）：
+    - random_state=42 在 HMMMacroStrategy 内部硬编码（保证 HMM 训练可复现）
+    - 结构配置（状态数/权重/迟滞阈值）来自 PortfolioRequest 既有字段
+    - 标量超参来自 strategy_params，经 HmmMacroParams 校验注入
     """
-    # ============ 步骤 1：获取各标的数据 ============
-    fetcher = MockDataFetcher(seed=DATA_DEFAULTS["mock_seed"])
+    from strategies.hmm_macro_strategy import HMMMacroStrategy, HmmMacroParams
+    from strategies.base import StrategyContext
 
+    # ============ 步骤 1：取数 ============
+    fetcher = MockDataFetcher(seed=DATA_DEFAULTS["mock_seed"])
     start_dt = datetime.combine(req.start_date, datetime.min.time())
     end_dt = datetime.combine(req.end_date, datetime.min.time())
 
-    price_data: Dict[str, pd.DataFrame] = {}
-    for symbol in req.symbols:
-        df = fetcher.fetch_ohlcv(symbol, start_dt, end_dt, freq="1d")
-        price_data[symbol] = df
-
-    # 获取宏观数据（用于 HMM 训练）
+    price_data: Dict[str, pd.DataFrame] = {
+        s: fetcher.fetch_ohlcv(s, start_dt, end_dt, freq="1d")
+        for s in req.symbols
+    }
     macro_df = fetcher.fetch_macro("m2", start_dt, end_dt)
 
-    # ============ 步骤 2：构建 HMM 训练数据 ============
-    # 使用第一个标的的日频数据作为时间轴基准，拼接宏观指标
-    base_symbol = req.symbols[0]
-    daily_df = price_data[base_symbol][["close"]].copy()
-    daily_df = daily_df.rename(columns={"close": f"{base_symbol}_close"})
+    # ============ 步骤 2：校验注入 HMM 标量参数 ============
+    # 显式 params_model(**dict) 构造，禁 **kwargs 黑盒；非法参数在此抛 ValidationError
+    hmm_params = HmmMacroParams(**(req.strategy_params or {}))
 
-    # 添加其他标的收盘价
-    for symbol in req.symbols[1:]:
-        if symbol in price_data:
-            daily_df[f"{symbol}_close"] = price_data[symbol]["close"]
-
-    # 对齐宏观数据到日频（严格防未来函数）
-    hmm_model = MacroRegimeHMM(
-        n_components=req.n_hmm_states,
-        covariance_type=PORTFOLIO_DEFAULTS["hmm_covariance_type"],
-        n_iter=PORTFOLIO_DEFAULTS["hmm_n_iter"],
-        random_state=PORTFOLIO_DEFAULTS["hmm_random_state"],
-    )
-
-    aligned_df = hmm_model.align_macro_data(
-        daily_df.dropna(),
-        macro_df,
-        release_lag=5,    # 模拟 5 天发布滞后
-        max_fill_days=90,
-    )
-
-    # ============ 步骤 3：训练 HMM 模型 ============
-    # 特征列：所有标的收盘价 + 宏观指标
-    feature_columns = [col for col in aligned_df.columns
-                       if not col.endswith("_freshness")]
-
-    hmm_model.fit(aligned_df, feature_columns=feature_columns, drop_na=True)
-
-    # ============ 步骤 4：HMM 预测状态概率矩阵 ============
-    prob_matrix, entropy = hmm_model.predict(aligned_df, drop_na=False)
-
-    # ============ 步骤 5：HMMStateMapper 映射目标权重信号 ============
-    # 构建资产配置列表
-    assets = [AssetWeightConfig(symbol=symbol, base_name=symbol) for symbol in req.symbols]
-
-    mapper = HMMStateMapper(
-        states=req.n_hmm_states,
-        assets=assets,
+    strategy = HMMMacroStrategy(
+        universe=req.symbols,
+        params=hmm_params,
+        n_hmm_states=req.n_hmm_states,
         state_weights=req.state_weights,
         buffer_threshold=req.buffer_threshold,
     )
 
-    # 批量映射：HMM 概率矩阵 → TargetWeightSignal 列表
-    signals = mapper.map_states_to_weights(prob_matrix)
-
-    # 重置 mapper 权重（确保下次调用从空仓开始）
-    mapper.reset_weights()
-
-    # ============ 步骤 6：执行组合回测 ============
-    engine = BacktestEngine(
-        initial_capital=req.initial_capital,
+    # ============ 步骤 3：训练 + 产出信号 ============
+    strategy.fit(price_data, macro_data=macro_df)
+    ctx = StrategyContext(
+        timestamp=start_dt,
+        current_weights={s: 0.0 for s in req.symbols},
+        cash=req.initial_capital,
+        aum=req.initial_capital,
     )
+    signals = strategy.generate_target_weights(price_data, ctx)
 
-    result = engine.run_portfolio(
-        price_data=price_data,
-        signals=signals,
-    )
+    # ============ 步骤 4：执行回测 ============
+    engine = BacktestEngine(initial_capital=req.initial_capital)
+    result = engine.run_portfolio(price_data=price_data, signals=signals)
 
-    # ============ 步骤 7：序列化结果 ============
+    # ============ 步骤 5：序列化结果 ============
     return _serialize_portfolio_result(result)
 
 

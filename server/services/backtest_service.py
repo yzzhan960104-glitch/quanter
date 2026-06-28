@@ -19,16 +19,13 @@
 - 每次请求必须实例化全新的 BacktestEngine，绝不允许跨请求复用引擎实例
 """
 from datetime import datetime
-from typing import Dict, Any
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
 
 from data.fetcher import MockDataFetcher
 from data.cleaner import DataCleaner
-from factors.technical import moving_average_cross, volume_price_trend
-from factors.macro import macro_anchor_signal
-from factors.fusion import signal_fusion
 from backtest.engine import BacktestEngine
 from backtest.cost_model import CostModel
 
@@ -53,112 +50,89 @@ def run_single_backtest(req: BacktestRequest) -> BacktestResponse:
     导致所有并发请求排队等待。必须在路由层通过 run_in_threadpool 调用。
 
     ── 全局状态污染警告 ──
-    BacktestEngine 实例在每次请求中全新创建，绝不允许跨请求复用。
-    原因：引擎内部持有 cash/position/nav 等可变状态，复用会导致
-    请求 A 的持仓状态泄漏到请求 B，产生不可复现的回测结果。
+    BacktestEngine 与策略在每次请求中全新创建，绝不允许跨请求复用。
+    原因：引擎内部持有 cash/position/nav 等可变状态，策略持有 _macro_df
+    等训练后状态，复用会导致请求 A 的状态泄漏到请求 B，产生不可复现结果。
 
-    完整流程（与 example.py 对齐）：
+    ── 策略驱动架构（Task 8）──
+    统一走策略 + run_portfolio，不再在 service 层硬编码 MA/VPT/融合逻辑：
     1. MockDataFetcher 获取 OHLCV + 宏观数据
-    2. DataCleaner 清洗数据
-    3. 计算技术信号（双均线 + VPT → 融合）
-    4. 计算宏观信号（M2 锚点）
-    5. 信号融合（tech_weights 加权）
-    6. 全新 BacktestEngine 实例执行回测
+    2. DataCleaner 清洗 OHLCV
+    3. StrategyLoader 按 req.strategy_name 取策略类（缺省 tech_macro_fusion）
+    4. 用策略 params_model 显式校验 req.strategy_params（Pydantic 自动类型/范围校验）
+    5. 实例化策略 → fit(price_data, macro) → generate_target_weights
+    6. 全新 BacktestEngine.run_portfolio 执行回测（成本走 cost_model）
     7. 序列化结果为 BacktestResponse
 
-    参数：
-        req: 已校验的回测请求参数
-
-    返回：
-        BacktestResponse（JSON 安全）
-
-    异常：
-        任何引擎/数据异常直接向上抛出，由路由层捕获
+    参数校验注入（反黑盒）：用 `params_model(**req.strategy_params)` 显式构造，
+    禁 **kwargs 黑盒；非法参数在此处抛 ValidationError/ValueError，由路由层捕获。
     """
-    # ============ 步骤 1：获取数据 ============
-    fetcher = MockDataFetcher(seed=DATA_DEFAULTS["mock_seed"])
+    from strategies.loader import StrategyLoader
+    from strategies.base import StrategyContext
 
+    # 默认策略：缺省 strategy_name 时取技术+宏观融合（与原 service 行为一致）
+    DEFAULT_STRATEGY = "tech_macro_fusion"
+
+    # ============ 步骤 1：取数 + 清洗 ============
+    fetcher = MockDataFetcher(seed=DATA_DEFAULTS["mock_seed"])
     start_dt = datetime.combine(req.start_date, datetime.min.time())
     end_dt = datetime.combine(req.end_date, datetime.min.time())
 
-    # 获取 OHLCV 数据
     df = fetcher.fetch_ohlcv(req.symbol, start_dt, end_dt, freq=req.signal_freq)
-
-    # 获取宏观数据（M2 增速）
-    macro_df = fetcher.fetch_macro("m2", start_dt, end_dt)
-
-    # ============ 步骤 2：清洗数据 ============
     cleaner = DataCleaner()
     df_clean = cleaner.clean_ohlcv(df, max_fill=5)
+    price_data = {req.symbol: df_clean}
 
-    # 对齐多频率数据
-    try:
-        df_aligned = cleaner.align_frequencies(df_clean, macro_df)
-    except ValueError:
-        # 宏观数据对齐失败时退化为纯技术信号
-        df_aligned = df_clean.copy()
-        df_aligned["m2"] = 200.0  # 虚拟宏观列
+    # 宏观数据（M2）——交由策略内部按 tech_weight 融合，对齐失败时策略自动退化为纯技术
+    macro_df = fetcher.fetch_macro("m2", start_dt, end_dt)
 
-    # ============ 步骤 3：计算技术信号 ============
-    # 双均线交叉信号
-    ma_signal = moving_average_cross(df_aligned, short_window=5, long_window=20)
+    # ============ 步骤 2：选策略 + 校验注入参数 ============
+    name = req.strategy_name or DEFAULT_STRATEGY
+    loader = StrategyLoader()
+    loader.scan()
+    strategy_cls = loader.get(name)
 
-    # 量价趋势信号
-    vpt_signal = volume_price_trend(df_aligned, window=20)
+    # 用策略的 params_model 校验请求参数（Pydantic 自动类型/范围校验）
+    # 缺省 strategy_params → 用 params_model 默认值（如默认 MA 周期/融合权重）
+    params = strategy_cls.params_model(**(req.strategy_params or {}))
+    strategy = strategy_cls(universe=[req.symbol], params=params)
 
-    # 技术信号融合（简单平均）
-    tech_signal = (ma_signal + vpt_signal) / 2
-
-    # ============ 步骤 4：计算宏观信号 ============
-    try:
-        macro_signal = macro_anchor_signal(macro_df, indicator="m2", threshold=0.02, window=3)
-    except Exception:
-        # 宏观信号计算失败时使用中等多头信号
-        macro_signal = pd.Series(0.5, index=tech_signal.index)
-
-    # ============ 步骤 5：信号融合 ============
-    # 对齐信号索引（技术信号日频 vs 宏观信号月频，取交集）
-    aligned_index = tech_signal.index.intersection(macro_signal.index)
-    tech_aligned = tech_signal.loc[aligned_index]
-    macro_aligned = macro_signal.loc[aligned_index]
-
-    fused_signal = signal_fusion(
-        tech_aligned,
-        macro_aligned,
-        weights=req.tech_weights
+    # ============ 步骤 3：训练 + 产出信号 ============
+    strategy.fit(price_data, macro_data=macro_df)
+    ctx = StrategyContext(
+        timestamp=start_dt,
+        current_weights={req.symbol: 0.0},
+        cash=req.initial_capital,
+        aum=req.initial_capital,
     )
+    signals = strategy.generate_target_weights(price_data, ctx)
 
-    # ============ 步骤 6：执行回测 ============
-    # 构建成本模型
-    cost_params = req.cost_model
-    if cost_params is None:
-        cost_model = CostModel()
-    else:
-        cost_model = CostModel(
-            commission_rate=cost_params.commission_rate,
-            stamp_duty=cost_params.stamp_duty,
-            min_commission=cost_params.min_commission,
-            slippage_model=cost_params.slippage_model,
-            slippage_rate=cost_params.slippage_rate,
-            liquidity_threshold=cost_params.liquidity_threshold,
-        )
+    # ============ 步骤 4：执行回测 ============
+    # 成本模型注入引擎（Task 6 已让其在 run_portfolio 路径生效）
+    cost_model = _build_cost_model(req.cost_model)
+    engine = BacktestEngine(initial_capital=req.initial_capital, cost_model=cost_model)
+    result = engine.run_portfolio(price_data=price_data, signals=signals)
 
-    # 【全局状态污染防御】每次请求实例化全新的 BacktestEngine
-    # 绝不允许跨请求复用引擎实例！
-    # 原因：引擎持有 cash/position/nav 等可变状态，
-    # 复用会导致请求 A 的持仓泄漏到请求 B
-    engine = BacktestEngine(
-        initial_capital=req.initial_capital,
-        cost_model=cost_model,
-        signal_freq=req.signal_freq,
-    )
-
-    # 执行回测（使用对齐后的数据）
-    df_for_backtest = df_aligned.loc[fused_signal.index].copy()
-    result = engine.run(df_for_backtest, fused_signal, symbol=req.symbol)
-
-    # ============ 步骤 7：序列化结果 ============
+    # ============ 步骤 5：序列化 ============
     return _serialize_backtest_result(result)
+
+
+def _build_cost_model(cost_params):
+    """从请求的 CostModelParams 构造 CostModel（缺省用默认）
+
+    Why 抽函数：原内联构造逻辑在 run_single_backtest 中重复，抽出后既
+    消除重复，又让"成本可调不退化"的意图显式化（与 Task 6 测试呼应）。
+    """
+    if cost_params is None:
+        return CostModel()
+    return CostModel(
+        commission_rate=cost_params.commission_rate,
+        stamp_duty=cost_params.stamp_duty,
+        min_commission=cost_params.min_commission,
+        slippage_model=cost_params.slippage_model,
+        slippage_rate=cost_params.slippage_rate,
+        liquidity_threshold=cost_params.liquidity_threshold,
+    )
 
 
 def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
@@ -273,8 +247,10 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
             max_drawdown=_safe_float(result["max_drawdown"]),
             sharpe_ratio=_safe_float(result["sharpe_ratio"]),
             calmar_ratio=_safe_float(result["calmar_ratio"]),
-            win_rate=_safe_float(result["win_rate"]),
-            profit_loss_ratio=_safe_float(result["profit_loss_ratio"]),
+            # win_rate/profit_loss_ratio 用 .get 容错：run_portfolio 路径不返回这两个
+            # 字段（与 _serialize_portfolio_result 行为对齐，统一取 0.0 兜底）
+            win_rate=_safe_float(result.get("win_rate", 0.0)),
+            profit_loss_ratio=_safe_float(result.get("profit_loss_ratio", 0.0)),
             n_trades=int(result["n_trades"]),
             n_failed_trades=int(result["n_failed_trades"]),
         ),
