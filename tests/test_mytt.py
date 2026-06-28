@@ -44,6 +44,42 @@ class TestEMA:
         ema = EMA(close_series, n=12)
         assert ema.std() < close_series.std()
 
+    def test_ema_exact_recursive_values(self):
+        """精确值断言：手算递归式逐项校验，捕获 adjust=True 等实现错误
+
+        α = 2/(3+1) = 0.5，递归式 y_0 = x_0; y_t = 0.5·x_t + 0.5·y_{t-1}：
+          y_0 = 1.0
+          y_1 = 0.5·2.0 + 0.5·1.0   = 1.5
+          y_2 = 0.5·3.0 + 0.5·1.5   = 2.25
+          y_3 = 0.5·4.0 + 0.5·2.25  = 3.125
+          y_4 = 0.5·5.0 + 0.5·3.125 = 4.0625
+        若误用 adjust=True，起始处会因归一化权重而偏离这套值。
+        """
+        s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+        ema = EMA(s, n=3)
+        expected = [1.0, 1.5, 2.25, 3.125, 4.0625]
+        for got, exp in zip(ema, expected):
+            assert got == pytest.approx(exp)
+
+    def test_n_equal_one_equals_input(self):
+        """n=1 时 α=1，EMA 完全跟踪输入（逐项相等）
+
+        边界覆盖：ewm(span=1) 不应报错，且结果与输入逐项一致。
+        """
+        s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+        pd.testing.assert_series_equal(EMA(s, 1), s)
+
+    def test_nan_input_does_not_crash(self):
+        """含 NaN 输入不抛异常，返回等长 Series（不固定具体传播值）
+
+        ewm 对 NaN 有其内部传播规则（此处实测为 [1.0, 1.0, 2.5]），
+        本断言只保证"不崩 + 等长"，避免对 pandas 内部实现做硬编码。
+        """
+        s = pd.Series([1.0, np.nan, 3.0])
+        result = EMA(s, n=3)  # 不应抛异常
+        assert isinstance(result, pd.Series)
+        assert len(result) == 3
+
 
 class TestMA:
     """测试简单移动平均"""
@@ -65,3 +101,22 @@ class TestMA:
         s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
         ma = MA(s, n=3)
         assert ma.iloc[:2].isna().all()
+
+    def test_n_greater_than_len_all_nan(self):
+        """n > len 时窗口永远填不满，结果全 NaN
+
+        边界覆盖：rolling(5) 对长度 3 的序列不报错，返回 3 个 NaN。
+        """
+        s = pd.Series([1.0, 2.0, 3.0])
+        result = MA(s, n=5)
+        assert result.isna().all()
+
+    def test_empty_series_returns_empty(self):
+        """空 Series 输入不抛异常，返回空 Series
+
+        边界覆盖：rolling 对空输入直接返回空，调用方无需特判。
+        """
+        s = pd.Series([], dtype=float)
+        result = MA(s, n=3)  # 不应抛异常
+        assert isinstance(result, pd.Series)
+        assert len(result) == 0

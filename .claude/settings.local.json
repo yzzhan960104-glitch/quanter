@@ -9,7 +9,12 @@
       "Bash(node --check _tmp_check.mjs)",
       "Bash(echo \"---NODE-EXIT:$?---\")",
       "Bash(node --check _tmp_check.ts)",
-      "Bash(echo \"---NODE-TS-EXIT:$?---\")"
+      "Bash(echo \"---NODE-TS-EXIT:$?---\")",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git commit -m 'feat\\(factors\\): 新增 MyTT EMA/MA 纯向量化基础函数 *)",
+      "Bash(git stash *)"
     ]
   }
 }

@@ -31,6 +31,9 @@ def EMA(s: pd.Series, n: int) -> pd.Series:
 
     返回：
         与 s 同索引的 EMA 序列（全程无 NaN）
+
+    约束说明：
+        n ≥ 1（n=0 会触发 ewm 异常）；输入含 NaN 时结果会传播，建议调用方先清洗
     """
     return s.ewm(span=n, adjust=False).mean()
 
@@ -48,5 +51,8 @@ def MA(s: pd.Series, n: int) -> pd.Series:
 
     返回：
         与 s 同索引的 MA 序列（前 n-1 个为 NaN）
+
+    约束说明：
+        n ≥ 1（n=0 会触发 rolling 异常）；输入含 NaN 时结果会传播，建议调用方先清洗
     """
     return s.rolling(window=n).mean()
