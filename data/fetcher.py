@@ -27,6 +27,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# 容灾基建（限流器令牌桶 + 手动熔断器 + 异常类型）
+# 设计原则：fetcher 保留"任何异常都返回空 DataFrame、绝不抛"的对外契约，
+# 仅在内部用 breaker 的手动 API（allow_request / record_success / record_failure）
+# 加保护 —— OPEN 时快速返回空 DF，基础设施异常计入熔断，但不改变对外行为。
+from data.resilience import (
+    DataFetchError,
+    fred_breaker,
+    fred_rate_limiter,
+    tushare_breaker,
+    tushare_rate_limiter,
+)
+
 # 配置模块级日志
 logger = logging.getLogger(__name__)
 
@@ -482,6 +494,17 @@ class FredDataFetcher(DataFetcher):
         │ 季频 (q) │ 滞后 45 个自然日 — 模拟季后 1.5 个月发布    │
         └──────────┴────────────────────────────────────────────┘
         """
+        # 【限流】取令牌（阻塞至有令牌或超时）—— 防 FRED 429 限频
+        fred_rate_limiter.acquire(1.0)
+        # 【熔断前置】OPEN 则快速返回空 DF（保留既有"不抛"契约）
+        # 原因：FRED 限频冷却约 60s，OPEN 期间继续打只会加重视英国防封禁
+        if not fred_breaker.allow_request():
+            logger.warning(f"FRED 熔断开启，跳过宏观指标请求：{indicator}")
+            return pd.DataFrame(
+                columns=[indicator],
+                index=pd.DatetimeIndex([], tz="Asia/Shanghai")
+            )
+
         # ── 本地 Parquet 缓存查询 ──
         # FRED 数据更新频率低（日/月/季），缓存命中率极高
         # 同一 (indicator, start, end) 的第二次请求直接毫秒级读取
@@ -490,22 +513,25 @@ class FredDataFetcher(DataFetcher):
             return cached
 
         try:
-            # 拉取原始序列（fredapi 返回 pd.Series）
-            series = self._fred.get_series(
-                series_id=indicator,
-                observation_start=start,
-                observation_end=end
-            )
+            # 拉取原始序列（fredapi 返回 pd.Series）—— 抽到独立方法便于异常分类
+            series = self._fetch_series_from_api(indicator, start, end)
+            # 真正触达外部 API 成功 → 计一次成功，复位熔断计数
+            fred_breaker.record_success()
         except Exception as e:
             # 捕获网络超时、HTTP 429 限频、无效指标代码等所有异常
             error_msg = str(e)
             if "429" in error_msg or "rate limit" in error_msg.lower():
                 logger.error(f"FRED API 限频：{indicator}，请降低请求频率")
+                # 基础设施类异常 → 计入熔断（连续达阈值后 OPEN，自动停打）
+                fred_breaker.record_failure()
             elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
                 logger.error(f"FRED API 网络超时/断线：{indicator}")
+                # 网络层异常同样属于基础设施 → 计熔断
+                fred_breaker.record_failure()
             else:
                 logger.error(f"FRED API 拉取失败 [{indicator}]：{error_msg}")
-            # 返回空 DataFrame 而非崩溃 — 下游策略应检查空数据
+                # 非基础设施类（如无效指标代码、解析错误）→ 不计熔断
+            # 保留既有契约：统一返回空 DataFrame，不抛
             return pd.DataFrame(
                 columns=[indicator],
                 index=pd.DatetimeIndex([], tz="Asia/Shanghai")
@@ -567,6 +593,22 @@ class FredDataFetcher(DataFetcher):
         _write_parquet_cache("fred", indicator, start, end, df)
 
         return df
+
+    def _fetch_series_from_api(
+        self, indicator: str, start: datetime, end: datetime
+    ) -> pd.Series:
+        """
+        真正调用 FRED API 拉取原始序列（fredapi 返回 pd.Series）。
+
+        抽离动机：把"触达外部接口"的代码与"缓存/前视偏差处理/异常分类"解耦，
+        便于熔断器在外层统一 try/except 包裹后做异常分类与 record_failure。
+        本方法只负责调用 + 返回原始 Series，不做任何加工。
+        """
+        return self._fred.get_series(
+            series_id=indicator,
+            observation_start=start,
+            observation_end=end
+        )
 
     def fetch_factor_data(
         self,
@@ -691,6 +733,18 @@ class TushareDataFetcher(DataFetcher):
             Tushare 日线接口返回 trade_date 列（格式 YYYYMMDD），
             需要手动转换为 DatetimeIndex 并添加时区。
         """
+        # 【限流】取令牌（阻塞至有令牌或超时）—— 防 Tushare 限频封禁
+        # Tushare 限频触发后会封禁 IP 一段时间，令牌桶在源头上削峰
+        tushare_rate_limiter.acquire(1.0)
+        # 【熔断前置】OPEN 则快速返回空 DF（保留既有"不抛"契约）
+        # 原因：Tushare 限频冷却期内继续打只会延长封禁，OPEN 即停打
+        if not tushare_breaker.allow_request():
+            logger.warning(f"Tushare 熔断开启，跳过日线请求：{symbol}")
+            return pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume", "amount"],
+                index=pd.DatetimeIndex([], tz="Asia/Shanghai")
+            )
+
         # ── 本地 Parquet 缓存查询 ──
         cache_id = f"ohlcv_{symbol}"
         cached = _read_parquet_cache("tushare", cache_id, start, end)
@@ -704,25 +758,61 @@ class TushareDataFetcher(DataFetcher):
             )
 
         try:
-            # Tushare 日线接口：ts_code 格式如 600000.SH
-            # trade_date 格式：YYYYMMDD 字符串
-            df = self._pro.daily(
-                ts_code=symbol,
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d")
-            )
+            # 真正触达 Tushare API 的逻辑抽到 _fetch_ohlcv_from_api，便于异常分类
+            df = self._fetch_ohlcv_from_api(symbol, start, end)
+            # 成功触达外部接口 → 计一次成功，复位熔断计数
+            tushare_breaker.record_success()
         except Exception as e:
             error_msg = str(e)
-            if "积分" in error_msg or "权限" in error_msg:
+            # 基础设施类（限频/超时/连接）异常 → 计入熔断
+            # 这类异常在冷却期内大概率持续，熔断可自动停打、缩短封禁时间
+            if ("频繁" in error_msg or "limit" in error_msg.lower()
+                    or "timeout" in error_msg.lower()
+                    or "connection" in error_msg.lower()):
+                logger.error(f"Tushare API 限频/网络异常：{symbol}")
+                tushare_breaker.record_failure()
+            elif "积分" in error_msg or "权限" in error_msg:
+                # 积分/权限为持久态异常 —— 60s 冷却内不可恢复，熔断无意义，仅记日志
                 logger.error(f"Tushare 积分不足/权限受限：{symbol} - {error_msg}")
-            elif "频繁" in error_msg or "limit" in error_msg.lower():
-                logger.error(f"Tushare API 限频：{symbol}")
             else:
                 logger.error(f"Tushare 日线拉取失败 [{symbol}]：{error_msg}")
+            # 保留既有契约：统一返回空 DataFrame，不抛
             return pd.DataFrame(
                 columns=["open", "high", "low", "close", "volume", "amount"],
                 index=pd.DatetimeIndex([], tz="Asia/Shanghai")
             )
+
+        self._request_count += 1
+
+        # ── 写入本地 Parquet 缓存 ──
+        _write_parquet_cache("tushare", cache_id, start, end, df)
+
+        return df
+
+    def _fetch_ohlcv_from_api(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> pd.DataFrame:
+        """
+        真正调用 Tushare daily 接口拉取日线，并组装为系统标准 DataFrame。
+
+        抽离动机：把"触达外部 API + 数据清洗组装"与"缓存读写 + 异常分类 +
+        熔断/限流守卫"解耦。本方法只负责取数与格式标准化，任何异常一律向上
+        抛给 fetch_ohlcv，由其统一分类（基础设施 vs 持久态）并决定是否计入熔断。
+
+        取数数学/数据逻辑（与改造前完全一致，未做任何调整）：
+        - trade_date YYYYMMDD → DatetimeIndex（正序）
+        - 列名小写：open/high/low/close/volume/amount（vol→volume 改名）
+        - tz 本地化为 Asia/Shanghai
+        - 成交额单位 千元 → 元（×1000）
+        - 过滤到 [start, end] 请求范围
+        """
+        # Tushare 日线接口：ts_code 格式如 600000.SH
+        # trade_date 格式：YYYYMMDD 字符串
+        df = self._pro.daily(
+            ts_code=symbol,
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d")
+        )
 
         if df is None or df.empty:
             logger.warning(f"Tushare 日线数据为空 [{symbol}]，可能停牌或退市")
@@ -760,11 +850,6 @@ class TushareDataFetcher(DataFetcher):
         mask = (df.index >= pd.Timestamp(start, tz="Asia/Shanghai")) & \
                (df.index <= pd.Timestamp(end, tz="Asia/Shanghai"))
         df = df.loc[mask]
-
-        self._request_count += 1
-
-        # ── 写入本地 Parquet 缓存 ──
-        _write_parquet_cache("tushare", cache_id, start, end, df)
 
         return df
 
@@ -830,6 +915,10 @@ class TushareDataFetcher(DataFetcher):
         if cached is not None:
             return cached
 
+        # 【限流】外层只取一次令牌 —— daily_basic / fina_indicator 两个 helper
+        # 不再各自 acquire，避免一次请求被双重计数（brief 明确禁止双重计数）。
+        tushare_rate_limiter.acquire(1.0)
+
         api_name, field_name = self.FACTOR_FIELD_MAP[factor_name]
 
         # ── 分支 1：日频估值因子（daily_basic）──
@@ -885,6 +974,8 @@ class TushareDataFetcher(DataFetcher):
                 logger.error(f"Tushare 积分不足：{symbol}.{factor_name} - {error_msg}")
             elif "频繁" in error_msg or "limit" in error_msg.lower():
                 logger.error(f"Tushare API 限频：{symbol}.{factor_name}")
+                # 限频属基础设施异常 → 计熔断（限流由外层 fetch_factor_data 统一取令牌，勿双重计数）
+                tushare_breaker.record_failure()
             else:
                 logger.error(f"Tushare daily_basic 拉取失败 [{symbol}.{factor_name}]：{error_msg}")
             return pd.DataFrame(
@@ -960,6 +1051,8 @@ class TushareDataFetcher(DataFetcher):
                 logger.error(f"Tushare 积分不足：{symbol}.{factor_name} - {error_msg}")
             elif "频繁" in error_msg or "limit" in error_msg.lower():
                 logger.error(f"Tushare API 限频：{symbol}.{factor_name}")
+                # 限频属基础设施异常 → 计熔断（限流由外层 fetch_factor_data 统一取令牌，勿双重计数）
+                tushare_breaker.record_failure()
             else:
                 logger.error(f"Tushare fina_indicator 拉取失败 [{symbol}.{factor_name}]：{error_msg}")
             return pd.DataFrame(
