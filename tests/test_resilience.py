@@ -112,3 +112,15 @@ def test_rate_limiter_decorator_throttles():
     # 容量 2 已用完，第 3 次会阻塞至补充（refill 极快，应很快返回）
     hit()
     assert len(called) == 3
+
+
+def test_breaker_half_open_failure_reopens():
+    # 半开试探失败 → 重回 OPEN（熔断器最关键的"自愈回退"路径）
+    cb = CircuitBreaker(name="t", failure_threshold=1, recovery_timeout=5.0)
+    cb.record_failure()                      # CLOSED→OPEN
+    assert cb.state == CircuitState.OPEN
+    cb._opened_at = time.monotonic() - 6.0   # 冷却到期→HALF_OPEN
+    assert cb.allow_request() is True        # 占半开名额
+    cb.record_failure()                      # 半开试探失败→重回 OPEN
+    assert cb.state == CircuitState.OPEN
+    assert cb.allow_request() is False       # OPEN 拒绝

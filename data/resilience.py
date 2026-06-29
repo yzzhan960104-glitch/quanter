@@ -170,7 +170,7 @@ class CircuitBreaker:
                     raise CircuitOpenError(f"熔断器 [{self.name}] 开启，拒绝请求")
                 try:
                     result = await func(*args, **kwargs)
-                except self.expected_exception as exc:
+                except self.expected_exception:
                     self.record_failure()
                     raise
                 self.record_success()
@@ -184,7 +184,7 @@ class CircuitBreaker:
                 raise CircuitOpenError(f"熔断器 [{self.name}] 开启，拒绝请求")
             try:
                 result = func(*args, **kwargs)
-            except self.expected_exception as exc:
+            except self.expected_exception:
                 self.record_failure()
                 raise
             self.record_success()
