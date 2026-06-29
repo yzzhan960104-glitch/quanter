@@ -5,13 +5,22 @@
  * 1. 创建 Vue 应用实例
  * 2. 注册 Element Plus 组件库（全量注册，简化开发）
  * 3. 挂载路由
- * 4. 挂载到 DOM
+ * 4. 全局强制暗黑终端模式 + 注册 ECharts 暗色主题
+ * 5. 挂载到 DOM
  */
 import { createApp } from 'vue'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
+// Element Plus 暗黑模式 CSS 变量覆盖（html.dark 生效）
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import App from './App.vue'
 import router from './router'
+import { initTerminalDarkTheme } from './theme/echarts-terminal-dark'
+
+// 全局强制暗黑终端模式：在 <html> 上挂 .dark 类，触发 EP dark css-vars
+document.documentElement.classList.add('dark')
+// 注册 ECharts 暗色主题（ProChart/NavChart 用 theme="terminal-dark"）
+initTerminalDarkTheme()
 
 const app = createApp(App)
 
