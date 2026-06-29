@@ -1,5 +1,16 @@
-"""持仓对账（Reconciliation）纯函数单测。"""
-from trading.execution_gateway import reconcile, ReconciliationResult
+"""持仓对账（Reconciliation）纯函数单测 + 执行网关抽象/Mock 异步单测。"""
+import asyncio
+
+import pytest
+
+from trading.execution_gateway import (
+    BaseExecutionGateway,
+    MockExecutionGateway,
+    OrderRequest,
+    reconcile,
+    ReconciliationResult,
+)
+from trading.order_state import OrderState
 
 
 def test_reconcile_all_match():
@@ -39,3 +50,40 @@ def test_reconcile_tolerance_boundary():
 def test_reconcile_max_abs_drift_is_global_max():
     r = reconcile({"A": 100, "B": 200}, {"A": 80, "B": 270})
     assert r.max_abs_drift == 70.0           # max(20, 70)
+
+
+# ---------------------------------------------------------------------------
+# Task 5：BaseExecutionGateway ABC + MockExecutionGateway 异步用例
+# 用 asyncio.run() 包装，避免引入 pytest-asyncio 新依赖（CLAUDE.md 极简原则）。
+# ---------------------------------------------------------------------------
+
+
+def test_mock_gateway_submit_then_reconcile_clean():
+    async def run():
+        gw = MockExecutionGateway()
+        await gw.connect()
+        # 本地下一单 100 股，Mock 券商同步成交
+        res = await gw.submit_order(OrderRequest(symbol="000001.SZ", qty=100, side="buy"))
+        assert res.state == OrderState.FILLED
+        # 对账：本地记录与券商一致 → is_ok
+        result = await gw.sync_positions({"000001.SZ": 100})
+        assert result.is_ok is True
+
+    asyncio.run(run())
+
+
+def test_mock_gateway_reconcile_detects_drift():
+    async def run():
+        gw = MockExecutionGateway(initial_broker_positions={"000001.SZ": 90})
+        await gw.connect()
+        # 本地认为是 100，但券商实际 90（注入漂移）→ drifted
+        result = await gw.sync_positions({"000001.SZ": 100})
+        assert result.is_ok is False
+        assert len(result.drifted) == 1
+
+    asyncio.run(run())
+
+
+def test_base_gateway_is_abstract():
+    with pytest.raises(TypeError):
+        BaseExecutionGateway()  # type: ignore[abstract]
