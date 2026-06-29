@@ -171,16 +171,20 @@ def _extract_ohlcv(price_data: dict[str, pd.DataFrame]) -> list[OhlcvPoint]:
     lows = df["low"].tolist()
     closes = df["close"].tolist()
     volumes = df["volume"].tolist()
+    # ── 数值透传用 _safe_float（防 NaN/Inf 透传致非法 JSON）──
+    # fetcher 通常干净，但停牌/缺失列场景下 OHLCV 仍可能出现 NaN；
+    # JSON 规范不允许 NaN/Infinity，此处与 nav_series / metrics 路径保持一致的
+    # 安全语义（NaN/Inf → 0.0），避免前端 JSON.parse 崩。
     points: list[OhlcvPoint] = []
     for i, d in enumerate(dates):
         points.append(
             OhlcvPoint(
                 date=d,
-                open=float(opens[i]),
-                high=float(highs[i]),
-                low=float(lows[i]),
-                close=float(closes[i]),
-                volume=float(volumes[i]),
+                open=_safe_float(opens[i]),
+                high=_safe_float(highs[i]),
+                low=_safe_float(lows[i]),
+                close=_safe_float(closes[i]),
+                volume=_safe_float(volumes[i]),
             )
         )
     return points
@@ -207,14 +211,19 @@ def _extract_positions(daily_records: pd.DataFrame, symbol: str) -> list[Positio
     if daily_records is None or daily_records.empty:
         return []
     last = daily_records.iloc[-1]
-    # position 可能缺失（防御历史结构），统一 .get 兜底为 0
-    qty = float(last.get("position", 0) or 0)
-    # 优先用引擎已算好的 position_value；缺失或为 None 时用 position*price 兜底
+    # ── 数值透传用 _safe_float（防 NaN/Inf 透传致非法 JSON）──
+    # 引擎在极端行情 / 除零场景下可能写出 NaN/Inf 的 position / position_value，
+    # 裸 float() 会原样透传进 PositionRow → FastAPI 产出非法 JSON → 前端 JSON.parse 崩。
+    # 与 nav_series / metrics 路径保持一致的安全语义（NaN/Inf → 0.0）。
+    # position 可能缺失（防御历史结构），统一 .get 兜底为 0。
+    qty = _safe_float(last.get("position", 0) or 0)
+    # 优先用引擎已算好的 position_value；缺失或为 None 时用 position*price 兜底。
+    # 两路径均先对各操作数 _safe_float，再运算，确保 NaN/Inf 不污染最终 market_value。
     if "position_value" in daily_records.columns and last.get("position_value") is not None:
-        mv = float(last["position_value"])
+        mv = _safe_float(last["position_value"])
     else:
-        price = float(last.get("price", 0) or 0)
-        mv = qty * price
+        price = _safe_float(last.get("price", 0) or 0)
+        mv = _safe_float(qty * price)
     # 清仓 / 从未建仓 → 空列表（前端 PositionsTable 显示空态）
     if qty == 0 and mv == 0:
         return []

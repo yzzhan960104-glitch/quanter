@@ -87,3 +87,53 @@ def test_extract_positions_empty_when_flat():
         index=pd.DatetimeIndex(["2024-01-03"], tz="Asia/Shanghai"),
     )
     assert _extract_positions(daily, symbol="X") == []
+
+
+def test_extract_positions_safe_when_position_value_nan_or_inf():
+    """position_value 为 NaN/Inf（极端行情 / 除零场景）时透传安全值（0.0），防非法 JSON。
+
+    覆盖本分支新加的 NaN/Inf 安全化：JSON 规范不允许 NaN/Infinity，
+    若 _safe_float 防护失效，NaN 会直接透传进 PositionRow → FastAPI 产出非法 JSON →
+    前端 JSON.parse 崩。此处锁定 NaN/Inf → 0.0 的兜底语义。
+    """
+    # 末行 position_value 为 NaN（position 非零，走 position_value 优先分支）
+    daily_nan = pd.DataFrame(
+        {
+            "nav": [1.0e6, 1.01e6],
+            "position": [0, 100],
+            "position_value": [0.0, float("nan")],
+            "price": [10.2, 10.2],
+        },
+        index=pd.DatetimeIndex(["2024-01-02", "2024-01-03"], tz="Asia/Shanghai"),
+    )
+    out_nan = _extract_positions(daily_nan, symbol="X")
+    # position=100 非零，故仍产出 1 行快照
+    assert len(out_nan) == 1
+    assert out_nan[0].market_value == 0.0  # NaN position_value → 安全值 0.0
+    assert out_nan[0].qty == 100.0  # qty 同样走 _safe_float，正常有限值恒等
+
+    # 末行 position_value 为 Inf（同分支）
+    daily_inf = pd.DataFrame(
+        {
+            "position": [100],
+            "position_value": [float("inf")],
+            "price": [10.2],
+        },
+        index=pd.DatetimeIndex(["2024-01-03"], tz="Asia/Shanghai"),
+    )
+    out_inf = _extract_positions(daily_inf, symbol="X")
+    assert len(out_inf) == 1
+    assert out_inf[0].market_value == 0.0  # Inf position_value → 安全值 0.0
+
+    # 兜底分支（position_value 列缺失）：price 为 NaN 时 qty*price 也应安全化
+    daily_fallback_nan = pd.DataFrame(
+        {
+            "position": [100],
+            "price": [float("nan")],
+        },
+        index=pd.DatetimeIndex(["2024-01-03"], tz="Asia/Shanghai"),
+    )
+    out_fb = _extract_positions(daily_fallback_nan, symbol="X")
+    assert len(out_fb) == 1
+    assert out_fb[0].market_value == 0.0  # qty*price 兜底路径 NaN → 安全值 0.0
+    assert out_fb[0].qty == 100.0
