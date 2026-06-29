@@ -494,10 +494,19 @@ class FredDataFetcher(DataFetcher):
         │ 季频 (q) │ 滞后 45 个自然日 — 模拟季后 1.5 个月发布    │
         └──────────┴────────────────────────────────────────────┘
         """
-        # 【限流】取令牌（阻塞至有令牌或超时）—— 防 FRED 429 限频
+        # ── 本地 Parquet 缓存查询（必须最先做）──
+        # FRED 数据更新频率低（日/月/季），缓存命中率极高。
+        # 同一 (indicator, start, end) 的第二次请求直接毫秒级读取。
+        # 【关键】限流 acquire 与熔断守卫必须放在缓存命中检查之后：
+        # 否则缓存命中也会白白扣令牌，导致高缓存命中率的并发回测被无谓限流。
+        cached = _read_parquet_cache("fred", indicator, start, end)
+        if cached is not None:
+            return cached
+
+        # 【限流】仅当缓存未命中、即将调真实 API 时才取令牌 —— 防 FRED 429 限频
         fred_rate_limiter.acquire(1.0)
-        # 【熔断前置】OPEN 则快速返回空 DF（保留既有"不抛"契约）
-        # 原因：FRED 限频冷却约 60s，OPEN 期间继续打只会加重视英国防封禁
+        # 【熔断守卫】OPEN 则快速返回空 DF（保留既有"不抛"契约）
+        # 原因：FRED 限频冷却约 60s，OPEN 期间继续打只会加重 FRED 防封禁
         if not fred_breaker.allow_request():
             logger.warning(f"FRED 熔断开启，跳过宏观指标请求：{indicator}")
             return pd.DataFrame(
@@ -505,18 +514,14 @@ class FredDataFetcher(DataFetcher):
                 index=pd.DatetimeIndex([], tz="Asia/Shanghai")
             )
 
-        # ── 本地 Parquet 缓存查询 ──
-        # FRED 数据更新频率低（日/月/季），缓存命中率极高
-        # 同一 (indicator, start, end) 的第二次请求直接毫秒级读取
-        cached = _read_parquet_cache("fred", indicator, start, end)
-        if cached is not None:
-            return cached
-
         try:
             # 拉取原始序列（fredapi 返回 pd.Series）—— 抽到独立方法便于异常分类
             series = self._fetch_series_from_api(indicator, start, end)
-            # 真正触达外部 API 成功 → 计一次成功，复位熔断计数
-            fred_breaker.record_success()
+            # 仅当真实 API 返回非空序列时才计一次成功 → 复位熔断计数。
+            # 空数据（指标无数据）属于中性事件：既不算成功也不算失败，
+            # 否则"429 与空数据交替"会不断复位计数，熔断永远不跳闸。
+            if series is not None and not series.empty:
+                fred_breaker.record_success()
         except Exception as e:
             # 捕获网络超时、HTTP 429 限频、无效指标代码等所有异常
             error_msg = str(e)
@@ -733,10 +738,18 @@ class TushareDataFetcher(DataFetcher):
             Tushare 日线接口返回 trade_date 列（格式 YYYYMMDD），
             需要手动转换为 DatetimeIndex 并添加时区。
         """
-        # 【限流】取令牌（阻塞至有令牌或超时）—— 防 Tushare 限频封禁
+        # ── 本地 Parquet 缓存查询（必须最先做）──
+        # 【关键】限流 acquire 与熔断守卫必须放在缓存命中检查之后：
+        # 否则缓存命中也会白白扣令牌，导致高缓存命中率的并发回测被无谓限流。
+        cache_id = f"ohlcv_{symbol}"
+        cached = _read_parquet_cache("tushare", cache_id, start, end)
+        if cached is not None:
+            return cached
+
+        # 【限流】仅当缓存未命中、即将调真实 API 时才取令牌 —— 防 Tushare 限频封禁
         # Tushare 限频触发后会封禁 IP 一段时间，令牌桶在源头上削峰
         tushare_rate_limiter.acquire(1.0)
-        # 【熔断前置】OPEN 则快速返回空 DF（保留既有"不抛"契约）
+        # 【熔断守卫】OPEN 则快速返回空 DF（保留既有"不抛"契约）
         # 原因：Tushare 限频冷却期内继续打只会延长封禁，OPEN 即停打
         if not tushare_breaker.allow_request():
             logger.warning(f"Tushare 熔断开启，跳过日线请求：{symbol}")
@@ -744,12 +757,6 @@ class TushareDataFetcher(DataFetcher):
                 columns=["open", "high", "low", "close", "volume", "amount"],
                 index=pd.DatetimeIndex([], tz="Asia/Shanghai")
             )
-
-        # ── 本地 Parquet 缓存查询 ──
-        cache_id = f"ohlcv_{symbol}"
-        cached = _read_parquet_cache("tushare", cache_id, start, end)
-        if cached is not None:
-            return cached
 
         if freq != "1d":
             logger.warning(
@@ -760,8 +767,12 @@ class TushareDataFetcher(DataFetcher):
         try:
             # 真正触达 Tushare API 的逻辑抽到 _fetch_ohlcv_from_api，便于异常分类
             df = self._fetch_ohlcv_from_api(symbol, start, end)
-            # 成功触达外部接口 → 计一次成功，复位熔断计数
-            tushare_breaker.record_success()
+            # 仅当真实 API 返回非空数据时才计一次成功 → 复位熔断计数。
+            # 空数据（停牌/退市/无数据）属于中性事件：既不算成功也不算失败，
+            # 否则"429 与空数据交替"会不断复位计数，熔断永远不跳闸。
+            # （DataFetchError 契约：无数据不计熔断 —— 中性语义最贴合）
+            if not df.empty:
+                tushare_breaker.record_success()
         except Exception as e:
             error_msg = str(e)
             # 基础设施类（限频/超时/连接）异常 → 计入熔断
