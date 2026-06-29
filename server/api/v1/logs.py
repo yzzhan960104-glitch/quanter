@@ -70,8 +70,18 @@ class LogStreamHub:
             try:
                 loop.call_soon_threadsafe(_safe_put, q, record)
             except RuntimeError:
-                # 订阅者事件循环已关闭：忽略，下次 publish 时其仍在 _subs（下次清理）
-                pass
+                # 该订阅者事件循环已关闭（SSE 客户端断开 / 连接半断）→ 立即清理，
+                # 否则死订阅者永久滞留 _subs：此后每条日志都会对其触发一次无效的
+                # call_soon_threadsafe + RuntimeError，且 _subs 单调增长，长期运行
+                # 必然内存与开销泄漏。
+                # 跨线程纪律：call_soon_threadsafe 已在锁外调用，此处仅持锁操作
+                # 纯 Python 对象（重建 set）；与 unsubscribe 一致用 `is` 定位、
+                # 重建 set 规避“迭代中修改”问题。注意按 q 比对（同一 loop 上可能
+                # 有多个队列，但每个 (q, loop) 唯一，按 q 移除即可精准剔除该死订阅者）。
+                with self._lock:
+                    self._subs = {
+                        (sq, sl) for (sq, sl) in self._subs if sq is not q
+                    }
 
 
 def _safe_put(q: asyncio.Queue, rec: dict) -> None:
