@@ -65,10 +65,13 @@ const option = computed(() => {
   // 净值按 K 线日期取值，缺失日给 null（折线在该点断开，不做插值）
   const navLine = props.ohlcv.map((o) => navByDate.value.get(o.date) ?? null)
 
+  // K 线交易日集合：用于过滤买卖点，保证 markPoint 的 coord 日期一定能被 category x 轴定位。
+  // 不变量：买卖点日期须为 K 线交易日，否则 category 轴无法定位（markPoint 渲染失败/错位）。
+  const datesSet = new Set(dates)
   // 买卖点 markPoint：coord=[日期, 价格]；B 绿（买入）/ S 红（卖出）
-  // 只接受方向明确的 buy/sell 记录，过滤掉任何异常 direction 字符串
+  // 只接受方向明确的 buy/sell 记录，且日期必须落在 K 线类目集内，过滤掉任何异常项
   const markPoints = props.trades
-    .filter((t) => t.direction === 'buy' || t.direction === 'sell')
+    .filter((t) => (t.direction === 'buy' || t.direction === 'sell') && datesSet.has(t.date))
     .map((t) => ({
       // coord 第一个元素为 category x 轴的类目值（日期字符串），第二为 y 值（价格）
       coord: [t.date, t.price],
@@ -97,7 +100,10 @@ const option = computed(() => {
     ],
     yAxis: [
       { scale: true, splitArea: { show: false } },             // 价格轴（左，蜡烛）scale:true 不含零轴
-      { scale: true, splitLine: { show: false } },             // 净值轴（右，与蜡烛共用 gridIndex 0）
+      // 净值轴：显式 position:'right' 落在主图右侧，否则 ECharts 默认把多条 yAxis 堆在
+      // 同一 grid 左侧，价格轴与净值轴会压叠在一起无法分辨。
+      // gridIndex:0 显式绑定主图 grid（蜡烛所在），splitLine 关闭避免与价格轴网格交叉污染。
+      { scale: true, position: 'right', gridIndex: 0, splitLine: { show: false } },
       { scale: true, gridIndex: 1, splitNumber: 2 },           // 成交量轴（副图 gridIndex 1）
     ],
     // dataZoom 联动：inside（鼠标滚轮/拖拽）+ slider（底部缩略条），
