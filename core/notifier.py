@@ -91,6 +91,10 @@ class NotificationManager:
 
     def __init__(self) -> None:
         self._channels: list[NotificationChannel] = []
+        # 装配标志：build_default_manager 完成装配后置 True，保证幂等。
+        # 防止多次调用（lifespan reload / 测试+实盘）把同一通道重复 append，
+        # 否则一条预警会被同通道投递 N 遍。
+        self._configured: bool = False
 
     @classmethod
     def get_default(cls) -> "NotificationManager":
@@ -105,8 +109,10 @@ class NotificationManager:
         self._channels.append(channel)
 
     def clear_channels(self) -> None:
-        """测试用：清空通道，避免跨用例污染单例。"""
+        """测试用：清空通道，避免跨用例污染单例。同时复位装配标志，
+        否则后续 build_default_manager 会因幂等短路而漏装通道。"""
         self._channels.clear()
+        self._configured = False
 
     async def notify_risk_event(self, msg: str, level: RiskLevel = "INFO") -> list:
         """并发推送所有通道；单通道异常被捕获记日志，不向外抛。"""
@@ -131,6 +137,10 @@ def build_default_manager() -> NotificationManager:
     环境变量：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / WECOM_WEBHOOK
     """
     mgr = NotificationManager.get_default()
+    # 幂等守卫：已装配过则直接返回，避免单例通道被重复 append（重复告警）。
+    # 测试可通过 clear_channels() 复位本标志以重新装配。
+    if mgr._configured:
+        return mgr
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     tg_chat = os.getenv("TELEGRAM_CHAT_ID", "")
     if tg_token and tg_chat:
@@ -138,4 +148,6 @@ def build_default_manager() -> NotificationManager:
     wecom = os.getenv("WECOM_WEBHOOK", "")
     if wecom:
         mgr.add_channel(WeComChannel(wecom))
+    # 装配完成标记，使后续调用幂等。
+    mgr._configured = True
     return mgr

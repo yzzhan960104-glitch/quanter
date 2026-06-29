@@ -1,7 +1,13 @@
 """通知管理器：多通道并发 + 单通道软降级 + 级别前缀 + 单例。"""
 import asyncio
 
-from core.notifier import NotificationManager, NotificationChannel
+from core.notifier import (
+    NotificationManager,
+    NotificationChannel,
+    TelegramChannel,
+    WeComChannel,
+    build_default_manager,
+)
 
 
 class _FakeChannel(NotificationChannel):
@@ -48,3 +54,53 @@ def test_singleton():
     a = NotificationManager.get_default()
     b = NotificationManager.get_default()
     assert a is b
+
+
+def test_build_default_manager_is_idempotent(monkeypatch):
+    """build_default_manager 多次调用必须幂等，否则同一通道被重复 append
+    会导致一条预警被投递 N 遍（回归守护）。"""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "BOT_TOKEN")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "CHAT_ID")
+    mgr = NotificationManager.get_default()
+    mgr.clear_channels()  # 复位单例，避免被其它用例污染
+    build_default_manager()
+    build_default_manager()  # 二次装配：必须短路、不重复
+    build_default_manager()  # 三次：再确认
+    # 直接数内部通道数（TelegramChannel 实例），不应重复堆积
+    tg = [c for c in mgr._channels if isinstance(c, TelegramChannel)]
+    assert len(tg) == 1
+
+
+def test_telegram_channel_payload(monkeypatch):
+    """守护真实 URL 与 JSON payload 拼装（脱网，monkeypatch _http_post）。"""
+    captured = {}
+
+    async def fake_post(url, payload):
+        captured["url"] = url
+        captured["payload"] = payload
+
+    channel = TelegramChannel("BOT_TOKEN", "CHAT_ID")
+    # 注入假投递函数，避免真实触网
+    channel._http_post = fake_post
+    asyncio.run(channel.send("hi"))
+    assert captured["url"] == "https://api.telegram.org/botBOT_TOKEN/sendMessage"
+    assert captured["payload"] == {
+        "chat_id": "CHAT_ID",
+        "text": "hi",
+        "parse_mode": "Markdown",
+    }
+
+
+def test_wecom_channel_payload(monkeypatch):
+    """守护企业微信 webhook URL 与 msgtype/text payload（脱网）。"""
+    captured = {}
+
+    async def fake_post(url, payload):
+        captured["url"] = url
+        captured["payload"] = payload
+
+    channel = WeComChannel("https://qyapi.example.com/webhook")
+    channel._http_post = fake_post
+    asyncio.run(channel.send("hi"))
+    assert captured["url"] == "https://qyapi.example.com/webhook"
+    assert captured["payload"] == {"msgtype": "text", "text": {"content": "hi"}}
