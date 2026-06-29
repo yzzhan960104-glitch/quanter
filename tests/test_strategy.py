@@ -632,7 +632,9 @@ class TestFinalFix:
         }
 
         # 不应抛 KeyError，返回合法 BacktestResponse
-        resp = _serialize_backtest_result(sparse_result)
+        # 注：Task 8 起 _serialize_backtest_result 增 price_data 参数（透传 OHLCV/positions）；
+        # 此处空 daily_records 场景传空 dict，ohlcv/positions 退化为 []。
+        resp = _serialize_backtest_result(sparse_result, {})
         assert resp is not None
         # metrics 各缺键字段 0 兜底
         assert resp.metrics.calmar_ratio == 0.0

@@ -36,6 +36,8 @@ from server.schemas.backtest import (
     NavPoint,
     DrawdownPoint,
     TradeRecord,
+    OhlcvPoint,
+    PositionRow,
 )
 from server.core.config import DATA_DEFAULTS
 
@@ -114,7 +116,9 @@ def run_single_backtest(req: BacktestRequest) -> BacktestResponse:
     result = engine.run_portfolio(price_data=price_data, signals=signals)
 
     # ============ 步骤 5：序列化 ============
-    return _serialize_backtest_result(result)
+    # 透传 price_data：序列化器需从中抽取 OHLCV 与持仓 symbol（引擎 daily_records
+    # 不含开高低收量，必须由 price_data 旁路传入）。
+    return _serialize_backtest_result(result, price_data)
 
 
 def _build_cost_model(cost_params):
@@ -135,7 +139,91 @@ def _build_cost_model(cost_params):
     )
 
 
-def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
+def _extract_ohlcv(price_data: dict[str, pd.DataFrame]) -> list[OhlcvPoint]:
+    """
+    从 price_data 透传 OHLCV（单资产：取唯一 symbol 的 df）。
+
+    ── 设计说明 ──
+    - 列名沿用 data.fetcher 的小写英文（open/high/low/close/volume），不做任何
+      数学变换，纯序列化。
+    - 日期按 DataFrame 索引（Asia/Shanghai DatetimeIndex）strftime 为 ISO 字符串，
+      与 nav_series / drawdown_series 的日期格式对齐。
+    - 空数据短路：price_data 为空 / df 为 None / df.empty 时直接返回 []，防范
+      后续 iloc 取列时 KeyError 或 IndexError。
+
+    参数：
+        price_data: {symbol: ohlcv_df}，由 run_single_backtest 第 84 行构造。
+
+    返回：
+        OhlcvPoint 列表（按 df 行序，保留全部交易日 K 线）。
+    """
+    if not price_data:
+        return []
+    # 单资产：取字典内唯一（或第一个）symbol 的 df
+    df = next(iter(price_data.values()))
+    if df is None or df.empty:
+        return []
+    # 向量化日期格式化（替代逐行 strftime）
+    dates = df.index.strftime("%Y-%m-%d").tolist()
+    # 列式提取，避免 iterrows 性能灾难
+    opens = df["open"].tolist()
+    highs = df["high"].tolist()
+    lows = df["low"].tolist()
+    closes = df["close"].tolist()
+    volumes = df["volume"].tolist()
+    points: list[OhlcvPoint] = []
+    for i, d in enumerate(dates):
+        points.append(
+            OhlcvPoint(
+                date=d,
+                open=float(opens[i]),
+                high=float(highs[i]),
+                low=float(lows[i]),
+                close=float(closes[i]),
+                volume=float(volumes[i]),
+            )
+        )
+    return points
+
+
+def _extract_positions(daily_records: pd.DataFrame, symbol: str) -> list[PositionRow]:
+    """
+    取回测末态持仓快照（单资产：用末行 position / position_value）。
+
+    ── 设计说明 ──
+    - 仅取末行：持仓快照语义是"回测结束时的状态"，全量逐日持仓留给后续组合迭代。
+    - market_value 优先取引擎已算好的 position_value 列；缺失（历史 daily 结构）
+      时用 position * price 兜底，保证字段总有值。
+    - 清仓短路：末态 qty=0 且 market_value=0 视为未持仓，返回 []（前端空表）。
+    - 空数据短路：daily_records 为空时返回 []，防范 iloc[-1] IndexError。
+
+    参数：
+        daily_records: 引擎产出的逐日记录 DataFrame（含 position / position_value / price 列）。
+        symbol: 单资产标的代码，用于 PositionRow.symbol 透传。
+
+    返回：
+        长度 0 或 1 的 PositionRow 列表（末态持仓快照）。
+    """
+    if daily_records is None or daily_records.empty:
+        return []
+    last = daily_records.iloc[-1]
+    # position 可能缺失（防御历史结构），统一 .get 兜底为 0
+    qty = float(last.get("position", 0) or 0)
+    # 优先用引擎已算好的 position_value；缺失或为 None 时用 position*price 兜底
+    if "position_value" in daily_records.columns and last.get("position_value") is not None:
+        mv = float(last["position_value"])
+    else:
+        price = float(last.get("price", 0) or 0)
+        mv = qty * price
+    # 清仓 / 从未建仓 → 空列表（前端 PositionsTable 显示空态）
+    if qty == 0 and mv == 0:
+        return []
+    return [PositionRow(symbol=symbol, qty=qty, market_value=mv)]
+
+
+def _serialize_backtest_result(
+    result: Dict[str, Any], price_data: dict[str, pd.DataFrame]
+) -> BacktestResponse:
     """
     将引擎结果序列化为 BacktestResponse
 
@@ -149,6 +237,8 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
 
     参数：
         result: 引擎返回的原始结果字典
+        price_data: {symbol: ohlcv_df}，由 run_single_backtest 第 84 行构造；
+            用于透传 K 线（OHLCV）与推断持仓 symbol。
 
     返回：
         BacktestResponse（JSON 安全）
@@ -162,6 +252,13 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
     # 而非 500。
     daily_df: pd.DataFrame = result.get("daily_records", pd.DataFrame())
     trades_df: pd.DataFrame = result.get("trades", pd.DataFrame())
+
+    # ── OHLCV / positions 透传（纯序列化，零数学逻辑）──
+    # symbol：单资产取 price_data 唯一键；空字典时退化为 ""（PositionRow.symbol 兜底）。
+    # ohlcv / positions 由两个 helper 统一处理空数据短路，此处不重复判空。
+    symbol = next(iter(price_data), "")
+    ohlcv = _extract_ohlcv(price_data)
+    positions = _extract_positions(daily_df, symbol)
 
     # 空 daily_records 短路：早返回路径的 DataFrame 无 nav/return/cumulative_return 列，
     # 后续列选择会 KeyError。此处直接返回全 0 + 空序列响应（与 metrics 各 .get 兜底一致）。
@@ -184,6 +281,8 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
             nav_series=[],
             drawdown_series=[],
             trades=[],
+            ohlcv=ohlcv,
+            positions=positions,
         )
 
     # ============ 提取净值时序（精简 4 字段） ============
@@ -289,6 +388,8 @@ def _serialize_backtest_result(result: Dict[str, Any]) -> BacktestResponse:
         nav_series=nav_series,
         drawdown_series=drawdown_series,
         trades=trades,
+        ohlcv=ohlcv,
+        positions=positions,
     )
 
 
