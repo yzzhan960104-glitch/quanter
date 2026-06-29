@@ -16,6 +16,7 @@ FastAPI 应用入口
 - CORS 配置从 core/config.py 读取，不硬编码
 - 路由版本化 /api/v1/，预留后续版本空间
 """
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -24,6 +25,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from server.core.config import CORS_ORIGINS
 from server.api.v1.backtest import router as backtest_router
 from server.api.v1.portfolio import router as portfolio_router
+from server.api.v1.logs import (
+    RingBufferLogHandler,
+    log_stream_hub,
+    router as logs_router,
+)
 from strategies.loader import StrategyLoader
 from server.api.v1.strategies import router as strategies_router
 
@@ -40,7 +46,19 @@ async def lifespan(app: FastAPI):
     loader = StrategyLoader()
     loader.scan()
     app.state.strategy_loader = loader
+
+    # 启动：挂载 SSE 日志 handler 到 root logger
+    # Why root logger：回测业务线程的全部日志（含第三方库）都需被捕获，只有 root
+    # 能拦截子 logger 的向上传播记录，确保 SSE 流完整。
+    log_handler = RingBufferLogHandler(log_stream_hub)
+    log_handler.setFormatter(logging.Formatter("%(name)s | %(message)s"))
+    app.state.log_handler = log_handler
+    logging.getLogger().addHandler(log_handler)
+
     yield
+
+    # 销毁：卸载日志 handler，避免重复挂载/引用泄漏（reload 或测试复用进程时关键）
+    logging.getLogger().removeHandler(app.state.log_handler)
     # 销毁：模块④在此追加 scheduler.shutdown()
 
 
@@ -70,6 +88,7 @@ app.add_middleware(
 app.include_router(backtest_router, prefix="/api/v1")
 app.include_router(portfolio_router, prefix="/api/v1")
 app.include_router(strategies_router, prefix="/api/v1")
+app.include_router(logs_router, prefix="/api/v1")
 
 
 # ============ 健康检查端点 ============
