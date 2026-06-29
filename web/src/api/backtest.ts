@@ -91,12 +91,42 @@ export interface TradeRecord {
   cost: number
 }
 
+/**
+ * OHLCV 行情节点（K 线）
+ *
+ * 用于 ProChart 蜡烛图渲染；后端在单资产回测响应中一并返回完整行情序列，
+ * 避免前端再发一次行情请求，降低耦合与首屏延迟。
+ */
+export interface OhlcvPoint {
+  date: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+/**
+ * 末态持仓快照行
+ *
+ * 仅展示回测结束时刻的持仓（symbol/数量/市值），不包含建仓平仓时序，
+ * 时序交易请用 trades。market_value 为按末态收盘价计算的市值。
+ */
+export interface PositionRow {
+  symbol: string
+  qty: number
+  market_value: number
+}
+
 /** 单资产回测响应 */
 export interface SingleBacktestResponse {
   metrics: Metrics
   nav_series: NavPoint[]
   drawdown_series: DrawdownPoint[]
   trades: TradeRecord[]
+  // 行情序列（ProChart 蜡烛图）+ 末态持仓快照（PositionsTable）—— 后端总会返回，故设为必填
+  ohlcv: OhlcvPoint[]
+  positions: PositionRow[]
 }
 
 /** 权重快照节点 */
