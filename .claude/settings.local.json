@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "bash", "Bash", "Write", "Edit",
       "Bash(python *)",
       "Bash(pip install *)",
       "Bash(timeout 60 tail -f \"C:\\\\Users\\\\yzzhan\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-yzzhan-Desktop-quanter\\\\0c3b678d-5b9a-4ae8-bee5-1e5658772b24\\\\tasks\\\\bnk4gtvea.output\")",
@@ -14,7 +15,9 @@
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(git commit -m 'feat\\(factors\\): 新增 MyTT EMA/MA 纯向量化基础函数 *)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "Bash(bash *)",
+      "Bash(git commit *)"
     ]
   }
 }
