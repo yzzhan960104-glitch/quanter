@@ -1,4 +1,4 @@
-"""熔断器单测（Task 1 中间态：仅 CircuitBreaker）。"""
+"""熔断器/限流器单测。"""
 import time
 
 import pytest
@@ -8,6 +8,7 @@ from data.resilience import (
     CircuitOpenError,
     CircuitState,
     DataFetchError,
+    RateLimiter,
 )
 
 
@@ -73,3 +74,41 @@ def test_breaker_decorator_async_is_coroutine():
     assert asyncio.iscoroutinefunction(ok)
     assert asyncio.run(ok()) == 42
     assert cb.state == CircuitState.CLOSED
+
+
+def test_rate_limiter_burst_then_refill():
+    # 桶容量 3、每秒补 1 个令牌
+    rl = RateLimiter(name="t", capacity=3, refill_rate=1.0)
+    assert rl.try_acquire(1.0) is True
+    assert rl.try_acquire(1.0) is True
+    assert rl.try_acquire(1.0) is True   # 突发放完 3 个
+    assert rl.try_acquire(1.0) is False  # 桶空
+
+
+def test_rate_limiter_acquire_blocks_until_token(monkeypatch):
+    rl = RateLimiter(name="t", capacity=1, refill_rate=100.0)  # 100/s 很快补
+    assert rl.acquire(1.0, timeout=1.0) is True
+    # 令牌刚耗尽，但 refill 极快，acquire 应在很短时间内拿到
+    assert rl.acquire(1.0, timeout=2.0) is True
+
+
+def test_rate_limiter_acquire_timeout_returns_false():
+    rl = RateLimiter(name="t", capacity=1, refill_rate=0.0 + 1e-6)  # 几乎不补
+    rl.try_acquire(1.0)
+    # 桶空且几乎不补充 → 超时返回 False（而非永久阻塞）
+    assert rl.acquire(1.0, timeout=0.2) is False
+
+
+def test_rate_limiter_decorator_throttles():
+    rl = RateLimiter(name="t", capacity=2, refill_rate=1000.0)
+    called = []
+
+    @rl
+    def hit():
+        called.append(1)
+
+    hit()
+    hit()
+    # 容量 2 已用完，第 3 次会阻塞至补充（refill 极快，应很快返回）
+    hit()
+    assert len(called) == 3

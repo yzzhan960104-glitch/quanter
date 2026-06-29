@@ -191,3 +191,92 @@ class CircuitBreaker:
             return result
 
         return sync_wrapper
+
+
+class RateLimiter:
+    """
+    令牌桶限流器：capacity 为桶容量上限，refill_rate 为 token/秒匀速补充。
+    acquire(tokens) 在令牌不足时阻塞等待（至多 timeout 秒），超时返回 False。
+    线程安全。适用于限频 API（防 429 / 封禁）。
+
+    算法（第一性原理）：
+      每次取令牌前，按"距上次补充的墙钟秒数 × refill_rate"线性补令牌，
+      封顶 capacity；再判断是否够扣除。无锁队列、无黑盒。
+    """
+
+    def __init__(self, name: str, capacity: float, refill_rate: float) -> None:
+        if capacity <= 0 or refill_rate <= 0:
+            raise ValueError("capacity 与 refill_rate 必须为正数")
+        self.name = name
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self._tokens = capacity
+        self._last_refill = time.monotonic()
+        self._lock = threading.Lock()
+
+    def _refill_locked(self) -> None:
+        """按墙钟时间线性补令牌，封顶 capacity。须持锁。"""
+        now = time.monotonic()
+        elapsed = now - self._last_refill
+        if elapsed > 0:
+            self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_rate)
+            self._last_refill = now
+
+    def try_acquire(self, tokens: float = 1.0) -> bool:
+        """非阻塞尝试：有令牌则扣减返回 True，否则返回 False。"""
+        with self._lock:
+            self._refill_locked()
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                return True
+            return False
+
+    def acquire(self, tokens: float = 1.0, timeout: float | None = None) -> bool:
+        """阻塞至令牌可用或超时。超时返回 False（调用方可降级处理）。"""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self._lock:
+                self._refill_locked()
+                if self._tokens >= tokens:
+                    self._tokens -= tokens
+                    return True
+                deficit = tokens - self._tokens
+                wait = deficit / self.refill_rate
+            # 自旋退避：以 10ms 粒度兼顾响应性与 CPU 占用
+            if deadline is not None and time.monotonic() + min(wait, 0.01) > deadline:
+                return False
+            time.sleep(min(wait, 0.01))
+
+    def __call__(self, func: Callable[..., T]) -> Callable[..., T]:
+        """装饰器：每次调用前 acquire(1)。同步阻塞 / 异步让出事件循环。"""
+        if asyncio.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                # 异步路径：用 asyncio.sleep 让出事件循环，不阻塞线程
+                while not self.try_acquire(1.0):
+                    await asyncio.sleep(0.01)
+                return await func(*args, **kwargs)
+
+            return async_wrapper  # type: ignore[return-value]
+
+        @functools.wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            self.acquire(1.0)
+            return func(*args, **kwargs)
+
+        return sync_wrapper
+
+
+# ============ 模块级单例（fetcher 共享，避免每次新建桶/熔断器）============
+# 限频策略：突发容量 + 持续 QPS，依据各数据源官方限频量级保守取值。
+tushare_rate_limiter = RateLimiter(name="tushare", capacity=5, refill_rate=1.0)
+fred_rate_limiter = RateLimiter(name="fred", capacity=2, refill_rate=0.5)
+
+# 熔断器：连续 3 次基础设施异常 → 熔断 60s（expected_exception 仅装饰器路径生效）
+tushare_breaker = CircuitBreaker(
+    name="tushare", failure_threshold=3, recovery_timeout=60.0, expected_exception=DataFetchError
+)
+fred_breaker = CircuitBreaker(
+    name="fred", failure_threshold=3, recovery_timeout=60.0, expected_exception=DataFetchError
+)
