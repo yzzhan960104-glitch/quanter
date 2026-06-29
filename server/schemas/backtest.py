@@ -179,9 +179,42 @@ class TradeRecord(BaseModel):
     cost: float
 
 
+class OhlcvPoint(BaseModel):
+    """
+    单根 K 线（开高低收量），用于前端 ProChart 绘制蜡烛图。
+
+    Why 单独建模：原 _serialize_backtest_result 丢弃了 OHLCV，前端无法画 K 线。
+    本字段是纯透传——列名沿用 data.fetcher 的小写英文（open/high/low/close/volume），
+    不做任何数学变换，仅把 DataFrame 行拍平为 JSON 安全的标量列表。
+    """
+    date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class PositionRow(BaseModel):
+    """
+    持仓快照行（取回测末态），用于前端 PositionsTable。
+
+    单资产行为：仅取末行 position / position_value 一行。组合多资产的持仓快照
+    作为后续迭代（PortfolioResponse），本轮不动——避免对单资产 BacktestResponse
+    塞入语义不成立的多 symbol 持仓。
+    """
+    symbol: str
+    qty: float
+    market_value: float
+
+
 class BacktestResponse(BaseModel):
     """单资产回测完整响应"""
     metrics: MetricsResponse
     nav_series: List[NavPoint]
     drawdown_series: List[DrawdownPoint]
     trades: List[TradeRecord]
+    # K 线序列：前端 ProChart 蜡烛图数据源（data.fetcher OHLCV 透传）
+    ohlcv: List[OhlcvPoint] = []
+    # 末态持仓快照：前端 PositionsTable 数据源（仅末行，单资产）
+    positions: List[PositionRow] = []
