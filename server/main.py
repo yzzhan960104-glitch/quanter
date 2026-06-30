@@ -54,6 +54,12 @@ async def lifespan(app: FastAPI):
     # 后续业务日志/风控事件即可被投递。build_default_manager 内部对缺凭证做软跳过。
     build_default_manager()
 
+    # 启动：数据湖常驻内存（parquet 缺失则离线降级，不阻断启动）
+    # Why 单例 + 启动期加载：DataLakeReader.load() 内部对 parquet 缺失只记 warning，
+    # 开发机/CI 无数据湖时进入离线模式（查询返回空 DF），绝不抛异常阻断 API 启动。
+    from data.lake_reader import DataLakeReader
+    DataLakeReader.get_instance().load()
+
     # 启动：挂载 SSE 日志 handler 到 root logger
     # Why root logger：回测业务线程的全部日志（含第三方库）都需被捕获，只有 root
     # 能拦截子 logger 的向上传播记录，确保 SSE 流完整。
