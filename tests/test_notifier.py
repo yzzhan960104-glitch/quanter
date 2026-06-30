@@ -137,3 +137,29 @@ def test_dingtalk_channel_payload_and_sign(monkeypatch):
     assert captured["payload"]["msgtype"] == "markdown"
     assert "【Quanter】" in captured["payload"]["markdown"]["text"]
     assert "最大回撤触红线" in captured["payload"]["markdown"]["text"]
+
+
+def test_build_default_manager_includes_dingtalk(monkeypatch):
+    """配齐钉钉凭证后 build_default_manager 必须装配 DingTalkChannel（幂等）。"""
+    from core.notifier import build_default_manager, DingTalkChannel
+    monkeypatch.setenv("DINGTALK_WEBHOOK", "https://oapi.dingtalk.com/robot/send?access_token=X")
+    monkeypatch.setenv("DINGTALK_SECRET", "SEC")
+    mgr = NotificationManager.get_default()
+    mgr.clear_channels()
+    build_default_manager()
+    dts = [c for c in mgr._channels if isinstance(c, DingTalkChannel)]
+    assert len(dts) == 1
+    build_default_manager()  # 幂等
+    dts2 = [c for c in mgr._channels if isinstance(c, DingTalkChannel)]
+    assert len(dts2) == 1
+
+
+def test_build_default_manager_skips_dingtalk_without_credentials(monkeypatch):
+    """缺凭证必须跳过该通道，不报错。"""
+    from core.notifier import build_default_manager, DingTalkChannel
+    monkeypatch.delenv("DINGTALK_WEBHOOK", raising=False)
+    monkeypatch.delenv("DINGTALK_SECRET", raising=False)
+    mgr = NotificationManager.get_default()
+    mgr.clear_channels()
+    build_default_manager()
+    assert not any(isinstance(c, DingTalkChannel) for c in mgr._channels)

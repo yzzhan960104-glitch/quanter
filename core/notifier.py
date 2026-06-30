@@ -153,6 +153,14 @@ def build_default_manager() -> NotificationManager:
     wecom = os.getenv("WECOM_WEBHOOK", "")
     if wecom:
         mgr.add_channel(WeComChannel(wecom))
+    # 钉钉机器人（Markdown + 加签）：缺一凭证则跳过该通道，不报错。
+    # Why 缺一即跳过：钉钉加签必须 webhook + secret 同时有效，单独配 webhook 会
+    # 在 send 时算签名失败（HMAC 的 secret 为空）导致每次告警都抛异常，徒增噪音；
+    # 故在此做前置门控，凭证不齐直接不装通道。
+    dt_webhook = os.getenv("DINGTALK_WEBHOOK", "")
+    dt_secret = os.getenv("DINGTALK_SECRET", "")
+    if dt_webhook and dt_secret:
+        mgr.add_channel(DingTalkChannel(dt_webhook, dt_secret))
     # 装配完成标记，使后续调用幂等。
     mgr._configured = True
     return mgr

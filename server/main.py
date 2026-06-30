@@ -32,6 +32,8 @@ from server.api.v1.logs import (
 )
 from strategies.loader import StrategyLoader
 from server.api.v1.strategies import router as strategies_router
+# 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
+from core.notifier import build_default_manager
 
 # ============ lifespan：启动/销毁钩子 ============
 @asynccontextmanager
@@ -46,6 +48,11 @@ async def lifespan(app: FastAPI):
     loader = StrategyLoader()
     loader.scan()
     app.state.strategy_loader = loader
+
+    # 启动：装配异步通知通道（Telegram/企微/钉钉），缺凭证则跳过对应通道
+    # Why 早于日志 handler：通知装配幂等且不依赖日志体系；先装配确保告警通道就绪，
+    # 后续业务日志/风控事件即可被投递。build_default_manager 内部对缺凭证做软跳过。
+    build_default_manager()
 
     # 启动：挂载 SSE 日志 handler 到 root logger
     # Why root logger：回测业务线程的全部日志（含第三方库）都需被捕获，只有 root
