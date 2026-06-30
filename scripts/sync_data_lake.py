@@ -20,12 +20,16 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import time
 from datetime import datetime, timedelta
 
 import pandas as pd
 from tqdm import tqdm
+
+# 模块级 logger：异常分类日志走统一句柄，便于运维 grep 定位故障类型。
+logger = logging.getLogger(__name__)
 
 from config import LAKE_CONFIG
 from data.resilience import tushare_breaker, tushare_rate_limiter
@@ -74,9 +78,26 @@ def fetch_qfq(pro, ts_code: str, start: str, end: str) -> pd.DataFrame:
         raw = pro.pro_bar(ts_code=ts_code, adj="qfq",
                           start_date=start.replace("-", ""), end_date=end.replace("-", ""),
                           freq="D")
-    except Exception:
-        # 基础设施异常（限频 429 / 超时 / 断线）：计熔断、返回空，由上层决定是否重试。
-        tushare_breaker.record_failure()
+    except Exception as e:
+        # 异常精细分类（复刻 data/fetcher.py::fetch_ohlcv 范式）：
+        # Why 必须分类：全市场 5000+ 标的逐只 pro_bar 时，若遇【积分不足】这类
+        # 【持久态】异常，当前裸 except 会把它也计入熔断——连续 3 只即 OPEN，
+        # 后续 60s 全返空、shard 大面积缺失。而积分不足是账户配置问题，60s 冷却
+        # 内根本不可自愈，熔断于此无益反放大故障半径。故仅【瞬时态】（限频/超时/
+        # 断线，冷却可自愈）计入熔断；持久态（积分/权限）仅记日志、不触达熔断器。
+        msg = str(e).lower()
+        if any(k in msg for k in ("limit", "429", "timeout", "connection", "频率", "超时", "频繁")):
+            # 瞬时基础设施异常 → 计入熔断（冷却期大概率自愈，熔断能自动停打止损）
+            tushare_breaker.record_failure()
+            logger.error("Tushare 限频/网络异常 [%s]：%s", ts_code, e)
+        elif any(k in str(e) for k in ("积分", "权限")):
+            # 持久态异常 → 不计熔断（冷却内不可恢复，熔断无意义且会误停全量同步）
+            logger.error("Tushare 积分不足/权限受限 [%s]：%s", ts_code, e)
+        else:
+            # 其它未知异常 → 保守计入熔断（宁可误停也不放过潜在连环故障）
+            tushare_breaker.record_failure()
+            logger.error("Tushare pro_bar 拉取失败 [%s]：%s", ts_code, e)
+        # 保留"绝不抛"契约：统一返回空 DF，空数据中性语义不变，由上层 continue 跳过。
         return pd.DataFrame()
     if raw is None or raw.empty:
         # 空数据 = 正常业务态（停牌区间/无行情/退市），不抛、不计熔断、直接返回空。
