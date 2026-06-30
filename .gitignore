@@ -13,3 +13,28 @@ env/
 # 数据和日志
 *.log
 data/
+
+# 依赖包
+node_modules/
+web/node_modules/
+
+# 生产环境构建产物
+dist/
+web/dist/
+dist-ssr/
+*.local
+
+# 日志文件
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 编辑器目录和文件
+.idea
+.vscode
+*.suo
+*.ntvs
+*.njsproj
+*.sln
+*.sw?
