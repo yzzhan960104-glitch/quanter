@@ -104,3 +104,36 @@ def test_wecom_channel_payload(monkeypatch):
     asyncio.run(channel.send("hi"))
     assert captured["url"] == "https://qyapi.example.com/webhook"
     assert captured["payload"] == {"msgtype": "text", "text": {"content": "hi"}}
+
+
+def test_fire_and_forget_runs_coroutine_in_background():
+    """fire_and_forget 必须在无事件循环的同步上下文里也能跑通协程。"""
+    from core.notifier import fire_and_forget
+    import time as _t
+    done = []
+    async def _work():
+        done.append(42)
+    fire_and_forget(_work())
+    _t.sleep(0.5)  # 等后台线程
+    assert done == [42]
+
+
+def test_dingtalk_channel_payload_and_sign(monkeypatch):
+    """守护钉钉加签 URL 拼装与 Markdown payload（脱网，monkeypatch _post）。"""
+    from core.notifier import DingTalkChannel
+    captured = {}
+
+    async def fake_post(url, payload):
+        captured["url"] = url
+        captured["payload"] = payload
+
+    ch = DingTalkChannel("https://oapi.dingtalk.com/robot/send?access_token=XXX", "SEC123")
+    ch._post = fake_post
+    import asyncio
+    asyncio.run(ch.send("最大回撤触红线"))
+    # 加签参数必须出现在 URL
+    assert "timestamp=" in captured["url"] and "sign=" in captured["url"]
+    # Markdown + 固定安全词【Quanter】
+    assert captured["payload"]["msgtype"] == "markdown"
+    assert "【Quanter】" in captured["payload"]["markdown"]["text"]
+    assert "最大回撤触红线" in captured["payload"]["markdown"]["text"]
