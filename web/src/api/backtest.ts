@@ -213,6 +213,27 @@ export function runSingleBacktest(params: SingleBacktestParams): Promise<SingleB
 }
 
 /**
+ * 创建 per-run 异步回测（Epic 4：建 run + SSE 流式推送）
+ *
+ * 设计意图（为何单独拆一个建 run 接口）：
+ * - 阻塞式 axios.post 会把整个回测计算周期压在一个 HTTP 连接里，浏览器
+ *   侧无任何中间反馈，长回测易触发 502/网关超时；用户体验差。
+ * - 改为两段式：先本接口拿到 run_id（毫秒级返回），再由前端开原生
+ *   EventSource(/run/stream/{run_id}) 接收 progress/trade/risk/result 帧。
+ *   后端可边算边推，前端可边收边渲染买卖点。
+ * - 仅"建 run"用 axios（短连接 + JSON body），SSE 接收走原生 EventSource
+ *   （EventSource 不支持自定义 header/body，只支持 GET）。
+ *
+ * 超时 30s：建 run 本身只做参数校验 + 注册，正常 <1s；留余量防慢启动。
+ *
+ * @param params 回测参数（形状与 SingleBacktestParams 对齐，原样透传给后端）
+ * @returns { run_id } —— 用于拼接 SSE 端点 URL
+ */
+export function createBacktestRun(params: SingleBacktestParams): Promise<{ run_id: string }> {
+  return apiClient.post('/api/v1/backtest/run/async', params, { timeout: 30000 })
+}
+
+/**
  * 执行组合回测
  *
  * 组合回测包含 HMM 训练，耗时更长，超时设为 120 秒
