@@ -247,12 +247,18 @@ class BacktestEngine:
                 _prev_n_trades = len(self.trades)
 
                 # 2) 进度事件：每日一发，推送真实收盘后净值
+                # Why nav 走 math.isfinite 兜底（与 result 帧 _safe_float/np.isfinite 对称）：
+                # 极端除零/持仓价异常场景 self.nav 可能 NaN/Inf，SSE 序列化为 JSON 时
+                # NaN/Inf 是非法 JSON 值（JSON.stringify(NaN) → null / 浏览器解析错乱），
+                # 前端 progress 行会显示 null 或整流中断。兜底为 0.0 保证流稳定（不掩盖
+                # 业务异常——result 帧的最终 nav 仍由上层 _safe_float 显式处理并报警）。
+                _nav = self.nav if math.isfinite(self.nav) else 0.0
                 event_emitter({
                     "type": "progress",
                     "date": str(date),
                     "i": i,
                     "n": len(aligned_df),
-                    "nav": self.nav,
+                    "nav": _nav,
                 })
 
         # 计算最终结果
@@ -997,10 +1003,13 @@ class BacktestEngine:
                   - {"type":"progress","date":str,"i":int,"n":int,"nav":float}
                   - {"type":"trade","date":str,"direction":"buy"|"sell",
                      "shares":int,"price":float,"symbol":str}
+                  - {"type":"risk","level":"WARN","date":str,"reason":str,
+                     "shares":int,"price":float,"symbol":str}
                 Why 用单一 if 守卫 + trades 切片法：最小侵入，不改既有调仓/净值/成本
                 逻辑（process_target_weight_signal / calculate_aum 等签名零变化）。
-                风控事件暂无干净分支（portfolio 失败成交未走 _record_failed_trade），
-                留 TODO 待组合路径风控分支明确后补。
+                风控帧来源：process_target_weight_signal 现金不足丢弃买入订单时已调用
+                _record_failed_trade(direction="failed", reason="资金不足...")，
+                这里复用 run() 的同款 failed 切片分流即可发射 risk 帧，零新增分支。
 
         返回：
             回测结果字典（含净值曲线、交易记录、绩效指标）
@@ -1082,29 +1091,52 @@ class BacktestEngine:
             # Why 用 self.trades 切片：portfolio 调仓走 _execute_portfolio_order →
             # _record_trade，每条成交追加 1 条 dict 到 self.trades；这里捕获切片
             # 即得到当日所有成交，无需改 process_target_weight_signal 签名。
-            # TODO(risk)：组合路径失败成交（涨跌停/资金不足）目前未走
-            # _record_failed_trade，无干净分支捕获 risk 帧；待组合风控分支明确后补。
+            # 风控帧来源（I-2）：process_target_weight_signal 现金不足丢弃买入订单时
+            # 已 _record_failed_trade(direction="failed", reason="资金不足...")，
+            # 此处复用 run() 的同款 failed 切片分流即可发射 risk 帧，与单资产路径
+            # run() 完全对称（字段名同为 reason，前端 toLogEntry 一致消费）。
             if event_emitter is not None:
-                # 1) 成交事件：当日新增 trades 切片
+                # 1) 成交 / 风控事件：当日新增 trades 切片分流（与 run() 同范式）
                 new_trades = self.trades[_prev_n_trades:]
                 for t in new_trades:
-                    event_emitter({
-                        "type": "trade",
-                        "date": str(date),
-                        "direction": t.get("direction", "buy"),
-                        "shares": t.get("shares", 0),
-                        "price": t.get("price", 0.0),
-                        "symbol": t.get("symbol", ""),
-                    })
+                    if t.get("direction") == "failed":
+                        # 失败成交（组合路径目前仅"资金不足"分支；涨跌停未在组合
+                        # 路径建模——_execute_portfolio_order 不含 high/low 检查，
+                        # 与单资产 _execute_trade 不同。复用既有 _record_failed_trade，
+                        # 不新增任何调仓/成交逻辑，零回归）
+                        event_emitter({
+                            "type": "risk",
+                            "level": "WARN",
+                            "date": str(date),
+                            "reason": t.get("reason", "unknown"),
+                            "shares": t.get("shares", 0),
+                            "price": t.get("price", 0.0),
+                            "symbol": t.get("symbol", "N/A"),
+                        })
+                    else:
+                        # 正常成交（buy / sell）
+                        event_emitter({
+                            "type": "trade",
+                            "date": str(date),
+                            "direction": t.get("direction", "buy"),
+                            "shares": t.get("shares", 0),
+                            "price": t.get("price", 0.0),
+                            "symbol": t.get("symbol", ""),
+                        })
                 _prev_n_trades = len(self.trades)
 
                 # 2) 进度事件：每日一发，推送真实收盘后净值
+                # Why nav 走 math.isfinite 兜底：与 run() 的 progress 帧 + result 帧的
+                # _safe_float/np.isfinite 完全对称，防止极端除零场景下 self.nav 为
+                # NaN/Inf 经 SSE 透传成非法 JSON（前端解析失败/流中断）。兜底 0.0，
+                # 不掩盖业务异常——最终 nav 仍由上层 _safe_float 序列化。
+                _nav = self.nav if math.isfinite(self.nav) else 0.0
                 event_emitter({
                     "type": "progress",
                     "date": str(date),
                     "i": i,
                     "n": len(all_dates),
-                    "nav": self.nav,
+                    "nav": _nav,
                 })
 
         # ============ 计算最终结果 ============

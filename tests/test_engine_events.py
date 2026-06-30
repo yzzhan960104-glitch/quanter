@@ -155,3 +155,76 @@ def test_run_portfolio_emits_progress_and_trade():
     assert t0["direction"] in {"buy", "sell"}
     assert t0["shares"] > 0
     assert t0["price"] > 0
+
+
+# ============ I-2 审查跟进：组合路径 risk 帧布点 ============
+# Why 单独覆盖：组合路径 process_target_weight_signal 现金不足丢弃买入订单时已调用
+# _record_failed_trade(direction="failed")。run_portfolio 的 SSE 循环此前只发 trade
+# 帧不发 risk 帧，导致组合回测的资金不足告警在前端终端静默（仅单资产 run() 路径
+# 有 risk 帧）。此用例守住组合路径 risk 帧布点，与 run() 对称。
+
+def test_run_portfolio_emits_risk_event_on_insufficient_cash():
+    """组合路径现金不足必须发 risk 帧（与 run() 单资产路径对称）。
+
+    构造手法：
+    - 初始资金 1000 元 + 标的 A 价格 10 元 + 首日目标权重 1.0。
+    - process_target_weight_signal 计算：target_shares=100（floor(1000/10/100)*100），
+      required_cash=1000，estimated_cost≈6.0（万三佣金最低5元），total_required≈1006。
+    - cash(1000) < total_required(1006) → 缩减分支：affordable_shares=0（<100）→
+      丢弃订单 + _record_failed_trade(reason="资金不足...")。
+    - run_portfolio 循环捕获 failed 切片 → 发射 risk 帧（type=risk, level=WARN,
+      reason 含"资金不足"）。
+    """
+    idx = pd.date_range("2024-01-01", periods=5)
+    df_a = pd.DataFrame({
+        "open": 10.0, "high": 10.5, "low": 9.8,
+        "close": 10.0, "volume": 10000,
+    }, index=idx)
+    price_data = {"000001.SZ": df_a}
+    signals = [
+        TargetWeightSignal(
+            timestamp=idx[0],
+            weights={"000001.SZ": 1.0},
+            directions={"000001.SZ": SignalDirection.BUY},
+        )
+    ]
+    events = []
+    # 初始资金恰好不足以买入 1 手（含成本）→ 触发现金不足分支
+    BacktestEngine(initial_capital=1_000.0).run_portfolio(
+        price_data, signals,
+        event_emitter=lambda ev: events.append(ev),
+    )
+    risk_events = [e for e in events if e["type"] == "risk"]
+    assert len(risk_events) >= 1, "现金不足应至少触发一帧 risk 事件"
+    r0 = risk_events[0]
+    # 字段完备性（与 run() 的 risk 帧契约一致）
+    assert {"type", "level", "date", "reason", "shares", "price", "symbol"} <= set(r0.keys())
+    assert r0["level"] == "WARN"
+    assert "资金不足" in r0["reason"]  # 含中文失败原因，前端 toLogEntry 消费 reason 字段
+    assert r0["shares"] > 0 and r0["price"] > 0
+
+
+def test_run_portfolio_progress_nav_never_nan_or_inf():
+    """progress 帧的 nav 字段必须永远是有限数（防 NaN/Inf 经 SSE 透传成非法 JSON）。
+
+    构造一个会触发除零的极端场景：空信号 + 价格含 0，验证兜底为 0.0 而非 NaN。
+    （兜底逻辑：nav = self.nav if math.isfinite(self.nav) else 0.0）
+    """
+    idx = pd.date_range("2024-01-01", periods=3)
+    df_a = pd.DataFrame({
+        "open": 10.0, "high": 10.5, "low": 9.8,
+        "close": 10.0, "volume": 10000,
+    }, index=idx)
+    price_data = {"000001.SZ": df_a}
+    # 空信号列表：循环只更新 latest_prices 与 nav，不发 trade/risk
+    events = []
+    BacktestEngine(initial_capital=1_000_000.0).run_portfolio(
+        price_data, signals=[],
+        event_emitter=lambda ev: events.append(ev),
+    )
+    progress_events = [e for e in events if e["type"] == "progress"]
+    assert len(progress_events) >= 1
+    for p in progress_events:
+        # nav 必须是有限数（非 NaN/非 Inf）—— SSE JSON 序列化的硬约束
+        assert isinstance(p["nav"], (int, float))
+        assert np.isfinite(p["nav"]), f"progress nav 出现 NaN/Inf: {p['nav']}"

@@ -32,4 +32,7 @@ def test_hurst_persistent_series_above_half():
     rng = np.random.default_rng(42)
     s = pd.Series(np.cumsum(rng.normal(0.01, 0.1, size=500)))
     h = hurst_exponent(s, max_k=50)
+    # 范围合法性 + 持续性方向锁定（此前仅断 0<h<1，名实不符：哪怕均值回复 h≈0.1 也通过）
     assert 0.0 < h < 1.0
+    # 锁定持续性：累积序列自相关强，实现实测 H≈0.986，应明显 >0.5
+    assert h > 0.5

@@ -74,7 +74,7 @@ let currentES: EventSource | null = null
  * 后端帧字段（与 server T14 对齐）：
  * - progress：{ type:'progress', date, nav, i, n }
  * - trade   ：{ type:'trade', date, direction, symbol, shares, price }
- * - risk    ：{ type:'risk', level, msg, date }
+ * - risk    ：{ type:'risk', level, reason, date, shares?, price?, symbol? }
  * 未知类型兜底为 INFO + JSON 序列化，确保任何坏帧都不会让前端崩。
  *
  * ts 取前端本地时间（Date.now()/1000）：SSE 帧不带 ts，避免与后端时区对齐问题。
@@ -94,11 +94,14 @@ function toLogEntry(ev: any): LogEntry {
       }
     case 'risk':
       // 风控告警按后端 level 区分 WARNING/ERROR（非法 level 兜底 WARNING）
+      // 字段取 ev.reason（与后端 backtest/engine.py 的 risk 帧 reason 字段对齐，
+      // 后端 reason 形如 "涨停无法买入"/"资金不足"/"跌停无法卖出"；此前误取 ev.msg
+      // 会得到 undefined，终端风控告警显示为 "undefined @ 日期"，零可见性）
       return {
         ts: now,
         level: ev.level === 'ERROR' ? 'ERROR' : 'WARNING',
         logger: 'risk',
-        message: `${ev.msg} @ ${ev.date}`,
+        message: `${ev.reason} @ ${ev.date}`,
       }
     case 'progress':
       // 进度行：日期 + 当前净值 + (i+1)/n，便于目测回测推进速度

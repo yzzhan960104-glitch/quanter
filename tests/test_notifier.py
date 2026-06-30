@@ -1,6 +1,8 @@
 """通知管理器：多通道并发 + 单通道软降级 + 级别前缀 + 单例。"""
 import asyncio
 
+import pytest
+
 from core.notifier import (
     NotificationManager,
     NotificationChannel,
@@ -163,3 +165,86 @@ def test_build_default_manager_skips_dingtalk_without_credentials(monkeypatch):
     mgr.clear_channels()
     build_default_manager()
     assert not any(isinstance(c, DingTalkChannel) for c in mgr._channels)
+
+
+# ============ I-1 审查跟进：钉钉 errcode 业务态校验 ============
+# Why 单独覆盖：钉钉 webhook 真实失败模式是 HTTP 200 + body errcode!=0（加签错/
+# IP 白名单/关键词/频控）。若只判 raise_for_status 会把所有业务失败都判为"投递
+# 成功"——熔断/最大回撤/敞口告警静默丢失，风控最后一道防线形同虚设。
+
+
+def test_dingtalk_validate_response_rejects_nonzero_errcode():
+    """errcode!=0 必须抛 RuntimeError（含 errcode 与 errmsg 上下文）。"""
+    from core.notifier import DingTalkChannel
+    # 加签失败是最高频的红线相邻故障
+    with pytest.raises(RuntimeError) as exc_info:
+        DingTalkChannel._validate_response({"errcode": 310000, "errmsg": "sign not match"})
+    msg = str(exc_info.value)
+    assert "310000" in msg and "sign not match" in msg
+    # IP 白名单（常见于生产部署换出口 IP 后告警全部静默）
+    with pytest.raises(RuntimeError):
+        DingTalkChannel._validate_response({"errcode": 310002, "errmsg": "ip not in white list"})
+    # 频控（连环告警触发钉钉限流）
+    with pytest.raises(RuntimeError):
+        DingTalkChannel._validate_response({"errcode": 130101, "errmsg": "rate limited"})
+
+
+def test_dingtalk_validate_response_accepts_success_and_tolerant():
+    """errcode==0 视为成功不抛；缺 errcode 字段保守放行（避免误杀）。"""
+    from core.notifier import DingTalkChannel
+    # 成功
+    DingTalkChannel._validate_response({"errcode": 0, "errmsg": "ok"})
+    # 缺 errcode 字段（极少数 SDK 不回包）——保守放行，避免误杀
+    DingTalkChannel._validate_response({})
+    # 注意：errcode 字符串 "0" 不等于 int 0，会被判失败——这是钉钉文档约定的
+    # 整数 errcode，正常不会出现字符串；此处用例不覆盖该边界。
+
+
+def test_dingtalk_post_raises_on_business_errcode(monkeypatch):
+    """端到端：mock aiohttp 返回 HTTP 200 + errcode!=0，_post 必须抛 RuntimeError。
+
+    守护红线：钉钉业务失败（HTTP 200）必须被识别为投递失败，不能静默成功。
+    构造一个假的 ClientSession.post async context manager，其 __aexit__ 返回的
+    response 对象 raise_for_status 是 no-op、json() 返回 errcode!=0 的 dict。
+    """
+    from core.notifier import DingTalkChannel
+    import aiohttp
+
+    class _FakeResp:
+        def raise_for_status(self):
+            # aiohttp.ClientResponse.raise_for_status 是同步方法；模拟 HTTP 200 不抛
+            # （钉钉业务失败的典型特征：HTTP 200 + body errcode!=0）
+            pass
+
+        async def json(self, content_type=None):
+            # 返回加签失败的业务 body（HTTP 200 下的真实失败负载）
+            return {"errcode": 310000, "errmsg": "sign not match"}
+
+    class _FakePostCtx:
+        # session.post(...) 返回的对象需同时支持 async with 与 __aexit__
+        async def __aenter__(self):
+            return _FakeResp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def post(self, url, **kwargs):
+            return _FakePostCtx()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    # 注入假的 aiohttp.ClientSession，避免真实触网
+    monkeypatch.setattr(aiohttp, "ClientSession", _FakeSession)
+
+    ch = DingTalkChannel("https://oapi.dingtalk.com/robot/send?access_token=X", "SEC")
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(ch._post("https://x", {"msgtype": "markdown"}))
+    assert "310000" in str(exc_info.value)

@@ -211,18 +211,53 @@ class DingTalkChannel(NotificationChannel):
         sign = urllib.parse.quote_plus(base64.b64encode(digest))
         return timestamp, sign
 
+    @staticmethod
+    def _validate_response(data: dict) -> None:
+        """校验钉钉 webhook 响应体。
+
+        Why 必须独立校验 errcode（红线告警通道，最易静默丢失）：
+          钉钉群机器人的真实失败模式是 **HTTP 200 + 业务 body**：
+            - {"errcode":310000,"errmsg":"sign not match"}        # 加签错
+            - {"errcode":310002,"errmsg":"ip not in white list"}  # IP 白名单
+            - {"errcode":300001,"errmsg":"keywords not in content"}# 关键词
+            - {"errcode":130101,"errmsg":"rate limited"}          # 频控
+          仅 resp.raise_for_status() 对这些业务错误完全无感（HTTP 仍 200），
+          会把所有投递都判为"成功"——熔断/最大回撤/敞口告警就此静默丢失，
+          风控最后一道防线形同虚设。故必须显式判 errcode != 0 即抛。
+          成功约定：{"errcode":0,"errmsg":"ok"}。
+          data 为空 dict 或缺 errcode 时保守放行（极少数 SDK 不回包，避免误杀）。
+        """
+        # errcode 显式存在且非 0 才视为业务失败；errcode 缺失/为 0 视为成功
+        errcode = data.get("errcode", 0)
+        if errcode != 0:
+            raise RuntimeError(
+                f"钉钉投递失败 [{errcode}]: {data.get('errmsg', 'unknown')}"
+            )
+
     async def _post(self, url: str, payload: dict) -> None:
-        """真实 aiohttp 投递（测试 monkeypatch 本方法以脱网）。
+        """真实 aiohttp 投递 + 钉钉业务态 errcode 校验（测试 monkeypatch 本方法以脱网）。
 
         Why 用 aiohttp 而非 httpx：通道间隔离，避免单通道阻塞影响其它通道的
         并发投递语义（NotificationManager 用 asyncio.gather 并发各通道 send）。
         aiohttp 在 spec(T1) 中已锁定。
+
+        双层校验：
+        1) resp.raise_for_status() 兜底 HTTP 层错误（4xx/5xx/超时转异常）。
+        2) 钉钉业务态校验：HTTP 200 但 body errcode!=0 同样视为失败抛 RuntimeError
+           （详见 _validate_response 的 why）。抛出后由 NotificationManager 的
+           gather(return_exceptions=True) 捕获并记日志，不再静默吞掉。
+        content_type=None 容错：钉钉某些回包以 text/plain 返回 JSON，
+        默认严格 content-type 会令 resp.json() 抛 ContentTypeError，故关闭该校验。
         """
         import aiohttp
         timeout = aiohttp.ClientTimeout(total=10.0)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as resp:
+                # 1) HTTP 层兜底（4xx/5xx）
                 resp.raise_for_status()
+                # 2) 钉钉业务态校验（HTTP 200 + errcode!=0 才是真实失败模式）
+                data = await resp.json(content_type=None)
+                DingTalkChannel._validate_response(data)
 
     async def send(self, text: str) -> None:
         timestamp, sign = self._sign(self._secret)
