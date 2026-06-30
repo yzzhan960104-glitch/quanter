@@ -62,9 +62,35 @@ class DataLakeReader:
             logger.error("数据湖索引非 MultiIndex(date, symbol)，跳过加载")
             self._loaded = False
             return
+
+        # Important 2：date 层级若为 datetime（含 tz-aware / 非零时间），先去时区并
+        # normalize 到午夜，与 _norm_date 查询键对齐，否则 xs/loc 会因 tz 或时间分量
+        # 不匹配而 silently 返回空（mismatch）。仅在 datetime 层级生效，str 层级原样保留。
+        date_vals = df.index.get_level_values("date")
+        if isinstance(date_vals, pd.DatetimeIndex):
+            # tz-aware：先 tz_convert 到 UTC 再 tz_localize(None) 剥离时区，避免
+            # 直接 tz_localize(None) 在非 UTC tz 下抛异常；naive 直接跳过 tz 步骤。
+            if date_vals.tz is not None:
+                date_vals = date_vals.tz_convert("UTC").tz_localize(None)
+            # normalize 到午夜（剥掉时分秒），保证与纯日期查询键相等。
+            date_vals = date_vals.normalize()
+            df = df.set_index(
+                pd.MultiIndex.from_arrays(
+                    [date_vals, df.index.get_level_values("symbol")],
+                    names=df.index.names,
+                )
+            )
+
+        # Important 1：上游同步脚本若未保证索引有序，对未排序索引做 .loc[start:end]
+        # 切片且边界标签缺失时会抛 KeyError "non-monotonic index"。load() 一次排序，
+        # 查询路径零开销（sort_index 是 O(n log n) 单次成本，换取后续所有 slice 的
+        # slice_locs 可正确解析边界）。一次排序、永久受益，符合"向量化/内存优化"基调。
+        df = df.sort_index()
+
         self._df = df
         # 记录 date 层级原生 dtype：查询入参按此归一化，避免 str 索引与 Timestamp
         # 比较（'<' not supported between str and Timestamp）。
+        # 注意：normalize 后 datetime 层级仍为 datetime64[ns]，dtype 不变。
         self._date_dtype = df.index.get_level_values("date").dtype
         # 仅【价格列】沿时间 ffill；groupby(level="symbol").ffill() 保证不跨标的串味：
         # 否则会把 A 标的末值填到 B 标的的停牌日，制造虚假价格与前视污染。
@@ -85,8 +111,10 @@ class DataLakeReader:
         # str 层级（parquet 落盘 str）：原样使用，保持与测试 & 落盘格式一致。
         if pd.api.types.is_string_dtype(self._date_dtype):
             return str(date)
-        # datetime 层级：转 Timestamp，并剥离时区/时间部分以防日级边界不匹配。
-        return pd.Timestamp(date)
+        # datetime 层级：转 Timestamp 并 normalize 到午夜（剥掉时分秒）。
+        # 兑现注释承诺：与 load() 中已 normalize 的 date 层级键严格对齐，
+        # 防止查询键 '2024-01-02 00:00:00' 与 normalize 后的索引键精确相等。
+        return pd.Timestamp(date).normalize()
 
     def get_cross_section(self, date: str) -> pd.DataFrame:
         """某日全市场截面（价格取 ffill 版，停牌沿用末次成交价；volume 取原始值不 ffill）。"""
