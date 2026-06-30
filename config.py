@@ -118,3 +118,46 @@ MOCK_TRADING_CONFIG = {
     "max_retries": 3,  # 最大重试次数
     "retry_delay": 1.0,  # 重试延迟（秒）
 }
+
+# ============================================================
+# 工业级蜕变新增配置（纯字典，凭证仍走 .env）
+# ============================================================
+# 局部别名 _os：与文件顶部已 import 的 os 复用同一模块，此处仅为
+# 保持新增配置块的视觉独立性；凭证一律通过 .env / 环境变量注入，
+# 业务代码不得在此硬编码任何 Token / API Key。
+import os as _os
+
+# 数据湖（Epic 1）
+# Parquet 作为 A 股日线落盘格式，列式存储兼顾读写吞吐与内存友好；
+# shard_dir 用于按年/月分片，避免单文件膨胀导致读取 OOM。
+LAKE_CONFIG = {
+    "default_path": _os.getenv("DATA_LAKE_PATH", "data_lake/a_shares_daily.parquet"),
+    "shard_dir": "data_lake/shards",
+    "years_default": 10,
+}
+
+# GLM 大模型（Epic 2）
+# 用于新闻/公告情感打分；timeout=15s 防范极端网络抖动下的请求挂死，
+# 避免占用回测主循环线程。
+LLM_CONFIG = {
+    "base_url": _os.getenv("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
+    "model": _os.getenv("ZHIPU_MODEL", "glm-4-flash"),
+    "timeout": 15,
+}
+
+# 宏观另类数据客户端（Epic 5）
+# yfinance_symbols: 标普/原油/黄金/VIX 的 Yahoo Finance 标准代号；
+# av_treasury_maturities: Alpha Vantage 美债收益率关键期限，覆盖短端与长端。
+MACRO_CLIENT_CONFIG = {
+    "yfinance_symbols": {"SPX": "^GSPC", "CL": "CL=F", "GC": "GC=F", "VIX": "^VIX"},
+    "av_treasury_maturities": ["3MO", "2Y", "10Y", "30Y"],
+}
+
+# Celery 因子沙盒（Epic 3）
+# cpu_gate_percent: CPU 占用闸门，超过该阈值则降级/排队，
+# 防止因子全量重算压垮实时交易宿主机。
+CELERY_CONFIG = {
+    "broker_url": _os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+    "queue": _os.getenv("CELERY_EXPLORER_QUEUE", "explorer"),
+    "cpu_gate_percent": 80.0,
+}
