@@ -60,6 +60,14 @@ async def lifespan(app: FastAPI):
     from data.lake_reader import DataLakeReader
     DataLakeReader.get_instance().load()
 
+    # 启动：GLM 客户端单例（凭证缺失则降级中性，不阻断启动）
+    # Why 放在 LakeReader 之后：GLM 情感因子属另类数据，与行情数据湖无依赖，
+    # 单例 __init__ 仅读 env + 建 AsyncOpenAI client 句柄（不发请求），
+    # 缺 ZHIPU_API_KEY 时 _client=None 进入降级模式，后续 analyze_sentiment
+    # 一律返回中性——保证开发机/CI 无凭证也能正常起服务。
+    from core.llm_client import GLMClient
+    GLMClient.get_instance()
+
     # 启动：挂载 SSE 日志 handler 到 root logger
     # Why root logger：回测业务线程的全部日志（含第三方库）都需被捕获，只有 root
     # 能拦截子 logger 的向上传播记录，确保 SSE 流完整。
