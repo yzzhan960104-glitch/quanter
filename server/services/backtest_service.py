@@ -19,7 +19,7 @@
 - 每次请求必须实例化全新的 BacktestEngine，绝不允许跨请求复用引擎实例
 """
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 import numpy as np
 import pandas as pd
@@ -42,7 +42,10 @@ from server.schemas.backtest import (
 from server.core.config import DATA_DEFAULTS
 
 
-def run_single_backtest(req: BacktestRequest) -> BacktestResponse:
+def run_single_backtest(
+    req: BacktestRequest,
+    event_emitter: Callable[[dict], None] | None = None,
+) -> BacktestResponse:
     """
     执行单资产回测（同步 CPU 密集函数）
 
@@ -68,6 +71,14 @@ def run_single_backtest(req: BacktestRequest) -> BacktestResponse:
 
     参数校验注入（反黑盒）：用 `params_model(**req.strategy_params)` 显式构造，
     禁 **kwargs 黑盒；非法参数在此处抛 ValidationError/ValueError，由路由层捕获。
+
+    参数：
+        req: 回测请求（Pydantic 校验后的对象）
+        event_emitter: 可选 SSE 事件回调（默认 None → 零开销零行为变化）。
+            Why 透传：SSE 实时流（GET /run/stream/{run_id}）需要从引擎逐日循环里
+            拿到 progress/trade 帧。引擎层 run_portfolio 已支持 event_emitter 关键字，
+            这里纯透传，不做任何中间加工（事件契约由引擎统一维护）。
+            非 None 时，引擎会在每个交易日末尾调用 emitter({"type":...})。
     """
     from strategies.loader import StrategyLoader
     from strategies.base import StrategyContext
@@ -111,9 +122,15 @@ def run_single_backtest(req: BacktestRequest) -> BacktestResponse:
 
     # ============ 步骤 4：执行回测 ============
     # 成本模型注入引擎（Task 6 已让其在 run_portfolio 路径生效）
+    # event_emitter 透传：SSE 实时流的核心——引擎逐日循环通过 emitter 推送
+    # progress/trade 帧；默认 None 时引擎完全短路，零开销（与既有同步调用一致）。
     cost_model = _build_cost_model(req.cost_model)
     engine = BacktestEngine(initial_capital=req.initial_capital, cost_model=cost_model)
-    result = engine.run_portfolio(price_data=price_data, signals=signals)
+    result = engine.run_portfolio(
+        price_data=price_data,
+        signals=signals,
+        event_emitter=event_emitter,
+    )
 
     # ============ 步骤 5：序列化 ============
     # 透传 price_data：序列化器需从中抽取 OHLCV 与持仓 symbol（引擎 daily_records

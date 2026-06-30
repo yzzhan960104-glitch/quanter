@@ -970,6 +970,7 @@ class BacktestEngine:
         self,
         price_data: Dict[str, pd.DataFrame],
         signals: List[TargetWeightSignal],
+        event_emitter: Callable[[dict], None] | None = None,
     ) -> Dict[str, Any]:
         """
         多资产组合回测（事件驱动）
@@ -986,6 +987,20 @@ class BacktestEngine:
             price_data: 各标的的价格数据字典
                 格式：{symbol: DataFrame}，每个 DataFrame 需包含 OHLCV 列
             signals: 目标权重信号列表（按时间排序）
+            event_emitter: SSE 事件回调（可选，默认 None）。
+                Why 默认 None：保证所有既有调用方（service / API / 旧测试）零改动、
+                零行为变化、零性能开销（事件发射完全被 None 短路）。
+                Why 这里也要布点（与 run() 同语义）：service.run_single_backtest 走的
+                是 run_portfolio 路径，若只有 run() 布点而 portfolio 不布点，则 SSE
+                实时流中途无 progress/trade 帧，前端终端回测期间会空白（Epic 4 核心
+                价值未达成）。布点完全复用 run() 的事件契约：
+                  - {"type":"progress","date":str,"i":int,"n":int,"nav":float}
+                  - {"type":"trade","date":str,"direction":"buy"|"sell",
+                     "shares":int,"price":float,"symbol":str}
+                Why 用单一 if 守卫 + trades 切片法：最小侵入，不改既有调仓/净值/成本
+                逻辑（process_target_weight_signal / calculate_aum 等签名零变化）。
+                风控事件暂无干净分支（portfolio 失败成交未走 _record_failed_trade），
+                留 TODO 待组合路径风控分支明确后补。
 
         返回：
             回测结果字典（含净值曲线、交易记录、绩效指标）
@@ -1007,8 +1022,12 @@ class BacktestEngine:
             sig.timestamp: sig for sig in signals
         }
 
+        # 事件检测基线：循环开始前 trades 已被 _reset_state 清零，
+        # 后续用 _prev_n_trades 比对当日是否有新成交记录追加（与 run() 同范式）。
+        _prev_n_trades = len(self.trades)
+
         # 逐日遍历（事件驱动核心循环）
-        for date in all_dates:
+        for i, date in enumerate(all_dates):
             # ============ 更新最新收盘价 ============
             for symbol, df in price_data.items():
                 if date in df.index:
@@ -1056,6 +1075,37 @@ class BacktestEngine:
                 "position_values": position_values,
             }
             self.daily_records.append(daily_record)
+
+            # ============ SSE 事件发射（默认 None 时完全短路，零开销） ============
+            # Why 放在循环末尾：此时本日 nav/cash/position/trades 已全部更新到
+            # 最终态，progress 的 nav 字段才是真实收盘后净值（与 run() 同语义）。
+            # Why 用 self.trades 切片：portfolio 调仓走 _execute_portfolio_order →
+            # _record_trade，每条成交追加 1 条 dict 到 self.trades；这里捕获切片
+            # 即得到当日所有成交，无需改 process_target_weight_signal 签名。
+            # TODO(risk)：组合路径失败成交（涨跌停/资金不足）目前未走
+            # _record_failed_trade，无干净分支捕获 risk 帧；待组合风控分支明确后补。
+            if event_emitter is not None:
+                # 1) 成交事件：当日新增 trades 切片
+                new_trades = self.trades[_prev_n_trades:]
+                for t in new_trades:
+                    event_emitter({
+                        "type": "trade",
+                        "date": str(date),
+                        "direction": t.get("direction", "buy"),
+                        "shares": t.get("shares", 0),
+                        "price": t.get("price", 0.0),
+                        "symbol": t.get("symbol", ""),
+                    })
+                _prev_n_trades = len(self.trades)
+
+                # 2) 进度事件：每日一发，推送真实收盘后净值
+                event_emitter({
+                    "type": "progress",
+                    "date": str(date),
+                    "i": i,
+                    "n": len(all_dates),
+                    "nav": self.nav,
+                })
 
         # ============ 计算最终结果 ============
         result = self._calculate_portfolio_result()

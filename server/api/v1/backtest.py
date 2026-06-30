@@ -24,6 +24,7 @@ import traceback
 import uuid
 
 from fastapi import APIRouter, HTTPException
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -143,24 +144,20 @@ class _RunBridge:
 
 
 def _run_with_emitter(req: BacktestRequest, publish) -> dict:
-    """线程池内执行回测：尝试把 emitter 透传给 service/engine。
+    """线程池内执行回测：把 emitter 透传给 service/engine。
 
-    ── emitter 透传现状（截至 T14）──
-    engine.run（单资产）已在 T13 支持 event_emitter 关键字（progress/trade/risk）；
-    但 service 层走的是 engine.run_portfolio（组合路径），该方法签名尚未支持
-    event_emitter（需在组合回测循环里布点 emit + 配套测试，属后续引擎扩展）。
+    ── emitter 透传（T14 审查跟进修复）──
+    engine.run_portfolio（组合路径）与 engine.run（单资产路径）均已支持
+    event_emitter 关键字（progress/trade/risk）。service.run_single_backtest
+    也已加 event_emitter 参数并透传给 engine。
 
-    故此处用 try/except TypeError 兜底：
-    - 若未来 service.run_single_backtest 加 event_emitter 关键字并能透传到
-      engine.run_portfolio，则中途会推送 progress/trade 帧（最佳体验）；
-    - 当前 service 不接受该关键字 → 抛 TypeError → 走 except 按原签名调用，
-      流仍能正常返回最终 result，只是中途无 progress/trade 帧（可接受）。
+    故此处直接透传，无需 try/except TypeError 兜底：
+    - emitter 非 None 时，引擎逐日循环会推送 progress/trade 帧到 publish，
+      前端 SSE 流中途实时渲染（Epic 4 核心价值达成）。
+    - publish 由 _RunBridge.publish 实现，内部用 call_soon_threadsafe 跨线程
+      投递，绝不抛（保护引擎循环）。
     """
-    try:
-        return run_single_backtest(req, event_emitter=publish)
-    except TypeError:
-        # service 暂不支持 event_emitter 关键字 → 兜底原签名，流仍返回最终 result
-        return run_single_backtest(req)
+    return run_single_backtest(req, event_emitter=publish)
 
 
 @router.post("/run/async", summary="创建回测 run（返回 run_id）")
@@ -214,8 +211,15 @@ async def stream_run(run_id: str):
         try:
             while True:
                 ev = await bridge.get()
-                # default=str：兜底 BacktestResponse pydantic 实例与 numpy 标量
-                yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+                # Why jsonable_encoder 而非裸 default=str：
+                # result 帧的 data 是 pydantic BacktestResponse 实例，default=str 会
+                # 把整个模型 str(model) 成一坨字符串，前端拿到的 data 是字符串而非
+                # JSON 对象（无法 .nav_series / .metrics 取值）。jsonable_encoder 会
+                # 把 pydantic 模型 / numpy 标量 / datetime / Decimal 等递归转成 JSON
+                # 原生类型（dict/list/str/float），再 dumps 即得合法结构化 JSON。
+                # 仍保留 ensure_ascii=False 让中文（symbol 名/错误信息）原样输出。
+                payload = jsonable_encoder(ev)
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                 # result / error 为终态帧，收到即收尾
                 if ev.get("type") in ("result", "error"):
                     break
