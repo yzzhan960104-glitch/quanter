@@ -21,7 +21,7 @@ from enum import Enum, auto
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable
 
 from .cost_model import CostModel
 from .metrics import MetricsCalculator
@@ -134,7 +134,8 @@ class BacktestEngine:
         self,
         df: pd.DataFrame,
         signal: pd.Series,
-        symbol: str = "600000.SH"
+        symbol: str = "600000.SH",
+        event_emitter: Callable[[dict], None] | None = None,
     ) -> Dict[str, Any]:
         """
         执行回测
@@ -143,6 +144,18 @@ class BacktestEngine:
             df: OHLCV 数据
             signal: 信号序列（值在 [0, 1] 范围内）
             symbol: 交易标的代码
+            event_emitter: SSE 事件回调（可选，默认 None）。
+                Why 默认 None：保证所有既有调用方（service / API / 旧测试）零改动、
+                零行为变化、零性能开销（事件发射完全被 None 短路）。
+                非 None 时，逐日循环会发射 dict 事件：
+                  - {"type":"progress","date":str,"i":int,"n":int,"nav":float}
+                  - {"type":"trade","date":str,"direction":"buy"|"sell",
+                     "shares":int,"price":float,"symbol":str}
+                  - {"type":"risk","level":"WARN","date":str,"reason":str,
+                     "shares":int,"price":float,"symbol":str}
+                Why 不深入 _execute_trade 内部传参：避免改造成交状态机签名、
+                破坏既有路径。改在循环层用 self.trades 长度变化 + 最后一条记录
+                的 direction 字段判定事件类型，最小侵入、零回归。
 
         返回：
             回测结果字典
@@ -156,6 +169,10 @@ class BacktestEngine:
         # 计算平均成交量（用于滑点计算）
         avg_volume = aligned_df["volume"].rolling(window=20).mean()
         avg_volume = avg_volume.fillna(aligned_df["volume"].mean())
+
+        # 事件检测基线：循环开始前 trades 为空（_reset_state 已清零），
+        # 后续用 _prev_n_trades 比对当日是否有新成交记录追加。
+        _prev_n_trades = len(self.trades)
 
         # 逐日遍历（事件驱动）
         for i, (date, row) in enumerate(aligned_df.iterrows()):
@@ -192,6 +209,51 @@ class BacktestEngine:
 
             # 记录每日状态
             self._record_daily_state(date, row, current_signal)
+
+            # ============ SSE 事件发射（默认 None 时完全短路，零开销） ============
+            # Why 放在循环末尾：此时本日 nav/cash/position/trades 已全部更新到
+            # 最终态，progress 事件的 nav 字段才是真实收盘后净值，前端进度条/
+            # 净值曲线渲染才不会与最终回测结果产生不一致。
+            if event_emitter is not None:
+                # 1) 成交 / 风控事件：通过比对 trades 长度变化捕获（_execute_trade
+                #    内可能 append 0~多条：正常成交 1 条 / 失败成交 1 条）。
+                #    Why 用 dict 取值而非 getattr：self.trades 存的是 dict（见
+                #    _record_trade / _record_failed_trade），getattr 会回退默认值
+                #    掩盖真实字段缺失，dict.get 显式可控。
+                new_trades = self.trades[_prev_n_trades:]
+                for t in new_trades:
+                    if t.get("direction") == "failed":
+                        # 失败成交：涨跌停 / 资金不足（_execute_trade 内三类分支
+                        # 均走 _record_failed_trade 落库，这里干净捕获，不改成交逻辑）
+                        event_emitter({
+                            "type": "risk",
+                            "level": "WARN",
+                            "date": str(date),
+                            "reason": t.get("reason", "unknown"),
+                            "shares": t.get("shares", 0),
+                            "price": t.get("price", price),
+                            "symbol": symbol,
+                        })
+                    else:
+                        # 正常成交（buy / sell）
+                        event_emitter({
+                            "type": "trade",
+                            "date": str(date),
+                            "direction": t.get("direction", "buy"),
+                            "shares": t.get("shares", 0),
+                            "price": t.get("price", price),
+                            "symbol": symbol,
+                        })
+                _prev_n_trades = len(self.trades)
+
+                # 2) 进度事件：每日一发，推送真实收盘后净值
+                event_emitter({
+                    "type": "progress",
+                    "date": str(date),
+                    "i": i,
+                    "n": len(aligned_df),
+                    "nav": self.nav,
+                })
 
         # 计算最终结果
         result = self._calculate_result()
