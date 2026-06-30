@@ -38,3 +38,31 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# ========================
+# Python & 环境
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.env
+
+# ========================
+# IDE & 本地配置
+# ========================
+.idea/
+.vscode/
+.claude/
+*.swp
+*.DS_Store
+
+# ========================
+# 测试 & 运行产物
+# ========================
+.coverage
+.pytest_cache/
+reports/*.html
+reports/*.csv
+reports/*.json
