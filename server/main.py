@@ -32,6 +32,7 @@ from server.api.v1.logs import (
 )
 from strategies.loader import StrategyLoader
 from server.api.v1.strategies import router as strategies_router
+from server.api.v1.explorer import router as explorer_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
 from core.notifier import build_default_manager
 
@@ -110,6 +111,9 @@ app.include_router(backtest_router, prefix="/api/v1")
 app.include_router(portfolio_router, prefix="/api/v1")
 app.include_router(strategies_router, prefix="/api/v1")
 app.include_router(logs_router, prefix="/api/v1")
+# 因子探索沙盒（Celery 派发 + Redis 宕机降级）：内部对 Redis 不可用做了
+# fire_and_forget 告警 + 线程池降级，无 Redis 也能挂载、不阻断 lifespan。
+app.include_router(explorer_router, prefix="/api/v1")
 
 
 # ============ 健康检查端点 ============
