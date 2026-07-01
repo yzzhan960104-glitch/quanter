@@ -238,3 +238,73 @@ class MockExecutionGateway(BaseExecutionGateway):
     async def cancel_order(self, order_id: str) -> OrderResult:
         # Mock 不支持撤已成交单，直接回 CANCELLED 终态（真实子类须查询当前状态）。
         return OrderResult(order_id=order_id, state=OrderState.CANCELLED, message="mock 撤单")
+
+
+# ============================================================================
+# 宏观一票否决网关（Task 14：宏观 CTA Epic 3）
+# ============================================================================
+class VetoedError(Exception):
+    """宏观一票否决异常。
+
+    语义：当信用环境进入收缩期（regime=-1）且 strict_veto=True 时，任何买入
+    订单在抵达券商前即被本网关否决。抛异常而非静默返回，目的是让上层策略
+    明确感知到「这单没下、且是被宏观风控主动拦截」，便于复盘与统计拦截率。
+    """
+
+
+class MacroAwareGateway:
+    """
+    宏观感知执行网关：在订单进入真实撮合前，依据注入的 credit regime 做
+    一票否决或强制减半。
+
+    Why 减半而非全否（CLAUDE.md 风险敞口拷问）：
+    - 全部否决会让策略在长熊/震荡市完全空仓，错失结构性机会，且一旦错过
+      关键反转点，回补成本极高（逼空风险）；而强制减半是一种「折中敞口」：
+      既显著降低收缩期的入场风险敞口（理论上把单笔最大亏损腰斩），又保留
+      了「试探性建仓」的能力，让策略能在信用回暖时快速加回仓位。
+    - strict_veto=True 时退化为硬否决，适用于极度不确定的尾部区间（如信用
+      危机爆发初期），由调用方按风控等级决定，本网关不替调用方做这一判断。
+
+    解耦设计（Why 不直接耦合 CreditRegime 单例）：
+    - regime 由调用方注入而非网关内部拉取，便于：
+      (1) 单测可确定性注入 regime 而无需 mock 数据源/单例；
+      (2) 生产侧可对同一批订单用「快照式 regime」统一处置，避免逐单重算导致
+          同一批订单内 regime 漂移（信用信号日频更新，应按日快照而非按单）。
+    - 本网关只关心 regime∈{-1,0,1} 三态的处置语义，regime 的具体计算口径、
+      数据源、阈值切分由 CreditRegime（Task 11）负责，职责单一。
+
+    边界与健壮性：
+    - regime 仅识别 -1（收缩）做风控动作，0/1 与其他值一律放行——保守的
+      默认放行策略，避免未知 regime 误杀正常订单。
+    - quantity//2 为整除，避免浮点减半后产生碎股；max(1, ...) 保证减半后
+      至少保留 1 股，避免「减半到 0」实际等同否决（与 strict_veto 语义混淆）。
+    - 仅 BUY 受否决/减半，SELL 在任何 regime 下原样放行——收缩期减仓/止损
+      是正确的风控动作，不应被本网关拦截。
+    """
+
+    def __init__(self, strict_veto: bool = False) -> None:
+        # strict_veto：True=收缩期买入直接抛 VetoedError；False=收缩期买入减半放行。
+        self.strict_veto = strict_veto
+
+    def submit_order(self, order, regime: int):
+        """
+        根据注入的 credit regime 处置订单（同步、就地修改 order）。
+
+        参数：
+        - order：可变订单对象，需暴露 side（str）与 quantity（int/float）属性；
+          本网关会就地改写 quantity（减半场景）。
+        - regime：-1=收缩期（信用收紧），0=中性，1=扩张期（信用宽松）。
+
+        返回：处置后的 order（便于链式调用；非 strict 场景下 order 已被就地修改）。
+
+        Why 同步而非异步：宏观否决是「纯计算 + 内存写」的快路径，无 I/O，
+        套异步反而徒增协程开销；真正的异步发生在后续 BaseExecutionGateway.submit_order。
+        """
+        # 仅在收缩期(-1)且为买入(BUY)时触发风控动作；其他 regime 与 SELL 一律放行。
+        if regime == -1 and getattr(order, "side", "").upper() == "BUY":
+            if self.strict_veto:
+                # 硬否决：抛异常，订单不下达，调用方须显式 catch 或让其上抛。
+                raise VetoedError("宏观收缩期，否决买入突破")
+            # 软减半：整除 2 并兜底 1 股，避免减半到 0 退化成隐式否决。
+            order.quantity = max(1, order.quantity // 2)
+        return order
