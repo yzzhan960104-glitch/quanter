@@ -219,4 +219,17 @@ async def factors(symbol: str) -> dict[str, Any]:
     if ts.empty:
         return {"atr": None}
     # ATR 末值：micro_momentum.atr 返 Series，取 .iloc[-1] 即最新一日 ATR
-    return {"atr": float(atr(ts).iloc[-1])}
+    v = atr(ts).iloc[-1]
+    # ★ NaN/不足窗口守卫（双保险）：
+    #   1) 窗口不足守卫：atr() 默认 14 bar 滚动窗口，当 minute 湖 bar 数 < 14 时
+    #      rolling 末值本应为 NaN——但 micro_momentum.atr 内部 .where(a>1e-9, 1e-9)
+    #      会把 NaN 一并替换成 1e-9（防除零 ε），即「窗口不足」被静默伪装成 1e-9 的
+    #      伪 ATR。这比裸 NaN 更危险：前端会信以为真地画出错误的微观波动率定权。
+    #      故必须在端点侧显式按序列长度判窗口，bar 数不足 → 返 None（语义=数据不足）。
+    #   2) NaN 直通守卫：即便未来 atr() 实现变更不再以 ε 兜底，pd.isna(v) 仍能把
+    #      裸 NaN 降级为 None——float(NaN) 会让 FastAPI 默认 json 编码器发出字面
+    #      "NaN" token（非法 JSON，JS JSON.parse/前端 axios 抛 SyntaxError 致整页
+    #      白屏），违背本文件「绝不致前端白屏」降级红线。两层守卫缺一不可。
+    if len(ts) < 14 or pd.isna(v):
+        return {"atr": None}
+    return {"atr": float(v)}

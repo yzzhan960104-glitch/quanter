@@ -173,3 +173,31 @@ def test_macro_factors_empty_when_no_timeseries(client, monkeypatch):
     resp = client.get("/api/v1/macro/factors/000001.SZ")
     assert resp.status_code == 200
     assert resp.json() == {"atr": None}
+
+
+# --------------------------------------------------------------
+# 契约 6：/macro/factors/{symbol} 时序 bar 数 < ATR 窗口(14) → NaN 降级为 None
+# --------------------------------------------------------------
+
+def test_factors_atr_none_when_nan(client, monkeypatch):
+    """分钟湖标的 bar 数 < ATR 窗口(14) → atr NaN → 端点须返 None（非非法 JSON nan）。
+
+    Why 必须降级：atr() 基于 rolling(14).mean，bar 数不足 14 时末值为 NaN；
+    float(NaN) 经 FastAPI 默认编码器会发出字面 "NaN" token，这是非法 JSON，
+    前端 JSON.parse/axios 会抛 SyntaxError 致整页白屏——直接违背降级红线。
+    故端点必须 pd.isna 守卫把 NaN 转成 None（合法 JSON null）。
+    """
+    import pandas as pd
+    from data.lake_reader import DataLakeReader
+    # 注入一个短序列（<14 bar）的 minute 湖：atr 末值必为 NaN
+    short_ts = pd.DataFrame(
+        {"open": [1] * 5, "high": [2] * 5, "low": [0] * 5, "close": [1] * 5, "volume": [10] * 5},
+        index=pd.date_range("2024-01-02", periods=5, freq="min"),
+    )
+    fake_reader = type("R", (), {"get_timeseries": lambda self, *a, **k: short_ts})()
+    monkeypatch.setattr(DataLakeReader, "get_instance", lambda: fake_reader)
+
+    resp = client.get("/api/v1/macro/factors/000001.SZ")
+    assert resp.status_code == 200
+    # ★ NaN 降级为 None（合法 JSON null），绝非非法 "nan" token
+    assert resp.json() == {"atr": None}
