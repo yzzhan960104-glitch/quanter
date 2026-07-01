@@ -136,15 +136,6 @@ LAKE_CONFIG = {
     "years_default": 10,
 }
 
-# GLM 大模型（Epic 2）
-# 用于新闻/公告情感打分；timeout=15s 防范极端网络抖动下的请求挂死，
-# 避免占用回测主循环线程。
-LLM_CONFIG = {
-    "base_url": _os.getenv("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/"),
-    "model": _os.getenv("ZHIPU_MODEL", "glm-4-flash"),
-    "timeout": 15,
-}
-
 # 宏观另类数据客户端（Epic 5）
 # yfinance_symbols: 标普/原油/黄金/VIX 的 Yahoo Finance 标准代号；
 # av_treasury_maturities: Alpha Vantage 美债收益率关键期限，覆盖短端与长端。
