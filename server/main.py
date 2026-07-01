@@ -33,6 +33,9 @@ from server.api.v1.logs import (
 from strategies.loader import StrategyLoader
 from server.api.v1.strategies import router as strategies_router
 from server.api.v1.explorer import router as explorer_router
+# 宏观/板块/因子只读端点（T16）：读内存湖 + CreditRegime，零写入，
+# 供给前端驾驶舱（T17 /dashboard）宏观灯/信贷曲线/板块流/ATR 四视图。
+from server.api.v1.macro import router as macro_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
 from core.notifier import build_default_manager
 
@@ -112,6 +115,9 @@ app.include_router(logs_router, prefix="/api/v1")
 # 因子探索沙盒（Celery 派发 + Redis 宕机降级）：内部对 Redis 不可用做了
 # fire_and_forget 告警 + 线程池降级，无 Redis 也能挂载、不阻断 lifespan。
 app.include_router(explorer_router, prefix="/api/v1")
+# 宏观/板块/因子只读端点：四端点全部只读内存湖，无网络/无写入，
+# 缺数据湖时端点内部短路返空结构（离线降级），不阻断 lifespan。
+app.include_router(macro_router, prefix="/api/v1")
 
 
 # ============ 健康检查端点 ============
