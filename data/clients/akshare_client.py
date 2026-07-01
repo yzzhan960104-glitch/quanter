@@ -226,12 +226,24 @@ class AKShareClient:
             return _EMPTY.copy()
         try:
             import akshare as ak
+            import datetime as _dt
 
-            today = _today8()
-            sse = ak.stock_margin_detail_sse(date=today)
-            szse = ak.stock_margin_detail_szse(date=today)
-            # 过滤 None / 空 DF 后合并（任一交易所当日无数据不致整体失败）
-            parts = [d for d in (sse, szse) if d is not None and not d.empty]
+            # 交易日回退：今日非交易日 / 数据盘后未公布时，向前找最近的有数据日（最多回退 7 自然日）。
+            # Why 不硬取 today：实测 stock_margin_detail_sse 对无数据日会内部抛
+            # "Length mismatch"（给空结果设 13 列名），逐日回退直到命中有效数据。
+            parts: list = []
+            for back in range(8):
+                d = (_dt.date.today() - _dt.timedelta(days=back)).strftime("%Y%m%d")
+                try:
+                    sse = ak.stock_margin_detail_sse(date=d)
+                    szse = ak.stock_margin_detail_szse(date=d)
+                    cand = [x for x in (sse, szse) if x is not None and not x.empty]
+                    if cand:
+                        parts = cand
+                        break
+                except Exception:
+                    # 该日无数据（Length mismatch 等）→ 继续回退
+                    continue
             if not parts:
                 return _EMPTY.copy()
             merged = pd.concat(parts, ignore_index=True)

@@ -62,6 +62,8 @@ def sync_jqdata_1min(
     freq: str = "5m",
     shard_dir: str = "data_lake/jq_shards",
     out: str = "data_lake/a_shares_1min.parquet",
+    start: str | None = None,
+    end: str | None = None,
 ) -> None:
     """循环活跃池拉分钟 K：断点续传（已存在跳过）+ 优雅停（QuotaExceeded 即停）。
 
@@ -80,8 +82,10 @@ def sync_jqdata_1min(
         out:       合并输出 parquet（data_lake/a_shares_1min.parquet）。
     """
     os.makedirs(shard_dir, exist_ok=True)
-    end = _dt.date.today().strftime("%Y-%m-%d")
-    start = (_dt.date.today() - _dt.timedelta(days=30 * months)).strftime("%Y-%m-%d")
+    # 日期范围：start/end 优先（试用账号须落在权限窗口内，如 2025-03-24~2026-03-31）；
+    # 缺省回看 months 个月（×30 天近似）。
+    end = end or _dt.date.today().strftime("%Y-%m-%d")
+    start = start or (_dt.date.today() - _dt.timedelta(days=30 * months)).strftime("%Y-%m-%d")
     client = JQDataClient.get_instance()
     stopped = False
     for sym in tqdm(pool, desc=f"JQData {freq}"):
@@ -109,14 +113,32 @@ def sync_jqdata_1min(
             print(e)
 
 
+# 兜底池：活跃池空（融资融券未拉到 / 非交易日）时用这批流动性高的沪深300核心股，保证分钟湖可建。
+_FALLBACK_POOL = [
+    "000001.SZ", "600519.SH", "000858.SZ", "601318.SH", "600036.SH",
+    "000333.SZ", "601166.SH", "002594.SZ", "600276.SH", "601888.SH",
+]
+
+
 if __name__ == "__main__":
+    import argparse
     from config import AKSHARE_CONFIG, JQDATA_CONFIG
     from data.clients.akshare_client import AKShareClient
     from scripts.sync_sector_daily import select_active_pool
 
+    ap = argparse.ArgumentParser(description="JQData 分钟级数据湖同步")
+    ap.add_argument("--start", default=None, help="起始日 YYYY-MM-DD（试用账号须落在权限窗口内，如 2025-03-24）")
+    ap.add_argument("--end", default=None, help="结束日 YYYY-MM-DD（缺省=今日）")
+    ap.add_argument("--freq", default=JQDATA_CONFIG["freq_default"], choices=["1m", "5m"])
+    ap.add_argument("--months", type=int, default=3, help="回看月数（--start 未传时生效）")
+    args = ap.parse_args()
+
     pool = select_active_pool(
-        AKShareClient(),
-        AKSHARE_CONFIG["top_sectors"],
-        AKSHARE_CONFIG["active_pool_size"],
+        AKShareClient(), AKSHARE_CONFIG["top_sectors"], AKSHARE_CONFIG["active_pool_size"]
     )
-    sync_jqdata_1min(pool, months=3, freq=JQDATA_CONFIG["freq_default"])
+    if not pool:
+        print(f"活跃池空（融资融券未拉到），使用预设兜底池 {len(_FALLBACK_POOL)} 只")
+        pool = _FALLBACK_POOL
+    sync_jqdata_1min(
+        pool, months=args.months, freq=args.freq, start=args.start, end=args.end
+    )

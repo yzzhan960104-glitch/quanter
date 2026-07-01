@@ -148,20 +148,23 @@ class CreditRegime:
             return 0
         win = s.tail(_MIN_LOOKBACK)
 
-        # 缺列防御：宏观湖结构异常（缺 shrzgm/M1M2_gap/dr007 任一）→ 返 0。
-        needed = ("shrzgm", "M1M2_gap", "dr007")
-        if any(c not in win.columns for c in needed):
+        # 缺列防御：shrzgm + M1M2_gap 是核心信号（必须有）；
+        # dr007 可选——AKShare 暂无干净的 DR007 接口（repo_rate_hist 停更于 2020），
+        # 缺失时不参与否决（rate_down/rate_up 视作 True），用双信号判别。
+        core = ("shrzgm", "M1M2_gap")
+        if any(c not in win.columns for c in core):
             return 0
+        has_dr = "dr007" in win.columns
 
         # 窗口首尾比较判趋势（向量化切片访问，无 for 循环热点）。
         credit_up = win["shrzgm"].iloc[-1] > win["shrzgm"].iloc[0]
         gap_pos = win["M1M2_gap"].iloc[-1] > 0
-        rate_down = win["dr007"].iloc[-1] < win["dr007"].iloc[0]
+        rate_down = (win["dr007"].iloc[-1] < win["dr007"].iloc[0]) if has_dr else True
         if credit_up and gap_pos and rate_down:
             return 1
 
         credit_down = win["shrzgm"].iloc[-1] < win["shrzgm"].iloc[0]
-        rate_up = win["dr007"].iloc[-1] > win["dr007"].iloc[0]
+        rate_up = (win["dr007"].iloc[-1] > win["dr007"].iloc[0]) if has_dr else True
         if credit_down and (not gap_pos) and rate_up:
             return -1
 

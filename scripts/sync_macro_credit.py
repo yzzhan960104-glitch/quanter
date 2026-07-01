@@ -54,7 +54,21 @@ def align_to_daily(
     """
     d = df.copy()
     # 日期列解析为 datetime 并设为索引，sort_index 防御上游乱序（时序运算前提）。
-    d[date_col] = pd.to_datetime(d[date_col])
+    # 容错：akshare 宏观接口（如 macro_china_shrzgm）的月份列返回 "201501" 形式
+    #   （6 位 YYYYMM），pd.to_datetime 默认解析会失败（month out of range）；
+    #   mock 测试用 "2024-01" 漏了此格式，实数据触发——先默认解析，失败再试 %Y%m。
+    _vals = d[date_col].astype(str).str.strip()
+    # 多格式容错：akshare 宏观月份列有三种形态——
+    #   "202604"(6位 YYYYMM) / "2008年02月份"(中文) / "2024-01"(标准)。
+    # pd.to_datetime 默认对前两种会返 NaT（不抛），须显式多格式回退。
+    parsed = pd.to_datetime(_vals, errors="coerce")
+    if parsed.isna().mean() > 0.5:  # 多数解析失败 → 试中文 "YYYY年MM月份" → "YYYY-MM"
+        cleaned = _vals.str.replace("月份", "", regex=False).str.replace("年", "-", regex=False)
+        parsed = pd.to_datetime(cleaned, format="%Y-%m", errors="coerce")
+    if parsed.isna().mean() > 0.5:  # 仍失败 → 试 6 位 YYYYMM
+        parsed = pd.to_datetime(_vals, format="%Y%m", errors="coerce")
+    d[date_col] = parsed
+    d = d.dropna(subset=[date_col])  # 丢弃最终仍解析失败的脏行
     d = d.set_index(date_col).sort_index()
     # 工作日日历：对齐 A 股交易日（周末无行情，reindex 进来也无意义，徒增 NaN）。
     cal = pd.bdate_range(start, end)
@@ -95,9 +109,23 @@ def fetch_macro_series(client: AKShareClient, start: str, end: str) -> pd.DataFr
     # 货币供应量月频 → 日频仅 ffill；衍生 M1M2_gap 剪刀差。
     if not money.empty:
         m = align_to_daily(_pick(money, "月份"), "月份", start, end)
+        # 归一 AKShare 原始列名 → CreditRegime 消费的标准名
+        # 实测列名：货币(M1)-同比增长 / 货币和准货币(M2)-同比增长 / 流通中的现金(M0)-同比增长
+        _ren = {}
+        for c in m.columns:
+            if "(M1)" in c and "同比增长" in c:
+                _ren[c] = "M1同比增长"
+            elif "(M2)" in c and "同比增长" in c:
+                _ren[c] = "M2同比增长"
+            elif "(M0)" in c and "同比增长" in c:
+                _ren[c] = "M0同比增长"
+        if _ren:
+            m = m.rename(columns=_ren)
         if "M1同比增长" in m and "M2同比增长" in m:
             # 衍生列在 ffill 之后计算：用已对齐的日频同比相减，保证整段时序连续。
-            m["M1M2_gap"] = m["M1同比增长"].astype(float) - m["M2同比增长"].astype(float)
+            m["M1M2_gap"] = pd.to_numeric(m["M1同比增长"], errors="coerce") - pd.to_numeric(
+                m["M2同比增长"], errors="coerce"
+            )
         series.update({c: m[c] for c in m.columns})
     # DR007 日频 → 直接 reindex（Task 4 新鲜度守卫已防过期；空则少一列不崩）。
     if not dr007.empty:
