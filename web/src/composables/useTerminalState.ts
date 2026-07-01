@@ -92,17 +92,40 @@ function toLogEntry(ev: any): LogEntry {
         logger: 'trade',
         message: `${ev.direction} ${ev.symbol} ${ev.shares}@${fmtNum(ev.price)} @ ${ev.date}`,
       }
-    case 'risk':
-      // 风控告警按后端 level 区分 WARNING/ERROR（非法 level 兜底 WARNING）
+    case 'risk': {
+      // 风控告警级别精细化（Task 18）：按 reason 字段区分止损/止盈/其它。
+      //
+      // Why 不再单纯依赖后端 level：后端 _close() 发射的分钟级风控平仓 risk 帧统一
+      // 标 level="WARN"（见 backtest/engine.py 的 _close），但 reason 可能是
+      // "触及止损"/"触及止盈"/"移动止损"——这三者在交易语义上颜色相反（止损=亏损
+      // 出场 应红/ERROR，止盈=盈利出场 应绿/SUCCESS），仅按 level 全标黄会掩盖
+      // 关键盈亏信号。这里按 reason 文本细化：
+      //   - 触及止损 / 移动止损 → lv-error（红，亏损被动出场）
+      //   - 触及止盈            → lv-success（绿，盈利被动出场）
+      //   - 其它（涨跌停/资金不足/未知）→ 维持后端 level（WARN→WARNING，ERROR→ERROR）
+      //
       // 字段取 ev.reason（与后端 backtest/engine.py 的 risk 帧 reason 字段对齐，
-      // 后端 reason 形如 "涨停无法买入"/"资金不足"/"跌停无法卖出"；此前误取 ev.msg
-      // 会得到 undefined，终端风控告警显示为 "undefined @ 日期"，零可见性）
+      // 后端 reason 形如 "涨停无法买入"/"资金不足"/"跌停无法卖出"/"触及止损"；
+      // 此前误取 ev.msg 会得到 undefined，终端风控告警显示为 "undefined @ 日期"）。
+      const reason: string = typeof ev.reason === 'string' ? ev.reason : ''
+      let level: string
+      if (reason.includes('止损')) {
+        // 含「止损」字样（"触及止损"/"移动止损"）—— 亏损被动出场，红色 ERROR
+        level = 'ERROR'
+      } else if (reason.includes('止盈')) {
+        // 含「止盈」字样（"触及止盈"）—— 盈利被动出场，绿色 SUCCESS
+        level = 'SUCCESS'
+      } else {
+        // 其它风控（涨跌停/资金不足/断线告警等）—— 维持后端 level，非法值兜底 WARNING
+        level = ev.level === 'ERROR' ? 'ERROR' : 'WARNING'
+      }
       return {
         ts: now,
-        level: ev.level === 'ERROR' ? 'ERROR' : 'WARNING',
+        level,
         logger: 'risk',
         message: `${ev.reason} @ ${ev.date}`,
       }
+    }
     case 'progress':
       // 进度行：日期 + 当前净值 + (i+1)/n，便于目测回测推进速度
       return {

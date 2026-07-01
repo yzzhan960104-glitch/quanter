@@ -37,6 +37,20 @@ export interface SingleBacktestParams {
   // 策略字段（Task 9：前端驱动调参；tech_weights 已下沉到 strategy_params.tech_weight）
   strategy_name?: string
   strategy_params?: Record<string, unknown>
+  /**
+   * 回测 K 线频率（Task 18：分钟级回测支持）。
+   *
+   * Why 与 signal_freq 解耦（独立字段而非复用）：
+   * - signal_freq 描述「信号生成」粒度（策略层采样周期），freq 描述「撮合 K 线」
+   *   粒度（引擎层回放周期）。日级策略完全可在分钟级 K 线上回测（如 ATR 移动
+   *   止损必须分钟级撮合才能刻画盘中穿越），二者解耦才能覆盖宏观 CTA 这种
+   *   「日级信号 + 分钟级风控」组合，强行合并会丧失表达力。
+   * - 可选字段：缺省时后端按既有日级路径 run() 执行，保证旧调用零回归。
+   * - 取值与 signal_freq 保持同词表（'1d'/'1h'/'5m'/'1m'），便于 ParamForm
+   *   复用同一组选项，且 brief 仅强约束 '1d'/'5m'/'1m'，这里补 '1h' 与既有
+   *   signal_freq 对齐（后端如不支持 '1h' 由其自身校验兜底，前端不收窄）。
+   */
+  freq?: '1d' | '1h' | '5m' | '1m'
 }
 
 /** 组合回测请求 */
@@ -82,13 +96,26 @@ export interface DrawdownPoint {
   drawdown: number
 }
 
-/** 交易记录 */
+/**
+ * 交易记录
+ *
+ * reason 字段（Task 18 新增，可选）：
+ * - 后端引擎 _close() 在风控平仓时回填此字段为「触及止损」/「触及止盈」/「移动止损」
+ *   等中文原因；常规信号驱动的买卖不带 reason。
+ * - ProChart 据此字段提炼止损/止盈触发点画 markLine 水平线 + 触发标注，
+ *   useTerminalState.toLogEntry 据此细化日志级别（error/success/warn）。
+ * - 设为可选：日级 run()/run_portfolio() 的 trades 不含 reason，前端容错取值。
+ *
+ * symbol 字段同理（分钟级 _close/_buy 落库时带 symbol，日级不含），设可选。
+ */
 export interface TradeRecord {
   date: string
   direction: string
   shares: number
   price: number
   cost: number
+  reason?: string
+  symbol?: string
 }
 
 /**
