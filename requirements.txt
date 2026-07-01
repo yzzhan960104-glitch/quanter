@@ -45,9 +45,21 @@ mypy>=1.5.0
 
 # ===== 工业级蜕变新增依赖 =====
 pyarrow>=14.0
-openai>=1.30
+# openai 已移除：LLM 情感路径已摒弃，不再引入 OpenAI/GLM 客户端
 aiohttp>=3.9
 celery[redis]>=5.3
 redis>=5.0
 psutil>=5.9
 tqdm>=4.66
+
+# ===== 宏观 CTA 究极重构：数据源切轨（替代 Tushare，引入 JQData 分钟级） =====
+# AKShare：开源 A 股/宏观/板块数据，无 Token 门槛，规避 Tushare 积分限制；
+# 锁定 1.18.64 是本会话已验证可用的版本，避免上游 API 字段漂移。
+akshare==1.18.64
+# JQData：分钟级 K 线与财务数据源，独立配额计数防超额扣费。
+jqdatasdk==1.9.8
+# thriftpy2：jqdatasdk 的 RPC 传输底层，显式锁定版本避免与服务端协议失配。
+thriftpy2==0.4.20
+# fastparquet：分钟级数据落盘的另一 Parquet 后端（pyarrow 已在依赖中），
+# 保留作为多湖写入的备选引擎，提升极端场景兼容性。
+fastparquet

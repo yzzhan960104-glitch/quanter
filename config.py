@@ -161,3 +161,47 @@ CELERY_CONFIG = {
     "queue": _os.getenv("CELERY_EXPLORER_QUEUE", "explorer"),
     "cpu_gate_percent": 80.0,
 }
+
+# ============================================================
+# 宏观 CTA 究极重构：JQData / AKShare / 多湖注册
+# （数据流从 Tushare 切轨到 AKShare，并引入 JQData 分钟级）
+# ============================================================
+
+# JQData 分钟级客户端（Epic 1）
+# 设计意图：JQData 按「调用次数」计费，必须在客户端侧建立配额闸门，
+# 任何一次越界调用都可能触发超额扣费，故三道防线缺一不可：
+#   - quota_manual_limit：本地手动计数到 95 万即硬停，留 5 万余量；
+#   - quota_warn_spare：与 get_query_count 差值低于 5 万即告警；
+#   - calibrate_every：每 10 次本地计数用服务端计数校准，防本地漂移。
+JQDATA_CONFIG: Dict[str, Any] = {
+    "freq_default": "5m",
+    "quota_warn_spare": 50_000,      # spare<5万 即停
+    "quota_manual_limit": 950_000,   # 手动计数 95万 即停
+    "calibrate_every": 10,           # 每 10 次用 get_query_count 校准
+}
+
+# AKShare 数据流（替代 Tushare）
+# 设计意图：AKShare 为开源数据源，无 Token 与配额限制，但接口字段
+# 存在上游漂移风险，故锁定 active_pool_size / top_sectors / momentum_window
+# 等业务阈值于 config，避免散落在调用点难以维护。
+AKSHARE_CONFIG: Dict[str, Any] = {
+    "qfq": "qfq",
+    "active_pool_size": 50,
+    "top_sectors": 3,
+    "momentum_window": 20,
+}
+
+# 多湖路径注册（DataLakeReader 按 key 缓存）
+# 设计意图：从单湖（仅日线）扩展到 macro/sector/daily/minute/crypto 五湖，
+# DataLakeReader 通过此 dict 按 key 寻址并缓存已打开的 Parquet 句柄，
+# 避免重复 IO 打开造成的句柄泄漏与内存膨胀。
+# 注意：此处仅「追加」lakes / default_lake 两个键到既有 LAKE_CONFIG，
+# 不重定义整个字典，保持 default_path / shard_dir / years_default 不变。
+LAKE_CONFIG["lakes"] = {
+    "macro": "data_lake/macro_credit.parquet",
+    "sector": "data_lake/sector.parquet",
+    "daily": "data_lake/a_shares_daily.parquet",
+    "minute": "data_lake/a_shares_1min.parquet",
+    "crypto": "data_lake/crypto_btc_1m.parquet",
+}
+LAKE_CONFIG["default_lake"] = "daily"
