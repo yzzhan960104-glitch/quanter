@@ -84,19 +84,39 @@ class DataLakeReader:
             logger.warning("数据湖缺失：%s(key=%s)，跳过加载（离线模式）", path, key)
             return
         df = pd.read_parquet(path)
-        # 校验索引形态：必须是 MultiIndex(date, symbol)，否则后续 xs 切片语义错乱。
-        if not isinstance(df.index, pd.MultiIndex):
-            logger.error("数据湖 %s 索引非 MultiIndex(date, symbol)，跳过加载", key)
+        # 按索引形态分流（修复跨任务硬阻塞 T11 审查发现）：
+        # - MultiIndex(date, symbol)：daily/minute/sector 等价格湖，走 xs(symbol)/
+        #   groupby(symbol).ffill 价格补齐路径，与既有语义完全一致（不动）。
+        # - DatetimeIndex 单索引：macro 湖这类【全市场级别单序列宏观指标】
+        #   （shrzgm/M1M2_gap/dr007，无 symbol 概念）。sync_macro_credit 落盘前
+        #   已 sort_index + 仅向前 ffill，此处无需二次 groupby；直接缓存进 _lakes，
+        #   供 CreditRegime._load_from_lake 用 reader._lakes["macro"].loc[:date]
+        #   直读（macro 湖无 symbol 层，get_cross_section/get_timeseries 对其无意义）。
+        #   若不在此分支放行，老逻辑会因"非 MultiIndex"直接 logger.error+return，
+        #   _lakes["macro"] 永远空 → CreditRegime.compute() 永远返 0 → 宏观否决失效。
+        # - 其它索引形态：维持拒绝（语义不明，拒绝早失败优于静默错乱）。
+        if isinstance(df.index, pd.MultiIndex):
+            df = self._normalize_and_sort(df)
+            date_dtype = df.index.get_level_values("date").dtype
+            self._lakes[key] = df
+            self._ffills[key] = self._build_ffill_view(df)
+            self._dtypes[key] = date_dtype
+        elif isinstance(df.index, pd.DatetimeIndex):
+            # tz 去化 + normalize 到午夜：与 MultiIndex 路径同等对待，防止查询键
+            # 带时分秒/tz 与索引键不可比或 silently 切空。
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert("UTC").tz_localize(None)
+            df.index = pd.DatetimeIndex(df.index).normalize()
+            df = df.sort_index()
+            # 单索引湖无 symbol 层、_series 路径不 xs symbol；ffill 在落盘前已完成，
+            # _ffills 这里直接等同 _lakes（避免 get_cross_section 在单索引湖误用，
+            # 单索引湖根本不应走 get_cross_section/get_timeseries）。
+            self._lakes[key] = df
+            self._ffills[key] = df
+            self._dtypes[key] = df.index.dtype
+        else:
+            logger.error("数据湖 %s 索引非 MultiIndex(date, symbol) 亦非 DatetimeIndex，跳过加载", key)
             return
-
-        df = self._normalize_and_sort(df)
-        # 记录 date 层级原生 dtype：查询入参按此归一化，避免 str 索引与 Timestamp
-        # 比较（'<' not supported between str and Timestamp）。
-        date_dtype = df.index.get_level_values("date").dtype
-
-        self._lakes[key] = df
-        self._ffills[key] = self._build_ffill_view(df)
-        self._dtypes[key] = date_dtype
         # 首个成功 load 的 key 锁定为默认湖 —— 保证 `get_*(lake=None)` 老调用路径有确定语义。
         if self._default_key is None:
             self._default_key = key

@@ -107,9 +107,10 @@ def test_no_lookahead_only_uses_past():
     macro.loc[idx[-1], "shrzgm"] = 9999
     r = CreditRegime(macro_df=macro)
     d = idx[20]
-    # D 当日的判断：D 之后的数据不可见 → 信号只能是中性(0)
-    # （末尾日的 9999 扩张因 .loc[:D] 截断而对 D 不可见，前视红线守护成立）
-    assert r.compute(d) in (0, 1, -1)   # 仅用 [:d]，断言不崩 + 不受未来值影响
+    # D 当日的判断：D 及之前全中性、末尾日 9999 扩张在 D 之后 → 必须 0。
+    # 旧弱断言 `in (0,1,-1)` 过弱（compute 本就只能返这三者，前视泄露也过），
+    # 升级为严格 == 0 守住前视红线。
+    assert r.compute(d) == 0
 
 
 def test_no_lookahead_neutral_when_future_only_expansion():
