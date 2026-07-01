@@ -62,3 +62,24 @@ def test_sell_not_vetoed_in_contraction():
     o = _Order("SELL", 1000)
     gw.submit_order(o, regime=-1)   # 即便 strict_veto=True，卖出仍放行
     assert o.quantity == 1000
+
+
+def test_contraction_buy_triggers_dingtalk_alert(monkeypatch):
+    """宏观收缩期买入减半须触发钉钉告警（Epic 5：宏观 -1 风控动作可观测）。"""
+    from unittest.mock import MagicMock
+    # mock fire_and_forget 捕获告警派发；mock NotificationManager 避免"协程未 await"告警
+    ff = MagicMock()
+    notify = MagicMock(return_value="coro-sentinel")
+    mgr = MagicMock()
+    mgr.get_default.return_value.notify_risk_event = notify
+    monkeypatch.setattr("core.notifier.fire_and_forget", ff)
+    monkeypatch.setattr("core.notifier.NotificationManager", mgr)
+
+    gw = MacroAwareGateway(strict_veto=False)
+    gw.submit_order(_Order("BUY", 1000), regime=-1)
+    assert ff.called              # ★ 收缩期减半 → 告警已派发
+
+    # 扩张期买入不应派发告警
+    ff.reset_mock()
+    gw.submit_order(_Order("BUY", 1000), regime=1)
+    assert not ff.called          # ★ 扩张期放行，无告警

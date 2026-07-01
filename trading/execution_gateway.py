@@ -302,6 +302,16 @@ class MacroAwareGateway:
         """
         # 仅在收缩期(-1)且为买入(BUY)时触发风控动作；其他 regime 与 SELL 一律放行。
         if regime == -1 and getattr(order, "side", "").upper() == "BUY":
+            # 宏观一票否决/减半触发钉钉告警（Epic 5：宏观 -1 收缩期风控动作须可观测）。
+            # Why fire_and_forget：跨线程安全告警（同步上下文无运行 loop 也能触发异步通知），
+            #   不阻塞风控主路径；告警链路自身异常被吞，绝不影响否决/减半的执行。
+            try:
+                from core.notifier import NotificationManager, fire_and_forget
+                _action = "否决" if self.strict_veto else "减半"
+                fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                    f"宏观收缩期(regime=-1)，买入已{_action}：{getattr(order, 'symbol', '?')}", "WARN"))
+            except Exception:
+                pass  # 告警链路异常绝不影响风控主路径
             if self.strict_veto:
                 # 硬否决：抛异常，订单不下达，调用方须显式 catch 或让其上抛。
                 raise VetoedError("宏观收缩期，否决买入突破")
