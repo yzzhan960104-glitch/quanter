@@ -64,8 +64,8 @@ class AKShareClient:
         """拉取 A 股个股日线；熔断/失败一律返回空 DF，绝不抛。
 
         参数：
-            symbol: akshare 代码（如 '000001'，注意【不带】交易所后缀，
-                    akshare 用纯数字代码 + market 参数区分沪深，非 yfinance 的 .SZ/.SH 形式）。
+            symbol: 支持 '000001' 或 '000001.SZ' 两种形式（wrapper 内部剥离 '.SZ/.SH'
+                    交易所后缀，因 akshare stock_zh_a_hist 只要纯数字代码，原样透传会实网返空）。
             start/end: 'YYYY-MM-DD'（内部转 YYYYMMDD 喂给 akshare）。
             adjust: '' 前复权不复权 / 'qfq' 前复权 / 'hfq' 后复权（默认 qfq，对齐回测复权口径）。
 
@@ -80,9 +80,14 @@ class AKShareClient:
         try:
             import akshare as ak
 
+            # akshare stock_zh_a_hist 只要纯数字代码（如 '000001'），不认 '.SZ/.SH' 后缀。
+            # Why 剥离：活跃股池的 symbol 多源自融资融券明细，形如 '000001.SZ'（带交易所后缀）；
+            #   若原样透传给 ak.stock_zh_a_hist 会实网返空/异常，导致整个活跃池日线全量拉空
+            #   （同文件 fetch_individual_fund_flow 已同样 split('.')[0] 剥离，这里对齐）。
+            code = symbol.split(".")[0]
             # akshare 日期参数为 YYYYMMDD 连续串（实测复核），需剥离 '-'
             raw = ak.stock_zh_a_hist(
-                symbol=symbol,
+                symbol=code,
                 period="daily",
                 start_date=start.replace("-", ""),
                 end_date=end.replace("-", ""),

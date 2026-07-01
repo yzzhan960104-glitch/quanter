@@ -28,6 +28,27 @@ def test_fetch_daily_hist_cleanses(monkeypatch):
     assert len(df) == 1
 
 
+def test_fetch_daily_hist_strips_exchange_suffix(monkeypatch):
+    """symbol 带 .SZ/.SH 后缀时，wrapper 须剥离后缀再调 ak.stock_zh_a_hist。
+
+    拷问背景：活跃股池的 symbol 多源自融资融券明细（形如 '000001.SZ'，带交易所后缀），
+    而 akshare stock_zh_a_hist 只要纯数字代码——原样透传会实网返空，导致整个活跃池日线
+    全量拉空。本测试捕获透传给 ak.* 的真实 symbol，断言已剥离为纯数字。
+    """
+    _reset()
+    captured = {}
+    fake = pd.DataFrame({"日期": ["2024-01-02"], "开盘": [10], "最高": [11], "最低": [9],
+                         "收盘": [10.5], "成交量": [1000], "成交额": [1e7]})
+
+    def _fake_hist(**kwargs):
+        captured["symbol"] = kwargs.get("symbol")
+        return fake
+
+    monkeypatch.setattr("akshare.stock_zh_a_hist", lambda **k: _fake_hist(**k))
+    AKShareClient().fetch_daily_hist("000001.SZ", "2024-01-02", "2024-01-03")
+    assert captured["symbol"] == "000001"   # ★ 剥离后缀，纯数字喂 akshare
+
+
 def test_failure_returns_empty_df(monkeypatch):
     """底层 ak.* 抛错时必须返回空 DF，绝不向外抛（红线契约）。"""
     _reset()
