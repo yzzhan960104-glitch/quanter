@@ -129,7 +129,39 @@ def select_active_pool(
     if sym_col is None:
         logger.warning("select_active_pool：margin 无代码列，无法筛股，返空池")
         return []
-    candidates_all = margin[sym_col].astype(str).tolist()
+    # 1) 取原始代码 + 过滤无效（NaN/空/非6位），避免脏符号失败 trip 熔断连累有效标的。
+    #    显式 str() 强转：margin 代码列可能是 float（NaN/601688.0），不依赖 astype(str) 的列级行为。
+    _raw_codes: list[str] = []
+    for _v in margin[sym_col].tolist():
+        c = str(_v).strip()
+        if not c or c.lower() == "nan":
+            continue
+        d = c.split(".")[0]
+        if d.isdigit() and len(d) == 6:
+            _raw_codes.append(c)
+    # 2) 性能红线：候选可能数千只，下游逐只 API（个股资金流/日线）O(N) 极慢（实测 6min+ 未完）。
+    #    先按融资余额（margin 内已有，零额外 API）预筛 top 100，再交给下游逐只评分。
+    bal_col = _pick_col(margin, "融资余额")
+    if bal_col is not None and len(_raw_codes) > 100:
+        _raw_set = set(_raw_codes)
+        _sub = (
+            margin[margin[sym_col].astype(str).isin(_raw_set)]
+            .sort_values(bal_col, ascending=False)
+            .head(100)
+        )
+        _raw_codes = _sub[sym_col].astype(str).tolist()
+        logger.info("候选预筛：按融资余额取 top 100（从全市场缩到 100，避免逐只 API 雪崩）")
+    # 3) 归一带后缀（margin 返6位纯数字，下游 JQData 需 .SZ/.SH；
+    #    沪 6/9→.SH, 深 0/3/2→.SZ, 北 8/4→.BJ）
+    def _suf(c: str) -> str:
+        d = c.split(".")[0]
+        return d + (
+            ".SH" if d[0] in "69"
+            else ".SZ" if d[0] in "032"
+            else ".BJ" if d[0] in "84"
+            else ""
+        )
+    candidates_all = [_suf(c) for c in _raw_codes]
 
     # ---- 主路径：margin 含行业列 → 行业 groupby ----
     ind_col = _pick_col(margin, "行业", "申万一级行业", "行业级别")
