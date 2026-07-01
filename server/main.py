@@ -55,11 +55,17 @@ async def lifespan(app: FastAPI):
     # 后续业务日志/风控事件即可被投递。build_default_manager 内部对缺凭证做软跳过。
     build_default_manager()
 
-    # 启动：数据湖常驻内存（parquet 缺失则离线降级，不阻断启动）
-    # Why 单例 + 启动期加载：DataLakeReader.load() 内部对 parquet 缺失只记 warning，
-    # 开发机/CI 无数据湖时进入离线模式（查询返回空 DF），绝不抛异常阻断 API 启动。
+    # 启动：按 LAKE_CONFIG["lakes"] 多湖逐个 load（parquet 缺失则离线降级，不阻断启动）
+    # Why 多湖而非单行：宏观 CTA 重构后数据体系分裂为 macro/sector/daily/minute/crypto
+    # 五个独立 parquet（Task 3 已将 DataLakeReader 改为 {key:(df,ffill)} 多湖缓存），
+    # 此处必须遍历 LAKE_CONFIG["lakes"] 逐 key 载入，首个成功 load 即为默认湖。
+    # Why 缺失不阻断：load() 内部对 parquet 不存在仅记 warning 并 return（不写缓存），
+    # 开发机/CI 缺数据湖时进入离线模式（.loaded=False，查询返回空 DF），保证 API 可启动。
     from data.lake_reader import DataLakeReader
-    DataLakeReader.get_instance().load()
+    from config import LAKE_CONFIG
+    reader = DataLakeReader.get_instance()
+    for key, path in LAKE_CONFIG.get("lakes", {}).items():
+        reader.load(path, key=key)
 
     # 启动：挂载 SSE 日志 handler 到 root logger
     # Why root logger：回测业务线程的全部日志（含第三方库）都需被捕获，只有 root
