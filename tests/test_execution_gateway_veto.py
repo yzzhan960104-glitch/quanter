@@ -83,3 +83,29 @@ def test_contraction_buy_triggers_dingtalk_alert(monkeypatch):
     ff.reset_mock()
     gw.submit_order(_Order("BUY", 1000), regime=1)
     assert not ff.called          # ★ 扩张期放行，无告警
+
+
+# ============ I-2: 减半后必须保留 100 整手契约 ============
+
+
+@pytest.mark.parametrize("inp,expected", [
+    (300, 100),    # 300//2=150 → 向下取整到手 = 100（非 150 碎股）
+    (100, 100),    # 100//2=50  → max(100, 0) = 100（最少保留 1 手）
+    (1000, 500),   # 1000//2=500 → 已是整手，原样
+    (500, 200),    # 500//2=250 → 向下取整到手 = 200（非 250 碎股）
+    (2000, 1000),  # 2000//2=1000 → 已是整手
+    (700, 300),    # 700//2=350 → 取整到手 = 300
+])
+def test_halve_preserves_100_lot_contract(inp, expected):
+    """收缩期减半后数量必须是 100 的整数倍（A 股 Order 契约：shares%100==0）。
+
+    修复前 ``max(1, qty//2)`` 会产生 50/150/250 等碎股，违反 A 股 Order 的
+    ``shares%100==0`` 强契约（Order.__post_init__ 会 raise ValueError）。
+
+    修复后 ``max(100, (qty//2//100)*100)``：先减半再向下取整到手，最少保留 1 手。
+    """
+    gw = MacroAwareGateway(strict_veto=False)
+    o = _Order("BUY", inp)
+    gw.submit_order(o, regime=-1)
+    assert o.quantity == expected
+    assert o.quantity % 100 == 0, f"减半后数量 {o.quantity} 破坏 100 整手契约"

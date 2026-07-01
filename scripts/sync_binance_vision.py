@@ -46,13 +46,17 @@ _STD_COLS = ["open", "high", "low", "close", "volume", "amount"]
 
 
 def parse_klines_csv(raw: bytes) -> pd.DataFrame:
-    """12 列无表头 CSV 字节流 → 标准 6 列 DataFrame + open_time(ms)→UTC datetime 索引。
+    """12 列无表头 CSV 字节流 → 标准 6 列 DataFrame + open_time(ms)→datetime 索引。
 
-    为何 UTC（而非 naive 或本地时区）：
-        Binance 全市场以 UTC 计时（00:00 UTC = 日切），多日/多币种拼接时若不
-        显式标 UTC，pandas 会按本地时区解释，跨夏令时/时区拼接会出现"同一秒
-        被解释成两个不同时刻"的错位 bug——分钟级策略对此零容忍。强制 tz=UTC
-        让索引成为绝对时间锚点，跨任何时区机器跑都一致。
+    为何 tz-naive（I-3 修复：与 jqdata _cleanse 的 tz_localize(None) 口径对称）：
+        Binance 全市场以 UTC 计时（00:00 UTC = 日切）。早期实现把索引标为 tz=UTC
+        作为「绝对时间锚点」，但这与下游 lake_reader.load 的【单索引分支】冲突——
+        该分支会对 tz-aware 索引调 normalize()，把【时分秒截掉】，导致同日 1440 根
+        1m K 线被压成同日，整张加密分钟湖退化失效。
+        修复方案：parse 阶段仍用 utc=True 解析（保证跨夏令时/时区拼接不错位），
+        但在返回前 tz_localize(None) 去掉 tz 标签【保留时分秒】。落盘后 lake_reader
+        走 tz-naive 分支不会 normalize()，时分秒得以保留；与 jqdata _cleanse 的
+        tz_localize(None) 完全对称，跨资产合并口径一致。
     为何 amount=quote_asset_volume（而非 volume）：
         volume 是【base 资产数量】（BTC 的个数），不同币种价格量级差万倍
         （BTC 6 万 vs SHIB 0.00001），量级不可比；quote_asset_volume 是
@@ -64,7 +68,7 @@ def parse_klines_csv(raw: bytes) -> pd.DataFrame:
 
     Returns:
         标准 6 列 DataFrame（open/high/low/close/volume/amount，数值已 coerce），
-        DatetimeIndex(tz=UTC, name="date")。空输入返空 DataFrame。
+        DatetimeIndex(tz-naive, name="date"，保留时分秒)。空输入返空 DataFrame。
     """
     rows = list(_csv.reader(io.StringIO(raw.decode().strip())))
     if not rows:
@@ -89,8 +93,17 @@ def parse_klines_csv(raw: bytes) -> pd.DataFrame:
     for c in ["open", "high", "low", "close", "volume", "amount", "number_of_trades"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-    # open_time(ms) → UTC datetime 索引（绝对时间锚点，见 docstring）。
-    df.index = pd.to_datetime(df["open_time"].astype("int64"), unit="ms", utc=True)
+    # open_time(ms) → UTC datetime（先用 utc=True 解析防跨时区拼接错位），
+    # 再 tz_convert(None) 去 tz 标签但【保留时分秒】（I-3：防 lake_reader.normalize 截掉时分秒）。
+    # Why 走 .dt.tz_convert(None)：to_datetime(Series, utc=True) 返回的是 tz-aware
+    # Series（不是 DatetimeIndex），其 tz 操作须通过 .dt 访问器；tz_convert(None)
+    # 把 UTC 时刻转成 naive 时间戳（保留时分秒），与 jqdata _cleanse 的
+    # tz_localize(None) 落盘口径完全对称。
+    naive_idx = (
+        pd.to_datetime(df["open_time"].astype("int64"), unit="ms", utc=True)
+        .dt.tz_convert(None)
+    )
+    df.index = naive_idx
     df.index.name = "date"
     return df[_STD_COLS]
 

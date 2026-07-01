@@ -72,3 +72,38 @@ def test_404_skipped():
 
     res = asyncio.run(fetch_one(_Sess(), "BTCUSDT", "2024-01-02"))
     assert res is None
+
+
+# ============ I-3: 落盘索引须保时分秒且 tz-naive（与 jqdata 对称） ============
+
+
+def test_parse_klines_csv_index_keeps_time_and_is_tz_naive():
+    """parse_klines_csv 返回的索引须含时分秒（非午夜）且 tz-naive。
+
+    Why（修复背景）：
+    - 修复前 parse_klines_csv 返回 DatetimeIndex(tz=UTC)，sync_binance_vision 落盘后
+      parquet 索引也是 tz=UTC。lake_reader.load 走【单索引分支】时会调 normalize()，
+      该方法对 tz-aware 索引会【截掉时分秒】把同日 1440 根 1m K 线压成同日 →
+      加密分钟湖整张表退化失效。
+    - 修复方案（与 jqdata _cleanse 的 tz_localize(None) 口径对称）：parse_klines_csv
+      在返回前 tz_localize(None) 去掉 tz 标签但【保留时分秒】，落盘后 lake_reader
+      走 tz-naive 分支不会调 normalize()，时分秒得以保留。
+
+    断言：
+    - 索引第 0 项的 hour/min 不全为 0（即非午夜截断）；
+    - 索引 tz 为 None（tz-naive）。
+    """
+    from scripts.sync_binance_vision import parse_klines_csv
+
+    # open_time=1700000000000ms → 2023-11-14 22:13:20 UTC（非午夜，时分秒显著）
+    csv = b"1700000000000,1.0,2.0,0.5,1.5,100,1700000060000,150,50,60,90,ignore\n"
+    df = parse_klines_csv(csv)
+    ts0 = df.index[0]
+    # ★ 时分秒保留：hour/min/sec 不应全为 0（修复前若被 normalize 截断会是 00:00:00）
+    assert not (ts0.hour == 0 and ts0.minute == 0 and ts0.second == 0), (
+        f"索引时分秒被截断为午夜：{ts0}——lake_reader.normalize() 会把同日 1440 根压成同日"
+    )
+    # 明确断言具体时分秒（1700000000000ms = 2023-11-14 22:13:20 UTC）
+    assert ts0.hour == 22 and ts0.minute == 13, f"时分秒应=22:13:20，实际 {ts0}"
+    # ★ tz-naive（修复前是 tz=UTC）
+    assert df.index.tz is None, f"索引应为 tz-naive，实际 tz={df.index.tz}"

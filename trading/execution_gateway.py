@@ -276,8 +276,9 @@ class MacroAwareGateway:
     边界与健壮性：
     - regime 仅识别 -1（收缩）做风控动作，0/1 与其他值一律放行——保守的
       默认放行策略，避免未知 regime 误杀正常订单。
-    - quantity//2 为整除，避免浮点减半后产生碎股；max(1, ...) 保证减半后
-      至少保留 1 股，避免「减半到 0」实际等同否决（与 strict_veto 语义混淆）。
+    - quantity 减半后向下取整为 100 整数倍（A 股 1 手 = 100 股），max(100, ...)
+      保证减半后至少保留 1 手，避免「减半到 0」实际等同否决（与 strict_veto
+      语义混淆）；同时绝不产出 50/150/250 等碎股（违反 Order.shares%100==0 契约）。
     - 仅 BUY 受否决/减半，SELL 在任何 regime 下原样放行——收缩期减仓/止损
       是正确的风控动作，不应被本网关拦截。
     """
@@ -315,6 +316,12 @@ class MacroAwareGateway:
             if self.strict_veto:
                 # 硬否决：抛异常，订单不下达，调用方须显式 catch 或让其上抛。
                 raise VetoedError("宏观收缩期，否决买入突破")
-            # 软减半：整除 2 并兜底 1 股，避免减半到 0 退化成隐式否决。
-            order.quantity = max(1, order.quantity // 2)
+            # 软减半（I-2 修复：必须保留 A 股 100 整手契约）：
+            # 先 qty//2 减半，再 //100*100 向下取整到手，最后 max(100, ...) 兜底至少 1 手。
+            # Why 不能用 max(1, qty//2)：会产出 50/150/250 等碎股，违反 Order.__post_init__
+            # 的 shares%100==0 强契约（直接 raise ValueError 让订单无法进入撮合）。
+            # Why 向下取整而非四舍五入：保守原则，不超买（与引擎 _round_to_lot_size 同口径）。
+            # Why max(100,...) 而非 max(0,...)：减半到 0 等同隐式否决（与 strict_veto 语义混淆），
+            # 至少保留 1 手让策略保留「试探性建仓」能力（信用回暖时可快速加回）。
+            order.quantity = max(100, (order.quantity // 2 // 100) * 100)
         return order

@@ -1446,6 +1446,24 @@ class BacktestEngine:
                         reason="移动止损", event_emitter=event_emitter,
                     )
 
+            # ============ 全平后重置基准（I-1 修复：杜绝新仓沿用旧 trailing_stop/entry） ============
+            # Why 必须在「止损/止盈/移动止损 _close 块之后」+「移动止损更新块之前」：
+            #   - _close 全平后 self.position 归 0，但 entry_price/running_high/trailing_stop
+            #     仍是上一轮建仓的旧值。若同日稍后信号再次 _buy，新仓会用旧偏高 entry 混入
+            #     加权成本 → 止损止盈阈值偏移；更致命的是 trailing_stop 不重置 → 新仓建立后
+            #     下一根 update 块会把旧 trailing_stop（可能高于新仓建仓价）作为 prev_stop，
+            #     导致新仓一建仓就被「移动止损」误触发平仓（趋势跟踪策略的隐藏杀手）。
+            # Why 仅 position==0 才重置（部分平仓/底仓减半不重置）：
+            #   - 部分平仓时 entry_price 仍是该批底仓的真实建仓成本，running_high/
+            #     trailing_stop 也是该持仓期间的真实高点与止损线——重置会丢失趋势跟踪
+            #     语义（移动止损应只上移不下移，跨持仓期间持续累积）。
+            #   - 仅当底仓【全部】平掉（position 归 0）才视为「这一轮持仓周期结束」，
+            #     下次建仓开启新周期，基准从 0 重新起算。
+            if self.position == 0:
+                entry_price = 0.0
+                running_high = 0.0
+                trailing_stop = 0.0
+
             # ============ 移动止损更新（持仓期间持续抬升止损线） ============
             # Why 在止损/止盈判定之后更新：先用旧止损线判定本根是否触发，
             # 再用本根 high 更新止损线供下一根使用——避免本根自己触发自己。

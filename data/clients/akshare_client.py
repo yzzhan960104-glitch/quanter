@@ -159,16 +159,17 @@ class AKShareClient:
             elif kind == "shibor":
                 df = ak.macro_china_shibor_all()
             elif kind == "dr007":
-                # ⚠️ TODO(Task 5)：真 DR007（银行间7天质押式回购加权利率）接口待实测确认。
-                #   现状拷问：ak.repo_rate_hist() 是【dead 接口】——数据停在 2020-10-29，
-                #   且返回的是 FR001/FR007/FDR007（央银公开市场操作利率），【不是】DR007
-                #   银行间质押式回购加权利率；兜底 rate_interbank 返 Shibor 也非 DR007。
-                #   若原样透传，会把 2020 过期 + 错列数据静默泄漏给下游 CreditRegime，
-                #   比崩溃更危险（数据看起来"有值"，实则早已失效与错列）。
-                #   故在 T5 确定正确接口（候选：bond_zh_us_rate / macro_china_bond_public
-                #   等，但需实网联调验证列名与频率）前，加【日期新鲜度守卫】：
-                #   取到数据若最新日期早于「今日-7天」或为空 → 视为失效返空，
-                #   杜绝过期/错列数据污染 CreditRegime（不崩，但绝不泄漏坏数据）。
+                # ⚠️ 事实审查（I-4 修正：如实标注接口现状，杜绝"实测签名"幻觉）：
+                #   ak.repo_rate_hist() 真实签名确为 repo_rate_hist(start_date, end_date)，
+                #   但本调用【不传 start_date/end_date】——不传即走接口默认区间（停在 2020-10），
+                #   拿到的是【过期数据】；且该接口返回的是 FR001/FR007/FDR007（央银公开市场
+                #   操作利率），【不是】DR007（银行间质押式回购加权利率）。
+                #   兜底 rate_interbank(market, symbol, indicator) 返回的是 Shibor，也非 DR007。
+                #   故本调用本身【无法】获得真 DR007——当前依赖下方【T5 新鲜度守卫】
+                #   （最新日期早于「今日-7天」即返空）兜底：过期数据必然被守卫拦截返空，
+                #   绝不静默泄漏给下游 CreditRegime（数据看起来"有值"实则失效，比崩更危险）。
+                #   真 DR007 接口待换源（候选：bond_zh_us_rate / macro_china_bond_public 等，
+                #   但需实网联调验证列名与频率，本调用在此之前保持现状不传日期区间）。
                 try:
                     raw = ak.repo_rate_hist()
                 except Exception:

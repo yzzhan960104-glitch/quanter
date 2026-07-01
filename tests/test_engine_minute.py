@@ -194,3 +194,90 @@ def test_run_minute_progress_nav_finite():
     for p in progress_events:
         assert isinstance(p["nav"], (int, float))
         assert np.isfinite(p["nav"]), f"progress nav 出现 NaN/Inf: {p['nav']}"
+
+
+# ============ I-1: 全平后重置基准（entry_price/running_high/trailing_stop） ============
+
+
+def test_run_minute_reset_baseline_after_full_close():
+    """止损全平后，二轮建仓的 trailing_stop 必须从 0 重新起算（不沿用旧值）。
+
+    场景（跨两日满足 T+1，全程持仓期间触发 update_trailing_stop）：
+    - D1[0]：信号 0.8，价格 10，high=13 → 建仓，running_high 抬到 13，trailing_stop≈13。
+    - D2[0]（次日，prev_held 转底仓可卖）：价格 9.4 < 10×0.95 → 固定止损全平（position 归 0）。
+    - D2[1]：价格 12，信号 0.8 → 二轮建仓（position>0），触发 update_trailing_stop。
+
+    ★ 核心断言（spy 法拦截 update_trailing_stop 入参）：
+    二轮建仓后第一次 update_trailing_stop 调用的 prev_stop 必须 == 0.0（已重置）。
+    修复前：prev_stop 沿用 D1 期间的 ~13（残留旧值），新仓一建立就会被旧 stop 误触发。
+
+    Why spy update_trailing_stop 而非读引擎属性：trailing_stop 是 run_minute 的局部变量，
+    无法从引擎实例外部读取；monkey-patch update_trailing_stop 函数拦截入参是最干净的
+    黑盒探测法（不依赖引擎内部实现细节，仅依赖"全平后下次 update 的 prev_stop 应为 0"契约）。
+    """
+    idx_d1 = pd.date_range("2024-01-02 09:30", periods=15, freq="min")
+    idx_d2 = pd.date_range("2024-01-03 09:30", periods=3, freq="min")
+    idx = idx_d1.append(idx_d2)
+    # D1[0..14]：价格 10 震荡（high-low=0.2 使 atr≈0.2 > 1e-9，update 块才会执行），
+    # D1[0] 信号建仓后持仓期间持续 update trailing_stop（running_high 累积抬升到 ~10.24）。
+    # D2[0]：次日开盘 prev_held 转底仓，价格暴跌到 9.4 → 止损全平（position 归 0）。
+    # D2[1]：价格 12，信号 0.8 → 二轮建仓（position>0）。
+    # D2[2]：价格 12.1（持仓无动作），update 块执行 → 此时 prev_stop 必须是 0（已重置）。
+    d1_close = pd.Series([10.0 + 0.01 * i for i in range(15)], index=idx_d1)
+    d1_high = d1_close + 0.1   # high-low=0.2 → atr≈0.2，使 update 块的 atr>1e-9 守卫通过
+    d1_low = d1_close - 0.1
+    d2_close = pd.Series([9.4, 12.0, 12.1], index=idx_d2)
+    d2_high = d2_close + 0.1
+    d2_low = d2_close - 0.1
+    close = pd.concat([d1_close, d2_close])
+    df = pd.DataFrame(
+        {
+            "open": close,
+            "high": pd.concat([d1_high, d2_high]),
+            "low": pd.concat([d1_low, d2_low]),
+            "close": close,
+            "volume": 1000,
+        },
+        index=idx,
+    )
+    # D1[0] 建, D1[1..14] 持仓, D2[0] 止损平（sig=0）, D2[1] 二轮建仓, D2[2] 持仓 update
+    sig = pd.Series(
+        [0.8] + [0.0] * 14 + [0.0, 0.8, 0.0],
+        index=idx,
+    )
+
+    from trading import order_state as _os
+
+    calls: list[dict] = []
+    _orig_update = _os.update_trailing_stop
+
+    def _spy_update(high_, atr_, k_, prev_stop):
+        ret = _orig_update(high_, atr_, k_, prev_stop)
+        calls.append({"prev_stop": prev_stop, "ret": ret, "high": high_})
+        return ret
+
+    # ⚠️ engine.run_minute 内部用 `from trading.order_state import update_trailing_stop`
+    # 把名字绑定到 engine 模块的局部作用域（每次调用时动态 import），
+    # 故 patch trading.order_state.update_trailing_stop 即可生效（import 时取最新值）。
+    _os.update_trailing_stop = _spy_update
+    eng = BacktestEngine(initial_capital=100000)
+    try:
+        # _calculate_result 在 win_count=0 时会除零（独立 bug，与本测试无关），吞掉
+        eng.run_minute(df, sig, "000001.SZ", sl_pct=0.05, tp_pct=0.05, trail_k=2.0)
+    except ZeroDivisionError:
+        pass
+    finally:
+        _os.update_trailing_stop = _orig_update
+
+    # 必须至少有 2 次 update（D1 建仓后 1 次 + D2 二轮建仓后 1 次）
+    assert len(calls) >= 2, f"应至少 2 次 trailing_stop 更新，实际 {len(calls)}: {calls}"
+
+    # 二轮建仓后第一次 update 是 calls[-1]（最后一根 K 线 D2[1] 触发）
+    # 修复前：prev_stop 沿用 D1 残留值（≈13）；修复后：prev_stop==0（已重置）
+    last_prev_stop = calls[-1]["prev_stop"]
+    assert last_prev_stop == 0.0, (
+        f"全平后二轮建仓，trailing_stop 应从 0 重新起算（已重置），"
+        f"实际 prev_stop={last_prev_stop}（沿用旧值，会导致新仓立即误触发移动止损）。"
+        f"全调用序列: {calls}"
+    )
+
