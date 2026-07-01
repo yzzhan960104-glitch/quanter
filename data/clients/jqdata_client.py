@@ -158,8 +158,16 @@ class JQDataClient:
             # 拉取（前复权 fq='pre'，分钟级 OHLCV + money）
             try:
                 import jqdatasdk as jq
+                # 聚宽代码格式为 .XSHE/.XSHG（非 Tushare/AKShare 的 .SZ/.SH）。
+                # 活跃池符号来自融资融券明细（.SZ/.SH 格式），此处统一转换，否则
+                # jq.get_price 会以“无效证券代码”拒收返空。.BJ 北交所暂未支持（罕见）。
+                jq_symbol = (
+                    symbol[:-3] + ".XSHE" if symbol.endswith(".SZ")
+                    else symbol[:-3] + ".XSHG" if symbol.endswith(".SH")
+                    else symbol
+                )
                 df = jq.get_price(
-                    symbol, start_date=start_date, end_date=end_date,
+                    jq_symbol, start_date=start_date, end_date=end_date,
                     frequency=frequency,
                     fields=["open", "high", "low", "close", "volume", "money"],
                     fq="pre", skip_paused=False)
