@@ -151,8 +151,11 @@ export interface PortfolioResponse {
  *
  * 开发环境下 baseURL 为空字符串，由 Vite proxy 转发 /api 到后端
  * 生产环境下可通过 VITE_API_BASE 环境变量覆盖
+ *
+ * Why export：api/macro.ts 等同域 facade 复用此实例共享响应拦截器（中文错误
+ * Toast / 超时降级），避免每个 facade 各自 create 导致拦截器逻辑漂移。
  */
-const apiClient: AxiosInstance = axios.create({
+export const apiClient: AxiosInstance = axios.create({
   baseURL: import.meta.env.VITE_API_BASE || '',
   timeout: 60000,   // 默认 60s 超时
   headers: {
