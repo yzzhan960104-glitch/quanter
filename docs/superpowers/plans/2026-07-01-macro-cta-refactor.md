@@ -18,7 +18,7 @@
 - **零回归**：DataLakeReader 多湖 `lake=` 默认 daily 向后兼容；`event_emitter` 默认 None。
 - **依赖**：`akshare==1.18.64` `jqdatasdk==1.9.8` `thriftpy2==0.4.20` `fastparquet`（移除 `openai`）。
 - **提交**：每 Task 末尾 `git commit`，中文消息 + `Co-Authored-By: Claude <noreply@anthropic.com>`。
-- **回归门槛**：基线 35 预存失败（pandas 2.x，无关）；LLM 移除后删 4 测试，基线下调至 31；任一 Task 后失败总数不得高于当时基线。
+- **回归门槛**：基线 35 预存失败（pandas 2.x，无关）；LLM 移除删的是**通过中**的测试，不影响失败计数，**基线失败数维持 35**（仅 passed 数下降）；任一 Task 后失败总数不得高于 35。
 - **data/ 目录被 .gitignore**：`data/clients/*.py`、`data/lake_reader.py` 等须 `git add -f`；提交后 `git show --stat HEAD` 核对入库。
 
 ## File Structure
@@ -105,7 +105,7 @@ LAKE_CONFIG["default_lake"] = "daily"
 - [ ] **Step 2: 删 4 文件** — `git rm core/llm_client.py factors/alternative_sentiment.py tests/test_llm_client.py tests/test_sentiment_factor.py`。
 - [ ] **Step 3: 改 `server/main.py`** — 删 `from core.llm_client import GLMClient` import；删 lifespan 中 `GLMClient.get_instance()` 装配段（含其上注释）。
 - [ ] **Step 4: 验证** — `python -c "from server.main import app; print('ok')"` → `ok`（无 GLM 引用残留）。
-- [ ] **Step 5: 回归** — `python -m pytest -q --tb=no 2>&1 | tail -3`；基线应从 35 降到 31（删了 4 个 LLM 测试），passed 数对应减少，**无新增失败**。
+- [ ] **Step 5: 回归** — `python -m pytest -q --tb=no 2>&1 | tail -3`；失败总数仍 = 35（删的是通过中的 LLM 测试，失败计数不变），passed 数对应减少，**无新增失败**。
 - [ ] **Step 6: Commit** — `git add -A && git commit -m "refactor: 移除 LLM(GLMClient+NewsSentimentFactor)，撤 lifespan 装配\n\nCo-Authored-By: Claude <noreply@anthropic.com>"`
 
 ---
