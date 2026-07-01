@@ -66,3 +66,5 @@ venv/
 reports/*.html
 reports/*.csv
 reports/*.json
+# 数据湖生成产物（parquet/shards，本地产物不入库）
+data_lake/
