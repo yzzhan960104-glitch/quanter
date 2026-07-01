@@ -39,6 +39,24 @@ def test_failure_returns_empty_df(monkeypatch):
     assert df.empty   # 绝不抛
 
 
+def test_dr007_stale_data_returns_empty(monkeypatch):
+    """DR007 接口返回过期数据(停在2020)时必须返空 DF，绝不泄漏给下游 CreditRegime。
+
+    拷问背景：ak.repo_rate_hist() 是 dead 接口（数据停 2020-10-29，且返 FR/FDR 非 DR007），
+    若透传会静默泄漏过期+错列数据。本测试 mock 一个最新日期为 2020 的 DF，断言新鲜度守卫
+    生效 → 返空 DF。
+    """
+    _reset()
+    # 模拟 dead 接口的过期返回（最新日期 2020-10-29，远超 7 天新鲜度阈值）
+    stale = pd.DataFrame({
+        "日期": ["2020-10-27", "2020-10-28", "2020-10-29"],
+        "FR007": [2.0, 2.1, 2.2],
+    })
+    monkeypatch.setattr("akshare.repo_rate_hist", lambda *a, **k: stale)
+    df = AKShareClient().fetch_macro_raw("dr007")
+    assert df.empty   # 新鲜度守卫生效，过期数据不泄漏
+
+
 def test_circuit_open_returns_empty_without_calling_ak(monkeypatch):
     """熔断 OPEN 期间须快速返回空 DF，且绝不触达底层 ak.*（防连环超时）。"""
     import time as _time

@@ -154,13 +154,44 @@ class AKShareClient:
             elif kind == "shibor":
                 df = ak.macro_china_shibor_all()
             elif kind == "dr007":
-                # DR007：先主接口 repo_rate_hist，失败兜底 rate_interbank
+                # ⚠️ TODO(Task 5)：真 DR007（银行间7天质押式回购加权利率）接口待实测确认。
+                #   现状拷问：ak.repo_rate_hist() 是【dead 接口】——数据停在 2020-10-29，
+                #   且返回的是 FR001/FR007/FDR007（央银公开市场操作利率），【不是】DR007
+                #   银行间质押式回购加权利率；兜底 rate_interbank 返 Shibor 也非 DR007。
+                #   若原样透传，会把 2020 过期 + 错列数据静默泄漏给下游 CreditRegime，
+                #   比崩溃更危险（数据看起来"有值"，实则早已失效与错列）。
+                #   故在 T5 确定正确接口（候选：bond_zh_us_rate / macro_china_bond_public
+                #   等，但需实网联调验证列名与频率）前，加【日期新鲜度守卫】：
+                #   取到数据若最新日期早于「今日-7天」或为空 → 视为失效返空，
+                #   杜绝过期/错列数据污染 CreditRegime（不崩，但绝不泄漏坏数据）。
                 try:
-                    df = ak.repo_rate_hist()
+                    raw = ak.repo_rate_hist()
                 except Exception:
                     # 兜底：rate_interbank 参数语义实测为 (market, symbol, indicator)
-                    df = ak.rate_interbank(
+                    raw = ak.rate_interbank(
                         market="上海银行间同业拆放利率", symbol="Shibor", indicator="7天")
+                # 空数据：中性返空，不计熔断
+                if raw is None or raw.empty:
+                    return _EMPTY.copy()
+                # 【新鲜度守卫】定位日期列（中英文兼容），取最新日期判定是否过期
+                date_col = next(
+                    (c for c in raw.columns
+                     if "日期" in str(c) or "date" in str(c).lower()),
+                    None,
+                )
+                if date_col is None:
+                    # 找不到日期列，结构不可信，宁可返空也不泄漏未知过期数据
+                    logger.warning("DR007 返回无日期列(结构不可信)，返空待 T5 换源")
+                    return _EMPTY.copy()
+                latest = pd.to_datetime(raw[date_col], errors="coerce").max()
+                if pd.isna(latest) or (pd.Timestamp.today() - latest).days > 7:
+                    # 数据过期（>7天）或日期解析失败 → 视为失效返空，等 T5 换正确接口
+                    logger.warning(
+                        "DR007 接口数据过期或日期不可解析(最新 %s)，返空待 T5 换源",
+                        getattr(latest, "date", lambda: latest)(),
+                    )
+                    return _EMPTY.copy()
+                df = raw
             else:
                 logger.warning("未知 macro kind：%s，返回空 DF", kind)
                 return _EMPTY.copy()
