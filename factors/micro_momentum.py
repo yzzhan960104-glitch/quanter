@@ -53,8 +53,11 @@ def atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
     """
     tr = (df["high"] - df["low"]).abs()
     a = tr.rolling(window).mean()
-    # 防 Inf：where(条件, 替换值)——条件为 True 处替换为 ε
-    return a.where(a > 1e-9, 1e-9)
+    # 防 Inf 且不掩盖 warm-up NaN：仅对【非 NaN 且 ≤ ε】的值抬到 ε（防 1/ATR 爆 Inf）；
+    #   rolling warm-up 期（前 window-1 根）的 NaN 保持 NaN——绝不静默替换成 1e-9，
+    #   否则下游会拿到伪 ATR(1e-9) 污染 Risk Parity 头寸与移动止损线(/factors 端点
+    #   另有 len<window + pd.isna 守卫兜底)。
+    return a.mask(a.notna() & (a <= 1e-9), 1e-9)
 
 
 def risk_parity_weight(atr_value: float, budget: float, min_atr: float = 1e-9) -> float:

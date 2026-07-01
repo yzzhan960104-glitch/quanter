@@ -1438,6 +1438,13 @@ class BacktestEngine:
                         actual_sellable, price, ts, symbol,
                         reason="触及止盈", event_emitter=event_emitter,
                     )
+                # 3) 移动止损：价格回落跌破既有止损线即触发（用【旧】止损线判定本根，
+                #    新止损线在下方更新块按本根 high 抬升供下一根——避免本根自触自发）。
+                elif trailing_stop > 0 and price <= trailing_stop:
+                    self._close(
+                        actual_sellable, price, ts, symbol,
+                        reason="移动止损", event_emitter=event_emitter,
+                    )
 
             # ============ 移动止损更新（持仓期间持续抬升止损线） ============
             # Why 在止损/止盈判定之后更新：先用旧止损线判定本根是否触发，
