@@ -262,9 +262,36 @@ class DingTalkChannel(NotificationChannel):
     async def send(self, text: str) -> None:
         timestamp, sign = self._sign(self._secret)
         url = f"{self._webhook}&timestamp={timestamp}&sign={sign}"
-        # Markdown + 固定安全词【Quanter】（text 已含 Manager 拼的级别前缀）
+        # Markdown + 固定安全词【Quanter】；text 经 _render_markdown 渲染为结构化卡片
         await self._post(url, {
             "msgtype": "markdown",
-            "markdown": {"title": "【Quanter】风控告警",
-                         "text": f"**【Quanter】**\n\n{text}"},
+            "markdown": self._render_markdown(text),
         })
+
+    @staticmethod
+    def _render_markdown(text: str) -> dict:
+        """把 Manager 传入的 '{级别前缀} {正文}' 渲染为结构化钉钉 Markdown 卡片。
+
+        Why 结构化：钉钉群机器人 Markdown 仅支持 #/##/### 标题、**粗体**、*斜体*、
+        > 引用、- 列表、[链接](url)、![图片](url)；**不支持** <font> 着色、表格、
+        --- 分隔线、代码块。在此约束下用「H1 品牌 + 引用块级别徽标 + 正文 + 引用块
+        品牌脚注」分层，避免「级别前缀 + 正文」挤成一眼难辨的文本墙。
+
+        Manager 拼接格式固定为 "{emoji} [LEVEL]} {msg}"，按首个 "] " 拆级别徽标与
+        正文；无级别前缀（裸文本直调 send）时不渲染徽标，整段作正文。
+        """
+        # partition 取首个 "] "：徽标形如 "🚨 [CRITICAL]"，余下为正文
+        if "] " in text:
+            head, _, body = text.partition("] ")
+            level_badge = head.strip() + "]"
+            body = body.strip()
+        else:
+            level_badge, body = "", text.strip()
+
+        parts: list[str] = ["### 【Quanter】风控告警", ""]
+        if level_badge:
+            parts += [f"> {level_badge}", ""]
+        if body:
+            parts += [body, ""]
+        parts += ["> Quanter · 量化风控网关"]
+        return {"title": "【Quanter】风控告警", "text": "\n".join(parts)}

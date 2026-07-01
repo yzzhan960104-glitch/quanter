@@ -248,3 +248,28 @@ def test_dingtalk_post_raises_on_business_errcode(monkeypatch):
     with pytest.raises(RuntimeError) as exc_info:
         asyncio.run(ch._post("https://x", {"msgtype": "markdown"}))
     assert "310000" in str(exc_info.value)
+
+
+# ============ 钉钉卡片结构化渲染（美观优化） ============
+
+
+def test_dingtalk_markdown_is_structured():
+    """钉钉卡片须结构化：H1 品牌 + 引用块级别徽标 + 正文 + 品牌脚注。"""
+    from core.notifier import DingTalkChannel
+    md = DingTalkChannel._render_markdown("🚨 [CRITICAL] 最大回撤触红线 12.3%")
+    assert md["title"] == "【Quanter】风控告警"
+    text = md["text"]
+    assert text.startswith("### 【Quanter】风控告警")   # H1 品牌标题
+    assert "> 🚨 [CRITICAL]" in text                    # 级别徽标渲染为引用块
+    assert "最大回撤触红线 12.3%" in text               # 正文保留
+    assert text.endswith("> Quanter · 量化风控网关")    # 品牌脚注
+
+
+def test_dingtalk_render_plain_text_has_no_level_badge():
+    """无级别前缀的裸文本（直调 send）：不渲染级别徽标，仅品牌标题+正文+脚注。"""
+    from core.notifier import DingTalkChannel
+    md = DingTalkChannel._render_markdown("裸文本消息")
+    text = md["text"]
+    assert "裸文本消息" in text
+    # 仅品牌脚注一处引用块，无级别徽标行
+    assert text.count("> ") == 1
