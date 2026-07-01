@@ -280,3 +280,12 @@ tushare_breaker = CircuitBreaker(
 fred_breaker = CircuitBreaker(
     name="fred", failure_threshold=3, recovery_timeout=60.0, expected_exception=DataFetchError
 )
+
+# ---- AKShare（A 股宏观/板块/资金流，替代 Tushare 的 CTA 数据流入口）----
+# Why 与 tushare/fred 同范式模块级单例：跨 AKShareClient 实例共享熔断/限流状态，
+# 避免每个 fetcher 实例各持一份导致阈值失真。akshare 官方无显式 QPS 文档，
+# 实测对同一 IP 高频拉取会触发限频（HTTP 429 / 临时封禁），故保守取突发 3 + 1 QPS。
+akshare_limiter = RateLimiter(name="akshare", capacity=3, refill_rate=1.0)
+akshare_breaker = CircuitBreaker(
+    name="akshare", failure_threshold=3, recovery_timeout=60.0, expected_exception=DataFetchError
+)
