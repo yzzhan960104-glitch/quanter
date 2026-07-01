@@ -1,17 +1,30 @@
-"""数据湖读取适配器：启动期一次性加载 parquet 到内存，提供截面/时序查询。
+"""数据湖读取适配器（多湖缓存）：按 key 缓存多张 parquet，提供截面/时序查询。
 
-前视偏差拷问（关键）：
+多湖改造（本轮）：
+- 由单湖（`_df/_ffill/_loaded/_date_dtype`）扩为多湖字典缓存
+  （`_lakes/_ffills/_dtypes/_default_key`），支持 Macro/Sector/Daily/1Min/Crypto 等多类资产。
+- `load(path, *, key=None)`：key 缺省=path；首个成功 load 的 key 设为 `_default_key`。
+- `get_*(..., lake=None)`：lake 缺省=`_default_key`，按 key 路由到对应湖。
+- 每湖独立应用既有 ffill/sort/normalize 逻辑，互不串味。
+
+前视偏差拷问（关键，每湖独立复用）：
 - 仅对【价格列】沿【时间轴】ffill —— 停牌日沿用末次成交价，安全无前视；
   volume/amount 绝不 ffill（停牌日成交应为 0，ffill 会造假量、污染流动性判断）。
+- groupby(level="symbol") 保证 ffill 不跨标的串味：否则会把 A 标的末值填到 B 标的的
+  停牌日，制造虚假价格与前视污染。
 - ffill 沿时间方向只传播【过去】值到当前，不引入未来信息。
 
-离线降级：parquet 缺失时 load() 仅记 warning，查询返回空 DF，绝不阻断启动。
+离线降级（向后兼容红线）：
+- parquet 缺失时 load() 仅记 warning，不写入缓存；`.loaded` 在无任何湖已载时为 False。
+- 无湖时 `get_cross_section`/`get_timeseries` 返回空 DF，绝不 raise ——
+  保住既有 `test_offline_mode_when_parquet_missing` 契约与开发机/CI 无湖启动语义。
 """
 from __future__ import annotations
 
 import logging
 import os
 import threading
+from typing import Any
 
 import pandas as pd
 
@@ -19,11 +32,13 @@ from config import LAKE_CONFIG
 
 logger = logging.getLogger(__name__)
 
+# 仅价格列参与 ffill；volume/amount 等量类列保持原始值（停牌日 volume=0，
+# ffill 会造假量、污染流动性判断）。OHLCV 经典契约。
 _PRICE_COLS = ["open", "high", "low", "close"]
 
 
 class DataLakeReader:
-    """单例：全市场日线常驻内存。"""
+    """单例：多湖常驻内存（每湖独立 ffill/sort/normalize）。"""
 
     _instance: "DataLakeReader | None" = None
     _lock = threading.Lock()
@@ -39,101 +54,161 @@ class DataLakeReader:
         return cls._instance
 
     def __init__(self) -> None:
-        self._df: pd.DataFrame | None = None      # 原始 MultiIndex(date, symbol)
-        self._ffill: pd.DataFrame | None = None   # 价格列已 ffill、量类列保持原值的视图
-        self._loaded: bool = False
+        # 多湖缓存：每湖独立存原始 MultiIndex 视图 + 价格已 ffill 的完整视图 + date 层级 dtype。
+        # 用 dict 而非嵌套类，保持策略代码扁平化、显式至上（拒绝过度抽象）。
+        self._lakes: dict[str, pd.DataFrame] = {}       # key -> 原始 df（MultiIndex(date, symbol)）
+        self._ffills: dict[str, pd.DataFrame] = {}      # key -> 价格列已 ffill、量类列保持原值的完整视图
+        self._dtypes: dict[str, Any] = {}               # key -> date 层级原生 dtype（_norm_date 归一化依据）
+        self._default_key: str | None = None            # 首次成功 load 的 key；lake 缺省时路由到此
 
     @property
     def loaded(self) -> bool:
-        return self._loaded
+        # 任一湖已载即 True；无湖（离线/未 load）即 False。
+        return bool(self._lakes)
 
-    def load(self, path: str | None = None) -> None:
-        """加载 parquet 到内存。缺失则进入离线模式（不阻断启动）。"""
+    def lakes(self) -> list[str]:
+        """已载入的湖 key 列表（按 load 顺序）。"""
+        return list(self._lakes.keys())
+
+    def load(self, path: str | None = None, *, key: str | None = None) -> None:
+        """加载 parquet 到内存（多湖）。缺失则进入离线模式（不阻断启动、不写入缓存）。
+
+        - key 缺省=path：便于单湖老用法 `load(path)` 自动以 path 为 key，向后兼容。
+        - 首个成功 load 的 key 设为 `_default_key`，作为 `get_*(lake=None)` 的默认湖。
+        """
         path = path or LAKE_CONFIG["default_path"]
-        # 离线降级：parquet 不存在仅记 warning，loaded=False，查询接口返回空 DF。
-        # 设计意图：开发机/CI 无数据湖时不致启动崩溃，仅降级为空结果。
+        key = key or path
+        # 离线降级：parquet 不存在仅记 warning，不写入缓存。设计意图：开发机/CI 无数据湖
+        # 时不致启动崩溃，仅降级为空结果（.loaded=False，查询返回空 DF）。
         if not os.path.exists(path):
-            logger.warning("数据湖缺失：%s，DataLakeReader 进入离线模式（查询返回空）", path)
-            self._loaded = False
+            logger.warning("数据湖缺失：%s(key=%s)，跳过加载（离线模式）", path, key)
             return
         df = pd.read_parquet(path)
         # 校验索引形态：必须是 MultiIndex(date, symbol)，否则后续 xs 切片语义错乱。
         if not isinstance(df.index, pd.MultiIndex):
-            logger.error("数据湖索引非 MultiIndex(date, symbol)，跳过加载")
-            self._loaded = False
+            logger.error("数据湖 %s 索引非 MultiIndex(date, symbol)，跳过加载", key)
             return
 
-        # Important 2：date 层级若为 datetime（含 tz-aware / 非零时间），先去时区并
-        # normalize 到午夜，与 _norm_date 查询键对齐，否则 xs/loc 会因 tz 或时间分量
-        # 不匹配而 silently 返回空（mismatch）。仅在 datetime 层级生效，str 层级原样保留。
+        df = self._normalize_and_sort(df)
+        # 记录 date 层级原生 dtype：查询入参按此归一化，避免 str 索引与 Timestamp
+        # 比较（'<' not supported between str and Timestamp）。
+        date_dtype = df.index.get_level_values("date").dtype
+
+        self._lakes[key] = df
+        self._ffills[key] = self._build_ffill_view(df)
+        self._dtypes[key] = date_dtype
+        # 首个成功 load 的 key 锁定为默认湖 —— 保证 `get_*(lake=None)` 老调用路径有确定语义。
+        if self._default_key is None:
+            self._default_key = key
+        logger.info("数据湖加载完成：%s(key=%s)，%d 行", path, key, len(df))
+
+    # ---------- 湖内数据规范化（每湖独立应用，复用既有逻辑） ----------
+
+    @staticmethod
+    def _normalize_and_sort(df: pd.DataFrame) -> pd.DataFrame:
+        """date 层级去 tz + normalize 到午夜，并对索引排序（每湖独立）。
+
+        Important 2（tz 拷问）：date 层级若为 datetime（含 tz-aware / 非零时间），
+        先去时区并 normalize 到午夜，与 _norm_date 查询键对齐，否则 xs/loc 会因 tz
+        或时间分量不匹配而 silently 返回空。仅在 datetime 层级生效，str 层级原样保留。
+        - tz-aware：先 tz_convert 到 UTC 再 tz_localize(None) 剥离时区，避免直接
+          tz_localize(None) 在非 UTC tz 下抛异常；naive 直接跳过 tz 步骤。
+        """
         date_vals = df.index.get_level_values("date")
         if isinstance(date_vals, pd.DatetimeIndex):
-            # tz-aware：先 tz_convert 到 UTC 再 tz_localize(None) 剥离时区，避免
-            # 直接 tz_localize(None) 在非 UTC tz 下抛异常；naive 直接跳过 tz 步骤。
             if date_vals.tz is not None:
                 date_vals = date_vals.tz_convert("UTC").tz_localize(None)
             # normalize 到午夜（剥掉时分秒），保证与纯日期查询键相等。
-            date_vals = date_vals.normalize()
+            date_vals = pd.DatetimeIndex(date_vals).normalize()
             df = df.set_index(
                 pd.MultiIndex.from_arrays(
                     [date_vals, df.index.get_level_values("symbol")],
                     names=df.index.names,
                 )
             )
+        # Important 1（sort 拷问）：上游同步脚本若未保证索引有序，对未排序索引做
+        # .loc[start:end] 切片且边界标签缺失时会抛 KeyError "non-monotonic index"。
+        # load() 一次排序，查询路径零开销（sort_index 是 O(n log n) 单次成本，换取后续
+        # 所有 slice 的 slice_locs 可正确解析边界）。一次排序、永久受益。
+        return df.sort_index()
 
-        # Important 1：上游同步脚本若未保证索引有序，对未排序索引做 .loc[start:end]
-        # 切片且边界标签缺失时会抛 KeyError "non-monotonic index"。load() 一次排序，
-        # 查询路径零开销（sort_index 是 O(n log n) 单次成本，换取后续所有 slice 的
-        # slice_locs 可正确解析边界）。一次排序、永久受益，符合"向量化/内存优化"基调。
-        df = df.sort_index()
+    @staticmethod
+    def _build_ffill_view(df: pd.DataFrame) -> pd.DataFrame:
+        """构造价格列已 ffill、量类列保持原值的完整视图（每湖独立）。
 
-        self._df = df
-        # 记录 date 层级原生 dtype：查询入参按此归一化，避免 str 索引与 Timestamp
-        # 比较（'<' not supported between str and Timestamp）。
-        # 注意：normalize 后 datetime 层级仍为 datetime64[ns]，dtype 不变。
-        self._date_dtype = df.index.get_level_values("date").dtype
-        # 仅【价格列】沿时间 ffill；groupby(level="symbol").ffill() 保证不跨标的串味：
-        # 否则会把 A 标的末值填到 B 标的的停牌日，制造虚假价格与前视污染。
+        - 仅【价格列】沿时间 ffill：groupby(level="symbol").ffill() 保证不跨标的串味。
+        - 拷贝后只改价格列，volume/amount 等保持原始值（停牌日 volume=0，ffill 会造假量）。
+        """
         price_cols = [c for c in _PRICE_COLS if c in df.columns]
         if price_cols:
-            # 拷贝后只对价格列 ffill，volume/amount 等保持原始值（停牌日 volume=0，
-            # ffill 会造假量、污染流动性判断）——故非价格列原样保留。
             ffill_view = df.copy()
             ffill_view[price_cols] = df[price_cols].groupby(level="symbol").ffill()
-            self._ffill = ffill_view
-        else:
-            self._ffill = df.copy()
-        self._loaded = True
-        logger.info("数据湖加载完成：%s，%d 行", path, len(df))
+            return ffill_view
+        # 无价格列时整体原样返回（策略层自负其责）。
+        return df.copy()
 
-    def _norm_date(self, date: str) -> object:
-        """把入参日期按 date 层级原生 dtype 归一化，规避 str/Timestamp 混比。"""
-        # str 层级（parquet 落盘 str）：原样使用，保持与测试 & 落盘格式一致。
-        if pd.api.types.is_string_dtype(self._date_dtype):
+    # ---------- 查询 ----------
+
+    def _norm_date(self, date: str, key: str) -> object:
+        """把入参日期按指定湖的 date 层级原生 dtype 归一化，规避 str/Timestamp 混比。"""
+        dt = self._dtypes.get(key)
+        # str 层级（parquet 落盘 str）：原样使用，保持与落盘格式一致。
+        if pd.api.types.is_string_dtype(dt):
             return str(date)
         # datetime 层级：转 Timestamp 并 normalize 到午夜（剥掉时分秒）。
         # 兑现注释承诺：与 load() 中已 normalize 的 date 层级键严格对齐，
         # 防止查询键 '2024-01-02 00:00:00' 与 normalize 后的索引键精确相等。
         return pd.Timestamp(date).normalize()
 
-    def get_cross_section(self, date: str) -> pd.DataFrame:
-        """某日全市场截面（价格取 ffill 版，停牌沿用末次成交价；volume 取原始值不 ffill）。"""
-        if not self._loaded or self._ffill is None:
+    def _resolve(self, lake: str | None) -> str | None:
+        """解析查询的湖 key。无可用湖时返回 None（由调用方判空返空 DF，不 raise）。
+
+        向后兼容红线：brief 原版在无湖时 raise KeyError，会破坏 `test_offline_mode_when_parquet_missing`
+        的离线降级契约（无湖 → get_* 返回空 DF，不抛）。这里改成返 None，由 get_* 顶部判空，
+        既保留 _default_key 语义又守住离线降级。
+        """
+        if lake is not None:
+            return lake
+        return self._default_key
+
+    def get_cross_section(
+        self, date: str, *, lake: str | None = None
+    ) -> pd.DataFrame:
+        """某日全市场截面（价格取 ffill 版，停牌沿用末次成交价；volume 取原始值不 ffill）。
+
+        无湖或指定湖不存在 → 返回空 DF（离线降级，不抛异常）。
+        """
+        # 顶部判空：无任何湖或 lake 不在缓存中 → 离线降级返空 DF，守住向后兼容契约。
+        key = self._resolve(lake)
+        if key is None:
+            return pd.DataFrame()
+        ff = self._ffills.get(key)
+        if ff is None:
             return pd.DataFrame()
         try:
             # xs 取 date 层级；ffill 视图中价格列已补齐末次成交价，volume 为原始值。
-            return self._ffill.xs(self._norm_date(date), level="date")
+            return ff.xs(self._norm_date(date, key), level="date")
         except KeyError:
-            logger.warning("截面日期不存在：%s", date)
+            logger.warning("截面日期不存在：%s(lake=%s)", date, key)
             return pd.DataFrame()
 
-    def get_timeseries(self, symbol: str, start: str, end: str) -> pd.DataFrame:
-        """单标的原始时序（不 ffill，保留真实停牌空洞供策略层自行决策）。"""
-        if not self._loaded or self._df is None:
+    def get_timeseries(
+        self, symbol: str, start: str, end: str, *, lake: str | None = None
+    ) -> pd.DataFrame:
+        """单标的原始时序（不 ffill，保留真实停牌空洞供策略层自行决策）。
+
+        无湖或指定湖不存在 → 返回空 DF（离线降级，不抛异常）。
+        """
+        # 顶部判空：无任何湖或 lake 不在缓存中 → 离线降级返空 DF，守住向后兼容契约。
+        key = self._resolve(lake)
+        if key is None:
+            return pd.DataFrame()
+        df = self._lakes.get(key)
+        if df is None:
             return pd.DataFrame()
         try:
-            ts = self._df.xs(symbol, level="symbol")
+            ts = df.xs(symbol, level="symbol")
         except KeyError:
             return pd.DataFrame()
         # 闭区间切片；start/end 按 date 层级原生 dtype 归一化后切片。
-        return ts.loc[self._norm_date(start):self._norm_date(end)]
+        return ts.loc[self._norm_date(start, key):self._norm_date(end, key)]
