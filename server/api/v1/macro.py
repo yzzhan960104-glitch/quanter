@@ -180,14 +180,25 @@ async def sector_flow() -> dict[str, Any]:
     Why pool 暂返 []：活跃股池目前由 sync_sector_daily 单独落盘到独立结构，
     本期端点先留字段占位（前端契约已对齐），下期接入活跃股池湖后填充。
     """
-    reader = DataLakeReader.get_instance()
-    df = reader._lakes.get("sector")
-    # 离线降级短路：无 sector 湖 → 返空双字段结构
-    if df is None or df.empty:
-        return {"sectors": [], "pool": []}
-    # head(20)：Top 20 板块资金流排名（sector 湖落盘时已排序，此处仅截断）
-    sectors = df.head(20).to_dict("records")
-    return {"sectors": sectors, "pool": []}
+    import os as _os
+    import pandas as _pd
+    from config import LAKE_CONFIG
+    # sector 资金流是【快照排名表】（RangeIndex，非时序），DataLakeReader 只载时序湖会跳过它，
+    # 故此处直读 parquet；活跃股池从 daily 湖的唯一标的取（select_active_pool 选出的 50 只）。
+    sectors: list = []
+    pool: list = []
+    _sp = LAKE_CONFIG["lakes"]["sector"]
+    if _os.path.exists(_sp):
+        _sdf = _pd.read_parquet(_sp)
+        if _sdf is not None and not _sdf.empty:
+            sectors = _sdf.head(20).to_dict("records")
+    _dp = LAKE_CONFIG["lakes"]["daily"]
+    if _os.path.exists(_dp):
+        _ddf = _pd.read_parquet(_dp)
+        if hasattr(_ddf.index, "get_level_values"):
+            _syms = list(_ddf.index.get_level_values("symbol").unique())[:50]
+            pool = [{"symbol": str(s)} for s in _syms]
+    return {"sectors": sectors, "pool": pool}
 
 
 # --------------------------------------------------------------
