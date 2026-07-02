@@ -127,9 +127,10 @@ function getColorClass(val: number, mode: string): string {
 }
 
 .metric-label {
-  font-size: 13px;
-  color: #909399;
+  font-size: 12px;
+  color: #787b86;
   margin-bottom: 8px;
+  letter-spacing: 0.3px;
 }
 
 .metric-value {
@@ -138,16 +139,19 @@ function getColorClass(val: number, mode: string): string {
   font-variant-numeric: tabular-nums;
 }
 
+/* 盈亏色与 candlestick 同色系：正收益=阴线绿系、亏损/风险=阳线红系，全终端统一。
+   注意：此处的「绿=盈利 / 红=亏损」是国际通用的绩效盈亏语义，与 K 线「红涨绿跌」
+   分属不同语境（绩效区 vs 行情区），共存于同一终端是行业惯例，不构成冲突。 */
 .color-profit {
-  color: #67c23a;
+  color: #26a69a;
 }
 
 .color-risk {
-  color: #f56c6c;
+  color: #ef5350;
 }
 
 .color-neutral {
-  color: #606266;
+  color: #787b86;
 }
 
 /* 响应式：小屏 2 列 */

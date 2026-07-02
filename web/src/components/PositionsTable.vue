@@ -29,6 +29,8 @@ defineProps<{ positions: PositionRow[] }>()
 </template>
 
 <style scoped>
-.pos-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 6px; }
-.title { color: #8b949e; font-size: 12px; margin-bottom: 4px; }
+/* 透明底：嵌在 TerminalView 右栏悬浮卡片(.panel-right #1e222d)内，
+   避免卡中卡色阶断层；仅保留极弱灰边作为「持仓快照」区块的视觉分组 */
+.pos-card { background: transparent; border: 1px solid #2b3139; border-radius: 6px; padding: 6px; }
+.title { color: #787b86; font-size: 12px; margin-bottom: 4px; }
 </style>

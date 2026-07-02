@@ -1,0 +1,166 @@
+/**
+ * 全局终端主题层（Epic 1：极夜暗黑调色板重写）
+ *
+ * 设计意图（反黑盒）：
+ * - 直接覆盖 Element Plus 的 dark 模式 CSS 变量（html.dark 作用域），把 EP 默认的
+ *   「亮蓝 + 灰底」整体拉到 TradingView 极夜黑体系：
+ *     页面底  #131722（极夜黑）  ← --el-bg-color-page
+ *     卡片底  #1e222d            ← --el-bg-color / fill-color-blank
+ *     浮层底  #2a2e39            ← --el-bg-color-overlay
+ *     边框线  #2b3139（极弱灰）  ← --el-border-color 系列
+ *     强调色  #2962ff（Quant 蓝）← --el-color-primary
+ * - 文字色阶沿用 TradingView：primary #d1d4dc / regular #b2b5be / secondary #787b86 /
+ *   placeholder #5d606b，保证 K 线区与表单区文字层级一致，无亮色割裂。
+ *
+ * Why 只覆盖「背景/边框/文字/primary」而不动 success/warning/danger：
+ *   EP 的 --el-color-success(#67c23a 绿)/danger(#f56c6c 红) 是「语义色」，被
+ *   el-tag / el-message / el-alert 的 type 着色逻辑绑定。若为追求「全红/全绿」
+ *   覆盖它们，会让「成功提示=绿」「危险提示=红」的国际通用语义错乱。这里严格守住：
+ *   只换「中性壳层」（背景/边框/文字/主色），语义色保持 EP 默认，避免组件着色漂移。
+ *
+ * primary 色阶推导：light-N = mix(#fff, #2962ff, N*10%)，dark-2 = mix(#000, #2962ff, 20%)。
+ * 手算近似值写入，避免运行时 calc/mix 带 paint 抖动。
+ */
+
+/* ===== Element Plus dark 变量覆盖（html.dark 作用域，与 EP dark css-vars 同级 specificity） ===== */
+html.dark {
+  /* —— 背景层 —— */
+  --el-bg-color: #1e222d;            /* 卡片 / 组件底 */
+  --el-bg-color-page: #131722;       /* 页面底（极夜黑） */
+  --el-bg-color-overlay: #2a2e39;    /* 下拉 / 浮层 / 弹层底 */
+
+  /* —— 填充层（输入框 hover、表头底等） —— */
+  --el-fill-color: #2a2e39;
+  --el-fill-color-blank: #1e222d;
+  --el-fill-color-light: #2a2e39;
+  --el-fill-color-lighter: #2a2e39;
+  --el-fill-color-extra-light: #232731;
+  --el-fill-color-dark: #303641;
+
+  /* —— 边框层（极弱灰，打破 EP 默认高对比蓝灰边） —— */
+  --el-border-color: #2b3139;
+  --el-border-color-light: #2b3139;
+  --el-border-color-lighter: #2b3139;
+  --el-border-color-extra-light: #2b3139;
+  --el-border-color-dark: #363a45;
+
+  /* —— 文字层 —— */
+  --el-text-color-primary: #d1d4dc;
+  --el-text-color-regular: #b2b5be;
+  --el-text-color-secondary: #787b86;
+  --el-text-color-placeholder: #5d606b;
+  --el-text-color-disabled: #4a4d57;
+
+  /* —— 强调色：Quant 蓝（替代 EP 默认浅蓝 #409eff） —— */
+  --el-color-primary: #2962ff;
+  --el-color-primary-light-3: #5481ff;
+  --el-color-primary-light-5: #94b0ff;
+  --el-color-primary-light-7: #b9caff;
+  --el-color-primary-light-8: #c9d4ff;
+  --el-color-primary-light-9: #e3e8ff;
+  --el-color-primary-dark-2: #214ecc;
+
+  /* —— 禁用态 —— */
+  --el-disabled-bg-color: #1e222d;
+  --el-disabled-text-color: #5d606b;
+  --el-disabled-border-color: #2b3139;
+
+  /* —— 遮罩 / 阴影（弹窗蒙层走极夜黑低透，非默认白蒙层） —— */
+  --el-mask-color: rgba(19, 23, 34, 0.82);
+  --el-mask-color-extra-light: rgba(19, 23, 34, 0.32);
+  --el-box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --el-box-shadow-light: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --el-box-shadow-dark: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+/* ===== 全局基底：极夜黑底 + 等宽数字（量化终端强制对齐） ===== */
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  background: #131722;          /* 极夜黑，与 html.dark --el-bg-color-page 同源 */
+  color: #d1d4dc;
+  /*
+   * font-variant-numeric: tabular-nums —— 强制所有数字等宽对齐。
+   * 量化终端里净值/收益/价格列必须按位对齐，否则 0.123 与 12.345 会因数字宽度
+   * 不一致（比例字）导致列视觉错位、扫读困难。等宽数字是交易终端的硬性基线。
+   */
+  font-variant-numeric: tabular-nums;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ===== 细节加固：让 EP 组件在极夜黑下不漏出亮底/亮边 ===== */
+
+/* 输入/选择器等表单控件底色与边框统一到卡片层 */
+html.dark .el-input__wrapper,
+html.dark .el-textarea__inner,
+html.dark .el-select__wrapper {
+  background-color: #2a2e39 !important;
+  box-shadow: 0 0 0 1px #2b3139 inset !important;
+}
+html.dark .el-input__wrapper:hover,
+html.dark .el-select__wrapper:hover {
+  box-shadow: 0 0 0 1px #363a45 inset !important;
+}
+html.dark .el-input.is-focus .el-input__wrapper,
+html.dark .el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px #2962ff inset !important;
+}
+
+/* 卡片：去默认亮阴影，改极弱暗阴影 + 终端边框 */
+html.dark .el-card {
+  background-color: #1e222d;
+  border: 1px solid #2b3139;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* 表格：表头底/行 hover 收敛到终端层，避免 EP 默认亮灰 */
+html.dark .el-table {
+  background-color: transparent;
+  color: #b2b5be;
+}
+html.dark .el-table tr,
+html.dark .el-table__row:hover > td {
+  background-color: transparent !important;
+}
+html.dark .el-table th.el-table__cell {
+  background-color: #232731 !important;
+  border-bottom: 1px solid #2b3139 !important;
+}
+html.dark .el-table td.el-table__cell {
+  border-bottom: 1px solid #2b3139;
+}
+
+/* 主按钮沿用 Quant 蓝；次按钮（plain）边框统一 */
+html.dark .el-button--primary {
+  --el-button-bg-color: #2962ff;
+  --el-button-border-color: #2962ff;
+  --el-button-hover-bg-color: #3b72ff;
+  --el-button-hover-border-color: #3b72ff;
+  --el-button-active-bg-color: #214ecc;
+  --el-button-active-border-color: #214ecc;
+}
+
+/* ===== 滚动条：细窄暗色，去浏览器默认亮灰粗条，贴近原生终端观感 ===== */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2b3139;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #363a45;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2b3139 transparent;
+}

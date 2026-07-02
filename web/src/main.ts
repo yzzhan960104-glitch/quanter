@@ -13,6 +13,9 @@ import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 // Element Plus 暗黑模式 CSS 变量覆盖（html.dark 生效）
 import 'element-plus/theme-chalk/dark/css-vars.css'
+// 全局终端主题层：必须在 EP dark css-vars 之后 import，靠后定义覆盖 EP 默认变量
+// （TradingView 极夜黑调色板 + 等宽数字 + 表格/按钮加固，详见 styles/terminal.css）
+import './styles/terminal.css'
 import App from './App.vue'
 import router from './router'
 import { initTerminalDarkTheme } from './theme/echarts-terminal-dark'

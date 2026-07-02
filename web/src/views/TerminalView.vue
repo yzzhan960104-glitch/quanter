@@ -17,12 +17,15 @@
  * 桥接（移植自原 App.vue）：
  * - ParamForm `@submit` 的 payload 字段已与 SingleBacktestParams 完全对齐，
  *   故直接把 execute 绑到 @submit，无需任何字段映射——与原 App.vue 行为一致。
+ *   （Epic 2 后 ParamForm 内部已把 symbol 劫持为 'dynamic_top50' 池子代号，
+ *    字段形状仍是 { symbol: string, ... }，契约不变。）
  */
 import ParamForm from '../components/ParamForm.vue'
 import ProChart from '../components/ProChart.vue'
 import TerminalLogs from '../components/TerminalLogs.vue'
 import MetricCards from '../components/MetricCards.vue'
 import PositionsTable from '../components/PositionsTable.vue'
+import TerminalWatermark from '../components/TerminalWatermark.vue'
 import { useTerminalState } from '../composables/useTerminalState'
 
 // 解构拿到的 loading/result/error 均为 ref（toRefs 保证响应性），execute 触发回测
@@ -46,10 +49,10 @@ const { loading, result, error, execute } = useTerminalState()
           :nav-series="result.nav_series"
           :trades="result.trades"
         />
-        <el-empty
+        <!-- 空态：极简水印替代 el-empty 纸箱子，传达「等待回测」而非「无数据」 -->
+        <TerminalWatermark
           v-else
-          description="提交左侧参数后在此显示 K 线与买卖点"
-          :image-size="80"
+          subtitle="提交左侧参数后在此显示 K 线与买卖点"
         />
       </section>
       <section class="center-logs">
@@ -72,6 +75,11 @@ const { loading, result, error, execute } = useTerminalState()
 /*
  * 终端外壳：三列 Grid，撑满路由出口剩余空间，整体不滚动（各面板内部各自滚动）。
  *
+ * 悬浮卡片化（Epic 1 呼吸感布局）：
+ * - 外围 padding:8px + 列间 gap:8px，让三栏从「贴边分隔」变为「悬浮独立卡片」，
+ *   打破原 border-right/border-left 的拥挤贴边感。
+ * - 每个面板独立 #1e222d 卡片底 + 1px #2b3139 边框 + 6px 圆角，视觉脱离极夜黑底。
+ *
  * Why flex:1 + min-height:0 而非 height:100vh：
  *   App.vue 现已退化为「顶部导航(36px) + router-view」纵向 flex 壳，本视图是
  *   router-view 的内容，需填满除导航外的剩余高度。用 height:100vh 会溢出底部
@@ -81,50 +89,57 @@ const { loading, result, error, execute } = useTerminalState()
 .terminal-shell {
   display: grid;
   grid-template-columns: 300px 1fr 250px;
+  gap: 8px;            /* 三栏呼吸间距，悬浮卡片感的关键 */
+  padding: 8px;        /* 外围留白，让面板脱离视口边缘 */
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: #0d1117; /* GitHub 暗黑底色，与各面板 #161b22 形成层级 */
+  background: #131722; /* 极夜黑底，衬托 #1e222d 卡片 */
 }
 
-/* 左右栏内部可纵向滚动，避免参数过多时溢出 */
+/* 通用面板：悬浮卡片（暗底 + 极弱灰边 + 圆角 + 纵向可滚动） */
 .panel {
+  background: #1e222d;
+  border: 1px solid #2b3139;
+  border-radius: 6px;
   overflow: auto;
 }
 
-.panel-left {
-  border-right: 1px solid #30363d;
-}
+/* 左栏 ParamForm 内部自带 padding，这里不重复加，避免双倍留白 */
 
+/* 右栏：内部纵向排列指标卡 / 持仓表 / 错误兜底 */
 .panel-right {
-  border-left: 1px solid #30363d;
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 8px;
 }
 
-/* 中央：上下两行 Grid，分别 70% / 30%，整体不滚动（图表与日志各自管理溢出） */
+/* 中央列：仅作容器，不画卡片边框；上下两个子卡片自绘 */
 .panel-center {
   display: grid;
   grid-template-rows: 70% 30%;
+  gap: 8px;            /* 上下子卡片间同样保留呼吸间距 */
   overflow: hidden;
 }
 
-/* 图表区：给底部留细分隔线，内部 hidden 防止 ECharts 撑爆容器 */
-.center-chart {
-  border-bottom: 1px solid #30363d;
-  padding: 4px;
-  overflow: hidden;
-}
-
+/* 图表区与日志区：各自独立子卡片，去贴边感；内部 hidden 防止 ECharts 撑爆容器 */
+.center-chart,
 .center-logs {
+  background: #1e222d;
+  border: 1px solid #2b3139;
+  border-radius: 6px;
   overflow: hidden;
+}
+
+/* 图表区给一点内边距，让 K 线与卡片边框留出呼吸 */
+.center-chart {
+  padding: 4px;
 }
 
 /* 错误提示：终端红字，低饱和度避免抢眼 */
 .err-tip {
-  color: #f85149;
+  color: #ef5350;
   font-size: 12px;
   padding: 4px;
 }

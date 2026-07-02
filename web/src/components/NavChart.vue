@@ -3,8 +3,8 @@
 
   职责：
   1. 使用 ECharts 渲染双 Y 轴图
-     - 左轴：净值曲线（面积图，蓝色）
-     - 右轴：回撤深度（反向填充图，红色）
+     - 左轴：净值曲线（面积图，Quant 蓝）
+     - 右轴：回撤深度（反向填充图，红）
   2. 响应式：窗口 resize 自动适配
   3. 组合模式额外渲染权重堆叠面积图
 
@@ -12,19 +12,20 @@
   - 使用 vue-echarts 简化 ECharts 集成
   - 不引入 ECharts 全量包，仅按需引入折线图/面积图组件
   - 纯展示组件，无交互逻辑
+  - 挂 terminal-dark 主题：轴/网格/tooltip 走主题，series 内联色仅作语义强调
 -->
 <template>
   <div class="chart-container">
     <!-- 净值曲线 + 回撤图 -->
     <div class="chart-section">
       <h3 class="chart-title">净值曲线与最大回撤</h3>
-      <v-chart class="chart" :option="navChartOption" autoresize />
+      <v-chart class="chart" :option="navChartOption" theme="terminal-dark" autoresize />
     </div>
 
     <!-- 权重堆叠面积图（仅组合模式显示） -->
     <div v-if="weightSeries && weightSeries.length > 0" class="chart-section">
       <h3 class="chart-title">资产权重时序</h3>
-      <v-chart class="chart" :option="weightChartOption" autoresize />
+      <v-chart class="chart" :option="weightChartOption" theme="terminal-dark" autoresize />
     </div>
   </div>
 </template>
@@ -142,14 +143,15 @@ const navChartOption = computed(() => {
         data: navValues,
         smooth: true,
         showSymbol: false,
-        lineStyle: { width: 2, color: '#409EFF' },
+        // Quant 蓝（与全局 primary 同源），替代 EP 默认亮蓝 #409EFF
+        lineStyle: { width: 2, color: '#2962ff' },
         areaStyle: {
           color: {
             type: 'linear',
             x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: 'rgba(64, 158, 255, 0.3)' },
-              { offset: 1, color: 'rgba(64, 158, 255, 0.02)' },
+              { offset: 0, color: 'rgba(41, 98, 255, 0.3)' },
+              { offset: 1, color: 'rgba(41, 98, 255, 0.02)' },
             ],
           },
         },
@@ -161,9 +163,10 @@ const navChartOption = computed(() => {
         data: ddValues,
         smooth: true,
         showSymbol: false,
-        lineStyle: { width: 1.5, color: '#F56C6C' },
+        // 回撤红（与 candlestick 阳线同色），替代 EP 默认 #F56C6C
+        lineStyle: { width: 1.5, color: '#ef5350' },
         areaStyle: {
-          color: 'rgba(245, 108, 108, 0.15)',
+          color: 'rgba(239, 83, 80, 0.15)',
         },
       },
     ],
@@ -179,9 +182,11 @@ const weightChartOption = computed(() => {
   // 提取所有标代码
   const symbols = Object.keys(props.weightSeries[0].weights)
 
+  // 终端调色板（与 echarts-terminal-dark 注册色一致），替代 EP 默认亮色调色板
+  const colors = ['#2962ff', '#26a69a', '#f78166', '#d29922', '#bc8cff']
+
   // 为每个标的构建权重序列
   const series = symbols.map((symbol, idx) => {
-    const colors = ['#409EFF', '#67C23A', '#E6A23C', '#F56C6C', '#909399']
     const data = props.weightSeries!.map((p) =>
       ((p.weights[symbol] ?? 0) * 100) // 转为百分比
     )
@@ -252,17 +257,19 @@ const weightChartOption = computed(() => {
   gap: 20px;
 }
 
+/* 暗黑终端：透明底（继承父级极夜黑/卡片底），去亮色阴影，避免白底刺眼 */
 .chart-section {
-  background: #fff;
-  border-radius: 8px;
+  background: transparent;
+  border: 1px solid #2b3139;
+  border-radius: 6px;
   padding: 16px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .chart-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: #d1d4dc;
   margin: 0 0 12px 0;
 }
 

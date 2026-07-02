@@ -39,39 +39,39 @@ const activeName = computed(() => route.path)
 </template>
 
 <style scoped>
-/* 根壳：暗黑底色，纵向 flex（导航 + 路由出口） */
+/* 根壳：极夜黑底色，纵向 flex（导航 + 路由出口） */
 .app-shell {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: #0d1117;
+  background: #131722; /* 极夜黑，与 --el-bg-color-page 同源 */
 }
 
-/* 顶部导航：固定高度，暗卡片底色，细分隔线分隔主体 */
+/* 顶部导航：固定高度，卡片底色 + 极弱灰下边框分隔主体 */
 .top-nav {
   display: flex;
   align-items: center;
   gap: 16px;
   height: 36px;
   padding: 0 16px;
-  background: #161b22;
-  border-bottom: 1px solid #30363d;
+  background: #1e222d;
+  border-bottom: 1px solid #2b3139;
   flex-shrink: 0;
 }
 
 .nav-brand {
   font-size: 13px;
   font-weight: 700;
-  color: #58a6ff;
+  color: #2962ff; /* Quant 蓝，与全局 primary 同源 */
   letter-spacing: 0.5px;
 }
 
-/* 导航项：默认灰，激活态高亮蓝（下划线锚定当前页） */
+/* 导航项：默认次要灰，激活态高亮 Quant 蓝（低透蓝底锚定当前页） */
 .nav-item {
   font-size: 12px;
-  color: #8b949e;
+  color: #787b86;
   text-decoration: none;
   padding: 4px 8px;
   border-radius: 4px;
@@ -79,11 +79,11 @@ const activeName = computed(() => route.path)
 }
 
 .nav-item:hover {
-  color: #c9d1d9;
+  color: #b2b5be;
 }
 
 .nav-item.active {
-  color: #58a6ff;
-  background: rgba(88, 166, 255, 0.1);
+  color: #2962ff;
+  background: rgba(41, 98, 255, 0.12);
 }
 </style>

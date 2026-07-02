@@ -80,7 +80,7 @@ watch(() => logs.value.length, () => scrollToBottom())
   width: 100%;
   height: 100%;
   background: #010409; /* 比面板更深的纯黑，强化终端感 */
-  color: #c9d1d9;
+  color: #d1d4dc;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.5;
@@ -100,19 +100,19 @@ watch(() => logs.value.length, () => scrollToBottom())
   margin-right: 6px;
 }
 .lv-info {
-  color: #8b949e;
+  color: #787b86;
 }
 .lv-success {
-  color: #3fb950;
+  color: #26a69a;
 }
 .lv-warn {
   color: #d29922;
 }
 .lv-error {
-  color: #f85149;
+  color: #ef5350;
 }
 .msg {
-  color: #c9d1d9;
+  color: #d1d4dc;
 }
 .empty {
   color: #6e7681;

@@ -13,9 +13,9 @@
  *
  * 离线降级红线（贯穿全视图）：
  *   后端在无 macro/sector 湖时返空结构（series:{} / sectors:[] / pool:[]），
- *   本视图所有面板均做空态兜底（el-empty 或图表空 option），绝不白屏。
- *   原因：宏观湖依赖离线同步脚本（sync_macro_daily），开发机/CI 默认无数据，
- *   前端必须能渲染空图表骨架供联调，避免「无数据 = 整页崩」。
+ *   本视图所有面板均做空态兜底（TerminalWatermark 极简水印或图表空 option），
+ *   绝不白屏。原因：宏观湖依赖离线同步脚本（sync_macro_daily），开发机/CI 默认
+ *   无数据，前端必须能渲染空骨架供联调，避免「无数据 = 整页崩」。
  *
  * 数据加载策略：
  *   onMounted 并发拉三个端点（Promise.allSettled，单个失败不阻塞其余）。
@@ -36,6 +36,7 @@ import {
   SingleAxisComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+import TerminalWatermark from '../components/TerminalWatermark.vue'
 import {
   getMacroRegime,
   getMacroCredit,
@@ -92,10 +93,10 @@ onMounted(loadDashboard)
 const regimeDisplay = computed(() => {
   const r = regimeData.value?.regime
   switch (r) {
-    case 1: return { label: '扩张 (Risk-On)', desc: '信用宽松，倾向加仓高 beta', color: '#3fb950', bg: '#0d2818' }
-    case -1: return { label: '收缩 (Risk-Off)', desc: '紧信用环境，防御为主', color: '#f85149', bg: '#2d1014' }
+    case 1: return { label: '扩张 (Risk-On)', desc: '信用宽松，倾向加仓高 beta', color: '#26a69a', bg: '#0d2818' }
+    case -1: return { label: '收缩 (Risk-Off)', desc: '紧信用环境，防御为主', color: '#ef5350', bg: '#2d1014' }
     case 0: return { label: '中性', desc: '震荡市，仓位中性', color: '#d29922', bg: '#2d2410' }
-    default: return { label: '数据不足', desc: '等待宏观湖同步', color: '#8b949e', bg: '#161b22' }
+    default: return { label: '数据不足', desc: '等待宏观湖同步', color: '#787b86', bg: '#1e222d' }
   }
 })
 
@@ -127,14 +128,14 @@ const regimeTimelineOption = computed(() => {
     visualMap: {
       min: -1, max: 1,
       show: false,
-      inRange: { color: ['#f85149', '#d29922', '#3fb950'] }, // 红/黄/绿
+      inRange: { color: ['#ef5350', '#d29922', '#26a69a'] }, // 红(收缩)/黄(中性)/绿(扩张)
     },
     series: [
       {
         type: 'heatmap',
         data,
-        // 大格子高度，让色带视觉上更显眼
-        itemStyle: { borderColor: '#0d1117', borderWidth: 1 },
+        // 大格子高度，让色带视觉上更显眼；边框色对齐极夜黑底
+        itemStyle: { borderColor: '#131722', borderWidth: 1 },
       },
     ],
   })
@@ -201,39 +202,39 @@ const creditChartOption = computed(() => {
   })
 
   const seriesArr: unknown[] = []
-  if (social) seriesArr.push(buildSeries(`社融(${social.name})`, socialM, 0, '#58a6ff'))
-  if (m1m2) seriesArr.push(buildSeries(`M1M2差(${m1m2.name})`, m1m2M, 0, '#3fb950'))
-  if (dr007) seriesArr.push(buildSeries(`DR007(${dr007.name})`, dr007M, 1, '#f85149'))
+  if (social) seriesArr.push(buildSeries(`社融(${social.name})`, socialM, 0, '#2962ff'))
+  if (m1m2) seriesArr.push(buildSeries(`M1M2差(${m1m2.name})`, m1m2M, 0, '#26a69a'))
+  if (dr007) seriesArr.push(buildSeries(`DR007(${dr007.name})`, dr007M, 1, '#ef5350'))
 
   return markRaw({
     backgroundColor: 'transparent',
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    legend: { top: 0, textStyle: { color: '#c9d1d9', fontSize: 11 } },
+    legend: { top: 0, textStyle: { color: '#d1d4dc', fontSize: 11 } },
     grid: { left: 50, right: 50, top: 36, bottom: 50 },
     xAxis: {
       type: 'category',
       data: dates,
-      axisLine: { lineStyle: { color: '#30363d' } },
-      axisLabel: { color: '#8b949e', fontSize: 10 },
+      axisLine: { lineStyle: { color: '#2b3139' } },
+      axisLabel: { color: '#787b86', fontSize: 10 },
     },
     yAxis: [
       {
         type: 'value',
         name: '社融/M1M2',
         position: 'left',
-        axisLine: { lineStyle: { color: '#30363d' } },
-        axisLabel: { color: '#8b949e', fontSize: 10 },
-        splitLine: { lineStyle: { color: '#21262d' } },
-        nameTextStyle: { color: '#8b949e', fontSize: 10 },
+        axisLine: { lineStyle: { color: '#2b3139' } },
+        axisLabel: { color: '#787b86', fontSize: 10 },
+        splitLine: { lineStyle: { color: '#232731' } },
+        nameTextStyle: { color: '#787b86', fontSize: 10 },
       },
       {
         type: 'value',
         name: 'DR007',
         position: 'right',
-        axisLine: { lineStyle: { color: '#30363d' } },
-        axisLabel: { color: '#8b949e', fontSize: 10 },
+        axisLine: { lineStyle: { color: '#2b3139' } },
+        axisLabel: { color: '#787b86', fontSize: 10 },
         splitLine: { show: false },
-        nameTextStyle: { color: '#8b949e', fontSize: 10 },
+        nameTextStyle: { color: '#787b86', fontSize: 10 },
       },
     ],
     dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 8 }],
@@ -293,30 +294,30 @@ const sectorChartOption = computed(() => {
     grid: { left: 10, right: 30, top: 10, bottom: 10, containLabel: true },
     xAxis: {
       type: 'value',
-      axisLine: { lineStyle: { color: '#30363d' } },
-      axisLabel: { color: '#8b949e', fontSize: 10 },
-      splitLine: { lineStyle: { color: '#21262d' } },
+      axisLine: { lineStyle: { color: '#2b3139' } },
+      axisLabel: { color: '#787b86', fontSize: 10 },
+      splitLine: { lineStyle: { color: '#232731' } },
     },
     yAxis: {
       type: 'category',
       data: sorted.map((r) => r.name),
-      axisLine: { lineStyle: { color: '#30363d' } },
-      axisLabel: { color: '#c9d1d9', fontSize: 11 },
+      axisLine: { lineStyle: { color: '#2b3139' } },
+      axisLabel: { color: '#d1d4dc', fontSize: 11 },
     },
     series: [
       {
         type: 'bar',
         data: sorted.map((r) => ({
           value: r.value,
-          // 龙头板块高亮红，其余默认蓝；why 不用 visualMap：单维离散高亮
+          // 龙头板块高亮红，其余默认 Quant 蓝；why 不用 visualMap：单维离散高亮
           // 用 itemStyle 直接染更直观
-          itemStyle: { color: highlightNames.has(r.name) ? '#f85149' : '#58a6ff' },
+          itemStyle: { color: highlightNames.has(r.name) ? '#ef5350' : '#2962ff' },
         })),
         barWidth: '60%',
         label: {
           show: true,
           position: 'right',
-          color: '#8b949e',
+          color: '#787b86',
           fontSize: 10,
           formatter: (p: { value: number }) => p.value.toFixed(2),
         },
@@ -375,10 +376,11 @@ const poolRows = computed(() => {
             :option="regimeTimelineOption"
             autoresize
           />
-          <el-empty
+          <!-- 空态：极简水印替代 el-empty，紧凑模式适配色带窄面板 -->
+          <TerminalWatermark
             v-else
-            description="暂无 regime 历史数据"
-            :image-size="60"
+            compact
+            subtitle="暂无 regime 历史数据"
           />
         </div>
       </section>
@@ -392,10 +394,10 @@ const poolRows = computed(() => {
           :option="creditChartOption"
           autoresize
         />
-        <el-empty
+        <TerminalWatermark
           v-else
-          description="暂无 credit 时序（macro 湖未同步）"
-          :image-size="60"
+          compact
+          subtitle="暂无 credit 时序（macro 湖未同步）"
         />
       </section>
 
@@ -408,10 +410,10 @@ const poolRows = computed(() => {
           :option="sectorChartOption"
           autoresize
         />
-        <el-empty
+        <TerminalWatermark
           v-else
-          description="暂无板块资金流（sector 湖未同步）"
-          :image-size="60"
+          compact
+          subtitle="暂无板块资金流（sector 湖未同步）"
         />
       </section>
 
@@ -430,10 +432,10 @@ const poolRows = computed(() => {
           <el-table-column prop="turnover" label="换手率" width="90" align="right" />
           <el-table-column prop="momentum" label="动量" width="90" align="right" />
         </el-table>
-        <el-empty
+        <TerminalWatermark
           v-else
-          description="活跃股池待接入（pool 湖下期填充）"
-          :image-size="60"
+          compact
+          subtitle="活跃股池待接入（pool 湖下期填充）"
         />
       </section>
     </main>
@@ -442,7 +444,7 @@ const poolRows = computed(() => {
 
 <style scoped>
 /*
- * 驾驶舱外壳：与终端共享暗黑底色。
+ * 驾驶舱外壳：与终端共享极夜黑底色。
  *
  * Why flex:1 + min-height:0 + overflow:auto 而非 min-height:100vh：
  *   App.vue 是「顶部导航(36px) + router-view」纵向 flex 壳，本视图填满除导航
@@ -453,8 +455,8 @@ const poolRows = computed(() => {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  background: #0d1117;
-  color: #c9d1d9;
+  background: #131722;
+  color: #d1d4dc;
   display: flex;
   flex-direction: column;
 }
@@ -465,8 +467,8 @@ const poolRows = computed(() => {
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px;
-  border-bottom: 1px solid #30363d;
-  background: #161b22;
+  border-bottom: 1px solid #2b3139;
+  background: #1e222d;
   flex-shrink: 0;
 }
 
@@ -474,12 +476,12 @@ const poolRows = computed(() => {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-  color: #c9d1d9;
+  color: #d1d4dc;
 }
 
 .dash-sub {
   font-size: 11px;
-  color: #8b949e;
+  color: #787b86;
   margin-left: 8px;
 }
 
@@ -493,10 +495,10 @@ const poolRows = computed(() => {
   padding: 10px;
 }
 
-/* 每个面板单元格：暗卡片 + 细边框 + 内边距 + 隐藏溢出（图表自适应填充） */
+/* 每个面板单元格：暗卡片 + 极弱灰边框 + 内边距 + 隐藏溢出（图表自适应填充） */
 .cell {
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: #1e222d;
+  border: 1px solid #2b3139;
   border-radius: 6px;
   padding: 10px;
   display: flex;
@@ -506,7 +508,7 @@ const poolRows = computed(() => {
 
 .cell-caption {
   font-size: 12px;
-  color: #8b949e;
+  color: #787b86;
   margin-bottom: 8px;
   flex-shrink: 0;
 }
@@ -538,7 +540,7 @@ const poolRows = computed(() => {
 
 .regime-desc {
   font-size: 12px;
-  color: #8b949e;
+  color: #787b86;
   line-height: 1.5;
 }
 

@@ -1,11 +1,12 @@
 <!--
-  参数表单组件
+  参数表单组件（Epic 2：去主观化动态标的池）
 
   职责：
-  1. 根据模式（single/portfolio）动态渲染不同的表单字段
-  2. 表单校验：初始资金 > 0、日期合法性、权重和 = 1
-  3. 组合模式的动态权重矩阵表单（symbols × states）
-  4. 提交时 emit 事件，由父组件调用 API
+  1. 顶部只读 Universe Card：声明当前运行池 = 宏观动能 Top 50 活跃池（盲打）
+  2. 通用回测参数：回测区间 / 初始资金 / 信号频率 / 策略 / 策略参数（single）
+     或 HMM 状态数 / 迟滞阈值 / 状态权重矩阵（portfolio）
+  3. 表单校验：初始资金 > 0、日期合法性、权重和 = 1（portfolio）
+  4. 提交时 emit 事件，由父组件调用 API；symbol/symbols 已被劫持为动态池代号
 
   设计原则：
   - 校验逻辑尽量在前端完成，减少无效请求
@@ -22,28 +23,28 @@
     class="param-form"
     @submit.prevent
   >
-    <!-- 单资产模式：标的代码 -->
-    <el-form-item v-if="mode === 'single'" label="标的代码" prop="symbol">
-      <el-input v-model="formData.symbol" placeholder="如 600000.SH" />
-    </el-form-item>
-
-    <!-- 组合模式：标的列表 -->
-    <el-form-item v-if="mode === 'portfolio'" label="ETF 标的列表" prop="symbols">
-      <el-select
-        v-model="formData.symbols"
-        multiple
-        filterable
-        allow-create
-        default-first-option
-        placeholder="输入 ETF 代码后回车添加"
-        style="width: 100%"
-      >
-        <el-option label="510300.SH（沪深300ETF）" value="510300.SH" />
-        <el-option label="511010.SH（国债ETF）" value="511010.SH" />
-        <el-option label="510500.SH（中证500ETF）" value="510500.SH" />
-        <el-option label="518880.SH（黄金ETF）" value="518880.SH" />
-      </el-select>
-    </el-form-item>
+    <!--
+      ===== Epic 2：动态标的池卡片（Universe Card，去主观化盲打） =====
+      真正的量化系统不依赖人工录入个股代码：标的池由后端数据湖按宏观动能自动筛出。
+      此卡片为只读信息层，向用户声明「当前运行池 = 宏观动能 Top 50 活跃池」，
+      实际标的解析在后端完成（server/api/v1/macro.py 的 [:50] 活跃股池逻辑）。
+      右上角闪烁绿点 = 「动态同步中」的活体指示，纯 CSS 动画，零 JS 开销。
+    -->
+    <div class="universe-card">
+      <div class="universe-head">
+        <span class="universe-title">策略运行池 (Universe)</span>
+        <span class="universe-sync">
+          <span class="sync-dot" aria-hidden="true"></span>
+          动态同步中
+        </span>
+      </div>
+      <div class="universe-body">
+        <span class="universe-core">⚡ 宏观动能 Top 50 活跃池</span>
+        <p class="universe-desc">
+          系统基于后端数据湖自动读取标的，按宏观动能 + 流动性动态筛选，无需手动指定。
+        </p>
+      </div>
+    </div>
 
     <!-- 日期范围 -->
     <el-form-item label="回测区间" prop="dateRange">
@@ -207,9 +208,18 @@ const emit = defineEmits<{
 
 const formRef = ref<FormInstance>()
 
-/** 表单数据 */
+/**
+ * 表单数据
+ *
+ * Epic 2 去 subjective 化后：
+ * - symbol / symbols 不再暴露输入框（顶部 Universe Card 取代），但字段保留为内部
+ *   默认值——portfolio 权重矩阵（rebuildStateWeights / state_weights）仍以
+ *   formData.symbols 为列维度构建。portfolio 模式当前未挂载任何视图（仅
+ *   TerminalView 用 single），故默认值不影响主路径，保留可避免连带改造权重矩阵。
+ * - 提交时 handleSubmit 会把 symbol/symbols 劫持为动态池代号，覆盖此处的默认值。
+ */
 const formData = reactive({
-  // 单资产
+  // 单资产（默认值仅为内部占位，提交时被劫持为 'dynamic_top50'）
   symbol: '600000.SH',
   signal_freq: '1d',
   // 策略选择（前端驱动调参）；tech_weights 已下沉到 strategy_params.tech_weight
@@ -218,7 +228,7 @@ const formData = reactive({
   // 通用
   dateRange: ['2023-01-01', '2024-12-31'] as string[],
   initial_capital: 1000000,
-  // 组合
+  // 组合（默认值仅供权重矩阵构建，提交时被劫持为 ['dynamic_top50']）
   symbols: ['510300.SH', '511010.SH'] as string[],
   n_hmm_states: 3,
   buffer_threshold: 0.05,
@@ -329,10 +339,13 @@ const matrixError = computed(() => {
   return '每行权重和必须等于 1.00'
 })
 
-/** 表单校验规则 */
+/**
+ * 表单校验规则
+ *
+ * Epic 2：已删除 symbol / symbols 的 required 规则（输入框已移除，标的由动态池接管）。
+ * 保留 dateRange / initial_capital / signal_freq 的合法性校验。
+ */
 const formRules: FormRules = {
-  symbol: [{ required: true, message: '请输入标的代码', trigger: 'blur' }],
-  symbols: [{ required: true, message: '请至少选择一个标的', trigger: 'change' }],
   dateRange: [{ required: true, message: '请选择回测日期范围', trigger: 'change' }],
   initial_capital: [
     { required: true, message: '请输入初始资金', trigger: 'blur' },
@@ -361,7 +374,17 @@ async function handleSubmit() {
   // 构建提交数据
   if (props.mode === 'single') {
     emit('submit', {
-      symbol: formData.symbol,
+      /*
+       * Epic 2 负载劫持：去主观化盲打，无视用户输入，强制下发动态池子代号。
+       *
+       * Why 字符串 'dynamic_top50' 而非数组：后端 BacktestRequest.symbol 字段
+       *   类型是 str（server/schemas/backtest.py: symbol: str = Field(...)），
+       *   若传数组 ["dynamic_top50"] 会触发 Pydantic 422（str 收到 list）。
+       *   这里守 str 契约——后端仍收到 { "symbol": "dynamic_top50", ... }，
+       *   只是值由单一代号路由到 Top50 活跃池逻辑，符合「零破坏原则」。
+       *   （portfolio 分支的 symbols: string[] 契约允许数组，故用 ['dynamic_top50']。）
+       */
+      symbol: 'dynamic_top50',
       start_date: formData.dateRange[0],
       end_date: formData.dateRange[1],
       initial_capital: formData.initial_capital,
@@ -371,7 +394,8 @@ async function handleSubmit() {
     })
   } else {
     emit('submit', {
-      symbols: formData.symbols,
+      // Epic 2 负载劫持：组合模式 symbols: string[] 契约允许数组，直接下发池子代号数组
+      symbols: ['dynamic_top50'],
       start_date: formData.dateRange[0],
       end_date: formData.dateRange[1],
       initial_capital: formData.initial_capital,
@@ -385,18 +409,94 @@ async function handleSubmit() {
 </script>
 
 <style scoped>
+/*
+ * 表单容器：暗黑终端透明底（继承父卡片 #1e222d，悬浮卡片由 TerminalView .panel 提供）。
+ * 修复历史残留：原 background:#fff 是亮色后台管理风格，与暗黑终端冲突。
+ */
 .param-form {
   padding: 16px;
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* ===== Epic 2：动态标的池卡片（Universe Card） ===== */
+.universe-card {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #1e222d 0%, #232731 100%);
+  border: 1px solid #2b3139;
+  border-left: 3px solid #2962ff;   /* Quant 蓝左边条，锚定「策略核心配置」语义 */
+  border-radius: 6px;
+}
+
+.universe-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.universe-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #b2b5be;
+  letter-spacing: 0.5px;
+}
+
+/* 「动态同步中」活体指示：闪烁绿点 + 文案 */
+.universe-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #26a69a;   /* 与 candlestick 阴线绿同色，传达「活跃/正常」状态 */
+}
+
+/* 闪烁绿点：1.6s 无限呼吸，模拟数据湖实时同步心跳（纯 CSS，零 JS 开销） */
+.sync-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #26a69a;
+  box-shadow: 0 0 6px rgba(38, 166, 154, 0.8);
+  animation: sync-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes sync-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(0.7); }
+}
+
+/* 无障碍：尊重 prefers-reduced-motion，用户系统关闭动画时停止闪烁，避免眩晕 */
+@media (prefers-reduced-motion: reduce) {
+  .sync-dot { animation: none; }
+}
+
+.universe-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.universe-core {
+  font-size: 14px;
+  font-weight: 700;
+  color: #d1d4dc;
+}
+
+.universe-desc {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #787b86;
 }
 
 /* tech_weights 相关样式（.weight-row / .weight-label）已随滑块块移除 */
 
 .threshold-hint {
   font-size: 12px;
-  color: #909399;
+  color: #787b86;
   margin-top: 4px;
 }
 
@@ -414,12 +514,12 @@ async function handleSubmit() {
 .matrix-table td {
   padding: 6px 4px;
   text-align: center;
-  border-bottom: 1px solid #ebeef5;
+  border-bottom: 1px solid #2b3139;
 }
 
 .state-label {
   font-weight: 600;
-  color: #303133;
+  color: #d1d4dc;
   white-space: nowrap;
 }
 </style>

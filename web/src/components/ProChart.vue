@@ -144,7 +144,7 @@ const option = computed(() => {
       // coord 第一个元素为 category x 轴的类目值（日期/时间字符串），第二为 y 值（价格）
       coord: [t.date, t.price],
       value: t.direction === 'buy' ? 'B' : 'S',
-      itemStyle: { color: t.direction === 'buy' ? '#3fb950' : '#ef5350' },
+      itemStyle: { color: t.direction === 'buy' ? '#26a69a' : '#ef5350' },
       label: { color: '#fff', fontSize: 10 },
       // 买卖点尺寸（pin 默认形状，28 足够容纳单字母 B/S）
       symbolSize: 28,
@@ -163,12 +163,12 @@ const option = computed(() => {
     label: {
       formatter: l.reason,     // 线端显示原因（"触及止损"/"触及止盈"）
       position: 'end',         // 标签贴在右端，避免与 K 线主体重叠
-      color: l.reason.includes('止盈') ? '#3fb950' : '#f85149',
+      color: l.reason.includes('止盈') ? '#26a69a' : '#ef5350',
       fontSize: 10,
     },
     lineStyle: {
       type: 'dashed',          // 虚线区分参考线与数据线
-      color: l.reason.includes('止盈') ? '#3fb950' : '#f85149',
+      color: l.reason.includes('止盈') ? '#26a69a' : '#ef5350',
       width: 1,
     },
   }))
@@ -183,7 +183,7 @@ const option = computed(() => {
       // 缩写：止损=SL(Stop Loss) / 止盈=TP(Take Profit) / 移动止损=TS(Trailing Stop)
       value: p.reason.includes('止盈') ? 'TP' : p.reason.includes('移动') ? 'TS' : 'SL',
       itemStyle: {
-        color: p.reason.includes('止盈') ? '#3fb950' : '#f85149',
+        color: p.reason.includes('止盈') ? '#26a69a' : '#ef5350',
       },
       label: { color: '#fff', fontSize: 9 },
       // 风控点用更小尺寸（20），与买卖点（28）区分，避免遮挡
@@ -266,11 +266,11 @@ const option = computed(() => {
       {
         name: '净值', type: 'line', data: navLine, xAxisIndex: 0, yAxisIndex: 1,
         // symbol:none 隐藏数据点，仅留折线；smooth 轻微平滑视觉降噪
-        smooth: true, symbol: 'none', lineStyle: { width: 1.5, color: '#58a6ff' },
+        smooth: true, symbol: 'none', lineStyle: { width: 1.5, color: '#2962ff' },
       },
       {
         name: '成交量', type: 'bar', data: volumes, xAxisIndex: 1, yAxisIndex: 2,
-        itemStyle: { color: '#30363d' },
+        itemStyle: { color: '#2b3139' },
       },
     ],
   })
