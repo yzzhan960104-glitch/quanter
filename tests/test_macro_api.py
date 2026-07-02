@@ -139,14 +139,14 @@ def test_macro_credit_with_data(client, monkeypatch):
 # --------------------------------------------------------------
 
 def test_macro_sector_flow_empty_when_no_lake(client, monkeypatch):
-    """无 sector 湖 → /macro/sector/flow 返 {sectors:[], pool:[]} 不抛。
+    """无 sector/daily parquet → /macro/sector/flow 返 {sectors:[], pool:[]} 不抛。
 
     离线降级红线：板块资金流缺失时前端容错渲染空表。
+    端点直读 parquet（sector 是快照表非时序，不走 DataLakeReader），故 mock 路径不存在。
     """
-    from data.lake_reader import DataLakeReader
-    monkeypatch.setattr(DataLakeReader, "_instance", None)
-    reader = DataLakeReader.get_instance()
-    monkeypatch.setattr(reader, "_lakes", {})
+    from config import LAKE_CONFIG
+    monkeypatch.setitem(LAKE_CONFIG["lakes"], "sector", "/nonexistent/sector.parquet")
+    monkeypatch.setitem(LAKE_CONFIG["lakes"], "daily", "/nonexistent/daily.parquet")
 
     resp = client.get("/api/v1/macro/sector/flow")
     assert resp.status_code == 200
