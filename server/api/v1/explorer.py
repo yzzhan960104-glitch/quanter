@@ -54,13 +54,20 @@ async def submit_grid(spec: FactorGridSpec):
     try:
         task = run_factor_grid.delay(spec.model_dump())
         return {"task_id": task.id, "degraded": False}
-    except redis.ConnectionError:
-        # 风控红线：Redis 不可用 → 钉钉告警 + 降级线程池，绝不阻断
+    except Exception as exc:
+        # 风控红线：Redis/Celery 不可用 → 钉钉告警 + 降级线程池，绝不阻断
+        # Why 宽 catch Exception：Celery 在 broker 不可用时抛的异常类型多变
+        # （redis.ConnectionError / kombu.OperationalError / RetryLimit RuntimeError），
+        # 仅捕 redis.ConnectionError 会漏掉 Celery 5 断连重试超限抛的
+        # RuntimeError(E_RETRY_LIMIT_EXCEEDED)，致 500 违背"降级不阻断"红线。
+        # try 块仅含 .delay()（broker 连接），异常来源单一，宽 catch 安全。
+        if not isinstance(exc, redis.ConnectionError):
+            logger.warning("explorer Celery 派发异常（%s），按不可用降级", type(exc).__name__)
         # fire_and_forget 起独立 daemon 线程跑协程，告警失败仅记日志，
         # 不影响本请求的降级执行路径（告警与降级解耦）。
         fire_and_forget(NotificationManager.get_default().notify_risk_event(
             "Redis 不可用，因子网格降级到线程池执行", "WARN"))
-        logger.warning("Redis 不可用，explorer 降级线程池")
+        logger.warning("Redis/Celery 不可用，explorer 降级线程池")
         # run_in_threadpool 把同步 impl 放进 starlette 线程池执行，
         # 避免阻塞 ASGI 事件循环（因子计算为 CPU 密集，直接在事件循环里跑会卡死其它请求）。
         result = await run_in_threadpool(run_factor_grid_impl, spec.model_dump())
