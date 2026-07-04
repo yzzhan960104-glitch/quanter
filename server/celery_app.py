@@ -59,7 +59,14 @@ def run_factor_grid_impl(spec: dict) -> dict:
         return {"ok": False, "reason": "universe 无可用数据"}
     panel = pd.concat(pieces, axis=1).sort_index()
     returns = panel.pct_change()
-    factor = cross_sectional_momentum(returns, window=20)
+    # 因子路由：当前仅集成 cross_sectional_momentum；其余因子（vol_adjusted_momentum /
+    # north_flow_momentum / dragon_signal / valuation_cross_section）待对应 factors
+    # 模块集成后接入动态调度。Why 显式拒绝而非静默算错：避免前端选 A 后端算 B 的语义欺骗。
+    factor_name = spec.get("factor", "cross_sectional_momentum")
+    if factor_name == "cross_sectional_momentum":
+        factor = cross_sectional_momentum(returns, window=20)
+    else:
+        return {"ok": False, "reason": f"因子 {factor_name} 尚未集成（当前仅支持 cross_sectional_momentum）"}
     fwd = returns.shift(-1)
 
     analyzer = FactorAnalyzer()
