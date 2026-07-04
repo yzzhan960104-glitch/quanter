@@ -170,6 +170,19 @@ class DrawdownPoint(BaseModel):
     drawdown: float
 
 
+class BenchmarkPoint(BaseModel):
+    """基准累计净值节点（归一化，起点=1.0）。
+
+    Why 单列 nav 而非透传 raw close：
+    - 基准（沪深300 ETF 510300.SH）与策略 nav 都按 nav/首值 归一化到起点 1.0，
+      保证 ProChart 左 log 轴下两条线物理可比（同币种/同时区/同交易日历）。
+    - date 与 NavPoint.date 同格式（YYYY-MM-DD），后端按策略 nav_series 的 date
+      reindex + 前向填充，避免基准停牌日折线断裂误导。
+    """
+    date: str
+    nav: float
+
+
 class TradeRecord(BaseModel):
     """精简交易记录（丢弃 amount/symbol 等冗余字段）"""
     date: str
@@ -230,3 +243,5 @@ class BacktestResponse(BaseModel):
     ohlcv: List[OhlcvPoint] = []
     # 末态持仓快照：前端 PositionsTable 数据源（仅末行，单资产）
     positions: List[PositionRow] = []
+    # 基准累计净值（沪深300 ETF 510300.SH 归一化）；缺数据/降级时空列表，ProChart 不画基准线
+    benchmark_series: List[BenchmarkPoint] = []

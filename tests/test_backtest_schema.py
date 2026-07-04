@@ -60,3 +60,24 @@ def test_backtest_response_ohlcv_positions_default_empty():
     )
     assert resp.ohlcv == []
     assert resp.positions == []
+
+
+def test_backtest_response_has_benchmark_series_field():
+    """BacktestResponse 必须含 benchmark_series 字段（默认空列表，向后兼容旧响应）。"""
+    from server.schemas.backtest import BenchmarkPoint
+
+    # 最小合法响应（benchmark_series 缺省 → 空列表）
+    resp = BacktestResponse(
+        metrics={
+            "initial_capital": 1e6, "final_nav": 1.0, "total_return": 0.0,
+            "annual_return": 0.0, "annual_volatility": 0.0, "max_drawdown": 0.0,
+            "sharpe_ratio": 0.0, "calmar_ratio": 0.0, "win_rate": 0.0,
+            "profit_loss_ratio": 0.0, "n_trades": 0, "n_failed_trades": 0,
+        },
+        nav_series=[], drawdown_series=[], trades=[], ohlcv=[], positions=[],
+    )
+    assert resp.benchmark_series == []  # 缺省空列表
+
+    # 显式构造基准节点
+    bp = BenchmarkPoint(date="2024-01-02", nav=1.0)
+    assert bp.date == "2024-01-02" and bp.nav == 1.0
