@@ -48,6 +48,7 @@ const { loading, result, error, execute } = useTerminalState()
           :ohlcv="result.ohlcv"
           :nav-series="result.nav_series"
           :trades="result.trades"
+          :benchmark-series="result.benchmark_series ?? []"
         />
         <!-- 空态：极简水印替代 el-empty 纸箱子，传达「等待回测」而非「无数据」 -->
         <TerminalWatermark

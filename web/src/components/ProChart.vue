@@ -1,49 +1,45 @@
 <script setup lang="ts">
 /**
- * 专业 K 线图：主图蜡烛（OHLCV）+ 净值叠加线（右轴）+ 副图成交量 +
- * 买卖点 markPoint（trades.direction）。主副图 dataZoom 联动。
+ * 专业回测主图（三大支柱重构）：
+ *   左 Y 轴 log 净值（策略 + 沪深300 基准）+ 右 Y 轴 inverse 回撤红填充 +
+ *   买卖点 scatter 叠加（按数据量三档自适应 symbolSize/label，万级开 progressive）。
  *
- * 数据来源：消费父组件传入的 ohlcv / navSeries / trades 三条序列，
- * 全部为只读快照，本组件不做任何回测计算，纯展示。
+ * 去K线决策：原 candlestick 主图信息密度过高，与净值/回撤主图冲突。新版本聚焦
+ * "系统何时崩溃"（回撤水下憋气红填充）+ "买卖点细节"（scatter tooltip 含手续费/原因）。
  *
- * 暗色主题：由 main.ts 注册的 'terminal-dark' 提供，<v-chart theme> 直接引用。
+ * 数据：消费父组件 ohlcv（接口兼容保留，去K线后未使用）/ navSeries / trades /
+ * benchmarkSeries，全部只读快照，纯展示。暗色主题：main.ts 注册的 'terminal-dark'。
+ *
+ * 性能红线：option 经 markRaw 隔离，阻止 Vue 深度代理整棵配置树（万级时序）。
  */
 import { computed, markRaw } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
-import { CandlestickChart, LineChart, BarChart } from 'echarts/charts'
+import { LineChart, ScatterChart } from 'echarts/charts'
 import {
   GridComponent,
   TooltipComponent,
   LegendComponent,
   DataZoomComponent,
-  MarkPointComponent,
-  MarkLineComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import type { OhlcvPoint, NavPoint, TradeRecord } from '@/api/backtest'
+import type { OhlcvPoint, NavPoint, TradeRecord, BenchmarkPoint } from '@/api/backtest'
 
-// 按需注册 ECharts 组件：蜡烛/折线/柱状三种 series + 六个 component（含 MarkLine）+ Canvas 渲染器
-// MarkLine（Task 18）：用于画止损/止盈/移动止损触发价的水平参考线
+// 按需注册：折线（净值/基准/回撤）+ 散点（买卖点）+ 四个 component + Canvas 渲染器
 use([
-  CandlestickChart, LineChart, BarChart,
+  LineChart, ScatterChart,
   GridComponent, TooltipComponent, LegendComponent,
-  DataZoomComponent, MarkPointComponent, MarkLineComponent, CanvasRenderer,
+  DataZoomComponent, CanvasRenderer,
 ])
 
 const props = defineProps<{
-  ohlcv: OhlcvPoint[]
+  ohlcv: OhlcvPoint[]                  // 接口兼容保留（去K线后未使用）
   navSeries: NavPoint[]
   trades: TradeRecord[]
+  benchmarkSeries?: BenchmarkPoint[]   // 沪深300 ETF 归一化净值（可空）
 }>()
 
-/**
- * 净值按日期建索引（Map O(1) 查找），用于把 nav 对齐到 K 线 x 轴。
- *
- * Why：K 线交易日与净值日期理论上同源（均出自后端同一时间序列），
- * 但防御性地用 Map + null 兜底——一旦某交易日缺失 nav，折线自然断开，
- * 避免错误地连线（前视偏差/插值污染）。
- */
+/** 净值按日期索引（O(1) 查找），用于把 scatter 点对齐到当日净值 y 值。 */
 const navByDate = computed(() => {
   const m = new Map<string, number>()
   for (const p of props.navSeries) m.set(p.date, p.nav)
@@ -51,226 +47,144 @@ const navByDate = computed(() => {
 })
 
 /**
- * 检测当前 ohlcv 是否为分钟级（Task 18）。
- *
- * 判定依据：取首个 date 字符串，分钟级形如 "2024-01-02 09:31:00"（含空格分隔的
- * 时分秒，或长度 >10 超出 "YYYY-MM-DD"）；日级形如 "2024-01-02"（长度恰好 10，无空格）。
- *
- * Why 只看首点而非全量扫描：ohlcv 由后端单一频率源产出，全序列同形——首点足以
- * 定性，全量扫描数千~数万根纯属浪费。后端若混频（异常）属数据契约破坏，前端
- * 不背锅，category 轴仍能容错渲染。
+ * 买卖点 scatter 数据：叠在左轴净值线上。
+ * Why y 取当日 nav 而非 trade.price：净值与回撤共享左 log 轴，scatter 也挂同一轴，
+ * 用 nav 让买卖点视觉上贴着净值折线，便于看"何时建仓/平仓 vs 净值位置"。
+ * 缺 nav 当日跳过该点（避免错位）。
  */
-const isMinute = computed(() => {
-  const first = props.ohlcv[0]?.date ?? ''
-  // 长度 >10 或含空格 → 视为分钟级 datetime（"YYYY-MM-DD HH:MM" / "YYYY-MM-DD HH:MM:SS"）
-  return first.length > 10 || first.includes(' ')
+const tradePoints = computed(() => {
+  const navMap = navByDate.value
+  return props.trades
+    .map((t) => {
+      const y = navMap.get(t.date)
+      if (y === undefined) return null
+      return {
+        value: [t.date, y],
+        itemStyle: { color: t.direction === 'buy' ? '#ef5350' : '#26a69a' },  // 买红卖绿（A 股配色）
+        // tooltip payload：方向/数量/价格/手续费/原因
+        _dir: t.direction, _shares: t.shares, _price: t.price, _cost: t.cost,
+        _reason: t.reason,
+      }
+    })
+    .filter(Boolean) as any[]
 })
 
 /**
- * 风控触发点提炼（Task 18：止损/止盈/移动止损标注）。
- *
- * 数据来源契约：后端 backtest/engine.py 的 _close() 在风控平仓时，会把
- * direction 记为 "sell"（正常卖出语义），但在 trades[-1].reason 回填
- * "触及止损"/"触及止盈"/"移动止损" 等中文原因。所以「风控触发点」=
- * trades 中 direction==="sell" 且 reason 非空且含上述关键字的记录。
- *
- * Why 不用 direction==="failed"：failed 是涨跌停/资金不足导致的「未成交」
- * （见 _record_failed_trade），与止损止盈「已成交的被动平仓」语义完全不同；
- * brief 的 "direction=failed 的 reason" 描述与后端实际不符，以后端实现为准。
- *
- * 同一价位可能被多根 K 线触发（如多次触及止损），全部保留以反映真实触发次数；
- * 价格水平线（markLine）按 reason 分组去重——同 reason 的多条记录画一条线
- * 会叠成无法辨识的色块，这里改为每组 reason 仅取代表价位画一条水平参考线。
+ * scatter 三档自适应（防御堆叠）：
+ *   ≤50  点：symbolSize=10，显示 direction label
+ *   ≤500 点：symbolSize=6，隐 label
+ *   >500  点：symbolSize=3，隐 label，开 progressive=400 大数据渐进渲染
  */
-const riskTriggers = computed(() => {
-  // 1) 触发点明细（用于 markPoint 标注）
-  const points = props.trades
-    .filter(
-      (t) =>
-        t.direction === 'sell' &&
-        typeof t.reason === 'string' &&
-        t.reason.length > 0 &&
-        (t.reason.includes('止损') || t.reason.includes('止盈'))
-    )
-    .map((t) => ({
-      date: t.date,
-      price: t.price,
-      reason: t.reason as string,
-    }))
-
-  // 2) 水平参考线分组（按 reason 去重，每组取首个触发价作为代表线）
-  //    Why 取首个而非均值：止损/止盈线是策略预设的固定价位（entry*(1-sl_pct) 等），
-  //    多次触发的价位理论上应一致；若因加仓导致 entry 变化出现不同价位，取首个
-  //    最贴近「首次触发」的语义，且避免均值产生不存在的「幽灵线」。
-  const lineSeen = new Set<string>()   // reason 去重集合
-  const lines: Array<{ reason: string; price: number }> = []
-  for (const p of points) {
-    if (!lineSeen.has(p.reason)) {
-      lineSeen.add(p.reason)
-      lines.push({ reason: p.reason, price: p.price })
-    }
-  }
-  return { points, lines }
+const scatterStyle = computed(() => {
+  const n = tradePoints.value.length
+  if (n <= 50) return { symbolSize: 10, showLabel: true }
+  if (n <= 500) return { symbolSize: 6, showLabel: false }
+  return { symbolSize: 3, showLabel: false }
 })
 
 /**
- * ECharts 完整 option。
- *
- * markRaw 隔离：option 内含数百~数千根 K 线的数值数组 + tooltip/markPoint 闭包，
- * 用 markRaw 阻止 Vue 对其做深度响应式代理（否则会递归代理整棵配置树，
- * 既浪费内存又会污染 echarts.setOption 期望的纯对象契约）。
- * 数据本体由父组件 shallowRef 持有，本组件只在切片变化时整体重算。
+ * ECharts 完整 option：双 Y 轴（左 log 净值 + 右 inverse 回撤红填充）+ scatter 买卖点。
+ * markRaw：option 内含万级时序数组 + tooltip 闭包，阻止 Vue 深度代理（性能红线）。
  */
 const option = computed(() => {
-  // x 轴共用日期/时间序列（主图、副图都消费同一份，保证 dataZoom 联动对齐）
-  // 分钟级时该序列为 "YYYY-MM-DD HH:MM" 字符串，category 轴对其与日级字符串同样容错
-  const dates = props.ohlcv.map((o) => o.date)
-  // ECharts 蜡烛数据顺序严格为 [open, close, low, high]，与后端字段命名不同，注意映射
-  const candles = props.ohlcv.map((o) => [o.open, o.close, o.low, o.high])
-  const volumes = props.ohlcv.map((o) => o.volume)
-  // 净值按 K 线日期取值，缺失日给 null（折线在该点断开，不做插值）
-  const navLine = props.ohlcv.map((o) => navByDate.value.get(o.date) ?? null)
+  const dates = props.navSeries.map((p) => p.date)
+  const navVals = props.navSeries.map((p) => p.nav)
 
-  // K 线交易日集合：用于过滤买卖点，保证 markPoint 的 coord 日期一定能被 category x 轴定位。
-  // 不变量：买卖点日期须为 K 线交易日，否则 category 轴无法定位（markPoint 渲染失败/错位）。
-  const datesSet = new Set(dates)
-  // 买卖点 markPoint：coord=[日期, 价格]；B 绿（买入）/ S 红（卖出）
-  // 只接受方向明确的 buy/sell 记录，且日期必须落在 K 线类目集内，过滤掉任何异常项
-  // 注意：buy/sell 都会被纳入（含带 reason 的风控卖出），但风控卖出会在 riskMarkPoints
-  // 里单独再标一个 SL/TP 点——两个标注共存（S 标常规卖出位、SL/TP 标风控语义），不冲突
-  const markPoints = props.trades
-    .filter((t) => (t.direction === 'buy' || t.direction === 'sell') && datesSet.has(t.date))
-    .map((t) => ({
-      // coord 第一个元素为 category x 轴的类目值（日期/时间字符串），第二为 y 值（价格）
-      coord: [t.date, t.price],
-      value: t.direction === 'buy' ? 'B' : 'S',
-      itemStyle: { color: t.direction === 'buy' ? '#26a69a' : '#ef5350' },
-      label: { color: '#fff', fontSize: 10 },
-      // 买卖点尺寸（pin 默认形状，28 足够容纳单字母 B/S）
-      symbolSize: 28,
-    }))
+  // 基准按策略 dates 对齐（后端已 reindex+ffill，前端兜底再对齐一次防漏）
+  const benchMap = new Map<string, number>()
+  for (const p of props.benchmarkSeries ?? []) benchMap.set(p.date, p.nav)
+  const hasBench = (props.benchmarkSeries?.length ?? 0) > 0
+  const benchVals = dates.map((d) => benchMap.get(d) ?? null)
 
-  // ============ 风控触发标注（Task 18：止损/止盈水平线 + 触发点） ============
-  const { points: riskPoints, lines: riskLines } = riskTriggers.value
+  // 回撤：累计净值派生（与 NavChart 同算法），百分比负值；inverse 轴下"水下"红填充
+  const ddVals: number[] = []
+  let running = 1.0
+  let peak = 1.0
+  for (const p of props.navSeries) {
+    const r = p.return
+    running = running * (1 + (isFinite(r) ? r : 0))
+    if (running > peak) peak = running
+    ddVals.push(peak > 0 ? ((running - peak) / peak) * 100 : 0)
+  }
 
-  // markLine 数据：每条水平参考线挂在主图蜡烛 series 上，type:'max'/'min' 无法表达
-  // 「指定价位的水平线」，这里用 yAxis + lineStyle 配合。ECharts markLine 的
-  // yAxis 类型可在指定 y 值画一条贯穿全图的水平线，是止损止盈参考线的标准画法。
-  // 颜色语义：止损=红（亏损出场）/ 止盈=绿（盈利出场），与终端日志级别配色一致。
-  const markLineData = riskLines.map((l) => ({
-    yAxis: l.price,
-    name: l.reason,
-    label: {
-      formatter: l.reason,     // 线端显示原因（"触及止损"/"触及止盈"）
-      position: 'end',         // 标签贴在右端，避免与 K 线主体重叠
-      color: l.reason.includes('止盈') ? '#26a69a' : '#ef5350',
-      fontSize: 10,
-    },
-    lineStyle: {
-      type: 'dashed',          // 虚线区分参考线与数据线
-      color: l.reason.includes('止盈') ? '#26a69a' : '#ef5350',
-      width: 1,
-    },
-  }))
-
-  // 风控触发点 markPoint：在触发根 K 线上标「SL」/「TP」/「TS」缩写
-  // Why 用缩写而非中文：markPoint symbolSize 有限，中文会溢出；缩写 + tooltip
-  // 悬浮显示完整 reason 是 ECharts 业界惯例（TradingView 同款）。
-  const riskMarkPoints = riskPoints
-    .filter((p) => datesSet.has(p.date))   // 日期须落在类目轴内，否则 coord 定位失败
-    .map((p) => ({
-      coord: [p.date, p.price],
-      // 缩写：止损=SL(Stop Loss) / 止盈=TP(Take Profit) / 移动止损=TS(Trailing Stop)
-      value: p.reason.includes('止盈') ? 'TP' : p.reason.includes('移动') ? 'TS' : 'SL',
-      itemStyle: {
-        color: p.reason.includes('止盈') ? '#26a69a' : '#ef5350',
-      },
-      label: { color: '#fff', fontSize: 9 },
-      // 风控点用更小尺寸（20），与买卖点（28）区分，避免遮挡
-      symbolSize: 20,
-    }))
-
-  // x 轴 axisLabel：分钟级数据点密集（数千~数万根），需旋转 + interval 自适应避免重叠；
-  // 日级数据点稀疏，保持水平显示更易读。
-  // axisLabel.formatter：分钟级仅显示 HH:MM（日期由 dataZoom slider 承担），
-  // 日级显示原样日期。Why 不用 ECharts time 轴：category 轴对字符串容错更强，
-  // 不依赖 Date 解析（避免时区/格式解析失败导致轴塌陷），零回归风险。
-  const minute = isMinute.value
-  const xAxisLabel = minute
-    ? {
-        // 旋转 30° 防重叠；interval:'auto' 让 ECharts 自动稀疏化标签
-        rotate: 30,
-        interval: 'auto' as const,
-        // 输入为完整 datetime 字符串，取空格后的 HH:MM 部分（"2024-01-02 09:31" → "09:31"）
-        formatter: (val: string) => {
-          const parts = String(val).split(' ')
-          return parts.length > 1 ? parts[1].slice(0, 5) : val
-        },
-      }
-    : { rotate: 0, interval: 'auto' as const }
+  const ss = scatterStyle.value
+  const tp = tradePoints.value
 
   return markRaw({
-    // 关闭动画：K 线点数多，动画既卡顿又干扰对历史行情的静态研判
+    // 关闭动画：万级点动画既卡顿又干扰对历史净值的静态研判
     animation: false,
-    legend: { top: 0, data: ['K线', '净值', '成交量'] },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    // 跨主副图的十字光标联动（x 轴同步指示）
-    axisPointer: { link: [{ xAxisIndex: 'all' }] },
-    // 双 grid 布局：主图占上方 58%，副图（成交量）占下方 18%，留出 dataZoom 空间
-    grid: [
-      { left: '6%', right: '6%', top: '8%', height: '58%' },   // 主图：蜡烛 + 净值叠加
-      { left: '6%', right: '6%', top: '74%', height: '18%' },  // 副图：成交量
-    ],
-    xAxis: [
-      // 主图 x 轴：category（日级日期 or 分钟级 datetime 字符串）。
-      // min/max='dataMin'/'dataMax' 让两端贴边显示完整区间
-      {
-        type: 'category', data: dates, scale: true, boundaryGap: true,
-        axisLine: { onZero: false }, splitLine: { show: false },
-        min: 'dataMin', max: 'dataMax',
-        axisLabel: xAxisLabel,
+    legend: {
+      top: 0,
+      data: ['策略净值', ...(hasBench ? ['基准(沪深300)'] : []), '回撤', '买卖点'],
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      formatter: (params: any[]) => {
+        let html = `<b>${params[0]?.axisValue}</b><br/>`
+        for (const p of params) {
+          if (p.seriesName === '回撤') {
+            html += `${p.marker} 回撤: ${Number(p.value).toFixed(2)}%<br/>`
+          } else if (p.seriesName === '买卖点') {
+            const d = p.data
+            // 散点 tooltip：方向/数量@价格 + 手续费 + 风控原因（如有）
+            html += `${p.marker} ${d._dir}: ${d._shares}@${Number(d._price).toFixed(2)}`
+              + ` 手续费=${Number(d._cost).toFixed(2)}${d._reason ? ' (' + d._reason + ')' : ''}<br/>`
+          } else if (p.value !== null && p.value !== undefined) {
+            html += `${p.marker} ${p.seriesName}: ${Number(p.value).toFixed(3)}<br/>`
+          }
+        }
+        return html
       },
-      // 副图 x 轴：show:false（标签由主图承担），但 data 必须与主图一致以保证联动对齐
-      { type: 'category', gridIndex: 1, data: dates, show: false, min: 'dataMin', max: 'dataMax' },
-    ],
+    },
+    grid: { left: 70, right: 70, top: 40, bottom: 60 },
+    xAxis: {
+      type: 'category', data: dates, boundaryGap: true,
+      // 分钟级 datetime 兼容：截取前 10 字符（YYYY-MM-DD），日级原样
+      axisLabel: { formatter: (v: string) => String(v).slice(0, 10) },
+    },
     yAxis: [
-      { scale: true, splitArea: { show: false } },             // 价格轴（左，蜡烛）scale:true 不含零轴
-      // 净值轴：显式 position:'right' 落在主图右侧，否则 ECharts 默认把多条 yAxis 堆在
-      // 同一 grid 左侧，价格轴与净值轴会压叠在一起无法分辨。
-      // gridIndex:0 显式绑定主图 grid（蜡烛所在），splitLine 关闭避免与价格轴网格交叉污染。
-      { scale: true, position: 'right', gridIndex: 0, splitLine: { show: false } },
-      { scale: true, gridIndex: 1, splitNumber: 2 },           // 成交量轴（副图 gridIndex 1）
+      {
+        // 左轴 log：策略净值与基准净值同币种/同起点归一化，log 轴下物理可比
+        type: 'log', name: '净值(log)', position: 'left',
+        axisLabel: { formatter: (v: number) => v.toFixed(2) },
+      },
+      {
+        // 右轴 inverse：回撤百分比负值，inverse 后"水下"区域朝下，红填充直观展现痛苦期
+        type: 'value', name: '回撤%', position: 'right', inverse: true,
+        axisLabel: { formatter: (v: number) => `${v.toFixed(1)}%` },
+      },
     ],
-    // dataZoom 联动：inside（鼠标滚轮/拖拽）+ slider（底部缩略条），
-    // xAxisIndex:[0,1] 让主副图同步缩放——独立缩放会导致价格与量能错位
-    // 分钟级默认窗口收窄到末尾 30%（分钟级点数远多于日级，30% 仍含足够细节且首屏不卡）
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: minute ? 70 : 60, end: 100 },
-      { type: 'slider', xAxisIndex: [0, 1], top: '94%', height: 16, start: minute ? 70 : 60, end: 100 },
+      { type: 'inside', start: 0, end: 100 },
+      { type: 'slider', start: 0, end: 100, height: 20 },
     ],
     series: [
       {
-        name: 'K线', type: 'candlestick', data: candles, xAxisIndex: 0, yAxisIndex: 0,
-        // 买卖点 + 风控触发点都挂在主图蜡烛上（coord 指向 K 线 x 轴 + 价格 y 值）
-        // 每个数据项内联 symbolSize（买卖点 28 / 风控点 20），避免用函数回调引入类型与兼容隐患
-        markPoint: {
-          data: [...markPoints, ...riskMarkPoints],
-        },
-        // 止损/止盈/移动止损水平参考线（Task 18）：贯穿主图的虚线，便于目测触发阈值
-        markLine: {
-          symbol: 'none',            // 参考线两端不画箭头（默认会有，影响视觉）
-          silent: true,              // 不响应鼠标（参考线非交互元素，避免干扰 tooltip）
-          data: markLineData,
-        },
+        name: '策略净值', type: 'line', yAxisIndex: 0, data: navVals,
+        smooth: true, symbol: 'none', connectNulls: true,
+        lineStyle: { width: 2, color: '#2962ff' },
+      },
+      ...(hasBench ? [{
+        name: '基准(沪深300)', type: 'line' as const, yAxisIndex: 0, data: benchVals,
+        smooth: true, symbol: 'none', connectNulls: true,
+        lineStyle: { width: 1.5, color: '#787b86', type: 'dashed' as const },
+      }] : []),
+      {
+        name: '回撤', type: 'line', yAxisIndex: 1, data: ddVals,
+        smooth: true, symbol: 'none',
+        lineStyle: { width: 1.5, color: '#ef5350' },
+        // 水下憋气：半透明红填充回撤曲线下方，直观展现"痛苦期"
+        areaStyle: { color: 'rgba(239, 83, 80, 0.18)' },
       },
       {
-        name: '净值', type: 'line', data: navLine, xAxisIndex: 0, yAxisIndex: 1,
-        // symbol:none 隐藏数据点，仅留折线；smooth 轻微平滑视觉降噪
-        smooth: true, symbol: 'none', lineStyle: { width: 1.5, color: '#2962ff' },
-      },
-      {
-        name: '成交量', type: 'bar', data: volumes, xAxisIndex: 1, yAxisIndex: 2,
-        itemStyle: { color: '#2b3139' },
+        name: '买卖点', type: 'scatter', yAxisIndex: 0, data: tp,
+        symbolSize: ss.symbolSize,
+        // 万级数据开渐进渲染，避免首屏卡顿
+        ...(tp.length > 500 ? { progressive: 400 } : {}),
+        label: ss.showLabel
+          ? { show: true, formatter: (p: any) => p.data._dir, color: '#fff', fontSize: 9 }
+          : { show: false },
       },
     ],
   })
