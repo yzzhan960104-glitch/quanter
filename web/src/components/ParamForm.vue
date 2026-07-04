@@ -30,21 +30,8 @@
       实际标的解析在后端完成（server/api/v1/macro.py 的 [:50] 活跃股池逻辑）。
       右上角闪烁绿点 = 「动态同步中」的活体指示，纯 CSS 动画，零 JS 开销。
     -->
-    <div class="universe-card">
-      <div class="universe-head">
-        <span class="universe-title">策略运行池 (Universe)</span>
-        <span class="universe-sync">
-          <span class="sync-dot" aria-hidden="true"></span>
-          动态同步中
-        </span>
-      </div>
-      <div class="universe-body">
-        <span class="universe-core">⚡ 宏观动能 Top 50 活跃池</span>
-        <p class="universe-desc">
-          系统基于后端数据湖自动读取标的，按宏观动能 + 流动性动态筛选，无需手动指定。
-        </p>
-      </div>
-    </div>
+    <!-- UniverseCard：去主观化锚点（独立组件，含 dynamic_top50 标识 + 只读 tag） -->
+    <UniverseCard />
 
     <!-- 日期范围 -->
     <el-form-item label="回测区间" prop="dateRange">
@@ -195,6 +182,7 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
 // Task 9：策略选择 + 动态参数表单（前端驱动调参）
 import StrategyParamForm from './StrategyParamForm.vue'
+import UniverseCard from './UniverseCard.vue'
 import { getStrategies, type StrategyMeta } from '../api/backtest'
 
 const props = defineProps<{
@@ -219,8 +207,8 @@ const formRef = ref<FormInstance>()
  * - 提交时 handleSubmit 会把 symbol/symbols 劫持为动态池代号，覆盖此处的默认值。
  */
 const formData = reactive({
-  // 单资产（默认值仅为内部占位，提交时被劫持为 'dynamic_top50'）
-  symbol: '600000.SH',
+  // 单资产：去主观化——直接持有动态池代号，提交时原样下发（不再有主观个股代码）
+  symbol: 'dynamic_top50',
   signal_freq: '1d',
   // 策略选择（前端驱动调参）；tech_weights 已下沉到 strategy_params.tech_weight
   strategy_name: 'tech_macro_fusion',
