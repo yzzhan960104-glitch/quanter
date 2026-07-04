@@ -19,6 +19,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import TerminalView from '../views/TerminalView.vue'
 import DashboardView from '../views/DashboardView.vue'
+import ExplorerView from '../views/ExplorerView.vue'
+import LiveCockpitView from '../views/LiveCockpitView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -32,6 +34,16 @@ const router = createRouter({
       path: '/dashboard',
       name: 'dashboard',
       component: DashboardView,
+    },
+    {
+      path: '/explorer',
+      name: 'explorer',
+      component: ExplorerView,
+    },
+    {
+      path: '/live',
+      name: 'live',
+      component: LiveCockpitView,
     },
   ],
 })

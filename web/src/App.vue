@@ -31,6 +31,12 @@ const activeName = computed(() => route.path)
       <router-link to="/dashboard" class="nav-item" :class="{ active: activeName === '/dashboard' }">
         宏观驾驶舱
       </router-link>
+      <router-link to="/explorer" class="nav-item" :class="{ active: activeName === '/explorer' }">
+        因子沙盒
+      </router-link>
+      <router-link to="/live" class="nav-item" :class="{ active: activeName === '/live' }">
+        实盘中控
+      </router-link>
     </nav>
 
     <!-- 路由出口：TerminalView / DashboardView 在此渲染 -->
