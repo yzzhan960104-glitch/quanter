@@ -97,6 +97,17 @@ export interface DrawdownPoint {
 }
 
 /**
+ * 基准累计净值节点（归一化起点 1.0）。
+ *
+ * 沪深300 ETF 510300.SH close 按首值归一化，与策略 nav 同币种/同时区/同交易日历，
+ * ProChart 左 log 轴下与策略净值物理可比。date 与 NavPoint.date 同格式（YYYY-MM-DD）。
+ */
+export interface BenchmarkPoint {
+  date: string
+  nav: number
+}
+
+/**
  * 交易记录
  *
  * reason 字段（Task 18 新增，可选）：
@@ -162,6 +173,8 @@ export interface SingleBacktestResponse {
   // 行情序列（ProChart 蜡烛图）+ 末态持仓快照（PositionsTable）—— 后端总会返回，故设为必填
   ohlcv: OhlcvPoint[]
   positions: PositionRow[]
+  // 基准累计净值（沪深300 ETF 归一化）；缺数据/降级时空数组，ProChart 不画基准线
+  benchmark_series?: BenchmarkPoint[]
 }
 
 /** 权重快照节点 */
