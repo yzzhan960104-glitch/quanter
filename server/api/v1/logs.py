@@ -14,7 +14,6 @@ text/event-stream），契合 Karpathy 极简；WebSocket 的双向/帧协议对
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 from collections import deque
@@ -22,7 +21,11 @@ from collections import deque
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
+from server.api.v1._sse import sse_dumps
+
 router = APIRouter(prefix="/logs", tags=["实时日志"])
+
+logger = logging.getLogger(__name__)
 
 
 class LogStreamHub:
@@ -141,7 +144,12 @@ async def stream_logs() -> StreamingResponse:
         try:
             while True:
                 record = await q.get()
-                yield f"data: {json.dumps(record, ensure_ascii=False)}\n\n"
+                # SSE 序列化统一出口（allow_nan=False）：日志帧若意外含 NaN/不可序列化
+                # 则跳过，绝不崩日志流（丢一条日志优于断整条流）
+                frame = sse_dumps(record, logger)
+                if frame is None:
+                    continue
+                yield frame
         finally:
             log_stream_hub.unsubscribe(q)
 

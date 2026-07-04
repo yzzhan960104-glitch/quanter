@@ -18,8 +18,9 @@
 - 绝对禁止在 async def 路由中直接调用，必须通过 run_in_threadpool 卸载到线程池
 - 每次请求必须实例化全新的 BacktestEngine，绝不允许跨请求复用引擎实例
 """
+import logging
 from datetime import datetime
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,8 @@ from server.schemas.backtest import (
     PositionRow,
 )
 from server.core.config import DATA_DEFAULTS
+
+logger = logging.getLogger(__name__)
 
 
 def run_single_backtest(
@@ -86,18 +89,38 @@ def run_single_backtest(
     # 默认策略：缺省 strategy_name 时取技术+宏观融合（与原 service 行为一致）
     DEFAULT_STRATEGY = "tech_macro_fusion"
 
-    # ============ 步骤 1：取数 + 清洗 ============
-    fetcher = MockDataFetcher(seed=DATA_DEFAULTS["mock_seed"])
+    # ============ 步骤 1：取数 + 清洗（优先真实湖，离线降级 Mock）============
+    # Why 双源：LakeDataFetcher 读 data_lake 真实历史；湖缺数据（开发机/CI 未同步）抛
+    # LookupError → 降级 MockDataFetcher 保回测可跑，logger.warning 留痕。
+    # 前视红线：不在取数层做 ffill/重采样（reader 返回原始时序，DataCleaner 统一清洗）。
+    from data.lake_fetcher import LakeDataFetcher
     start_dt = datetime.combine(req.start_date, datetime.min.time())
     end_dt = datetime.combine(req.end_date, datetime.min.time())
+    _lake = LakeDataFetcher()
+    _mock = MockDataFetcher(seed=DATA_DEFAULTS["mock_seed"])
 
-    df = fetcher.fetch_ohlcv(req.symbol, start_dt, end_dt, freq=req.signal_freq)
+    try:
+        df = _lake.fetch_ohlcv(req.symbol, start_dt, end_dt, freq=req.signal_freq)
+        ohlcv_src = "data_lake"
+    except LookupError as e:
+        logger.warning("OHLCV 湖取数失败，降级 Mock：%s", e)
+        df = _mock.fetch_ohlcv(req.symbol, start_dt, end_dt, freq=req.signal_freq)
+        ohlcv_src = "mock"
+
     cleaner = DataCleaner()
     df_clean = cleaner.clean_ohlcv(df, max_fill=5)
     price_data = {req.symbol: df_clean}
+    logger.info(
+        "单资产取数 symbol=%s %s~%s freq=%s → %d 根K线（源=%s）",
+        req.symbol, start_dt.date(), end_dt.date(), req.signal_freq, len(df_clean), ohlcv_src,
+    )
 
     # 宏观数据（M2）——交由策略内部按 tech_weight 融合，对齐失败时策略自动退化为纯技术
-    macro_df = fetcher.fetch_macro("m2", start_dt, end_dt)
+    try:
+        macro_df = _lake.fetch_macro("m2", start_dt, end_dt)
+    except LookupError as e:
+        logger.warning("macro 湖取数失败，M2 降级 Mock：%s", e)
+        macro_df = _mock.fetch_macro("m2", start_dt, end_dt)
 
     # ============ 步骤 2：选策略 + 校验注入参数 ============
     name = req.strategy_name or DEFAULT_STRATEGY
@@ -112,6 +135,7 @@ def run_single_backtest(
 
     # ============ 步骤 3：训练 + 产出信号 ============
     strategy.fit(price_data, macro_data=macro_df)
+    logger.info("策略训练完成 strategy=%s", name)
     ctx = StrategyContext(
         timestamp=start_dt,
         current_weights={req.symbol: 0.0},
@@ -130,6 +154,10 @@ def run_single_backtest(
         price_data=price_data,
         signals=signals,
         event_emitter=event_emitter,
+    )
+    logger.info(
+        "回测引擎执行完毕 n_trades=%d final_nav=%.2f",
+        result.get("n_trades", 0), result.get("final_nav", 0.0),
     )
 
     # ============ 步骤 5：序列化 ============
@@ -207,20 +235,26 @@ def _extract_ohlcv(price_data: dict[str, pd.DataFrame]) -> list[OhlcvPoint]:
     return points
 
 
-def _extract_positions(daily_records: pd.DataFrame, symbol: str) -> list[PositionRow]:
+def _extract_positions(
+    daily_records: pd.DataFrame,
+    symbol: str,
+    trades_df: pd.DataFrame | None = None,
+) -> list[PositionRow]:
     """
-    取回测末态持仓快照（单资产：用末行 position / position_value）。
+    取回测末态持仓快照（单资产）。
 
-    ── 设计说明 ──
-    - 仅取末行：持仓快照语义是"回测结束时的状态"，全量逐日持仓留给后续组合迭代。
-    - market_value 优先取引擎已算好的 position_value 列；缺失（历史 daily 结构）
-      时用 position * price 兜底，保证字段总有值。
-    - 清仓短路：末态 qty=0 且 market_value=0 视为未持仓，返回 []（前端空表）。
-    - 空数据短路：daily_records 为空时返回 []，防范 iloc[-1] IndexError。
+    适配两条引擎路径的 daily_records 结构（缺一即 qty 错乱）：
+    - run_portfolio（组合路径，单资产回测实际走此）：daily_records 含 positions dict
+      {symbol: 股数} 与 position_values dict {symbol: 市值}，【无】position 标量列。
+    - run（历史单资产路径）：daily_records 含 position 标量列 + position_value/price。
+
+    Why 优先 dict：单资产回测经 service → engine.run_portfolio，daily_records 是组合结构，
+    若仍按 position 标量列取值会得到 0（列不存在），mv 又误取 position_value 标量（总市值），
+    表现为「0 股 + 15 万市值」的错乱快照。dict 路径按 symbol 精确取股数与该 symbol 市值。
 
     参数：
-        daily_records: 引擎产出的逐日记录 DataFrame（含 position / position_value / price 列）。
-        symbol: 单资产标的代码，用于 PositionRow.symbol 透传。
+        daily_records: 引擎产出的逐日记录 DataFrame。
+        symbol: 单资产标的代码，用于从 positions/position_values dict 取该 symbol 的值。
 
     返回：
         长度 0 或 1 的 PositionRow 列表（末态持仓快照）。
@@ -228,23 +262,102 @@ def _extract_positions(daily_records: pd.DataFrame, symbol: str) -> list[Positio
     if daily_records is None or daily_records.empty:
         return []
     last = daily_records.iloc[-1]
-    # ── 数值透传用 _safe_float（防 NaN/Inf 透传致非法 JSON）──
-    # 引擎在极端行情 / 除零场景下可能写出 NaN/Inf 的 position / position_value，
-    # 裸 float() 会原样透传进 PositionRow → FastAPI 产出非法 JSON → 前端 JSON.parse 崩。
-    # 与 nav_series / metrics 路径保持一致的安全语义（NaN/Inf → 0.0）。
-    # position 可能缺失（防御历史结构），统一 .get 兜底为 0。
-    qty = _safe_float(last.get("position", 0) or 0)
-    # 优先用引擎已算好的 position_value；缺失或为 None 时用 position*price 兜底。
-    # 两路径均先对各操作数 _safe_float，再运算，确保 NaN/Inf 不污染最终 market_value。
-    if "position_value" in daily_records.columns and last.get("position_value") is not None:
-        mv = _safe_float(last["position_value"])
+
+    positions_dict = last.get("positions")
+    position_values_dict = last.get("position_values")
+
+    if isinstance(positions_dict, dict) and symbol in positions_dict:
+        # run_portfolio 路径（当前主路径）：从 dict 按 symbol 取股数与市值
+        qty = _safe_float(positions_dict.get(symbol, 0))
+        mv = _safe_float(position_values_dict.get(symbol, 0)) if isinstance(position_values_dict, dict) else 0.0
+    elif "position" in daily_records.columns:
+        # 历史 run 路径：用 position 标量列 + position_value/price 兜底（向后兼容）
+        qty = _safe_float(last.get("position", 0) or 0)
+        if "position_value" in daily_records.columns and last.get("position_value") is not None:
+            mv = _safe_float(last["position_value"])
+        else:
+            price = _safe_float(last.get("price", 0) or 0)
+            mv = _safe_float(qty * price)
     else:
-        price = _safe_float(last.get("price", 0) or 0)
-        mv = _safe_float(qty * price)
+        qty = 0.0
+        mv = 0.0
+
     # 清仓 / 从未建仓 → 空列表（前端 PositionsTable 显示空态）
     if qty == 0 and mv == 0:
         return []
-    return [PositionRow(symbol=symbol, qty=qty, market_value=mv)]
+
+    # ── 详情字段：成本/盈亏/时间/资产 ──
+    avg_cost, open_date = _compute_cost_basis(trades_df)
+    cost_total = qty * avg_cost
+    pnl = mv - cost_total
+    pnl_pct = (pnl / cost_total) if cost_total > 0 else 0.0
+    holding_days = 0
+    open_date_str: str | None = None
+    if open_date is not None:
+        open_date_str = open_date.strftime("%Y-%m-%d")
+        try:
+            end_date = pd.Timestamp(daily_records.index[-1])
+            holding_days = int((end_date - pd.Timestamp(open_date)).days)
+        except Exception:
+            holding_days = 0
+    cash = _safe_float(last.get("cash", 0) or 0)
+    nav = _safe_float(last.get("nav", 0) or 0)
+
+    return [PositionRow(
+        symbol=symbol,
+        qty=qty,
+        market_value=mv,
+        avg_cost=avg_cost,
+        unrealized_pnl=pnl,
+        unrealized_pnl_pct=pnl_pct,
+        open_date=open_date_str,
+        holding_days=holding_days,
+        cash=cash,
+        nav=nav,
+    )]
+
+
+def _compute_cost_basis(
+    trades_df: pd.DataFrame | None,
+) -> tuple[float, Optional[pd.Timestamp]]:
+    """从 trades 加权平均算末态持仓成本与首笔建仓日期。
+
+    加权平均法：buy 累加成本与股数（avg = 累计成本 / 累计股数），sell 按当前 avg
+    减成本与股数。返回 (avg_cost, 首笔 buy 日期)。无 trades / 未建仓 → (0.0, None)。
+
+    Why 加权平均而非 FIFO：A 股单一标的调仓场景下，加权平均与 FIFO 末态成本接近，
+    且实现直白（单趟遍历、O(n)），符合极简原则；FIFO 需维护分批队列，复杂度不值得。
+    """
+    if trades_df is None or len(trades_df) == 0:
+        return 0.0, None
+    # 按 date 排序保证交易时序正确（加权平均依赖顺序）
+    df = trades_df.sort_values("date") if "date" in trades_df.columns else trades_df
+    cost_basis = 0.0   # 当前持仓的成本总额
+    qty = 0.0           # 当前持仓股数
+    avg_cost = 0.0
+    first_buy_date: Optional[pd.Timestamp] = None
+    for _, t in df.iterrows():
+        direction = t.get("direction")
+        shares = _safe_float(t.get("shares", 0))
+        price = _safe_float(t.get("price", 0))
+        if direction == "buy" and shares > 0:
+            cost_basis += shares * price
+            qty += shares
+            avg_cost = cost_basis / qty if qty > 0 else 0.0
+            if first_buy_date is None:
+                try:
+                    first_buy_date = pd.Timestamp(t.get("date"))
+                except Exception:
+                    pass
+        elif direction == "sell" and shares > 0:
+            # 卖出按当前 avg_cost 减成本与股数（加权平均法）
+            cost_basis -= shares * avg_cost
+            qty -= shares
+            if qty <= 0:
+                qty = 0.0
+                cost_basis = 0.0
+                avg_cost = 0.0
+    return avg_cost, first_buy_date
 
 
 def _serialize_backtest_result(
@@ -284,7 +397,7 @@ def _serialize_backtest_result(
     # ohlcv / positions 由两个 helper 统一处理空数据短路，此处不重复判空。
     symbol = next(iter(price_data), "")
     ohlcv = _extract_ohlcv(price_data)
-    positions = _extract_positions(daily_df, symbol)
+    positions = _extract_positions(daily_df, symbol, trades_df)
 
     # 空 daily_records 短路：早返回路径的 DataFrame 无 nav/return/cumulative_return 列，
     # 后续列选择会 KeyError。此处直接返回全 0 + 空序列响应（与 metrics 各 .get 兜底一致）。
@@ -336,11 +449,16 @@ def _serialize_backtest_result(
     # 构建精简的 NavPoint 列表（保持与 Pydantic 模型兼容）
     nav_series: list[NavPoint] = []
     for i in range(len(dates)):
+        # 每个数值经 _safe_float：NaN/Inf → 0.0，兑现上方「NaN/Inf → null」的安全语义。
+        # Why 不依赖 nav_data.where(np.isfinite, None)：pandas float 列中 None 会被
+        # 自动转回 NaN（float dtype 不支持 NA，None→NaN），该 where 对数值列无效；
+        # 必须在标量出口处用 _safe_float 兜底，否则 NaN 流入 SSE result 帧，经
+        # json.dumps(allow_nan=True) 输出字面 NaN → 浏览器 JSON.parse 失败、K 线不显示。
         nav_series.append(NavPoint(
             date=dates[i],
-            nav=nav_dict["nav"][i],
-            return_=nav_dict["return"][i],
-            cumulative_return=nav_dict["cumulative_return"][i],
+            nav=_safe_float(nav_dict["nav"][i]),
+            return_=_safe_float(nav_dict["return"][i]),
+            cumulative_return=_safe_float(nav_dict["cumulative_return"][i]),
         ))
 
     # ============ 计算回撤时序（纯向量化，无 iterrows） ============
@@ -395,6 +513,10 @@ def _serialize_backtest_result(
     # Why .get 兜底：早返回路径（daily_records 空）返回的字典缺 calmar_ratio /
     # n_failed_trades / trades 等键，硬取键会 KeyError。此处全部改 .get 与
     # _serialize_portfolio_result 对称，空数据 → 全 0 兜底，避免 500。
+    logger.info(
+        "序列化完成 ohlcv=%d nav=%d drawdown=%d trades=%d positions=%d",
+        len(ohlcv), len(nav_series), len(drawdown_series), len(trades), len(positions),
+    )
     return BacktestResponse(
         metrics=MetricsResponse(
             initial_capital=_safe_float(result.get("initial_capital", 0.0)),
@@ -436,10 +558,13 @@ def _safe_float(val: Any) -> float:
     try:
         f = float(val)
     except (TypeError, ValueError):
+        # None/str 等「正常缺失」（如 position 字段缺失）静默归零，不打扰
         return 0.0
 
     # 防范 NaN / Inf（JSON 规范不允许）
     if not np.isfinite(f):
+        # NaN/Inf 是脏数据（如未清洗的 pct_change 首行），留痕便于定位源头
+        logger.warning("_safe_float 拦截到 NaN/Inf 已归零：原始值=%r", val)
         return 0.0
 
     return f

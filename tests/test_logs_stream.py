@@ -6,12 +6,17 @@ from server.api.v1.logs import LogStreamHub, RingBufferLogHandler, log_stream_hu
 
 
 def test_hub_publish_reaches_subscriber():
+    # 用独立 hub 而非模块级单例 log_stream_hub：单例会被 test_backtest_stream 触发的
+    # 回测日志（经 RingBufferLogHandler）污染缓冲，subscribe 回放历史会令 q.get() 取到
+    # 回测日志而非本测试 publish 的 "hello"。独立 hub 隔离测试，守住 publish→订阅者投递契约。
+    hub = LogStreamHub()
+
     async def run():
-        q = log_stream_hub.subscribe()
-        log_stream_hub.publish({"level": "INFO", "message": "hello"})
+        q = hub.subscribe()
+        hub.publish({"level": "INFO", "message": "hello"})
         rec = await asyncio.wait_for(q.get(), timeout=1.0)
         assert rec["message"] == "hello"
-        log_stream_hub.unsubscribe(q)
+        hub.unsubscribe(q)
 
     asyncio.run(run())
 

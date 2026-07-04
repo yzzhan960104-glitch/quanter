@@ -143,6 +143,14 @@ export interface PositionRow {
   symbol: string
   qty: number
   market_value: number
+  // 持仓详情（后端 _extract_positions 从 trades 加权平均算得；可选，向后兼容）
+  avg_cost?: number             // 持仓加权平均买入成本（元/股）
+  unrealized_pnl?: number       // 浮盈额（市值 - 持仓成本），负=亏损
+  unrealized_pnl_pct?: number   // 浮盈百分比
+  open_date?: string | null     // 建仓日期（首笔买入，YYYY-MM-DD）
+  holding_days?: number         // 持仓自然日数
+  cash?: number                 // 末态现金
+  nav?: number                  // 末态总资产（AUM）
 }
 
 /** 单资产回测响应 */

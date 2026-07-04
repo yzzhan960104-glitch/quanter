@@ -14,6 +14,7 @@
 - 支持多策略并行（预留）
 - 多资产组合模式与单资产模式共存，互不干扰
 """
+import logging
 import math
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -26,6 +27,10 @@ from typing import Dict, Any, Optional, List, Callable
 from .cost_model import CostModel
 from .metrics import MetricsCalculator
 from factors.fusion import TargetWeightSignal, SignalDirection
+
+# 模块级 logger：run_portfolio 完成时记录 n_trades/final_nav，便于本地日志定位回测产出。
+# 记录经 root logger → RingBufferLogHandler 流前端 + FileHandler 落盘（见 main.py）。
+logger = logging.getLogger(__name__)
 
 
 # ============ 订单数据类 ============
@@ -1188,6 +1193,14 @@ class BacktestEngine:
         # ============ 计算最终结果 ============
         result = self._calculate_portfolio_result()
 
+        # 回测完成留痕：n_trades/final_nav 是定位「回测是否有产出」的关键指标，
+        # 写本地日志便于事后核对（无需复现）。极端值（nav=0/n_trades 异常）在此暴露。
+        logger.info(
+            "run_portfolio 完成：n_trades=%d final_nav=%.2f daily_records=%d",
+            result.get("n_trades", 0),
+            result.get("final_nav", 0.0),
+            len(result.get("daily_records", [])),
+        )
         return result
 
     def _calculate_portfolio_result(self) -> Dict[str, Any]:
@@ -1221,7 +1234,12 @@ class BacktestEngine:
         # 计算日收益率
         daily_df["return"] = daily_df["nav"].pct_change()
         # 首日收益率设为 0
-        daily_df["return"].iloc[0] = 0.0
+        # 显式 .loc 原位赋值（修复 chained assignment 在 Copy-on-Write 下不生效）：
+        # 原写法 daily_df["return"].iloc[0] = 0.0 作用于 pct_change 返回 Series 的副本，
+        # pandas CoW 下原 daily_df 不变 → 首行 return 残留 NaN → 流入 SSE result 帧
+        # （json.dumps 输出字面 NaN）→ 浏览器 JSON.parse 失败 → 前端 K 线不显示。
+        # .loc[行标签, 列] 是单步原位赋值，CoW 安全。
+        daily_df.loc[daily_df.index[0], "return"] = 0.0
 
         # 计算累计收益率
         daily_df["cumulative_return"] = (1 + daily_df["return"]).cumprod() - 1

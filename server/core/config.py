@@ -77,3 +77,19 @@ API_CONFIG: Dict[str, Any] = {
     "backtest_timeout": 60,     # 单资产回测超时（秒）
     "portfolio_timeout": 120,   # 组合回测超时（秒），HMM 训练更耗时
 }
+
+# ============ 本地日志配置 ============
+# 设计意图：Python root logger 默认级别 WARNING 会吞掉 INFO（业务链路打点的
+# 主要级别），必须显式 setLevel(INFO) 才能放行；同时落盘一份本地文件，便于
+# 事后排查无需复现。日志记录经 RingBufferLogHandler 同时流到前端 TerminalLogs
+#（见 server/main.py lifespan 装配），本地文件 + 前端流 + 控制台三路并行。
+# 凭证隔离红线：此处不含任何敏感信息，仅格式/级别/路径，可安全提交。
+LOG_CONFIG: Dict[str, Any] = {
+    # 默认 INFO（放行业务链路打点）；可经 LOG_LEVEL 环境变量提级到 DEBUG 排查
+    "level": os.getenv("LOG_LEVEL", "INFO"),
+    # 时间 | 级别(7列对齐) | logger名 | 消息 —— 与 server/api/v1/logs.py 的
+    # RingBufferLogHandler formatter 风格一致，便于本地文件与前端日志交叉比对
+    "format": "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    # 本地落盘路径（项目根/logs/quanter.log）；启动时自动建目录
+    "file": str(PROJECT_ROOT / "logs" / "quanter.log"),
+}

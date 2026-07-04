@@ -69,6 +69,9 @@ reports/*.json
 # 数据湖生成产物（parquet/shards，本地产物不入库）
 data_lake/
 qmt_data
+# 本地运行日志（server/main.py LOG_CONFIG 落盘，回测链路日志，本地产物不入库）
+logs/
 
 .codegraph
 .superpowers
+.ref

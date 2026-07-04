@@ -28,6 +28,7 @@ import {
   type SingleBacktestParams,
   type SingleBacktestResponse,
 } from '@/api/backtest'
+import { logger } from '@/utils/logger'
 
 /** 终端日志条目（与后端 SSE 事件归一化对齐；TerminalLogs.vue 直接消费） */
 export interface LogEntry {
@@ -167,32 +168,51 @@ export function useTerminalState() {
 
     try {
       const { run_id } = await createBacktestRun(req)
+      logger.info('回测 run 已创建，开启 SSE 流 run_id=' + run_id)
       const es = new EventSource(`/api/v1/backtest/run/stream/${run_id}`)
       currentES = es
+
+      // 帧计数（按 type）：F12 一眼看清流是否完整（result 帧是否到达、各类帧数量）
+      const typeCounts: Record<string, number> = {}
 
       es.onmessage = (e) => {
         // [DONE]：后端约定流结束标记，关闭 EventSource 并解除 loading
         if (e.data === '[DONE]') {
+          logger.info('SSE 流结束 [DONE]，帧统计=', typeCounts)
           es.close()
           currentES = null
           state.loading = false
           return
         }
-        // 解析 JSON 帧；坏帧静默丢弃（不污染终端，也不抛错中断流）
+        // 解析 JSON 帧；坏帧记 error（不再静默吞——上一轮「K 线不显示」根因即此
+        // catch 丢弃了含字面 NaN 的 result 帧，F12 毫无线索；现在必留痕）
         let ev: any
         try {
           ev = JSON.parse(e.data)
-        } catch {
+        } catch (err) {
+          logger.error(
+            'SSE 帧 JSON.parse 失败 长度=' + e.data.length +
+            ' 帧头="' + e.data.slice(0, 80) + '" 错误=', err,
+          )
           return
         }
+        typeCounts[ev.type] = (typeCounts[ev.type] || 0) + 1
+
         if (ev.type === 'result') {
           // result 帧承载 SingleBacktestResponse（metrics/nav_series/ohlcv/trades/...）
           // markRaw：阻止 reactive 深度代理海量时序，仅追踪引用替换触发刷新
-          state.result = markRaw(ev.data as SingleBacktestResponse)
+          const d = ev.data as SingleBacktestResponse
+          logger.info(
+            '收到 result 帧 ohlcv=' + (d.ohlcv?.length ?? -1) +
+            ' nav=' + (d.nav_series?.length ?? -1) +
+            ' trades=' + (d.trades?.length ?? -1),
+          )
+          state.result = markRaw(d)
           // 收到 result 即视为回测实质完成（[DONE] 紧随其后），提前解除 loading
           state.loading = false
         } else if (ev.type === 'error') {
-          // 后端显式 error 帧：回测过程抛异常（如数据缺失、参数非法）
+          // 后端显式 error 帧：回测过程抛异常（数据缺失/参数非法/result 帧含 NaN 被降级）
+          logger.warn('收到后端 error 帧:', ev.message)
           state.error = ev.message || '回测执行失败'
           state.loading = false
         } else {
@@ -209,6 +229,7 @@ export function useTerminalState() {
       es.onerror = () => {
         // 流中断（网络抖动 / 服务端崩 / 中途关连）：关流 + 设 error，避免 loading 卡死。
         // 不依赖浏览器自动重连——per-run 流语义是一次性的，重连可能拉到已结束 run 的空流。
+        logger.error('SSE 流中断（网络抖动/服务端关连），已收帧统计=', typeCounts)
         state.error = state.error || '日志流中断'
         es.close()
         currentES = null

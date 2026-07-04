@@ -20,6 +20,10 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
+import sys
+
+# 加项目根到 sys.path：脚本可从任意 cwd 直接 `python scripts/xxx.py` 运行。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 
@@ -248,19 +252,24 @@ def sync_sector_daily(
     top_n: int | None = None,
     pool_size: int | None = None,
 ) -> None:
-    """落 data_lake/sector.parquet（板块资金流）+ a_shares_daily.parquet（活跃池日线）。
+    """落 data_lake/sector.parquet（板块资金流）+ a_shares_active.parquet（活跃池日线）。
 
     数据流：
         1. select_active_pool 选 ≤pool_size 只活跃股；
         2. 板块资金流（fetch_sector_fund_flow）原样落 sector.parquet（供 CreditRegime
            / 前端驾驶舱读板块景气）；
-        3. 活跃池前复权日线（近 1 年）合并落 a_shares_daily.parquet，MultiIndex
-           (date, symbol) 便于下游因子按 symbol groupby。
+        3. 活跃池前复权日线（近 1 年）合并落 daily_active 湖（a_shares_active.parquet），
+           MultiIndex(date, symbol) 便于下游因子按 symbol groupby。
+
+    Why 分流到 daily_active（不复用 daily 湖）：sync_data_lake 写 daily 湖（全市场×N年），
+    本脚本写活跃池（~50只×1年）；若同写 a_shares_daily.parquet 会互相整表覆盖（活跃池是
+    全市场稀疏子集，维度远小，覆盖即丢失全市场历史）。分流后 daily=全市场、daily_active=活跃池，
+    回测按需 lake= 路由（LakeDataFetcher 的 dynamic_top50 走 daily_active）。
 
     容错：pool 空 / 板块流空 / 日线拉取失败 → 跳过对应落盘，绝不崩整个 sync。
     """
     out_sector = out_sector or LAKE_CONFIG["lakes"]["sector"]
-    out_daily = out_daily or LAKE_CONFIG["lakes"]["daily"]
+    out_daily = out_daily or LAKE_CONFIG["lakes"]["daily_active"]
     if top_n is None:
         top_n = AKSHARE_CONFIG.get("top_sectors", 3)
     if pool_size is None:

@@ -1,178 +1,179 @@
 """数据湖批量同步 CLI：全市场（剔除 ST/退市）过去 N 年日线【前复权】OHLCV。
 
+数据源：代理 tnskhdata（10000 积分）的 pro.daily + pro.adj_factor，手动重建前复权。
+
+Why 不用 pro_bar：pro_bar 是 ts 模块级函数（走 tushare 直连地址），代理只改 pro_api 地址，
+pro_bar 不走代理（代理 token 在直连地址无效，实测『没有接口(daily)权限』）。改用 daily（不复权）
++ adj_factor（复权因子）重建前复权：price_qfq = price_raw × adj_factor / adj_factor_latest。
+两条接口都走 pro_api 代理，稳定可用，绕过 AKShare 网络瞬态。
+
+前复权公式：以区间最新交易日为基准（adj_factor_latest），历史价 = 原始价 × adj_factor / latest。
+基准日（最新）价 = 原始价（adj/adjj_latest = 1），历史价向下调整消除除权断崖，与 pro_bar(qfq) 同语义。
+
 关键正确性：
-- 前复权用 pro_bar(adj='qfq')，【不可】用 pro.daily()（后者不复权）。
-  Why 复权一致性：data/fetcher.py 的 _fetch_ohlcv_from_api 走 pro.daily() 拿的是【不复权】
-  原始价，回测里拼接历史会因除权除息出现断崖跳变，导致策略信号失真。数据湖要求【前复权】
-  全历史同口径，故必须用 pro.pro_bar(adj='qfq') 重算历史价，与 fetcher 不可复用。
-- 断点续传：每标的独立落 shard（data_lake/shards/{ts_code}.parquet），已存在则跳过。
-  Why 全市场 5000+ 标的逐只拉取耗时数小时，若中途因限频/断线失败，重跑必须从断点继续，
-  不能每次从头再来——shard 粒度即最小续传单位。
-- 复用 tushare_rate_limiter / tushare_breaker 防封；空数据跳过不中断。
-  Why Tushare 对 pro_bar 有严格 QPS 限制，连环超限会被封 IP/账号；复用 data/resilience.py
-  的令牌桶（匀速补令牌）+ 熔断器（连续失败 OPEN 期间不触达，防连环打满），与 fetcher 共享
-  单例，避免重复建桶。空数据（停牌/退市/无行情）属正常业务态，不抛异常、不计熔断、不中断
-  全量同步，仅跳过该只继续下一只。
+- 断点续传：每标的独立落 shard，已存在则跳过。全市场 5000+ 标的 × 2 请求（daily + adj_factor）
+  ≈ 10000 请求 ~2.8h（1QPS），中途失败重跑从断点继续。
+- 限频 + 熔断：tushare_rate_limiter + tushare_breaker；空数据跳过不中断。
 
 用法：
-    python scripts/sync_data_lake.py --years 10 --out data_lake/a_shares_daily.parquet
+    python scripts/sync_data_lake.py --years 10            # 全市场 10 年（~2.8h）
+    python scripts/sync_data_lake.py --years 2 --limit 10  # 小样本调试
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timedelta
+
+# 加项目根到 sys.path：脚本可从任意 cwd 直接 `python scripts/xxx.py` 运行。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 from tqdm import tqdm
 
-# 模块级 logger：异常分类日志走统一句柄，便于运维 grep 定位故障类型。
 logger = logging.getLogger(__name__)
 
 from config import LAKE_CONFIG
 from data.resilience import tushare_breaker, tushare_rate_limiter
-
-
-# tushare 延迟导入，避免无 token 环境直接崩。
-# Why 显式隔离：本模块在 import 期不触达 tushare，单测注入 _FakePro 即可，CI/无 token
-# 开发机 import 本模块也不报错；真正需要 pro_api 时才在 main()/_get_pro() 内 import。
-def _get_pro():
-    import tushare as ts
-    from config import get_credential
-    ts.set_token(get_credential("tushare", "token"))
-    return ts.pro_api()
+from data._tushare_compat import get_pro, source_name
 
 
 def load_universe(pro) -> list[str]:
-    """全市场在售标的，剔除名称含 'ST'/'退' 的。
+    """pro.stock_basic 全市场在售标的（代理），剔名称含 'ST'/'退'。
 
-    Why 过滤 ST/退市：ST/*ST 股有 5% 涨跌幅限制、流动性差、退市风险高，策略层一般
-    不持仓；名称含 '退' 表示已进入退市整理期，行情异常。在同步期就剔除，避免脏标的
-    进入数据湖污染截面统计。
+    返回的 ts_code 已带 .SH/.SZ 后缀（Tushare 格式，与 daily 湖 symbol 一致）。
     """
-    df = pro.stock_basic(list_status="L",
-                         fields="ts_code,symbol,name,list_date")
-    # 名称含 ST（含 *ST）或"退"字的剔除；na=False 防 NaN 名称导致 contains 报错。
+    df = pro.stock_basic(list_status="L", fields="ts_code,symbol,name,list_date")
     mask = (~df["name"].str.contains("ST", na=False)) & \
            (~df["name"].str.contains("退", na=False))
     return df.loc[mask, "ts_code"].tolist()
 
 
-def fetch_qfq(pro, ts_code: str, start: str, end: str) -> pd.DataFrame:
-    """拉取前复权日线，洗净为标准 schema。失败/空数据返回空 DF。
+def _fetch_with_guard(pro, api_name: str, **kwargs) -> pd.DataFrame:
+    """限频 + 熔断 + 异常分类包装的 pro 接口调用，空数据/失败返空 DF。
 
-    限频 + 熔断手动 API 路径：
-      1. acquire 令牌（阻塞至令牌桶补够，防突发打满 Tushare QPS 限频）；
-      2. allow_request 熔断前置检查（OPEN 期间直接返回空，不触达 API，防连环封禁）；
-      3. 失败 record_failure（连续 3 次熔断）、空数据不计熔断、成功 record_success。
+    瞬时态（限频/超时/断线）计熔断；持久态（积分/权限）仅记日志；空数据不计熔断。
     """
     tushare_rate_limiter.acquire(1.0)
     if not tushare_breaker.allow_request():
-        # 熔断 OPEN：返回空，跳过该只——上层 main() 遇空 DF 即 continue 不中断。
         return pd.DataFrame()
     try:
-        # adj='qfq' 前复权：全历史价按最新除权基准重算，保证序列连续无除权断崖。
-        # 日期入参 strip 掉 '-'（pro_bar 要求 YYYYMMDD 整型串）。
-        raw = pro.pro_bar(ts_code=ts_code, adj="qfq",
-                          start_date=start.replace("-", ""), end_date=end.replace("-", ""),
-                          freq="D")
+        df = getattr(pro, api_name)(**kwargs)
     except Exception as e:
-        # 异常精细分类（复刻 data/fetcher.py::fetch_ohlcv 范式）：
-        # Why 必须分类：全市场 5000+ 标的逐只 pro_bar 时，若遇【积分不足】这类
-        # 【持久态】异常，当前裸 except 会把它也计入熔断——连续 3 只即 OPEN，
-        # 后续 60s 全返空、shard 大面积缺失。而积分不足是账户配置问题，60s 冷却
-        # 内根本不可自愈，熔断于此无益反放大故障半径。故仅【瞬时态】（限频/超时/
-        # 断线，冷却可自愈）计入熔断；持久态（积分/权限）仅记日志、不触达熔断器。
         msg = str(e).lower()
         if any(k in msg for k in ("limit", "429", "timeout", "connection", "频率", "超时", "频繁")):
-            # 瞬时基础设施异常 → 计入熔断（冷却期大概率自愈，熔断能自动停打止损）
             tushare_breaker.record_failure()
-            logger.error("Tushare 限频/网络异常 [%s]：%s", ts_code, e)
+            logger.error("Tushare %s 限频/网络异常 [%s]：%s", api_name, kwargs.get("ts_code"), e)
         elif any(k in str(e) for k in ("积分", "权限")):
-            # 持久态异常 → 不计熔断（冷却内不可恢复，熔断无意义且会误停全量同步）
-            logger.error("Tushare 积分不足/权限受限 [%s]：%s", ts_code, e)
+            logger.error("Tushare %s 积分不足 [%s]：%s", api_name, kwargs.get("ts_code"), e)
         else:
-            # 其它未知异常 → 保守计入熔断（宁可误停也不放过潜在连环故障）
             tushare_breaker.record_failure()
-            logger.error("Tushare pro_bar 拉取失败 [%s]：%s", ts_code, e)
-        # 保留"绝不抛"契约：统一返回空 DF，空数据中性语义不变，由上层 continue 跳过。
+            logger.error("Tushare %s 拉取失败 [%s]：%s", api_name, kwargs.get("ts_code"), e)
         return pd.DataFrame()
-    if raw is None or raw.empty:
-        # 空数据 = 正常业务态（停牌区间/无行情/退市），不抛、不计熔断、直接返回空。
+    if df is None or df.empty:
         return pd.DataFrame()
     tushare_breaker.record_success()
-    raw = raw.copy()
-    # trade_date 入参为 YYYYMMDD 字符串，转 datetime 作为时序索引，便于后续 MultiIndex 合并。
+    return df
+
+
+def fetch_qfq(pro, ts_code: str, start: str, end: str) -> pd.DataFrame:
+    """pro.daily + pro.adj_factor 重建前复权日线。空数据/失败返空 DF。
+
+    前复权：price_qfq = price_raw × adj_factor / adj_factor_latest（latest = 区间最新）。
+    绕过 pro_bar（走直连不可用），daily + adj_factor 都走 pro_api 代理，稳定。
+    volume/amount 不复权（除权不影响成交额口径）。
+    """
+    sd, ed = start.replace("-", ""), end.replace("-", "")
+    raw = _fetch_with_guard(pro, "daily", ts_code=ts_code, start_date=sd, end_date=ed)
+    if raw.empty:
+        return pd.DataFrame()
+    af = _fetch_with_guard(pro, "adj_factor", ts_code=ts_code, start_date=sd, end_date=ed)
+    if af.empty:
+        return pd.DataFrame()  # 无复权因子，无法重建前复权
     raw["trade_date"] = pd.to_datetime(raw["trade_date"], format="%Y%m%d")
-    raw = raw.set_index("trade_date").sort_index()
-    # vol → volume 改名：统一 OHLCV schema 命名，与下游因子/回测模块期望一致。
-    raw = raw.rename(columns={"vol": "volume"})
-    # 列洗净：仅保留标准 6 列，丢弃 pro_bar 额外返回的 change/pct_chg/pre_close 等噪声列。
+    af["trade_date"] = pd.to_datetime(af["trade_date"], format="%Y%m%d")
+    df = raw.sort_values("trade_date").merge(
+        af[["trade_date", "adj_factor"]], on="trade_date", how="left"
+    )
+    # 前复权基准 = 区间最新 adj_factor（按 trade_date 升序后取末值）
+    af_values = df["adj_factor"].dropna()
+    if af_values.empty:
+        return pd.DataFrame()
+    latest_af = af_values.iloc[-1]
+    if pd.isna(latest_af) or latest_af == 0:
+        latest_af = 1.0
+    # 价格列前复权（open/high/low/close）；volume/amount 保持原值
+    for col in ["open", "high", "low", "close"]:
+        if col in df.columns:
+            df[col] = df[col] * df["adj_factor"] / latest_af
+    df = df.set_index("trade_date").sort_index()
+    df = df.rename(columns={"vol": "volume"})  # 统一 OHLCV schema
     cols = ["open", "high", "low", "close", "volume", "amount"]
-    return raw[[c for c in cols if c in raw.columns]]
+    return df[[c for c in cols if c in df.columns]]
 
 
 def build_multiindex(shard_dir: str, out: str) -> None:
     """合并所有 shard → MultiIndex(date, symbol) → pyarrow 写超级大表。
 
-    Why MultiIndex(date, symbol)：DataLakeReader 按 date 截面 xs 切片、按 symbol 时序 xs
-    切片均依赖此层级名；sort_index 让 .loc[start:end] 边界解析成立（否则 non-monotonic
-    抛 KeyError）。date 列必须落盘为 datetime（非 str），保证 T6 DataLakeReader 的
-    datetime 分支正常工作（_norm_date 归一化依赖 datetime dtype）。
+    Why MultiIndex(date, symbol)：DataLakeReader 按 date 截面 xs、按 symbol 时序 xs 均依赖
+    此层级名；sort_index 让 .loc[start:end] 边界解析成立。date 列落盘为 datetime。
     """
     frames = []
     for f in os.listdir(shard_dir):
         if not f.endswith(".parquet"):
             continue
-        ts_code = f.replace(".parquet", "")
+        symbol = f.replace(".parquet", "")
         df = pd.read_parquet(os.path.join(shard_dir, f))
-        df["symbol"] = ts_code
-        # 兼容 shard 里 index 为 trade_date 或已为 date 的情况，统一拉平为 date 列。
+        df["symbol"] = symbol
         df = df.reset_index().rename(columns={"trade_date": "date", "index": "date"})
-        # 兼容 shard 里 index 已是 date 的情况（reset_index 后列名就是 'index'/'date'）
         if "date" not in df.columns:
             df = df.reset_index().rename(columns={"index": "date"})
         frames.append(df)
     if not frames:
         raise RuntimeError(f"shard 目录无数据：{shard_dir}")
     big = pd.concat(frames, ignore_index=True)
-    # 保证 date 列为 datetime64[ns]：concat 后可能因 shard 异构 dtype 退化成 object，
-    # 强制 to_datetime 收敛，落盘后层级即 datetime，符合 T6 DataLakeReader 假设。
     big["date"] = pd.to_datetime(big["date"])
     big = big.set_index(["date", "symbol"]).sort_index()
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    # pyarrow engine：列式写，DataLakeReader 启动期 read_parquet 内存友好。
     big.to_parquet(out, engine="pyarrow")
-    print(f"数据湖写入完成：{out}，{len(big)} 行")
+    print(f"数据湖写入完成：{out}，{len(big)} 行，{big.index.get_level_values('symbol').nunique()} 标的")
 
 
-def main(years: int, out: str, resume: bool = True) -> None:
-    """全量同步入口：拉 universe → 逐只 fetch_qfq 落 shard → 合并超级表。"""
-    pro = _get_pro()
+def main(years: int, out: str, resume: bool = True, limit: int | None = None) -> None:
+    """全量同步入口：get_pro → load_universe → 逐只 fetch_qfq 落 shard → 合并超级表。"""
+    pro = get_pro()
     end = datetime.today().strftime("%Y-%m-%d")
     start = (datetime.today() - timedelta(days=365 * years)).strftime("%Y-%m-%d")
     shard_dir = LAKE_CONFIG["shard_dir"]
     os.makedirs(shard_dir, exist_ok=True)
     codes = load_universe(pro)
-    print(f"待同步标的数：{len(codes)}，区间 {start} ~ {end}")
+    if limit:
+        codes = codes[:limit]
+    print(f"待同步标的数：{len(codes)}，区间 {start} ~ {end}"
+          f"（源={source_name()} daily+adj_factor 前复权重建）")
     for ts_code in tqdm(codes):
         shard = os.path.join(shard_dir, f"{ts_code}.parquet")
         if resume and os.path.exists(shard):
-            continue  # 断点续传：已落盘的跳过，重跑从断点继续。
+            continue  # 断点续传：已落盘的跳过
         df = fetch_qfq(pro, ts_code, start, end)
         if df.empty:
-            continue  # 停牌/退市/空 → 跳过不中断全量同步。
+            continue  # 停牌/退市/空 → 跳过不中断
         df.to_parquet(shard)
-        time.sleep(0.2)  # 节流：令牌桶外再叠加 200ms 间隔，双保险防 Tushare 封禁。
+        time.sleep(0.2)  # 令牌桶外双保险节流
     build_multiindex(shard_dir, out)
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="A 股全市场前复权日线数据湖同步")
+    ap = argparse.ArgumentParser(
+        description="A 股全市场前复权日线数据湖同步（代理 daily+adj_factor 重建）"
+    )
     ap.add_argument("--years", type=int, default=LAKE_CONFIG["years_default"])
     ap.add_argument("--out", default=LAKE_CONFIG["default_path"])
     ap.add_argument("--no-resume", action="store_true")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="仅同步前 N 只标的（小样本调试；全量留空）")
     args = ap.parse_args()
-    main(years=args.years, out=args.out, resume=not args.no_resume)
+    main(years=args.years, out=args.out, resume=not args.no_resume, limit=args.limit)

@@ -19,18 +19,21 @@
 - 必须通过 run_in_threadpool 卸载到独立线程
 """
 import asyncio
-import json
+import logging
 import traceback
 import uuid
 
 from fastapi import APIRouter, HTTPException
-from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from server.schemas.backtest import BacktestRequest, BacktestResponse
 from server.services.backtest_service import run_single_backtest
 from server.core.config import API_CONFIG
+# SSE 序列化统一出口（allow_nan=False 防 NaN 流前端）
+from server.api.v1._sse import sse_dumps
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/backtest", tags=["单资产回测"])
 
@@ -211,15 +214,22 @@ async def stream_run(run_id: str):
         try:
             while True:
                 ev = await bridge.get()
-                # Why jsonable_encoder 而非裸 default=str：
-                # result 帧的 data 是 pydantic BacktestResponse 实例，default=str 会
-                # 把整个模型 str(model) 成一坨字符串，前端拿到的 data 是字符串而非
-                # JSON 对象（无法 .nav_series / .metrics 取值）。jsonable_encoder 会
-                # 把 pydantic 模型 / numpy 标量 / datetime / Decimal 等递归转成 JSON
-                # 原生类型（dict/list/str/float），再 dumps 即得合法结构化 JSON。
-                # 仍保留 ensure_ascii=False 让中文（symbol 名/错误信息）原样输出。
-                payload = jsonable_encoder(ev)
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                # SSE 序列化统一出口 sse_dumps：allow_nan=False 让 NaN/Inf 在后端当场
+                # 暴露（等价浏览器 JSON.parse），而非流到前端被 catch 静默吞（K 线空白）。
+                # jsonable_encoder + dumps 的细节封装在 _sse.py，调用方只关心降级策略。
+                frame = sse_dumps(ev, logger)
+                if frame is None:
+                    # 序列化失败（含 NaN/Inf 或不可序列化）→ 降级 error 帧并断流。
+                    # 典型场景：service 层漏标量化致 BacktestResponse 残留 NaN。
+                    # 前端 useTerminalState 收到 error 帧会展示明确错误，而非空白 K 线。
+                    logger.error("回测 result 帧序列化失败，降级为 error 帧断流，run_id=%s", run_id)
+                    yield sse_dumps(
+                        {"type": "error",
+                         "message": "回测结果序列化失败：含非法数值(NaN/Inf)，请联系管理员核查日志"},
+                        logger,
+                    )
+                    break
+                yield frame
                 # result / error 为终态帧，收到即收尾
                 if ev.get("type") in ("result", "error"):
                     break

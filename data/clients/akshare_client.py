@@ -306,3 +306,70 @@ class AKShareClient:
             logger.error("AKShare 个股资金流失败 [%s]：%s", symbol, e)
             akshare_breaker.record_failure()
             return _EMPTY.copy()
+
+    # ---------------- 北向资金（沪深股通净流入）----------------
+    def fetch_north_flow(self, start: str, end: str) -> pd.DataFrame:
+        """北向资金日频净流入；熔断/失败返空 DF，绝不抛。
+
+        数据源：ak.stock_hsgt_north_net_flow_in(symbol='北上')，历史日频净流入。
+        返回：DatetimeIndex(date) × ['north_net_flow']（亿元），升序，切片 start~end。
+        供 sync_north_flow 落盘 + factors/alternative 算连续净流入信号。
+        """
+        if not self._guard():
+            logger.warning("akshare 熔断开启，返回空 DF：北向资金")
+            return _EMPTY.copy()
+        try:
+            import akshare as ak
+            raw = ak.stock_hsgt_hist_em(symbol="北向资金")
+            if raw is None or raw.empty:
+                return _EMPTY.copy()
+            akshare_breaker.record_success()
+            return self._cleanse_north(raw, start, end)
+        except Exception as e:
+            logger.error("AKShare 北向资金拉取失败：%s", e)
+            akshare_breaker.record_failure()
+            return _EMPTY.copy()
+
+    @staticmethod
+    def _cleanse_north(raw: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+        """洗净北向资金：日期列→DatetimeIndex，净流入列归一为 north_net_flow，切片。
+
+        akshare stock_hsgt_north_net_flow_in 列名漂移（日期/当日资金流入/...），按列名
+        模糊匹配「日期」「资金流入」防御版本差异；net flow 数值化 coerce。
+        """
+        df = raw.copy()
+        date_col = next((c for c in df.columns if "日期" in str(c) or "date" in str(c).lower()), None)
+        if date_col is None:
+            return _EMPTY.copy()
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df = df.dropna(subset=[date_col]).set_index(date_col).sort_index()
+        df.index.name = "date"
+        flow_col = next((c for c in df.columns
+                         if any(k in str(c) for k in ("资金流入", "净流入", "净买额", "净买", "流入"))), None)
+        if flow_col is None:
+            return _EMPTY.copy()
+        out = pd.DataFrame({"north_net_flow": pd.to_numeric(df[flow_col], errors="coerce")})
+        return out.loc[start:end].dropna()
+
+    # ---------------- 龙虎榜（当日上榜明细）----------------
+    def fetch_dragon_list(self, date: str) -> pd.DataFrame:
+        """龙虎榜当日上榜明细；熔断/失败返空 DF，绝不抛。
+
+        数据源：ak.stock_lhb_detail_daily_sina(date='YYYYMMDD')。date 入参 'YYYY-MM-DD'
+        或 'YYYYMMDD' 均可（内部 strip '-'）。返回原始 DataFrame（代码/名称/上榜原因/净买入等），
+        由 sync_dragon_list 规整为 MultiIndex(date, symbol)。
+        """
+        if not self._guard():
+            logger.warning("akshare 熔断开启，返回空 DF：龙虎榜 [%s]", date)
+            return _EMPTY.copy()
+        try:
+            import akshare as ak
+            raw = ak.stock_lhb_detail_daily_sina(date=date.replace("-", ""))
+            if raw is None or raw.empty:
+                return _EMPTY.copy()
+            akshare_breaker.record_success()
+            return raw
+        except Exception as e:
+            logger.error("AKShare 龙虎榜拉取失败 [%s]：%s", date, e)
+            akshare_breaker.record_failure()
+            return _EMPTY.copy()

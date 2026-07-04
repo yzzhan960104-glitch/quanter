@@ -189,6 +189,12 @@ class DataLakeReader:
         """
         if lake is not None:
             return lake
+        # 优先 config 显式 default_lake（如 "daily"），回退首个 load 成功的 key。
+        # Why：reader._default_key 按 load 顺序（main.py lifespan 按字典序 macro→sector→daily...），
+        # 首个成功的常是 macro，致 get_*(lake=None) 误走宏观湖；显式 default_lake 修正语义。
+        configured = LAKE_CONFIG.get("default_lake")
+        if configured and configured in self._lakes:
+            return configured
         return self._default_key
 
     def get_cross_section(

@@ -197,15 +197,27 @@ class OhlcvPoint(BaseModel):
 
 class PositionRow(BaseModel):
     """
-    持仓快照行（取回测末态），用于前端 PositionsTable。
+    末态持仓快照（单资产），用于前端 PositionsTable 详情展示。
 
-    单资产行为：仅取末行 position / position_value 一行。组合多资产的持仓快照
-    作为后续迭代（PortfolioResponse），本轮不动——避免对单资产 BacktestResponse
-    塞入语义不成立的多 symbol 持仓。
+    字段分四组：
+    - 持仓：symbol / qty / market_value / avg_cost（加权平均买入成本）
+    - 盈亏：unrealized_pnl（浮盈额）/ unrealized_pnl_pct（浮盈百分比）
+    - 时间：open_date（首笔建仓日期）/ holding_days（持仓自然日）
+    - 资产：cash（末态现金）/ nav（末态总资产 AUM）
+
+    成本/盈亏由 _extract_positions 从 trades 加权平均算得；cash/nav 从 daily_records
+    末行直取（零计算）。新增字段均带默认值，向后兼容旧调用方。
     """
     symbol: str
     qty: float
     market_value: float
+    avg_cost: float = 0.0            # 持仓加权平均买入成本（元/股）
+    unrealized_pnl: float = 0.0       # 浮盈额（市值 - 持仓成本），负=亏损
+    unrealized_pnl_pct: float = 0.0   # 浮盈百分比（pnl / 持仓成本）
+    open_date: Optional[str] = None   # 建仓日期（首笔买入，YYYY-MM-DD），从未建仓则 None
+    holding_days: int = 0             # 持仓自然日数（末态日期 - 建仓日期）
+    cash: float = 0.0                 # 末态现金
+    nav: float = 0.0                  # 末态总资产（AUM = cash + 持仓市值）
 
 
 class BacktestResponse(BaseModel):

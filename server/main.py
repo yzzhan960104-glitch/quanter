@@ -22,7 +22,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.core.config import CORS_ORIGINS
+from server.core.config import CORS_ORIGINS, LOG_CONFIG
+from server.core._responses import StrictJSONResponse
 from server.api.v1.backtest import router as backtest_router
 from server.api.v1.portfolio import router as portfolio_router
 from server.api.v1.logs import (
@@ -70,18 +71,39 @@ async def lifespan(app: FastAPI):
     for key, path in LAKE_CONFIG.get("lakes", {}).items():
         reader.load(path, key=key)
 
-    # 启动：挂载 SSE 日志 handler 到 root logger
-    # Why root logger：回测业务线程的全部日志（含第三方库）都需被捕获，只有 root
-    # 能拦截子 logger 的向上传播记录，确保 SSE 流完整。
+    # 启动：统一日志装配（三路并行：本地文件 + 前端 SSE 流 + 控制台）
+    # Why 三路：本地文件事后排查无需复现（NaN 早抛/序列化失败留痕主阵地）；
+    # 前端 SSE 流（RingBufferLogHandler→log_stream_hub→TerminalLogs）实时可观测；
+    # 控制台由 uvicorn 自带 stdout handler 承担，此处不重复加。
+    log_format = logging.Formatter(LOG_CONFIG["format"])
+    # root setLevel：Python 默认 WARNING 会吞掉 INFO（业务链路打点主级别），
+    # 必须显式放行到 LOG_CONFIG["level"]（默认 INFO），否则 service/engine 的
+    # logger.info 既不进文件也不进前端流（test_logs_stream.py 的隐含契约）。
+    root_logger = logging.getLogger()
+    root_logger.setLevel(LOG_CONFIG["level"])
+
+    # 本地文件 handler：自动建 logs/ 目录；事后定位 NaN/异常的核心证据来源
+    import os as _os
+    _os.makedirs(_os.path.dirname(LOG_CONFIG["file"]), exist_ok=True)
+    file_handler = logging.FileHandler(LOG_CONFIG["file"], encoding="utf-8")
+    file_handler.setFormatter(log_format)
+    file_handler.setLevel(LOG_CONFIG["level"])
+    root_logger.addHandler(file_handler)
+    app.state.log_file_handler = file_handler
+
+    # 前端 SSE 流 handler（既有，保留 name|message 简格式供 TerminalLogs 展示）
     log_handler = RingBufferLogHandler(log_stream_hub)
     log_handler.setFormatter(logging.Formatter("%(name)s | %(message)s"))
     app.state.log_handler = log_handler
-    logging.getLogger().addHandler(log_handler)
+    root_logger.addHandler(log_handler)
 
     yield
 
-    # 销毁：卸载日志 handler，避免重复挂载/引用泄漏（reload 或测试复用进程时关键）
-    logging.getLogger().removeHandler(app.state.log_handler)
+    # 销毁：卸载日志 handler（前端流 + 本地文件），避免重复挂载/引用泄漏
+    # （reload 或测试复用进程时关键，否则 handler 单调累积致日志重复输出）
+    root_logger = logging.getLogger()
+    root_logger.removeHandler(app.state.log_handler)
+    root_logger.removeHandler(app.state.log_file_handler)
     # 销毁：模块④在此追加 scheduler.shutdown()
 
 
@@ -94,6 +116,10 @@ app = FastAPI(
     ),
     version="2.0.0",
     lifespan=lifespan,
+    # 同步端点 NaN 早抛防线：StrictJSONResponse 用 allow_nan=False，任何漏标量化
+    # 的路径在这里暴露（500 + 中文错误），而非把字面 NaN 推给前端静默吞。
+    # 与 SSE 流式端点的 sse_dumps 对称（见 server/api/v1/_sse.py）。
+    default_response_class=StrictJSONResponse,
 )
 
 # ============ 注册 CORS 中间件 ============

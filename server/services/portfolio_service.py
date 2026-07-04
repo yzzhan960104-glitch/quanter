@@ -14,6 +14,7 @@
 - 权重时序从 daily_records 的 positions 字段提取
 - 与 backtest_service.py 共享 _safe_float 工具函数
 """
+import logging
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -33,6 +34,8 @@ from server.schemas.portfolio import (
     TradeRecord,
 )
 from server.core.config import DATA_DEFAULTS
+
+logger = logging.getLogger(__name__)
 
 
 def run_portfolio_backtest(req: PortfolioRequest) -> PortfolioResponse:
@@ -57,16 +60,32 @@ def run_portfolio_backtest(req: PortfolioRequest) -> PortfolioResponse:
     from strategies.hmm_macro_strategy import HMMMacroStrategy, HmmMacroParams
     from strategies.base import StrategyContext
 
-    # ============ 步骤 1：取数 ============
-    fetcher = MockDataFetcher(seed=DATA_DEFAULTS["mock_seed"])
+    # ============ 步骤 1：取数（优先真实湖，离线降级 Mock）============
+    from data.lake_fetcher import LakeDataFetcher
     start_dt = datetime.combine(req.start_date, datetime.min.time())
     end_dt = datetime.combine(req.end_date, datetime.min.time())
+    _lake = LakeDataFetcher()
+    _mock = MockDataFetcher(seed=DATA_DEFAULTS["mock_seed"])
 
-    price_data: Dict[str, pd.DataFrame] = {
-        s: fetcher.fetch_ohlcv(s, start_dt, end_dt, freq="1d")
-        for s in req.symbols
-    }
-    macro_df = fetcher.fetch_macro("m2", start_dt, end_dt)
+    price_data: Dict[str, pd.DataFrame] = {}
+    ohlcv_src = "data_lake"
+    for s in req.symbols:
+        try:
+            price_data[s] = _lake.fetch_ohlcv(s, start_dt, end_dt, freq="1d")
+        except LookupError as e:
+            logger.warning("组合 OHLCV 湖取数失败 %s，降级 Mock：%s", s, e)
+            price_data[s] = _mock.fetch_ohlcv(s, start_dt, end_dt, freq="1d")
+            ohlcv_src = "mock"
+    logger.info(
+        "组合取数 symbols=%s %s~%s → %d 标的（源=%s）",
+        req.symbols, start_dt.date(), end_dt.date(), len(price_data), ohlcv_src,
+    )
+
+    try:
+        macro_df = _lake.fetch_macro("m2", start_dt, end_dt)
+    except LookupError as e:
+        logger.warning("macro 湖取数失败，M2 降级 Mock：%s", e)
+        macro_df = _mock.fetch_macro("m2", start_dt, end_dt)
 
     # ============ 步骤 2：校验注入 HMM 标量参数 ============
     # 显式 params_model(**dict) 构造，禁 **kwargs 黑盒；非法参数在此抛 ValidationError
@@ -82,6 +101,7 @@ def run_portfolio_backtest(req: PortfolioRequest) -> PortfolioResponse:
 
     # ============ 步骤 3：训练 + 产出信号 ============
     strategy.fit(price_data, macro_data=macro_df)
+    logger.info("HMM 宏观策略训练完成 universe=%d 标的", len(req.symbols))
     ctx = StrategyContext(
         timestamp=start_dt,
         current_weights={s: 0.0 for s in req.symbols},
@@ -93,6 +113,10 @@ def run_portfolio_backtest(req: PortfolioRequest) -> PortfolioResponse:
     # ============ 步骤 4：执行回测 ============
     engine = BacktestEngine(initial_capital=req.initial_capital)
     result = engine.run_portfolio(price_data=price_data, signals=signals)
+    logger.info(
+        "组合回测引擎执行完毕 n_trades=%d final_nav=%.2f",
+        result.get("n_trades", 0), result.get("final_nav", 0.0),
+    )
 
     # ============ 步骤 5：序列化结果 ============
     return _serialize_portfolio_result(result)
@@ -137,12 +161,16 @@ def _serialize_portfolio_result(result: Dict[str, Any]) -> PortfolioResponse:
     nav_dict = nav_data.to_dict(orient="list")
 
     # 列式 → NavPoint（zip 构建，O(n) 且无 Series 包装开销）
+    # 每个数值经 _safe_float：NaN/Inf → 0.0（与单资产 _serialize_backtest_result 对称）。
+    # Why 不依赖上方 nav_data.where(np.isfinite, None)：pandas float 列中 None 会被
+    # 自动转回 NaN（float dtype 不支持 NA），该 where 对数值列无效；必须在标量出口
+    # _safe_float 兜底，否则 NaN 流入 SSE result 帧致前端 JSON.parse 失败（K 线空白）。
     nav_series: List[NavPoint] = [
         NavPoint(
             date=d,
-            nav=n,
-            return_=r,
-            cumulative_return=c,
+            nav=_safe_float(n),
+            return_=_safe_float(r),
+            cumulative_return=_safe_float(c),
         )
         for d, n, r, c in zip(
             dates,
@@ -156,17 +184,19 @@ def _serialize_portfolio_result(result: Dict[str, Any]) -> PortfolioResponse:
     # pct_change 首行为 NaN → fillna(0.0)，规避后续 cumprod / 除法产生异常值
     daily_returns = daily_df["nav"].pct_change().fillna(0.0)
     if len(daily_returns) > 0:
-        daily_returns.iloc[0] = 0.0  # 首日无前值，收益率为 0
+        # 首日无前值收益率为 0；用 .loc 原位赋值，避免 .iloc[0]= 的 chained-assignment
+        # 警告（与 backtest/engine.py 的 .loc 修复对称，消 ChainedAssignmentError 警告源）
+        daily_returns.loc[daily_returns.index[0]] = 0.0
 
     cumulative = (1 + daily_returns).cumprod()
     rolling_max = cumulative.expanding().max()
     drawdown = (cumulative - rolling_max) / rolling_max
 
-    # 向量化 NaN / Inf → None
+    # 向量化 NaN / Inf → None（pandas float 列 None→NaN 坑在此无效，靠下方 _safe_float 兜底）
     drawdown_safe = drawdown.where(np.isfinite(drawdown), None)
 
     drawdown_series: List[DrawdownPoint] = [
-        DrawdownPoint(date=d, drawdown=dd)
+        DrawdownPoint(date=d, drawdown=_safe_float(dd))
         for d, dd in zip(dates, drawdown_safe.tolist())
     ]
 
@@ -219,8 +249,9 @@ def _serialize_portfolio_result(result: Dict[str, Any]) -> PortfolioResponse:
                 date=d,
                 direction=direc,
                 shares=shares,
-                price=price,
-                cost=cost,
+                # price/cost 过 _safe_float：NaN/Inf/None → 0.0（空成交价兜底，防非法 JSON）
+                price=_safe_float(price),
+                cost=_safe_float(cost),
             )
             for d, direc, shares, price, cost in zip(
                 trade_dates, trade_dirs, trade_shares, trade_prices, trade_costs
@@ -228,6 +259,10 @@ def _serialize_portfolio_result(result: Dict[str, Any]) -> PortfolioResponse:
         ]
 
     # ============ 构建响应 ============
+    logger.info(
+        "组合序列化完成 nav=%d drawdown=%d weight=%d trades=%d",
+        len(nav_series), len(drawdown_series), len(weight_series), len(trades),
+    )
     return PortfolioResponse(
         metrics=MetricsResponse(
             initial_capital=_safe_float(result["initial_capital"]),
@@ -266,9 +301,12 @@ def _safe_float(val: Any) -> float:
     try:
         f = float(val)
     except (TypeError, ValueError):
+        # None/str 等「正常缺失」静默归零
         return 0.0
 
     if not np.isfinite(f):
+        # NaN/Inf 是脏数据，留痕便于定位源头
+        logger.warning("_safe_float 拦截到 NaN/Inf 已归零：原始值=%r", val)
         return 0.0
 
     return f
