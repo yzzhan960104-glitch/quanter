@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 
 from data.fetcher import MockDataFetcher
+from data.clients.akshare_client import AKShareClient
+from data.lake_fetcher import LakeDataFetcher
 from data.cleaner import DataCleaner
 from backtest.engine import BacktestEngine
 from backtest.cost_model import CostModel
@@ -39,6 +41,7 @@ from server.schemas.backtest import (
     TradeRecord,
     OhlcvPoint,
     PositionRow,
+    BenchmarkPoint,
 )
 from server.core.config import DATA_DEFAULTS
 
@@ -163,7 +166,16 @@ def run_single_backtest(
     # ============ 步骤 5：序列化 ============
     # 透传 price_data：序列化器需从中抽取 OHLCV 与持仓 symbol（引擎 daily_records
     # 不含开高低收量，必须由 price_data 旁路传入）。
-    return _serialize_backtest_result(result, price_data)
+    # 基准净值（沪深300 ETF 归一化）：按策略 nav 日期 reindex；缺数据返 [] 不崩
+    strategy_dates = [
+        idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx)
+        for idx in result.get("daily_records", pd.DataFrame()).index
+    ]
+    benchmark_series = _compute_benchmark_series(
+        start_date=req.start_date, end_date=req.end_date,
+        strategy_dates=strategy_dates,
+    )
+    return _serialize_backtest_result(result, price_data, benchmark_series=benchmark_series)
 
 
 def _build_cost_model(cost_params):
@@ -360,8 +372,79 @@ def _compute_cost_basis(
     return avg_cost, first_buy_date
 
 
+_BENCHMARK_SYMBOL = "510300.SH"
+
+
+def _compute_benchmark_series(start_date, end_date, strategy_dates: list) -> list:
+    """计算沪深300 ETF 基准累计净值（归一化起点 1.0，按策略日期 reindex + 前向填充）。
+
+    取数三级降级（绝不抛）：
+      1) LakeDataFetcher.fetch_ohlcv("510300.SH", daily 湖) —— 与策略同协议
+      2) AKShareClient.fetch_daily_hist 在线兜底（带熔断）
+      3) 全空 → 返 []（ProChart 不画基准线，降级不崩）
+
+    归一化：close / close[0]（首值），起点 = 1.0。
+    对齐：基准按 strategy_dates reindex，缺失日前向填充（基准停牌日沿用前收）。
+    NaN 守卫：close 列 dropna 后归一化；strategy_dates 为空 → 返 []。
+
+    参数：
+        start_date/end_date: datetime.date，回测区间（取数窗口）。
+        strategy_dates: 策略 nav_series 的日期字符串列表（YYYY-MM-DD），基准按此 reindex。
+    """
+    if not strategy_dates:
+        return []
+
+    start_dt = datetime.combine(start_date, datetime.min.time())
+    end_dt = datetime.combine(end_date, datetime.min.time())
+
+    # 三级降级取 close Series
+    close = pd.Series(dtype=float)
+    try:
+        df = LakeDataFetcher().fetch_ohlcv(_BENCHMARK_SYMBOL, start_dt, end_dt, freq="1d")
+        if df is not None and not df.empty and "close" in df.columns:
+            close = df["close"].dropna()
+    except LookupError as e:
+        logger.info("基准 daily 湖取数失败，降级 AKShare：%s", e)
+    except Exception as e:
+        logger.warning("基准 daily 湖取数异常：%s", e)
+
+    if close.empty:
+        try:
+            ak_df = AKShareClient().fetch_daily_hist(
+                _BENCHMARK_SYMBOL,
+                start_date.strftime("%Y%m%d"),
+                end_date.strftime("%Y%m%d"),
+                adjust="qfq",
+            )
+            if ak_df is not None and not ak_df.empty and "close" in ak_df.columns:
+                close = ak_df["close"].dropna()
+        except Exception as e:
+            logger.warning("基准 AKShare 在线取数失败（降级空基准）：%s", e)
+
+    if close.empty:
+        return []  # 三级全空 → 不画基准线
+
+    # 归一化到起点 1.0
+    first = close.iloc[0]
+    if first == 0 or not np.isfinite(first):
+        return []
+    nav = close / first
+
+    # 按策略日期 reindex + 前向填充（基准日期索引归一为 YYYY-MM-DD 字符串）
+    nav.index = nav.index.strftime("%Y-%m-%d")
+    aligned = nav.reindex(strategy_dates).ffill()
+
+    return [
+        BenchmarkPoint(date=d, nav=float(v))
+        for d, v in aligned.items()
+        if pd.notna(v)
+    ]
+
+
 def _serialize_backtest_result(
-    result: Dict[str, Any], price_data: dict[str, pd.DataFrame]
+    result: Dict[str, Any],
+    price_data: dict[str, pd.DataFrame],
+    benchmark_series: list | None = None,
 ) -> BacktestResponse:
     """
     将引擎结果序列化为 BacktestResponse
@@ -389,6 +472,7 @@ def _serialize_backtest_result(
     # 或直接对空 DataFrame 做 nav_cols 列选择，空数据场景会 KeyError 崩；此处统一
     # .get 兜底 + 空 daily_records 短路，令空数据退化为合法的"全 0 + 空序列"响应，
     # 而非 500。
+    benchmark_series = benchmark_series or []
     daily_df: pd.DataFrame = result.get("daily_records", pd.DataFrame())
     trades_df: pd.DataFrame = result.get("trades", pd.DataFrame())
 
@@ -422,6 +506,7 @@ def _serialize_backtest_result(
             trades=[],
             ohlcv=ohlcv,
             positions=positions,
+            benchmark_series=benchmark_series,
         )
 
     # ============ 提取净值时序（精简 4 字段） ============
@@ -538,6 +623,7 @@ def _serialize_backtest_result(
         trades=trades,
         ohlcv=ohlcv,
         positions=positions,
+        benchmark_series=benchmark_series,
     )
 
 
