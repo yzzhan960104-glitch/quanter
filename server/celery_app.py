@@ -39,6 +39,7 @@ def run_factor_grid_impl(spec: dict) -> dict:
       避免在 celery_app 模块级形成对数据湖/因子库的硬 import 时序耦合；
     - 函数内 import 在 Python 中有 LRU 字节码缓存，反复调用无显著开销。
     """
+    import numpy as np
     from data.lake_reader import DataLakeReader
     from factors.analyzer import FactorAnalyzer
     from factors.exploratory_momentum import cross_sectional_momentum
@@ -60,8 +61,57 @@ def run_factor_grid_impl(spec: dict) -> dict:
     returns = panel.pct_change()
     factor = cross_sectional_momentum(returns, window=20)
     fwd = returns.shift(-1)
-    out = FactorAnalyzer().compute_ic(factor, fwd)
-    return {"ok": True, "ic_mean": out["ic_mean"], "ic_ir": out["ic_ir"]}
+
+    analyzer = FactorAnalyzer()
+    ic_out = analyzer.compute_ic(factor, fwd)
+    frac = analyzer.fractile_analysis(factor, fwd, n_groups=5)
+
+    # IC 时序 + 日期（dropna 防 NaN 进直方图）
+    ic_series = ic_out["ic_series"].dropna()
+    dates = [d.strftime("%Y-%m-%d") for d in ic_series.index]
+    ic_list = [float(v) for v in ic_series.values]
+
+    # 分层累计净值：每组 (1+r).cumprod() 后归一起点 1.0；LS = Q5 累计 - Q1 累计
+    group_returns = frac["group_returns"]   # dict[g, Series of 远期收益]
+    n_groups = 5
+    quantile_nav: dict = {}
+    group_cum: dict = {}
+    for g in range(n_groups):
+        s = group_returns.get(g, pd.Series(dtype=float)).dropna()
+        if s.empty:
+            group_cum[g] = pd.Series(dtype=float)
+            continue
+        cum = (1.0 + s).cumprod()
+        cum = cum / cum.iloc[0] if cum.iloc[0] != 0 else cum   # 起点归一 1.0
+        group_cum[g] = cum
+        quantile_nav[f"Q{g + 1}"] = [float(v) for v in cum.values]
+    # 多空 Alpha：Q5 累计 - Q1 累计（对齐到 Q5 索引，Q1 缺失前向填充）
+    q5 = group_cum.get(n_groups - 1, pd.Series(dtype=float))
+    q1 = group_cum.get(0, pd.Series(dtype=float))
+    if not q5.empty and not q1.empty:
+        ls = (q5 - q1.reindex(q5.index).ffill()).fillna(0.0)
+        quantile_nav["LS"] = [float(v) for v in ls.values]
+    else:
+        quantile_nav["LS"] = []
+
+    # IC 直方图（bin 数自适应样本量；样本过少返空边界保护前端）
+    if len(ic_list) >= 2:
+        counts, edges = np.histogram(ic_list, bins=min(20, max(5, len(ic_list) // 2)))
+        ic_hist = {"bin_edges": [float(x) for x in edges], "counts": [int(c) for c in counts]}
+    else:
+        ic_hist = {"bin_edges": [], "counts": []}
+
+    return {
+        "ok": True,
+        "factor": spec.get("factor", ""),
+        "dates": dates,
+        "ic_series": ic_list,
+        "ic_mean": float(ic_out["ic_mean"]),
+        "ic_ir": float(ic_out["ic_ir"]),
+        "t_stat": float(ic_out["t_stat"]),
+        "quantile_nav": quantile_nav,
+        "ic_hist": ic_hist,
+    }
 
 
 @celery_app.task(name="explorer.run_factor_grid")
