@@ -106,10 +106,13 @@ class TestOrderStateMachine:
         assert order.get_state() == OrderState.FAILED
 
     def test_invalid_transition_raises_error(self, order):
-        """测试非法状态迁移抛出异常"""
-        order.submit({"symbol": "600000.SH", "direction": "buy", "shares": 1000})
+        """测试非法状态迁移抛出异常（PENDING → FILLED 非法）
 
-        # 从 SUBMITTED 直接到 FILLED 是非法的（必须通过 fill）
+        PENDING 仅允许迁移到 SUBMITTED（见 _is_valid_transition）。
+        注：原断言「SUBMITTED→FILLED 非法」是误解——fill() 本身就走 SUBMITTED→FILLED
+        （满成交的合法路径），故该迁移合法、不会抛；改用 PENDING→FILLED 才是真非法。
+        """
+        # order 仍处 PENDING（未 submit）；PENDING→FILLED 不在合法迁移表 → 必抛
         with pytest.raises(ValueError, match="非法状态迁移"):
             order._transition_to(OrderState.FILLED)
 

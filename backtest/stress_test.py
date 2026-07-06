@@ -54,6 +54,9 @@ class StressTester:
         - 收盘价被限制在涨跌停板内
         """
         df_stress = df.copy()
+        # volume 可能为 int32，后续 *= 浮点在 pandas 2.x CoW 下抛 LossySetitemError；
+        # 压力模拟允许分数成交量，先转 float 解除 dtype 约束。
+        df_stress["volume"] = df_stress["volume"].astype(float)
 
         # 计算前一交易日收盘价
         prev_close = df_stress["close"].shift(1)
@@ -114,6 +117,9 @@ class StressTester:
         - 滑点放大（在成本模型中处理）
         """
         df_stress = df.copy()
+        # volume 可能为 int32，后续 *= crisis_ratio（浮点）在 pandas 2.x CoW 下抛
+        # LossySetitemError；压力模拟允许分数成交量，先转 float 解除 dtype 约束。
+        df_stress["volume"] = df_stress["volume"].astype(float)
 
         # 如果未指定日期，随机选择
         if crisis_dates is None:

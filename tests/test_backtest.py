@@ -217,32 +217,32 @@ class TestStressTester:
         assert isinstance(df_stress, pd.DataFrame)
 
     def test_apply_limit_up_clips_price(self, stress_tester, sample_df):
-        """测试涨停限制价格"""
-        # 构造涨停场景
+        """测试涨停限制价格（day1 超过 前收盘×1.1 → 钳制）"""
+        # 涨停价基准 = 前一交易日收盘价。day0 无前收盘（prev_close=NaN）无法触发，
+        # 故必须 pump day1，以 day0 收盘为基准验证钳制。
         df = sample_df.copy()
-        df.iloc[0, df.columns.get_loc("close")] = df.iloc[0, df.columns.get_loc("close")] * 1.3
+        ccol = df.columns.get_loc("close")
+        base = df.iloc[0, ccol]
+        df.iloc[1, ccol] = base * 1.3   # day1 拉到 day0×1.3，超过涨停价 day0×1.1
 
         df_stress = stress_tester.apply_limit_up_down(df, limit_rate=0.10)
 
-        # 价格应被限制
-        prev_close = df.iloc[0, df.columns.get_loc("close")]
-        current_close = df_stress.iloc[0, df_stress.columns.get_loc("close")]
-
-        assert abs(current_close - prev_close * 1.1) < 1e-6
+        # day1 应被钳制到 前收盘(day0) × 1.1
+        current_close = df_stress.iloc[1, df_stress.columns.get_loc("close")]
+        assert abs(current_close - base * 1.1) < 1e-6
 
     def test_apply_limit_down_clips_price(self, stress_tester, sample_df):
-        """测试跌停限制价格"""
-        # 构造跌停场景
+        """测试跌停限制价格（day1 跌破 前收盘×0.9 → 钳制）"""
         df = sample_df.copy()
-        df.iloc[0, df.columns.get_loc("close")] = df.iloc[0, df.columns.get_loc("close")] * 0.7
+        ccol = df.columns.get_loc("close")
+        base = df.iloc[0, ccol]
+        df.iloc[1, ccol] = base * 0.7   # day1 跌到 day0×0.7，跌破跌停价 day0×0.9
 
         df_stress = stress_tester.apply_limit_up_down(df, limit_rate=0.10)
 
-        # 价格应被限制
-        prev_close = df.iloc[0, df.columns.get_loc("close")]
-        current_close = df_stress.iloc[0, df_stress.columns.get_loc("close")]
-
-        assert abs(current_close - prev_close * 0.9) < 1e-6
+        # day1 应被钳制到 前收盘(day0) × 0.9
+        current_close = df_stress.iloc[1, df_stress.columns.get_loc("close")]
+        assert abs(current_close - base * 0.9) < 1e-6
 
     def test_apply_liquidity_crisis_reduces_volume(self, stress_tester, sample_df):
         """测试流动性枯竭降低成交量"""

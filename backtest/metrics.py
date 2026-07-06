@@ -100,6 +100,14 @@ class MetricsCalculator:
         返回：
             交易指标字典
         """
+        # 空 trades 兜底（report.py / 测试可能传入空 DataFrame，无 direction 列 → 直接索引会 KeyError）
+        if trades is None or len(trades) == 0:
+            return {
+                "n_trades": 0, "n_failed_trades": 0, "win_rate": 0.0,
+                "profit_loss_ratio": 0.0, "total_profit": 0.0, "total_loss": 0.0,
+                "avg_profit": 0.0, "avg_loss": 0.0, "trade_frequency": 0.0,
+            }
+
         # 过滤失败交易
         successful_trades = trades[trades["direction"] != "failed"]
         failed_trades = trades[trades["direction"] == "failed"]
@@ -286,6 +294,11 @@ class MetricsCalculator:
         返回：
             报告文本
         """
+        # 缺失字段兜底：report.py 在空 daily_records / 空 trades 时传入 {} 字典，
+        # 直接下标索引会 KeyError；统一 .get() 默认值，缺失指标以 0/0.0 展示（绝不崩）。
+        rm = return_metrics or {}
+        tm = trade_metrics or {}
+
         report = []
         report.append("=" * 60)
         report.append("回测指标报告")
@@ -293,36 +306,40 @@ class MetricsCalculator:
 
         # 收益指标
         report.append("\n【收益指标】")
-        report.append(f"累计收益率: {return_metrics['cumulative_return']:.2%}")
-        report.append(f"年化收益率: {return_metrics['annual_return']:.2%}")
-        report.append(f"年化波动率: {return_metrics['annual_volatility']:.2%}")
-        report.append(f"最大回撤: {return_metrics['max_drawdown']:.2%}")
-        report.append(f"最大回撤持续天数: {return_metrics['max_drawdown_duration']:.0f}")
+        report.append(f"累计收益率: {rm.get('cumulative_return', 0.0):.2%}")
+        report.append(f"年化收益率: {rm.get('annual_return', 0.0):.2%}")
+        report.append(f"年化波动率: {rm.get('annual_volatility', 0.0):.2%}")
+        report.append(f"最大回撤: {rm.get('max_drawdown', 0.0):.2%}")
+        # max_drawdown_duration 在无回撤时可能为 None/NaN（空 Series .max()）→ 兜底 0
+        _mdd = rm.get('max_drawdown_duration')
+        _mdd = 0 if (_mdd is None or pd.isna(_mdd)) else _mdd
+        report.append(f"最大回撤持续天数: {_mdd:.0f}")
 
         # 风险调整指标
         report.append("\n【风险调整指标】")
-        report.append(f"夏普比率: {return_metrics['sharpe_ratio']:.2f}")
-        report.append(f"卡玛比率: {return_metrics['calmar_ratio']:.2f}")
-        report.append(f"索提诺比率: {return_metrics['sortino_ratio']:.2f}")
+        report.append(f"夏普比率: {rm.get('sharpe_ratio', 0.0):.2f}")
+        report.append(f"卡玛比率: {rm.get('calmar_ratio', 0.0):.2f}")
+        report.append(f"索提诺比率: {rm.get('sortino_ratio', 0.0):.2f}")
 
         # 交易指标
         report.append("\n【交易指标】")
-        report.append(f"交易次数: {trade_metrics['n_trades']}")
-        report.append(f"失败交易次数: {trade_metrics['n_failed_trades']}")
-        report.append(f"胜率: {trade_metrics['win_rate']:.2%}")
-        report.append(f"盈亏比: {trade_metrics['profit_loss_ratio']:.2f}")
-        report.append(f"总盈利: {trade_metrics['total_profit']:.2f}")
-        report.append(f"总亏损: {trade_metrics['total_loss']:.2f}")
-        report.append(f"交易频率: {trade_metrics['trade_frequency']:.2f} 次/天")
+        report.append(f"交易次数: {tm.get('n_trades', 0)}")
+        report.append(f"失败交易次数: {tm.get('n_failed_trades', 0)}")
+        report.append(f"胜率: {tm.get('win_rate', 0.0):.2%}")
+        report.append(f"盈亏比: {tm.get('profit_loss_ratio', 0.0):.2f}")
+        report.append(f"总盈利: {tm.get('total_profit', 0.0):.2f}")
+        report.append(f"总亏损: {tm.get('total_loss', 0.0):.2f}")
+        report.append(f"交易频率: {tm.get('trade_frequency', 0.0):.2f} 次/天")
 
         # 因子归因
         if factor_attribution is not None:
+            fa = factor_attribution or {}
             report.append("\n【因子归因】")
-            report.append(f"技术信号相关性: {factor_attribution['tech_correlation']:.4f}")
-            report.append(f"宏观信号相关性: {factor_attribution['macro_correlation']:.4f}")
-            report.append(f"融合信号相关性: {factor_attribution['fused_correlation']:.4f}")
-            report.append(f"技术信号贡献度: {factor_attribution['tech_contribution']:.4f}")
-            report.append(f"宏观信号贡献度: {factor_attribution['macro_contribution']:.4f}")
+            report.append(f"技术信号相关性: {fa.get('tech_correlation', 0.0):.4f}")
+            report.append(f"宏观信号相关性: {fa.get('macro_correlation', 0.0):.4f}")
+            report.append(f"融合信号相关性: {fa.get('fused_correlation', 0.0):.4f}")
+            report.append(f"技术信号贡献度: {fa.get('tech_contribution', 0.0):.4f}")
+            report.append(f"宏观信号贡献度: {fa.get('macro_contribution', 0.0):.4f}")
 
         report.append("\n" + "=" * 60)
 

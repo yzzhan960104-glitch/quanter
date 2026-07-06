@@ -618,15 +618,22 @@ class BacktestEngine:
         # 计算卡玛比率
         calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else 0.0
 
-        # 计算交易次数
+        # 计算交易次数（空 trades 守卫：无 trades 时 trades_df 无 direction 列，直接索引 KeyError）
         trades_df = pd.DataFrame(self.trades)
-        successful_trades = trades_df[trades_df["direction"] != "failed"]
-        n_trades = len(successful_trades)
-        n_failed_trades = len(trades_df[trades_df["direction"] == "failed"])
+        if len(trades_df) > 0:
+            successful_trades = trades_df[trades_df["direction"] != "failed"]
+            n_trades = len(successful_trades)
+            n_failed_trades = len(trades_df[trades_df["direction"] == "failed"])
 
-        # 计算胜率
-        buy_trades = successful_trades[successful_trades["direction"] == "buy"]
-        sell_trades = successful_trades[successful_trades["direction"] == "sell"]
+            # 计算胜率
+            buy_trades = successful_trades[successful_trades["direction"] == "buy"]
+            sell_trades = successful_trades[successful_trades["direction"] == "sell"]
+        else:
+            successful_trades = trades_df
+            n_trades = 0
+            n_failed_trades = 0
+            buy_trades = trades_df
+            sell_trades = trades_df
 
         # 计算盈亏
         total_profit = 0.0

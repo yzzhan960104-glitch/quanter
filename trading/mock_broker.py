@@ -167,19 +167,15 @@ class MockBroker:
 
         # 判断是否部分成交
         if self.rng.random() < self.partial_fill_prob:
-            # 部分成交
+            # 部分成交：仅成交订单的一部分（30%~80%），订单停留在 PARTIAL_FILLED 态，
+            # 剩余部分由后续 execute_order 调用完成（真实部分成交语义）。
+            # Why 不在此自动补完剩余：原实现在此立即 fill(remaining) 把订单推到 FILLED，
+            # 使「部分成交」名存实亡（filled_shares 恒等于下单量），违背部分成交语义。
             filled_shares = int(order_info["shares"] * self.rng.uniform(0.3, 0.8))
             order.fill(filled_shares, slippage_price)
 
-            # 更新账户
+            # 更新账户（仅按实际成交股数记账）
             self._update_account(order_info, filled_shares, slippage_price)
-
-            # 剩余部分后续成交
-            remaining_shares = order_info["shares"] - filled_shares
-            order.fill(remaining_shares, slippage_price)
-
-            # 更新账户
-            self._update_account(order_info, remaining_shares, slippage_price)
         else:
             # 完全成交
             order.fill(order_info["shares"], slippage_price)
@@ -245,11 +241,8 @@ class MockBroker:
         返回：
             滑点后的价格
         """
-        # 计算流动性因子
-        liquidity_factor = 1.0
-        if current_volume < avg_volume * 0.1:
-            # 流动性枯竭，滑点放大
-            liquidity_factor = 2.0
+        # 计算流动性因子（抽取为独立方法，便于单测与复用）
+        liquidity_factor = self._calculate_liquidity_factor(current_volume, avg_volume)
 
         # 计算滑点率（与订单规模相关）
         volume_ratio = shares / avg_volume if avg_volume > 0 else 1.0
@@ -265,6 +258,16 @@ class MockBroker:
             slippage_price = market_price * (1 - slippage_rate)
 
         return slippage_price
+
+    def _calculate_liquidity_factor(self, current_volume: float, avg_volume: float) -> float:
+        """计算流动性因子：当前成交量相对均量极度萎缩（<10%）时判定流动性枯竭，因子放大到 2.0。
+
+        物理含义：流动性枯竭时大单会击穿盘口、滑点失控，故把滑点率翻倍以保守计价，
+        对应极端行情（如地缘事件导致的盘中流动性真空）的风险刻画。
+        """
+        if current_volume < avg_volume * 0.1:
+            return 2.0
+        return 1.0
 
     def _check_rate_limit(self) -> bool:
         """
