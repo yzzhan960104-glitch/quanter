@@ -12,24 +12,31 @@
  * 红线：万级数据 shallowRef + markRaw（防深 reactive）；轮询定时器
  *      onBeforeUnmount 清理（防内存泄漏）。
  */
-import { ref, shallowRef, onBeforeUnmount, computed, markRaw } from 'vue'
+import { ref, shallowRef, onBeforeUnmount, onMounted, computed, markRaw } from 'vue'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
 import { submitGrid, getResult, type FactorGridSpec, type FactorGridResult } from '../api/explorer'
+import { getFactors, type FactorSummary } from '../api/factors'
 import { logger } from '../utils/logger'
 
-// 固定因子下拉（与 factors 模块导出函数名对齐）
-const FACTORS = [
-  { label: '横截面动量', value: 'cross_sectional_momentum' },
-  { label: '波动率调整动量', value: 'vol_adjusted_momentum' },
-  { label: '北向资金动量', value: 'north_flow_momentum' },
-  { label: '龙虎榜信号', value: 'dragon_signal' },
-  { label: '横截面估值', value: 'valuation_cross_section' },
-]
+// 因子下拉：动态反射 /factors/registry（反硬编码红线，与 FactorManagerView 同源）
+const factors = ref<FactorSummary[]>([])
 
 const form = ref({
-  factor: 'cross_sectional_momentum',
+  factor: '',                             // 注册表载入后由 onMounted 设默认值
   dateRange: ['2024-01-02', '2024-06-30'] as string[],
+})
+
+// 拉因子注册表填充下拉；默认选首个实盘因子，避免提交空 factor
+onMounted(async () => {
+  try {
+    factors.value = await getFactors()
+    const live = factors.value.find(f => f.status === 'live')
+    form.value.factor = (live || factors.value[0])?.name || ''
+  } catch (e: any) {
+    logger.error('因子注册表拉取失败:', e)
+    ElMessage.warning('因子注册表拉取失败，下拉为空')
+  }
 })
 const loading = ref(false)
 // shallowRef：海量时序不深 reactive（性能红线）
@@ -190,7 +197,7 @@ const icChartOption = computed(() => {
     <!-- 顶部参数条 -->
     <div class="param-bar">
       <el-select v-model="form.factor" placeholder="因子" style="width: 200px">
-        <el-option v-for="f in FACTORS" :key="f.value" :label="f.label" :value="f.value" />
+        <el-option v-for="f in factors" :key="f.name" :label="f.label" :value="f.name" />
       </el-select>
       <el-date-picker
         v-model="form.dateRange" type="daterange" value-format="YYYY-MM-DD"

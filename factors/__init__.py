@@ -9,6 +9,7 @@
 6. HMM 状态映射与迟滞滤波（防范高频换手）
 """
 
+from .base import register_factor, FactorMeta, FactorLoader
 from .technical import moving_average_cross, volume_price_trend, rsi, macd
 from .macro import macro_anchor_signal, cpi_inflation_signal, social_financing_signal
 from .fusion import (
@@ -34,4 +35,8 @@ __all__ = [
     "SignalDirection",
     "MacroRegimeHMM",
     "test_hmm_macro_module",
+    # 因子注册表（层级二）
+    "register_factor",
+    "FactorMeta",
+    "FactorLoader",
 ]

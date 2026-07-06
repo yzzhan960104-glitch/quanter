@@ -10,7 +10,20 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .base import register_factor, FactorMeta
 
+
+@register_factor(FactorMeta(
+    name="cross_sectional_momentum",
+    label="横截面动量",
+    category="动量",
+    author="系统",
+    status="live",                 # 唯一已实盘服役的探索性因子（explorer 网格已集成）
+    input_kind="returns_panel",
+    dataset="daily",
+    description="滚动累计收益的逐日横截面百分位排名（0~1），刻画全市场动量强弱的相对位置。",
+    default_params={"window": 20},
+))
 def cross_sectional_momentum(returns: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     """横截面动量：滚动累计收益 → 逐日横截面百分位排名。
 
@@ -21,6 +34,16 @@ def cross_sectional_momentum(returns: pd.DataFrame, window: int = 20) -> pd.Data
     return cum.rank(pct=True, axis=1)
 
 
+@register_factor(FactorMeta(
+    name="vol_adjusted_momentum",
+    label="波动率调整动量",
+    category="动量",
+    status="training",
+    input_kind="ohlcv_panel",       # 需 high/low/close 面板算 ATR
+    dataset="daily",
+    description="滚动累计收益 / ATR，用波动率标准化动量（高波动标的动量打折），ATR→0 时 ε 兜底防除零。",
+    default_params={"window": 20, "atr_window": 20},
+))
 def vol_adjusted_momentum(returns: pd.DataFrame, high: pd.DataFrame, low: pd.DataFrame,
                           close: pd.DataFrame, window: int = 20,
                           atr_window: int = 20) -> pd.DataFrame:

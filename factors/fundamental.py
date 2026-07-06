@@ -20,10 +20,21 @@ from typing import Optional
 import pandas as pd
 
 from data.lake_reader import DataLakeReader
+from .base import register_factor, FactorMeta
 
 logger = logging.getLogger(__name__)
 
 
+@register_factor(FactorMeta(
+    name="valuation_cross_section",
+    label="横截面估值",
+    category="估值",
+    status="training",
+    input_kind="cross_section",     # 逐日截面，非时序面板，不参与标准 IC 网格
+    dataset="fundamentals",
+    description="全市场当日估值分位（0~1，pe_ttm/pb/dv_ratio 等）。方向由 direction 决定（价值/成长）。",
+    default_params={"field": "pe_ttm", "direction": "value"},
+))
 def valuation_cross_section(
     date: str,
     field: str = "pe_ttm",

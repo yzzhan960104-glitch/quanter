@@ -184,12 +184,22 @@ class BenchmarkPoint(BaseModel):
 
 
 class TradeRecord(BaseModel):
-    """精简交易记录（丢弃 amount/symbol 等冗余字段）"""
+    """精简交易记录（含归因字段，层级四）。
+
+    归因三字段（全部可选，向后兼容）：
+    - signal_rationale: 入场原因（buy，如「信号驱动加仓：目标权重 80.0%」）
+    - exit_rationale:   出场原因（sell，信号减仓 或 风控平仓「触及止损」）
+    - reason:           分钟级风控平仓原始原因（_close 回填，与 exit_rationale 同源）
+    """
     date: str
     direction: str      # "buy" / "sell" / "failed"
     shares: int
     price: float
     cost: float
+    symbol: Optional[str] = None
+    signal_rationale: Optional[str] = None
+    exit_rationale: Optional[str] = None
+    reason: Optional[str] = None
 
 
 class OhlcvPoint(BaseModel):

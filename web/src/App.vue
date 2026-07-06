@@ -37,6 +37,21 @@ const activeName = computed(() => route.path)
       <router-link to="/live" class="nav-item" :class="{ active: activeName === '/live' }">
         实盘中控
       </router-link>
+      <router-link to="/data" class="nav-item" :class="{ active: activeName === '/data' }">
+        数据湖
+      </router-link>
+      <router-link to="/factors" class="nav-item" :class="{ active: activeName === '/factors' }">
+        因子
+      </router-link>
+      <router-link to="/strategies" class="nav-item" :class="{ active: activeName === '/strategies' }">
+        策略
+      </router-link>
+      <router-link to="/backtest" class="nav-item" :class="{ active: activeName === '/backtest' }">
+        归因回测
+      </router-link>
+      <router-link to="/review" class="nav-item" :class="{ active: activeName === '/review' }">
+        AI 复盘
+      </router-link>
     </nav>
 
     <!-- 路由出口：TerminalView / DashboardView 在此渲染 -->

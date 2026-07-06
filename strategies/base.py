@@ -10,7 +10,7 @@
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import pandas as pd
 from pydantic import BaseModel
@@ -53,6 +53,14 @@ class BaseStrategy(ABC):
     label: ClassVar[str]
     universe: ClassVar[List[str]]
     params_model: ClassVar[type[BaseModel]]
+    # 层级三·策略拓扑白盒化（composition/rhythm/capital_allocation）
+    # composition: 依赖的因子与数据集 {"factors": [...], "datasets": [...]}；
+    #              factors 列表供因子注册表反向查「被哪些策略引用」，datasets 驱动执行计划图数据节点。
+    # rhythm:      交易节奏（超短频/日频/周频），执行计划下单节点与回测频率对齐。
+    # capital_allocation: 资金分配逻辑的人类可读描述，执行计划下单节点展示。
+    composition: ClassVar[Dict[str, Any]] = {}
+    rhythm: ClassVar[str] = "日频"
+    capital_allocation: ClassVar[str] = ""
 
     def __init__(self, universe: List[str], params: BaseModel):
         """

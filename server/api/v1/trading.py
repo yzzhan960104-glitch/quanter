@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from server.services.trading_service import (
     emergency_halt,
+    export_trades,
     get_positions,
     get_status,
 )
@@ -60,3 +62,22 @@ async def halt() -> dict:
     except RuntimeError as e:
         # 网关未装配 → 503
         raise HTTPException(503, str(e))
+
+
+@router.get("/export", summary="导出实盘成交 CSV（按日期）")
+async def export_live_trades(
+    start: str = Query(..., description="起 'YYYY-MM-DD'"),
+    end: str = Query(..., description="止 'YYYY-MM-DD'"),
+) -> Response:
+    """导出 [start,end] 区间实盘成交日志（logs/live_trades.csv）为标准 CSV。
+
+    无日志 → 仅表头（诚实空导出，非 404）。Layer 6 LLM 复盘直接消费此 CSV。
+    """
+    csv_str = await run_in_threadpool(export_trades, start, end)
+    return Response(
+        content=csv_str,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="live_trades_{start}_{end}.csv"',
+        },
+    )

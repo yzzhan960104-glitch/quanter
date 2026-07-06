@@ -562,7 +562,7 @@ def _serialize_backtest_result(
             drawdown=dd_val,
         ))
 
-    # ============ 提取交易记录（精简 5 字段） ============
+    # ============ 提取交易记录（精简 5 字段 + 层级四归因） ============
     trades: list[TradeRecord] = []
     if len(trades_df) > 0:
         # 仅保留绘图必需列
@@ -578,12 +578,35 @@ def _serialize_backtest_result(
         # 向量化日期格式化（替代逐行 strftime）
         trades_subset["date"] = pd.to_datetime(trades_subset["date"]).dt.strftime("%Y-%m-%d")
 
+        # 层级四·归因列附加：reason/symbol/signal_rationale/exit_rationale
+        # Why reindex + where(notna)：引擎不同路径产出列不同（组合路径有 signal_rationale/
+        # exit_rationale，分钟 _close 有 reason，旧结果可能全无）；统一 NaN/缺失 → None，
+        # 前端 Optional 字段统一容错，绝不把字面 NaN 推给 JSON。
+        for col in ["reason", "symbol", "signal_rationale", "exit_rationale"]:
+            if col in trades_df.columns:
+                trades_subset[col] = trades_df[col].where(pd.notna(trades_df[col]), None).values
+            else:
+                trades_subset[col] = [None] * len(trades_subset)
+
         # 列式提取，一次性构建列表
         trade_dates = trades_subset["date"].tolist()
         trade_dirs = trades_subset["direction"].tolist()
         trade_shares = trades_subset["shares"].astype(int).tolist()
         trade_prices = trades_subset["price"].tolist()
         trade_costs = trades_subset["cost"].tolist()
+        trade_reasons = trades_subset["reason"].tolist()
+        trade_symbols = trades_subset["symbol"].tolist()
+        trade_sig = trades_subset["signal_rationale"].tolist()
+        trade_exit = trades_subset["exit_rationale"].tolist()
+
+        def _opt(v: Any) -> Optional[str]:
+            """None/NaN/空串 → None（归因缺失时前端统一显示 '—'）。"""
+            if v is None:
+                return None
+            if isinstance(v, float) and pd.isna(v):
+                return None
+            s = str(v).strip()
+            return s or None
 
         for i in range(len(trade_dates)):
             trades.append(TradeRecord(
@@ -592,6 +615,10 @@ def _serialize_backtest_result(
                 shares=trade_shares[i],
                 price=trade_prices[i],
                 cost=trade_costs[i],
+                symbol=_opt(trade_symbols[i]),
+                signal_rationale=_opt(trade_sig[i]),
+                exit_rationale=_opt(trade_exit[i]),
+                reason=_opt(trade_reasons[i]),
             ))
 
     # ============ 构建响应 ============

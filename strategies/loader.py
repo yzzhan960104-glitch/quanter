@@ -74,6 +74,11 @@ class StrategyLoader:
                 "name": name,
                 "label": getattr(cls, "label", name),
                 "universe": getattr(cls, "universe", []),
+                # 层级三·拓扑白盒：composition/rhythm/capital_allocation 反射到前端
+                #（StrategyArchitectView 执行计划图 + 因子 drill-down 反查引用消费）
+                "composition": getattr(cls, "composition", {}) or {},
+                "rhythm": getattr(cls, "rhythm", "日频"),
+                "capital_allocation": getattr(cls, "capital_allocation", ""),
             }
             for name, cls in self._registry.items()
         ]

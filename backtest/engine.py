@@ -65,6 +65,10 @@ class Order:
     price: float
     timestamp: pd.Timestamp
     status: str = "pending"
+    # 层级四·归因红线：订单对应的入场/出场原因（由 process_target_weight_signal 按
+    # 目标权重派生，经 _execute_portfolio_order → _record_trade 写入 trade 的
+    # signal_rationale/exit_rationale，前端 BacktestView 悬浮展示「为什么买/卖」）
+    rationale: str = ""
 
     def __post_init__(self):
         """初始化后验证订单合法性"""
@@ -511,7 +515,8 @@ class BacktestEngine:
         shares: int,
         price: float,
         cost: float,
-        symbol: str
+        symbol: str,
+        rationale: str = "",
     ):
         """
         记录交易
@@ -523,6 +528,8 @@ class BacktestEngine:
             price: 成交价格
             cost: 交易成本
             symbol: 交易标的代码
+            rationale: 归因说明（层级四）。按方向路由：buy→signal_rationale（入场原因），
+                sell→exit_rationale（出场原因）。空串则不写归因字段（向后兼容旧调用方）。
         """
         trade = {
             "date": date,
@@ -533,6 +540,12 @@ class BacktestEngine:
             "cost": cost,
             "symbol": symbol,
         }
+        # 层级四·归因路由：入场原因 vs 出场原因分字段落库，前端 BacktestView 分别悬浮展示
+        if rationale:
+            if direction == "buy":
+                trade["signal_rationale"] = rationale
+            elif direction == "sell":
+                trade["exit_rationale"] = rationale
 
         self.trades.append(trade)
 
@@ -883,6 +896,8 @@ class BacktestEngine:
                     price=current_price,
                     timestamp=signal.timestamp,
                     status="pending",
+                    # 层级四·出场归因：信号驱动减仓，显式记录目标权重便于事后回答「为什么卖」
+                    rationale=f"信号驱动减仓：目标权重 {target_weight:.1%}",
                 )
                 sell_orders.append(order)
 
@@ -898,6 +913,8 @@ class BacktestEngine:
                     price=current_price,
                     timestamp=signal.timestamp,
                     status="pending",
+                    # 层级四·入场归因：信号驱动加仓，显式记录目标权重便于事后回答「为什么买」
+                    rationale=f"信号驱动加仓：目标权重 {target_weight:.1%}",
                 )
                 buy_orders.append(order)
 
@@ -995,7 +1012,7 @@ class BacktestEngine:
         # 更新订单状态
         order.status = "filled"
 
-        # 记录交易（复用原有的 _record_trade 方法）
+        # 记录交易（复用原有的 _record_trade 方法；透传 order.rationale 写入归因字段）
         self._record_trade(
             date=order.timestamp,
             direction="sell" if order.side == OrderSide.SELL else "buy",
@@ -1003,6 +1020,7 @@ class BacktestEngine:
             price=order.price,
             cost=total_cost,
             symbol=order.symbol,
+            rationale=order.rationale,
         )
 
     def _generate_order_id(self, symbol: str, timestamp: pd.Timestamp) -> str:
@@ -1671,8 +1689,10 @@ class BacktestEngine:
             price=price, cost=total_cost, symbol=symbol,
         )
         # 回填 reason 到刚追加的交易记录（用于事后归因，emitter 的 risk 帧也读此字段）
+        # 层级四：同时写 exit_rationale，与组合路径归因字段对齐（前端 BacktestView 统一消费）
         if self.trades:
             self.trades[-1]["reason"] = reason
+            self.trades[-1]["exit_rationale"] = reason
 
         # ============ 风控平仓主动发射 risk 帧 ============
         # Why 在 _close 内发射而非在循环切片里判定：循环切片里 sell 是正常 trade 帧，

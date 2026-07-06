@@ -58,6 +58,13 @@ class TechMacroFusionStrategy(BaseStrategy):
     name: ClassVar[str] = "tech_macro_fusion"
     label: ClassVar[str] = "技术+宏观融合"
     params_model: ClassVar[type[BaseModel]] = TechMacroFusionParams
+    # 层级三·拓扑白盒：技术(MA+VPT)+宏观锚点 加权融合
+    composition: ClassVar[dict] = {
+        "factors": ["moving_average_cross", "volume_price_trend", "macro_anchor_signal"],
+        "datasets": ["daily", "macro"],
+    }
+    rhythm: ClassVar[str] = "日频"
+    capital_allocation: ClassVar[str] = "技术(MA+VPT)与宏观锚点按 tech_weight 加权融合 → 单标的 0~1 权重"
 
     def __init__(self, universe: List[str], params: Optional[TechMacroFusionParams] = None):
         super().__init__(universe, params or TechMacroFusionParams())
