@@ -201,3 +201,45 @@ LAKE_CONFIG["lakes"] = {
     "dragon_list": "data_lake/dragon_list.parquet",        # 龙虎榜明细（sync_dragon_list 写）
 }
 LAKE_CONFIG["default_lake"] = "daily"
+
+# ============================================================
+# 数据集资产注册表（层级一·数据湖可视）—— 决策点① = 方案 B（不引 Celery Beat）
+# ============================================================
+# 这是「数据湖有哪些资产、各自怎么同步、多新鲜算健康」的**单一真相源**。
+# 前端 DataLakeView 的表格、下拉框全部经 /api/v1/data/datasets 反射本表，
+# 绝不在前端硬编码数据集名。状态判定由 data_service 联合 parquet mtime +
+# data_lake/.syncing/{key} 哨兵文件推导，不依赖任何调度器，零新增守护进程。
+#
+# 字段契约：
+#   source:          数据源（与 data/clients 实际对接的源对齐）
+#   market:          市场口径（仅展示）
+#   granularity:     粒度（仅展示）
+#   script:          同步脚本相对路径（POST /sync/{key} 以 sys.executable 子进程拉起）
+#   args:            同步脚本额外 argv（缺省 []，走脚本 __main__ 默认参数）
+#   schedule:        计划节奏（**仅元信息展示**，无 Beat 守护，不做强约束）
+#   freshness_hours: 「健康」新鲜度阈值（小时）；parquet mtime 距今 ≤ 此值 = healthy，否则 stale
+# key 与 LAKE_CONFIG["lakes"] 的 key 一一对应（路径不重复定义，只在此声明资产语义）。
+DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "macro":         {"source": "AKShare", "market": "宏观", "granularity": "月频→日频",
+                      "script": "scripts/sync_macro_credit.py", "schedule": "每月初",   "freshness_hours": 720},
+    "sector":        {"source": "AKShare", "market": "板块", "granularity": "1d",
+                      "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "daily":         {"source": "AKShare", "market": "A股",  "granularity": "1d",
+                      "script": "scripts/sync_data_lake.py",   "schedule": "每日18:00", "freshness_hours": 24},
+    "daily_active":  {"source": "AKShare", "market": "A股",  "granularity": "1d",
+                      "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "minute":        {"source": "JQData",  "market": "A股",  "granularity": "1m",
+                      "script": "scripts/sync_jqdata_1min.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "crypto":        {"source": "Binance", "market": "加密", "granularity": "1m",
+                      "script": "scripts/sync_binance_vision.py", "schedule": "每日",   "freshness_hours": 24},
+    "fundamentals":  {"source": "AKShare", "market": "A股",  "granularity": "日频",
+                      "script": "scripts/sync_fundamentals.py", "schedule": "每周",     "freshness_hours": 168},
+    "north_flow":    {"source": "AKShare", "market": "A股",  "granularity": "1d",
+                      "script": "scripts/sync_north_flow.py",  "schedule": "每日18:00", "freshness_hours": 24},
+    "dragon_list":   {"source": "AKShare", "market": "A股",  "granularity": "1d",
+                      "script": "scripts/sync_dragon_list.py", "schedule": "每日18:00", "freshness_hours": 24},
+}
+
+# 同步哨兵目录：POST /sync/{key} 触发时 touch {key}（=syncing）；成功删除，失败写 {key}.failed。
+# 置于 data_lake/ 下便于与数据资产共同观测；运行时由 data_service 自动建目录。
+SYNCING_DIR = os.path.join("data_lake", ".syncing")

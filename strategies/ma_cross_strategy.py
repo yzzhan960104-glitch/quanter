@@ -43,6 +43,10 @@ class MaCrossStrategy(BaseStrategy):
     name: ClassVar[str] = "ma_cross"
     label: ClassVar[str] = "MACD双均线"
     params_model: ClassVar[type[BaseModel]] = MaCrossParams
+    # 层级三·拓扑白盒（factors/datasets 供执行计划图与因子反查引用消费）
+    composition: ClassVar[dict] = {"factors": ["MACD"], "datasets": ["daily"]}
+    rhythm: ClassVar[str] = "日频"
+    capital_allocation: ClassVar[str] = "MACD 金叉满仓、死叉空仓（权重 0↔1 二值切换），单标的"
 
     def __init__(self, universe: List[str], params: Optional[MaCrossParams] = None):
         # params 缺省用模型默认值；service 层正常会注入请求参数

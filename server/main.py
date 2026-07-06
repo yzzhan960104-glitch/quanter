@@ -39,6 +39,12 @@ from server.api.v1.explorer import router as explorer_router
 from server.api.v1.macro import router as macro_router
 # 实盘交易（优雅降级真接 QMT；无 xtquant/缺凭证时 /status 返 unavailable，不阻断 lifespan）
 from server.api.v1.trading import router as trading_router
+# 数据湖资产路由（层级一）：扫描 parquet mtime + 哨兵推导状态，触发同步起 daemon 子进程
+from server.api.v1.data import router as data_router
+# 因子注册表路由（层级二）：@register_factor 装饰器反射 + IC 衰减
+from server.api.v1.factors import router as factors_router
+# AI 复盘路由（层级六）：GLM 调用 + 三级降级，CPU/网络阻塞走线程池
+from server.api.v1.review import router as review_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
 from core.notifier import build_default_manager
 
@@ -55,6 +61,14 @@ async def lifespan(app: FastAPI):
     loader = StrategyLoader()
     loader.scan()
     app.state.strategy_loader = loader
+
+    # 启动：扫描因子注册表到 app.state（层级二·决策②）
+    # importlib 扫 factors 子模块，触发各 @register_factor 副作用注册到全局 _FACTOR_REGISTRY；
+    # 后续 /factors/* 路由只读 app.state.factor_loader，避免每请求重复扫描。
+    from factors.base import FactorLoader
+    factor_loader = FactorLoader()
+    factor_loader.scan()
+    app.state.factor_loader = factor_loader
 
     # 启动：装配异步通知通道（Telegram/企微/钉钉），缺凭证则跳过对应通道
     # Why 早于日志 handler：通知装配幂等且不依赖日志体系；先装配确保告警通道就绪，
@@ -148,6 +162,12 @@ app.include_router(explorer_router, prefix="/api/v1")
 app.include_router(macro_router, prefix="/api/v1")
 # 实盘交易路由（优雅降级真接 QMT；lifespan 不自动 connect，单例 lazy 构造）
 app.include_router(trading_router, prefix="/api/v1")
+# 数据湖资产（层级一）：纯字典注册表 + 文件系统状态推导，零守护进程，不阻断 lifespan
+app.include_router(data_router, prefix="/api/v1")
+# 因子注册表（层级二）：纯内存装饰器反射 + IC 衰减（CPU 密集端点走 run_in_threadpool）
+app.include_router(factors_router, prefix="/api/v1")
+# AI 复盘（层级六）：GLM 调用 + 三级降级（缺凭证/调用失败/无数据均不阻断）
+app.include_router(review_router, prefix="/api/v1")
 
 
 # ============ 健康检查端点 ============

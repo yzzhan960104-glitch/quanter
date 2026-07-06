@@ -18,7 +18,7 @@ import { TreemapChart } from 'echarts/charts'
 import { TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import {
-  getStatus, getPositions, emergencyHalt,
+  getStatus, getPositions, emergencyHalt, exportLiveTrades,
   type TradingStatus, type PositionRow,
 } from '../api/trading'
 import { logger } from '../utils/logger'
@@ -83,6 +83,33 @@ async function onHalt() {
   }
 }
 
+// ============ 层级五·CSV 导出 + 运行中策略 ============
+// 导出日期区间（默认近 30 天）
+const exportRange = ref<[string, string]>(lastNDays(30))
+function lastNDays(n: number): [string, string] {
+  const end = new Date(); const start = new Date(); start.setDate(start.getDate() - n)
+  return [start.toISOString().slice(0, 10), end.toISOString().slice(0, 10)]
+}
+const exporting = ref(false)
+async function onExport() {
+  exporting.value = true
+  try {
+    await exportLiveTrades(exportRange.value[0], exportRange.value[1])
+    ElMessage.success('CSV 已导出（logs/live_trades.csv 区间数据）')
+  } catch (e: any) {
+    ElMessage.error('导出失败：' + (e?.message || ''))
+  } finally {
+    exporting.value = false
+  }
+}
+
+/** 运行中策略集合（从持仓归因派生：distinct strategy，去 null） */
+const runningStrategies = computed(() => {
+  const set = new Set<string>()
+  positions.value.forEach((p) => { if (p.strategy) set.add(p.strategy) })
+  return Array.from(set)
+})
+
 // ============ Treemap option（面积=市值/数量，颜色=浮盈红绿） ============
 const treemapOption = computed(() => {
   const rows = positions.value
@@ -138,10 +165,57 @@ const treemapOption = computed(() => {
       </el-popconfirm>
     </div>
 
+    <!-- 层级五·工具条：运行中策略 + CSV 导出 -->
+    <div class="toolbar">
+      <div class="stat">
+        <span class="stat-k">持仓数</span><span class="stat-v">{{ positions.length }}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-k">运行中策略</span>
+        <span class="stat-v">{{ runningStrategies.length ? runningStrategies.join('、') : '—' }}</span>
+      </div>
+      <div class="export-group">
+        <el-date-picker
+          v-model="exportRange" type="daterange" value-format="YYYY-MM-DD" size="small"
+          start-placeholder="导出起" end-placeholder="导出止" style="width: 240px"
+        />
+        <el-button size="small" type="primary" plain :loading="exporting" @click="onExport">
+          导出 CSV
+        </el-button>
+      </div>
+    </div>
+
     <!-- 持仓 Treemap -->
     <section class="treemap-card">
       <div class="chart-title">持仓敞口热力图（面积=市值占比，红涨绿跌）</div>
       <v-chart class="treemap" :option="treemapOption" autoresize theme="terminal-dark" />
+    </section>
+
+    <!-- 层级五·持仓明细表（含所属策略 / 建仓因子逻辑） -->
+    <section class="positions-card">
+      <div class="chart-title">持仓明细（标的 / 策略 / 建仓因子逻辑 / 浮盈）</div>
+      <el-table :data="positions" size="small" empty-text="无持仓（或网关未连接）" max-height="240">
+        <el-table-column label="标的" prop="symbol" width="120" />
+        <el-table-column label="数量" width="100">
+          <template #default="{ row }">{{ row.qty }}</template>
+        </el-table-column>
+        <el-table-column label="市值" width="110">
+          <template #default="{ row }">{{ row.market_value === null ? '—' : row.market_value.toFixed(0) }}</template>
+        </el-table-column>
+        <el-table-column label="浮盈" width="110">
+          <template #default="{ row }">
+            <span :style="{ color: row.pnl === null ? '#787b86' : (row.pnl >= 0 ? '#ef5350' : '#26a69a') }">
+              {{ row.pnl === null ? '—' : row.pnl.toFixed(0) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="所属策略" width="160">
+          <template #default="{ row }">{{ row.strategy || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="建仓因子逻辑" min-width="220">
+          <template #default="{ row }">{{ row.entry_rationale || '—' }}</template>
+        </el-table-column>
+      </el-table>
     </section>
   </div>
 </template>
@@ -178,4 +252,18 @@ const treemapOption = computed(() => {
 }
 .chart-title { font-size: 13px; color: #d1d4dc; margin-bottom: 6px; }
 .treemap { height: calc(100% - 26px); }
+
+/* 层级五·工具条与持仓表 */
+.toolbar {
+  display: flex; align-items: center; gap: 20px; padding: 8px 12px;
+  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px;
+}
+.stat { display: flex; align-items: baseline; gap: 6px; }
+.stat-k { font-size: 11px; color: #787b86; }
+.stat-v { font-size: 13px; color: #d1d4dc; font-weight: 600; font-variant-numeric: tabular-nums; }
+.export-group { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.positions-card {
+  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 8px;
+  max-height: 280px; overflow: hidden;
+}
 </style>

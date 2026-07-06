@@ -62,6 +62,13 @@ class HMMMacroStrategy(BaseStrategy):
     name: ClassVar[str] = "hmm_macro"
     label: ClassVar[str] = "HMM宏观状态"
     params_model: ClassVar[type[BaseModel]] = HmmMacroParams
+    # 层级三·拓扑白盒：HMM 状态识别 → 状态权重矩阵映射多标的
+    composition: ClassVar[dict] = {
+        "factors": ["MacroRegimeHMM", "HMMStateMapper"],
+        "datasets": ["daily", "macro"],
+    }
+    rhythm: ClassVar[str] = "日频（迟滞滤波降换手）"
+    capital_allocation: ClassVar[str] = "HMM 状态概率 → state_weights 矩阵映射多标的权重，buffer_threshold 迟滞"
 
     def __init__(
         self,

@@ -18,6 +18,9 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Request
 
+from server.schemas.strategy import StrategyTopology, ExecutionPlan
+from server.services import strategy_service
+
 router = APIRouter(prefix="/strategies", tags=["策略"])
 
 
@@ -34,14 +37,17 @@ def _get_loader(request: Request):
     return loader
 
 
-@router.get("", summary="列出已注册策略")
-async def list_strategies(request: Request) -> List[Dict[str, Any]]:
-    """返回启动时扫描注册的全部策略（供前端下拉框）
+@router.get("", response_model=List[StrategyTopology], summary="列出已注册策略")
+async def list_strategies(request: Request) -> List[StrategyTopology]:
+    """返回启动时扫描注册的全部策略（供前端下拉框 + 策略拓扑视图）
 
-    每条结构：{name, label, universe}
+    每条结构：{name, label, universe, composition, rhythm, capital_allocation}
     - name: 策略唯一标识（前端下拉框 value，回测请求体里 strategy 字段用它）
-    - label: 中文显示名（前端下拉框 label）
+    - label: 中文展示名（前端下拉框 label）
     - universe: 标的池（类层面声明，仅参考；实际回测以请求体 universe 为准）
+    - composition: {factors, datasets}（层级三拓扑白盒 + 因子反查引用）
+    - rhythm: 交易节奏（超短频/日频/周频）
+    - capital_allocation: 资金分配逻辑（人类可读描述）
     """
     return _get_loader(request).list()
 
@@ -58,5 +64,18 @@ async def get_strategy_schema(name: str, request: Request) -> Dict[str, Any]:
     loader = _get_loader(request)
     try:
         return loader.get_schema(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/{name}/plan", response_model=ExecutionPlan, summary="策略执行计划 DAG")
+async def get_strategy_plan(name: str, request: Request) -> ExecutionPlan:
+    """派生策略执行计划：数据拉取 → 因子计算 → 信号融合 → 风控/下单（依赖树 DAG）。
+
+    由 composition + rhythm + capital_allocation + universe 派生标准四阶段；
+    前端 ECharts graph 按 nodes + depends_on 渲染生命周期。
+    """
+    try:
+        return ExecutionPlan(**strategy_service.build_execution_plan(_get_loader(request), name))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))

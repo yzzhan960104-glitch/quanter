@@ -127,6 +127,9 @@ export interface TradeRecord {
   cost: number
   reason?: string
   symbol?: string
+  // 层级四·归因（后端引擎 Order.rationale → _record_trade 路由写入）
+  signal_rationale?: string   // 入场原因（buy，如「信号驱动加仓：目标权重 80.0%」）
+  exit_rationale?: string     // 出场原因（sell，信号减仓 / 风控平仓「触及止损」）
 }
 
 /**

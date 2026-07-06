@@ -21,6 +21,13 @@ import TerminalView from '../views/TerminalView.vue'
 import DashboardView from '../views/DashboardView.vue'
 import ExplorerView from '../views/ExplorerView.vue'
 import LiveCockpitView from '../views/LiveCockpitView.vue'
+// 新增 5 视图采用懒加载（去玩具化 6 层重构）：这些视图多含 ECharts 图表，体量较大，
+// 不全部塞进首屏主 chunk；按路由按需加载，降低 TerminalView 首屏延迟。
+const DataLakeView = () => import('../views/DataLakeView.vue')
+const FactorManagerView = () => import('../views/FactorManagerView.vue')
+const StrategyArchitectView = () => import('../views/StrategyArchitectView.vue')
+const BacktestView = () => import('../views/BacktestView.vue')
+const ReviewView = () => import('../views/ReviewView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -44,6 +51,36 @@ const router = createRouter({
       path: '/live',
       name: 'live',
       component: LiveCockpitView,
+    },
+    // 层级一：数据湖资产（白盒反射 DATASET_REGISTRY + mtime/哨兵状态推导）
+    {
+      path: '/data',
+      name: 'data',
+      component: DataLakeView,
+    },
+    // 层级二：因子全生命周期（@register_factor 注册表 + IC 衰减 drill-down）
+    {
+      path: '/factors',
+      name: 'factors',
+      component: FactorManagerView,
+    },
+    // 层级三：策略拓扑与执行计划（composition/rhythm + 动态参数表单 + DAG）
+    {
+      path: '/strategies',
+      name: 'strategies',
+      component: StrategyArchitectView,
+    },
+    // 层级四：深度归因回测（动态下拉 + 归因面板 + 切片复盘）
+    {
+      path: '/backtest',
+      name: 'backtest',
+      component: BacktestView,
+    },
+    // 层级六：AI 复盘（GLM + 实盘日志 → Markdown 诊断报告）
+    {
+      path: '/review',
+      name: 'review',
+      component: ReviewView,
     },
   ],
 })

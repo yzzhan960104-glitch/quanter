@@ -18,10 +18,21 @@ from typing import Set
 import pandas as pd
 
 from data.lake_reader import DataLakeReader
+from .base import register_factor, FactorMeta
 
 logger = logging.getLogger(__name__)
 
 
+@register_factor(FactorMeta(
+    name="north_flow_momentum",
+    label="北向资金动量",
+    category="资金流",
+    status="training",
+    input_kind="lake_series",       # 单序列时序，非横截面，不参与 IC 网格
+    dataset="north_flow",
+    description="近 window 日北向资金累计净流入（亿元）。正=外资持续流入看多领先，负=持续流出。",
+    default_params={"window": 5},
+))
 def north_flow_momentum(start: str, end: str, *, window: int = 5) -> pd.Series:
     """北向资金连续净流入动量：近 window 日累计净流入（亿元）。
 
@@ -44,6 +55,15 @@ def north_flow_momentum(start: str, end: str, *, window: int = 5) -> pd.Series:
     return series.rolling(window).sum().dropna()
 
 
+@register_factor(FactorMeta(
+    name="dragon_signal",
+    label="龙虎榜信号",
+    category="情绪",
+    status="training",
+    input_kind="set",               # 集合型（上榜 symbol 集），非数值，仅做关注度过滤
+    dataset="dragon_list",
+    description="当日龙虎榜上榜个股集合。供策略层做关注度/情绪过滤，不直接产出数值因子。",
+))
 def dragon_signal(date: str) -> Set[str]:
     """龙虎榜当日上榜 symbol 集合。
 

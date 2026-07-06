@@ -24,6 +24,9 @@ export interface PositionRow {
   qty: number
   market_value: number | null    // 第一版未查行情 → null（中性灰）
   pnl: number | null             // 累计浮盈；未查行情 → null
+  // 层级五·持仓归因（trading_service 归因注册表 join；未登记 → null，前端显示 '—'）
+  strategy?: string | null         // 所属策略
+  entry_rationale?: string | null  // 建仓因子逻辑
 }
 
 /** GET /trading/status：心跳四态 */
@@ -39,4 +42,26 @@ export function getPositions(): Promise<{ positions: PositionRow[] }> {
 /** POST /trading/emergency_halt：一键熔断（幂等；按钮二次确认后调用） */
 export function emergencyHalt(): Promise<{ halted: boolean; message: string }> {
   return apiClient.post('/api/v1/trading/emergency_halt', {}, { timeout: 15000 })
+}
+
+/**
+ * GET /trading/export：导出实盘成交 CSV（按日期），触发浏览器下载。
+ *
+ * responseType:'blob' 拿原始 CSV 字节流；手动 createObjectURL + a.download 触发下载。
+ * Layer 6 LLM 复盘直接消费此 CSV。
+ */
+export async function exportLiveTrades(start: string, end: string): Promise<void> {
+  const blob = await apiClient.get('/api/v1/trading/export', {
+    params: { start, end },
+    timeout: 30000,
+    responseType: 'blob',
+  }) as unknown as Blob
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `live_trades_${start}_${end}.csv`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }

@@ -16,13 +16,31 @@ Why 模块级 import fire_and_forget：emergency_halt 投递告警走 fire_and_f
 """
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
+from datetime import datetime
 from typing import Optional
 
 from core.notifier import NotificationManager, fire_and_forget
+from server.core.config import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
+
+# ============ 层级五·实盘可追溯性 ============
+# 实盘交易日志（CSV 持久化）：record_live_trade 追加，export_trades 按日期过滤读取。
+# 设计意图（反黑盒）：CSV 是标准化、可审计、可被 Layer 6 LLM 复盘消费的格式；
+# 落盘而非仅内存，进程重启后历史成交可追溯（实盘合规基线）。
+LIVE_TRADE_LOG = os.path.join(str(PROJECT_ROOT), "logs", "live_trades.csv")
+LIVE_TRADE_COLUMNS = [
+    "timestamp", "symbol", "direction", "shares", "price", "strategy", "rationale",
+]
+
+# 持仓归因注册表（内存）：symbol → {strategy, rationale}。
+# 实盘 submit_order 成交时调 record_position_attribution 登记；get_positions 据此富化。
+# Why 内存而非落盘：持仓归因是「当前态」快照（平仓即清除），与成交日志（历史态）语义不同。
+_position_attribution: dict = {}
 
 # 模块级单例（lazy：首次 get_qmt_gateway 调用时构造）
 _gateway_singleton: Optional[object] = None
@@ -89,10 +107,87 @@ async def get_positions() -> list:
     raw = await gw._fetch_broker_positions()   # {stock_code: volume}
     if not raw:
         return []
+    # 层级五·持仓富化：join 归因注册表，附 strategy/entry_rationale（未登记则 None，前端显示 '—'）。
+    # market_value/pnl 仍 None（第一版未查行情）；契约形状就位，待行情查询接入后填充。
     return [
-        {"symbol": str(sym), "qty": float(qty), "market_value": None, "pnl": None}
+        {
+            "symbol": str(sym),
+            "qty": float(qty),
+            "market_value": None,
+            "pnl": None,
+            "strategy": _position_attribution.get(sym, {}).get("strategy"),
+            "entry_rationale": _position_attribution.get(sym, {}).get("rationale"),
+        }
         for sym, qty in raw.items()
     ]
+
+
+def record_position_attribution(symbol: str, strategy: str, rationale: str = "") -> None:
+    """登记某标的的建仓策略与因子逻辑（供 get_positions 富化）。
+
+    供实盘 submit_order 成交回调调用：把「策略 + 入场因子逻辑」与标的绑定，
+    使 Cockpit 持仓表能回答「这只票是哪个策略、因什么因子建的仓」。
+    平仓后应清除（调 clear_position_attribution）。
+    """
+    _position_attribution[symbol] = {"strategy": strategy, "rationale": rationale}
+
+
+def clear_position_attribution(symbol: str) -> None:
+    """清除某标的的归因（平仓后调用，防过期归因污染后续持仓）。"""
+    _position_attribution.pop(symbol, None)
+
+
+def record_live_trade(
+    symbol: str,
+    direction: str,
+    shares: float,
+    price: float,
+    strategy: str = "",
+    rationale: str = "",
+) -> None:
+    """追加一笔实盘成交到 logs/live_trades.csv（CSV 导出 + Layer 6 LLM 复盘数据源）。
+
+    供实盘订单成交回调调用。文件不存在/空时先写表头；utf-8-sig 编码便于 Excel 直开。
+    """
+    os.makedirs(os.path.dirname(LIVE_TRADE_LOG), exist_ok=True)
+    is_new = (not os.path.exists(LIVE_TRADE_LOG)) or os.path.getsize(LIVE_TRADE_LOG) == 0
+    row = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "direction": direction,
+        "shares": shares,
+        "price": price,
+        "strategy": strategy,
+        "rationale": rationale,
+    }
+    with open(LIVE_TRADE_LOG, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=LIVE_TRADE_COLUMNS)
+        if is_new:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def export_trades(start: str, end: str) -> str:
+    """按日期区间 [start, end]（YYYY-MM-DD）导出实盘成交 CSV 字符串。
+
+    无日志 → 仅返回表头（诚实空导出，非 404；前端照常下载）。
+    日期过滤按 timestamp 的日期前缀闭区间比较。
+    """
+    if not os.path.exists(LIVE_TRADE_LOG):
+        return ",".join(LIVE_TRADE_COLUMNS) + "\n"
+    rows = []
+    with open(LIVE_TRADE_LOG, "r", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            ts = r.get("timestamp", "")
+            day = ts.split(" ")[0]
+            if start <= day <= end:
+                rows.append(r)
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=LIVE_TRADE_COLUMNS)
+    writer.writeheader()
+    for r in rows:
+        writer.writerow({k: r.get(k, "") for k in LIVE_TRADE_COLUMNS})
+    return buf.getvalue()
 
 
 def emergency_halt() -> dict:
