@@ -220,11 +220,16 @@ class InteractiveChart:
             row_heights=[0.6, 0.4],
         )
 
+        # 价格列兼容：OHLCV 用 'close'，daily_records（report.py 实际传入）用 'price'。
+        # Why 兼容：report.generate_html_report 用 daily_records 调本方法，daily_records 只有
+        # 'price' 列；若硬读 'close' 会 KeyError，实盘空数据/日级回测直接崩。
+        price_col = "close" if "close" in df.columns else "price"
+
         # 添加价格曲线
         fig.add_trace(
             go.Scatter(
                 x=df.index,
-                y=df["close"],
+                y=df[price_col],
                 mode="lines",
                 name="收盘价",
                 line=dict(color="blue", width=1),

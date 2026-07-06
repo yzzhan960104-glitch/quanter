@@ -96,7 +96,7 @@ def sample_result():
 
     return {
         "initial_capital": 1_000_000,
-        "final_nav": float(nav_values.iloc[-1]),
+        "final_nav": float(nav_values[-1]),
         "total_return": 0.1,
         "annual_return": 0.12,
         "annual_volatility": 0.15,

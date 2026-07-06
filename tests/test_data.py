@@ -72,8 +72,8 @@ class TestMockDataFetcher:
         start, end = date_range
         df = fetcher.fetch_ohlcv("600000.SH", start, end, freq="1d")
 
-        # 计算价格变化率
-        price_change = df["close"].pct_change()
+        # 计算价格变化率（首行 pct_change 为 NaN，dropna 后再判；否则 NaN<=0.11 为 False 拖垮 .all()）
+        price_change = df["close"].pct_change().dropna()
 
         # 验证没有超过 10% 的单日涨幅（涨停）
         assert (price_change <= 0.11).all()  # 容忍 1% 误差
@@ -338,9 +338,9 @@ class TestDataCleaner:
 
         df_with_factor = DataCleaner.add_factor_price(df, method="vwap")
 
-        # VWAP = 成交额 / 成交量
+        # VWAP = 成交额 / 成交量（check_names=False：factor_price 列名与 expected 的 None 名不同）
         expected = df["amount"] / df["volume"]
-        pd.testing.assert_series_equal(df_with_factor["factor_price"], expected)
+        pd.testing.assert_series_equal(df_with_factor["factor_price"], expected, check_names=False)
 
     def test_add_factor_price_close_method(self):
         """测试收盘价方法计算因子价格"""
@@ -352,8 +352,8 @@ class TestDataCleaner:
 
         df_with_factor = DataCleaner.add_factor_price(df, method="close")
 
-        # 因子价格应等于收盘价
-        pd.testing.assert_series_equal(df_with_factor["factor_price"], df["close"])
+        # 因子价格应等于收盘价（check_names=False：列名 factor_price vs close 不同）
+        pd.testing.assert_series_equal(df_with_factor["factor_price"], df["close"], check_names=False)
 
     def test_validate_data_returns_dict(self, df_with_issues):
         """测试数据验证返回字典"""

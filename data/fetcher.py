@@ -301,15 +301,17 @@ class MockDataFetcher(DataFetcher):
         limit_up = 1.10
         limit_down = 0.90
 
-        # 涨停处理
-        limit_up_mask = df["close"] >= df["open"].shift(1) * limit_up
-        df.loc[limit_up_mask, "close"] = df.loc[limit_up_mask, "open"].shift(1) * limit_up
+        # 涨停处理（A 股涨停价基准 = 前一交易日【收盘价】，非开盘价；用 open.shift(1)
+        # 会让 close-to-close 单日变动超 10%，违背涨跌停规则）
+        prev_close = df["close"].shift(1)
+        limit_up_mask = df["close"] >= prev_close * limit_up
+        df.loc[limit_up_mask, "close"] = prev_close[limit_up_mask] * limit_up
         df.loc[limit_up_mask, "high"] = df.loc[limit_up_mask, "close"]
         df.loc[limit_up_mask, "low"] = df.loc[limit_up_mask, "open"]
 
-        # 跌停处理
-        limit_down_mask = df["close"] <= df["open"].shift(1) * limit_down
-        df.loc[limit_down_mask, "close"] = df.loc[limit_down_mask, "open"].shift(1) * limit_down
+        # 跌停处理（基准同为前收盘价）
+        limit_down_mask = df["close"] <= prev_close * limit_down
+        df.loc[limit_down_mask, "close"] = prev_close[limit_down_mask] * limit_down
         df.loc[limit_down_mask, "low"] = df.loc[limit_down_mask, "close"]
         df.loc[limit_down_mask, "high"] = df.loc[limit_down_mask, "open"]
 

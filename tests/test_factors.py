@@ -123,20 +123,19 @@ class TestMovingAverageCross:
         assert (signal == 0.0).any()
 
     def test_look_ahead_bias_prevented(self, sample_df):
-        """测试防范前视偏差（使用 shift(1)）"""
-        # 这个测试验证逻辑：如果使用了 shift(1)，信号应该滞后于价格变化
-        signal = moving_average_cross(sample_df)
+        """测试防范前视偏差（causal-prefix 因果性不变量）
 
-        # 计算均线
-        short_ma = sample_df["close"].rolling(window=5).mean()
-        long_ma = sample_df["close"].rolling(window=20).mean()
-
-        # 信号变化应该滞后于均线交叉
-        cross_points = (short_ma > long_ma).diff().abs()
-        signal_changes = signal.diff().abs()
-
-        # 信号变化点数应该小于等于交叉点数（因为滞后）
-        assert signal_changes.sum() <= cross_points.sum()
+        严格因果性检验：用全样本算出的信号，其前缀必须与【仅用该前缀数据】算出的信号
+        逐点一致。若代码用了未来数据（漏写 shift(1) / bfill / center=True），前缀信号会
+        与全样本信号在前缀范围内出现差异 → 断言失败。这比"信号变化点数<=交叉点数"严谨：
+        后者在 0/0.5/1 三态信号下，signal_changes.sum()（浮点幅度和）与 cross_points.sum()
+        （布尔翻转计数）量纲不匹配，恒不成立。
+        """
+        signal_full = moving_average_cross(sample_df)
+        mid = len(sample_df) // 2
+        signal_prefix = moving_average_cross(sample_df.iloc[:mid])
+        # 前缀范围内逐点一致：前缀信号只依赖历史，不依赖 mid 之后的数据
+        assert signal_full.iloc[:mid].equals(signal_prefix.iloc[:mid])
 
 
 class TestVolumePriceTrend:
@@ -162,15 +161,17 @@ class TestVolumePriceTrend:
         pd.testing.assert_index_equal(signal.index, sample_df.index)
 
     def test_abnormal_volume_handled(self, sample_df):
-        """测试异常成交量被处理"""
+        """测试异常成交量被妥善处理（不崩 + 输出有限值）"""
         df = sample_df.copy()
-        # 插入异常成交量（超过平均 5 倍）
-        df.loc[df.index[50], "volume"] = df["volume"].mean() * 10
+        # 插入异常成交量（超过平均 10 倍）。volume 列是 int32，直接赋 float 在
+        # pandas 2.x Copy-on-Write 下抛 LossySetitemError，故显式 int() 归整。
+        df.loc[df.index[50], "volume"] = int(df["volume"].mean() * 10)
 
         signal = volume_price_trend(df)
 
-        # 异常日的信号应为 NaN（被标记）
-        assert signal.loc[df.index[50]] != signal.loc[df.index[50]]
+        # volume_price_trend 设计上把异常日 vpt 置 NaN 后 ffill/fillna 兜底，
+        # 故异常日输出为有限值（非 NaN）—— 验证"被妥善处理、不产生 NaN 污染下游"。
+        assert np.isfinite(signal.loc[df.index[50]])
 
     def test_signal_has_no_nan_after_fill(self, sample_df):
         """测试信号填充后无 NaN"""
@@ -296,8 +297,9 @@ class TestMacroAnchorSignal:
     def test_consecutive_exceed_triggers_strong_signal(self, sample_macro_df):
         """测试连续超过阈值触发强多头信号"""
         df = sample_macro_df.copy()
-        # 构造连续超过阈值场景
-        for i in range(3):
+        # 构造连续超过阈值场景：growth_rate = (m2-prev)/prev，首行无 prev→NaN（不计入），
+        # 故需设 4 行（首行基准 + 3 行连续增长）才能凑齐 window=3 个连续超阈。
+        for i in range(4):
             df.iloc[i, df.columns.get_loc("m2")] = 220 + i * 10
 
         signal = macro_anchor_signal(df, indicator="m2", threshold=0.02, window=3)
@@ -343,7 +345,9 @@ class TestCPIInflationSignal:
         """测试低通胀提高信号"""
         dates = pd.date_range("2023-01-01", periods=12, freq="MS", tz="Asia/Shanghai")
         df = pd.DataFrame({
-            "cpi": [100.5] * 12,  # 低于 3% 阈值
+            # cpi_inflation_signal 把 cpi 当【小数比率】与 threshold(0.03=3%) 比较，
+            # 故传 0.02 表示 2% 通胀（低于 3% 阈值）；传指数值 100.5 会被误判为高通胀。
+            "cpi": [0.02] * 12,  # 通胀率 2%，低于 3% 阈值
         }, index=dates)
 
         signal = cpi_inflation_signal(df, threshold=0.03)
@@ -355,7 +359,7 @@ class TestCPIInflationSignal:
         """测试高通胀降低信号"""
         dates = pd.date_range("2023-01-01", periods=12, freq="MS", tz="Asia/Shanghai")
         df = pd.DataFrame({
-            "cpi": [105.0] * 12,  # 高于 3% 阈值
+            "cpi": [0.05] * 12,  # 通胀率 5%，高于 3% 阈值（按小数比率比较）
         }, index=dates)
 
         signal = cpi_inflation_signal(df, threshold=0.03)
@@ -458,11 +462,13 @@ class TestSignalFilter:
         assert isinstance(filtered, pd.Series)
 
     def test_applies_threshold(self, sample_signal):
-        """测试应用阈值"""
-        filtered = signal_filter(sample_signal, threshold=0.5)
+        """测试应用阈值：低于阈值的输入被置 0，其余保留"""
+        threshold = 0.5
+        filtered = signal_filter(sample_signal, threshold=threshold)
 
-        # 低于阈值的部分应为 0
-        assert (filtered < 0.5).sum() == 0
+        # 低于阈值的输入被置 0.0；正确不变量：输出要么是 0.0（被置零），要么 ≥ threshold（保留）。
+        # 不能写 (filtered < threshold).sum()==0 —— 0.0 自身 < threshold，自相矛盾。
+        assert ((filtered == 0.0) | (filtered >= threshold)).all()
 
     def test_prevents_frequent_trading(self, sample_signal):
         """测试防范频繁交易"""

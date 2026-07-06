@@ -133,7 +133,7 @@ def cpi_inflation_signal(
     signal[above_threshold & ~consecutive_above] = 0.4
 
     # 7. 填充 NaN
-    signal = signal.fillna(method="ffill", limit=window)
+    signal = signal.ffill(limit=window)
     signal = signal.fillna(0.5)
 
     return signal
@@ -187,7 +187,7 @@ def social_financing_signal(
     signal[exceed_threshold & ~consecutive_exceed] = 0.6
 
     # 6. 填充 NaN
-    signal = signal.fillna(method="ffill", limit=window)
+    signal = signal.ffill(limit=window)
     signal = signal.fillna(0.4)  # 默认中等偏空
 
     return signal

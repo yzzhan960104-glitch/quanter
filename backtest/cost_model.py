@@ -164,25 +164,25 @@ class CostModel:
         avg_volume: float
     ) -> float:
         """
-        计算流动性因子
+        计算流动性因子（滑点放大倍数）
 
         参数：
             current_volume: 当前成交量
             avg_volume: 平均成交量
 
         返回：
-            流动性因子（1.0=正常，<1.0=流动性枯竭）
+            流动性因子（1.0=正常，>1.0=流动性枯竭放大；作为 calculate_slippage 的乘数）
 
         流动性枯竭定义：
-        - 当前成交量 < 平均成交量的阈值，流动性因子 = 1 / (阈值 / 占比)
+        - 当前成交量占比 < 阈值时，因子 = 阈值/占比（>1.0），成交越萎缩放大越多；
+          对应极端行情下大单击穿盘口、滑点失控的风险刻画。
         """
         # 计算成交量占比
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
 
-        # 流动性枯竭检测
+        # 流动性枯竭检测：占比低于阈值 → 放大（>1.0）
         if volume_ratio < self.liquidity_threshold:
-            # 流动性枯竭，滑点放大
-            liquidity_factor = 1.0 / (self.liquidity_threshold / volume_ratio)
+            liquidity_factor = self.liquidity_threshold / volume_ratio
         else:
             # 流动性正常
             liquidity_factor = 1.0

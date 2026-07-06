@@ -161,8 +161,9 @@ class DataCleaner:
         """
         df_clean = df.copy()
 
-        # 计算平均成交量（滚动 20 日）
-        avg_volume = df_clean["volume"].rolling(window=20).mean()
+        # 计算平均成交量（滚动 20 日，min_periods=1：前 19 行用部分窗口均值，
+        # 否则早期低放量日 avg_volume=NaN 导致 low_volume_mask 恒 False、漏检停牌）
+        avg_volume = df_clean["volume"].rolling(window=20, min_periods=1).mean()
 
         # 检测成交量骤降
         low_volume_mask = df_clean["volume"] < avg_volume * volume_threshold
