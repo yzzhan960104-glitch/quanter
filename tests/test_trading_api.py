@@ -30,7 +30,7 @@ def test_submit_order_dry_run(client, monkeypatch):
         @property
         def is_locked(self):
             return False
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: _FakeGW())
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: _FakeGW())
     monkeypatch.setattr(trading_service, "record_live_trade", lambda *a, **kw: None)
 
     r = client.post("/api/v1/trading/submit_order", json={
@@ -51,7 +51,7 @@ def test_submit_order_no_confirm_returns_409(client, monkeypatch):
         @property
         def is_locked(self):
             return False
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: _FakeGW())
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: _FakeGW())
     monkeypatch.setattr(trading_service, "record_live_trade", lambda *a, **kw: None)
     monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
 
@@ -68,7 +68,7 @@ def test_submit_order_unavailable(client, monkeypatch):
     本用例锁定：无网关时 submit_order 不静默成功（至少非 200）。
     """
     from server.services import trading_service
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: None)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     r = client.post("/api/v1/trading/submit_order", json={
         "symbol": "510300.SH", "qty": 100, "side": "buy",
         "dry_run": True, "confirm": True,
@@ -79,7 +79,7 @@ def test_submit_order_unavailable(client, monkeypatch):
 def test_orders_and_asset_empty(client, monkeypatch):
     """无网关 → orders 返空 list，asset 返空 dict（均 200，非 503）。"""
     from server.services import trading_service
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: None)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     ro = client.get("/api/v1/trading/orders")
     ra = client.get("/api/v1/trading/asset")
     assert ro.status_code == 200 and ra.status_code == 200
@@ -90,6 +90,6 @@ def test_orders_and_asset_empty(client, monkeypatch):
 def test_connect_unavailable_503(client, monkeypatch):
     """无网关 → /connect 返 503。"""
     from server.services import trading_service
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: None)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     r = client.post("/api/v1/trading/connect")
     assert r.status_code == 503

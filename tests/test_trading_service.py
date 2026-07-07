@@ -15,7 +15,7 @@ import pytest
 def test_status_unavailable_when_no_gateway(monkeypatch):
     """无网关单例（缺 QMT 凭证）→ mode='unavailable'。"""
     from server.services import trading_service
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: None)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     s = trading_service.get_status()
     assert s == {"connected": False, "locked": False, "mode": "unavailable"}
 
@@ -24,7 +24,7 @@ def test_status_disconnected_when_gateway_not_connected(monkeypatch):
     """网关存在但未 connect → mode='disconnected'。"""
     from server.services import trading_service
     gw = type("G", (), {"_connected": False, "is_locked": False})()
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     s = trading_service.get_status()
     assert s["mode"] == "disconnected" and s["connected"] is False
 
@@ -33,7 +33,7 @@ def test_status_live_when_connected(monkeypatch):
     """已连接且未锁定 → mode='live'。"""
     from server.services import trading_service
     gw = type("G", (), {"_connected": True, "is_locked": False})()
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     assert trading_service.get_status()["mode"] == "live"
 
 
@@ -41,7 +41,7 @@ def test_status_vetoed_when_locked(monkeypatch):
     """断线锁定 → mode='vetoed_by_risk'（锁定优先于 connected）。"""
     from server.services import trading_service
     gw = type("G", (), {"_connected": True, "is_locked": True})()
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     assert trading_service.get_status()["mode"] == "vetoed_by_risk"
 
 
@@ -67,7 +67,7 @@ def test_emergency_halt_idempotent(monkeypatch):
     monkeypatch.setattr(trading_service, "fire_and_forget", _swallow_fire_and_forget)
 
     gw = FakeGW()
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
 
     r1 = trading_service.emergency_halt()
     assert r1["halted"] is True and gw._lock_down is True
@@ -80,7 +80,7 @@ def test_emergency_halt_idempotent(monkeypatch):
 def test_emergency_halt_unavailable(monkeypatch):
     """无网关 → raise RuntimeError（路由层转 503）。"""
     from server.services import trading_service
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: None)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     with pytest.raises(RuntimeError):
         trading_service.emergency_halt()
 
@@ -124,14 +124,14 @@ def _fake_gw_connected():
 def test_connect_gateway(monkeypatch):
     from server.services import trading_service
     gw = _fake_gw_connected()
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     asyncio.run(trading_service.connect_gateway())
     assert gw.connect_called is True
 
 
 def test_connect_gateway_unavailable(monkeypatch):
     from server.services import trading_service
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: None)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     with pytest.raises(RuntimeError):
         asyncio.run(trading_service.connect_gateway())
 
@@ -146,7 +146,7 @@ def test_submit_order_dry_run_records_and_returns(monkeypatch):
     from trading.execution_gateway import OrderRequest
 
     gw = _fake_gw_connected()
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
 
     recorded = []
     monkeypatch.setattr(trading_service, "record_live_trade",
@@ -165,7 +165,7 @@ def test_submit_order_blocked_raises(monkeypatch):
     from trading.execution_gateway import OrderRequest
 
     gw = _fake_gw_connected()
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
 
     recorded = []
     monkeypatch.setattr(trading_service, "record_live_trade",
@@ -186,7 +186,7 @@ def test_submit_order_live_calls_gateway(monkeypatch):
     from trading.execution_gateway import OrderRequest
 
     gw = _fake_gw_connected()
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
     monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
     monkeypatch.setattr(trading_service, "_max_amount", lambda: 10000.0, raising=False)
@@ -206,7 +206,7 @@ def test_submit_order_disconnected_blocks(monkeypatch):
 
     gw = _fake_gw_connected()
     gw._connected = False
-    monkeypatch.setattr(trading_service, "get_qmt_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
     with pytest.raises(RuntimeError, match="连接"):

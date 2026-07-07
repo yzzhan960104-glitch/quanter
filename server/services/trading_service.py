@@ -2,7 +2,7 @@
 """实盘交易服务：QMT 网关单例装配 + status/positions/emergency_halt 业务逻辑。
 
 设计红线（Why 这样切分）：
-- 单例装配在模块级 lazy：get_qmt_gateway() 首次调用时读环境变量构造，缺凭证/无
+- 单例装配在模块级 lazy：get_gateway() 首次调用时读环境变量构造，缺凭证/无
   xtquant 返 None。不在 import 期构造（避免无 xtquant 机器 import 即崩）；不在
   lifespan 自动 connect（connect 是同步阻塞 C++ 调用，会拖慢启动；由 Cockpit
   视图或调度器按需 connect）。
@@ -49,31 +49,48 @@ _position_attribution: dict = {}
 _gateway_singleton: Optional[object] = None
 
 
-def get_qmt_gateway() -> Optional[object]:
-    """懒构造 QmtExecutionGateway 单例。
+def get_gateway() -> Optional[object]:
+    """懒构造交易网关单例（Phase 1.5：EMT 优先，QMT 回退，都无则 None）。
 
-    环境变量 QMT_USERDATA_PATH / QMT_ACCOUNT_ID 齐全 → 构造单例（不 connect）；
-    缺凭证 / 无 xtquant → 返 None（Cockpit 走 unavailable 降级态）。
+    优先级：
+    1. EMT 凭证（EMT_USER/EMT_PASSWORD）齐全 → EmtExecutionGateway
+    2. QMT 凭证（QMT_USERDATA_PATH/QMT_ACCOUNT_ID）齐全 → QmtExecutionGateway
+    3. 都无 → None（Cockpit 走 unavailable 降级态）
 
-    Why 懒构造不在 import 期：xtquant 是 Windows 专用 C++ 扩展，开发机/CI 无该包时
-    import QmtExecutionGateway 会触发 ImportError；放函数内 + try/except 让无 xtquant
-    环境也能正常 import trading_service（仅 get_qmt_gateway 返 None）。
+    Why 懒构造不在 import 期：EMT 的 vnemttrader / QMT 的 xtquant 都是 Windows C++
+    扩展，开发机/CI 无相应包时 import 会触发 ImportError；放函数内 + try/except 让
+    无 SDK 环境也能正常 import trading_service（仅 get_gateway 返 None）。
     """
     global _gateway_singleton
     if _gateway_singleton is not None:
         return _gateway_singleton
-    if not (os.environ.get("QMT_USERDATA_PATH") and os.environ.get("QMT_ACCOUNT_ID")):
-        logger.info("QMT 凭证未配置，trading_service 走 unavailable 模式")
-        return None
-    try:
-        from trading.qmt_gateway import QmtExecutionGateway
-        _gateway_singleton = QmtExecutionGateway()
-        logger.info("QMT 网关单例已构造（未 connect）account=%s",
-                    os.environ.get("QMT_ACCOUNT_ID"))
-        return _gateway_singleton
-    except Exception as e:
-        logger.warning("QMT 网关构造失败（无 xtquant?），走 unavailable：%s", e)
-        return None
+    # 优先 EMT（Phase 1.5 主用券商，MiniQMT 因监管停用后改用）
+    if os.environ.get("EMT_USER") and os.environ.get("EMT_PASSWORD"):
+        try:
+            from trading.emt_gateway import EmtExecutionGateway
+            _gateway_singleton = EmtExecutionGateway()
+            logger.info("EMT 网关单例已构造（未 connect）user=%s",
+                        os.environ.get("EMT_USER"))
+            return _gateway_singleton
+        except Exception as e:
+            logger.warning("EMT 网关构造失败（无 vnemttrader?），尝试 QMT：%s", e)
+    # 回退 QMT（Phase 1 既有，MiniQMT 监管可用时）
+    if os.environ.get("QMT_USERDATA_PATH") and os.environ.get("QMT_ACCOUNT_ID"):
+        try:
+            from trading.qmt_gateway import QmtExecutionGateway
+            _gateway_singleton = QmtExecutionGateway()
+            logger.info("QMT 网关单例已构造（未 connect）account=%s",
+                        os.environ.get("QMT_ACCOUNT_ID"))
+            return _gateway_singleton
+        except Exception as e:
+            logger.warning("QMT 网关构造失败（无 xtquant?），走 unavailable：%s", e)
+            return None
+    logger.info("无 EMT/QMT 凭证，trading_service 走 unavailable 模式")
+    return None
+
+
+# 向后兼容别名（Phase 1 外部调用方/旧名引用）
+get_qmt_gateway = get_gateway
 
 
 def get_status() -> dict:
@@ -82,7 +99,7 @@ def get_status() -> dict:
     锁定优先于连接：即便 _connected=True，只要 is_locked=True 即视为风控否决
     （断线瞬间 _connected 可能未被 on_disconnected 翻转，但 _lock_down 已率先置位）。
     """
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         return {"connected": False, "locked": False, "mode": "unavailable"}
     locked = bool(getattr(gw, "is_locked", False))
@@ -102,7 +119,7 @@ async def get_positions() -> list:
     仅返 symbol/qty，避免引入额外行情查询接口。
     未连接/锁定 → raise RuntimeError（路由层转 409）；无网关 → raise（路由层转 503）。
     """
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         raise RuntimeError("QMT 网关未装配（unavailable）")
     if getattr(gw, "is_locked", False) or not getattr(gw, "_connected", False):
@@ -203,7 +220,7 @@ def emergency_halt() -> dict:
 
     无网关 → raise RuntimeError（路由层转 503）。
     """
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         raise RuntimeError("QMT 网关未装配（unavailable），无法熔断")
 
@@ -286,7 +303,7 @@ async def connect_gateway() -> None:
     网关未装配 → RuntimeError（路由层转 503）；connect 失败 → ConnectionError 上抛（转 503）。
     Why 不在 lifespan 自动 connect：connect 是同步阻塞 C++ 调用，按需触发更可控。
     """
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         raise RuntimeError("QMT 网关未装配（unavailable），请配置 QMT_USERDATA_PATH/QMT_ACCOUNT_ID")
     await gw.connect()
@@ -294,7 +311,7 @@ async def connect_gateway() -> None:
 
 async def disconnect_gateway() -> None:
     """优雅断开网关。"""
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         return
     await gw.disconnect()
@@ -310,7 +327,7 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool) -> 
 
     交易流水全覆盖（spec §6.3）：dry_run / BLOCKED / 真单 / 废单 / 撤单 均落 CSV。
     """
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         raise RuntimeError("QMT 网关未装配（unavailable）")
 
@@ -361,7 +378,7 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool) -> 
 
 async def cancel_order(order_id: str) -> dict:
     """撤单（透传网关）。"""
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         raise RuntimeError("QMT 网关未装配（unavailable）")
     result = await gw.cancel_order(order_id)
@@ -370,7 +387,7 @@ async def cancel_order(order_id: str) -> dict:
 
 async def get_orders() -> list:
     """查询本地缓存的订单回报流水（主线程同步读，转 list[dict]）。"""
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         return []
     orders = getattr(gw, "_orders", {}) or {}
@@ -378,15 +395,25 @@ async def get_orders() -> list:
 
 
 async def get_asset() -> dict:
-    """查询资金资产（现金/总资产）。未连接或无网关 → 空字典。
+    """查询资金资产（现金/总资产/市值）。未连接或无网关 → 空字典。
 
-    依赖 xttrader.query_stock_asset（同步阻塞 C++ 调用）；经线程池查询，返关键字段。
+    双网关适配：
+    - EMT：gw._fetch_asset()（async，queryAsset 回调聚合）
+    - QMT：gw._trader.query_stock_asset（同步 C++，投线程池）
     """
-    gw = get_qmt_gateway()
+    gw = get_gateway()
     if gw is None:
         return {}
     if getattr(gw, "is_locked", False) or not getattr(gw, "_connected", False):
         return {}
+    # EMT 网关：_fetch_asset（async，queryAsset 回调聚合）
+    if hasattr(gw, "_fetch_asset"):
+        try:
+            return await gw._fetch_asset()
+        except Exception as e:
+            logger.warning("EMT query_asset 异常：%s", e)
+            return {}
+    # QMT 网关：query_stock_asset（同步 C++，投线程池）
     import asyncio
     loop = asyncio.get_running_loop()
     try:
