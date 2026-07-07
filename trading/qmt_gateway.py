@@ -185,8 +185,10 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         self._trader: Any = None          # XtQuantTrader 实例（Any：xtquant 缺失时为 None）
         self._account: Any = None         # StockAccount 实例
         self._connected: bool = False
-        # 断线锁定：初始即 True，connect 成功才放开；断线立刻回锁，风控层据此熔断
-        self._lock_down: bool = True
+        # 断线锁定：初始 False（未连接由下方 _connected 检查兜底拒单，避免初始态被
+        # get_status 误判为 vetoed_by_risk）；connect 成功保持 False；
+        # on_disconnected/emergency_halt 置 True，风控层据此熔断。
+        self._lock_down: bool = False
 
         # seq ↔ 真实 order_id ↔ 客户端单号 的三向映射（撤单与回报匹配的唯一依据）
         self._seq_to_real: dict[int, int] = {}     # seq -> QMT 柜台真实 order_id
