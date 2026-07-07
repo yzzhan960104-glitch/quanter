@@ -160,8 +160,8 @@ def _install_fake_vnemttrader() -> None:
         def getApiLastError(self):
             return {}
 
-        def queryPosition(self, session, reqid):
-            self.calls.append(("queryPosition", reqid))
+        def queryPosition(self, account_id, session, reqid):
+            self.calls.append(("queryPosition", account_id, reqid))
             data = type(self).query_position_data or []
             if data:
                 for i, d in enumerate(data):

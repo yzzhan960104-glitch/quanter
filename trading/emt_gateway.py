@@ -221,6 +221,14 @@ class _EmtCallback(_CallbackBase):  # type: ignore[misc]
             logger.exception("EMT onQueryAsset 解析异常，已吞并")
 
 
+# 给未显式重写的所有 onXXX 回调兜底 pass（防 SDK login 时调 onConnected 等未实现
+# 回调报 'NoneType' not callable；EMT TraderApi 共 68 个回调，本网关只重写关键的 6 个）
+if _EMT_AVAILABLE:
+    for _cb_name in dir(TraderApi):
+        if _cb_name.startswith("on") and _cb_name not in _EmtCallback.__dict__:
+            setattr(_EmtCallback, _cb_name, lambda self, *a, **kw: None)
+
+
 class EmtExecutionGateway(BaseExecutionGateway):
     """EMT 极速交易实盘网关（CTPAPI 风格：login + insertOrder + 回调）。"""
 
@@ -338,7 +346,11 @@ class EmtExecutionGateway(BaseExecutionGateway):
             raise RuntimeError("EMT 已锁定（断线保护），拒绝对账以防脏读")
 
         reqid = self._next_reqid()
-        raw = await self._run_query(reqid, lambda: self._api.queryPosition(self._session, reqid))
+        # EMT queryPosition 签名 (account_id:str, session:uint64, reqid:int)——
+        # 与 queryAsset(session, reqid) 不同，首参为资金账号字符串
+        raw = await self._run_query(
+            reqid, lambda: self._api.queryPosition(self._user, self._session, reqid)
+        )
         cleaned: dict[str, float] = {}
         for row in raw:
             ticker = row.get("ticker")
