@@ -12,8 +12,8 @@
 本脚本直连网关验证 SDK 连通性（connect/资产/持仓/真单/撤单），dry_run 与风控
 挡板的端到端验证由 HTTP 层（test_trading_api.py）覆盖。
 
-⚠️ 步骤 5 真单直连网关、不经 risk_shield 挡板——仅限模拟盘小额验证连通性；
-   生产实盘下单务必走 POST /api/v1/trading/submit_order（经 10 关挡板）。
+[!] 步骤 5 真单直连网关、不经 risk_shield 挡板——仅限模拟盘小额验证连通性；
+    生产实盘下单务必走 POST /api/v1/trading/submit_order（经 10 关挡板）。
 """
 import asyncio
 import os
@@ -43,7 +43,7 @@ def _step(title: str) -> bool:
 
 async def main():
     print("QMT 联调脚本启动。account=", os.getenv("QMT_ACCOUNT_ID"))
-    print("⚠️  本脚本直连网关，步骤 5 真单不经风控挡板，仅限模拟盘小额验证。")
+    print("[!] 本脚本直连网关，步骤 5 真单不经风控挡板，仅限模拟盘小额验证。")
 
     gw = QmtExecutionGateway()
 
@@ -53,12 +53,12 @@ async def main():
     try:
         await gw.connect()
     except ConnectionError as e:
-        print(f"❌ 连接失败：{e}")
+        print(f"[FAIL] 连接失败：{e}")
         print("请确认 XtItClient.exe 已启动登录，且 QMT_USERDATA_PATH 路径正确。")
         return
     print(f"结果：_connected={gw._connected}, is_locked={gw.is_locked}")
     if not gw._connected:
-        print("❌ 连接未成功，终止。")
+        print("[FAIL] 连接未成功，终止。")
         return
 
     # --- 步骤 2：query_asset ---
@@ -90,7 +90,7 @@ async def main():
         print("已跳过真单步骤。")
         await gw.disconnect()
         return
-    print("⚠️  发起真实限价单 100 股（模拟盘）...")
+    print("[!] 发起真实限价单 100 股（模拟盘）...")
     order = OrderRequest(symbol=symbol, qty=100, side="buy", price=5.0)
     result = await gw.submit_order(order)
     print(f"下单结果：order_id={result.order_id}, state={result.state.name}, msg={result.message}")
