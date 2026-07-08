@@ -71,7 +71,7 @@ def test_macro_regime_endpoint(client, monkeypatch):
     regime=+1（扩张，绿灯）/ 0（中性，黄灯）/ -1（收缩，红灯）三态严格枚举，
     history 为近 60 日逐日状态序列（前端绘红黄绿带）。
     """
-    from factors.macro_regime import CreditRegime
+    from core.macro_regime import CreditRegime
     # 重置单例避免其他测试污染本断言（_FakeRegime 完全绕开真实 macro 湖）
     monkeypatch.setattr(CreditRegime, "get_default", lambda: _FakeRegime())
 

@@ -17,9 +17,9 @@ macro 湖读取约定：
 """
 import pandas as pd
 
-# RED 阶段：factors/macro_regime.py 尚未创建 → ImportError 即首次失败信号。
+# RED 阶段：core/macro_regime.py 尚未创建 → ImportError 即首次失败信号。
 # GREEN 阶段：模块创建后此处正常 import。
-from factors.macro_regime import CreditRegime
+from core.macro_regime import CreditRegime
 
 
 # --------------------------------------------------------------

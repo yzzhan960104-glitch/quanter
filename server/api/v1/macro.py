@@ -29,7 +29,7 @@ import pandas as pd
 from fastapi import APIRouter
 
 from data.lake_reader import DataLakeReader
-from factors.macro_regime import CreditRegime
+from core.macro_regime import CreditRegime
 
 router = APIRouter(prefix="/macro", tags=["宏观/板块/因子"])
 
