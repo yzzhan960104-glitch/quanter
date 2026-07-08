@@ -75,7 +75,8 @@ fastparquet
 # 遵循 CLAUDE.md「第一性原理、拒绝黑盒」原则，不强依赖第三方形态库。
 mplfinance>=0.12.9b7            # K 线可视化（PyPI 实际版本 0.12.10b0，约束带 b 后缀以匹配）
 lightweight-charts>=2.0         # 交互式图表（PyPI 真名 lightweight-charts，非 -python）
-# —— 以下三项 PyPI 在 py3.10 不可用，保留为声明性占位，pip install 时允许失败 ——
-zigzag>=0.2.0                   # sdist 元数据 bug（Cython>=^0.29 + 缺 .pyx），暂不可装
-pandas-ta>=0.3.14b              # py3.10 下 PyPI 无可用版本（0.4.x 要求 >=3.12），改用显式实现
-trendln>=4.0.0                  # PyPI 最高仅 0.1.18（4.0.0 版本号不存在），有 numpy polyfit 回退
+# —— 以下三项 PyPI 装不上（上游 bug / py3.10 约束），注释掉以保 pip install -r 幂等性 ——
+# 形态学算法改用 numpy/pandas 显式实现（因果 ZigZag / ATR / 颈线），符合极简无黑盒原则。
+# zigzag>=0.2.0                  # PyPI 装不上（sdist 元数据 bug：Cython>=^0.29 + 缺 .pyx），改用 numpy 显式因果 ZigZag
+# pandas-ta>=0.3.14b             # PyPI 装不上（py3.10 下无可用版本，0.4.x 要求 >=3.12），改用 pandas 显式 ATR/指标
+# trendln>=4.0.0                 # PyPI 装不上（最高仅 0.1.18，4.0.0 版本号不存在），改用 numpy polyfit 显式颈线/趋势线
