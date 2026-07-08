@@ -86,3 +86,8 @@ xtquant
 emt_api_python
 xtquant_250807.rar
 EMT_API_Python_V2.27.0.zip
+scripts/pages/
+
+# 书籍扫描版(版权+大文件)
+多空轉折一手抓.pdf
+*.pdf
