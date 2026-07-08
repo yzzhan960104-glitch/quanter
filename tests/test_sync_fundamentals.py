@@ -1,4 +1,8 @@
-"""sync_fundamentals + factors/fundamental 单测（mock Tushare + 临时湖，不依赖网络/积分）。"""
+"""sync_fundamentals 数据同步层单测（mock Tushare，不依赖网络/积分）。
+
+注：原文件含 factors/fundamental 截面因子测试，蔡森专精化 Phase 1 Task 3 删除 factors 体系后
+整段移除——保留纯数据同步（面板合并/数值 coerce/熔断不计分）部分，因子计算测试随 factors 一同下线。
+"""
 import pandas as pd
 import pytest
 
@@ -80,64 +84,3 @@ def test_fetch_valuation_panel_quota_error_returns_empty_no_breaker():
     finally:
         tushare_breaker._state = CircuitState.CLOSED
         tushare_breaker._failure_count = 0
-
-
-# ---------------- factors/fundamental ----------------
-
-@pytest.fixture
-def fundamentals_lake(tmp_path):
-    """注入临时 fundamentals 湖（用 reader.load 正确初始化 _lakes + _ffills + _dtypes）。"""
-    from data.lake_reader import DataLakeReader
-    reader = DataLakeReader.get_instance()
-    reader._lakes.clear()
-    reader._ffills.clear()
-    reader._dtypes.clear()
-    reader._default_key = None
-
-    # 4 只标的的 pe_ttm 截面（A=10 最低，D=40 最高）
-    df = pd.DataFrame(
-        {"pe_ttm": [10, 20, 30, 40]},
-        index=pd.MultiIndex.from_tuples(
-            [("2024-01-02", "A"), ("2024-01-02", "B"),
-             ("2024-01-02", "C"), ("2024-01-02", "D")],
-            names=["date", "symbol"],
-        ),
-    )
-    path = tmp_path / "fund.parquet"
-    df.to_parquet(path)
-    reader.load(str(path), key="fundamentals")  # 正确建 _lakes + _ffills + _dtypes
-
-    yield reader
-    reader._lakes.clear()
-    reader._ffills.clear()
-    reader._dtypes.clear()
-    reader._default_key = None
-
-
-def test_valuation_cross_section_value_direction(fundamentals_lake):
-    """价值方向：低 pe → 高分（A=10 最低 → 最高分）。"""
-    from factors.fundamental import valuation_cross_section
-    rank = valuation_cross_section("2024-01-02", "pe_ttm", direction="value")
-    assert rank["A"] > rank["B"] > rank["C"] > rank["D"]
-    assert 0.0 <= rank.min() <= rank.max() <= 1.0
-
-
-def test_valuation_cross_section_growth_direction(fundamentals_lake):
-    """成长方向：高 pe → 高分（D=40 最高 → 最高分）。"""
-    from factors.fundamental import valuation_cross_section
-    rank = valuation_cross_section("2024-01-02", "pe_ttm", direction="growth")
-    assert rank["D"] > rank["A"]
-
-
-def test_valuation_cross_section_missing_lake_returns_empty():
-    """fundamentals 湖未加载 → 返空 Series（离线降级，不抛）。"""
-    from data.lake_reader import DataLakeReader
-    reader = DataLakeReader.get_instance()
-    reader._lakes.clear()
-    reader._ffills.clear()
-    reader._dtypes.clear()
-    reader._default_key = None
-
-    from factors.fundamental import valuation_cross_section
-    rank = valuation_cross_section("2024-01-02", "pe_ttm")
-    assert rank.empty
