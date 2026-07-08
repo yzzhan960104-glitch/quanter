@@ -26,7 +26,61 @@ from typing import Dict, Any, Optional, List, Callable
 
 from .cost_model import CostModel
 from .metrics import MetricsCalculator
-from factors.fusion import TargetWeightSignal, SignalDirection
+
+# === 信号方向枚举 + 目标权重信号（原 factors/fusion.py，Phase 1·Task 3 因子体系
+#     整体删除后内联到 backtest 域自洽依赖。Task 4 删除 backtest 时一并清理）===
+class SignalDirection(Enum):
+    """信号方向枚举（BUY/SELL/HOLD 三态，驱动引擎调仓分支）。"""
+    BUY = "buy"
+    SELL = "sell"
+    HOLD = "hold"
+
+
+@dataclass
+class TargetWeightSignal:
+    """目标权重信号（数据类）。
+
+    回测引擎接收的核心信号结构：理论最优权重 + 调仓方向。
+    设计决策（消除归一化扭曲）：weights 始终存"理论最优权重"（和恒为 1），
+    directions 控制是否生成调仓订单；HOLD 标的保持现有仓位不动，避免
+    "HOLD 资产被归一化扭曲"的经典问题。
+
+    属性：
+        timestamp: 信号时间戳
+        weights:   理论最优目标权重字典（symbol -> target_weight），和为 1
+        directions: 调仓方向字典（symbol -> SignalDirection）
+    """
+    timestamp: pd.Timestamp
+    weights: Dict[str, float]
+    directions: Dict[str, SignalDirection]
+
+    def __post_init__(self):
+        # 验证权重和在 [0, 1]（允许部分仓位，现金为隐含剩余）
+        weight_sum = sum(self.weights.values())
+        if weight_sum < -1e-8 or weight_sum > 1.0 + 1e-8:
+            raise ValueError(f"权重和超出 [0,1] 范围（现金为隐含剩余）: {weight_sum:.6f}")
+        # 验证权重范围 [0, 1]（纯多头：不允许负权重/做空）
+        for symbol, weight in self.weights.items():
+            if weight < -1e-8 or weight > 1.0 + 1e-8:
+                raise ValueError(f"标的 '{symbol}' 的权重 {weight} 超出范围 [0, 1]")
+        # 验证标的与方向键一致（防遗漏或多余方向标注）
+        if set(self.weights.keys()) != set(self.directions.keys()):
+            raise ValueError(
+                f"权重与方向的标的集合不匹配："
+                f"权重含 {set(self.weights.keys())}，方向含 {set(self.directions.keys())}"
+            )
+
+    def get_rebalance_symbols(self) -> List[str]:
+        """方向不为 HOLD 的标的代码列表。"""
+        return [s for s, d in self.directions.items() if d != SignalDirection.HOLD]
+
+    def is_hold_only(self) -> bool:
+        """是否纯持有（无调仓）。"""
+        return len(self.get_rebalance_symbols()) == 0
+
+    def get_rebalance_weights(self) -> Dict[str, float]:
+        """仅含需调仓标的的权重子字典。"""
+        return {s: self.weights[s] for s in self.get_rebalance_symbols()}
 
 # 模块级 logger：run_portfolio 完成时记录 n_trades/final_nav，便于本地日志定位回测产出。
 # 记录经 root logger → RingBufferLogHandler 流前端 + FileHandler 落盘（见 main.py）。

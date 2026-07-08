@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """最终审查跟进修复的覆盖测试：
-1. factors/micro_momentum.atr() 须保留 rolling warm-up 期 NaN（不静默替换成 1e-9 伪 ATR）。
+1. core/indicator.atr() 须保留 rolling warm-up 期 NaN（不静默替换成 1e-9 伪 ATR）。
+   （ATR 已从 factors/micro_momentum 迁到 core/indicator——Phase 1·Task 3 因子体系剥离。）
 2. backtest/engine.run_minute 移动止损须主动触发（价格跌破既有止损线 → reason='移动止损' 平仓）。
 """
 import numpy as np
@@ -9,7 +10,7 @@ import pandas as pd
 
 def test_atr_preserves_warmup_nan_not_fake_value():
     """atr() warm-up 期（前 window-1 根）须是 NaN，绝不能被 .where 静默替换成 1e-9 伪 ATR。"""
-    from factors.micro_momentum import atr
+    from core.indicator import atr
     idx = pd.date_range("2024-01-02 09:30", periods=20, freq="min")
     df = pd.DataFrame({"high": [11.0] * 20, "low": [9.0] * 20, "close": [10.0] * 20}, index=idx)
     a = atr(df, window=14)
