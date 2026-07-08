@@ -128,7 +128,7 @@ function getColorClass(val: number, mode: string): string {
 
 .metric-label {
   font-size: 12px;
-  color: #787b86;
+  color: var(--qt-text-secondary);
   margin-bottom: 8px;
   letter-spacing: 0.3px;
 }
@@ -143,15 +143,15 @@ function getColorClass(val: number, mode: string): string {
    注意：此处的「绿=盈利 / 红=亏损」是国际通用的绩效盈亏语义，与 K 线「红涨绿跌」
    分属不同语境（绩效区 vs 行情区），共存于同一终端是行业惯例，不构成冲突。 */
 .color-profit {
-  color: #26a69a;
+  color: var(--qt-down);
 }
 
 .color-risk {
-  color: #ef5350;
+  color: var(--qt-up);
 }
 
 .color-neutral {
-  color: #787b86;
+  color: var(--qt-text-secondary);
 }
 
 /* 响应式：小屏 2 列 */

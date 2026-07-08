@@ -417,16 +417,16 @@ const treemapOption = computed(() => {
 <style scoped>
 .cockpit-shell {
   padding: 12px; height: 100%; display: flex; flex-direction: column;
-  gap: 12px; background: #131722; overflow: auto;
+  gap: 12px; background: var(--qt-bg-page); overflow: auto;
 }
 .top-bar { display: flex; gap: 12px; align-items: stretch; }
 .heartbeat {
   flex: 1; display: flex; align-items: center; gap: 10px; padding: 0 16px;
-  border: 1px solid #2b3139; border-radius: 6px; background: #1e222d;
+  border: 1px solid var(--qt-border); border-radius: 6px; background: var(--qt-bg-card);
 }
 .dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
 .ht-label { font-size: 14px; font-weight: 700; }
-.ht-mode { font-size: 11px; color: #787b86; margin-left: auto; font-family: ui-monospace, Menlo, monospace; }
+.ht-mode { font-size: 11px; color: var(--qt-text-secondary); margin-left: auto; font-family: ui-monospace, Menlo, monospace; }
 
 /* Phase 2：连接/断开按钮 */
 .conn-btn {
@@ -456,37 +456,37 @@ const treemapOption = computed(() => {
 /* 工具条 */
 .toolbar {
   display: flex; align-items: center; gap: 20px; padding: 8px 12px;
-  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px;
+  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px;
   flex-wrap: wrap;
 }
 .stat { display: flex; align-items: baseline; gap: 6px; }
-.stat-k { font-size: 11px; color: #787b86; }
-.stat-v { font-size: 13px; color: #d1d4dc; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-k { font-size: 11px; color: var(--qt-text-secondary); }
+.stat-v { font-size: 13px; color: var(--qt-text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
 .export-group { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
 /* Phase 2：下单面板 */
 .order-panel {
-  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 10px 14px;
+  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 10px 14px;
 }
 .order-form { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; margin-top: 6px; }
 .order-form :deep(.el-form-item) { margin-bottom: 0; margin-right: 4px; }
-.mode-sim { color: #d29922; font-weight: 700; }
-.mode-live { color: #ef5350; font-weight: 700; }
-.hint { font-size: 11px; color: #787b86; margin-left: 8px; }
+.mode-sim { color: var(--qt-warn); font-weight: 700; }
+.mode-live { color: var(--qt-up); font-weight: 700; }
+.hint { font-size: 11px; color: var(--qt-text-secondary); margin-left: 8px; }
 
-.chart-title { font-size: 13px; color: #d1d4dc; margin-bottom: 6px; }
+.chart-title { font-size: 13px; color: var(--qt-text-primary); margin-bottom: 6px; }
 
 /* Phase 2：订单列表 */
 .orders-card {
-  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 8px;
+  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 8px;
 }
 
 .treemap-card {
-  flex: 1; min-height: 200px; background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 8px;
+  flex: 1; min-height: 200px; background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 8px;
 }
 .treemap { height: calc(100% - 26px); min-height: 180px; }
 
 .positions-card {
-  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 8px;
+  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 8px;
 }
 </style>

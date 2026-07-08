@@ -455,8 +455,8 @@ const poolRows = computed(() => {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  background: #131722;
-  color: #d1d4dc;
+  background: var(--qt-bg-page);
+  color: var(--qt-text-primary);
   display: flex;
   flex-direction: column;
 }
@@ -467,8 +467,8 @@ const poolRows = computed(() => {
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px;
-  border-bottom: 1px solid #2b3139;
-  background: #1e222d;
+  border-bottom: 1px solid var(--qt-border);
+  background: var(--qt-bg-card);
   flex-shrink: 0;
 }
 
@@ -476,12 +476,12 @@ const poolRows = computed(() => {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-  color: #d1d4dc;
+  color: var(--qt-text-primary);
 }
 
 .dash-sub {
   font-size: 11px;
-  color: #787b86;
+  color: var(--qt-text-secondary);
   margin-left: 8px;
 }
 
@@ -497,8 +497,8 @@ const poolRows = computed(() => {
 
 /* 每个面板单元格：暗卡片 + 极弱灰边框 + 内边距 + 隐藏溢出（图表自适应填充） */
 .cell {
-  background: #1e222d;
-  border: 1px solid #2b3139;
+  background: var(--qt-bg-card);
+  border: 1px solid var(--qt-border);
   border-radius: 6px;
   padding: 10px;
   display: flex;
@@ -508,7 +508,7 @@ const poolRows = computed(() => {
 
 .cell-caption {
   font-size: 12px;
-  color: #787b86;
+  color: var(--qt-text-secondary);
   margin-bottom: 8px;
   flex-shrink: 0;
 }
@@ -540,7 +540,7 @@ const poolRows = computed(() => {
 
 .regime-desc {
   font-size: 12px;
-  color: #787b86;
+  color: var(--qt-text-secondary);
   line-height: 1.5;
 }
 

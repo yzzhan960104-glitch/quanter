@@ -413,8 +413,8 @@ async function handleSubmit() {
   margin-bottom: 16px;
   padding: 12px 14px;
   background: linear-gradient(135deg, #1e222d 0%, #232731 100%);
-  border: 1px solid #2b3139;
-  border-left: 3px solid #2962ff;   /* Quant 蓝左边条，锚定「策略核心配置」语义 */
+  border: 1px solid var(--qt-border);
+  border-left: 3px solid var(--qt-accent);   /* Quant 蓝左边条，锚定「策略核心配置」语义 */
   border-radius: 6px;
 }
 
@@ -428,7 +428,7 @@ async function handleSubmit() {
 .universe-title {
   font-size: 12px;
   font-weight: 600;
-  color: #b2b5be;
+  color: var(--qt-text-regular);
   letter-spacing: 0.5px;
 }
 
@@ -438,7 +438,7 @@ async function handleSubmit() {
   align-items: center;
   gap: 5px;
   font-size: 11px;
-  color: #26a69a;   /* 与 candlestick 阴线绿同色，传达「活跃/正常」状态 */
+  color: var(--qt-down);   /* 与 candlestick 阴线绿同色，传达「活跃/正常」状态 */
 }
 
 /* 闪烁绿点：1.6s 无限呼吸，模拟数据湖实时同步心跳（纯 CSS，零 JS 开销） */
@@ -446,7 +446,7 @@ async function handleSubmit() {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #26a69a;
+  background: var(--qt-down);
   box-shadow: 0 0 6px rgba(38, 166, 154, 0.8);
   animation: sync-pulse 1.6s ease-in-out infinite;
 }
@@ -470,21 +470,21 @@ async function handleSubmit() {
 .universe-core {
   font-size: 14px;
   font-weight: 700;
-  color: #d1d4dc;
+  color: var(--qt-text-primary);
 }
 
 .universe-desc {
   margin: 0;
   font-size: 11px;
   line-height: 1.5;
-  color: #787b86;
+  color: var(--qt-text-secondary);
 }
 
 /* tech_weights 相关样式（.weight-row / .weight-label）已随滑块块移除 */
 
 .threshold-hint {
   font-size: 12px;
-  color: #787b86;
+  color: var(--qt-text-secondary);
   margin-top: 4px;
 }
 
@@ -502,12 +502,12 @@ async function handleSubmit() {
 .matrix-table td {
   padding: 6px 4px;
   text-align: center;
-  border-bottom: 1px solid #2b3139;
+  border-bottom: 1px solid var(--qt-border);
 }
 
 .state-label {
   font-weight: 600;
-  color: #d1d4dc;
+  color: var(--qt-text-primary);
   white-space: nowrap;
 }
 </style>

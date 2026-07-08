@@ -195,12 +195,12 @@ const metricsLine = computed(() => {
 .bt-view { flex: 1; overflow: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
 .param-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .metrics-strip {
-  font-size: 12px; color: #26a69a; font-family: ui-monospace, Menlo, monospace;
-  background: #1e222d; border: 1px solid #2b3139; border-radius: 4px; padding: 6px 10px;
+  font-size: 12px; color: var(--qt-down); font-family: ui-monospace, Menlo, monospace;
+  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 4px; padding: 6px 10px;
 }
-.chart-card { background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 8px; }
-.chart-title { font-size: 12px; color: #d1d4dc; margin-bottom: 4px; }
+.chart-card { background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 8px; }
+.chart-title { font-size: 12px; color: var(--qt-text-primary); margin-bottom: 4px; }
 .chart { height: 340px; }
 .chart.small { height: 180px; }
-.empty { color: #787b86; padding: 48px; text-align: center; font-size: 12px; }
+.empty { color: var(--qt-text-secondary); padding: 48px; text-align: center; font-size: 12px; }
 </style>

@@ -81,5 +81,5 @@ const tagLabel = (s: DatasetStatus) => TAG_LABEL[s]
 </template>
 
 <style scoped>
-.muted { color: #787b86; }
+.muted { color: var(--qt-text-secondary); }
 </style>

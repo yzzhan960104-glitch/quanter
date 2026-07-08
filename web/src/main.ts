@@ -13,9 +13,14 @@ import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 // Element Plus 暗黑模式 CSS 变量覆盖（html.dark 生效）
 import 'element-plus/theme-chalk/dark/css-vars.css'
-// 全局终端主题层：必须在 EP dark css-vars 之后 import，靠后定义覆盖 EP 默认变量
-// （TradingView 极夜黑调色板 + 等宽数字 + 表格/按钮加固，详见 styles/terminal.css）
+// 业务 design token 层（--qt-* 命名空间）：色/间距/圆角/字体单一真相源。
+// 必须在 terminal.css 之前——terminal.css 的全局 :focus-visible 用 var(--qt-accent)。
+import './styles/tokens.css'
+// 全局终端主题层：覆盖 EP dark css-vars（极夜黑+Quant 蓝）+ 等宽数字 + a11y（focus/reduced-motion）。
+// 必须在 EP dark css-vars 之后 import，靠后定义覆盖 EP 默认变量。
 import './styles/terminal.css'
+// 业务工具类（qt-card / qt-view-shell / qt-section-title），消除重复 scoped CSS。
+import './styles/utils.css'
 import App from './App.vue'
 import router from './router'
 import { initTerminalDarkTheme } from './theme/echarts-terminal-dark'

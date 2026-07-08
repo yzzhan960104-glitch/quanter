@@ -260,7 +260,7 @@ const weightChartOption = computed(() => {
 /* 暗黑终端：透明底（继承父级极夜黑/卡片底），去亮色阴影，避免白底刺眼 */
 .chart-section {
   background: transparent;
-  border: 1px solid #2b3139;
+  border: 1px solid var(--qt-border);
   border-radius: 6px;
   padding: 16px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
@@ -269,7 +269,7 @@ const weightChartOption = computed(() => {
 .chart-title {
   font-size: 15px;
   font-weight: 600;
-  color: #d1d4dc;
+  color: var(--qt-text-primary);
   margin: 0 0 12px 0;
 }
 

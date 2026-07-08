@@ -63,26 +63,26 @@ const pnlClass = (v: number | undefined | null) => {
 /* 透明底：嵌在 TerminalView 右栏悬浮卡片（.panel-right #1e222d）内，避免卡中卡色阶断层 */
 .pos-card {
   background: transparent;
-  border: 1px solid #2b3139;
+  border: 1px solid var(--qt-border);
   border-radius: 6px;
   padding: 6px;
 }
-.title { color: #787b86; font-size: 12px; margin-bottom: 4px; }
-.empty { color: #787b86; font-size: 12px; padding: 8px; text-align: center; }
+.title { color: var(--qt-text-secondary); font-size: 12px; margin-bottom: 4px; }
+.empty { color: var(--qt-text-secondary); font-size: 12px; padding: 8px; text-align: center; }
 
 .pos-item { padding: 4px 0; }
 /* 多标的（组合模式预留）用虚线分隔 */
-.pos-item + .pos-item { border-top: 1px dashed #2b3139; margin-top: 4px; padding-top: 6px; }
-.pos-symbol { color: #d1d4dc; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.pos-item + .pos-item { border-top: 1px dashed var(--qt-border); margin-top: 4px; padding-top: 6px; }
+.pos-symbol { color: var(--qt-text-primary); font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 
 /* 2×4 grid：8 个 key-value 紧凑排在 250px 右栏内 */
 .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 8px; }
 .kv { display: flex; justify-content: space-between; font-size: 11px; line-height: 18px; }
-.kv span { color: #787b86; }
-.kv b { color: #d1d4dc; font-variant-numeric: tabular-nums; font-weight: 500; }
+.kv span { color: var(--qt-text-secondary); }
+.kv b { color: var(--qt-text-primary); font-variant-numeric: tabular-nums; font-weight: 500; }
 
 /* 浮盈染色：与 MetricCards 同款绩效盈亏语义（绿=盈利 / 红=亏损），非 K 线涨跌色 */
-.kv b.profit { color: #26a69a; }
-.kv b.loss { color: #ef5350; }
-.kv b.neutral { color: #d1d4dc; }
+.kv b.profit { color: var(--qt-down); }
+.kv b.loss { color: var(--qt-up); }
+.kv b.neutral { color: var(--qt-text-primary); }
 </style>

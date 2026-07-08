@@ -20,6 +20,11 @@ fredapi>=0.5.0
 
 # A 股数据源 (Tushare Pro)
 tushare>=1.4.0
+# tnskhdata：Tushare 代理库（API 完全兼容，10000 积分，优先于直连 tushare）。
+# data/_tushare_compat.get_pro() 在 TNSKHDATA_TOKEN 配置时走代理分支；stock_basic/
+# daily_basic/daily/adj_factor 等接口需其高积分解锁，直连 tushare 积分不足拉不动。
+# 纯 Python wheel（py3-none-any），3.10 venv 可直接装。依赖 bs4/lxml/pandas/requests。
+tnskhdata>=0.1.1
 
 # 环境变量加载（API 凭证隔离，绝不硬编码）
 python-dotenv>=1.0.0

@@ -15,7 +15,14 @@ const emit = defineEmits<{ (e: 'click', f: FactorSummary): void }>()
 </script>
 
 <template>
-  <div class="factor-card" :class="factor.status" @click="emit('click', factor)">
+  <div
+    class="factor-card"
+    :class="factor.status"
+    role="button"
+    tabindex="0"
+    @click="emit('click', factor)"
+    @keyup.enter="emit('click', factor)"
+  >
     <div class="status-bar" />
     <div class="card-body">
       <div class="row1">
@@ -37,30 +44,30 @@ const emit = defineEmits<{ (e: 'click', f: FactorSummary): void }>()
 .factor-card {
   position: relative;
   display: flex;
-  background: #1e222d;
-  border: 1px solid #2b3139;
+  background: var(--qt-bg-card);
+  border: 1px solid var(--qt-border);
   border-radius: 6px;
   cursor: pointer;
   transition: border-color 0.15s, transform 0.1s;
   overflow: hidden;
 }
-.factor-card:hover { border-color: #2962ff; transform: translateY(-1px); }
+.factor-card:hover { border-color: var(--qt-accent); transform: translateY(-1px); }
 .status-bar { width: 3px; flex-shrink: 0; }
-.factor-card.live .status-bar { background: #26a69a; }
-.factor-card.training .status-bar { background: #d29922; }
-.factor-card.deprecated .status-bar { background: #787b86; }
+.factor-card.live .status-bar { background: var(--qt-down); }
+.factor-card.training .status-bar { background: var(--qt-warn); }
+.factor-card.deprecated .status-bar { background: var(--qt-text-secondary); }
 
 .card-body { padding: 8px 10px; flex: 1; min-width: 0; }
 .row1 { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.row1 .label { font-size: 13px; font-weight: 600; color: #d1d4dc; }
+.row1 .label { font-size: 13px; font-weight: 600; color: var(--qt-text-primary); }
 .row2 { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 4px; }
 .row2 .name {
-  font-size: 11px; color: #787b86; font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px; color: var(--qt-text-secondary); font-family: ui-monospace, Menlo, monospace;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .badge {
   font-size: 10px; padding: 1px 6px; border-radius: 3px; flex-shrink: 0;
-  background: #2a2e39; color: #787b86;
+  background: var(--qt-bg-overlay); color: var(--qt-text-secondary);
 }
-.badge.grid { background: rgba(38, 166, 154, 0.15); color: #26a69a; }
+.badge.grid { background: rgba(38, 166, 154, 0.15); color: var(--qt-down); }
 </style>

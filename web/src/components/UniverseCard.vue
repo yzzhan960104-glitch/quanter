@@ -25,8 +25,8 @@
 
 <style scoped>
 .universe-card {
-  border: 1px solid #2b3139;
-  border-left: 3px solid #2962ff;   /* Quant 蓝左条锚定"动态池"语义 */
+  border: 1px solid var(--qt-border);
+  border-left: 3px solid var(--qt-accent);   /* Quant 蓝左条锚定"动态池"语义 */
   border-radius: 6px;
   padding: 10px 12px;
   background: #1a1f2c;
@@ -34,16 +34,16 @@
 }
 .uc-head { display: flex; align-items: center; gap: 6px; }
 .uc-icon { font-size: 14px; }
-.uc-title { font-size: 13px; font-weight: 600; color: #d1d4dc; }
+.uc-title { font-size: 13px; font-weight: 600; color: var(--qt-text-primary); }
 .uc-desc {
-  font-size: 11px; color: #787b86; line-height: 1.5; margin-top: 6px;
+  font-size: 11px; color: var(--qt-text-secondary); line-height: 1.5; margin-top: 6px;
 }
 .uc-desc code {
-  background: #131722; padding: 1px 4px; border-radius: 3px;
-  color: #26a69a; font-family: ui-monospace, Menlo, monospace;
+  background: var(--qt-bg-page); padding: 1px 4px; border-radius: 3px;
+  color: var(--qt-down); font-family: ui-monospace, Menlo, monospace;
 }
 .uc-tag {
   display: inline-block; margin-top: 6px; font-size: 10px;
-  color: #d29922; border: 1px solid #d2992244; border-radius: 3px; padding: 1px 6px;
+  color: var(--qt-warn); border: 1px solid #d2992244; border-radius: 3px; padding: 1px 6px;
 }
 </style>

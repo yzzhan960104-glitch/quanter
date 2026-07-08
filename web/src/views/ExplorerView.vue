@@ -230,14 +230,14 @@ const icChartOption = computed(() => {
 </template>
 
 <style scoped>
-.explorer-shell { padding: 12px; height: 100%; overflow: auto; background: #131722; }
+.explorer-shell { padding: 12px; flex: 1; overflow: auto; background: var(--qt-bg-page); }
 .param-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-.summary { font-size: 12px; color: #26a69a; font-family: ui-monospace, Menlo, monospace; }
+.summary { font-size: 12px; color: var(--qt-down); font-family: ui-monospace, Menlo, monospace; }
 .chart-card {
-  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px;
+  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px;
   margin-bottom: 12px; padding: 8px;
 }
-.chart-title { font-size: 13px; color: #d1d4dc; margin-bottom: 6px; }
+.chart-title { font-size: 13px; color: var(--qt-text-primary); margin-bottom: 6px; }
 .chart { height: 380px; }
-.empty { color: #6e7681; padding: 40px; text-align: center; }
+.empty { color: var(--qt-text-secondary); padding: 40px; text-align: center; }
 </style>

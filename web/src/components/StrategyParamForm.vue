@@ -165,7 +165,7 @@ function setField(key: string, v: unknown) {
 <style scoped>
 .spf-loading, .spf-empty {
   padding: 12px;
-  color: #787b86;
+  color: var(--qt-text-secondary);
   font-size: 13px;
   text-align: center;
 }

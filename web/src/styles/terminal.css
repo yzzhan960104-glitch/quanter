@@ -87,8 +87,8 @@ body,
    * 不一致（比例字）导致列视觉错位、扫读困难。等宽数字是交易终端的硬性基线。
    */
   font-variant-numeric: tabular-nums;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  /* 字体栈走 --qt-font-sans（Inter 优先，离线降级系统栈），定义见 tokens.css */
+  font-family: var(--qt-font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -163,4 +163,33 @@ html.dark .el-button--primary {
 * {
   scrollbar-width: thin;
   scrollbar-color: #2b3139 transparent;
+}
+
+/* ===== 全局可访问性（a11y）补强 ===== */
+/*
+ * :focus-visible 键盘焦点环——此前全仓 0 处，键盘用户无法看见焦点位置。
+ * Why :focus-visible 而非 :focus：仅在键盘导航（Tab）时显示，鼠标点击不触发，
+ *   兼顾键盘可达与鼠标整洁（WCAG 2.4.7；skill focus-states）。
+ * 用 --qt-accent（Quant 蓝）做焦点色，与主色一致、高对比可辨。
+ */
+:focus-visible {
+  outline: 2px solid var(--qt-accent);
+  outline-offset: 2px;
+  border-radius: var(--qt-radius-sm);
+}
+
+/*
+ * prefers-reduced-motion——此前全仓仅 1 处局部处理。尊重系统「减少动效」偏好，
+ * 把所有过渡/动画压到近零，避免前庭不适（WCAG 2.3.3；skill reduced-motion）。
+ * 覆盖 hover translateY、pulse 熔断闪烁、treemap 入场等全部动效。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

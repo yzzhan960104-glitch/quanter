@@ -81,3 +81,8 @@ logs/
 .ref
 # tokensave MCP 运行时索引（机器特定、持续变化的二进制 db，不入库）
 .tokensave/
+
+xtquant
+emt_api_python
+xtquant_250807.rar
+EMT_API_Python_V2.27.0.zip

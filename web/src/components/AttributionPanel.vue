@@ -158,21 +158,21 @@ const money = (v: number) => v.toLocaleString('zh-CN', { maximumFractionDigits: 
 .attribution { display: flex; flex-direction: column; gap: 12px; }
 .slices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .slice-card {
-  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 10px 12px;
+  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 10px 12px;
 }
-.slice-title { font-size: 11px; color: #787b86; margin-bottom: 6px; }
+.slice-title { font-size: 11px; color: var(--qt-text-secondary); margin-bottom: 6px; }
 .slice-body { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.slice-body.profit { color: #26a69a; }
-.slice-body.loss { color: #ef5350; }
-.slice-detail { font-size: 11px; color: #b2b5be; margin-top: 4px; font-family: ui-monospace, Menlo, monospace; }
-.slice-rationale { font-size: 11px; color: #787b86; margin-top: 2px; }
-.slice-empty { font-size: 12px; color: #787b86; padding: 6px 0; }
+.slice-body.profit { color: var(--qt-down); }
+.slice-body.loss { color: var(--qt-up); }
+.slice-detail { font-size: 11px; color: var(--qt-text-regular); margin-top: 4px; font-family: ui-monospace, Menlo, monospace; }
+.slice-rationale { font-size: 11px; color: var(--qt-text-secondary); margin-top: 2px; }
+.slice-empty { font-size: 12px; color: var(--qt-text-secondary); padding: 6px 0; }
 
-.trade-section { background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 8px; }
-.section-title { font-size: 12px; color: #d1d4dc; font-weight: 600; margin-bottom: 6px; padding: 0 4px; }
-.mono { font-family: ui-monospace, Menlo, monospace; color: #b2b5be; }
+.trade-section { background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 8px; }
+.section-title { font-size: 12px; color: var(--qt-text-primary); font-weight: 600; margin-bottom: 6px; padding: 0 4px; }
+.mono { font-family: ui-monospace, Menlo, monospace; color: var(--qt-text-regular); }
 .rationale-cell {
-  font-size: 11px; color: #b2b5be; cursor: help;
+  font-size: 11px; color: var(--qt-text-regular); cursor: help;
   display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 </style>

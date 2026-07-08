@@ -98,11 +98,11 @@ onBeforeUnmount(() => {
   align-items: baseline;
   gap: 12px;
 }
-.page-header .title { font-size: 15px; font-weight: 700; color: #d1d4dc; }
-.page-header .sub { font-size: 11px; color: #787b86; flex: 1; }
+.page-header .title { font-size: 15px; font-weight: 700; color: var(--qt-text-primary); }
+.page-header .sub { font-size: 11px; color: var(--qt-text-secondary); flex: 1; }
 .table-wrap {
-  background: #1e222d;
-  border: 1px solid #2b3139;
+  background: var(--qt-bg-card);
+  border: 1px solid var(--qt-border);
   border-radius: 6px;
   padding: 8px;
 }

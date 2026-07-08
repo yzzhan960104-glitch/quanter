@@ -95,13 +95,13 @@ const { loading, result, error, execute } = useTerminalState()
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: #131722; /* 极夜黑底，衬托 #1e222d 卡片 */
+  background: var(--qt-bg-page); /* 极夜黑底，衬托 #1e222d 卡片 */
 }
 
 /* 通用面板：悬浮卡片（暗底 + 极弱灰边 + 圆角 + 纵向可滚动） */
 .panel {
-  background: #1e222d;
-  border: 1px solid #2b3139;
+  background: var(--qt-bg-card);
+  border: 1px solid var(--qt-border);
   border-radius: 6px;
   overflow: auto;
 }
@@ -127,8 +127,8 @@ const { loading, result, error, execute } = useTerminalState()
 /* 图表区与日志区：各自独立子卡片，去贴边感；内部 hidden 防止 ECharts 撑爆容器 */
 .center-chart,
 .center-logs {
-  background: #1e222d;
-  border: 1px solid #2b3139;
+  background: var(--qt-bg-card);
+  border: 1px solid var(--qt-border);
   border-radius: 6px;
   overflow: hidden;
 }
@@ -140,7 +140,7 @@ const { loading, result, error, execute } = useTerminalState()
 
 /* 错误提示：终端红字，低饱和度避免抢眼 */
 .err-tip {
-  color: #ef5350;
+  color: var(--qt-up);
   font-size: 12px;
   padding: 4px;
 }

@@ -1,60 +1,95 @@
 <script setup lang="ts">
 /**
- * 应用根壳（T17 路由恢复）
+ * 应用根壳（路由导航 + 出口）
  *
- * 职责收敛为：
- *   1. 顶部导航条（在「回测终端」/「宏观驾驶舱」两页间切换）
+ * 职责：
+ *   1. 顶部导航条：在 9 个功能页间切换（图标 + 文字双标，按使用动线分组）
  *   2. <router-view/> 渲染当前路由对应的视图
  *
+ * 导航信息架构（整体优化）：
+ * - 左段「研究/配置」8 项：回测终端 → 归因回测 → AI 复盘 → 因子沙盒 → 因子 → 策略 →
+ *   宏观驾驶舱 → 数据湖（按研究动线：回测复盘链 → 因子策略构建 → 数据宏观面）。
+ * - 右段「实盘」1 项：实盘中控。用 .nav-divider 细分隔线物理区隔——这是全站唯一会
+ *   真实下单的高危入口，空间区隔降低误点风险（skill destructive-nav-separation）。
+ * - 每项 EP 官方图标（@element-plus/icons-vue，按需引入）+ 文字双标，提升识别度
+ *   （skill nav-label-icon：禁 icon-only 导航，损害发现性）。
+ *
  * Why 抽空 App.vue（上一轮工业级蜕变曾把终端 Grid 直接放在 App.vue）：
- * - T17 引入 /dashboard 宏观驾驶舱，需恢复 vue-router 双页结构；
- * - 把终端 Grid 下移到 views/TerminalView.vue，App.vue 退化为纯路由壳，
- *   保持「根组件只承载导航与路由出口」这一 Vue 项目的标准骨架。
+ * - 引入多路由后需 vue-router 多页结构，App.vue 退化为纯路由壳，
+ *   保持「根组件只承载导航与路由出口」的 Vue 标准骨架。
  * - 终端状态共享经 useTerminalState 模块级单例，视图切换不丢回测状态。
  */
 import { useRoute } from 'vue-router'
-import { computed } from 'vue'
+import { computed, type Component } from 'vue'
+// 导航图标：EP 官方图标包，按需引入（非重型依赖，EP 生态标准配套）
+import {
+  TrendCharts, PieChart, MagicStick, Search, Histogram,
+  SetUp, DataBoard, Files, Monitor,
+} from '@element-plus/icons-vue'
 
-// 当前路由名（用于高亮激活的导航项）
 const route = useRoute()
 const activeName = computed(() => route.path)
+
+// 导航项类型：路由 + 文字 + 图标组件
+interface NavItem {
+  to: string
+  label: string
+  icon: Component
+}
+
+// 左段：研究/配置（回测复盘链 → 因子策略构建 → 数据宏观面）
+const researchNav: NavItem[] = [
+  { to: '/',           label: '回测终端',   icon: TrendCharts },
+  { to: '/backtest',   label: '归因回测',   icon: PieChart },
+  { to: '/review',     label: 'AI 复盘',    icon: MagicStick },
+  { to: '/explorer',   label: '因子沙盒',   icon: Search },
+  { to: '/factors',    label: '因子',       icon: Histogram },
+  { to: '/strategies', label: '策略',       icon: SetUp },
+  { to: '/dashboard',  label: '宏观驾驶舱', icon: DataBoard },
+  { to: '/data',       label: '数据湖',     icon: Files },
+]
+
+// 右段：实盘（唯一真实下单的高危入口，分隔线区隔）
+const liveNav: NavItem[] = [
+  { to: '/live', label: '实盘中控', icon: Monitor },
+]
 </script>
 
 <template>
   <div class="app-shell">
-    <!-- 顶部导航：暗黑细条，两个 router-link 切换 / 与 /dashboard -->
+    <!-- 顶部导航：暗黑细条，brand + 研究/配置段 ｜ 实盘段 -->
     <nav class="top-nav">
       <span class="nav-brand">Quanter</span>
-      <router-link to="/" class="nav-item" :class="{ active: activeName === '/' }">
-        回测终端
+
+      <!-- 研究/配置段 -->
+      <router-link
+        v-for="item in researchNav"
+        :key="item.to"
+        :to="item.to"
+        class="nav-item"
+        :class="{ active: activeName === item.to }"
+      >
+        <el-icon :size="14"><component :is="item.icon" /></el-icon>
+        <span>{{ item.label }}</span>
       </router-link>
-      <router-link to="/dashboard" class="nav-item" :class="{ active: activeName === '/dashboard' }">
-        宏观驾驶舱
-      </router-link>
-      <router-link to="/explorer" class="nav-item" :class="{ active: activeName === '/explorer' }">
-        因子沙盒
-      </router-link>
-      <router-link to="/live" class="nav-item" :class="{ active: activeName === '/live' }">
-        实盘中控
-      </router-link>
-      <router-link to="/data" class="nav-item" :class="{ active: activeName === '/data' }">
-        数据湖
-      </router-link>
-      <router-link to="/factors" class="nav-item" :class="{ active: activeName === '/factors' }">
-        因子
-      </router-link>
-      <router-link to="/strategies" class="nav-item" :class="{ active: activeName === '/strategies' }">
-        策略
-      </router-link>
-      <router-link to="/backtest" class="nav-item" :class="{ active: activeName === '/backtest' }">
-        归因回测
-      </router-link>
-      <router-link to="/review" class="nav-item" :class="{ active: activeName === '/review' }">
-        AI 复盘
+
+      <!-- 分隔线：物理区隔实盘高危入口 -->
+      <span class="nav-divider" aria-hidden="true" />
+
+      <!-- 实盘段 -->
+      <router-link
+        v-for="item in liveNav"
+        :key="item.to"
+        :to="item.to"
+        class="nav-item"
+        :class="{ active: activeName === item.to }"
+      >
+        <el-icon :size="14"><component :is="item.icon" /></el-icon>
+        <span>{{ item.label }}</span>
       </router-link>
     </nav>
 
-    <!-- 路由出口：TerminalView / DashboardView 在此渲染 -->
+    <!-- 路由出口：各 View 在此渲染 -->
     <router-view />
   </div>
 </template>
@@ -67,44 +102,63 @@ const activeName = computed(() => route.path)
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: #131722; /* 极夜黑，与 --el-bg-color-page 同源 */
+  background: var(--qt-bg-page);
 }
 
 /* 顶部导航：固定高度，卡片底色 + 极弱灰下边框分隔主体 */
 .top-nav {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 2px;
   height: 36px;
-  padding: 0 16px;
-  background: #1e222d;
-  border-bottom: 1px solid #2b3139;
+  padding: 0 var(--qt-space-3);
+  background: var(--qt-bg-card);
+  border-bottom: 1px solid var(--qt-border);
   flex-shrink: 0;
 }
 
 .nav-brand {
   font-size: 13px;
   font-weight: 700;
-  color: #2962ff; /* Quant 蓝，与全局 primary 同源 */
+  color: var(--qt-accent); /* Quant 蓝，与全局 primary 同源 */
   letter-spacing: 0.5px;
+  margin-right: var(--qt-space-2);
 }
 
-/* 导航项：默认次要灰，激活态高亮 Quant 蓝（低透蓝底锚定当前页） */
+/*
+ * 导航项：图标 + 文字双标（inline-flex 对齐），默认次要灰，hover 抬升底色，
+ * 激活态高亮 Quant 蓝（低透蓝底锚定当前页）。
+ * 焦点环由全局 :focus-visible 覆盖（terminal.css），键盘 Tab 可见。
+ */
 .nav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
-  color: #787b86;
+  color: var(--qt-text-secondary);
   text-decoration: none;
-  padding: 4px 8px;
-  border-radius: 4px;
-  transition: color 0.15s;
+  padding: 4px var(--qt-space-2);
+  border-radius: var(--qt-radius-sm);
+  white-space: nowrap;
+  transition: color 0.15s, background-color 0.15s;
 }
 
 .nav-item:hover {
-  color: #b2b5be;
+  color: var(--qt-text-regular);
+  background: var(--qt-bg-elevated);
 }
 
 .nav-item.active {
-  color: #2962ff;
+  color: var(--qt-accent);
+  /* rgba(41,98,255,0.12) = --qt-accent (#2962ff) @ 12% 透明，锚定当前页 */
   background: rgba(41, 98, 255, 0.12);
+}
+
+/* 分隔线：区隔实盘高危入口（destructive-nav-separation） */
+.nav-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--qt-border);
+  margin: 0 var(--qt-space-2);
 }
 </style>

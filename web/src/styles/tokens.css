@@ -1,0 +1,84 @@
+/**
+ * 业务 Design Token 层（--qt-* 命名空间）
+ *
+ * 定位：与 Element Plus 的 --el-* 变量「平行」，互不污染。
+ *   - --el-* 是「框架层 token」，由 styles/terminal.css 覆盖（极夜黑+Quant 蓝）；
+ *   - --qt-* 是「业务层 token」，供所有 .vue 组件引用，是配色/间距/圆角/字体的单一真相源。
+ *
+ * 设计意图（反黑盒 + 单一真相源）：
+ * - 此前 245 处裸 hex 散落 23 个 .vue 文件，已出现 #787b86 vs #6e7681 悄无声息的漂移。
+ *   抽成 --qt-* 后，任何配色微调改这一处即全站生效，杜绝字面量漂移。
+ * - 所有色值「直接取自 terminal.css 已在用的值」，迁移后视觉零变化（不是重新设计配色）。
+ *
+ * Why 挂在 html.dark 作用域：本项目全局强制暗黑（main.ts 给 <html> 挂 .dark），
+ *   与 terminal.css 的 --el-* 覆盖同级作用域，保证 :root/html.dark 下均能解析。
+ *
+ * 命名约定：
+ *   --qt-bg-*     中性壳层（page/card/overlay/elevated）
+ *   --qt-border*  边框（含 strong 加强态）
+ *   --qt-text-*   文字层级（primary/regular/secondary/placeholder）
+ *   --qt-up/down  A 股交易语义（红涨/绿跌，独立于 EP success/danger，绝不混用）
+ *   --qt-accent   Quant 蓝主色（= --el-color-primary，业务层别名）
+ *   --qt-warn     警示/模拟模式
+ *   --qt-space-*  4/8 间距节奏
+ *   --qt-radius*  圆角（sm/默认/lg）
+ *   --qt-font-*   字体栈（Inter 优先，离线降级系统栈）
+ *   --qt-fs-*     字号（title/body/caption）
+ */
+html.dark {
+  /* —— 中性壳层 —— */
+  --qt-bg-page: #131722;        /* 页面底（极夜黑，= --el-bg-color-page） */
+  --qt-bg-card: #1e222d;        /* 卡片/组件底（= --el-bg-color） */
+  --qt-bg-overlay: #2a2e39;     /* 浮层/表头/输入底（= --el-bg-color-overlay） */
+  --qt-bg-elevated: #232731;    /* 抬升层：表头/active/hover（= --el-fill-color-extra-light） */
+
+  /* —— 边框（极弱灰，打破 EP 默认高对比蓝灰边） —— */
+  --qt-border: #2b3139;         /* = --el-border-color */
+  --qt-border-strong: #363a45;  /* hover/聚焦加强（= --el-border-color-dark） */
+
+  /* —— 文字层级（沿用 TradingView 色阶） —— */
+  --qt-text-primary: #d1d4dc;   /* = --el-text-color-primary */
+  --qt-text-regular: #b2b5be;   /* = --el-text-color-regular */
+  --qt-text-secondary: #787b86; /* = --el-text-color-secondary（次级说明/空态） */
+  --qt-text-placeholder: #5d606b; /* = --el-text-color-placeholder */
+
+  /* —— 语义/交易色 —— */
+  /*
+   * Why 独立命名 up/down 而非复用 EP success/danger：
+   *   A 股「红涨绿跌」与 EP「绿=success/红=danger」的国际语义正好相反。若把涨色绑到
+   *   --el-color-danger，会让 el-alert/el-tag 的 danger 着色逻辑错乱（危险提示变绿）。
+   *   故交易涨跌色独立成 --qt-up/--qt-down，与 EP 语义色彻底解耦。
+   */
+  --qt-accent: #2962ff;         /* Quant 蓝主色（= --el-color-primary），业务层别名 */
+  --qt-up: #ef5350;             /* 涨/正盈亏（A 股红） */
+  --qt-down: #26a69a;           /* 跌/负盈亏（A 股绿） */
+  --qt-warn: #d29922;           /* 警示/模拟模式/网关未装配 */
+
+  /* —— 间距（4/8 节奏，消除此前 6/8/10/12/14/16px 六种散乱取值） —— */
+  --qt-space-1: 4px;
+  --qt-space-2: 8px;
+  --qt-space-3: 12px;
+  --qt-space-4: 16px;
+  --qt-space-5: 20px;
+  --qt-space-6: 24px;
+
+  /* —— 圆角 —— */
+  --qt-radius-sm: 4px;          /* tag/小元素/输入 */
+  --qt-radius: 6px;             /* 卡片（默认） */
+  --qt-radius-lg: 8px;          /* 大容器 */
+
+  /* —— 字体栈 —— */
+  /*
+   * Inter 优先：fintech/trading 公认最佳字体，数字字形与等宽表现优于系统字体。
+   * 离线/内网降级：Inter 加载失败时，后续 -apple-system/Segoe UI/PingFang SC 自动接管，
+   *   不阻断功能（本项目数据源多为内网代理，联网拉字体不可靠，故保留稳健降级链）。
+   */
+  --qt-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --qt-font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* —— 字号 —— */
+  --qt-fs-title: 13px;          /* 区块小标题统一口径（消除此前 12/13/15px 三档分裂） */
+  --qt-fs-body: 13px;
+  --qt-fs-caption: 11px;        /* 次级说明/标签 */
+}

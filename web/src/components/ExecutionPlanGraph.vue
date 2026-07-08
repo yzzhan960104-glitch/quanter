@@ -101,5 +101,5 @@ const chartOption = computed(() => {
 
 <style scoped>
 .plan-chart { height: 360px; }
-.empty { color: #787b86; padding: 24px; text-align: center; font-size: 12px; }
+.empty { color: var(--qt-text-secondary); padding: 24px; text-align: center; font-size: 12px; }
 </style>
