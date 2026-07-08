@@ -47,7 +47,18 @@ class StrategyConfig(BaseModel):
     )
     max_pattern_depth: float = Field(
         0.30,
-        description="形态最深幅度(防失效长趋势；>30% 通常意味基本面恶化、需另套逻辑)",
+        description="形态最深幅度(防失效长趋势；>30% 通常意味基本面恶化、需另套逻辑)；"
+                    "W 底判定专用（W 底颈线高度比天然 < 30%）",
+    )
+    hs_max_pattern_depth: float = Field(
+        1.0,
+        description=(
+            "头肩底 depth 宽阈值（Task 7 follow-up concern 2）。物理意图：头肩底头部幅度"
+            "（颈线均价 vs 头底最低）天然深于 W 底颈线高度比——头底是整个形态区间最低、"
+            "且两肩之上，故 depth 常达 50%~100%。用 W 底的 max_pattern_depth=0.30 会"
+            "误否决合法头肩底。PatternScreener 调 head_shoulder.detect 时用此宽阈值，"
+            "调 w_bottom.detect 时仍用 max_pattern_depth。默认 1.0 容纳标准头肩底。"
+        ),
     )
     w_price_tolerance: float = Field(
         0.02,
