@@ -31,8 +31,6 @@ from server.api.v1.logs import (
     log_stream_hub,
     router as logs_router,
 )
-from strategies.loader import StrategyLoader
-from server.api.v1.strategies import router as strategies_router
 from server.api.v1.explorer import router as explorer_router
 # 宏观/板块/因子只读端点（T16）：读内存湖 + CreditRegime，零写入，
 # 供给前端驾驶舱（T17 /dashboard）宏观灯/信贷曲线/板块流/ATR 四视图。
@@ -53,15 +51,10 @@ from core.notifier import build_default_manager
 async def lifespan(app: FastAPI):
     """应用生命周期钩子（替代已废弃的 @app.on_event("startup")）
 
-    Why 集中扫描：策略注册表进程内不变，启动期 importlib 一次性扫描写入
-    app.state.strategy_loader，后续 API 路由只读，避免每请求重复扫描。
+    Why 集中扫描：因子注册表进程内不变，启动期 importlib 一次性扫描写入
+    app.state.factor_loader，后续 API 路由只读，避免每请求重复扫描。
     模块④（调度引擎）会在同一 lifespan 追加 scheduler 启动/关闭逻辑。
     """
-    # 启动：扫描策略注册到 app.state
-    loader = StrategyLoader()
-    loader.scan()
-    app.state.strategy_loader = loader
-
     # 启动：扫描因子注册表到 app.state（层级二·决策②）
     # importlib 扫 factors 子模块，触发各 @register_factor 副作用注册到全局 _FACTOR_REGISTRY；
     # 后续 /factors/* 路由只读 app.state.factor_loader，避免每请求重复扫描。
@@ -152,7 +145,6 @@ app.add_middleware(
 # API 版本化前缀：/api/v1/
 app.include_router(backtest_router, prefix="/api/v1")
 app.include_router(portfolio_router, prefix="/api/v1")
-app.include_router(strategies_router, prefix="/api/v1")
 app.include_router(logs_router, prefix="/api/v1")
 # 因子探索沙盒（Celery 派发 + Redis 宕机降级）：内部对 Redis 不可用做了
 # fire_and_forget 告警 + 线程池降级，无 Redis 也能挂载、不阻断 lifespan。
