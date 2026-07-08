@@ -39,8 +39,11 @@ def test_sse_dumps_pydantic_model_structured():
     """pydantic 模型经 jsonable_encoder 转为结构化 JSON（result 帧场景）。
 
     回归：原裸 default=str 会把整个模型 str() 成一坨字符串，前端拿不到对象。
+    注：NavPoint 原 server.schemas.backtest 已在 Phase 1·Task 4 删除，现内联于
+    server.schemas.portfolio（Task 5 将整体删 portfolio）；此处仅验证 sse_dumps 对
+    pydantic 模型的结构化序列化契约，模型来源无关紧要。
     """
-    from server.schemas.backtest import NavPoint
+    from server.schemas.portfolio import NavPoint
     frame = sse_dumps({
         "type": "result",
         "data": NavPoint(date="2023-01-01", nav=1.0, return_=0.0, cumulative_return=0.0),

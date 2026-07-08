@@ -20,7 +20,6 @@ from starlette.concurrency import run_in_threadpool
 
 from server.schemas.portfolio import PortfolioRequest, PortfolioResponse
 from server.services.portfolio_service import run_portfolio_backtest
-from server.core.config import API_CONFIG
 
 router = APIRouter(prefix="/portfolio", tags=["组合回测"])
 

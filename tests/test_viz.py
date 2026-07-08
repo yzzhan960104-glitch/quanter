@@ -2,14 +2,16 @@
 
 覆盖范围：
 - 交互式图表（净值曲线、滚动指标、信号对比、热力图）
-- 报告生成（HTML、文本）
+
+注：通用回测 HTML/文本报告测试（TestReportGenerator）已在蔡森专精化
+Phase 1·Task 4 随 viz.report.ReportGenerator 整体删除。
 """
 import pytest
 import numpy as np
 import pandas as pd
 from datetime import datetime
 
-from viz import InteractiveChart, ReportGenerator
+from viz import InteractiveChart
 
 
 @pytest.fixture
@@ -64,51 +66,6 @@ def sample_factor_attribution():
         "fused_correlation": 0.4,
         "tech_contribution": 0.21,
         "macro_contribution": 0.06,
-    }
-
-
-@pytest.fixture
-def sample_result():
-    """生成示例回测结果"""
-    dates = pd.date_range("2023-01-01", periods=100, freq="D", tz="Asia/Shanghai")
-    np.random.seed(42)
-
-    nav_values = 1_000_000 * (1 + np.cumsum(np.random.randn(100) * 0.01))
-
-    daily_df = pd.DataFrame({
-        "nav": nav_values,
-        "cash": nav_values * 0.5,
-        "position": np.random.randint(0, 1000, 100),
-        "position_value": nav_values * 0.5,
-        "price": np.random.rand(100) * 100 + 100,
-        "signal": np.random.rand(100),
-    }, index=dates)
-
-    trades_df = pd.DataFrame({
-        "date": pd.date_range("2023-01-01", periods=20),
-        "direction": ["buy"] * 10 + ["sell"] * 10,
-        "shares": [1000] * 20,
-        "price": [100] * 20,
-        "amount": [100000] * 20,
-        "cost": [30] * 20,
-        "symbol": ["600000.SH"] * 20,
-    })
-
-    return {
-        "initial_capital": 1_000_000,
-        "final_nav": float(nav_values[-1]),
-        "total_return": 0.1,
-        "annual_return": 0.12,
-        "annual_volatility": 0.15,
-        "max_drawdown": -0.05,
-        "sharpe_ratio": 0.6,
-        "calmar_ratio": 2.4,
-        "win_rate": 0.6,
-        "profit_loss_ratio": 1.5,
-        "n_trades": 20,
-        "n_failed_trades": 0,
-        "trades": trades_df,
-        "daily_records": daily_df,
     }
 
 
@@ -213,116 +170,3 @@ class TestInteractiveChart:
         # 检查是否包含 HTML 标签
         assert "<html" in content or "<!DOCTYPE html>" in content
         assert "</html>" in content
-
-
-class TestReportGenerator:
-    """测试报告生成器"""
-
-    @pytest.fixture
-    def report_generator(self):
-        """初始化报告生成器"""
-        return ReportGenerator()
-
-    def test_initialization(self, report_generator):
-        """测试初始化"""
-        assert report_generator.chart_generator is not None
-
-    def test_generate_html_report_writes_file(self, report_generator, sample_result, tmp_path):
-        """测试生成 HTML 报告写入文件"""
-        filepath = tmp_path / "test_report.html"
-        report_generator.generate_html_report(sample_result, str(filepath), include_charts=False)
-
-        assert filepath.exists()
-
-    def test_generate_html_report_creates_valid_html(self, report_generator, sample_result, tmp_path):
-        """测试生成 HTML 报告创建有效的 HTML 文件"""
-        filepath = tmp_path / "test_report.html"
-        report_generator.generate_html_report(sample_result, str(filepath), include_charts=False)
-
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # 检查是否包含 HTML 标签
-        assert "<html" in content or "<!DOCTYPE html>" in content
-        assert "</html>" in content
-
-    def test_generate_html_report_includes_title(self, report_generator, sample_result, tmp_path):
-        """测试 HTML 报告包含标题"""
-        filepath = tmp_path / "test_report.html"
-        report_generator.generate_html_report(sample_result, str(filepath), include_charts=False)
-
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        assert "回测报告" in content
-
-    def test_generate_text_report_returns_string(self, report_generator, sample_result):
-        """测试生成文本报告返回字符串"""
-        report = report_generator.generate_text_report(sample_result)
-
-        assert isinstance(report, str)
-
-    def test_generate_text_report_includes_headers(self, report_generator, sample_result):
-        """测试文本报告包含标题"""
-        report = report_generator.generate_text_report(sample_result)
-
-        assert "回测指标报告" in report
-        assert "收益指标" in report
-
-    def test_generate_text_report_handles_empty_trades(self, report_generator):
-        """测试文本报告处理空交易记录"""
-        result = {
-            "initial_capital": 1_000_000,
-            "final_nav": 1_100_000,
-            "daily_records": pd.DataFrame({
-                "nav": [1_000_000, 1_100_000],
-            }),
-            "trades": pd.DataFrame(),
-        }
-
-        # 不应抛出异常
-        report = report_generator.generate_text_report(result)
-        assert isinstance(report, str)
-
-    def test_generate_text_report_handles_empty_daily_records(self, report_generator):
-        """测试文本报告处理空每日记录"""
-        result = {
-            "initial_capital": 1_000_000,
-            "final_nav": 1_100_000,
-            "daily_records": pd.DataFrame(),
-            "trades": pd.DataFrame(),
-        }
-
-        # 不应抛出异常
-        report = report_generator.generate_text_report(result)
-        assert isinstance(report, str)
-
-    def test_generate_html_report_with_charts(self, report_generator, sample_result, tmp_path):
-        """测试生成包含图表的 HTML 报告"""
-        filepath = tmp_path / "test_report_with_charts.html"
-        report_generator.generate_html_report(sample_result, str(filepath), include_charts=True)
-
-        # 主报告文件应存在
-        assert filepath.exists()
-
-    def test_generate_html_report_without_charts(self, report_generator, sample_result, tmp_path):
-        """测试生成不包含图表的 HTML 报告"""
-        filepath = tmp_path / "test_report_no_charts.html"
-        report_generator.generate_html_report(sample_result, str(filepath), include_charts=False)
-
-        # 主报告文件应存在
-        assert filepath.exists()
-
-    def test_generate_html_report_handles_missing_fields(self, report_generator, tmp_path):
-        """测试 HTML 报告处理缺失字段"""
-        result = {
-            "initial_capital": 1_000_000,
-            "daily_records": pd.DataFrame(),
-            "trades": pd.DataFrame(),
-        }
-
-        filepath = tmp_path / "test_report_missing_fields.html"
-        # 不应抛出异常
-        report_generator.generate_html_report(result, str(filepath), include_charts=False)
-
-        assert filepath.exists()

@@ -5,7 +5,7 @@ FastAPI 应用入口
 职责：
 1. 创建 FastAPI 应用实例
 2. 注册 CORS 中间件（允许前端 Vite dev server 跨域访问）
-3. 挂载 API 路由（/api/v1/backtest, /api/v1/portfolio）
+3. 挂载 API 路由（/api/v1/portfolio, /api/v1/logs 等）
 4. 提供健康检查端点
 
 启动方式：
@@ -24,7 +24,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from server.core.config import CORS_ORIGINS, LOG_CONFIG
 from server.core._responses import StrictJSONResponse
-from server.api.v1.backtest import router as backtest_router
 from server.api.v1.portfolio import router as portfolio_router
 from server.api.v1.logs import (
     RingBufferLogHandler,
@@ -132,7 +131,6 @@ app.add_middleware(
 
 # ============ 挂载路由 ============
 # API 版本化前缀：/api/v1/
-app.include_router(backtest_router, prefix="/api/v1")
 app.include_router(portfolio_router, prefix="/api/v1")
 app.include_router(logs_router, prefix="/api/v1")
 # 宏观/板块/因子只读端点：四端点全部只读内存湖，无网络/无写入，

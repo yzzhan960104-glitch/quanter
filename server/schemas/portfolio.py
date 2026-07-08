@@ -9,13 +9,74 @@
 设计原则：
 - state_weights 矩阵校验：每个状态的权重和为 1，且覆盖所有 symbols
 - buffer_threshold 范围约束：过大会导致组合偏离理论权重过远
-- 与 backtest.py 的共享模型通过 import 复用，不重复定义
+
+注：原 `from .backtest import MetricsResponse, NavPoint, DrawdownPoint, TradeRecord`
+共享模型已在蔡森专精化 Phase 1·Task 4 随 backtest schema 整体删除。此处将 4 个
+portfolio 仍依赖的纯响应模型就地内联（无回测引擎耦合），以解耦 server.main 导入链。
+Task 5 将整体删除 portfolio（route/service/schema），本内联仅作为中间态过渡。
 """
 from datetime import date
-from typing import Any, Dict, List
-from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .backtest import MetricsResponse, NavPoint, DrawdownPoint, TradeRecord
+
+# ============ 共享响应模型（原 server/schemas/backtest.py 内联） ============
+
+class MetricsResponse(BaseModel):
+    """核心绩效指标（从引擎结果中提取的 JSON 安全字段）"""
+    initial_capital: float
+    final_nav: float
+    total_return: float
+    annual_return: float
+    annual_volatility: float
+    max_drawdown: float
+    sharpe_ratio: float
+    calmar_ratio: float
+    win_rate: float
+    profit_loss_ratio: float
+    n_trades: int
+    n_failed_trades: int
+
+
+class NavPoint(BaseModel):
+    """
+    精简净值时序节点（仅传输绘图必需字段，避免几十 MB 冗余数据）
+
+    注意：return 是 Python 关键字，使用 return_ 作为字段名 + alias="return" 输出。
+    populate_by_name=True 允许构造时使用 Python 字段名（return_），
+    序列化时输出 JSON 键名 "return"。
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    date: str           # ISO 8601 格式 YYYY-MM-DD
+    nav: float
+    return_: float = Field(alias="return")
+    cumulative_return: float
+
+
+class DrawdownPoint(BaseModel):
+    """回撤时序节点"""
+    date: str
+    drawdown: float
+
+
+class TradeRecord(BaseModel):
+    """精简交易记录（含归因字段，层级四）。
+
+    归因三字段（全部可选，向后兼容）：
+    - signal_rationale: 入场原因（buy，如「信号驱动加仓：目标权重 80.0%」）
+    - exit_rationale:   出场原因（sell，信号减仓 或 风控平仓「触及止损」）
+    - reason:           分钟级风控平仓原始原因（_close 回填，与 exit_rationale 同源）
+    """
+    date: str
+    direction: str      # "buy" / "sell" / "failed"
+    shares: int
+    price: float
+    cost: float
+    symbol: Optional[str] = None
+    signal_rationale: Optional[str] = None
+    exit_rationale: Optional[str] = None
+    reason: Optional[str] = None
 
 
 # ============ 请求模型 ============

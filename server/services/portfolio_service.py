@@ -22,7 +22,6 @@ import numpy as np
 import pandas as pd
 
 from data.fetcher import MockDataFetcher
-from backtest.engine import BacktestEngine
 
 from server.schemas.portfolio import (
     PortfolioRequest,
@@ -111,6 +110,10 @@ def run_portfolio_backtest(req: PortfolioRequest) -> PortfolioResponse:
     signals = strategy.generate_target_weights(price_data, ctx)
 
     # ============ 步骤 4：执行回测 ============
+    # 延迟导入 BacktestEngine：Phase 1·Task 4 已删除通用 backtest 引擎，
+    # portfolio_service 整体将在 Task 5 删除；此处仅在 run_portfolio_backtest 被实际
+    # 调用时才触发导入，确保顶层 import server.main 零 ImportError（中间态）。
+    from backtest.engine import BacktestEngine
     engine = BacktestEngine(initial_capital=req.initial_capital)
     result = engine.run_portfolio(price_data=price_data, signals=signals)
     logger.info(
