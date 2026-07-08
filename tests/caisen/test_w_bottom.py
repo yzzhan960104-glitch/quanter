@@ -52,7 +52,7 @@ def _atr_const(n: int, val: float = 1.0) -> pd.Series:
 def _mk_cfg(**overrides) -> StrategyConfig:
     """构造测试用 StrategyConfig（默认量价参数对齐 StrategyConfig 真实默认值）。
 
-    设计意图（Task 6 review Minor#2 修复）：
+    设计意图（Task 6 review Minor#2 + Task 8 review Important#1）：
       - right_vol_shrink=0.8、breakout_vol_multiplier=1.5 与 StrategyConfig 的
         真实默认值完全一致，避免测试用宽松量价参数掩盖量价校验逻辑的缺陷；
       - 合成序列的 vol 显式构造为"左底放量 / 右底缩量(≤80%) / 突破日放量(≥150%)"，
@@ -62,7 +62,11 @@ def _mk_cfg(**overrides) -> StrategyConfig:
       - w_price_tolerance=0.05（右脚可在左脚 ±5% 内，right_above_left=True 时
         仅约束下限 P3 ≥ P1×(1-0.05)）；
       - ma26w_filter 默认关闭（短合成序列样本不足，由兜底用例专门覆盖）；
-      - abc_wave_detect 默认关闭（合成序列区段未必严格 C>A）。
+      - abc_wave_detect 默认关闭（合成序列区段未必严格 C>A）；
+      - max_pattern_depth 不覆盖——直接用 StrategyConfig 默认 0.50（Task 8 review
+        Important#1 校准：旧默认 0.30 会否决标准 W 底 depth≈0.467）。本测试所有合成
+        W 底序列的 depth 均落入 (0.05, 0.50]：标准序列 0.467、right_breaks_left 0.277、
+        short_span 0.22、below_ma26w ≈0.20，默认阈值全部通过。
     """
     base = dict(
         min_pattern_bars=11,
@@ -71,7 +75,7 @@ def _mk_cfg(**overrides) -> StrategyConfig:
         confirm_bars=2,
         w_price_tolerance=0.05,
         min_pattern_depth=0.05,
-        max_pattern_depth=0.50,
+        # max_pattern_depth 不覆盖 → 用 StrategyConfig 默认 0.50（合成 W 底 depth ≤ 0.467 通过）
         pattern_tension_ratio=0.05,
         right_vol_shrink=0.8,           # Minor#2：还原为 StrategyConfig 真实默认值
         breakout_vol_multiplier=1.5,    # Minor#2：还原为 StrategyConfig 真实默认值

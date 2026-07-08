@@ -46,18 +46,27 @@ class StrategyConfig(BaseModel):
         description="形态最浅幅度(占价格比例)；<3% 的波动不构成可交易的转折结构",
     )
     max_pattern_depth: float = Field(
-        0.30,
-        description="形态最深幅度(防失效长趋势；>30% 通常意味基本面恶化、需另套逻辑)；"
-                    "W 底判定专用（W 底颈线高度比天然 < 30%）",
+        0.50,
+        description=(
+            "W 底最深幅度阈值（颈线高度比 = (颈线均价 - 两底最低) / 两底最低）。"
+            "物理事实（Task 8 review Important#1 校准）：标准合成 W 底 depth≈0.467，"
+            "实战 W 底颈线高度比典型分布 0.30~0.60；Task 8 旧默认 0.30 会否决所有"
+            "标准 W 底（生产隐患——测试靠 _mk_cfg 覆盖 0.50 才绿，生产 screener 用"
+            "默认 0.30 漏检）。改为 0.50 容纳标准 W 底并留 6.7% 余量。W 底判定专用，"
+            "头肩底走 hs_max_pattern_depth（头部幅度天然更深，分类型阈值）。"
+        ),
     )
     hs_max_pattern_depth: float = Field(
         1.0,
         description=(
-            "头肩底 depth 宽阈值（Task 7 follow-up concern 2）。物理意图：头肩底头部幅度"
-            "（颈线均价 vs 头底最低）天然深于 W 底颈线高度比——头底是整个形态区间最低、"
-            "且两肩之上，故 depth 常达 50%~100%。用 W 底的 max_pattern_depth=0.30 会"
-            "误否决合法头肩底。PatternScreener 调 head_shoulder.detect 时用此宽阈值，"
-            "调 w_bottom.detect 时仍用 max_pattern_depth。默认 1.0 容纳标准头肩底。"
+            "头肩底 depth 宽阈值（Task 7 follow-up concern 2 + Task 8 review Important#1）。"
+            "物理事实：头肩底头部幅度（颈线均价 vs 头底最低）天然深于 W 底颈线高度比——"
+            "头底是整个形态区间最低、且两肩之上，故 depth 典型分布 0.50~1.00（标准合成"
+            "≈0.736）。若与 W 底共用 max_pattern_depth=0.50 会误否决所有合法头肩底。"
+            "PatternScreener 调 head_shoulder.detect 时用 model_copy 临时将 max_pattern_depth"
+            "覆写为本字段值（detect 内部只读 cfg.max_pattern_depth，故 screener 用覆写模拟"
+            "分类型阈值）；调 w_bottom.detect 时仍用原始 max_pattern_depth。默认 1.0 容纳"
+            "标准头肩底（depth≈0.74 留 26% 余量）。"
         ),
     )
     w_price_tolerance: float = Field(

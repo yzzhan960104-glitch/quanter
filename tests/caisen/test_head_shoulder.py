@@ -55,7 +55,7 @@ def _atr_const(n: int, val: float = 1.0) -> pd.Series:
 def _mk_cfg(**overrides) -> StrategyConfig:
     """构造测试用 StrategyConfig（默认量价参数对齐 StrategyConfig 真实默认值）。
 
-    设计意图（与 Task 6 W 底测试对齐）：
+    设计意图（与 Task 6 W 底测试对齐 + Task 8 review Important#1 说明）：
       - right_vol_shrink=0.8、breakout_vol_multiplier=1.5 与 StrategyConfig 的真实
         默认值完全一致，避免测试用宽松量价参数掩盖量价校验逻辑的缺陷；
       - 合成序列的 vol 显式构造为"左肩放量 / 右肩缩量(≤80%) / 突破日放量(≥150%)"；
@@ -64,7 +64,14 @@ def _mk_cfg(**overrides) -> StrategyConfig:
       - w_price_tolerance=0.05（右肩可在左肩 ±5% 内，right_above_left=True 时
         仅约束下限 P6 ≥ P2×(1-0.05)）；
       - ma26w_filter 默认关闭（短合成序列样本不足，由 ma26w 用例专门覆盖）；
-      - abc_wave_detect 默认关闭（合成序列区段未必严格 C>A）。
+      - abc_wave_detect 默认关闭（合成序列区段未必严格 C>A）；
+      - max_pattern_depth=1.0：【保留覆盖·非默认】理由——本文件直测 detect 函数本身，
+        detect 内部只读 cfg.max_pattern_depth 单一字段做 depth 判定，无 hs_max_pattern_depth
+        分类型概念（分类型由 screener 编排层用 model_copy 覆写实现，见 screener.py）。
+        合成头肩底 depth≈0.5-0.74（>W 底默认 0.50），若用默认 0.50 会全部否决。故 detect
+        单测统一用 1.0 模拟"生产 screener 已用 hs_max_pattern_depth=1.0 覆写"的效果；
+        生产侧默认不漏检的回归由 test_screener.py::test_production_default_cfg_detects_standard_w_bottom
+        与 test_head_shoulder_wide_depth 共同保证。
     """
     base = dict(
         min_pattern_bars=11,
@@ -73,7 +80,7 @@ def _mk_cfg(**overrides) -> StrategyConfig:
         confirm_bars=2,
         w_price_tolerance=0.05,
         min_pattern_depth=0.05,
-        max_pattern_depth=0.50,
+        max_pattern_depth=1.0,          # 保留覆盖（见 docstring 说明：detect 单测模拟 screener 覆写后的 1.0）
         pattern_tension_ratio=0.05,
         right_vol_shrink=0.8,           # 对齐 StrategyConfig 真实默认值
         breakout_vol_multiplier=1.5,    # 对齐 StrategyConfig 真实默认值

@@ -16,8 +16,10 @@
        （HV 异常标的处于无序暴动，颈线突破统计有效性大幅下降）；
     3. causal_pivots + ATR：因果 ZigZag 提取 pivot（未来函数隔离，T 日看 T-1 及之前）；
     4. w_bottom.detect / head_shoulder.detect：
-       - W 底用 cfg.max_pattern_depth（默认 0.30，W 底颈线高度比天然 < 30%）；
-       - 头肩底用 cfg.hs_max_pattern_depth（默认 1.0，Task 7 follow-up：头部幅度天然更深）；
+       - W 底用 cfg.max_pattern_depth（默认 0.50，标准 W 底 depth≈0.47；Task 8 review
+         Important#1 校准——旧默认 0.30 会否决所有标准 W 底，生产漏检）；
+       - 头肩底用 cfg.hs_max_pattern_depth（默认 1.0，标准头肩底 depth≈0.74；头部幅度
+         天然深于 W 底颈线高度比，需分类型宽阈值，否则合法头肩底被误否决）；
     5. 命中收集：任一形态 is_valid=True 即收集为候选，pattern_type 标记具体形态；
        两个形态都命中时取颈线满足空间更大者（depth 更大 = 头部更深 = 量度涨幅更大）；
     6. 排序：按近 30 日成交额(amount30d)降序，优先输出流动性最好的候选。
@@ -26,7 +28,10 @@
     symbol：标的代码；
     pattern_type：形态类型 ∈ {"w_bottom", "head_shoulder"}；
     formed_at：形态形成日（pivot 末点日期，用 DataFrame index 末值）；
-    breakout_price：颈线突破价（W底=P4 收盘价 / 头肩底=P7 收盘价）；
+    breakout_price：颈线突破价（粗算：统一用 close.iloc[-1]——P4/P7 的 idx 可能
+                    因 causal_pivots 末尾 confirm_bars 丢弃而早于末根，故用末根
+                    收盘价代表"当前突破状态"。精算颈线满足目标价留给 Task 9 plan.py，
+                    此字段仅作排序展示）；
     neckline_price：颈线价（形态识别组件返回的 neckline_price）；
     depth：颈线高度比（形态幅度，用于双形态择优）；
     tension：幅宽张力（高度/宽度，张力越强交易价值越高）；
@@ -42,6 +47,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 from caisen.config import StrategyConfig
@@ -49,6 +56,10 @@ from caisen.risk import RiskManager
 from caisen.patterns.zigzag_causal import causal_pivots, compute_atr
 from caisen.patterns.w_bottom import detect as w_detect
 from caisen.patterns.head_shoulder import detect as hs_detect
+
+
+# 模块级 logger：单 symbol 异常走 debug 级（不污染 prod 日志，但可调试追溯）
+_logger = logging.getLogger(__name__)
 
 
 class PatternScreener:
@@ -79,8 +90,9 @@ class PatternScreener:
         参数：
             price_data: {symbol: DataFrame} 字典。每个 DataFrame 至少含列
                 close / high / low / volume / amount（index 为交易日，可为整数或日期）。
-            date: 当前交易日（保留给宏观 regime 判定/回测对齐，本编排未直接使用——
-                  流动性/HV/pivots 全部基于 price_data 内部时序，无前视）。
+            date: 当前交易日（预留字段，当前未用——Task 9 macro regime 接入后用于
+                  宏观周期判定/回测对齐。本编排的流动性/HV/pivots 全部基于 price_data
+                  内部时序，无前视，故 date 暂不参与计算）。
 
         返回：
             DataFrame[symbol, pattern_type, formed_at, breakout_price, neckline_price,
@@ -103,8 +115,11 @@ class PatternScreener:
             # 防御性：单个 symbol 异常不拖垮全市场扫描（CLAUDE.md 量化风控·边界审查）
             try:
                 hit = self._screen_one(symbol, df)
-            except Exception:
-                # 数据脏值/列缺失等异常 → 记 None 跳过，保证标的池完整性
+            except Exception as exc:
+                # 数据脏值/列缺失等异常 → debug 级记录 symbol+异常类型后跳过，保证
+                # 标的池完整性（prod 不污染日志，但保留可追溯线索，杜绝裸静默）。
+                _logger.debug("screener 跳过 symbol=%s 异常类型=%s 详情=%s",
+                              symbol, type(exc).__name__, exc)
                 hit = None
             if hit is not None:
                 candidates.append(hit)

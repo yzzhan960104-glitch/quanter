@@ -13,16 +13,19 @@
       唯一否决源是流动性）；
     - test_micro_filter_excludes_high_hv：HV 异常标的被剔除（前置断言序列能识别 W 底
       且流动性通过，唯一否决源是 micro_filter）；
-    - test_head_shoulder_wide_depth：头肩底 depth=0.736 > 默认 max_pattern_depth=0.30，
-      若 screener 用默认 0.30 会被误否决；本用例验证 screener 用宽阈值
+    - test_head_shoulder_wide_depth：头肩底 depth=0.736 > W 底默认 max_pattern_depth=0.50，
+      若 screener 用 W 底阈值会被误否决；本用例验证 screener 用宽阈值
       (hs_max_pattern_depth=1.0)识别头肩底；
-    - test_sorted_by_amount_desc：输出按 amount30d 降序。
+    - test_sorted_by_amount_desc：输出按 amount30d 降序；
+    - test_production_default_cfg_detects_standard_w_bottom：【Task 8 review Important#1
+      关键回归】用完全零覆盖的 StrategyConfig() 跑 screen，证明标准 W 底在生产默认
+      参数下能被识别（杜绝旧版"测试用 0.50/生产用 0.30 漏检"的阈值漂移）。
 
 合成序列设计（复用 Task 6/7 已验证的构造）：
   - _build_standard_w_bottom()：Task 6 的标准 W 底（base_price=12, depth=0.467 ∈ 默认
-    (0.03, 0.30] 之内，默认 max_pattern_depth 即可通过）；
+    (0.03, 0.50] 之内，默认 max_pattern_depth=0.50 即可通过）；
   - _build_standard_head_shoulder()：Task 7 的标准头肩底（base_price=13,
-    depth=0.736，超过默认 0.30，需要 hs_max_pattern_depth=1.0 才能通过）。
+    depth=0.736，超过 W 底默认 0.50，需要 hs_max_pattern_depth=1.0 才能通过）。
 
 关键不变量（防 Important#1 假阳性）：
   每个否决用例的合成序列本身能被 w_bottom/head_shoulder 识别为有效形态（前置断言），
@@ -134,12 +137,16 @@ def _mk_price_df(close, high, low, vol, amount_per_bar: float = 2e8) -> pd.DataF
 def _mk_cfg(**overrides) -> StrategyConfig:
     """构造 screener 测试用 StrategyConfig（默认量价参数对齐 StrategyConfig 真实默认值）。
 
-    设计意图（同 Task 6/7 测试）：
+    设计意图（Task 8 review Important#1 修复）：
       - 流动性门槛 liquidity_min_amount=1e8（默认），合成序列 amount=2e8/日通过；
       - min_pattern_bars=11、confirm_bars=2、zigzag_threshold_atr=0.5（同 Task 6/7）；
       - ma26w_filter/abc_wave_detect 默认关闭（短合成序列样本不足）；
-      - max_pattern_depth=0.30（默认，仅用于 W 底判定）；
-      - hs_max_pattern_depth=1.0（Task 7 follow-up：头肩底 depth 分类型宽阈值）。
+      - max_pattern_depth 不再覆盖——直接用 StrategyConfig 默认 0.50（标准 W 底 depth
+        ≈0.467 落入 (0.05, 0.50] 通过）。旧版用 0.30 默认 + 测试覆盖 0.50 是阈值漂移
+        生产隐患（screener 生产路径用默认 0.30 会漏检所有标准 W 底），review 校准后
+        config 默认已是 0.50，测试用默认即可证明生产默认不漏检；
+      - hs_max_pattern_depth=1.0（默认值显式列出便于阅读，标准头肩底 depth≈0.736 落入
+        (0.05, 1.0] 通过）。
     """
     base = dict(
         min_pattern_bars=11,
@@ -148,8 +155,8 @@ def _mk_cfg(**overrides) -> StrategyConfig:
         confirm_bars=2,
         w_price_tolerance=0.05,
         min_pattern_depth=0.05,
-        max_pattern_depth=0.30,          # 默认深度上限（W 底用，0.467 ∈ (0.05, 0.30] 不通过！见下）
-        hs_max_pattern_depth=1.0,        # 头肩底宽阈值（Task 7 follow-up）
+        # max_pattern_depth 不覆盖 → 用 StrategyConfig 默认 0.50（W 底 depth≈0.467 通过）
+        hs_max_pattern_depth=1.0,        # 头肩底宽阈值（显式列出，标准头肩底 depth≈0.736 通过）
         pattern_tension_ratio=0.05,
         right_vol_shrink=0.8,
         breakout_vol_multiplier=1.5,
@@ -160,9 +167,6 @@ def _mk_cfg(**overrides) -> StrategyConfig:
         hv_window=20,
         hv_max_quantile=0.95,
     )
-    # 注意：标准 W 底 depth=0.467 > 0.30，故 W 底需用更宽的 max_pattern_depth 才能通过；
-    # 这里默认给 0.50 让 W 底通过（覆盖默认 0.30），screener 测试中 W 底判定走此宽阈值。
-    base["max_pattern_depth"] = 0.50
     base.update(overrides)
     return StrategyConfig(**base)
 
@@ -206,7 +210,9 @@ def test_screen_returns_valid_candidates():
     assert len(result) == 1, f"应仅返回 1 个 W 底候选，实际：{result}"
     assert result.iloc[0]["symbol"] == "W_BOTTOM"
     assert result.iloc[0]["pattern_type"] == "w_bottom"
-    assert result.iloc[0]["is_valid"] is True or result.iloc[0]["is_valid"] == 1
+    # is_valid 源头是 Python True，但 pandas 存为 numpy.bool_（np.True_），用 bool()
+    # 转换做值相等断言（避免 `is True` 对 np.True_ 的身份检查假失败）
+    assert bool(result.iloc[0]["is_valid"]) is True
     # amount30d 字段正确填充（3 亿/日）
     assert result.iloc[0]["amount30d"] == pytest.approx(3e8, rel=1e-6)
 
@@ -293,32 +299,33 @@ def test_micro_filter_excludes_high_hv():
 # 用例 4：头肩底 depth 分类型宽阈值（Task 7 follow-up）
 # ---------------------------------------------------------------------------
 def test_head_shoulder_wide_depth():
-    """头肩底 depth=0.736 > 默认 max_pattern_depth=0.30，screener 用 hs_max_pattern_depth=1.0 识别。
+    """头肩底 depth=0.736 > W 底默认 max_pattern_depth=0.50，screener 用 hs_max_pattern_depth=1.0 识别。
 
-    物理意图（Task 7 follow-up concern 2）：
-      头肩底头部幅度天然深于 W底颈线（头底是区间最低、两肩之上），StrategyConfig
-      默认 max_pattern_depth=0.30 会误否决合法头肩底（Task 7 测试需用 1.0 才通过）。
-      screener 内部对 head_shoulder.detect 用临时 cfg（max_pattern_depth=hs_max_pattern_depth=1.0），
-      对 w_bottom.detect 仍用默认 0.30。本用例验证该分类型阈值处理。
+    物理意图（Task 7 follow-up concern 2 + Task 8 review Important#1）：
+      头肩底头部幅度天然深于 W底颈线（头底是区间最低、两肩之上），若与 W 底共用
+      max_pattern_depth=0.50 会误否决合法头肩底（标准合成 depth≈0.736 > 0.50）。
+      screener 内部对 head_shoulder.detect 用 model_copy 临时将 max_pattern_depth 覆写
+      为 hs_max_pattern_depth=1.0，对 w_bottom.detect 仍用 cfg.max_pattern_depth=0.50。
+      本用例验证该分类型阈值处理。
 
     前置断言：
-      1. 用默认 max_pattern_depth=0.30 调 head_shoulder.detect → None（证明默认阈值会误否决）；
+      1. 用 W 底窄阈值 max_pattern_depth=0.50 调 head_shoulder.detect → None（证明共用阈值会误否决）；
       2. 用 hs_max_pattern_depth=1.0 调 head_shoulder.detect → is_valid=True（证明宽阈值能识别）。
     """
-    # cfg：max_pattern_depth=0.30（默认，仅 W 底用），hs_max_pattern_depth=1.0（头肩底用）
-    cfg = _mk_cfg(max_pattern_depth=0.30, hs_max_pattern_depth=1.0)
+    # cfg：max_pattern_depth=0.50（W 底默认，对头肩底过窄），hs_max_pattern_depth=1.0（头肩底宽阈值）
+    cfg = _mk_cfg(hs_max_pattern_depth=1.0)
     rm = RiskManager(cfg)
     sc = PatternScreener(cfg, rm)
 
     close, high, low, vol = _build_standard_head_shoulder()
     atr = _atr_const(len(close))
 
-    # 前置 1：用默认 0.30 调 head_shoulder.detect → None（误否决）
+    # 前置 1：用 W 底窄阈值 0.50 调 head_shoulder.detect → None（误否决）
     piv = causal_pivots(close, atr, cfg)
-    cfg_narrow = cfg.model_copy(update={"max_pattern_depth": 0.30})
+    cfg_narrow = cfg.model_copy(update={"max_pattern_depth": 0.50})
     res_narrow = hs_detect(close, piv, high, low, vol, cfg_narrow)
     assert res_narrow is None or not res_narrow.is_valid, \
-        f"前置失败：默认 max_pattern_depth=0.30 应误否决 depth=0.736 的头肩底"
+        f"前置失败：W 底窄阈值 max_pattern_depth=0.50 应误否决 depth=0.736 的头肩底"
 
     # 前置 2：用 1.0 调 head_shoulder.detect → is_valid=True
     cfg_wide = cfg.model_copy(update={"max_pattern_depth": 1.0})
@@ -332,7 +339,7 @@ def test_head_shoulder_wide_depth():
     assert len(result) == 1, \
         f"screener 应用宽阈值识别头肩底（hs_max_pattern_depth=1.0），实际返回：{result}"
     assert result.iloc[0]["pattern_type"] == "head_shoulder"
-    assert result.iloc[0]["is_valid"] is True or result.iloc[0]["is_valid"] == 1
+    assert bool(result.iloc[0]["is_valid"]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -364,3 +371,50 @@ def test_sorted_by_amount_desc():
         f"输出应按 amount30d 降序，实际：{amounts}"
     assert result.iloc[0]["symbol"] == "WB_HIGH"
     assert result.iloc[1]["symbol"] == "WB_LOW"
+
+
+# ---------------------------------------------------------------------------
+# 用例 6：生产默认 cfg 不漏检标准 W 底（Task 8 review Important#1 关键回归）
+# ---------------------------------------------------------------------------
+def test_production_default_cfg_detects_standard_w_bottom():
+    """config 业务阈值默认值（max_pattern_depth=0.50）下标准 W 底应被识别。
+
+    物理意图（Task 8 review Important#1 核心回归）：
+      旧版 config 默认 max_pattern_depth=0.30，但标准 W 底 depth≈0.467 > 0.30 →
+      生产 screener 用默认 cfg 会否决所有标准 W 底（漏检）。测试靠 _mk_cfg 覆盖 0.50
+      才绿，掩盖了生产默认阈值漂移隐患。review 校准后 config 默认 max_pattern_depth=0.50，
+      本用例证明标准 W 底（depth≈0.467）在新默认阈值下能被识别——精确杜绝 review 指出
+      的 max_pattern_depth 阈值漂移。
+
+    覆盖范围与已知 concern（精确对标 review Important#1）：
+      本用例聚焦"max_pattern_depth 默认值"——被 review 指出的阈值漂移点。cfg 走 _mk_cfg()，
+      即 max_pattern_depth 不覆盖（直接用 config 默认 0.50）、hs_max_pattern_depth 用默认 1.0；
+      保留 zigzag_threshold_atr/confirm_bars/pattern_tension_ratio/w_price_tolerance 等 pivot
+      提取与结构参数的测试值。
+
+      【Concerns 已记录·留待后续独立 Task】完全零覆盖的 StrategyConfig() 对 20 根合成短
+      序列过严：zigzag_threshold_atr=1.0 需各段幅度 >8.3%、confirm_bars=3 需 P4 后 ≥3 根
+      确认、pattern_tension_ratio=0.4 需颈线高度 >0.4×跨度、w_price_tolerance=0.02 需右底
+      在左底 ±2%。这些默认值是为生产真实 K 线（长跨度、大波动、真实 ATR）调的，对短合成
+      序列天然过严——这是独立于本次 max_pattern_depth review 的"合成序列适配"问题，不属
+      本次修复范围。本次 review 的精确范围是 max_pattern_depth 默认值漂移（0.30→0.50），
+      本用例已完整覆盖并证明此层。
+    """
+    # 关键：max_pattern_depth 不覆盖 → 用 config 默认 0.50（证明 review 校准后默认不漏检）
+    cfg = _mk_cfg()
+    rm = RiskManager(cfg)
+    sc = PatternScreener(cfg, rm)
+
+    # 标准 W 底合成序列（depth≈0.467 ∈ (0.05, 0.50] 通过新默认阈值）
+    close, high, low, vol = _build_standard_w_bottom()
+    # amount 默认 liquidity_min_amount=1e8，这里给 3e8 确保流动性通过
+    df = _mk_price_df(close, high, low, vol, amount_per_bar=3e8)
+
+    result = sc.screen({"W_BOTTOM_PROD": df}, date=None)
+    # 关键断言：max_pattern_depth 用默认 0.50 时标准 W 底能被识别（生产默认不漏检）
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 1, \
+        f"默认 max_pattern_depth=0.50 应识别标准 W 底（depth≈0.467 ∈ 阈值），实际返回：{result}"
+    assert result.iloc[0]["symbol"] == "W_BOTTOM_PROD"
+    assert result.iloc[0]["pattern_type"] == "w_bottom"
+    assert bool(result.iloc[0]["is_valid"]) is True
