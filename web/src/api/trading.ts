@@ -1,7 +1,7 @@
 /**
  * 实盘交易 API 封装
  *
- * 对应后端 server/api/v1/trading.py。复用 backtest.ts 的 apiClient。
+ * 对应后端 server/api/v1/trading.py。复用 client.ts 的 apiClient。
  *
  * 状态四态严格镜像后端：unavailable / disconnected / live / vetoed_by_risk，
  * 前端心跳灯完全跟随后端返回值，绝不本地推断（杜绝"虚假繁荣"）。
@@ -9,7 +9,7 @@
  * Phase 2 新增（EMT 适配，前端不感知券商）：connect/disconnect/submitOrder/
  * cancelOrder/getOrders/getAsset。dry_run 由前端按单控制（双开关语义见后端 risk_shield）。
  */
-import { apiClient } from './backtest'
+import { apiClient } from './client'
 
 /** 网关模式（与后端 get_status().mode 对齐） */
 export type GatewayMode = 'unavailable' | 'disconnected' | 'live' | 'vetoed_by_risk'

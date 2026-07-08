@@ -28,13 +28,13 @@ import { logger } from './utils/logger'
 
 // 全局强制暗黑终端模式：在 <html> 上挂 .dark 类，触发 EP dark css-vars
 document.documentElement.classList.add('dark')
-// 注册 ECharts 暗色主题（ProChart/NavChart 用 theme="terminal-dark"）
+// 注册 ECharts 暗色主题（DashboardView 等图表组件用 theme="terminal-dark"）
 initTerminalDarkTheme()
 
 const app = createApp(App)
 
 // 全局错误兜底：任何组件内未捕获的异常都经此落到 console（带 [quanter] 前缀），
-// 避免静默失败难定位。与 useTerminalState 的 SSE 错误打点配合，覆盖前端主要失败面。
+// 避免静默失败难定位（前端统一 logger）。
 app.config.errorHandler = (err, _instance, info) => {
   logger.error('未捕获的 Vue 异常:', err, '| 组件追踪:', info)
 }

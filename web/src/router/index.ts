@@ -1,87 +1,32 @@
 /**
- * Vue Router 配置（T17 路由恢复 + 宏观驾驶舱接入）
+ * Vue Router 配置（蔡森专精化 Phase 1：删除回测/因子/策略前端）
  *
- * 路由规则：
- * - /           → TerminalView（回测终端：ParamForm/ProChart/TerminalLogs 等）
- * - /dashboard  → DashboardView（宏观·板块驾驶舱：CreditRegime/三因子/板块/活跃池）
+ * 当前路由（4 条）：
+ * - /           → 临时重定向 /dashboard（回测终端已删；Phase 3 建 CaisenScreenView 后改指 /caisen）
+ * - /dashboard  → DashboardView（宏观·板块驾驶舱）
+ * - /live       → LiveCockpitView（实盘交易中控：EMT/QMT 连接 + 下单 + 订单/资产）
+ * - /data       → DataLakeView（数据湖资产白盒反射）
+ * - /review     → ReviewView（AI 复盘：GLM + 实盘日志 → Markdown 诊断报告）
  *
- * Why 直接 import 而非懒加载：
- * - 项目仅 2 个页面，首屏加载即可，懒加载反而引入额外 chunk 请求增加首屏延迟；
- * - TerminalView 是默认入口页，必须同步加载；DashboardView 体量也小（4 个
- *   ECharts 面板），合并进主 chunk 在 gzip 后体积可控。
- *
- * Why 移除旧的 SingleBacktest / PortfolioBacktest 路由：
- * - 上一轮工业级蜕变已把回测终端编排上提到 App.vue（现 TerminalView），
- *   SingleBacktest.vue 是蜕变前的旧视图（与终端共享状态不兼容），保留会
- *   产生死代码 + 类型检查负担；PortfolioBacktest 同理待组合模式重启时
- *   再以 TerminalView 子模式接入，不在路由层挂裸页。
+ * Why DashboardView 直接 import、其余懒加载：
+ * - DashboardView 是临时首页（首屏必加载），体量小（ECharts 面板 gzip 后可控）；
+ * - DataLake/Review 体量较大且非首屏，按路由懒加载降低首屏主 chunk 体积。
  */
 import { createRouter, createWebHistory } from 'vue-router'
-import TerminalView from '../views/TerminalView.vue'
 import DashboardView from '../views/DashboardView.vue'
-import ExplorerView from '../views/ExplorerView.vue'
 import LiveCockpitView from '../views/LiveCockpitView.vue'
-// 新增 5 视图采用懒加载（去玩具化 6 层重构）：这些视图多含 ECharts 图表，体量较大，
-// 不全部塞进首屏主 chunk；按路由按需加载，降低 TerminalView 首屏延迟。
 const DataLakeView = () => import('../views/DataLakeView.vue')
-const FactorManagerView = () => import('../views/FactorManagerView.vue')
-const StrategyArchitectView = () => import('../views/StrategyArchitectView.vue')
-const BacktestView = () => import('../views/BacktestView.vue')
 const ReviewView = () => import('../views/ReviewView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    {
-      path: '/',
-      name: 'terminal',
-      component: TerminalView,
-    },
-    {
-      path: '/dashboard',
-      name: 'dashboard',
-      component: DashboardView,
-    },
-    {
-      path: '/explorer',
-      name: 'explorer',
-      component: ExplorerView,
-    },
-    {
-      path: '/live',
-      name: 'live',
-      component: LiveCockpitView,
-    },
-    // 层级一：数据湖资产（白盒反射 DATASET_REGISTRY + mtime/哨兵状态推导）
-    {
-      path: '/data',
-      name: 'data',
-      component: DataLakeView,
-    },
-    // 层级二：因子全生命周期（@register_factor 注册表 + IC 衰减 drill-down）
-    {
-      path: '/factors',
-      name: 'factors',
-      component: FactorManagerView,
-    },
-    // 层级三：策略拓扑与执行计划（composition/rhythm + 动态参数表单 + DAG）
-    {
-      path: '/strategies',
-      name: 'strategies',
-      component: StrategyArchitectView,
-    },
-    // 层级四：深度归因回测（动态下拉 + 归因面板 + 切片复盘）
-    {
-      path: '/backtest',
-      name: 'backtest',
-      component: BacktestView,
-    },
-    // 层级六：AI 复盘（GLM + 实盘日志 → Markdown 诊断报告）
-    {
-      path: '/review',
-      name: 'review',
-      component: ReviewView,
-    },
+    // 首页临时指宏观驾驶舱（回测终端已删；Phase 3 建 CaisenScreenView 后改指 /caisen）
+    { path: '/', redirect: '/dashboard' },
+    { path: '/dashboard', name: 'dashboard', component: DashboardView },
+    { path: '/live', name: 'live', component: LiveCockpitView },
+    { path: '/data', name: 'data', component: DataLakeView },
+    { path: '/review', name: 'review', component: ReviewView },
   ],
 })
 

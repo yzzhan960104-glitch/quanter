@@ -3,12 +3,13 @@
  * 应用根壳（路由导航 + 出口）
  *
  * 职责：
- *   1. 顶部导航条：在 9 个功能页间切换（图标 + 文字双标，按使用动线分组）
+ *   1. 顶部导航条：在 4 个功能页间切换（图标 + 文字双标，按使用动线分组）
  *   2. <router-view/> 渲染当前路由对应的视图
  *
- * 导航信息架构（整体优化）：
- * - 左段「研究/配置」8 项：回测终端 → 归因回测 → AI 复盘 → 因子沙盒 → 因子 → 策略 →
- *   宏观驾驶舱 → 数据湖（按研究动线：回测复盘链 → 因子策略构建 → 数据宏观面）。
+ * 导航信息架构（蔡森专精化 Phase 1 收敛后）：
+ * - 左段「研究/配置」3 项：宏观驾驶舱 → 数据湖 → AI 复盘（按研究动线：宏观面 →
+ *   数据资产 → 复盘诊断）。回测/因子/策略前端已删，Phase 3 建 CaisenScreenView
+ *   后再加入蔡森形态学入口。
  * - 右段「实盘」1 项：实盘中控。用 .nav-divider 细分隔线物理区隔——这是全站唯一会
  *   真实下单的高危入口，空间区隔降低误点风险（skill destructive-nav-separation）。
  * - 每项 EP 官方图标（@element-plus/icons-vue，按需引入）+ 文字双标，提升识别度
@@ -17,15 +18,11 @@
  * Why 抽空 App.vue（上一轮工业级蜕变曾把终端 Grid 直接放在 App.vue）：
  * - 引入多路由后需 vue-router 多页结构，App.vue 退化为纯路由壳，
  *   保持「根组件只承载导航与路由出口」的 Vue 标准骨架。
- * - 终端状态共享经 useTerminalState 模块级单例，视图切换不丢回测状态。
  */
 import { useRoute } from 'vue-router'
 import { computed, type Component } from 'vue'
 // 导航图标：EP 官方图标包，按需引入（非重型依赖，EP 生态标准配套）
-import {
-  TrendCharts, PieChart, MagicStick, Search, Histogram,
-  SetUp, DataBoard, Files, Monitor,
-} from '@element-plus/icons-vue'
+import { MagicStick, DataBoard, Files, Monitor } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const activeName = computed(() => route.path)
@@ -37,16 +34,12 @@ interface NavItem {
   icon: Component
 }
 
-// 左段：研究/配置（回测复盘链 → 因子策略构建 → 数据宏观面）
+// 左段：研究/配置（蔡森专精化 Phase 1：仅留宏观/数据湖/AI 复盘 3 项；
+// 回测终端/归因/因子沙盒/因子/策略 已随 Phase 1 前端清理删除，Phase 3 建 CaisenScreenView 后再加入形态学入口）
 const researchNav: NavItem[] = [
-  { to: '/',           label: '回测终端',   icon: TrendCharts },
-  { to: '/backtest',   label: '归因回测',   icon: PieChart },
-  { to: '/review',     label: 'AI 复盘',    icon: MagicStick },
-  { to: '/explorer',   label: '因子沙盒',   icon: Search },
-  { to: '/factors',    label: '因子',       icon: Histogram },
-  { to: '/strategies', label: '策略',       icon: SetUp },
   { to: '/dashboard',  label: '宏观驾驶舱', icon: DataBoard },
   { to: '/data',       label: '数据湖',     icon: Files },
+  { to: '/review',     label: 'AI 复盘',    icon: MagicStick },
 ]
 
 // 右段：实盘（唯一真实下单的高危入口，分隔线区隔）

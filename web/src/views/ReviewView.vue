@@ -8,18 +8,18 @@
  * 数据源二选一（radio 切换）：
  *   - 按日期：从 logs/live_trades.csv 读取（start/end）。
  *   - 粘贴文本：直接贴 CSV 日志。
- * 策略下拉从 /strategies 反射（反硬编码）。
+ *
+ * 策略名（可选）：原从 /strategies 反射下拉，蔡森专精化 Phase 1 删除策略域后，
+ * 改为可选自由文本输入（后端 review 端点 strategy_name 仍为可选字段，缺省由后端自理）。
  *
  * Markdown 渲染：自写极简 mdToHtml（标题/粗体/列表/代码块），先 escape HTML 防 XSS，
  * 再 apply 格式化；不引 markdown 重型依赖（Karpathy 极简）。
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { diagnose, type ReviewReport } from '@/api/review'
-import { getStrategies, type StrategyTopology } from '@/api/strategy'
 import { logger } from '@/utils/logger'
 
-const strategies = ref<StrategyTopology[]>([])
 const loading = ref(false)
 const report = ref<ReviewReport | null>(null)
 
@@ -27,22 +27,13 @@ const report = ref<ReviewReport | null>(null)
 const sourceMode = ref<'date' | 'paste'>('date')
 const dateRange = ref<[string, string]>(lastNDays(30))
 const csvText = ref('')
-const strategy = ref('')
+const strategy = ref('')             // 可选：自由文本（原下拉框已随策略域删除）
 const metricsText = ref('')  // 可选 JSON 关键指标
 
 function lastNDays(n: number): [string, string] {
   const end = new Date(); const start = new Date(); start.setDate(start.getDate() - n)
   return [start.toISOString().slice(0, 10), end.toISOString().slice(0, 10)]
 }
-
-onMounted(async () => {
-  try {
-    strategies.value = await getStrategies()
-    if (strategies.value.length) strategy.value = strategies.value[0].name
-  } catch (e: any) {
-    logger.error('策略列表拉取失败:', e)
-  }
-})
 
 async function onDiagnose() {
   loading.value = true
@@ -108,9 +99,7 @@ const reportHtml = computed(() => report.value ? mdToHtml(report.value.report) :
     <!-- 参数面板 -->
     <div class="panel">
       <div class="form-row">
-        <el-select v-model="strategy" placeholder="策略" style="width: 200px">
-          <el-option v-for="s in strategies" :key="s.name" :label="s.label" :value="s.name" />
-        </el-select>
+        <el-input v-model="strategy" placeholder="策略名（可选）" size="small" style="width: 200px" />
         <el-radio-group v-model="sourceMode" size="small">
           <el-radio-button label="date">按日期读日志</el-radio-button>
           <el-radio-button label="paste">粘贴日志文本</el-radio-button>

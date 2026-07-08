@@ -1,13 +1,13 @@
 /**
  * 层级一·数据湖 API 封装
  *
- * 对应后端 server/api/v1/data.py。复用 backtest.ts 的 apiClient（共享响应拦截器：
+ * 对应后端 server/api/v1/data.py。复用 client.ts 的 apiClient（共享响应拦截器：
  * 中文错误 Toast / 超时降级，避免每个 facade 各自 create 导致拦截器逻辑漂移）。
  *
  * 反黑盒契约：DatasetAsset.status 五态严格镜像后端 data_service._derive_status，
  * 前端表格徽章按此着色，绝不本地推断（杜绝「虚假健康」）。
  */
-import { apiClient } from './backtest'
+import { apiClient } from './client'
 
 /** 数据集状态五态（与后端 DatasetStatus Literal 同源） */
 export type DatasetStatus = 'syncing' | 'healthy' | 'stale' | 'missing' | 'failed'
