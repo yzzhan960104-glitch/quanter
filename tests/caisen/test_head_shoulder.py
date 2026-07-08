@@ -638,3 +638,180 @@ def test_ma26w_filter_control_passes_when_filter_disabled():
     # 对照：关闭 ma26w_filter → 应通过（证明 ma26w_filter 是唯一否决源）
     assert res is not None and res.is_valid, \
         f"关闭 ma26w_filter 后应通过（证明否决唯一来自 ma26w_filter）：{res}"
+
+
+# ---------------------------------------------------------------------------
+# 用例 6：close[-1] 兜底分支（Task7 review I2 补强——零覆盖兜底分支）
+# ---------------------------------------------------------------------------
+# 物理意图（head_shoulder.py:231-242 的兜底逻辑）：
+#   主路径：P7 > 颈线在 P7 处投影价 → breakout_confirmed=True，直接确认突破；
+#   兜底分支：P7 未突破颈线（P7 pivot 可能略早于真实突破日），但序列末根 close[-1]
+#             突破颈线 → 仍视为有效突破（用末根处颈线投影价作 neckline_price）；
+#   否决分支：P7 未突破且 close[-1] 也未突破 → 形态未确认，return None。
+#   原测试 9 用例全部让 P7 直接突破颈线（走主路径），兜底分支零覆盖。本组 2 用例
+#   补强：末根突破走兜底确认 / 都未突破走否决。
+#
+# 合成序列设计要点（与 causal_pivots confirm_bars 机制对齐）：
+#   detect 要求尾部正好 7 pivot [峰-谷-峰-谷-峰-谷-峰]，P7=末尾第7=峰。要让 P7
+#   成为"已确认的末尾峰"，其后必须有 ≥thresh 下跌来确认反转——但该下跌点本身会
+#   变成新 pivot。矛盾解法：让确认 P7 的下跌点落在距末尾 < confirm_bars 的区间被
+#   保守丢弃（causal_pivots 红线：末尾未确认 pivot 不标记）。具体：
+#     P7@idx26=12.4（峰，颈线投影 12.54，未突破）；
+#     idx27=11.7（下跌 5.6% > thresh 3.8% 确认 P7 为峰；但 n=29 时距末尾=1 <
+#                confirm_bars=2 → 被 causal_pivots 丢弃，尾部 pivot 数=7 不变）；
+#     idx28=末根 close（用例1: 12.75 > 颈线 12.60 突破；用例2: 12.0 < 颈线未突破）。
+def _build_p7_no_breakout_close_last_breaks() -> tuple:
+    """合成"P7 未突破颈线但末根 close[-1] 突破"序列（兜底确认分支用例的基准序列）。
+
+    设计意图（Task7 review I2）：
+      P7=12.4 < 颈线投影 12.54（未突破主路径），但末根 close[-1]=12.75 > 颈线末根
+      投影 12.60（兜底确认突破）→ detect 走兜底分支，返回 is_valid=True，且
+      neckline_price 重算为末根处投影价 12.60（而非 P7 处 12.54）。
+
+      序列与 _build_standard_head_shoulder 同构（跨度/幅度/量价/头底最低/右肩≥左肩
+      全部满足），唯一差异：P7 拉低至 12.4（不突破颈线），末尾追加 1 根 close=12.75
+      突破颈线（兜底确认）。
+
+    序列（29 根，base_price=13 → thresh≈0.038，各段幅度 >> thresh）：
+        [13.0, 11.0, 10.0, 9.0, 8.0,           P1峰(0)=13, P2左肩底(4)=8
+         9.0, 10.0, 11.0, 12.0,                P3左颈(8)=12
+         11.0, 10.0, 9.0, 7.0,                 P4头底(12)=7 (区间最低)
+         8.0, 9.0, 10.0, 11.0, 12.0, 12.3,     P5右颈(18)=12.3
+         11.0, 10.0, 9.0, 8.0,                 P6右肩底(22)=8 (等高左肩)
+         9.0, 10.0, 11.0, 12.4,                P7峰(26)=12.4 (未突破颈线12.54)
+         11.7,                                 下跌5.6%确认P7峰(距末尾1<confirm_bars=2丢弃)
+         12.75]                                末根close=12.75 突破颈线12.60(兜底确认)
+    实测尾部 7 pivot: idx0(1),4(-1),8(1),12(-1),18(1),22(-1),26(1) ✓
+    P7=12.4 < 颈线@26=12.54（未突破主路径）；close[-1]=12.75 > 颈线@28=12.60（兜底确认）。
+    """
+    close = pd.Series(
+        [13.0, 11.0, 10.0, 9.0, 8.0,            # P1峰(0)=13, P2左肩底(4)=8
+         9.0, 10.0, 11.0, 12.0,                 # P3左颈(8)=12
+         11.0, 10.0, 9.0, 7.0,                  # P4头底(12)=7
+         8.0, 9.0, 10.0, 11.0, 12.0, 12.3,      # P5右颈(18)=12.3
+         11.0, 10.0, 9.0, 8.0,                  # P6右肩底(22)=8
+         9.0, 10.0, 11.0, 12.4,                 # P7峰(26)=12.4 (未突破颈线)
+         11.7,                                  # 下跌确认P7(距末尾<confirm_bars丢弃)
+         12.75],                                # 末根close=12.75 突破颈线(兜底确认)
+        dtype=float,
+    )
+    high = close + 0.3
+    low = close - 0.3
+    # 量价：颈线段(P3=8..P5=18)均量=200（baseline）+ P7(26)=500 放量（≥200×1.5=300）
+    vol = _vol_pattern(len(close),
+                       shoulder_i=[4, 22], neck_i=[8, 18],
+                       head_i=12, breakout_i=26)
+    return close, high, low, vol
+
+
+def _build_p7_no_breakout_close_last_no_break() -> tuple:
+    """合成"P7 与 close[-1] 均未突破颈线"序列（无突破否决用例的基准序列）。
+
+    设计意图（Task7 review I2）：
+      与 _build_p7_no_breakout_close_last_breaks 同构，唯一差异：末根 close 从 12.75
+      改为 12.0（< 颈线末根投影 12.57），即 P7 与 close[-1] 均未突破颈线 → detect
+      走否决分支（return None），证明无突破时不识别为头肩底。
+
+    序列（29 根，与 _build_p7_no_breakout_close_last_breaks 仅末根 close 不同）：
+        ...（前 28 根同上）
+        12.0]                                  末根close=12.0 < 颈线12.57 未突破
+    实测尾部 7 pivot: idx0(1),4(-1),8(1),12(-1),18(1),22(-1),26(1) ✓
+    P7=12.4 < 颈线@26=12.54；close[-1]=12.0 < 颈线@28=12.57 → 都未突破 → 否决。
+    """
+    close = pd.Series(
+        [13.0, 11.0, 10.0, 9.0, 8.0,            # P1峰(0)=13, P2左肩底(4)=8
+         9.0, 10.0, 11.0, 12.0,                 # P3左颈(8)=12
+         11.0, 10.0, 9.0, 7.0,                  # P4头底(12)=7
+         8.0, 9.0, 10.0, 11.0, 12.0, 12.3,      # P5右颈(18)=12.3
+         11.0, 10.0, 9.0, 8.0,                  # P6右肩底(22)=8
+         9.0, 10.0, 11.0, 12.4,                 # P7峰(26)=12.4 (未突破颈线)
+         11.7,                                  # 下跌确认P7(距末尾<confirm_bars丢弃)
+         12.0],                                 # 末根close=12.0 未突破颈线
+        dtype=float,
+    )
+    high = close + 0.3
+    low = close - 0.3
+    vol = _vol_pattern(len(close),
+                       shoulder_i=[4, 22], neck_i=[8, 18],
+                       head_i=12, breakout_i=26)
+    return close, high, low, vol
+
+
+def test_breakout_confirmed_by_last_close():
+    """【兜底分支确认】P7 未突破颈线但末根 close[-1] 突破 → 兜底确认，is_valid=True。
+
+    物理意图（head_shoulder.py:231-242 兜底分支）：
+      P7 是末尾已确认的突破峰 pivot，但 P7 处 close 可能略早于真实突破日（P7 反转
+      确认需要 ≥thresh 下跌，真实突破可能发生在 P7 之后、序列末根）。此时用序列末根
+      close[-1] 是否突破颈线兜底判定——突破则形态仍有效，neckline_price 重算为末根
+      处投影价（保持与"末根突破"语义一致）。
+
+    前置断言（防 Task 6 review Important#1 假阳性）：
+      1. 尾部 7 pivot 顺序为 峰-谷-峰-谷-峰-谷-峰；
+      2. P7 close 确实 < 颈线在 P7 处投影价（主路径未突破）；
+      3. 末根 close[-1] 确实 > 颈线在末根处投影价（兜底条件成立）。
+    满足三者 → 证明 detect 的 is_valid=True 唯一来自兜底分支，而非主路径。
+    """
+    from caisen.patterns import neckline as neckline_mod
+    close, high, low, vol = _build_p7_no_breakout_close_last_breaks()
+    cfg = _mk_cfg(max_pattern_depth=1.0)
+    atr = _atr_const(len(close))
+    piv = causal_pivots(close, atr, cfg)
+    # 前置 1：尾部 7 pivot 顺序正确
+    assert _last_n_pivots(piv, 7) == [1, -1, 1, -1, 1, -1, 1], \
+        f"尾部 7 pivot 顺序错误：{_last_n_pivots(piv, 7)}"
+    nz = [i for i in range(len(piv)) if piv.iloc[i] != 0]
+    p7_i, p5_i, p3_i = nz[-1], nz[-3], nz[-5]
+    p3, p5, p7 = float(close.iloc[p3_i]), float(close.iloc[p5_i]), float(close.iloc[p7_i])
+    neck_at_p7 = neckline_mod.fit_line([(p3_i, p3), (p5_i, p5)], at=p7_i)
+    neck_at_end = neckline_mod.fit_line([(p3_i, p3), (p5_i, p5)], at=len(close) - 1)
+    # 前置 2：P7 主路径未突破颈线
+    assert p7 <= neck_at_p7, \
+        f"P7={p7} 应 ≤ 颈线@P7={neck_at_p7:.3f}（主路径未突破，才走兜底分支）"
+    # 前置 3：末根 close[-1] 突破颈线（兜底条件成立）
+    assert float(close.iloc[-1]) > neck_at_end, \
+        f"close[-1]={close.iloc[-1]} 应 > 颈线@end={neck_at_end:.3f}（兜底确认突破）"
+
+    res = detect(close, piv, high, low, vol, cfg)
+    # 兜底分支确认 → is_valid=True
+    assert res is not None and res.is_valid, \
+        f"P7 未突破但 close[-1] 突破时应走兜底确认分支返回 is_valid=True，但得到：{res}"
+    # 兜底分支 neckline_price 应为末根处投影价（非 P7 处），证明走了兜底重算路径
+    assert abs(res.neckline_price - neck_at_end) < 1e-6, \
+        f"兜底分支 neckline_price={res.neckline_price:.6f} 应等于末根处颈线投影 " \
+        f"{neck_at_end:.6f}（证明走兜底重算，非主路径）"
+
+
+def test_no_breakout_rejected():
+    """【无突破否决】P7 与 close[-1] 均未突破颈线 → 否决（None 或 is_valid=False）。
+
+    物理意图（head_shoulder.py:236-240 否决分支）：
+      P7 未突破颈线，且末根 close[-1] 也未突破 → 形态未被任何方式确认，detect 必须
+      否决（return None），证明无突破时不识别为头肩底（杜绝假信号）。
+
+    前置断言：尾部 7 pivot 顺序正确，P7 与 close[-1] 均未突破颈线。
+    """
+    from caisen.patterns import neckline as neckline_mod
+    close, high, low, vol = _build_p7_no_breakout_close_last_no_break()
+    cfg = _mk_cfg(max_pattern_depth=1.0)
+    atr = _atr_const(len(close))
+    piv = causal_pivots(close, atr, cfg)
+    # 前置 1：尾部 7 pivot 顺序正确
+    assert _last_n_pivots(piv, 7) == [1, -1, 1, -1, 1, -1, 1], \
+        f"尾部 7 pivot 顺序错误：{_last_n_pivots(piv, 7)}"
+    nz = [i for i in range(len(piv)) if piv.iloc[i] != 0]
+    p7_i, p5_i, p3_i = nz[-1], nz[-3], nz[-5]
+    p3, p5, p7 = float(close.iloc[p3_i]), float(close.iloc[p5_i]), float(close.iloc[p7_i])
+    neck_at_p7 = neckline_mod.fit_line([(p3_i, p3), (p5_i, p5)], at=p7_i)
+    neck_at_end = neckline_mod.fit_line([(p3_i, p3), (p5_i, p5)], at=len(close) - 1)
+    # 前置 2：P7 主路径未突破
+    assert p7 <= neck_at_p7, \
+        f"P7={p7} 应 ≤ 颈线@P7={neck_at_p7:.3f}（主路径未突破）"
+    # 前置 3：末根 close[-1] 也未突破（兜底条件不成立 → 应否决）
+    assert float(close.iloc[-1]) <= neck_at_end, \
+        f"close[-1]={close.iloc[-1]} 应 ≤ 颈线@end={neck_at_end:.3f}（兜底未突破，应否决）"
+
+    res = detect(close, piv, high, low, vol, cfg)
+    # P7 与 close[-1] 均未突破 → 否决
+    assert res is None or not res.is_valid, \
+        f"P7 与 close[-1] 均未突破颈线时应否决（无突破不识别），但得到：{res}"

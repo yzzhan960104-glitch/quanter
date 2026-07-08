@@ -213,11 +213,16 @@ def detect(
     vol_p6 = float(volume.iloc[p6_i]) if p6_i < len(volume) else 0.0
     if vol_p2 > 0 and vol_p6 > vol_p2 * cfg.right_vol_shrink:
         return None   # 右肩未缩量，打底未完成
-    # 突破放量：P7 突破日成交量 ≥ P5-P6 颈线段平均成交量 × breakout_vol_multiplier
+    # 突破放量：P7 突破日成交量 ≥ 颈线段 P3-P5 平均成交量 × breakout_vol_multiplier
+    # 物理语义（Task7 review I1）：颈线段 P3→P5（左颈到右颈，颈线本身）是震荡蓄势区间，
+    # 其均量代表" baseline 蓄势量能"；突破日放量相对该 baseline 才有"资金增量进场"意义。
+    # 原先用 P5→P6 下跌段（右颈回落到右肩的萎缩段）作 baseline，物理语义弱——下跌段
+    # 量能本就萎缩，baseline 偏低，breakout_vol_multiplier=1.5 门槛被人为放低。
+    # 改用 P3→P5 颈线段（含 p5 端点，与"P3-P5 颈线"几何语义一致）均量作突破参照基准。
     breakout_baseline = (
-        float(volume.iloc[p5_i:p6_i].mean())
-        if (p6_i - p5_i) > 0
-        else float(volume.iloc[p5_i])
+        float(volume.iloc[p3_i:p5_i + 1].mean())
+        if (p5_i - p3_i) >= 0
+        else float(volume.iloc[p3_i])
     )
     vol_p7 = float(volume.iloc[p7_i]) if p7_i < len(volume) else 0.0
     if breakout_baseline > 0 and vol_p7 < breakout_baseline * cfg.breakout_vol_multiplier:
