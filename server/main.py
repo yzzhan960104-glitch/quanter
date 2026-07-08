@@ -5,7 +5,7 @@ FastAPI 应用入口
 职责：
 1. 创建 FastAPI 应用实例
 2. 注册 CORS 中间件（允许前端 Vite dev server 跨域访问）
-3. 挂载 API 路由（/api/v1/portfolio, /api/v1/logs 等）
+3. 挂载 API 路由（/api/v1/logs, /api/v1/trading 等）
 4. 提供健康检查端点
 
 启动方式：
@@ -24,7 +24,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from server.core.config import CORS_ORIGINS, LOG_CONFIG
 from server.core._responses import StrictJSONResponse
-from server.api.v1.portfolio import router as portfolio_router
 from server.api.v1.logs import (
     RingBufferLogHandler,
     log_stream_hub,
@@ -108,8 +107,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Quanter 量化回测平台",
     description=(
-        "基于 HMM 宏观状态识别的多资产组合回测 API。"
-        "支持单资产信号回测和多资产组合调仓回测两种模式。"
+        "量化交易驾驶舱 API：宏观/板块/数据湖只读视图 + 实盘交易 + AI 复盘。"
+        "（HMM 组合回测已在蔡森专精化 Phase 1·Task 5 移除）"
     ),
     version="2.0.0",
     lifespan=lifespan,
@@ -131,7 +130,6 @@ app.add_middleware(
 
 # ============ 挂载路由 ============
 # API 版本化前缀：/api/v1/
-app.include_router(portfolio_router, prefix="/api/v1")
 app.include_router(logs_router, prefix="/api/v1")
 # 宏观/板块/因子只读端点：四端点全部只读内存湖，无网络/无写入，
 # 缺数据湖时端点内部短路返空结构（离线降级），不阻断 lifespan。
