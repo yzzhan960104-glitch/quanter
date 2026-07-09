@@ -4,13 +4,13 @@
  * 对应后端 server/api/v1/macro.py 的四个 GET 端点。本文件只做 axios 调用与
  * 类型对齐，不做任何数据加工——加工交给 DashboardView.vue 内的 ECharts option。
  *
- * 设计意图（why 复用 backtest.ts 的 apiClient 而非新建实例）：
+ * 设计意图（why 复用 client.ts 的 apiClient 而非新建实例）：
  * - 拦截器（中文错误 Toast / 超时降级）对所有 API 通用，复用单一 axios 实例
  *   避免拦截器逻辑漂移；宏观端点都是只读快照，60s 默认超时足够。
  * - 不导出 apiClient：保持「一个域一个 facade」边界，宏观视图不直接触碰
- *   backtest 实例，反之亦然。
+ *   其它域 facade，反之亦然。
  */
-import { apiClient } from './backtest'
+import { apiClient } from './client'
 
 // ============ 类型定义（与后端 macro.py 响应结构对齐） ============
 

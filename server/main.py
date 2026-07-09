@@ -5,7 +5,7 @@ FastAPI 应用入口
 职责：
 1. 创建 FastAPI 应用实例
 2. 注册 CORS 中间件（允许前端 Vite dev server 跨域访问）
-3. 挂载 API 路由（/api/v1/backtest, /api/v1/portfolio）
+3. 挂载 API 路由（/api/v1/logs, /api/v1/trading 等）
 4. 提供健康检查端点
 
 启动方式：
@@ -24,25 +24,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from server.core.config import CORS_ORIGINS, LOG_CONFIG
 from server.core._responses import StrictJSONResponse
-from server.api.v1.backtest import router as backtest_router
-from server.api.v1.portfolio import router as portfolio_router
 from server.api.v1.logs import (
     RingBufferLogHandler,
     log_stream_hub,
     router as logs_router,
 )
-from strategies.loader import StrategyLoader
-from server.api.v1.strategies import router as strategies_router
-from server.api.v1.explorer import router as explorer_router
 # 宏观/板块/因子只读端点（T16）：读内存湖 + CreditRegime，零写入，
 # 供给前端驾驶舱（T17 /dashboard）宏观灯/信贷曲线/板块流/ATR 四视图。
 from server.api.v1.macro import router as macro_router
 # 实盘交易（优雅降级真接 QMT；无 xtquant/缺凭证时 /status 返 unavailable，不阻断 lifespan）
 from server.api.v1.trading import router as trading_router
+# 蔡森形态学流水线 REST 路由（Phase 3 Task 4）：scan/plans/activate/chart/positions/replay，
+# 调 caisen_service 编排层 + storage 持久化，异常三类（KeyError→404/ValidationError→422/
+# ValueError→422）路由层转译。NaN 经 StrictJSONResponse 早抛。
+from server.api.v1.caisen import router as caisen_router
 # 数据湖资产路由（层级一）：扫描 parquet mtime + 哨兵推导状态，触发同步起 daemon 子进程
 from server.api.v1.data import router as data_router
-# 因子注册表路由（层级二）：@register_factor 装饰器反射 + IC 衰减
-from server.api.v1.factors import router as factors_router
 # AI 复盘路由（层级六）：GLM 调用 + 三级降级，CPU/网络阻塞走线程池
 from server.api.v1.review import router as review_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
@@ -53,23 +50,10 @@ from core.notifier import build_default_manager
 async def lifespan(app: FastAPI):
     """应用生命周期钩子（替代已废弃的 @app.on_event("startup")）
 
-    Why 集中扫描：策略注册表进程内不变，启动期 importlib 一次性扫描写入
-    app.state.strategy_loader，后续 API 路由只读，避免每请求重复扫描。
+    职责：装配异步通知通道、载入数据湖、装配日志三路 handler。
+    （因子注册表扫描已在 Phase 1·Task 3 随 factors 体系整体删除。）
     模块④（调度引擎）会在同一 lifespan 追加 scheduler 启动/关闭逻辑。
     """
-    # 启动：扫描策略注册到 app.state
-    loader = StrategyLoader()
-    loader.scan()
-    app.state.strategy_loader = loader
-
-    # 启动：扫描因子注册表到 app.state（层级二·决策②）
-    # importlib 扫 factors 子模块，触发各 @register_factor 副作用注册到全局 _FACTOR_REGISTRY；
-    # 后续 /factors/* 路由只读 app.state.factor_loader，避免每请求重复扫描。
-    from factors.base import FactorLoader
-    factor_loader = FactorLoader()
-    factor_loader.scan()
-    app.state.factor_loader = factor_loader
-
     # 启动：装配异步通知通道（Telegram/企微/钉钉），缺凭证则跳过对应通道
     # Why 早于日志 handler：通知装配幂等且不依赖日志体系；先装配确保告警通道就绪，
     # 后续业务日志/风控事件即可被投递。build_default_manager 内部对缺凭证做软跳过。
@@ -127,8 +111,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Quanter 量化回测平台",
     description=(
-        "基于 HMM 宏观状态识别的多资产组合回测 API。"
-        "支持单资产信号回测和多资产组合调仓回测两种模式。"
+        "量化交易驾驶舱 API：宏观/板块/数据湖只读视图 + 实盘交易 + AI 复盘。"
+        "（HMM 组合回测已在蔡森专精化 Phase 1·Task 5 移除）"
     ),
     version="2.0.0",
     lifespan=lifespan,
@@ -150,22 +134,17 @@ app.add_middleware(
 
 # ============ 挂载路由 ============
 # API 版本化前缀：/api/v1/
-app.include_router(backtest_router, prefix="/api/v1")
-app.include_router(portfolio_router, prefix="/api/v1")
-app.include_router(strategies_router, prefix="/api/v1")
 app.include_router(logs_router, prefix="/api/v1")
-# 因子探索沙盒（Celery 派发 + Redis 宕机降级）：内部对 Redis 不可用做了
-# fire_and_forget 告警 + 线程池降级，无 Redis 也能挂载、不阻断 lifespan。
-app.include_router(explorer_router, prefix="/api/v1")
 # 宏观/板块/因子只读端点：四端点全部只读内存湖，无网络/无写入，
 # 缺数据湖时端点内部短路返空结构（离线降级），不阻断 lifespan。
 app.include_router(macro_router, prefix="/api/v1")
 # 实盘交易路由（优雅降级真接 QMT；lifespan 不自动 connect，单例 lazy 构造）
 app.include_router(trading_router, prefix="/api/v1")
+# 蔡森形态学流水线 REST 路由（Phase 3 Task 4）：7 端点 + 异常映射（KeyError→404/
+# ValidationError→422/ValueError→422），算法/IO 异常 service 层已降级返空结果。
+app.include_router(caisen_router, prefix="/api/v1")
 # 数据湖资产（层级一）：纯字典注册表 + 文件系统状态推导，零守护进程，不阻断 lifespan
 app.include_router(data_router, prefix="/api/v1")
-# 因子注册表（层级二）：纯内存装饰器反射 + IC 衰减（CPU 密集端点走 run_in_threadpool）
-app.include_router(factors_router, prefix="/api/v1")
 # AI 复盘（层级六）：GLM 调用 + 三级降级（缺凭证/调用失败/无数据均不阻断）
 app.include_router(review_router, prefix="/api/v1")
 

@@ -1,0 +1,61 @@
+/**
+ * 业务工具类层（.qt-*）
+ *
+ * 定位：把高频重复的 scoped CSS 模式抽象成工具类，消除「暗卡片壳」「同构根容器」
+ *   「区块小标题」「空态」在 15+ 文件逐字复制的技术债。
+ *
+ * 实证（Explore 扫读）：
+ *   - 暗卡片壳 `bg:#1e222d; border:#2b3139; radius:6px; padding:N` 在 ~20 处重复，
+ *     padding 散在 6/8/10/12/14/16px 六种取值 → .qt-card + padding 变体收敛。
+ *   - 同构根容器在 6 个 view 逐字重复 → .qt-view-shell。
+ *   - 区块标题 6 种类名/3 档字号/2 套颜色 → .qt-section-title。
+ *   - 空态 7 处重复，padding 散在 24/32/40/48 → .qt-empty。
+ *
+ * Why 用工具类而非 @apply/mixin：纯 CSS class 零运行时、无构建依赖，符合极简原则；
+ *   组件用 class="qt-card qt-card--pad3" 组合，比 scoped 复制更直白、更易删改。
+ */
+
+/* —— 同构根容器：撑满路由出口，纵向 flex 堆叠 + 极夜黑底 —— */
+.qt-view-shell {
+  flex: 1;
+  padding: var(--qt-space-3) var(--qt-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--qt-space-3);
+  overflow: auto;
+  background: var(--qt-bg-page);
+}
+
+/* —— 暗卡片壳：统一卡片底/边框/圆角，padding 默认 8px —— */
+.qt-card {
+  background: var(--qt-bg-card);
+  border: 1px solid var(--qt-border);
+  border-radius: var(--qt-radius);
+  padding: var(--qt-space-2);
+}
+/* padding 变体：原各页 padding 散乱，迁移时按「最近 token」选变体，不再各自硬编码 */
+.qt-card--pad1 { padding: var(--qt-space-1); }
+.qt-card--pad3 { padding: var(--qt-space-3); }
+.qt-card--pad4 { padding: var(--qt-space-4); }
+
+/* —— 区块小标题：统一字号/字重/颜色/下间距（消除 6 种类名分裂） —— */
+.qt-section-title {
+  font-size: var(--qt-fs-title);
+  font-weight: 600;
+  color: var(--qt-text-primary);
+  margin: 0 0 var(--qt-space-2);
+  line-height: 1.4;
+}
+
+/* —— 空态：次级灰文字 + 居中 + 统一留白 —— */
+.qt-empty {
+  color: var(--qt-text-secondary);
+  padding: var(--qt-space-6);
+  text-align: center;
+  font-size: var(--qt-fs-caption);
+}
+
+/* —— 交易涨跌色 / 等宽：行内语义着色快捷类 —— */
+.qt-up { color: var(--qt-up); }
+.qt-down { color: var(--qt-down); }
+.qt-mono { font-family: var(--qt-font-mono); }

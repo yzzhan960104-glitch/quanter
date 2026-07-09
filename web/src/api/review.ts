@@ -1,10 +1,10 @@
 /**
  * 层级六·AI 复盘 API 封装
  *
- * 对应后端 server/api/v1/review.py。复用 backtest.ts 的 apiClient。
+ * 对应后端 server/api/v1/review.py。复用 client.ts 的 apiClient。
  * 超时 90s：LLM 推理耗时较长，前端配合 loading 态。
  */
-import { apiClient } from './backtest'
+import { apiClient } from './client'
 
 export interface ReviewRequest {
   csv_text?: string                    // 直接上传的日志文本（优先）

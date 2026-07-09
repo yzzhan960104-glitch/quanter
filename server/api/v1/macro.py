@@ -29,7 +29,7 @@ import pandas as pd
 from fastapi import APIRouter
 
 from data.lake_reader import DataLakeReader
-from factors.macro_regime import CreditRegime
+from core.macro_regime import CreditRegime
 
 router = APIRouter(prefix="/macro", tags=["宏观/板块/因子"])
 
@@ -220,8 +220,9 @@ async def factors(symbol: str) -> dict[str, Any]:
     Why 30 日窗口：ATR 默认 14 bar 滚动窗口，30 日保证有足够样本算出末值，
     又不会因窗口过长引入过时波动率。
     """
-    # 延迟 import：仅此端点用 ATR，避免顶层 import 污染其它三端点的导入图
-    from factors.micro_momentum import atr
+    # 延迟 import：仅此端点用 ATR，避免顶层 import 污染其它三端点的导入图。
+    # ATR 已从 factors/micro_momentum 迁到 core/indicator（Phase 1·Task 3 因子体系剥离）。
+    from core.indicator import atr
 
     ts = DataLakeReader.get_instance().get_timeseries(
         symbol, _shift(30), _today(), lake="minute"

@@ -20,6 +20,11 @@ fredapi>=0.5.0
 
 # A 股数据源 (Tushare Pro)
 tushare>=1.4.0
+# tnskhdata：Tushare 代理库（API 完全兼容，10000 积分，优先于直连 tushare）。
+# data/_tushare_compat.get_pro() 在 TNSKHDATA_TOKEN 配置时走代理分支；stock_basic/
+# daily_basic/daily/adj_factor 等接口需其高积分解锁，直连 tushare 积分不足拉不动。
+# 纯 Python wheel（py3-none-any），3.10 venv 可直接装。依赖 bs4/lxml/pandas/requests。
+tnskhdata>=0.1.1
 
 # 环境变量加载（API 凭证隔离，绝不硬编码）
 python-dotenv>=1.0.0
@@ -63,3 +68,15 @@ thriftpy2==0.4.20
 # fastparquet：分钟级数据落盘的另一 Parquet 后端（pyarrow 已在依赖中），
 # 保留作为多湖写入的备选引擎，提升极端场景兼容性。
 fastparquet
+
+# ===== 蔡森形态学流水线 =====
+# 注：以下依赖因 PyPI 上游元数据 bug / py3.10 版本约束，实际安装状态见 task-0-report.md。
+# 形态学核心算法（因果 ZigZag / 颈线 / W底 / 头肩底）一律用 numpy/pandas 显式实现，
+# 遵循 CLAUDE.md「第一性原理、拒绝黑盒」原则，不强依赖第三方形态库。
+mplfinance>=0.12.9b7            # K 线可视化（PyPI 实际版本 0.12.10b0，约束带 b 后缀以匹配）
+lightweight-charts>=2.0         # 交互式图表（PyPI 真名 lightweight-charts，非 -python）
+# —— 以下三项 PyPI 装不上（上游 bug / py3.10 约束），注释掉以保 pip install -r 幂等性 ——
+# 形态学算法改用 numpy/pandas 显式实现（因果 ZigZag / ATR / 颈线），符合极简无黑盒原则。
+# zigzag>=0.2.0                  # PyPI 装不上（sdist 元数据 bug：Cython>=^0.29 + 缺 .pyx），改用 numpy 显式因果 ZigZag
+# pandas-ta>=0.3.14b             # PyPI 装不上（py3.10 下无可用版本，0.4.x 要求 >=3.12），改用 pandas 显式 ATR/指标
+# trendln>=4.0.0                 # PyPI 装不上（最高仅 0.1.18，4.0.0 版本号不存在），改用 numpy polyfit 显式颈线/趋势线

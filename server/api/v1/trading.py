@@ -11,7 +11,7 @@
   → 本层按消息关键字分流：未连接/锁定 → 409；未装配/unavailable → 503；其余 → 500。
 
 Why emergency_halt 投线程池：它是同步函数（含 setattr + 日志 + fire_and_forget），
-虽无重 CPU，但保持与既有 portfolio 路由同纪律（同步业务逻辑统一 run_in_threadpool），
+虽无重 CPU，但保持与既有同步业务路由同纪律（同步业务逻辑统一 run_in_threadpool），
 避免在事件循环里直接执行潜在的阻塞日志 IO。
 """
 from __future__ import annotations

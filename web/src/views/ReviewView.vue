@@ -8,18 +8,18 @@
  * 数据源二选一（radio 切换）：
  *   - 按日期：从 logs/live_trades.csv 读取（start/end）。
  *   - 粘贴文本：直接贴 CSV 日志。
- * 策略下拉从 /strategies 反射（反硬编码）。
+ *
+ * 策略名（可选）：原从 /strategies 反射下拉，蔡森专精化 Phase 1 删除策略域后，
+ * 改为可选自由文本输入（后端 review 端点 strategy_name 仍为可选字段，缺省由后端自理）。
  *
  * Markdown 渲染：自写极简 mdToHtml（标题/粗体/列表/代码块），先 escape HTML 防 XSS，
  * 再 apply 格式化；不引 markdown 重型依赖（Karpathy 极简）。
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { diagnose, type ReviewReport } from '@/api/review'
-import { getStrategies, type StrategyTopology } from '@/api/strategy'
 import { logger } from '@/utils/logger'
 
-const strategies = ref<StrategyTopology[]>([])
 const loading = ref(false)
 const report = ref<ReviewReport | null>(null)
 
@@ -27,22 +27,13 @@ const report = ref<ReviewReport | null>(null)
 const sourceMode = ref<'date' | 'paste'>('date')
 const dateRange = ref<[string, string]>(lastNDays(30))
 const csvText = ref('')
-const strategy = ref('')
+const strategy = ref('')             // 可选：自由文本（原下拉框已随策略域删除）
 const metricsText = ref('')  // 可选 JSON 关键指标
 
 function lastNDays(n: number): [string, string] {
   const end = new Date(); const start = new Date(); start.setDate(start.getDate() - n)
   return [start.toISOString().slice(0, 10), end.toISOString().slice(0, 10)]
 }
-
-onMounted(async () => {
-  try {
-    strategies.value = await getStrategies()
-    if (strategies.value.length) strategy.value = strategies.value[0].name
-  } catch (e: any) {
-    logger.error('策略列表拉取失败:', e)
-  }
-})
 
 async function onDiagnose() {
   loading.value = true
@@ -108,9 +99,7 @@ const reportHtml = computed(() => report.value ? mdToHtml(report.value.report) :
     <!-- 参数面板 -->
     <div class="panel">
       <div class="form-row">
-        <el-select v-model="strategy" placeholder="策略" style="width: 200px">
-          <el-option v-for="s in strategies" :key="s.name" :label="s.label" :value="s.name" />
-        </el-select>
+        <el-input v-model="strategy" placeholder="策略名（可选）" size="small" style="width: 200px" />
         <el-radio-group v-model="sourceMode" size="small">
           <el-radio-button label="date">按日期读日志</el-radio-button>
           <el-radio-button label="paste">粘贴日志文本</el-radio-button>
@@ -157,27 +146,27 @@ const reportHtml = computed(() => report.value ? mdToHtml(report.value.report) :
 <style scoped>
 .rv-view { flex: 1; overflow: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
 .page-header { display: flex; align-items: baseline; gap: 12px; }
-.page-header .title { font-size: 15px; font-weight: 700; color: #d1d4dc; }
-.page-header .sub { font-size: 11px; color: #787b86; flex: 1; }
+.page-header .title { font-size: 15px; font-weight: 700; color: var(--qt-text-primary); }
+.page-header .sub { font-size: 11px; color: var(--qt-text-secondary); flex: 1; }
 
-.panel { background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.panel { background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .form-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
-.report-loading { padding: 60px; text-align: center; color: #787b86; font-size: 13px; }
+.report-loading { padding: 60px; text-align: center; color: var(--qt-text-secondary); font-size: 13px; }
 .report-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-.report-meta .model { font-size: 11px; color: #787b86; font-family: ui-monospace, Menlo, monospace; }
+.report-meta .model { font-size: 11px; color: var(--qt-text-secondary); font-family: ui-monospace, Menlo, monospace; }
 .report-body {
-  background: #1e222d; border: 1px solid #2b3139; border-radius: 6px; padding: 16px 20px;
-  color: #b2b5be; font-size: 13px; line-height: 1.8;
+  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 16px 20px;
+  color: var(--qt-text-regular); font-size: 13px; line-height: 1.8;
 }
-.report-body :deep(h3) { color: #d1d4dc; font-size: 15px; margin: 14px 0 6px; }
-.report-body :deep(h4) { color: #d1d4dc; font-size: 13px; margin: 12px 0 4px; }
-.report-body :deep(strong) { color: #2962ff; }
+.report-body :deep(h3) { color: var(--qt-text-primary); font-size: 15px; margin: 14px 0 6px; }
+.report-body :deep(h4) { color: var(--qt-text-primary); font-size: 13px; margin: 12px 0 4px; }
+.report-body :deep(strong) { color: var(--qt-accent); }
 .report-body :deep(ul) { margin: 4px 0 8px 20px; }
 .report-body :deep(li) { margin: 2px 0; }
 .report-body :deep(pre) {
-  background: #131722; border: 1px solid #2b3139; border-radius: 4px; padding: 8px;
+  background: var(--qt-bg-page); border: 1px solid var(--qt-border); border-radius: 4px; padding: 8px;
   font-family: ui-monospace, Menlo, monospace; font-size: 11px; overflow-x: auto; color: #8e939d;
 }
-.empty { color: #787b86; padding: 48px; text-align: center; font-size: 12px; }
+.empty { color: var(--qt-text-secondary); padding: 48px; text-align: center; font-size: 12px; }
 </style>

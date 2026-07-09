@@ -57,7 +57,7 @@ withDefaults(
   font-size: 30px;
   font-weight: 800;
   letter-spacing: 3px;
-  color: #d1d4dc;
+  color: var(--qt-text-primary);
   opacity: 0.05;
   white-space: nowrap;
 }
@@ -66,7 +66,7 @@ withDefaults(
 .wm-subtitle {
   font-size: 12px;
   letter-spacing: 0.5px;
-  color: #787b86;
+  color: var(--qt-text-secondary);
   opacity: 0.55;
   font-variant-numeric: tabular-nums;
 }

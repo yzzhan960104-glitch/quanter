@@ -14,6 +14,9 @@ env/
 *.log
 data/
 
+# 蔡森 CLI 运行时输出（plans/<date>.json 为 screen 子命令产物，不入库）
+plans/
+
 # 依赖包
 node_modules/
 web/node_modules/
@@ -81,3 +84,13 @@ logs/
 .ref
 # tokensave MCP 运行时索引（机器特定、持续变化的二进制 db，不入库）
 .tokensave/
+
+xtquant
+emt_api_python
+xtquant_250807.rar
+EMT_API_Python_V2.27.0.zip
+scripts/pages/
+
+# 书籍扫描版(版权+大文件)
+多空轉折一手抓.pdf
+*.pdf
