@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""蔡森形态学流水线 REST 路由（Phase 3 · Task 4）。
+"""蔡森形态学流水线 REST 路由（Phase 3 · Task 4 + Task 6 chart 完善）。
 
 物理定位（CLAEDE.md 极简 + 显式原则）：
     本模块是蔡森形态学流水线的"对外 HTTP 契约层"——把 caisen_service 的六个编排函数
     （run_scan / list_plans / approve_plan / activate_plan / get_plan / run_replay）
-    + chart/positions 占位端点封装为 REST 友好接口，前端/调度器只感知这一层。
+    + chart 端点（Task 6 接 viz_interactive）+ positions 占位端点封装为 REST 友好接口，
+    前端/调度器只感知这一层。
 
     端点清单（prefix=/caisen，挂载时叠加 /api/v1 → /api/v1/caisen/...）：
         POST   /scan                     扫描（run_scan → list[CandidatePlan]）
@@ -12,7 +13,7 @@
         GET    /plans/{plan_id}          单计划查询（get_plan；KeyError→404）
         PATCH  /plans/{plan_id}          审核 approve/reject + edits（approve_plan）
         POST   /plans/{plan_id}/activate 激活 APPROVED→ARMED（activate_plan）
-        GET    /plans/{plan_id}/chart    lightweight-charts 数据（占位，Task 6 完善）
+        GET    /plans/{plan_id}/chart    lightweight-charts 数据（Task 6：接 viz_interactive）
         GET    /positions                形态学持仓（占位，后续富化 trading_service）
         POST   /replay                   历史回放（run_replay → ReplayReportResponse）
 
@@ -32,8 +33,8 @@
     - 路由层零业务逻辑：仅异常转译 + 透传 service，所有数学内核在 Phase 2 完成；
     - 同步 service 函数直接调用（非 run_in_threadpool）：caisen_service 的 IO 是
       JSON 文件读写（毫秒级），无网络阻塞，FastAPI 同步路由自带线程池调度；
-    - chart/positions 端点占位：Task 6 接 viz 层 + 后续形态学持仓富化，本任务先
-      立契约（端点可达 + 200 + 基本结构），不阻断 Phase 3 前端集成。
+    - chart 端点 Task 6 完善：price_data 可装配（data_lake 接入后）→ build_chart_data
+      返完整 candles+markers+priceLines；不可装配（当前 Phase 3+ 占位）→ priceLines-only 降级。
 """
 from __future__ import annotations
 
@@ -170,42 +171,98 @@ async def activate_plan(plan_id: str) -> CandidatePlan:
 
 
 # ---------------------------------------------------------------------------
-# 端点 6：GET /plans/{plan_id}/chart —— lightweight-charts 数据（占位）
+# 端点 6：GET /plans/{plan_id}/chart —— lightweight-charts 数据（Task 6 接 viz_interactive）
 # ---------------------------------------------------------------------------
-@router.get("/plans/{plan_id}/chart", summary="计划图表数据（lightweight-charts，Task 6 完善）")
+@router.get("/plans/{plan_id}/chart", summary="计划图表数据（lightweight-charts K线+标注）")
 async def get_chart_data(plan_id: str) -> Dict[str, Any]:
-    """返回 lightweight-charts 渲染所需的计划图表数据。
+    """返回 lightweight-charts 渲染所需的计划图表数据（candles + markers + priceLines）。
 
     物理意图（Task 6 viz 层入口契约）：
-        本端点当前为【占位实现】——返回 plan 的基本信息 + 占位 chart 字段，
-        供前端先打通端到端调用链。Task 6 接入真实 viz 层后完善：
-          - 末段 K 线序列（lightweight-charts candlestick data）；
-          - 颈线/止损/止盈标注线（priceLine markers）；
-          - 形态 pivot 标注（A/B/C/D 波位置 marker）。
+        1. 从 storage.get_plan 读原始 plan dict（含 metadata.pattern_points，标记用）；
+        2. 尝试从 data_lake 装配 price_data（_load_price_data，生产 Phase 3+ 接入）：
+           - 可装配 → viz_interactive.build_chart_data 返回完整 candles+markers+priceLines；
+           - 不可装配 → 降级仅返 priceLines（从 plan 字段直接构造止损/止盈/颈线价位线），
+             candles/markers 留空，前端仍能画关键价位（不白屏）。
+        3. plan 基本信息字段（symbol/pattern_type/关键价位）一并附在顶层供前端快速渲染。
 
     异常策略：plan_id 不存在 → 404（与 get_plan 一致的状态机守护）。
+    viz_interactive 装配异常 → 降级 priceLines-only，不抛 500（图缺失好过端点宕机）。
     """
-    result = caisen_service.get_plan(plan_id)
-    if result is None:
+    # storage.get_plan 返回原始 dict（含 metadata），caisen_service.get_plan 返回
+    # CandidatePlan（无 metadata）——chart 端点需要 metadata.pattern_points 装配 markers，
+    # 故直接走 storage 取 dict。
+    from caisen import storage as _storage
+    plan_dict = _storage.get_plan(plan_id)
+    if plan_dict is None:
         raise HTTPException(status_code=404, detail=f"计划不存在：plan_id={plan_id!r}")
-    # 占位：返回 plan 基本信息 + 待 Task 6 填充的 chart 结构
-    return {
-        "plan_id": result.plan_id,
-        "symbol": result.symbol,
-        "pattern_type": result.pattern_type,
-        # 关键价位（前端先按这些画标注线占位）
-        "breakout_price": result.breakout_price,
-        "neckline_price": result.neckline_price,
-        "bottom_price": result.bottom_price,
-        "entry_upper": result.entry_upper,
-        "entry_lower": result.entry_lower,
-        "stop_loss": result.stop_loss,
-        "take_profit": result.take_profit,
-        "take_profit_2x": result.take_profit_2x,
-        # 占位：Task 6 viz 层填充真实 K 线 + marker 数据
-        "candles": [],
-        "markers": [],
+
+    # 基本信息字段（前端先按这些画占位 + 顶层快速访问）
+    base_fields = {
+        "plan_id": plan_dict.get("plan_id"),
+        "symbol": plan_dict.get("symbol"),
+        "pattern_type": plan_dict.get("pattern_type"),
+        "breakout_price": plan_dict.get("breakout_price"),
+        "neckline_price": plan_dict.get("neckline_price"),
+        "bottom_price": plan_dict.get("bottom_price"),
+        "entry_upper": plan_dict.get("entry_upper"),
+        "entry_lower": plan_dict.get("entry_lower"),
+        "stop_loss": plan_dict.get("stop_loss"),
+        "take_profit": plan_dict.get("take_profit"),
+        "take_profit_2x": plan_dict.get("take_profit_2x"),
     }
+
+    # 尝试装配 price_data：生产 Phase 3+ 接 data_lake 后返回真实 OHLCV DataFrame；
+    # 当前（Phase 3+ 未接）返回空 dict → 走 priceLines-only 降级路径。
+    symbol = plan_dict.get("symbol")
+    formed_at = plan_dict.get("formed_at")
+    chart_payload: Dict[str, Any] = {"candles": [], "markers": [], "priceLines": []}
+    try:
+        price_data = caisen_service._load_price_data(
+            [symbol] if symbol else None,
+            str(formed_at) if formed_at is not None else "",
+        )
+        price_df = price_data.get(symbol) if isinstance(price_data, dict) else None
+        if price_df is not None and not price_df.empty:
+            # price_data 可装配 → 走完整 viz_interactive 装配
+            from caisen.viz_interactive import build_chart_data
+            chart_payload = build_chart_data(plan_dict, price_df)
+        else:
+            # price_data 不可装配 → 降级 priceLines-only（从 plan 字段直接构造）
+            chart_payload = {"candles": [], "markers": [], "priceLines": _fallback_price_lines(plan_dict)}
+    except Exception as exc:
+        logger.warning(
+            "chart 端点 viz 装配异常降级 priceLines-only（plan_id=%s）：type=%s detail=%s",
+            plan_id, type(exc).__name__, exc,
+        )
+        chart_payload = {"candles": [], "markers": [], "priceLines": _fallback_price_lines(plan_dict)}
+
+    return {**base_fields, **chart_payload}
+
+
+def _fallback_price_lines(plan_dict: dict) -> list:
+    """price_data 不可装配时，从 plan 字段直接构造 lightweight-charts priceLines。
+
+    物理意图：data_lake 未接入或标的 price_data 缺失时，前端 CaisenScreenView 仍能
+    画出止损/止盈/颈线/突破等关键价位水平线（无 K 线 + 形态点，但不白屏）。
+    """
+    lines = []
+    spec = [
+        ("take_profit_2x", "#009933", 1, 2, "第二波满足"),
+        ("take_profit",    "#009933", 2, 0, "止盈·第一波满足"),
+        ("breakout_price", "#0066cc", 1, 2, "突破价"),
+        ("neckline_price", "#ff8800", 1, 0, "颈线"),
+        ("bottom_price",   "#888888", 1, 2, "C波低点"),
+        ("stop_loss",      "#cc0000", 2, 0, "止损"),
+    ]
+    for key, color, lw, ls, title in spec:
+        v = plan_dict.get(key)
+        if v is not None and not (isinstance(v, float) and v != v):  # NaN 守护
+            lines.append({
+                "price": float(v), "color": color,
+                "lineWidth": lw, "lineStyle": ls,
+                "axisLabelVisible": True, "title": title,
+            })
+    return lines
 
 
 # ---------------------------------------------------------------------------
