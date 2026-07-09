@@ -85,7 +85,8 @@ class TradePlan:
         rr_ratio         : 盈亏比 = (take_profit − entry_upper)/(entry_upper − stop_loss)；
         valid_until      : 回踩触发窗口截止日（formed_at + pullback_window_bars 交易日）；
         max_holding_until: 时间止损截止日（formed_at + max_holding_bars 交易日）；
-        timeout_exit_threshold : 时间止损浮盈阈值（持仓超时且浮盈 ≥ 此值才允许离场）；
+        timeout_exit_threshold : 时间止损砍亏浮盈阈值（持仓超时且浮盈 < 此值则砍亏离场；
+                          回测 backtest_replay 与实盘 check_exit 同口径、百分比分母）；
         shares           : 分配股数（A 股整手，position_size 计算）；
         metadata         : 补充元数据（bottom_price 反推来源/atr 来源/原始 depth 等）。
     """

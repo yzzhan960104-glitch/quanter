@@ -323,6 +323,83 @@ class TestReplayStats:
 
 
 # ---------------------------------------------------------------------------
+# 3.5 时间止损语义（B-3：回测须与实盘 check_exit 对齐为「砍亏」）
+# ---------------------------------------------------------------------------
+class TestTimeoutExitSemantics:
+    """时间止损语义统一：超时 + 浮盈不足 → 砍亏离场（与实盘 check_exit 一致）。
+
+    B-3 缺陷：旧回测 _simulate_one_trade 用 `unrealized>=threshold`(R 分母)→锁盈离场，
+    与实盘 check_exit 的 `profit<threshold`(% 分母)→砍亏离场 运算符/分母/意图全反。
+    后果：超时浮亏单在回测中不实现亏损（继续持有到末尾记 still_open），系统性虚高
+    回测胜率/盈亏比，可能放行实盘亏损策略通过上线 gate。
+
+    本测试构造「超时浮亏」场景，断言回测应 timeout 砍亏（rr<0），而非 still_open。
+    """
+
+    def test_simulate_timeout_cuts_loser(self):
+        """超时且浮亏 → timeout 离场 + 负 rr（砍亏），非 still_open 持有到末尾。"""
+        from caisen.backtest_replay import _simulate_one_trade
+        from caisen.plan import TradePlan
+
+        plan = TradePlan(
+            plan_id="t", symbol="X.SZ", pattern_type="w_bottom",
+            formed_at=pd.Timestamp("2024-01-01"),
+            breakout_price=10.0, neckline_price=10.0, bottom_price=8.0, H=2.0,
+            entry_upper=10.0, entry_lower=9.8,
+            stop_loss=8.0, take_profit=12.0, take_profit_2x=14.0,
+            rr_ratio=1.0, valid_until=pd.Timestamp("2024-01-05"),
+            max_holding_until=pd.Timestamp("2024-01-20"),
+            timeout_exit_threshold=0.01, shares=100, metadata={},
+        )
+        # entry_day=0；T+1(=1) 回踩触发（low<=10 且 high>=9.8）；其后收盘 9.9 缓慢阴跌。
+        # entry_price=10.0；close=9.9 → profit=(9.9-10)/10=-0.01 < threshold 0.01 → 砍亏。
+        # 全程不触止损(8.0)/止盈(12/14)。
+        closes = [10.5, 9.9] + [9.9] * 8
+        highs = [11.0, 10.2] + [10.1] * 8
+        lows = [10.0, 9.7] + [9.8] * 8
+        df = pd.DataFrame(
+            {"close": closes, "high": highs, "low": lows,
+             "volume": [100] * 10, "amount": [1e8] * 10},
+            index=pd.RangeIndex(10),
+        )
+        hit = _simulate_one_trade(df, plan, entry_day=0, max_holding_bars=3)
+        assert hit is not None, "回踩应触发成交"
+        assert hit["exit_reason"] == "timeout", (
+            f"超时浮亏应 timeout 砍亏（B-3），实际 {hit['exit_reason']}"
+        )
+        assert hit["rr"] < 0, "砍亏离场 rr 应为负"
+
+    def test_simulate_timeout_holds_when_profit_meets_threshold(self):
+        """超时但浮盈 ≥ threshold → 不砍亏，继续持有（未达砍亏条件）。"""
+        from caisen.backtest_replay import _simulate_one_trade
+        from caisen.plan import TradePlan
+
+        plan = TradePlan(
+            plan_id="t2", symbol="Y.SZ", pattern_type="w_bottom",
+            formed_at=pd.Timestamp("2024-01-01"),
+            breakout_price=10.0, neckline_price=10.0, bottom_price=8.0, H=2.0,
+            entry_upper=10.0, entry_lower=9.8,
+            stop_loss=8.0, take_profit=12.0, take_profit_2x=14.0,
+            rr_ratio=1.0, valid_until=pd.Timestamp("2024-01-05"),
+            max_holding_until=pd.Timestamp("2024-01-20"),
+            timeout_exit_threshold=0.01, shares=100, metadata={},
+        )
+        # 超时点收盘 10.2 → profit=(10.2-10)/10=0.02 ≥ 0.01 → 不砍亏，持有到末尾 still_open。
+        closes = [10.5, 10.0] + [10.2] * 8
+        highs = [11.0, 10.3] + [10.3] * 8
+        lows = [10.0, 9.8] + [10.1] * 8
+        df = pd.DataFrame(
+            {"close": closes, "high": highs, "low": lows,
+             "volume": [100] * 10, "amount": [1e8] * 10},
+            index=pd.RangeIndex(10),
+        )
+        hit = _simulate_one_trade(df, plan, entry_day=0, max_holding_bars=3)
+        assert hit is not None
+        # 浮盈达标不砍亏 → 不应是 timeout（持有到末尾 still_open）
+        assert hit["exit_reason"] != "timeout", "浮盈≥阈值不应砍亏"
+
+
+# ---------------------------------------------------------------------------
 # 4. min_rr_ratio 敏感性（Task 9 rr 张力承袭）
 # ---------------------------------------------------------------------------
 class TestReplayMinRRSensitivity:
