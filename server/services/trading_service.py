@@ -369,6 +369,16 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool) -> 
 
     # 4. 全过 → 真下单
     result: OrderResult = await gw.submit_order(order)
+    # 真单审计落盘（spec §6.3 可追溯性契约：真单/废单/撤单均落 CSV）。
+    # Why 此前缺失：原实现拿到 OrderResult 直接 return，真实成交在
+    # logs/live_trades.csv 完全缺失，进程崩溃后存在「真实已成交但系统不知情」的
+    # 敞口黑洞，违反量化交易审计合规红线（B-6/应修项1）。
+    # rationale 记录网关类名 + 真实 state + message，便于事后复盘/对账。
+    direction = "BUY" if order.side.lower() == "buy" else "SELL"
+    record_live_trade(
+        order.symbol, direction, order.qty, order.price or 0.0,
+        rationale=f"{gw.__class__.__name__}:{result.state.name}:{result.message}",
+    )
     return {
         "order_id": result.order_id,
         "state": result.state.name,
