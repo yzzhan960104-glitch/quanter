@@ -38,6 +38,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+from pydantic import ValidationError
 
 from caisen import plan as plan_mod
 from caisen import backtest_replay
@@ -67,7 +68,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_AUM: float = 1_000_000.0
 
 
-def _load_price_data(symbols: List[str], date: str) -> Dict[str, pd.DataFrame]:
+def _load_price_data(symbols: Optional[List[str]], date: str) -> Dict[str, pd.DataFrame]:
     """按标的池 + 日期装配 price_data（生产走 data_lake，测试 monkeypatch 注入）。
 
     物理意图：
@@ -78,31 +79,52 @@ def _load_price_data(symbols: List[str], date: str) -> Dict[str, pd.DataFrame]:
         测试环境：通过 monkeypatch 覆盖此函数，注入合成 price_data。
 
     参数：
-        symbols: 标的池（ScanRequest.universe）。
-        date:    扫描交易日（预留：未来按日期过滤 lake 数据）。
+        symbols: 标的池（ScanRequest.universe / ReplayRequest.universe）。
+            None 或 [] 表示全市场（Phase 3+ 接 data_lake 后生产全市场装配生效，
+            当前实现均返回空 dict 占位，安全降级）。
+        date:    扫描/回放交易日（预留：未来按日期过滤 lake 数据）。
 
     返回：
         {symbol: DataFrame} 字典。生产未接 lake 时返回 {}（降级）。
     """
     # TODO(Phase 3+): 接入 data.lake_reader 按 symbols + date 装配真实 price_data。
-    # 当前返回空 dict——run_scan 会得到空候选，安全降级（不抛异常）。
+    # symbols=None/[] 全市场语义待 data_lake 接入后实现；当前返回空 dict 占位——
+    # run_scan/run_replay 收到空 dict 后安全降级（不抛异常）。
     logger.debug("_load_price_data 占位返回空 dict（data_lake 接入待 Phase 3+），symbols=%s", symbols)
     return {}
 
 
 def _merge_cfg(cfg_override: Dict[str, Any]) -> StrategyConfig:
-    """默认 StrategyConfig + cfg_override 增量合并（model_copy 浅拷贝）。
+    """默认 StrategyConfig + cfg_override 增量合并（extra=forbid 动态子类全字段校验）。
 
     物理意图：用户传入 cfg_override（如 {"min_rr_ratio": 1.5}）增量覆盖默认配置，
-    不修改全局默认 cfg 实例（model_copy 是浅拷贝，原 cfg 不受影响）。
+    不修改全局默认 cfg 实例（每次重新 model_validate 构造新对象）。
 
-    防御性：cfg_override 字段名必须是 StrategyConfig 的合法字段，否则 model_copy
-    会抛 ValidationError——service 层不静默吞，让异常上抛到路由层转 422（参数错误）。
+    防御性（Task 3 review I-1 校准）：
+        Pydantic v2 有两个静默陷阱会掩盖非法 cfg_override：
+          (1) `model_copy(update=...)` 是【不触发校验】的浅拷贝——未知字段名会被
+              静默当作新属性附加，不抛 ValidationError；
+          (2) `model_validate` 的默认 extra="ignore" 会静默丢弃未知字段名。
+        二者都会让"cfg_override 字段名拼错"（如 {"min_rr_ration": 1.5}）被前端
+        误当作"无候选"而非"参数错误"，掩盖配置 Bug。
+        故此函数构建一个 extra="forbid" 的动态子类（_ForbidExtraConfig）做全字段
+        校验——未知字段 / 类型不匹配 / 约束违反（ge/le）统一抛 ValidationError。
+        service 层不静默吞，让其上抛路由层转 422（参数错误）。
     """
     base = StrategyConfig()
     if not cfg_override:
         return base
-    return base.model_copy(update=cfg_override)
+    # extra="forbid" 动态子类：Pydantic v2 默认 extra="ignore" 静默丢弃未知字段，
+    # 故临时开 forbid 才能让拼错字段名 → ValidationError 透传路由层转 422。
+    # 用 create_model 生成子类保持 StrategyConfig 全部字段/约束不变，仅叠加 forbid。
+    from pydantic import ConfigDict, create_model
+    _ForbidExtra = create_model(
+        "_ForbidExtraConfig",
+        __base__=StrategyConfig,
+        __config__=ConfigDict(extra="forbid"),
+    )
+    merged: Dict[str, Any] = {**base.model_dump(), **cfg_override}
+    return _ForbidExtra.model_validate(merged)
 
 
 def _plan_to_candidate(d: Dict[str, Any]) -> CandidatePlan:
@@ -156,9 +178,13 @@ def run_scan(req: ScanRequest) -> List[CandidatePlan]:
         5. storage.save_plans(date, plans) → 落 plans/<date>.json（默认 status=PENDING_APPROVAL）；
         6. 读回 storage.load_plans() → 转 CandidatePlan 返回（保证 status 字段持久化）。
 
-    防御性（CLAUDE.md 量化风控·边界审查）：
-        - algorithm 异常（screener/plan 内部）不裸抛到路由层——try/except 捕获并降级
-          返回空列表 + warning 日志（禁裸抛到路由层以外，杜绝 500 噪声）；
+    防御性（CLAUDE.md 量化风控·边界审查·Task 3 review I-1 校准）：
+        - 参数/状态机异常（ValidationError / ValueError / KeyError）【透传上抛】，
+          由路由层转 422（参数错误）/404（状态机未命中）——让前端能区分"参数错误"
+          vs"无候选"，避免非法 cfg_override 被静默吞成空结果；
+        - 算法/IO 异常（screener/plan/storage/data_lake 内部）不裸抛到路由层，
+          try/except 捕获并降级返回空列表 + warning 日志（禁裸抛到路由层以外，
+          杜绝 500 噪声污染前端）；
         - universe 为空 → 直接返回 []（不触发装配/screener，避免无意义计算）；
         - amount 单位待 Phase 3 统一（data_lake 千元 vs risk 元）——流动性过滤在
           screener 内部执行，本编排层不重复校验，单位标注见 screener.py。
@@ -168,13 +194,18 @@ def run_scan(req: ScanRequest) -> List[CandidatePlan]:
 
     返回：
         list[CandidatePlan]，落盘后的候选计划（含 status=PENDING_APPROVAL 初始态）。
-        无候选或异常降级时返回空列表。
+        无候选或算法异常降级时返回空列表；参数/状态机异常上抛（不降级）。
+
+    异常（透传路由层）：
+        ValidationError: cfg_override 字段名/值非法（路由层转 422）。
+        ValueError: 状态机参数非法（路由层转 422）。
+        KeyError: 状态机键未命中（路由层转 404）。
     """
     if not req.universe:
         return []
 
     try:
-        cfg = _merge_cfg(req.cfg_override)
+        cfg = _merge_cfg(req.cfg_override)   # 可能抛 ValidationError（cfg_override 非法）
         risk = RiskManager(cfg)
         price_data = _load_price_data(req.universe, req.date)
         if not price_data:
@@ -206,10 +237,15 @@ def run_scan(req: ScanRequest) -> List[CandidatePlan]:
         new_ids = {p.plan_id for p in plans}
         result = [_plan_to_candidate(d) for d in loaded if d.get("plan_id") in new_ids]
         return result
+    except (ValidationError, ValueError, KeyError):
+        # 参数/状态机异常透传路由层转 422/404（Task 3 review I-1）：
+        # ValidationError = cfg_override 字段名/值非法；ValueError = 业务参数非法；
+        # KeyError = 状态机键未命中。让前端能区分"参数错误"vs"无候选"。
+        raise
     except Exception as exc:
-        # 编排红线：算法/IO 异常不裸抛到路由层，降级返回空列表 + warning 日志
-        # （路由层据此返 200 空结果或 500，取决于业务语义；此处保守返空）
-        logger.warning("run_scan 编排异常（date=%s）：type=%s detail=%s",
+        # 编排红线：仅算法/IO 异常降级返回空列表 + warning 日志
+        # （screener/plan/storage/data_lake 内部异常，路由层据此返 200 空结果或 500）
+        logger.warning("run_scan 算法异常降级（date=%s）：type=%s detail=%s",
                        req.date, type(exc).__name__, exc, exc_info=True)
         return []
 
@@ -319,26 +355,39 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
         命中数/形态分布/月度收益。无前视红线：严格 .loc[:T] 裁剪（详见 backtest_replay）。
 
     参数：
-        req: ReplayRequest（start/end/cfg_override）。
+        req: ReplayRequest（start/end/universe/cfg_override）。
+            universe=None 表示全市场回放（Phase 3+ 接 data_lake 后生效，当前占位降级）；
+            universe=[...] 缩小到指定标的池（_load_price_data 按 symbols 装配）。
 
     返回：
         ReplayReportResponse（字段对齐 ReplayReport，metadata 内部字段不暴露）。
 
-    防御性：
-        - algorithm 异常不裸抛到路由层——try/except 捕获并降级返回零统计报告
+    防御性（Task 3 review I-1 + I-2 校准）：
+        - 参数/状态机异常（ValidationError / ValueError / KeyError）【透传上抛】，
+          由路由层转 422/404——让前端能区分"参数错误"vs"无样本"；
+        - 算法/IO 异常不裸抛到路由层——try/except 捕获并降级返回零统计报告
           （n_hits=0/win_rate=0.0/...，杜绝 500 噪声）；
         - price_data 装配为空 → 同样降级返回零统计（无样本可回放）。
+
+    异常（透传路由层）：
+        ValidationError: cfg_override 字段名/值非法（路由层转 422）。
+        ValueError: 业务参数非法（路由层转 422）。
+        KeyError: 状态机键未命中（路由层转 404）。
     """
     try:
-        cfg = _merge_cfg(req.cfg_override)
+        cfg = _merge_cfg(req.cfg_override)   # 可能抛 ValidationError（cfg_override 非法）
         risk = RiskManager(cfg)
-        # 回放 price_data 装配：用 universe=None 占位触发 _load_price_data 返回空 dict，
-        # 测试通过 monkeypatch 覆盖注入合成数据（生产应扩展 ReplayRequest 支持 universe
-        # 参数，或从 data_lake 全市场装配——Phase 3+ 接入）。
-        price_data = _load_price_data([], req.start)
+        # price_data 装配（Task 3 review I-2）：
+        #   req.universe 由 ReplayRequest 契约层传入：None=全市场（Phase 3+ 接 data_lake
+        #   后生产全市场回放生效，当前 _load_price_data 占位返空降级零统计）；
+        #   显式 universe=[...] 缩小到指定标的池。
+        #   _load_price_data 收到 None 时内部按"全市场"装配（当前实现仍返空 dict 占位，
+        #   测试通过 monkeypatch 覆盖注入合成数据）。
+        universe = req.universe if req.universe is not None else []
+        price_data = _load_price_data(universe, req.start)
         if not price_data:
-            logger.info("run_replay 无可用 price_data（start=%s, end=%s），返回零统计",
-                        req.start, req.end)
+            logger.info("run_replay 无可用 price_data（start=%s, end=%s, universe=%s），返回零统计",
+                        req.start, req.end, req.universe)
             return _empty_replay_report()
 
         report = backtest_replay.replay(
@@ -355,9 +404,13 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
             avg_holding_bars=report.avg_holding_bars,
             min_rr_ratio_recommendation=report.min_rr_ratio_recommendation,
         )
+    except (ValidationError, ValueError, KeyError):
+        # 参数/状态机异常透传路由层转 422/404（Task 3 review I-1）：
+        # 让前端能区分"参数错误"vs"无样本"，避免非法 cfg_override 被静默吞成零统计。
+        raise
     except Exception as exc:
-        # 编排红线：回放异常不裸抛，降级返回零统计（路由层据此返 200 或 500）
-        logger.warning("run_replay 编排异常（start=%s, end=%s）：type=%s detail=%s",
+        # 编排红线：仅算法/IO 异常降级返回零统计（路由层据此返 200 或 500）
+        logger.warning("run_replay 算法异常降级（start=%s, end=%s）：type=%s detail=%s",
                        req.start, req.end, type(exc).__name__, exc, exc_info=True)
         return _empty_replay_report()
 

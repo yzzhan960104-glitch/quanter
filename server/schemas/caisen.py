@@ -121,15 +121,23 @@ class ReplayRequest(BaseModel):
 
     物理意图：
         start / end：回放起止交易日（index label，整数 RangeIndex 或 ISO 日期）；
+        universe：     回放标的池（symbol 列表，生产由 data_lake 装配 price_data）；
         cfg_override：策略参数增量覆盖（同 ScanRequest.cfg_override 语义）。
 
     回放语义（对齐 backtest_replay.replay）：
         对每个交易日 T 用【T 及之前】数据滚动跑 screener→plan→离场模拟，
         统计胜率/平均盈亏比/最大回撤/命中数/形态分布/月度收益。
         无前视红线：严格 .loc[:T] 裁剪。
+
+    universe 契约（Task 3 review I-2）：
+        Optional，默认 None = 全市场回放。当前 Phase 3 data_lake 全市场装配尚未
+        接入，_load_price_data(None) 仍返回空 dict 占位（run_replay 降级零统计）。
+        契约层入口先就位，Phase 3+ 接 data_lake 后生产全市场回放即生效；调用方
+        亦可显式传 universe=[...] 缩小到指定标的池。
     """
     start: str
     end: str
+    universe: Optional[List[str]] = None
     cfg_override: Dict[str, Any] = Field(default_factory=dict)
 
 

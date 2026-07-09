@@ -39,6 +39,7 @@ from typing import Any, Dict
 
 from caisen import storage
 from caisen.config import StrategyConfig
+from pydantic import ValidationError
 from server.schemas.caisen import (
     CandidatePlan,
     PlanReview,
@@ -292,6 +293,46 @@ class TestRunScan:
         finally:
             svc._load_price_data = original_load
         assert plans == [], "min_rr_ratio=99 应过滤掉所有计划（cfg_override 生效）"
+
+    def test_run_scan_validation_error_propagates(self):
+        """cfg_override 非法字段 → ValidationError 上抛（非降级空列表）。
+
+        物理意图（Task 3 review I-1）：
+            service 层 try/except 不能一锅端吞掉参数错误。cfg_override 含未知字段名
+            （如拼写错误 "min_rr_ration"）或非法值（类型/约束违反）时，必须抛
+            ValidationError 透传路由层转 422——让前端能区分"参数错误"vs"无候选"。
+
+        校准要点：
+            Pydantic v2 的 model_copy(update=...) 是【不触发校验】的浅拷贝，会静默
+            接受未知字段；故 service._merge_cfg 改走 model_validate 全字段校验，
+            未知键/类型错误统一抛 ValidationError。本测试验证此契约不退化。
+        """
+        # 拼写错误的字段名（合法字段是 min_rr_ratio）→ _merge_cfg 抛 ValidationError
+        bad_override = dict(_LOOSE_CFG_OVERRIDE)
+        bad_override["min_rr_ration_typo"] = 1.5   # 未知字段
+        req = ScanRequest(
+            date="2024-01-15",
+            universe=["TESTW.SZ"],
+            cfg_override=bad_override,
+        )
+        with pytest.raises(ValidationError):
+            caisen_service.run_scan(req)
+
+    def test_run_scan_value_error_propagates(self):
+        """业务参数非法（约束违反）→ ValidationError 上抛（非降级空列表）。
+
+        物理意图：cfg_override 字段名合法但值违反 Pydantic 约束（如 min_pattern_bars
+        的 ge=11，传 5 违反下界）→ 同样应抛 ValidationError 透传路由层转 422。
+        """
+        bad_override = dict(_LOOSE_CFG_OVERRIDE)
+        bad_override["min_pattern_bars"] = 5   # 违反 ge=11 约束
+        req = ScanRequest(
+            date="2024-01-15",
+            universe=["TESTW.SZ"],
+            cfg_override=bad_override,
+        )
+        with pytest.raises(ValidationError):
+            caisen_service.run_scan(req)
 
 
 # ---------------------------------------------------------------------------
@@ -570,3 +611,70 @@ class TestRunReplay:
         assert isinstance(report, ReplayReportResponse)
         assert report.n_hits == 0
         assert report.win_rate == pytest.approx(0.0)
+
+    def test_run_replay_accepts_universe(self):
+        """ReplayRequest(universe=[...]) 能传入并下传 _load_price_data（Task 3 review I-2）。
+
+        物理意图：
+            run_replay 之前用 universe=None 占位（生产永远降级零统计）。I-2 给
+            ReplayRequest 加 universe 字段后，契约层入口就位——即使当前 _load_price_data
+            仍占位返空，调用方传 universe=[...] 也应能成功构造 ReplayRequest 并被
+            run_replay 接收（不抛异常，下传 symbols 到 _load_price_data）。
+
+        核心断言：
+            - ReplayRequest(universe=[...]) 构造成功（schema 接受 universe 字段）；
+            - run_replay 接收后不抛异常（返回合法 ReplayReportResponse）；
+            - _load_price_data 收到的 symbols == 请求的 universe（捕获 monkeypatch 入参）。
+        """
+        captured = {}
+
+        def fake_load(symbols, date):
+            captured["symbols"] = symbols
+            captured["date"] = date
+            return {}   # 占位返空 → run_replay 降级零统计（验证契约入口，非回放逻辑）
+
+        req = ReplayRequest(
+            start="2024-01-01",
+            end="2024-01-31",
+            universe=["UNI1.SZ", "UNI2.SZ"],
+            cfg_override={},
+        )
+        # schema 层：universe 字段已就位
+        assert req.universe == ["UNI1.SZ", "UNI2.SZ"]
+
+        import server.services.caisen_service as svc
+        original_load = svc._load_price_data
+        svc._load_price_data = fake_load
+        try:
+            report = caisen_service.run_replay(req)
+        finally:
+            svc._load_price_data = original_load
+
+        # service 层：universe 下传到 _load_price_data
+        assert captured.get("symbols") == ["UNI1.SZ", "UNI2.SZ"]
+        # run_replay 不抛异常，降级零统计
+        assert isinstance(report, ReplayReportResponse)
+
+    def test_run_replay_universe_none_defaults_to_empty(self):
+        """ReplayRequest(universe=None) → 全市场占位（_load_price_data 收到 []）。"""
+        captured = {}
+
+        def fake_load(symbols, date):
+            captured["symbols"] = symbols
+            return {}
+
+        req = ReplayRequest(
+            start="2024-01-01", end="2024-01-31", cfg_override={},  # universe 默认 None
+        )
+        assert req.universe is None   # 默认值 = None = 全市场
+
+        import server.services.caisen_service as svc
+        original_load = svc._load_price_data
+        svc._load_price_data = fake_load
+        try:
+            caisen_service.run_replay(req)
+        finally:
+            svc._load_price_data = original_load
+
+        # None → service 内部归一化为 []（_load_price_data 占位全市场语义）
+        assert captured.get("symbols") == []
