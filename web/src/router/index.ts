@@ -1,28 +1,31 @@
 /**
- * Vue Router 配置（蔡森专精化 Phase 1：删除回测/因子/策略前端）
+ * Vue Router 配置（蔡森形态学流水线 Phase 3 Task 8：首页改指 /caisen）
  *
- * 当前路由（4 条）：
- * - /           → 临时重定向 /dashboard（回测终端已删；Phase 3 建 CaisenScreenView 后改指 /caisen）
+ * 当前路由（5 条）：
+ * - /           → 重定向 /caisen（蔡森筛选作为研究/配置首屏，形态学流水线入口）
+ * - /caisen     → CaisenScreenView（蔡森形态学筛选：Tick 缓存 → MA/无敌量/KZ → 结果展示）
  * - /dashboard  → DashboardView（宏观·板块驾驶舱）
  * - /live       → LiveCockpitView（实盘交易中控：EMT/QMT 连接 + 下单 + 订单/资产）
  * - /data       → DataLakeView（数据湖资产白盒反射）
  * - /review     → ReviewView（AI 复盘：GLM + 实盘日志 → Markdown 诊断报告）
  *
- * Why DashboardView 直接 import、其余懒加载：
- * - DashboardView 是临时首页（首屏必加载），体量小（ECharts 面板 gzip 后可控）；
- * - DataLake/Review 体量较大且非首屏，按路由懒加载降低首屏主 chunk 体积。
+ * Why 全部懒加载（含 CaisenScreenView/DashboardView）：
+ * - 首页 /caisen 形态学筛选面板体量中等，懒加载后主 chunk 更聚焦；
+ * - 各 View 互不依赖，按路由切片可显著降低首屏主 bundle 体积。
  */
 import { createRouter, createWebHistory } from 'vue-router'
-import DashboardView from '../views/DashboardView.vue'
 import LiveCockpitView from '../views/LiveCockpitView.vue'
+const CaisenScreenView = () => import('../views/CaisenScreenView.vue')
+const DashboardView = () => import('../views/DashboardView.vue')
 const DataLakeView = () => import('../views/DataLakeView.vue')
 const ReviewView = () => import('../views/ReviewView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    // 首页临时指宏观驾驶舱（回测终端已删；Phase 3 建 CaisenScreenView 后改指 /caisen）
-    { path: '/', redirect: '/dashboard' },
+    // 首页改指蔡森筛选：形态学流水线为研究/配置第一入口（Phase 3 起）
+    { path: '/', redirect: '/caisen' },
+    { path: '/caisen', name: 'caisen', component: CaisenScreenView },
     { path: '/dashboard', name: 'dashboard', component: DashboardView },
     { path: '/live', name: 'live', component: LiveCockpitView },
     { path: '/data', name: 'data', component: DataLakeView },

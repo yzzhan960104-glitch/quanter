@@ -6,10 +6,10 @@
  *   1. 顶部导航条：在 4 个功能页间切换（图标 + 文字双标，按使用动线分组）
  *   2. <router-view/> 渲染当前路由对应的视图
  *
- * 导航信息架构（蔡森专精化 Phase 1 收敛后）：
- * - 左段「研究/配置」3 项：宏观驾驶舱 → 数据湖 → AI 复盘（按研究动线：宏观面 →
- *   数据资产 → 复盘诊断）。回测/因子/策略前端已删，Phase 3 建 CaisenScreenView
- *   后再加入蔡森形态学入口。
+ * 导航信息架构（蔡森形态学流水线 Phase 3 Task 8 起）：
+ * - 左段「研究/配置」4 项：蔡森筛选（形态学流水线，研究第一入口）→ 宏观驾驶舱 →
+ *   数据湖 → AI 复盘（按研究动线：形态学选股 → 宏观面 → 数据资产 → 复盘诊断）。
+ *   Phase 3 建 CaisenScreenView 后首页改指 /caisen，蔡森筛选作为研究/配置首项。
  * - 右段「实盘」1 项：实盘中控。用 .nav-divider 细分隔线物理区隔——这是全站唯一会
  *   真实下单的高危入口，空间区隔降低误点风险（skill destructive-nav-separation）。
  * - 每项 EP 官方图标（@element-plus/icons-vue，按需引入）+ 文字双标，提升识别度
@@ -22,7 +22,7 @@
 import { useRoute } from 'vue-router'
 import { computed, type Component } from 'vue'
 // 导航图标：EP 官方图标包，按需引入（非重型依赖，EP 生态标准配套）
-import { MagicStick, DataBoard, Files, Monitor } from '@element-plus/icons-vue'
+import { TrendCharts, MagicStick, DataBoard, Files, Monitor } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const activeName = computed(() => route.path)
@@ -34,9 +34,10 @@ interface NavItem {
   icon: Component
 }
 
-// 左段：研究/配置（蔡森专精化 Phase 1：仅留宏观/数据湖/AI 复盘 3 项；
-// 回测终端/归因/因子沙盒/因子/策略 已随 Phase 1 前端清理删除，Phase 3 建 CaisenScreenView 后再加入形态学入口）
+// 左段：研究/配置（蔡森形态学流水线 Phase 3 起：蔡森筛选作为研究第一入口，
+// 放 researchNav 首位；宏观驾驶舱/数据湖/AI 复盘依次承接研究动线）
 const researchNav: NavItem[] = [
+  { to: '/caisen',     label: '蔡森筛选',   icon: TrendCharts },
   { to: '/dashboard',  label: '宏观驾驶舱', icon: DataBoard },
   { to: '/data',       label: '数据湖',     icon: Files },
   { to: '/review',     label: 'AI 复盘',    icon: MagicStick },
