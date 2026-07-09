@@ -34,6 +34,10 @@ from server.api.v1.logs import (
 from server.api.v1.macro import router as macro_router
 # 实盘交易（优雅降级真接 QMT；无 xtquant/缺凭证时 /status 返 unavailable，不阻断 lifespan）
 from server.api.v1.trading import router as trading_router
+# 蔡森形态学流水线 REST 路由（Phase 3 Task 4）：scan/plans/activate/chart/positions/replay，
+# 调 caisen_service 编排层 + storage 持久化，异常三类（KeyError→404/ValidationError→422/
+# ValueError→422）路由层转译。NaN 经 StrictJSONResponse 早抛。
+from server.api.v1.caisen import router as caisen_router
 # 数据湖资产路由（层级一）：扫描 parquet mtime + 哨兵推导状态，触发同步起 daemon 子进程
 from server.api.v1.data import router as data_router
 # AI 复盘路由（层级六）：GLM 调用 + 三级降级，CPU/网络阻塞走线程池
@@ -136,6 +140,9 @@ app.include_router(logs_router, prefix="/api/v1")
 app.include_router(macro_router, prefix="/api/v1")
 # 实盘交易路由（优雅降级真接 QMT；lifespan 不自动 connect，单例 lazy 构造）
 app.include_router(trading_router, prefix="/api/v1")
+# 蔡森形态学流水线 REST 路由（Phase 3 Task 4）：7 端点 + 异常映射（KeyError→404/
+# ValidationError→422/ValueError→422），算法/IO 异常 service 层已降级返空结果。
+app.include_router(caisen_router, prefix="/api/v1")
 # 数据湖资产（层级一）：纯字典注册表 + 文件系统状态推导，零守护进程，不阻断 lifespan
 app.include_router(data_router, prefix="/api/v1")
 # AI 复盘（层级六）：GLM 调用 + 三级降级（缺凭证/调用失败/无数据均不阻断）
