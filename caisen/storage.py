@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict
 from typing import Optional
 
@@ -61,6 +62,12 @@ _DEFAULT_STATUS = "PENDING_APPROVAL"
 
 # 活跃状态集合：进入这两个状态的计划同步写入 active.json（执行器高频读路径）。
 _ACTIVE_STATUSES = ("ARMED", "FILLED")
+
+# ISO 日期严格正则：仅 YYYY-MM-DD（4位年-2位月-2位日）。
+# Why 严格：save_plans 的 date 直接拼进文件名 plans/<date>.json，任何非标准字符
+# （含 "../" 路径跳板、"/"/"\\" 分隔符、空格等）都可能造成路径遍历或注入（B-2）。
+# 正则先做格式拦截，_validate_iso_date 内再用 pd.Timestamp 做语义二次校验（如月份 13）。
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +115,26 @@ def _ensure_dir() -> None:
     os.makedirs(_PLANS_DIR, exist_ok=True)
 
 
+def _validate_iso_date(date: str) -> None:
+    """校验 date 为严格 YYYY-MM-DD，非法抛 ValueError（B-2 路径遍历/注入防御）。
+
+    两道防线：
+        1. 正则 _ISO_DATE_RE：格式拦截，拒绝含 "../" / "\\" / "/" / 空格等任何
+           非标准字符的输入——这是防路径遍历的核心（date 直接拼进文件名）；
+        2. pd.Timestamp 二次解析：拦截 re 通过但语义非法的输入（如 "2024-13-01"
+           月份越界），pd.Timestamp 对非法日期抛异常。
+
+    Why 不静默容错：date 是安全敏感输入（决定文件落盘路径），任何非法值都必须
+    显式失败而非猜测纠正——显式优于隐式（CLAUDE.md 量化风控·边界审查）。
+    """
+    if not isinstance(date, str) or not _ISO_DATE_RE.match(date):
+        raise ValueError(f"非法日期（须 YYYY-MM-DD）：{date!r}")
+    try:
+        pd.Timestamp(date)   # 语义二次校验（月份/日期越界）
+    except Exception as exc:
+        raise ValueError(f"非法日期（解析失败）：{date!r}") from exc
+
+
 def _read_json(path: str, default):
     """读 JSON 文件，文件缺失/JSON 异常时返回 default（幂等读，不抛异常）。
 
@@ -147,6 +174,9 @@ def save_plans(date: str, plans: list) -> None:
 
     幂等性：同 date 重复 save 会整体覆盖（T 日重跑筛形态时是期望行为）。
     """
+    # date 安全校验（B-2）：拼文件名前强制 YYYY-MM-DD，防路径遍历/注入。
+    # 先于 _ensure_dir：非法输入不应产生任何副作用（连目录都不建）。
+    _validate_iso_date(date)
     _ensure_dir()
     plans_serial = [_plan_to_dict(p, status=_DEFAULT_STATUS) for p in plans]
     payload = {"date": str(date), "plans": plans_serial}

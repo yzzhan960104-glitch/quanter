@@ -86,7 +86,11 @@ class ScanRequest(BaseModel):
         经 StrategyConfig.model_copy(update=cfg_override) 增量合并到默认配置。
         空 dict = 用默认 StrategyConfig。
     """
-    date: str
+    date: str = Field(
+        ...,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="扫描交易日 YYYY-MM-DD（同时作 plans/<date>.json 文件名，严格格式防路径遍历 B-2）",
+    )
     universe: List[str]
     cfg_override: Dict[str, Any] = Field(default_factory=dict)
 

@@ -402,3 +402,43 @@ class TestActivePlansPersistence:
     def test_active_empty_when_no_file(self):
         """无 active.json 时 load_active_plans 返回空列表（不抛异常）。"""
         assert storage.load_active_plans() == []
+
+
+# ---------------------------------------------------------------------------
+# 6. save_plans date 严格 ISO 校验（B-2 路径遍历防御）
+# ---------------------------------------------------------------------------
+class TestSavePlansDateValidation:
+    """save_plans(date) 对 date 做严格 YYYY-MM-DD 校验，防路径遍历/注入。
+
+    安全背景（B-2）：date 直接拼进文件名 plans/<date>.json，若为自由字符串，
+    攻击者可传 "../../../etc/cron.d/evil" 在任意路径写文件。校验必须：
+        - 拒绝含路径分隔符 / ".." 的输入；
+        - 拒绝非 ISO 格式（如 "2024/06/01"）；
+        - 接受合法 "YYYY-MM-DD"。
+    """
+
+    def test_save_plans_rejects_path_traversal(self):
+        """含 '../' 的 date 必须被拒（防路径遍历写任意路径）。"""
+        with pytest.raises(ValueError, match="非法日期"):
+            storage.save_plans("../../../etc/cron.d/evil", plans=[])
+
+    def test_save_plans_rejects_backslash_traversal(self):
+        """含反斜杠的 date 必须被拒（Windows 路径跳板）。"""
+        with pytest.raises(ValueError):
+            storage.save_plans("..\\..\\windows\\evil", plans=[])
+
+    def test_save_plans_rejects_non_iso_separator(self):
+        """非标准分隔符（/ 或 .）必须被拒（只接受 YYYY-MM-DD）。"""
+        with pytest.raises(ValueError):
+            storage.save_plans("2024/06/01", plans=[])
+
+    def test_save_plans_rejects_invalid_month(self):
+        """re 通过但语义非法（月份 13）必须被拒（二次 Timestamp 解析防御）。"""
+        with pytest.raises(ValueError):
+            storage.save_plans("2024-13-01", plans=[])
+
+    def test_save_plans_accepts_legal_iso(self):
+        """合法 YYYY-MM-DD 不抛且正常落盘。"""
+        storage.save_plans("2024-06-01", plans=[])
+        import os
+        assert os.path.isfile(os.path.join(storage._PLANS_DIR, "2024-06-01.json"))
