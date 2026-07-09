@@ -36,13 +36,16 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-import pandas as pd
-
 from caisen import storage
+
+# 模块级 logger（实盘可观测性：tick 编排内单计划异常需落日志，便于运维定位
+# "为什么今天没平仓"——行情偶发丢字段致 KeyError 不能被静默吞掉）。
+_logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -267,10 +270,19 @@ class ExecutionEngine:
                     status="FILLED",
                     entry_bar=self._today_bar(),
                 )
-            except Exception:
+            except Exception as e:
                 # 单计划异常不中断本轮其它计划（边界隔离）。
                 # 不在此处重试（断线/限频由 trading_service 内部熔断兜底；
                 # 状态机一致性由下一轮 beat 重新读 storage 自然收敛）。
+                # 实盘可观测性（CLAUDE.md 显式至上）：行情源偶发丢字段（quote 缺
+                # high/low/close）会抛 KeyError，若静默吞掉则运维无法定位"为什么
+                # 今天没成交"。此处落 warning 日志记录 plan_id + symbol + 异常类型 +
+                # 详情，便于回溯。
+                _logger.warning(
+                    "tick_pullback 计划 %s(%s) 处理异常，本轮跳过：%s: %s",
+                    plan.get("plan_id"), plan.get("symbol"),
+                    type(e).__name__, e,
+                )
                 continue
 
     async def tick_exit(self) -> None:
@@ -328,6 +340,15 @@ class ExecutionEngine:
                 elif decision.new_stop is not None:
                     # —— HOLD + 移动止盈激活 → 持久化新止损（止损只上移）——
                     storage.update_plan(plan["plan_id"], stop=decision.new_stop)
-            except Exception:
+            except Exception as e:
                 # 单持仓异常不中断本轮其它持仓（边界隔离）。
+                # 实盘可观测性（CLAUDE.md 显式至上）：行情源偶发丢字段（quote 缺
+                # high/low/close）会抛 KeyError，若静默吞掉则该持仓本轮离场判定
+                # 整轮失效，运维无法定位"为什么今天没平仓"。此处落 warning 日志
+                # 记录 plan_id + symbol + 异常类型 + 详情，便于回溯。
+                _logger.warning(
+                    "tick_exit 持仓 %s(%s) 处理异常，本轮跳过：%s: %s",
+                    plan.get("plan_id"), plan.get("symbol"),
+                    type(e).__name__, e,
+                )
                 continue
