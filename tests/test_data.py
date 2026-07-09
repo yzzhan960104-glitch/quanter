@@ -220,8 +220,13 @@ class TestDataCleaner:
 
         assert isinstance(df_clean, pd.DataFrame)
 
-    def test_clean_macro_bfills_missing_values(self):
-        """测试宏观数据清洗后向填充缺失值"""
+    def test_clean_macro_ffills_missing_values(self):
+        """宏观数据缺失应【向前填充】（用过去解释现在，防前视偏差 B-5）。
+
+        Why ffill 而非 bfill：bfill 把「未来才公布的值」回填到历史，构成前视偏差
+        （回测完美、实盘崩盘的典型未来函数）。ffill 用「已公布的最近一期值」解释
+        当下，是唯一合法方向。
+        """
         dates = pd.date_range("2023-01-01", periods=12, freq="MS", tz="Asia/Shanghai")
         df = pd.DataFrame({"m2": np.random.rand(12) * 100 + 200}, index=dates)
 
@@ -229,10 +234,42 @@ class TestDataCleaner:
         df.loc[df.index[3], "m2"] = np.nan
         df.loc[df.index[5], "m2"] = np.nan
 
-        df_clean = DataCleaner.clean_macro(df, fill_method="bfill")
+        df_clean = DataCleaner.clean_macro(df)   # 默认 ffill
 
-        # 缺失值应被后向填充
+        # 缺失值应被向前填充（无残留 NaN）
         assert not df_clean["m2"].isna().any()
+        # 方向性断言：index[3] 应填 index[2] 的【前值】（ffill），而非 index[4] 的后值（bfill）
+        assert df_clean.loc[df.index[3], "m2"] == df.loc[df.index[2], "m2"]
+        assert df_clean.loc[df.index[5], "m2"] == df.loc[df.index[4], "m2"]
+
+    def test_clean_macro_rejects_bfill(self):
+        """bfill 引入前视偏差，clean_macro 必须拒绝（仅允许 ffill）。"""
+        dates = pd.date_range("2023-01-01", periods=12, freq="MS", tz="Asia/Shanghai")
+        df = pd.DataFrame({"m2": np.random.rand(12) * 100 + 200}, index=dates)
+
+        with pytest.raises(ValueError):
+            DataCleaner.clean_macro(df, fill_method="bfill")
+
+    def test_clean_ohlcv_preserves_volume_amount_nan(self):
+        """volume/amount 绝不 ffill——停牌期间须保留 NaN 防流动性测算失真（B-9）。
+
+        Why：停牌日成交量为真·零流动性，ffill 会用「停牌前最后一天的量」伪装，
+        导致流动性过滤/VWAP 计算严重失真（与 lake_reader.py 同口径红线）。
+        """
+        dates = pd.date_range("2023-01-01", periods=10, freq="D", tz="Asia/Shanghai")
+        df = pd.DataFrame({
+            "open": [10.0] * 10, "high": [11.0] * 10, "low": [9.0] * 10, "close": [10.0] * 10,
+            "volume": [1000.0, np.nan, 3000.0] + [4000.0] * 7,
+            "amount": [10000.0, np.nan, 30000.0] + [40000.0] * 7,
+        }, index=dates)
+
+        df_clean = DataCleaner.clean_ohlcv(df)
+
+        # 停牌日（index[1]）的 volume/amount 须保留 NaN，不得 ffill
+        assert pd.isna(df_clean.loc[dates[1], "volume"])
+        assert pd.isna(df_clean.loc[dates[1], "amount"])
+        # OHLC 仍正常（不受 volume 排除影响）
+        assert not pd.isna(df_clean.loc[dates[1], "close"])
 
     def test_align_frequencies_returns_dataframe(self):
         """测试多频率数据对齐返回 DataFrame"""
