@@ -442,3 +442,50 @@ class TestSavePlansDateValidation:
         storage.save_plans("2024-06-01", plans=[])
         import os
         assert os.path.isfile(os.path.join(storage._PLANS_DIR, "2024-06-01.json"))
+
+
+# ---------------------------------------------------------------------------
+# 7. 原子写 + 重扫保留实盘状态（B-13/B-14）
+# ---------------------------------------------------------------------------
+class TestAtomicWriteAndRescanMerge:
+    """_write_json 原子替换 + save_plans 重扫保留已执行态计划（B-13/B-14）。
+
+    B-13：同 date 重扫不应清空已 ARMED/FILLED 的计划（实盘执行状态不可回退），
+          也不应在 active.json 留下孤儿条目（旧 plan_id 被新 uuid4 覆盖）。
+    B-14：_write_json 非原子，多进程（screen/execute）并发读-改-写会丢更新。
+          改为 tempfile+os.replace 原子替换 + 跨进程写锁串行化 RMW。
+    """
+
+    def test_write_json_roundtrip_and_no_tmp_leftover(self):
+        """原子写后内容完整可读，且不残留 .tmp 临时文件（B-14）。"""
+        import os
+        storage._write_json(storage._full_path("x.json"),
+                            {"v": 1, "list": [1, 2, 3], "中文": "ok"})
+        with open(storage._full_path("x.json"), encoding="utf-8") as f:
+            assert json.load(f) == {"v": 1, "list": [1, 2, 3], "中文": "ok"}
+        leftover = [p for p in os.listdir(storage._PLANS_DIR) if p.endswith(".tmp")]
+        assert leftover == []
+
+    def test_rescan_same_date_preserves_active_plans(self):
+        """同 date 重扫保留已 ARMED 旧计划，不回退实盘状态、不留 active 孤儿（B-13）。"""
+        # 第一次扫：存计划并推进到 ARMED（模拟已审核激活、待回踩成交）
+        p_old = _make_plan(plan_id="armed-old", symbol="OLD.SZ")
+        storage.save_plans("2024-06-01", [p_old])
+        storage.update_plan("armed-old", status="ARMED")
+        assert any(pl["plan_id"] == "armed-old" for pl in storage.load_active_plans())
+
+        # 第二次扫（T 日重跑筛形态）：新候选 plan_id 不同（uuid4 重生成）
+        p_new = _make_plan(plan_id="new-cand", symbol="NEW.SZ")
+        storage.save_plans("2024-06-01", [p_new])
+
+        # 旧 ARMED 计划应保留（status 未回退）
+        all_plans = storage.load_plans()
+        by_id = {pl["plan_id"]: pl for pl in all_plans}
+        assert "armed-old" in by_id, "重扫清空了已 ARMED 计划（B-13）"
+        assert by_id["armed-old"]["status"] == "ARMED"
+        # 新候选正常加入
+        assert "new-cand" in by_id
+        assert by_id["new-cand"]["status"] == "PENDING_APPROVAL"
+        # active.json 无孤儿：armed-old 仍在
+        active_ids = {pl["plan_id"] for pl in storage.load_active_plans()}
+        assert "armed-old" in active_ids
