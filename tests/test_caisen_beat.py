@@ -70,6 +70,37 @@ def test_scan_universe_calls_run_scan(monkeypatch):
     assert isinstance(req.universe, list)
 
 
+def test_scan_universe_swallows_run_scan_exception(monkeypatch):
+    """run_scan 抛异常时 scan_universe 吞掉异常返 [] 不抛（beat 不崩兜底验证）。
+
+    物理意图（CLAUDE.md 量化风控·接口与状态机边界）：
+        scan_universe 是日级 beat（T 日 15:30 触发），若 caisen_service.run_scan
+        因参数/状态机/底层 IO 异常抛错，beat 不应把异常透传到 Celery 调度器——
+        否则触发 beat 单次失败告警 + 连锁重试风暴。本测试显式验证兜底分支：
+        monkeypatch run_scan 抛 ValueError/RuntimeError，scan_universe() 必须返
+        回空列表且自身不抛（异常被 try/except 吞掉落 error 日志）。
+
+    防御性边界：覆盖 ValueError（参数/契约异常）+ RuntimeError（运行期异常）
+        两种典型类型，证明兜底是 catch-all Exception 而非仅限特定异常。
+    """
+    # 用参数化思想覆盖两类异常：分别 monkeypatch 后断言行为一致。
+    for exc_factory in (ValueError("契约异常模拟"), RuntimeError("运行期异常模拟")):
+        def boom(_req, _exc=exc_factory):
+            # 模拟 run_scan 内部未降级的异常（绕过 run_scan 自己的 try/except 直接抛）
+            raise _exc
+
+        monkeypatch.setattr(
+            "server.celery_app.caisen_service.run_scan", boom
+        )
+
+        # 关键断言：scan_universe 不抛（吞掉异常），返回空列表
+        result = celery_app_mod.scan_universe()
+        assert result == [], (
+            f"scan_universe 在 run_scan 抛 {type(exc_factory).__name__} 时"
+            f"应吞掉异常返回 []，实际返回 {result!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # monitor_pullback：非交易时段 / 非 live 跳过；交易时段 + live 调 tick_pullback
 # ---------------------------------------------------------------------------
@@ -138,6 +169,37 @@ def test_monitor_pullback_runs_in_session(monkeypatch):
     fake_engine.tick_pullback.assert_awaited_once()
 
 
+def test_monitor_pullback_swallows_tick_exception(monkeypatch):
+    """tick_pullback 抛异常时 monitor_pullback 吞掉不抛（beat 不崩·盘中持续监控保障）。
+
+    物理意图（CLAUDE.md 量化风控·接口与状态机边界）：
+        monitor_pullback 是 60s 周期 beat，tick_pullback 内部已对"单计划异常"
+        try/except 隔离（见 execution.py），但仍可能存在 engine 装配/storage 读取
+        层面的异常逃逸。若异常透传到 beat 调度器，本轮 beat 失败 + 后续可能触发
+        Celery 重试/告警——盘中 ARMED→FILLED 状态机推进会中断。本测试验证：tick
+        抛 RuntimeError 时 monitor_pullback() 自身不抛（吞掉落 error 日志等下一轮）。
+    """
+    monkeypatch.setattr(trading_service, "_in_a_share_session", lambda: True)
+    monkeypatch.setattr(
+        "server.celery_app.trading_service.get_status",
+        lambda: {"connected": True, "locked": False, "mode": "live"},
+    )
+    # tick_pullback 抛 RuntimeError（模拟 engine 装配层异常逃逸）
+    fake_engine = MagicMock()
+    fake_engine.tick_pullback = AsyncMock(side_effect=RuntimeError("engine 装配层异常模拟"))
+    monkeypatch.setattr(
+        "server.celery_app._build_execution_engine", lambda: fake_engine
+    )
+
+    # 关键断言：monitor_pullback 不抛（吞掉异常），静默返回 None
+    result = celery_app_mod.monitor_pullback()
+    assert result is None, (
+        f"monitor_pullback 在 tick_pullback 抛异常时应吞掉返回 None，实际 {result!r}"
+    )
+    # 同时验证 tick 确实被调用（证明进入了编排链路而非被闸门跳过）
+    fake_engine.tick_pullback.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # monitor_holding：调 tick_exit
 # ---------------------------------------------------------------------------
@@ -174,6 +236,37 @@ def test_monitor_holding_calls_tick_exit(monkeypatch):
 
     celery_app_mod.monitor_holding()
 
+    fake_engine.tick_exit.assert_awaited_once()
+
+
+def test_monitor_holding_swallows_tick_exception(monkeypatch):
+    """tick_exit 抛异常时 monitor_holding 吞掉不抛（持仓风控持续运行保障）。
+
+    物理意图（CLAUDE.md 量化风控·持仓风控必须持续运行）：
+        monitor_holding 是 60s 周期 beat，盘中遍历 FILLED 持仓执行止损/止盈/时间
+        止损。tick_exit 内部已对"单持仓异常" try/except 隔离，但 engine 装配层异常
+        仍可能逃逸。若异常透传到 beat，本轮失败 + 中断后续轮次离场监控——已有
+        FILLED 持仓的止损/止盈停摆是高风险事件。本测试验证：tick 抛 RuntimeError
+        时 monitor_holding() 自身不抛（吞掉等下一轮 beat 重试）。
+    """
+    monkeypatch.setattr(trading_service, "_in_a_share_session", lambda: True)
+    monkeypatch.setattr(
+        "server.celery_app.trading_service.get_status",
+        lambda: {"connected": True, "locked": False, "mode": "live"},
+    )
+    # tick_exit 抛 RuntimeError（模拟 engine 装配层异常逃逸）
+    fake_engine = MagicMock()
+    fake_engine.tick_exit = AsyncMock(side_effect=RuntimeError("engine 装配层异常模拟"))
+    monkeypatch.setattr(
+        "server.celery_app._build_execution_engine", lambda: fake_engine
+    )
+
+    # 关键断言：monitor_holding 不抛（吞掉异常），静默返回 None
+    result = celery_app_mod.monitor_holding()
+    assert result is None, (
+        f"monitor_holding 在 tick_exit 抛异常时应吞掉返回 None，实际 {result!r}"
+    )
+    # 同时验证 tick 确实被调用（证明进入了编排链路而非被闸门跳过）
     fake_engine.tick_exit.assert_awaited_once()
 
 

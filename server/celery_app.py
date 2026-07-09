@@ -189,6 +189,11 @@ def monitor_pullback() -> None:
         return
 
     # —— 进入编排：调 ExecutionEngine.tick_pullback（asyncio.run 包裹 async 方法）——
+    # asyncio.run 边界：当前 prefork worker（默认同步执行模型）每次 beat 新建一个
+    # 临时 event loop 驱动 async tick——安全。若后续切 gevent/eventlet 池，或
+    # ExecutionEngine 引入持久 HTTP session（跨 tick 复用连接池/aiohttp.ClientSession），
+    # asyncio.run 每次新建 loop 会导致 session 复用断裂（session 绑定到已关闭的旧 loop
+    # 上抛 RuntimeError）——届时需改为持久 loop（worker 级单例 loop / asynccelery）。
     engine = _build_execution_engine()
     try:
         asyncio.run(engine.tick_pullback())
@@ -218,6 +223,12 @@ def monitor_holding() -> None:
     if not trading_service._in_a_share_session():
         return
     # —— 闸门 2：网关非 live 直接 return（断线不补发）——
+    # ⚠️ 离场停摆风险（vetoed_by_risk）：trading_service 触发风控锁时 mode 会变为
+    # "vetoed_by_risk"，本闸门将其与 disconnected 同等跳过——已有 FILLED 持仓的
+    # 止损/止盈/时间止损将暂停。当前采取保守策略（风控锁时不发单，避免与风控决策
+    # 冲突）。follow-up：是否在 vetoed_by_risk 时仅停 pullback（新开仓）但保留 exit
+    # （离场）监控，让止损/止盈继续生效，需风控策略决策——离场与开仓风控语义不同，
+    # 持仓风控原则上必须持续运行，待评审后决定是否拆分跳过逻辑。
     status = trading_service.get_status()
     if status.get("mode") != "live":
         logger.debug(
@@ -226,6 +237,9 @@ def monitor_holding() -> None:
         return
 
     # —— 进入编排：调 ExecutionEngine.tick_exit（asyncio.run 包裹）——
+    # asyncio.run 边界：同 monitor_pullback——prefork worker 安全；若切 gevent/eventlet
+    # 池或 ExecutionEngine 引入持久 HTTP session（跨 tick 复用），asyncio.run 每次新建
+    # loop 会致 session 复用断裂，需改持久 loop（worker 级单例 loop / asynccelery）。
     engine = _build_execution_engine()
     try:
         asyncio.run(engine.tick_exit())
