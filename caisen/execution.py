@@ -263,13 +263,34 @@ class ExecutionEngine:
                     side="buy",
                     price=plan["entry_upper"],
                 )
-                await self.trading.submit_order(order, dry_run=False, confirm=True)
-                # —— 成交 → 状态推进 FILLED（记录 entry_bar 便于后续 bars_held 推算）——
-                storage.update_plan(
-                    plan["plan_id"],
-                    status="FILLED",
-                    entry_bar=self._today_bar(),
-                )
+                result = await self.trading.submit_order(order, dry_run=False, confirm=True)
+                # 【B-4 修复】仅在真实成交才推进 FILLED，杜绝幽灵持仓。
+                # EMT submit_order 返回 state=SUBMITTED（限价单已提交、成交靠异步回报），
+                # 若无视 state 直接标 FILLED，会在未成交单上建出「幽灵持仓」，tick_exit
+                # 随后可能在其上发市价 SELL → 对不存在的持仓发卖单（裸卖空/拒单/敞口失控）。
+                state = (result or {}).get("state")
+                if state in ("FILLED", "PARTIAL_FILLED"):
+                    # —— 真实成交 → 状态推进 FILLED（记录 entry_bar 便于后续 bars_held 推算）——
+                    storage.update_plan(
+                        plan["plan_id"],
+                        status="FILLED",
+                        entry_bar=self._today_bar(),
+                    )
+                elif state in ("REJECTED", "FAILED"):
+                    # —— 废单/失败 → 回退 PENDING_APPROVAL 待人工，绝不标 FILLED ——
+                    # Why 回退而非留 ARMED：废单不会自愈成成交，留 ARMED 会每轮重复发废单；
+                    # 回退审核让人工介入（资金不足/参数非法等原因需人工裁决）。
+                    _logger.warning(
+                        "tick_pullback 计划 %s(%s) 下单被拒/失败 state=%s msg=%s，回退审核",
+                        plan.get("plan_id"), plan.get("symbol"),
+                        state, (result or {}).get("message"),
+                    )
+                    storage.update_plan(
+                        plan["plan_id"], status="PENDING_APPROVAL",
+                        note=f"order_{state}",
+                    )
+                # SUBMITTED / 其它中间态：限价单排队未成交，保持 ARMED，等成交回报推进
+                # （完整闭环需 P1-9 网关对账/回调把 SUBMITTED→FILLED 推进，本处先堵乐观标记）。
             except Exception as e:
                 # 单计划异常不中断本轮其它计划（边界隔离）。
                 # 不在此处重试（断线/限频由 trading_service 内部熔断兜底；
