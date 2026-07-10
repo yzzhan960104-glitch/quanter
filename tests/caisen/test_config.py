@@ -17,7 +17,7 @@ def test_default_config_loads():
     cfg = StrategyConfig()
     # —— 时间跨度 / 风控基准 ——
     assert cfg.min_pattern_bars == 11            # >10 硬约束（蔡森实战篇：形态跨度至少 11 根）
-    assert cfg.min_rr_ratio == 3.0               # 25% 胜率下期望为正的盈亏比下限
+    assert cfg.min_rr_ratio == 1.5               # 兜底定标值（2026-07-11，待replay去重+全市场复算；旧3.0全拦标准W底）
     assert cfg.max_position_pct == 0.05          # 单标的占总资金 5% 上限
     # —— Task 1 精读校准：等额累加满足级数 + 右脚>左脚 + 26 周线打底 ——
     assert cfg.neckline_height_multiple == 2     # 默认看第一+第二波满足（颈线 + n×H 等额累加）
