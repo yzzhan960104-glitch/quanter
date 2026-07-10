@@ -22,10 +22,11 @@
 设计取舍（Why 这样切分）：
     - cfg_override 增量合并：StrategyConfig.model_copy(update=cfg_override)，
       浅拷贝默认配置后增量覆盖，零侵入（不修改全局默认 cfg 实例）。
-    - price_data 装配：生产由 data_lake 提供（_load_price_data 默认实现走 data.lake_reader，
-      但当前 Phase 3 暂未接 lake，先返回空 dict 占位，测试通过 monkeypatch 注入合成数据）。
-    - amount 单位待 Phase 3 统一（data_lake 千元 vs risk 元）——本任务编排时若涉及
-      流动性过滤，注释标注单位待统一，不在本任务修（Phase 2 follow-up）。
+    - price_data 装配：_load_price_data 走 DataLakeReader（lifespan 已 load daily 湖；
+      独立进程无 lifespan 时自确保 load，守卫防重复）。universe 为 None/[] 时按
+      reader.symbols 全市场枚举；reader 离线/湖空时降级返空 dict（测试可 monkeypatch 注入）。
+    - amount 单位统一：data_lake amount 落盘为千元（tushare pro.daily 原生），_load_price_data
+      装配时已 ×1000 转元，与 risk.liquidity_min_amount=1e8(元) 口径一致（#3）。
 
 蔡森方法学对齐：
     server 层是蔡森流水线的"对外契约层"——把算法 + 持久化封装为 REST 友好的
@@ -69,29 +70,65 @@ _DEFAULT_AUM: float = 1_000_000.0
 
 
 def _load_price_data(symbols: Optional[List[str]], date: str) -> Dict[str, pd.DataFrame]:
-    """按标的池 + 日期装配 price_data（生产走 data_lake，测试 monkeypatch 注入）。
+    """按标的池 + 日期从 data_lake 装配 price_data（生产走 DataLakeReader）。
 
     物理意图：
-        生产环境：从 data_lake 读取每个 symbol 的 OHLCV DataFrame（含 close/high/
-            low/volume/amount），index 为交易日（RangeIndex 或 DatetimeIndex）。
-        当前 Phase 3：data_lake 接入尚未完成，返回空 dict 占位（screener 收到空
-            dict 时返回空候选 DataFrame，run_scan 返回空列表——降级而非崩溃）。
-        测试环境：通过 monkeypatch 覆盖此函数，注入合成 price_data。
+        生产：DataLakeReader.get_instance()（lifespan 已 load daily 湖进内存），
+              按 symbols 逐标的 get_timeseries 取时序并装配。
+        universe 语义：symbols 为 None 或 [] → 全市场枚举（reader.symbols）。
+        单位统一：data_lake amount 为千元（tushare pro.daily 原生），装配时 ×1000 转元，
+              与 risk.liquidity_min_amount=1e8(元) 口径一致（#3）。
+        离线降级：reader 未 load / 湖空 / 全部 symbol 取空 → 返 {}，run_scan/run_replay
+              按既有契约降级（空候选 / 零统计），不抛异常。
 
     参数：
         symbols: 标的池（ScanRequest.universe / ReplayRequest.universe）。
-            None 或 [] 表示全市场（Phase 3+ 接 data_lake 后生产全市场装配生效，
-            当前实现均返回空 dict 占位，安全降级）。
-        date:    扫描/回放交易日（预留：未来按日期过滤 lake 数据）。
+                 None 或 [] → 全市场。
+        date:    截止交易日（scan 传 T 日取 [:T] 无前视；replay 传 req.end 取全历史段）。
 
     返回：
-        {symbol: DataFrame} 字典。生产未接 lake 时返回 {}（降级）。
+        {symbol: DataFrame}（OHLCV + amount 已转元）。离线/空时返回 {}。
     """
-    # TODO(Phase 3+): 接入 data.lake_reader 按 symbols + date 装配真实 price_data。
-    # symbols=None/[] 全市场语义待 data_lake 接入后实现；当前返回空 dict 占位——
-    # run_scan/run_replay 收到空 dict 后安全降级（不抛异常）。
-    logger.debug("_load_price_data 占位返回空 dict（data_lake 接入待 Phase 3+），symbols=%s", symbols)
-    return {}
+    from data.lake_reader import DataLakeReader
+    from config import LAKE_CONFIG
+
+    reader = DataLakeReader.get_instance()
+    lake = LAKE_CONFIG.get("default_lake") or "daily"
+    # ensure daily 湖已 load：server lifespan 启动时 load，但独立进程（celery worker /
+    # 脚本）无 lifespan，此处自确保（守卫防重复 load；首次 load 408MB 进内存）。
+    import os
+    if not reader.loaded or lake not in reader.lakes():
+        daily_path = LAKE_CONFIG["lakes"].get(lake)
+        if daily_path and os.path.exists(daily_path):
+            reader.load(daily_path, key=lake)
+    if not reader.loaded:
+        logger.debug("_load_price_data 离线（daily 湖缺失/加载失败），返空 dict")
+        return {}
+
+    # universe 解析：None/空 → 全市场枚举
+    if not symbols:
+        symbols = reader.symbols(lake)
+        if not symbols:
+            logger.debug("_load_price_data 湖无 symbol（lake=%s），返空 dict", lake)
+            return {}
+
+    price_data: Dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        # start 用足够早的固定日期（早于 daily 湖起点 2016），get_timeseries 的
+        # .loc[start:end] 闭区间切片自然截到实际数据范围；end=date 截到 T 日（无前视）。
+        ts = reader.get_timeseries(sym, start="2010-01-01", end=date, lake=lake)
+        if ts is None or ts.empty:
+            continue
+        # 列对齐（screener 需 close/high/low/volume/amount）
+        cols = [c for c in ("open", "high", "low", "close", "volume", "amount")
+                if c in ts.columns]
+        ts = ts[cols].copy()
+        # #3 单位统一：amount 千元 → 元（流动性过滤口径统一；volume 手单位不影响策略，
+        # 放量校验全用比例 right_vol_shrink/breakout_vol_multiplier，单位无关）。
+        if "amount" in ts.columns:
+            ts["amount"] = ts["amount"] * 1000.0
+        price_data[sym] = ts
+    return price_data
 
 
 def _merge_cfg(cfg_override: Dict[str, Any]) -> StrategyConfig:
@@ -185,9 +222,12 @@ def run_scan(req: ScanRequest) -> List[CandidatePlan]:
         - 算法/IO 异常（screener/plan/storage/data_lake 内部）不裸抛到路由层，
           try/except 捕获并降级返回空列表 + warning 日志（禁裸抛到路由层以外，
           杜绝 500 噪声污染前端）；
-        - universe 为空 → 直接返回 []（不触发装配/screener，避免无意义计算）；
-        - amount 单位待 Phase 3 统一（data_lake 千元 vs risk 元）——流动性过滤在
-          screener 内部执行，本编排层不重复校验，单位标注见 screener.py。
+        - universe 为空 → 流向 _load_price_data 全市场枚举（scan_universe beat
+          传 universe=[] 触发全市场扫描；reader 离线时 _load_price_data 返空 →
+          candidates 为空 → 降级返 []，不抛异常）；
+        - amount 单位已在 _load_price_data 装配时 ×1000 转元（data_lake 千元 → 元），
+          与 risk.liquidity_min_amount=1e8(元) 口径一致（#3）；流动性过滤在 screener
+          内部执行，本编排层不重复校验。
 
     参数：
         req: ScanRequest（date/universe/cfg_override）。
@@ -201,9 +241,9 @@ def run_scan(req: ScanRequest) -> List[CandidatePlan]:
         ValueError: 状态机参数非法（路由层转 422）。
         KeyError: 状态机键未命中（路由层转 404）。
     """
-    if not req.universe:
-        return []
-
+    # 【Task3】空 universe 不再早返：流向 _load_price_data 全市场枚举（scan_universe beat
+    # 传 universe=[] 触发全市场扫描；reader 离线时 _load_price_data 返空 → 下面 candidates
+    # 为空 → 降级返 []）。
     try:
         cfg = _merge_cfg(req.cfg_override)   # 可能抛 ValidationError（cfg_override 非法）
         risk = RiskManager(cfg)
@@ -356,8 +396,9 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
 
     参数：
         req: ReplayRequest（start/end/universe/cfg_override）。
-            universe=None 表示全市场回放（Phase 3+ 接 data_lake 后生效，当前占位降级）；
-            universe=[...] 缩小到指定标的池（_load_price_data 按 symbols 装配）。
+            universe=None/[] → 全市场回放（_load_price_data 按 reader.symbols 枚举；
+            reader 离线时降级返空 → 零统计报告）；universe=[...] 缩小到指定标的池
+            （_load_price_data 按 symbols 装配）。
 
     返回：
         ReplayReportResponse（字段对齐 ReplayReport，metadata 内部字段不暴露）。
@@ -378,13 +419,15 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
         cfg = _merge_cfg(req.cfg_override)   # 可能抛 ValidationError（cfg_override 非法）
         risk = RiskManager(cfg)
         # price_data 装配（Task 3 review I-2）：
-        #   req.universe 由 ReplayRequest 契约层传入：None=全市场（Phase 3+ 接 data_lake
-        #   后生产全市场回放生效，当前 _load_price_data 占位返空降级零统计）；
+        #   req.universe 由 ReplayRequest 契约层传入：None/[] = 全市场枚举
+        #   （reader.symbols 列举全 symbol；reader 离线时 _load_price_data 返空降级零统计）；
         #   显式 universe=[...] 缩小到指定标的池。
-        #   _load_price_data 收到 None 时内部按"全市场"装配（当前实现仍返空 dict 占位，
-        #   测试通过 monkeypatch 覆盖注入合成数据）。
+        #   _load_price_data 收到 None/[] 时内部按全市场装配（reader 走 default_lake，
+        #   lifespan 或自确保已 load；测试可 monkeypatch 注入合成数据）。
         universe = req.universe if req.universe is not None else []
-        price_data = _load_price_data(universe, req.start)
+        # 【Task3】传 req.end（取 [start,end] 全段），而非 req.start（[:start] 数据不足）；
+        # backtest_replay.replay 内部按 T∈[start,end] 滚动 .loc[:T] 隔离未来（无前视）。
+        price_data = _load_price_data(universe, req.end)
         if not price_data:
             logger.info("run_replay 无可用 price_data（start=%s, end=%s, universe=%s），返回零统计",
                         req.start, req.end, req.universe)

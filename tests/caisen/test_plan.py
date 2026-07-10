@@ -162,7 +162,7 @@ class TestRiskRewardFilter:
           risk = 9.9 - 9.5238 ≈ 0.3762
           rr = (10.9524 - 9.9) / 0.3762 ≈ 2.80 < 3.0 → 丢弃
         """
-        cfg = StrategyConfig()
+        cfg = StrategyConfig(min_rr_ratio=3.0)   # 显式 3.0：测"rr<min 丢弃"，不依赖生产默认(现1.5)
         risk = RiskManager(cfg)
         cands = _make_candidate(neckline_price=10.0, depth=0.05)
 
@@ -283,7 +283,7 @@ class TestPlanGenerationFromCandidates:
                  take_profit=24, rr=(24-18)/(18-16)=6.0 保留
           cand3: neckline=10, depth=0.05, breakout=10 → rr=1.0 丢弃
         """
-        cfg = StrategyConfig()
+        cfg = StrategyConfig(min_rr_ratio=3.0)   # 显式 3.0：cand3 rr≈2.80<3 丢弃，不依赖生产默认(现1.5)
         risk = RiskManager(cfg)
         cands = pd.concat([
             _make_candidate(symbol="A", neckline_price=10.0, depth=0.25,

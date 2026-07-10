@@ -98,8 +98,14 @@ class StrategyConfig(BaseModel):
         description="止损 ATR 额外缓冲(注：蔡森原著止损=C 波低点；此 buffer 仅为日线噪声保险)",
     )
     min_rr_ratio: float = Field(
-        3.0,
-        description="盈亏比下限(25% 胜率下期望值为正的最低 R/R；低于此值不入场)",
+        1.5,
+        description=(
+            "盈亏比下限(回踩均价入场+第n波目标公式，Phase2 Bug4 修后；标准 W 底新公式 rr≈1.4，"
+            "旧默认 3.0 会全拦发不出计划)。"
+            "【定标 2026-07-11】默认 1.5 为兜底值——近3年全市场 replay 单机太慢(O(标的×T²))，"
+            "sample=20/2年 排查发现 backtest_replay 重复计数 bug(同一形态连续T日反复计)致统计失真，"
+            "未能跑出可信定标。待 replay 去重修复 + 全市场定标复算后据实调整。"
+        ),
     )
 
     # —— 时间止损/超时离场 ——
