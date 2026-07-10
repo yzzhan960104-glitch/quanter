@@ -31,15 +31,16 @@ def _make_candidate(
     neckline_price: float = 10.0,
     depth: float = 0.25,           # depth=0.25 → bottom = 10/(1+0.25) = 8.0
     breakout_price: float | None = None,
+    bottom_price: float | None = None,   # Bug3：默认 neckline/(1+depth) 与原反推一致
     amount30d: float = 2e8,
     atr: float | None = None,      # 可选 ATR（缺省时止损 buffer 退化为 0）
     formed_at: pd.Timestamp = pd.Timestamp("2024-01-15"),
 ) -> pd.DataFrame:
     """构造单行候选 DataFrame，字段对齐 PatternScreener.screen() 输出契约。
 
-    bottom_price 反推关系（W 底 depth 定义）：
-        depth = (neckline - bottom) / bottom  →  bottom = neckline / (1 + depth)
-    头肩底 depth 定义相同结构（(颈线均价 - P4)/P4），反推公式一致，近似可接受。
+    bottom_price（Bug3）：screener 现直接输出形态识别的 bottom_price（W底=min(p1,p3)，
+    头肩底=p4），plan 不再逆推。本构造器默认 bottom_price = neckline/(1+depth) 保持
+    与 depth 定义的一致性（合成场景下两者等价），可显式覆盖以测试非典型场景。
 
     atr 为可选字段：screener 输出无 ATR，plan.generate 通过 metadata 或额外列接收；
     缺省时 stop_loss_atr_buffer × ATR 项归零（蔡森原著止损 = C 波低点，buffer 仅为
@@ -47,12 +48,15 @@ def _make_candidate(
     """
     if breakout_price is None:
         breakout_price = neckline_price  # 默认突破价 = 颈线价（理想突破瞬间）
+    if bottom_price is None:
+        bottom_price = neckline_price / (1.0 + depth)   # 默认与 depth 定义一致
     row = {
         "symbol": symbol,
         "pattern_type": pattern_type,
         "formed_at": formed_at,
         "breakout_price": float(breakout_price),
         "neckline_price": float(neckline_price),
+        "bottom_price": float(bottom_price),
         "depth": float(depth),
         "tension": 0.5,
         "amount30d": float(amount30d),
@@ -137,17 +141,26 @@ class TestNecklineSatisfyEqualAccumulation:
 # 2. 盈亏比校验：rr < 3 丢弃 / rr = 3 边界保留
 # ---------------------------------------------------------------------------
 class TestRiskRewardFilter:
-    """盈亏比校验：rr = (take_profit - entry) / (entry - stop_loss)，< 3.0 丢弃。"""
+    """盈亏比校验（Bug4 新公式）：rr = (第n波满足 - 回踩均价) / (回踩均价 - stop)，< 3.0 丢弃。
+
+    新公式（回踩入场策略的真实盈亏比）：
+        expected_entry = (entry_upper + entry_lower) / 2   回踩挂单区间均价
+        target = neckline + n×H                            第 n 波满足（默认 n=2）
+        risk = expected_entry - stop_loss
+        rr = (target - expected_entry) / risk
+    旧公式用突破价作入场 + 第一波目标，数学上 rr 必 < 1（死锁），已废弃。
+    """
 
     def test_rr_below_3_dropped(self):
-        """盈亏比 < 3.0 的计划被丢弃。
+        """盈亏比 < 3.0 的计划被丢弃（新公式下 rr≈2.80 < 3.0）。
 
-        构造浅形态使 rr 落到 3.0 以下：
-          neckline=10, depth=0.05 → bottom=10/1.05≈9.524, H≈0.476
-          take_profit = 10 + 0.476 = 10.476
-          entry_upper = breakout = 10（=颈线）
-          stop_loss = bottom = 9.524（无 ATR，buffer=0）
-          rr = (10.476 - 10) / (10 - 9.524) = 0.476 / 0.476 = 1.0 < 3.0 → 丢弃
+        构造浅形态：
+          neckline=10, depth=0.05 → bottom≈9.5238, H≈0.4762
+          breakout=10 → entry_upper=10, entry_lower=9.8, expected_entry=9.9
+          第 2 波满足 take_profit_n = 10 + 2×0.4762 ≈ 10.9524
+          stop = bottom ≈ 9.5238（无 ATR）
+          risk = 9.9 - 9.5238 ≈ 0.3762
+          rr = (10.9524 - 9.9) / 0.3762 ≈ 2.80 < 3.0 → 丢弃
         """
         cfg = StrategyConfig()
         risk = RiskManager(cfg)
@@ -155,39 +168,54 @@ class TestRiskRewardFilter:
 
         plans = generate(cands, cfg, risk, aum=1e6, date=pd.Timestamp("2024-01-15"))
 
-        assert len(plans) == 0, "盈亏比 1.0 < 3.0 的计划应被丢弃"
+        assert len(plans) == 0, "盈亏比 ≈2.80 < 3.0 的计划应被丢弃"
 
-    def test_rr_equals_3_kept(self):
-        """盈亏比 = 3.0 边界保留（>= min_rr_ratio，非严格 >）。
+    def test_rr_meets_threshold_kept(self):
+        """盈亏比 ≥ 3.0 的计划保留（新公式下深回踩场景 rr≈5.59）。
 
-        构造精确 rr=3.0 的形态：
-          需要 (take_profit - entry) / (entry - stop) = 3.0
-          设 bottom=8, neckline=10 → H=2, take_profit=12
-          entry_upper = breakout = 10
-          无 ATR: stop_loss = bottom = 8
-          rr = (12 - 10) / (10 - 8) = 2 / 2 = 1.0  ❌ 不够
+        构造：
+          neckline=10, depth=0.25 → bottom=8, H=2
+          breakout=9.0（突破价低于颈线，模拟颈线下的深回踩挂单边界）
+          entry_upper=9.0, entry_lower=8.82, expected_entry=8.91
+          第 2 波满足 take_profit_n = 10 + 2×2 = 14
+          stop = 8（无 ATR）
+          risk = 8.91 - 8 = 0.91
+          rr = (14 - 8.91) / 0.91 ≈ 5.5934 ≥ 3.0 → 保留
 
-        调整：需要 entry - stop 更小或 take_profit - entry 更大。
-        用 depth=0.25（H=2, take_profit=12）+ 较高 breakout 使 entry 抬高：
-          取 breakout=10.5 → entry_upper=10.5
-          rr = (12 - 10.5) / (10.5 - 8) = 1.5 / 2.5 = 0.6  ❌ 更小
-
-        正确构造：bottom=8, neckline=10, H=2, take_profit=12
-          要 rr=3 → (12 - entry) / (entry - 8) = 3 → 12 - entry = 3×entry - 24
-          → 4×entry = 36 → entry = 9.0
-          即 breakout = 9.0（突破价 = 9，低于颈线 10——非典型但数学合法，
-          模拟"突破颈线前夜挂单"的边界场景）。
+        注：标准 W 底（breakout≈neckline）新公式 rr 仍偏低（约 1~2），min_rr_ratio=3.0
+        偏高是另一独立待办（数据驱动定标），非本 rr 公式修复范围。
         """
         cfg = StrategyConfig()
         risk = RiskManager(cfg)
         cands = _make_candidate(
             neckline_price=10.0, breakout_price=9.0, depth=0.25
-        )  # bottom=8, H=2, take_profit=12, rr=(12-9)/(9-8)=3.0
+        )  # bottom=8, H=2, 第2波=14, expected_entry=8.91, rr≈5.5934
 
         plans = generate(cands, cfg, risk, aum=1e6, date=pd.Timestamp("2024-01-15"))
 
-        assert len(plans) == 1, "盈亏比 = 3.0 边界应保留（>= min_rr_ratio）"
-        assert plans[0].rr_ratio == pytest.approx(3.0, abs=1e-9)
+        assert len(plans) == 1, "盈亏比 ≈5.59 ≥ 3.0 应保留"
+        assert plans[0].rr_ratio == pytest.approx(5.5934, abs=1e-3)
+
+    def test_rr_uses_pullback_avg_entry_not_breakout(self):
+        """【Bug4 数学内核】rr 用回踩均价入场，而非突破价。
+
+        构造使回踩均价 ≠ 突破价的场景，验证 expected_entry = (entry_upper+entry_lower)/2
+        被用于 rr（而非旧公式的 entry_upper=breakout）：
+          neckline=10, depth=0.25 → bottom=8, H=2, 第2波=14
+          breakout=10 → entry_upper=10, entry_lower=9.8, expected_entry=9.9
+          stop=8, risk=1.9, rr=(14-9.9)/1.9≈2.158
+        若错误用突破价 entry_upper=10 作入场：rr=(14-10)/(10-8)=2.0（不同值）。
+        断言锁定 2.158（回踩均价语义），证伪旧突破价语义。
+        """
+        cfg = StrategyConfig(min_rr_ratio=1.5)   # 放宽阈值使 rr≈2.158 的计划保留以便检查 rr 值
+        risk = RiskManager(cfg)
+        cands = _make_candidate(neckline_price=10.0, breakout_price=10.0, depth=0.25)
+
+        plans = generate(cands, cfg, risk, aum=1e6, date=pd.Timestamp("2024-01-15"))
+
+        assert len(plans) == 1
+        # 回踩均价 rr≈2.158（≠ 旧突破价语义的 2.0）
+        assert plans[0].rr_ratio == pytest.approx(2.1579, abs=1e-3)
 
 
 # ---------------------------------------------------------------------------

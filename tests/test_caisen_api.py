@@ -47,8 +47,9 @@ from caisen.plan import TradePlan
 # ---------------------------------------------------------------------------
 # 宽松 cfg_override：生产默认 StrategyConfig() 严格（confirm_bars=3/ma26w_filter=True/
 # abc_wave_detect=True 等），合成标准 W 底在严格默认下会被否决。测试需传完整宽松
-# override 才能复现 Task 8/10 已验证的命中场景。min_rr_ratio=1.5 承 rr 张力
-# （标准突破入场 rr≈1.0，生产默认 3.0 会过滤掉所有样本）。
+# override 才能复现 Task 8/10 已验证的命中场景。min_rr_ratio=1.0 承 rr 张力
+# （Bug4 修复后新 rr 公式下标准 W 底 rr≈1.4，生产默认 3.0 会过滤掉所有样本；
+# min_rr_ratio 定标是独立 Phase3+ 待办）。
 _LOOSE_CFG_OVERRIDE: Dict[str, Any] = dict(
     min_pattern_bars=11,
     max_pattern_bars=60,
@@ -67,7 +68,7 @@ _LOOSE_CFG_OVERRIDE: Dict[str, Any] = dict(
     liquidity_min_amount=1e8,
     hv_window=20,
     hv_max_quantile=0.95,
-    min_rr_ratio=1.5,
+    min_rr_ratio=1.0,
     pullback_window_bars=3,
     max_holding_bars=15,
     timeout_exit_threshold=0.01,

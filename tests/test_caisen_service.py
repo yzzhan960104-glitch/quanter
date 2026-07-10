@@ -19,8 +19,8 @@
   - 全程用 tmp_path fixture 隔离 storage（monkeypatch storage._PLANS_DIR），绝不污染真实 plans/；
   - 合成 price_data 复用 Task 8/10 已验证的标准 W 底序列（_build_w_bottom_with_rise 同源），
     保证 screener.screen 能产出非空候选 DataFrame，plan.generate 能产出 rr≥min_rr 的计划；
-  - cfg_override 用宽松 min_rr_ratio=1.5（承 Task 9/10 rr 张力：标准突破入场 rr≈1.0，
-    生产默认 3.0 会过滤掉所有样本）；
+  - cfg_override 用宽松 min_rr_ratio=1.0（Bug4 修复后新 rr 公式下标准 W 底 rr≈1.4，
+    生产默认 3.0 会过滤掉所有样本；min_rr_ratio 定标是独立 Phase3+ 待办）；
   - 服务编排要求"异常捕获返回结构化错误"（禁裸抛到路由层外）——测试用 monkeypatch
     注入异常验证降级路径。
 
@@ -56,8 +56,10 @@ from server.services import caisen_service
 def _mk_cfg(**overrides) -> StrategyConfig:
     """构造 service 测试用 StrategyConfig（宽松阈值，保证标准 W 底通过）。
 
-    承 Task 9/10 rr 张力：min_rr_ratio 用 1.5（生产默认 3.0 会过滤掉所有标准
-    突破入场计划，service 编排测试需要可重复命中的样本）。
+    承 Task 9/10 rr 张力 + Bug4 修复后新 rr 公式：标准 W 底（止损远 + 回踩浅）
+    新公式 rr≈1.4（如 breakout≈颈线时），min_rr_ratio 用 1.0 保证链路命中样本
+    （生产默认 3.0 会过滤掉所有标准突破入场计划——min_rr_ratio 数据驱动定标是
+    独立 Phase3+ 待办，非本链路测试范围）。
     """
     base = dict(
         min_pattern_bars=11,
@@ -77,7 +79,7 @@ def _mk_cfg(**overrides) -> StrategyConfig:
         liquidity_min_amount=1e8,
         hv_window=20,
         hv_max_quantile=0.95,
-        min_rr_ratio=1.5,
+        min_rr_ratio=1.0,
         pullback_window_bars=3,
         max_holding_bars=15,
         timeout_exit_threshold=0.01,
@@ -108,7 +110,7 @@ _LOOSE_CFG_OVERRIDE: Dict[str, Any] = dict(
     liquidity_min_amount=1e8,
     hv_window=20,
     hv_max_quantile=0.95,
-    min_rr_ratio=1.5,
+    min_rr_ratio=1.0,
     pullback_window_bars=3,
     max_holding_bars=15,
     timeout_exit_threshold=0.01,

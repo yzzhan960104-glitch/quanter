@@ -129,7 +129,8 @@ class PatternScreener:
             # 无命中：返回含完整列名的空 DataFrame（下游 concat/字段访问不报错）
             return pd.DataFrame(columns=[
                 "symbol", "pattern_type", "formed_at", "breakout_price",
-                "neckline_price", "depth", "tension", "amount30d", "is_valid",
+                "neckline_price", "bottom_price", "depth", "tension",
+                "amount30d", "is_valid",
             ])
         out = pd.DataFrame(candidates)
         out = out.sort_values("amount30d", ascending=False, kind="mergesort").reset_index(drop=True)
@@ -214,6 +215,7 @@ class PatternScreener:
             "formed_at": formed_at,
             "breakout_price": breakout_price,
             "neckline_price": float(res.neckline_price),
+            "bottom_price": float(res.bottom_price),   # 【Bug3】谷底价由形态直接给出
             "depth": float(res.depth),
             "tension": float(res.tension),
             "amount30d": amount30d,

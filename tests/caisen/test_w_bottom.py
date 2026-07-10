@@ -508,3 +508,86 @@ def test_ma26w_filter_passthrough_when_insufficient_samples():
     # 样本不足应放行（与关闭 ma26w_filter 等价）
     assert res is not None and res.is_valid, \
         f"样本不足 ma26w_window 时应兜底放行，但被否决：{res}"
+
+
+# ---------------------------------------------------------------------------
+# 用例 5：Phase 2 数学/业务逻辑 Bug 修复回归（Bug1/2/3/5）
+# ---------------------------------------------------------------------------
+def test_abc_wave_detect_does_not_reject_raised_right_foot():
+    """【Bug1】abc_wave_detect=True 时标准右脚垫高 W 底仍应被识别。
+
+    旧 ABC 检测要求 P3 接近 P1..P4 区间最低（p3 ≤ seg_min×1.005），但右脚垫高使
+    P3 ≥ P1 ≥ seg_min（seg_min ≤ P1，因 P1 在区间内）→ 标准右脚垫高 W 底必然
+    p3 > seg_min×1.005 被全部否决（自杀式逻辑）。W 底已移除 ABC 检测——打底由
+    「右脚≥左脚」+ ZigZag 保证 P1/P3 为局部谷底共同覆盖。
+    生产 config 默认 abc_wave_detect=True，故此 bug 在生产中致命（测试 _mk_cfg
+    关掉了所以未暴露）。本用例显式开启 ABC 验证修复。
+    """
+    close, high, low, vol = _build_standard_w_bottom()   # p1=7.5, p3=8.0 右脚垫高
+    cfg = _mk_cfg(abc_wave_detect=True)                  # 显式开启（生产默认）
+    atr = _atr_const(len(close))
+    piv = causal_pivots(close, atr, cfg)
+    assert _last4_pivots(piv) == [-1, 1, -1, 1]
+    res = detect(close, piv, high, low, vol, cfg)
+    assert res is not None and res.is_valid, \
+        f"abc_wave_detect=True 不应否决右脚垫高 W 底（Bug1 自杀式逻辑已移除）"
+
+
+def test_neckline_is_p2_horizontal_line():
+    """【Bug2】W 底颈线 = 中间峰 P2 的水平线（非两点拟合在 P4 处的投影）。
+
+    旧实现 neckline.fit_line([(p2_i,p2),(p4_i,p4)], at=p4_i)：过 (p4_i,p4) 的直线
+    在 p4_i 处求值必 = p4（=突破价），使颈线=突破价、阻力线跟着价格跑，H/止盈/盈亏比
+    全部失效。标准 W 底颈线即中间峰 P2 水平线。
+    """
+    close, high, low, vol = _build_standard_w_bottom()   # p2=11.0
+    cfg = _mk_cfg()
+    atr = _atr_const(len(close))
+    piv = causal_pivots(close, atr, cfg)
+    res = detect(close, piv, high, low, vol, cfg)
+    assert res is not None and res.is_valid
+    # 颈线价应 == P2 价（水平线），而非 P4 突破价
+    assert res.neckline_price == pytest.approx(res.p2_price, abs=1e-9), \
+        f"颈线应为 P2 水平线（Bug2），实际 neckline={res.neckline_price} p2={res.p2_price}"
+    assert res.neckline_price != pytest.approx(res.p4_price, abs=1e-9), \
+        f"颈线不应=突破价 P4（Bug2 旧实现缺陷）"
+
+
+def test_bottom_price_field_is_min_of_p1_p3():
+    """【Bug3】WBottom.bottom_price = min(p1,p3)，由形态直接给出（供 plan 直接读取）。
+
+    废除 plan.py 的 neckline/(1+depth) 逆推（脆弱 + 受 Bug2 连锁影响），改为形态识别
+    直接输出谷底价。W 底谷底 = 两底较低者 min(p1,p3)。
+    """
+    close, high, low, vol = _build_standard_w_bottom()   # p1=7.5, p3=8.0
+    cfg = _mk_cfg()
+    atr = _atr_const(len(close))
+    piv = causal_pivots(close, atr, cfg)
+    res = detect(close, piv, high, low, vol, cfg)
+    assert res is not None and res.is_valid
+    assert res.bottom_price == pytest.approx(min(res.p1_price, res.p3_price), abs=1e-9)
+    assert res.bottom_price == pytest.approx(7.5, abs=1e-9)   # min(7.5, 8.0)
+
+
+def test_breakout_volume_uses_segment_max_not_p4_only():
+    """【Bug5】突破放量校验用 P3→P4 段最大量，而非仅 P4 单根。
+
+    实盘价到 P4 见顶时常已缩量，真正放量发生在突破 P2 的那天（P3→P4 段内）。构造
+    P4 见顶缩量、但 P3→P4 段中间某根放量的序列：新实现（段内 max）应通过，旧实现
+    （仅查 P4）会否决。标准序列下标：p1=5, p2=10, p3=13, p4=17。
+    """
+    close, high, low, _ = _build_standard_w_bottom()
+    n = len(close)
+    p1_i, p2_i, p3_i, p4_i = 5, 10, 13, 17
+    vol = pd.Series(200.0, index=pd.RangeIndex(n))   # 基准温和量（=baseline）
+    vol.iloc[p1_i] = 300.0   # 左底放量
+    vol.iloc[p3_i] = 100.0   # 右底缩量（≤ 300×0.8 通过缩量校验）
+    vol.iloc[p4_i] = 100.0   # P4 见顶缩量（旧实现只查 P4 → 否决）
+    vol.iloc[p3_i + 2] = 500.0   # P3→P4 段内某根放量（突破当日，新实现认可）
+    cfg = _mk_cfg()
+    atr = _atr_const(len(close))
+    piv = causal_pivots(close, atr, cfg)
+    assert _last4_pivots(piv) == [-1, 1, -1, 1]
+    res = detect(close, piv, high, low, vol, cfg)
+    assert res is not None and res.is_valid, \
+        f"突破段内放量（P4 见顶缩量）应通过段内 max 校验（Bug5）：{res}"
