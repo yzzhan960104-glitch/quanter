@@ -123,7 +123,7 @@ celery -A server.celery_app worker -Q explorer -l info
 |------|------|-----------|
 | **Epic 1** | 四级数据湖 | AKShare 宏观/板块/日线 + JQData 分钟 + Binance 可选；`DataLakeReader` 多湖缓存，价格 ffill/volume 不 ffill 防前视。 |
 | **Epic 2** | 因子沙盒 | `CreditRegime`（日频 +1/0/-1 宏观信贷状态机）+ 微观动量爆发 + ATR Risk Parity 头寸（波动越大头寸越小）。 |
-| **Epic 3** | 执行网关 + 订单 | `MacroAwareGateway` 收缩期买入一票否决/减半 + 止损/止盈/ATR 移动止损 + T+1 底仓冻结感知（变相 T+0）。 |
+| **Epic 3** | 执行网关 + 订单 | `BaseExecutionGateway` 异步抽象（QMT/EMT/Mock 子类）+ 止损/止盈/ATR 移动止损 + T+1 底仓冻结感知（变相 T+0）。（注：`MacroAwareGateway` 宏观一票否决已于蔡森专精化后移除——caisen 为纯价量形态学、不消费 CreditRegime；宏观 regime 经 `risk.macro_position_coef` 仓位系数体现。） |
 | **Epic 4** | SSE 实时回测流 | `run_minute(event_emitter=)` 透传进度/成交/风控（触及止损止盈）事件至前端 EventSource，分钟级跑码视觉。 |
 | **Epic 5** | 钉钉风控网关 | `DingTalkChannel`（aiohttp + 加签 + errcode 校验 + 结构化卡片）+ `fire_and_forget` 跨线程告警：JQData 流量耗尽 / 外部熔断 / 宏观 -1 否决 / 回撤超阈。 |
 

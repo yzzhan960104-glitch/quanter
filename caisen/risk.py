@@ -3,11 +3,13 @@
 
 物理定位（CLAUDE.md 极简 + 显式原则）：
     本模块决定"能否开、开多大、标的是否被过滤"，在筛形态阶段执行（事前）。
-    与既有 risk_shield.check_order（事中拦废单）、MacroAwareGateway（事中 regime 否决）
-    三层互补，构成事前→事中的完整风控链：
-      - 事前（本模块）：宏观 regime 否决/HV 过滤/流动性过滤/仓位 5% 钳
+    与既有 risk_shield.check_order（事中拦废单）两层互补，构成事前→事中的风控链：
+      - 事前（本模块）：宏观 regime 仓位系数/HV 过滤/流动性过滤/仓位 5% 钳
       - 事中（risk_shield）：废单/超限/熔断拦截
-      - 事中（MacroAwareGateway）：regime 变化时的实时否决
+
+    注：宏观 CTA 重构时的 MacroAwareGateway（事中 regime 一票否决/减半）已于
+    蔡森专精化后移除——caisen 为纯价量形态学、不消费 CreditRegime；宏观 regime
+    在本模块经 macro_position_coef（仓位系数 0.0/0.3/0.6/1.0）体现，而非独立网关。
 
 蔡森 Task 1 校准：
     停损 = C 波低点（在 Task 9 plan.py 实现，本模块 position_size 仅接收 entry/stop 参数，
