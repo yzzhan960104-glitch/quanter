@@ -97,6 +97,11 @@ class DataLakeReader:
         """
         path = path or LAKE_CONFIG["default_path"]
         key = key or path
+        # 幂等守卫：同 key 已 load 不重复 read_parquet（daily 湖 408MB，重复 load 浪费内存+IO）。
+        # _load_price_data 的 ensure-load 也用 not reader.loaded 判空，但独立进程多次调用
+        # load() 时此守卫是最后一道防线，避免重复 read 进内存。
+        if key in self._lakes:
+            return
         # 离线降级：parquet 不存在仅记 warning，不写入缓存。设计意图：开发机/CI 无数据湖
         # 时不致启动崩溃，仅降级为空结果（.loaded=False，查询返回空 DF）。
         if not os.path.exists(path):

@@ -22,10 +22,11 @@
 设计取舍（Why 这样切分）：
     - cfg_override 增量合并：StrategyConfig.model_copy(update=cfg_override)，
       浅拷贝默认配置后增量覆盖，零侵入（不修改全局默认 cfg 实例）。
-    - price_data 装配：生产由 data_lake 提供（_load_price_data 默认实现走 data.lake_reader，
-      但当前 Phase 3 暂未接 lake，先返回空 dict 占位，测试通过 monkeypatch 注入合成数据）。
-    - amount 单位待 Phase 3 统一（data_lake 千元 vs risk 元）——本任务编排时若涉及
-      流动性过滤，注释标注单位待统一，不在本任务修（Phase 2 follow-up）。
+    - price_data 装配：_load_price_data 走 DataLakeReader（lifespan 已 load daily 湖；
+      独立进程无 lifespan 时自确保 load，守卫防重复）。universe 为 None/[] 时按
+      reader.symbols 全市场枚举；reader 离线/湖空时降级返空 dict（测试可 monkeypatch 注入）。
+    - amount 单位统一：data_lake amount 落盘为千元（tushare pro.daily 原生），_load_price_data
+      装配时已 ×1000 转元，与 risk.liquidity_min_amount=1e8(元) 口径一致（#3）。
 
 蔡森方法学对齐：
     server 层是蔡森流水线的"对外契约层"——把算法 + 持久化封装为 REST 友好的
@@ -224,8 +225,9 @@ def run_scan(req: ScanRequest) -> List[CandidatePlan]:
         - universe 为空 → 流向 _load_price_data 全市场枚举（scan_universe beat
           传 universe=[] 触发全市场扫描；reader 离线时 _load_price_data 返空 →
           candidates 为空 → 降级返 []，不抛异常）；
-        - amount 单位待 Phase 3 统一（data_lake 千元 vs risk 元）——流动性过滤在
-          screener 内部执行，本编排层不重复校验，单位标注见 screener.py。
+        - amount 单位已在 _load_price_data 装配时 ×1000 转元（data_lake 千元 → 元），
+          与 risk.liquidity_min_amount=1e8(元) 口径一致（#3）；流动性过滤在 screener
+          内部执行，本编排层不重复校验。
 
     参数：
         req: ScanRequest（date/universe/cfg_override）。
@@ -394,8 +396,9 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
 
     参数：
         req: ReplayRequest（start/end/universe/cfg_override）。
-            universe=None 表示全市场回放（Phase 3+ 接 data_lake 后生效，当前占位降级）；
-            universe=[...] 缩小到指定标的池（_load_price_data 按 symbols 装配）。
+            universe=None/[] → 全市场回放（_load_price_data 按 reader.symbols 枚举；
+            reader 离线时降级返空 → 零统计报告）；universe=[...] 缩小到指定标的池
+            （_load_price_data 按 symbols 装配）。
 
     返回：
         ReplayReportResponse（字段对齐 ReplayReport，metadata 内部字段不暴露）。
@@ -416,11 +419,11 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
         cfg = _merge_cfg(req.cfg_override)   # 可能抛 ValidationError（cfg_override 非法）
         risk = RiskManager(cfg)
         # price_data 装配（Task 3 review I-2）：
-        #   req.universe 由 ReplayRequest 契约层传入：None=全市场（Phase 3+ 接 data_lake
-        #   后生产全市场回放生效，当前 _load_price_data 占位返空降级零统计）；
+        #   req.universe 由 ReplayRequest 契约层传入：None/[] = 全市场枚举
+        #   （reader.symbols 列举全 symbol；reader 离线时 _load_price_data 返空降级零统计）；
         #   显式 universe=[...] 缩小到指定标的池。
-        #   _load_price_data 收到 None 时内部按"全市场"装配（当前实现仍返空 dict 占位，
-        #   测试通过 monkeypatch 覆盖注入合成数据）。
+        #   _load_price_data 收到 None/[] 时内部按全市场装配（reader 走 default_lake，
+        #   lifespan 或自确保已 load；测试可 monkeypatch 注入合成数据）。
         universe = req.universe if req.universe is not None else []
         # 【Task3】传 req.end（取 [start,end] 全段），而非 req.start（[:start] 数据不足）；
         # backtest_replay.replay 内部按 T∈[start,end] 滚动 .loc[:T] 隔离未来（无前视）。
