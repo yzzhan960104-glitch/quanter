@@ -102,6 +102,19 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # 销毁：优雅断开交易网关（B-18）——logout 释放券商会话，防进程退出时连接泄漏。
+    # Why try/except 吞异常：shutdown 路径不应因网关断开失败而阻塞后续 handler 清理；
+    # 无网关装配（开发态/CI）时 get_gateway 返 None，直接跳过。
+    try:
+        from server.services.trading_service import get_gateway
+        gw = get_gateway()
+        if gw is not None:
+            await gw.disconnect()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan shutdown 断开交易网关异常（已忽略，继续清理日志 handler）"
+        )
+
     # 销毁：卸载日志 handler（前端流 + 本地文件），避免重复挂载/引用泄漏
     # （reload 或测试复用进程时关键，否则 handler 单调累积致日志重复输出）
     root_logger = logging.getLogger()
