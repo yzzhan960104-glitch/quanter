@@ -139,12 +139,14 @@ def generate(
         候选为空或全部被盈亏比过滤时返回空列表。
 
     处理流程（每行候选）：
-        1. 反推 bottom_price = neckline / (1 + depth)（depth 数学定义的逆运算）；
+        1. 谷底价：直接读 row["bottom_price"]（Bug3 废除 neckline/(1+depth) 逆推，
+           由形态识别直接给出）；
         2. 等额累加满足计算：H = neckline − bottom；take_profit = neckline + H；
            take_profit_2x = neckline + 2×H（cfg.neckline_height_multiple 默认 2）；
         3. 入场区间：entry_upper = breakout；entry_lower = breakout×(1−pullback_max_pct)；
         4. C 波低点止损：stop_loss = bottom − buffer×ATR（无 ATR 时 buffer=0）；
-        5. 盈亏比校验：rr < min_rr_ratio(3.0) → 跳过；
+        5. 盈亏比校验（Bug4）：expected_entry = 回踩区间均价；rr = (第n波满足 − expected_entry)
+           / (expected_entry − stop)；rr < min_rr_ratio → 跳过；
         6. 时间窗口：valid_until = formed_at + pullback_window_bars 交易日；
                     max_holding_until = formed_at + max_holding_bars 交易日；
         7. 仓位：shares = risk.position_size(aum, entry_upper, stop_loss, coef)；
@@ -197,14 +199,15 @@ def _build_plan_from_row(
     depth = float(row["depth"])
     formed_at = pd.Timestamp(row["formed_at"])
 
-    # —— 1. 反推 bottom_price = neckline / (1 + depth) ——
-    # 数学依据：W底 depth = (neckline − bottom)/bottom = neckline/bottom − 1
-    #         → bottom = neckline / (1 + depth)
-    # 头肩底 depth = (颈线均价 − P4)/P4，颈线均价 ≈ breakout 处颈线价（近似可接受）。
-    # depth ≤ 0 是脏数据（防除零/负无穷），跳过。
-    if depth <= 0:
-        return None
-    bottom_price = neckline_price / (1.0 + depth)
+    # —— 1. 谷底价：直接读取形态识别结果（Bug3 废除 neckline/(1+depth) 逆推）——
+    # 旧逆推公式依赖 depth 精度 + neckline 几何，极度脆弱，且受 Bug2 颈线错误连锁影响
+    # （neckline 错 → bottom 逆推错 → H/止盈/止损全错）。现由 w_bottom/head_shoulder
+    # detect 直接给出 bottom_price（W底=min(p1,p3)，头肩底=p4），契约更稳健。
+    if "bottom_price" not in row or pd.isna(row.get("bottom_price")):
+        return None   # 候选缺谷底价（契约不完整），跳过
+    bottom_price = float(row["bottom_price"])
+    if bottom_price <= 0 or depth <= 0:
+        return None   # 脏数据防御（非正谷底价 / 非正 depth）
 
     # —— 2. 颈线满足计算（等额累加，蔡森 §2）——
     # H = 颈线价 − 谷底价；take_profit = 颈线 + 1×H；take_profit_2x = 颈线 + 2×H
@@ -228,14 +231,18 @@ def _build_plan_from_row(
     atr_val = float(row["atr"]) if "atr" in row and pd.notna(row.get("atr")) else 0.0
     stop_loss = bottom_price - cfg.stop_loss_atr_buffer * atr_val
 
-    # —— 5. 盈亏比校验：rr < min_rr_ratio(3.0) → 丢弃 ——
-    # rr = (take_profit − entry_upper) / (entry_upper − stop_loss)
-    # 防御性：entry_upper ≤ stop_loss 时 rr 无意义（亏损方向），跳过防 Inf/NaN 污染。
-    risk_per_unit = entry_upper - stop_loss
+    # —— 5. 盈亏比校验（Bug4：回踩入场 + 第 n 波目标的真实盈亏比）——
+    # 旧公式 (take_profit - breakout)/(breakout - stop) 用【突破价】作入场价，但本策略是
+    # 【回踩入场】（在 entry_lower..entry_upper 区间挂单），实际成交价低于突破价；且目标
+    # 应用第 n 波满足（cfg.neckline_height_multiple，默认 2）而非第一波。旧公式数学上
+    # 分子永远 < H、分母永远 > H → rr 必 < 1.0，被 min_rr_ratio 全拦（发不出任何计划）。
+    # 新公式：expected_entry = 回踩区间均价；target = 第 n 波满足；risk = expected_entry - stop。
+    expected_entry = (entry_upper + entry_lower) / 2.0
+    risk_per_unit = expected_entry - stop_loss
     if risk_per_unit <= 0:
-        # 入场价已跌破止损 = 形态已破位（理论不应出现，但脏数据防御），跳过
+        # 回踩均价已跌破止损 = 形态破位（理论不应出现，脏数据防御），跳过
         return None
-    rr = (take_profit - entry_upper) / risk_per_unit
+    rr = (take_profit_n - expected_entry) / risk_per_unit
     if rr < cfg.min_rr_ratio:
         return None
 
@@ -273,7 +280,7 @@ def _build_plan_from_row(
         shares=shares,
         metadata={
             "depth": depth,
-            "bottom_price_source": "derived:neckline/(1+depth)",
+            "bottom_price_source": "pattern:min(p1,p3)|p4",
             "atr_source": "column" if atr_val > 0 else "none(buffer=0)",
             "neckline_height_multiple": n,
             "take_profit_n": take_profit_n,  # 第 n 波满足价（cfg.neckline_height_multiple 级）

@@ -24,10 +24,13 @@
      蔡森原著"多头市场打底通常在 26 周平均线之上完成"。要求右底 P3 处的 close
      ≥ close 的 ma26w_window(默认 130 日) 均线。样本不足（len < ma26w_window）时
      保守放行（兜底，避免扼杀新标的）。
-  8. 【plan 保留】打底 ABC 波（abc_wave_detect=True 时）：
-     P3（右底/C 波末跌）应为整个 P1..P4 区间的最低或接近最低
-     （C 波不创新低 = 低点垫高 = ABC 打底完成，避免下跌中继误判）。
-     注：本规则与"右脚≥左脚"方向一致，是 ABC 波时序过程的简化静态校验。
+
+  注（ABC 波检测已移除）：原第 8 步「ABC 打底」要求 P3 接近 P1..P4 区间最低
+     （p3 ≤ seg_min×1.005）。但右脚垫高规则要求 P3 ≥ P1，而 seg_min ≤ P1（P1 在
+     区间内），故 seg_min ≤ P1 ≤ P3 → 标准右脚垫高 W 底必然 p3 > seg_min×1.005 被
+     全部否决（自杀式逻辑）。W 底的打底由「右脚≥左脚」+ ZigZag 保证 P1/P3 为局部
+     谷底共同覆盖，无需重复 ABC 校验；abc_wave_detect 配置项保留给头肩底（其头底
+     P4 本就是区间最低，ABC 检测不自杀）。
 
 风控边界（CLAUDE.md 极简 + 显式原则）：
   - 所有阈值取自 StrategyConfig，无逻辑硬编码；
@@ -52,7 +55,8 @@ class WBottom:
     字段物理意图：
         p1_idx/p1_price ~ p4_idx/p4_price：四点下标与收盘价（P1=左底, P2=颈线高点,
             P3=右底, P4=突破高点）；
-        neckline_price：P4 处的颈线价（P2-P4 两点回归直线的 P4 投影价）；
+        neckline_price：颈线价（标准 W 底 = 中间峰 P2 的水平线，Bug2 校正）；
+        bottom_price：谷底价 = min(P1, P3)（直接由形态给出，供下游 plan 使用，Bug3）；
         depth：颈线高度比 = (P2 - min(P1,P3)) / min(P1,P3)，形态垂直幅度；
         tension：幅宽张力 = neck_h / span，高度/宽度比例；
         is_valid：综合判定是否有效；
@@ -67,6 +71,7 @@ class WBottom:
     p3_price: float
     p4_price: float
     neckline_price: float
+    bottom_price: float
     depth: float
     tension: float
     is_valid: bool
@@ -126,8 +131,8 @@ def detect(
         5. 幅宽张力；
         6. 量价：右底缩量 + 突破放量；
         7. 颈线斜率 ≥ 0；
-        8. 26 周均线过滤（ma26w_filter=True 时）；
-        9. ABC 波打底（abc_wave_detect=True 时）。
+        8. 26 周均线过滤（ma26w_filter=True 时）。
+        （W 底不做 ABC 打底校验——见模块 docstring 注，原 ABC 步骤为自杀式逻辑已移除。）
     """
     # 提取所有 pivot 下标（值非 0 的位置）
     idxs = [i for i in range(len(pivots)) if pivots.iloc[i] != 0]
@@ -186,15 +191,19 @@ def detect(
     vol_p3 = float(volume.iloc[p3_i]) if p3_i < len(volume) else 0.0
     if vol_p1 > 0 and vol_p3 > vol_p1 * cfg.right_vol_shrink:
         return None   # 右底未缩量，打底未完成
-    # 突破放量：P4 突破日成交量 ≥ P2-P3 颈线段平均成交量 × breakout_vol_multiplier
+    # 突破放量：P3→P4 上涨段【最高单日成交量】≥ 颈线段均量 × breakout_vol_multiplier
+    # 【Bug5】旧实现只校验 P4 单根量，但实盘价到 P4 见顶时常已缩量，真正放量发生在
+    # 突破 P2 的那天（P3→P4 段内）。改用段内最大量——突破段某日放量即认可。
     breakout_baseline = (
         float(volume.iloc[p2_i:p3_i].mean())
         if (p3_i - p2_i) > 0
         else float(volume.iloc[p2_i])
     )
-    vol_p4 = float(volume.iloc[p4_i]) if p4_i < len(volume) else 0.0
-    if breakout_baseline > 0 and vol_p4 < breakout_baseline * cfg.breakout_vol_multiplier:
-        return None   # 突破未放量，形态可靠性差
+    breakout_max_vol = (
+        float(volume.iloc[p3_i : p4_i + 1].max()) if p4_i >= p3_i else 0.0
+    )
+    if breakout_baseline > 0 and breakout_max_vol < breakout_baseline * cfg.breakout_vol_multiplier:
+        return None   # 突破段全段未放量，形态可靠性差
 
     # —— 6. 颈线斜率 ≥ 0：水平或上倾 ——
     # P2→P4 颈线斜率 < 0 表示颈线下倾，趋势仍在下行，形态可靠性低
@@ -205,23 +214,16 @@ def detect(
     if cfg.ma26w_filter and not _ma26w_passes(close, p3_i, cfg):
         return None   # 右底在 26 周线之下，多头基底环境不成立
 
-    # —— 8. ABC 波打底（plan 保留）——
-    # 简化静态校验：P3（右底/C 波末跌）应为整个 P1..P4 区间的最低或接近最低
-    # （C 波不创新低 = 低点垫高 = ABC 打底完成）。与"右脚≥左脚"方向一致。
-    if cfg.abc_wave_detect:
-        seg = close.iloc[p1_i : p4_i + 1]
-        seg_min = float(seg.min())
-        # P3 应接近区间最低（允许 0.5% 容差，避免数值噪声误杀）
-        if p3 > seg_min * 1.005:
-            return None   # 右底非区间最低，疑似下跌中继而非 ABC 打底
-
-    # 颈线价：P2-P4 两点回归直线在 P4 处的投影价（突破确认点）
-    neck_at_break = neckline.fit_line([(p2_i, p2), (p4_i, p4)], at=p4_i)
+    # 颈线价：标准 W 底颈线 = 中间峰 P2 的水平线。
+    # 【Bug2】旧实现用两点 (p2,p4) 拟合直线在 p4 处求值，过 (p4_i,p4) 点 → 必 = p4，
+    # 使颈线=突破价、阻力线跟着价格跑，H/止盈/盈亏比全部失效。标准 W 底颈线即 P2 水平线。
+    neck_at_break = p2
 
     return WBottom(
         p1_idx=p1_i, p2_idx=p2_i, p3_idx=p3_i, p4_idx=p4_i,
         p1_price=p1, p2_price=p2, p3_price=p3, p4_price=p4,
         neckline_price=neck_at_break,
+        bottom_price=bottom,   # 【Bug3】min(p1,p3)，直接传谷底价，废除 plan 逆推
         depth=depth,
         tension=tension,
         is_valid=True,

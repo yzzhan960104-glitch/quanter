@@ -59,6 +59,7 @@ class HeadShoulderBottom:
         p1_idx/p1_price ~ p6_idx/p6_price：六点下标与收盘价
             （P1=峰/起点, P2=左肩底, P3=左颈峰, P4=头底, P5=右颈峰, P6=右肩底）；
         neckline_price：颈线（P3-P5 两点回归直线）在突破点 P7 处的投影价；
+        bottom_price：谷底价 = P4（头底，区间最低，供下游 plan 使用，Bug3）；
         depth：颈线高度比 = ((P3+P5)/2 - P4) / P4，头部相对颈线的垂直幅度；
         tension：幅宽张力 = neck_h / span，头部高度/形态宽度比例；
         is_valid：综合判定是否有效；
@@ -77,6 +78,7 @@ class HeadShoulderBottom:
     p5_price: float
     p6_price: float
     neckline_price: float
+    bottom_price: float
     depth: float
     tension: float
     is_valid: bool
@@ -265,6 +267,7 @@ def detect(
         p1_idx=p1_i, p2_idx=p2_i, p3_idx=p3_i, p4_idx=p4_i, p5_idx=p5_i, p6_idx=p6_i,
         p1_price=p1, p2_price=p2, p3_price=p3, p4_price=p4, p5_price=p5, p6_price=p6,
         neckline_price=neck_at_break,
+        bottom_price=p4,   # 【Bug3】头底 = 区间最低，直接传谷底价，废除 plan 逆推
         depth=depth,
         tension=tension,
         is_valid=True,
