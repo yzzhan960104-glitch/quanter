@@ -78,6 +78,10 @@ _EMT_ORDER_UNKNOWN = 11        # 未知 → SUBMITTED（保守，不冒进终态
 # 上层注入的回报回调签名（与 qmt_gateway 一致）
 OrderUpdateCallback = Callable[[Mapping[str, Any]], Awaitable[None]]
 
+# 断线自动重连退避序列（秒，指数退避，B-8）：最多 5 次。
+# Why 有上限：无限重连会刷爆柜台登录限频；耗尽后保持锁态 + 告警，等人工介入。
+_RECONNECT_BACKOFFS: tuple[int, ...] = (2, 4, 8, 16, 30)
+
 
 def _map_emt_status(status: int) -> OrderState:
     """EMT order_status 整数 → 内部 OrderState。
@@ -540,8 +544,62 @@ class EmtExecutionGateway(BaseExecutionGateway):
                 logger.warning("事件循环不可用，丢弃一次订单回报回调 oid=%s", oid)
 
     def _on_disconnect_fatal(self) -> None:
-        """主线程：断线告警（由 onDisconnected 经 call_soon_threadsafe 投递）。"""
+        """主线程：断线告警 + 启动自动重连（由 onDisconnected 经 call_soon_threadsafe 投递）。
+
+        B-8：旧实现仅 critical 日志「请人工重新 connect()」，断线期间持仓离场停摆、
+        敞口失控。现启动指数退避自动重连 + 钉钉告警，重连成功即恢复 live（lock_down 清）。
+        """
         logger.critical(
-            "【EMT 断线】user=%s 网关已锁定，禁止后续发单！请人工检查后重新 await connect()",
-            self._user,
+            "【EMT 断线】user=%s 网关已锁定，启动自动重连（指数退避 %s）...",
+            self._user, _RECONNECT_BACKOFFS,
         )
+        # 钉钉告警（fire_and_forget 跨线程安全，链路异常被吞不影响重连主路径）
+        try:
+            from core.notifier import NotificationManager, fire_and_forget
+            fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                f"EMT 断线，启动自动重连 user={self._user}", "WARN"))
+        except Exception:
+            pass
+        # 在持久 loop 上调度重连任务（loop 关闭/为空时不调度，防 shutdown 期徒劳重连）
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.create_task(self._reconnect())
+
+    async def _reconnect(self) -> None:
+        """断线后指数退避自动重连（B-8）：最多 len(_RECONNECT_BACKOFFS) 次，每次失败告警。
+
+        - 重连成功 → connect() 内部清 lock_down/置 connected，下轮 beat 自动恢复 live；
+        - 全部失败 → 保持锁态（connect 失败已置 lock_down=True）+ ERROR 告警，等人工
+          介入（避免无限重连刷爆柜台登录限频）。
+        - 退避 sleep 期间 lock_down=True，submit_order 被网关拒，tick_exit 优雅 no-op。
+        """
+        from core.notifier import NotificationManager, fire_and_forget
+        # 防御：重连期间确保锁态（拒新单）；connect 成功会清锁，失败/耗尽保持锁。
+        # （onDisconnected 已置锁，此处冗余但稳健——不依赖 connect 的副作用。）
+        self._lock_down = True
+        n = len(_RECONNECT_BACKOFFS)
+        for i, delay in enumerate(_RECONNECT_BACKOFFS, 1):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                await self.connect()
+                logger.info("EMT 重连成功（第 %s/%s 次）", i, n)
+                try:
+                    fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                        f"EMT 断线后重连成功（第{i}次）", "INFO"))
+                except Exception:
+                    pass
+                return
+            except Exception as exc:
+                logger.warning("EMT 重连失败（第 %s/%s）：%s", i, n, exc)
+                try:
+                    fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                        f"EMT 重连失败第{i}次：{exc}", "WARN"))
+                except Exception:
+                    pass
+        # 耗尽：保持锁态（connect 失败已置 lock_down），告警等人工
+        logger.critical("EMT 重连耗尽（%s 次），网关保持锁态，请人工介入", n)
+        try:
+            fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                f"EMT 重连耗尽（{n}次），网关锁态，请人工介入！", "ERROR"))
+        except Exception:
+            pass
