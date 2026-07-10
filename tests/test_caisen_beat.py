@@ -14,8 +14,10 @@
     - trading_service.get_status().mode != "live" → return
       （网关 unavailable/disconnected/vetoed_by_risk 时断线不补发，等下一轮重连）。
 
-  async 包裹：tick_pullback / tick_exit 是 async 方法，Celery 同步任务内用
-  asyncio.run() 包裹驱动事件循环（Celery worker 默认 prefork 同步执行模型）。
+  async 包裹：tick_pullback / tick_exit 是 async 方法，Celery 同步任务内经 _run_async
+  投递到 worker 进程级单例 loop（run_coroutine_threadsafe + future.result 同步等待），
+  而非每 tick asyncio.run 新建 loop——后者与网关 connect 固化的 self._loop 跨 loop
+  冲突会致订单成交回调静默丢弃（B-10）。
 
 设计要点（CLAUDE.md 极简 + 显式原则）：
   - mock caisen_service.run_scan / trading_service._in_a_share_session / get_status /
@@ -33,6 +35,32 @@ import pytest
 
 from server import celery_app as celery_app_mod
 from server.services import trading_service
+
+
+# ---------------------------------------------------------------------------
+# worker 单例 loop（B-10：根治 asyncio.run-per-tick 跨 loop 冲突）
+# ---------------------------------------------------------------------------
+def test_worker_loop_is_singleton_and_running():
+    """_get_worker_loop 返回同一持久 loop（单例），且 loop 正在运行（run_forever）。"""
+    loop1 = celery_app_mod._get_worker_loop()
+    loop2 = celery_app_mod._get_worker_loop()
+    assert loop1 is loop2, "worker loop 应为进程级单例"
+    assert loop1.is_running(), "worker loop 应在后台 daemon 线程 run_forever"
+
+
+def test_run_async_executes_coro_on_worker_loop():
+    """_run_async 把 async 协程投到 worker loop 执行并同步返回结果。"""
+    async def _coro():
+        return 42
+    assert celery_app_mod._run_async(_coro()) == 42
+
+
+def test_run_async_propagates_exception():
+    """协程内异常经 future.result 上抛（由 beat try/except 兜底，beat 不崩）。"""
+    async def _boom():
+        raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"):
+        celery_app_mod._run_async(_boom())
 
 
 # ---------------------------------------------------------------------------
