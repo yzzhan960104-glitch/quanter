@@ -57,3 +57,46 @@ def test_symbols_respects_lake_arg(tmp_path, monkeypatch):
     assert len(reader.symbols("daily")) == 3
     # 不存在的湖返空
     assert reader.symbols("nonexistent") == []
+
+
+def test_load_price_data_assembles_and_converts_amount(tmp_path, monkeypatch):
+    """_load_price_data 接 reader：装配 {symbol:df} + amount×1000（千元→元）。"""
+    from server.services import caisen_service as svc
+    reader = _make_reader_with_daily(tmp_path, monkeypatch)
+    monkeypatch.setattr("data.lake_reader.DataLakeReader.get_instance",
+                        classmethod(lambda cls: reader))
+
+    # date 取湖内某日（截到该日）
+    pd_data = svc._load_price_data(["000001.SZ"], "2024-01-03")
+
+    assert "000001.SZ" in pd_data
+    df = pd_data["000001.SZ"]
+    # amount 已 ×1000 转元（原 110.0 千元 → 110000.0 元）
+    assert df["amount"].iloc[-1] == pytest.approx(110000.0, rel=1e-9)
+    # OHLCV 列齐全
+    for c in ("open", "high", "low", "close", "volume", "amount"):
+        assert c in df.columns
+
+
+def test_load_price_data_full_market_when_symbols_empty(tmp_path, monkeypatch):
+    """symbols=None/[] → 全市场枚举（reader.symbols）。"""
+    from server.services import caisen_service as svc
+    reader = _make_reader_with_daily(tmp_path, monkeypatch)
+    monkeypatch.setattr("data.lake_reader.DataLakeReader.get_instance",
+                        classmethod(lambda cls: reader))
+
+    pd_data = svc._load_price_data(None, "2024-01-03")   # None → 全市场
+    assert set(pd_data.keys()) == {"000001.SZ", "600000.SH", "920982.BJ"}
+
+    pd_data2 = svc._load_price_data([], "2024-01-03")    # 空列表 → 全市场
+    assert set(pd_data2.keys()) == {"000001.SZ", "600000.SH", "920982.BJ"}
+
+
+def test_load_price_data_empty_when_reader_offline(monkeypatch):
+    """reader 未 load（离线/CI）→ 返空 dict（降级，不抛）。"""
+    from server.services import caisen_service as svc
+    offline = type("R", (), {"loaded": False, "symbols": lambda self, l=None: []})()
+    monkeypatch.setattr("data.lake_reader.DataLakeReader.get_instance",
+                        classmethod(lambda cls: offline))
+
+    assert svc._load_price_data(None, "2024-01-03") == {}

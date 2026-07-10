@@ -69,29 +69,58 @@ _DEFAULT_AUM: float = 1_000_000.0
 
 
 def _load_price_data(symbols: Optional[List[str]], date: str) -> Dict[str, pd.DataFrame]:
-    """按标的池 + 日期装配 price_data（生产走 data_lake，测试 monkeypatch 注入）。
+    """按标的池 + 日期从 data_lake 装配 price_data（生产走 DataLakeReader）。
 
     物理意图：
-        生产环境：从 data_lake 读取每个 symbol 的 OHLCV DataFrame（含 close/high/
-            low/volume/amount），index 为交易日（RangeIndex 或 DatetimeIndex）。
-        当前 Phase 3：data_lake 接入尚未完成，返回空 dict 占位（screener 收到空
-            dict 时返回空候选 DataFrame，run_scan 返回空列表——降级而非崩溃）。
-        测试环境：通过 monkeypatch 覆盖此函数，注入合成 price_data。
+        生产：DataLakeReader.get_instance()（lifespan 已 load daily 湖进内存），
+              按 symbols 逐标的 get_timeseries 取时序并装配。
+        universe 语义：symbols 为 None 或 [] → 全市场枚举（reader.symbols）。
+        单位统一：data_lake amount 为千元（tushare pro.daily 原生），装配时 ×1000 转元，
+              与 risk.liquidity_min_amount=1e8(元) 口径一致（#3）。
+        离线降级：reader 未 load / 湖空 / 全部 symbol 取空 → 返 {}，run_scan/run_replay
+              按既有契约降级（空候选 / 零统计），不抛异常。
 
     参数：
         symbols: 标的池（ScanRequest.universe / ReplayRequest.universe）。
-            None 或 [] 表示全市场（Phase 3+ 接 data_lake 后生产全市场装配生效，
-            当前实现均返回空 dict 占位，安全降级）。
-        date:    扫描/回放交易日（预留：未来按日期过滤 lake 数据）。
+                 None 或 [] → 全市场。
+        date:    截止交易日（scan 传 T 日取 [:T] 无前视；replay 传 req.end 取全历史段）。
 
     返回：
-        {symbol: DataFrame} 字典。生产未接 lake 时返回 {}（降级）。
+        {symbol: DataFrame}（OHLCV + amount 已转元）。离线/空时返回 {}。
     """
-    # TODO(Phase 3+): 接入 data.lake_reader 按 symbols + date 装配真实 price_data。
-    # symbols=None/[] 全市场语义待 data_lake 接入后实现；当前返回空 dict 占位——
-    # run_scan/run_replay 收到空 dict 后安全降级（不抛异常）。
-    logger.debug("_load_price_data 占位返回空 dict（data_lake 接入待 Phase 3+），symbols=%s", symbols)
-    return {}
+    from data.lake_reader import DataLakeReader
+    from config import LAKE_CONFIG
+
+    reader = DataLakeReader.get_instance()
+    if not reader.loaded:
+        logger.debug("_load_price_data 离线（reader 未 load），返空 dict")
+        return {}
+    lake = LAKE_CONFIG.get("default_lake") or "daily"
+
+    # universe 解析：None/空 → 全市场枚举
+    if not symbols:
+        symbols = reader.symbols(lake)
+        if not symbols:
+            logger.debug("_load_price_data 湖无 symbol（lake=%s），返空 dict", lake)
+            return {}
+
+    price_data: Dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        # start 用足够早的固定日期（早于 daily 湖起点 2016），get_timeseries 的
+        # .loc[start:end] 闭区间切片自然截到实际数据范围；end=date 截到 T 日（无前视）。
+        ts = reader.get_timeseries(sym, start="2010-01-01", end=date, lake=lake)
+        if ts is None or ts.empty:
+            continue
+        # 列对齐（screener 需 close/high/low/volume/amount）
+        cols = [c for c in ("open", "high", "low", "close", "volume", "amount")
+                if c in ts.columns]
+        ts = ts[cols].copy()
+        # #3 单位统一：amount 千元 → 元（流动性过滤口径统一；volume 手单位不影响策略，
+        # 放量校验全用比例 right_vol_shrink/breakout_vol_multiplier，单位无关）。
+        if "amount" in ts.columns:
+            ts["amount"] = ts["amount"] * 1000.0
+        price_data[sym] = ts
+    return price_data
 
 
 def _merge_cfg(cfg_override: Dict[str, Any]) -> StrategyConfig:
