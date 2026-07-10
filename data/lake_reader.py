@@ -70,6 +70,25 @@ class DataLakeReader:
         """已载入的湖 key 列表（按 load 顺序）。"""
         return list(self._lakes.keys())
 
+    def symbols(self, lake: str | None = None) -> list[str]:
+        """返回指定湖（缺省 default_lake）的全部唯一 symbol 列表。
+
+        用途：caisen_service._load_price_data 全市场枚举入口（universe=None/空 时调用），
+        封装私有 _lakes 避免调用方穿透。
+
+        无湖或指定湖不存在 → 返空列表（离线降级，不抛异常，与 get_* 同口径）。
+        """
+        # _resolve 复用既有路由：显式 lake 优先，否则 config default_lake，回退首个 load 成功的 key。
+        key = self._resolve(lake)
+        if key is None or key not in self._lakes:
+            return []
+        # 仅 MultiIndex(date, symbol) 湖有 symbol 层；macro 这类 DatetimeIndex 单索引湖
+        # 取不到 symbol 层会抛，故先 isinstance 守卫，单索引湖直接返空（无 symbol 概念）。
+        idx = self._lakes[key].index
+        if not isinstance(idx, pd.MultiIndex):
+            return []
+        return list(idx.get_level_values("symbol").unique())
+
     def load(self, path: str | None = None, *, key: str | None = None) -> None:
         """加载 parquet 到内存（多湖）。缺失则进入离线模式（不阻断启动、不写入缓存）。
 
