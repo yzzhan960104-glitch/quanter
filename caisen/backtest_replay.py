@@ -116,6 +116,10 @@ def replay(
 
     # —— 对每个交易日 T 滚动执行 screen → plan（严格 .loc[:T]）——
     for symbol, df in price_data.items():
+        # per-symbol 形态签名去重：同一形态在连续 T 日会被 screener 反复识别（尾部 4
+        # pivot 不变），实盘 T 日入场后 T+1 已持仓不会重入。跟踪上次模拟的形态签名
+        # (neckline_price, bottom_price)，同形态只模拟首次，杜绝重复计数。
+        last_sig: Optional[tuple] = None
         # T 的取值范围：[start, end]（index label）。
         # 用 df.index 定位 start/end 的位置，对每个 T 取 .loc[:T] 子序列喂 screener。
         for T in _iter_trading_days(df.index, start, end):
@@ -140,6 +144,11 @@ def replay(
             # 注：传 cfg.max_holding_bars 用于基于位置的持仓超时判定（RangeIndex 下
             # plan.max_holding_until 的 Timestamp 会失真，故用位置计数更稳健）。
             for p in plans:
+                # 去重：同形态（neckline+bottom 不变）连续 T 日只模拟首次
+                sig = (round(p.neckline_price, 6), round(p.bottom_price, 6))
+                if sig == last_sig:
+                    continue
+                last_sig = sig   # 标记该形态已处理（无论成交与否，后续重复跳过）
                 hit = _simulate_one_trade(df, p, T, cfg.max_holding_bars)
                 if hit is not None:
                     all_hits.append(hit)

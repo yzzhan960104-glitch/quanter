@@ -453,3 +453,55 @@ class TestReplayMinRRSensitivity:
         assert len(report.min_rr_ratio_recommendation) > 0, (
             "min_rr_ratio 建议应非空（数据驱动：基于胜率/平均盈亏比给出）"
         )
+
+
+# ---------------------------------------------------------------------------
+# 去重：同一形态连续 T 日只计一次（防重复计数 bug）
+# ---------------------------------------------------------------------------
+def test_replay_dedups_same_pattern_across_consecutive_T(monkeypatch):
+    """【去重】同一形态在连续 T 日被 screener 反复识别时，replay 只计一次。
+
+    背景：replay 对每个 T 日独立 screener.screen(.loc[:T])。某形态形成后尾部 4 pivot
+    在后续 T 日不变 → screener 反复识别同一形态 → 每 T 都 plan + _simulate → 重复计数
+    （实盘 T 日入场后 T+1 已持仓不会重入）。去重：per-symbol 跟踪形态签名
+    (neckline_price, bottom_price)，同形态只模拟首次。
+    """
+    import pandas as pd
+    from caisen import backtest_replay as br
+    from caisen import plan as plan_mod
+    from caisen.plan import TradePlan
+
+    cfg = StrategyConfig(min_rr_ratio=0.0, abc_wave_detect=False, ma26w_filter=False)
+    risk = RiskManager(cfg)
+
+    # 单标的 30 根横盘（让 _iter_trading_days 产多 T，T>=min_pattern_bars=11 起处理）
+    n = 30
+    df = pd.DataFrame({
+        "open": [10.0] * n, "high": [10.5] * n, "low": [9.5] * n, "close": [10.0] * n,
+        "volume": [1000.0] * n, "amount": [1e8] * n,
+    }, index=pd.RangeIndex(n))
+    price_data = {"TEST": df}
+
+    # FAKE_PLAN：所有 T 返同一 plan（同 neckline/bottom = 同形态签名）
+    fake_plan = TradePlan(
+        plan_id="x", symbol="TEST", pattern_type="w_bottom",
+        formed_at=pd.Timestamp("2024-01-01"),
+        breakout_price=10.0, neckline_price=11.0, bottom_price=8.0, H=3.0,
+        entry_upper=10.0, entry_lower=9.8, stop_loss=8.0,
+        take_profit=14.0, take_profit_2x=17.0, rr_ratio=2.0,
+        valid_until=pd.Timestamp("2024-01-10"), max_holding_until=pd.Timestamp("2024-02-01"),
+        timeout_exit_threshold=0.5, shares=100, metadata={},
+    )
+    fake_cands = pd.DataFrame([{"symbol": "TEST"}])   # 非空，让 replay 不 skip
+
+    # mock screener（每 T 返同 candidates）+ plan.generate（每 T 返同 plan）
+    class _FakeScreener:
+        def __init__(self, cfg, risk): pass
+        def screen(self, pd_data, date): return fake_cands
+    monkeypatch.setattr(br, "PatternScreener", _FakeScreener)
+    monkeypatch.setattr(plan_mod, "generate", lambda *a, **k: [fake_plan])
+
+    report = replay(price_data, cfg, risk, start=0, end=29, aum=1e6)
+    hits = report.metadata["hits"]
+    # 去重：同形态连续 T 日只计 1 次（旧实现每 T 一个 hit = 多个）
+    assert len(hits) == 1, f"同形态连续T日应去重只计1次，实际 {len(hits)}"
