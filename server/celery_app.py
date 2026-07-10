@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from datetime import datetime
 
 from celery import Celery
@@ -109,6 +110,48 @@ def _build_execution_engine() -> ExecutionEngine:
     不重复校验连接态（单一真理源：连接态判断只在 tick 编排入口做一次）。
     """
     return ExecutionEngine(trading_service=trading_service, cfg=StrategyConfig())
+
+
+# ============================================================================
+# worker 进程级单例 event loop（B-10：根治 asyncio.run-per-tick 跨 loop 冲突）
+# ============================================================================
+_worker_loop: asyncio.AbstractEventLoop | None = None
+_worker_loop_lock = threading.Lock()
+
+
+def _get_worker_loop() -> asyncio.AbstractEventLoop:
+    """worker 进程级单例 event loop（后台 daemon 线程跑 run_forever）。
+
+    B-10：Celery beat 用 _run_async 把 async tick 投递到这个持久 loop，而非每 tick
+    asyncio.run 新建 loop。EMT/QMT 网关 connect() 固化的 self._loop 与所有 tick 共享
+    同一 loop，根治跨 loop RuntimeError——C++ 回调 call_soon_threadsafe 指向的 loop 不再
+    是已关闭的旧 loop，订单成交回调不再被静默丢弃。
+
+    Why 单例 loop 而非每 tick 新建：网关回调/future 绑定在 connect 时的 loop 上，
+    新建 loop 会与之断裂；持久 loop 让 connect + 所有 tick + 回调同驻一个 loop。
+    follow-up（P1-9b）：可进一步把 beat 迁到 FastAPI 进程内 APScheduler，彻底移除
+    Celery 对 async 的承载（当前最小修复先保证 loop 一致）。
+    """
+    global _worker_loop
+    with _worker_loop_lock:
+        if _worker_loop is None or _worker_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            t = threading.Thread(target=loop.run_forever, daemon=True,
+                                 name="celery-async-loop")
+            t.start()
+            _worker_loop = loop
+        return _worker_loop
+
+
+def _run_async(coro, timeout: float = 120.0):
+    """把 async tick 投递到 worker 单例 loop 并同步等待结果（beat 任务是同步的）。
+
+    run_coroutine_threadsafe 跨线程调度到持久 loop；future.result 同步阻塞至完成，
+    超时/异常上抛由调用方 beat 的 try/except 兜底（beat 不崩，等下一轮重试）。
+    """
+    loop = _get_worker_loop()
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    return fut.result(timeout=timeout)
 
 
 # ============================================================================
@@ -188,15 +231,13 @@ def monitor_pullback() -> None:
         )
         return
 
-    # —— 进入编排：调 ExecutionEngine.tick_pullback（asyncio.run 包裹 async 方法）——
-    # asyncio.run 边界：当前 prefork worker（默认同步执行模型）每次 beat 新建一个
-    # 临时 event loop 驱动 async tick——安全。若后续切 gevent/eventlet 池，或
-    # ExecutionEngine 引入持久 HTTP session（跨 tick 复用连接池/aiohttp.ClientSession），
-    # asyncio.run 每次新建 loop 会导致 session 复用断裂（session 绑定到已关闭的旧 loop
-    # 上抛 RuntimeError）——届时需改为持久 loop（worker 级单例 loop / asynccelery）。
+    # —— 进入编排：投递 tick_pullback 到 worker 单例 loop（B-10）——
+    # _run_async 用 run_coroutine_threadsafe 把 async tick 投到持久 loop 同步等待，
+    # 而非 asyncio.run 每 tick 新建 loop——后者与网关 connect 固化的 self._loop 跨 loop
+    # 冲突，会致订单成交回调静默丢弃（B-10）。
     engine = _build_execution_engine()
     try:
-        asyncio.run(engine.tick_pullback())
+        _run_async(engine.tick_pullback())
     except Exception as exc:
         # tick_pullback 内部已对单计划异常 try/except 隔离（见 execution.py），
         # 此处捕获的应是 engine 装配/storage 读取层面的异常——beat 不应崩，
@@ -212,9 +253,15 @@ def monitor_pullback() -> None:
 # ============================================================================
 @celery_app.task(name="caisen.monitor_holding")
 def monitor_holding() -> None:
-    """盘中持仓离场监控 beat：交易时段 + live → ExecutionEngine.tick_exit。
+    """盘中持仓离场监控 beat：交易时段 + 网关可用 → ExecutionEngine.tick_exit。
 
-    双闸门跳过（同 monitor_pullback 语义）：非交易时段 / 网关非 live 直接 return。
+    闸门语义（B-8 拆分：离场监控与开仓风控分离）：
+        - 闸门 1：非交易时段 → return（隔夜/周末空转保护，同 monitor_pullback）；
+        - 闸门 2：仅 mode == "unavailable"（无网关装配）→ return；
+          disconnected / vetoed_by_risk / live 均【持续】调 tick_exit。
+    Why 离场不停摆：风险否决锁态（vetoed_by_risk）只应停【新开仓】(pullback)，已有
+    FILLED 持仓的止损/止盈是风险缩减动作，停摆会让敞口失控。tick_exit 内部 + 网关
+    state 校验兜底卖单是否真成交（拒单保持 FILLED 待下轮重试，不幽灵了结）。
 
     物理意图：盘中每 60s 遍历 FILLED 持仓，check_exit 命中止损/止盈/时间止损
     即市价平仓（FILLED→CLOSED），并推进移动止盈止损上移（update_plan）。
@@ -222,27 +269,16 @@ def monitor_holding() -> None:
     # —— 闸门 1：非交易时段直接 return ——
     if not trading_service._in_a_share_session():
         return
-    # —— 闸门 2：网关非 live 直接 return（断线不补发）——
-    # ⚠️ 离场停摆风险（vetoed_by_risk）：trading_service 触发风控锁时 mode 会变为
-    # "vetoed_by_risk"，本闸门将其与 disconnected 同等跳过——已有 FILLED 持仓的
-    # 止损/止盈/时间止损将暂停。当前采取保守策略（风控锁时不发单，避免与风控决策
-    # 冲突）。follow-up：是否在 vetoed_by_risk 时仅停 pullback（新开仓）但保留 exit
-    # （离场）监控，让止损/止盈继续生效，需风控策略决策——离场与开仓风控语义不同，
-    # 持仓风控原则上必须持续运行，待评审后决定是否拆分跳过逻辑。
+    # —— 闸门 2：仅无网关装配（unavailable）跳过；其余状态持续离场监控（B-8）——
     status = trading_service.get_status()
-    if status.get("mode") != "live":
-        logger.debug(
-            "monitor_holding 跳过（网关非 live，mode=%s）", status.get("mode")
-        )
+    if status.get("mode") == "unavailable":
+        logger.debug("monitor_holding 跳过（网关 unavailable，无装配）")
         return
 
-    # —— 进入编排：调 ExecutionEngine.tick_exit（asyncio.run 包裹）——
-    # asyncio.run 边界：同 monitor_pullback——prefork worker 安全；若切 gevent/eventlet
-    # 池或 ExecutionEngine 引入持久 HTTP session（跨 tick 复用），asyncio.run 每次新建
-    # loop 会致 session 复用断裂，需改持久 loop（worker 级单例 loop / asynccelery）。
+    # —— 进入编排：投递 tick_exit 到 worker 单例 loop（B-10，同 monitor_pullback）——
     engine = _build_execution_engine()
     try:
-        asyncio.run(engine.tick_exit())
+        _run_async(engine.tick_exit())
     except Exception as exc:
         # tick_exit 内部已对单持仓异常 try/except 隔离，此处捕获 engine 装配层异常。
         # 离场监控异常不可容忍 tick 崩溃——落 error 日志后等下一轮 beat 重试，

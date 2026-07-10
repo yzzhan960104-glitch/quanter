@@ -109,7 +109,11 @@ class StrategyConfig(BaseModel):
     )
     timeout_exit_threshold: float = Field(
         0.01,
-        description="超时离场浮盈阈值(持仓达 max_holding_bars 且浮盈 ≥1% 才允许离场)",
+        description=(
+            "超时砍亏浮盈阈值(持仓达 max_holding_bars 且浮盈【<此值】则砍亏离场；"
+            "回测 backtest_replay 与实盘 execution.check_exit 同口径、百分比分母。"
+            "【B-3】旧语义「≥此值才允许离场(锁盈)」与实盘相反且虚高回测，已统一为砍亏。"
+        ),
     )
     trailing_activation_bars: int = Field(
         5,

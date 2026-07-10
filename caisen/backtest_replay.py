@@ -181,7 +181,7 @@ def _simulate_one_trade(df: pd.DataFrame, p, entry_day, max_holding_bars: int) -
         T+1：若 low≤entry_upper 且 high≥entry_lower → 成交（entry_price=entry_upper）；
              同日若触 stop/take_profit_2x 则当日离场（保守：先判 stop，防日内闪崩）；
         T+2..：逐日判 stop_loss（先）→ take_profit_2x → take_profit；
-        超 max_holding_bars 且浮盈 ≥ timeout_exit_threshold：时间止损（按当日 close 平）；
+        超 max_holding_bars 且浮盈 < timeout_exit_threshold：时间止损砍亏（按当日 close 平）；
         若序列末尾仍未离场：still_open（按末根 close 记浮盈 rr）。
 
     注：max_holding 用位置计数（entry_pos + max_holding_bars），不依赖 plan.max_holding_until
@@ -246,16 +246,20 @@ def _simulate_one_trade(df: pd.DataFrame, p, entry_day, max_holding_bars: int) -
             exit_pos = pos
             break
 
-        # 优先级 4：时间止损（持仓达 max_holding_bars 且浮盈 ≥ timeout_exit_threshold）
-        # 物理意图：蔡森原著"超时未达目标则离场"，避免资金长期占用。
+        # 优先级 4：时间止损砍亏（持仓达 max_holding_bars 且浮盈 < timeout_exit_threshold → 离场）
+        # 【B-3 修复】与实盘 check_exit（execution.py:142-148）完全对齐：百分比分母
+        # (close-entry)/entry + profit<threshold→离场（砍亏）。
+        # 旧实现用 R 分母 unrealized>=threshold→锁盈是错误的：与实盘运算符/分母/意图全反，
+        # 且让超时浮亏单永不实现（继续持有到末尾记 still_open），系统性虚高回测胜率/盈亏比，
+        # 可能放行实盘亏损策略通过上线 gate。现统一为「超时浮盈不足即砍亏」的行业惯例。
         if pos >= max_hold_pos:
-            unrealized = (close - entry_price) / max(entry_price - p.stop_loss, 1e-9)
-            if unrealized >= p.timeout_exit_threshold:
+            profit = (close - entry_price) / entry_price   # 百分比，与 check_exit 同口径
+            if profit < p.timeout_exit_threshold:
                 exit_price = close
                 exit_reason = "timeout"
                 exit_pos = pos
                 break
-            # 浮盈不足 timeout_exit_threshold：继续持有到序列末尾（保守不止损）
+            # 浮盈 ≥ threshold：未达砍亏条件，继续持有
 
     # —— 序列末尾仍未离场 → still_open（按末根 close 记浮盈）——
     if exit_price is None:

@@ -263,13 +263,34 @@ class ExecutionEngine:
                     side="buy",
                     price=plan["entry_upper"],
                 )
-                await self.trading.submit_order(order, dry_run=False, confirm=True)
-                # —— 成交 → 状态推进 FILLED（记录 entry_bar 便于后续 bars_held 推算）——
-                storage.update_plan(
-                    plan["plan_id"],
-                    status="FILLED",
-                    entry_bar=self._today_bar(),
-                )
+                result = await self.trading.submit_order(order, dry_run=False, confirm=True)
+                # 【B-4 修复】仅在真实成交才推进 FILLED，杜绝幽灵持仓。
+                # EMT submit_order 返回 state=SUBMITTED（限价单已提交、成交靠异步回报），
+                # 若无视 state 直接标 FILLED，会在未成交单上建出「幽灵持仓」，tick_exit
+                # 随后可能在其上发市价 SELL → 对不存在的持仓发卖单（裸卖空/拒单/敞口失控）。
+                state = (result or {}).get("state")
+                if state in ("FILLED", "PARTIAL_FILLED"):
+                    # —— 真实成交 → 状态推进 FILLED（记录 entry_bar 便于后续 bars_held 推算）——
+                    storage.update_plan(
+                        plan["plan_id"],
+                        status="FILLED",
+                        entry_bar=self._today_bar(),
+                    )
+                elif state in ("REJECTED", "FAILED"):
+                    # —— 废单/失败 → 回退 PENDING_APPROVAL 待人工，绝不标 FILLED ——
+                    # Why 回退而非留 ARMED：废单不会自愈成成交，留 ARMED 会每轮重复发废单；
+                    # 回退审核让人工介入（资金不足/参数非法等原因需人工裁决）。
+                    _logger.warning(
+                        "tick_pullback 计划 %s(%s) 下单被拒/失败 state=%s msg=%s，回退审核",
+                        plan.get("plan_id"), plan.get("symbol"),
+                        state, (result or {}).get("message"),
+                    )
+                    storage.update_plan(
+                        plan["plan_id"], status="PENDING_APPROVAL",
+                        note=f"order_{state}",
+                    )
+                # SUBMITTED / 其它中间态：限价单排队未成交，保持 ARMED，等成交回报推进
+                # （完整闭环需 P1-9 网关对账/回调把 SUBMITTED→FILLED 推进，本处先堵乐观标记）。
             except Exception as e:
                 # 单计划异常不中断本轮其它计划（边界隔离）。
                 # 不在此处重试（断线/限频由 trading_service 内部熔断兜底；
@@ -288,19 +309,23 @@ class ExecutionEngine:
     async def tick_exit(self) -> None:
         """beat 调用：遍历 FILLED 持仓，check_exit 命中 CLOSE → 市价平仓。
 
-        编排流程（断线不补发）：
-            1. trading.get_status() 判定连接态：locked 或 not connected → return；
+        编排流程（持仓风控持续运行，B-8）：
+            1. trading.get_status() 判定连接态：仅 not connected → return（断线无可靠行情）；
+               locked（风险否决）不再跳过——已有持仓的止损/止盈是风险缩减动作，必须持续；
             2. storage.load_plans(status="FILLED") 拉所有持仓中计划；
             3. 逐计划：_get_quote → check_exit(pos, bar, bars_held, cfg)；
-            4. CLOSE → submit_order(OrderRequest(sell, 市价)) + update_plan(status="CLOSED")；
+            4. CLOSE → submit_order(sell 市价)；仅 state∈{FILLED,PARTIAL_FILLED} 才 update_plan(CLOSED)，
+               拒单/失败保持 FILLED 等下一轮重试（防幽灵了结，B-4 对称）；
             5. HOLD + new_stop != None → update_plan(stop=new_stop)（移动止盈止损上移）。
 
         bars_held 推算：plan["bars_held"]（由 service 层按交易日历推算后写入 plan dict），
         缺省时按 entry_bar 推算 today_bar - entry_bar（_today_bar 占位为 0，生产注入）。
         """
-        # —— 断线不补发 ——
+        # —— 闸门：仅断线（not connected）跳过；locked（风险否决）不跳过（B-8 离场持续）——
+        # Why 不再因 locked 跳过：风险否决锁态只应停新开仓(pullback)，离场是风险缩减须持续；
+        # 断线时无可靠行情/下单通道，才保守跳过（_get_quote 返 None 亦会逐持仓 continue 兜底）。
         status = self.trading.get_status()
-        if status.get("locked") or not status.get("connected"):
+        if not status.get("connected"):
             return
 
         # —— 遍历 FILLED 持仓 ——
@@ -335,8 +360,19 @@ class ExecutionEngine:
                         side="sell",
                         price=None,   # 市价平仓（A 股市价单走对手价/最优五档）
                     )
-                    await self.trading.submit_order(order, dry_run=False, confirm=True)
-                    storage.update_plan(plan["plan_id"], status="CLOSED")
+                    result = await self.trading.submit_order(order, dry_run=False, confirm=True)
+                    # 【B-4 对称】仅真实成交才标 CLOSED，防幽灵了结：卖单被拒/未成交时
+                    # 若盲目标 CLOSED，会把仍持有的仓位移出监控 → 敞口失控且与券商不一致。
+                    # 保持 FILLED，下一轮 tick_exit 重新评估（止损只更急）。
+                    state = (result or {}).get("state")
+                    if state in ("FILLED", "PARTIAL_FILLED"):
+                        storage.update_plan(plan["plan_id"], status="CLOSED")
+                    else:
+                        _logger.warning(
+                            "tick_exit 持仓 %s(%s) 平仓未成交 state=%s msg=%s，保持 FILLED 待下轮重试",
+                            plan.get("plan_id"), plan.get("symbol"),
+                            state, (result or {}).get("message"),
+                        )
                 elif decision.new_stop is not None:
                     # —— HOLD + 移动止盈激活 → 持久化新止损（止损只上移）——
                     storage.update_plan(plan["plan_id"], stop=decision.new_stop)

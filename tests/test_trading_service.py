@@ -199,6 +199,40 @@ def test_submit_order_live_calls_gateway(monkeypatch):
     assert gw.submit_calls and gw.submit_calls[0].symbol == "510300.SH"
 
 
+def test_submit_order_live_records_audit(monkeypatch):
+    """真单成功路径必须落 record_live_trade 审计流水（spec §6.3 可追溯性，B-6/应修项1）。
+
+    背景：submit_order docstring 声称「真单/废单/撤单均落 CSV」，但此前的真单成功
+    路径（370-376 行）拿到 OrderResult 后直接 return，未落任何流水——真实成交在
+    logs/live_trades.csv 中完全缺失，违反审计合规红线。
+    """
+    from server.services import trading_service
+    from trading.execution_gateway import OrderRequest
+
+    gw = _fake_gw_connected()
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
+    monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
+    monkeypatch.setattr(trading_service, "_max_amount", lambda: 10000.0, raising=False)
+    monkeypatch.setattr(trading_service, "_max_shares", lambda: 1000, raising=False)
+    monkeypatch.setattr(trading_service, "_enforce_session", lambda: False, raising=False)
+
+    recorded = []
+    monkeypatch.setattr(trading_service, "record_live_trade",
+                        lambda *a, **kw: recorded.append((a, kw)))
+
+    order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
+    asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
+
+    # 真单成功必须落审计流水（此前缺失）
+    assert recorded, "真单成功未落 record_live_trade 审计流水（B-6）"
+    # direction 为 BUY（真单语义，非 DRY_RUN_/BLOCKED 前缀）
+    assert recorded[0][0][1] == "BUY"
+    # rationale 应含网关类名 + 真实 state（便于事后复盘）
+    rationale = recorded[0][1].get("rationale", "")
+    assert "SUBMITTED" in rationale
+
+
 def test_submit_order_disconnected_blocks(monkeypatch):
     """网关未连接 → 挡板 connection 关命中。"""
     from server.services import trading_service

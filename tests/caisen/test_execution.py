@@ -244,3 +244,157 @@ def test_tick_skipped_when_disconnected(monkeypatch):
 
     asyncio.run(engine.tick_exit())
     trading.submit_order.assert_not_awaited()
+
+
+# ============================================================================
+# tick_pullback 状态校验（B-4：杜绝幽灵持仓）
+# ============================================================================
+def test_tick_pullback_submitted_not_marked_filled(monkeypatch):
+    """限价单仅 SUBMITTED（未成交）时，计划不得标 FILLED（防幽灵持仓 B-4）。
+
+    EMT submit_order 返回 state=SUBMITTED（订单已提交，成交靠异步回报）。若 tick_pullback
+    无视返回 state 直接标 FILLED，会在未实际成交的限价单上建出「幽灵持仓」，随后 tick_exit
+    可能在其上发市价 SELL → 对不存在的持仓发卖单（裸卖空/拒单/敞口失控）。
+    """
+    cfg = StrategyConfig()
+    trading = MagicMock()
+    trading.get_status.return_value = {"connected": True, "locked": False, "mode": "live"}
+    trading.submit_order = AsyncMock(
+        return_value={"order_id": "test-sub", "state": "SUBMITTED", "message": "已提交排队"}
+    )
+    engine = ExecutionEngine(trading_service=trading, cfg=cfg)
+
+    armed_plan = {
+        "plan_id": "p-sub", "symbol": "FAKE.SZ", "status": "ARMED",
+        "entry_upper": 10.0, "entry_lower": 9.8, "shares": 100,
+    }
+    updates = []
+    monkeypatch.setattr(
+        "caisen.execution.storage.load_plans",
+        lambda status=None: [armed_plan] if status == "ARMED" else [],
+    )
+    monkeypatch.setattr(
+        "caisen.execution.storage.update_plan",
+        lambda plan_id, **fields: updates.append((plan_id, fields)),
+    )
+    monkeypatch.setattr(engine, "_get_quote", AsyncMock(return_value={"high": 10.1, "low": 9.9}))
+
+    asyncio.run(engine.tick_pullback())
+
+    # 限价单确实挂出去了
+    trading.submit_order.assert_awaited_once()
+    # 但 plan 绝不得被标 FILLED（SUBMITTED 未成交 = 无持仓）
+    filled = [u for u in updates if u[1].get("status") == "FILLED"]
+    assert filled == [], "SUBMITTED 不得标 FILLED（幽灵持仓 B-4）"
+
+
+def test_tick_pullback_rejected_reverts_to_pending(monkeypatch):
+    """下单被拒（REJECTED）→ 计划回退 PENDING_APPROVAL，不得标 FILLED（B-4）。"""
+    cfg = StrategyConfig()
+    trading = MagicMock()
+    trading.get_status.return_value = {"connected": True, "locked": False, "mode": "live"}
+    trading.submit_order = AsyncMock(
+        return_value={"order_id": "", "state": "REJECTED", "message": "资金不足"}
+    )
+    engine = ExecutionEngine(trading_service=trading, cfg=cfg)
+
+    armed_plan = {
+        "plan_id": "p-rej", "symbol": "FAKE.SZ", "status": "ARMED",
+        "entry_upper": 10.0, "entry_lower": 9.8, "shares": 100,
+    }
+    updates = []
+    monkeypatch.setattr(
+        "caisen.execution.storage.load_plans",
+        lambda status=None: [armed_plan] if status == "ARMED" else [],
+    )
+    monkeypatch.setattr(
+        "caisen.execution.storage.update_plan",
+        lambda plan_id, **fields: updates.append((plan_id, fields)),
+    )
+    monkeypatch.setattr(engine, "_get_quote", AsyncMock(return_value={"high": 10.1, "low": 9.9}))
+
+    asyncio.run(engine.tick_pullback())
+
+    statuses = [u[1].get("status") for u in updates]
+    assert "FILLED" not in statuses, "REJECTED 不得标 FILLED"
+    assert "PENDING_APPROVAL" in statuses, "REJECTED 应回退 PENDING_APPROVAL 待人工"
+
+
+def test_tick_exit_rejected_not_marked_closed(monkeypatch):
+    """平仓卖单被拒（REJECTED）→ 不得标 CLOSED（防幽灵了结，B-4 对称）。
+
+    tick_exit 命中止损后 submit_order(sell)，若卖单被拒（如锁态/限价未成交/柜台拒），
+    不得盲目标 CLOSED——否则会把仍持有的仓位从监控移除，敞口失控且与券商不一致。
+    保持 FILLED，下一轮 tick_exit 重新评估（止损只更急）。
+    """
+    cfg = StrategyConfig()
+    trading = MagicMock()
+    trading.get_status.return_value = {"connected": True, "locked": False, "mode": "live"}
+    trading.submit_order = AsyncMock(
+        return_value={"order_id": "", "state": "REJECTED", "message": "柜台拒单"}
+    )
+    engine = ExecutionEngine(trading_service=trading, cfg=cfg)
+
+    filled_plan = {
+        "plan_id": "p-exit-rej", "symbol": "FAKE.SZ", "status": "FILLED",
+        "entry": 10.0, "stop": 9.0, "take_profit": 12.0, "take_profit_2x": 14.0,
+        "shares": 100, "entry_bar": 0, "bars_held": 1,
+    }
+    updates = []
+    monkeypatch.setattr(
+        "caisen.execution.storage.load_plans",
+        lambda status=None: [filled_plan] if status == "FILLED" else [],
+    )
+    monkeypatch.setattr(
+        "caisen.execution.storage.update_plan",
+        lambda plan_id, **fields: updates.append((plan_id, fields)),
+    )
+    # 行情 low 8.8 ≤ stop 9.0 → 触发止损 CLOSE
+    monkeypatch.setattr(engine, "_get_quote",
+                        AsyncMock(return_value={"high": 9.5, "low": 8.8, "close": 9.0}))
+
+    asyncio.run(engine.tick_exit())
+
+    # submit_order(sell) 被调用
+    trading.submit_order.assert_awaited_once()
+    # 但卖单 REJECTED → 不得标 CLOSED（防幽灵了结）
+    closed = [u for u in updates if u[1].get("status") == "CLOSED"]
+    assert closed == [], "卖单 REJECTED 不得标 CLOSED（幽灵了结，B-4 对称）"
+
+
+def test_tick_exit_processes_when_connected_and_locked(monkeypatch):
+    """connected+locked（vetoed_by_risk）→ tick_exit 仍处理离场（持仓风控持续，B-8）。
+
+    tick_exit 旧闸门 `locked or not connected → return` 在风险否决锁态下停摆离场监控，
+    已有 FILLED 持仓的止损/止盈失控。放宽为仅 not-connected 跳过（断线无可靠行情），
+    connected+locked 时仍评估离场（卖单是否成交由网关/state 校验决定）。
+    """
+    cfg = StrategyConfig()
+    trading = MagicMock()
+    # connected=True + locked=True（vetoed_by_risk）—— 旧闸门会 return，新闸门放行
+    trading.get_status.return_value = {"connected": True, "locked": True, "mode": "vetoed_by_risk"}
+    trading.submit_order = AsyncMock(
+        return_value={"order_id": "ok", "state": "FILLED", "message": "平仓成交"}
+    )
+    engine = ExecutionEngine(trading_service=trading, cfg=cfg)
+
+    filled_plan = {
+        "plan_id": "p-lock", "symbol": "FAKE.SZ", "status": "FILLED",
+        "entry": 10.0, "stop": 9.0, "take_profit": 12.0, "take_profit_2x": 14.0,
+        "shares": 100, "entry_bar": 0, "bars_held": 1,
+    }
+    monkeypatch.setattr(
+        "caisen.execution.storage.load_plans",
+        lambda status=None: [filled_plan] if status == "FILLED" else [],
+    )
+    monkeypatch.setattr(
+        "caisen.execution.storage.update_plan",
+        lambda plan_id, **fields: None,
+    )
+    monkeypatch.setattr(engine, "_get_quote",
+                        AsyncMock(return_value={"high": 9.5, "low": 8.8, "close": 9.0}))
+
+    asyncio.run(engine.tick_exit())
+
+    # 关键：connected+locked 时 tick_exit 仍提交卖单（未在闸门处 return）
+    trading.submit_order.assert_awaited_once()

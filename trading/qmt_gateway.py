@@ -32,6 +32,10 @@ from trading.order_state import OrderState
 
 logger = logging.getLogger(__name__)
 
+# 断线自动重连退避序列（秒，指数退避，B-8）：与 emt_gateway 同口径，最多 5 次。
+# Why 有上限：无限重连刷爆柜台登录限频；耗尽后保持锁态 + 告警等人工介入。
+_RECONNECT_BACKOFFS: tuple[int, ...] = (2, 4, 8, 16, 30)
+
 # === xtquant 延迟/容错导入 ====================================================
 # Why 延迟容错：xtquant 是 Windows + MiniQMT 客户端专属的 C++ 绑定，开发/CI/单测
 # 环境通常未安装。用 try/except 退化基类为 object，保证「无 xtquant 也能 import
@@ -458,18 +462,66 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
 
     def _on_disconnect_fatal(self) -> None:
         """
-        主线程：断线告警处理（由 on_disconnected 经 call_soon_threadsafe 投递）。
+        主线程：断线告警 + 启动自动重连（由 on_disconnected 经 call_soon_threadsafe 投递）。
 
         Why 单列主线程处理：on_disconnected 在 C++ 线程，不能直接发钉钉报警协程；
-        投递到主线程后，此处方可安全 create_task 触发最高级别告警。锁定标志已在
-        C++ 线程率先置位（见 on_disconnected），此处只负责告警与状态清理。
+        投递到主线程后，此处方可安全 create_task 触发告警 + 重连。锁定标志已在
+        C++ 线程率先置位（见 on_disconnected），此处只负责告警与重连调度。
+
+        B-8：旧实现仅 critical 日志「请人工重新 connect()」（含 TODO 报警未落地），
+        断线期间持仓离场停摆、敞口失控。现启动指数退避自动重连 + 钉钉告警。
         """
         logger.critical(
-            "【QMT 断线】account=%s 网关已锁定，禁止后续发单！请人工介入检查 MiniQMT 客户端"
-            "与网络后，重新 await connect() 复位", self._account_id
+            "【QMT 断线】account=%s 网关已锁定，启动自动重连（指数退避 %s）...",
+            self._account_id, _RECONNECT_BACKOFFS,
         )
-        # TODO(风控): 此处可 create_task 触发钉钉/企业微信最高级别报警；
-        #   报警协程应由上层注入，网关不直接依赖 notifier，保持解耦。
+        # 钉钉告警（fire_and_forget 跨线程安全，链路异常被吞不影响重连主路径）
+        try:
+            from core.notifier import NotificationManager, fire_and_forget
+            fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                f"QMT 断线，启动自动重连 account={self._account_id}", "WARN"))
+        except Exception:
+            pass
+        # 在持久 loop 上调度重连任务（loop 关闭/为空时不调度，防 shutdown 期徒劳重连）
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.create_task(self._reconnect())
+
+    async def _reconnect(self) -> None:
+        """断线后指数退避自动重连（B-8）：最多 len(_RECONNECT_BACKOFFS) 次，每次失败告警。
+
+        - 重连成功 → connect() 内部清 lock_down/置 connected，下轮 beat 自动恢复 live；
+        - 全部失败 → 保持锁态（connect 失败已置 lock_down=True）+ ERROR 告警等人工；
+        - 退避 sleep 期间 lock_down=True，submit_order 被网关拒，tick_exit 优雅 no-op。
+        """
+        from core.notifier import NotificationManager, fire_and_forget
+        # 防御：重连期间确保锁态（拒新单）；connect 成功会清锁，失败/耗尽保持锁。
+        self._lock_down = True
+        n = len(_RECONNECT_BACKOFFS)
+        for i, delay in enumerate(_RECONNECT_BACKOFFS, 1):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                await self.connect()
+                logger.info("QMT 重连成功（第 %s/%s 次）", i, n)
+                try:
+                    fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                        f"QMT 断线后重连成功（第{i}次）", "INFO"))
+                except Exception:
+                    pass
+                return
+            except Exception as exc:
+                logger.warning("QMT 重连失败（第 %s/%s）：%s", i, n, exc)
+                try:
+                    fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                        f"QMT 重连失败第{i}次：{exc}", "WARN"))
+                except Exception:
+                    pass
+        logger.critical("QMT 重连耗尽（%s 次），网关保持锁态，请人工介入", n)
+        try:
+            fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                f"QMT 重连耗尽（{n}次），网关锁态，请人工介入！", "ERROR"))
+        except Exception:
+            pass
 
     # ================================================ XtQuantTraderCallback
     # 以下回调全部运行在 xtquant 的 C++ 线程！

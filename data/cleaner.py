@@ -49,8 +49,14 @@ class DataCleaner:
         illiquid_mask = df_clean["volume"] == 0
         df_clean["is_illiquid"] = illiquid_mask
 
-        # 3. 缺失值填充（前向填充 + 限制，Pandas 2.x 使用 ffill()）
-        df_clean = df_clean.ffill(limit=max_fill)
+        # 3. 缺失值填充：仅对 OHLC 前向填充（最多 max_fill 天）。
+        # Why 排除 volume/amount：停牌期间成交量/成交额为真·零流动性，ffill 会用
+        # 「停牌前最后一天的量」伪装流动性，导致流动性测算/VWAP 严重失真（与
+        # lake_reader.py「volume/amount 绝不 ffill」同口径红线，B-9）。
+        ohlc_cols = [c for c in ("open", "high", "low", "close") if c in df_clean.columns]
+        for c in ohlc_cols:
+            df_clean[c] = df_clean[c].ffill(limit=max_fill)
+        # volume/amount 不动：保留 NaN，下游 liquidity_filter 会 dropna 排除停牌日。
 
         # 4. 高价不能低于低价（防范数据错误）
         invalid_ohlc = df_clean["high"] < df_clean["low"]
@@ -71,29 +77,35 @@ class DataCleaner:
         return df_clean
 
     @staticmethod
-    def clean_macro(df: pd.DataFrame, fill_method: str = "bfill") -> pd.DataFrame:
+    def clean_macro(df: pd.DataFrame, fill_method: str = "ffill") -> pd.DataFrame:
         """
         清洗宏观数据
 
         参数：
-            df: 原始宏观数据
-            fill_method: 填充方法（"bfill"=后向填充，防范前视偏差）
+            df: 原始宏观数据（低频，如月度社融/M1M2，发布后才有值）
+            fill_method: 填充方法。**仅 "ffill" 合法**——向前填充，用「已公布的
+                          最近一期值」解释当下，是防前视偏差的唯一合法方向。
 
         返回：
-            清洗后的 DataFrame
+            清洗后的 DataFrame（NaN 已 ffill；首行前无历史则保留 NaN，由调用方 dropna）
 
         清洗规则：
-            1. 后向填充（宏观数据发布后才生效）
+            1. 向前填充（用过去解释现在，防前视偏差）
             2. 检测 NaN（数据缺失）
-            3. 标记发布延迟
+
+        ⚠️ 前视偏差红线：bfill（后向填充）会把「未来才公布的值」回填到历史，构成
+        前视偏差——量化系统绝禁使用（回测完美、实盘崩盘的典型未来函数陷阱）。
+        故本函数对任何非 "ffill" 的入参直接 raise ValueError，从 API 层杜绝误用。
         """
         df_clean = df.copy()
 
-        # 1. 后向填充（防范前视偏差，Pandas 2.x 使用 bfill()）
-        if fill_method == "bfill":
-            df_clean = df_clean.bfill()
-        else:
-            raise ValueError(f"不支持的填充方法: {fill_method}")
+        # 1. 向前填充（防前视偏差的唯一合法方向；bfill 引入未来函数，拒绝）
+        if fill_method != "ffill":
+            raise ValueError(
+                f"不支持的填充方法: {fill_method}（宏观数据仅允许 ffill；"
+                f"bfill 引入前视偏差）"
+            )
+        df_clean = df_clean.ffill()
 
         return df_clean
 
@@ -118,7 +130,7 @@ class DataCleaner:
 
         对齐规则：
             1. 宏观数据使用发布时间（而非数据发生时间）
-            2. 向后填充（数据发布后才生效）
+            2. 向前填充 ffill（数据发布后，用该值解释之后的每一个交易日，防前视偏差）
             3. 检测对齐后的 NaN（确保无遗漏）
         """
         # 1. 确保时间戳一致

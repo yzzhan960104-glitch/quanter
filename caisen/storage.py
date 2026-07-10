@@ -34,6 +34,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
+import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Optional
 
@@ -61,6 +66,12 @@ _DEFAULT_STATUS = "PENDING_APPROVAL"
 
 # 活跃状态集合：进入这两个状态的计划同步写入 active.json（执行器高频读路径）。
 _ACTIVE_STATUSES = ("ARMED", "FILLED")
+
+# ISO 日期严格正则：仅 YYYY-MM-DD（4位年-2位月-2位日）。
+# Why 严格：save_plans 的 date 直接拼进文件名 plans/<date>.json，任何非标准字符
+# （含 "../" 路径跳板、"/"/"\\" 分隔符、空格等）都可能造成路径遍历或注入（B-2）。
+# 正则先做格式拦截，_validate_iso_date 内再用 pd.Timestamp 做语义二次校验（如月份 13）。
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +119,26 @@ def _ensure_dir() -> None:
     os.makedirs(_PLANS_DIR, exist_ok=True)
 
 
+def _validate_iso_date(date: str) -> None:
+    """校验 date 为严格 YYYY-MM-DD，非法抛 ValueError（B-2 路径遍历/注入防御）。
+
+    两道防线：
+        1. 正则 _ISO_DATE_RE：格式拦截，拒绝含 "../" / "\\" / "/" / 空格等任何
+           非标准字符的输入——这是防路径遍历的核心（date 直接拼进文件名）；
+        2. pd.Timestamp 二次解析：拦截 re 通过但语义非法的输入（如 "2024-13-01"
+           月份越界），pd.Timestamp 对非法日期抛异常。
+
+    Why 不静默容错：date 是安全敏感输入（决定文件落盘路径），任何非法值都必须
+    显式失败而非猜测纠正——显式优于隐式（CLAUDE.md 量化风控·边界审查）。
+    """
+    if not isinstance(date, str) or not _ISO_DATE_RE.match(date):
+        raise ValueError(f"非法日期（须 YYYY-MM-DD）：{date!r}")
+    try:
+        pd.Timestamp(date)   # 语义二次校验（月份/日期越界）
+    except Exception as exc:
+        raise ValueError(f"非法日期（解析失败）：{date!r}") from exc
+
+
 def _read_json(path: str, default):
     """读 JSON 文件，文件缺失/JSON 异常时返回 default（幂等读，不抛异常）。
 
@@ -125,10 +156,69 @@ def _read_json(path: str, default):
 
 
 def _write_json(path: str, data) -> None:
-    """写 JSON 文件（UTF-8 + ensure_ascii=False，中文 metadata 不转义）。"""
+    """原子写 JSON（tempfile + os.replace，B-14）：读路径永不撞见半截文件。
+
+    Why 原子：直接 open(w) 写到一半若进程崩溃/断电，会留下残缺 JSON，下游
+    _read_json 降级返 default 但数据已丢。改为先写同目录临时文件，再 os.replace
+    原子替换（同文件系统下 os.replace 是原子操作）——要么旧要么新，无中间态。
+    """
     _ensure_dir()
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # 临时文件放同目录：os.replace 仅在同文件系统下原子（跨目录可能非原子）。
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        # 写/替换失败：清理临时文件，保持原文件不动（原子语义）。
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def _plans_write_lock():
+    """跨进程独占锁（串行化 plans 目录的读-改-写，防并发丢更新，B-14）。
+
+    Why 锁：screen（审核）与 execute（执行）是分离进程，并发对 active.json/
+    <date>.json 做 read-modify-write 会丢更新（A、B 都读到旧值，后写覆盖先写）。
+    原子写只保证单次写完整，不防 RMW 竞态——故用 sentinel 文件字节锁串行化整段 RMW。
+
+    实现：锁 plans/.lock 文件首字节。Win 用 msvcrt.locking(LK_LOCK 阻塞直到获得)，
+    POSIX 用 fcntl.flock(LOCK_EX)；fd 关闭即释放（进程崩溃亦自动释放，无死锁残留）。
+    """
+    _ensure_dir()
+    lock_path = _full_path(".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        if sys.platform == "win32":
+            import msvcrt
+            # LK_LOCK 阻塞直到获得锁；偶发 OSError 中断则短暂退避重试。
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.01)
+        else:  # pragma: no cover - POSIX 路径，当前部署以 Win 为主
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:  # pragma: no cover
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -145,12 +235,28 @@ def save_plans(date: str, plans: list) -> None:
         {"date": "2024-06-01", "plans": [{plan1 with status, plan2, ...}]}
     每个计划默认 status=_DEFAULT_STATUS（PENDING_APPROVAL）。
 
-    幂等性：同 date 重复 save 会整体覆盖（T 日重跑筛形态时是期望行为）。
+    幂等性（B-13 修订）：同 date 重复 save 时，【已进入执行态（ARMED/FILLED）的
+        旧计划会被保留】——重扫不应清空实盘执行状态、也不应在 active.json 留下
+        旧 plan_id 孤儿；未执行态（PENDING_APPROVAL/APPROVED/REJECTED）由新候选
+        整体替换（T 日重跑筛形态的期望行为）。
     """
-    _ensure_dir()
-    plans_serial = [_plan_to_dict(p, status=_DEFAULT_STATUS) for p in plans]
-    payload = {"date": str(date), "plans": plans_serial}
-    _write_json(_full_path(f"{date}.json"), payload)
+    # date 安全校验（B-2）：拼文件名前强制 YYYY-MM-DD，防路径遍历/注入。
+    # 先于 _ensure_dir/锁：非法输入不应产生任何副作用（连目录/锁都不建）。
+    _validate_iso_date(date)
+    path = _full_path(f"{date}.json")
+    # 写锁串行化「读旧→合并→写新」整段 RMW，防 screen/execute 并发丢更新（B-14）。
+    with _plans_write_lock():
+        _ensure_dir()
+        # B-13：保留已执行态（ARMED/FILLED）旧计划，未执行态由新候选替换。
+        preserved: list[dict] = []
+        existing = _read_json(path, None)
+        if isinstance(existing, dict):
+            for p in existing.get("plans", []):
+                if isinstance(p, dict) and p.get("status") in _ACTIVE_STATUSES:
+                    preserved.append(p)
+        plans_serial = [_plan_to_dict(p, status=_DEFAULT_STATUS) for p in plans]
+        payload = {"date": str(date), "plans": plans_serial + preserved}
+        _write_json(path, payload)
 
 
 def _load_raw_plans() -> list[dict]:
@@ -245,31 +351,34 @@ def update_plan(plan_id: str, **fields) -> None:
         - 若新 status ∈ {ARMED, FILLED}：同步写入/更新 active.json；
         - 若新 status == CLOSED：从 active.json 移除（持仓已了结）。
     """
-    # 1. 定位 plan 所在文件
-    plan_file = _find_plan_file(plan_id)
-    if plan_file is None:
-        raise KeyError(f"update_plan: plan_id={plan_id!r} 不存在于任何 plans/<date>.json")
+    # 写锁串行化「定位→改 date 文件→同步 active」整段 RMW，防并发丢更新（B-14）。
+    # _sync_to_active/_remove_from_active 在锁内调用，自身不再加锁（避免非重入死锁）。
+    with _plans_write_lock():
+        # 1. 定位 plan 所在文件
+        plan_file = _find_plan_file(plan_id)
+        if plan_file is None:
+            raise KeyError(f"update_plan: plan_id={plan_id!r} 不存在于任何 plans/<date>.json")
 
-    # 2. 更新原文件中的 plan 字段
-    payload = _read_json(plan_file, {"plans": []})
-    plans_list = payload.get("plans", []) if isinstance(payload, dict) else []
-    target = None
-    for d in plans_list:
-        if d.get("plan_id") == plan_id:
-            target = d
-            break
-    if target is None:
-        # 文件级竞态：_find_plan_file 命中但此处找不到，按 KeyError 处理（防御）
-        raise KeyError(f"update_plan: plan_id={plan_id!r} 定位后丢失（文件竞态）")
-    target.update(fields)
-    _write_json(plan_file, payload)
+        # 2. 更新原文件中的 plan 字段
+        payload = _read_json(plan_file, {"plans": []})
+        plans_list = payload.get("plans", []) if isinstance(payload, dict) else []
+        target = None
+        for d in plans_list:
+            if d.get("plan_id") == plan_id:
+                target = d
+                break
+        if target is None:
+            # 文件级竞态：_find_plan_file 命中但此处找不到，按 KeyError 处理（防御）
+            raise KeyError(f"update_plan: plan_id={plan_id!r} 定位后丢失（文件竞态）")
+        target.update(fields)
+        _write_json(plan_file, payload)
 
-    # 3. 状态机同步 active.json（ARMED/FILLED 进、CLOSED 出）
-    new_status = fields.get("status")
-    if new_status in _ACTIVE_STATUSES:
-        _sync_to_active(target)
-    elif new_status == "CLOSED":
-        _remove_from_active(plan_id)
+        # 3. 状态机同步 active.json（ARMED/FILLED 进、CLOSED 出）
+        new_status = fields.get("status")
+        if new_status in _ACTIVE_STATUSES:
+            _sync_to_active(target)
+        elif new_status == "CLOSED":
+            _remove_from_active(plan_id)
 
 
 # ---------------------------------------------------------------------------
@@ -327,11 +436,13 @@ def add_to_cooldown(symbol: str, until_date: str) -> None:
     语义：同标的多日 add 取最新 until_date（覆盖，用于延长冷却期）。
     持久化：落 cooldown.json，跨进程（screen/execute）共享。
     """
-    cooldown = _read_json(_full_path(_COOLDOWN_FILE), {})
-    if not isinstance(cooldown, dict):
-        cooldown = {}
-    cooldown[symbol] = str(until_date)
-    _write_json(_full_path(_COOLDOWN_FILE), cooldown)
+    # 写锁串行化「读 cooldown→改→写」RMW，防并发 add 丢更新（B-14 同源）。
+    with _plans_write_lock():
+        cooldown = _read_json(_full_path(_COOLDOWN_FILE), {})
+        if not isinstance(cooldown, dict):
+            cooldown = {}
+        cooldown[symbol] = str(until_date)
+        _write_json(_full_path(_COOLDOWN_FILE), cooldown)
 
 
 def in_cooldown(symbol: str, date: str) -> bool:

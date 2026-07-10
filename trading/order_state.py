@@ -46,7 +46,7 @@ class OrderStateMachine:
     3. 取消：PENDING -> SUBMITTED -> CANCELLED
     4. 拒绝：PENDING -> SUBMITTED -> REJECTED
     5. 部分取消：PENDING -> SUBMITTED -> PARTIAL_FILLED -> PARTIAL_CANCELLED -> FILLED
-    6. 异常处理：任何状态 -> FAILED
+    6. 异常处理：任何【非终态】 -> FAILED（终态封闭，不可逆；submit 前含 PENDING）
     """
 
     def __init__(self):
@@ -152,14 +152,23 @@ class OrderStateMachine:
 
     def fail(self, reason: str) -> bool:
         """
-        失败（异常处理）
+        失败（异常处理）：支持从【任意非终态】迁移到 FAILED（含 PENDING）。
 
         参数：
             reason: 失败原因
 
         返回：
             是否成功标记为失败
+
+        边界（应修项2）：
+            - order_info 可能为 None（submit 前调用，如构造期/网络异常兜底），
+              此处惰性初始化为 {}，防 TypeError；
+            - 终态（FILLED/CANCELLED/REJECTED）不可再迁移到 FAILED（终态封闭，
+              已成交单标失败会让风控/对账误判），由 _is_valid_transition 拒绝。
         """
+        # order_info 为 None 时惰性初始化（submit 前调用场景），防 NoneType 不可下标。
+        if self.order_info is None:
+            self.order_info = {}
         self.order_info["fail_reason"] = reason
         self._transition_to(OrderState.FAILED)
 
@@ -216,7 +225,8 @@ class OrderStateMachine:
         """
         # 定义合法的状态迁移
         valid_transitions = {
-            OrderState.PENDING: [OrderState.SUBMITTED],
+            # PENDING 允许 FAILED：submit 前异常兜底（网络/构造期失败），见 fail()。
+            OrderState.PENDING: [OrderState.SUBMITTED, OrderState.FAILED],
             OrderState.SUBMITTED: [OrderState.PARTIAL_FILLED, OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.FAILED],
             OrderState.PARTIAL_FILLED: [OrderState.PARTIAL_FILLED, OrderState.FILLED, OrderState.PARTIAL_CANCELLED, OrderState.FAILED],
             OrderState.PARTIAL_CANCELLED: [OrderState.FILLED],
