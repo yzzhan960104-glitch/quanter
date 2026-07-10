@@ -95,7 +95,13 @@ def test_load_price_data_full_market_when_symbols_empty(tmp_path, monkeypatch):
 def test_load_price_data_empty_when_reader_offline(monkeypatch):
     """reader 未 load（离线/CI）→ 返空 dict（降级，不抛）。"""
     from server.services import caisen_service as svc
-    offline = type("R", (), {"loaded": False, "symbols": lambda self, l=None: []})()
+    # ensure-load 会调 lakes()/load()；fake load 是 no-op（不改 loaded，模拟 load 失败）
+    offline = type("R", (), {
+        "loaded": False,
+        "symbols": lambda self, l=None: [],
+        "lakes": lambda self: [],
+        "load": lambda self, *a, **k: None,
+    })()
     monkeypatch.setattr("data.lake_reader.DataLakeReader.get_instance",
                         classmethod(lambda cls: offline))
 

@@ -92,10 +92,17 @@ def _load_price_data(symbols: Optional[List[str]], date: str) -> Dict[str, pd.Da
     from config import LAKE_CONFIG
 
     reader = DataLakeReader.get_instance()
-    if not reader.loaded:
-        logger.debug("_load_price_data 离线（reader 未 load），返空 dict")
-        return {}
     lake = LAKE_CONFIG.get("default_lake") or "daily"
+    # ensure daily 湖已 load：server lifespan 启动时 load，但独立进程（celery worker /
+    # 脚本）无 lifespan，此处自确保（守卫防重复 load；首次 load 408MB 进内存）。
+    import os
+    if not reader.loaded or lake not in reader.lakes():
+        daily_path = LAKE_CONFIG["lakes"].get(lake)
+        if daily_path and os.path.exists(daily_path):
+            reader.load(daily_path, key=lake)
+    if not reader.loaded:
+        logger.debug("_load_price_data 离线（daily 湖缺失/加载失败），返空 dict")
+        return {}
 
     # universe 解析：None/空 → 全市场枚举
     if not symbols:
