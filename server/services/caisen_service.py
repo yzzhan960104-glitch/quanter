@@ -214,7 +214,9 @@ def run_scan(req: ScanRequest) -> List[CandidatePlan]:
         - 算法/IO 异常（screener/plan/storage/data_lake 内部）不裸抛到路由层，
           try/except 捕获并降级返回空列表 + warning 日志（禁裸抛到路由层以外，
           杜绝 500 噪声污染前端）；
-        - universe 为空 → 直接返回 []（不触发装配/screener，避免无意义计算）；
+        - universe 为空 → 流向 _load_price_data 全市场枚举（scan_universe beat
+          传 universe=[] 触发全市场扫描；reader 离线时 _load_price_data 返空 →
+          candidates 为空 → 降级返 []，不抛异常）；
         - amount 单位待 Phase 3 统一（data_lake 千元 vs risk 元）——流动性过滤在
           screener 内部执行，本编排层不重复校验，单位标注见 screener.py。
 
@@ -230,9 +232,9 @@ def run_scan(req: ScanRequest) -> List[CandidatePlan]:
         ValueError: 状态机参数非法（路由层转 422）。
         KeyError: 状态机键未命中（路由层转 404）。
     """
-    if not req.universe:
-        return []
-
+    # 【Task3】空 universe 不再早返：流向 _load_price_data 全市场枚举（scan_universe beat
+    # 传 universe=[] 触发全市场扫描；reader 离线时 _load_price_data 返空 → 下面 candidates
+    # 为空 → 降级返 []）。
     try:
         cfg = _merge_cfg(req.cfg_override)   # 可能抛 ValidationError（cfg_override 非法）
         risk = RiskManager(cfg)
@@ -413,7 +415,9 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
         #   _load_price_data 收到 None 时内部按"全市场"装配（当前实现仍返空 dict 占位，
         #   测试通过 monkeypatch 覆盖注入合成数据）。
         universe = req.universe if req.universe is not None else []
-        price_data = _load_price_data(universe, req.start)
+        # 【Task3】传 req.end（取 [start,end] 全段），而非 req.start（[:start] 数据不足）；
+        # backtest_replay.replay 内部按 T∈[start,end] 滚动 .loc[:T] 隔离未来（无前视）。
+        price_data = _load_price_data(universe, req.end)
         if not price_data:
             logger.info("run_replay 无可用 price_data（start=%s, end=%s, universe=%s），返回零统计",
                         req.start, req.end, req.universe)

@@ -266,10 +266,45 @@ class TestRunScan:
         assert returned_ids.issubset(ids_in_storage), "run_scan 返回的计划必须已落盘"
 
     def test_run_scan_empty_universe_returns_empty(self):
-        """universe 为空 → screener 无输入 → 返回空列表（不抛异常）。"""
+        """universe 为空 → screener 无输入 → 返回空列表（不抛异常）。
+
+        物理意图（Task3 订正）：
+            原实现 run_scan 对空 universe 早返 []（不调 _load_price_data）。Task3
+            去早返后，空 universe 流向 _load_price_data（触发全市场枚举语义）。
+            此处 monkeypatch _load_price_data 返空（模拟离线/无候选），保持
+            "universe=[] → 返 []" 的对外契约不变——但内部已走了全市场装配链路。
+            （不用真实 reader：测试环境 reader 离线行为本身不可控，显式 mock
+            确保断言确定性，杜绝环境耦合。）
+        """
         req = ScanRequest(date="2024-01-15", universe=[], cfg_override={})
-        plans = caisen_service.run_scan(req)
+        import server.services.caisen_service as svc
+        original_load = svc._load_price_data
+        svc._load_price_data = lambda symbols, date: {}   # 模拟离线 → 降级返 []
+        try:
+            plans = caisen_service.run_scan(req)
+        finally:
+            svc._load_price_data = original_load
         assert plans == []
+
+    def test_run_scan_empty_universe_flows_to_full_market(self, monkeypatch):
+        """【Task3】空 universe 不再早返，流向 _load_price_data 全市场枚举。
+
+        scan_universe beat 传 universe=[] → run_scan 应调 _load_price_data（而非早返 []）。
+        monkeypatch _load_price_data 返空（模拟离线），run_scan 降级返 []；关键断言是
+        _load_price_data 被调用（证明未早返）。
+        """
+        from server.services import caisen_service as svc
+        called = {}
+        def _fake_load(symbols, date):
+            called["symbols"] = symbols
+            called["invoked"] = True
+            return {}   # 模拟离线/空，run_scan 降级返 []
+        monkeypatch.setattr(svc, "_load_price_data", _fake_load)
+        req = ScanRequest(date="2024-01-15", universe=[], cfg_override=dict(_LOOSE_CFG_OVERRIDE))
+        plans = svc.run_scan(req)
+        assert plans == []                      # 离线降级返空
+        assert called.get("invoked") is True, "空 universe 应流向 _load_price_data（不再早返）"
+        assert called.get("symbols") == []      # 空 universe 原样透传给 _load_price_data
 
     def test_run_scan_cfg_override_applied(self):
         """cfg_override 增量覆盖默认配置（min_rr_ratio 提至 99 过滤全部）。
