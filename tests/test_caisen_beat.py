@@ -239,6 +239,31 @@ def test_monitor_holding_calls_tick_exit(monkeypatch):
     fake_engine.tick_exit.assert_awaited_once()
 
 
+def test_monitor_holding_runs_when_vetoed_by_risk(monkeypatch):
+    """vetoed_by_risk（connected+locked）→ 仍调 tick_exit（持仓风控持续，B-8 后半）。
+
+    物理意图：风险否决锁态（如收缩期/手动 kill）只应停【新开仓】(pullback)，不应停
+    【已有持仓离场】(holding)——止损/止盈是风险缩减动作，停摆会让 FILLED 持仓敞口失控。
+    monitor_holding 闸门放宽为仅 unavailable（无网关）跳过；disconnected/vetoed/live 均
+    持续调 tick_exit（tick_exit 内部 + 网关 state 校验兜底卖单是否真成交）。
+    """
+    monkeypatch.setattr(trading_service, "_in_a_share_session", lambda: True)
+    monkeypatch.setattr(
+        "server.celery_app.trading_service.get_status",
+        lambda: {"connected": True, "locked": True, "mode": "vetoed_by_risk"},
+    )
+    fake_engine = MagicMock()
+    fake_engine.tick_exit = AsyncMock()
+    monkeypatch.setattr(
+        "server.celery_app._build_execution_engine", lambda: fake_engine
+    )
+
+    celery_app_mod.monitor_holding()
+
+    # 关键：vetoed_by_risk 时 tick_exit 仍被调用（离场监控不停摆）
+    fake_engine.tick_exit.assert_awaited_once()
+
+
 def test_monitor_holding_swallows_tick_exception(monkeypatch):
     """tick_exit 抛异常时 monitor_holding 吞掉不抛（持仓风控持续运行保障）。
 

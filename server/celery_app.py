@@ -212,9 +212,15 @@ def monitor_pullback() -> None:
 # ============================================================================
 @celery_app.task(name="caisen.monitor_holding")
 def monitor_holding() -> None:
-    """盘中持仓离场监控 beat：交易时段 + live → ExecutionEngine.tick_exit。
+    """盘中持仓离场监控 beat：交易时段 + 网关可用 → ExecutionEngine.tick_exit。
 
-    双闸门跳过（同 monitor_pullback 语义）：非交易时段 / 网关非 live 直接 return。
+    闸门语义（B-8 拆分：离场监控与开仓风控分离）：
+        - 闸门 1：非交易时段 → return（隔夜/周末空转保护，同 monitor_pullback）；
+        - 闸门 2：仅 mode == "unavailable"（无网关装配）→ return；
+          disconnected / vetoed_by_risk / live 均【持续】调 tick_exit。
+    Why 离场不停摆：风险否决锁态（vetoed_by_risk）只应停【新开仓】(pullback)，已有
+    FILLED 持仓的止损/止盈是风险缩减动作，停摆会让敞口失控。tick_exit 内部 + 网关
+    state 校验兜底卖单是否真成交（拒单保持 FILLED 待下轮重试，不幽灵了结）。
 
     物理意图：盘中每 60s 遍历 FILLED 持仓，check_exit 命中止损/止盈/时间止损
     即市价平仓（FILLED→CLOSED），并推进移动止盈止损上移（update_plan）。
@@ -222,18 +228,10 @@ def monitor_holding() -> None:
     # —— 闸门 1：非交易时段直接 return ——
     if not trading_service._in_a_share_session():
         return
-    # —— 闸门 2：网关非 live 直接 return（断线不补发）——
-    # ⚠️ 离场停摆风险（vetoed_by_risk）：trading_service 触发风控锁时 mode 会变为
-    # "vetoed_by_risk"，本闸门将其与 disconnected 同等跳过——已有 FILLED 持仓的
-    # 止损/止盈/时间止损将暂停。当前采取保守策略（风控锁时不发单，避免与风控决策
-    # 冲突）。follow-up：是否在 vetoed_by_risk 时仅停 pullback（新开仓）但保留 exit
-    # （离场）监控，让止损/止盈继续生效，需风控策略决策——离场与开仓风控语义不同，
-    # 持仓风控原则上必须持续运行，待评审后决定是否拆分跳过逻辑。
+    # —— 闸门 2：仅无网关装配（unavailable）跳过；其余状态持续离场监控（B-8）——
     status = trading_service.get_status()
-    if status.get("mode") != "live":
-        logger.debug(
-            "monitor_holding 跳过（网关非 live，mode=%s）", status.get("mode")
-        )
+    if status.get("mode") == "unavailable":
+        logger.debug("monitor_holding 跳过（网关 unavailable，无装配）")
         return
 
     # —— 进入编排：调 ExecutionEngine.tick_exit（asyncio.run 包裹）——
