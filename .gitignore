@@ -15,7 +15,8 @@ env/
 data/
 
 # 蔡森 CLI 运行时输出（plans/<date>.json 为 screen 子命令产物，不入库）
-plans/
+# 锚定根目录（/plans/），避免误伤 docs/superpowers/plans/ 设计文档
+/plans/
 
 # 依赖包
 node_modules/
