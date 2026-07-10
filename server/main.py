@@ -19,11 +19,14 @@ FastAPI 应用入口
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from server.core.config import CORS_ORIGINS, LOG_CONFIG
 from server.core._responses import StrictJSONResponse
+# API 鉴权依赖（B-1）：挂在敏感 router（trading/caisen/data/review）上，
+# token 未配置=开发态放行（WARNING），生产须配 QUANTER_API_TOKEN。
+from server.core.auth import require_write
 from server.api.v1.logs import (
     RingBufferLogHandler,
     log_stream_hub,
@@ -124,12 +127,14 @@ app = FastAPI(
 
 # ============ 注册 CORS 中间件 ============
 # 开发阶段允许前端 Vite dev server 跨域访问后端 API
+# 【B-1】allow_methods 收敛为实际使用的谓词（不再 "*"，配合 allow_credentials=True
+# 缩小跨域攻击面）；allow_origins 读 CORS_ORIGINS 白名单（仅本地 dev 端口）。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],      # 允许所有 HTTP 方法
-    allow_headers=["*"],      # 允许所有请求头
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],      # 允许所有请求头（含 Authorization Bearer）
 )
 
 # ============ 挂载路由 ============
@@ -139,14 +144,18 @@ app.include_router(logs_router, prefix="/api/v1")
 # 缺数据湖时端点内部短路返空结构（离线降级），不阻断 lifespan。
 app.include_router(macro_router, prefix="/api/v1")
 # 实盘交易路由（优雅降级真接 QMT；lifespan 不自动 connect，单例 lazy 构造）
-app.include_router(trading_router, prefix="/api/v1")
+# 【B-1】路由级鉴权：下单/熔断/连接等敏感端点强制 require_write（token 未配置=开发放行）。
+app.include_router(trading_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 # 蔡森形态学流水线 REST 路由（Phase 3 Task 4）：7 端点 + 异常映射（KeyError→404/
 # ValidationError→422/ValueError→422），算法/IO 异常 service 层已降级返空结果。
-app.include_router(caisen_router, prefix="/api/v1")
+# 含 scan/activate/审核等可触发真实下单流程的端点，路由级鉴权保护。
+app.include_router(caisen_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 # 数据湖资产（层级一）：纯字典注册表 + 文件系统状态推导，零守护进程，不阻断 lifespan
-app.include_router(data_router, prefix="/api/v1")
+# sync 端点可起同步子进程/落盘，路由级鉴权保护。
+app.include_router(data_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 # AI 复盘（层级六）：GLM 调用 + 三级降级（缺凭证/调用失败/无数据均不阻断）
-app.include_router(review_router, prefix="/api/v1")
+# diagnose 触发外部 LLM 调用（成本/滥用面），路由级鉴权保护。
+app.include_router(review_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 
 
 # ============ 健康检查端点 ============
