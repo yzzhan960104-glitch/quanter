@@ -26,7 +26,7 @@
 
 输出 DataFrame 字段物理意图：
     symbol：标的代码；
-    pattern_type：形态类型 ∈ {"w_bottom", "head_shoulder"}；
+    pattern_type：形态类型 ∈ {"w_bottom", "head_shoulder", "triangle_bottom"}；
     formed_at：形态形成日（pivot 末点日期，用 DataFrame index 末值）；
     breakout_price：颈线突破价（粗算：统一用 close.iloc[-1]——P4/P7 的 idx 可能
                     因 causal_pivots 末尾 confirm_bars 丢弃而早于末根，故用末根
@@ -36,6 +36,7 @@
     depth：颈线高度比（形态幅度，用于双形态择优）；
     tension：幅宽张力（高度/宽度，张力越强交易价值越高）；
     amount30d：近 30 日均成交额（排序键，流动性度量）；
+    pattern_height：仅 triangle_bottom 候选输出（三角形边长 P1−P2，供 plan.py 满足点用）；
     is_valid：形态综合判定是否有效（恒为 True，因为仅收集命中候选）。
 
 风控边界（CLAUDE.md 极简 + 量化风控拷问）：
@@ -56,6 +57,7 @@ from caisen.risk import RiskManager
 from caisen.patterns.zigzag_causal import causal_pivots, compute_atr
 from caisen.patterns.w_bottom import detect as w_detect
 from caisen.patterns.head_shoulder import detect as hs_detect
+from caisen.patterns.triangle_bottom import detect as tri_detect
 
 
 # 模块级 logger：单 symbol 异常走 debug 级（不污染 prod 日志，但可调试追溯）
@@ -179,19 +181,33 @@ class PatternScreener:
         hs_cfg = self.cfg.model_copy(update={"max_pattern_depth": self.cfg.hs_max_pattern_depth})
         hs_res = hs_detect(close, pivots, high, low, volume, hs_cfg)
 
-        # —— 6. 命中收集：任一形态 is_valid=True 即收集；双命中取 depth 更大者 ——
-        # depth 物理意图：颈线高度比 = 形态垂直幅度。depth 越大 → 颈线满足空间（量度涨幅）
-        # 越大 → 交易价值越高。双形态命中时取 depth 更大者，等价于"颈线满足空间更大者"。
+        # —— 5b. 收敛三角形底部识别（白皮书招12；受 enable_triangle_bottom 开关控制）——
+        # 物理意图：三角形边长比 depth=(P1-P2)/P2 与 W底颈线高度比量级不同，需独立宽阈值
+        # triangle_max_pattern_depth（默认 0.6），仿头肩底 model_copy 覆写。三角形额外输出
+        # pattern_height（边长 P1-P2），供 plan.py 满足点计算（满足=颈线+边长，与 W底/头肩底
+        # 的"颈线−谷底"步长不同，必须经 pattern_height 单独消费）。
+        tri_res = None
+        if self.cfg.enable_triangle_bottom:
+            tri_cfg = self.cfg.model_copy(
+                update={"max_pattern_depth": self.cfg.triangle_max_pattern_depth}
+            )
+            tri_res = tri_detect(close, pivots, high, low, volume, tri_cfg)
+
+        # —— 6. 命中收集：任一形态 is_valid=True 即收集；多形态命中取 depth 更大者 ——
+        # depth 物理意图：形态垂直幅度。depth 越大 → 满足空间（量度涨幅）越大 → 交易
+        # 价值越高。多形态命中时取 depth 更大者，等价于"满足空间更大者"。
         hits: list[tuple[str, object]] = []
         if w_res is not None and w_res.is_valid:
             hits.append(("w_bottom", w_res))
         if hs_res is not None and hs_res.is_valid:
             hits.append(("head_shoulder", hs_res))
+        if tri_res is not None and tri_res.is_valid:
+            hits.append(("triangle_bottom", tri_res))
 
         if not hits:
-            return None   # 两形态均未命中，跳过
+            return None   # 所有形态均未命中，跳过
 
-        # 双形态命中：取 depth 更大者（颈线满足空间更大）
+        # 多形态命中：取 depth 更大者（满足空间更大）
         pattern_type, res = max(hits, key=lambda h: h[1].depth)
 
         # —— amount30d：近 30 日均成交额（排序键，与流动性过滤同源数据）——
@@ -203,13 +219,13 @@ class PatternScreener:
         formed_at = df.index[-1]
 
         # —— breakout_price：颈线突破价 ——
-        # W 底 P4 与头肩底 P7 均为"末尾已确认的突破 pivot"，但其 idx 可能不等于末根
+        # 各形态突破 pivot（W底 P4 / 头肩底 P7 / 三角形 P5）idx 可能不等于末根
         # （causal_pivots 末尾 confirm_bars 内 pivot 被丢弃，真实突破点落在末根之前）。
-        # 这里统一用 close.iloc[-1] 作为"当前突破状态"的代表价——下游 plan.py 计算颈线
-        # 满足时会用 res.neckline_price + depth×H 重新精算，breakout_price 仅作排序展示。
+        # 这里统一用 close.iloc[-1] 作为"当前突破状态"的代表价——下游 plan.py 计算满足
+        # 时会用 res.neckline_price + H 重新精算，breakout_price 仅作排序展示。
         breakout_price = float(close.iloc[-1])
 
-        return {
+        candidate = {
             "symbol": symbol,
             "pattern_type": pattern_type,
             "formed_at": formed_at,
@@ -221,3 +237,8 @@ class PatternScreener:
             "amount30d": amount30d,
             "is_valid": True,
         }
+        # 收敛三角形额外输出 pattern_height（边长 P1-P2），供 plan.py 满足点用；
+        # W底/头肩底不带此键 → plan.py 走默认 H=颈线−谷底（零影响）。
+        if pattern_type == "triangle_bottom":
+            candidate["pattern_height"] = float(res.edge_height)
+        return candidate

@@ -353,13 +353,15 @@ onBeforeUnmount(() => {
 function patternTagType(p: string): '' | 'success' | 'warning' | 'info' | 'danger' {
   if (p === 'w_bottom') return 'success'
   if (p === 'head_shoulder') return 'warning'
+  if (p === 'triangle_bottom') return 'danger'
   return 'info'
 }
 
 /** 形态类型中文名 */
 function patternLabel(p: string): string {
   if (p === 'w_bottom') return 'W 底'
-  if (p === 'head_shoulder') return '头肩顶'
+  if (p === 'head_shoulder') return '头肩底'
+  if (p === 'triangle_bottom') return '收敛三角'
   return p
 }
 

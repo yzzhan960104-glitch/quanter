@@ -86,7 +86,7 @@ class HeadShoulderBottom:
 
 
 def _ma26w_passes(close: pd.Series, p4_idx: int, cfg: StrategyConfig) -> bool:
-    """26 周均线打底环境过滤（类推 W底 Task 1 校准，蔡森原著 §5）。
+    """26 周均线打底环境过滤（经典形态学防御性过滤，非白皮书原著逐字，作为可选风控保留）。
 
     物理意图：蔡森原著"多头市场打底通常在 26 周平均线之上完成"。
     要求头底 P4 处的 close ≥ close 的 ma26w_window(默认 130 日) 均线。

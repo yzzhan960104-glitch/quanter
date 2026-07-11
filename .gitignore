@@ -95,3 +95,7 @@ scripts/pages/
 # 书籍扫描版(版权+大文件)
 多空轉折一手抓.pdf
 *.pdf
+# 白皮书扫描原图（28MB PNG，同上版权+大文件理由，不入库；OCR 文本「多空转折策略白皮书.md」入库）
+.book_pages/
+# E2E 测试截图产物（tests/e2e/caisen_token_path.py 生成，按需本地查看，不入库）
+tests/e2e/_*.png

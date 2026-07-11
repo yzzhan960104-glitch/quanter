@@ -197,6 +197,38 @@ class StrategyConfig(BaseModel):
         False,
         description="启用破底翻形态(Task 1 新增；默认关，后续按需开启，避免误信号)",
     )
+    enable_triangle_bottom: bool = Field(
+        True,
+        description=(
+            "启用收敛三角形底部形态(白皮书招12·多头买进讯号)。"
+            "识别要求：上缘(峰)递减 + 下缘(谷)递增的收敛结构，带量突破上缘颈线，"
+            "且突破点落在三角形跨度的 1/2~3/4 区间(原著硬规则，防未成熟/假突破)。"
+            "满足点 = 突破颈线 + 三角形边长(首个峰-谷高度)，由 plan.py 经 pattern_height 字段消费。"
+        ),
+    )
+    triangle_max_pattern_depth: float = Field(
+        0.6,
+        description=(
+            "收敛三角形边长比上限(depth=(P1-P2)/P2)。三角形首个峰-谷幅度通常 <60%，"
+            "超过此值视为非收敛的剧烈波动(更像头肩底/M头)，由 screener 经 model_copy "
+            "覆写 max_pattern_depth 为本字段(仿头肩底 hs_max_pattern_depth 模式)。"
+        ),
+    )
+    triangle_breakout_min: float = Field(
+        0.5,
+        description=(
+            "收敛三角形有效突破进度下限(白皮书招12硬规则)。突破进度 = "
+            "(突破idx-P1_idx)/(上下缘交点idx-P1_idx)；原著要求须在 1/2 处之后突破"
+            "形态才算成熟成型——太早(<1/2)突破视为未完成收敛，可靠性差，否决。"
+        ),
+    )
+    triangle_breakout_max: float = Field(
+        0.75,
+        description=(
+            "收敛三角形有效突破进度上限(白皮书招12硬规则)。>3/4 接近三角形顶点处突破，"
+            "原著明确易出现假突破/反向走势，可靠性差，否决。1/2~3/4 区间是有效突破窗口。"
+        ),
+    )
     false_breakout_threshold: float = Field(
         0.03,
         description="假突破跌破颈线阈值(3%；OCR 辨识，可配置；超过此幅度判定假突破)",

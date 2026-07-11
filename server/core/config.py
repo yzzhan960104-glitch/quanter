@@ -33,6 +33,14 @@ CORS_ORIGINS: List[str] = [
     "http://127.0.0.1:3000",
 ]
 
+# ============ 服务监听配置 ============
+# 后端 uvicorn 监听地址与端口——前后端端口的**单一真相源**：被 server/main.py 的
+# __main__ 块与 scripts/check_ports.py（前端 npm run dev 的 predev 护栏）共同引用，
+# 杜绝 web/vite.config.ts 的 proxy target 与后端端口漂移（曾出现 8001 vs 8000 的
+# ECONNREFUSED 事故）。env 可覆盖：API_HOST / API_PORT（容器/CI 内需改端口时）。
+API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
+API_PORT: int = int(os.getenv("API_PORT", "8000"))
+
 # ============ 数据源默认参数 ============
 DATA_DEFAULTS: Dict[str, Any] = {
     "mock_seed": 42,            # MockDataFetcher 随机种子（确保可复现）

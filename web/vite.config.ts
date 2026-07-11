@@ -28,7 +28,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8001',
+        // 端口须与后端启动命令 `uvicorn server.main:app --port 8000` 对齐；
+        // 用 127.0.0.1 锁定 IPv4，规避 Windows + Node17+ 下 localhost 解析为
+        // ::1+127.0.0.1 双地址、internalConnectMultiple 并发尝试引发的 AggregateError。
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
     },

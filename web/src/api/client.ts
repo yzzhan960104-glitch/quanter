@@ -2,11 +2,12 @@
  * Axios 请求实例（共享 HTTP 单例 + 响应拦截器）
  *
  * 职责：
- * 1. 统一配置 baseURL、默认超时、响应拦截器
- * 2. 拦截器统一提取后端中文错误信息，ElMessage 弹出
+ * 1. 统一配置 baseURL、默认超时
+ * 2. 请求拦截器：从 VITE_API_TOKEN 注入 Authorization Bearer（对齐后端 require_write 鉴权）
+ * 3. 响应拦截器：统一提取后端中文错误信息，ElMessage 弹出
  *
  * 设计原则：
- * - 不引入复杂的拦截器链，仅做错误提取和 Toast 提示
+ * - 不引入复杂的拦截器链，仅做 token 注入 + 错误提取/Toast（两条直白拦截器，零黑盒）
  * - 单例共享：data/macro/review/trading 等域 facade 复用此实例，
  *   共享响应拦截器（中文错误 Toast / 超时降级），避免每个 facade 各自 create
  *   导致拦截器逻辑漂移。
@@ -31,6 +32,27 @@ export const apiClient: AxiosInstance = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+})
+
+// ============ 请求拦截器：鉴权 token 注入（对齐后端 require_write） ============
+// 物理意图：后端 server/core/auth.py 的 require_write 校验 `Authorization: Bearer <token>`，
+// token 真值由后端环境变量 QUANTER_API_TOKEN 决定。前端经 VITE_API_TOKEN 在构建期注入
+// 同一字面量（VITE_ 前缀才会暴露给前端 bundle），请求拦截器统一加头，所有 facade 无需各自处理。
+//
+// 安全边界（CLAUDE.md 量化风控·极度拷问）：
+//   - VITE_API_TOKEN 会被打进前端 bundle，等同对「能访问前端」的用户公开；
+//   - 故仅适用于【内网/单用户】自部署场景（与 auth.py 静态 Bearer token 设计同前提）；
+//   - 公网部署必须叠加后端 QUANTER_ALLOWED_IPS 白名单，或改由反向代理层注入 token，
+//     严禁在此裸填生产密钥后直接公网暴露。
+//
+// 两端对称（零摩擦）：token 为空（未配置 VITE_API_TOKEN）则不注入，后端开发态
+// （未配置 QUANTER_API_TOKEN）同样放行——本地开发与 CI 不受影响。
+apiClient.interceptors.request.use((config) => {
+  const token = import.meta.env.VITE_API_TOKEN
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
 })
 
 // ============ 响应拦截器 ============

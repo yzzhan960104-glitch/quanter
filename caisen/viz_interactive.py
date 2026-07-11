@@ -192,6 +192,9 @@ def _is_peak_point(pattern_type: str, label: str) -> bool:
     if pattern_type == "head_shoulder":
         # 头肩底：奇数 P1/P3/P5=峰，偶数 P2/P4/P6=谷
         return n % 2 == 1
+    if pattern_type == "triangle_bottom":
+        # 收敛三角形底部：P1/P3/P5=峰（奇数），P2/P4=谷（偶数），同头肩底奇偶规则
+        return n % 2 == 1
     # 未知 pattern_type：默认按 W 底规则（多数场景为 W 底，保守降级）
     return n % 2 == 0
 

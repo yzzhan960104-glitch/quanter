@@ -282,5 +282,6 @@ def _pattern_type_label(ptype: str) -> str:
     mapping = {
         "w_bottom": "W-Bottom",
         "head_shoulder": "HeadShoulder",
+        "triangle_bottom": "Triangle",
     }
     return mapping.get(ptype, ptype)

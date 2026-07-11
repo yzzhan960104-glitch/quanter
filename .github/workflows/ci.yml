@@ -1,0 +1,54 @@
+# 全栈护栏 CI（fast gate）。
+#
+# 物理意图：push/PR 时自动跑与本地同源的 scripts/run_checks.py——「本地过了 CI 也过」，
+# 杜绝护栏只靠人脑记得手跑。4 项 gate：端口一致性 / 前后端契约 / 后端单测 / 前端类型检查。
+#
+# 边界（诚实）：E2E（Playwright，慢 + 需起前后端服务编排）不入首版 CI，本地按
+# docs/superpowers 的 SOP 手动跑；后续可加独立 e2e job（nightly / 手动 dispatch）。
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch: {} # 允许 GitHub 网页手动触发
+
+# 同 ref 重复 push 时取消旧 run，省 CI 额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-gate:
+    name: 全栈护栏（端口/契约/单测/类型）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 装 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 装后端依赖（requirements.txt）
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 装前端依赖（npm ci，按 lock 精确安装）
+        run: npm ci --prefix web
+
+      - name: 全栈护栏（与本地 python scripts/run_checks.py 同源）
+        run: python scripts/run_checks.py

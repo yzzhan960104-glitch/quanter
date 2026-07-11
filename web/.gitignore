@@ -1,0 +1,7 @@
+# 本地环境变量（含真实 VITE_API_TOKEN 等密钥，禁止入库）
+# 根 .gitignore 的 `.env` 规则已忽略 web/.env；此处在 web 目录自包含地补齐
+# vite 的 .env.local 系列忽略规则，防止真实 token 误入库。
+# 注意：`.env`/`.env.local`/`.env.*.local` 均不匹配 `.env.example`，故示范文件可安全入库。
+.env
+.env.local
+.env.*.local

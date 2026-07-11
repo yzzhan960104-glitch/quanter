@@ -418,3 +418,123 @@ def test_production_default_cfg_detects_standard_w_bottom():
     assert result.iloc[0]["symbol"] == "W_BOTTOM_PROD"
     assert result.iloc[0]["pattern_type"] == "w_bottom"
     assert bool(result.iloc[0]["is_valid"]) is True
+
+
+# ---------------------------------------------------------------------------
+# 收敛三角形底部合成序列（白皮书招12·多头买进讯号）
+# ---------------------------------------------------------------------------
+def _tri_vol_pattern(n: int, p5_i: int, baseline: float = 200.0) -> pd.Series:
+    """收敛三角形量价模式：颈线段温和 baseline + P5 突破日放量（同 test_triangle_bottom）。"""
+    vol = pd.Series(baseline, index=pd.RangeIndex(n), dtype=float)
+    vol.iloc[p5_i] = baseline * 2.5
+    return vol
+
+
+def _build_standard_triangle() -> tuple:
+    """合成标准收敛三角形（同 test_triangle_bottom._build_standard_triangle）。
+
+    上缘降(P3=12.0<P1=12.5) + 下缘升(P4=10.9>P2=10.8) + 突破进度≈0.69∈[1/2,3/4]，
+    depth=0.157∈(0.05,0.6]，base=15→thresh≈3.3% 各段幅度>8%。
+    """
+    close = pd.Series(
+        [15.0, 14.0, 13.0, 12.0, 11.0, 10.0,
+         10.8, 11.7, 12.5,
+         12.0, 11.4, 10.8,
+         11.2, 11.6, 12.0,
+         11.6, 11.25, 10.9,
+         11.5, 12.2, 13.0,
+         12.5, 12.0],
+        dtype=float,
+    )
+    high = close + 0.3
+    low = close - 0.3
+    vol = _tri_vol_pattern(len(close), p5_i=20)
+    return close, high, low, vol
+
+
+# ---------------------------------------------------------------------------
+# 用例 7：收敛三角形底部识别（白皮书招12）
+# ---------------------------------------------------------------------------
+def test_triangle_bottom_detected_by_screener():
+    """标准收敛三角形 → screener 返回 pattern_type=triangle_bottom + pattern_height（边长）。
+
+    前置断言：序列本身能被 triangle_bottom.detect 识别。screener 额外输出 pattern_height
+    字段（=edge_height=P1−P2），供 plan.py 满足点计算（满足=颈线+边长）。
+    """
+    from caisen.patterns.triangle_bottom import detect as tri_detect
+    cfg = _mk_cfg()
+    rm = RiskManager(cfg)
+    sc = PatternScreener(cfg, rm)
+
+    close, high, low, vol = _build_standard_triangle()
+    # 前置：序列能识别为有效收敛三角形（screener 内部会用 triangle_max_pattern_depth 覆写）
+    atr = _atr_const(len(close))
+    piv = causal_pivots(close, atr, cfg)
+    res = tri_detect(close, piv, high, low, vol,
+                     cfg.model_copy(update={"max_pattern_depth": cfg.triangle_max_pattern_depth}))
+    assert res is not None and res.is_valid, \
+        f"前置失败：序列应识别为收敛三角形，piv={piv.tolist()}"
+
+    df = _mk_price_df(close, high, low, vol, amount_per_bar=3e8)
+    result = sc.screen({"TRI": df}, date=None)
+    assert len(result) == 1, f"应返回 1 个三角形候选，实际：{result}"
+    assert result.iloc[0]["pattern_type"] == "triangle_bottom"
+    assert bool(result.iloc[0]["is_valid"]) is True
+    # pattern_height = 边长 P1−P2（供 plan.py 满足点用）
+    assert "pattern_height" in result.columns
+    assert result.iloc[0]["pattern_height"] == pytest.approx(res.edge_height, rel=1e-6)
+
+
+def test_triangle_wide_depth():
+    """screener 对三角形用独立的 triangle_max_pattern_depth，不受 max_pattern_depth 影响。
+
+    物理意图（类推头肩底 test_head_shoulder_wide_depth）：三角形边长比与 W底颈线高度比
+    量级不同，screener 对 triangle_bottom.detect 用 model_copy 覆写 max_pattern_depth 为
+    triangle_max_pattern_depth，与 W底用的 max_pattern_depth 解耦。
+
+    本用例：把 max_pattern_depth 压到 0.1（W底极窄阈值），标准三角形 depth=0.157 > 0.1，
+    若 screener 误用 max_pattern_depth 会否决三角形；但 screener 用 triangle_max_pattern_depth=0.6
+    → 识别成功，证明三角形走独立宽阈值通道。
+    """
+    from caisen.patterns.triangle_bottom import detect as tri_detect
+    cfg = _mk_cfg(max_pattern_depth=0.1, triangle_max_pattern_depth=0.6)
+    rm = RiskManager(cfg)
+    sc = PatternScreener(cfg, rm)
+
+    close, high, low, vol = _build_standard_triangle()   # depth=0.157，低 HV（标准序列）
+    atr = _atr_const(len(close))
+    piv = causal_pivots(close, atr, cfg)
+    # 前置 1：用 max_pattern_depth=0.1 调 tri_detect → 否决（depth=0.157 > 0.1）
+    cfg_narrow = cfg.model_copy(update={"max_pattern_depth": 0.1})
+    res_narrow = tri_detect(close, piv, high, low, vol, cfg_narrow)
+    assert res_narrow is None or not res_narrow.is_valid, \
+        f"前置失败：max_pattern_depth=0.1 应否决 depth=0.157 的三角形"
+    # 前置 2：用 triangle_max_pattern_depth=0.6 调 tri_detect → 通过
+    cfg_wide = cfg.model_copy(update={"max_pattern_depth": 0.6})
+    res_wide = tri_detect(close, piv, high, low, vol, cfg_wide)
+    assert res_wide is not None and res_wide.is_valid, \
+        f"前置失败：triangle_max_pattern_depth=0.6 应识别 depth=0.157 的三角形"
+
+    df = _mk_price_df(close, high, low, vol, amount_per_bar=3e8)
+    result = sc.screen({"TRI_WIDE": df}, date=None)
+    assert len(result) == 1, \
+        f"screener 应用 triangle_max_pattern_depth（独立宽阈值）识别三角形，实际：{result}"
+    assert result.iloc[0]["pattern_type"] == "triangle_bottom"
+
+
+def test_production_default_cfg_detects_standard_triangle():
+    """config 默认参数下标准收敛三角形应被识别（生产默认不漏检三角形）。
+
+    物理意图：screener 默认 enable_triangle_bottom=True、triangle_max_pattern_depth=0.6，
+    标准三角形 depth=0.157 ∈ (0.05, 0.6] 通过。证明三角形在生产默认下不漏检。
+    """
+    cfg = _mk_cfg()   # enable_triangle_bottom 走 StrategyConfig 默认 True
+    rm = RiskManager(cfg)
+    sc = PatternScreener(cfg, rm)
+
+    close, high, low, vol = _build_standard_triangle()
+    df = _mk_price_df(close, high, low, vol, amount_per_bar=3e8)
+    result = sc.screen({"TRI_PROD": df}, date=None)
+    assert len(result) == 1, f"默认 cfg 应识别标准三角形，实际：{result}"
+    assert result.iloc[0]["pattern_type"] == "triangle_bottom"
+    assert bool(result.iloc[0]["is_valid"]) is True
