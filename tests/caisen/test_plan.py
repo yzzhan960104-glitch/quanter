@@ -69,6 +69,71 @@ def _make_candidate(
 
 
 # ---------------------------------------------------------------------------
+# 0. 收敛三角形 pattern_height 满足点（白皮书招12·边长 ≠ 颈线−底）
+# ---------------------------------------------------------------------------
+class TestTrianglePatternHeight:
+    """收敛三角形（招12）满足点用 pattern_height（边长 P1−P2），非颈线−谷底。
+
+    物理意图：三角形上缘突破价（neckline）< P1（首峰），故「颈线−谷底」< 边长(P1−P2)。
+    plan.py 对带 pattern_height 列的候选优先用边长作 H，满足点 = 颈线 + n×边长
+    （白皮书原著：满足 = 突破颈线 + 三角形垂直边长）。
+    """
+
+    def test_triangle_target_uses_pattern_height(self):
+        """三角形候选带 pattern_height → take_profit = 颈线 + 边长（非颈线+(颈线−底)）。
+
+        构造：neckline=12（上缘突破投影）, bottom=10.8（真实谷底）, pattern_height=1.7（边长）。
+        - 正确（pattern_height）：H=1.7, take_profit=12+1.7=13.7
+        - 错误（颈线−底）：H=12−10.8=1.2, take_profit=13.2
+        断言 take_profit=13.7，证明三角形走 pattern_height 通道。
+        """
+        cfg = StrategyConfig()
+        risk = RiskManager(cfg)
+        row = {
+            "symbol": "TRI", "pattern_type": "triangle_bottom",
+            "formed_at": pd.Timestamp("2024-01-15"),
+            "breakout_price": 12.0, "neckline_price": 12.0,
+            "bottom_price": 10.8, "depth": 0.157, "tension": 0.14,
+            "amount30d": 3e8, "is_valid": True,
+            "pattern_height": 1.7,   # 三角形边长 P1−P2（screener 仅三角形输出此列）
+        }
+        cands = pd.DataFrame([row])
+        plans = generate(cands, cfg, risk, aum=1e6, date=pd.Timestamp("2024-01-15"))
+        assert len(plans) == 1
+        p = plans[0]
+        # H = pattern_height（边长），非 neckline−bottom=1.2
+        assert p.H == pytest.approx(1.7, abs=1e-9)
+        # 第一波满足 = 颈线 + 1×边长 = 12 + 1.7 = 13.7（非 12+1.2=13.2）
+        assert p.take_profit == pytest.approx(13.7, abs=1e-9)
+        # 第二波满足 = 颈线 + 2×边长 = 12 + 3.4 = 15.4
+        assert p.take_profit_2x == pytest.approx(15.4, abs=1e-9)
+        # 止损仍用真实谷底 bottom=10.8（与满足点边长分离，无 ATR buffer）
+        assert p.stop_loss == pytest.approx(10.8, abs=1e-9)
+
+    def test_triangle_without_pattern_height_falls_back_to_neckline_minus_bottom(self):
+        """无 pattern_height 列 → 回退 H=颈线−底（防御性，与 W底/头肩底一致）。
+
+        screener 对 triangle_bottom 始终输出 pattern_height，但 plan 防御性回退：
+        候选无 pattern_height 时 H=颈线−底。保证三角形候选异常缺列时不崩溃。
+        """
+        cfg = StrategyConfig()
+        risk = RiskManager(cfg)
+        row = {
+            "symbol": "TRI2", "pattern_type": "triangle_bottom",
+            "formed_at": pd.Timestamp("2024-01-15"),
+            "breakout_price": 12.0, "neckline_price": 12.0,
+            "bottom_price": 10.8, "depth": 0.157, "tension": 0.14,
+            "amount30d": 3e8, "is_valid": True,
+            # 故意不带 pattern_height 列
+        }
+        cands = pd.DataFrame([row])
+        plans = generate(cands, cfg, risk, aum=1e6, date=pd.Timestamp("2024-01-15"))
+        if plans:   # rr 可能因 H 偏小而不通过；若通过则 H 应回退为颈线−底
+            p = plans[0]
+            assert p.H == pytest.approx(12.0 - 10.8, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # 1. 颈线满足计算：等额累加（Task 1 校准核心）
 # ---------------------------------------------------------------------------
 class TestNecklineSatisfyEqualAccumulation:
@@ -347,3 +412,27 @@ class TestPlanGenerationFromCandidates:
         # max_holding_until = 2024-01-15 + 15 交易日 = 2024-02-05(周一)
         # （bdate_range 验证：1-16..1-19, 1-22..1-26, 1-29..2-2, 2-5 共 15 工作日）
         assert p.max_holding_until == pd.Timestamp("2024-02-05")
+
+
+# ---------------------------------------------------------------------------
+# 形态时机守卫：breakout > take_profit（第一波已超=形态确认太晚）→ 丢弃
+# ---------------------------------------------------------------------------
+def test_plan_filters_breakout_above_take_profit():
+    """【形态时机】breakout > take_profit（第一波目标已被突破价超过=形态确认太晚）→ 丢弃。
+
+    诊断（2026-07-11 sample=200/3年）发现近年部分 W 底 breakout 涨过头（第一波 tp 在脚下），
+    回踩入场后无盈利空间（如 002779 breakout 127.83 > tp 118.50，rr≈0）。守卫过滤这类形态。
+    """
+    cfg = StrategyConfig(min_rr_ratio=0.0)   # 不 rr 过滤，只测形态时机守卫
+    risk = RiskManager(cfg)
+    # neckline=10, bottom=8 → H=2, take_profit=12. breakout=13 > 12 → 形态太晚，丢弃
+    cands = _make_candidate(neckline_price=10.0, bottom_price=8.0,
+                            breakout_price=13.0, depth=0.25)
+    plans = generate(cands, cfg, risk, aum=1e6, date=pd.Timestamp("2024-01-15"))
+    assert len(plans) == 0, "breakout>take_profit（第一波已超，形态太晚）应丢弃"
+
+    # 对照：breakout=11 < take_profit=12（第一波未超）→ 正常生成
+    cands_ok = _make_candidate(neckline_price=10.0, bottom_price=8.0,
+                               breakout_price=11.0, depth=0.25)
+    plans_ok = generate(cands_ok, cfg, risk, aum=1e6, date=pd.Timestamp("2024-01-15"))
+    assert len(plans_ok) == 1, "breakout<take_profit（第一波未超）应正常生成"

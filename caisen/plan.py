@@ -76,7 +76,8 @@ class TradePlan:
         breakout_price   : 颈线突破价（回踩挂单上限 entry_upper）；
         neckline_price   : 颈线价（满足计算的加法基准）；
         bottom_price     : 谷底价（C 波低点 = W底右底 P3 / 头肩底头底 P4）；
-        H                : 颈线绝对高度 = 颈线价 − 谷底价（满足计算步长）；
+        H                : 满足计算步长。默认=颈线价−谷底价（W底/头肩底）；
+                           收敛三角形候选带 pattern_height 时=三角形边长(P1−P2)；
         entry_upper      : 回踩挂单上限（= breakout_price）；
         entry_lower      : 回踩挂单下限（= breakout × (1 − pullback_max_pct)）；
         stop_loss        : 止损价（C 波低点 − buffer×ATR，蔡森原典）；
@@ -210,10 +211,23 @@ def _build_plan_from_row(
         return None   # 脏数据防御（非正谷底价 / 非正 depth）
 
     # —— 2. 颈线满足计算（等额累加，蔡森 §2）——
-    # H = 颈线价 − 谷底价；take_profit = 颈线 + 1×H；take_profit_2x = 颈线 + 2×H
+    # H = 满足计算步长。默认 = 颈线价 − 谷底价（W底/头肩底：颈线−底 = 形态高度）。
+    # 收敛三角形底部（白皮书招12）例外：满足点 = 突破颈线 + 三角形边长(P1−P2)，而
+    # 「颈线价−谷底」≠ 边长（突破价 < P1 → 颈线−谷底 < P1−P2），故三角形 screener
+    # 候选带 pattern_height 列时优先用它作为 H；其余形态不传此列 → 走颈线−谷底
+    # （与原逻辑完全一致，现有 W底/头肩底测试零影响）。
+    if "pattern_height" in row and pd.notna(row.get("pattern_height")):
+        H = float(row["pattern_height"])
+    else:
+        H = neckline_price - bottom_price
+    # take_profit = 颈线 + 1×H；take_profit_2x = 颈线 + 2×H
     # 关键：基于【颈线价】加法，不是基于突破价乘以倍数（Task 1 校准覆盖 plan 旧版）。
-    H = neckline_price - bottom_price
     take_profit = neckline_price + 1.0 * H      # 第一波满足
+    # 【形态时机守卫】breakout > take_profit（第一波目标已被突破价超过）→ 形态确认太晚，
+    # 回踩入场后第一波止盈空间为零/负，丢弃。诊断(2026-07-11 sample=200/3年)发现近年部分
+    # W 底 breakout 涨过头（如 002779 breakout 127.83 > tp 118.50），致 plan 无盈利空间。
+    if breakout_price > take_profit:
+        return None
     # 多级满足：cfg.neckline_height_multiple 控制看到第几级（默认 2 = 第二波满足）
     n = cfg.neckline_height_multiple
     take_profit_n = neckline_price + n * H       # 第 n 波满足（生成到第 n 级）
