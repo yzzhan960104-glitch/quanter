@@ -26,8 +26,11 @@ _DEFAULT_LIMIT = 1800
 _FONT_TAG = re.compile(r"<font[^>]*>(.*?)</font>", re.IGNORECASE | re.DOTALL)
 # 通用 HTML 标签清理（<br> 转换行，其余剥离）
 _OTHER_TAGS = re.compile(r"</?(?!b>|strong>|i>|em>|code>)[a-zA-Z][^>]*>")
-# Markdown 表格分隔行（纯 | - : 组成）
-_TABLE_SEPARATOR = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$", re.MULTILINE)
+# Markdown 表格分隔行（|---|---| 这种）
+# 收紧正则：必须含至少一个 |（表格特征），避免误删纯分隔字符的正常文本行
+# （如 Markdown 的 --- 水平线、或 ": : : :" 这种无 | 文本）。
+# lookahead (?=.*\|) 保证行内至少一个 |，主匹配体只允许分隔字符。
+_TABLE_SEPARATOR = re.compile(r"^(?=.*\|)[\s:|-]+$", re.MULTILINE)
 
 
 def clean_markdown_for_dingtalk(text: str) -> str:
@@ -37,7 +40,9 @@ def clean_markdown_for_dingtalk(text: str) -> str:
     # 2) <br> → 换行；其它陌生 HTML 标签剥离
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = _OTHER_TAGS.sub("", text)
-    # 3) 表格分隔行整行删除（数据行的 | 保留为竖线视觉分隔，钉钉能显示纯文本）
+    # 3) 表格处理（controller 裁决：保留数据行 | 作竖线视觉分隔）
+    # 钉钉不渲染表格，"| a | b |" 比 " a  b " 可读性更好，故数据行的 | 一律保留；
+    # 仅删除表格分隔行（|---|---|），分隔行无信息量且钉钉会原样显示成乱码。
     text = _TABLE_SEPARATOR.sub("", text)
     return text.strip()
 
