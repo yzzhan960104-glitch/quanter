@@ -82,3 +82,9 @@ def test_extract_assistant_text_ignores_non_text_content():
         ']}}'
     )
     assert extract_assistant_text(ev) == "看这个文件："
+
+
+def test_extract_result_text_null_returns_empty():
+    """is_error turn 的 result:null 不应回字面量 'None'。"""
+    ev = {"type": "result", "result": None, "is_error": True}
+    assert extract_result_text(ev) == ""

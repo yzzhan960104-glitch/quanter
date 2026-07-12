@@ -57,8 +57,14 @@ def is_result(event: dict) -> bool:
 
 
 def extract_result_text(event: dict) -> str:
-    """result 帧的 result 字段 = claude 给用户的最终文本（权威输出）。"""
-    return str(event.get("result", ""))
+    """result 帧的 result 字段 = claude 给用户的最终文本（权威输出）。
+
+    Why isinstance 防御：is_error turn 的 result 字段存在但为 None，
+    dict.get("result","") 取到 None（不触发默认值 ""），str(None) 会回字面量 "None"
+    给钉钉用户。错误 turn 恰是我们要优雅处理的场景，必须返空串。
+    """
+    result = event.get("result")
+    return result if isinstance(result, str) else ""
 
 
 def extract_session_id(event: dict) -> Optional[str]:
