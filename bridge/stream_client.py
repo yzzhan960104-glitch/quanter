@@ -135,11 +135,7 @@ class BridgeHandler(dingtalk_stream.ChatbotHandler):
             await self._handle_command(msg, conv_id, verdict.command)
             return
 
-        # allow：频控 → 派发 claude
-        if not self._rate_allow(sender):
-            # 频控触发：回执提示用户慢下来（避免钉钉侧频控直接吞消息无反馈）
-            await self._reply_fn(self, msg, "太快了，稍候再试 ⏳")
-            return
+        # allow：派发 claude（无限流——不打断用户与 claude 的交互）
         await self._ask_claude(msg, conv_id, sender, text)
 
     # ---- 分支实现 ----

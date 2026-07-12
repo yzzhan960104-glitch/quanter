@@ -129,21 +129,16 @@ class ClaudeProcess:
         accumulated: list[str] = []
         assert self._proc is not None and self._proc.stdout is not None
         while True:
-            # 空闲超时（非总时长超时）：每次 readline 限 ask_timeout 内产出一行。
-            # Why：复杂任务 claude 多轮工具调用+深度思考总时长常 >120s，但其间持续
-            # 产出 thinking_tokens/assistant 增量帧；"总时长 wait_for"会误杀正常长任务
-            # （实测复杂问题必触发 TimeoutError 连续失败）。改为 readline 级空闲超时——
-            # claude 在动就持续等，连续 ask_timeout 无任何输出才判卡死 kill 重建。
-            try:
-                line_bytes = await asyncio.wait_for(
-                    self._proc.stdout.readline(), timeout=self._cfg.ask_timeout
-                )
-            except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"claude stdout 连续 {self._cfg.ask_timeout}s 无输出（疑似卡死）"
-                )
+            # 不打断 claude：readline 无超时，无限等。
+            # Why 无 idle 超时：claude 深度思考/多轮工具/慢模型可能长时间产出
+            # thinking_tokens 或在工具间停顿；人为设 idle 上限会误杀正常长任务
+            # （用户策略：信任 claude 跑到底，只在它自己崩时才重建）。只在 stdout
+            # EOF（进程退出）时抛错走重建。
+            # 风险：claude 若真卡死（进程在但 stdout 永久无输出）会挂起同会话——
+            # 可 Ctrl+C 重启桥或换会话（不同 conversationId 用不同进程）。
+            line_bytes = await self._proc.stdout.readline()
             if not line_bytes:
-                # stdout EOF = 进程已退出（崩溃/被 kill）。抛出让上层走重建。
+                # stdout EOF = claude 自己崩/被外部杀。抛出让上层走重建。
                 raise RuntimeError("claude stdout EOF（进程意外退出）")
             ev = ce.parse_event_line(line_bytes.decode("utf-8", errors="replace"))
             if ev is None:
@@ -182,9 +177,9 @@ class ClaudeProcess:
                     # 读到 result 为止；空闲超时在 _read_until_result 内部逐行判定
                     #（claude 持续输出帧就不算超时，连续 ask_timeout 无输出才判卡死）
                     return await self._read_until_result(on_event)
-                except (asyncio.TimeoutError, RuntimeError,
-                        asyncio.LimitOverrunError) as e:
-                    # LimitOverrunError 兜底：极端单帧 >16MB 时仍可能触发，kill 重建
+                except (RuntimeError, asyncio.LimitOverrunError) as e:
+                    # 仅在 claude 自己出问题时重建：进程崩(stdout EOF)或极端单帧超限。
+                    # 不打断正在思考/工作的 claude（无 idle 超时、无总时长上限、无限流）。
                     last_err = e
                     logger.warning("claude 第 %d 轮失败 (%s)，kill 后重建重试",
                                    attempt, type(e).__name__)
