@@ -90,6 +90,10 @@ class ClaudeProcess:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self._cfg.workdir,
+            # StreamReader 单行缓冲调大到 16MB：claude 复杂问题的单帧 JSON
+            #（含大段代码/大文件工具结果）可远超默认 64KB，readline 会抛
+            # LimitOverrunError。16MB 足以容纳任何单帧。
+            limit=2 ** 24,
         )
         logger.info("claude 子进程已启动 (pid=%s, resume=%s)",
                     self._proc.pid, self._session_id or "(new)")
@@ -125,7 +129,19 @@ class ClaudeProcess:
         accumulated: list[str] = []
         assert self._proc is not None and self._proc.stdout is not None
         while True:
-            line_bytes = await self._proc.stdout.readline()
+            # 空闲超时（非总时长超时）：每次 readline 限 ask_timeout 内产出一行。
+            # Why：复杂任务 claude 多轮工具调用+深度思考总时长常 >120s，但其间持续
+            # 产出 thinking_tokens/assistant 增量帧；"总时长 wait_for"会误杀正常长任务
+            # （实测复杂问题必触发 TimeoutError 连续失败）。改为 readline 级空闲超时——
+            # claude 在动就持续等，连续 ask_timeout 无任何输出才判卡死 kill 重建。
+            try:
+                line_bytes = await asyncio.wait_for(
+                    self._proc.stdout.readline(), timeout=self._cfg.ask_timeout
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"claude stdout 连续 {self._cfg.ask_timeout}s 无输出（疑似卡死）"
+                )
             if not line_bytes:
                 # stdout EOF = 进程已退出（崩溃/被 kill）。抛出让上层走重建。
                 raise RuntimeError("claude stdout EOF（进程意外退出）")
@@ -163,12 +179,12 @@ class ClaudeProcess:
                     assert self._proc is not None and self._proc.stdin is not None
                     self._proc.stdin.write(frame.encode("utf-8"))
                     await self._proc.stdin.drain()
-                    # 读到 result 为止，带单轮超时
-                    return await asyncio.wait_for(
-                        self._read_until_result(on_event),
-                        timeout=self._cfg.ask_timeout,
-                    )
-                except (asyncio.TimeoutError, RuntimeError) as e:
+                    # 读到 result 为止；空闲超时在 _read_until_result 内部逐行判定
+                    #（claude 持续输出帧就不算超时，连续 ask_timeout 无输出才判卡死）
+                    return await self._read_until_result(on_event)
+                except (asyncio.TimeoutError, RuntimeError,
+                        asyncio.LimitOverrunError) as e:
+                    # LimitOverrunError 兜底：极端单帧 >16MB 时仍可能触发，kill 重建
                     last_err = e
                     logger.warning("claude 第 %d 轮失败 (%s)，kill 后重建重试",
                                    attempt, type(e).__name__)
