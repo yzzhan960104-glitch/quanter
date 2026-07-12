@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Callable, Optional
 
 from bridge import claude_events as ce
 from bridge.config import BridgeConfig
+from bridge.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -158,4 +160,140 @@ class ClaudeProcess:
             raise RuntimeError(f"claude 连续 {_MAX_ATTEMPTS} 轮失败：{last_err}")
 
 
-# ClaudePool 在 Task 5 追加到本文件
+# ===================== ClaudePool（进程池） =====================
+# 每个 conversationId 懒启动一个 ClaudeProcess，同会话串行（由 ClaudeProcess
+# 内部锁保证）、跨会话并行（不同进程互不干扰）。空闲超 idle_ttl 的进程主动
+# 回收，session_id 仍在 store 落盘，下次同会话再来走 --resume 续上下文。
+
+
+class ClaudePool:
+    """conversationId → ClaudeProcess 的进程池。
+
+    Why 每会话一进程：claude CLI 是有状态的多轮对话（同一进程内 stdin 持续写
+    user 帧即可推进上下文）。一个进程同一时刻只能处理一轮（内部锁），但不同
+    会话彼此独立——故「每会话一进程」是同会话串行 + 跨会话并行的最小可行解。
+
+    Why session_id 落盘：进程会死（崩溃/超时 kill/空闲回收），但 claude 把完整
+    会话历史存本地 ~/.claude/。拿着 session_id 即可 --resume <sid> 续上下文，
+    故 ask 后必须把 session_id 落 SessionStore（进程死、映射在，上下文不丢）。
+    """
+
+    # proc_factory 仅测试注入用（生产用默认 ClaudeProcess），便于 FakeProc 替身
+    def __init__(
+        self,
+        cfg: BridgeConfig,
+        store: SessionStore,
+        proc_factory: Optional[Callable] = None,
+    ) -> None:
+        self._cfg = cfg
+        self._store = store
+        # 会话 → 常驻进程映射（懒启动：首次 ask 才创建）
+        self._procs: dict[str, ClaudeProcess] = {}
+        # 会话 → 最近活跃时间（monotonic），空闲回收判定依据
+        self._last_active: dict[str, float] = {}
+        # 生产默认造真实 ClaudeProcess；测试注入 FakeProc 避免真跑 claude
+        self._proc_factory = proc_factory or (lambda c, sid: ClaudeProcess(c, sid))
+
+    def _get_or_create(self, conv_id: str) -> ClaudeProcess:
+        """懒启动：首次取用时创建，已知 session_id 则传入（--resume 续上下文）。
+
+        Why 从 store 取 sid：进程可能被空闲回收掉了，但 session_id 在磁盘上。
+        把 sid 传给新进程构造函数，ClaudeProcess._spawn 会拼 --resume <sid>，
+        于是「进程死、上下文不丢」的崩溃恢复链成立。
+        """
+        if conv_id not in self._procs:
+            sid = self._store.get(conv_id)
+            self._procs[conv_id] = self._proc_factory(self._cfg, sid)
+        return self._procs[conv_id]
+
+    async def ask(
+        self,
+        conv_id: str,
+        text: str,
+        sender_staff_id: str,
+        on_event: Optional[Callable[[dict], None]] = None,
+    ) -> str:
+        """派发一轮问答到对应会话进程；ask 后落盘 session_id。
+
+        - 同会话串行：由 ClaudeProcess 内部 _lock 保证（一轮没出 result，下一轮 await）。
+        - 跨会话并行：不同 conv_id 取到不同进程对象，互不阻塞。
+        - sender_staff_id 目前透传留口（后续审计/权限分级用），本轮不强校验。
+        """
+        proc = self._get_or_create(conv_id)
+        try:
+            answer = await proc.ask(text, on_event=on_event)
+        except Exception:
+            # 进程挂了：从池中摘除，下次 ask 走重建（已知 sid → --resume 续上下文）
+            self._procs.pop(conv_id, None)
+            raise
+        # 记活跃时间（monotonic 不受系统时钟跳变影响，回收判定更稳）
+        self._last_active[conv_id] = time.monotonic()
+        # 落盘 session_id：进程死后 --resume 可续（spec §4.1 三级链）
+        if proc.session_id:
+            self._store.set(conv_id, proc.session_id)
+        return answer
+
+    async def reset(self, conv_id: str) -> None:
+        """/new：杀该会话进程 + 清映射 → 下次开全新会话。
+
+        Why 三清：进程要杀（释放资源）、_procs 映射要清（下次懒启动造新的）、
+        store 映射要清（不传 sid = 不 --resume = 全新会话，不接旧上下文）。
+        """
+        proc = self._procs.pop(conv_id, None)
+        if proc is not None:
+            await proc.aclose()
+        self._store.clear(conv_id)
+        self._last_active.pop(conv_id, None)
+
+    def status(self) -> list[dict]:
+        """/status：每会话的 alive / session_id / last_active 快照（运维观测用）。"""
+        out = []
+        for conv_id, proc in self._procs.items():
+            out.append({
+                "conversation_id": conv_id,
+                "alive": proc.is_alive,
+                "session_id": proc.session_id,
+                "last_active": self._last_active.get(conv_id),
+            })
+        return out
+
+    async def _sweep_once(self) -> None:
+        """扫一次：空闲超 idle_ttl 的进程回收（start_idle_sweeper 周期调用）。
+
+        Why 用 reset 而非裸 pop：reset 既杀进程又清 _last_active，且保留 store
+        里的 session_id（下次同会话来仍可 --resume 续上下文，只是进程当前不在池中）。
+        """
+        now = time.monotonic()
+        # 用 >= 而非 >：idle_ttl=0 表示「立即回收」（brief 测试明意）；TTL 边界
+        # 上也算过期，避免进程恰好在 idle_ttl 整数秒时永远不被回收的边界抖动。
+        stale = [
+            cid for cid, t in self._last_active.items()
+            if now - t >= self._cfg.idle_ttl
+        ]
+        for cid in stale:
+            logger.info("会话 %s 空闲超 %ss，回收进程", cid, self._cfg.idle_ttl)
+            await self.reset(cid)
+
+    def start_idle_sweeper(self) -> "asyncio.Task":
+        """启动后台空闲回收任务（每 60s 扫一次）。
+
+        Why 单独任务：常驻进程数会随历史会话无限堆积，必须有 reaper。60s 粒度
+        足够（idle_ttl 量级是分钟/小时），过频浪费 CPU 且频繁扫锁无意义。
+        异常吞掉仅记日志——sweeper 挂了不影响主流程，下一轮自动续命。
+        """
+        async def _loop():
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    await self._sweep_once()
+                except Exception:  # noqa: BLE001
+                    logger.exception("idle sweeper 异常")
+        return asyncio.create_task(_loop())
+
+    async def aclose_all(self) -> None:
+        """桥退出时优雅关闭全部进程（SIGTERM/KeyboardInterrupt 收尾用）。"""
+        for cid in list(self._procs.keys()):
+            proc = self._procs.pop(cid, None)
+            if proc is not None:
+                await proc.aclose()
+        self._last_active.clear()
