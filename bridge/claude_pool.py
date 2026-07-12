@@ -289,19 +289,25 @@ class ClaudePool:
     async def _sweep_once(self) -> None:
         """扫一次：空闲超 idle_ttl 的进程回收（start_idle_sweeper 周期调用）。
 
-        Why 用 reset 而非裸 pop：reset 既杀进程又清 _last_active，且保留 store
-        里的 session_id（下次同会话来仍可 --resume 续上下文，只是进程当前不在池中）。
+        只杀进程 + 清 _procs/_last_active，**不清 store 映射**——保留 session_id，
+        下次同会话发消息时 _get_or_create 取 sid → --resume 续上下文。
+        （reset 才清 store，那是 /new 用户主动重置专用；回收误用 reset 会丢上下文。）
         """
         now = time.monotonic()
-        # 用 >= 而非 >：idle_ttl=0 表示「立即回收」（brief 测试明意）；TTL 边界
-        # 上也算过期，避免进程恰好在 idle_ttl 整数秒时永远不被回收的边界抖动。
+        # 用 >= 而非 >：idle_ttl=0 表示「立即回收」（测试明意）；TTL 边界上也算过期，
+        # 避免进程恰好在 idle_ttl 整数秒时永远不被回收的边界抖动。
         stale = [
             cid for cid, t in self._last_active.items()
             if now - t >= self._cfg.idle_ttl
         ]
         for cid in stale:
-            logger.info("会话 %s 空闲超 %ss，回收进程", cid, self._cfg.idle_ttl)
-            await self.reset(cid)
+            logger.info("会话 %s 空闲超 %ss，回收进程（保留 session_id，下次 --resume 续）",
+                        cid, self._cfg.idle_ttl)
+            proc = self._procs.pop(cid, None)
+            if proc is not None:
+                await proc.aclose()
+            self._last_active.pop(cid, None)
+            # 故意不清 store：session_id 是「进程死、上下文不丢」的关键，回收只省内存
 
     def start_idle_sweeper(self) -> "asyncio.Task":
         """启动后台空闲回收任务（每 60s 扫一次）。

@@ -86,3 +86,20 @@ async def test_idle_sweeper_reclaims_idle_process(tmp_path):
     await pool._sweep_once()   # 手动触发一次扫描
     assert "convA" not in pool._procs
     await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_sweep_preserves_session_id(tmp_path):
+    """空闲回收只杀进程，不清 store——session_id 保留供下次 --resume 续上下文。
+
+    回归保护：之前 _sweep_once 误用 reset（清 store），导致空闲 15 分钟后丢上下文。
+    """
+    store = SessionStore(str(tmp_path / "s.json"))
+    pool = ClaudePool(cfg=MagicMock(idle_ttl=0, ask_timeout=10), store=store,
+                      proc_factory=lambda cfg, sid: FakeProc())  # 默认 session_id="sid-x"
+    await pool.ask("convA", "q", "staff")
+    assert store.get("convA") == "sid-x"
+    await pool._sweep_once()
+    assert "convA" not in pool._procs            # 进程已回收
+    assert store.get("convA") == "sid-x"         # session_id 保留（修复点）
+    await pool.aclose_all()
