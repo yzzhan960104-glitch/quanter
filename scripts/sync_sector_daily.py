@@ -211,7 +211,7 @@ def _score_by_momentum(
             continue
         close = df["close"] if "close" in df.columns else df.iloc[:, 0]
         vol = df["volume"] if "volume" in df.columns else pd.Series([1] * len(df))
-        mom = float(close.pct_change().sum())
+        mom = float(close.pct_change(fill_method=None).sum())
         turn = float(vol.mean())
         # 综合分：动量为主，成交量作微弱加权次序键（避免高动量低流动性陷阱）
         scored.append((sym, mom + turn * 1e-8))

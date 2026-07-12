@@ -74,6 +74,34 @@ async def lifespan(app: FastAPI):
     for key, path in LAKE_CONFIG.get("lakes", {}).items():
         reader.load(path, key=key)
 
+    # 启动：加载 symbol→企业名映射（#1，Tushare pro.stock_basic 全量，降级返 symbol）
+    # Why 同步加载（非 daemon 线程）：stock_basic 一次 <1MB 快，且 list_plans 首请求需 symbol_name
+    # 就绪；失败降级（get_name 返 symbol），不阻断启动。
+    try:
+        from data import symbol_names as _symbol_names
+        _symbol_names.load_all()
+    except Exception:
+        logging.getLogger(__name__).warning("symbol_names load_all 异常", exc_info=True)
+
+    # 启动：后台 daemon 线程扫 stale/missing 数据集，静默调 trigger_sync 补数据（#6）
+    # Why daemon 线程不阻断启动：同步子进程是长任务（daily ~2.8h），线程异步跑；契合
+    # config.py「零守护进程」（线程寄生主进程，非独立调度器如 Celery Beat/APScheduler）。
+    # 复用 data_service.sweep_stale_on_startup（扫 list_datasets + trigger_sync 子进程+哨兵）。
+    import threading as _threading
+    from server.services import data_service as _data_service
+
+    def _startup_sync_sweep() -> None:
+        try:
+            _triggered = _data_service.sweep_stale_on_startup()
+            if _triggered:
+                logging.getLogger(__name__).info(
+                    "启动同步 sweep 触发：%s", _triggered)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "启动同步 sweep 异常", exc_info=True)
+
+    _threading.Thread(target=_startup_sync_sweep, daemon=True).start()
+
     # 启动：统一日志装配（三路并行：本地文件 + 前端 SSE 流 + 控制台）
     # Why 三路：本地文件事后排查无需复现（NaN 早抛/序列化失败留痕主阵地）；
     # 前端 SSE 流（RingBufferLogHandler→log_stream_hub→TerminalLogs）实时可观测；

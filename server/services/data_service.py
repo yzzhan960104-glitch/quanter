@@ -250,3 +250,27 @@ def list_datasets() -> List[Dict[str, Any]]:
             "last_error": last_error,
         })
     return out
+
+
+def sweep_stale_on_startup() -> List[str]:
+    """启动同步 sweep：扫 DATASET_REGISTRY 对 stale/missing 数据集调 trigger_sync（#6）。
+
+    物理意图：后端启动时静默补过期/缺失数据（用户诉求 #6「启动后静默更新数据」）。
+    复用 trigger_sync 的子进程 + 哨兵幂等 + JQData QuotaExceeded 优雅停，不引独立
+    调度器（契合 config.py「方案 B 零守护进程」——线程寄生主进程，非 Celery Beat/APScheduler）。
+
+    Why freshness 而非 schedule：DATASET_REGISTRY 的 schedule 是中文展示串（"每日18:00"，
+    非机器可读 cron），用 _derive_status 的 freshness_hours 隐式定时——stale/missing 即补，
+    等价"超计划节奏即重跑"，无需解析 cron。
+
+    返回：本次触发同步的 key 列表（stale/missing 的），便于上层日志记录与测试断言。
+    """
+    triggered: List[str] = []
+    for asset in list_datasets():
+        if asset.get("status") in ("stale", "missing"):
+            try:
+                trigger_sync(asset["key"])
+                triggered.append(asset["key"])
+            except KeyError:
+                pass   # 无 script 配置的数据集跳过（不阻断 sweep 其余数据集）
+    return triggered

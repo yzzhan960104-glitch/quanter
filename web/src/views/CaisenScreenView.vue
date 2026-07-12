@@ -23,7 +23,7 @@
  *   - series.createPriceLine(options)（v4/v5 通用）
  */
 import { ref, shallowRef, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createChart, CandlestickSeries, createSeriesMarkers,
   type IChartApi, type ISeriesApi, type IPriceLine, type Time,
@@ -41,8 +41,9 @@ import VChart from 'vue-echarts'
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, TitleComponent])
 import {
   scan, listPlans, getChart, reviewPlan, activatePlan, runReplay, getConfigSchema,
+  listReplayRuns, getReplayRun, deleteReplayRun,
   type CandidatePlan, type ChartData, type ReplayReport, type ScanRequestBody,
-  type EquityPoint, type Trade,
+  type EquityPoint, type Trade, type ReplayRunSummary,
 } from '../api/caisen'
 import { logger } from '../utils/logger'
 
@@ -92,7 +93,13 @@ const replayForm = ref({
   start: today,
   end: today,
   universe: '' as string,                    // 空字符串 = 全市场（后端 null）
+  save: true,                                // 方案 A：默认落盘进历史（「默认都存」）
 })
+
+// 回测历史记录（方案 A）：已落盘的回放摘要列表 + 当前展示中的 run_id
+const replayRuns = shallowRef<ReplayRunSummary[]>([])
+const loadingRuns = ref(false)
+const currentRunId = ref<string | null>(null)   // 当前回放结果对应的 run_id（已落盘则有值）
 
 // 审核 edits 微调表单（仅 approve 时提交，绑定选中计划字段）
 const editForm = ref({
@@ -343,15 +350,113 @@ async function onReplay() {
         ? replayForm.value.universe.split(/[\s,，]+/).filter(Boolean)
         : null,
       cfg_override: overrides,
+      save: replayForm.value.save,           // 方案 A：默认 true=落盘进历史
     }
     replayReport.value = await runReplay(body)
+    currentRunId.value = replayReport.value.run_id ?? null
     ElMessage.success(`回放完成，命中 ${replayReport.value.n_hits} 笔`)
+    // 落盘后才刷新历史列表（save=false 时 run_id 为 null，列表无变化不刷）
+    if (replayForm.value.save) {
+      await loadReplayRuns()
+    }
   } catch (e: any) {
     const detail = e?.response?.data?.detail || e?.message || ''
     ElMessage.error('回放失败：' + detail)
   } finally {
     replaying.value = false
   }
+}
+
+// ============ 回测历史记录（方案 A：加载 / 删除） ============
+/**
+ * 拉历史回测摘要列表（GET /caisen/replay/runs，按 created_at 降序）。
+ *
+ * 物理意图：「历史回测记录」面板数据源。onMounted 初载 + 每次 runReplay(save=true)
+ * / deleteReplayRun 后刷新。失败仅静默日志（历史面板缺失不应阻断回放主流程）。
+ */
+async function loadReplayRuns() {
+  loadingRuns.value = true
+  try {
+    replayRuns.value = await listReplayRuns()
+  } catch (e: any) {
+    logger.error('加载回测历史失败:', e)
+  } finally {
+    loadingRuns.value = false
+  }
+}
+
+/**
+ * 加载一条历史记录到回放结果面板（GET /caisen/replay/runs/{id}）。
+ *
+ * 物理意图：用户点「加载」→ 取详情 → report 回填资金曲线/买卖流水/统计卡，
+ * request 回填表单（可微调后重跑对比）。不覆盖 save 开关（保留用户当前偏好）。
+ */
+async function onLoadRun(runId: string) {
+  try {
+    const detail = await getReplayRun(runId)
+    replayReport.value = detail.report
+    currentRunId.value = runId
+    // 回填表单参数（便于重跑/对比；universe 数组→逗号串，与表单承载形式对齐）
+    const req = detail.request as Record<string, any>
+    if (typeof req.start === 'string') replayForm.value.start = req.start
+    if (typeof req.end === 'string') replayForm.value.end = req.end
+    const uni = req.universe
+    replayForm.value.universe = Array.isArray(uni) ? uni.join(',') : ''
+    // cfg_override 回填到参数表单（若当时有调参）
+    if (req.cfg_override && typeof req.cfg_override === 'object') {
+      cfgOverride.value = { ...req.cfg_override }
+    }
+    ElMessage.success('已加载历史回测记录')
+  } catch (e: any) {
+    const detail = e?.response?.data?.detail || e?.message || ''
+    ElMessage.error('加载历史失败：' + detail)
+  }
+}
+
+/**
+ * 删除一条历史记录（DELETE /caisen/replay/runs/{id}，带二次确认）。
+ *
+ * 物理意图（方案 A 清理机制）：相同配置+标的的重复回放默认都存，由此手动清理。
+ * 删除当前展示中的记录时同步清空 replayReport（避免界面停留已删数据）。
+ */
+async function onDeleteRun(runId: string) {
+  try {
+    await ElMessageBox.confirm('确认删除该条回测记录？删除后不可恢复。', '删除确认', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      confirmButtonType: 'danger',        // 删除高危：主键显式 danger（红）+ 给 E2E 稳定 class 锚点
+      type: 'warning',
+    })
+  } catch {
+    return   // 用户取消
+  }
+  try {
+    await deleteReplayRun(runId)
+    ElMessage.success('已删除')
+    if (currentRunId.value === runId) {
+      replayReport.value = null
+      currentRunId.value = null
+    }
+    await loadReplayRuns()
+  } catch (e: any) {
+    const detail = e?.response?.data?.detail || e?.message || ''
+    ElMessage.error('删除失败：' + detail)
+  }
+}
+
+/**
+ * 历史记录时间格式化（微秒 ISO → 可读「YYYY-MM-DD HH:MM:SS」）。
+ *
+ * 物理意图：created_at 是微秒精度 ISO（排序键），展示时截断到秒即可。
+ * 非法/空值兜底空串，避免 toLocaleString 抛错。
+ */
+function formatCreatedAt(iso: string): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 // ============ 生命周期 ============
@@ -364,6 +469,8 @@ onMounted(async () => {
   } catch (e: any) {
     logger.error('加载策略参数 schema 失败:', e)
   }
+  // 方案 A：初载回测历史列表（「历史回测记录」面板）
+  await loadReplayRuns()
 })
 
 onBeforeUnmount(() => {
@@ -478,7 +585,11 @@ const equityChartOption = computed(() => {
           @current-change="onSelectPlan"
           max-height="100%"
         >
-          <el-table-column label="标的" prop="symbol" width="110" />
+          <el-table-column label="标的" width="140">
+            <template #default="{ row }">
+              <span :title="row.symbol">{{ row.symbol_name || row.symbol }}</span>
+            </template>
+          </el-table-column>
           <el-table-column label="形态" width="80">
             <template #default="{ row }">
               <el-tag size="small" :type="patternTagType(row.pattern_type)">
@@ -655,8 +766,83 @@ const equityChartOption = computed(() => {
                 </el-form-item>
                 <el-form-item>
                   <el-button type="primary" :loading="replaying" @click="onReplay">运行回放</el-button>
+                  <el-tooltip
+                    content="勾选后本次回放结果落盘进「历史回测记录」，可随时加载/删除（方案 A：默认都存）"
+                    placement="top"
+                  >
+                    <el-checkbox v-model="replayForm.save" class="save-cb">保存到历史</el-checkbox>
+                  </el-tooltip>
                 </el-form-item>
               </el-form>
+            </div>
+
+            <!-- 历史回测记录（方案 A：默认都存 + 加载/删除；可折叠保持主视野清爽） -->
+            <div class="form-block">
+              <el-collapse>
+                <el-collapse-item name="history">
+                  <template #title>
+                    <span class="block-title">
+                      历史回测记录（{{ replayRuns.length }} 条）
+                      <span v-if="loadingRuns" class="hint"> · 加载中…</span>
+                    </span>
+                  </template>
+                  <el-table
+                    :data="replayRuns" size="small" max-height="280"
+                    class="replay-runs-table"
+                    empty-text="暂无历史回测（运行回放时勾选「保存到历史」即累积）"
+                  >
+                    <el-table-column label="时间" width="150">
+                      <template #default="{ row }">
+                        <span class="mono">{{ formatCreatedAt(row.created_at) }}</span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="区间" width="180">
+                      <template #default="{ row }">
+                        <span class="mono">{{ row.start }} ~ {{ row.end }}</span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="标的" width="90">
+                      <template #default="{ row }">
+                        <el-tag v-if="row.universe_n < 0" size="small" type="info">全市场</el-tag>
+                        <span v-else>{{ row.universe_n }} 只</span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="min_rr" width="70">
+                      <template #default="{ row }">
+                        <span class="mono">{{ row.cfg_min_rr ?? '—' }}</span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="n_hits" label="命中" width="60" />
+                    <el-table-column label="胜率" width="70">
+                      <template #default="{ row }">
+                        <span :class="row.win_rate >= 0.5 ? 'up' : 'down'">
+                          {{ (row.win_rate * 100).toFixed(1) }}%
+                        </span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="盈亏比" width="70">
+                      <template #default="{ row }">{{ row.avg_rr.toFixed(2) }}</template>
+                    </el-table-column>
+                    <el-table-column label="年化" width="80">
+                      <template #default="{ row }">
+                        <span :class="row.annualized_return >= 0 ? 'up' : 'down'">
+                          {{ (row.annualized_return * 100).toFixed(1) }}%
+                        </span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="140">
+                      <template #default="{ row }">
+                        <el-button
+                          link type="primary" size="small"
+                          :disabled="currentRunId === row.run_id"
+                          @click="onLoadRun(row.run_id)"
+                        >加载</el-button>
+                        <el-button link type="danger" size="small" @click="onDeleteRun(row.run_id)">删除</el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </el-collapse-item>
+              </el-collapse>
             </div>
 
             <!-- 策略参数表单（反射 schema 动态渲染，#2 规则列举 + #4 参数可调 同源）-->
@@ -957,6 +1143,8 @@ const equityChartOption = computed(() => {
 /* 回放报告区 */
 .replay-area { display: flex; flex-direction: column; gap: var(--qt-space-3); }
 .replay-report { display: flex; flex-direction: column; gap: var(--qt-space-3); }
+/* 「保存到历史」复选框：与运行回放按钮同排留白（方案 A 默认勾选） */
+.save-cb { margin-left: var(--qt-space-3); }
 .report-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));

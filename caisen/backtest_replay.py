@@ -134,7 +134,7 @@ def replay(
     for symbol, df in price_data.items():
         atr_full = compute_atr(df["high"], df["low"], df["close"])
         full_pivots[symbol] = causal_pivots(df["close"], atr_full, cfg)
-        ret = df["close"].pct_change()
+        ret = df["close"].pct_change(fill_method=None)
         full_hv[symbol] = ret.rolling(cfg.hv_window).std() * math.sqrt(252)
 
     # —— 对每个交易日 T 滚动执行 screen → plan（严格 .loc[:T]）——

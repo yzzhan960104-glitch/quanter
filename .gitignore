@@ -12,7 +12,12 @@ env/
 
 # 数据和日志
 *.log
-data/
+# 注：data/ 是源码目录（cleaner/clients/lake_reader/symbol_names 等），非数据——
+# 数据在 data_lake/（见下）。历史曾误用 `data/` 忽略整个源码目录，已移除，源码正常入库。
+# 回放历史记录落盘（caisen/replay_runs.py 写，运行时数据不入库）
+replay_runs/
+# tushare 因子缓存（data/cache/，运行时 parquet 缓存，不入库）
+data/cache/
 
 # 蔡森 CLI 运行时输出（plans/<date>.json 为 screen 子命令产物，不入库）
 # 锚定根目录（/plans/），避免误伤 docs/superpowers/plans/ 设计文档

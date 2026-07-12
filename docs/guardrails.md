@@ -61,7 +61,8 @@ VENV=.venv310/Scripts/python.exe
 QUANTER_API_TOKEN=e2e-token python "$WITH_SERVER" \
   --server "$VENV -m uvicorn server.main:app --port 8000" --port 8000 \
   --server "npm --prefix web run dev" --port 5173 --timeout 120 \
-  -- "$VENV" tests/e2e/caisen_token_path.py
+  -- "$VENV" tests/e2e/caisen_token_path.py \
+&& python scripts/clean_ports.py
 ```
 
 断言三件：`GET /caisen/plans` 带 `Authorization: Bearer` 头、响应非 401、`POST /scan` 同样带 token。
@@ -70,12 +71,18 @@ QUANTER_API_TOKEN=e2e-token python "$WITH_SERVER" \
 > **解释器坑**：务必用 `.venv310` 绝对 python 跑 E2E 脚本——`with_server.py` 用 subprocess 时
 > 可能绕过 venv 激活落到系统 python（无 playwright）。`run_checks.py` 用 `sys.executable` 已规避此坑。
 >
-> **Windows 残留坑**：`with_server.py` 在 Windows 上停服时可能 kill 不掉 uvicorn 子进程，残留进程
-> 占着 8000 → 下次直接 `uvicorn server.main:app` 会报 `[WinError 10013] 访问套接字权限不允许`。
-> 排查清理：
+> **Windows 残留坑（含自动闭环）**：`with_server.py` 在 Windows 停服时 kill 不掉 vite/uvicorn 子进程，
+> 残留进程占 5173-5177/8000 → 下次 `uvicorn server.main:app` 报 `[WinError 10013]`（已踩两次）。
+>
+> **自动闭环（推荐）**：E2E 命令尾串 `&& python scripts/clean_ports.py`（with_server 退出后自动清
+> 残留 + socket bind 实测端口可绑）。10013 根因常是 winnat（Hyper-V/WSL）**动态保留**——
+> `netstat`/`excludedportrange` 都**滞后**于实际保留状态（查不到，但 bind 失败），socket bind 实测才准；
+> clean_ports.py 用 socket bind 兜底验证，netstat 不可靠时仍能确认端口就绪。
+>
+> 手动清理（兜底）：
 > ```bash
-> netstat -ano | findstr ":8000 "                                        # 找占用 PID
-> powershell -NoProfile -Command "Stop-Process -Id <PID> -Force"         # 强杀残留
+> python scripts/clean_ports.py                                          # 一键清残留 + socket bind 实测
+> # 或手查：netstat -ano | findstr ":8000 " → powershell Stop-Process -Id <PID> -Force
 > ```
 
 ---

@@ -40,6 +40,7 @@ import { apiClient } from './client'
 export interface CandidatePlan {
   plan_id: string
   symbol: string
+  symbol_name: string                        // 企业名（#1，后端 data.symbol_names 填充，降级空串兜底显代号）
   pattern_type: string                       // ∈ {"w_bottom", "head_shoulder"}
   formed_at: string                          // ISO 字符串（形态成立日）
   breakout_price: number                     // 突破价（C 波高点）
@@ -173,6 +174,7 @@ export interface ReplayReport {
   trades: Trade[]                             // 买卖流水（前端流水表，逐笔 entry/exit/rr）
   annualized_return: number                   // 年化收益 CAGR = equity_end^(252/n_trading_days)-1
   n_trading_days: number                      // 回放区间交易日数（CAGR 时间维度）
+  run_id?: string | null                      // 落盘后回填（save=true）；未落盘为 null
 }
 
 // ============ 请求体类型 ============
@@ -196,6 +198,41 @@ export interface ReplayRequestBody {
   end: string
   universe?: string[] | null                  // 默认 null = 全市场（当前 Phase 3+ 占位）
   cfg_override?: Record<string, unknown>
+  save?: boolean                              // 默认 true=落盘进历史（方案 A「默认都存」）
+}
+
+// ============ 回测历史记录类型（方案 A：GET /replay/runs · 详情 · 删除） ============
+
+/**
+ * 历史回测摘要（GET /caisen/replay/runs 列表项，对齐 server.schemas.caisen.ReplayRunSummary）。
+ *
+ * 物理意图：「历史回测记录」面板表格行——只含「何时跑的/什么参数/关键统计」，
+ * 不含完整 trades/equity_curve（保持列表轻量）。完整记录用 ReplayRunDetail。
+ */
+export interface ReplayRunSummary {
+  run_id: string
+  created_at: string                          // ISO 微秒精度（排序键；展示可截断到秒）
+  start: string
+  end: string
+  universe_n: number                          // -1 = 全市场（前端显示「全市场」）
+  cfg_min_rr?: number | null                  // 当时生效的 min_rr_ratio（可能缺省）
+  n_hits: number
+  win_rate: number
+  avg_rr: number
+  max_drawdown: number
+  annualized_return: number
+}
+
+/**
+ * 历史回测详情（GET /caisen/replay/runs/{id}，对齐 ReplayRunDetail）。
+ *
+ * 物理意图：从历史列表点「加载」→ 取此详情 → report 回填回放结果面板，
+ * request 回填表单（可重跑/对比），summary 附详情头部统计。
+ */
+export interface ReplayRunDetail {
+  summary: ReplayRunSummary
+  report: ReplayReport
+  request: Record<string, unknown>
 }
 
 // ============ API 封装（仿 trading.ts 风格，超时按端点特性覆写） ============
@@ -274,4 +311,36 @@ export function runReplay(body: ReplayRequestBody): Promise<ReplayReport> {
  */
 export function getConfigSchema(): Promise<Record<string, unknown>> {
   return apiClient.get('/api/v1/caisen/config/schema', { timeout: 10000 })
+}
+
+// ============ 回测历史记录 API（方案 A：默认都存 + 前端删除） ============
+
+/**
+ * GET /caisen/replay/runs：历史回测摘要列表（按 created_at 降序，最新在前）。
+ *
+ * 物理意图：「历史回测记录」面板数据源。每次 runReplay(save=true) 后调它刷新列表。
+ * 无历史时返 []（后端容错，前端不抛）。
+ */
+export function listReplayRuns(): Promise<ReplayRunSummary[]> {
+  return apiClient.get('/api/v1/caisen/replay/runs', { timeout: 10000 })
+}
+
+/**
+ * GET /caisen/replay/runs/{run_id}：取单条历史详情（summary + report + request）。
+ *
+ * 物理意图：点「加载」→ 取详情 → report 回填回放结果面板，request 回填表单。
+ * run_id 不存在后端返 404（由调用方 try/catch 提示）。
+ */
+export function getReplayRun(runId: string): Promise<ReplayRunDetail> {
+  return apiClient.get(`/api/v1/caisen/replay/runs/${encodeURIComponent(runId)}`, { timeout: 10000 })
+}
+
+/**
+ * DELETE /caisen/replay/runs/{run_id}：删除单条历史（移除 run 文件 + 从 index 摘出）。
+ *
+ * 物理意图（方案 A 清理机制）：相同配置+标的的重复回放默认都存，由此端点手动清理。
+ * 删成功返 {ok:true}；run_id 不存在后端返 404。
+ */
+export function deleteReplayRun(runId: string): Promise<{ ok: boolean }> {
+  return apiClient.delete(`/api/v1/caisen/replay/runs/${encodeURIComponent(runId)}`, { timeout: 10000 })
 }

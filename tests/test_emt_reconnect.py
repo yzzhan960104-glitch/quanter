@@ -29,7 +29,11 @@ def _make_gw() -> EmtExecutionGateway:
 def _neutralize_sleep_and_notifier(monkeypatch):
     """退避 sleep 置空（加速）+ 告警通道置空（测试不发真通知）。"""
     monkeypatch.setattr(emt.asyncio, "sleep", AsyncMock(return_value=None))
-    monkeypatch.setattr("core.notifier.fire_and_forget", lambda coro=None, *a, **k: None)
+    # mock 消费 coro（close）防 "coroutine never awaited" RuntimeWarning——fire_and_forget
+    # 本身在 loop 内外都能跑（新 daemon 线程 asyncio.run，已 test_notifier 验证），此 mock
+    # 仅隔离真通知，必须 close coro 否则 Python 回收未 await 协程时报 RuntimeWarning。
+    monkeypatch.setattr("core.notifier.fire_and_forget",
+                        lambda coro=None, *a, **k: coro.close() if coro is not None else None)
 
 
 def test_reconnect_succeeds_after_retries(monkeypatch):

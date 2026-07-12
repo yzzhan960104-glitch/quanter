@@ -45,6 +45,8 @@ from server.schemas.caisen import (
     PlanReview,
     ReplayRequest,
     ReplayReportResponse,
+    ReplayRunDetail,
+    ReplayRunSummary,
     ScanRequest,
 )
 from server.services import caisen_service
@@ -197,13 +199,17 @@ def _build_detections_w_bottom() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _isolate_storage(tmp_path, monkeypatch):
-    """每个测试自动隔离：storage._PLANS_DIR 指向 tmp_path/plans（绝不污染真实 plans/）。
+    """每个测试自动隔离：storage._PLANS_DIR + replay_runs._REPLAY_RUNS_DIR 指向 tmp_path。
 
-    防御性（CLAUDE.md 量化风控·边界审查）：测试落盘的 plans JSON 绝不能写入
-    生产 plans/ 目录，避免 CI 脏数据干扰后续真实运行。
+    防御性（CLAUDE.md 量化风控·边界审查）：测试落盘的 plans / replay_runs JSON 绝不能
+    写入生产目录，避免 CI 脏数据干扰后续真实运行。replay_runs 同源 storage 范式，
+    一并隔离（方案 A：run_replay 默认落盘历史，测试须拦在 tmp_path）。
     """
+    from caisen import replay_runs
     plans_dir = tmp_path / "plans"
+    runs_dir = tmp_path / "replay_runs"
     monkeypatch.setattr(storage, "_PLANS_DIR", str(plans_dir))
+    monkeypatch.setattr(replay_runs, "_REPLAY_RUNS_DIR", str(runs_dir))
     yield
 
 
@@ -715,3 +721,162 @@ class TestRunReplay:
 
         # None → service 内部归一化为 []（_load_price_data 占位全市场语义）
         assert captured.get("symbols") == []
+
+
+# ---------------------------------------------------------------------------
+# 7. run_replay 历史持久化（方案 A：默认都存）+ list/get/delete 编排
+# ---------------------------------------------------------------------------
+def _inject_price_data(price_data):
+    """把合成 price_data 注入 caisen_service._load_price_data（测试隔离，完必恢复）。
+
+    生产由 _load_price_data 走 data_lake 装配；测试直接覆盖以喂合成 W 底序列。
+    返回 (patch_func, restore_func) —— 用 try/finally 保证恢复，避免跨测试泄漏。
+    """
+    import server.services.caisen_service as svc
+    original = svc._load_price_data
+
+    def _patched(symbols, date):
+        return price_data
+
+    svc._load_price_data = _patched
+    return original
+
+
+class TestReplayRunsPersistence:
+    """方案 A：run_replay 默认落盘历史 + list/get/delete 编排。"""
+
+    def test_run_replay_save_default_persists_and_sets_run_id(self):
+        """save 默认 True → run_replay 落 replay_runs + 响应回填 run_id。
+
+        核心断言：
+            - ReplayRequest.save 默认 True（「默认都存」契约）；
+            - run_replay 返回的 report.run_id 非空；
+            - list_replay_runs 含本次摘要（run_id 对得上）。
+        """
+        df = _build_standard_w_bottom_price_df()
+        req = ReplayRequest(
+            start=str(len(df) // 2),
+            end=str(len(df) - 1),
+            cfg_override=dict(_LOOSE_CFG_OVERRIDE),
+        )
+        assert req.save is True   # 默认都存（方案 A）
+
+        original = _inject_price_data({"TESTW.SZ": df})
+        try:
+            report = caisen_service.run_replay(req)
+        finally:
+            import server.services.caisen_service as svc
+            svc._load_price_data = original
+
+        assert isinstance(report, ReplayReportResponse)
+        assert report.run_id is not None, "save=True 应落盘并回填 run_id"
+
+        runs = caisen_service.list_replay_runs()
+        assert len(runs) == 1
+        assert isinstance(runs[0], ReplayRunSummary)
+        assert runs[0].run_id == report.run_id
+
+    def test_run_replay_save_false_skips_persist(self):
+        """save=False → 不落盘，run_id=None（一次性回放）。"""
+        df = _build_standard_w_bottom_price_df()
+        req = ReplayRequest(
+            start=str(len(df) // 2),
+            end=str(len(df) - 1),
+            cfg_override=dict(_LOOSE_CFG_OVERRIDE),
+            save=False,
+        )
+        original = _inject_price_data({"TESTW.SZ": df})
+        try:
+            report = caisen_service.run_replay(req)
+        finally:
+            import server.services.caisen_service as svc
+            svc._load_price_data = original
+
+        assert report.run_id is None, "save=False 不应落盘"
+        assert caisen_service.list_replay_runs() == []
+
+    def test_run_replay_save_failure_degrades_gracefully(self, monkeypatch):
+        """落盘异常 → run_replay 降级 run_id=None，不抛（回放结果仍正常返回）。
+
+        物理意图（CLAUDE.md 量化风控·边界审查）：持久化是附属价值，回放统计是主价值。
+        落盘失败（磁盘满/权限）不应让整个回放 500——降级 run_id=None + warning，
+        前端仍拿到合法 report（仅「未进历史」）。
+        """
+        from caisen import replay_runs
+        # 让 save_run 抛异常（模拟磁盘满/IO 故障）
+        def _boom(*args, **kwargs):
+            raise OSError("disk full")
+        monkeypatch.setattr(replay_runs, "save_run", _boom)
+
+        df = _build_standard_w_bottom_price_df()
+        req = ReplayRequest(
+            start=str(len(df) // 2),
+            end=str(len(df) - 1),
+            cfg_override=dict(_LOOSE_CFG_OVERRIDE),
+        )
+        original = _inject_price_data({"TESTW.SZ": df})
+        try:
+            report = caisen_service.run_replay(req)
+        finally:
+            import server.services.caisen_service as svc
+            svc._load_price_data = original
+
+        assert isinstance(report, ReplayReportResponse)
+        assert report.run_id is None, "落盘失败应降级 run_id=None（不抛）"
+
+    def test_get_replay_run_returns_full_detail(self):
+        """落盘后 get_replay_run 返回 ReplayRunDetail（summary + report + request）。"""
+        df = _build_standard_w_bottom_price_df()
+        req = ReplayRequest(
+            start=str(len(df) // 2),
+            end=str(len(df) - 1),
+            universe=["TESTW.SZ"],
+            cfg_override=dict(_LOOSE_CFG_OVERRIDE),
+        )
+        original = _inject_price_data({"TESTW.SZ": df})
+        try:
+            report = caisen_service.run_replay(req)
+        finally:
+            import server.services.caisen_service as svc
+            svc._load_price_data = original
+
+        detail = caisen_service.get_replay_run(report.run_id)
+        assert isinstance(detail, ReplayRunDetail)
+        assert detail.summary.run_id == report.run_id
+        assert detail.report.n_hits == report.n_hits
+        assert detail.report.win_rate == pytest.approx(report.win_rate)
+        # request 完整保留（前端可回填表单重跑）
+        assert detail.request["start"] == req.start
+        assert detail.request["universe"] == ["TESTW.SZ"]
+
+    def test_get_replay_run_nonexistent_returns_none(self):
+        """run_id 不存在 / 非法 → None（路由层转 404，与 get_plan 同源契约）。"""
+        assert caisen_service.get_replay_run("20240101-000000-deadbe") is None
+        assert caisen_service.get_replay_run("../etc/passwd") is None
+        assert caisen_service.get_replay_run("") is None
+
+    def test_delete_replay_run_removes_record(self):
+        """delete_replay_run 删除成功返 True；再删同 id 返 False（已不存在）。"""
+        df = _build_standard_w_bottom_price_df()
+        req = ReplayRequest(
+            start=str(len(df) // 2),
+            end=str(len(df) - 1),
+            cfg_override=dict(_LOOSE_CFG_OVERRIDE),
+        )
+        original = _inject_price_data({"TESTW.SZ": df})
+        try:
+            report = caisen_service.run_replay(req)
+        finally:
+            import server.services.caisen_service as svc
+            svc._load_price_data = original
+
+        assert caisen_service.delete_replay_run(report.run_id) is True
+        assert caisen_service.get_replay_run(report.run_id) is None
+        assert caisen_service.list_replay_runs() == []
+        # 再删同 id → False（不存在）
+        assert caisen_service.delete_replay_run(report.run_id) is False
+
+    def test_delete_replay_run_rejects_path_traversal(self):
+        """非法 run_id（路径跳板）→ 返 False（不删目录外文件）。"""
+        assert caisen_service.delete_replay_run("../etc/passwd") is False
+        assert caisen_service.delete_replay_run("") is False

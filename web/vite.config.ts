@@ -26,6 +26,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    strictPort: true,   // 5173 被占则启动失败（不漂移到 5174+），强制走 scripts/dev.py 启动前清残留，杜绝多 vite 累积
     proxy: {
       '/api': {
         // 端口须与后端启动命令 `uvicorn server.main:app --port 8000` 对齐；

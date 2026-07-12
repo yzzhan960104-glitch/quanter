@@ -49,6 +49,8 @@ from server.schemas.caisen import (
     PlanReview,
     ReplayReportResponse,
     ReplayRequest,
+    ReplayRunDetail,
+    ReplayRunSummary,
     ScanRequest,
 )
 from server.services import caisen_service
@@ -305,6 +307,54 @@ async def replay(body: ReplayRequest) -> ReplayReportResponse:
         return caisen_service.run_replay(body)
     except (KeyError, ValidationError, ValueError) as exc:
         raise _map_service_exception(exc)
+
+
+# ---------------------------------------------------------------------------
+# 端点 9-11：回测历史记录（方案 A：GET /replay/runs · GET /replay/runs/{id} · DELETE）
+# ---------------------------------------------------------------------------
+@router.get("/replay/runs", summary="历史回测记录列表（轻量摘要，最新在前）")
+def list_replay_runs() -> List[ReplayRunSummary]:
+    """列出已落盘的回测历史摘要（按 created_at 降序）。
+
+    物理意图（方案 A 前端「历史回测记录」面板数据源）：
+        返回 replay_runs/index.json 的摘要列表——每条含「何时跑的/什么参数/关键统计」，
+        不含完整 trades/equity_curve（保持轻量）。前端据此渲染历史表格，点「加载」取详情、
+        点「删除」清记录。
+
+    无历史文件时返 200 + []（不抛异常，与 list_plans 容错契约一致）。
+    """
+    return caisen_service.list_replay_runs()
+
+
+@router.get("/replay/runs/{run_id}", summary="历史回测记录详情（完整 report + request）")
+def get_replay_run(run_id: str) -> ReplayRunDetail:
+    """取单条回测历史的完整记录（summary + report + request）。
+
+    物理意图：前端从历史列表点「加载」→ 取此详情 → 用 report 回填回放结果面板
+    （资金曲线/买卖流水/统计卡），用 request 回填表单（可重跑/对比）。
+
+    异常策略：run_id 不存在或非法（路径遍历）→ service 返 None → 本层转 404
+    （与 get_plan 的 None→404 契约一致，状态机不进 NULL）。
+    """
+    result = caisen_service.get_replay_run(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"回测记录不存在：run_id={run_id!r}")
+    return result
+
+
+@router.delete("/replay/runs/{run_id}", summary="删除历史回测记录")
+def delete_replay_run(run_id: str) -> Dict[str, bool]:
+    """删除单条回测历史（移除 run 文件 + 从 index 摘出）。
+
+    物理意图（方案 A 清理机制）：相同配置+标的的重复回放默认都存，由前端删除按钮
+    做手动清理。删后前端刷新列表即可看到剩余记录。
+
+    异常策略：run_id 不存在或非法 → service 返 False → 本层转 404（与 get 一致）。
+    """
+    ok = caisen_service.delete_replay_run(run_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"回测记录不存在：run_id={run_id!r}")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

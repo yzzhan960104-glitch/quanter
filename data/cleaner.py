@@ -41,7 +41,7 @@ class DataCleaner:
         df_clean = df.copy()
 
         # 1. 检测价格异常（突变 > 20%）
-        price_change = df_clean["close"].pct_change()
+        price_change = df_clean["close"].pct_change(fill_method=None)
         abnormal_mask = price_change.abs() > 0.20
         df_clean["is_abnormal"] = abnormal_mask
 

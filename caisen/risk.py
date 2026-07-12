@@ -107,7 +107,7 @@ class RiskManager:
         """
         if hv_win is None:
             # screen() 旧路径：现场算 pct_change + rolling HV
-            ret = price_df["close"].pct_change().dropna()
+            ret = price_df["close"].pct_change(fill_method=None).dropna()
             if len(ret) < self.cfg.hv_window:
                 return True, "样本不足放行"
             hv = ret.rolling(self.cfg.hv_window).std() * math.sqrt(252)

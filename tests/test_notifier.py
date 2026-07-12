@@ -120,6 +120,27 @@ def test_fire_and_forget_runs_coroutine_in_background():
     assert done == [42]
 
 
+def test_fire_and_forget_inside_running_loop_executes_coro():
+    """loop 内（async 上下文）调 fire_and_forget 也应执行协程。
+
+    回归 emt_gateway._reconnect 场景：async 函数内调 fire_and_forget，验证新 daemon
+    线程 asyncio.run 在 loop 上下文仍正常跑（不抛 RuntimeError 吞协程）。
+    若此测试 FAIL，说明 fire_and_forget 需改自适应（loop 内 create_task）。
+    """
+    from core.notifier import fire_and_forget
+    done = []
+
+    async def _work():
+        done.append(99)
+
+    async def _runner():
+        fire_and_forget(_work())   # loop 内（async 上下文）
+        await asyncio.sleep(0.5)   # 等 daemon 线程跑完
+
+    asyncio.run(_runner())
+    assert done == [99], "loop 内 fire_and_forget 应执行协程"
+
+
 def test_dingtalk_channel_payload_and_sign(monkeypatch):
     """守护钉钉加签 URL 拼装与 Markdown payload（脱网，monkeypatch _post）。"""
     from core.notifier import DingTalkChannel

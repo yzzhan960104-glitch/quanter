@@ -53,6 +53,7 @@ class CandidatePlan(BaseModel):
     """
     plan_id: str
     symbol: str
+    symbol_name: str = ""                               # 企业名（#1，data.symbol_names 启动加载，降级空串兜底显代号）
     pattern_type: str                                   # ∈ {"w_bottom", "head_shoulder"}
     formed_at: str                                      # ISO 字符串（Timestamp.isoformat）
     breakout_price: float
@@ -126,7 +127,8 @@ class ReplayRequest(BaseModel):
     物理意图：
         start / end：回放起止交易日（index label，整数 RangeIndex 或 ISO 日期）；
         universe：     回放标的池（symbol 列表，生产由 data_lake 装配 price_data）；
-        cfg_override：策略参数增量覆盖（同 ScanRequest.cfg_override 语义）。
+        cfg_override：策略参数增量覆盖（同 ScanRequest.cfg_override 语义）；
+        save：         是否把本次回放结果落盘进 replay_runs 历史（方案 A：默认 True=都存）。
 
     回放语义（对齐 backtest_replay.replay）：
         对每个交易日 T 用【T 及之前】数据滚动跑 screener→plan→离场模拟，
@@ -138,11 +140,18 @@ class ReplayRequest(BaseModel):
         接入，_load_price_data(None) 仍返回空 dict 占位（run_replay 降级零统计）。
         契约层入口先就位，Phase 3+ 接 data_lake 后生产全市场回放即生效；调用方
         亦可显式传 universe=[...] 缩小到指定标的池。
+
+    save 契约（方案 A：默认都存 + 前端删除）：
+        默认 True——回放算完即落 replay_runs/<run_id>.json，前端「历史回测记录」
+        面板可加载/删除。backtest_replay.replay 是纯确定性的（相同配置+标的→相同
+        结果），但保留全部以审计/对比，由前端删除做清理（而非写入时哈希去重）。
+        设 False 时为一次性回放（不落盘，run_id=None），适用于随手验证场景。
     """
     start: str
     end: str
     universe: Optional[List[str]] = None
     cfg_override: Dict[str, Any] = Field(default_factory=dict)
+    save: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +176,10 @@ class ReplayReportResponse(BaseModel):
         trades：            买卖流水列表（逐笔 entry/exit/rr/holding_bars，前端流水表）；
         annualized_return： 年化收益 CAGR = (equity_end)^(252/n_trading_days) - 1；
         n_trading_days：    回放区间交易日数（CAGR 时间维度）。
+
+    run_id（方案 A 历史持久化）：
+        落盘后回填本次运行的 run_id（前端据此显示「已保存」+ 跳转历史）。
+        save=False 或落盘异常降级时为 None——响应体仍合法，仅未进历史。
     """
     n_hits: int
     win_rate: float
@@ -180,3 +193,48 @@ class ReplayReportResponse(BaseModel):
     trades: List[Dict[str, Any]] = Field(default_factory=list)
     annualized_return: float = 0.0
     n_trading_days: int = 0
+    run_id: Optional[str] = None    # 落盘后回填；save=False/异常降级时 None
+
+
+# ---------------------------------------------------------------------------
+# 回放历史记录（方案 A：replay_runs 持久化的列表/详情契约）
+# ---------------------------------------------------------------------------
+class ReplayRunSummary(BaseModel):
+    """GET /caisen/replay/runs 列表项：单次回放的轻量摘要。
+
+    物理意图：前端「历史回测记录」面板的表格行——只展示「何时跑的 / 什么参数 /
+    关键统计」，不含完整 trades/equity_curve（这些可能是数百笔大列表），保持列表
+    轻量。完整记录由 GET /caisen/replay/runs/{run_id} 取 ReplayRunDetail。
+
+    字段对齐 caisen.replay_runs._summary() 输出（storage 层摘要 dict 同源）：
+        run_id / created_at：标识 + 落盘时刻（ISO 字符串，列表降序排序键）；
+        start / end：        回放区间（前端显示「2024-01 ~ 2024-03」）；
+        universe_n：         标的数（-1 = 全市场，前端显示「全市场」徽标）；
+        cfg_min_rr：         当时生效的 min_rr_ratio（最关键调参，列表快览；可能 None）；
+        n_hits / win_rate / avg_rr / max_drawdown / annualized_return：核心统计。
+    """
+    run_id: str
+    created_at: str
+    start: str
+    end: str
+    universe_n: int                                       # -1 = 全市场
+    cfg_min_rr: Optional[float] = None
+    n_hits: int
+    win_rate: float
+    avg_rr: float
+    max_drawdown: float
+    annualized_return: float = 0.0
+
+
+class ReplayRunDetail(BaseModel):
+    """GET /caisen/replay/runs/{run_id} 响应：单次回放的完整记录。
+
+    物理意图：前端从历史列表点「加载」→ 取此详情 → 用 report 回填回放结果面板
+    （资金曲线/买卖流水/统计卡），用 request 回填回放参数表单（可重跑/对比）。
+    summary 同时附带，便于详情头部展示无需再从 report 抽统计。
+
+    组合而非重复定义：summary / report 是已定义模型的内嵌，零字段漂移。
+    """
+    summary: ReplayRunSummary
+    report: ReplayReportResponse
+    request: Dict[str, Any]

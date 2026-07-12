@@ -43,7 +43,9 @@ from pydantic import ValidationError
 
 from caisen import plan as plan_mod
 from caisen import backtest_replay
+from caisen import replay_runs
 from caisen import storage
+from data import symbol_names
 from caisen.config import StrategyConfig
 from caisen.patterns.screener import PatternScreener
 from caisen.risk import RiskManager
@@ -52,6 +54,8 @@ from server.schemas.caisen import (
     PlanReview,
     ReplayReportResponse,
     ReplayRequest,
+    ReplayRunDetail,
+    ReplayRunSummary,
     ScanRequest,
 )
 
@@ -183,6 +187,7 @@ def _plan_to_candidate(d: Dict[str, Any]) -> CandidatePlan:
     return CandidatePlan(
         plan_id=str(d["plan_id"]),
         symbol=str(d["symbol"]),
+        symbol_name=symbol_names.get_name(str(d["symbol"])),
         pattern_type=str(d["pattern_type"]),
         formed_at=_iso(d.get("formed_at")),
         breakout_price=float(d["breakout_price"]),
@@ -437,7 +442,7 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
             price_data, cfg, risk,
             start=req.start, end=req.end, aum=_DEFAULT_AUM,
         )
-        return ReplayReportResponse(
+        response = ReplayReportResponse(
             n_hits=report.n_hits,
             win_rate=report.win_rate,
             avg_rr=report.avg_rr,
@@ -451,6 +456,20 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
             annualized_return=report.annualized_return,
             n_trading_days=report.n_trading_days,
         )
+        # 方案 A（用户决策）：save 默认 True=都存。落盘历史 + 回填 run_id（前端据此
+        # 显示「已保存」+ 进历史列表）。落盘异常降级 run_id=None——持久化是附属价值，
+        # 回放统计是主价值，IO 故障不应让回放 500（CLAUDE.md 量化风控·边界审查）。
+        if req.save:
+            try:
+                response.run_id = replay_runs.save_run(
+                    req.model_dump(), response.model_dump(),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "run_replay 落盘历史失败（降级 run_id=None）：type=%s detail=%s",
+                    type(exc).__name__, exc, exc_info=True,
+                )
+        return response
     except (ValidationError, ValueError, KeyError):
         # 参数/状态机异常透传路由层转 422/404（Task 3 review I-1）：
         # 让前端能区分"参数错误"vs"无样本"，避免非法 cfg_override 被静默吞成零统计。
@@ -485,3 +504,58 @@ def _empty_replay_report() -> ReplayReportResponse:
         annualized_return=0.0,
         n_trading_days=0,
     )
+
+
+# ---------------------------------------------------------------------------
+# 回放历史记录编排（方案 A：replay_runs 持久化的 list/get/delete）
+# ---------------------------------------------------------------------------
+def list_replay_runs() -> List[ReplayRunSummary]:
+    """读 replay_runs/index.json → List[ReplayRunSummary]（按 created_at 降序）。
+
+    物理意图：前端「历史回测记录」面板的列表数据源。storage 层 list_runs 返摘要
+    dict 列表（不含完整 trades/equity_curve，保持轻量），本层套 Pydantic 契约对齐。
+
+    防御性：index 单条损坏（字段缺失/类型错）→ 跳过该条 + warning（不抛，幂等读契约，
+    与 load_plans 同源——index 文件可能被人工误编辑/写入损坏，不应让整个列表 500）。
+    """
+    result: List[ReplayRunSummary] = []
+    for s in replay_runs.list_runs():
+        if not isinstance(s, dict):
+            continue
+        try:
+            result.append(ReplayRunSummary(**s))
+        except Exception as exc:
+            logger.warning("list_replay_runs 跳过损坏摘要（%s）：%s", exc, s)
+    return result
+
+
+def get_replay_run(run_id: str) -> Optional[ReplayRunDetail]:
+    """读 replay_runs/<run_id>.json → ReplayRunDetail（summary + report + request）。
+
+    返回：完整详情；run_id 不存在或非法（路径遍历）→ None（路由层转 404）。
+    防御性：记录文件损坏（report/summary 字段错）→ 返 None（路由层转 404）而非 500，
+    与 get_plan 的 None 契约一致——前端按「记录不存在」处理。
+    """
+    payload = replay_runs.get_run(run_id)
+    if payload is None:
+        return None
+    try:
+        return ReplayRunDetail(
+            summary=ReplayRunSummary(**payload["summary"]),
+            report=ReplayReportResponse(**payload["report"]),
+            request=payload.get("request", {}),
+        )
+    except Exception as exc:
+        logger.warning(
+            "get_replay_run 记录损坏（run_id=%s，转 None→404）：%s", run_id, exc,
+        )
+        return None
+
+
+def delete_replay_run(run_id: str) -> bool:
+    """删 replay_runs/<run_id>.json + 从 index 移除。
+
+    返回：True=删除成功；False=run_id 不存在或非法（路由层转 404）。
+    透传 replay_runs.delete_run（它内部已处理路径遍历防御 + 锁内 RMW）。
+    """
+    return replay_runs.delete_run(run_id)

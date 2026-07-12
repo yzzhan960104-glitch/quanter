@@ -157,13 +157,17 @@ def client():
 
 @pytest.fixture(autouse=True)
 def _isolate_storage(tmp_path, monkeypatch):
-    """每个测试自动隔离：storage._PLANS_DIR 指向 tmp_path/plans（绝不污染真实 plans/）。
+    """每个测试自动隔离：storage._PLANS_DIR + replay_runs._REPLAY_RUNS_DIR 指向 tmp_path。
 
-    防御性（CLAUDE.md 量化风控·边界审查）：测试落盘的 plans JSON 绝不能写入
-    生产 plans/ 目录，避免 CI 脏数据干扰后续真实运行。
+    防御性（CLAUDE.md 量化风控·边界审查）：测试落盘的 plans / replay_runs JSON 绝不能
+    写入生产目录。方案 A 让 POST /replay 默认落盘历史——若不隔离 replay_runs，test_replay
+    会把测试回放写进真实 replay_runs/ 污染生产，故两目录一并拦在 tmp_path。
     """
+    from caisen import replay_runs
     plans_dir = tmp_path / "plans"
+    runs_dir = tmp_path / "replay_runs"
     monkeypatch.setattr(storage, "_PLANS_DIR", str(plans_dir))
+    monkeypatch.setattr(replay_runs, "_REPLAY_RUNS_DIR", str(runs_dir))
     yield
 
 
@@ -455,3 +459,134 @@ def test_get_positions_returns_200(client):
     # positions 字段为 list（占位空列表或富化后的持仓记录）
     assert "positions" in body
     assert isinstance(body["positions"], list)
+
+
+# ---------------------------------------------------------------------------
+# 10. 回测历史记录（方案 A：GET /replay/runs · GET /replay/runs/{id} · DELETE）
+# ---------------------------------------------------------------------------
+def test_replay_response_carries_run_id(client, inject_price_data):
+    """POST /replay 默认 save=True → 响应回填 run_id（前端据此显示「已保存」）。"""
+    df = _build_standard_w_bottom_price_df()
+    inject_price_data({"TESTW.SZ": df})
+    n = len(df)
+
+    resp = client.post("/api/v1/caisen/replay", json={
+        "start": str(n // 2),
+        "end": str(n - 1),
+        "cfg_override": dict(_LOOSE_CFG_OVERRIDE),
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["run_id"], "默认 save=True 应落盘并回填 run_id"
+
+
+def test_replay_save_false_no_run_id(client, inject_price_data):
+    """POST /replay save=false → 不落盘，run_id=null（一次性回放）。"""
+    df = _build_standard_w_bottom_price_df()
+    inject_price_data({"TESTW.SZ": df})
+    n = len(df)
+
+    resp = client.post("/api/v1/caisen/replay", json={
+        "start": str(n // 2),
+        "end": str(n - 1),
+        "cfg_override": dict(_LOOSE_CFG_OVERRIDE),
+        "save": False,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["run_id"] is None
+
+    # 历史列表仍为空（未落盘）
+    assert client.get("/api/v1/caisen/replay/runs").json() == []
+
+
+def test_list_replay_runs_empty(client):
+    """无历史 → GET /caisen/replay/runs 200 + []。"""
+    resp = client.get("/api/v1/caisen/replay/runs")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_list_replay_runs_after_replay(client, inject_price_data):
+    """跑一次 replay → GET /caisen/replay/runs 含本次摘要（降序，最新在前）。"""
+    df = _build_standard_w_bottom_price_df()
+    inject_price_data({"TESTW.SZ": df})
+    n = len(df)
+    # 跑两次（验证多次都存 + 降序）
+    r1 = client.post("/api/v1/caisen/replay", json={
+        "start": str(n // 2), "end": str(n - 1),
+        "cfg_override": dict(_LOOSE_CFG_OVERRIDE),
+    }).json()
+    r2 = client.post("/api/v1/caisen/replay", json={
+        "start": str(n // 2), "end": str(n - 1),
+        "cfg_override": dict(_LOOSE_CFG_OVERRIDE),
+    }).json()
+    assert r1["run_id"] != r2["run_id"], "方案 A：重复回放产生不同 run_id（不去重）"
+
+    resp = client.get("/api/v1/caisen/replay/runs")
+    assert resp.status_code == 200
+    runs = resp.json()
+    assert len(runs) == 2
+    # 降序：最新（r2）在前
+    assert runs[0]["run_id"] == r2["run_id"]
+    assert runs[1]["run_id"] == r1["run_id"]
+    # 摘要关键字段
+    for k in ("run_id", "created_at", "start", "end", "universe_n",
+              "n_hits", "win_rate", "avg_rr", "annualized_return", "max_drawdown"):
+        assert k in runs[0]
+    # 摘要不含完整 trades（list 轻量契约）
+    assert "trades" not in runs[0]
+    assert "equity_curve" not in runs[0]
+
+
+def test_get_replay_run_returns_detail(client, inject_price_data):
+    """GET /caisen/replay/runs/{id} → 200 + ReplayRunDetail（summary + report + request）。"""
+    df = _build_standard_w_bottom_price_df()
+    inject_price_data({"TESTW.SZ": df})
+    n = len(df)
+    run_id = client.post("/api/v1/caisen/replay", json={
+        "start": str(n // 2), "end": str(n - 1),
+        "universe": ["TESTW.SZ"],
+        "cfg_override": dict(_LOOSE_CFG_OVERRIDE),
+    }).json()["run_id"]
+
+    resp = client.get(f"/api/v1/caisen/replay/runs/{run_id}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["summary"]["run_id"] == run_id
+    assert isinstance(body["report"]["n_hits"], int)
+    # request 完整保留（前端可回填表单重跑）
+    assert body["request"]["start"] == str(n // 2)
+    assert body["request"]["universe"] == ["TESTW.SZ"]
+
+
+def test_get_replay_run_404(client):
+    """GET 不存在/非法 run_id → 404（service 返 None → 路由转 HTTPException）。"""
+    resp = client.get("/api/v1/caisen/replay/runs/20240101-000000-deadbe")
+    assert resp.status_code == 404
+    # 非法格式（路径遍历防御同源）→ 404
+    assert client.get("/api/v1/caisen/replay/runs/garbage").status_code == 404
+
+
+def test_delete_replay_run(client, inject_price_data):
+    """DELETE /caisen/replay/runs/{id} → 200 {ok:true}；再 GET/DELETE → 404。"""
+    df = _build_standard_w_bottom_price_df()
+    inject_price_data({"TESTW.SZ": df})
+    n = len(df)
+    run_id = client.post("/api/v1/caisen/replay", json={
+        "start": str(n // 2), "end": str(n - 1),
+        "cfg_override": dict(_LOOSE_CFG_OVERRIDE),
+    }).json()["run_id"]
+
+    resp = client.delete(f"/api/v1/caisen/replay/runs/{run_id}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True}
+    # 文件已删 → 再 GET/DELETE 都 404
+    assert client.get(f"/api/v1/caisen/replay/runs/{run_id}").status_code == 404
+    assert client.delete(f"/api/v1/caisen/replay/runs/{run_id}").status_code == 404
+    # 列表也同步清空
+    assert client.get("/api/v1/caisen/replay/runs").json() == []
+
+
+def test_delete_replay_run_404(client):
+    """DELETE 不存在 run_id → 404。"""
+    resp = client.delete("/api/v1/caisen/replay/runs/20240101-000000-deadbe")
+    assert resp.status_code == 404

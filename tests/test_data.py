@@ -73,7 +73,7 @@ class TestMockDataFetcher:
         df = fetcher.fetch_ohlcv("600000.SH", start, end, freq="1d")
 
         # 计算价格变化率（首行 pct_change 为 NaN，dropna 后再判；否则 NaN<=0.11 为 False 拖垮 .all()）
-        price_change = df["close"].pct_change().dropna()
+        price_change = df["close"].pct_change(fill_method=None).dropna()
 
         # 验证没有超过 10% 的单日涨幅（涨停）
         assert (price_change <= 0.11).all()  # 容忍 1% 误差
