@@ -169,22 +169,69 @@ class BridgeHandler(dingtalk_stream.ChatbotHandler):
 
     async def _ask_claude(self, msg: Any, conv_id: str,
                           sender: str, text: str) -> None:
-        """喂给 pool + 挂 alarmer 监听事件 → reply。
+        """喂给 pool + 挂事件监听(本地可见/钉钉进度/高危告警) → reply。
 
-        on_event 是同步回调（ClaudeProcess 读 stream-json 每帧调一次），
-        alarmer.check_event 也是同步——不阻塞 claude 主流程。
-        pool.ask 抛任何异常都兜底成错误文案回钉钉（不让用户对着空气等）。
+        复杂问题 claude 可能跑数分钟甚至数十分钟，若只等 result 帧才回复，用户
+        盯着空气无法判断卡在哪（实测有 34 分钟无反馈的 case）。故 on_event 做三件事：
+          ① 本地 logger.info 实时打印 claude 思考文本/工具调用（定位卡住根因）；
+          ② 节流(15s)推钉钉进度（用户手机端看到 claude 在动，不干等）；
+          ③ 高危工具调用实时告警（全放行纵深防御③：事中知情）。
+        钉钉进度用 asyncio.create_task fire-and-forget，不阻塞 claude 读循环。
         """
+        started = time.monotonic()
+        logger.info("→ claude 开始处理 (sender=%s): %s", sender,
+                    text[:80].replace("\n", " "))
+        progress = {"chars": 0, "tools": [], "last_text": "", "last_push": 0.0}
+
         def on_event(event: dict) -> None:
-            # 高危工具调用实时告警（全放行纵深防御③：事中知情）
+            if event.get("type") == "assistant":
+                content = event.get("message", {}).get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype == "text" and block.get("text"):
+                            snippet = block["text"]
+                            progress["chars"] += len(snippet)
+                            progress["last_text"] = snippet
+                            # ① 本地终端实时打印 claude 思考（定位卡住的关键可见性）
+                            logger.info("[claude 思考] %s",
+                                        snippet[:300].replace("\n", " "))
+                        elif btype == "tool_use":
+                            name = block.get("name", "?")
+                            inp = json.dumps(block.get("input", {}),
+                                             ensure_ascii=False)
+                            progress["tools"].append(name)
+                            logger.info("[claude 工具] %s | %s", name, inp[:150])
+                            # ② 节流推钉钉进度（每 15s 一次，防刷屏 + 钉钉频控）
+                            now = time.monotonic()
+                            if now - progress["last_push"] > 15:
+                                progress["last_push"] = now
+                                elapsed = int(now - started)
+                                tip = (f"⏳ 思考中 {elapsed}s · 工具 "
+                                       f"{len(progress['tools'])} 次(近:{name})"
+                                       f" · 已输出 {progress['chars']} 字")
+                                asyncio.create_task(self._reply_fn(self, msg, tip))
+            # ③ 高危工具调用实时告警（全放行纵深防御③：事中知情）
             self._alarmer.check_event(event, sender_staff_id=sender)
 
         try:
             answer = await self._pool.ask(conv_id, text, sender, on_event=on_event)
+            logger.info("← claude 完成 (%ds, 工具 %d 次, 输出 %d 字)",
+                        int(time.monotonic() - started),
+                        len(progress["tools"]), progress["chars"])
         except Exception as e:  # noqa: BLE001
-            # claude 处理失败：回错误文本，不抛（用户能立刻看到，而非超时静默）
-            logger.exception("claude 处理失败")
-            answer = f"⚠️ claude 处理出错：{e}"
+            # 失败诊断：运行时长/工具次数/输出字数/最后动作，定位卡住根因
+            elapsed = int(time.monotonic() - started)
+            last = progress["tools"][-1] if progress["tools"] else (
+                progress["last_text"][:60] or "(无)")
+            logger.exception(
+                "claude 处理失败 (运行 %ds, 工具 %d 次, 输出 %d 字, 最后动作: %s)",
+                elapsed, len(progress["tools"]), progress["chars"], last)
+            answer = (f"⚠️ claude 处理失败（{elapsed}s 后）：{e}\n"
+                      f"已运行：工具 {len(progress['tools'])} 次，"
+                      f"输出 {progress['chars']} 字，最后动作：{last}")
         await self._reply_fn(self, msg, answer)
 
     # ---- 频控 ----
