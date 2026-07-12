@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
 from typing import Callable, Optional
 
@@ -53,8 +54,17 @@ class ClaudeProcess:
     # ---- 进程生命周期 ----
     async def _spawn(self) -> None:
         """拉起 claude（stream-json 双流 + 全放行）。已知 session_id 则 --resume。"""
+        # shutil.which 把 claude_bin 解析成完整路径：
+        # Windows 上 npm 全局装的 claude 是 .cmd 批处理，asyncio.create_subprocess_exec
+        # 非 shell 模式不走 PATHEXT，裸 "claude" 会让 CreateProcess FileNotFoundError（WinError 2）。
+        # which 用 PATHEXT 找到 claude.CMD 完整路径，直接 spawn 完整路径可行（已实测 rc=0）。
+        claude_path = shutil.which(self._cfg.claude_bin)
+        if claude_path is None:
+            raise RuntimeError(
+                f"找不到 claude 可执行 '{self._cfg.claude_bin}'——检查 PATH 或 .env 的 CLAUDE_BIN"
+            )
         cmd = [
-            self._cfg.claude_bin,
+            claude_path,
             "--print",
             "--input-format", "stream-json",
             "--output-format", "stream-json",
