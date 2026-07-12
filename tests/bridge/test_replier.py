@@ -54,8 +54,14 @@ def test_clean_keeps_non_table_separator_lines():
 async def test_reply_splits_into_multiple_sends():
     """超长回复分多条 reply（防钉钉单条 ~20KB 限 + Markdown 渲染截断）。"""
     handler = MagicMock()
-    handler.reply_text = AsyncMock()
+    # reply_text 是 dingtalk-stream 同步方法，replier 用 asyncio.to_thread 包它，
+    # 故这里用同步 MagicMock（而非 AsyncMock）才能真实复现「同步方法」语义。
+    handler.reply_text = MagicMock()
     incoming = MagicMock()
     text = "x" * 4000
     await reply(handler, incoming, text, limit=1800)
     assert handler.reply_text.call_count >= 3
+    # 验证参数顺序：(text, incoming_message) —— text 在前、incoming 在后
+    first_call = handler.reply_text.call_args_list[0]
+    assert first_call.args[0].startswith("[1/")  # text 在前（含 [1/N] 序号前缀）
+    assert first_call.args[1] is incoming  # incoming_message 在后
