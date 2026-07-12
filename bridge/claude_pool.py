@@ -66,11 +66,19 @@ class ClaudeProcess:
             # 续上下文：进程死后用 session_id 重建，历史不丢
             cmd += ["--resume", self._session_id]
 
+        # Why stderr=DEVNULL（防管道死锁，M1 修复）：
+        # claude --verbose 在 stderr 上会输出可观的诊断/心跳噪声。若用 PIPE
+        # 且不主动读取，OS 管道缓冲（Linux 默认 64KB，Windows 更小）写满后
+        # 子进程会阻塞在 stderr write → stdout 不再产新行 → _read_until_result
+        # 死等到 ask_timeout。长会话尤其易触发。
+        # 这里丢弃 stderr：真正有用的事件（session_id / assistant 增量 / result）
+        # 全部走 stdout 的 stream-json 帧，stderr 仅是冗余诊断噪声。
+        # 若未来需要 stderr 调试，应起独立 task 持续 readline 排空，而非 PIPE 留空。
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
             cwd=self._cfg.workdir,
         )
         logger.info("claude 子进程已启动 (pid=%s, resume=%s)",

@@ -245,21 +245,31 @@ _HELP_TEXT = (
 def build_and_run(cfg: BridgeConfig) -> None:
     """装配 Stream 客户端 + Handler 并阻塞运行（入口 __main__ 调用）。
 
-    装配顺序：SessionStore → ClaudePool → Alarmer → 后台空闲回收 sweeper →
-    dingtalk_stream.Credential → DingTalkStreamClient → 注册 BridgeHandler →
-    start_forever 阻塞。
+    装配顺序：
+      - 同步阶段（无 loop）：SessionStore → ClaudePool → Alarmer →
+        dingtalk_stream.Credential → DingTalkStreamClient → 注册 BridgeHandler。
+      - 异步阶段（_run 协程内，已有 running loop）：启动空闲回收 sweeper →
+        client.start() 阻塞 → finally 取消 sweeper + aclose_all 优雅收尾。
 
-    finally 里优雅收尾：取消 sweeper + aclose_all 关闭全部常驻 claude 进程，
-    避免僵尸子进程残留。
+    Why 直接 await client.start() 而非 SDK 的 start_forever()（M5 修复 + SDK 实测）：
+      SDK 0.24.3 的 start_forever() 是同步函数，内部自带 `while True: asyncio.run(self.start())`
+      的重连循环。若我们 await start_forever() 会立刻抛 RuntimeError: "asyncio.run()
+      cannot be called from a running event loop"。即使不 await、直接同步调它，
+      也意味着 sweeper / aclose_all 跑在它内部建的 loop 上，进程退出时我们
+      无法在同 loop 里收尾（loop 已关）→ aclose_all 跨 loop RuntimeError。
+      故改为：绕过 start_forever，直接 await client.start()（SDK 的真正协程，
+      内部已含 while True 网络重连），由我们自己的 asyncio.run 拥有 loop，
+      sweeper 与 aclose_all 同 loop。
+
+    KeyboardInterrupt（Ctrl-C 退出）会被 asyncio.run 转成 KeyboardInterrupt 上抛，
+    本函数不拦——交由 __main__ 让进程整体退出；finally 已保证 sweeper/aclose 在
+    KeyboardInterrupt 触发的 loop 收尾阶段执行（asyncio.run 的 finally 会跑 cleanup）。
     """
     from bridge.session_store import SessionStore
 
     store = SessionStore(cfg.session_store_path)
     pool = ClaudePool(cfg, store)
     alarmer = Alarmer()
-
-    # 启动后台空闲回收（每 60s 扫一次，超 idle_ttl 的常驻进程被 reset 回收）
-    sweeper = pool.start_idle_sweeper()
 
     credential = dingtalk_stream.Credential(cfg.app_key, cfg.app_secret)
     client = dingtalk_stream.DingTalkStreamClient(credential)
@@ -268,10 +278,20 @@ def build_and_run(cfg: BridgeConfig) -> None:
     client.register_callback_handler(ChatbotMessage.TOPIC, handler)
 
     logger.info("钉钉桥启动，工作目录=%s", cfg.workdir)
-    try:
-        # start_forever 是 SDK 的阻塞协程（内部 loop 接钉钉 stream）
-        asyncio.run(client.start_forever())
-    finally:
-        # 收尾：无论正常退出还是异常，都优雅关进程，防僵尸子进程
-        sweeper.cancel()
-        asyncio.run(pool.aclose_all())
+
+    # 单 loop 包裹：主循环 + 收尾共享同一个 asyncio.run 建的 loop。
+    async def _run() -> None:
+        # 启动后台空闲回收（每 60s 扫一次，超 idle_ttl 的常驻进程被 reset 回收）。
+        # 必须在 loop 内建：create_task 需 running loop。
+        sweeper = pool.start_idle_sweeper()
+        try:
+            # client.start() 是 SDK 的阻塞协程（内部 while True 接钉钉 stream，
+            # 含网络异常自动重连）。直接 await——不要用 SDK 的 start_forever()。
+            await client.start()
+        finally:
+            # 收尾：无论正常退出还是异常，都取消 sweeper + 关全部常驻 claude 进程，
+            # 防僵尸子进程残留。
+            sweeper.cancel()
+            await pool.aclose_all()
+
+    asyncio.run(_run())
