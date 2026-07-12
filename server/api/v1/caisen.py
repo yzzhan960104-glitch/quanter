@@ -305,3 +305,19 @@ async def replay(body: ReplayRequest) -> ReplayReportResponse:
         return caisen_service.run_replay(body)
     except (KeyError, ValidationError, ValueError) as exc:
         raise _map_service_exception(exc)
+
+
+# ---------------------------------------------------------------------------
+# 端点 9：GET /config/schema —— 策略参数 JSON Schema（参数表单/规则清单单一真相源）
+# ---------------------------------------------------------------------------
+@router.get("/config/schema", summary="策略参数 JSON Schema（前端参数表单 + 规则清单）")
+def get_config_schema() -> Dict[str, Any]:
+    """返回 StrategyConfig 的 JSON Schema（Pydantic model_json_schema）。
+
+    物理意图（#2 规则列举 + #4 参数可调 同源解决）：
+        前端反射渲染参数表单（每个 Field 的 type/description/约束 ge/le），同时作为
+        「当前生效规则清单」（description 即规则说明）。一处定义（caisen/config.py），
+        前后端同源，杜绝参数漂移——前端不再硬编码参数名/范围。
+    """
+    from caisen.config import StrategyConfig
+    return StrategyConfig.model_json_schema()

@@ -32,9 +32,17 @@ import {
   LineStyle,                                   // v5 价位线样式枚举（Solid/Dotted/Dashed/...）
   type LineWidth,                              // v5 价位线宽度字面量联合类型（1|2|3|4）
 } from 'lightweight-charts'
+// ECharts（年化收益曲线，vue-echarts 按需注册）
+import { use } from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
+import { LineChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, TitleComponent } from 'echarts/components'
+import VChart from 'vue-echarts'
+use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, TitleComponent])
 import {
-  scan, listPlans, getChart, reviewPlan, activatePlan, runReplay,
+  scan, listPlans, getChart, reviewPlan, activatePlan, runReplay, getConfigSchema,
   type CandidatePlan, type ChartData, type ReplayReport, type ScanRequestBody,
+  type EquityPoint, type Trade,
 } from '../api/caisen'
 import { logger } from '../utils/logger'
 
@@ -65,6 +73,9 @@ const activating = ref(false)
 const replaying = ref(false)
 const replayReport = shallowRef<ReplayReport | null>(null)
 const activeTab = ref<'review' | 'replay'>('review')
+// 回测跑通批次：策略参数 schema（反射渲染参数表单 + 规则清单）+ cfg_override（用户调参，随 replay 提交）
+const configSchema = shallowRef<Record<string, any>>({})
+const cfgOverride = ref<Record<string, any>>({})
 
 // 扫描参数表单（简化版 ScanRequest：date 默认今日，universe 默认宽基，cfg_override 留高级输入）
 const today = new Date().toISOString().slice(0, 10)
@@ -320,13 +331,18 @@ async function onActivate() {
 async function onReplay() {
   replaying.value = true
   try {
+    // cfg_override：只提交用户实际改过的参数（非空），空值用 StrategyConfig 默认
+    const overrides: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(cfgOverride.value)) {
+      if (v !== '' && v !== null && v !== undefined) overrides[k] = v
+    }
     const body = {
       start: replayForm.value.start,
       end: replayForm.value.end,
       universe: replayForm.value.universe.trim()
         ? replayForm.value.universe.split(/[\s,，]+/).filter(Boolean)
         : null,
-      cfg_override: {},
+      cfg_override: overrides,
     }
     replayReport.value = await runReplay(body)
     ElMessage.success(`回放完成，命中 ${replayReport.value.n_hits} 笔`)
@@ -342,6 +358,12 @@ async function onReplay() {
 onMounted(async () => {
   initChart()
   await refreshPlans()
+  // 拉策略参数 schema（反射渲染参数表单 + 规则清单，#2/#4 同源）
+  try {
+    configSchema.value = await getConfigSchema()
+  } catch (e: any) {
+    logger.error('加载策略参数 schema 失败:', e)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -395,6 +417,37 @@ const sortedMonthlyReturns = computed(() => {
 const patternDistEntries = computed(() => {
   if (!replayReport.value) return []
   return Object.entries(replayReport.value.pattern_dist)
+})
+
+// 策略参数表单：反射 configSchema.properties → [{name, type, description, default, min, max}]
+// 物理意图：前端动态渲染参数输入（#4 参数可调），description 同时是规则说明（#2 规则列举）。
+const schemaParams = computed(() => {
+  const props = (configSchema.value?.properties || {}) as Record<string, any>
+  return Object.entries(props).map(([name, spec]) => ({
+    name,
+    type: spec.type as string,
+    description: (spec.description || spec.title || '') as string,
+    default: spec.default,
+    minimum: spec.minimum,
+    maximum: spec.maximum,
+  }))
+})
+
+// 年化收益曲线 ECharts option（equity_curve → LineSeries；标题标年化 CAGR）
+const equityChartOption = computed(() => {
+  const curve = replayReport.value?.equity_curve || []
+  const ann = ((replayReport.value?.annualized_return || 0) * 100).toFixed(2)
+  return {
+    title: { text: `资金曲线（年化 ${ann}%）`, left: 'center', textStyle: { color: '#d1d4dc', fontSize: 13 } },
+    tooltip: { trigger: 'axis' },
+    grid: { left: 50, right: 20, top: 40, bottom: 30 },
+    xAxis: { type: 'category', data: curve.map((p: EquityPoint) => (p.date || '').slice(0, 10)), axisLabel: { color: '#888' } },
+    yAxis: { type: 'value', scale: true, axisLabel: { color: '#888', formatter: (v: number) => v.toFixed(2) } },
+    series: [{
+      name: 'equity', type: 'line', data: curve.map((p: EquityPoint) => p.equity),
+      smooth: true, lineStyle: { color: '#0066cc', width: 2 }, areaStyle: { color: 'rgba(0,102,204,0.15)' },
+    }],
+  }
 })
 </script>
 
@@ -596,14 +649,40 @@ const patternDistEntries = computed(() => {
                 <el-form-item label="标的池">
                   <el-input
                     v-model="replayForm.universe"
-                    placeholder="留空=全市场（data_lake 未接则零统计）"
-                    style="width: 280px"
+                    placeholder="留空=全市场（慢）；建议填 30-100 只标的快回放"
+                    style="width: 320px"
                   />
                 </el-form-item>
                 <el-form-item>
                   <el-button type="primary" :loading="replaying" @click="onReplay">运行回放</el-button>
                 </el-form-item>
               </el-form>
+            </div>
+
+            <!-- 策略参数表单（反射 schema 动态渲染，#2 规则列举 + #4 参数可调 同源）-->
+            <div class="form-block">
+              <el-collapse>
+                <el-collapse-item name="cfg">
+                  <template #title>
+                    <span class="block-title">策略参数（展开调参 · {{ schemaParams.length }} 个 · 默认零命中请放宽）</span>
+                  </template>
+                  <div class="cfg-grid">
+                    <div v-for="p in schemaParams" :key="p.name" class="cfg-item">
+                      <span class="cfg-label" :title="p.description">{{ p.name }}</span>
+                      <el-switch
+                        v-if="p.type === 'boolean'" v-model="cfgOverride[p.name]" size="small"
+                      />
+                      <el-input-number
+                        v-else v-model="cfgOverride[p.name]" size="small"
+                        :min="p.minimum" :max="p.maximum"
+                        :step="p.type === 'integer' ? 1 : 0.1"
+                        :precision="p.type === 'integer' ? 0 : 3"
+                        style="width: 130px"
+                      />
+                    </div>
+                  </div>
+                </el-collapse-item>
+              </el-collapse>
             </div>
 
             <!-- 回放结果 -->
@@ -628,9 +707,49 @@ const patternDistEntries = computed(() => {
                   <span class="mv down">{{ replayReport.max_drawdown.toFixed(2) }}</span>
                 </div>
                 <div class="metric">
+                  <span class="mk">年化收益</span>
+                  <span class="mv" :class="replayReport.annualized_return >= 0 ? 'up' : 'down'">
+                    {{ (replayReport.annualized_return * 100).toFixed(2) }}%
+                  </span>
+                </div>
+                <div class="metric">
                   <span class="mk">平均持仓</span>
                   <span class="mv">{{ replayReport.avg_holding_bars.toFixed(1) }} 日</span>
                 </div>
+              </div>
+
+              <div class="report-section">
+                <div class="block-title">资金曲线（年化收益）</div>
+                <v-chart
+                  v-if="replayReport.equity_curve.length"
+                  class="equity-chart" :option="equityChartOption" autoresize
+                />
+                <span v-else class="hint">无资金曲线数据（命中 0 笔）</span>
+              </div>
+
+              <div class="report-section">
+                <div class="block-title">买卖流水（{{ replayReport.trades.length }} 笔）</div>
+                <el-table :data="replayReport.trades" size="small" max-height="320" empty-text="无成交">
+                  <el-table-column prop="symbol" label="标的" width="100" />
+                  <el-table-column label="形态" width="90">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="patternTagType(row.pattern_type)">{{ patternLabel(row.pattern_type) }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="买入" width="160">
+                    <template #default="{ row }">{{ row.entry_price.toFixed(2) }} @ {{ row.entry_date.slice(0, 10) }}</template>
+                  </el-table-column>
+                  <el-table-column label="卖出" width="160">
+                    <template #default="{ row }">{{ row.exit_price.toFixed(2) }} @ {{ row.exit_date.slice(0, 10) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="exit_reason" label="离场" width="100" />
+                  <el-table-column label="盈亏比" width="80">
+                    <template #default="{ row }">
+                      <span :class="row.rr >= 0 ? 'up' : 'down'">{{ row.rr.toFixed(2) }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="holding_bars" label="持仓(日)" width="80" />
+                </el-table>
               </div>
 
               <div class="report-section">
@@ -671,7 +790,7 @@ const patternDistEntries = computed(() => {
               </div>
             </div>
             <div v-else class="empty-block">
-              <span class="hint">运行回放后展示胜率/盈亏比/回撤/月度收益</span>
+              <span class="hint">运行回放后展示胜率/盈亏比/年化曲线/买卖流水（默认 cfg 零命中时，展开上方「策略参数」放宽阈值）</span>
             </div>
           </div>
         </el-tab-pane>
@@ -901,5 +1020,29 @@ const patternDistEntries = computed(() => {
   color: var(--qt-text-regular);
   line-height: 1.6;
   margin-top: var(--qt-space-1);
+}
+
+/* 回测跑通批次：年化收益曲线 + 策略参数表单 */
+.equity-chart {
+  width: 100%;
+  height: 260px;
+}
+.cfg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--qt-space-2);
+}
+.cfg-item {
+  display: flex;
+  align-items: center;
+  gap: var(--qt-space-2);
+}
+.cfg-label {
+  font-size: var(--qt-fs-caption);
+  color: var(--qt-text-secondary);
+  min-width: 130px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

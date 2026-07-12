@@ -138,11 +138,54 @@ class PatternScreener:
         out = out.sort_values("amount30d", ascending=False, kind="mergesort").reset_index(drop=True)
         return out
 
-    def _screen_one(self, symbol: str, df: pd.DataFrame) -> dict | None:
+    def screen_with_pivots(self, price_data: dict, pivots_map: dict, hv_map: dict, date) -> pd.DataFrame:
+        """对标的池用【预算好的 pivots + HV】执行过滤→识别→收集（跳过 compute_atr+causal_pivots+HV 重算）。
+
+        性能优化入口：replay 全 df 一次算 pivots + HV，每 T 截断 iloc[:T+1] + confirm_bars 过滤
+        （pivots）+ 尾部 hv_window 窗口（HV）后调本方法，跳过每 T 重算（O(标的×T²)→O(标的×T)）。
+        detect + micro_filter 逻辑与 screen() 完全一致。
+
+        参数：
+            price_data: {symbol: df.loc[:T]}——截至 T 的截断 df，detect 消费用（量价/ma26w）。
+            pivots_map: {symbol: pivots_T}——已 iloc[:T+1] 截断 + confirm_bars 过滤的 pivot Series。
+            hv_map: {symbol: hv_win}——截至 T 的尾部 hv_window 个 HV（第三轮 HV 复用）。
+            date: 当前交易日（预留，未参与计算，同 screen）。
+
+        无前视保证：pivots_map / hv_map 必须由调用方做截断 + confirm_bars 过滤（模拟 .loc[:T]），
+        replay 负责该过滤。
+        """
+        candidates: list[dict] = []
+        for symbol, df in price_data.items():
+            try:
+                hit = self._screen_one(symbol, df, pivots=pivots_map.get(symbol),
+                                       hv_win=hv_map.get(symbol))
+            except Exception as exc:
+                _logger.debug("screen_with_pivots 跳过 symbol=%s 异常类型=%s 详情=%s",
+                              symbol, type(exc).__name__, exc)
+                hit = None
+            if hit is not None:
+                candidates.append(hit)
+
+        if not candidates:
+            return pd.DataFrame(columns=[
+                "symbol", "pattern_type", "formed_at", "breakout_price",
+                "neckline_price", "bottom_price", "depth", "tension",
+                "amount30d", "is_valid",
+            ])
+        out = pd.DataFrame(candidates)
+        return out.sort_values("amount30d", ascending=False, kind="mergesort").reset_index(drop=True)
+
+    def _screen_one(self, symbol: str, df: pd.DataFrame, pivots: "pd.Series | None" = None,
+                    hv_win: "pd.Series | None" = None) -> dict | None:
         """对单个 symbol 执行完整编排链路，返回候选 dict 或 None（未命中/被过滤）。
 
         本方法是 screen 的内循环主体，独立出来便于单 symbol 调试与异常隔离。
         所有过滤/识别组件的调用顺序与 screen 文档一致。
+
+        参数：
+            pivots: 可选的预算 pivot Series（性能优化用）。传入则跳过 compute_atr+
+                causal_pivots 重算（screen_with_pivots 复用入口）；None 则现场重算
+                （screen() 旧行为，向后兼容）。两种路径下游 detect 逻辑完全一致。
         """
         # —— 0. 列完整性兜底 ——
         # 缺列是数据脏值，screen 外层 try/except 会捕获，这里显式给出清晰错误信息。
@@ -157,7 +200,7 @@ class PatternScreener:
 
         # —— 2. micro_filter：近 hv_window HV 分位 > hv_max_quantile → 剔除 ——
         # 物理意图：HV 异常标的处于无序暴动，颈线突破统计有效性大幅下降。
-        ok, _reason = self.risk.micro_filter(df, symbol)
+        ok, _reason = self.risk.micro_filter(df, symbol, hv_win=hv_win)
         if not ok:
             return None
 
@@ -168,8 +211,11 @@ class PatternScreener:
         high = df["high"]
         low = df["low"]
         volume = df["volume"]
-        atr = compute_atr(high, low, close)
-        pivots = causal_pivots(close, atr, self.cfg)
+        if pivots is None:
+            # 旧路径（screen() 调用，向后兼容）：现场重算 atr + causal_pivots。
+            atr = compute_atr(high, low, close)
+            pivots = causal_pivots(close, atr, self.cfg)
+        # pivots 已就绪（screen_with_pivots 传入复用，或上方刚算）→ 下游 detect 直接消费，不重算。
 
         # —— 4. W 底识别（用 cfg.max_pattern_depth，W 底颈线高度比天然 < 30%）——
         w_res = w_detect(close, pivots, high, low, volume, self.cfg)

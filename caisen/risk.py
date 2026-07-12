@@ -74,7 +74,8 @@ class RiskManager:
             return 0.0 if self.cfg.macro_regime_veto else 0.3
         return 0.6
 
-    def micro_filter(self, price_df: pd.DataFrame, symbol: str) -> tuple[bool, str]:
+    def micro_filter(self, price_df: pd.DataFrame, symbol: str,
+                     hv_win: "pd.Series | None" = None) -> tuple[bool, str]:
         """微观波动率过滤：近 hv_window 的 HV 分位 > hv_max_quantile → 剔除。
 
         物理意图（蔡森方法学）：
@@ -87,6 +88,11 @@ class RiskManager:
             2. 滚动年化 HV = ret.rolling(hv_window).std() * sqrt(252)；
             3. 取近 hv_window 个 HV 样本，若末值 > 该窗口 hv_max_quantile（默认 95 分位）则否决。
 
+        第三轮性能优化（HV 复用）：
+            hv_win 传入则直接用（replay 已预算并截断到 T 的尾部 hv_window 个 HV），跳过
+            pct_change+rolling 重算（profile 显示 micro_filter 是 4.6s 中的 2.1s = 45%）。
+            None 则现场算（screen() 旧路径，向后兼容）。两条路径判定语义完全一致。
+
         防御性兜底：
             - 样本不足（< hv_window）：放行（小样本分位无统计意义，不应误杀新股）；
             - HV 全 NaN：放行（数据异常不应成为否决理由，让后续流动性/形态过滤兜底）。
@@ -94,17 +100,23 @@ class RiskManager:
         Args:
             price_df: 标的行情 DataFrame（至少含 close 列）。
             symbol: 标的代码（仅用于剔除原因日志）。
+            hv_win: 可选预算 HV 窗口（截至 T 的尾部 hv_window 个 HV，replay 复用）。
 
         Returns:
             (True, "通过/放行原因") 或 (False, "剔除原因")。
         """
-        ret = price_df["close"].pct_change().dropna()
-        if len(ret) < self.cfg.hv_window:
-            return True, "样本不足放行"
-        hv = ret.rolling(self.cfg.hv_window).std() * math.sqrt(252)
-        recent = hv.dropna().iloc[-self.cfg.hv_window:]
+        if hv_win is None:
+            # screen() 旧路径：现场算 pct_change + rolling HV
+            ret = price_df["close"].pct_change().dropna()
+            if len(ret) < self.cfg.hv_window:
+                return True, "样本不足放行"
+            hv = ret.rolling(self.cfg.hv_window).std() * math.sqrt(252)
+            hv_win = hv.dropna().iloc[-self.cfg.hv_window:]
+        recent = hv_win.dropna()
         if len(recent) == 0:
             return True, "HV 空放行"
+        if len(recent) < self.cfg.hv_window:
+            return True, "样本不足放行"
         if recent.iloc[-1] > recent.quantile(self.cfg.hv_max_quantile):
             return False, f"{symbol} HV 异常(无序震荡)"
         return True, "通过"

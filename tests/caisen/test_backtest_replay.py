@@ -495,9 +495,11 @@ def test_replay_dedups_same_pattern_across_consecutive_T(monkeypatch):
     fake_cands = pd.DataFrame([{"symbol": "TEST"}])   # 非空，让 replay 不 skip
 
     # mock screener（每 T 返同 candidates）+ plan.generate（每 T 返同 plan）
+    # replay 优化后调 screen_with_pivots（复用预算 pivots），mock 需同步提供该方法。
     class _FakeScreener:
         def __init__(self, cfg, risk): pass
         def screen(self, pd_data, date): return fake_cands
+        def screen_with_pivots(self, pd_data, pivots_map, hv_map, date): return fake_cands
     monkeypatch.setattr(br, "PatternScreener", _FakeScreener)
     monkeypatch.setattr(plan_mod, "generate", lambda *a, **k: [fake_plan])
 
@@ -505,3 +507,137 @@ def test_replay_dedups_same_pattern_across_consecutive_T(monkeypatch):
     hits = report.metadata["hits"]
     # 去重：同形态连续 T 日只计 1 次（旧实现每 T 一个 hit = 多个）
     assert len(hits) == 1, f"同形态连续T日应去重只计1次，实际 {len(hits)}"
+
+
+# ---------------------------------------------------------------------------
+# 5. 性能基准 + pivot 复用等价（回测跑通批次）
+# ---------------------------------------------------------------------------
+class TestReplayPerfAndReuse:
+    """性能回归基准 + pivot 复用路径与逐T .loc[:T] 路径的等价守护。
+
+    背景：旧 replay 每 T 重算整个历史的 compute_atr+causal_pivots → O(标的×T²)，
+    实测 10只×2年 114s（全市场 16h，前端 90s 超时 = 用户看到"跑不出"）。
+    pivot 复用优化（全df一次算 atr+pivots，每T复用截断+confirm_bars 过滤）后应
+    O(标的×T) <15s。本类守护：①性能不回退；②复用路径与逐T金标准严格等价（无前视）。
+    """
+
+    def test_replay_perf_10sym_500bars_under_30s(self):
+        """性能基准：10 标的 × 500 K线 replay < 30s。
+
+        旧 O(T²) 实现此规模 ~100s+（红，确认基线）；pivot 复用后应 <15s（绿）。
+        合成随机游走序列（无稳定形态，但 screener 每 T 跑全链路 = 真实负载，测的就是
+        per-T screener 调用次数的性能，与是否命中形态无关）。
+        Why 30s 而非 15s：留 CI/不同机器余量防 flaky；显著低于旧 ~100s 即证明优化生效。
+        """
+        import time
+
+        cfg = _mk_cfg()
+        rm = RiskManager(cfg)
+        rng = np.random.default_rng(42)
+        price_data = {}
+        for i in range(10):
+            n = 500
+            rets = rng.normal(0, 0.02, n)
+            close = 10.0 * np.exp(np.cumsum(rets))
+            df = pd.DataFrame({
+                "close": close,
+                "high": close * 1.01,
+                "low": close * 0.99,
+                "volume": [1000.0] * n,
+                "amount": [2e8] * n,
+            }, index=pd.RangeIndex(n))
+            price_data[f"S{i}"] = df
+
+        t0 = time.perf_counter()
+        replay(price_data, cfg, rm, start=20, end=499, aum=1e6)
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 30.0, (
+            f"replay 10标的×500K线 耗时 {elapsed:.1f}s > 30s——pivot 复用优化未生效？"
+            f"（旧 O(T²) 实现此规模 ~100s+）"
+        )
+
+    def test_replay_pivot_reuse_equiv_manual_loc(self):
+        """pivot 复用路径入场集合 == 手动逐T screener.screen(.loc[:T]) 金标准。
+
+        金标准：测试内手动对每个 T 调 screener.screen({sym:df.loc[:T]}, T) +
+        plan.generate + _simulate_one_trade（逐T重算 atr/pivots，无复用）。replay（内部
+        走 pivot 复用）应产出完全相同的 (entry_day, entry_price) 入场集合。
+
+        Why：pivot 复用的正确性 = 与逐T .loc[:T] 严格等价。此测试直接对比，比
+        test_replay_no_lookahead（裁剪等价）更精确地守护复用实现——一旦复用路径的
+        confirm_bars 过滤或截断出错，入场集合会与金标准分歧。
+        """
+        from caisen import plan as plan_mod
+        from caisen.backtest_replay import _simulate_one_trade
+
+        cfg = _mk_cfg()
+        rm = RiskManager(cfg)
+        close, high, low, vol = _build_w_bottom_with_rise(n_tail=18, target_mult=1.5)
+        df = _mk_price_df(close, high, low, vol)
+        price_data = {"TEST": df}
+        start = df.index[15]
+        end = df.index[-1]
+
+        # —— replay（内部 pivot 复用路径）——
+        report = replay(price_data, cfg, rm, start=start, end=end, aum=1e6)
+        replay_entries = sorted(
+            (h["entry_day"], round(h["entry_price"], 4)) for h in report.metadata["hits"]
+        )
+
+        # —— 金标准：手动逐 T .loc[:T]（无复用，每T重算 atr+pivots）——
+        screener = PatternScreener(cfg, rm)
+        manual_entries = []
+        last_sig = None
+        for T in range(int(start), int(end) + 1):
+            df_T = df.loc[:T]
+            if len(df_T) < cfg.min_pattern_bars:
+                continue
+            cands = screener.screen({"TEST": df_T}, T)
+            if cands.empty:
+                continue
+            plans = plan_mod.generate(cands, cfg, rm, 1e6, T)
+            for p in plans:
+                sig = (round(p.neckline_price, 6), round(p.bottom_price, 6))
+                if sig == last_sig:
+                    continue
+                last_sig = sig
+                hit = _simulate_one_trade(df, p, T, cfg.max_holding_bars)
+                if hit is not None:
+                    manual_entries.append((hit["entry_day"], round(hit["entry_price"], 4)))
+        manual_entries = sorted(manual_entries)
+
+        assert replay_entries == manual_entries, (
+            f"pivot 复用路径与逐T .loc[:T] 金标准入场集合不一致：\n"
+            f"复用={replay_entries}\n金标准={manual_entries}"
+        )
+
+    def test_replay_equity_curve_trades_present(self):
+        """输出增强：有命中时 equity_curve/trades 非空且字段完整 + 年化收益合理。
+
+        验回测跑通批次新增的 equity_curve（资金曲线）/trades（买卖流水）/annualized_return
+        （年化 CAGR）/n_trading_days（区间交易日数）四字段。
+        """
+        cfg = _mk_cfg()
+        rm = RiskManager(cfg)
+        close, high, low, vol = _build_w_bottom_with_rise(n_tail=18, target_mult=1.5)
+        df = _mk_price_df(close, high, low, vol)
+        report = replay({"TEST": df}, cfg, rm, start=df.index[15], end=df.index[-1], aum=1e6)
+
+        hits = report.metadata.get("hits", [])
+        if not hits:
+            pytest.skip("合成序列无命中，跳过 equity_curve/trades 验证")
+
+        # equity_curve / trades 长度 == 命中数（每笔一个点/一条流水）
+        assert len(report.equity_curve) == len(hits)
+        assert len(report.trades) == len(hits)
+        # equity_curve 每点字段完整（date/cumulative_rr/equity）
+        for pt in report.equity_curve:
+            assert {"date", "cumulative_rr", "equity"} <= set(pt.keys())
+        # trades 每笔字段完整（前端流水表所需）
+        for t in report.trades:
+            assert {"symbol", "entry_date", "entry_price", "exit_date",
+                    "exit_price", "exit_reason", "rr"} <= set(t.keys())
+        # n_trading_days > 0（回放区间非空）
+        assert report.n_trading_days > 0
+        # annualized_return 是有限数（CAGR）
+        assert isinstance(report.annualized_return, (int, float))

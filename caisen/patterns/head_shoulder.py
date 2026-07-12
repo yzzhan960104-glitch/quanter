@@ -143,8 +143,11 @@ def detect(
         10. 26 周均线过滤（ma26w_filter=True 时）；
         11. ABC 波打底（abc_wave_detect=True 时）。
     """
-    # 提取所有 pivot 下标（值非 0 的位置）
-    idxs = [i for i in range(len(pivots)) if pivots.iloc[i] != 0]
+    # 性能优化（回测跑通批次）：pandas .iloc 逐元素是 profile 暴露的瓶颈，改 numpy。
+    pv = pivots.values
+    cl = close.values
+    vl = volume.values
+    idxs = (pv != 0).nonzero()[0].tolist()
     if len(idxs) < 7:
         return None   # pivot 不足 7 个，无法构成头肩底六点 + 突破确认峰
 
@@ -154,24 +157,17 @@ def detect(
     p7_i, p6_i, p5_i, p4_i, p3_i, p2_i, p1_i = (
         idxs[-1], idxs[-2], idxs[-3], idxs[-4], idxs[-5], idxs[-6], idxs[-7]
     )
-    if not (
-        pivots.iloc[p1_i] == 1
-        and pivots.iloc[p2_i] == -1
-        and pivots.iloc[p3_i] == 1
-        and pivots.iloc[p4_i] == -1
-        and pivots.iloc[p5_i] == 1
-        and pivots.iloc[p6_i] == -1
-        and pivots.iloc[p7_i] == 1
-    ):
+    if not (pv[p1_i] == 1 and pv[p2_i] == -1 and pv[p3_i] == 1 and pv[p4_i] == -1
+            and pv[p5_i] == 1 and pv[p6_i] == -1 and pv[p7_i] == 1):
         return None   # 末尾七点不构成 峰-谷-峰-谷-峰-谷-峰，非头肩底结构
 
-    p1 = float(close.iloc[p1_i])
-    p2 = float(close.iloc[p2_i])
-    p3 = float(close.iloc[p3_i])
-    p4 = float(close.iloc[p4_i])
-    p5 = float(close.iloc[p5_i])
-    p6 = float(close.iloc[p6_i])
-    p7 = float(close.iloc[p7_i])
+    p1 = float(cl[p1_i])
+    p2 = float(cl[p2_i])
+    p3 = float(cl[p3_i])
+    p4 = float(cl[p4_i])
+    p5 = float(cl[p5_i])
+    p6 = float(cl[p6_i])
+    p7 = float(cl[p7_i])
     span = p6_i - p1_i   # 形态跨度用 P1..P6（不含突破确认峰 P7）
 
     # —— 2. 头底 P4 为 P1..P6 区间最低（形态学硬规则）——
@@ -211,8 +207,8 @@ def detect(
 
     # —— 7. 量价配合：右肩缩量 + 突破放量 ——
     # 右肩缩量：右肩 P6 处成交量 ≤ 左肩 P2 处成交量 × right_vol_shrink（缩量打底完成）
-    vol_p2 = float(volume.iloc[p2_i]) if p2_i < len(volume) else 0.0
-    vol_p6 = float(volume.iloc[p6_i]) if p6_i < len(volume) else 0.0
+    vol_p2 = float(vl[p2_i]) if p2_i < len(vl) else 0.0
+    vol_p6 = float(vl[p6_i]) if p6_i < len(vl) else 0.0
     if vol_p2 > 0 and vol_p6 > vol_p2 * cfg.right_vol_shrink:
         return None   # 右肩未缩量，打底未完成
     # 突破放量：P7 突破日成交量 ≥ 颈线段 P3-P5 平均成交量 × breakout_vol_multiplier
@@ -222,11 +218,11 @@ def detect(
     # 量能本就萎缩，baseline 偏低，breakout_vol_multiplier=1.5 门槛被人为放低。
     # 改用 P3→P5 颈线段（含 p5 端点，与"P3-P5 颈线"几何语义一致）均量作突破参照基准。
     breakout_baseline = (
-        float(volume.iloc[p3_i:p5_i + 1].mean())
+        float(vl[p3_i:p5_i + 1].mean())
         if (p5_i - p3_i) >= 0
-        else float(volume.iloc[p3_i])
+        else float(vl[p3_i])
     )
-    vol_p7 = float(volume.iloc[p7_i]) if p7_i < len(volume) else 0.0
+    vol_p7 = float(vl[p7_i]) if p7_i < len(vl) else 0.0
     if breakout_baseline > 0 and vol_p7 < breakout_baseline * cfg.breakout_vol_multiplier:
         return None   # 突破未放量，形态可靠性差
 

@@ -446,6 +446,10 @@ def run_replay(req: ReplayRequest) -> ReplayReportResponse:
             monthly_returns=report.monthly_returns,
             avg_holding_bars=report.avg_holding_bars,
             min_rr_ratio_recommendation=report.min_rr_ratio_recommendation,
+            equity_curve=report.equity_curve,
+            trades=report.trades,
+            annualized_return=report.annualized_return,
+            n_trading_days=report.n_trading_days,
         )
     except (ValidationError, ValueError, KeyError):
         # 参数/状态机异常透传路由层转 422/404（Task 3 review I-1）：
@@ -476,4 +480,8 @@ def _empty_replay_report() -> ReplayReportResponse:
             "回放无样本：price_data 装配为空或异常降级。请确认 data_lake 已接入 / "
             "cfg_override 参数合法。"
         ),
+        equity_curve=[],
+        trades=[],
+        annualized_return=0.0,
+        n_trading_days=0,
     )

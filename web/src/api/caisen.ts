@@ -134,6 +134,32 @@ export interface ChartData {
  * 物理意图：历史区间滚动回放的聚合统计——前端独立 tab 展示胜率/盈亏比/回撤，
  * 用于策略参数调优（如数据驱动地校准 min_rr_ratio）。
  */
+/** 资金曲线点（年化收益曲线图数据）。字段对齐 backtest_replay._compute_stats equity_curve 项。 */
+export interface EquityPoint {
+  date: string                                // exit_date（ISO 或 index 字符串）
+  cumulative_rr: number                       // 截至该笔的累计 rr
+  equity: number                              // 归一化资金曲线（equity_0=1.0）
+}
+
+/** 单笔买卖流水（前端流水表行）。字段对齐 backtest_replay._compute_stats trades 项。 */
+export interface Trade {
+  symbol: string
+  pattern_type: string
+  entry_date: string
+  entry_price: number
+  exit_date: string
+  exit_price: number
+  exit_reason: string                         // take_profit / stop_loss / timeout / still_open
+  rr: number
+  holding_bars: number
+}
+
+/**
+ * 回放报告（字段对齐 server.schemas.caisen.ReplayReportResponse / caisen.ReplayReport）。
+ *
+ * 物理意图：历史区间滚动回放的聚合统计——前端独立 tab 展示胜率/盈亏比/回撤，
+ * 用于策略参数调优（如数据驱动地校准 min_rr_ratio）。
+ */
 export interface ReplayReport {
   n_hits: number                              // 命中（成交）交易笔数
   win_rate: number                            // 胜率（盈利笔数 / n_hits）
@@ -143,6 +169,10 @@ export interface ReplayReport {
   monthly_returns: Record<string, number>     // 月度收益（按 entry 月份聚合）
   avg_holding_bars: number                    // 平均持仓天数
   min_rr_ratio_recommendation: string         // 数据驱动的 min_rr_ratio 建议（中文）
+  equity_curve: EquityPoint[]                 // 资金曲线（年化收益曲线图，按 exit_date 排序）
+  trades: Trade[]                             // 买卖流水（前端流水表，逐笔 entry/exit/rr）
+  annualized_return: number                   // 年化收益 CAGR = equity_end^(252/n_trading_days)-1
+  n_trading_days: number                      // 回放区间交易日数（CAGR 时间维度）
 }
 
 // ============ 请求体类型 ============
@@ -233,4 +263,15 @@ export function getChart(planId: string): Promise<ChartData> {
  */
 export function runReplay(body: ReplayRequestBody): Promise<ReplayReport> {
   return apiClient.post('/api/v1/caisen/replay', body, { timeout: 90000 })
+}
+
+/**
+ * GET /caisen/config/schema：策略参数 JSON Schema（前端反射渲染参数表单 + 规则清单）。
+ *
+ * 物理意图：返回 StrategyConfig.model_json_schema()，前端按 Field 的 type/description/约束
+ * 动态渲染参数表单（绑定 cfg_override 随 replay/scan 提交），同时作为「规则清单」展示
+ * （#2 规则列举 + #4 参数可调 同源解决，一处定义前后端不漂移）。
+ */
+export function getConfigSchema(): Promise<Record<string, unknown>> {
+  return apiClient.get('/api/v1/caisen/config/schema', { timeout: 10000 })
 }

@@ -80,6 +80,11 @@ class ReplayReport:
     monthly_returns: dict
     avg_holding_bars: float
     min_rr_ratio_recommendation: str
+    # 回测跑通批次新增：资金曲线 + 买卖流水 + 年化收益 + 区间交易日数（前端展示用）
+    equity_curve: list = field(default_factory=list)
+    trades: list = field(default_factory=list)
+    annualized_return: float = 0.0
+    n_trading_days: int = 0
     metadata: dict = field(default_factory=dict, hash=False, compare=False)
 
 
@@ -111,8 +116,26 @@ def replay(
         screener 内部 causal_pivots 已隔离未来函数（confirm_bars），plan.generate 基于其输出。
         离场模拟从 T+1 起逐日推进，只用已发生的 high/low/close，不前视。
     """
+    from caisen.patterns.zigzag_causal import causal_pivots, compute_atr
+
     screener = PatternScreener(cfg, risk)
     all_hits: list[dict] = []
+
+    # —— 性能优化（O(标的×T²)→O(标的×T)）：全 df 一次算 atr+pivots+HV，每 T 复用截断 ——
+    # 因果保证：causal_pivots 纯因果，已确认 pivot 追加数据下不变（zigzag_causal docstring
+    # 不变量 + test_no_lookahead_bias 守护）。每 T 从 full_pivots 截断 iloc[:T+1] 并对末尾
+    # confirm_bars 个位置标 0（模拟 causal_pivots(df.loc[:T]) 的末尾丢弃），与逐 T 重算
+    # 严格等价（test_replay_pivot_reuse_equiv_manual_loc 守护）。
+    # 第三轮（HV 复用）：全 df 一次算 pct_change+rolling HV，每 T 取尾部 hv_window 个判分位，
+    # 跳过 micro_filter 每 T 重算（profile 显示 micro_filter 占 4.6s 中的 2.1s）。
+    import math
+    full_pivots: dict = {}
+    full_hv: dict = {}
+    for symbol, df in price_data.items():
+        atr_full = compute_atr(df["high"], df["low"], df["close"])
+        full_pivots[symbol] = causal_pivots(df["close"], atr_full, cfg)
+        ret = df["close"].pct_change()
+        full_hv[symbol] = ret.rolling(cfg.hv_window).std() * math.sqrt(252)
 
     # —— 对每个交易日 T 滚动执行 screen → plan（严格 .loc[:T]）——
     for symbol, df in price_data.items():
@@ -120,15 +143,27 @@ def replay(
         # pivot 不变），实盘 T 日入场后 T+1 已持仓不会重入。跟踪上次模拟的形态签名
         # (neckline_price, bottom_price)，同形态只模拟首次，杜绝重复计数。
         last_sig: Optional[tuple] = None
-        # T 的取值范围：[start, end]（index label）。
-        # 用 df.index 定位 start/end 的位置，对每个 T 取 .loc[:T] 子序列喂 screener。
-        for T in _iter_trading_days(df.index, start, end):
+        sym_full_pivots = full_pivots[symbol]
+        sym_full_hv = full_hv[symbol]
+        sym_index = df.index
+        for T in _iter_trading_days(sym_index, start, end):
             try:
                 # 严格无前视：只用 T 及之前的数据（含 T 当日）
                 df_T = df.loc[:T]
                 if len(df_T) < cfg.min_pattern_bars:
                     continue   # 数据不足以形成形态，跳过
-                candidates = screener.screen({symbol: df_T}, T)
+                # pivot 复用：截断到 T + confirm_bars 过滤（末尾 confirm_bars 个标 0），
+                # 等价 causal_pivots(df.loc[:T])——防前视红线（test_replay_no_lookahead 守护）。
+                T_pos = sym_index.get_loc(T)
+                pivots_T = sym_full_pivots.iloc[:T_pos + 1].copy()
+                n_pt = len(pivots_T)
+                if cfg.confirm_bars > 0 and n_pt > 0:
+                    pivots_T.iloc[max(0, n_pt - cfg.confirm_bars):] = 0
+                # HV 复用：截至 T 的尾部 hv_window 个 HV（窗口小 O(hv_window)，对齐 micro_filter）
+                hv_win = sym_full_hv.iloc[max(0, T_pos + 1 - cfg.hv_window):T_pos + 1]
+                candidates = screener.screen_with_pivots(
+                    {symbol: df_T}, {symbol: pivots_T}, {symbol: hv_win}, T,
+                )
                 if candidates.empty:
                     continue
                 plans = plan_mod.generate(
@@ -157,6 +192,22 @@ def replay(
     stats = _compute_stats(all_hits)
     recommendation = _recommend_min_rr(stats)
 
+    # n_trading_days：回放区间交易日数（各 symbol 同区间，取首个非空 symbol 的计数）。
+    # 用于年化收益 CAGR 的时间维度（252 交易日/年）。
+    n_trading_days = 0
+    for df in price_data.values():
+        n_trading_days = len(_iter_trading_days(df.index, start, end))
+        if n_trading_days:
+            break
+    # 年化收益 CAGR = (equity_end/equity_0)^(252/n_trading_days) - 1。
+    # equity 已归一化 equity_0=1.0（见 _compute_stats），故 equity_end = 末点 equity。
+    equity_curve = stats.get("equity_curve", [])
+    equity_end = equity_curve[-1]["equity"] if equity_curve else 1.0
+    if n_trading_days > 0 and equity_end > 0:
+        annualized_return = equity_end ** (252.0 / n_trading_days) - 1.0
+    else:
+        annualized_return = 0.0
+
     return ReplayReport(
         n_hits=stats["n_hits"],
         win_rate=stats["win_rate"],
@@ -166,6 +217,10 @@ def replay(
         monthly_returns=stats["monthly_returns"],
         avg_holding_bars=stats["avg_holding_bars"],
         min_rr_ratio_recommendation=recommendation,
+        equity_curve=equity_curve,
+        trades=stats.get("trades", []),
+        annualized_return=annualized_return,
+        n_trading_days=n_trading_days,
         metadata={"hits": all_hits, "cfg_min_rr_ratio": cfg.min_rr_ratio},
     )
 
@@ -335,6 +390,8 @@ def _compute_stats(hits: list[dict]) -> dict:
             "pattern_dist": {},
             "monthly_returns": {},
             "avg_holding_bars": 0.0,
+            "equity_curve": [],
+            "trades": [],
         }
 
     n = len(hits)
@@ -378,6 +435,47 @@ def _compute_stats(hits: list[dict]) -> dict:
     # 平均持仓天数
     avg_holding = sum(float(h.get("holding_bars", 0)) for h in hits) / n
 
+    # —— 回测跑通批次：买卖流水 trades + 资金曲线 equity_curve（按 exit_date 排序）——
+    # 物理意图：trades=逐笔流水（前端买卖流水表）；equity_curve=累计资金曲线（前端年化图）。
+    # equity 模型：固定风险占比 RISK_FRAC（每笔冒 AUM 的 RISK_FRAC 比例风险，盈亏按 rr 放大），
+    # equity_t = Π(1 + rr_i × RISK_FRAC)，归一化 equity_0=1.0。年化收益由 replay() 用 CAGR 算
+    #（需区间交易日数，_compute_stats 只见 hits 不知区间）。
+    def _iso(v):
+        if v is None:
+            return ""
+        if isinstance(v, pd.Timestamp):
+            return v.isoformat()
+        return str(v)
+
+    RISK_FRAC = 0.01
+    sorted_hits = sorted(hits, key=lambda h: str(h.get("exit_date", "")))
+    trades = [
+        {
+            "symbol": h.get("symbol"),
+            "pattern_type": h.get("pattern_type"),
+            "entry_date": _iso(h.get("entry_date")),
+            "entry_price": h.get("entry_price"),
+            "exit_date": _iso(h.get("exit_date")),
+            "exit_price": h.get("exit_price"),
+            "exit_reason": h.get("exit_reason"),
+            "rr": h.get("rr"),
+            "holding_bars": h.get("holding_bars"),
+        }
+        for h in sorted_hits
+    ]
+    equity_curve: list = []
+    eq = 1.0
+    run_rr = 0.0
+    for h in sorted_hits:
+        rr = float(h.get("rr", 0.0))
+        run_rr += rr
+        eq *= (1.0 + rr * RISK_FRAC)
+        equity_curve.append({
+            "date": _iso(h.get("exit_date")),
+            "cumulative_rr": run_rr,
+            "equity": eq,
+        })
+
     return {
         "n_hits": n,
         "win_rate": wins / n,
@@ -386,6 +484,8 @@ def _compute_stats(hits: list[dict]) -> dict:
         "pattern_dist": pattern_dist,
         "monthly_returns": monthly_returns,
         "avg_holding_bars": avg_holding,
+        "equity_curve": equity_curve,
+        "trades": trades,
     }
 
 

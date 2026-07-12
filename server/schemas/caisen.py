@@ -161,8 +161,12 @@ class ReplayReportResponse(BaseModel):
         avg_holding_bars：平均持仓天数；
         min_rr_ratio_recommendation：数据驱动的生产 min_rr_ratio 建议（中文）。
 
-    注：ReplayReport.metadata（含完整 hits 列表 + cfg 快照）此处不暴露——
-    前端展示只需聚合统计，完整 hits 列表体积大且含内部字段，按需单独接口提供。
+    回测跑通批次新增（前端展示用，对齐 ReplayReport）：
+        equity_curve：      资金曲线 [{date, cumulative_rr, equity}]（按 exit_date 排序，
+                            前端画年化收益曲线；equity 归一化 equity_0=1.0）；
+        trades：            买卖流水列表（逐笔 entry/exit/rr/holding_bars，前端流水表）；
+        annualized_return： 年化收益 CAGR = (equity_end)^(252/n_trading_days) - 1；
+        n_trading_days：    回放区间交易日数（CAGR 时间维度）。
     """
     n_hits: int
     win_rate: float
@@ -172,3 +176,7 @@ class ReplayReportResponse(BaseModel):
     monthly_returns: Dict[str, float]
     avg_holding_bars: float
     min_rr_ratio_recommendation: str
+    equity_curve: List[Dict[str, Any]] = Field(default_factory=list)
+    trades: List[Dict[str, Any]] = Field(default_factory=list)
+    annualized_return: float = 0.0
+    n_trading_days: int = 0

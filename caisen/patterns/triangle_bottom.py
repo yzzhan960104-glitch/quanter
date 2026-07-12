@@ -141,8 +141,11 @@ def detect(
         8. 【原著硬规则★】突破位置：进度 ∈ [1/2, 3/4]；
         9. 26 周均线过滤（ma26w_filter=True 时）。
     """
-    # 提取所有 pivot 下标（值非 0 的位置）
-    idxs = [i for i in range(len(pivots)) if pivots.iloc[i] != 0]
+    # 性能优化（回测跑通批次）：pandas .iloc 逐元素是 profile 暴露的瓶颈，改 numpy。
+    pv = pivots.values
+    cl = close.values
+    vl = volume.values
+    idxs = (pv != 0).nonzero()[0].tolist()
     if len(idxs) < 5:
         return None   # pivot 不足 5 个，无法构成三角形五点
 
@@ -152,13 +155,7 @@ def detect(
     p5_i, p4_i, p3_i, p2_i, p1_i = (
         idxs[-1], idxs[-2], idxs[-3], idxs[-4], idxs[-5]
     )
-    if not (
-        pivots.iloc[p1_i] == 1
-        and pivots.iloc[p2_i] == -1
-        and pivots.iloc[p3_i] == 1
-        and pivots.iloc[p4_i] == -1
-        and pivots.iloc[p5_i] == 1
-    ):
+    if not (pv[p1_i] == 1 and pv[p2_i] == -1 and pv[p3_i] == 1 and pv[p4_i] == -1 and pv[p5_i] == 1):
         return None   # 末尾五点不构成 峰-谷-峰-谷-峰，非收敛三角形结构
 
     # —— 1b. P1 必须是从前期谷底 P0 反弹的峰（排除下跌起点的"伪三角形"）——
@@ -171,14 +168,14 @@ def detect(
     if len(idxs) < 6:
         return None
     p0_i = idxs[-6]
-    if pivots.iloc[p0_i] != -1:
+    if pv[p0_i] != -1:
         return None   # P1 前一个 pivot 非谷 → P1 不是反弹峰 → 非收敛三角形
 
-    p1 = float(close.iloc[p1_i])
-    p2 = float(close.iloc[p2_i])
-    p3 = float(close.iloc[p3_i])
-    p4 = float(close.iloc[p4_i])
-    p5 = float(close.iloc[p5_i])
+    p1 = float(cl[p1_i])
+    p2 = float(cl[p2_i])
+    p3 = float(cl[p3_i])
+    p4 = float(cl[p4_i])
+    p5 = float(cl[p5_i])
     span = p5_i - p1_i   # 形态跨度用 P1..P5（突破峰为形态完成点）
 
     # —— 2. 【原著硬规则】收敛结构：上缘递减 + 下缘递增 ——
@@ -211,9 +208,9 @@ def detect(
     # 突破日（P5）成交量 ≥ 颈线段（P1→P4，整个三角形主体）平均成交量 × 倍数。
     # 物理语义：颈线段均量代表「三角形蓄势期 baseline 量能」，突破日放量相对该
     # baseline 才有「资金增量进场选择方向」的意义（类推头肩底 P3-P5 颈线段 baseline）。
-    seg = volume.iloc[p1_i : p4_i + 1]
+    seg = vl[p1_i : p4_i + 1]
     breakout_baseline = float(seg.mean()) if len(seg) > 0 else 0.0
-    vol_p5 = float(volume.iloc[p5_i]) if p5_i < len(volume) else 0.0
+    vol_p5 = float(vl[p5_i]) if p5_i < len(vl) else 0.0
     if breakout_baseline > 0 and vol_p5 < breakout_baseline * cfg.breakout_vol_multiplier:
         return None   # 突破未放量，方向选择可靠性差
 

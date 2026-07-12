@@ -137,25 +137,26 @@ def detect(
         8. 26 周均线过滤（ma26w_filter=True 时）。
         （W 底不做 ABC 打底校验——见模块 docstring 注，原 ABC 步骤为自杀式逻辑已移除。）
     """
-    # 提取所有 pivot 下标（值非 0 的位置）
-    idxs = [i for i in range(len(pivots)) if pivots.iloc[i] != 0]
+    # 性能优化（回测跑通批次）：pandas .iloc 逐元素是 profile 暴露的绝对瓶颈（89%），
+    # 改 numpy——pivots.values/close.values/volume.values 是 numpy array，向量 nonzero +
+    # 整形索引比 .iloc 快 ~100×。逻辑等价（.iloc[i] == .values[i]）。
+    pv = pivots.values
+    cl = close.values
+    vl = volume.values
+    # 提取所有 pivot 下标（值非 0 的位置）——向量化 nonzero 替代逐元素 .iloc 遍历。
+    idxs = (pv != 0).nonzero()[0].tolist()
     if len(idxs) < 4:
         return None   # pivot 不足，无法构成 W 底四点
 
     # 从尾部取最后 4 个 pivot，要求顺序为 谷(-1)-峰(1)-谷(-1)-峰(1)
     p4_i, p3_i, p2_i, p1_i = idxs[-1], idxs[-2], idxs[-3], idxs[-4]
-    if not (
-        pivots.iloc[p4_i] == 1
-        and pivots.iloc[p3_i] == -1
-        and pivots.iloc[p2_i] == 1
-        and pivots.iloc[p1_i] == -1
-    ):
+    if not (pv[p4_i] == 1 and pv[p3_i] == -1 and pv[p2_i] == 1 and pv[p1_i] == -1):
         return None   # 末尾四点不构成 谷-峰-谷-峰，非 W 底结构
 
-    p1 = float(close.iloc[p1_i])
-    p2 = float(close.iloc[p2_i])
-    p3 = float(close.iloc[p3_i])
-    p4 = float(close.iloc[p4_i])
+    p1 = float(cl[p1_i])
+    p2 = float(cl[p2_i])
+    p3 = float(cl[p3_i])
+    p4 = float(cl[p4_i])
     span = p4_i - p1_i
 
     # —— 1. 跨度过滤：蔡森原著至少 11 根才具结构意义 ——
@@ -190,20 +191,20 @@ def detect(
 
     # —— 5. 量价配合：右底缩量 + 突破放量 ——
     # 右底缩量：右底 P3 处成交量 ≤ 左底 P1 处成交量 × right_vol_shrink（缩量打底完成）
-    vol_p1 = float(volume.iloc[p1_i]) if p1_i < len(volume) else 0.0
-    vol_p3 = float(volume.iloc[p3_i]) if p3_i < len(volume) else 0.0
+    vol_p1 = float(vl[p1_i]) if p1_i < len(vl) else 0.0
+    vol_p3 = float(vl[p3_i]) if p3_i < len(vl) else 0.0
     if vol_p1 > 0 and vol_p3 > vol_p1 * cfg.right_vol_shrink:
         return None   # 右底未缩量，打底未完成
     # 突破放量：P3→P4 上涨段【最高单日成交量】≥ 颈线段均量 × breakout_vol_multiplier
     # 【Bug5】旧实现只校验 P4 单根量，但实盘价到 P4 见顶时常已缩量，真正放量发生在
     # 突破 P2 的那天（P3→P4 段内）。改用段内最大量——突破段某日放量即认可。
     breakout_baseline = (
-        float(volume.iloc[p2_i:p3_i].mean())
+        float(vl[p2_i:p3_i].mean())
         if (p3_i - p2_i) > 0
-        else float(volume.iloc[p2_i])
+        else float(vl[p2_i])
     )
     breakout_max_vol = (
-        float(volume.iloc[p3_i : p4_i + 1].max()) if p4_i >= p3_i else 0.0
+        float(vl[p3_i : p4_i + 1].max()) if p4_i >= p3_i else 0.0
     )
     if breakout_baseline > 0 and breakout_max_vol < breakout_baseline * cfg.breakout_vol_multiplier:
         return None   # 突破段全段未放量，形态可靠性差
