@@ -46,9 +46,16 @@ NotifyFn = Callable[[str, str], object]
 # 命中即告警，不拦截——权衡：误报可接受（多一条告警），漏报不可接受（实盘被误操作）。
 _DANGER_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("实盘交易路径", re.compile(r"trading/|emt_gateway|qmt_|xtquant", re.IGNORECASE)),
-    ("凭证文件", re.compile(r"\.env\b", re.IGNORECASE)),
+    # Why 精确化为「前后均非 [\w.]」：原 `\.env\b` 因 `.` 非词字符、`\b` 即边界，
+    # 会误命中 `.env.example`/`.envrc`/`dotenv` 等无真值的模板或非凭证路径，
+    # 读这些模板会误告警 → 告警疲劳 → 真高危被忽略。
+    # 现仅在独立 `.env` 文件路径（path/.env、/.env、行首 .env）上命中。
+    ("凭证文件", re.compile(r"(?<![\w.])\.env(?![\w.])", re.IGNORECASE)),
     ("破坏性命令", re.compile(r"\brm\b\s|git\s+push|git\s+reset|--force|mkfs|dd\s+if=", re.IGNORECASE)),
-    ("网络外传", re.compile(r"\bcurl\b|\bwget\b|scp\b|nc\b", re.IGNORECASE)),
+    # Why 双侧 \b：原 `scp\b|nc\b` 缺左侧 `\b`，`nc` 作为子串 + 右边界即命中
+    # `sync`/`func`/`localStorage`/`javascript` 等普通代码（误告警）。
+    # 现四词均加双侧 `\b`，只匹配独立命令名。
+    ("网络外传", re.compile(r"\bcurl\b|\bwget\b|\bscp\b|\bnc\b", re.IGNORECASE)),
     ("下单函数", re.compile(r"place_order|insert_order|activate_plan|order_place", re.IGNORECASE)),
 ]
 

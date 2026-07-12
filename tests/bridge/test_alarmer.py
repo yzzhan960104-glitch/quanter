@@ -111,3 +111,30 @@ def test_notify_exception_does_not_raise():
         _tool_use_event("Bash", {"command": "rm -rf x"}),
         sender_staff_id="staff",
     )
+
+
+def test_safe_text_no_alert_on_sync_func():
+    """nc/scp 加双侧 \\b 后，sync/func/localStorage 等含 nc/scp 子串的代码不误告警。"""
+    mgr = MagicMock()
+    al = Alarmer(notify=lambda msg, level: mgr(msg, level))
+    al.check_event(_tool_use_event("Read", {"file_path": "sync_handler.py"}),
+                   sender_staff_id="staff")
+    al.check_event(_tool_use_event("Read", {"file_path": "utils/func.py"}),
+                   sender_staff_id="staff")
+    al.check_event(_tool_use_event("Edit", {"file_path": "app/localStorage.js"}),
+                   sender_staff_id="staff")
+    mgr.assert_not_called()
+
+
+def test_env_example_template_no_alert():
+    """读 .env.example 模板（无真值）不告警；但读真 .env 仍告警。"""
+    mgr = MagicMock()
+    al = Alarmer(notify=lambda msg, level: mgr(msg, level))
+    # 模板不告警
+    al.check_event(_tool_use_event("Read", {"file_path": ".env.example"}),
+                   sender_staff_id="staff")
+    mgr.assert_not_called()
+    # 真 .env 仍告警
+    al.check_event(_tool_use_event("Read", {"file_path": "/proj/.env"}),
+                   sender_staff_id="staff")
+    mgr.assert_called_once()
