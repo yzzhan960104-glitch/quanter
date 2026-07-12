@@ -142,6 +142,47 @@ celery -A server.celery_app worker -Q explorer -l info
 
 ---
 
+## 钉钉远程驱动 Claude 旁路桥
+
+独立守护进程，用手机钉钉远程驱动本机 `claude` CLI（全放行模式，等同你在终端每个确认按 `y`）。
+适合「人不在电脑前，但要远程让 claude 跑一段分析/改一处代码/看一份回测」的场景。
+
+### 配置（`.env`）
+
+```
+DINGTALK_APP_KEY=<企业内部应用 Client ID>
+DINGTALK_APP_SECRET=<Client Secret>
+DINGTALK_ALLOWED_STAFF_IDS=<你的 staffId，逗号分隔>
+```
+
+凭证在钉钉开放平台「应用开发 → 企业内部应用 → 凭证与基础信息」获取；机器人需开通 Stream 模式并发布上线。其余可选项（`CLAUDE_BIN` / `CLAUDE_WORKDIR` / `BRIDGE_ASK_TIMEOUT` / `BRIDGE_IDLE_TTL` / `BRIDGE_RATE_LIMIT_PER_MIN`）见 `.env.example`。
+
+### 启动
+
+```bash
+python -m bridge            # 等价：python scripts/dingtalk_claude_bridge.py
+```
+
+启动后在钉钉群/单聊 @机器人 发消息即可。机器人把消息透传给本机常驻的 `claude` 子进程，回复分段推回钉钉。
+
+### 安全须知（全放行模式）
+
+- claude 拥有完整文件读写 + 命令执行能力（等同终端每个确认按 `y`）。
+- 仅 `DINGTALK_ALLOWED_STAFF_IDS` 内用户可触发——全放行模式下唯一身份闸。
+- 全量审计：`logs/dingtalk_bridge_audit.jsonl`（每条消息一行，含 sender / conversation_id / text / action）。
+- 高危操作（碰 `trading/`、`.env`、`rm`、下单函数等）实时推钉钉告警（事中知情）。
+- 会话历史由 claude 存本地 `~/.claude/`，进程崩溃后 `--resume <session_id>` 自动续上下文。
+- 降级：把 `bridge/claude_pool.py` 的 `--permission-mode bypassPermissions` 改 `acceptEdits` 即可禁掉命令执行（仍可读写文件）。
+
+### 指令
+
+- 直接发消息 = 与 claude 对话
+- `/new` 重置当前会话上下文（杀进程 + 清映射 + 清 store）
+- `/status` 查看桥的活跃会话列表
+- `/help` 显示帮助
+
+---
+
 ## 许可与贡献
 
 本项目为个人量化研究工程，代码与策略仅供学习交流。贡献请遵循 `CLAUDE.md` 的「全中文 + 显式实现 + 极端边界拷问」工程协议。
