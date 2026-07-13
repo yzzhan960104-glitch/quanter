@@ -15,6 +15,7 @@ class FakeProc:
         self._answer = answer
         self.session_id = session_id
         self.is_alive = True
+        self.is_busy = False        # 模拟"正在跑 ask"；sweeper 据此跳过活进程
         self.last_active = 0.0
         self.ask = AsyncMock(return_value=answer)
         self.aclose = AsyncMock()
@@ -102,4 +103,29 @@ async def test_sweep_preserves_session_id(tmp_path):
     await pool._sweep_once()
     assert "convA" not in pool._procs            # 进程已回收
     assert store.get("convA") == "sid-x"         # session_id 保留（修复点）
+    await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_sweep_skips_busy_process(tmp_path):
+    """正在跑 ask 的进程绝不被 sweeper 回收（修 race：last_active 停在旧值误杀活进程）。
+
+    复现 2026-07-13 22:23 那次 AttributeError：一轮 99s 的 ask 被 sweeper 当空闲杀掉。
+    根因——ClaudePool.ask 只在 ask 完成后才更新 last_active，跑的过程中 last_active
+    停在上一次完成的旧值；距上一条消息 >idle_ttl(900s) 的新 ask 会被下一次 sweep 误判
+    空闲而回收，_kill 把 _proc=None，_read_until_result 下轮 readline 即 AttributeError。
+
+    修法：ClaudeProcess 暴露 is_busy（ask 进行中=True），sweeper 跳过 is_busy 的进程。
+    本用 idle_ttl=0 + last_active=0.0 构造"平时必杀"的条件，验证 is_busy=True 时跳过。
+    """
+    store = SessionStore(str(tmp_path / "s.json"))
+    pool = ClaudePool(cfg=MagicMock(idle_ttl=0, ask_timeout=10), store=store,
+                      proc_factory=lambda cfg, sid: FakeProc())
+    proc = FakeProc()
+    pool._procs["convA"] = proc
+    pool._last_active["convA"] = 0.0   # 极旧 + idle_ttl=0 → 通常必回收
+    proc.is_busy = True                 # 但正在跑 ask → 必须跳过
+    await pool._sweep_once()
+    assert "convA" in pool._procs       # 没被杀
+    assert proc.aclose.await_count == 0
     await pool.aclose_all()

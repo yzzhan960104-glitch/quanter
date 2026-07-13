@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Optional
@@ -40,6 +41,30 @@ from bridge.replier import reply as reply_text_chunks
 from bridge.safety import classify
 
 logger = logging.getLogger(__name__)
+
+# 完成日志的稳定切片（测试据此定位完成行；文案改动只改格式串，不改本常量）。
+_COMPLETION_SENTINEL = "claude 完成"
+
+# 上游模型网关/推理错误检测：claude CLI 把这类错误当 assistant 文本 + result 正常返回，
+# 桥若原样 @ 回钉钉，用户会误以为是 claude 的结论（2026-07-13 10:15 的 529 实事故）。
+# Why 精确匹配 "API Error: \d{3}"：claude 错误文案以此固定前缀打头（529/429/503…），
+# 不会误伤含 "error" 字样的真实回答（如"该策略 error rate 低"）。捕获三位数字用于
+# 失败提示展示，而非把整段错误原文当答案发出。
+_UPSTREAM_ERR_RE = re.compile(r"API Error: (\d{3})")
+
+
+def _honest_failure_for_upstream(code: str) -> str:
+    """上游错误 → 给用户的诚实失败状态（不重试、不用错误原文当答案）。
+
+    Why 不重试：529 这类瞬态错误 claude CLI 内部已带退避重试（202s 的实事故即已耗尽），
+    桥层再重试多半再撞过载且烧钱；改为明确告知用户"非 claude 结论、稍后重发即可"，
+    让用户掌握节奏。上下文已落盘（session_id 在），重发即续，无需 /new。
+    """
+    return (
+        f"⚠️ 本轮未产出结论：上游模型网关返回 {code}（过载/限流），"
+        f"这不是 claude 的回答。\n请稍后重发即可，上下文已保留。"
+    )
+
 
 # dingtalk-stream SDK（Task 8 Step 0 已核对真实接口，0.24.3）
 import dingtalk_stream
@@ -214,9 +239,14 @@ class BridgeHandler(dingtalk_stream.ChatbotHandler):
 
         try:
             answer = await self._pool.ask(conv_id, text, sender, on_event=on_event)
-            logger.info("← claude 完成 (%ds, 工具 %d 次, 输出 %d 字)",
+            # 完成日志带上 answer 实际内容（截断 200 字）：原先只打"输出 N 字"，
+            # 无法分辨那 N 字是错误文本还是真实结论（2026-07-13 10:15 的 250 字
+            # 实为 529，得反复对照才知）。带内容后一眼可辨。
+            logger.info("← %s (%ds, 工具 %d 次, 输出 %d 字) | %s",
+                        _COMPLETION_SENTINEL,
                         int(time.monotonic() - started),
-                        len(progress["tools"]), progress["chars"])
+                        len(progress["tools"]), progress["chars"],
+                        answer[:200].replace("\n", " "))
         except Exception as e:  # noqa: BLE001
             # 失败诊断：运行时长/工具次数/输出字数/最后动作，定位卡住根因
             elapsed = int(time.monotonic() - started)
@@ -228,6 +258,13 @@ class BridgeHandler(dingtalk_stream.ChatbotHandler):
             answer = (f"⚠️ claude 处理失败（{elapsed}s 后）：{e}\n"
                       f"已运行：工具 {len(progress['tools'])} 次，"
                       f"输出 {progress['chars']} 字，最后动作：{last}")
+        # 上游模型网关错误（529/429/503…）会被 claude 当文本返回，桥若原样发出，
+        # 用户误以为是 claude 的结论。命中即改发诚实失败状态（不重试，原文不外发）。
+        m = _UPSTREAM_ERR_RE.search(answer or "")
+        if m:
+            logger.warning("claude 返回实为上游错误 %s，改发诚实失败状态（不重试，原文截断）：%s",
+                           m.group(1), (answer or "")[:120].replace("\n", " "))
+            answer = _honest_failure_for_upstream(m.group(1))
         await self._reply_fn(self, msg, answer)
 
     # ---- 频控 ----

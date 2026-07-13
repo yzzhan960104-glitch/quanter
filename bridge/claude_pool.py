@@ -41,6 +41,12 @@ class ClaudeProcess:
         self._proc: Optional[asyncio.subprocess.Process] = None
         # 同会话串行锁：claude 进程一次只能处理一轮，第二条 ask 必须等第一条 result
         self._lock = asyncio.Lock()
+        # 是否正处在一轮 ask 当中（_read_until_result 读循环进行时为 True）。
+        # Why 暴露给池：sweeper 据此跳过活进程——ask 只在完成时才更新 last_active，
+        # 跑的过程中 last_active 停在旧值，纯按 last_idle 判定会把"距上一条消息
+        # >idle_ttl 的长 ask"误判空闲而回收，_kill 置 _proc=None → 读循环撞
+        # AttributeError（2026-07-13 22:23 实事故）。is_busy 是"有在飞请求"的硬判据。
+        self._busy: bool = False
 
     # ---- 对外属性 ----
     @property
@@ -50,6 +56,11 @@ class ClaudeProcess:
     @property
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
+
+    @property
+    def is_busy(self) -> bool:
+        """是否正处在一轮 ask 读循环中。sweeper 见 True 必跳过（防误杀活进程）。"""
+        return self._busy
 
     # ---- 进程生命周期 ----
     async def _spawn(self) -> None:
@@ -129,6 +140,15 @@ class ClaudeProcess:
         accumulated: list[str] = []
         assert self._proc is not None and self._proc.stdout is not None
         while True:
+            # 读循环中被外部把 _proc 置空（/new reset、桥退出 aclose_all 等）的防御：
+            # 不加本守卫，下一行 self._proc.stdout.readline() 会抛裸 AttributeError
+            # （2026-07-13 22:23 实事故的报错栈即此）。改抛 RuntimeError，落到 ask
+            # 的 (RuntimeError, LimitOverrunError) 重建重试链——对用户至多"慢一点
+            # 重试成功"，而非以 AttributeError 上抛崩溃。
+            if self._proc is None:
+                raise RuntimeError(
+                    "claude _proc 在读循环中被置空（可能被 reset/回收/退出杀掉）"
+                )
             # 不打断 claude：readline 无超时，无限等。
             # Why 无 idle 超时：claude 深度思考/多轮工具/慢模型可能长时间产出
             # thinking_tokens 或在工具间停顿；人为设 idle 上限会误杀正常长任务
@@ -163,30 +183,34 @@ class ClaudeProcess:
     ) -> str:
         """发一轮问答。超时/崩溃 → kill → --resume 重建重试 1 次。"""
         async with self._lock:  # 同会话串行
-            last_err: Optional[Exception] = None
-            for attempt in range(1, _MAX_ATTEMPTS + 1):
-                # 懒启动 or 进程已死则（重新）拉起
-                if not self.is_alive:
-                    await self._spawn()
-                try:
-                    # 写 user 帧（stream-json 一行一帧，尾加 \n）
-                    frame = ce.make_user_frame(text) + "\n"
-                    assert self._proc is not None and self._proc.stdin is not None
-                    self._proc.stdin.write(frame.encode("utf-8"))
-                    await self._proc.stdin.drain()
-                    # 读到 result 为止；空闲超时在 _read_until_result 内部逐行判定
-                    #（claude 持续输出帧就不算超时，连续 ask_timeout 无输出才判卡死）
-                    return await self._read_until_result(on_event)
-                except (RuntimeError, asyncio.LimitOverrunError) as e:
-                    # 仅在 claude 自己出问题时重建：进程崩(stdout EOF)或极端单帧超限。
-                    # 不打断正在思考/工作的 claude（无 idle 超时、无总时长上限、无限流）。
-                    last_err = e
-                    logger.warning("claude 第 %d 轮失败 (%s)，kill 后重建重试",
-                                   attempt, type(e).__name__)
-                    await self._kill()
-                    # 循环回到 _spawn：已知 session_id 会自动 --resume 续上下文
-            # 重试用尽：抛出，让上层回错误文本给钉钉（不无限重试）
-            raise RuntimeError(f"claude 连续 {_MAX_ATTEMPTS} 轮失败：{last_err}")
+            self._busy = True  # 标记"有在飞 ask"，sweeper 据此跳过本进程
+            try:
+                last_err: Optional[Exception] = None
+                for attempt in range(1, _MAX_ATTEMPTS + 1):
+                    # 懒启动 or 进程已死则（重新）拉起
+                    if not self.is_alive:
+                        await self._spawn()
+                    try:
+                        # 写 user 帧（stream-json 一行一帧，尾加 \n）
+                        frame = ce.make_user_frame(text) + "\n"
+                        assert self._proc is not None and self._proc.stdin is not None
+                        self._proc.stdin.write(frame.encode("utf-8"))
+                        await self._proc.stdin.drain()
+                        # 读到 result 为止；空闲超时在 _read_until_result 内部逐行判定
+                        #（claude 持续输出帧就不算超时，连续 ask_timeout 无输出才判卡死）
+                        return await self._read_until_result(on_event)
+                    except (RuntimeError, asyncio.LimitOverrunError) as e:
+                        # 仅在 claude 自己出问题时重建：进程崩(stdout EOF)或极端单帧超限。
+                        # 不打断正在思考/工作的 claude（无 idle 超时、无总时长上限、无限流）。
+                        last_err = e
+                        logger.warning("claude 第 %d 轮失败 (%s)，kill 后重建重试",
+                                       attempt, type(e).__name__)
+                        await self._kill()
+                        # 循环回到 _spawn：已知 session_id 会自动 --resume 续上下文
+                # 重试用尽：抛出，让上层回错误文本给钉钉（不无限重试）
+                raise RuntimeError(f"claude 连续 {_MAX_ATTEMPTS} 轮失败：{last_err}")
+            finally:
+                self._busy = False  # 无论成功失败都归位，允许后续空闲回收
 
 
 # ===================== ClaudePool（进程池） =====================
@@ -296,10 +320,22 @@ class ClaudePool:
         now = time.monotonic()
         # 用 >= 而非 >：idle_ttl=0 表示「立即回收」（测试明意）；TTL 边界上也算过期，
         # 避免进程恰好在 idle_ttl 整数秒时永远不被回收的边界抖动。
-        stale = [
-            cid for cid, t in self._last_active.items()
-            if now - t >= self._cfg.idle_ttl
-        ]
+        stale = []
+        for cid, t in self._last_active.items():
+            if now - t < self._cfg.idle_ttl:
+                continue
+            proc = self._procs.get(cid)
+            # 关键守卫：正在跑 ask 的进程（is_busy）绝不回收。
+            # Why：ask 只在完成时更新 last_active，跑的过程中 last_active 停在旧值，
+            # 若仅按 idle 判定，"距上一条消息 >idle_ttl 的长 ask"会被误判空闲而回收——
+            # _kill 置 _proc=None，_read_until_result 下轮 readline 即 AttributeError
+            # （2026-07-13 22:23 实事故：99s 的 ask 被 sweeper 当空闲杀）。
+            # is_busy 是"有在飞请求"的硬判据，优先于 idle_ttl。
+            if proc is not None and getattr(proc, "is_busy", False):
+                logger.info("会话 %s 虽空闲超 %ss，但 ask 进行中，跳过回收（防误杀活进程）",
+                            cid, self._cfg.idle_ttl)
+                continue
+            stale.append(cid)
         for cid in stale:
             logger.info("会话 %s 空闲超 %ss，回收进程（保留 session_id，下次 --resume 续）",
                         cid, self._cfg.idle_ttl)

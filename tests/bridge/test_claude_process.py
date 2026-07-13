@@ -158,3 +158,87 @@ async def test_on_event_callback_invoked(monkeypatch, tmp_path):
     assert "assistant" in seen_types
     assert "result" in seen_types
     await cp_obj.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ask_marks_busy_during_read(monkeypatch, tmp_path):
+    """ask 执行期间 is_busy=True、结束后 False（sweeper 据此跳过活进程，修 race）。
+
+    on_event 在 _read_until_result 读循环内触发，此刻 is_busy 必为 True；
+    ask 返回后归位 False，确保非跑动状态可被正常空闲回收。
+    """
+    from bridge import claude_pool as cp
+    from bridge.config import BridgeConfig
+
+    cfg = BridgeConfig(
+        app_key="k", app_secret="s", allowed_staff_ids=frozenset({"x"}),
+        claude_bin="claude", workdir=str(tmp_path), ask_timeout=10,
+        idle_ttl=900, rate_limit_per_min=10,
+        session_store_path=str(tmp_path / "s.json"),
+        audit_log_path=str(tmp_path / "a.jsonl"), log_path=str(tmp_path / "l.log"),
+    )
+    proc, fake_create = _make_proc_mock([INIT_LINE, ASSISTANT_REAL, RESULT_LINE])
+    monkeypatch.setattr(cp.asyncio, "create_subprocess_exec", fake_create)
+
+    busy_seen: list[bool] = []
+    cp_obj = ClaudeProcess(cfg)
+    await cp_obj.ask("hi", on_event=lambda ev: busy_seen.append(cp_obj.is_busy))
+
+    assert any(busy_seen), f"读期间应 is_busy=True，实测 {busy_seen}"
+    assert cp_obj.is_busy is False      # 结束后归位
+    await cp_obj.aclose()
+
+
+@pytest.mark.asyncio
+async def test_read_until_result_guard_when_proc_nulled(monkeypatch, tmp_path):
+    """读循环中 _proc 被外部置 None（/new reset / 异常回收）→ 抛清晰 RuntimeError 走重建，
+    而非裸 AttributeError 崩溃。
+
+    回归保护 2026-07-13 22:23 那条 `AttributeError: 'NoneType' has no attribute 'stdout'`：
+    即便 sweeper 不再杀活进程，任何把 _proc 置空的路径都不该以 AttributeError 上抛——
+    RuntimeError 会被 ask 的重建重试链兜住，对用户只是"慢一点重试成功"而非"崩溃失败"。
+    """
+    from bridge import claude_pool as cp
+    from bridge.config import BridgeConfig
+
+    cfg = BridgeConfig(
+        app_key="k", app_secret="s", allowed_staff_ids=frozenset({"x"}),
+        claude_bin="claude", workdir=str(tmp_path), ask_timeout=10,
+        idle_ttl=900, rate_limit_per_min=10,
+        session_store_path=str(tmp_path / "s.json"),
+        audit_log_path=str(tmp_path / "a.jsonl"), log_path=str(tmp_path / "l.log"),
+    )
+    # 第 1 组：吐 1 行 assistant 后让 readline 把 _proc 置 None（模拟外部杀进程）；
+    # 第 2 组（重建后）：直接吐 result → 重试成功。
+    seqs = [[ASSISTANT_REAL], [RESULT_LINE]]
+    state = {"call": 0, "idx": 0}
+    cp_ref: dict = {}
+
+    async def readline():
+        idx_seq = max(0, state["call"] - 1)
+        seq = seqs[idx_seq] if idx_seq < len(seqs) else []
+        idx = state["idx"]
+        state["idx"] = idx + 1
+        if idx < len(seq):
+            # 第 1 组首行读出前，模拟外部把 _proc 置空
+            if idx_seq == 0 and idx == 0 and "o" in cp_ref:
+                cp_ref["o"]._proc = None
+            return (seq[idx] + "\n").encode("utf-8")
+        return b""  # EOF
+
+    proc = MagicMock()
+    proc.stdout = MagicMock(); proc.stdout.readline = readline
+    proc.stdin = MagicMock(); proc.stdin.write = MagicMock(); proc.stdin.drain = AsyncMock()
+    proc.returncode = None; proc.wait = AsyncMock(return_value=0)
+    proc.kill = MagicMock(); proc.terminate = MagicMock()
+
+    async def fake_create(*a, **kw):
+        state["call"] += 1; state["idx"] = 0; proc.returncode = None
+        return proc
+
+    monkeypatch.setattr(cp.asyncio, "create_subprocess_exec", fake_create)
+    cp_obj = ClaudeProcess(cfg)
+    cp_ref["o"] = cp_obj
+    answer = await cp_obj.ask("hi")
+    assert answer == "hello world"   # 经 guard→RuntimeError→重建重试→result 恢复
+    await cp_obj.aclose()
