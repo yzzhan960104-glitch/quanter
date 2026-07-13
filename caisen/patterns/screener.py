@@ -4,10 +4,11 @@
 物理定位（CLAUDE.md 极简 + 显式原则）：
     本模块是蔡森形态学流水线的"指挥官"——对标的池逐个串行执行：
         流动性过滤 → 微观波动率过滤(micro_filter) → 因果 ZigZag(causal_pivots + ATR)
-        → W底/头肩底识别 → 命中收集 → 按近 30 日成交额降序输出候选 DataFrame。
-    所有阈值/识别逻辑全部委托给既有组件（RiskManager / causal_pivots / w_bottom /
-    head_shoulder），本模块只负责"串接 + 收集 + 排序"，不引入新的识别规则——
-    这是显式至上原则的体现：编排逻辑扁平可审计，每一步都能追溯到既有组件。
+        → 遍历形态注册表(PATTERNS)识别 → 命中收集 → 按近 30 日成交额降序输出候选 DataFrame。
+    所有阈值/识别逻辑全部委托给既有组件（RiskManager / causal_pivots + 各形态 detect），
+    本模块只负责"串接 + 收集 + 排序"，不引入新的识别规则——形态经 caisen.patterns.registry
+    的 PATTERNS 显式注册表声明式接入（方案B，新形态只改 registry 加一行，本模块零改），
+    编排逻辑扁平可审计，每一步都能追溯到既有组件。
 
 编排链路（每步硬否决，任一失败即跳过该 symbol）：
     1. 流动性过滤：近 30 日均成交额 < liquidity_min_amount → 跳过
@@ -15,13 +16,13 @@
     2. micro_filter：近 hv_window 的 HV 分位 > hv_max_quantile → 跳过
        （HV 异常标的处于无序暴动，颈线突破统计有效性大幅下降）；
     3. causal_pivots + ATR：因果 ZigZag 提取 pivot（未来函数隔离，T 日看 T-1 及之前）；
-    4. w_bottom.detect / head_shoulder.detect：
-       - W 底用 cfg.max_pattern_depth（默认 0.50，标准 W 底 depth≈0.47；Task 8 review
-         Important#1 校准——旧默认 0.30 会否决所有标准 W 底，生产漏检）；
-       - 头肩底用 cfg.hs_max_pattern_depth（默认 1.0，标准头肩底 depth≈0.74；头部幅度
-         天然深于 W 底颈线高度比，需分类型宽阈值，否则合法头肩底被误否决）；
-    5. 命中收集：任一形态 is_valid=True 即收集为候选，pattern_type 标记具体形态；
-       两个形态都命中时取颈线满足空间更大者（depth 更大 = 头部更深 = 量度涨幅更大）；
+    4. 遍历形态注册表 PATTERNS（caisen.patterns.registry）：对每个 PatternMeta 做
+       enable 开关过滤 → depth 覆写(model_copy 替换 max_pattern_depth，如头肩底用
+       hs_max_pattern_depth、三角形用 triangle_max_pattern_depth，头部/边长幅度天然
+       深于 W底颈线高度比，需分类型宽阈值) → meta.detect 识别；单形态异常 try/except
+       隔离（一个形态抛错只跳过该形态，不影响同 symbol 其他形态）；
+    5. 命中收集：任一形态 is_valid=True 即收集为候选，pattern_type=meta.name 标记具体形态；
+       多形态命中时取颈线满足空间更大者（depth 更大 = 头部更深 = 量度涨幅更大）；
     6. 排序：按近 30 日成交额(amount30d)降序，优先输出流动性最好的候选。
 
 输出 DataFrame 字段物理意图：
@@ -33,15 +34,16 @@
                     收盘价代表"当前突破状态"。精算颈线满足目标价留给 Task 9 plan.py，
                     此字段仅作排序展示）；
     neckline_price：颈线价（形态识别组件返回的 neckline_price）；
-    depth：颈线高度比（形态幅度，用于双形态择优）；
+    depth：颈线高度比（形态幅度，用于多形态择优）；
     tension：幅宽张力（高度/宽度，张力越强交易价值越高）；
     amount30d：近 30 日均成交额（排序键，流动性度量）；
     pattern_height：仅 triangle_bottom 候选输出（三角形边长 P1−P2，供 plan.py 满足点用）；
     is_valid：形态综合判定是否有效（恒为 True，因为仅收集命中候选）。
 
 风控边界（CLAUDE.md 极简 + 量化风控拷问）：
-    - 任一组件异常不中断整个扫描：单个 symbol 抛异常时记录 None 并跳过，保证
-      标的池扫描完整性（避免一只标的的数据脏值拖垮全市场扫描）；
+    - 任一组件异常不中断整个扫描：双层隔离——内层单形态 detect 异常 try/except 跳过
+      该形态（debug 日志记 meta.name + symbol），外层单 symbol 异常记录 None 跳过整个
+      标的，保证标的池扫描完整性（避免一只标的/一个形态的数据脏值拖垮全市场扫描）；
     - micro_filter/流动性过滤在形态识别前执行，前置剔除无序/冷门标的，既加速也防
       在无意义标的上浪费识别算力；
     - causal_pivots 已保证 pivot 因果无未来函数，本模块纯前向消费 pivot 序列。
