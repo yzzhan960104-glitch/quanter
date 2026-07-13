@@ -44,6 +44,7 @@ from pydantic import ValidationError
 from caisen import plan as plan_mod
 from caisen import backtest_replay
 from caisen import replay_runs
+from caisen import replay_tasks_db
 from caisen import storage
 from data import symbol_names
 from caisen.config import StrategyConfig
@@ -504,6 +505,26 @@ def _empty_replay_report() -> ReplayReportResponse:
         annualized_return=0.0,
         n_trading_days=0,
     )
+
+
+# ---------------------------------------------------------------------------
+# 异步回测编排（Spec 1 · Task 5：run_replay_async 写 SQLite PENDING，调度器 poll 派发）
+# ---------------------------------------------------------------------------
+def run_replay_async(req) -> str:
+    """提交异步回测：写 PENDING 行，立即返回 task_id（不阻塞）。
+
+    物理意图（Spec 1 闭环地基）：全市场回测耗时几十分钟~几小时，同步 HTTP 必超时。
+    本函数只写任务行（PENDING）立即返回，调度器 daemon 线程后续 poll 到该任务 →
+    submit worker 子进程跑 replay → 写回 SUCCESS/FAILED/CANCELLED。进度/取消经回调
+    + SQLite 全程可观测。
+
+    参数：
+        req：ReplayRequest（或任意含 model_dump 的对象；字段 start/end/universe/cfg_override）。
+    返回：
+        task_id（前端据此轮询 GET /replay/tasks/{task_id} 观测进度与结果）。
+    """
+    replay_tasks_db.init_db()               # 幂等建表（lifespan 亦建，重复无害）
+    return replay_tasks_db.create_task(req.model_dump())
 
 
 # ---------------------------------------------------------------------------

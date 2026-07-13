@@ -880,3 +880,46 @@ class TestReplayRunsPersistence:
         """非法 run_id（路径跳板）→ 返 False（不删目录外文件）。"""
         assert caisen_service.delete_replay_run("../etc/passwd") is False
         assert caisen_service.delete_replay_run("") is False
+
+
+# ---------------------------------------------------------------------------
+# 8. run_replay_async：异步回测提交（Spec 1 · Task 5）
+# ---------------------------------------------------------------------------
+class TestRunReplayAsync:
+    """run_replay_async(req) -> task_id：写 SQLite PENDING，立即返回（不阻塞）。
+
+    覆盖：提交即 PENDING + 字段无损保留 + universe None/list 语义。
+    老同步 run_replay 链路暂保留（Task 6 统一切换为 async + 切 list/get/delete 读 SQLite）。
+    """
+
+    def test_run_replay_async_writes_pending(self, tmp_path, monkeypatch):
+        """提交 → PENDING + task_id + start/end/universe/cfg_override 无损保留。"""
+        from caisen import replay_tasks_db
+        monkeypatch.setattr(replay_tasks_db, "_DEFAULT_DB_PATH", str(tmp_path / "t.db"))
+        replay_tasks_db.init_db()
+
+        req = ReplayRequest(
+            start="2024-01-01", end="2024-06-01",
+            universe=["000001.SZ"], cfg_override={"min_rr_ratio": 1.5},
+        )
+        tid = caisen_service.run_replay_async(req)
+
+        got = replay_tasks_db.get_task(tid)
+        assert got["status"] == "PENDING"
+        assert got["start"] == "2024-01-01"
+        assert got["end"] == "2024-06-01"
+        assert got["universe"] == ["000001.SZ"]
+        assert got["cfg_override"] == {"min_rr_ratio": 1.5}
+        assert got["universe_n"] == 1
+
+    def test_run_replay_async_universe_none_is_all_market(self, tmp_path, monkeypatch):
+        """universe=None（默认）→ 全市场语义（universe_n=-1, universe_json=null）。"""
+        from caisen import replay_tasks_db
+        monkeypatch.setattr(replay_tasks_db, "_DEFAULT_DB_PATH", str(tmp_path / "t.db"))
+        replay_tasks_db.init_db()
+
+        req = ReplayRequest(start="2024-01-01", end="2024-06-01")   # universe 默认 None
+        tid = caisen_service.run_replay_async(req)
+        got = replay_tasks_db.get_task(tid)
+        assert got["universe"] is None
+        assert got["universe_n"] == -1
