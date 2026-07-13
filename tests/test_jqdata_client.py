@@ -88,3 +88,20 @@ def test_quota_near_limit_raises_and_alerts(monkeypatch):
         c.fetch_minute_bars("000001.SZ", "2024-01-02", "2024-01-03")
     # 守护红线：临限时绝不可发起 get_price 拉取（否则越界扣费）
     assert not jq.get_price.called
+
+
+def test_quota_check_does_not_double_call_spare(monkeypatch):
+    """#7：临限判定 _spare() 合并局部变量，不重复 get_query_count 网络查询。
+
+    原实现判定 + 告警消息各调一次 _spare()（每次都是 get_query_count 网络），临限触发
+    时多一次配额查询。修复后临限路径仅 _calibrate(1) + 判定(1) = 2 次（原 3 次）。
+    """
+    _reset_singleton()
+    monkeypatch.setenv("JQDATA_USERNAME", "u")
+    monkeypatch.setenv("JQDATA_PASSWORD", "p")
+    jq = _mock_jq(monkeypatch, spare=10_000)  # spare<5万 → 临限路径
+    c = JQDataClient()
+    with pytest.raises(QuotaExceeded):
+        c.fetch_minute_bars("000001.SZ", "2024-01-02", "2024-01-03")
+    # _calibrate 首次校准(1) + 临限判定局部变量(1) = 2；原实现多一次告警消息重复调用
+    assert jq.get_query_count.call_count == 2

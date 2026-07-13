@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from trading.execution_gateway import BaseExecutionGateway, OrderRequest, OrderResult
@@ -81,6 +82,17 @@ OrderUpdateCallback = Callable[[Mapping[str, Any]], Awaitable[None]]
 # 断线自动重连退避序列（秒，指数退避，B-8）：最多 5 次。
 # Why 有上限：无限重连会刷爆柜台登录限频；耗尽后保持锁态 + 告警，等人工介入。
 _RECONNECT_BACKOFFS: tuple[int, ...] = (2, 4, 8, 16, 30)
+
+# 网关调用超时（#9）：connect/submit/cancel 经 run_in_executor 投线程池，须 asyncio.wait_for
+# 兜底——柜台无响应时底层 C++ 同步调用永久阻塞，wait_for 让事件循环及时脱困恢复响应。
+# 固有限制：超时仅放弃等待，底层线程仍在跑（Python 无法真 kill 线程），事件循环不卡死即可。
+_CONNECT_TIMEOUT: float = 30.0   # login 含网络握手 + 柜台鉴权，30s 兜底
+_ORDER_TIMEOUT: float = 10.0     # insertOrder/cancelOrder 柜台通常亚秒级，10s 兜底防挂死
+
+# 订单流水 GC（#10）：_orders 终态单调增长致内存泄漏，超阈值触发 cleanup_orders。
+# 保留近 7 日终态单（对账/审计窗口）+ 全部非终态单（等回报推进），仅删终态且超期者。
+_ORDERS_GC_THRESHOLD = 2000
+_ORDERS_GC_KEEP_SECONDS = 7 * 86400
 
 
 def _map_emt_status(status: int) -> OrderState:
@@ -301,10 +313,12 @@ class EmtExecutionGateway(BaseExecutionGateway):
             return api, session
 
         try:
-            api, session = await self._loop.run_in_executor(None, _bootstrap)
+            # #9：wait_for 兜底防柜台无响应永久阻塞事件循环（超时→ConnectionError→_reconnect 重试）。
+            api, session = await asyncio.wait_for(
+                self._loop.run_in_executor(None, _bootstrap), timeout=_CONNECT_TIMEOUT)
         except Exception as exc:
             self._lock_down = True
-            raise ConnectionError(f"EMT login 异常：{exc}") from exc
+            raise ConnectionError(f"EMT login 异常/超时(>{_CONNECT_TIMEOUT}s)：{exc}") from exc
 
         # _EmtCallback 实例即 TraderApi（createTraderApi 是 in-place 初始化，见 tradertest.py）
         self._api = api
@@ -464,11 +478,13 @@ class EmtExecutionGateway(BaseExecutionGateway):
             return self._api.insertOrder(order_dict, self._session)
 
         try:
-            order_emt_id = await self._loop.run_in_executor(None, _do_order)
+            # #9：wait_for 兜底防 insertOrder 永久阻塞事件循环（超时返 FAILED）。
+            order_emt_id = await asyncio.wait_for(
+                self._loop.run_in_executor(None, _do_order), timeout=_ORDER_TIMEOUT)
         except Exception as exc:
-            logger.exception("EMT insertOrder 异常 symbol=%s", order.symbol)
+            logger.exception("EMT insertOrder 异常/超时 symbol=%s", order.symbol)
             return OrderResult(order_id=order.order_id or "", state=OrderState.FAILED,
-                               message=f"下单异常：{exc}")
+                               message=f"下单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
 
         if not order_emt_id:  # 0=失败
             err = {}
@@ -501,11 +517,13 @@ class EmtExecutionGateway(BaseExecutionGateway):
             return self._api.cancelOrder(order_emt_id, self._session)
 
         try:
-            rc = await self._loop.run_in_executor(None, _do_cancel)
+            # #9：wait_for 兜底防 cancelOrder 永久阻塞事件循环（超时返 FAILED）。
+            rc = await asyncio.wait_for(
+                self._loop.run_in_executor(None, _do_cancel), timeout=_ORDER_TIMEOUT)
         except Exception as exc:
-            logger.exception("EMT cancelOrder 异常 order_id=%s", order_id)
+            logger.exception("EMT cancelOrder 异常/超时 order_id=%s", order_id)
             return OrderResult(order_id=order_id, state=OrderState.FAILED,
-                               message=f"撤单异常：{exc}")
+                               message=f"撤单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
 
         if not rc:  # 0=失败
             err = {}
@@ -531,12 +549,41 @@ class EmtExecutionGateway(BaseExecutionGateway):
     def get_order(self, order_id: str) -> Optional[Mapping[str, Any]]:
         return self._orders.get(order_id)
 
+    def cleanup_orders(self, keep_seconds: float = _ORDERS_GC_KEEP_SECONDS) -> int:
+        """GC 终态且超 keep_seconds 的订单流水（#10 防内存泄漏）。
+
+        保留：非终态单（SUBMITTED/PARTIAL_FILLED 等待回报推进）+ 终态但未超期（近 N 日对账窗口）。
+        删除：终态（FILLED/CANCELLED/REJECTED/FAILED/PARTIAL_CANCELLED）且 _gc_ts 超 keep_seconds。
+        触发：_process_order_update 在 _orders 超 _ORDERS_GC_THRESHOLD 时自动调，亦可由 beat 周期调。
+        """
+        now = time.time()
+        terminal = {
+            OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED,
+            OrderState.FAILED, OrderState.PARTIAL_CANCELLED,
+        }
+        stale = [
+            oid for oid, rec in self._orders.items()
+            if rec.get("state") in terminal
+            and now - rec.get("_gc_ts", now) > keep_seconds
+        ]
+        for oid in stale:
+            del self._orders[oid]
+        if stale:
+            logger.info("EMT 订单流水 GC：删除 %s 条终态超期单（保留 %s 条）",
+                        len(stale), len(self._orders))
+        return len(stale)
+
     # ----------------------------------------------- 主线程处理（被投递）
     def _process_order_update(self, update: Mapping[str, Any]) -> None:
         """主线程：更新订单流水 + 触发上层异步回调（与 qmt_gateway 同款）。"""
         oid = str(update.get("order_emt_id") or update.get("order_id") or "")
         if oid:
-            self._orders[oid] = dict(update)
+            rec = dict(update)
+            rec["_gc_ts"] = time.time()   # #10 GC 时间基准（终态单按此判定超期）
+            self._orders[oid] = rec
+        # #10：_orders 终态单调增长致内存泄漏，超阈值触发 GC（保留近 N 日终态 + 全部非终态）。
+        if len(self._orders) > _ORDERS_GC_THRESHOLD:
+            self.cleanup_orders()
         if self._on_order_update is not None:
             try:
                 self._loop.create_task(self._on_order_update(update))  # type: ignore[union-attr]

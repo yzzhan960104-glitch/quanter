@@ -28,11 +28,10 @@
     - 部分成交/网络异常：tick 内 try/except 包裹单计划异常（不中断本轮其它计划），
       单计划失败不影响整体（边界审查·边界隔离）。
 
-注：check_exit 当前实现优先级为 止损 > 止盈(第一波) > 时间止损，与 plan 完整代码逐字
-对齐（蔡森原著止损优先于止盈——防日内闪崩穿止损后反弹的假象）。回放验证器
-（backtest_replay._simulate_one_trade）离场优先级为 止损 > take_profit_2x > take_profit，
-两者在"止损优先 + 第一波满足即离场"语义上一致（简化单笔全平），差异在 take_profit_2x
-预检——已记入 concerns，后续分级止盈时统一收口。
+注：check_exit 离场优先级为 止损 > take_profit_2x(第二波) > take_profit(第一波) > 时间止损，
+与回放验证器（backtest_replay._simulate_one_trade）逐字对齐（#16 修复：消除双源真理）。
+蔡森原著止损优先于止盈——防日内闪崩穿止损后反弹的假象。第二波优先于第一波：触及 2x
+按更优离场档判定（回测同口径按 2x 价记 rr）。pos 缺 take_profit_2x 时降级只看第一波。
 """
 from __future__ import annotations
 
@@ -134,12 +133,22 @@ def check_exit(pos: dict, bar: dict, bars_held: int, cfg) -> ExitDecision:
     if bar["low"] <= stop:
         return ExitDecision(ExitAction.CLOSE, ExitReason.STOP_LOSS, new_stop)
 
-    # —— 优先级 2：止盈（日内最高价触及/突破第一波满足 → 平，记盈）——
+    # —— 优先级 2：第二波满足 take_profit_2x（与回测 backtest_replay 对齐，#16 修复）——
+    # 物理意图：回测 _simulate_one_trade 离场优先级为 stop_loss > take_profit_2x >
+    # take_profit，本函数原仅看第一波 take_profit，构成「回测一套/实盘一套」双源真理——
+    # 回测在触及 2x 时按 2x 价记大盈 rr、实盘却可能在第一波即市价平仓，系统性使回测
+    # avg_rr 虚高于实盘，可能放行实盘亏损策略通过上线 gate。现与回测同口径：先判 2x
+    # （更优离场档）。pos 缺 take_profit_2x（None/缺失）时降级跳过本档，向后兼容。
+    tp2x = pos.get("take_profit_2x")
+    if tp2x is not None and bar["high"] >= tp2x:
+        return ExitDecision(ExitAction.CLOSE, ExitReason.TAKE_PROFIT, new_stop)
+
+    # —— 优先级 3：止盈（日内最高价触及/突破第一波满足 → 平，记盈）——
     # 物理意图：第一波满足点（颈线 + 1×H）达成，平仓锁盈（简化单笔全平）。
     if bar["high"] >= pos["take_profit"]:
         return ExitDecision(ExitAction.CLOSE, ExitReason.TAKE_PROFIT, new_stop)
 
-    # —— 优先级 3：时间止损（持仓达 max_holding_bars 且浮盈 < threshold → 平）——
+    # —— 优先级 4：时间止损（持仓达 max_holding_bars 且浮盈 < threshold → 平）——
     # 物理意图：超时未达目标 + 浮盈不足阈值 = 资金占用机会成本过高，离场释放资金。
     # 浮盈比 = (close - entry) / entry（相对成交价的涨幅比例）。
     if bars_held >= cfg.max_holding_bars:

@@ -23,6 +23,7 @@ akshare 1.18.64 关键函数签名（2026-07-01 实测复核）：
 """
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as _dt
 import logging
 
@@ -31,6 +32,21 @@ import pandas as pd
 from data.resilience import akshare_breaker, akshare_limiter
 
 logger = logging.getLogger(__name__)
+
+# #8 akshare 超时执行器：ak.* 内部 requests 无超时，可挂死工作线程（离线 sync 路径）。
+# 独立 ThreadPoolExecutor + future.result(timeout) 包裹：超时抛 TimeoutError，由各 fetch
+# 方法的外层 except 捕获 → 熔断 record_failure + 空降级（与既有异常处理同口径）。
+# 固有限制：超时仅放弃等待，底层 akshare 线程仍在跑（Python 无法真 kill 线程）。
+_AK_TIMEOUT: float = 30.0
+_ak_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="akshare-timeout")
+
+
+def _call_ak(func, *args, **kwargs):
+    """akshare 调用包线程池超时（#8）。超时抛 TimeoutError（调用方外层 except 捕获→熔断+空降级）。"""
+    fut = _ak_executor.submit(func, *args, **kwargs)
+    return fut.result(timeout=_AK_TIMEOUT)   # 超时抛 TimeoutError，其他异常透传
+
 
 # 空降级 DataFrame（无列定义的裸空表，供熔断/失败时返回）
 # Why 用 .copy() 返回：_EMPTY 是模块级共享单例，若直接返回引用，下游若对返回值做
@@ -86,7 +102,8 @@ class AKShareClient:
             #   （同文件 fetch_individual_fund_flow 已同样 split('.')[0] 剥离，这里对齐）。
             code = symbol.split(".")[0]
             # akshare 日期参数为 YYYYMMDD 连续串（实测复核），需剥离 '-'
-            raw = ak.stock_zh_a_hist(
+            raw = _call_ak(
+                ak.stock_zh_a_hist,
                 symbol=code,
                 period="daily",
                 start_date=start.replace("-", ""),
@@ -153,11 +170,11 @@ class AKShareClient:
             import akshare as ak
 
             if kind == "shrzgm":
-                df = ak.macro_china_shrzgm()
+                df = _call_ak(ak.macro_china_shrzgm)
             elif kind == "money_supply":
-                df = ak.macro_china_money_supply()
+                df = _call_ak(ak.macro_china_money_supply)
             elif kind == "shibor":
-                df = ak.macro_china_shibor_all()
+                df = _call_ak(ak.macro_china_shibor_all)
             elif kind == "dr007":
                 # ⚠️ 事实审查（I-4 修正：如实标注接口现状，杜绝"实测签名"幻觉）：
                 #   ak.repo_rate_hist() 真实签名确为 repo_rate_hist(start_date, end_date)，
@@ -171,10 +188,11 @@ class AKShareClient:
                 #   真 DR007 接口待换源（候选：bond_zh_us_rate / macro_china_bond_public 等，
                 #   但需实网联调验证列名与频率，本调用在此之前保持现状不传日期区间）。
                 try:
-                    raw = ak.repo_rate_hist()
+                    raw = _call_ak(ak.repo_rate_hist)
                 except Exception:
                     # 兜底：rate_interbank 参数语义实测为 (market, symbol, indicator)
-                    raw = ak.rate_interbank(
+                    raw = _call_ak(
+                        ak.rate_interbank,
                         market="上海银行间同业拆放利率", symbol="Shibor", indicator="7天")
                 # 空数据：中性返空，不计熔断
                 if raw is None or raw.empty:
@@ -235,8 +253,8 @@ class AKShareClient:
             for back in range(8):
                 d = (_dt.date.today() - _dt.timedelta(days=back)).strftime("%Y%m%d")
                 try:
-                    sse = ak.stock_margin_detail_sse(date=d)
-                    szse = ak.stock_margin_detail_szse(date=d)
+                    sse = _call_ak(ak.stock_margin_detail_sse, date=d)
+                    szse = _call_ak(ak.stock_margin_detail_szse, date=d)
                     cand = [x for x in (sse, szse) if x is not None and not x.empty]
                     if cand:
                         parts = cand
@@ -267,7 +285,7 @@ class AKShareClient:
         try:
             import akshare as ak
 
-            df = ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
+            df = _call_ak(ak.stock_sector_fund_flow_rank, indicator="今日", sector_type="行业资金流")
             if df is None or df.empty:
                 return _EMPTY.copy()
             akshare_breaker.record_success()
@@ -297,7 +315,7 @@ class AKShareClient:
             # 剥离交易所后缀，akshare 只要纯数字代码
             code = symbol.split(".")[0]
             market = "sh" if symbol.upper().endswith(".SH") else "sz"
-            df = ak.stock_individual_fund_flow(stock=code, market=market)
+            df = _call_ak(ak.stock_individual_fund_flow, stock=code, market=market)
             if df is None or df.empty:
                 return _EMPTY.copy()
             akshare_breaker.record_success()
@@ -320,7 +338,7 @@ class AKShareClient:
             return _EMPTY.copy()
         try:
             import akshare as ak
-            raw = ak.stock_hsgt_hist_em(symbol="北向资金")
+            raw = _call_ak(ak.stock_hsgt_hist_em, symbol="北向资金")
             if raw is None or raw.empty:
                 return _EMPTY.copy()
             akshare_breaker.record_success()
@@ -364,7 +382,7 @@ class AKShareClient:
             return _EMPTY.copy()
         try:
             import akshare as ak
-            raw = ak.stock_lhb_detail_daily_sina(date=date.replace("-", ""))
+            raw = _call_ak(ak.stock_lhb_detail_daily_sina, date=date.replace("-", ""))
             if raw is None or raw.empty:
                 return _EMPTY.copy()
             akshare_breaker.record_success()

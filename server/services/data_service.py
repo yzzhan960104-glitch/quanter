@@ -37,6 +37,12 @@ _SYNC_TIMEOUT_SEC = 600
 # .failed 文件保留的 stderr 尾部字符数（防巨量日志撑爆 /datasets 响应体）
 _ERR_TAIL_CHARS = 500
 
+# trigger_sync 哨兵 check-then-set 锁（#15）：防并发触发同 key 同步。
+# 物理意图：原 exists 检查与写哨兵非原子，两并发请求都过检查 → 两个 daemon 子进程互覆盖
+# 同一 parquet（半截写入损坏）。Lock 包 check-then-set 使哨兵检查+写入原子化，第二个请求
+# 必看到第一个写的哨兵而返"进行中"。daemon 子进程在锁外异步跑（不持锁阻塞其它 key）。
+_trigger_lock = threading.Lock()
+
 # 项目根：data_service.py 位于 server/services/，上溯三级 = quanter/。
 # 用绝对路径拼 script，保证 uvicorn 以任意 CWD 启动都能定位 scripts/sync_*.py。
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -114,7 +120,7 @@ def _loaded_data_span(key: str) -> Tuple[Optional[str], Optional[str]]:
         import pandas as pd  # 延迟 import，避免模块级耦合
         from data.lake_reader import DataLakeReader
         reader = DataLakeReader.get_instance()
-        df = reader._lakes.get(key)  # 同进程内受控读私有缓存（扁平化，拒绝过度封装）
+        df = reader.get_lake(key)  # #4：公开读 API，替代穿透 _lakes 私有缓存
         if df is None or len(df) == 0:
             return None, None
         idx = df.index
@@ -200,23 +206,26 @@ def trigger_sync(key: str) -> Dict[str, Any]:
     if not spec or not spec.get("script"):
         raise KeyError(f"未登记的数据集或缺失同步脚本: {key}")
     os.makedirs(SYNCING_DIR, exist_ok=True)
-    # 重复触发保护：syncing 中直接拒绝二次派发
-    if os.path.exists(_sentinel_path(key)):
-        return {"key": key, "status": "syncing", "message": "同步进行中，请勿重复触发"}
-    # 清掉历史 .failed，本次重试
-    failed_path = _sentinel_path(key, failed=True)
-    if os.path.exists(failed_path):
+    # #15：Lock 包 check-then-set，原子化哨兵检查+写入（防并发触发同 key 双子进程互覆盖 parquet）。
+    # 锁内只做哨兵 check-改-写；起 daemon 子进程在锁外（异步，不持锁阻塞其它 key 的 trigger）。
+    with _trigger_lock:
+        # 重复触发保护：syncing 中直接拒绝二次派发
+        if os.path.exists(_sentinel_path(key)):
+            return {"key": key, "status": "syncing", "message": "同步进行中，请勿重复触发"}
+        # 清掉历史 .failed，本次重试
+        failed_path = _sentinel_path(key, failed=True)
+        if os.path.exists(failed_path):
+            try:
+                os.remove(failed_path)
+            except OSError:
+                pass
+        # 写 syncing 哨兵（含触发时刻，便于排查）
         try:
-            os.remove(failed_path)
-        except OSError:
-            pass
-    # 写 syncing 哨兵（含触发时刻，便于排查）
-    try:
-        with open(_sentinel_path(key), "w", encoding="utf-8") as f:
-            f.write(_now_iso())
-    except OSError as exc:
-        logger.warning("写 syncing 哨兵失败(key=%s): %s", key, exc)
-    # 起 daemon 线程跑子进程（daemon=True：进程退出时自动回收，不阻塞 uvicorn 关停）
+            with open(_sentinel_path(key), "w", encoding="utf-8") as f:
+                f.write(_now_iso())
+        except OSError as exc:
+            logger.warning("写 syncing 哨兵失败(key=%s): %s", key, exc)
+    # 起 daemon 线程跑子进程（锁外：daemon=True 进程退出时自动回收，不阻塞 uvicorn 关停）
     threading.Thread(target=_run_sync_subprocess, args=(key,), daemon=True).start()
     return {"key": key, "status": "syncing", "message": "已触发同步，后台子进程执行中"}
 

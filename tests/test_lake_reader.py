@@ -47,6 +47,17 @@ def test_offline_mode_when_parquet_missing(tmp_path):
     assert r.get_cross_section("2024-01-02").empty
 
 
+def test_get_lake_returns_df_and_none(tmp_path):
+    """#4：get_lake 公开读返指定湖原始 df（替代穿透 _lakes）；missing key → None。"""
+    path = tmp_path / "lake.parquet"
+    _make_lake_df().to_parquet(path)
+    r = DataLakeReader()
+    r.load(str(path), key="daily")
+    df = r.get_lake("daily")
+    assert df is not None and len(df) == 4
+    assert r.get_lake("nonexistent") is None   # 无此 key → None（调用方自行降级）
+
+
 def test_get_timeseries_on_unsorted_parquet(tmp_path):
     # Important 1：date 层级乱序的 parquet —— 验证 load() 已对索引排序，
     # get_timeseries 在 start 早于数据最早日期、end 晚于最晚日期的范围内切片不抛 KeyError，

@@ -121,9 +121,9 @@ async def get_positions() -> list:
     """
     gw = get_gateway()
     if gw is None:
-        raise RuntimeError("QMT 网关未装配（unavailable）")
+        raise RuntimeError("交易网关未装配（unavailable）")
     if getattr(gw, "is_locked", False) or not getattr(gw, "_connected", False):
-        raise RuntimeError("QMT 网关未连接或已锁定，拒绝对账")
+        raise RuntimeError("交易网关未连接或已锁定，拒绝对账")
     raw = await gw._fetch_broker_positions()   # {stock_code: volume}
     if not raw:
         return []
@@ -222,7 +222,7 @@ def emergency_halt() -> dict:
     """
     gw = get_gateway()
     if gw is None:
-        raise RuntimeError("QMT 网关未装配（unavailable），无法熔断")
+        raise RuntimeError("交易网关未装配（unavailable），无法熔断")
 
     if getattr(gw, "_lock_down", False):
         return {"halted": True, "message": "已处于熔断态（lock_down 已置位，跳过重复处理）"}
@@ -305,7 +305,7 @@ async def connect_gateway() -> None:
     """
     gw = get_gateway()
     if gw is None:
-        raise RuntimeError("QMT 网关未装配（unavailable），请配置 QMT_USERDATA_PATH/QMT_ACCOUNT_ID")
+        raise RuntimeError("交易网关未装配（unavailable），请配置 EMT_USER/EMT_PASSWORD 或 QMT_USERDATA_PATH/QMT_ACCOUNT_ID")
     await gw.connect()
 
 
@@ -329,7 +329,7 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool) -> 
     """
     gw = get_gateway()
     if gw is None:
-        raise RuntimeError("QMT 网关未装配（unavailable）")
+        raise RuntimeError("交易网关未装配（unavailable）")
 
     # 1. 预取行情（涨跌停关 + 金额估算用）；失败返 None，挡板跳过涨跌停关
     quote = await qmt_market_data.get_quote(order.symbol)
@@ -390,7 +390,7 @@ async def cancel_order(order_id: str) -> dict:
     """撤单（透传网关）。"""
     gw = get_gateway()
     if gw is None:
-        raise RuntimeError("QMT 网关未装配（unavailable）")
+        raise RuntimeError("交易网关未装配（unavailable）")
     result = await gw.cancel_order(order_id)
     return {"order_id": result.order_id, "state": result.state.name, "message": result.message}
 

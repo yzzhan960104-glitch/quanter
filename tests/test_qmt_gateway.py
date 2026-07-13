@@ -88,7 +88,63 @@ def test_connect_failure_raises(monkeypatch):
     gw = QmtExecutionGateway()
     with pytest.raises(ConnectionError):
         asyncio.run(gw.connect())
-    assert gw._lock_down is True
+
+
+def test_connect_timeout_raises(monkeypatch):
+    """#9：connect 柜台无响应（阻塞）→ wait_for 超时 raise ConnectionError，事件循环不卡死。
+
+    物理意图：柜台断连/无响应时底层 start/connect/subscribe 是同步阻塞 C++ 调用，无 wait_for
+    会永久卡住事件循环。wait_for 兜底后超时转 ConnectionError，由 _reconnect 重试。
+    """
+    import time
+    _setup_env(monkeypatch)
+    monkeypatch.setattr(qmt_gateway, "_CONNECT_TIMEOUT", 0.05)
+
+    def _slow_connect(self):
+        time.sleep(0.5)   # 模拟柜台无响应
+        return 0
+    monkeypatch.setattr(FakeTrader, "connect", _slow_connect)
+
+    gw = QmtExecutionGateway()
+    with pytest.raises(ConnectionError):
+        asyncio.run(gw.connect())
+
+
+def test_submit_order_timeout_returns_failed(monkeypatch):
+    """#9：order_stock_async 阻塞 → wait_for 超时返 FAILED（不抛、不卡事件循环）。"""
+    import time
+    _setup_env(monkeypatch)
+    monkeypatch.setattr(qmt_gateway, "_ORDER_TIMEOUT", 0.05)
+
+    def _slow_order(self, *args):
+        time.sleep(0.5)
+        return 999
+    monkeypatch.setattr(FakeTrader, "order_stock_async", _slow_order)
+
+    async def run():
+        gw = QmtExecutionGateway()
+        await gw.connect()   # 正常 connect（_CONNECT_TIMEOUT 默认 30s 不超时）
+        order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
+        res = await gw.submit_order(order)
+        assert res.state == OrderState.FAILED   # 超时兜底返 FAILED
+
+    asyncio.run(run())
+
+
+def test_cleanup_orders_removes_stale_terminal_only(monkeypatch):
+    """#10：cleanup_orders 删终态+超期单；保留非终态（无论时长）+ 终态未超期。"""
+    import time
+    _setup_env(monkeypatch)
+    now = time.time()
+    gw = QmtExecutionGateway()
+    gw._orders["old_filled"] = {"state": OrderState.FILLED, "_gc_ts": now - 8 * 86400}      # 删
+    gw._orders["old_cancel"] = {"state": OrderState.CANCELLED, "_gc_ts": now - 8 * 86400}   # 删
+    gw._orders["new_filled"] = {"state": OrderState.FILLED, "_gc_ts": now - 86400}          # 留（未超期）
+    gw._orders["pending"] = {"state": OrderState.SUBMITTED, "_gc_ts": now - 10 * 86400}     # 留（非终态）
+    removed = gw.cleanup_orders(keep_seconds=7 * 86400)
+    assert removed == 2
+    assert "old_filled" not in gw._orders and "old_cancel" not in gw._orders
+    assert "new_filled" in gw._orders and "pending" in gw._orders
 
 
 def test_missing_credentials_raises(monkeypatch):

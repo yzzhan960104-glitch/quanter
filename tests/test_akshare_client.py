@@ -60,6 +60,24 @@ def test_failure_returns_empty_df(monkeypatch):
     assert df.empty   # 绝不抛
 
 
+def test_call_ak_timeout_returns_empty(monkeypatch):
+    """#8：ak.* 挂死（内部 requests 无超时）→ _call_ak 超时抛 TimeoutError → fetch 返空 DF。
+
+    物理意图：akshare 内部 requests 无 timeout，柜台/网络无响应会永久阻塞工作线程。
+    _call_ak 用 ThreadPoolExecutor + future.result(timeout) 兜底，超时抛 TimeoutError，
+    由 fetch 外层 except 捕获 → 熔断 record_failure + 空降级（与既有异常同口径）。
+    """
+    import time
+    _reset()
+    monkeypatch.setattr("data.clients.akshare_client._AK_TIMEOUT", 0.05)
+
+    def _slow(*a, **k):
+        time.sleep(0.3)   # 模拟柜台无响应（>0.05s 超时）
+    monkeypatch.setattr("akshare.stock_zh_a_hist", _slow)
+    df = AKShareClient().fetch_daily_hist("000001.SZ", "2024-01-02", "2024-01-03")
+    assert df.empty   # 超时→TimeoutError→外层 except→空降级
+
+
 def test_dr007_stale_data_returns_empty(monkeypatch):
     """DR007 接口返回过期数据(停在2020)时必须返空 DF，绝不泄漏给下游 CreditRegime。
 

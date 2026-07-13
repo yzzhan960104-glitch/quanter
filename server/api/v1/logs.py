@@ -131,26 +131,37 @@ class RingBufferLogHandler(logging.Handler):
 log_stream_hub = LogStreamHub()
 
 
+# #12 SSE 空闲保活间隔（秒）：无日志时定期发 ': ping' 注释帧，防中间代理/nginx
+# （默认 60s proxy_read_timeout）静默断开空闲 SSE 连接。15s 留足代理超时余量。
+_SSE_KEEPALIVE_TIMEOUT: float = 15.0
+
+
+async def _sse_event_gen():
+    """SSE 事件生成器：日志帧 + 空闲 ping 保活（#12）。
+
+    无日志时 q.get() 永久阻塞 → SSE 连接无数据流动 → 中间代理/nginx 静默断开。
+    wait_for 超时则发 SSE 注释帧 ': ping\\n\\n'（客户端不触发 message，仅保连接活跃）。
+    生命周期：subscribe 在生成器启动时建立，客户端断开（生成器被取消）时 finally 注销。
+    """
+    q = log_stream_hub.subscribe()
+    try:
+        while True:
+            try:
+                record = await asyncio.wait_for(q.get(), timeout=_SSE_KEEPALIVE_TIMEOUT)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"   # SSE 注释帧：客户端忽略，仅保活防代理断开
+                continue
+            # SSE 序列化统一出口（allow_nan=False）：日志帧若意外含 NaN/不可序列化
+            # 则跳过，绝不崩日志流（丢一条日志优于断整条流）
+            frame = sse_dumps(record, logger)
+            if frame is None:
+                continue
+            yield frame
+    finally:
+        log_stream_hub.unsubscribe(q)
+
+
 @router.get("/stream", summary="实时日志 SSE 流")
 async def stream_logs() -> StreamingResponse:
-    """SSE：每条日志为一帧 `data: {json}\\n\\n`。客户端用 EventSource 订阅。
-
-    生命周期：订阅在 endpoint 进入时建立，客户端断开（生成器被取消）时 finally
-    注销队列，杜绝泄漏。
-    """
-
-    async def event_gen():
-        q = log_stream_hub.subscribe()
-        try:
-            while True:
-                record = await q.get()
-                # SSE 序列化统一出口（allow_nan=False）：日志帧若意外含 NaN/不可序列化
-                # 则跳过，绝不崩日志流（丢一条日志优于断整条流）
-                frame = sse_dumps(record, logger)
-                if frame is None:
-                    continue
-                yield frame
-        finally:
-            log_stream_hub.unsubscribe(q)
-
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    """SSE：每条日志为一帧 `data: {json}\\n\\n`；空闲 15s 发 ': ping' 保活。客户端用 EventSource 订阅。"""
+    return StreamingResponse(_sse_event_gen(), media_type="text/event-stream")

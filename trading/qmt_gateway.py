@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from trading.execution_gateway import BaseExecutionGateway, OrderRequest, OrderResult
@@ -35,6 +36,17 @@ logger = logging.getLogger(__name__)
 # 断线自动重连退避序列（秒，指数退避，B-8）：与 emt_gateway 同口径，最多 5 次。
 # Why 有上限：无限重连刷爆柜台登录限频；耗尽后保持锁态 + 告警等人工介入。
 _RECONNECT_BACKOFFS: tuple[int, ...] = (2, 4, 8, 16, 30)
+
+# 网关调用超时（#9）：与 emt_gateway 同口径——connect/submit/cancel 经 run_in_executor 投
+# 线程池，须 asyncio.wait_for 兜底防柜台无响应永久阻塞事件循环。固有限制：超时仅放弃等待，
+# 底层线程仍在跑（Python 无法真 kill 线程），事件循环不卡死即可。
+_CONNECT_TIMEOUT: float = 30.0   # start/connect/subscribe 含网络握手，30s 兜底
+_ORDER_TIMEOUT: float = 10.0     # order_stock_async/cancel_order_stock 通常亚秒级，10s 兜底
+
+# 订单流水 GC（#10）：_orders 终态单调增长致内存泄漏，超阈值触发 cleanup_orders。
+# 保留近 7 日终态单（对账/审计窗口）+ 全部非终态单（等回报推进），仅删终态且超期者。
+_ORDERS_GC_THRESHOLD = 2000
+_ORDERS_GC_KEEP_SECONDS = 7 * 86400
 
 # === xtquant 延迟/容错导入 ====================================================
 # Why 延迟容错：xtquant 是 Windows + MiniQMT 客户端专属的 C++ 绑定，开发/CI/单测
@@ -240,7 +252,13 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             sub_rc = self._trader.subscribe(self._account)
             return connect_rc, sub_rc
 
-        connect_rc, sub_rc = await self._loop.run_in_executor(None, _bootstrap)
+        try:
+            # #9：wait_for 兜底防柜台无响应永久阻塞事件循环（超时→ConnectionError→_reconnect）。
+            connect_rc, sub_rc = await asyncio.wait_for(
+                self._loop.run_in_executor(None, _bootstrap), timeout=_CONNECT_TIMEOUT)
+        except Exception as exc:
+            self._lock_down = True
+            raise ConnectionError(f"QMT connect 异常/超时(>{_CONNECT_TIMEOUT}s)：{exc}") from exc
 
         if connect_rc != 0:
             # connect 返回非 0 即连接失败（xttrader.md：返回 0 表示成功）
@@ -360,12 +378,14 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             )
 
         try:
-            seq = await self._loop.run_in_executor(None, _do_order)
+            # #9：wait_for 兜底防 order_stock_async 永久阻塞事件循环（超时返 FAILED）。
+            seq = await asyncio.wait_for(
+                self._loop.run_in_executor(None, _do_order), timeout=_ORDER_TIMEOUT)
         except Exception as exc:
-            # C++ 调用异常（如会话失效）：记 FAILED 而非冒泡，让上层状态机兜底
-            logger.exception("QMT order_stock_async 异常 symbol=%s", order.symbol)
+            # C++ 调用异常/超时（如会话失效）：记 FAILED 而非冒泡，让上层状态机兜底
+            logger.exception("QMT order_stock_async 异常/超时 symbol=%s", order.symbol)
             return OrderResult(order_id=order.order_id or "", state=OrderState.FAILED,
-                               message=f"下单异常：{exc}")
+                               message=f"下单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
 
         if seq is None or seq < 0:
             # seq == -1：柜台拒单（资金不足/涨跌停/参数非法等），具体原因由 on_order_error 推送
@@ -405,11 +425,13 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             return self._trader.cancel_order_stock(self._account, real_order_id)
 
         try:
-            rc = await self._loop.run_in_executor(None, _do_cancel)
+            # #9：wait_for 兜底防 cancel_order_stock 永久阻塞事件循环（超时返 FAILED）。
+            rc = await asyncio.wait_for(
+                self._loop.run_in_executor(None, _do_cancel), timeout=_ORDER_TIMEOUT)
         except Exception as exc:
-            logger.exception("QMT cancel_order_stock 异常 order_id=%s", order_id)
+            logger.exception("QMT cancel_order_stock 异常/超时 order_id=%s", order_id)
             return OrderResult(order_id=order_id, state=OrderState.FAILED,
-                               message=f"撤单异常：{exc}")
+                               message=f"撤单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
 
         if rc == 0:
             # 撤单指令已发出，最终状态以 on_stock_order 推送的 CANCELLED 为准
@@ -438,6 +460,31 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         """查询本地缓存的最新订单回报（主线程同步读，无锁安全）。"""
         return self._orders.get(order_id)
 
+    def cleanup_orders(self, keep_seconds: float = _ORDERS_GC_KEEP_SECONDS) -> int:
+        """GC 终态且超 keep_seconds 的订单流水（#10 防内存泄漏）。
+
+        保留：非终态单（SUBMITTED/PARTIAL_FILLED 等待回报推进）+ 终态但未超期（近 N 日对账窗口）。
+        删除：终态（FILLED/CANCELLED/REJECTED/FAILED/PARTIAL_CANCELLED）且 _gc_ts 超期。
+        注：_seq_to_real/_seq_to_client（seq 解耦映射）量小且清理有撤单时序风险（async_response
+        与 on_stock_order 时序窗口内映射仍需保留），暂不 GC，留 follow-up。
+        """
+        now = time.time()
+        terminal = {
+            OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED,
+            OrderState.FAILED, OrderState.PARTIAL_CANCELLED,
+        }
+        stale = [
+            oid for oid, rec in self._orders.items()
+            if rec.get("state") in terminal
+            and now - rec.get("_gc_ts", now) > keep_seconds
+        ]
+        for oid in stale:
+            del self._orders[oid]
+        if stale:
+            logger.info("QMT 订单流水 GC：删除 %s 条终态超期单（保留 %s 条）",
+                        len(stale), len(self._orders))
+        return len(stale)
+
     # ------------------------------------------------- 主线程处理（被投递）
     def _process_order_update(self, update: Mapping[str, Any]) -> None:
         """
@@ -450,7 +497,12 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # order_id 统一转 str 做 key（兼容 on_stock_order 的 int 真实单号与 seq-str）
         order_id = str(update.get("order_id", ""))
         if order_id:
-            self._orders[order_id] = dict(update)  # type: ignore[assignment]
+            rec = dict(update)
+            rec["_gc_ts"] = time.time()   # #10 GC 时间基准（终态单按此判定超期）
+            self._orders[order_id] = rec  # type: ignore[assignment]
+        # #10：_orders 终态单调增长致内存泄漏，超阈值触发 GC（保留近 N 日终态 + 全部非终态）。
+        if len(self._orders) > _ORDERS_GC_THRESHOLD:
+            self.cleanup_orders()
 
         if self._on_order_update is not None:
             try:

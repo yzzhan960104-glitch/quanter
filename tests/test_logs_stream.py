@@ -75,3 +75,25 @@ def test_publish_removes_dead_subscriber_when_loop_closed():
     # 死订阅者已从 _subs 移除，且其队列不在集合内
     assert len(hub._subs) == 0
     assert all(sq is not q1 for (sq, sl) in hub._subs)
+
+
+def test_sse_event_gen_emits_ping_on_idle(monkeypatch):
+    """#12：无日志时 _sse_event_gen 在超时后 yield ': ping' 保活（防代理断开空闲连接）。
+
+    物理意图：原 q.get() 无超时永久阻塞，SSE 连接无数据流动会被 nginx/代理 60s 静默断开。
+    wait_for 超时发 SSE 注释帧 ': ping\\n\\n'（客户端不触发 message，仅保连接活跃）。
+    用独立空 hub（无历史缓冲）+ 极小超时加速测试。
+    """
+    import server.api.v1.logs as logs_mod
+    from server.api.v1.logs import _sse_event_gen, LogStreamHub
+
+    monkeypatch.setattr(logs_mod, "_SSE_KEEPALIVE_TIMEOUT", 0.05)
+    empty_hub = LogStreamHub()   # 空缓冲：subscribe 后 q.get() 无历史可取 → 必走 ping 路径
+    monkeypatch.setattr(logs_mod, "log_stream_hub", empty_hub)
+
+    async def run():
+        gen = _sse_event_gen()
+        return await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+
+    frame = asyncio.run(run())
+    assert frame == ": ping\n\n"

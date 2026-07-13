@@ -155,6 +155,28 @@ def test_macro_sector_flow_empty_when_no_lake(client, monkeypatch):
     assert body["pool"] == []
 
 
+def test_macro_sector_flow_pool_from_reader_symbols(client, monkeypatch):
+    """#5：活跃股池走内存湖 reader.symbols()，不重读 408MB daily parquet。
+
+    物理意图：原实现每请求 read_parquet(daily) 仅取 symbol 列表，是 dashboard 性能黑洞；
+    改走 reader.symbols()（内存湖 index）零 IO。mock reader.symbols 返固定列表验证接线，
+    且 sector parquet 不存在时 sectors=[] 而 pool 来自 reader.symbols（证明不再依赖 daily parquet）。
+    """
+    from data.lake_reader import DataLakeReader
+    from config import LAKE_CONFIG
+    fake_reader = type("R", (), {
+        "symbols": lambda self, lake=None: ["000001.SZ", "600000.SH", "510300.SH"],
+    })()
+    monkeypatch.setattr(DataLakeReader, "get_instance", lambda: fake_reader)
+    monkeypatch.setitem(LAKE_CONFIG["lakes"], "sector", "/nonexistent/sector.parquet")
+
+    resp = client.get("/api/v1/macro/sector/flow")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sectors"] == []
+    assert [p["symbol"] for p in body["pool"]] == ["000001.SZ", "600000.SH", "510300.SH"]
+
+
 # --------------------------------------------------------------
 # 契约 5：/macro/factors/{symbol} 无时序 → 返 {atr: None} 不抛
 # --------------------------------------------------------------

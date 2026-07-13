@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 
@@ -27,10 +28,11 @@ class StrictJSONResponse(JSONResponse):
     """
 
     def render(self, content: Any) -> bytes:
-        # allow_nan=False：NaN/Inf 在此抛 ValueError，FastAPI 转 500 响应（早抛）。
+        # #11：先过 jsonable_encoder 把 Pydantic/datetime/Decimal/np 标量等转 JSON 兼容类型，
+        # 再 json.dumps(allow_nan=False)。原实现直接 json.dumps(content) 绕过 jsonable_encoder，
+        # 端点若返回未标量化对象（datetime / DataFrame.to_dict 的 Timestamp 等）会抛 TypeError
+        # 致 500。allow_nan=False 保留：jsonable_encoder 不防 NaN/Inf，仍需 json.dumps 兜底早抛
+        # （本类设计意图——NaN 当场暴露而非推给前端）。
         # ensure_ascii=False：与 SSE 路径（sse_dumps）一致，中文（symbol/错误信息）原样输出。
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8")
+        safe = jsonable_encoder(content)
+        return json.dumps(safe, ensure_ascii=False, allow_nan=False).encode("utf-8")

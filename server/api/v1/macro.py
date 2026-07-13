@@ -147,12 +147,13 @@ async def credit() -> dict[str, Any]:
     离线降级：macro 湖未载入（离线/CI 无 parquet）→ 返 {series: {}} 不抛，
     前端渲染空图表容错。
 
-    Why 直读 _lakes["macro"] 而非 get_timeseries：macro 湖是 DatetimeIndex
+    Why reader.get_lake("macro") 而非 get_timeseries：macro 湖是 DatetimeIndex
     （无 symbol 层，全市场级宏观指标），DataLakeReader.get_timeseries 内部
-    df.xs(symbol, level="symbol") 对无 symbol 层的湖会抛 KeyError，故必须直读。
+    df.xs(symbol, level="symbol") 对无 symbol 层的湖会抛 KeyError，故用公开
+    get_lake 直读原始 df（#4：替代穿透 _lakes 私有成员）。
     """
     reader = DataLakeReader.get_instance()
-    df = reader._lakes.get("macro")
+    df = reader.get_lake("macro")
     # 离线降级短路：无 macro 湖或空 df → 返空结构（不抛，前端容错）
     if df is None or df.empty:
         return {"series": {}}
@@ -184,20 +185,19 @@ async def sector_flow() -> dict[str, Any]:
     import pandas as _pd
     from config import LAKE_CONFIG
     # sector 资金流是【快照排名表】（RangeIndex，非时序），DataLakeReader 只载时序湖会跳过它，
-    # 故此处直读 parquet；活跃股池从 daily 湖的唯一标的取（select_active_pool 选出的 50 只）。
+    # 故此处直读 parquet（小表 ~500 行，IO 可忽略）。
     sectors: list = []
-    pool: list = []
     _sp = LAKE_CONFIG["lakes"]["sector"]
     if _os.path.exists(_sp):
         _sdf = _pd.read_parquet(_sp)
         if _sdf is not None and not _sdf.empty:
             sectors = _sdf.head(20).to_dict("records")
-    _dp = LAKE_CONFIG["lakes"]["daily"]
-    if _os.path.exists(_dp):
-        _ddf = _pd.read_parquet(_dp)
-        if hasattr(_ddf.index, "get_level_values"):
-            _syms = list(_ddf.index.get_level_values("symbol").unique())[:50]
-            pool = [{"symbol": str(s)} for s in _syms]
+    # #5：活跃股池改走内存湖 reader.symbols()，杜绝每请求重读 408MB daily parquet。
+    # 原实现每次请求 read_parquet(daily) 仅为取 symbol 列表，是 dashboard 性能黑洞；
+    # reader.symbols() 走内存湖 index 零 IO。CI 无 daily 湖时返 [] → pool 空（离线降级）。
+    reader = DataLakeReader.get_instance()
+    syms = reader.symbols(lake="daily")[:50]
+    pool = [{"symbol": str(s)} for s in syms]
     return {"sectors": sectors, "pool": pool}
 
 

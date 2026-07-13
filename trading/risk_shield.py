@@ -107,14 +107,24 @@ def check_order(
         return RiskDecision(True, f"单笔股数 {order.qty} 超上限 {max_shares}", "max_shares")
 
     # 关9：涨跌停封板（quote 缺失 → 跳过，xtdata 不可用时的降级）
+    # #6 修复：按 side 区分（A 股涨跌停物理正确性）。
+    #   涨停(last≥high)：买盘封死 → 能卖不能买 → 仅 BUY 拦（买不进），SELL 放行。
+    #   跌停(last≤low)：卖盘封死 → 能买不能卖 → 仅 SELL 拦（卖不出），BUY 放行。
+    #   原实现不分 side：SELL 涨停被拦=止盈/止损 SELL 无法发出（错过离场=敞口失控，
+    #   本关最致命的实盘风险）；BUY 跌停被拦=错过建仓。蔡森 tick_exit 的止损/止盈/
+    #   时间止损全走 SELL，涨停时必须放行 SELL。stage 名沿用 high_limit/low_limit
+    #   不破前端/审计契约。
     if quote is not None:
         last = quote.get("last_price")
         high = quote.get("high_limit")
         low = quote.get("low_limit")
-        if last is not None and high is not None and last >= high:
-            return RiskDecision(True, f"{order.symbol} 已涨停（{last}>={high}）", "high_limit")
-        if last is not None and low is not None and last <= low:
-            return RiskDecision(True, f"{order.symbol} 已跌停（{last}<={low}）", "low_limit")
+        side = order.side.lower()
+        if side == "buy" and last is not None and high is not None and last >= high:
+            return RiskDecision(
+                True, f"{order.symbol} 涨停封板，BUY 无法成交（{last}≥{high}）", "high_limit")
+        if side == "sell" and last is not None and low is not None and last <= low:
+            return RiskDecision(
+                True, f"{order.symbol} 跌停封板，SELL 无法成交（{last}≤{low}）", "low_limit")
 
     # 关10：A 股交易时段
     if enforce_session and not in_session:

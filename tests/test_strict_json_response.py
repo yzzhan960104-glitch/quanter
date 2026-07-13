@@ -33,3 +33,15 @@ def test_strict_json_response_chinese_not_escaped():
     r = StrictJSONResponse(content={"msg": "回测完成"})
     assert "回测完成" in r.body.decode("utf-8")
     assert "\\u" not in r.body.decode("utf-8")  # 未被 ASCII 转义
+
+
+def test_strict_json_response_handles_datetime():
+    """#11：datetime 等非 JSON 原生类型经 jsonable_encoder 转 ISO 字符串，不抛 TypeError。
+
+    物理意图：原 render 直接 json.dumps(content) 绕过 jsonable_encoder，端点返回 datetime/
+    Timestamp 会抛 TypeError 致 500。加 jsonable_encoder 防御层后正常转 ISO 字符串。
+    """
+    import datetime
+    r = StrictJSONResponse(content={"ts": datetime.datetime(2024, 1, 2, 3, 4, 5)})
+    body = json.loads(r.body.decode("utf-8"))
+    assert body["ts"] == "2024-01-02T03:04:05"   # jsonable_encoder：datetime → ISO 字符串

@@ -61,6 +61,39 @@ def test_take_profit_hit():
     assert act.reason == ExitReason.TAKE_PROFIT
 
 
+def test_take_profit_2x_preferred_over_first_wave():
+    """high ≥ take_profit_2x → 止盈离场（第二波优先，与回测 backtest_replay 对齐）。
+
+    物理意图(#16)：回测 _simulate_one_trade 离场优先级 stop_loss > take_profit_2x >
+    take_profit；实盘 check_exit 原仅看第一波，构成双源真理（回测按 2x 价记大盈 rr、
+    实盘第一波即平），系统性虚高回测 avg_rr。现 check_exit 先判 2x，与本测试共同
+    守护「2x 字段被消费」+ 与回测判定链一致。本用例 high=14.5 ≥ 2x(14) → CLOSE。
+    """
+    cfg = StrategyConfig()
+    pos = {"entry": 10.0, "stop": 9.0, "take_profit": 12.0, "take_profit_2x": 14.0,
+           "entry_bar": 0, "bars_held": 2}
+    bar = {"high": 14.5, "low": 13.8, "close": 14.2}
+    act = check_exit(pos, bar, bars_held=2, cfg=cfg)
+    assert act.action == ExitAction.CLOSE
+    assert act.reason == ExitReason.TAKE_PROFIT
+
+
+def test_take_profit_2x_absent_falls_back_to_first_wave():
+    """pos 缺 take_profit_2x → 降级只看第一波 take_profit（向后兼容老调用）。
+
+    物理意图：tick_exit 传 pos["take_profit_2x"]=plan.get("take_profit_2x")，老计划
+    可能无此字段；check_exit 用 .get 取，缺失/None 时跳过 2x 档直接判第一波，不破老契约。
+    本用例 high=12.5 ≥ take_profit(12)，2x 缺失 → 仍 TAKE_PROFIT（第一波）。
+    """
+    cfg = StrategyConfig()
+    pos = {"entry": 10.0, "stop": 9.0, "take_profit": 12.0,   # 无 take_profit_2x
+           "entry_bar": 0, "bars_held": 2}
+    bar = {"high": 12.5, "low": 11.8, "close": 12.2}
+    act = check_exit(pos, bar, bars_held=2, cfg=cfg)
+    assert act.action == ExitAction.CLOSE
+    assert act.reason == ExitReason.TAKE_PROFIT
+
+
 def test_timeout_exit_when_profit_below_threshold():
     """持仓 ≥ max_holding_bars 且浮盈 < timeout_exit_threshold → 时间止损。
 

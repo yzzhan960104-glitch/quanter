@@ -149,10 +149,13 @@ class JQDataClient:
             # 临限判定（双机制红线）：手动计数>=95万 或 服务端spare<5万 → 抛+告警。
             # Why 必须抛 + 告警：越界即扣费/封号，是聚宽试用账号最致命的边界；
             # 钉钉告警让人工立即介入，QuotaExceeded 让调用方显式停拉。
+            # #7：_spare() 合并局部变量——原实现判定 + 告警消息各调一次（=两次
+            # get_query_count 网络），临限触发时重复一次配额查询。合并后仅一次。
+            spare = self._spare()
             if self._today_count >= JQDATA_CONFIG["quota_manual_limit"] \
-                    or self._spare() < JQDATA_CONFIG["quota_warn_spare"]:
+                    or spare < JQDATA_CONFIG["quota_warn_spare"]:
                 fire_and_forget(NotificationManager.get_default().notify_risk_event(
-                    f"JQData 日额度将尽（已用≈{self._today_count}，spare≈{int(self._spare())}），"
+                    f"JQData 日额度将尽（已用≈{self._today_count}，spare≈{int(spare)}），"
                     f"已停止拉取 {symbol}", "WARN"))
                 raise QuotaExceeded("JQData 日额度接近上限")
             # 拉取（前复权 fq='pre'，分钟级 OHLCV + money）

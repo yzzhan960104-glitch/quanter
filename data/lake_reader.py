@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -60,6 +60,9 @@ class DataLakeReader:
         self._ffills: dict[str, pd.DataFrame] = {}      # key -> 价格列已 ffill、量类列保持原值的完整视图
         self._dtypes: dict[str, Any] = {}               # key -> date 层级原生 dtype（_norm_date 归一化依据）
         self._default_key: str | None = None            # 首次成功 load 的 key；lake 缺省时路由到此
+        # #3：保护 load() 的 check-then-set，防并发 load 同 key 都过幂等检查 → 重复
+        # read_parquet(408MB) 内存翻倍（无 lifespan 的 worker 进程首批并发 scan 的窄窗口）。
+        self._load_lock = threading.Lock()
 
     @property
     def loaded(self) -> bool:
@@ -89,12 +92,28 @@ class DataLakeReader:
             return []
         return list(idx.get_level_values("symbol").unique())
 
+    def get_lake(self, key: str) -> Optional[pd.DataFrame]:
+        """公开读：返回指定 key 湖的原始 DataFrame（替代调用方穿透 _lakes 私有，#4）。
+
+        用途：macro 湖（DatetimeIndex 单索引、无 symbol 层）等非标准湖的端点直读——
+        get_cross_section/get_timeseries 假设 MultiIndex(date, symbol)，对单索引湖无效，
+        故暴露此公开方法让路由层合法读，避免穿透 _lakes。无湖/key 不存在 → 返 None。
+        """
+        return self._lakes.get(key)
+
     def load(self, path: str | None = None, *, key: str | None = None) -> None:
-        """加载 parquet 到内存（多湖）。缺失则进入离线模式（不阻断启动、不写入缓存）。
+        """加载 parquet 到内存（多湖）。#3：委托 _load_impl 并加锁防并发重复 read。
 
         - key 缺省=path：便于单湖老用法 `load(path)` 自动以 path 为 key，向后兼容。
         - 首个成功 load 的 key 设为 `_default_key`，作为 `get_*(lake=None)` 的默认湖。
         """
+        # 锁包 _load_impl 的 check-then-set：锁内含 read_parquet（秒级 IO），load 非热路径
+        # （启动/ensure），序列化保证不重复 read；不同 key 也序列化——可接受（启动本就串行）。
+        with self._load_lock:
+            self._load_impl(path, key=key)
+
+    def _load_impl(self, path: str | None = None, *, key: str | None = None) -> None:
+        """实际加载逻辑（多湖）。缺失则进入离线模式（不阻断启动、不写入缓存）。"""
         path = path or LAKE_CONFIG["default_path"]
         key = key or path
         # 幂等守卫：同 key 已 load 不重复 read_parquet（daily 湖 408MB，重复 load 浪费内存+IO）。
