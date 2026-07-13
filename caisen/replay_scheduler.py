@@ -45,9 +45,14 @@ class ReplayScheduler:
         self._clock = clock
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._manager = None     # multiprocessing.Manager（start 时起；Event/Queue 须用其 proxy）
 
     def start(self):
-        """启动 daemon 调度线程（先做重启恢复）。幂等：重复 start 会被 _stop 状态挡住。"""
+        """启动 daemon 调度线程（先做重启恢复 + 起 Manager）。幂等：重复 start 会被 _stop 状态挡住。"""
+        # 起 Manager：生产 Event/Queue 必须经它创建——mp.Event/Queue 是 Condition，不能作
+        # ProcessPoolExecutor.submit 参数（pickle 抛 RuntimeError），Manager proxy 可 pickle。
+        if self._manager is None:
+            self._manager = mp.Manager()
         self._reset_on_startup()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True,
@@ -57,6 +62,12 @@ class ReplayScheduler:
     def stop(self):
         """请求停止（set event，daemon 线程下次循环退出；不 join——不阻塞调用方）。"""
         self._stop.set()
+        if self._manager is not None:
+            try:
+                self._manager.shutdown()
+            except Exception:
+                logger.warning("Manager shutdown 异常（已忽略）", exc_info=True)
+            self._manager = None
 
     def request_cancel(self, task_id: str):
         """cancel 端点调：set abort_flag（worker 循环顶命中即 CANCELLED）。
@@ -92,10 +103,10 @@ class ReplayScheduler:
         if task is None:
             return
         task_id = task["task_id"]
-        abort_flag = mp.Event()
+        abort_flag = self._make_event()
         self.abort_flags[task_id] = abort_flag
-        progress_q = mp.Queue()
-        heartbeat_q = mp.Queue()
+        progress_q = self._make_queue()
+        heartbeat_q = self._make_queue()
         # submit 到 pool（concurrency=1 串行；pool 满时 submit 内部排队，不丢任务）。
         self._pool.submit(run_worker, task_id, abort_flag, progress_q, heartbeat_q)
         # 队列消费线程：worker 上报的 progress 落库（主进程单点写 DB）。
@@ -144,6 +155,23 @@ class ReplayScheduler:
                     path=self._db_path,
                 )
                 self.abort_flags.pop(t["task_id"], None)
+
+    def _make_event(self):
+        """创建 abort flag。
+
+        生产（Manager 已起）：返 manager.Event()——proxy 可经 ProcessPoolExecutor.submit
+        pickle 传给子进程（mp.Event 是 Condition 不能 pickle，submit 会抛 RuntimeError）。
+        测试（Manager 未起，_FakePool 不真 spawn）：fallback mp.Event()，类型无关。
+        """
+        if self._manager is not None:
+            return self._manager.Event()
+        return mp.Event()
+
+    def _make_queue(self):
+        """创建 progress/heartbeat Queue（同 _make_event：生产用 Manager proxy 可 pickle）。"""
+        if self._manager is not None:
+            return self._manager.Queue()
+        return mp.Queue()
 
     @staticmethod
     def _import_worker():

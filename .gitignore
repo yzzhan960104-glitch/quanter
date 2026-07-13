@@ -16,6 +16,8 @@ env/
 # 数据在 data_lake/（见下）。历史曾误用 `data/` 忽略整个源码目录，已移除，源码正常入库。
 # 回放历史记录落盘（caisen/replay_runs.py 写，运行时数据不入库）
 replay_runs/
+# 异步回测任务表 SQLite（Spec 1 caisen/replay_tasks_db.py 写，运行时数据不入库）
+data/replay_tasks.db
 # tushare 因子缓存（data/cache/，运行时 parquet 缓存，不入库）
 data/cache/
 

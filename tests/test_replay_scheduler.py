@@ -105,3 +105,30 @@ def test_sweep_skips_fresh_heartbeat(db):
     sched = _new_sched(db, clock=datetime.now)   # 真实 now（age≈0）
     sched._sweep_stale()
     assert replay_tasks_db.get_task(tid)["status"] == "RUNNING"
+
+
+def test_make_event_uses_manager_proxy_when_started():
+    """regression（实环境 spawn bug 修复）：_manager 起后 _make_event/_make_queue 返 manager proxy。
+
+    根因（实环境实测发现）：mp.Event/Queue 是 Condition，不能作 ProcessPoolExecutor.submit
+    参数（pickle 抛 RuntimeError「Condition objects should only be shared between processes
+    through inheritance」），被 _loop try/except 吞 → 任务卡 RUNNING、worker 从不执行。
+    生产必须用 manager.Event()/Queue()（proxy 可 pickle 经 submit 传）。本测试守护此修复
+    不被误回退到 mp.Event（单元测试的 _FakePool 不真 spawn，无法捕获此 bug）。
+    """
+    import multiprocessing as mp
+    sched = replay_scheduler.ReplayScheduler(
+        _FakePool(), {}, "x", run_replay_worker=lambda *a, **k: None)
+    # start 前（_manager=None）：fallback mp.Event
+    e_pre = sched._make_event()
+    assert not hasattr(e_pre, "_callmethod"), "start 前应 fallback mp.Event（非 manager proxy）"
+    # 起 manager 后：_make_event/_make_queue 返 manager proxy（经 BaseProxy._callmethod IPC）
+    mgr = mp.Manager()
+    sched._manager = mgr
+    try:
+        e = sched._make_event()
+        q = sched._make_queue()
+        assert hasattr(e, "_callmethod"), f"_make_event 应返 manager proxy，实际 {type(e).__name__}"
+        assert hasattr(q, "_callmethod"), f"_make_queue 应返 manager proxy，实际 {type(q).__name__}"
+    finally:
+        mgr.shutdown()
