@@ -55,9 +55,7 @@ import pandas as pd
 from caisen.config import StrategyConfig
 from caisen.risk import RiskManager
 from caisen.patterns.zigzag_causal import causal_pivots, compute_atr
-from caisen.patterns.w_bottom import detect as w_detect
-from caisen.patterns.head_shoulder import detect as hs_detect
-from caisen.patterns.triangle_bottom import detect as tri_detect
+from caisen.patterns.registry import PATTERNS, PatternMeta
 
 
 # 模块级 logger：单 symbol 异常走 debug 级（不污染 prod 日志，但可调试追溯）
@@ -105,11 +103,12 @@ class PatternScreener:
             1. 流动性过滤（risk.liquidity_filter）：不过 → 跳过；
             2. micro_filter（risk.micro_filter）：不过 → 跳过；
             3. causal_pivots + compute_atr：因果 pivot 提取（异常 → 跳过该 symbol）；
-            4. w_bottom.detect（用 cfg.max_pattern_depth）：命中 → 收集；
-            5. head_shoulder.detect（用临时宽 cfg：max_pattern_depth=hs_max_pattern_depth）：
-               命中 → 收集；
-            6. 双形态都命中 → 取 depth 更大者（颈线满足空间更大）；
-            7. 全部 symbol 处理完 → 按 amount30d 降序输出。
+            4. 遍历 PATTERNS 注册表（w_bottom/head_shoulder/triangle_bottom 等）：
+               - enable_field 开关过滤（如 enable_triangle_bottom）；
+               - depth_override_field 覆写 max_pattern_depth（hs/tri 分类型宽阈值）；
+               - meta.detect 命中（is_valid=True）→ 收集；单形态异常隔离；
+            5. 多形态命中 → 取 depth 更大者（颈线满足空间更大）；
+            6. 全部 symbol 处理完 → 按 amount30d 降序输出。
         """
         candidates: list[dict] = []
 
@@ -217,44 +216,36 @@ class PatternScreener:
             pivots = causal_pivots(close, atr, self.cfg)
         # pivots 已就绪（screen_with_pivots 传入复用，或上方刚算）→ 下游 detect 直接消费，不重算。
 
-        # —— 4. W 底识别（用 cfg.max_pattern_depth，W 底颈线高度比天然 < 30%）——
-        w_res = w_detect(close, pivots, high, low, volume, self.cfg)
-
-        # —— 5. 头肩底识别（用临时宽 cfg：max_pattern_depth=hs_max_pattern_depth）——
-        # 物理意图（Task 7 follow-up concern 2）：头肩底头部幅度天然深于 W底颈线
-        # （头底是区间最低、两肩之上），用 W 底的 0.30 默认阈值会误否决合法头肩底。
-        # model_copy(update={...}) 浅拷贝 cfg 仅替换 max_pattern_depth，其他参数不变。
-        hs_cfg = self.cfg.model_copy(update={"max_pattern_depth": self.cfg.hs_max_pattern_depth})
-        hs_res = hs_detect(close, pivots, high, low, volume, hs_cfg)
-
-        # —— 5b. 收敛三角形底部识别（白皮书招12；受 enable_triangle_bottom 开关控制）——
-        # 物理意图：三角形边长比 depth=(P1-P2)/P2 与 W底颈线高度比量级不同，需独立宽阈值
-        # triangle_max_pattern_depth（默认 0.6），仿头肩底 model_copy 覆写。三角形额外输出
-        # pattern_height（边长 P1-P2），供 plan.py 满足点计算（满足=颈线+边长，与 W底/头肩底
-        # 的"颈线−谷底"步长不同，必须经 pattern_height 单独消费）。
-        tri_res = None
-        if self.cfg.enable_triangle_bottom:
-            tri_cfg = self.cfg.model_copy(
-                update={"max_pattern_depth": self.cfg.triangle_max_pattern_depth}
-            )
-            tri_res = tri_detect(close, pivots, high, low, volume, tri_cfg)
-
-        # —— 6. 命中收集：任一形态 is_valid=True 即收集；多形态命中取 depth 更大者 ——
-        # depth 物理意图：形态垂直幅度。depth 越大 → 满足空间（量度涨幅）越大 → 交易
-        # 价值越高。多形态命中时取 depth 更大者，等价于"满足空间更大者"。
-        hits: list[tuple[str, object]] = []
-        if w_res is not None and w_res.is_valid:
-            hits.append(("w_bottom", w_res))
-        if hs_res is not None and hs_res.is_valid:
-            hits.append(("head_shoulder", hs_res))
-        if tri_res is not None and tri_res.is_valid:
-            hits.append(("triangle_bottom", tri_res))
+        # —— 4. 遍历形态注册表：enable 过滤 + depth 覆写 + detect + 命中收集 ——
+        # 注册表驱动（方案B）：把原硬编码的 w/hs/tri 三段 detect + 三套 cfg 覆写收敛为
+        # 数据驱动的遍历。新形态只改 caisen/patterns/registry.py 的 PATTERNS，screener 零改。
+        hits: list[tuple[PatternMeta, object]] = []
+        for meta in PATTERNS:
+            # enable 开关过滤（meta.enable_field=None 表示总启用，如 W底/头肩底）
+            if meta.enable_field is not None and not getattr(self.cfg, meta.enable_field, True):
+                continue
+            # depth 覆写：声明了 depth_override_field 则 model_copy 替换 max_pattern_depth
+            # （hs 头部幅度 / tri 边长比天然深于 W底颈线高度比，需分类型宽阈值，否则误否决）。
+            detect_cfg = self.cfg
+            if meta.depth_override_field is not None:
+                detect_cfg = self.cfg.model_copy(
+                    update={"max_pattern_depth": getattr(self.cfg, meta.depth_override_field)}
+                )
+            # 单形态异常隔离：一个形态 detect 抛错只跳过该形态，不影响同 symbol 其他形态
+            # （粒度细于外层单 symbol 异常隔离，诊断更准——debug 日志标形态名）。
+            try:
+                res = meta.detect(close, pivots, high, low, volume, detect_cfg)
+            except Exception as exc:
+                _logger.debug("形态 %s detect 异常 symbol=%s：%s", meta.name, symbol, exc)
+                continue
+            if res is not None and res.is_valid:
+                hits.append((meta, res))
 
         if not hits:
             return None   # 所有形态均未命中，跳过
 
-        # 多形态命中：取 depth 更大者（满足空间更大）
-        pattern_type, res = max(hits, key=lambda h: h[1].depth)
+        # 多形态命中：取 depth 更大者（满足空间更大；逻辑与原实现一致）
+        meta, res = max(hits, key=lambda h: h[1].depth)
 
         # —— amount30d：近 30 日均成交额（排序键，与流动性过滤同源数据）——
         amount30d = float(df["amount"].tail(30).mean())
@@ -264,27 +255,26 @@ class PatternScreener:
         # 被丢弃，但形态的"当前形成时点"就是数据末根（T 日收盘看 T-1 及之前，合法）。
         formed_at = df.index[-1]
 
-        # —— breakout_price：颈线突破价 ——
-        # 各形态突破 pivot（W底 P4 / 头肩底 P7 / 三角形 P5）idx 可能不等于末根
-        # （causal_pivots 末尾 confirm_bars 内 pivot 被丢弃，真实突破点落在末根之前）。
-        # 这里统一用 close.iloc[-1] 作为"当前突破状态"的代表价——下游 plan.py 计算满足
-        # 时会用 res.neckline_price + H 重新精算，breakout_price 仅作排序展示。
+        # —— breakout_price：颈线突破价（统一用 close.iloc[-1] 代表当前突破状态）——
+        # 各形态突破 pivot idx 可能不等于末根（causal_pivots 末尾 confirm_bars 丢弃），
+        # 下游 plan.py 计算满足点时用 res.neckline_price + H 重新精算，此处仅排序展示。
         breakout_price = float(close.iloc[-1])
 
+        # —— candidate 构造：通用字段 + extra_output 声明的额外字段 ——
         candidate = {
             "symbol": symbol,
-            "pattern_type": pattern_type,
+            "pattern_type": meta.name,
             "formed_at": formed_at,
             "breakout_price": breakout_price,
             "neckline_price": float(res.neckline_price),
-            "bottom_price": float(res.bottom_price),   # 【Bug3】谷底价由形态直接给出
+            "bottom_price": float(res.bottom_price),   # 谷底价由形态直接给出（Bug3 契约）
             "depth": float(res.depth),
             "tension": float(res.tension),
             "amount30d": amount30d,
             "is_valid": True,
         }
-        # 收敛三角形额外输出 pattern_height（边长 P1-P2），供 plan.py 满足点用；
-        # W底/头肩底不带此键 → plan.py 走默认 H=颈线−谷底（零影响）。
-        if pattern_type == "triangle_bottom":
-            candidate["pattern_height"] = float(res.edge_height)
+        # extra_output：candidate 字段名 → Result 属性名（如 triangle: pattern_height=edge_height，
+        # 供 plan.py 满足点计算；W底/头肩底 extra_output={} 无额外字段）。
+        for out_field, res_attr in meta.extra_output.items():
+            candidate[out_field] = float(getattr(res, res_attr))
         return candidate

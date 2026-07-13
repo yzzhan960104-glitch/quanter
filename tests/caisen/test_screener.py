@@ -538,3 +538,117 @@ def test_production_default_cfg_detects_standard_triangle():
     assert len(result) == 1, f"默认 cfg 应识别标准三角形，实际：{result}"
     assert result.iloc[0]["pattern_type"] == "triangle_bottom"
     assert bool(result.iloc[0]["is_valid"]) is True
+
+
+# ---------------------------------------------------------------------------
+# 注册表驱动测试（方案B）：验证 screener 经 PATTERNS 遍历的 enable/depth/extra/异常隔离机制
+# ---------------------------------------------------------------------------
+def test_registry_driven_enable_filter(monkeypatch):
+    """注册表驱动：enable_field 指向的 cfg 开关=False 时该形态被跳过（detect 不调用）。"""
+    from caisen.patterns.registry import PatternMeta
+    from caisen.patterns import screener as screener_mod
+
+    called = []
+
+    def fake_detect(close, pivots, high, low, volume, cfg):
+        called.append("detect")
+        return None   # 返 None 不命中，只验证是否被调用
+
+    fake_meta = PatternMeta(name="fake", detect=fake_detect,
+                            enable_field="enable_triangle_bottom")
+    monkeypatch.setattr(screener_mod, "PATTERNS", [fake_meta])
+
+    close, high, low, vol = _build_standard_w_bottom()
+    df = _mk_price_df(close, high, low, vol, amount_per_bar=3e8)
+
+    # enable=False → 假形态被跳过
+    cfg_off = _mk_cfg(enable_triangle_bottom=False)
+    sc_off = PatternScreener(cfg_off, RiskManager(cfg_off))
+    sc_off.screen({"X": df}, date=None)
+    assert called == [], "enable_field=False 时形态应被跳过，detect 不应被调用"
+
+    # 对照：enable=True → detect 被调
+    called.clear()
+    cfg_on = _mk_cfg(enable_triangle_bottom=True)
+    sc_on = PatternScreener(cfg_on, RiskManager(cfg_on))
+    sc_on.screen({"X": df}, date=None)
+    assert called == ["detect"], "enable_field=True 时 detect 应被调用"
+
+
+def test_registry_driven_depth_override(monkeypatch):
+    """注册表驱动：depth_override_field 声明的 cfg 字段值覆写 detect 收到的 max_pattern_depth。"""
+    from caisen.patterns.registry import PatternMeta
+    from caisen.patterns import screener as screener_mod
+
+    received = []
+
+    def fake_detect(close, pivots, high, low, volume, cfg):
+        received.append(cfg.max_pattern_depth)
+        return None
+
+    fake_meta = PatternMeta(name="fake", detect=fake_detect,
+                            depth_override_field="hs_max_pattern_depth")
+    monkeypatch.setattr(screener_mod, "PATTERNS", [fake_meta])
+
+    cfg = _mk_cfg(hs_max_pattern_depth=0.88)   # 显式设覆写值
+    sc = PatternScreener(cfg, RiskManager(cfg))
+    close, high, low, vol = _build_standard_w_bottom()
+    df = _mk_price_df(close, high, low, vol, amount_per_bar=3e8)
+    sc.screen({"X": df}, date=None)
+    # detect 收到的 cfg.max_pattern_depth 应被覆写为 hs_max_pattern_depth=0.88
+    assert received == [0.88]
+
+
+def test_registry_driven_extra_output(monkeypatch):
+    """注册表驱动：extra_output 声明的字段从 Result 属性提取进 candidate。"""
+    from caisen.patterns.registry import PatternMeta
+    from caisen.patterns import screener as screener_mod
+
+    class _FakeResult:
+        # 模拟一个命中形态的 Result（含通用字段 + 自定义属性）
+        is_valid = True
+        neckline_price = 11.0
+        bottom_price = 7.5
+        depth = 0.47
+        tension = 0.5
+        custom_metric = 42.0
+
+    def fake_detect(close, pivots, high, low, volume, cfg):
+        return _FakeResult()
+
+    fake_meta = PatternMeta(name="fake", detect=fake_detect,
+                            extra_output={"custom_field": "custom_metric"})
+    monkeypatch.setattr(screener_mod, "PATTERNS", [fake_meta])
+
+    cfg = _mk_cfg()
+    sc = PatternScreener(cfg, RiskManager(cfg))
+    close, high, low, vol = _build_standard_w_bottom()
+    df = _mk_price_df(close, high, low, vol, amount_per_bar=3e8)
+    result = sc.screen({"X": df}, date=None)
+    assert len(result) == 1
+    assert result.iloc[0]["pattern_type"] == "fake"
+    assert result.iloc[0]["custom_field"] == pytest.approx(42.0)
+
+
+def test_registry_driven_isolates_per_pattern_exception(monkeypatch):
+    """注册表驱动：某形态 detect 抛异常时被隔离，不影响同 symbol 其他形态。"""
+    from caisen.patterns.registry import PatternMeta
+    from caisen.patterns import screener as screener_mod
+    from caisen.patterns.w_bottom import detect as w_detect
+
+    def boom_detect(close, pivots, high, low, volume, cfg):
+        raise KeyError("脏值致形态内部异常")
+
+    # boom（抛异常）+ 真实 w_bottom 并存：boom 被隔离，w_bottom 仍命中
+    monkeypatch.setattr(screener_mod, "PATTERNS", [
+        PatternMeta(name="boom", detect=boom_detect),
+        PatternMeta(name="w_bottom", detect=w_detect),
+    ])
+
+    cfg = _mk_cfg()
+    sc = PatternScreener(cfg, RiskManager(cfg))
+    close, high, low, vol = _build_standard_w_bottom()
+    df = _mk_price_df(close, high, low, vol, amount_per_bar=3e8)
+    result = sc.screen({"X": df}, date=None)
+    assert len(result) == 1, "boom 异常应被隔离，w_bottom 仍应命中"
+    assert result.iloc[0]["pattern_type"] == "w_bottom"
