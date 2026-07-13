@@ -74,6 +74,25 @@ async def lifespan(app: FastAPI):
     for key, path in LAKE_CONFIG.get("lakes", {}).items():
         reader.load(path, key=key)
 
+    # 启动：异步回测调度器（Spec 1 · Task 7）——ProcessPoolExecutor(concurrency=1) + daemon 调度线程
+    # Why 寄生 uvicorn（零守护进程）：与 data_service sweep 同源——线程/子进程寄生主进程，非独立
+    # Celery/PM2。worker initializer 自 load daily 湖（子进程独立内存空间），不依赖上面主进程 reader.load。
+    # Why try/except 不阻断：装配失败（资源限制等）不应让整个 API 起不来——scheduler 缺席时
+    # cancel 端点返 503，async 提交仍写 PENDING（下次启动调度器 poll 派发，不丢任务）。
+    try:
+        from concurrent.futures import ProcessPoolExecutor
+        from caisen import replay_tasks_db, replay_worker, replay_scheduler
+        replay_tasks_db.init_db()                       # 建表（幂等）
+        app.state.replay_pool = ProcessPoolExecutor(
+            max_workers=1, initializer=replay_worker._init_worker)   # concurrency=1 串行
+        app.state.replay_scheduler = replay_scheduler.ReplayScheduler(
+            app.state.replay_pool, {}, replay_tasks_db._DEFAULT_DB_PATH)
+        app.state.replay_scheduler.start()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan 装配异步回测调度器异常（已忽略，cancel 端点将返 503）"
+        )
+
     # 启动：加载 symbol→企业名映射（#1，Tushare pro.stock_basic 全量，降级返 symbol）
     # Why 同步加载（非 daemon 线程）：stock_basic 一次 <1MB 快，且 list_plans 首请求需 symbol_name
     # 就绪；失败降级（get_name 返 symbol），不阻断启动。
@@ -148,7 +167,13 @@ async def lifespan(app: FastAPI):
     root_logger = logging.getLogger()
     root_logger.removeHandler(app.state.log_handler)
     root_logger.removeHandler(app.state.log_file_handler)
-    # 销毁：模块④在此追加 scheduler.shutdown()
+    # 销毁：异步回测调度器（Spec 1 · Task 7）——停调度线程 + 关进程池（不等在跑回测，最快退出）
+    _sched = getattr(app.state, "replay_scheduler", None)
+    if _sched is not None:
+        _sched.stop()
+    _pool = getattr(app.state, "replay_pool", None)
+    if _pool is not None:
+        _pool.shutdown(wait=False)
 
 
 # ============ 创建应用 ============
