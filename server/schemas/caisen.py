@@ -238,3 +238,56 @@ class ReplayRunDetail(BaseModel):
     summary: ReplayRunSummary
     report: ReplayReportResponse
     request: Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# 异步回测任务（Spec 1 · Task 6：POST /replay/async + 任务查询/取消契约）
+# ---------------------------------------------------------------------------
+class ReplayAsyncRequest(BaseModel):
+    """POST /caisen/replay/async 请求体：提交异步回测（立即返 task_id）。
+
+    物理意图（Spec 1 闭环地基）：全市场回测几十分钟~几小时，同步 HTTP 必超时。本请求
+    只写 SQLite PENDING 行立即返回，前端轮询 GET /replay/tasks/{task_id} 观测进度/结果。
+    字段与 ReplayRequest 同源（start/end/universe/cfg_override），无 save——异步任务落
+    SQLite 是任务表本职，不需开关。
+    """
+    start: str
+    end: str
+    universe: Optional[List[str]] = None
+    cfg_override: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ReplayTaskSummary(BaseModel):
+    """GET /caisen/replay/tasks 列表项：异步任务轻量摘要（任务表行直映）。
+
+    物理意图：前端「异步任务」面板的表格行——展示任务状态机 + 进度。完整 report/error
+    由 GET /replay/tasks/{task_id} 取详情。
+    """
+    task_id: str
+    created_at: str
+    status: str                                   # PENDING/RUNNING/SUCCESS/FAILED/CANCELLED
+    progress: int                                 # 0-100（已处理 symbol 占比）
+    start: Optional[str] = None
+    end: Optional[str] = None
+    universe_n: Optional[int] = None              # -1 = 全市场
+    cfg_override: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ReplayTaskDetail(ReplayTaskSummary):
+    """GET /caisen/replay/tasks/{task_id} 响应：单任务完整详情。
+
+    扩展 summary：SUCCESS 时内嵌完整 report（ReplayReport），FAILED 时含 error，
+    以及全生命周期时间戳（观测/审计用）。
+    """
+    report: Optional[Dict[str, Any]] = None       # SUCCESS 内嵌完整 ReplayReport（report_json 反序列化）
+    error: Optional[str] = None                   # FAILED 错误信息
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    last_heartbeat: Optional[str] = None
+
+
+class CancelResponse(BaseModel):
+    """POST /caisen/replay/tasks/{task_id}/cancel 响应。"""
+    task_id: str
+    cancelled: bool
+    message: str

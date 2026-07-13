@@ -590,3 +590,99 @@ def test_delete_replay_run_404(client):
     """DELETE 不存在 run_id → 404。"""
     resp = client.delete("/api/v1/caisen/replay/runs/20240101-000000-deadbe")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 异步回测端点（Spec 1 · Task 6：POST /replay/async + GET /replay/tasks + cancel）
+# 与老同步 /replay 并存：异步任务走 SQLite 任务表，全生命周期可观测/可取消。
+# ---------------------------------------------------------------------------
+class TestReplayAsyncEndpoints:
+    """异步回测 4 端点契约：提交→PENDING、列表、详情（含 report）、取消。"""
+
+    def _isolate_db(self, tmp_path, monkeypatch):
+        """隔离 replay_tasks_db 到 tmp_path（不污染生产 data/replay_tasks.db）。"""
+        from caisen import replay_tasks_db
+        monkeypatch.setattr(replay_tasks_db, "_DEFAULT_DB_PATH", str(tmp_path / "t.db"))
+        replay_tasks_db.init_db()
+
+    def test_post_replay_async_returns_task_id(self, client, tmp_path, monkeypatch):
+        """POST /replay/async → 200 + {task_id}，任务表写入 PENDING 行。"""
+        self._isolate_db(tmp_path, monkeypatch)
+        from caisen import replay_tasks_db
+
+        resp = client.post("/api/v1/caisen/replay/async", json={
+            "start": "2024-01-01", "end": "2024-06-01",
+            "universe": ["000001.SZ"], "cfg_override": {"min_rr_ratio": 1.5},
+        })
+        assert resp.status_code == 200, resp.text
+        tid = resp.json()["task_id"]
+        got = replay_tasks_db.get_task(tid)
+        assert got["status"] == "PENDING"
+        assert got["universe"] == ["000001.SZ"]
+
+    def test_list_replay_tasks(self, client, tmp_path, monkeypatch):
+        """GET /replay/tasks → 200 + 任务列表（PENDING 行可见）。"""
+        self._isolate_db(tmp_path, monkeypatch)
+        from caisen import replay_tasks_db
+        replay_tasks_db.create_task(
+            {"start": "s", "end": "e", "universe": None, "cfg_override": {}})
+
+        resp = client.get("/api/v1/caisen/replay/tasks")
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "PENDING"
+
+    def test_get_replay_task_404(self, client, tmp_path, monkeypatch):
+        """GET /replay/tasks/{不存在} → 404。"""
+        self._isolate_db(tmp_path, monkeypatch)
+        resp = client.get("/api/v1/caisen/replay/tasks/nope-id")
+        assert resp.status_code == 404
+
+    def test_get_replay_task_detail_with_report(self, client, tmp_path, monkeypatch):
+        """GET /replay/tasks/{id} → 200 + 详情（SUCCESS 行内嵌 report）。"""
+        self._isolate_db(tmp_path, monkeypatch)
+        from caisen import replay_tasks_db
+        tid = replay_tasks_db.create_task(
+            {"start": "s", "end": "e", "universe": None, "cfg_override": {}})
+        replay_tasks_db.mark_success(tid, '{"n_hits": 7}')
+
+        resp = client.get(f"/api/v1/caisen/replay/tasks/{tid}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "SUCCESS"
+        assert body["progress"] == 100
+        assert body["report"] == {"n_hits": 7}
+
+    def test_cancel_returns_503_when_scheduler_not_attached(self, client, tmp_path, monkeypatch):
+        """调度器未装配（app.state.replay_scheduler 缺，Task 7 前）→ cancel 返 503。"""
+        self._isolate_db(tmp_path, monkeypatch)
+        # 兜底：若前序用例残留，先摘掉（测试结束 monkeypatch 不恢复手动 setattr，故显式清）
+        if hasattr(client.app.state, "replay_scheduler"):
+            monkeypatch.delattr(client.app.state, "replay_scheduler", raising=False)
+        resp = client.post("/api/v1/caisen/replay/tasks/some-id/cancel")
+        assert resp.status_code == 503
+
+    def test_cancel_sets_abort_flag_when_scheduler_attached(self, client, tmp_path, monkeypatch):
+        """调度器已装配 → cancel 调 request_cancel → 200 + cancelled=True + abort_flag 已 set。"""
+        import multiprocessing as mp
+        self._isolate_db(tmp_path, monkeypatch)
+        from caisen import replay_tasks_db
+        tid = replay_tasks_db.create_task(
+            {"start": "s", "end": "e", "universe": None, "cfg_override": {}})
+        flag = mp.Event()
+
+        class _FakeSched:
+            def request_cancel(self, task_id):
+                flag.set()
+
+        client.app.state.replay_scheduler = _FakeSched()
+        try:
+            resp = client.post(f"/api/v1/caisen/replay/tasks/{tid}/cancel")
+            assert resp.status_code == 200
+            assert resp.json()["cancelled"] is True
+            assert flag.is_set()
+        finally:
+            # 清理：避免污染后续用例的 app.state（cancel 503 用例依赖未装配）
+            if hasattr(client.app.state, "replay_scheduler"):
+                del client.app.state.replay_scheduler

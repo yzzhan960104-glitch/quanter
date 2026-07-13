@@ -41,16 +41,19 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import ValidationError
 
+from caisen import replay_tasks_db
 from server.schemas.caisen import (
     CandidatePlan,
     PlanReview,
+    ReplayAsyncRequest,
     ReplayReportResponse,
     ReplayRequest,
     ReplayRunDetail,
     ReplayRunSummary,
+    CancelResponse,
     ScanRequest,
 )
 from server.services import caisen_service
@@ -355,6 +358,55 @@ def delete_replay_run(run_id: str) -> Dict[str, bool]:
     if not ok:
         raise HTTPException(status_code=404, detail=f"回测记录不存在：run_id={run_id!r}")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 端点 12-15：异步回测任务（Spec 1 · Task 6：POST /replay/async + 任务查询/取消）
+# 与老同步 POST /replay（replay_runs JSON）并存——异步任务走 SQLite 任务表，全生命周期
+# 可观测/可取消。spec §6「废弃同步 /replay」留待 spec 2 前端工作台统一切换（前端先迁 async）。
+# ---------------------------------------------------------------------------
+@router.post("/replay/async", summary="提交异步回测（立即返 task_id，不阻塞）")
+def replay_async(body: ReplayAsyncRequest) -> Dict[str, Any]:
+    """提交异步回测：写 SQLite PENDING 行 → 立即返 task_id（调度器后续 poll 派发）。
+
+    物理意图（Spec 1）：全市场回测几十分钟~几小时，同步 HTTP 必超时。本端点只落任务行
+    立即返回，前端轮询 GET /replay/tasks/{task_id} 观测 progress% 与终态结果。
+    """
+    return {"task_id": caisen_service.run_replay_async(body)}
+
+
+@router.get("/replay/tasks", summary="异步任务列表（降序，可按 status 过滤）")
+def list_replay_tasks(
+    status: Optional[str] = Query(None, description="状态过滤（PENDING/RUNNING/SUCCESS/FAILED/CANCELLED）"),
+) -> List[Dict[str, Any]]:
+    """列出异步任务（按 created_at 降序）。无任务时返 200 + []（不抛）。"""
+    return replay_tasks_db.list_tasks(status=status)
+
+
+@router.get("/replay/tasks/{task_id}", summary="单异步任务状态/进度/结果")
+def get_replay_task(task_id: str) -> Dict[str, Any]:
+    """取单任务详情（status/progress/report/error/时间戳）。
+
+    异常策略：task_id 不存在 → 404（状态机不进 NULL，与 get_plan 同源契约）。
+    """
+    t = replay_tasks_db.get_task(task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在：task_id={task_id!r}")
+    return t
+
+
+@router.post("/replay/tasks/{task_id}/cancel", summary="取消异步任务（置 abort flag）")
+def cancel_replay_task(task_id: str, request: Request) -> CancelResponse:
+    """取消任务：调度器 set abort_flag → worker 循环顶命中 → CANCELLED。
+
+    异常策略：调度器未装配（lifespan 未起 / 纯单元测试环境）→ 503（明确告警，不静默成功）；
+    已完成 / 不存在的 task_id → 静默返 cancelled=True（cancel 已完成 task 是幂等 no-op）。
+    """
+    sched = getattr(request.app.state, "replay_scheduler", None)
+    if sched is None:
+        raise HTTPException(status_code=503, detail="调度器未装配（回测调度器未启动）")
+    sched.request_cancel(task_id)
+    return CancelResponse(task_id=task_id, cancelled=True, message="取消信号已发送")
 
 
 # ---------------------------------------------------------------------------
