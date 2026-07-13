@@ -32,7 +32,7 @@ import pytest
 from caisen.config import StrategyConfig
 from caisen.risk import RiskManager
 from caisen.patterns.screener import PatternScreener
-from caisen.backtest_replay import replay, ReplayReport
+from caisen.backtest_replay import replay, ReplayReport, ReplayAborted
 
 
 # ---------------------------------------------------------------------------
@@ -641,3 +641,54 @@ class TestReplayPerfAndReuse:
         assert report.n_trading_days > 0
         # annualized_return 是有限数（CAGR）
         assert isinstance(report.annualized_return, (int, float))
+
+
+# ---------------------------------------------------------------------------
+# 6. 异步化回调：progress_cb（进度上报）+ abort_cb（取消）+ ReplayAborted（Spec 1 Task 2）
+# ---------------------------------------------------------------------------
+def _flat_df(n: int = 30) -> pd.DataFrame:
+    """横盘序列（无形态，screener 快速返空），专供 progress/abort 回调用例提速。"""
+    return pd.DataFrame({
+        "close": [10.0] * n, "high": [10.5] * n, "low": [9.5] * n,
+        "volume": [1000.0] * n, "amount": [1e8] * n,
+    }, index=pd.RangeIndex(n))
+
+
+class TestReplayAsyncCallbacks:
+    """异步化回调（Spec 1 Task 2）：replay 增加 kw-only progress_cb/abort_cb，默认 None=现状。
+
+    物理意图：几十分钟的全市场回测需可观测进度（progress_cb 每 50 symbol 上报）+
+    可取消（abort_cb 返回 True 于 symbol 循环顶抛 ReplayAborted）。回调默认 None，
+    现有 3 个 caller（__main__/calibrate/caisen_service）不传 = 完全现状行为。
+    """
+
+    def test_progress_cb_invoked_every_50_symbols(self):
+        """55 标的 → progress_cb 在 done=50 与 done=55 触发；末次 total=标的数。"""
+        cfg = _mk_cfg()
+        rm = RiskManager(cfg)
+        price_data = {f"S{i}": _flat_df(30) for i in range(55)}
+        seen: list = []
+        replay(price_data, cfg, rm, start=15, end=29, aum=1e6,
+               progress_cb=lambda d, t: seen.append((d, t)))
+        assert (50, 55) in seen          # 每 50 触发一次
+        assert seen[-1] == (55, 55)       # 收尾 done=total
+        assert seen[-1][1] == 55          # total = 标的数
+
+    def test_abort_cb_raises_replay_aborted(self):
+        """abort_cb 返回 True → symbol 循环顶抛 ReplayAborted（取消信号）。"""
+        cfg = _mk_cfg()
+        rm = RiskManager(cfg)
+        with pytest.raises(ReplayAborted):
+            replay({"TEST": _flat_df(30)}, cfg, rm, start=15, end=29, aum=1e6,
+                   abort_cb=lambda: True)
+
+    def test_default_callbacks_none_is_current_behavior(self):
+        """progress_cb/abort_cb 默认 None = 现状行为（正常返回 ReplayReport，不抛）。"""
+        cfg = _mk_cfg()
+        rm = RiskManager(cfg)
+        close, high, low, vol = _build_w_bottom_with_rise(n_tail=18, target_mult=1.5)
+        df = _mk_price_df(close, high, low, vol)
+        report = replay({"TEST": df}, cfg, rm,
+                        start=df.index[15], end=df.index[-1], aum=1e6)
+        assert isinstance(report, ReplayReport)
+        assert report.n_hits >= 0

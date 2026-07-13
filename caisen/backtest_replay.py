@@ -88,6 +88,15 @@ class ReplayReport:
     metadata: dict = field(default_factory=dict, hash=False, compare=False)
 
 
+class ReplayAborted(Exception):
+    """回测被用户取消（abort_cb 于 symbol 循环顶返回 True 时抛出）。
+
+    物理意图：异步回测的取消信号——调度器置 abort flag，worker 的 abort_cb 读 flag，
+    replay 在每个 symbol 处理前检查，命中即抛本异常向上冒泡。worker 捕获后标 task
+    CANCELLED（非 FAILED——区分「用户主动取消」与「异常崩溃」，spec §7 取消竞态）。
+    """
+
+
 def replay(
     price_data: dict,
     cfg: StrategyConfig,
@@ -95,6 +104,9 @@ def replay(
     start,
     end,
     aum: float,
+    *,
+    progress_cb=None,           # Callable[[done:int, total:int], None] —— 每 50 symbol 上报一次
+    abort_cb=None,              # Callable[[], bool] —— True 即中止（symbol 循环顶抛 ReplayAborted）
     trading_calendar: Optional[pd.DatetimeIndex] = None,
 ) -> ReplayReport:
     """对 price_data 滚动执行 screen→plan→离场模拟，返回 ReplayReport。
@@ -138,7 +150,15 @@ def replay(
         full_hv[symbol] = ret.rolling(cfg.hv_window).std() * math.sqrt(252)
 
     # —— 对每个交易日 T 滚动执行 screen → plan（严格 .loc[:T]）——
+    # 进度/取消回调（Spec 1 Task 2）：默认 None=现状；异步 worker 传入以观测进度+可取消。
+    total_symbols = len(price_data)
+    _done = 0
+    _PROGRESS_EVERY = 50        # 全市场 5000 只 ≈ 100 次上报（spec §5.1，平衡精度与写频）
     for symbol, df in price_data.items():
+        # 取消检查点（symbol 循环顶）：abort_cb 命中即抛 ReplayAborted → task 标 CANCELLED。
+        # 放 symbol 顶而非 T 内：取消响应延迟 ≤ 单 symbol 处理时长，且不破坏 T 内逻辑。
+        if abort_cb is not None and abort_cb():
+            raise ReplayAborted()
         # per-symbol 形态签名去重：同一形态在连续 T 日会被 screener 反复识别（尾部 4
         # pivot 不变），实盘 T 日入场后 T+1 已持仓不会重入。跟踪上次模拟的形态签名
         # (neckline_price, bottom_price)，同形态只模拟首次，杜绝重复计数。
@@ -187,6 +207,10 @@ def replay(
                 hit = _simulate_one_trade(df, p, T, cfg.max_holding_bars)
                 if hit is not None:
                     all_hits.append(hit)
+        # symbol 处理完：进度上报（每 50 个 + 收尾一次），供异步任务观测完成百分比
+        _done += 1
+        if progress_cb is not None and (_done % _PROGRESS_EVERY == 0 or _done == total_symbols):
+            progress_cb(_done, total_symbols)
 
     # —— 汇总统计 ——
     stats = _compute_stats(all_hits)

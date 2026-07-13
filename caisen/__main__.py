@@ -499,8 +499,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     # —— 3. backtest_replay.replay（滚动 screen → plan → 离场模拟）——
     risk = RiskManager(cfg)
     cal = lake.index.get_level_values("date").unique().sort_values()
+    # trading_calendar 改为 kw-only（Spec 1 Task 2），此处显式关键字传参（原位置第 7 参 cal）
     report = backtest_replay.replay(
-        universe_window, cfg, risk, start, end, _DEFAULT_AUM, cal,
+        universe_window, cfg, risk, start, end, _DEFAULT_AUM, trading_calendar=cal,
     )
 
     # —— 4. 终端打印 ReplayReport ——
