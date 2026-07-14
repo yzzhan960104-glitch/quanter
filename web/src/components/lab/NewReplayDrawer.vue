@@ -13,7 +13,7 @@
  * start/end 必填校验在按钮 disabled 上显式守护，杜绝空区间误触发后端 422。
  */
 import { computed, ref, watch } from 'vue'
-import { PARAM_GROUPS, PARAM_META } from './paramMeta'
+import { PARAM_GROUPS, PARAM_META, CORE_GROUPS, isCoreGroup } from './paramMeta'
 import type { ReplayAsyncRequestBody } from '@/api/caisen'
 
 const props = defineProps<{
@@ -24,9 +24,17 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'update:visible': [boolean]; submit: [ReplayAsyncRequestBody] }>()
 
-// 折叠面板默认全展开（PARAM_GROUPS 即所有分组名）——抽屉打开即见全部参数，免逐个点击。
-// 物理意图：参数多（30+）但分 7 组，默认展开便于横向对照；用户可手动收起不关心分组。
-const activeGroups = ref<string[]>([...PARAM_GROUPS])
+// 折叠面板默认仅展开形态核心组（CORE_GROUPS：时间跨度/空间高度/量价配合/蔡森方法学）。
+// 物理意图：参数瘦身 Task 2 分层——抽屉打开即见「形态核心」参数（策略骨架），高级组
+// （交易执行/时间止损/风控）折叠在「显示高级参数」开关后，默认不挡视野。用户可手动展开/收起。
+const activeGroups = ref<string[]>([...CORE_GROUPS])
+
+// 「显示高级参数」开关——仅控高级组可见性（交易执行/时间止损/风控），默认 false。
+// 语义：开关=false 时高级组不渲染（v-if 卸载），用户看不到也填不了；要调高级参数就开 toggle
+// 再填。这符合「默认不挡视野」且不会丢值——默认 false 时本就没填，true 时才出现可填。
+// 高级参数仍绑定 cfg、onSubmit 仍收集改过的字段（见 onSubmit 的 Object.entries(cfg.value)，
+// 遍历的是 cfg 而非 visibleGroups），故「开关仅控可见性、保留全调参能力」契约成立。
+const showAdvanced = ref(false)
 
 const start = ref('')
 const end = ref('')
@@ -61,6 +69,14 @@ const groupedFields = computed(() =>
       .filter(([name, m]) => m.group === g && props.configSchema?.properties?.[name])
       .map(([name, m]) => ({ name, ...m, spec: props.configSchema.properties[name] })),
   })).filter((g) => g.fields.length),
+)
+
+// 可见分组：形态核心组恒显；高级组（交易执行/时间止损/风控）仅 showAdvanced=true 时显。
+// 物理意图：模板 v-for 用此（而非 groupedFields）渲染，实现「形态核心默认展开、高级组折叠在
+// 开关后」的分层。注意 onSubmit 仍遍历 cfg.value（全部已填字段，含高级），与 visibleGroups 解耦——
+// 隐藏不等于不收集，保留全调参能力。
+const visibleGroups = computed(() =>
+  groupedFields.value.filter((g) => isCoreGroup(g.group) || showAdvanced.value),
 )
 
 function onSubmit() {
@@ -98,8 +114,12 @@ function onSubmit() {
     </div>
 
     <!-- 分组参数表单（configSchema 反射 + paramMeta 中文标题） -->
+    <!-- 形态核心组默认展开；高级组折叠在「显示高级参数」开关后（showAdvanced 仅控可见性） -->
+    <div class="drawer-section">
+      <el-switch v-model="showAdvanced" active-text="显示高级参数（计划/执行/风控）" size="small" />
+    </div>
     <el-collapse v-model="activeGroups" class="drawer-section">
-      <el-collapse-item v-for="g in groupedFields" :key="g.group" :title="g.group" :name="g.group">
+      <el-collapse-item v-for="g in visibleGroups" :key="g.group" :title="g.group" :name="g.group">
         <div v-for="f in g.fields" :key="f.name" class="param-row">
           <span class="param-label" :title="f.spec?.description">{{ f.title }}</span>
           <!-- bool → switch；number/integer → input-number（带 ge/le 约束）；其余 → input -->

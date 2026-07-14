@@ -25,7 +25,7 @@ import {
   submitReplayAsync, cancelReplayTask, deleteReplayTask,
 } from '@/api/caisen'
 import type { ReplayTask, ReplayTaskDetail, ReplayTaskStatus, ReplayAsyncRequestBody } from '@/api/caisen'
-import { PARAM_GROUPS, PARAM_META } from '@/components/lab/paramMeta'
+import { PARAM_GROUPS, PARAM_META, isCoreGroup } from '@/components/lab/paramMeta'
 import ReplayReportPanel from '@/components/lab/ReplayReportPanel.vue'
 import NewReplayDrawer from '@/components/lab/NewReplayDrawer.vue'
 import { logger } from '@/utils/logger'
@@ -54,6 +54,14 @@ const groupedParamValues = computed(() =>
         return { name, title: m.title, value: overridden ?? def, isDefault: overridden === undefined, desc: configSchema.value.properties[name].description }
       }),
   })).filter((g) => g.fields.length),
+)
+
+// 参数瘦身 Task 2：详情面板同抽屉分层——形态核心组恒显，高级组（交易执行/时间止损/风控）
+// 在「高级」开关后。详情面板为只读展示（非表单），分层纯粹是「收起非形态核心的次要参数」，
+// 让用户聚焦「这次回测的形态核心骨架」，需要查执行/风控细节时开 toggle。语义与抽屉一致。
+const showAdvanced = ref(false)
+const visibleParamGroups = computed(() =>
+  groupedParamValues.value.filter((g) => isCoreGroup(g.group) || showAdvanced.value),
 )
 
 // 是否存在活跃任务（PENDING/RUNNING）——驱动轮询启停，无活跃即停省请求
@@ -177,8 +185,12 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
     <!-- 第1层：左参数详情(只读) ｜ 右收益走势+统计 -->
     <div class="lab-row lab-row-top">
       <div class="qt-card lab-params">
-        <div class="qt-section-title">参数详情</div>
-        <div v-for="g in groupedParamValues" :key="g.group" class="param-group">
+        <div class="qt-section-title">
+          参数详情
+          <!-- 形态核心/高级分层开关（只读面板，仅控可见性，与抽屉分层语义一致） -->
+          <el-switch v-model="showAdvanced" size="small" active-text="高级" class="params-adv-switch" />
+        </div>
+        <div v-for="g in visibleParamGroups" :key="g.group" class="param-group">
           <div class="param-group-name">{{ g.group }}</div>
           <div v-for="f in g.fields" :key="f.name" class="param-line" :title="f.desc">
             <span class="param-line-title">{{ f.title }}</span>
@@ -254,6 +266,9 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .lab-sub { color: var(--qt-text-secondary); font-weight: 400; font-size: 12px; }
 .lab-row-top { display: grid; grid-template-columns: 360px 1fr; gap: var(--qt-space-2); }
 .lab-params, .lab-chart, .lab-trades, .lab-tasks { padding: var(--qt-space-3); }
+/* 参数详情标题行：标题左、高级开关右（分层 Task 2，开关与标题同行省纵向空间） */
+.lab-params > .qt-section-title { display: flex; align-items: center; justify-content: space-between; }
+.params-adv-switch { margin: 0; }   /* 覆盖 .qt-section-title 的下边距不影响 switch 自身边距 */
 .param-group-name { color: var(--qt-accent); font-size: 12px; margin: var(--qt-space-2) 0 2px; }
 .param-line { display: flex; justify-content: space-between; font-size: 12px; color: var(--qt-text-regular); padding: 1px 0; }
 .param-line-val.overridden { color: var(--qt-up); font-weight: 600; }   /* 改过默认的值高亮（非 A 涨跌语义，仅强调） */
