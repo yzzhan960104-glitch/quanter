@@ -73,11 +73,20 @@ def _shard_dir(key: str) -> str:
     return cfg.get("shard_dir", os.path.join("data_lake", "shards", key))
 
 
-def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str) -> None:
+def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str,
+                      by: str = "symbol") -> None:
     """合并 shard → MultiIndex(date, symbol) parquet。
 
     Why MultiIndex(date, symbol)：列式 parquet 上 (date, symbol) 双层索引支持
     DataLakeReader 按日期区间 + 标的列表双向切片，避免单层索引二次过滤的内存膨胀。
+
+    Why by 参数区分 symbol 来源（关键反前视偏差防线）：
+      - by=symbol：shard 是「单标的全历史」（如 000001.SZ.parquet），shard 内无
+        symbol 列，symbol 必须从文件名取（f.replace('.parquet',''))；
+      - by=date：shard 是「单日全市场」（如 20240103.parquet），shard 内已含
+        symbol_col 列（多标的），symbol 必须从该列取。若误用文件名会把交易日
+        串（'20240103'）当成 symbol 落湖，symbol 级全错——这是前视偏差之外的
+        数据污染，必须在落湖层堵死。
 
     兼容点：shard 文件可能由 _cleanse 写入（已把 date_col 转为名为 date_col 的
     DatetimeIndex），也可能由外部预置（索引名各异）。此处统一 reset_index 后
@@ -87,9 +96,11 @@ def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str) 
     for f in os.listdir(shard_dir):
         if not f.endswith(".parquet"):
             continue
-        symbol = f.replace(".parquet", "")
         df = pd.read_parquet(os.path.join(shard_dir, f))
-        df["symbol"] = symbol
+        if by == "symbol":
+            # 单标的全历史 shard：symbol 来自文件名
+            df["symbol"] = f.replace(".parquet", "")
+        # by=date：symbol 已在 symbol_col 列中，无需额外赋值
         df = df.reset_index().rename(columns={date_col: "date"})
         if "date" not in df.columns:
             df = df.rename(columns={df.columns[0]: "date"})
@@ -98,6 +109,9 @@ def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str) 
         raise RuntimeError(f"shard 目录无数据：{shard_dir}")
     big = pd.concat(frames, ignore_index=True)
     big["date"] = pd.to_datetime(big["date"])
+    if by == "date":
+        # by=date：symbol_col 列重命名为 symbol（统一索引名），保留真实标的码
+        big = big.rename(columns={symbol_col: "symbol"})
     big = big.set_index(["date", "symbol"]).sort_index()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     big.to_parquet(out, engine="pyarrow")
@@ -132,7 +146,7 @@ def sync_dataset(key: str, start: str, end: str,
     elif by == "date":
         _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out)
     elif by == "single":
-        _sync_single(key, api, fields, date_col, out)
+        _sync_single(key, api, fields, out)
     else:
         raise ValueError(f"未知分页模式 by={by}（key={key}）")
 
@@ -161,7 +175,7 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
             continue
         df = _cleanse(df, date_col)
         df.to_parquet(shard)
-    _build_multiindex(shard_dir, date_col, symbol_col, out)
+    _build_multiindex(shard_dir, date_col, symbol_col, out, by="symbol")
 
 
 def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out):
@@ -185,17 +199,18 @@ def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, ou
             continue
         df = _cleanse(df, date_col)
         df.to_parquet(shard)
-    _build_multiindex(shard_dir, date_col, symbol_col, out)
+    _build_multiindex(shard_dir, date_col, symbol_col, out, by="date")
 
 
-def _sync_single(key, api, fields, date_col, out):
+def _sync_single(key, api, fields, out):
     """单次拉取（指数/列表）。直接落盘，不分页。
 
     Why 不分页：指数日线等接口支持一次性按区间拉全量（参数化 start/end 在 cfg 里
     已隐含或接口本身无区间概念），无需 shard/断点续传的复杂度。
 
-    注意：本 task 严格按 brief 实现（不加 cfg 参数）。Plan C Task 1 会扩展签名
-    支持 index_mode=datetime（指数日线落湖时间索引）。
+    Why 无 date_col：本 task 直接 to_parquet 原样落盘，不重建时间索引。Plan C Task 1
+    会重加 cfg + date_col 支持 index_mode=datetime（指数日线落湖时间索引），本 task
+    不预留死参（YAGNI）。
     """
     kwargs = {}
     if fields:

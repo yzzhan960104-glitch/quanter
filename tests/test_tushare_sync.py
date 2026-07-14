@@ -7,9 +7,29 @@
   仅验证同步器的分页/断点/落湖逻辑正确性。
 - 通过 TUSHARE_DATASETS[key] 临时覆盖落湖路径到 tmp_path，保证测试隔离无副作用。
 """
+import copy
 import os
 import pandas as pd
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tushare_registry():
+    """深拷贝 TUSHARE_DATASETS + LAKE_CONFIG['lakes']，测试后还原原对象。
+
+    Why autouse 深拷贝：两个测试就地覆盖全局 TUSHARE_DATASETS['fina_income'] 和
+    LAKE_CONFIG['lakes']['fina_income']，若不还原会污染后续测试（测试顺序依赖、
+    隔离性破坏）。深拷贝保证测试内 mutate 不影响原注册表，yield 后还原引用即可
+    让其他模块看到原始未被改动的配置。copy.deepcopy 处理嵌套 dict（lakes 子键）。
+    """
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    saved_datasets = copy.deepcopy(TUSHARE_DATASETS)
+    saved_lakes = copy.deepcopy(LAKE_CONFIG["lakes"])
+    yield
+    TUSHARE_DATASETS.clear()
+    TUSHARE_DATASETS.update(saved_datasets)
+    LAKE_CONFIG["lakes"].clear()
+    LAKE_CONFIG["lakes"].update(saved_lakes)
 
 
 class _FakePro:
@@ -98,3 +118,40 @@ def test_sync_dataset_resume_skips_existing_shard(tmp_path, fake_pro, monkeypatc
                  symbols=["000001.SZ"], resume=True)
     # fake_pro 未被调（shard 已存在跳过）
     assert fake_pro.calls == []
+
+
+def test_build_multiindex_by_date_symbol_from_column(tmp_path):
+    """by=date 模式：symbol 必须来自 shard 内 ts_code 列，而非交易日文件名。
+
+    Why 此测试：by=date shard 是「单日全市场」（文件名=交易日如 20240105.parquet，
+    shard 内含多标的的 ts_code 列）。早期实现一律从文件名取 symbol，导致每行被标
+    symbol='20240105'，symbol 级全错。本测试直接构造单日全市场 shard，验证合并后
+    MultiIndex 的 symbol 来自真实标的码（000001.SZ / 600000.SH），不是交易日串。
+    """
+    from data.tushare_sync import _build_multiindex
+    shard_dir = tmp_path / "shards"
+    shard_dir.mkdir()
+    # 构造单日全市场 shard：DatetimeIndex(ann_date) + ts_code 列 + 数据列
+    # 两个真实标的，同一天 ann_date=2024-01-05
+    shard_df = pd.DataFrame({
+        "ts_code": ["000001.SZ", "600000.SH"],
+        "end_date": ["20231231", "20231231"],
+        "total_revenue": [1e9, 2e9],
+    }, index=pd.DatetimeIndex(["2024-01-05", "2024-01-05"], name="ann_date"))
+    # 文件名是交易日（by=date 模式的 shard 命名约定）
+    shard_df.to_parquet(shard_dir / "20240105.parquet")
+
+    out = str(tmp_path / "moneyflow.parquet")
+    _build_multiindex(str(shard_dir), date_col="ann_date",
+                      symbol_col="ts_code", out=out, by="date")
+
+    df = pd.read_parquet(out)
+    # MultiIndex 名
+    assert df.index.names == ["date", "symbol"]
+    # symbol 必须是真实标的码，不是交易日 '20240105'（防退化核心断言）
+    symbols = set(df.index.get_level_values("symbol"))
+    assert symbols == {"000001.SZ", "600000.SH"}, (
+        f"by=date symbol 应来自 ts_code 列，实际：{symbols}")
+    # 行数 + 数据列保持
+    assert len(df) == 2
+    assert "total_revenue" in df.columns
