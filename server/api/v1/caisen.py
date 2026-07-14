@@ -409,6 +409,23 @@ def cancel_replay_task(task_id: str, request: Request) -> CancelResponse:
     return CancelResponse(task_id=task_id, cancelled=True, message="取消信号已发送")
 
 
+@router.delete("/replay/tasks/{task_id}", summary="删除异步任务记录")
+def delete_replay_task(task_id: str) -> Dict[str, bool]:
+    """删除单条异步任务（清理历史）。
+
+    物理意图（spec §5 交互6 清理能力）：任务历史不能只增不删。「不删 RUNNING」是
+    前端 UX 约定（RUNNING 行只显示「取消」），后端薄路由不加状态守卫——delete_task
+    直删任意行。RUNNING 行被直删时 worker 仍会跑完但 mark_success/update 进 0 行（无害），
+    故由前端按钮可见性兜底即可，YAGNI 不加后端守卫。
+
+    异常策略：task_id 不存在 → delete_task 返 False → 本层转 404（与 get 同源契约）。
+    """
+    ok = replay_tasks_db.delete_task(task_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"任务不存在：task_id={task_id!r}")
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # 端点 9：GET /config/schema —— 策略参数 JSON Schema（参数表单/规则清单单一真相源）
 # ---------------------------------------------------------------------------

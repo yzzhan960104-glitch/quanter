@@ -686,3 +686,24 @@ class TestReplayAsyncEndpoints:
             # 清理：避免污染后续用例的 app.state（cancel 503 用例依赖未装配）
             if hasattr(client.app.state, "replay_scheduler"):
                 del client.app.state.replay_scheduler
+
+    def test_delete_replay_task_200_and_404(self, client, tmp_path, monkeypatch):
+        """DELETE /replay/tasks/{id} → 200 {ok:true}；不存在 → 404。
+
+        物理意图：任务历史清理能力（spec §5 交互6）。后端薄路由不加状态守卫——
+        「不删 RUNNING」是前端 UX 约定（RUNNING 行无删除按钮），非后端硬约束。
+        """
+        self._isolate_db(tmp_path, monkeypatch)
+        from caisen import replay_tasks_db
+        tid = replay_tasks_db.create_task(
+            {"start": "s", "end": "e", "universe": None, "cfg_override": {}})
+
+        # 存在 → 200 + {ok:true}，且 DB 行确实删除
+        resp = client.delete(f"/api/v1/caisen/replay/tasks/{tid}")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"ok": True}
+        assert replay_tasks_db.get_task(tid) is None
+
+        # 不存在 → 404（与 get 同源契约，状态机不进 NULL）
+        resp2 = client.delete("/api/v1/caisen/replay/tasks/nope-id")
+        assert resp2.status_code == 404
