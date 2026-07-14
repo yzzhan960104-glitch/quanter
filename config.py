@@ -253,7 +253,12 @@ LAKE_CONFIG["default_lake"] = "daily"
 #   akshare，parquet 落同一文件，避免双湖分叉）。data_service 的 _parquet_path /
 #   _loaded_data_span 优先读 lake_key 作湖索引，fallback 到数据集 key（零回归保护既有湖）。
 DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "macro":         {"source": "AKShare", "market": "宏观", "granularity": "月频→日频",
+    # macro（macro_credit 湖）：CreditRegime 的输入湖，由 sync_macro_credit.py 产出。
+    # Plan C Task 6 源切换：主源 Tushare cn_m(M0/M1/M2) + akshare 社融(shrzgm)/DR007 fallback。
+    # Why source 标 Tushare（主源）而非 AKShare：sync_macro_credit 已重写为 Tushare cn_m 为主，
+    # akshare 仅作社融/DR007 的 fallback（Tushare 无专门接口）。前端 DataLakeView 据此反射
+    # 「宏观信贷现已切 Tushare」，而非仍停留在 AKShare 标签（混合源语义，plan 既定决策非 bug）。
+    "macro":         {"source": "Tushare", "market": "宏观", "granularity": "月频→日频",
                       "script": "scripts/sync_macro_credit.py", "schedule": "每月初",   "freshness_hours": 720},
     "sector":        {"source": "AKShare", "market": "板块", "granularity": "1d",
                       "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
@@ -353,6 +358,40 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     # —— 特色筹码 1（cyq_perf，300/分独立通道，日频）——
     "cyq_perf":        {"source": "Tushare", "market": "A股", "granularity": "1d",
+                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # ============================================================================
+    # Plan C Task 6：宏观经济原始指标数据集注册（8 湖，与 Task 11 股票类对等）
+    # ============================================================================
+    # 设计意图：这 8 个宏观原始指标湖已在 TUSHARE_DATASETS + LAKE_CONFIG 注册（Task 3-5 同步器 +
+    # reader 用），但 DATASET_REGISTRY 缺元信息 → 前端 DataLakeView 表格看不到这些资产。
+    # 本组补 source=Tushare + market=宏观 + granularity + freshness_hours，让前端可反射。
+    #
+    # Why 按数据集粒度注册（与股票类同范式）：每个宏观指标的披露频率不同（CPI/PPI/PMI 月频、
+    # GDP 季频、Shibor 日频），freshness_hours 因频率而异，按数据集粒度才能精确表达。
+    #
+    # 字段口径（freshness_hours）：
+    #   月频 = 730h（30.4天*24，自然月阈值，过此即标 stale）
+    #   季频 = 2190h（与财报同口径，90天*24.3）
+    #   日频 = 24h（Shibor/交易所统计，每日披露）
+    # —— C 组·宏观原始指标 6（CPI/PPI/GDP/PMI 月季频 + Shibor 日频，tushare_sync 写）——
+    "cn_cpi":          {"source": "Tushare", "market": "宏观", "granularity": "月频",
+                        "script": "scripts/sync_tushare.py", "schedule": "每月中旬",  "freshness_hours": 730},
+    "cn_ppi":          {"source": "Tushare", "market": "宏观", "granularity": "月频",
+                        "script": "scripts/sync_tushare.py", "schedule": "每月中旬",  "freshness_hours": 730},
+    "cn_gdp":          {"source": "Tushare", "market": "宏观", "granularity": "季频",
+                        "script": "scripts/sync_tushare.py", "schedule": "每季发布",  "freshness_hours": 2190},
+    "cn_pmi":          {"source": "Tushare", "market": "宏观", "granularity": "月频",
+                        "script": "scripts/sync_tushare.py", "schedule": "月末",      "freshness_hours": 730},
+    "shibor":          {"source": "Tushare", "market": "宏观", "granularity": "1d",
+                        "script": "scripts/sync_tushare.py", "schedule": "每日11:00", "freshness_hours": 24},
+    "shibor_quote":    {"source": "Tushare", "market": "宏观", "granularity": "1d",
+                        "script": "scripts/sync_tushare.py", "schedule": "每日11:00", "freshness_hours": 24},
+    # —— C 组·交易所成交统计 2（市场宽度，by=date，tushare_sync 写）——
+    # LAKE_CONFIG key=szse_daily/sse_daily（与 TUSHARE_DATASETS 一致），lake 路径用 mkt_daily_*.parquet
+    # （单一真相源：LAKE_CONFIG[key]==TUSHARE_DATASETS[key]['lake']）。
+    "szse_daily":      {"source": "Tushare", "market": "宏观", "granularity": "1d",
+                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "sse_daily":       {"source": "Tushare", "market": "宏观", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
 }
 
