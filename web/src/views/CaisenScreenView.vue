@@ -1,14 +1,18 @@
 <script setup lang="ts">
 /**
- * 蔡森形态学审核大屏（Phase 3 · Task 7）
+ * 蔡森形态学审核大屏（Phase 3 · Task 7；Spec 2 Task 8 退役回放 tab）
  *
  * 三栏布局（复用 --qt-* token + Element Plus，与 LiveCockpitView 同构）：
  *   ① 左栏：候选计划列表（ElTable，按 rr_ratio 降序，徽章 pattern_type/status）
  *   ② 右栏：lightweight-charts K 线图（candles + markers 形态点 + priceLines 止损止盈/颈线）
- *   ③ 底部：参数表单 + scan/approve/reject/activate 按钮 + 回放 tab
+ *   ③ 底部：扫描参数表单 + approve/reject/activate 审核操作（直接铺平，无 tab）
  *
  * 顶部操作动线（蔡森流水线审核 SOP）：
  *   scan 触发筛选 → 刷新候选列表 → 选中 → 看 K 线 → approve/reject/微调 → activate
+ *
+ * Spec 2 Task 8 退役记录：原「历史回放」tab（走同步 runReplay API）已下线，回测能力
+ * 全部迁至独立路由 /lab（ParamLabView，走异步任务 + 抽屉式新建）。本视图回归纯审核职责，
+ * 审核区由原 el-tabs 双 tab 退化为直接铺平的扫描参数 + 审核操作两栏。
  *
  * 红线（CLAUDE.md 量化风控·边界审查）：
  *   - lightweight-charts 实例 onBeforeUnmount 必销毁（防 canvas 内存泄漏）；
@@ -32,15 +36,12 @@ import {
   LineStyle,                                   // v5 价位线样式枚举（Solid/Dotted/Dashed/...）
   type LineWidth,                              // v5 价位线宽度字面量联合类型（1|2|3|4）
 } from 'lightweight-charts'
-// ECharts 资金曲线已随回放结果渲染迁入 ReplayReportPanel（Spec 2 Task 4），本视图不再直接注册 ECharts。
+// ECharts 资金曲线随回放结果渲染迁入 ReplayReportPanel（Spec 2 Task 4），/lab 消费；
+// Spec 2 Task 8 下线 /caisen 老「历史回放」tab 后，本视图不再直接注册 ECharts、也不复用该面板。
 import {
-  scan, listPlans, getChart, reviewPlan, activatePlan, runReplay, getConfigSchema,
-  listReplayRuns, getReplayRun, deleteReplayRun,
-  type CandidatePlan, type ChartData, type ReplayReport, type ScanRequestBody,
-  type Trade, type ReplayRunSummary,
+  scan, listPlans, getChart, reviewPlan, activatePlan,
+  type CandidatePlan, type ChartData, type ScanRequestBody,
 } from '../api/caisen'
-// 回放结果渲染面板（Spec 2 Task 4 抽取，/lab 与 /caisen 复用——统计卡/资金曲线/流水/形态/月度）
-import ReplayReportPanel from '@/components/lab/ReplayReportPanel.vue'
 import { logger } from '../utils/logger'
 
 /**
@@ -67,35 +68,16 @@ const scanning = ref(false)
 const loadingChart = ref(false)
 const reviewing = ref(false)
 const activating = ref(false)
-const replaying = ref(false)
-const replayReport = shallowRef<ReplayReport | null>(null)
-const activeTab = ref<'review' | 'replay'>('review')
-// 回测跑通批次：策略参数 schema（反射渲染参数表单 + 规则清单）+ cfg_override（用户调参，随 replay 提交）
-const configSchema = shallowRef<Record<string, any>>({})
-const cfgOverride = ref<Record<string, any>>({})
 
 // 扫描参数表单（简化版 ScanRequest：date 默认今日，universe 默认宽基，cfg_override 留高级输入）
 const today = new Date().toISOString().slice(0, 10)
 // universe 在表单层用 string（逗号分隔）承载，提交时 split 转数组——
-// 镜像 replayForm.universe 的模式（el-input v-model 绑数组会导致输入/显示异常，破坏 scan 入口）。
+// el-input v-model 直接绑数组会导致输入/显示异常，破坏 scan 入口。
 const scanForm = ref({
   date: today,
   universe: '510300.SH,510050.SH,510500.SH,159915.SZ',
   cfg_override: {} as Record<string, unknown>,
 })
-
-// 回放参数表单
-const replayForm = ref({
-  start: today,
-  end: today,
-  universe: '' as string,                    // 空字符串 = 全市场（后端 null）
-  save: true,                                // 方案 A：默认落盘进历史（「默认都存」）
-})
-
-// 回测历史记录（方案 A）：已落盘的回放摘要列表 + 当前展示中的 run_id
-const replayRuns = shallowRef<ReplayRunSummary[]>([])
-const loadingRuns = ref(false)
-const currentRunId = ref<string | null>(null)   // 当前回放结果对应的 run_id（已落盘则有值）
 
 // 审核 edits 微调表单（仅 approve 时提交，绑定选中计划字段）
 const editForm = ref({
@@ -331,142 +313,13 @@ async function onActivate() {
   }
 }
 
-async function onReplay() {
-  replaying.value = true
-  try {
-    // cfg_override：只提交用户实际改过的参数（非空），空值用 StrategyConfig 默认
-    const overrides: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(cfgOverride.value)) {
-      if (v !== '' && v !== null && v !== undefined) overrides[k] = v
-    }
-    const body = {
-      start: replayForm.value.start,
-      end: replayForm.value.end,
-      universe: replayForm.value.universe.trim()
-        ? replayForm.value.universe.split(/[\s,，]+/).filter(Boolean)
-        : null,
-      cfg_override: overrides,
-      save: replayForm.value.save,           // 方案 A：默认 true=落盘进历史
-    }
-    replayReport.value = await runReplay(body)
-    currentRunId.value = replayReport.value.run_id ?? null
-    ElMessage.success(`回放完成，命中 ${replayReport.value.n_hits} 笔`)
-    // 落盘后才刷新历史列表（save=false 时 run_id 为 null，列表无变化不刷）
-    if (replayForm.value.save) {
-      await loadReplayRuns()
-    }
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('回放失败：' + detail)
-  } finally {
-    replaying.value = false
-  }
-}
-
-// ============ 回测历史记录（方案 A：加载 / 删除） ============
-/**
- * 拉历史回测摘要列表（GET /caisen/replay/runs，按 created_at 降序）。
- *
- * 物理意图：「历史回测记录」面板数据源。onMounted 初载 + 每次 runReplay(save=true)
- * / deleteReplayRun 后刷新。失败仅静默日志（历史面板缺失不应阻断回放主流程）。
- */
-async function loadReplayRuns() {
-  loadingRuns.value = true
-  try {
-    replayRuns.value = await listReplayRuns()
-  } catch (e: any) {
-    logger.error('加载回测历史失败:', e)
-  } finally {
-    loadingRuns.value = false
-  }
-}
-
-/**
- * 加载一条历史记录到回放结果面板（GET /caisen/replay/runs/{id}）。
- *
- * 物理意图：用户点「加载」→ 取详情 → report 回填资金曲线/买卖流水/统计卡，
- * request 回填表单（可微调后重跑对比）。不覆盖 save 开关（保留用户当前偏好）。
- */
-async function onLoadRun(runId: string) {
-  try {
-    const detail = await getReplayRun(runId)
-    replayReport.value = detail.report
-    currentRunId.value = runId
-    // 回填表单参数（便于重跑/对比；universe 数组→逗号串，与表单承载形式对齐）
-    const req = detail.request as Record<string, any>
-    if (typeof req.start === 'string') replayForm.value.start = req.start
-    if (typeof req.end === 'string') replayForm.value.end = req.end
-    const uni = req.universe
-    replayForm.value.universe = Array.isArray(uni) ? uni.join(',') : ''
-    // cfg_override 回填到参数表单（若当时有调参）
-    if (req.cfg_override && typeof req.cfg_override === 'object') {
-      cfgOverride.value = { ...req.cfg_override }
-    }
-    ElMessage.success('已加载历史回测记录')
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('加载历史失败：' + detail)
-  }
-}
-
-/**
- * 删除一条历史记录（DELETE /caisen/replay/runs/{id}，带二次确认）。
- *
- * 物理意图（方案 A 清理机制）：相同配置+标的的重复回放默认都存，由此手动清理。
- * 删除当前展示中的记录时同步清空 replayReport（避免界面停留已删数据）。
- */
-async function onDeleteRun(runId: string) {
-  try {
-    await ElMessageBox.confirm('确认删除该条回测记录？删除后不可恢复。', '删除确认', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-      confirmButtonType: 'danger',        // 删除高危：主键显式 danger（红）+ 给 E2E 稳定 class 锚点
-      type: 'warning',
-    })
-  } catch {
-    return   // 用户取消
-  }
-  try {
-    await deleteReplayRun(runId)
-    ElMessage.success('已删除')
-    if (currentRunId.value === runId) {
-      replayReport.value = null
-      currentRunId.value = null
-    }
-    await loadReplayRuns()
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('删除失败：' + detail)
-  }
-}
-
-/**
- * 历史记录时间格式化（微秒 ISO → 可读「YYYY-MM-DD HH:MM:SS」）。
- *
- * 物理意图：created_at 是微秒精度 ISO（排序键），展示时截断到秒即可。
- * 非法/空值兜底空串，避免 toLocaleString 抛错。
- */
-function formatCreatedAt(iso: string): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return iso
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
-    + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
 // ============ 生命周期 ============
 onMounted(async () => {
   initChart()
   await refreshPlans()
-  // 拉策略参数 schema（反射渲染参数表单 + 规则清单，#2/#4 同源）
-  try {
-    configSchema.value = await getConfigSchema()
-  } catch (e: any) {
-    logger.error('加载策略参数 schema 失败:', e)
-  }
-  // 方案 A：初载回测历史列表（「历史回测记录」面板）
-  await loadReplayRuns()
+  // Spec 2 Task 8：回放 tab 退役后，策略参数 schema（configSchema）与回测历史
+  // 列表（loadReplayRuns）的初载随之移除——两者均为回放链路专属。/lab 路由独立
+  // 持有这些能力（异步任务 + 抽屉式新建），本视图回归纯审核职责。
 })
 
 onBeforeUnmount(() => {
@@ -508,22 +361,8 @@ const canActivate = computed(() => selectedPlan.value?.status === 'APPROVED')
 /** 选中计划是否可审核（仅 PENDING_APPROVAL 态可 approve/reject） */
 const canReview = computed(() => selectedPlan.value?.status === 'PENDING_APPROVAL')
 
-// 回放月度收益排序 / 形态分布 / 资金曲线 ECharts option 已迁入
-// ReplayReportPanel.vue（Spec 2 Task 4 纯展示组件抽取），本视图不再持有。
-
-// 策略参数表单：反射 configSchema.properties → [{name, type, description, default, min, max}]
-// 物理意图：前端动态渲染参数输入（#4 参数可调），description 同时是规则说明（#2 规则列举）。
-const schemaParams = computed(() => {
-  const props = (configSchema.value?.properties || {}) as Record<string, any>
-  return Object.entries(props).map(([name, spec]) => ({
-    name,
-    type: spec.type as string,
-    description: (spec.description || spec.title || '') as string,
-    default: spec.default,
-    minimum: spec.minimum,
-    maximum: spec.maximum,
-  }))
-})
+// 回放链路（月度收益/形态分布/资金曲线 ECharts option、策略参数反射表单、回测历史表）已随
+// Spec 2 Task 8 老「历史回放」tab 下线一并移除——回测能力由 /lab 独立路由承接。
 </script>
 
 <template>
@@ -625,228 +464,83 @@ const schemaParams = computed(() => {
       </section>
     </div>
 
-    <!-- 底部：审核/回放双 tab -->
+    <!-- 底部：审核区（Spec 2 Task 8 起，回放 tab 退役，扫描参数 + 审核操作直接铺平） -->
     <section class="bottom-card">
-      <el-tabs v-model="activeTab" class="bottom-tabs">
-        <!-- Tab 1：参数表单 + 审核/激活 -->
-        <el-tab-pane label="扫描参数 & 审核" name="review">
-          <div class="bottom-grid">
-            <!-- 扫描参数 -->
-            <div class="form-block">
-              <div class="block-title">扫描参数（ScanRequest）</div>
-              <el-form size="small" label-width="70px">
-                <el-form-item label="扫描日">
-                  <el-date-picker
-                    v-model="scanForm.date" type="date" value-format="YYYY-MM-DD"
-                    style="width: 160px"
-                  />
-                </el-form-item>
-                <el-form-item label="标的池">
-                  <el-input
-                    v-model="scanForm.universe"
-                    placeholder="逗号分隔，如 510300.SH,510050.SH"
-                    style="width: 320px"
-                  />
-                </el-form-item>
-                <el-form-item>
-                  <el-button type="primary" :loading="scanning" @click="onScan">触发扫描</el-button>
-                </el-form-item>
-              </el-form>
-            </div>
+      <div class="bottom-grid">
+        <!-- 扫描参数 -->
+        <div class="form-block">
+          <div class="block-title">扫描参数（ScanRequest）</div>
+          <el-form size="small" label-width="70px">
+            <el-form-item label="扫描日">
+              <el-date-picker
+                v-model="scanForm.date" type="date" value-format="YYYY-MM-DD"
+                style="width: 160px"
+              />
+            </el-form-item>
+            <el-form-item label="标的池">
+              <el-input
+                v-model="scanForm.universe"
+                placeholder="逗号分隔，如 510300.SH,510050.SH"
+                style="width: 320px"
+              />
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="scanning" @click="onScan">触发扫描</el-button>
+            </el-form-item>
+          </el-form>
+        </div>
 
-            <!-- 审核操作 -->
-            <div class="form-block" v-if="selectedPlan">
-              <div class="block-title">
-                审核操作（{{ selectedPlan.symbol }} · 当前态 {{ selectedPlan.status }}）
-              </div>
-              <!-- edits 微调（仅 PENDING_APPROVAL 态可调） -->
-              <el-form size="small" label-width="80px" :disabled="!canReview">
-                <el-form-item label="止损">
-                  <el-input-number
-                    v-model="editForm.stop_loss" :min="0" :precision="3" :step="0.1" style="width: 140px"
-                  />
-                </el-form-item>
-                <el-form-item label="止盈·一">
-                  <el-input-number
-                    v-model="editForm.take_profit" :min="0" :precision="3" :step="0.1" style="width: 140px"
-                  />
-                </el-form-item>
-                <el-form-item label="止盈·二">
-                  <el-input-number
-                    v-model="editForm.take_profit_2x" :min="0" :precision="3" :step="0.1" style="width: 140px"
-                  />
-                </el-form-item>
-                <el-form-item>
-                  <el-button
-                    type="success" :loading="reviewing" :disabled="!canReview"
-                    @click="onReview('approve')"
-                  >通过（APPROVED）</el-button>
-                  <el-button
-                    type="danger" plain :loading="reviewing" :disabled="!canReview"
-                    @click="onReview('reject')"
-                  >驳回（REJECTED）</el-button>
-                  <el-popconfirm
-                    title="确认激活？计划将进入 ARMED 态，挂单待执行（不可撤销）。"
-                    confirm-button-text="激活" cancel-button-text="取消"
-                    @confirm="onActivate"
-                  >
-                    <template #reference>
-                      <el-button
-                        type="danger" :loading="activating" :disabled="!canActivate"
-                      >激活挂单（ARMED）</el-button>
-                    </template>
-                  </el-popconfirm>
-                </el-form-item>
-              </el-form>
-              <span v-if="!canReview" class="hint">（仅 PENDING_APPROVAL 态可审核）</span>
-              <span v-else-if="!canActivate" class="hint">（通过审核后可激活）</span>
-            </div>
-            <div class="form-block empty-block" v-else>
-              <span class="hint">从左侧选择候选计划进行审核</span>
-            </div>
+        <!-- 审核操作 -->
+        <div class="form-block" v-if="selectedPlan">
+          <div class="block-title">
+            审核操作（{{ selectedPlan.symbol }} · 当前态 {{ selectedPlan.status }}）
           </div>
-        </el-tab-pane>
-
-        <!-- Tab 2：回放 -->
-        <el-tab-pane label="历史回放" name="replay">
-          <div class="replay-area">
-            <div class="form-block">
-              <div class="block-title">回放参数（ReplayRequest）</div>
-              <el-form size="small" label-width="60px" inline>
-                <el-form-item label="起始">
-                  <el-date-picker
-                    v-model="replayForm.start" type="date" value-format="YYYY-MM-DD"
-                    style="width: 150px"
-                  />
-                </el-form-item>
-                <el-form-item label="结束">
-                  <el-date-picker
-                    v-model="replayForm.end" type="date" value-format="YYYY-MM-DD"
-                    style="width: 150px"
-                  />
-                </el-form-item>
-                <el-form-item label="标的池">
-                  <el-input
-                    v-model="replayForm.universe"
-                    placeholder="留空=全市场（慢）；建议填 30-100 只标的快回放"
-                    style="width: 320px"
-                  />
-                </el-form-item>
-                <el-form-item>
-                  <el-button type="primary" :loading="replaying" @click="onReplay">运行回放</el-button>
-                  <el-tooltip
-                    content="勾选后本次回放结果落盘进「历史回测记录」，可随时加载/删除（方案 A：默认都存）"
-                    placement="top"
-                  >
-                    <el-checkbox v-model="replayForm.save" class="save-cb">保存到历史</el-checkbox>
-                  </el-tooltip>
-                </el-form-item>
-              </el-form>
-            </div>
-
-            <!-- 历史回测记录（方案 A：默认都存 + 加载/删除；可折叠保持主视野清爽） -->
-            <div class="form-block">
-              <el-collapse>
-                <el-collapse-item name="history">
-                  <template #title>
-                    <span class="block-title">
-                      历史回测记录（{{ replayRuns.length }} 条）
-                      <span v-if="loadingRuns" class="hint"> · 加载中…</span>
-                    </span>
-                  </template>
-                  <el-table
-                    :data="replayRuns" size="small" max-height="280"
-                    class="replay-runs-table"
-                    empty-text="暂无历史回测（运行回放时勾选「保存到历史」即累积）"
-                  >
-                    <el-table-column label="时间" width="150">
-                      <template #default="{ row }">
-                        <span class="mono">{{ formatCreatedAt(row.created_at) }}</span>
-                      </template>
-                    </el-table-column>
-                    <el-table-column label="区间" width="180">
-                      <template #default="{ row }">
-                        <span class="mono">{{ row.start }} ~ {{ row.end }}</span>
-                      </template>
-                    </el-table-column>
-                    <el-table-column label="标的" width="90">
-                      <template #default="{ row }">
-                        <el-tag v-if="row.universe_n < 0" size="small" type="info">全市场</el-tag>
-                        <span v-else>{{ row.universe_n }} 只</span>
-                      </template>
-                    </el-table-column>
-                    <el-table-column label="min_rr" width="70">
-                      <template #default="{ row }">
-                        <span class="mono">{{ row.cfg_min_rr ?? '—' }}</span>
-                      </template>
-                    </el-table-column>
-                    <el-table-column prop="n_hits" label="命中" width="60" />
-                    <el-table-column label="胜率" width="70">
-                      <template #default="{ row }">
-                        <span :class="row.win_rate >= 0.5 ? 'up' : 'down'">
-                          {{ (row.win_rate * 100).toFixed(1) }}%
-                        </span>
-                      </template>
-                    </el-table-column>
-                    <el-table-column label="盈亏比" width="70">
-                      <template #default="{ row }">{{ row.avg_rr.toFixed(2) }}</template>
-                    </el-table-column>
-                    <el-table-column label="年化" width="80">
-                      <template #default="{ row }">
-                        <span :class="row.annualized_return >= 0 ? 'up' : 'down'">
-                          {{ (row.annualized_return * 100).toFixed(1) }}%
-                        </span>
-                      </template>
-                    </el-table-column>
-                    <el-table-column label="操作" width="140">
-                      <template #default="{ row }">
-                        <el-button
-                          link type="primary" size="small"
-                          :disabled="currentRunId === row.run_id"
-                          @click="onLoadRun(row.run_id)"
-                        >加载</el-button>
-                        <el-button link type="danger" size="small" @click="onDeleteRun(row.run_id)">删除</el-button>
-                      </template>
-                    </el-table-column>
-                  </el-table>
-                </el-collapse-item>
-              </el-collapse>
-            </div>
-
-            <!-- 策略参数表单（反射 schema 动态渲染，#2 规则列举 + #4 参数可调 同源）-->
-            <div class="form-block">
-              <el-collapse>
-                <el-collapse-item name="cfg">
-                  <template #title>
-                    <span class="block-title">策略参数（展开调参 · {{ schemaParams.length }} 个 · 默认零命中请放宽）</span>
-                  </template>
-                  <div class="cfg-grid">
-                    <div v-for="p in schemaParams" :key="p.name" class="cfg-item">
-                      <span class="cfg-label" :title="p.description">{{ p.name }}</span>
-                      <el-switch
-                        v-if="p.type === 'boolean'" v-model="cfgOverride[p.name]" size="small"
-                      />
-                      <el-input-number
-                        v-else v-model="cfgOverride[p.name]" size="small"
-                        :min="p.minimum" :max="p.maximum"
-                        :step="p.type === 'integer' ? 1 : 0.1"
-                        :precision="p.type === 'integer' ? 0 : 3"
-                        style="width: 130px"
-                      />
-                    </div>
-                  </div>
-                </el-collapse-item>
-              </el-collapse>
-            </div>
-
-            <!-- 回放结果（Spec 2 Task 4：抽为 ReplayReportPanel 纯展示组件，/lab 与 /caisen 复用） -->
-            <ReplayReportPanel v-if="replayReport" :report="replayReport" />
-            <div v-else class="empty-block">
-              <span class="hint">运行回放后展示胜率/盈亏比/年化曲线/买卖流水（默认 cfg 零命中时，展开上方「策略参数」放宽阈值）</span>
-            </div>
-          </div>
-        </el-tab-pane>
-      </el-tabs>
+          <!-- edits 微调（仅 PENDING_APPROVAL 态可调） -->
+          <el-form size="small" label-width="80px" :disabled="!canReview">
+            <el-form-item label="止损">
+              <el-input-number
+                v-model="editForm.stop_loss" :min="0" :precision="3" :step="0.1" style="width: 140px"
+              />
+            </el-form-item>
+            <el-form-item label="止盈·一">
+              <el-input-number
+                v-model="editForm.take_profit" :min="0" :precision="3" :step="0.1" style="width: 140px"
+              />
+            </el-form-item>
+            <el-form-item label="止盈·二">
+              <el-input-number
+                v-model="editForm.take_profit_2x" :min="0" :precision="3" :step="0.1" style="width: 140px"
+              />
+            </el-form-item>
+            <el-form-item>
+              <el-button
+                type="success" :loading="reviewing" :disabled="!canReview"
+                @click="onReview('approve')"
+              >通过（APPROVED）</el-button>
+              <el-button
+                type="danger" plain :loading="reviewing" :disabled="!canReview"
+                @click="onReview('reject')"
+              >驳回（REJECTED）</el-button>
+              <el-popconfirm
+                title="确认激活？计划将进入 ARMED 态，挂单待执行（不可撤销）。"
+                confirm-button-text="激活" cancel-button-text="取消"
+                @confirm="onActivate"
+              >
+                <template #reference>
+                  <el-button
+                    type="danger" :loading="activating" :disabled="!canActivate"
+                  >激活挂单（ARMED）</el-button>
+                </template>
+              </el-popconfirm>
+            </el-form-item>
+          </el-form>
+          <span v-if="!canReview" class="hint">（仅 PENDING_APPROVAL 态可审核）</span>
+          <span v-else-if="!canActivate" class="hint">（通过审核后可激活）</span>
+        </div>
+        <div class="form-block empty-block" v-else>
+          <span class="hint">从左侧选择候选计划进行审核</span>
+        </div>
+      </div>
     </section>
   </div>
 </template>
@@ -959,7 +653,7 @@ const schemaParams = computed(() => {
 .dv.up { color: var(--qt-up); }
 .dv.down { color: var(--qt-down); }
 
-/* 底部 tab 区 */
+/* 底部审核区（Spec 2 Task 8：回放 tab 退役后，扫描参数 + 审核操作直接铺平） */
 .bottom-card {
   flex-shrink: 0;
   background: var(--qt-bg-card);
@@ -969,7 +663,6 @@ const schemaParams = computed(() => {
   max-height: 38%;
   overflow: auto;
 }
-.bottom-tabs :deep(.el-tabs__content) { padding-top: var(--qt-space-1); }
 
 .bottom-grid {
   display: flex;
@@ -1005,29 +698,4 @@ const schemaParams = computed(() => {
 }
 .loss-text { color: var(--qt-down); font-variant-numeric: tabular-nums; }
 .mono { font-family: var(--qt-font-mono); font-size: var(--qt-fs-caption); }
-
-/* 回放 tab 区（结果渲染样式已随 ReplayReportPanel 迁出，此处仅留 tab 容器与参数表单样式） */
-.replay-area { display: flex; flex-direction: column; gap: var(--qt-space-3); }
-/* 「保存到历史」复选框：与运行回放按钮同排留白（方案 A 默认勾选） */
-.save-cb { margin-left: var(--qt-space-3); }
-
-/* 策略参数表单（反射 schema 渲染的调参网格） */
-.cfg-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: var(--qt-space-2);
-}
-.cfg-item {
-  display: flex;
-  align-items: center;
-  gap: var(--qt-space-2);
-}
-.cfg-label {
-  font-size: var(--qt-fs-caption);
-  color: var(--qt-text-secondary);
-  min-width: 130px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 </style>

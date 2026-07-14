@@ -25,7 +25,7 @@ vi.mock('./client', () => ({
 
 import { apiClient } from './client'
 import {
-  scan, listPlans, getPlan, reviewPlan, activatePlan, getChart, runReplay,
+  scan, listPlans, getPlan, reviewPlan, activatePlan, getChart,
   submitReplayAsync, listReplayTasks, getReplayTask, cancelReplayTask, deleteReplayTask,
 } from './caisen'
 
@@ -94,14 +94,8 @@ describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
     expect(mockGet).toHaveBeenCalledWith('/api/v1/caisen/plans/p1/chart', { timeout: 15000 })
   })
 
-  it('runReplay：POST /api/v1/caisen/replay，timeout 90000（全市场回放计算密集）', async () => {
-    await runReplay({ start: '2026-01-01', end: '2026-02-01' })
-    expect(mockPost).toHaveBeenCalledWith(
-      '/api/v1/caisen/replay',
-      { start: '2026-01-01', end: '2026-02-01' },
-      { timeout: 90000 },
-    )
-  })
+  // 注：老同步 runReplay（POST /caisen/replay）用例随 Spec 2 Task 8 /caisen 回放 tab 下线移除。
+  // 回测能力由下方异步任务 5 端点承接（/lab 消费）。
 
   // ============ 异步回测任务（Spec 2 Task 2；对应 Spec 1 后端 5 端点） ============
 

@@ -15,7 +15,14 @@
  *     POST   /caisen/plans/{plan_id}/activate → CandidatePlan（APPROVED → ARMED）
  *     GET    /caisen/plans/{plan_id}/chart    → ChartData（candles/markers/priceLines）
  *     GET    /caisen/positions                → { positions: [] }（占位）
- *     POST   /caisen/replay                   → ReplayReport
+ *     GET    /caisen/config/schema            → Record<string,unknown>（/lab 参数表单反射用）
+ *     POST   /caisen/replay/async             → { task_id }（Spec 2 异步回测，/lab 消费）
+ *     GET    /caisen/replay/tasks             → List[ReplayTask]
+ *     GET    /caisen/replay/tasks/{id}        → ReplayTaskDetail
+ *     POST   /caisen/replay/tasks/{id}/cancel → CancelResponse
+ *     DELETE /caisen/replay/tasks/{id}        → { ok: true }
+ *   注：老同步 POST /caisen/replay + GET/DELETE /caisen/replay/runs 端点后端仍保留（异步
+ *   worker + 潜在 CLI 入口复用），但前端在 Spec 2 Task 8 后不再消费（老 /caisen 回放 tab 已下线）。
  *
  * 状态机（与 storage 状态机严格同源，前端只读消费，不本地推断）：
  *   PENDING_APPROVAL → APPROVED → ARMED → FILLED → CLOSED
@@ -192,15 +199,6 @@ export interface PlanReviewBody {
   edits?: Record<string, unknown>             // 字段微调（仅 approve 时生效）
 }
 
-/** POST /caisen/replay 请求体（对齐 ReplayRequest）。 */
-export interface ReplayRequestBody {
-  start: string
-  end: string
-  universe?: string[] | null                  // 默认 null = 全市场（当前 Phase 3+ 占位）
-  cfg_override?: Record<string, unknown>
-  save?: boolean                              // 默认 true=落盘进历史（方案 A「默认都存」）
-}
-
 // ============ 异步回测任务类型（Spec 1 SQLite 任务表，Spec 2 /lab 消费） ============
 
 /**
@@ -230,7 +228,7 @@ export interface ReplayTask {
   progress: number                            // 0-100（已处理 symbol 占比）
   start?: string | null                       // 回测区间起（可缺省=全市场默认）
   end?: string | null
-  universe_n?: number | null                  // -1 = 全市场（与 ReplayRunSummary 同语义）
+  universe_n?: number | null                  // -1 = 全市场（前端显示「全市场」）
   cfg_override?: Record<string, unknown>      // 提交时的参数增量（展示「用了什么 min_rr_ratio」）
 }
 
@@ -263,40 +261,6 @@ export interface CancelResponse {
   task_id: string
   cancelled: boolean                          // true=已置 abort flag（终态任务返 false）
   message: string                             // 中文说明（「已取消」/「任务已结束，无法取消」）
-}
-
-// ============ 回测历史记录类型（方案 A：GET /replay/runs · 详情 · 删除） ============
-
-/**
- * 历史回测摘要（GET /caisen/replay/runs 列表项，对齐 server.schemas.caisen.ReplayRunSummary）。
- *
- * 物理意图：「历史回测记录」面板表格行——只含「何时跑的/什么参数/关键统计」，
- * 不含完整 trades/equity_curve（保持列表轻量）。完整记录用 ReplayRunDetail。
- */
-export interface ReplayRunSummary {
-  run_id: string
-  created_at: string                          // ISO 微秒精度（排序键；展示可截断到秒）
-  start: string
-  end: string
-  universe_n: number                          // -1 = 全市场（前端显示「全市场」）
-  cfg_min_rr?: number | null                  // 当时生效的 min_rr_ratio（可能缺省）
-  n_hits: number
-  win_rate: number
-  avg_rr: number
-  max_drawdown: number
-  annualized_return: number
-}
-
-/**
- * 历史回测详情（GET /caisen/replay/runs/{id}，对齐 ReplayRunDetail）。
- *
- * 物理意图：从历史列表点「加载」→ 取此详情 → report 回填回放结果面板，
- * request 回填表单（可重跑/对比），summary 附详情头部统计。
- */
-export interface ReplayRunDetail {
-  summary: ReplayRunSummary
-  report: ReplayReport
-  request: Record<string, unknown>
 }
 
 // ============ API 封装（仿 trading.ts 风格，超时按端点特性覆写） ============
@@ -357,16 +321,6 @@ export function getChart(planId: string): Promise<ChartData> {
 }
 
 /**
- * POST /caisen/replay：历史回放（胜率/盈亏比/回撤统计）。
- *
- * 物理意图：对 price_data 滚动跑 screener→plan→离场模拟，统计聚合指标。
- * 超时放宽到 90s（全市场回放计算密集）。
- */
-export function runReplay(body: ReplayRequestBody): Promise<ReplayReport> {
-  return apiClient.post('/api/v1/caisen/replay', body, { timeout: 90000 })
-}
-
-/**
  * GET /caisen/config/schema：策略参数 JSON Schema（前端反射渲染参数表单 + 规则清单）。
  *
  * 物理意图：返回 StrategyConfig.model_json_schema()，前端按 Field 的 type/description/约束
@@ -404,7 +358,7 @@ export function listReplayTasks(status?: ReplayTaskStatus): Promise<ReplayTask[]
  * GET /caisen/replay/tasks/{id}：单任务详情（status/progress/report/error/时间戳）。
  *
  * 物理意图：任务 SUCCESS 后取此详情 → report 字段内嵌完整 ReplayReport，
- * 直接回填到既有回放结果面板（与同步 runReplay 走同一渲染路径）。
+ * /lab 路由直接回填到 ReplayReportPanel 渲染（统计卡/资金曲线/买卖流水）。
  * taskId 经 encodeURIComponent 防特殊字符（如空格/斜杠）破坏路由。
  */
 export function getReplayTask(taskId: string): Promise<ReplayTaskDetail> {
@@ -425,42 +379,14 @@ export function cancelReplayTask(taskId: string): Promise<CancelResponse> {
 /**
  * DELETE /caisen/replay/tasks/{id}：删除任务记录（清理历史）。
  *
- * 物理意图：与同步 deleteReplayRun 对称的清理机制——异步任务跑完看够了就删，
- * 防 SQLite 无限膨胀。前端仅对非 RUNNING 行调用（RUNNING 删除由后端守护，
- * 但前端按钮置灰更友好）。返 {ok:true}；task_id 不存在后端返 404。
+ * 物理意图：异步任务跑完看够了就删，防 SQLite 无限膨胀。前端仅对非 RUNNING 行调用
+ * （RUNNING 删除由后端守护，但前端按钮置灰更友好）。返 {ok:true}；task_id 不存在后端返 404。
  */
 export function deleteReplayTask(taskId: string): Promise<{ ok: boolean }> {
   return apiClient.delete(`/api/v1/caisen/replay/tasks/${encodeURIComponent(taskId)}`, { timeout: 10000 })
 }
 
-// ============ 回测历史记录 API（方案 A：默认都存 + 前端删除） ============
-
-/**
- * GET /caisen/replay/runs：历史回测摘要列表（按 created_at 降序，最新在前）。
- *
- * 物理意图：「历史回测记录」面板数据源。每次 runReplay(save=true) 后调它刷新列表。
- * 无历史时返 []（后端容错，前端不抛）。
- */
-export function listReplayRuns(): Promise<ReplayRunSummary[]> {
-  return apiClient.get('/api/v1/caisen/replay/runs', { timeout: 10000 })
-}
-
-/**
- * GET /caisen/replay/runs/{run_id}：取单条历史详情（summary + report + request）。
- *
- * 物理意图：点「加载」→ 取详情 → report 回填回放结果面板，request 回填表单。
- * run_id 不存在后端返 404（由调用方 try/catch 提示）。
- */
-export function getReplayRun(runId: string): Promise<ReplayRunDetail> {
-  return apiClient.get(`/api/v1/caisen/replay/runs/${encodeURIComponent(runId)}`, { timeout: 10000 })
-}
-
-/**
- * DELETE /caisen/replay/runs/{run_id}：删除单条历史（移除 run 文件 + 从 index 摘出）。
- *
- * 物理意图（方案 A 清理机制）：相同配置+标的的重复回放默认都存，由此端点手动清理。
- * 删成功返 {ok:true}；run_id 不存在后端返 404。
- */
-export function deleteReplayRun(runId: string): Promise<{ ok: boolean }> {
-  return apiClient.delete(`/api/v1/caisen/replay/runs/${encodeURIComponent(runId)}`, { timeout: 10000 })
-}
+// Spec 2 Task 8：同步回放老 API（runReplay / listReplayRuns / getReplayRun / deleteReplayRun）
+// 及其专属类型（ReplayRequestBody / ReplayRunSummary / ReplayRunDetail）已随 /caisen 老
+// 「历史回放」tab 下线一并移除。回测能力由异步任务 5 函数 + /lab 路由承接。后端端点暂留，
+// 供异步任务 worker 与潜在的 CLI 调试入口复用。
