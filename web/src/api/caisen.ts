@@ -136,12 +136,6 @@ export interface ChartData {
   priceLines: PriceLine[]
 }
 
-/**
- * 回放报告（字段对齐 server.schemas.caisen.ReplayReportResponse / ReplayReport）。
- *
- * 物理意图：历史区间滚动回放的聚合统计——前端独立 tab 展示胜率/盈亏比/回撤，
- * 用于策略参数调优（如数据驱动地校准 min_rr_ratio）。
- */
 /** 资金曲线点（年化收益曲线图数据）。字段对齐 backtest_replay._compute_stats equity_curve 项。 */
 export interface EquityPoint {
   date: string                                // exit_date（ISO 或 index 字符串）
