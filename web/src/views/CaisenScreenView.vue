@@ -32,19 +32,15 @@ import {
   LineStyle,                                   // v5 价位线样式枚举（Solid/Dotted/Dashed/...）
   type LineWidth,                              // v5 价位线宽度字面量联合类型（1|2|3|4）
 } from 'lightweight-charts'
-// ECharts（年化收益曲线，vue-echarts 按需注册）
-import { use } from 'echarts/core'
-import { CanvasRenderer } from 'echarts/renderers'
-import { LineChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, TitleComponent } from 'echarts/components'
-import VChart from 'vue-echarts'
-use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, TitleComponent])
+// ECharts 资金曲线已随回放结果渲染迁入 ReplayReportPanel（Spec 2 Task 4），本视图不再直接注册 ECharts。
 import {
   scan, listPlans, getChart, reviewPlan, activatePlan, runReplay, getConfigSchema,
   listReplayRuns, getReplayRun, deleteReplayRun,
   type CandidatePlan, type ChartData, type ReplayReport, type ScanRequestBody,
-  type EquityPoint, type Trade, type ReplayRunSummary,
+  type Trade, type ReplayRunSummary,
 } from '../api/caisen'
+// 回放结果渲染面板（Spec 2 Task 4 抽取，/lab 与 /caisen 复用——统计卡/资金曲线/流水/形态/月度）
+import ReplayReportPanel from '@/components/lab/ReplayReportPanel.vue'
 import { logger } from '../utils/logger'
 
 /**
@@ -512,19 +508,8 @@ const canActivate = computed(() => selectedPlan.value?.status === 'APPROVED')
 /** 选中计划是否可审核（仅 PENDING_APPROVAL 态可 approve/reject） */
 const canReview = computed(() => selectedPlan.value?.status === 'PENDING_APPROVAL')
 
-// 回放月度收益排序（用于柱状展示，按月份时间序）
-const sortedMonthlyReturns = computed(() => {
-  if (!replayReport.value) return []
-  return Object.entries(replayReport.value.monthly_returns)
-    .map(([month, rr]) => ({ month, rr }))
-    .sort((a, b) => a.month.localeCompare(b.month))
-})
-
-// 形态分布（回放报告里的形态命中数）
-const patternDistEntries = computed(() => {
-  if (!replayReport.value) return []
-  return Object.entries(replayReport.value.pattern_dist)
-})
+// 回放月度收益排序 / 形态分布 / 资金曲线 ECharts option 已迁入
+// ReplayReportPanel.vue（Spec 2 Task 4 纯展示组件抽取），本视图不再持有。
 
 // 策略参数表单：反射 configSchema.properties → [{name, type, description, default, min, max}]
 // 物理意图：前端动态渲染参数输入（#4 参数可调），description 同时是规则说明（#2 规则列举）。
@@ -538,23 +523,6 @@ const schemaParams = computed(() => {
     minimum: spec.minimum,
     maximum: spec.maximum,
   }))
-})
-
-// 年化收益曲线 ECharts option（equity_curve → LineSeries；标题标年化 CAGR）
-const equityChartOption = computed(() => {
-  const curve = replayReport.value?.equity_curve || []
-  const ann = ((replayReport.value?.annualized_return || 0) * 100).toFixed(2)
-  return {
-    title: { text: `资金曲线（年化 ${ann}%）`, left: 'center', textStyle: { color: '#d1d4dc', fontSize: 13 } },
-    tooltip: { trigger: 'axis' },
-    grid: { left: 50, right: 20, top: 40, bottom: 30 },
-    xAxis: { type: 'category', data: curve.map((p: EquityPoint) => (p.date || '').slice(0, 10)), axisLabel: { color: '#888' } },
-    yAxis: { type: 'value', scale: true, axisLabel: { color: '#888', formatter: (v: number) => v.toFixed(2) } },
-    series: [{
-      name: 'equity', type: 'line', data: curve.map((p: EquityPoint) => p.equity),
-      smooth: true, lineStyle: { color: '#0066cc', width: 2 }, areaStyle: { color: 'rgba(0,102,204,0.15)' },
-    }],
-  }
 })
 </script>
 
@@ -871,110 +839,8 @@ const equityChartOption = computed(() => {
               </el-collapse>
             </div>
 
-            <!-- 回放结果 -->
-            <div v-if="replayReport" class="replay-report">
-              <div class="report-grid">
-                <div class="metric">
-                  <span class="mk">命中笔数</span>
-                  <span class="mv">{{ replayReport.n_hits }}</span>
-                </div>
-                <div class="metric">
-                  <span class="mk">胜率</span>
-                  <span class="mv" :class="replayReport.win_rate >= 0.5 ? 'up' : 'down'">
-                    {{ (replayReport.win_rate * 100).toFixed(1) }}%
-                  </span>
-                </div>
-                <div class="metric">
-                  <span class="mk">平均盈亏比</span>
-                  <span class="mv">{{ replayReport.avg_rr.toFixed(2) }}</span>
-                </div>
-                <div class="metric">
-                  <span class="mk">最大回撤</span>
-                  <span class="mv down">{{ replayReport.max_drawdown.toFixed(2) }}</span>
-                </div>
-                <div class="metric">
-                  <span class="mk">年化收益</span>
-                  <span class="mv" :class="replayReport.annualized_return >= 0 ? 'up' : 'down'">
-                    {{ (replayReport.annualized_return * 100).toFixed(2) }}%
-                  </span>
-                </div>
-                <div class="metric">
-                  <span class="mk">平均持仓</span>
-                  <span class="mv">{{ replayReport.avg_holding_bars.toFixed(1) }} 日</span>
-                </div>
-              </div>
-
-              <div class="report-section">
-                <div class="block-title">资金曲线（年化收益）</div>
-                <v-chart
-                  v-if="replayReport.equity_curve.length"
-                  class="equity-chart" :option="equityChartOption" autoresize
-                />
-                <span v-else class="hint">无资金曲线数据（命中 0 笔）</span>
-              </div>
-
-              <div class="report-section">
-                <div class="block-title">买卖流水（{{ replayReport.trades.length }} 笔）</div>
-                <el-table :data="replayReport.trades" size="small" max-height="320" empty-text="无成交">
-                  <el-table-column prop="symbol" label="标的" width="100" />
-                  <el-table-column label="形态" width="90">
-                    <template #default="{ row }">
-                      <el-tag size="small" :type="patternTagType(row.pattern_type)">{{ patternLabel(row.pattern_type) }}</el-tag>
-                    </template>
-                  </el-table-column>
-                  <el-table-column label="买入" width="160">
-                    <template #default="{ row }">{{ row.entry_price.toFixed(2) }} @ {{ row.entry_date.slice(0, 10) }}</template>
-                  </el-table-column>
-                  <el-table-column label="卖出" width="160">
-                    <template #default="{ row }">{{ row.exit_price.toFixed(2) }} @ {{ row.exit_date.slice(0, 10) }}</template>
-                  </el-table-column>
-                  <el-table-column prop="exit_reason" label="离场" width="100" />
-                  <el-table-column label="盈亏比" width="80">
-                    <template #default="{ row }">
-                      <span :class="row.rr >= 0 ? 'up' : 'down'">{{ row.rr.toFixed(2) }}</span>
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="holding_bars" label="持仓(日)" width="80" />
-                </el-table>
-              </div>
-
-              <div class="report-section">
-                <div class="block-title">形态分布</div>
-                <div class="dist-row">
-                  <el-tag
-                    v-for="[pattern, count] in patternDistEntries"
-                    :key="pattern"
-                    :type="patternTagType(pattern)"
-                    size="small"
-                  >{{ patternLabel(pattern) }}：{{ count }}</el-tag>
-                  <span v-if="patternDistEntries.length === 0" class="hint">无命中</span>
-                </div>
-              </div>
-
-              <div class="report-section">
-                <div class="block-title">月度收益（累计盈亏比）</div>
-                <div class="monthly-bars">
-                  <div
-                    v-for="item in sortedMonthlyReturns" :key="item.month"
-                    class="monthly-bar"
-                  >
-                    <div
-                      class="bar"
-                      :class="item.rr >= 0 ? 'up' : 'down'"
-                      :style="{ height: Math.min(Math.abs(item.rr) * 40, 60) + 'px' }"
-                      :title="`${item.month}: ${item.rr.toFixed(2)}`"
-                    ></div>
-                    <span class="bar-month">{{ item.month.slice(5) }}</span>
-                  </div>
-                  <span v-if="sortedMonthlyReturns.length === 0" class="hint">无月度数据</span>
-                </div>
-              </div>
-
-              <div class="report-section">
-                <div class="block-title">生产建议</div>
-                <div class="recommendation">{{ replayReport.min_rr_ratio_recommendation }}</div>
-              </div>
-            </div>
+            <!-- 回放结果（Spec 2 Task 4：抽为 ReplayReportPanel 纯展示组件，/lab 与 /caisen 复用） -->
+            <ReplayReportPanel v-if="replayReport" :report="replayReport" />
             <div v-else class="empty-block">
               <span class="hint">运行回放后展示胜率/盈亏比/年化曲线/买卖流水（默认 cfg 零命中时，展开上方「策略参数」放宽阈值）</span>
             </div>
@@ -1140,81 +1006,12 @@ const equityChartOption = computed(() => {
 .loss-text { color: var(--qt-down); font-variant-numeric: tabular-nums; }
 .mono { font-family: var(--qt-font-mono); font-size: var(--qt-fs-caption); }
 
-/* 回放报告区 */
+/* 回放 tab 区（结果渲染样式已随 ReplayReportPanel 迁出，此处仅留 tab 容器与参数表单样式） */
 .replay-area { display: flex; flex-direction: column; gap: var(--qt-space-3); }
-.replay-report { display: flex; flex-direction: column; gap: var(--qt-space-3); }
 /* 「保存到历史」复选框：与运行回放按钮同排留白（方案 A 默认勾选） */
 .save-cb { margin-left: var(--qt-space-3); }
-.report-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: var(--qt-space-2);
-}
-.metric {
-  display: flex;
-  flex-direction: column;
-  padding: var(--qt-space-2) var(--qt-space-3);
-  background: var(--qt-bg-elevated);
-  border-radius: var(--qt-radius-sm);
-}
-.mk { font-size: var(--qt-fs-caption); color: var(--qt-text-secondary); }
-.mv {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--qt-text-primary);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-}
-.mv.up { color: var(--qt-up); }
-.mv.down { color: var(--qt-down); }
 
-.report-section {
-  padding: var(--qt-space-2) var(--qt-space-3);
-  background: var(--qt-bg-elevated);
-  border-radius: var(--qt-radius-sm);
-}
-.dist-row { display: flex; gap: var(--qt-space-2); flex-wrap: wrap; }
-
-/* 月度收益柱状（简易 div 实现，避免引入 ECharts 增重） */
-.monthly-bars {
-  display: flex;
-  gap: 6px;
-  align-items: flex-end;
-  height: 80px;
-  margin-top: var(--qt-space-2);
-  overflow-x: auto;
-}
-.monthly-bar {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  min-width: 28px;
-}
-.bar {
-  width: 16px;
-  border-radius: 2px 2px 0 0;
-}
-.bar.up { background: var(--qt-up); }
-.bar.down { background: var(--qt-down); }
-.bar-month {
-  font-size: 10px;
-  color: var(--qt-text-secondary);
-  font-family: var(--qt-font-mono);
-}
-
-.recommendation {
-  font-size: var(--qt-fs-body);
-  color: var(--qt-text-regular);
-  line-height: 1.6;
-  margin-top: var(--qt-space-1);
-}
-
-/* 回测跑通批次：年化收益曲线 + 策略参数表单 */
-.equity-chart {
-  width: 100%;
-  height: 260px;
-}
+/* 策略参数表单（反射 schema 渲染的调参网格） */
 .cfg-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
