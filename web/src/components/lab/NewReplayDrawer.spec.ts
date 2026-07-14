@@ -34,7 +34,14 @@ describe('NewReplayDrawer', () => {
     // 7 分组（PARAM_GROUPS）至少渲染「交易执行」「时间止损」（含两字段）
     expect(wrapper.text()).toContain('交易执行')
     expect(wrapper.text()).toContain('时间止损')
-    expect(wrapper.find('input[placeholder*="开始"]').exists() || wrapper.text()).toBeTruthy()
+    // 区间输入真实验证：断言两个 el-date-picker（start/end）真渲染到 DOM。
+    //
+    // 为何用 .el-date-editor 计数=2 而非 [data-testid]：el-date-picker 在当前 EP 版本下
+    // 会吞掉非 prop attr（data-testid 不透传到根节点，jsdom 实测 testid 命中数=0）。
+    // .el-date-editor 是 el-date-picker 渲染出的稳定根 class，count===2 精确对应模板里两个
+    // 日期选择器——既不依赖文案（placeholder），又真实验证区间输入存在（失败时 count≠2 真抛错）。
+    // 原 `find(input[placeholder]).exists() || wrapper.text()` 后半永为真理值，恒真，名存实亡。
+    expect(wrapper.findAll('.el-date-editor')).toHaveLength(2)
   })
 
   it('prefill 灌入：min_rr_ratio 显示 prefill 值而非 schema 默认', async () => {

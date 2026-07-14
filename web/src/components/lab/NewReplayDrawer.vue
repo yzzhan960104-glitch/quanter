@@ -66,9 +66,17 @@ const groupedFields = computed(() =>
 function onSubmit() {
   // 仅传非默认字段（增量覆盖语义，与后端 _merge_cfg 一致）；start/end 必填，
   // universe 留空=全市场（null，后端按全 universe 跑，显式 null 而非 undefined）。
+  //
+  // 清空=不覆盖（用后端默认），防 null 透传触发 pydantic 422：
+  // el-input-number 清空后 cfg[name] 变 null，若该字段无 schema default（defaults[name] 为
+  // undefined），null !== undefined 为真会把 null 塞进 cfg_override；后端 model_copy(update=...)
+  // 对 float/int 字段收 null 会抛 422。故这里只传「真正改过且非空」的值——
+  // 注意：boolean false / 数字 0 是合法非空值，须正常传，不能被过滤掉。
   const cfgOverride: Record<string, any> = {}
   for (const [name, val] of Object.entries(cfg.value)) {
-    if (val !== defaults.value[name]) cfgOverride[name] = val
+    if (val !== defaults.value[name] && val !== null && val !== undefined) {
+      cfgOverride[name] = val
+    }
   }
   const universe = universeText.value.trim()
     ? universeText.value.split(/[\s,，]+/).filter(Boolean)
