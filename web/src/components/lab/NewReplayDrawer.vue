@@ -14,6 +14,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { PARAM_GROUPS, PARAM_META, CORE_GROUPS, isCoreGroup } from './paramMeta'
+import type { ParamGroup } from './paramMeta'
 import type { ReplayAsyncRequestBody } from '@/api/caisen'
 
 const props = defineProps<{
@@ -60,6 +61,16 @@ watch(
   },
   { immediate: true },
 )
+
+// 开「显示高级参数」时自动展开高级组——避免「开了开关、高级折叠组出现但仍收起」的两道门
+// 粗糙体验（用户既已主动开 toggle，意图明确就是想看/调高级参数，应直接展开）。
+// 关闭时同步把高级组移出 activeGroups，保持展开态与可见性一致（无残留副作用）。
+watch(showAdvanced, (on) => {
+  const advanced = PARAM_GROUPS.filter((g) => !isCoreGroup(g))
+  activeGroups.value = on
+    ? Array.from(new Set([...activeGroups.value, ...advanced]))
+    : activeGroups.value.filter((g) => isCoreGroup(g as ParamGroup))
+})
 
 // 按 PARAM_GROUPS 分组的字段（仅含 schema 里实际存在的字段——防御 schema 与 paramMeta 漂移）。
 const groupedFields = computed(() =>
