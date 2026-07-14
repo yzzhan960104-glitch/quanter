@@ -284,3 +284,33 @@ def test_margin_by_date_and_secs_single(tmp_path, fake_pro, monkeypatch):
     ts.sync_dataset("margin_secs", "2024-01-05", "2024-01-05", resume=False)
     secs = pd.read_parquet(TUSHARE_DATASETS["margin_secs"]["lake"])
     assert len(secs) == 1 and "ts_code" in secs.columns  # 扁平 df（single 模式）
+
+
+def test_hsgt_top10_by_date_reuse_north_flow(tmp_path, fake_pro, monkeypatch):
+    """hsgt_top10 by=date 复用 north_flow 湖（切 Tushare 替代 akshare）。"""
+    import data.tushare_sync as ts
+    monkeypatch.setattr(ts, "_trade_days", lambda s, e: ["20240105"])
+    fake_pro.set("hsgt_top10", pd.DataFrame({
+        "trade_date": ["20240105", "20240105"], "name": ["贵州茅台", "招商银行"],
+        "ts_code": ["600519.SH", "600036.SH"], "vol": [1e6, 9e5],
+        "amount": [1.8e9, 4e8], "north_direction": ["北向", "北向"]}))
+    monkeypatch.setitem(TUSHARE_DATASETS["hsgt_top10"], "lake", str(tmp_path / "north.parquet"))
+    monkeypatch.setitem(TUSHARE_DATASETS["hsgt_top10"], "shard_dir", str(tmp_path / "shards_hsgt"))
+    ts.sync_dataset("hsgt_top10", "2024-01-05", "2024-01-05", resume=False)
+    df = pd.read_parquet(TUSHARE_DATASETS["hsgt_top10"]["lake"])
+    assert df.index.names == ["date", "symbol"]
+    assert {"600519.SH", "600036.SH"} == set(df.index.get_level_values("symbol"))
+    # hsgt_top10 复用 north_flow 湖（切源，不新增 LAKE_CONFIG key）
+    assert TUSHARE_DATASETS["hsgt_top10"]["lake"] == LAKE_CONFIG["lakes"]["north_flow"]
+
+
+def test_moneyflow_hsgt_single(tmp_path, fake_pro, monkeypatch):
+    """moneyflow_hsgt 市场级（single 扁平，非 MultiIndex）。"""
+    import data.tushare_sync as ts
+    fake_pro.set("moneyflow_hsgt", pd.DataFrame({
+        "trade_date": ["20240105"], "ggt_ss": [1e9], "ggt_sz": [8e8],
+        "sgt_ss": [5e9], "sgt_sz": [4e9], "north_money": [9e9], "south_money": [1.8e9]}))
+    monkeypatch.setitem(TUSHARE_DATASETS["moneyflow_hsgt"], "lake", str(tmp_path / "mf_hsgt.parquet"))
+    ts.sync_dataset("moneyflow_hsgt", "2024-01-05", "2024-01-05", resume=False)
+    df = pd.read_parquet(TUSHARE_DATASETS["moneyflow_hsgt"]["lake"])
+    assert len(df) == 1 and "north_money" in df.columns  # 扁平 df（single）
