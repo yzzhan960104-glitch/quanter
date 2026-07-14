@@ -186,6 +186,12 @@ LAKE_CONFIG["lakes"] = {
     "forecast": "data_lake/forecast.parquet",              # 业绩预告
     "express": "data_lake/express.parquet",                # 业绩快报
     "dividend": "data_lake/dividend.parquet",              # 分红送股
+    # Plan A Task 3-5：资金流/龙虎榜/融资融券（tushare_sync 写）
+    "moneyflow": "data_lake/moneyflow.parquet",            # 个股资金流（by=date）
+    "top_inst": "data_lake/top_inst.parquet",              # 龙虎榜机构席位（by=date）
+    "margin": "data_lake/margin.parquet",                  # 融资融券市场汇总（by=date, exchange_id 作 symbol）
+    "margin_detail": "data_lake/margin_detail.parquet",    # 融资融券逐标的（by=date）
+    "margin_secs": "data_lake/margin_secs.parquet",        # 融资融券标的列表（by=single 快照，扁平 df）
 }
 LAKE_CONFIG["default_lake"] = "daily"
 
@@ -289,7 +295,51 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "ts_code,ann_date,div_proc,stk_div,cash_div,record_date,ex_date",
         "lake": "data_lake/dividend.parquet",
     },
-    # 后续 Task 追加 moneyflow/top_list/margin/...
+    # —— 个股资金流（moneyflow）：单日全市场，按 date 分页 ——
+    # 物理意图：主力资金（大单/特大单）流向是动量/反转因子核心。单次请求返全市场当日，
+    # 请求数=交易日数（效率高）。by=date 时 symbol 从 ts_code 列取（不从文件名）。
+    "moneyflow": {
+        "api": "moneyflow", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,buy_sm_amount,sell_sm_amount,buy_elg_amount,sell_elg_amount,net_mf_amount",
+        "lake": "data_lake/moneyflow.parquet",
+    },
+    # —— 龙虎榜（top_list/top_inst）：单日全市场，按 date 分页 ——
+    # dragon_list 湖切 Tushare（原 akshare 源退役）；top_inst 机构席位单独湖。
+    "top_list": {
+        "api": "top_list", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,name,close,pct_change,amount,net_amount,buy_amount,sell_amount",
+        "lake": "data_lake/dragon_list.parquet",  # 复用 dragon_list 湖（切 Tushare）
+    },
+    "top_inst": {
+        "api": "top_inst", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,name,close,pct_change,amount,net_amount,buy_amount,sell_amount",
+        "lake": "data_lake/top_inst.parquet",
+    },
+    # —— 融资融券（margin/margin_detail/margin_secs）——
+    # margin（市场汇总，symbol_col=exchange_id 交易所）/ margin_detail（逐标的 ts_code）：by=date。
+    # margin_secs（标的列表快照）：by=single，落扁平 DataFrame（非时序 MultiIndex）。
+    "margin": {
+        "api": "margin", "by": "date",
+        "date_col": "trade_date", "symbol_col": "exchange_id",
+        "fields": "exchange_id,trade_date,rzye,rzmre,rqye,rqmcl,rzche,rqchl",
+        "lake": "data_lake/margin.parquet",
+    },
+    "margin_detail": {
+        "api": "margin_detail", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,rzye,rzmre,rqye,rqmcl,rzche,rqchl",
+        "lake": "data_lake/margin_detail.parquet",
+    },
+    "margin_secs": {
+        # 标的列表快照（单次拉全市场不分页）→ single 模式落扁平 DataFrame。
+        "api": "margin_secs", "by": "single",
+        "date_col": "start_date", "symbol_col": "ts_code",
+        "fields": "ts_code,name,start_date",
+        "lake": "data_lake/margin_secs.parquet",
+    },
 }
 
 # 同步哨兵目录：POST /sync/{key} 触发时 touch {key}（=syncing）；成功删除，失败写 {key}.failed。

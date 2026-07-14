@@ -198,3 +198,89 @@ def test_forecast_express_dividend_lake(tmp_path, fake_pro, monkeypatch):
         df = pd.read_parquet(TUSHARE_DATASETS[key]["lake"])
         assert df.index.names == ["date", "symbol"], f"{key} 索引名错误"
         assert len(df) == 1, f"{key} 行数错误"
+
+
+def test_task3to5_datasets_registered():
+    """Task 3-5 数据集配置完备性 + 落湖注册契约。
+
+    top_list 复用 dragon_list 湖（切 Tushare 替代 akshare sync_dragon_list），
+    不在 LAKE_CONFIG 新增 key；其余 5 个各自独立湖。
+    """
+    by_date_specs = {
+        "moneyflow": ("trade_date", "ts_code"),
+        "top_list": ("trade_date", "ts_code"),
+        "top_inst": ("trade_date", "ts_code"),
+        "margin": ("trade_date", "exchange_id"),
+        "margin_detail": ("trade_date", "ts_code"),
+    }
+    for key, (date_col, sym) in by_date_specs.items():
+        assert key in TUSHARE_DATASETS, f"{key} 未注册"
+        cfg = TUSHARE_DATASETS[key]
+        assert cfg["by"] == "date", f"{key} by 应为 date"
+        assert cfg["date_col"] == date_col, f"{key} date_col 应为 {date_col}"
+        assert cfg["symbol_col"] == sym, f"{key} symbol_col 应为 {sym}"
+    assert TUSHARE_DATASETS["margin_secs"]["by"] == "single"
+    # 各自独立湖的 5 个：注册到 LAKE_CONFIG 且路径与 TUSHARE_DATASETS 一致
+    for key in ("moneyflow", "top_inst", "margin", "margin_detail", "margin_secs"):
+        assert key in LAKE_CONFIG["lakes"], f"{key} 未注册到 LAKE_CONFIG"
+        assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
+            f"{key} LAKE_CONFIG 与 TUSHARE_DATASETS 路径不一致"
+    # top_list 复用 dragon_list 湖（切源，不新增 key）
+    assert TUSHARE_DATASETS["top_list"]["lake"] == LAKE_CONFIG["lakes"]["dragon_list"], \
+        "top_list 应复用 dragon_list 湖（切 Tushare 替代 akshare sync_dragon_list）"
+
+
+def test_moneyflow_top_list_by_date(tmp_path, fake_pro, monkeypatch):
+    """by=date 数据集（moneyflow/top_list）落 MultiIndex，symbol 从 symbol_col 列取（非文件名）。
+
+    Why 守卫 Task 1 fix：by=date 的 shard 文件名是交易日（20240105.parquet），
+    _build_multiindex 必须从 df[symbol_col] 取 symbol——若误从文件名取，symbol 全错成交易日。
+    """
+    import data.tushare_sync as ts
+    monkeypatch.setattr(ts, "_trade_days", lambda s, e: ["20240105"])
+    cases = {
+        "moneyflow": ("moneyflow", pd.DataFrame({
+            "ts_code": ["000001.SZ", "600000.SH"], "trade_date": ["20240105", "20240105"],
+            "buy_sm_amount": [1e8, 2e8], "sell_sm_amount": [9e7, 1.5e8],
+            "buy_elg_amount": [3e8, 4e8], "sell_elg_amount": [2e8, 3e8],
+            "net_mf_amount": [1e7, 5e7]})),
+        "top_list": ("top_list", pd.DataFrame({
+            "ts_code": ["000001.SZ"], "trade_date": ["20240105"],
+            "name": ["平安银行"], "close": [10.5], "pct_change": [9.9],
+            "amount": [5e8], "net_amount": [1e8], "buy_amount": [3e8], "sell_amount": [2e8]})),
+    }
+    for key, (api, data) in cases.items():
+        fake_pro.set(api, data)
+        monkeypatch.setitem(TUSHARE_DATASETS[key], "lake", str(tmp_path / f"{key}.parquet"))
+        monkeypatch.setitem(TUSHARE_DATASETS[key], "shard_dir", str(tmp_path / f"shards_{key}"))
+        ts.sync_dataset(key, "2024-01-05", "2024-01-05", resume=False)
+        df = pd.read_parquet(TUSHARE_DATASETS[key]["lake"])
+        assert df.index.names == ["date", "symbol"], f"{key} 索引名错"
+        syms = set(df.index.get_level_values("symbol"))
+        assert "20240105" not in syms, f"{key} symbol 误取自文件名（交易日）"
+        # symbol 必须来自 ts_code 列（真实标的码）
+        assert syms.issubset(set(data["ts_code"].tolist())), f"{key} symbol 不在 ts_code 列"
+
+
+def test_margin_by_date_and_secs_single(tmp_path, fake_pro, monkeypatch):
+    """margin by=date（市场汇总，symbol_col=exchange_id）+ margin_secs by=single（扁平快照）。"""
+    import data.tushare_sync as ts
+    monkeypatch.setattr(ts, "_trade_days", lambda s, e: ["20240105"])
+    # margin 市场汇总（exchange_id 作 symbol）
+    fake_pro.set("margin", pd.DataFrame({
+        "exchange_id": ["SSE"], "trade_date": ["20240105"],
+        "rzye": [1e10], "rzmre": [1e9], "rqye": [1e8], "rqmcl": [1e7],
+        "rzche": [5e8], "rqchl": [5e6]}))
+    monkeypatch.setitem(TUSHARE_DATASETS["margin"], "lake", str(tmp_path / "margin.parquet"))
+    monkeypatch.setitem(TUSHARE_DATASETS["margin"], "shard_dir", str(tmp_path / "shards_margin"))
+    ts.sync_dataset("margin", "2024-01-05", "2024-01-05", resume=False)
+    df = pd.read_parquet(TUSHARE_DATASETS["margin"]["lake"])
+    assert df.index.names == ["date", "symbol"]
+    assert "SSE" in df.index.get_level_values("symbol")  # exchange_id 作 symbol
+    # margin_secs single（扁平快照，非 MultiIndex）
+    fake_pro.set("margin_secs", pd.DataFrame({
+        "ts_code": ["000001.SZ"], "name": ["平安银行"], "start_date": ["20100301"]}))
+    monkeypatch.setitem(TUSHARE_DATASETS["margin_secs"], "lake", str(tmp_path / "margin_secs.parquet"))
+    ts.sync_dataset("margin_secs", "2024-01-05", "2024-01-05", resume=False)
+    secs = pd.read_parquet(TUSHARE_DATASETS["margin_secs"]["lake"])
+    assert len(secs) == 1 and "ts_code" in secs.columns  # 扁平 df（single 模式）
