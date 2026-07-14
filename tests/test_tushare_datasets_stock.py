@@ -300,7 +300,14 @@ def test_hsgt_top10_by_date_reuse_north_flow(tmp_path, fake_pro, monkeypatch):
     df = pd.read_parquet(TUSHARE_DATASETS["hsgt_top10"]["lake"])
     assert df.index.names == ["date", "symbol"]
     assert {"600519.SH", "600036.SH"} == set(df.index.get_level_values("symbol"))
-    # hsgt_top10 复用 north_flow 湖（切源，不新增 LAKE_CONFIG key）
+
+
+def test_hsgt_top10_reuses_north_flow_config():
+    """hsgt_top10 配置层复用 north_flow 湖（切 Tushare 替代 akshare，不新增 LAKE_CONFIG key）。
+
+    Why 独立配置测试：端到端测试会 monkeypatch lake 到 tmp_path，无法断言原始配置契约。
+    复用关系是配置层不变量（hsgt_top10 是 north_flow 湖的 Tushare 生产者），单独钉死。
+    """
     assert TUSHARE_DATASETS["hsgt_top10"]["lake"] == LAKE_CONFIG["lakes"]["north_flow"]
 
 
