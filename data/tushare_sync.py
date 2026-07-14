@@ -1,0 +1,249 @@
+# -*- coding: utf-8 -*-
+"""通用 Tushare 湖同步器：配置驱动，一个框架覆盖所有时序接口。
+
+各数据集在 config.TUSHARE_DATASETS 声明接口/字段/分页模式/落湖，本模块统一执行：
+_fetch_with_guard 限频+熔断 → 分页拉取 → shard 断点续传 → build_multiindex 落湖。
+
+分页模式（by）：
+  - symbol：逐标的拉取（财报/股东等，单标的全历史一次返）
+  - date：逐交易日拉取（资金流/龙虎榜/融资融券，单日全市场）
+  - single：单次拉取（指数/列表类，不分页）
+
+前视红线：财报类 date_col=ann_date（公告日），绝不用 end_date（报告期）。
+"""
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime
+from typing import Any, Optional
+
+import pandas as pd
+
+from config import TUSHARE_DATASETS, LAKE_CONFIG
+from data._tushare_compat import get_pro, source_name
+from data.resilience import tushare_breaker, tushare_rate_limiter
+
+logger = logging.getLogger(__name__)
+
+
+def _fetch_with_guard(api_name: str, **kwargs) -> pd.DataFrame:
+    """限频 + 熔断 + 异常分类包装的 pro 接口调用，空数据/失败返空 DF。
+
+    瞬时态（限频/超时）计熔断；持久态（积分/权限）仅记日志；空数据不计熔断。
+    与 sync_data_lake._fetch_with_guard 同范式。
+
+    Why 异常分类而非一刀切 record_failure：
+      - 限频/超时/断网属「瞬时态」，重试可能成功，应计入熔断阈值防连环打满被封；
+      - 积分/权限不足属「持久态」，重试必败且与外部接口健康无关，计熔断会误OPEN
+        拖累其他正常接口，故仅记日志、不record_failure；
+      - 未知异常保守计熔断（宁可误OPEN也不漏防线）。
+    空数据（df.empty）是「正常无数据」语义，调 record_success 维持熔断器健康度。
+    """
+    tushare_rate_limiter.acquire(1.0)
+    if not tushare_breaker.allow_request():
+        return pd.DataFrame()
+    pro = get_pro()
+    try:
+        df = getattr(pro, api_name)(**kwargs)
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ("limit", "429", "timeout", "connection", "频率", "超时", "频繁")):
+            tushare_breaker.record_failure()
+            logger.error("Tushare %s 限频/网络异常：%s", api_name, e)
+        elif any(k in str(e) for k in ("积分", "权限")):
+            logger.error("Tushare %s 积分不足：%s", api_name, e)
+        else:
+            tushare_breaker.record_failure()
+            logger.error("Tushare %s 拉取失败：%s", api_name, e)
+        return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    tushare_breaker.record_success()
+    return df
+
+
+def _shard_dir(key: str) -> str:
+    """数据集 shard 目录（断点续传）。
+
+    Why 配置可覆盖：默认 data_lake/shards/<key> 已足够；但测试/特殊场景需自定义
+    （如 tmp_path 隔离），故尊重 cfg["shard_dir"] 优先。
+    """
+    cfg = TUSHARE_DATASETS[key]
+    return cfg.get("shard_dir", os.path.join("data_lake", "shards", key))
+
+
+def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str) -> None:
+    """合并 shard → MultiIndex(date, symbol) parquet。
+
+    Why MultiIndex(date, symbol)：列式 parquet 上 (date, symbol) 双层索引支持
+    DataLakeReader 按日期区间 + 标的列表双向切片，避免单层索引二次过滤的内存膨胀。
+
+    兼容点：shard 文件可能由 _cleanse 写入（已把 date_col 转为名为 date_col 的
+    DatetimeIndex），也可能由外部预置（索引名各异）。此处统一 reset_index 后
+    按 date_col 重命名为 date，再 to_datetime 兜底非法/空值。
+    """
+    frames = []
+    for f in os.listdir(shard_dir):
+        if not f.endswith(".parquet"):
+            continue
+        symbol = f.replace(".parquet", "")
+        df = pd.read_parquet(os.path.join(shard_dir, f))
+        df["symbol"] = symbol
+        df = df.reset_index().rename(columns={date_col: "date"})
+        if "date" not in df.columns:
+            df = df.rename(columns={df.columns[0]: "date"})
+        frames.append(df)
+    if not frames:
+        raise RuntimeError(f"shard 目录无数据：{shard_dir}")
+    big = pd.concat(frames, ignore_index=True)
+    big["date"] = pd.to_datetime(big["date"])
+    big = big.set_index(["date", "symbol"]).sort_index()
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    big.to_parquet(out, engine="pyarrow")
+    logger.info("湖写入完成：%s，%d 行，%d 标的",
+                out, len(big), big.index.get_level_values("symbol").nunique())
+
+
+def sync_dataset(key: str, start: str, end: str,
+                 symbols: Optional[list[str]] = None,
+                 resume: bool = True) -> None:
+    """按 TUSHARE_DATASETS[key] 配置同步一个数据集。
+
+    参数：
+        key: 数据集 key（TUSHARE_DATASETS 注册）
+        start/end: "YYYY-MM-DD" 区间
+        symbols: by=symbol 时的标的列表（None=全市场，需上游 load_universe）
+        resume: 断点续传（shard 已存在跳过）
+
+    Why 入口收敛到一个函数：所有数据集走同一限频/熔断/落湖管道，调用方只需
+    传 key + 区间，分页细节由 cfg["by"] 决定。新增数据集零新增分支代码。
+    """
+    cfg = TUSHARE_DATASETS[key]
+    api = cfg["api"]
+    by = cfg["by"]
+    date_col = cfg["date_col"]
+    symbol_col = cfg.get("symbol_col", "ts_code")
+    fields = cfg.get("fields")
+    out = cfg["lake"]
+
+    if by == "symbol":
+        _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end, symbols, resume, out)
+    elif by == "date":
+        _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out)
+    elif by == "single":
+        _sync_single(key, api, fields, date_col, out)
+    else:
+        raise ValueError(f"未知分页模式 by={by}（key={key}）")
+
+
+def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
+                    symbols, resume, out):
+    """逐标的拉取（财报/股东）。shard 按 symbol。
+
+    Why 按 symbol 分片：财报类接口单标的全历史一次返回（无分页），按标的分片天然
+    支持断点续传（某标的已拉过即跳过，省配额）+ 并行扩展（未来可按 symbol 分发 worker）。
+    """
+    if symbols is None:
+        symbols = _load_universe()
+    shard_dir = _shard_dir(key)
+    os.makedirs(shard_dir, exist_ok=True)
+    sd, ed = start.replace("-", ""), end.replace("-", "")
+    for ts_code in symbols:
+        shard = os.path.join(shard_dir, f"{ts_code}.parquet")
+        if resume and os.path.exists(shard):
+            continue
+        kwargs = {"ts_code": ts_code, "start_date": sd, "end_date": ed}
+        if fields:
+            kwargs["fields"] = fields
+        df = _fetch_with_guard(api, **kwargs)
+        if df.empty:
+            continue
+        df = _cleanse(df, date_col)
+        df.to_parquet(shard)
+    _build_multiindex(shard_dir, date_col, symbol_col, out)
+
+
+def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out):
+    """逐交易日拉取（资金流/龙虎榜/融资融券）。shard 按 date。
+
+    Why 按日分片：此类接口单日全市场一次返回（无标的维度的全历史），按交易日分片
+    支持断点续传（某日已拉即跳过）+ 增量同步友好（每日仅补最新一天）。
+    """
+    shard_dir = _shard_dir(key)
+    os.makedirs(shard_dir, exist_ok=True)
+    trade_dates = _trade_days(start, end)
+    for td in trade_dates:
+        shard = os.path.join(shard_dir, f"{td}.parquet")
+        if resume and os.path.exists(shard):
+            continue
+        kwargs = {"trade_date": td}
+        if fields:
+            kwargs["fields"] = fields
+        df = _fetch_with_guard(api, **kwargs)
+        if df.empty:
+            continue
+        df = _cleanse(df, date_col)
+        df.to_parquet(shard)
+    _build_multiindex(shard_dir, date_col, symbol_col, out)
+
+
+def _sync_single(key, api, fields, date_col, out):
+    """单次拉取（指数/列表）。直接落盘，不分页。
+
+    Why 不分页：指数日线等接口支持一次性按区间拉全量（参数化 start/end 在 cfg 里
+    已隐含或接口本身无区间概念），无需 shard/断点续传的复杂度。
+
+    注意：本 task 严格按 brief 实现（不加 cfg 参数）。Plan C Task 1 会扩展签名
+    支持 index_mode=datetime（指数日线落湖时间索引）。
+    """
+    kwargs = {}
+    if fields:
+        kwargs["fields"] = fields
+    df = _fetch_with_guard(api, **kwargs)
+    if df.empty:
+        logger.warning("%s 数据为空，跳过", key)
+        return
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    df.to_parquet(out, engine="pyarrow")
+    logger.info("%s 写入：%s，%d 行", key, out, len(df))
+
+
+def _cleanse(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    """洗净：date_col → datetime 索引 + 升序。
+
+    Why errors="coerce"：Tushare 偶发返回脏日期（空串/非标准格式），coerce 转 NaT
+    后 dropna 剔除，避免 NaT 落入索引破坏 MultiIndex 排序与时序查询语义。
+    format="%Y%m%d" 锁定 Tushare 日期格式（YYYYMMDD 数字串），避免 dateutil 慢解析。
+    """
+    if date_col in df.columns:
+        df[date_col] = pd.to_datetime(df[date_col], format="%Y%m%d", errors="coerce")
+        df = df.dropna(subset=[date_col]).set_index(date_col).sort_index()
+    return df
+
+
+def _load_universe() -> list[str]:
+    """全市场在售标的（复用 sync_data_lake.load_universe 逻辑：stock_basic 剔 ST/退）。
+
+    Why 剔 ST/退：ST/*ST/退市标的流动性差、财务异常，财报/资金流类数据集纳入会污染
+    统计口径（如行业均值/中位数），故默认剔除。调用方若需全量可显式传 symbols。
+    """
+    df = _fetch_with_guard("stock_basic", list_status="L",
+                           fields="ts_code,symbol,name,list_date")
+    if df.empty:
+        return []
+    mask = (~df["name"].str.contains("ST", na=False)) & \
+           (~df["name"].str.contains("退", na=False))
+    return df.loc[mask, "ts_code"].tolist()
+
+
+def _trade_days(start: str, end: str) -> list[str]:
+    """交易日历（trade_cal is_open=1）。返回 ['YYYYMMDD', ...]。
+
+    Why 经 trade_cal 而非 pd.bdate_range：A 股节假日（春节/国庆等）非标准周末规则，
+    必须用交易所官方日历，否则会对节假日发空请求浪费配额 + 误判为接口异常。
+    """
+    df = _fetch_with_guard("trade_cal", exchange="SSE",
+                           start_date=start.replace("-", ""),
+                           end_date=end.replace("-", ""), is_open="1")
+    return df["cal_date"].tolist() if not df.empty else []

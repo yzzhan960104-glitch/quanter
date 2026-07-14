@@ -179,6 +179,8 @@ LAKE_CONFIG["lakes"] = {
     "fundamentals": "data_lake/fundamentals.parquet",      # 基本面因子面板 pe/pb/roe...（sync_fundamentals 写）
     "north_flow": "data_lake/north_flow.parquet",          # 北向资金日频净流入（sync_north_flow 写）
     "dragon_list": "data_lake/dragon_list.parquet",        # 龙虎榜明细（sync_dragon_list 写）
+    # 通用 Tushare 湖同步器（Plan A/B/C）落湖：key 与 TUSHARE_DATASETS 一一对应
+    "fina_income": "data_lake/fina_income.parquet",        # 利润表（tushare_sync 写，MultiIndex date/symbol）
 }
 LAKE_CONFIG["default_lake"] = "daily"
 
@@ -218,6 +220,33 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                       "script": "scripts/sync_north_flow.py",  "schedule": "每日18:00", "freshness_hours": 24},
     "dragon_list":   {"source": "AKShare", "market": "A股",  "granularity": "1d",
                       "script": "scripts/sync_dragon_list.py", "schedule": "每日18:00", "freshness_hours": 24},
+}
+
+# ============================================================
+# 通用 Tushare 湖同步器注册表（Plan A/B/C 三大类采集共用框架）
+# ============================================================
+# 设计意图（配置驱动 / 显式至上）：每个数据集 = 一份声明式配置（接口/分页/字段/落湖），
+# data/tushare_sync.py 的 sync_dataset(key) 统一执行，新增数据集只需在此注册一行，
+# 不再为每个接口写一份同步脚本。三份 plan（股票/ETF/宏观）均复用本框架。
+#
+# 字段契约：
+#   api:        tushare pro 接口名（pro.<api>(...)），如 income / moneyflow / index_daily
+#   by:         分页模式 —— symbol（逐标的）/ date（逐交易日）/ single（单次不分页）
+#   date_col:   前视红线 —— 用作时间索引的列。财报类必须用 ann_date（公告日），
+#               绝不用 end_date（报告期）—— 报告期早于实际公告日，会导致前视偏差。
+#   symbol_col: 标的列名（多数 ts_code，指数类为 ts_code；落湖 MultiIndex 第二级）
+#   fields:     逗号分隔字段串（省配额：只拉所需列，避免全字段回传 + 落盘膨胀）
+#   lake:       落湖 parquet 路径（与 LAKE_CONFIG["lakes"][key] 保持一致）
+#   shard_dir:  可选，分片目录（断点续传，缺省 data_lake/shards/<key>）
+TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
+    # —— 股票类（Plan A 各 Task 逐步填充）——
+    "fina_income": {
+        "api": "income", "by": "symbol",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,end_date,total_revenue,n_income,n_income_attr_p",
+        "lake": "data_lake/fina_income.parquet",
+    },
+    # 后续 Task 追加 fina_balance/fina_cashflow/moneyflow/top_list/margin/...
 }
 
 # 同步哨兵目录：POST /sync/{key} 触发时 touch {key}（=syncing）；成功删除，失败写 {key}.failed。
