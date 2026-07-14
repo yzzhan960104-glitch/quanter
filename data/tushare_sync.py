@@ -179,6 +179,13 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
     os.makedirs(shard_dir, exist_ok=True)
     sd, ed = start.replace("-", ""), end.replace("-", "")
     rename = (cfg or {}).get("rename")
+    # 特色数据通道标注（Plan A Task 9）：cyq_perf 等特色数据按 300/分独立计频，
+    # 限流仍走统一 tushare_rate_limiter（refill_rate=1 token/s + 突发桶 capacity=5，
+    # 持续 ~60/分，远严于特色数据 300/分配额，不会触发 Tushare 端限频），此处仅
+    # 日志层标记 quota_type=special，便于限频排查时快速定位特色通道。放循环外只标一次，
+    # 避免 5000+ 标的逐个打日志。debug 级别默认不输出，仅排查时开启。
+    if (cfg or {}).get("quota_type") == "special":
+        logger.debug("%s 为特色数据（300/分独立通道，限流仍走统一 rate_limiter）", key)
     for ts_code in symbols:
         shard = os.path.join(shard_dir, f"{ts_code}.parquet")
         if resume and os.path.exists(shard):

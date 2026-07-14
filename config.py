@@ -614,6 +614,26 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "trade_date,issuer_num,sec_num,total_share,total_value,pe",
         "lake": "data_lake/mkt_daily_sse.parquet",
     },
+    # —— D 组·特色筹码（Plan A Task 9：cyq_perf，300/分独立通道）——
+    # 物理意图：cyq_perf 是筹码分布及胜率（cost_5/15/50/85/95 五档成本 + weight_avg 平均成本
+    # + winner_rate 获利盘比例 + his_low/his_high 历史高低价），用于判断个股筹码集中度与
+    # 盈亏结构，是主力动向与支撑压力分析的特色数据源。
+    # by=symbol：逐标的拉全历史筹码分布（单标的一次返，无分页），与财报/股东同管道。
+    # date_col=trade_date：交易日（非报告期，无前视风险），与日线对齐。
+    # quota_type=special：特色数据按 300 次/分单独计频通道。
+    #   限流仍走统一 tushare_rate_limiter（refill_rate=1 token/s + 突发桶 capacity=5，
+    #   持续 ~60/分，远严于特色数据 300/分配额，故实际消耗 ≤ 配额上限，不会触发
+    #   Tushare 端 300/分限频）；quota_type 仅作日志层标记，便于限频问题时快速定位
+    #   特色数据通道，不新增单独限流器（极简，拒绝过度设计）。
+    #   Why 不按 300/分放宽：特色数据为低频批量任务，统一限流器已足够且与常规数据集
+    #   共享桶，避免按通道各建一桶导致的阈值失真与复杂度膨胀。
+    "cyq_perf": {
+        "api": "cyq_perf", "by": "symbol",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,his_low,his_high,cost_5,cost_15,cost_50,cost_85,cost_95,weight_avg,winner_rate",
+        "lake": "data_lake/cyq_perf.parquet",
+        "quota_type": "special",  # 特色数据：300/分独立通道（纯日志标记，限流仍走统一 rate_limiter）
+    },
 }
 
 # 同步哨兵目录：POST /sync/{key} 触发时 touch {key}（=syncing）；成功删除，失败写 {key}.failed。

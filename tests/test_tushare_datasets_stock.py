@@ -680,3 +680,69 @@ def test_a10_share_float_suspend_d_by_date(tmp_path, fake_pro, monkeypatch):
     sd_dates = set(str(d.date()) for d in df_sd.index.get_level_values("date"))
     assert "2024-01-15" in sd_dates, f"suspend_d date 应来自 ann_date=20240115，实际 {sd_dates}"
     assert "2024-01-20" not in sd_dates, "suspend_d date 不应来自 suspend_date（前视偏差）"
+
+
+# ====================================================================
+# Plan A Task 9：特色筹码 cyq_perf（300/分独立通道标记）
+# ====================================================================
+
+def test_cyq_perf_registered_and_special_quota():
+    """cyq_perf 配置层守卫：特色数据（300/分）必须在 TUSHARE_DATASETS 注册且标记 quota_type=special。
+
+    What：cyq_perf（筹码分布及胜率）是 Tushare 特色数据接口，按 300 次/分单独计频通道，
+    与常规 500/分数据集共用 tushare_rate_limiter（令牌桶按 500 设定对 300/分保守安全），
+    仅在日志层标注 quota_type=special 以便排查限频问题，不新增单独限流器。
+
+    Why 配置层守卫（TDD RED 来源）：sync_dataset 直接 cfg = TUSHARE_DATASETS[key]，
+    cyq_perf 未注册立即 KeyError。本测试把注册 + quota_type 标记钉死在配置层，
+    PR review 漏一眼也守得住。date_col=trade_date（交易日，非报告期，无前视风险）。
+    """
+    assert "cyq_perf" in TUSHARE_DATASETS, "cyq_perf 未在 TUSHARE_DATASETS 注册"
+    cfg = TUSHARE_DATASETS["cyq_perf"]
+    for f in ("api", "by", "date_col", "symbol_col", "fields", "lake", "quota_type"):
+        assert f in cfg, f"cyq_perf 配置缺字段 {f}"
+    assert cfg["by"] == "symbol", "cyq_perf 应为 symbol（逐标的拉全历史筹码分布）"
+    assert cfg["date_col"] == "trade_date", "cyq_perf date_col 应为 trade_date（交易日）"
+    assert cfg["symbol_col"] == "ts_code", "cyq_perf symbol_col 应为 ts_code"
+    assert cfg["quota_type"] == "special", \
+        "cyq_perf 必须标记 quota_type=special（特色数据 300/分通道，纯日志区分）"
+    assert cfg["api"] == "cyq_perf"
+
+
+def test_cyq_perf_special_quota(fake_pro, monkeypatch, tmp_path):
+    """cyq_perf 端到端：特色数据经 sync_dataset 落 MultiIndex，quota_type 标记零行为变化。
+
+    What：cyq_perf（筹码分布及胜率）是 Tushare 特色数据接口，按 300 次/分单独计频，
+    与常规数据集共用 tushare_rate_limiter（refill_rate=1 token/s + 突发桶 capacity=5，
+    持续 ~60/分，远严于 300/分配额），仅在日志层标注 quota_type=special 以便排查限频
+    问题，不新增单独限流器。
+
+    Why 端到端契约守卫：特色数据的 quota_type 标记是纯日志，不应改变既有 by=symbol
+    落湖管道（逐标的拉全历史 → shard → MultiIndex(date, symbol)）。本测试注入 1 只
+    标的 + 单日筹码数据，验证管道正常产出 MultiIndex parquet，证明特色标记零行为回归。
+
+    Why 重定向 lake + shard_dir 到 tmp_path：与 test_a10_top10_holders_by_symbol 同手法，
+    避免假 shard 残留污染共享 data_lake/shards/，测试结束自动销毁，零残留。
+    """
+    fake_pro.set("cyq_perf", pd.DataFrame({
+        "ts_code": ["000001.SZ"], "trade_date": ["20240105"],
+        "his_low": [9.0], "his_high": [11.0], "cost_5": [9.5], "cost_15": [9.8],
+        "cost_50": [10.0], "cost_85": [10.2], "cost_95": [10.4], "weight_avg": [10.0],
+        "winner_rate": [0.6]}))
+    import data.tushare_sync as ts
+    # 重定向 lake + shard 到 tmp_path（零磁盘残留，与文件内其他端到端测试同范式）
+    monkeypatch.setitem(TUSHARE_DATASETS["cyq_perf"], "lake",
+                        str(tmp_path / "cyq_perf.parquet"))
+    monkeypatch.setitem(TUSHARE_DATASETS["cyq_perf"], "shard_dir",
+                        str(tmp_path / "shards_cyq_perf"))
+    ts.sync_dataset("cyq_perf", "2024-01-05", "2024-12-31",
+                    symbols=["000001.SZ"], resume=False)
+    df = pd.read_parquet(TUSHARE_DATASETS["cyq_perf"]["lake"])
+    # 特色标记是纯日志，落湖契约不变：MultiIndex(date, symbol)
+    assert df.index.names == ["date", "symbol"], "cyq_perf 索引名错（特色标记不应改管道）"
+    assert set(df.index.get_level_values("symbol")) == {"000001.SZ"}
+    # 筹码全部 9 个数据字段必须落湖（防 fields 串漏任一档成本价位/支撑位）：
+    # his_low/his_high 历史支撑阻力、cost_5/15/50/85/95 五档成本分布、weight_avg 加权成本、winner_rate 获利比例。
+    for col in ("his_low", "his_high", "cost_5", "cost_15", "cost_50", "cost_85",
+                "cost_95", "weight_avg", "winner_rate"):
+        assert col in df.columns, f"cyq_perf 缺核心字段 {col}"
