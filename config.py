@@ -270,7 +270,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # 按 symbol 分页拉全历史再按 ann_date 切区间，避免逐日拉取空窗期浪费配额。
         "api": "forecast", "by": "symbol",
         "date_col": "ann_date", "symbol_col": "ts_code",
-        "fields": "ts_code,ann_date,end_date,type,p_change,min_range,max_range",
+        "fields": "ts_code,ann_date,end_date,type,p_change_min,p_change_max,min_range,max_range",
         "lake": "data_lake/forecast.parquet",
     },
     "express": {

@@ -174,14 +174,15 @@ def test_forecast_express_dividend_lake(tmp_path, fake_pro, monkeypatch):
 
     Why 补全端到端：brief 只示范了三大报表，但 forecast/express/dividend 走同一
     sync_dataset 管道，索引契约应一致。任一接口字段差异（如 forecast 的 type/
-    p_change）不应影响索引结构——索引由 date_col + symbol_col 驱动，与数据列无关。
+    p_change_min/max）不应影响索引结构——索引由 date_col + symbol_col 驱动，与数据列无关。
 
     Why 同时重定向 shard_dir：与 test_fina_three_statements_lake 同理，避免假 shard
     污染共享 data_lake/shards/，污染后续 test_tushare_sync.py 等测试。
     """
     fake_pro.set("forecast", pd.DataFrame({
         "ts_code": ["000001.SZ"], "ann_date": ["20240115"], "end_date": ["20231231"],
-        "type": ["预增"], "p_change": [50], "min_range": [40], "max_range": [60]}))
+        "type": ["预增"], "p_change_min": [40], "p_change_max": [60],
+        "min_range": [4e7], "max_range": [6e7]}))
     fake_pro.set("express", pd.DataFrame({
         "ts_code": ["000001.SZ"], "ann_date": ["20240220"], "end_date": ["20231231"],
         "revenue": [1e9], "n_income": [1e8], "total_profit": [1.2e8]}))
