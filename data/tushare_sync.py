@@ -110,8 +110,16 @@ def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str,
     big = pd.concat(frames, ignore_index=True)
     big["date"] = pd.to_datetime(big["date"])
     if by == "date":
-        # by=date：symbol_col 列重命名为 symbol（统一索引名），保留真实标的码
-        big = big.rename(columns={symbol_col: "symbol"})
+        # by=date：symbol_col 列重命名为 symbol（统一索引名），保留真实标的码。
+        # 边界（市场级时序，如 szse_daily/sse_daily：date_col==symbol_col==trade_date，
+        # 无独立 symbol 列）：此时 trade_date 已在上一步被改名为 date，无法再 rename，
+        # 故用 date 列的字符串副本作 symbol 层（symbol 恒等于交易日，冗余但符合 by=date
+        # 的 MultiIndex(date, symbol) 契约，DataLakeReader 按 date 单级切片即可）。
+        if symbol_col != date_col and symbol_col in big.columns:
+            big = big.rename(columns={symbol_col: "symbol"})
+        else:
+            # 市场级时序：symbol 层 = 交易日字符串（与 date 同源，但作为第二级索引独立存在）
+            big["symbol"] = big["date"].dt.strftime("%Y%m%d")
     big = big.set_index(["date", "symbol"]).sort_index()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     big.to_parquet(out, engine="pyarrow")
@@ -142,27 +150,35 @@ def sync_dataset(key: str, start: str, end: str,
     out = cfg["lake"]
 
     if by == "symbol":
-        _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end, symbols, resume, out)
+        _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end, symbols, resume, out, cfg=cfg)
     elif by == "date":
-        _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out)
+        _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out, cfg=cfg)
     elif by == "single":
-        _sync_single(key, api, fields, out)
+        # single 模式传 date_col + cfg：Plan C 宏观湖（cn_cpi/ppi/gdp/pmi/shibor）
+        # 依赖 cfg['index_mode']=='datetime' 把月/季/日频列重建为 DatetimeIndex。
+        _sync_single(key, api, fields, date_col, out, cfg=cfg)
     else:
         raise ValueError(f"未知分页模式 by={by}（key={key}）")
 
 
 def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
-                    symbols, resume, out):
+                    symbols, resume, out, cfg=None):
     """逐标的拉取（财报/股东）。shard 按 symbol。
 
     Why 按 symbol 分片：财报类接口单标的全历史一次返回（无分页），按标的分片天然
     支持断点续传（某标的已拉过即跳过，省配额）+ 并行扩展（未来可按 symbol 分发 worker）。
+
+    Why cfg['rename'] 应用在 _cleanse 后、落 shard 前：fund_daily 接口返 vol 列
+    （与股票日线 volume 列名分叉），配置 rename={'vol':'volume'} 在落 shard 前归一，
+    确保 etf_daily 湖与 a_shares_daily 湖列名一致，跨湖因子计算免分支。rename 只在
+    shard 写入前做一次，后续 _build_multiindex 读取 shard 即拿到已归一列名。
     """
     if symbols is None:
         symbols = _load_universe()
     shard_dir = _shard_dir(key)
     os.makedirs(shard_dir, exist_ok=True)
     sd, ed = start.replace("-", ""), end.replace("-", "")
+    rename = (cfg or {}).get("rename")
     for ts_code in symbols:
         shard = os.path.join(shard_dir, f"{ts_code}.parquet")
         if resume and os.path.exists(shard):
@@ -174,19 +190,25 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
         if df.empty:
             continue
         df = _cleanse(df, date_col)
+        if rename:
+            df = df.rename(columns=rename)  # 列名归一（如 fund_daily vol→volume）
         df.to_parquet(shard)
     _build_multiindex(shard_dir, date_col, symbol_col, out, by="symbol")
 
 
-def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out):
+def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out, cfg=None):
     """逐交易日拉取（资金流/龙虎榜/融资融券）。shard 按 date。
 
     Why 按日分片：此类接口单日全市场一次返回（无标的维度的全历史），按交易日分片
     支持断点续传（某日已拉即跳过）+ 增量同步友好（每日仅补最新一天）。
+
+    Why 同样支持 cfg['rename']：与 _sync_by_symbol 对称（未来 by=date 接口可能也有
+    列名归一需求，一次性补齐，避免日后反复改框架）。
     """
     shard_dir = _shard_dir(key)
     os.makedirs(shard_dir, exist_ok=True)
     trade_dates = _trade_days(start, end)
+    rename = (cfg or {}).get("rename")
     for td in trade_dates:
         shard = os.path.join(shard_dir, f"{td}.parquet")
         if resume and os.path.exists(shard):
@@ -198,19 +220,31 @@ def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, ou
         if df.empty:
             continue
         df = _cleanse(df, date_col)
+        if rename:
+            df = df.rename(columns=rename)  # 列名归一（与 by=symbol 对称）
         df.to_parquet(shard)
     _build_multiindex(shard_dir, date_col, symbol_col, out, by="date")
 
 
-def _sync_single(key, api, fields, out):
-    """单次拉取（指数/列表）。直接落盘，不分页。
+def _sync_single(key, api, fields, date_col, out, cfg=None):
+    """单次拉取（指数/列表/宏观）。index_mode=datetime 时落 DatetimeIndex。
 
-    Why 不分页：指数日线等接口支持一次性按区间拉全量（参数化 start/end 在 cfg 里
-    已隐含或接口本身无区间概念），无需 shard/断点续传的复杂度。
+    Why 不分页：指数日线/概念字典/宏观指标等接口支持一次性按区间拉全量（或本身无
+    区间概念），无需 shard/断点续传的复杂度，直接落盘。
 
-    Why 无 date_col：本 task 直接 to_parquet 原样落盘，不重建时间索引。Plan C Task 1
-    会重加 cfg + date_col 支持 index_mode=datetime（指数日线落湖时间索引），本 task
-    不预留死参（YAGNI）。
+    Why index_mode='datetime' 分支（Plan C 宏观湖）：CPI/PPI/GDP/PMI/Shibor 是单一
+    时间序列，落 DatetimeIndex（无 symbol 层），区别于股票湖的 MultiIndex(date, symbol)。
+    原 single 路径直接 to_parquet 落扁平 df（时间列作普通列），DataLakeReader 按
+    日期切片会 KeyError。index_mode='datetime' 时把 date_col 转时间索引。
+
+    Why 三段 format 推断（关键反格式假设，规避 Tushare 字段格式漂移）：
+      - 季频（YYYYQ1，如 '2024Q1'）：含 'Q' → pd.PeriodIndex(freq='Q').to_timestamp()
+        （pandas 原生 to_datetime 不认 'Q'，必须经 PeriodIndex 中转，季度首月首日为锚点）
+      - 月频（YYYYMM，6 位数字，如 '202401'）→ format='%Y%m'（月初首日）
+      - 日频（YYYYMMDD，8 位数字，如 '20240105'）→ format='%Y%m%d'（兜底）
+    format 错配会静默产出 NaT（errors='coerce'）→ dropna 清空整表，故必须按数据形态
+    分流，不能一刀切。此处用字符串形态判断而非硬编码 key→format 映射，规避字段漂移。
+    无 index_mode 时保持原扁平落盘（concept/margin_secs 等静态字典/快照不重建索引）。
     """
     kwargs = {}
     if fields:
@@ -219,6 +253,20 @@ def _sync_single(key, api, fields, out):
     if df.empty:
         logger.warning("%s 数据为空，跳过", key)
         return
+    cfg = cfg or TUSHARE_DATASETS[key]
+    if cfg.get("index_mode") == "datetime" and date_col and date_col in df.columns:
+        col = df[date_col].astype(str)
+        if col.str.contains("Q", na=False).any():
+            # 季频（YYYYQ1）→ PeriodIndex(freq='Q') → 季度首月首日 Timestamp
+            # 例 2024Q1 → 2024-01-01，2024Q2 → 2024-04-01
+            df[date_col] = pd.PeriodIndex(col, freq="Q").to_timestamp()
+        elif col.str.len().eq(6).all():
+            # 月频（YYYYMM，6 位）→ 月初首日
+            df[date_col] = pd.to_datetime(col, format="%Y%m", errors="coerce")
+        else:
+            # 日频（YYYYMMDD，8 位）兜底
+            df[date_col] = pd.to_datetime(col, format="%Y%m%d", errors="coerce")
+        df = df.dropna(subset=[date_col]).set_index(date_col).sort_index()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     df.to_parquet(out, engine="pyarrow")
     logger.info("%s 写入：%s，%d 行", key, out, len(df))
@@ -250,6 +298,29 @@ def _load_universe() -> list[str]:
     mask = (~df["name"].str.contains("ST", na=False)) & \
            (~df["name"].str.contains("退", na=False))
     return df.loc[mask, "ts_code"].tolist()
+
+
+def _load_etf_universe() -> list[str]:
+    """ETF 标的列表（fund_basic market='EFT'，仅场内 ETF）。
+
+    Why 独立于 _load_universe：_load_universe 拉 stock_basic（A 股股票，剔 ST/退），
+    而 ETF 走 fund_basic market='EFT' 接口，数据源与过滤口径完全不同。ETF 不适用
+    ST/退市过滤（基金无 ST 概念），故单独 helper，由调用方按 --market etf 显式选用。
+
+    Why market='EFT' 服务端过滤：fund_basic 同时含场内 ETF（EFT）与场外基金（OF），
+    在服务端用 market='EFT' 过滤比客户端过滤省回传带宽 + 配额。返回 ts_code 列表
+    作为 fund_daily/fund_nav/fund_portfolio/fund_share 的 by=symbol 标的池。
+
+    注意 Tushare 内部码是 'EFT'（Exchange Fund Trader）而非 'ETF'，属易混事实。
+    """
+    df = _fetch_with_guard("fund_basic", market="EFT",
+                           fields="ts_code,name,market,management,found_date,list_date")
+    if df.empty:
+        return []
+    # 双保险：服务端已按 market=EFT 过滤，客户端再兜一层（防接口行为漂移导致场外基金混入）
+    if "market" in df.columns:
+        df = df[df["market"] == "EFT"]
+    return df["ts_code"].tolist()
 
 
 def _trade_days(start: str, end: str) -> list[str]:
