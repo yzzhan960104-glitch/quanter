@@ -201,6 +201,70 @@ export interface ReplayRequestBody {
   save?: boolean                              // 默认 true=落盘进历史（方案 A「默认都存」）
 }
 
+// ============ 异步回测任务类型（Spec 1 SQLite 任务表，Spec 2 /lab 消费） ============
+
+/**
+ * 异步任务状态机（对齐 server.schemas.caisen.ReplayTaskSummary.status）。
+ *
+ * 物理意图（CLAUDE.md 风控拷问·状态机边界）：
+ *   PENDING  → 任务已落 SQLite，等待 worker 取走（ProcessPoolExecutor 调度槽满时驻留）
+ *   RUNNING  → worker 已领任务，last_heartbeat 持续更新（心跳超时由调度器回收）
+ *   SUCCESS  → 全 universe 处理完，report 已内嵌（前端取详情一次性拿全）
+ *   FAILED   → 异常终止，error 字段填充 Python 堆栈摘要
+ *   CANCELLED→ 用户 POST cancel 置 abort flag，worker 下次轮询感知后置此态
+ *
+ * 前端只读消费，不做状态机推断（不本地猜「RUNNING 超 X 秒就算超时」——以心跳/finished_at 为准）。
+ */
+export type ReplayTaskStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'CANCELLED'
+
+/**
+ * GET /caisen/replay/tasks 列表项（对齐 ReplayTaskSummary）。
+ *
+ * 物理意图：「异步回测任务」面板表格行——只含「何时跑的/什么状态/进度多少」，
+ * 不含完整 report（保持列表轻量；详情用 ReplayTaskDetail 拿内嵌 ReplayReport）。
+ */
+export interface ReplayTask {
+  task_id: string
+  created_at: string                          // ISO（任务落 SQLite 时刻；排序键）
+  status: ReplayTaskStatus
+  progress: number                            // 0-100（已处理 symbol 占比）
+  start?: string | null                       // 回测区间起（可缺省=全市场默认）
+  end?: string | null
+  universe_n?: number | null                  // -1 = 全市场（与 ReplayRunSummary 同语义）
+  cfg_override?: Record<string, unknown>      // 提交时的参数增量（展示「用了什么 min_rr_ratio」）
+}
+
+/**
+ * GET /caisen/replay/tasks/{id} 详情（对齐 ReplayTaskDetail）。
+ *
+ * 物理意图：SUCCESS 时 report 内嵌完整 ReplayReport（走势/统计/日志一次取齐，
+ * 避免列表/详情两次往返）；非 SUCCESS 时 report 为 null，error 描述失败原因。
+ * 时间戳四元组覆盖任务全生命周期，供前端「耗时/卡死诊断」展示。
+ */
+export interface ReplayTaskDetail extends ReplayTask {
+  report?: ReplayReport | null                // SUCCESS 时填，复用本文件既有 ReplayReport 类型
+  error?: string | null                       // FAILED 时填（Python 异常摘要）
+  started_at?: string | null                  // worker 领任务时刻
+  finished_at?: string | null                 // SUCCESS/FAILED/CANCELLED 终态时刻
+  last_heartbeat?: string | null              // 最近心跳（调度器据此判 RUNNING 卡死）
+}
+
+/** POST /caisen/replay/async 请求体（对齐 ReplayAsyncRequest）。
+ *  无 save 字段——异步任务落 SQLite 是本职，不像同步 replay 需显式 save 开关。 */
+export interface ReplayAsyncRequestBody {
+  start: string
+  end: string
+  universe?: string[] | null                  // null/缺省 = 全市场
+  cfg_override?: Record<string, unknown>
+}
+
+/** POST /caisen/replay/tasks/{id}/cancel 响应（对齐 CancelResponse）。 */
+export interface CancelResponse {
+  task_id: string
+  cancelled: boolean                          // true=已置 abort flag（终态任务返 false）
+  message: string                             // 中文说明（「已取消」/「任务已结束，无法取消」）
+}
+
 // ============ 回测历史记录类型（方案 A：GET /replay/runs · 详情 · 删除） ============
 
 /**
@@ -311,6 +375,62 @@ export function runReplay(body: ReplayRequestBody): Promise<ReplayReport> {
  */
 export function getConfigSchema(): Promise<Record<string, unknown>> {
   return apiClient.get('/api/v1/caisen/config/schema', { timeout: 10000 })
+}
+
+// ============ 异步回测任务 API（Spec 1：SQLite 任务表，/lab 消费） ============
+
+/**
+ * POST /caisen/replay/async：提交异步回测（立即返 task_id，不阻塞）。
+ *
+ * 物理意图：Spec 1 把同步 replay（90s 阻塞）拆为「提交→轮询」——前端提交后立即拿
+ * task_id，后台 ProcessPoolExecutor 串行消化 universe，前端轮询 list/get 看进度。
+ * 超时 10s 仅约束「提交落 SQLite」动作本身（不等待回测完成）。
+ */
+export function submitReplayAsync(body: ReplayAsyncRequestBody): Promise<{ task_id: string }> {
+  return apiClient.post('/api/v1/caisen/replay/async', body, { timeout: 10000 })
+}
+
+/**
+ * GET /caisen/replay/tasks：异步任务列表（降序，可按 status 过滤）。
+ *
+ * 物理意图：任务面板数据源——前端 1-2s 轮询一次（不带 status=全量）刷新进度条；
+ * 也可带 status='RUNNING' 只看在跑的。无任务时返 []（后端容错，前端不抛）。
+ */
+export function listReplayTasks(status?: ReplayTaskStatus): Promise<ReplayTask[]> {
+  return apiClient.get('/api/v1/caisen/replay/tasks', { params: status ? { status } : {}, timeout: 10000 })
+}
+
+/**
+ * GET /caisen/replay/tasks/{id}：单任务详情（status/progress/report/error/时间戳）。
+ *
+ * 物理意图：任务 SUCCESS 后取此详情 → report 字段内嵌完整 ReplayReport，
+ * 直接回填到既有回放结果面板（与同步 runReplay 走同一渲染路径）。
+ * taskId 经 encodeURIComponent 防特殊字符（如空格/斜杠）破坏路由。
+ */
+export function getReplayTask(taskId: string): Promise<ReplayTaskDetail> {
+  return apiClient.get(`/api/v1/caisen/replay/tasks/${encodeURIComponent(taskId)}`, { timeout: 10000 })
+}
+
+/**
+ * POST /caisen/replay/tasks/{id}/cancel：取消（置 abort flag，轮询到 CANCELLED 生效）。
+ *
+ * 物理意图：用户点「取消」→ 后端置 abort flag → worker 下次 universe 轮询感知后置
+ * CANCELLED 终态（非立即杀进程，避免 SQLite 写半截）。空 body {} 因后端路由签名无入参。
+ * 终态任务（SUCCESS/FAILED）后端返 cancelled=false + message 说明「已结束无法取消」。
+ */
+export function cancelReplayTask(taskId: string): Promise<CancelResponse> {
+  return apiClient.post(`/api/v1/caisen/replay/tasks/${encodeURIComponent(taskId)}/cancel`, {}, { timeout: 10000 })
+}
+
+/**
+ * DELETE /caisen/replay/tasks/{id}：删除任务记录（清理历史）。
+ *
+ * 物理意图：与同步 deleteReplayRun 对称的清理机制——异步任务跑完看够了就删，
+ * 防 SQLite 无限膨胀。前端仅对非 RUNNING 行调用（RUNNING 删除由后端守护，
+ * 但前端按钮置灰更友好）。返 {ok:true}；task_id 不存在后端返 404。
+ */
+export function deleteReplayTask(taskId: string): Promise<{ ok: boolean }> {
+  return apiClient.delete(`/api/v1/caisen/replay/tasks/${encodeURIComponent(taskId)}`, { timeout: 10000 })
 }
 
 // ============ 回测历史记录 API（方案 A：默认都存 + 前端删除） ============

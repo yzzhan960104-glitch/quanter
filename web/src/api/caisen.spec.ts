@@ -19,27 +19,32 @@ vi.mock('./client', () => ({
     post: vi.fn(),
     get: vi.fn(),
     patch: vi.fn(),
+    delete: vi.fn(),   // 新增：DELETE /replay/tasks/{id} 用（Spec 2 Task 2）
   },
 }))
 
 import { apiClient } from './client'
 import {
   scan, listPlans, getPlan, reviewPlan, activatePlan, getChart, runReplay,
+  submitReplayAsync, listReplayTasks, getReplayTask, cancelReplayTask, deleteReplayTask,
 } from './caisen'
 
 const mockPost = vi.mocked(apiClient.post)
 const mockGet = vi.mocked(apiClient.get)
 const mockPatch = vi.mocked(apiClient.patch)
+const mockDelete = vi.mocked(apiClient.delete)
 
 beforeEach(() => {
   mockPost.mockReset()
   mockGet.mockReset()
   mockPatch.mockReset()
+  mockDelete.mockReset()
   // facade 期望拿到 response.data（client.ts 响应拦截器剥壳），但 client 被 mock 绕过拦截器，
   // 这里直接 resolve 一个占位值，让 await 不抛；断言只关心「如何调用」而非「返回什么」。
   mockPost.mockResolvedValue([] as any)
   mockGet.mockResolvedValue([] as any)
   mockPatch.mockResolvedValue({} as any)
+  mockDelete.mockResolvedValue({} as any)
 })
 
 describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
@@ -96,5 +101,42 @@ describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
       { start: '2026-01-01', end: '2026-02-01' },
       { timeout: 90000 },
     )
+  })
+
+  // ============ 异步回测任务（Spec 2 Task 2；对应 Spec 1 后端 5 端点） ============
+
+  it('submitReplayAsync: POST /replay/async，body 透传，timeout 10000', async () => {
+    await submitReplayAsync({ start: '2024-01-01', end: '2024-06-01', cfg_override: { min_rr_ratio: 1.5 } })
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/v1/caisen/replay/async',
+      { start: '2024-01-01', end: '2024-06-01', cfg_override: { min_rr_ratio: 1.5 } },
+      { timeout: 10000 },
+    )
+  })
+
+  it('listReplayTasks() 无 status：GET /replay/tasks，params 空', async () => {
+    await listReplayTasks()
+    expect(mockGet).toHaveBeenCalledWith('/api/v1/caisen/replay/tasks', { params: {}, timeout: 10000 })
+  })
+
+  it('listReplayTasks(status)：params 含 status', async () => {
+    await listReplayTasks('RUNNING')
+    expect(mockGet).toHaveBeenCalledWith(
+      '/api/v1/caisen/replay/tasks', { params: { status: 'RUNNING' }, timeout: 10000 })
+  })
+
+  it('getReplayTask：task_id 经 encodeURIComponent', async () => {
+    await getReplayTask('abc 123')
+    expect(mockGet).toHaveBeenCalledWith('/api/v1/caisen/replay/tasks/abc%20123', { timeout: 10000 })
+  })
+
+  it('cancelReplayTask：POST .../cancel，空 body {}', async () => {
+    await cancelReplayTask('t1')
+    expect(mockPost).toHaveBeenCalledWith('/api/v1/caisen/replay/tasks/t1/cancel', {}, { timeout: 10000 })
+  })
+
+  it('deleteReplayTask：DELETE .../tasks/{id}', async () => {
+    await deleteReplayTask('t1')
+    expect(mockDelete).toHaveBeenCalledWith('/api/v1/caisen/replay/tasks/t1', { timeout: 10000 })
   })
 })
