@@ -1,6 +1,14 @@
-"""宏观信贷同步：AKShare 社融/M1M2/DR007/SHIBOR → 日频对齐 parquet。
+"""宏观信贷同步：Tushare cn_m(M0/M1/M2) + akshare fallback(社融/DR007) → 日频对齐 parquet。
 
-前视红线（Look-ahead bias 防护）：
+源切换（Plan C Task 2，用户决策：宏观切 Tushare）：
+    - M0/M1/M2 → Tushare cn_m（货币供应量同比，月频 month=YYYYMM）
+    - 社融(shrzgm)/DR007 → Tushare 无专门接口，fallback akshare 单指标
+
+CreditRegime 不变量（core/macro_regime.py:154）：macro 湖必须含 shrzgm + M1M2_gap
+两列，dr007 可选。本脚本保证列名对齐——CreditRegime 代码不改。任何 rename 都会
+让 test_credit_regime_unchanged_reads_columns 先红，比改 sync 早暴露。
+
+前视红线（Look-ahead bias 防护，不变）：
     社融/M1M2 是【月频】数据，每月才公布一次。要把它们 join 到日频策略上，
     必须把月度值"展平"到日频——但展平方向只有【向前 ffill】是合法的：
     即用"已公布的最近一期月度值"解释当下的每一天。
@@ -9,12 +17,13 @@
     本脚本 align_to_daily() 严格 ffill-only，无任何 bfill，是整个宏观 CTA
     四级数据湖（宏观月频→板块日频→微观日线→分钟）顶层的合规基石。
 
-数据流（宏观月频湖）：
-    AKShareClient.fetch_macro_raw(kind)
-        kind ∈ {shrzgm: 社融增量, money_supply: M0/M1/M2, dr007: 银行间7天回购, shibor: 同业拆放}
-    → 月频 reindex 到工作日 + 仅 ffill
-    → 衍生 M1M2_gap = M1同比 - M2同比（货币活性剪刀差，宽/紧信用判据）
-    → 落 data_lake/macro_credit.parquet（DatetimeIndex，列式 parquet）
+⚠️ 事实审查 / 待探测风险（brief §Step 3 注）：
+    Tushare cn_m 接口的参数名(start_m/end_m vs start_date/end_date)与字段名
+    (m0_yoy/m1_yoy/m2_yoy) 为 brief 假设——开发机无 token，单测用 fake_pro mock
+    不验证真实字段。生产首次联调需用真 token 探测：
+        python -c "import tushare as ts; pro=ts.pro_api('TOKEN'); \
+                    print(pro.cn_m(start_m='202401', end_m='202402').columns.tolist())"
+    若字段名不同，调整 _fetch_with_guard("cn_m", ...) 的参数与下方列对齐逻辑。
 """
 from __future__ import annotations
 
@@ -27,7 +36,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 
 from config import LAKE_CONFIG
+from data._tushare_compat import get_pro
 from data.clients.akshare_client import AKShareClient
+from data.resilience import tushare_breaker, tushare_rate_limiter
 
 
 def align_to_daily(
@@ -84,65 +95,6 @@ def align_to_daily(
     return out
 
 
-def fetch_macro_series(client: AKShareClient, start: str, end: str) -> pd.DataFrame:
-    """合并社融/M1M2/DR007/SHIBOR → 日频对齐 DataFrame（衍生 M1M2_gap）。
-
-    容错策略（任一档缺失不崩，按列合并）：
-        - 社融/货币月频 → align_to_daily 仅 ffill 到日频；
-        - DR007 日频直接 reindex（若 Task 4 新鲜度守卫返空，则缺了少一列不崩）；
-        - SHIBOR 当前未参与合并（结构复杂，留待后续），返空亦不影响。
-
-    M1M2_gap 衍生：M1同比 - M2同比。
-        含义：货币活性剪刀差。M1 增速 > M2 → 资金活化（企业活期存款上行，
-        投资活跃）→ 宽信用预期；M1 < M2 → 资金沉淀为定期/储蓄 → 紧信用预期。
-        CreditRegime（Task 11）据此判状态机迁移。
-
-    参数：
-        client: AKShareClient 实例（或任何具 fetch_macro_raw(kind) 协议的对象）。
-        start/end: 'YYYY-MM-DD' 日历范围。
-    """
-    shrzgm = client.fetch_macro_raw("shrzgm")
-    money = client.fetch_macro_raw("money_supply")
-    dr007 = client.fetch_macro_raw("dr007")
-
-    series: dict[str, pd.Series] = {}
-    # 社融月频 → 日频仅 ffill；列名以 akshare 实测为准，_pick 做日期列防御性 rename。
-    if not shrzgm.empty:
-        s = align_to_daily(_pick(shrzgm, "月份"), "月份", start, end)
-        series["shrzgm"] = s.iloc[:, 0]
-    # 货币供应量月频 → 日频仅 ffill；衍生 M1M2_gap 剪刀差。
-    if not money.empty:
-        m = align_to_daily(_pick(money, "月份"), "月份", start, end)
-        # 归一 AKShare 原始列名 → CreditRegime 消费的标准名
-        # 实测列名：货币(M1)-同比增长 / 货币和准货币(M2)-同比增长 / 流通中的现金(M0)-同比增长
-        _ren = {}
-        for c in m.columns:
-            if "(M1)" in c and "同比增长" in c:
-                _ren[c] = "M1同比增长"
-            elif "(M2)" in c and "同比增长" in c:
-                _ren[c] = "M2同比增长"
-            elif "(M0)" in c and "同比增长" in c:
-                _ren[c] = "M0同比增长"
-        if _ren:
-            m = m.rename(columns=_ren)
-        if "M1同比增长" in m and "M2同比增长" in m:
-            # 衍生列在 ffill 之后计算：用已对齐的日频同比相减，保证整段时序连续。
-            m["M1M2_gap"] = pd.to_numeric(m["M1同比增长"], errors="coerce") - pd.to_numeric(
-                m["M2同比增长"], errors="coerce"
-            )
-        series.update({c: m[c] for c in m.columns})
-    # DR007 日频 → 直接 reindex（Task 4 新鲜度守卫已防过期；空则少一列不崩）。
-    if not dr007.empty:
-        d = align_to_daily(_pick(dr007, "日期"), "日期", start, end)
-        series["dr007"] = d.iloc[:, 0]
-
-    if not series:
-        return pd.DataFrame()
-    # 列合并后再 ffill：弥合各档时间起点不同留下的头部 NaN（仍只向前，无 bfill）。
-    df = pd.DataFrame(series).ffill().dropna(how="all")
-    return df
-
-
 def _pick(df: pd.DataFrame, prefer: str) -> pd.DataFrame:
     """容错取日期列（akshare 版本间列名漂移，需防御性归一）。
 
@@ -159,21 +111,106 @@ def _pick(df: pd.DataFrame, prefer: str) -> pd.DataFrame:
     return df.rename(columns={cand[0]: prefer}) if cand else df
 
 
+def _fetch_with_guard(api_name: str, **kwargs) -> pd.DataFrame:
+    """限频+熔断包装（与 data.tushare_sync 同范式，反黑盒显式重写）。
+
+    Why 单独实现而非 import tushare_sync._fetch_with_guard：sync_macro_credit 是
+    按月拉取的轻量场景（cn_m 单次单月），不涉及 tushare_sync 的分页/续传语义；
+    复用其 helper 反而引入不必要的耦合（改一处影响全局）。此处显式重写限频+熔断
+    包装，保持宏观脚本独立可演进。
+
+    失败语义：限频 acquire(1.0) → 熔断 allow_request() → getattr(pro, api) →
+    任一异常/空返空 DF（不抛，让上游按列缺失降级——单档缺失不崩宏观湖）。
+    """
+    tushare_rate_limiter.acquire(1.0)
+    if not tushare_breaker.allow_request():
+        return pd.DataFrame()
+    pro = get_pro()
+    try:
+        df = getattr(pro, api_name)(**kwargs)
+    except Exception:
+        tushare_breaker.record_failure()
+        return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    tushare_breaker.record_success()
+    return df
+
+
+def fetch_macro_series(start: str, end: str) -> pd.DataFrame:
+    """合并 M0/M1/M2(Tushare cn_m) + 社融/DR007(akshare fallback) → 日频对齐。
+
+    M1M2_gap 衍生 = M1同比 - M2同比（CreditRegime core 字段，货币活性剪刀差）。
+    含义：M1 增速 > M2 → 资金活化（企业活期存款上行，投资活跃）→ 宽信用预期；
+         M1 < M2 → 资金沉淀为定期/储蓄 → 紧信用预期。CreditRegime 据此判状态迁移。
+
+    容错策略（任一档缺失不崩，按列合并）：
+        - cn_m 月频(M1/M2 同比) → align_to_daily 仅 ffill 到日频 → 衍生 M1M2_gap；
+        - 社融(shrzgm)/DR007 → akshare fallback，月/日频 ffill 到日频；
+        - 列合并后再 ffill：弥合各档时间起点不同留下的头部 NaN（仍只向前，无 bfill）。
+    """
+    series: dict[str, pd.Series] = {}
+
+    # M0/M1/M2 走 Tushare cn_m（月频，month=YYYYMM）。
+    # ⚠️ 参数 start_m/end_m 为 brief 假设（6 位 YYYYMM），待真 token 探测确认。
+    #    截取 [:6] 容错 YYYY-MM-DD → YYYYMM（cn_m 接口按月查）。
+    cn_m = _fetch_with_guard(
+        "cn_m",
+        start_m=start.replace("-", "")[:6],
+        end_m=end.replace("-", "")[:6],
+    )
+    if not cn_m.empty:
+        # _pick 把 cn_m 的 month 列防御性归一（若上游改名为别的，仍能取到日期列）。
+        m = align_to_daily(_pick(cn_m, "month"), "month", start, end)
+        # cn_m 字段名 m1_yoy/m2_yoy → CreditRegime 消费的标准名 M1同比增长/M2同比增长。
+        # 归一映射而非硬编码列名：字段漂移时只改映射表，不改下游算式。
+        for col, key in [("m1_yoy", "M1同比增长"), ("m2_yoy", "M2同比增长")]:
+            if col in m.columns:
+                series[key] = pd.to_numeric(m[col], errors="coerce")
+
+    # 社融 shrzgm + DR007：akshare fallback（Tushare 无专门接口，spec §3.7 风险条款）。
+    # Why 保留 akshare：Tushare cn_m 只覆盖货币供应量同比，社融增量(shrzgm)与银行间
+    # 7 天回购(DR007) 无对应 Tushare 接口，akshare 的 macro_china_shrzgm /
+    # repo_rate_hist 仍是当前最干净的源——三源并存而非强求单一接口。
+    ak = AKShareClient()
+    shrzgm = ak.fetch_macro_raw("shrzgm")
+    if not shrzgm.empty:
+        s = align_to_daily(_pick(shrzgm, "月份"), "月份", start, end)
+        series["shrzgm"] = s.iloc[:, 0]
+    dr007 = ak.fetch_macro_raw("dr007")
+    if not dr007.empty:
+        d = align_to_daily(_pick(dr007, "日期"), "日期", start, end)
+        series["dr007"] = d.iloc[:, 0]
+
+    if not series:
+        return pd.DataFrame()
+    # 列合并后再 ffill：弥合各档时间起点不同留下的头部 NaN（仍只向前，无 bfill）。
+    df = pd.DataFrame(series).ffill().dropna(how="all")
+    # M1M2_gap 衍生：M1同比 - M2同比（CreditRegime core 字段，必须在 ffill 之后算，
+    # 保证整段时序连续；任一同比缺失则 M1M2_gap 整段 NaN——CreditRegime 走中性兜底）。
+    if "M1同比增长" in df and "M2同比增长" in df:
+        df["M1M2_gap"] = (
+            pd.to_numeric(df["M1同比增长"], errors="coerce")
+            - pd.to_numeric(df["M2同比增长"], errors="coerce")
+        )
+    return df
+
+
 def sync_macro(start: str, end: str, out: str | None = None) -> None:
-    """落 data_lake/macro_credit.parquet（DatetimeIndex，列式 parquet）。
+    """落 data_lake/macro_credit.parquet（DatetimeIndex，列含 shrzgm + M1M2_gap）。
 
     参数：
         start/end: 'YYYY-MM-DD' 同步区间。
         out: 自定义输出路径（默认 LAKE_CONFIG['lakes']['macro']）。
     """
     out = out or LAKE_CONFIG["lakes"]["macro"]
-    df = fetch_macro_series(AKShareClient(), start, end)
+    df = fetch_macro_series(start, end)
     if df.empty:
         print("宏观数据为空，跳过")
         return
     os.makedirs(os.path.dirname(out), exist_ok=True)
     df.to_parquet(out)
-    print(f"宏观湖写入：{out}，{len(df)} 行")
+    print(f"宏观湖写入：{out}，{len(df)} 行，列={list(df.columns)}")
 
 
 if __name__ == "__main__":

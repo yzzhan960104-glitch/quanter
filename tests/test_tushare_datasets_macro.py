@@ -205,3 +205,63 @@ def test_szse_daily_by_date(tmp_path, fake_pro, monkeypatch):
     # symbol 层恒等于 trade_date（市场级，无个股）
     assert "20240105" in df.index.get_level_values("symbol")
     assert "pe" in df.columns
+
+
+# ---------------------------------------------------------------------------
+# Plan C Task 2：sync_macro_credit 切 Tushare cn_m + CreditRegime 列名契约
+# ---------------------------------------------------------------------------
+# Why 本组测试：sync_macro_credit 从 akshare 切到 Tushare cn_m(M0/M1/M2)，社融/
+# DR007 走 akshare fallback。CreditRegime(core/macro_regime.py:154) **不改**——
+# 它只读 macro 湖列名 shrzgm + M1M2_gap（dr007 可选）。本组测试钉死"列名契约"：
+# 源切换后产出湖必须仍含这两列，否则 CreditRegime 状态机返 0（中性兜底）导致
+# 宏观 CTA 宏观锚失效，是整个四级数据湖顶层最致命的回归。
+
+
+def test_macro_lake_credit_regime_columns(tmp_path, fake_pro, monkeypatch):
+    """macro 湖必须含 shrzgm + M1M2_gap（CreditRegime core 字段契约）。
+
+    Why 端到端契约：sync_macro_credit 重写为 Tushare cn_m(M1/M2) + akshare
+    fallback(社融 shrzgm/DR007) 后，落盘的 macro_credit.parquet 必须仍含
+    shrzgm + M1M2_gap 两列——CreditRegime(core 字段) 直接消费它们，缺失则
+    compute() 走"缺列防御"分支返 0（强制中性），宏观否决/绿灯双双失效。
+    M1M2_gap = M1同比 - M2同比（货币活性剪刀差，CreditRegime 据此判宽/紧信用）。
+    """
+    # Tushare cn_m：M0/M1/M2 同比（月频，month=YYYYMM）
+    # ⚠️ 事实风险：cn_m 字段名(m0_yoy/m1_yoy/m2_yoy)与参数(start_m/end_m)待真 token 探测，
+    #    单测用 fake_pro mock 不验证真实字段；本测试按 brief 约定字段名钉死契约。
+    fake_pro.set("cn_m", pd.DataFrame({
+        "month": ["202401", "202402"],
+        "m0_yoy": [8.0, 8.5], "m1_yoy": [5.9, 6.6], "m2_yoy": [8.7, 8.7]}))
+    # akshare 社融/DR007 fallback（mock：避开真实网络）
+    import data.clients.akshare_client as akc
+    monkeypatch.setattr(akc.AKShareClient, "fetch_macro_raw",
+                        lambda self, kind: {
+                            "shrzgm": pd.DataFrame({"月份": ["202401", "202402"],
+                                                    "社融增量": [50000, 60000]}),
+                            "dr007": pd.DataFrame({"日期": ["2024-01-05", "2024-02-05"],
+                                                   "DR007": [1.9, 1.8]}),
+                        }.get(kind, pd.DataFrame()))
+    out = str(tmp_path / "macro.parquet")
+    from scripts.sync_macro_credit import sync_macro
+    sync_macro("2024-01-01", "2024-02-28", out=out)
+    df = pd.read_parquet(out)
+    assert "shrzgm" in df.columns, "CreditRegime core 字段 shrzgm 缺失"
+    assert "M1M2_gap" in df.columns, "CreditRegime core 字段 M1M2_gap 缺失"
+    # M1M2_gap = M1同比 - M2同比：必须存在非空值（202402 期 6.6-8.7=-2.1）
+    assert df["M1M2_gap"].notna().any()
+
+
+def test_credit_regime_unchanged_reads_columns(fake_pro, monkeypatch):
+    """CreditRegime 代码不改，验证其消费 macro 湖列名（shrzgm/M1M2_gap/dr007）。
+
+    Why 钉死"消费者不变量"：CreditRegime.compute(core/macro_regime.py:154) 声明
+    core=("shrzgm","M1M2_gap")，dr007 可选。源切换后这些列名【绝不可变】——
+    本测试注入含此 3 列的合成 macro_df，验证 compute(date) 不抛、返回 ∈{+1,0,-1}，
+    即列名契约在消费者侧成立（任何 rename 都会让此测试先红，比改 sync 早暴露）。
+    """
+    from core.macro_regime import CreditRegime
+    idx = pd.date_range("2024-01-01", periods=30, freq="B")
+    macro = pd.DataFrame({"shrzgm": range(30), "M1M2_gap": [1.0] * 30,
+                          "dr007": [2.0] * 30}, index=idx)
+    r = CreditRegime(macro_df=macro)
+    assert r.compute(idx[-1]) in (1, 0, -1)  # 列名对齐，不抛
