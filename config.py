@@ -192,6 +192,7 @@ LAKE_CONFIG["lakes"] = {
     "margin": "data_lake/margin.parquet",                  # 融资融券市场汇总（by=date, exchange_id 作 symbol）
     "margin_detail": "data_lake/margin_detail.parquet",    # 融资融券逐标的（by=date）
     "margin_secs": "data_lake/margin_secs.parquet",        # 融资融券标的列表（by=single 快照，扁平 df）
+    "moneyflow_hsgt": "data_lake/moneyflow_hsgt.parquet",  # 北/南向资金市场级（by=single 扁平）
 }
 LAKE_CONFIG["default_lake"] = "daily"
 
@@ -339,6 +340,21 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "date_col": "start_date", "symbol_col": "ts_code",
         "fields": "ts_code,name,start_date",
         "lake": "data_lake/margin_secs.parquet",
+    },
+    # —— 北向资金（hsgt_top10/moneyflow_hsgt）：切 Tushare 替代 akshare sync_north_flow ——
+    # hsgt_top10 当日十大成交股（有 ts_code，by=date），复用 north_flow 湖（切源）。
+    "hsgt_top10": {
+        "api": "hsgt_top10", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "trade_date,name,ts_code,vol,amount,north_direction",
+        "lake": "data_lake/north_flow.parquet",  # 复用 north_flow 湖（切 Tushare）
+    },
+    # moneyflow_hsgt 市场级北/南向资金（无个股 symbol）→ single 扁平快照（非 MultiIndex）。
+    "moneyflow_hsgt": {
+        "api": "moneyflow_hsgt", "by": "single",
+        "date_col": "trade_date", "symbol_col": "trade_date",
+        "fields": "trade_date,ggt_ss,ggt_sz,sgt_ss,sgt_sz,north_money,south_money",
+        "lake": "data_lake/moneyflow_hsgt.parquet",
     },
 }
 
