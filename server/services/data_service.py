@@ -71,9 +71,26 @@ def _sentinel_path(key: str, *, failed: bool = False) -> str:
     return os.path.join(SYNCING_DIR, f"{key}.failed" if failed else key)
 
 
+def _lake_key(key: str) -> str:
+    """取数据集 key 对应的「物理湖 key」（LAKE_CONFIG["lakes"] 索引键）。
+
+    物理意图：多数数据集 key 与湖 key 一一相等；但复用湖场景（top_list→dragon_list、
+    hsgt_top10→north_flow，切 Tushare 替代 akshare）数据集名 ≠ 湖 key，需在 DATASET_REGISTRY
+    用 lake_key 字段显式指向既有湖。本函数读 lake_key，缺省 fallback 到数据集 key 自身——
+    保证既有 daily/macro 等正常数据集零回归。
+
+    Why 集中在此：_parquet_path / _loaded_data_span 都靠它作湖索引，单一维护点防分叉。
+    """
+    return DATASET_REGISTRY.get(key, {}).get("lake_key", key)
+
+
 def _parquet_path(key: str) -> Optional[str]:
-    """取湖 key 对应的 parquet 路径（LAKE_CONFIG["lakes"] 单一真相源）；未登记返 None。"""
-    return LAKE_CONFIG.get("lakes", {}).get(key)
+    """取湖 key 对应的 parquet 路径（LAKE_CONFIG["lakes"] 单一真相源）；未登记返 None。
+
+    复用湖（top_list/hsgt_top10）经 _lake_key 映射到 dragon_list/north_flow 的物理路径，
+    否则前端 list_datasets 会误报这两个数据集 status=missing（即便物理湖已同步）。
+    """
+    return LAKE_CONFIG.get("lakes", {}).get(_lake_key(key))
 
 
 def _derive_status(key: str, parquet_path: Optional[str]) -> Tuple[str, Optional[str]]:
@@ -120,7 +137,7 @@ def _loaded_data_span(key: str) -> Tuple[Optional[str], Optional[str]]:
         import pandas as pd  # 延迟 import，避免模块级耦合
         from data.lake_reader import DataLakeReader
         reader = DataLakeReader.get_instance()
-        df = reader.get_lake(key)  # #4：公开读 API，替代穿透 _lakes 私有缓存
+        df = reader.get_lake(_lake_key(key))  # 复用湖（top_list→dragon_list 等）映射到物理湖 key
         if df is None or len(df) == 0:
             return None, None
         idx = df.index
