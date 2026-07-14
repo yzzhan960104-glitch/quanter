@@ -30,7 +30,18 @@ import type { EquityPoint, ReplayReport } from '@/api/caisen'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, TitleComponent])
 
-const props = defineProps<{ report: ReplayReport }>()
+/**
+ * showTrades：是否渲染内置「买卖流水表」section。
+ *
+ * 物理意图（Spec 2 Task 6 控制器裁决）：/lab 主画布自身有独立的「买卖日志」区会直接渲染
+ * report.trades，若此处也画流水表则同一份 trades 被渲染两遍（UX 重复）。故 /lab 传 false
+ * 省略本组件的流水表（资金曲线/统计卡/形态/月度仍渲染），/caisen 不传该 prop → 默认 true →
+ * 行为零变化（纯加法 prop，不破坏既有调用方）。
+ */
+const props = withDefaults(
+  defineProps<{ report: ReplayReport; showTrades?: boolean }>(),
+  { showTrades: true },
+)
 
 // ============ 回放 computed（从 CaisenScreenView 逐字迁入，replayReport.value → props.report） ============
 
@@ -125,7 +136,8 @@ function patternLabel(p: string): string {
       <span v-else class="hint">无资金曲线数据（命中 0 笔）</span>
     </div>
 
-    <div class="report-section">
+    <!-- 买卖流水表：showTrades=false 时省略（/lab 有独立买卖日志区，避免重复渲染 trades） -->
+    <div v-if="props.showTrades" class="report-section">
       <div class="block-title">买卖流水（{{ props.report.trades.length }} 笔）</div>
       <el-table :data="props.report.trades" size="small" max-height="320" empty-text="无成交">
         <el-table-column prop="symbol" label="标的" width="100" />

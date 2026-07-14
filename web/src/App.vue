@@ -22,7 +22,7 @@
 import { useRoute } from 'vue-router'
 import { computed, type Component } from 'vue'
 // 导航图标：EP 官方图标包，按需引入（非重型依赖，EP 生态标准配套）
-import { TrendCharts, MagicStick, DataBoard, Files, Monitor } from '@element-plus/icons-vue'
+import { TrendCharts, MagicStick, DataBoard, Files, Monitor, DataAnalysis } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const activeName = computed(() => route.path)
@@ -35,9 +35,11 @@ interface NavItem {
 }
 
 // 左段：研究/配置（蔡森形态学流水线 Phase 3 起：蔡森筛选作为研究第一入口，
-// 放 researchNav 首位；宏观驾驶舱/数据湖/AI 复盘依次承接研究动线）
+// 放 researchNav 首位；Spec 2 起参数实验室紧随其后——选股 → 调参的研究动线；
+// 宏观驾驶舱/数据湖/AI 复盘依次承接）
 const researchNav: NavItem[] = [
   { to: '/caisen',     label: '蔡森筛选',   icon: TrendCharts },
+  { to: '/lab',        label: '参数实验室', icon: DataAnalysis },
   { to: '/dashboard',  label: '宏观驾驶舱', icon: DataBoard },
   { to: '/data',       label: '数据湖',     icon: Files },
   { to: '/review',     label: 'AI 复盘',    icon: MagicStick },
