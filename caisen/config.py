@@ -31,10 +31,6 @@ class StrategyConfig(BaseModel):
         60, ge=20, le=120,
         description="形态最大跨度(超过 120 日视为长趋势失效，避免误把大级别回调当打底)",
     )
-    symmetry_tolerance: float = Field(
-        0.3,
-        description="左右结构时间对称容忍度(左脚到颈线 vs 颈线到右脚的耗时占比偏差上限)",
-    )
 
     # —— 空间高度类 ——
     zigzag_threshold_atr: float = Field(
@@ -185,18 +181,6 @@ class StrategyConfig(BaseModel):
         0.4,
         description="幅宽张力比例下限(形态高度/宽度比例；张力不足的扁平结构交易价值低)",
     )
-    pattern_width_bonus: bool = Field(
-        True,
-        description="幅宽加分(打分阶段：形态宽度达阈值的给予 scoring bonus)",
-    )
-    enable_pot_breakout: bool = Field(
-        True,
-        description="启用破头锅形态(突破前头部颈线的强势形态)",
-    )
-    enable_bottom_flip: bool = Field(
-        False,
-        description="启用破底翻形态(Task 1 新增；默认关，后续按需开启，避免误信号)",
-    )
     enable_triangle_bottom: bool = Field(
         True,
         description=(
@@ -228,12 +212,4 @@ class StrategyConfig(BaseModel):
             "收敛三角形有效突破进度上限(白皮书招12硬规则)。>3/4 接近三角形顶点处突破，"
             "原著明确易出现假突破/反向走势，可靠性差，否决。1/2~3/4 区间是有效突破窗口。"
         ),
-    )
-    false_breakout_threshold: float = Field(
-        0.03,
-        description="假突破跌破颈线阈值(3%；OCR 辨识，可配置；超过此幅度判定假突破)",
-    )
-    false_breakout_window: int = Field(
-        3,
-        description="假突破判定窗口(3 日内收回颈线之上视为洗盘而非破位)",
     )

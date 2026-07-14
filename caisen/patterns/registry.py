@@ -42,8 +42,8 @@ class PatternMeta:
 
 
 # 显式注册表：现有 3 形态。新形态（B2 破底翻等）在此追加一行即可，screener 零改。
-# 未实现的 enable_pot_breakout/enable_bottom_flip/false_breakout_* 开关待对应形态
-# 实现后再入此表（本轮只搬现有 3 形态，不含未实现形态）。
+# （原 enable_pot_breakout/enable_bottom_flip/false_breakout_* 预埋开关已随参数瘦身
+# spec 2026-07-14-param-slim 移除——零消费的死字段；后续对应形态实现时再补 config 字段+注册表行。）
 PATTERNS: list[PatternMeta] = [
     PatternMeta(name="w_bottom", detect=w_detect),
     PatternMeta(
