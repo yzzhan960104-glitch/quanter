@@ -65,9 +65,19 @@ def fake_pro(monkeypatch):
     Why 同时 mock 三个：sync_dataset 经 _fetch_with_guard 串联 rate_limiter → breaker
     → get_pro，三道闸门任一未被 mock 都会触达真实 tushare/网络。fixture 一次性
     把数据路径短路，让测试聚焦分页/落湖逻辑本身。
+
+    Why 双重 patch get_pro（Task 2 修复 Task 1 隔离漏洞）：data/tushare_sync.py 顶部
+    `from data._tushare_compat import get_pro` 把函数对象绑到 tushare_sync 模块全局
+    命名空间。_fetch_with_guard 体内的 `pro = get_pro()` 解析的是 tushare_sync 模块的
+    get_pro（导入时绑定），而非 _tushare_compat 模块的 get_pro。仅 patch
+    `data._tushare_compat.get_pro` **不会** 改变 tushare_sync.get_pro 的绑定——旧实现下
+    测试静默穿透到真实 Tushare（.env 有 token 时命中真 API，无 token 时返空→shard 为空
+    →_build_multiindex 抛错或读到上次残留 shard），导致跨文件测试套件污染（test_tushare_datasets_stock
+    先运行时本测试读到残留 shard），断言 flaky。本 fixture 同时 patch 两处绑定，保证替身真正短路。
     """
     fake = _FakePro()
     monkeypatch.setattr("data._tushare_compat.get_pro", lambda: fake)
+    monkeypatch.setattr("data.tushare_sync.get_pro", lambda: fake)
     monkeypatch.setattr("data.tushare_sync.tushare_rate_limiter",
                         type("L", (), {"acquire": lambda self, n: None})())
     monkeypatch.setattr("data.tushare_sync.tushare_breaker",

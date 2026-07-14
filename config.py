@@ -181,6 +181,11 @@ LAKE_CONFIG["lakes"] = {
     "dragon_list": "data_lake/dragon_list.parquet",        # 龙虎榜明细（sync_dragon_list 写）
     # 通用 Tushare 湖同步器（Plan A/B/C）落湖：key 与 TUSHARE_DATASETS 一一对应
     "fina_income": "data_lake/fina_income.parquet",        # 利润表（tushare_sync 写，MultiIndex date/symbol）
+    "fina_balance": "data_lake/fina_balance.parquet",      # 资产负债表
+    "fina_cashflow": "data_lake/fina_cashflow.parquet",    # 现金流量表
+    "forecast": "data_lake/forecast.parquet",              # 业绩预告
+    "express": "data_lake/express.parquet",                # 业绩快报
+    "dividend": "data_lake/dividend.parquet",              # 分红送股
 }
 LAKE_CONFIG["default_lake"] = "daily"
 
@@ -246,7 +251,45 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "ts_code,ann_date,end_date,total_revenue,n_income,n_income_attr_p",
         "lake": "data_lake/fina_income.parquet",
     },
-    # 后续 Task 追加 fina_balance/fina_cashflow/moneyflow/top_list/margin/...
+    "fina_balance": {
+        # 资产负债表（balancesheet）：单标的全历史一次返，按 symbol 分页
+        "api": "balancesheet", "by": "symbol",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int",
+        "lake": "data_lake/fina_balance.parquet",
+    },
+    "fina_cashflow": {
+        # 现金流量表（cashflow）：单标的全历史一次返，按 symbol 分页
+        "api": "cashflow", "by": "symbol",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,end_date,net_profit_cash_flow,c_pay_acq_foroth_assets",
+        "lake": "data_lake/fina_cashflow.parquet",
+    },
+    "forecast": {
+        # 业绩预告（forecast）：披露窗口通常 1月（年报预告）/4月（一季报）/7月（中报）/10月（三季报），
+        # 按 symbol 分页拉全历史再按 ann_date 切区间，避免逐日拉取空窗期浪费配额。
+        "api": "forecast", "by": "symbol",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,end_date,type,p_change,min_range,max_range",
+        "lake": "data_lake/forecast.parquet",
+    },
+    "express": {
+        # 业绩快报（express）：披露窗口与 forecast 类似，按 symbol 分页。
+        "api": "express", "by": "symbol",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,end_date,revenue,n_income,total_profit",
+        "lake": "data_lake/express.parquet",
+    },
+    "dividend": {
+        # 分红送股（dividend）：date_col=ann_date（分红方案公告日）。
+        # ⚠️ 前视红线：绝不用 end_date（接口无此列）/ record_date（除权登记日，晚于公告日）
+        # / div_proc（预案/实施等文本进度字段，非日期）。ann_date 是市场最早能感知分红的时点。
+        "api": "dividend", "by": "symbol",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,div_proc,stk_div,cash_div,record_date,ex_date",
+        "lake": "data_lake/dividend.parquet",
+    },
+    # 后续 Task 追加 moneyflow/top_list/margin/...
 }
 
 # 同步哨兵目录：POST /sync/{key} 触发时 touch {key}（=syncing）；成功删除，失败写 {key}.failed。
