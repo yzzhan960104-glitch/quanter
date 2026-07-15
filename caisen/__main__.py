@@ -35,6 +35,13 @@ cfg-override 设计（承 Task 10 concern 1 · 真实参数调优）：
     - cfg-override JSON 解析失败：报错退出，不让脏参数静默走默认；
     - 单 symbol 异常：screener 内部已 try/except（承 Task 8），CLI 不再重复包裹；
     - 候选为空：打印诊断信息（命中数 + 各否决层淘汰分布），不视为错误。
+
+Step3 后内部模块已分包子包（engines/optimize/infra），本 CLI 的 5 处 import 全部
+经 caisen/__init__ 预加载 + 顶层 sys.modules 别名垫片可达——``caisen.config``↔
+``caisen.engines.config``（同对象）、``caisen.patterns.screener``↔
+``caisen.engines.patterns.screener``、``caisen.plan``↔``caisen.engines.plan``、
+``caisen.backtest_replay``↔``caisen.infra.backtest_replay`` 均为同一模块对象。
+故 ``python -m caisen`` 入口位置不变（不迁移），import 零改动（strangler 铁律①）。
 """
 from __future__ import annotations
 
