@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """training_loop 状态机单测。mock 回测 DB + analyzer + notifier，不碰真网络/真回测。"""
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from caisen import training_loop
+from caisen import training_dingtalk   # 端到端测试 mock 其 urllib.request.urlopen（真 webhook 通道）
 from caisen.training_loop import TrainingLoopOrchestrator, LoopBusyError
 
 
@@ -141,3 +142,97 @@ def test_stop_interrupts_running_round(orch, monkeypatch):
     assert loop["history"] == []                 # 无 phantom：未 append 任何轮次摘要
     # current_round 在 _handle_running 开头已 +1（提交回测时即记账，stop 中断不回滚）——
     # 这是可接受的（round 已开始跑过回测 task，即便被中断也计为发起过）
+
+
+def test_full_roundtrip_with_dingtalk_notifier(monkeypatch, tmp_path):
+    """端到端：loop→回测SUCCESS→analyze→push 报告→收审核→确认→下一轮 RUNNING。
+
+    真实接线验证（区别于前 4 个用 FakeNotifier 的单测）：注入真实 DingTalkNotifier
+    （mock urllib.request.urlopen 不触网），覆盖整条动线：
+      RUNNING→ANALYZING→AWAITING_REVIEW（active_loop_id 正确路由）→ 收审核 CONFIRMING
+      → 确认 → RUNNING(下一轮) + current_cfg 累积（min_rr_ratio: 1.5 → 2.0）。
+
+    物理意图：验证 (1) active_loop_id property 返回当前 loop；(2) DingTalkNotifier.push
+    走真实 webhook 通道（mock urllib 后的 json POST + errcode 校验）；(3) TrainingNotifier
+    Protocol 与 loop 状态机正确接线——这是 Spec3「钉钉闭环」的端到端门控。
+    """
+    import threading
+    import time as _t
+
+    # ---- 1) tmp DB 隔离（同 orch fixture 范式，但不复用 fixture 以便插入真实 notifier）----
+    db = str(tmp_path / "loops.db")
+    monkeypatch.setattr(training_loop.training_loops_db, "_DEFAULT_DB_PATH", db)
+    training_loop.training_loops_db.init_db()
+    monkeypatch.setattr(training_loop.replay_tasks_db, "_DEFAULT_DB_PATH",
+                        str(tmp_path / "replay.db"))
+    training_loop.replay_tasks_db.init_db()
+
+    # ---- 2) 装配真实 DingTalkNotifier（REVIEW_WEBHOOK 配上，触发 push 真走 urllib 分支）----
+    # stream 三件套（APP_KEY/SECRET/STAFF_IDS）+ webhook 两件套（WEBHOOK/SECRET）全配齐，
+    # 让 from_env 装配成功且 push 真正 POST（webhook 空 → push 软降级 no-op，测不到 urllib 路径）。
+    monkeypatch.setenv("REVIEW_APP_KEY", "ak")
+    monkeypatch.setenv("REVIEW_APP_SECRET", "sk")
+    monkeypatch.setenv("REVIEW_WEBHOOK", "https://oapi.dingtalk.com/robot/send?access_token=X")
+    monkeypatch.setenv("REVIEW_WEBHOOK_SECRET", "sec")
+    monkeypatch.setenv("REVIEW_ALLOWED_STAFF_IDS", "s1")
+
+    # ---- 3) mock urllib（webhook POST 响应）----
+    # DingTalkNotifier.push 在 webhook 方案下只发一次 POST（无 access_token 换取），
+    # 响应体 {"errcode":0,"errmsg":"ok"} 经 DingTalkChannel._validate_response 视为成功。
+    # 这里用上下文管理器协议 mock（with urlopen(...) as resp），匹配真实代码的 with 写法。
+    def fake_urlopen(req, timeout=None):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps({"errcode": 0, "errmsg": "ok"}).encode()
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+    monkeypatch.setattr(training_dingtalk.urllib.request, "urlopen", fake_urlopen)
+
+    from caisen.training_dingtalk import DingTalkNotifier, ReviewBotConfig
+    cfg = ReviewBotConfig.from_env()
+    assert cfg is not None, "REVIEW_* 环境变量装配失败，DingTalkNotifier 无法构造"
+    notifier = DingTalkNotifier(cfg)
+    o = training_loop.TrainingLoopOrchestrator(notifier)
+
+    # ---- 4) mock 回测/analyzer（回测直 SUCCESS；analyze 产报告；parse 返 rerun 改 min_rr）----
+    monkeypatch.setattr(training_loop.replay_tasks_db, "get_task",
+                        lambda tid, path=None: {"status": "SUCCESS",
+                            "report": {"n_hits": 5, "win_rate": 0.5, "avg_rr": 1.0,
+                                       "max_drawdown": -0.1, "annualized_return": 0.1,
+                                       "pattern_dist": {}}})
+    monkeypatch.setattr(training_loop.training_analyzer, "analyze_round",
+                        lambda r, c, h: "报告")
+    monkeypatch.setattr(training_loop.training_analyzer, "parse_review",
+                        lambda t, c: {"cfg_override": {"min_rr_ratio": 2.0}, "action": "rerun"})
+
+    # ---- 5) 起训练 loop（max_rounds=3，首轮 RUNNING→…→AWAITING_REVIEW）----
+    loop_id = o.start({"start": "2020-01-01", "end": "2024-12-31",
+                       "base_cfg": {"min_rr_ratio": 1.5}, "max_rounds": 3})
+
+    # _POLL_INTERVAL 压到 0.05（同 Task3 范式）：AWAITING_REVIEW/CONFIRMING 的 wait 循环
+    # 超时快、唤醒响应快，配合子线程 sleep(0.2) 触发 submit_review，时序稳定不 flaky。
+    monkeypatch.setattr(training_loop, "_POLL_INTERVAL", 0.05)
+
+    # 第一拍：IDLE→RUNNING→提交回测→SUCCESS→ANALYZING→AWAITING_REVIEW（一轮动线原子跑完）
+    o._step_once(loop_id)
+    # active_loop_id 必须正确路由到当前 loop（钉钉 handler 据此决定喂哪个 loop）
+    assert o.active_loop_id == loop_id
+
+    # ---- 6) 子线程模拟钉钉 handler 调 submit_review（CONFIRMING 两段式确认）----
+    # _step_once 第二拍进 _handle_awaiting_review 阻塞等 event；子线程 0.2s 后喂"重跑意图"
+    # 唤醒第一次（_confirm 回显草稿），_confirm 再等"确认"，子线程再 0.2s 后喂"确认"唤醒第二次
+    # → _apply_confirmed → 下一轮 RUNNING + current_cfg 累积 min_rr_ratio: 1.5 → 2.0。
+    def review_later():
+        _t.sleep(0.2)                       # 等 daemon 进 _handle_awaiting_review 的 wait 阻塞
+        o.submit_review(loop_id, "min_rr 改2.0 重跑")  # 唤醒第一次 → _confirm 回显
+        _t.sleep(0.2)                       # 等 _confirm 进第二次 wait 阻塞
+        o.submit_review(loop_id, "确认")     # 唤醒第二次 → _apply_confirmed 落库
+    threading.Thread(target=review_later, daemon=True).start()
+
+    # 第二拍：AWAITING_REVIEW → CONFIRMING（parse+回显）→ 等「确认」→ RUNNING（下一轮）
+    o._step_once(loop_id)
+
+    # ---- 7) 断言终态：下一轮 RUNNING + current_cfg 累积生效 ----
+    loop = training_loop.training_loops_db.get_loop(loop_id)
+    assert loop["status"] == "RUNNING"
+    assert loop["current_cfg"]["min_rr_ratio"] == 2.0   # rerun 累积（1.5 ∪ {min_rr_ratio:2.0}）

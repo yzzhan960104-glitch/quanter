@@ -58,6 +58,18 @@ class TrainingLoopOrchestrator:
         self._lock = threading.Lock()
 
     # ---- 公开 API ----
+    @property
+    def active_loop_id(self) -> Optional[str]:
+        """当前活跃 loop_id（供 ReviewChatbotHandler 把 @消息路由到正确 loop）。
+
+        物理定位：钉钉 stream handler 收到 @此机器人的消息时，需确定"喂给哪个 loop 的
+        submit_review"。concurrency=1 下同时只一个活跃 loop，取 list_active_loops 首个即可；
+        无活跃 loop 返 None（handler 据此忽略，防误触）。直接查 DB 而非缓存内存值——
+        保证多入口（API start / handler 收消息）看到的活跃态一致，避免内存态与 DB 漂移。
+        """
+        active = training_loops_db.list_active_loops()
+        return active[0]["loop_id"] if active else None
+
     def start_daemon(self) -> None:
         """启动 daemon 推进线程（lifespan 调；幂等）。"""
         if self._thread and self._thread.is_alive():
