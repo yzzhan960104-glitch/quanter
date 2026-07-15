@@ -32,3 +32,14 @@ def test_config_credentials_dotenv_loaded():
     """dotenv 副作用随包入口执行——DATA_SOURCE_CREDENTIALS 结构完整（值可为空但键在）。"""
     from config import DATA_SOURCE_CREDENTIALS
     assert "fred" in DATA_SOURCE_CREDENTIALS and "tushare" in DATA_SOURCE_CREDENTIALS
+
+
+# ============================================================================
+# Step 1 契约：core/indicator → factors/atr 后，新旧路径并存
+# ============================================================================
+def test_factor_atr_legacy_and_new_path():
+    """core.indicator.atr 迁至 factors.atr，两条 import 路径都可用且同一对象。"""
+    from core.indicator import atr as atr_legacy
+    from factors.atr import atr as atr_new
+    from factors import atr as atr_pkg  # 包级 re-export
+    assert atr_legacy is atr_new is atr_pkg
