@@ -238,6 +238,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # ⚠️ 前视红线：绝不用 end_date（接口无此列）/ record_date（除权登记日，晚于公告日）
         # / div_proc（预案/实施等文本进度字段，非日期）。ann_date 是市场最早能感知分红的时点。
         "api": "dividend", "by": "symbol",
+        "no_date_filter": True,  # 分红事件类：不认 start/end_date（实测传了返空），拉全历史
         "date_col": "ann_date", "symbol_col": "ts_code",
         "fields": "ts_code,ann_date,div_proc,stk_div,cash_div,record_date,ex_date",
         "lake": "data_lake/dividend.parquet",
@@ -585,7 +586,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # ⚠️ 事实订正（结构重写）：shibor_quote 是双边报价（每个期限拆入 b / 拆出 a 两列），
         # 非均值。旧 fields（on/1w/...单列）是 shibor 均值湖的字段，误抄过来。真实列为
         # 各期限的 _b（拆入）/ _a（拆出）双列。date_col=date 落 DatetimeIndex。
-        # date_range=true（quick 批正）：与 shibor 同理，加区间精确返近 3 年。
+        # date_range=true（quick 批订正）：与 shibor 同理，加区间精确返近 3 年。
         # ⚠️ 实测局限（2026-07 probe）：接口约 4000 行服务端上限（17 银行 × ~235 日 ≈ 1 年），
         #   date_range 3 年区间实际仅落近 1 年（2025-08 起）。全历史需按区间分批拉（follow-up）。
         "api": "shibor_quote", "by": "single",
