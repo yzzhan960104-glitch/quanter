@@ -173,7 +173,11 @@ def _isolate_storage(tmp_path, monkeypatch):
 
 @pytest.fixture
 def inject_price_data(monkeypatch):
-    """注入合成 W 底 price_data 到 caisen_service._load_price_data（模拟生产 data_lake）。
+    """注入合成 W 底 price_data 到 caisen_service._facade._load_price_data（模拟生产 data_lake）。
+
+    【Step2.2】run_scan/run_replay 转发 _facade.scan()/_facade.replay()，编排 in facade
+    （调 self._load_price_data），故 patch 必须打到 facade 单例实例属性才生效
+    （patch svc 模块属性不再传递到 facade 内部调用）。
 
     用法：
         plans = inject_price_data({"TESTW.SZ": df})
@@ -182,7 +186,7 @@ def inject_price_data(monkeypatch):
     import server.services.caisen_service as svc
 
     def _inject(price_data):
-        monkeypatch.setattr(svc, "_load_price_data", lambda symbols, date: price_data)
+        monkeypatch.setattr(svc._facade, "_load_price_data", lambda symbols, date: price_data)
 
     return _inject
 

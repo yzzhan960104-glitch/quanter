@@ -241,13 +241,17 @@ class TestRunScan:
         )
 
         # 注入合成 price_data（生产由 data_lake 装配，测试直接覆盖）
+        # 【Step2.2】run_scan 转发 _facade.scan()，编排 in facade（调 self._load_price_data），
+        # 故 patch 必须打到 facade 单例实例属性才生效（patch svc 模块属性不再传递）。
+        # lambda 无 self 参数——实例属性 shadow 掉类方法，调用时 self._load_price_data(symbols, date)
+        # 命中实例属性（不经描述符绑定），故 lambda 签名 (symbols, date) 与调用点匹配。
         import server.services.caisen_service as svc
-        original_load = svc._load_price_data
-        svc._load_price_data = lambda symbols, date: price_data
+        original_load = svc._facade._load_price_data
+        svc._facade._load_price_data = lambda symbols, date: price_data
         try:
             plans = caisen_service.run_scan(req)
         finally:
-            svc._load_price_data = original_load
+            svc._facade._load_price_data = original_load
 
         # —— 断言：返回候选非空 + 类型正确 ——
         assert len(plans) >= 1, "合成标准 W 底应命中候选"
@@ -284,12 +288,12 @@ class TestRunScan:
         """
         req = ScanRequest(date="2024-01-15", universe=[], cfg_override={})
         import server.services.caisen_service as svc
-        original_load = svc._load_price_data
-        svc._load_price_data = lambda symbols, date: {}   # 模拟离线 → 降级返 []
+        original_load = svc._facade._load_price_data
+        svc._facade._load_price_data = lambda symbols, date: {}   # 模拟离线 → 降级返 []
         try:
             plans = caisen_service.run_scan(req)
         finally:
-            svc._load_price_data = original_load
+            svc._facade._load_price_data = original_load
         assert plans == []
 
     def test_run_scan_empty_universe_flows_to_full_market(self, monkeypatch):
@@ -305,7 +309,9 @@ class TestRunScan:
             called["symbols"] = symbols
             called["invoked"] = True
             return {}   # 模拟离线/空，run_scan 降级返 []
-        monkeypatch.setattr(svc, "_load_price_data", _fake_load)
+        # 【Step2.2】patch 目标迁 svc._facade（facade 单例）——run_scan 转发 _facade.scan()
+        # 在 facade 内调 self._load_price_data，打 svc 模块属性不传递。
+        monkeypatch.setattr(svc._facade, "_load_price_data", _fake_load)
         req = ScanRequest(date="2024-01-15", universe=[], cfg_override=dict(_LOOSE_CFG_OVERRIDE))
         plans = svc.run_scan(req)
         assert plans == []                      # 离线降级返空
@@ -329,12 +335,12 @@ class TestRunScan:
             cfg_override=override,
         )
         import server.services.caisen_service as svc
-        original_load = svc._load_price_data
-        svc._load_price_data = lambda symbols, date: price_data
+        original_load = svc._facade._load_price_data
+        svc._facade._load_price_data = lambda symbols, date: price_data
         try:
             plans = caisen_service.run_scan(req)
         finally:
-            svc._load_price_data = original_load
+            svc._facade._load_price_data = original_load
         assert plans == [], "min_rr_ratio=99 应过滤掉所有计划（cfg_override 生效）"
 
     def test_run_scan_validation_error_propagates(self):
@@ -619,12 +625,12 @@ class TestRunReplay:
         )
 
         import server.services.caisen_service as svc
-        original_load = svc._load_price_data
-        svc._load_price_data = lambda symbols, date: price_data
+        original_load = svc._facade._load_price_data
+        svc._facade._load_price_data = lambda symbols, date: price_data
         try:
             report = caisen_service.run_replay(req)
         finally:
-            svc._load_price_data = original_load
+            svc._facade._load_price_data = original_load
 
         assert isinstance(report, ReplayReportResponse)
         # 字段对齐 ReplayReport
@@ -644,12 +650,12 @@ class TestRunReplay:
         """无候选命中（空 price_data）→ 返回零统计报告（不抛异常）。"""
         req = ReplayRequest(start="2024-01-01", end="2024-01-31", cfg_override={})
         import server.services.caisen_service as svc
-        original_load = svc._load_price_data
-        svc._load_price_data = lambda symbols, date: {}
+        original_load = svc._facade._load_price_data
+        svc._facade._load_price_data = lambda symbols, date: {}
         try:
             report = caisen_service.run_replay(req)
         finally:
-            svc._load_price_data = original_load
+            svc._facade._load_price_data = original_load
 
         assert isinstance(report, ReplayReportResponse)
         assert report.n_hits == 0
@@ -686,12 +692,12 @@ class TestRunReplay:
         assert req.universe == ["UNI1.SZ", "UNI2.SZ"]
 
         import server.services.caisen_service as svc
-        original_load = svc._load_price_data
-        svc._load_price_data = fake_load
+        original_load = svc._facade._load_price_data
+        svc._facade._load_price_data = fake_load
         try:
             report = caisen_service.run_replay(req)
         finally:
-            svc._load_price_data = original_load
+            svc._facade._load_price_data = original_load
 
         # service 层：universe 下传到 _load_price_data
         assert captured.get("symbols") == ["UNI1.SZ", "UNI2.SZ"]
@@ -712,12 +718,12 @@ class TestRunReplay:
         assert req.universe is None   # 默认值 = None = 全市场
 
         import server.services.caisen_service as svc
-        original_load = svc._load_price_data
-        svc._load_price_data = fake_load
+        original_load = svc._facade._load_price_data
+        svc._facade._load_price_data = fake_load
         try:
             caisen_service.run_replay(req)
         finally:
-            svc._load_price_data = original_load
+            svc._facade._load_price_data = original_load
 
         # None → service 内部归一化为 []（_load_price_data 占位全市场语义）
         assert captured.get("symbols") == []
@@ -727,18 +733,20 @@ class TestRunReplay:
 # 7. run_replay 历史持久化（方案 A：默认都存）+ list/get/delete 编排
 # ---------------------------------------------------------------------------
 def _inject_price_data(price_data):
-    """把合成 price_data 注入 caisen_service._load_price_data（测试隔离，完必恢复）。
+    """把合成 price_data 注入 caisen_service._facade._load_price_data（测试隔离，完必恢复）。
 
+    【Step2.2】run_replay 转发 _facade.replay()，编排 in facade（调 self._load_price_data），
+    故 patch 目标从 svc._load_price_data 迁到 svc._facade._load_price_data（单例实例属性）。
     生产由 _load_price_data 走 data_lake 装配；测试直接覆盖以喂合成 W 底序列。
-    返回 (patch_func, restore_func) —— 用 try/finally 保证恢复，避免跨测试泄漏。
+    返回 original —— 调用方 try/finally 恢复 svc._facade._load_price_data = original。
     """
     import server.services.caisen_service as svc
-    original = svc._load_price_data
+    original = svc._facade._load_price_data
 
     def _patched(symbols, date):
         return price_data
 
-    svc._load_price_data = _patched
+    svc._facade._load_price_data = _patched
     return original
 
 
@@ -766,7 +774,7 @@ class TestReplayRunsPersistence:
             report = caisen_service.run_replay(req)
         finally:
             import server.services.caisen_service as svc
-            svc._load_price_data = original
+            svc._facade._load_price_data = original
 
         assert isinstance(report, ReplayReportResponse)
         assert report.run_id is not None, "save=True 应落盘并回填 run_id"
@@ -790,7 +798,7 @@ class TestReplayRunsPersistence:
             report = caisen_service.run_replay(req)
         finally:
             import server.services.caisen_service as svc
-            svc._load_price_data = original
+            svc._facade._load_price_data = original
 
         assert report.run_id is None, "save=False 不应落盘"
         assert caisen_service.list_replay_runs() == []
@@ -819,7 +827,7 @@ class TestReplayRunsPersistence:
             report = caisen_service.run_replay(req)
         finally:
             import server.services.caisen_service as svc
-            svc._load_price_data = original
+            svc._facade._load_price_data = original
 
         assert isinstance(report, ReplayReportResponse)
         assert report.run_id is None, "落盘失败应降级 run_id=None（不抛）"
@@ -838,7 +846,7 @@ class TestReplayRunsPersistence:
             report = caisen_service.run_replay(req)
         finally:
             import server.services.caisen_service as svc
-            svc._load_price_data = original
+            svc._facade._load_price_data = original
 
         detail = caisen_service.get_replay_run(report.run_id)
         assert isinstance(detail, ReplayRunDetail)
@@ -868,7 +876,7 @@ class TestReplayRunsPersistence:
             report = caisen_service.run_replay(req)
         finally:
             import server.services.caisen_service as svc
-            svc._load_price_data = original
+            svc._facade._load_price_data = original
 
         assert caisen_service.delete_replay_run(report.run_id) is True
         assert caisen_service.get_replay_run(report.run_id) is None

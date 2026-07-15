@@ -71,3 +71,33 @@ def test_facade_exposes_ten_use_cases():
                "delete_replay_run"]
     for m in methods:
         assert callable(getattr(CaisenFacade, m)), f"facade 缺方法 {m}"
+
+
+# ============================================================================
+# Step 2.2 契约：caisen_service 降级 facade 薄壳后，不再穿透 caisen 内部
+# ============================================================================
+def test_caisen_service_no_longer_penetrates_caisen_internals():
+    """caisen_service.py 已整文件替换为 facade 转发薄壳——读源码断言 8 个
+    caisen 内部穿透 import 子串全部消失（duplication 消除终点）。
+
+    design §6.3：Step2.2 收敛步——Task2.1 建的 facade 在此被 service 持有，
+    service 不再直连 caisen 内部 8 个子模块（plan/storage/backtest_replay/
+    replay_runs/replay_tasks_db/patterns/risk/config）。后续 caisen 内部分包
+    重组（Task 3）对 server 层完全不可见。
+    """
+    import server.services.caisen_service as mod
+    src = open(mod.__file__, encoding="utf-8").read()
+    forbidden = [
+        "from caisen import plan",
+        "from caisen import backtest_replay",
+        "from caisen import replay_runs",
+        "from caisen import replay_tasks_db",
+        "from caisen import storage",
+        "from caisen.config import",
+        "from caisen.patterns.screener import",
+        "from caisen.risk import",
+    ]
+    for needle in forbidden:
+        assert needle not in src, (
+            f"caisen_service.py 仍含穿透 import：{needle!r}（Step2.2 应已降级为 facade 薄壳）"
+        )
