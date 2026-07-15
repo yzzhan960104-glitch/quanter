@@ -101,3 +101,15 @@ def test_caisen_service_no_longer_penetrates_caisen_internals():
         assert needle not in src, (
             f"caisen_service.py 仍含穿透 import：{needle!r}（Step2.2 应已降级为 facade 薄壳）"
         )
+
+
+# ============================================================================
+# Step 3a 契约：四子包可 import，旧路径仍可用（新旧并存）
+# ============================================================================
+def test_caisen_subpackages_scaffold():
+    import caisen.engines, caisen.optimize, caisen.infra, caisen.advisor  # noqa: F401
+    from caisen.engines import StrategyConfig, PatternScreener  # 新路径
+    from caisen.config import StrategyConfig as SC_old  # 旧路径仍可用
+    from caisen.patterns.screener import PatternScreener as PS_old
+    assert StrategyConfig is SC_old
+    assert PatternScreener is PS_old
