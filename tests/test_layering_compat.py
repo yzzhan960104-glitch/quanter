@@ -54,3 +54,20 @@ def test_notifier_legacy_and_new_path():
     from infra.notifier import NotificationManager as NM2, fire_and_forget as ff2
     assert NotificationManager is NM2
     assert fire_and_forget is ff2
+
+
+# ============================================================================
+# Step 2 契约：facade 10 用例齐备（caisen 内部穿透收口到 CaisenFacade）
+# ============================================================================
+def test_facade_exposes_ten_use_cases():
+    """CaisenFacade 封装 10 个对外用例，签名与 caisen_service 对齐。
+
+    design §6.3：caisen/ 包对 server 层的唯一对外契约是 caisen.facade.CaisenFacade，
+    后续内部分包重组（Task 3）对 server 不可见——本断言钉死 10 方法齐备。
+    """
+    from caisen.facade import CaisenFacade
+    methods = ["scan", "list_plans", "approve_plan", "activate_plan", "get_plan",
+               "replay", "replay_async", "list_replay_runs", "get_replay_run",
+               "delete_replay_run"]
+    for m in methods:
+        assert callable(getattr(CaisenFacade, m)), f"facade 缺方法 {m}"
