@@ -8,8 +8,8 @@
 - **列名归一（rename 机制）**：fund_daily 原始返 vol 列（与股票日线 volume 分叉），
   配置 rename={'vol':'volume'} 由通用同步器在落 shard 前应用，确保 etf_daily 湖与
   a_shares_daily 湖列名一致，跨湖因子计算免分支。test_fund_daily_by_symbol_vol_to_volume 守卫。
-- **标的池纯净度**：_load_etf_universe 必须用 market='EFT' 过滤场内 ETF（排除场外 OF），
-  否则 fund_daily 等会拉到场外基金污染 ETF 专题湖。test_load_etf_universe_filters_market_eft 守卫。
+- **标的池纯净度**：_load_etf_universe 必须用 market='E' 过滤场内基金（排除场外 O），
+  否则 fund_daily 等会拉到场外基金污染 ETF 专题湖。test_load_etf_universe_filters_market_e 守卫。
 
 fixture 复制说明：本文件顶部完整复制 test_tushare_datasets_stock.py 的 autouse
 _isolate_tushare_registry fixture（深拷贝还原全局注册表）+ fake_pro fixture
@@ -123,16 +123,20 @@ def test_etf_lakes_registered():
 
 
 def test_fund_basic_single(tmp_path, fake_pro, monkeypatch):
-    """fund_basic single 模式落扁平 df（ETF 列表快照，非 MultiIndex）。
+    """fund_basic single 模式落扁平 df（场内基金列表快照，非 MultiIndex）。
 
     Why 端到端 single 契约：_sync_single 直接 to_parquet 原样落盘，不重建时间索引，
     落湖是扁平 DataFrame（ts_code/name/market 列保留），区别于 by=symbol/date 的 MultiIndex。
+
+    ⚠️ quick 批订正：fund_basic 配置加 params={'market':'E'}（实测 market='EFT'=0 行，E 才正确），
+    _sync_single 把 params 合并进 kwargs 传 API。fake_pro 忽略 kwargs 返固定 df，故测试数据
+    market 列用 'E'（与新 params 语义一致），验证落盘扁平结构不受 params 影响。
     """
     import data.tushare_sync as ts
     fake_pro.set("fund_basic", pd.DataFrame({
         "ts_code": ["510300.SH", "510050.SH"],
         "name": ["沪深300ETF", "50ETF"],
-        "market": ["EFT", "EFT"],
+        "market": ["E", "E"],
         "management": ["华泰柏瑞", "华夏"],
         "custodian": ["招商银行", "工商银行"],
         "found_date": ["20120504", "20110509"],
@@ -144,6 +148,9 @@ def test_fund_basic_single(tmp_path, fake_pro, monkeypatch):
     df = pd.read_parquet(TUSHARE_DATASETS["fund_basic"]["lake"])
     assert len(df) == 2, "fund_basic 行数错误"
     assert "ts_code" in df.columns and "name" in df.columns, "fund_basic 扁平列缺失"
+    # params market='E' 守卫：配置层必须带 params（实测 market='EFT'=0 行污染标的池）
+    assert TUSHARE_DATASETS["fund_basic"].get("params") == {"market": "E"}, \
+        "fund_basic 必须配 params market='E'（market='EFT' 返 0 行，E 才是场内基金真实码）"
 
 
 def test_fund_daily_by_symbol_vol_to_volume(tmp_path, fake_pro, monkeypatch):
@@ -248,19 +255,22 @@ def test_fund_share_by_symbol(tmp_path, fake_pro, monkeypatch):
     assert len(df) == 2 and "fd_share" in df.columns
 
 
-def test_load_etf_universe_filters_market_eft(fake_pro, monkeypatch):
-    """_load_etf_universe 仅返回 market='EFT' 的场内 ETF（排除场外基金 OF）。
+def test_load_etf_universe_filters_market_e(fake_pro, monkeypatch):
+    """_load_etf_universe 仅返回 market='E' 的场内基金（排除场外基金 O）。
 
-    Why 守卫标的池纯净度：fund_basic 同时含场内 ETF（market=EFT）与场外基金（market=OF），
-    _load_etf_universe 必须用 market='EFT' 过滤，否则后续 fund_daily/fund_nav 会拉到场外
+    Why 守卫标的池纯净度：fund_basic 同时含场内基金（market=E）与场外基金（market=O，13827 只），
+    _load_etf_universe 必须用 market='E' 过滤，否则后续 fund_daily/fund_nav 会拉到场外
     基金（无日线行情或字段不符），污染 ETF 专题湖。
+
+    ⚠️ quick 批订正（EFT→E 事实修正）：实测 fund_basic(market='EFT') 返 **0 行**（EFT 不是
+    Tushare 真实 market 码），market='E' 才返场内基金。_load_etf_universe 改用 market='E'。
     """
     from data.tushare_sync import _load_etf_universe
     fake_pro.set("fund_basic", pd.DataFrame({
         "ts_code": ["510300.SH", "510050.SH", "000001.OF"],
         "name": ["沪深300ETF", "50ETF", "华夏成长"],
-        "market": ["EFT", "EFT", "OF"],  # 第三只是场外基金，须排除
+        "market": ["E", "E", "O"],  # 第三只是场外基金，须排除
         "management": ["华泰柏瑞", "华夏", "华夏"]}))
     codes = _load_etf_universe()
     assert "510300.SH" in codes and "510050.SH" in codes
-    assert "000001.OF" not in codes, "场外基金（market=OF）应被 _load_etf_universe 排除"
+    assert "000001.OF" not in codes, "场外基金（market=O）应被 _load_etf_universe 排除"

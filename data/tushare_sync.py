@@ -238,9 +238,11 @@ def sync_dataset(key: str, start: str, end: str,
     elif by == "date":
         _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, out, cfg=cfg)
     elif by == "single":
-        # single 模式传 date_col + cfg：Plan C 宏观湖（cn_cpi/ppi/gdp/pmi/shibor）
-        # 依赖 cfg['index_mode']=='datetime' 把月/季/日频列重建为 DatetimeIndex。
-        _sync_single(key, api, fields, date_col, out, cfg=cfg)
+        # single 模式传 date_col + cfg + start/end：Plan C 宏观湖（cn_cpi/ppi/gdp/pmi/shibor）
+        # 依赖 cfg['index_mode']=='datetime' 把月/季/日频列重建为 DatetimeIndex；
+        # shibor/shibor_quote 等需按区间拉取的接口通过 cfg['date_range']=True 让
+        # _sync_single 把 start/end 转 start_date/end_date 传给 API（避免全历史/近段）。
+        _sync_single(key, api, fields, date_col, out, cfg=cfg, start=start, end=end)
     else:
         raise ValueError(f"未知分页模式 by={by}（key={key}）")
 
@@ -322,11 +324,23 @@ def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, ou
     _build_multiindex(shard_dir, date_col, symbol_col, out, by="date")
 
 
-def _sync_single(key, api, fields, date_col, out, cfg=None):
+def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None):
     """单次拉取（指数/列表/宏观）。index_mode=datetime 时落 DatetimeIndex。
 
     Why 不分页：指数日线/概念字典/宏观指标等接口支持一次性按区间拉全量（或本身无
     区间概念），无需 shard/断点续传的复杂度，直接落盘。
+
+    Why 三个区间/参数增强（quick 批暴露的 5 数据集 sync bug 修复）：
+      - cfg['params']（dict）：额外 API 参数，合并进 kwargs。fund_basic 需传
+        market='E' 过滤场内基金（实测 market='EFT' 返 0 行——EFT 是错误码，E 才是
+        Tushare 场内基金真实 market 值）。_sync_single 原只传 fields，无法传这类
+        必需参数，导致 fund_basic 拉到全量 15000 行（含 13827 场外基金）污染标的池。
+      - cfg['date_range']=True + start/end：把区间转 start_date/end_date（YYYYMMDD）
+        合并进 kwargs。shibor 无参返最近 2000 行（2018 起，全历史分页上限），加区间
+        后精确返近 3 年 249 行，避免烧配额拉无用历史 + 落盘膨胀。
+      - start/end 签名：由 sync_dataset 传入（与 by=symbol/date 共享区间语义），single
+        模式下仅在 date_range=True 时消费，其余 single 数据集（concept/margin_secs 等
+        静态快照）不传区间保持原行为。
 
     Why index_mode='datetime' 分支（Plan C 宏观湖）：CPI/PPI/GDP/PMI/Shibor 是单一
     时间序列，落 DatetimeIndex（无 symbol 层），区别于股票湖的 MultiIndex(date, symbol)。
@@ -342,14 +356,25 @@ def _sync_single(key, api, fields, date_col, out, cfg=None):
     分流，不能一刀切。此处用字符串形态判断而非硬编码 key→format 映射，规避字段漂移。
     无 index_mode 时保持原扁平落盘（concept/margin_secs 等静态字典/快照不重建索引）。
     """
+    cfg = cfg or TUSHARE_DATASETS[key]
     kwargs = {}
     if fields:
         kwargs["fields"] = fields
+    # cfg['params'] 合并：fund_basic 的 market='E' 等必需 API 参数（实测 market='EFT'=0 行，
+    # E 才是场内基金真实码）。浅拷贝避免 mutate 全局配置（params 是共享 dict 引用）。
+    extra_params = (cfg or {}).get("params")
+    if extra_params:
+        kwargs.update(dict(extra_params))
+    # cfg['date_range']=True：把 start/end 转 start_date/end_date（YYYYMMDD）合并进 kwargs。
+    # Why shibor 等接口无参返最近 2000 行（2018 起全历史），加区间精确返近 3 年，省配额
+    # + 避免落盘膨胀。仅 date_range=True 时消费 start/end，其余 single 数据集不传区间。
+    if (cfg or {}).get("date_range") and start and end:
+        kwargs["start_date"] = start.replace("-", "")
+        kwargs["end_date"] = end.replace("-", "")
     df = _fetch_with_guard(api, **kwargs)
     if df.empty:
         logger.warning("%s 数据为空，跳过", key)
         return
-    cfg = cfg or TUSHARE_DATASETS[key]
     if cfg.get("index_mode") == "datetime" and date_col and date_col in df.columns:
         col = df[date_col].astype(str)
         if col.str.contains("Q", na=False).any():
@@ -397,25 +422,29 @@ def _load_universe() -> list[str]:
 
 
 def _load_etf_universe() -> list[str]:
-    """ETF 标的列表（fund_basic market='EFT'，仅场内 ETF）。
+    """ETF 标的列表（fund_basic market='E'，场内基金）。
 
     Why 独立于 _load_universe：_load_universe 拉 stock_basic（A 股股票，剔 ST/退），
-    而 ETF 走 fund_basic market='EFT' 接口，数据源与过滤口径完全不同。ETF 不适用
+    而 ETF 走 fund_basic market='E' 接口，数据源与过滤口径完全不同。ETF 不适用
     ST/退市过滤（基金无 ST 概念），故单独 helper，由调用方按 --market etf 显式选用。
 
-    Why market='EFT' 服务端过滤：fund_basic 同时含场内 ETF（EFT）与场外基金（OF），
-    在服务端用 market='EFT' 过滤比客户端过滤省回传带宽 + 配额。返回 ts_code 列表
-    作为 fund_daily/fund_nav/fund_portfolio/fund_share 的 by=symbol 标的池。
+    Why market='E' 服务端过滤（事实订正，quick 批暴露）：fund_basic 同时含场内基金（E）
+    与场外基金（O，13827 只）。实测 market='EFT' 返 **0 行**（EFT 不是 Tushare 真实
+    market 码——属易混事实，曾误以为内部码是 EFT），market='E' 才返场内基金。在服务端
+    用 market='E' 过滤比客户端过滤省回传带宽 + 配额。返回 ts_code 列表作为
+    fund_daily/fund_nav/fund_portfolio/fund_share 的 by=symbol 标的池。
 
-    注意 Tushare 内部码是 'EFT'（Exchange Fund Trader）而非 'ETF'，属易混事实。
+    注意 market='E' 实测返 2864 行（tnskhdata 代理口径），含 ETF+LOF+REITs+封闭式等
+    全部场内基金，标的池略宽于纯 ETF（~1173），但 fund_daily 对非 ETF 场内基金也返
+    日线行情，不致命；下游若需纯 ETF 可再按 fund_type 过滤。
     """
-    df = _fetch_with_guard("fund_basic", market="EFT",
+    df = _fetch_with_guard("fund_basic", market="E",
                            fields="ts_code,name,market,management,found_date,list_date")
     if df.empty:
         return []
-    # 双保险：服务端已按 market=EFT 过滤，客户端再兜一层（防接口行为漂移导致场外基金混入）
+    # 双保险：服务端已按 market=E 过滤，客户端再兜一层（防接口行为漂移导致场外基金混入）
     if "market" in df.columns:
-        df = df[df["market"] == "EFT"]
+        df = df[df["market"] == "E"]
     return df["ts_code"].tolist()
 
 

@@ -192,7 +192,7 @@ LAKE_CONFIG["lakes"] = {
     "margin": "data_lake/margin.parquet",                  # 融资融券市场汇总（by=date, exchange_id 作 symbol）
     "margin_detail": "data_lake/margin_detail.parquet",    # 融资融券逐标的（by=date）
     "margin_secs": "data_lake/margin_secs.parquet",        # 融资融券标的列表（by=single 快照，扁平 df）
-    "moneyflow_hsgt": "data_lake/moneyflow_hsgt.parquet",  # 北/南向资金市场级（by=single 扁平）
+    "moneyflow_hsgt": "data_lake/moneyflow_hsgt.parquet",  # 北/南向资金市场级（by=date 逐日，MultiIndex）
     # Plan A Task 7：板块/概念（ths_daily 不复用 sector 湖——同花顺概念板块 vs 申万行业，分类口径与 ts_code 空间不同）
     "concept": "data_lake/concept.parquet",            # 概念字典（concept 接口，by=single 扁平）
     "ths_daily": "data_lake/ths_daily.parquet",        # 同花顺板块指数日线（ths_daily，by=date）
@@ -522,10 +522,16 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "trade_date,ts_code,name,close,rank,amount,net_amount,buy,sell",
         "lake": "data_lake/north_flow.parquet",  # 复用 north_flow 湖（切 Tushare）
     },
-    # moneyflow_hsgt 市场级北/南向资金（无个股 symbol）→ single 扁平快照（非 MultiIndex）。
+    # moneyflow_hsgt 市场级北/南向资金（无个股 symbol）→ by=date 逐日拉（市场级时序）。
+    # ⚠️ quick 批订正（by=single → by=date）：原 single 模式 _sync_single 只传 fields 不传
+    # 任何日期参数，实测 moneyflow_hsgt() 无参抛 Invalid request parameters（接口硬性要求
+    # 日期参数）。实测 moneyflow_hsgt(trade_date='20240105')=1 行（接受单日 trade_date 参数，
+    # 返回当日沪深港通合计资金流）。改 by=date 后 _sync_by_date 逐日传 trade_date，每日返
+    # 1 行市场级时序，落 MultiIndex(date, symbol)——symbol 层恒等于 trade_date（市场级无个股，
+    # 与 mkt_daily 同构，_build_multiindex 走 symbol_col==date_col 的冗余 symbol 分支）。
     # ⚠️ 事实订正：删幻觉列 sgt_ss / sgt_sz（API 只返沪/深股通合计 hgt/sgt，不分沪深细分）。
     "moneyflow_hsgt": {
-        "api": "moneyflow_hsgt", "by": "single",
+        "api": "moneyflow_hsgt", "by": "date",
         "date_col": "trade_date", "symbol_col": "trade_date",
         "fields": "trade_date,ggt_ss,ggt_sz,hgt,sgt,north_money,south_money",
         "lake": "data_lake/moneyflow_hsgt.parquet",
@@ -616,13 +622,18 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "lake": "data_lake/top10_floatholders.parquet",
     },
     "share_float": {
-        # 限售股解禁（share_float）：单日全市场一次返，按 date 分页。
+        # 限售股解禁（share_float）：单次拉全量解禁记录，by=single（不再逐日分页）。
         # 物理意图：解禁日前后存在系统性抛压（解禁股可流通），是事件驱动/回避策略关键信号。
         # date_col=ann_date（解禁公告日）—— float_date（实际解禁日）可能晚于公告，
         # 用 ann_date 索引保证回测只读到「市场已知」的解禁信息，无前视。
+        # ⚠️ quick 批订正（by=date → by=single，积分红线）：实测 share_float 服务端单次硬上限
+        # 6000 行，且 trade_date 参数无效（share_float 用 ann_date/float_date，非 trade_date）。
+        # 原 by=date 逐日传 trade_date → 每日返全量第一页 6000 行 → 730 日重复拉 ~435 万行
+        # 白烧积分。改 by=single 一次拉最新 6000 条解禁记录（ann_date 跨近 1-2 年），覆盖近期
+        # 解禁事件足够（事件驱动策略关注近期解禁压力），远期历史解禁已过期无信号价值。
         # ⚠️ 事实订正：删幻觉列 float_share_share（API 不返回），真实列含 float_ratio
         # （解禁比例）/ holder_name（持有人）/ share_type（解禁类型）。
-        "api": "share_float", "by": "date",
+        "api": "share_float", "by": "single",
         "date_col": "ann_date", "symbol_col": "ts_code",
         "fields": "ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type",
         "lake": "data_lake/share_float.parquet",
@@ -645,16 +656,20 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     },
     # ===== ETF 专题（Plan B Task 1-5）：fund_basic/fund_daily/fund_nav/fund_portfolio/fund_share =====
     # 物理意图：ETF 全景数据（列表/日线/净值/持仓/份额），用于 ETF 动量/折溢价/跟踪误差/份额变动分析。
-    # fund_basic(market='EFT') 是其余 4 个 by=symbol 接口的标的池来源（_load_etf_universe 读它）。
+    # fund_basic(market='E') 是其余 4 个 by=symbol 接口的标的池来源（_load_etf_universe 读它）。
     "fund_basic": {
-        # ETF/基金基础信息（fund_basic market='EFT'）：单次拉全市场 ETF 列表，不分页 → single 模式。
-        # Why single 而非 symbol：列表类接口本身无「标的维度分页」语义，一次性返全量更省配额；
-        #   市场口径 market='EFT' 由调用方（_load_etf_universe）显式传，配置层 fields 不含 market 过滤（接口参数）。
+        # ETF/基金基础信息（fund_basic market='E'）：单次拉全市场场内基金列表，不分页 → single 模式。
+        # Why single 而非 symbol：列表类接口本身无「标的维度分页」语义，一次性返全量更省配额。
+        # Why params market='E'（quick 批订正，事实修正）：fund_basic 全量返 15000 行（含 13827
+        #   场外基金 O + 1173 场内基金 E）。实测 market='EFT' 返 **0 行**（EFT 是错误码，非 Tushare
+        #   真实 market 值），market='E' 才返场内基金。params market='E' 由 _sync_single 合并进
+        #   kwargs 传给 API，在服务端过滤场内基金，避免拉到全量 15000 污染标的池。
         # Why date_col=found_date：single 模式当前不建时间索引（_sync_single 直接落扁平 df），
         #   date_col 仅为 schema 完备保留（Plan C 才给 single 加 index_mode=datetime）。
         "api": "fund_basic", "by": "single",
         "date_col": "found_date", "symbol_col": "ts_code",
         "fields": "ts_code,name,market,management,custodian,found_date,list_date,issue_date,delist_date",
+        "params": {"market": "E"},  # 服务端过滤场内基金（实测 market='EFT'=0 行，E 才正确）
         "lake": "data_lake/fund_basic.parquet",
     },
     "fund_daily": {
@@ -758,10 +773,14 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     # by=single index_mode=datetime：shibor 单一时间序列（1w..1y 各期限利率列），落 DatetimeIndex。
     # shibor_quote 含 bank（报价行）列，作数据列保留（不拆 MultiIndex，保持日期索引扁平）。
     "shibor": {
+        # date_range=true（quick 批订正）：shibor 无参返最近 2000 行（2018 起全历史分页上限），
+        # 加 start_date/end_date 区间精确返近 3 年，避免落盘膨胀 + 烧配额拉无用远期历史。
+        # _sync_single 检测 date_range=true 后把 sync_dataset 的 start/end 转 start_date/end_date 传 API。
         "api": "shibor", "by": "single",
         "date_col": "date", "symbol_col": "date",
         "fields": "date,on,1w,2w,1m,3m,6m,9m,1y",
         "index_mode": "datetime",
+        "date_range": True,  # 区间拉取（避免无参返 2000 行全历史）
         "lake": "data_lake/shibor.parquet",
     },
     "shibor_quote": {
@@ -769,10 +788,12 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # ⚠️ 事实订正（结构重写）：shibor_quote 是双边报价（每个期限拆入 b / 拆出 a 两列），
         # 非均值。旧 fields（on/1w/...单列）是 shibor 均值湖的字段，误抄过来。真实列为
         # 各期限的 _b（拆入）/ _a（拆出）双列。date_col=date 落 DatetimeIndex。
+        # date_range=true（quick 批订正）：与 shibor 同理，加区间精确返近 3 年。
         "api": "shibor_quote", "by": "single",
         "date_col": "date", "symbol_col": "date",
         "fields": "date,bank,on_b,on_a,1w_b,1w_a,2w_b,2w_a,1m_b,1m_a,3m_b,3m_a,6m_b,6m_a,9m_b,9m_a,1y_b,1y_a",
         "index_mode": "datetime",
+        "date_range": True,  # 区间拉取（避免无参返近期分页上限，精确近 3 年）
         "lake": "data_lake/shibor_quote.parquet",
     },
     # —— C 组·交易所成交统计（Plan C Task 5，B 类合并订正：szse_daily/sse_daily → mkt_daily）——

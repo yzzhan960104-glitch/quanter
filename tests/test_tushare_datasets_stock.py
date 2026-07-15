@@ -315,17 +315,31 @@ def test_hsgt_top10_reuses_north_flow_config():
     assert TUSHARE_DATASETS["hsgt_top10"]["lake"] == LAKE_CONFIG["lakes"]["north_flow"]
 
 
-def test_moneyflow_hsgt_single(tmp_path, fake_pro, monkeypatch):
-    """moneyflow_hsgt 市场级（single 扁平，非 MultiIndex）。"""
+def test_moneyflow_hsgt_by_date(tmp_path, fake_pro, monkeypatch):
+    """moneyflow_hsgt 市场级（by=date 逐日，MultiIndex，symbol 层=trade_date）。
+
+    Why quick 批订正（single→date）：原 single 模式 _sync_single 只传 fields 不传日期参数，
+    实测 moneyflow_hsgt() 无参抛 Invalid request parameters（接口硬性要求日期参数）。
+    实测 moneyflow_hsgt(trade_date='20240105')=1 行（接受单日 trade_date）。改 by=date 后
+    _sync_by_date 逐日传 trade_date，每日返 1 行市场级时序，落 MultiIndex(date, symbol)——
+    symbol 层恒等于 trade_date（市场级无个股，与 mkt_daily 同构）。
+    """
     import data.tushare_sync as ts
+    monkeypatch.setattr(ts, "_trade_days", lambda s, e: ["20240105"])
     # ⚠️ 真实列对齐：API 返 hgt/sgt 合计（非旧幻觉 sgt_ss/sgt_sz 沪深细分）
     fake_pro.set("moneyflow_hsgt", pd.DataFrame({
         "trade_date": ["20240105"], "ggt_ss": [1e9], "ggt_sz": [8e8],
         "hgt": [5e9], "sgt": [9e9], "north_money": [9e9], "south_money": [1.8e9]}))
     monkeypatch.setitem(TUSHARE_DATASETS["moneyflow_hsgt"], "lake", str(tmp_path / "mf_hsgt.parquet"))
+    monkeypatch.setitem(TUSHARE_DATASETS["moneyflow_hsgt"], "shard_dir", str(tmp_path / "shards_mfhsgt"))
     ts.sync_dataset("moneyflow_hsgt", "2024-01-05", "2024-01-05", resume=False)
     df = pd.read_parquet(TUSHARE_DATASETS["moneyflow_hsgt"]["lake"])
-    assert len(df) == 1 and "north_money" in df.columns  # 扁平 df（single）
+    # by=date 落 MultiIndex(date, symbol)，symbol 层恒等于 trade_date（市场级无个股）
+    assert df.index.names == ["date", "symbol"], "moneyflow_hsgt 索引名错（应为 MultiIndex）"
+    assert "20240105" in df.index.get_level_values("symbol"), \
+        "moneyflow_hsgt symbol 层应为 trade_date（市场级时序）"
+    assert "north_money" in df.columns
+    assert len(df) == 1
 
 
 # ====================================================================
@@ -565,13 +579,17 @@ def test_a10_share_float_uses_ann_date_suspend_d_degraded():
 
     Why share_float 钉死 ann_date：float_date（实际解禁日）可能晚于公告日 ann_date，
     用 ann_date 索引保证回测只读到「市场已知」的解禁信息。
+    Why share_float by=single（quick 批订正）：实测 share_float 服务端单次硬上限 6000 行，
+    trade_date 参数无效（用 ann_date/float_date），原 by=date 逐日拉每日返全量第一页
+    6000 行 → 730 日重复拉 ~435 万行白烧积分。改 by=single 一次拉最新 6000 条解禁记录。
     Why suspend_d 降级到 trade_date：真 token 探测确认 suspend_d API 仅返 4 列
     （ts_code/trade_date/suspend_timing/suspend_type），不返 ann_date。理想前视防护
     应用 ann_date（市场最早能预知停牌的时点），但 API 不支持，只能用 trade_date
     （停牌当日）作降级索引——停牌当日不撮合即可，轻微前视残留可接受。
     """
-    # share_float：ann_date 防前视（float_date 晚于公告）
-    assert TUSHARE_DATASETS["share_float"]["by"] == "date"
+    # share_float：ann_date 防前视（float_date 晚于公告），by=single（不再逐日分页，积分红线）
+    assert TUSHARE_DATASETS["share_float"]["by"] == "single", \
+        "share_float by 应为 single（实测 6000 行硬上限 + trade_date 无效，逐日拉白烧积分）"
     assert TUSHARE_DATASETS["share_float"]["date_col"] == "ann_date", \
         "share_float 必须用 ann_date（公告日）索引，禁用 float_date（前视偏差）"
     assert TUSHARE_DATASETS["share_float"]["symbol_col"] == "ts_code"
@@ -658,19 +676,21 @@ def test_a10_top10_holders_by_symbol(tmp_path, fake_pro, monkeypatch):
     assert len(df) == 2  # 两条股东记录
 
 
-def test_a10_share_float_suspend_d_by_date(tmp_path, fake_pro, monkeypatch):
-    """share_float/suspend_d by=date 端到端：落 MultiIndex，symbol 从 ts_code 列取。
+def test_a10_share_float_single_suspend_d_by_date(tmp_path, fake_pro, monkeypatch):
+    """share_float by=single（扁平快照）+ suspend_d by=date（MultiIndex）端到端。
 
-    Why 守卫 Task 1 fix：by=date 的 shard 文件名是交易日（20240105.parquet），
-    _build_multiindex 必须从 df[ts_code] 取 symbol——若误从文件名取，symbol 全错成交易日。
-    同时验证 date_col=ann_date 生效：share_float 的 ann_date=20240120（公告）而非
-    float_date=20240201（实际解禁），suspend_d 的 ann_date=20240115（公告）而非
-    suspend_date=20240120（实际停牌），证明前视防线在 by=date 路径同样生效。
+    Why share_float 改 by=single（quick 批订正）：实测 share_float 服务端单次硬上限 6000 行，
+    trade_date 参数无效（用 ann_date/float_date），原 by=date 逐日拉每日返全量第一页
+    6000 行 → 重复拉白烧积分。改 by=single 一次拉全量解禁记录，落扁平 df（single 无
+    index_mode 时不建时间索引，ann_date 作普通列保留）。
+
+    Why suspend_d 保留 by=date：suspend_d 单日全市场停复牌，trade_date 参数有效，
+    _build_multiindex 从 ts_code 列取 symbol（守卫 Task 1 fix：不从文件名取）。
+    date_col=trade_date（停牌日，前视防护降级——API 不返 ann_date）。
     """
     import data.tushare_sync as ts
-    monkeypatch.setattr(ts, "_trade_days", lambda s, e: ["20240105"])
 
-    # share_float：单日全市场解禁公告，ann_date 公告日 ≠ float_date 解禁日
+    # share_float：单次拉全量解禁记录（by=single 扁平快照）。
     # ⚠️ 真实列对齐：删幻觉 float_share_share，真实列含 float_ratio/holder_name/share_type
     fake_pro.set("share_float", pd.DataFrame({
         "ts_code": ["000001.SZ", "600000.SH"],
@@ -680,21 +700,19 @@ def test_a10_share_float_suspend_d_by_date(tmp_path, fake_pro, monkeypatch):
         "float_ratio": [2.5, 1.5], "holder_name": ["A公司", "B公司"],
         "share_type": ["定增", "IPO"]}))
     monkeypatch.setitem(TUSHARE_DATASETS["share_float"], "lake", str(tmp_path / "share_float.parquet"))
-    monkeypatch.setitem(TUSHARE_DATASETS["share_float"], "shard_dir", str(tmp_path / "shards_sf"))
-    ts.sync_dataset("share_float", "2024-01-05", "2024-01-05", resume=False)
+    ts.sync_dataset("share_float", "2024-01-05", "2024-12-31", resume=False)
     df_sf = pd.read_parquet(TUSHARE_DATASETS["share_float"]["lake"])
-    assert df_sf.index.names == ["date", "symbol"], "share_float 索引名错"
-    syms = set(df_sf.index.get_level_values("symbol"))
-    assert syms == {"000001.SZ", "600000.SH"}, f"share_float symbol 应来自 ts_code 列，实际 {syms}"
-    assert "20240105" not in syms, "share_float symbol 误取自文件名（交易日）"
-    # date 来自 ann_date（20240120 公告），证明未用 float_date（20240201 实际解禁）
-    sf_dates = set(str(d.date()) for d in df_sf.index.get_level_values("date"))
-    assert "2024-01-20" in sf_dates, f"share_float date 应来自 ann_date=20240120，实际 {sf_dates}"
-    assert "2024-02-01" not in sf_dates, "share_float date 不应来自 float_date（前视偏差）"
+    # single 无 index_mode → 扁平 df（非 MultiIndex），ann_date/ts_code 作普通列保留
+    assert "ts_code" in df_sf.columns and "ann_date" in df_sf.columns, \
+        "share_float single 扁平快照应保留 ts_code/ann_date 列"
+    assert len(df_sf) == 2, "share_float 行数错"
+    assert "float_ratio" in df_sf.columns, "share_float 应保留 float_ratio（解禁比例）"
+    # ann_date 防前视守卫仍在（date_col 配置层钉死，证明未回退 float_date）
+    assert TUSHARE_DATASETS["share_float"]["date_col"] == "ann_date"
 
-    # suspend_d：单日全市场停复牌。⚠️ 真实列仅 4 列（ts_code/trade_date/suspend_timing/
-    # suspend_type），date_col=trade_date（停牌日，前视防护降级——API 不返 ann_date，
-    # 用停牌日作降级索引，停牌当日不撮合即可）。
+    # suspend_d：单日全市场停复牌（by=date，守卫 Task 1 fix：symbol 从 ts_code 列取）。
+    monkeypatch.setattr(ts, "_trade_days", lambda s, e: ["20240105"])
+    # ⚠️ 真实列仅 4 列（ts_code/trade_date/suspend_timing/suspend_type），date_col=trade_date
     fake_pro.set("suspend_d", pd.DataFrame({
         "ts_code": ["000002.SZ"],
         "trade_date": ["20240120"],
