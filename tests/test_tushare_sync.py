@@ -401,3 +401,117 @@ def test_fetch_guard_empty_data_no_failure(monkeypatch):
     # 空数据不计熔断但仍维持健康度（原逻辑：return 前未显式 record_success，
     # 此处验证至少不 record_failure —— 关键是不污染熔断）
 
+
+# ============ resolve_symbols 标的池自动路由测试 ============
+# Why 独立测试组：by=symbol 数据集标的来源有三类（股票/ETF/指数），resolve_symbols 按
+# cfg['universe'] 字段路由到正确 loader。核心防退化：旧逻辑统一喂股票列表，导致 ETF/指数
+# 类数据集（fund_*/index_*）在 slow 批静默落空（df.empty 直接 continue，不报错不落盘）。
+
+
+def test_resolve_symbols_stock(monkeypatch):
+    """universe=stock → 调 _load_universe（全市场股票列表）。"""
+    from config import TUSHARE_DATASETS
+    from data import tushare_sync
+    monkeypatch.setattr(tushare_sync, "_load_universe", lambda: ["000001.SZ", "600000.SH"])
+    monkeypatch.setattr(tushare_sync, "_load_etf_universe", lambda: ["159919.SZ"])
+    TUSHARE_DATASETS["_test_stock"] = {"by": "symbol", "universe": "stock"}
+    assert tushare_sync.resolve_symbols("_test_stock") == ["000001.SZ", "600000.SH"]
+
+
+def test_resolve_symbols_etf(monkeypatch):
+    """universe=etf → 调 _load_etf_universe（基金代码），绝不调股票 loader。
+
+    防退化核心：ETF 类若误用 _load_universe（股票），fund_daily 等会被喂股票代码
+    → 接口返空 → 静默落空。本测试钉死 ETF 必须走基金标的池。
+    """
+    from config import TUSHARE_DATASETS
+    from data import tushare_sync
+    monkeypatch.setattr(tushare_sync, "_load_universe", lambda: ["000001.SZ"])
+    monkeypatch.setattr(tushare_sync, "_load_etf_universe", lambda: ["159919.SZ", "510300.SH"])
+    TUSHARE_DATASETS["_test_etf"] = {"by": "symbol", "universe": "etf"}
+    syms = tushare_sync.resolve_symbols("_test_etf")
+    assert syms == ["159919.SZ", "510300.SH"]
+    assert "000001.SZ" not in syms, "ETF 数据集不能喂股票代码"
+
+
+def test_resolve_symbols_index(monkeypatch):
+    """universe=index → 返回核心宽基指数常量（不发任何标的池请求）。
+
+    防退化核心：指数类若误用 _load_universe（股票），index_daily 会被喂股票代码
+    → 静默落空。指数代码是固定核心宽基，无需也不应从股票/基金接口拉。
+    """
+    from config import TUSHARE_DATASETS
+    from data import tushare_sync
+    # 确保两个网络 loader 都不被调（指数代码是常量，零网络依赖）
+    monkeypatch.setattr(tushare_sync, "_load_universe", lambda: ["000001.SZ"])
+    monkeypatch.setattr(tushare_sync, "_load_etf_universe", lambda: ["159919.SZ"])
+    TUSHARE_DATASETS["_test_index"] = {"by": "symbol", "universe": "index"}
+    syms = tushare_sync.resolve_symbols("_test_index")
+    assert "000300.SH" in syms, "沪深300（核心宽基）必须在指数池"
+    # 指数池里不应混入股票/基金代码
+    assert "000001.SZ" not in syms and "159919.SZ" not in syms
+
+
+def test_resolve_symbols_default_stock(monkeypatch):
+    """无 universe 字段 → 缺省 stock（向后兼容未显式声明的既有数据集）。"""
+    from config import TUSHARE_DATASETS
+    from data import tushare_sync
+    monkeypatch.setattr(tushare_sync, "_load_universe", lambda: ["600000.SH"])
+    TUSHARE_DATASETS["_test_default"] = {"by": "symbol"}  # 故意不写 universe
+    assert tushare_sync.resolve_symbols("_test_default") == ["600000.SH"]
+
+
+def test_resolve_symbols_limit(monkeypatch):
+    """limit 切片：编排脚本子集验证（如先跑沪深300 子集）用。"""
+    from config import TUSHARE_DATASETS
+    from data import tushare_sync
+    monkeypatch.setattr(tushare_sync, "_load_universe",
+                        lambda: ["a.SZ", "b.SZ", "c.SZ", "d.SZ"])
+    TUSHARE_DATASETS["_test_limit"] = {"by": "symbol", "universe": "stock"}
+    assert tushare_sync.resolve_symbols("_test_limit", limit=2) == ["a.SZ", "b.SZ"]
+
+
+def test_sync_by_symbol_uses_resolver_when_symbols_none(tmp_path, fake_pro, monkeypatch):
+    """_sync_by_symbol：symbols=None 时经 resolve_symbols(key) 路由，不硬调 _load_universe。
+
+    Why 此集成测：旧实现 symbols=None 时硬调 _load_universe()（股票），是 ETF/指数类静默
+    落空的根因。改造后应经 resolve_symbols 按 universe 字段路由。spy 替换 resolve_symbols，
+    断言它被以正确 key 调用——这一行改动是整个修复的落点。
+    """
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    TUSHARE_DATASETS["_test_route"] = {
+        "api": "income", "by": "symbol", "universe": "etf",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,total_revenue",
+        "lake": str(tmp_path / "routed.parquet"),
+    }
+    LAKE_CONFIG["lakes"]["_test_route"] = TUSHARE_DATASETS["_test_route"]["lake"]
+    spy = {"key": None}
+    def _spy(key, limit=None):
+        spy["key"] = key
+        return ["159919.SZ"]
+    monkeypatch.setattr("data.tushare_sync.resolve_symbols", _spy)
+    from data.tushare_sync import sync_dataset
+    sync_dataset("_test_route", "2024-01-01", "2024-12-31", symbols=None, resume=False)
+    assert spy["key"] == "_test_route", "symbols=None 时必须经 resolve_symbols 路由"
+
+
+def test_by_symbol_datasets_universe_correctly_declared():
+    """守卫：by=symbol 数据集的 universe 字段必须与标的语义一致（防漏配导致静默落空）。
+
+    Why 此守卫：resolve_symbols 按 universe 路由，若 fund_* 误标 stock（或漏标走 default），
+    fund_daily 会被喂股票代码静默落空。本测试按数据集名前缀钉死三类映射，未来新增/改名
+    数据集时若漏配 universe 会立即在 CI 失败，而非跑到 slow 批才发现空湖。
+    """
+    from config import TUSHARE_DATASETS
+    for key, cfg in TUSHARE_DATASETS.items():
+        if cfg.get("by") != "symbol" or cfg.get("_unavailable"):
+            continue
+        uni = cfg.get("universe", "stock")  # 缺省视为 stock（向后兼容）
+        if key.startswith("fund_"):
+            assert uni == "etf", f"{key} 应 universe=etf（基金代码），实际 {uni!r}"
+        elif key.startswith("index_"):
+            assert uni == "index", f"{key} 应 universe=index（指数代码），实际 {uni!r}"
+        else:
+            assert uni == "stock", f"{key} 应 universe=stock（股票），实际 {uni!r}"
+

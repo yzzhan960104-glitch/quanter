@@ -568,6 +568,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     # 无前视风险）。fields 对齐 tushare index_daily 输出（vol=成交量手数，amount=成交额千元）。
     "index_daily": {
         "api": "index_daily", "by": "symbol",
+        "universe": "index",
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "ts_code,trade_date,open,high,low,close,vol,amount",
         "lake": "data_lake/index_daily.parquet",
@@ -592,6 +593,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     # （by=date 全市场当日）区别仅在分页口径（逐指数 vs 逐交易日）。
     "index_member": {
         "api": "index_weight", "by": "symbol",
+        "universe": "index",
         "date_col": "trade_date", "symbol_col": "con_code",
         "fields": "index_code,con_code,trade_date,weight",
         # code_param=index_code：index_weight 接口按指数代码拉取，参数名是 index_code
@@ -680,6 +682,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         #   Why 对齐：etf_daily 湖若保留 vol 列名，与 a_shares_daily 的 volume 列名分叉，跨湖因子
         #   计算需写两套列名分支，违反单一真相原则。
         "api": "fund_daily", "by": "symbol",
+        "universe": "etf",
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "ts_code,trade_date,open,high,low,close,vol,amount",
         "rename": {"vol": "volume"},  # vol→volume 列名归一（与股票日线湖对齐）
@@ -692,6 +695,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # ⚠️ 事实订正：删幻觉列 accum_nav_rate（API 不返回）。真实列含 ann_date（公告日）/
         #   accum_div（累计分红）/ net_asset, total_netasset（净资产）/ adj_nav（复权净值）。
         "api": "fund_nav", "by": "symbol",
+        "universe": "etf",
         "date_col": "nav_date", "symbol_col": "ts_code",
         "fields": "ts_code,ann_date,nav_date,unit_nav,accum_nav,accum_div,adj_nav",
         "lake": "data_lake/etf_nav.parquet",
@@ -705,6 +709,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         #   真实列：symbol（重仓股代码）/ mkv（市值）/ stk_mkv_ratio（占股票市值比）/
         #   stk_float_ratio（占流通股比）。原 stk_value 真实名为 mkv。
         "api": "fund_portfolio", "by": "symbol",
+        "universe": "etf",
         "date_col": "ann_date", "symbol_col": "ts_code",
         "fields": "ts_code,ann_date,end_date,symbol,mkv,amount,stk_mkv_ratio,stk_float_ratio",
         "lake": "data_lake/etf_portfolio.parquet",
@@ -716,6 +721,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         #   （API 不返回）。真实列为 fd_share（基金份额）/ fund_type（基金类型）/
         #   market（市场）。fd_share 即当日总份额。
         "api": "fund_share", "by": "symbol",
+        "universe": "etf",
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "ts_code,trade_date,fd_share,fund_type,market",
         "lake": "data_lake/etf_share.parquet",

@@ -260,7 +260,9 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
     shard 写入前做一次，后续 _build_multiindex 读取 shard 即拿到已归一列名。
     """
     if symbols is None:
-        symbols = _load_universe()
+        # 按 cfg['universe'] 自动路由标的池（stock/etf/index），不再硬调 _load_universe。
+        # Why：ETF/指数类若喂股票列表会静默落空（接口返空→df.empty→continue，湖缺数据无感知）。
+        symbols = resolve_symbols(key)
     shard_dir = _shard_dir(key)
     os.makedirs(shard_dir, exist_ok=True)
     sd, ed = start.replace("-", ""), end.replace("-", "")
@@ -446,6 +448,46 @@ def _load_etf_universe() -> list[str]:
     if "market" in df.columns:
         df = df[df["market"] == "E"]
     return df["ts_code"].tolist()
+
+
+# A 股核心宽基指数（覆盖主流规模/板块风格）。指数类数据集（index_daily/index_member）
+# 的标的池——固定常量，无需也不应从股票/基金接口拉（与 _load_universe 股票池语义隔离）。
+CORE_INDEX_CODES: list[str] = [
+    "000300.SH",  # 沪深300
+    "000905.SH",  # 中证500
+    "000852.SH",  # 中证1000
+    "000016.SH",  # 上证50
+    "000688.SH",  # 科创50
+    "399006.SZ",  # 创业板指
+    "399001.SZ",  # 深证成指
+    "000001.SH",  # 上证指数
+]
+
+
+def resolve_symbols(key: str, limit: Optional[int] = None) -> list[str]:
+    """按 cfg['universe'] 自动选 by=symbol 数据集的标的池。
+
+    Why 存在：by=symbol 数据集标的来源有三类——股票（财报/股东/筹码）、ETF（fund_*）、
+    指数（index_*）。旧逻辑（_sync_by_symbol 在 symbols=None 时硬调 _load_universe）把三类
+    统一喂股票列表，导致 fund_*/index_* 被喂错标的 → 接口返空 → 静默落空（df.empty 直接
+    continue，不报错不落盘，湖里缺数据却无感知）。本函数按数据集声明的 universe 字段路由
+    到正确 loader，让单数据集 CLI 与编排脚本零特殊分支都自动正确。
+
+    参数：
+        key: TUSHARE_DATASETS 注册的数据集 key
+        limit: 切前 N 个标的（编排脚本子集验证用，如先跑沪深300 子集）
+    """
+    cfg = TUSHARE_DATASETS[key]
+    universe = cfg.get("universe", "stock")  # 缺省 stock（向后兼容未显式声明的数据集）
+    if universe == "etf":
+        syms = _load_etf_universe()
+    elif universe == "index":
+        syms = list(CORE_INDEX_CODES)
+    else:  # stock（含缺省）
+        syms = _load_universe()
+    if limit:
+        syms = syms[:limit]
+    return syms
 
 
 def _trade_days(start: str, end: str) -> list[str]:
