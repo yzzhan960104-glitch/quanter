@@ -96,6 +96,7 @@ def test_sync_dataset_by_symbol_multiindex(tmp_path, fake_pro, monkeypatch):
         "date_col": "ann_date", "symbol_col": "ts_code",
         "fields": "ts_code,ann_date,end_date,total_revenue,n_income",
         "lake": str(tmp_path / "income.parquet"),
+        "shard_dir": str(tmp_path / "shards"),  # 隔离 shard_dir（避免读到全局 data_lake/shards 的真实 shard）
     }
     LAKE_CONFIG["lakes"]["fina_income"] = TUSHARE_DATASETS["fina_income"]["lake"]
     from data.tushare_sync import sync_dataset
@@ -549,4 +550,37 @@ def test_sync_single_filters_to_cfg_fields(tmp_path, fake_pro, monkeypatch):
     assert "UPDATE_BY" not in df.columns, "100% NaN 垃圾元字段应在落湖前删除"
     assert "CREATE_BY" not in df.columns, "100% NaN 垃圾元字段应在落湖前删除"
     assert "PMI010500" not in df.columns, "fields 外多余列应删除"
+
+
+def test_sync_by_symbol_no_date_filter_skips_date(tmp_path, fake_pro, monkeypatch):
+    """_sync_by_symbol: cfg['no_date_filter']=True 时不传 start_date/end_date。
+
+    Why: 事件类接口（如 dividend 分红）按标的返全历史，不认 start_date/end_date——实测
+    dividend 传日期参数直接返空（shard 全空 → _build_multiindex 抛 RuntimeError）。
+    no_date_filter 让此类接口拉全历史（落湖后按区间自然覆盖），避免日期参数致空。
+    对认日期的接口（fina_* 财报）不加该标记，行为不变。
+    """
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    import pandas as pd
+    fake_pro._data["dividend"] = pd.DataFrame({
+        "ts_code": ["600000.SH"] * 2,
+        "ann_date": ["20240627", "20250627"],
+        "div_proc": ["实施", "实施"],
+        "stk_div": [0.0, 0.0], "cash_div": [0.42, 0.40],
+        "record_date": ["20240715", "20250715"], "ex_date": ["20240716", "20250716"],
+    })
+    TUSHARE_DATASETS["_test_div"] = {
+        "api": "dividend", "by": "symbol", "no_date_filter": True,
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,div_proc,stk_div,cash_div,record_date,ex_date",
+        "lake": str(tmp_path / "div.parquet"),
+    }
+    LAKE_CONFIG["lakes"]["_test_div"] = TUSHARE_DATASETS["_test_div"]["lake"]
+    from data.tushare_sync import sync_dataset
+    sync_dataset("_test_div", "2024-01-01", "2024-12-31", symbols=["600000.SH"], resume=False)
+    # no_date_filter=True → 请求 kwargs 不应含 start_date/end_date（防 dividend 日期致空）
+    div_calls = [kw for api, kw in fake_pro.calls if api == "dividend"]
+    assert div_calls, "dividend 应被调用"
+    assert "start_date" not in div_calls[0], "no_date_filter 时不应传 start_date（dividend 不认日期）"
+    assert "end_date" not in div_calls[0], "no_date_filter 时不应传 end_date"
 

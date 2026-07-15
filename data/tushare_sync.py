@@ -283,7 +283,13 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
         shard = os.path.join(shard_dir, f"{ts_code}.parquet")
         if resume and os.path.exists(shard):
             continue
-        kwargs = {code_param: ts_code, "start_date": sd, "end_date": ed}
+        kwargs = {code_param: ts_code}
+        # date_filter：多数 by=symbol 接口认 start_date/end_date（财报按 ann_date 过滤）；
+        # 但事件类接口（dividend 分红）不认日期参数（实测传了返空），cfg['no_date_filter']=True
+        # 时跳过，拉单标的全历史由落湖后区间自然覆盖，避免日期致 shard 全空。
+        if not (cfg or {}).get("no_date_filter"):
+            kwargs["start_date"] = sd
+            kwargs["end_date"] = ed
         if fields:
             kwargs["fields"] = fields
         df = _fetch_with_guard(api, **kwargs)
