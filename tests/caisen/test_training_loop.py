@@ -176,11 +176,30 @@ def test_full_roundtrip_with_dingtalk_notifier(monkeypatch, tmp_path):
     monkeypatch.setenv("REVIEW_WEBHOOK_SECRET", "sec")
     monkeypatch.setenv("REVIEW_ALLOWED_STAFF_IDS", "s1")
 
-    # ---- 3) mock urllib（webhook POST 响应）----
+    # ---- 3) mock urllib（webhook POST 响应）+ call 收集（端到端门控核心）----
     # DingTalkNotifier.push 在 webhook 方案下只发一次 POST（无 access_token 换取），
     # 响应体 {"errcode":0,"errmsg":"ok"} 经 DingTalkChannel._validate_response 视为成功。
     # 这里用上下文管理器协议 mock（with urlopen(...) as resp），匹配真实代码的 with 写法。
-    def fake_urlopen(req, timeout=None):
+    #
+    # 【I1 修法】call 收集是端到端门控的核心：DingTalkNotifier.push 用 `except Exception`
+    # 吞失败 + webhook 空 no-op early return。若未来误删 REVIEW_WEBHOOK env（或 push 静默
+    # 出错被吞），仅断言终态（status/cfg）会全绿——门控形同虚设。此处记录每次 urlopen 的
+    # url + 解析 body 还原的 markdown text，后续断言 calls ≥1（报告真推了）+ 某次 text 含
+    # CONFIRMING 草稿特征（_confirm 真发生了），锁住整条 webhook 通道真实工作。
+    urlopen_calls = []   # [(url, markdown_text)]
+    def fake_urlopen(req, *args, **kwargs):
+        # 【M2 修法】*args/**kwargs 签名比 (req, timeout=None) 更稳——防未来 push 调用
+        # urlopen 时传参方式变化（如加 cafile/capath/context 等 urllib 原生参数）导致 mock 漏匹配。
+        url = req.full_url
+        text = ""
+        try:
+            # body 是 DingTalkNotifier.push 构造的 json：{"msgtype":"markdown","markdown":{"title":..,"text":..}}
+            body = req.data.decode("utf-8") if req.data else ""
+            payload = json.loads(body) if body else {}
+            text = payload.get("markdown", {}).get("text", "")
+        except Exception:  # noqa: BLE001
+            text = ""
+        urlopen_calls.append((url, text))
         resp = MagicMock()
         resp.read.return_value = json.dumps({"errcode": 0, "errmsg": "ok"}).encode()
         resp.__enter__ = MagicMock(return_value=resp)
@@ -217,6 +236,9 @@ def test_full_roundtrip_with_dingtalk_notifier(monkeypatch, tmp_path):
     o._step_once(loop_id)
     # active_loop_id 必须正确路由到当前 loop（钉钉 handler 据此决定喂哪个 loop）
     assert o.active_loop_id == loop_id
+    # 【I1 门控】AWAITING_REVIEW 后 urlopen 必被调 ≥1 次（报告真推到 webhook 了）。
+    # 若未来误删 REVIEW_WEBHOOK env 或 push 被吞，urlopen_calls 为空——此处断言立即红。
+    assert len(urlopen_calls) >= 1, "AWAITING_REVIEW 后 webhook 未被调（REVIEW_WEBHOOK 可能丢失或 push 静默 no-op）"
 
     # ---- 6) 子线程模拟钉钉 handler 调 submit_review（CONFIRMING 两段式确认）----
     # _step_once 第二拍进 _handle_awaiting_review 阻塞等 event；子线程 0.2s 后喂"重跑意图"
@@ -236,3 +258,18 @@ def test_full_roundtrip_with_dingtalk_notifier(monkeypatch, tmp_path):
     loop = training_loop.training_loops_db.get_loop(loop_id)
     assert loop["status"] == "RUNNING"
     assert loop["current_cfg"]["min_rr_ratio"] == 2.0   # rerun 累积（1.5 ∪ {min_rr_ratio:2.0}）
+
+    # 【I1+M3 门控】CONFIRMING 草稿真推过 webhook：两次 submit_review 间无法插断言（子线程
+    # 时序），故在终态后间接锁住——断言某次推送的 markdown text 含 _render_confirm 草稿特征词
+    # （「请确认」/「动作」/「改参重跑」之一，见 training_loop._render_confirm）。若 _confirm
+    # 未发生（如 submit_review 唤醒失败、parse 异常早退），草稿推送缺失——此处断言立即红。
+    # 同时验证 _confirm 的 push(loop_id, draft) 走的也是真实 webhook 通道（urlopen_calls 收得到）。
+    confirm_keywords = ("请确认", "动作", "改参重跑")
+    has_confirm_draft = any(
+        any(kw in text for kw in confirm_keywords)
+        for _, text in urlopen_calls
+    )
+    assert has_confirm_draft, (
+        f"未在任何 webhook 推送中检测到 CONFIRMING 草稿特征词 {confirm_keywords}——"
+        f"_confirm 回显草稿可能未推送（CONFIRMING 未真实发生）。urlopen_calls={urlopen_calls}"
+    )
