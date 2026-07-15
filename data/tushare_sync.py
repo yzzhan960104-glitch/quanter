@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -27,40 +28,118 @@ from data.resilience import tushare_breaker, tushare_rate_limiter
 logger = logging.getLogger(__name__)
 
 
+# ============ 限频退避参数 ============
+# Why 集中常量：瞬时态限频的退避策略需可调（全量下载时撞 tnskhdata 代理服务端限频，
+# 需要更长退避），抽到模块顶部便于排查 + 测试时 monkeypatch。
+# base=2s + max_retries=5 → 序列 2/4/8/16/32s（最坏单接口 ~62s）。
+# Why 上限 32s：退避不能无限烧积分，最坏 ~1 分钟退避后仍失败则 record_failure 走熔断。
+_BACKOFF_BASE_SEC = 2.0
+_BACKOFF_MAX_RETRIES = 5
+
+# 熔断 OPEN 时的冷却等待：sleep 一个 recovery_timeout 让 breaker 自动 HALF_OPEN，
+# 再试 1 次（避免 by=date 全历史一旦熔断整数据集永远拉不到，卡片全空）。
+# Why 用 breaker.recovery_timeout 而非硬编码：保持熔断参数单一事实源。
+_BREAKER_OPEN_WAIT_RETRIES = 1
+
+
+def _classify_exc(e: Exception) -> str:
+    """异常分类：transient（瞬时态/限频/超时/断网）/ persistent（持久态/积分权限）/ unknown。
+
+    Why 显式分类而非在 _fetch_with_guard 里散落 if-elif：
+      - 三态处理策略差异大（瞬时态退避重试、持久态直接返空、未知态保守熔断），
+        抽出纯函数便于单测逐态覆盖（mock 抛特定异常 → 验证对应行为）；
+      - 关键词集中一处，避免限频关键词（limit/频率/429/timeout...）在多处重复维护漂移。
+    """
+    msg = str(e).lower()
+    # 瞬时态：服务端限频 / 网络抖动 / 连接重置 / 代理繁忙 —— 退避后可能成功
+    if any(k in msg for k in (
+        "limit", "429", "timeout", "connection", "频率", "超时", "频繁",
+        "busy", "rate", "retry", "reset", "broken pipe", "timed out",
+    )):
+        return "transient"
+    # 持久态：积分/权限不足 —— 重试必败，与外部接口健康无关
+    if any(k in msg for k in ("积分", "权限", "permission", "forbidden", "403")):
+        return "persistent"
+    return "unknown"
+
+
 def _fetch_with_guard(api_name: str, **kwargs) -> pd.DataFrame:
     """限频 + 熔断 + 异常分类包装的 pro 接口调用，空数据/失败返空 DF。
 
-    瞬时态（限频/超时）计熔断；持久态（积分/权限）仅记日志；空数据不计熔断。
-    与 sync_data_lake._fetch_with_guard 同范式。
+    三态处理（关键修复：瞬时态限频改指数退避重试，而非原直接 record_failure 返空）：
+      - transient（限频/超时/断网）：指数退避重试（2/4/8/16/32s），重试期间**不**
+        record_failure（限频是瞬时态，退避后可能成功，不应污染熔断计数拖累其他接口）；
+        max_retries 全失败才 record_failure 一次 + 返空。
+      - persistent（积分/权限）：不重试直接返空 + 日志，不 record_failure（重试必败
+        且与接口健康无关，计熔断会误 OPEN 拖累正常接口）。
+      - unknown：保守 record_failure 一次 + 返空（宁可误 OPEN 也不漏防线）。
 
-    Why 异常分类而非一刀切 record_failure：
-      - 限频/超时/断网属「瞬时态」，重试可能成功，应计入熔断阈值防连环打满被封；
-      - 积分/权限不足属「持久态」，重试必败且与外部接口健康无关，计熔断会误OPEN
-        拖累其他正常接口，故仅记日志、不record_failure；
-      - 未知异常保守计熔断（宁可误OPEN也不漏防线）。
-    空数据（df.empty）是「正常无数据」语义，调 record_success 维持熔断器健康度。
+    Why 熔断 OPEN 不直接返空（原 bug）：by=date 全市场逐日拉时连续限频 → breaker OPEN
+    → 原 allow_request False 直接返空 → 整数据集永远拉不到（全空）。改为 sleep 一个
+    recovery_timeout 让 breaker 自动 HALF_OPEN 再试，给大数据集一条活路。
+
+    空数据（df.empty）是「正常无数据」语义，直接返空不计熔断（不 record_failure，
+    也不 record_success —— 空数据不污染熔断计数，原逻辑保持）。
     """
-    tushare_rate_limiter.acquire(1.0)
-    if not tushare_breaker.allow_request():
-        return pd.DataFrame()
     pro = get_pro()
-    try:
-        df = getattr(pro, api_name)(**kwargs)
-    except Exception as e:
-        msg = str(e).lower()
-        if any(k in msg for k in ("limit", "429", "timeout", "connection", "频率", "超时", "频繁")):
-            tushare_breaker.record_failure()
-            logger.error("Tushare %s 限频/网络异常：%s", api_name, e)
-        elif any(k in str(e) for k in ("积分", "权限")):
-            logger.error("Tushare %s 积分不足：%s", api_name, e)
-        else:
-            tushare_breaker.record_failure()
-            logger.error("Tushare %s 拉取失败：%s", api_name, e)
-        return pd.DataFrame()
-    if df is None or df.empty:
-        return pd.DataFrame()
-    tushare_breaker.record_success()
-    return df
+    # 限频令牌桶：阻塞至令牌可用（桶容量+匀速补充已由 RateLimiter 管控，此处只扣 1）
+    tushare_rate_limiter.acquire(1.0)
+
+    # 熔断 OPEN 冷却重试：allow_request False 时不直接返空，sleep recovery_timeout
+    # 让 breaker 自动转 HALF_OPEN，再走一次完整重试链（最多 _BREAKER_OPEN_WAIT_RETRIES 次）。
+    # Why 不在 OPEN 时直接调用 pro：HALF_OPEN 名额限制会拒绝，必须等冷却到期。
+    breaker_waits = 0
+    while not tushare_breaker.allow_request():
+        if breaker_waits >= _BREAKER_OPEN_WAIT_RETRIES:
+            logger.warning("Tushare %s 熔断 OPEN，冷却重试 %d 次后仍不放行，返空",
+                           api_name, breaker_waits)
+            return pd.DataFrame()
+        wait = tushare_breaker.recovery_timeout
+        logger.warning("Tushare %s 熔断 OPEN，sleep %.0fs 等 HALF_OPEN 后重试 (wait %d/%d)",
+                       api_name, wait, breaker_waits + 1, _BREAKER_OPEN_WAIT_RETRIES)
+        time.sleep(wait)
+        breaker_waits += 1
+
+    # 瞬时态限频指数退避重试：2/4/8/16/32s，最多 _BACKOFF_MAX_RETRIES 次
+    # Why 退避而非立即失败：tnskhdata 代理对大数据接口（by=date 全市场逐日）有服务端
+    # 限频，瞬时撞限频后退避几秒通常即可恢复；原实现直接 record_failure 返空导致
+    # by=date 全历史一旦撞限频就卡死（连续 record_failure → breaker OPEN → 全空）。
+    last_exc: Exception | None = None
+    for attempt in range(_BACKOFF_MAX_RETRIES + 1):  # 0..max_retries，首次不退避
+        try:
+            df = getattr(pro, api_name)(**kwargs)
+        except Exception as e:
+            kind = _classify_exc(e)
+            # 持久态：积分/权限不足，重试必败，直接返空（不 record_failure，原逻辑）
+            if kind == "persistent":
+                logger.error("Tushare %s 积分/权限不足（持久态，不重试）：%s", api_name, e)
+                return pd.DataFrame()
+            # 未知态：保守 record_failure 一次 + 返空（宁可误 OPEN 也不漏防线，原逻辑）
+            if kind == "unknown":
+                tushare_breaker.record_failure()
+                logger.error("Tushare %s 拉取失败（未知异常，保守熔断）：%s", api_name, e)
+                return pd.DataFrame()
+            # transient：瞬时态限频 —— 退避重试，重试期间不污染熔断计数
+            last_exc = e
+            if attempt >= _BACKOFF_MAX_RETRIES:
+                break  # 退避次数耗尽，跳出走最终 record_failure
+            backoff = _BACKOFF_BASE_SEC * (2 ** attempt)  # 2,4,8,16,32s
+            logger.warning("Tushare %s 瞬时态限频 (retry %d/%d)，sleep %.0fs 后重试：%s",
+                           api_name, attempt + 1, _BACKOFF_MAX_RETRIES, backoff, e)
+            time.sleep(backoff)
+            continue
+        # 成功路径
+        if df is None or df.empty:
+            # 正常无数据：record_success 维持熔断器健康度（空数据 ≠ 接口异常）
+            return pd.DataFrame()
+        tushare_breaker.record_success()
+        return df
+
+    # 退避耗尽仍失败：此时才 record_failure（瞬时态持续不恢复 → 视为接口异常走熔断）
+    tushare_breaker.record_failure()
+    logger.error("Tushare %s 瞬时态限频退避 %d 次仍失败，record_failure 返空：%s",
+                 api_name, _BACKOFF_MAX_RETRIES, last_exc)
+    return pd.DataFrame()
 
 
 def _shard_dir(key: str) -> str:

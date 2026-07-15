@@ -165,3 +165,239 @@ def test_build_multiindex_by_date_symbol_from_column(tmp_path):
     # 行数 + 数据列保持
     assert len(df) == 2
     assert "total_revenue" in df.columns
+
+
+# ============ _fetch_with_guard 限频退避重试测试 ============
+# Why 独立测试组：限频退避是全量下载（by=date 全市场逐日）的关键修复，原实现直接
+# record_failure 返空导致整数据集卡死。此处逐态覆盖（瞬时态退避成功 / 退避耗尽失败 /
+# 持久态不重试 / 熔断 OPEN 冷却重试），mock time.sleep 避免真睡拖慢测试。
+
+class _FlakyPro:
+    """可控失败序列的 pro 替身：按预设异常序列抛错，之后返回正常 DataFrame。
+
+    Why 不复用 _FakePro：_FakePro 的 __getattr__ 永远返静态数据，无法模拟「前 N 次
+    抛限频异常、第 N+1 次成功」的退避场景。_FlakyPro 按调用序号消费 failures 队列，
+    队列空后返回 success_df，精确刻画瞬时态限频的恢复过程。
+    """
+    def __init__(self, failures: list[Exception], success_df: pd.DataFrame):
+        self._failures = list(failures)  # 按序抛出的异常队列
+        self._success_df = success_df
+        self.call_count = 0  # 总调用次数（含抛异常 + 成功）
+
+    def __getattr__(self, api_name):
+        def _call(**kwargs):
+            self.call_count += 1
+            if self._failures:
+                raise self._failures.pop(0)
+            return self._success_df
+        return _call
+
+
+def _mock_sleep(monkeypatch):
+    """mock time.sleep 为 no-op，记录 sleep 时长序列供断言退避是否指数增长。
+
+    Why 单独 helper：退避重试路径里 time.sleep 会真睡（2/4/8/16/32s 累计 ~62s），
+    拖慢测试套件。patch data.tushare_sync.time.sleep 为记录器，既不睡又能断言退避序列。
+    """
+    sleeps = []
+    monkeypatch.setattr("data.tushare_sync.time.sleep", lambda s: sleeps.append(s))
+    return sleeps
+
+
+def test_fetch_guard_transient_retry_then_success(monkeypatch):
+    """瞬时态限频 → 指数退避重试 → 恢复成功（验证不直接返空、不 record_failure）。
+
+    场景：pro 前 2 次抛限频异常，第 3 次返正常 df。期望 _fetch_with_guard 退避后重试成功
+    返回数据，且重试期间不 record_failure（限频是瞬时态，不应污染熔断计数）。
+    """
+    from data import tushare_sync
+    sleeps = _mock_sleep(monkeypatch)
+
+    # 真实 breaker + rate_limiter：验证 record_failure 未被调用（熔断不跳闸）
+    real_breaker_calls = {"fail": 0, "succ": 0}
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "allow_request", lambda: True)
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_success",
+                        lambda: real_breaker_calls.__setitem__("succ", real_breaker_calls["succ"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_failure",
+                        lambda: real_breaker_calls.__setitem__("fail", real_breaker_calls["fail"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_rate_limiter, "acquire", lambda n=1.0, timeout=None: None)
+
+    success_df = pd.DataFrame({"ts_code": ["000001.SZ"], "v": [1]})
+    flaky = _FlakyPro(
+        failures=[Exception("rate limit temporarily busy"),
+                  Exception("Sorry, 频率过快")],
+        success_df=success_df,
+    )
+    monkeypatch.setattr(tushare_sync, "get_pro", lambda: flaky)
+
+    df = tushare_sync._fetch_with_guard("moneyflow", trade_date="20240105")
+    # 返回成功数据（不是空）
+    assert not df.empty
+    assert len(df) == 1
+    # pro 被调用 3 次（2 次失败 + 1 次成功）
+    assert flaky.call_count == 3
+    # 退避了 2 次（首次不退避，2 次失败各退避一次），序列 2s, 4s（指数）
+    assert sleeps == [2.0, 4.0], f"退避序列应为 [2,4]，实际 {sleeps}"
+    # 重试期间不 record_failure；成功后 record_success 一次
+    assert real_breaker_calls["fail"] == 0, "瞬时态退避期间不应 record_failure"
+    assert real_breaker_calls["succ"] == 1
+
+
+def test_fetch_guard_transient_exhaust_then_record_failure(monkeypatch):
+    """连续瞬时态限频超 max_retries → 最终 record_failure 一次 + 返空。
+
+    场景：pro 连续抛限频异常（> _BACKOFF_MAX_RETRIES 次）。期望退避耗尽后才
+    record_failure 一次（而非每次失败都计），并返回空 DF。
+    """
+    from data import tushare_sync
+    sleeps = _mock_sleep(monkeypatch)
+
+    real_breaker_calls = {"fail": 0, "succ": 0}
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "allow_request", lambda: True)
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_success",
+                        lambda: real_breaker_calls.__setitem__("succ", real_breaker_calls["succ"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_failure",
+                        lambda: real_breaker_calls.__setitem__("fail", real_breaker_calls["fail"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_rate_limiter, "acquire", lambda n=1.0, timeout=None: None)
+
+    # 抛 max_retries+1 次异常（首次 + max_retries 次退避重试全失败）
+    n_fail = tushare_sync._BACKOFF_MAX_RETRIES + 1
+    flaky = _FlakyPro(
+        failures=[Exception("rate limit 429 too many requests")] * n_fail,
+        success_df=pd.DataFrame(),
+    )
+    monkeypatch.setattr(tushare_sync, "get_pro", lambda: flaky)
+
+    df = tushare_sync._fetch_with_guard("moneyflow", trade_date="20240105")
+    # 退避耗尽返空
+    assert df.empty
+    # 调用 max_retries+1 次（首次 + max_retries 次重试）
+    assert flaky.call_count == n_fail
+    # 退避 max_retries 次（序列 2,4,8,16,32s）
+    assert len(sleeps) == tushare_sync._BACKOFF_MAX_RETRIES, (
+        f"退避次数应为 {_BACKOFF_MAX_RETRIES}，实际 {len(sleeps)}")
+    assert sleeps == [2.0, 4.0, 8.0, 16.0, 32.0], f"退避序列应指数增长，实际 {sleeps}"
+    # 最终只 record_failure 一次（不是每次失败都计）
+    assert real_breaker_calls["fail"] == 1, "退避耗尽应只 record_failure 一次"
+    assert real_breaker_calls["succ"] == 0
+
+
+def test_fetch_guard_persistent_no_retry(monkeypatch):
+    """持久态（积分/权限）→ 不重试直接返空，不 record_failure。
+
+    场景：pro 抛「积分不足」异常。期望不退避、不重试、不 record_failure，直接返空。
+    Why 不 record_failure：积分不足与接口健康无关，计熔断会误 OPEN 拖累其他正常接口。
+    """
+    from data import tushare_sync
+    sleeps = _mock_sleep(monkeypatch)
+
+    real_breaker_calls = {"fail": 0, "succ": 0}
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "allow_request", lambda: True)
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_success",
+                        lambda: real_breaker_calls.__setitem__("succ", real_breaker_calls["succ"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_failure",
+                        lambda: real_breaker_calls.__setitem__("fail", real_breaker_calls["fail"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_rate_limiter, "acquire", lambda n=1.0, timeout=None: None)
+
+    flaky = _FlakyPro(
+        failures=[Exception("抱歉，您积分不足 permission denied")],
+        success_df=pd.DataFrame({"v": [1]}),
+    )
+    monkeypatch.setattr(tushare_sync, "get_pro", lambda: flaky)
+
+    df = tushare_sync._fetch_with_guard("income", ts_code="000001.SZ")
+    assert df.empty
+    # 只调用 1 次（不重试）
+    assert flaky.call_count == 1
+    # 不退避
+    assert sleeps == []
+    # 不 record_failure（持久态与接口健康无关）
+    assert real_breaker_calls["fail"] == 0
+    assert real_breaker_calls["succ"] == 0
+
+
+def test_fetch_guard_unknown_exception_records_failure(monkeypatch):
+    """未知异常 → 保守 record_failure 一次 + 返空（宁可误 OPEN 也不漏防线）。
+
+    场景：pro 抛非限频非积分的未知异常（如 JSON 解析错）。期望不重试、直接
+    record_failure + 返空。
+    """
+    from data import tushare_sync
+    _mock_sleep(monkeypatch)
+
+    real_breaker_calls = {"fail": 0, "succ": 0}
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "allow_request", lambda: True)
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_success",
+                        lambda: real_breaker_calls.__setitem__("succ", real_breaker_calls["succ"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_failure",
+                        lambda: real_breaker_calls.__setitem__("fail", real_breaker_calls["fail"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_rate_limiter, "acquire", lambda n=1.0, timeout=None: None)
+
+    flaky = _FlakyPro(
+        failures=[ValueError("unexpected JSON parse error")],
+        success_df=pd.DataFrame(),
+    )
+    monkeypatch.setattr(tushare_sync, "get_pro", lambda: flaky)
+
+    df = tushare_sync._fetch_with_guard("income", ts_code="000001.SZ")
+    assert df.empty
+    assert flaky.call_count == 1
+    assert real_breaker_calls["fail"] == 1
+
+
+def test_fetch_guard_breaker_open_cooldown_retry(monkeypatch):
+    """熔断 OPEN → sleep recovery_timeout → HALF_OPEN 放行 → 重试成功（不直接返空）。
+
+    场景：allow_request 首次 False（OPEN），sleep recovery_timeout 后第二次 True。
+    期望不直接返空，而是冷却后重走重试链。这是 by=date 全历史不卡死的关键。
+    """
+    from data import tushare_sync
+    sleeps = _mock_sleep(monkeypatch)
+
+    # allow_request 序列：False, True（首次 OPEN，冷却后 HALF_OPEN 放行）
+    allow_seq = [False, True]
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "allow_request",
+                        lambda: allow_seq.pop(0) if allow_seq else True)
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_success", lambda: None)
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_failure", lambda: None)
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "recovery_timeout", 60.0)
+    monkeypatch.setattr(tushare_sync.tushare_rate_limiter, "acquire", lambda n=1.0, timeout=None: None)
+
+    success_df = pd.DataFrame({"ts_code": ["000001.SZ"], "v": [1]})
+    flaky = _FlakyPro(failures=[], success_df=success_df)
+    monkeypatch.setattr(tushare_sync, "get_pro", lambda: flaky)
+
+    df = tushare_sync._fetch_with_guard("moneyflow", trade_date="20240105")
+    # 冷却后重试成功，返回数据（不因首次 OPEN 直接返空）
+    assert not df.empty
+    assert flaky.call_count == 1
+    # sleep 了一次 recovery_timeout（60s）等待 HALF_OPEN
+    assert 60.0 in sleeps, f"应 sleep recovery_timeout=60s 等冷却，实际 sleeps={sleeps}"
+
+
+def test_fetch_guard_empty_data_no_failure(monkeypatch):
+    """空数据（df.empty）→ 不 record_failure（正常无数据语义，不污染熔断）。
+
+    场景：pro 返回空 df（如节假日无数据）。期望返空且不 record_failure
+    （空数据是正常无数据，非接口异常，不应拖累熔断器）。
+    """
+    from data import tushare_sync
+    _mock_sleep(monkeypatch)
+
+    real_breaker_calls = {"fail": 0, "succ": 0}
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "allow_request", lambda: True)
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_success",
+                        lambda: real_breaker_calls.__setitem__("succ", real_breaker_calls["succ"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_breaker, "record_failure",
+                        lambda: real_breaker_calls.__setitem__("fail", real_breaker_calls["fail"] + 1))
+    monkeypatch.setattr(tushare_sync.tushare_rate_limiter, "acquire", lambda n=1.0, timeout=None: None)
+
+    flaky = _FlakyPro(failures=[], success_df=pd.DataFrame())
+    monkeypatch.setattr(tushare_sync, "get_pro", lambda: flaky)
+
+    df = tushare_sync._fetch_with_guard("moneyflow", trade_date="20240105")
+    assert df.empty
+    assert real_breaker_calls["fail"] == 0
+    # 空数据不计熔断但仍维持健康度（原逻辑：return 前未显式 record_success，
+    # 此处验证至少不 record_failure —— 关键是不污染熔断）
+
