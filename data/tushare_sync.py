@@ -390,6 +390,16 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
             # 日频（YYYYMMDD，8 位）兜底
             df[date_col] = pd.to_datetime(col, format="%Y%m%d", errors="coerce")
         df = df.dropna(subset=[date_col]).set_index(date_col).sort_index()
+    # fields 筛选（落湖前）：部分接口（如 cn_pmi 宏观）忽略 fields 参数，请求 fields='A,B'
+    # 仍返回全部列（含 UPDATE_BY/CREATE_BY 等 100% NaN 垃圾元字段）。此处按 cfg.fields 只保留
+    # 声明列，防湖膨胀 + 防垃圾列污染下游。Why 放 index 建立后：date_col 已转 index 不在
+    # df.columns，fields 含 date_col 也不影响（只筛 columns，index 始终保留）；对尊重 fields 的
+    # 接口（落湖列本就 ⊆ fields）keep=全部 columns，筛选无变化，中性安全。
+    if fields:
+        fields_set = {f.strip() for f in fields.split(",")}
+        keep = [c for c in df.columns if c in fields_set]
+        if keep:
+            df = df[keep]
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     df.to_parquet(out, engine="pyarrow")
     logger.info("%s 写入：%s，%d 行", key, out, len(df))

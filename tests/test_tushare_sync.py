@@ -515,3 +515,38 @@ def test_by_symbol_datasets_universe_correctly_declared():
         else:
             assert uni == "stock", f"{key} 应 universe=stock（股票），实际 {uni!r}"
 
+
+def test_sync_single_filters_to_cfg_fields(tmp_path, fake_pro, monkeypatch):
+    """_sync_single: 接口忽略 fields 返多余列时，落湖前按 cfg.fields 筛选保留列。
+
+    Why: cn_pmi 等宏观接口忽略 fields 参数——请求 fields='MONTH,PMI010000' 仍返回全部 64 列
+    （含 UPDATE_BY/CREATE_BY 等 100% NaN 垃圾元字段）。落湖前按 cfg.fields 筛选，确保湖只含
+    声明列，防湖膨胀 + 防垃圾列污染下游。对尊重 fields 的接口（落湖列本就 ⊆ fields）筛选无变化。
+    """
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    import pandas as pd
+    # 模拟 cn_pmi 接口忽略 fields：请求 2 列但返回 5 列（含 100% NaN 垃圾元字段 + 多余列）
+    fake_pro._data["cn_pmi_test"] = pd.DataFrame({
+        "MONTH": ["202401", "202402"],
+        "PMI010000": [50.1, 50.2],
+        "UPDATE_BY": [None, None],   # 100% NaN 垃圾元字段
+        "CREATE_BY": [None, None],
+        "PMI010500": [49.8, 49.9],   # fields 外多余列
+    })
+    TUSHARE_DATASETS["cn_pmi_test"] = {
+        "api": "cn_pmi_test", "by": "single",
+        "date_col": "MONTH", "symbol_col": "MONTH",
+        "fields": "MONTH,PMI010000",   # 只声明 2 列
+        "index_mode": "datetime",
+        "lake": str(tmp_path / "pmi.parquet"),
+    }
+    LAKE_CONFIG["lakes"]["cn_pmi_test"] = TUSHARE_DATASETS["cn_pmi_test"]["lake"]
+    from data.tushare_sync import sync_dataset
+    sync_dataset("cn_pmi_test", "2024-01-01", "2024-12-31", resume=False)
+    df = pd.read_parquet(TUSHARE_DATASETS["cn_pmi_test"]["lake"])
+    # 只保留 fields 声明列：MONTH 进 index，PMI010000 为唯一数据列
+    assert "PMI010000" in df.columns, "声明列 PMI010000 应保留"
+    assert "UPDATE_BY" not in df.columns, "100% NaN 垃圾元字段应在落湖前删除"
+    assert "CREATE_BY" not in df.columns, "100% NaN 垃圾元字段应在落湖前删除"
+    assert "PMI010500" not in df.columns, "fields 外多余列应删除"
+

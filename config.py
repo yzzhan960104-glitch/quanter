@@ -517,6 +517,9 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # ⚠️ 事实订正：删幻觉列 vol / north_direction（API 不返回）。真实列为
         # close/change/rank/market_type/amount/net_amount/buy/sell。north_money 在
         # moneyflow_hsgt 市场级接口里，hsgt_top10 只返个股十大成交明细。
+        # ⚠️ 实测局限（2026-07 probe）：buy/sell/net_amount 为代理近期降级字段——2023 历史
+        #   段全有值，2024+ tnskhdata 代理不再返（None 或缺列），落湖约 63% NaN。核心 amount
+        #   全期 0% NaN 可用。保留三字段不丢 2023 历史，下游北向明细分析须知近期缺值。
         "api": "hsgt_top10", "by": "date",
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "trade_date,ts_code,name,close,rank,amount,net_amount,buy,sell",
@@ -651,6 +654,9 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # 市场最早能预知停牌的时点），但 API 不返回 ann_date，只能用 trade_date（停牌
         # 当日）——回测在停牌当日开盘前可能尚未感知，存在轻微前视残留，但停牌信息通常
         # 盘前/盘中即时公告，用 trade_date 作降级索引可接受（停牌当日不撮合即可）。
+        # ⚠️ 实测局限（2026-07 probe）：suspend_timing 99% NaN（API 返该列但绝大多数停牌无
+        #   午盘/全天时点标注），suspend_type 为主要有效字段（0% NaN）。保留 timing 因 API 结构
+        #   返该列且 test_a10 钉死 4 列契约；下游停牌过滤应以 suspend_type 为准。
         "api": "suspend_d", "by": "date",
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "ts_code,trade_date,suspend_timing,suspend_type",
@@ -795,6 +801,8 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # 非均值。旧 fields（on/1w/...单列）是 shibor 均值湖的字段，误抄过来。真实列为
         # 各期限的 _b（拆入）/ _a（拆出）双列。date_col=date 落 DatetimeIndex。
         # date_range=true（quick 批订正）：与 shibor 同理，加区间精确返近 3 年。
+        # ⚠️ 实测局限（2026-07 probe）：接口约 4000 行服务端上限（17 银行 × ~235 日 ≈ 1 年），
+        #   date_range 3 年区间实际仅落近 1 年（2025-08 起）。全历史需按区间分批拉（follow-up）。
         "api": "shibor_quote", "by": "single",
         "date_col": "date", "symbol_col": "date",
         "fields": "date,bank,on_b,on_a,1w_b,1w_a,2w_b,2w_a,1m_b,1m_a,3m_b,3m_a,6m_b,6m_a,9m_b,9m_a,1y_b,1y_a",
@@ -812,6 +820,9 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     # 真实列见 fields（com_count=上市公司数 / total_mv=总市值 / float_mv=流通市值 /
     # trans_count=成交笔数 / pe=市盈率 / tr=换手率 / exchange=交易所）。
     "mkt_daily": {
+        # ⚠️ 实测局限（2026-07 probe）：total_share/float_share 约 75% NaN（daily_info 对多数
+        #   市场分层如沪 A/B 股不返总股本，仅个别分层有值），属接口正常稀疏非 bug；
+        #   com_count/total_mv/float_mv/pe 为有效字段，下游取市值宽度用 total_mv/float_mv。
         "api": "daily_info", "by": "date",
         "date_col": "trade_date", "symbol_col": "trade_date",
         "fields": "trade_date,ts_code,ts_name,com_count,total_share,float_share,total_mv,float_mv,pe,exchange",
