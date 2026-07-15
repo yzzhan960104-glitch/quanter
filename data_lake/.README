@@ -1,0 +1,8 @@
+data_lake/ = 物理存储层（Parquet 数据湖）。
+================================================================
+边界声明（Step1 后端分层重构）：
+  - 只放 .parquet 数据文件 + .syncing/ 同步状态哨兵目录。
+  - 禁止放 .py 代码（取数代码归 data/ 包）。
+  - 数据集资产元信息（source/market/granularity/script/freshness）单一真相源 =
+    config/registry.py 的 DATASET_REGISTRY + TUSHARE_DATASETS。
+  - 多湖路径注册 = config/data.py 的 LAKE_CONFIG["lakes"]。

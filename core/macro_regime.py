@@ -28,6 +28,9 @@ macro 湖读取约定（关键，与 daily/minute 湖不同）：
 """
 from __future__ import annotations
 
+"""（归属：模型层·宏观域。Step1 暂留 core/，最终随 Step3/4 迁入模型层·宏观子域。
+CreditRegime 信贷周期识别，依赖 data_lake macro 湖。）"""
+
 import threading
 
 import pandas as pd
