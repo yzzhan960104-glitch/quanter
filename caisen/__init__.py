@@ -21,3 +21,18 @@ from caisen.optimize.training_analyzer import *  # noqa: F401,F403
 from caisen.optimize.training_loops_db import *  # noqa: F401,F403
 from caisen.optimize.training_loop import *  # noqa: F401,F403
 from caisen.optimize.training_dingtalk import *  # noqa: F401,F403
+# Step3.4：infra storage/execution/replay_*/viz_* 物理迁移后，预先触发 caisen.infra.* 的
+# 真实模块进入 sys.modules，使顶层 caisen.<infra> 垫片的 sys.modules 别名在「垫片先于
+# infra 包被导入」的顺序下仍能绑定到同一真实模块对象（与 engines/optimize 同模式）。
+# Task3.3 沉淀：凡被 ``from caisen import X`` 引用的迁移模块须同步加预加载行。
+from caisen.infra.storage import *  # noqa: F401,F403
+from caisen.infra.execution import *  # noqa: F401,F403
+# 批 B：5 个 replay_* 模块。facade 依赖 backtest_replay/replay_runs/replay_tasks_db 三个名。
+from caisen.infra.backtest_replay import *  # noqa: F401,F403
+from caisen.infra.replay_runs import *  # noqa: F401,F403
+from caisen.infra.replay_tasks_db import *  # noqa: F401,F403
+from caisen.infra.replay_scheduler import *  # noqa: F401,F403
+from caisen.infra.replay_worker import *  # noqa: F401,F403
+# 批 C：2 个 viz_* 模块（横切可视化层，Step4 同迁出）。
+from caisen.infra.viz_static import *  # noqa: F401,F403
+from caisen.infra.viz_interactive import *  # noqa: F401,F403

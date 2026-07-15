@@ -24,7 +24,10 @@ from typing import Any, Dict, List, Optional, Protocol
 from caisen import replay_tasks_db, training_analyzer, training_loops_db
 # 复用 replay_tasks_db 的时间戳工具——loop 表的 started_at/finished_at 与 replay_tasks
 # 同源时钟，零重复实现。brief Step3 代码漏了这两行 import，实现者补齐。
-from caisen.replay_tasks_db import _now_iso
+# Step3.4 follow-up：replay_tasks_db 已迁 caisen/infra/。直接走物理新路径，避免循环 import 下
+# 顶层垫片对 ``from caisen.replay_tasks_db import name`` 的 from-import 取属性失效（详见
+# training_loops_db.py:18 注释）。与 replay_tasks_db 实体同对象，零行为差异。
+from caisen.infra.replay_tasks_db import _now_iso
 
 logger = logging.getLogger(__name__)
 
