@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 from typing import Any, Dict, List, Optional, Protocol
 
 from caisen import replay_tasks_db, training_analyzer, training_loops_db
@@ -48,9 +47,8 @@ class TrainingLoopOrchestrator:
     per-loop threading.Event 解除阻塞——submit_review set event，daemon 继续。
     """
 
-    def __init__(self, notifier: TrainingNotifier, clock=time.monotonic):
+    def __init__(self, notifier: TrainingNotifier):
         self._notifier = notifier
-        self._clock = clock
         self._thread: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
         # loop_id → 审核事件 + 待审文本（AWAITING_REVIEW 时 submit_review 唤醒）
@@ -79,13 +77,18 @@ class TrainingLoopOrchestrator:
         物理意图：一次只允许一个活跃 loop，避免两个 loop 并发回测撞算力/撞库。
         守卫查 list_active_loops（含 RUNNING/ANALYZING/AWAITING_REVIEW/CONFIRMING），
         任一在跑即拒。loop 落库时 status=IDLE，首轮 _step_once 才 IDLE→RUNNING。
+
+        TOCTOU 防御：check（list_active_loops）+ create（create_loop）必须同在 self._lock
+        内原子完成——否则两并发 start 都过空检查再各自 create，会出现两个 IDLE loop 并存，
+        都被 daemon 点火成 RUNNING → 两个活跃 loop 同时回测（撞算力/撞库）。把 init_db 也
+        移入锁内（幂等，无副作用），确保 create 前表一定就绪。
         """
         with self._lock:
             if training_loops_db.list_active_loops():
                 raise LoopBusyError("已有活跃训练 loop（一次只允许一个）")
-        training_loops_db.init_db()
-        replay_tasks_db.init_db()
-        loop_id = training_loops_db.create_loop(req)
+            training_loops_db.init_db()
+            replay_tasks_db.init_db()
+            loop_id = training_loops_db.create_loop(req)
         # 起一个审核 event 供首轮 AWAITING_REVIEW 用
         self._review_events[loop_id] = {"event": threading.Event(), "text": None}
         return loop_id
@@ -172,7 +175,15 @@ class TrainingLoopOrchestrator:
             "cfg_override": loop["current_cfg"],
         })
         # 轮询等终态（带 stop 检查，避免你 stop 后还死等）
+        # 两道 stop 感知：(1) daemon 级 _stop_flag（lifespan 关闭）；(2) 本 loop 级 DB STOPPED
+        # （你钉钉喊停）。stop(loop_id) 只 update DB + _wake review event，不 set _stop_flag，
+        # 故这里必须显式查 DB——否则长回测（几十分钟~几小时）要等自然终态才退出，且 SUCCESS
+        # 时 _on_round_success 会无视 STOPPED 继续 append_history + 推报告，污染已停 loop。
+        # 与 _handle_awaiting_review 的 wait 循环对称：响应延迟 ≤ _POLL_INTERVAL。
         while not self._stop_flag.is_set():
+            cur = training_loops_db.get_loop(loop_id)
+            if cur is None or cur["status"] == "STOPPED":
+                return   # 你喊停了，放弃本轮回测轮询（不 append history、不推报告）
             task = replay_tasks_db.get_task(task_id)
             if task is None:
                 # 回测任务被清/丢失——不自动重提，交人审决策（重跑/改/停）

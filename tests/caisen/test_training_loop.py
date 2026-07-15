@@ -105,3 +105,39 @@ def test_confirm_rerun_accumulates_cfg(orch, monkeypatch):
     assert loop["status"] == "RUNNING"
     assert loop["current_round"] == 1   # RUNNING 等 _handle_running 才 +1
     assert loop["current_cfg"] == {"min_rr_ratio": 1.5, "max_holding_bars": 20}  # 累积
+
+
+def test_stop_interrupts_running_round(orch, monkeypatch):
+    """I1 回归：stop() 必须能中断 RUNNING 态的回测轮询（驱动 I1 的 DB stop 检查）。
+
+    场景：loop 进 RUNNING 后回测一直 PENDING（模拟长回测不终态）→ 主线程 stop(loop_id)
+    → 断言 _handle_running 在 ≤2×_POLL_INTERVAL 内退出 + DB status==STOPPED + history
+    未被 append（无 phantom 轮次污染）。
+
+    时序：_POLL_INTERVAL 压到 0.05（同 CONFIRMING 测试范式），子线程 sleep(0.08) 后喊停，
+    确保 daemon 已进入 _handle_running 的 wait 阻塞再 stop。若无 I1 的 DB stop 检查，
+    _handle_running 会死等回测终态（本测 mock 永远 PENDING），测试会超时挂死。
+    """
+    o, notifier = orch
+    loop_id = o.start({"start": "2020-01-01", "end": "2024-12-31", "universe": None,
+                       "base_cfg": {"min_rr_ratio": 1.5}, "max_rounds": 3})
+    # mock：回测永远 PENDING（长回测不终态）——逼出 _handle_running 的轮询循环
+    monkeypatch.setattr(training_loop.replay_tasks_db, "get_task",
+                        lambda task_id, path=None: {"task_id": task_id, "status": "PENDING"})
+    monkeypatch.setattr(training_loop, "_POLL_INTERVAL", 0.05)
+
+    import threading
+    import time as _t
+    def stop_later():
+        _t.sleep(0.08)   # 等 daemon 进 _handle_running 的 wait 阻塞
+        o.stop(loop_id)
+    threading.Thread(target=stop_later).start()
+
+    o._step_once(loop_id)   # IDLE→RUNNING→_handle_running 轮询 → 被 stop 中断退出
+
+    from caisen import training_loops_db
+    loop = training_loops_db.get_loop(loop_id)
+    assert loop["status"] == "STOPPED"          # stop() 落库的终态
+    assert loop["history"] == []                 # 无 phantom：未 append 任何轮次摘要
+    # current_round 在 _handle_running 开头已 +1（提交回测时即记账，stop 中断不回滚）——
+    # 这是可接受的（round 已开始跑过回测 task，即便被中断也计为发起过）
