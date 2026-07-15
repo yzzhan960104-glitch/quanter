@@ -59,3 +59,5 @@ class TrainingLoopState(BaseModel):
     history: List[RoundSummary] = Field(default_factory=list)
     pending_review: Optional[str] = None
     error: Optional[str] = None
+    universe: Optional[List[str]] = None  # 此 loop 的标的池（跨轮固定），客户端展示"此 loop 的池"用
+    created_at: Optional[str] = None       # 创建时间（created_at 降序排序/展示用）

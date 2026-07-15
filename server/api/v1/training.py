@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from caisen import training_loops_db
 from caisen.training_loop import LoopBusyError
-from server.schemas.training import TrainingStartRequest
+from server.schemas.training import TrainingLoopState, TrainingStartRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/training", tags=["训练 loop"])
@@ -57,12 +57,14 @@ def start_training(body: TrainingStartRequest, request: Request) -> Dict[str, An
     return {"loop_id": loop_id}
 
 
-@router.get("/{loop_id}", summary="loop 状态 + 历史轮次摘要")
+@router.get("/{loop_id}", summary="loop 状态 + 历史轮次摘要", response_model=TrainingLoopState)
 def get_training(loop_id: str) -> Any:
     """直调 training_loops_db.get_loop（纯读，不经 orchestrator）。
 
-    返回的 dict 字段对齐 TrainingLoopState（_row_to_dict 已反序列化 cfg/history）。
-    不存在 → 404。
+    response_model=TrainingLoopState 锁定传输契约：_row_to_dict 返回的原始 dict
+    （含所有 DB 列）经 Pydantic 过滤，只下发 schema 声明的字段——杜绝未来加列
+    自动泄漏到 JSON。返回 dict 字段对齐 TrainingLoopState（_row_to_dict 已反序列化
+    cfg/history）。不存在 → 404。
     """
     loop = training_loops_db.get_loop(loop_id)
     if loop is None:
@@ -77,7 +79,11 @@ def stop_training(loop_id: str, request: Request) -> Dict[str, Any]:
     return {"loop_id": loop_id, "status": "STOPPED"}
 
 
-@router.get("", summary="loop 列表（created_at 降序）")
+@router.get("", summary="loop 列表（created_at 降序）", response_model=List[TrainingLoopState])
 def list_trainings(limit: int = 100) -> List[Any]:
-    """直调 training_loops_db.list_loops（纯读，不经 orchestrator）。"""
+    """直调 training_loops_db.list_loops（纯读，不经 orchestrator）。
+
+    response_model=List[TrainingLoopState] 同 get：每个 row 经 Pydantic 过滤，
+    传输字段集与 schema 锁定一致。
+    """
     return training_loops_db.list_loops(limit=limit)

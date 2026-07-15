@@ -56,15 +56,27 @@ def test_start_rejects_when_busy():
 
 
 def test_get_loop_state(monkeypatch):
-    """get 直调 training_loops_db.get_loop（不经 orchestrator）→ 200 + 状态。"""
+    """get 直调 training_loops_db.get_loop（不经 orchestrator）→ 200 + 状态。
+
+    response_model=TrainingLoopState 锁定契约后：
+    - universe 字段仍可见（schema 已声明，合法下发）。
+    - 未声明字段（如此处的 rogue_col）被 Pydantic 过滤掉，验证 schema 真正生效。
+    """
     monkeypatch.setattr(
         training_api.training_loops_db, "get_loop",
         lambda lid: {"loop_id": lid, "status": "AWAITING_REVIEW",
-                     "current_round": 1, "history": [], "current_cfg": {}})
+                     "current_round": 1, "max_rounds": 20, "history": [], "current_cfg": {},
+                     "universe": ["000001.SZ", "600000.SH"], "created_at": "2026-07-15 10:00:00",
+                     "rogue_col": "SHOULD_BE_FILTERED"})  # 模拟未来加列泄漏
     client = _app_with_fake_orch(MagicMock())
     r = client.get("/api/v1/training/l1")
     assert r.status_code == 200
-    assert r.json()["status"] == "AWAITING_REVIEW"
+    body = r.json()
+    assert body["status"] == "AWAITING_REVIEW"
+    # universe 是 schema 声明的合法字段 → response_model 保留
+    assert body["universe"] == ["000001.SZ", "600000.SH"]
+    # rogue_col 未声明 → response_model 过滤，验证契约锁定（防未来加列自动泄漏）
+    assert "rogue_col" not in body
 
 
 def test_get_loop_not_found(monkeypatch):
@@ -89,7 +101,8 @@ def test_list_loops(monkeypatch):
     """list 直调 training_loops_db.list_loops（不经 orchestrator）→ 200 + 数组。"""
     monkeypatch.setattr(
         training_api.training_loops_db, "list_loops",
-        lambda limit=100: [{"loop_id": "l1", "status": "STOPPED"}])
+        lambda limit=100: [{"loop_id": "l1", "status": "STOPPED",
+                            "current_round": 1, "max_rounds": 20}])
     client = _app_with_fake_orch(MagicMock())
     r = client.get("/api/v1/training")
     assert r.status_code == 200
