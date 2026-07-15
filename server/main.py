@@ -41,6 +41,10 @@ from server.api.v1.trading import router as trading_router
 # 调 caisen_service 编排层 + storage 持久化，异常三类（KeyError→404/ValidationError→422/
 # ValueError→422）路由层转译。NaN 经 StrictJSONResponse 早抛。
 from server.api.v1.caisen import router as caisen_router
+# AI 参数训练 loop 路由（Spec 3 Task 6）：start/get/list/submit_review 四端点，
+# 驱动 orchestrator 状态机（CREATED→RUNNING→ANALYZING→AWAITING_REVIEW→…→DONE）。
+# 钉钉审核进程内调 handler 不走 HTTP；此 router 仅对外暴露状态查询 + 启停 + 审核提交。
+from server.api.v1.training import router as training_router
 # 数据湖资产路由（层级一）：扫描 parquet mtime + 哨兵推导状态，触发同步起 daemon 子进程
 from server.api.v1.data import router as data_router
 # AI 复盘路由（层级六）：GLM 调用 + 三级降级，CPU/网络阻塞走线程池
@@ -91,6 +95,40 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception(
             "lifespan 装配异步回测调度器异常（已忽略，cancel 端点将返 503）"
+        )
+
+    # 启动：训练 loop 编排器 + 参数审查钉钉机器人（Spec 3 Task 7）
+    # Why 寄生 uvicorn（合「零守护进程」哲学）：orchestrator daemon 线程 + review bot stream
+    # 均寄生主进程，非独立 Celery/PM2。与上面 replay_scheduler / data sweep 同源。
+    # Why try/except 不阻断：凭证缺/库异常不应让整个 API 起不来——orchestrator 缺席时 training
+    # API 端点返 503/空状态，但 uvicorn 仍可起（其他业务不受影响）。重启恢复靠 reset_interrupted()
+    # 把残留 RUNNING/ANALYZING → STOPPED（进程崩溃/重启时清理半成品 loop）。
+    # 凭证软降级：REVIEW_* 未配 → _NoopNotifier（loop 可跑但无推送）+ 不起 review bot stream。
+    try:
+        from caisen import training_loops_db
+        from caisen.training_loop import TrainingLoopOrchestrator
+        from caisen.training_dingtalk import (
+            ReviewBotConfig,
+            DingTalkNotifier,
+            _NoopNotifier,
+            start_review_bot,
+        )
+        training_loops_db.init_db()                       # 建 training_loops 表（幂等）
+        training_loops_db.reset_interrupted()             # 重启恢复：残留 RUNNING/ANALYZING → STOPPED
+        _review_cfg = ReviewBotConfig.from_env()          # 凭证齐返 cfg，否则 None
+        _notifier = DingTalkNotifier(_review_cfg) if _review_cfg is not None else _NoopNotifier()
+        app.state.training_orchestrator = TrainingLoopOrchestrator(_notifier)
+        app.state.training_orchestrator.start_daemon()    # daemon 线程跑 _loop 状态机
+        # review bot stream 仅在凭证齐时起（凭证不齐 _NoopNotifier 下不起，软降级）
+        if _review_cfg is not None:
+            app.state.review_bot_task = start_review_bot(app, app.state.training_orchestrator)
+        else:
+            logging.getLogger(__name__).info(
+                "REVIEW_* 凭证未配，参数审查机器人软降级（loop 可跑但无人审推送）"
+            )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan 装配训练 loop 异常（已忽略，training API 将降级）"
         )
 
     # 启动：加载 symbol→企业名映射（#1，Tushare pro.stock_basic 全量，降级返 symbol）
@@ -174,6 +212,17 @@ async def lifespan(app: FastAPI):
     _pool = getattr(app.state, "replay_pool", None)
     if _pool is not None:
         _pool.shutdown(wait=False)
+    # 销毁：训练 loop daemon + review bot stream（Spec 3 Task 7）
+    # Why getattr 防御：lifespan 装配块 try/except 隔离，装配失败时 state 上无此属性；
+    # shutdown 路径必须对「未装配」也安全（不能因 training 装配失败而让整个 shutdown 崩）。
+    # stop_daemon 设 daemon 线程 stop 标志（线程自行退出，不 join 阻塞 uvicorn 退出）；
+    # review_bot_task 是 asyncio.Task，cancel 触发 stream 协作式取消。
+    _orch = getattr(app.state, "training_orchestrator", None)
+    if _orch is not None:
+        _orch.stop_daemon()
+    _rbtask = getattr(app.state, "review_bot_task", None)
+    if _rbtask is not None:
+        _rbtask.cancel()
 
 
 # ============ 创建应用 ============
@@ -216,6 +265,10 @@ app.include_router(trading_router, prefix="/api/v1", dependencies=[Depends(requi
 # ValidationError→422/ValueError→422），算法/IO 异常 service 层已降级返空结果。
 # 含 scan/activate/审核等可触发真实下单流程的端点，路由级鉴权保护。
 app.include_router(caisen_router, prefix="/api/v1", dependencies=[Depends(require_write)])
+# AI 参数训练 loop（Spec 3 Task 7）：start/get/list/submit_review 四端点。
+# 训练提交/审核提交是写操作（落库 + 触发回测子进程），路由级鉴权保护；
+# 钉钉审核 handler 进程内调 orchestrator 不走 HTTP，不受 require_write 限制。
+app.include_router(training_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 # 数据湖资产（层级一）：纯字典注册表 + 文件系统状态推导，零守护进程，不阻断 lifespan
 # sync 端点可起同步子进程/落盘，路由级鉴权保护。
 app.include_router(data_router, prefix="/api/v1", dependencies=[Depends(require_write)])
