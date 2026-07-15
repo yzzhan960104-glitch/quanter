@@ -13,3 +13,11 @@ AI 决策预留 advisor/。本 __init__ re-export 旧顶层路径，保证 ``fro
 from caisen.engines.plan import *  # noqa: F401,F403
 from caisen.engines.risk import *  # noqa: F401,F403
 from caisen.engines.config import StrategyConfig  # noqa: F401
+# Step3.3：optimize training_* 物理迁移后，预先触发 caisen.optimize.training_* 的真实模块
+# 进入 sys.modules，使顶层 caisen.training_* 垫片的 sys.modules 别名在「垫片先于 optimize 包
+# 被导入」的顺序下仍能绑定到同一真实模块对象（否则 from caisen import training_analyzer 会
+# 绑定到垫片壳子，monkeypatch caisen.training_analyzer._call_glm 失效）。与 engines 同模式。
+from caisen.optimize.training_analyzer import *  # noqa: F401,F403
+from caisen.optimize.training_loops_db import *  # noqa: F401,F403
+from caisen.optimize.training_loop import *  # noqa: F401,F403
+from caisen.optimize.training_dingtalk import *  # noqa: F401,F403
