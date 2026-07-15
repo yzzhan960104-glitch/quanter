@@ -156,6 +156,15 @@ def update_loop(loop_id: str, path: Optional[str] = None, **fields) -> None:
     物理意图：编排器每跨一个状态（IDLE→RUNNING→ANALYZING→AWAITING_REVIEW→…）和每轮
     累积 cfg 调整，都通过本函数落库——状态机推进的单一写入点。
 
+    ⚠️ 调用约定（path 必须以关键字参数传递）：
+        path 是位置参数（与 replay_tasks_db 风格一致，不改签名），但调用方若误把
+        状态字串当 path 传，如 `update_loop(id, "RUNNING")`，"RUNNING" 会被 path
+        吞掉、fields 为空 → 函数静默 no-op，状态机不推进——极隐蔽 bug。
+        故调用方传 fields 一律用关键字参数，如：
+            update_loop(id, status="RUNNING")
+            update_loop(id, current_cfg={...})
+        切勿 `update_loop(id, "RUNNING")`。
+
     字段映射规则（白名单防 SQL 注入——列名不参数化，只允许字面列名进 SQL）：
         - current_cfg → current_cfg_json 列（JSON 序列化；唯一需要列名映射的字段）
         - pending_review/error → 同名列，str 直存（已是 JSON 字符串或纯文本），

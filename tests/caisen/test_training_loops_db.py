@@ -55,21 +55,49 @@ def test_update_loop_and_append_history(monkeypatch, tmp_path):
     assert loop["history"][0]["round"] == 1
 
 
-def test_list_active_loops_concurrency_guard(monkeypatch, tmp_path):
+import pytest
+
+
+# 4 个活跃态全列：concurrency=1 守卫核心，任一活跃态漏判会致守卫失效
+# （误放行第二个 loop 或永远阻塞）。此前测试只覆盖 AWAITING_REVIEW 一个态
+# （review finding I3），现参数化覆盖全部 4 个活跃态都进活跃列表。
+_ACTIVE_STATUSES = ["RUNNING", "ANALYZING", "AWAITING_REVIEW", "CONFIRMING"]
+
+
+@pytest.mark.parametrize("active_status", _ACTIVE_STATUSES)
+def test_list_active_loops_concurrency_guard(monkeypatch, tmp_path, active_status):
+    """活跃态守卫：每个活跃态 loop 都应进活跃列表；IDLE/STOPPED 不在列。
+
+    每个参数化 case 各起独立 tmp DB（pytest fixture 隔离），造一个该活跃态 loop + 一个
+    IDLE loop + 一个 STOPPED loop，断言 list_active_loops 只返回那一个活跃态 loop。
+    """
     _use_tmp_db(monkeypatch, tmp_path)
     training_loops_db.init_db()
-    a = training_loops_db.create_loop(
+    active_loop = training_loops_db.create_loop(
         {"start": "2020-01-01", "end": "2024-12-31", "base_cfg": {}, "max_rounds": 3})
-    b = training_loops_db.create_loop(
+    idle_loop = training_loops_db.create_loop(
         {"start": "2020-01-01", "end": "2024-12-31", "base_cfg": {}, "max_rounds": 3})
-    assert training_loops_db.list_active_loops() == []   # 两个都 IDLE
-    training_loops_db.update_loop(a, status="AWAITING_REVIEW")
+    stopped_loop = training_loops_db.create_loop(
+        {"start": "2020-01-01", "end": "2024-12-31", "base_cfg": {}, "max_rounds": 3})
+    # 起步全 IDLE → 空列表（守卫放行）
+    assert training_loops_db.list_active_loops() == []
+    # 把 active_loop 推到目标活跃态；另两个分别停在 IDLE / 推到 STOPPED
+    training_loops_db.update_loop(active_loop, status=active_status)
+    training_loops_db.update_loop(stopped_loop, status="STOPPED")  # STOPPED 不是活跃态
     active = training_loops_db.list_active_loops()
-    assert len(active) == 1 and active[0]["loop_id"] == a
+    # 守卫核心断言：活跃列表有且仅有 active_loop，idle/stopped 都不在列
+    assert len(active) == 1
+    assert active[0]["loop_id"] == active_loop
+    assert active[0]["status"] == active_status
 
 
 def test_reset_interrupted(monkeypatch, tmp_path):
-    """重启恢复：RUNNING/ANALYZING 残留 → STOPPED；AWAITING_REVIEW/STOPPED 不动。"""
+    """重启恢复：RUNNING/ANALYZING 残留 → STOPPED；AWAITING_REVIEW/CONFIRMING/STOPPED 不动。
+
+    全局约束："AWAITING_REVIEW/CONFIRMING 不动"——这两个是人审/确认中态，跨重启应保留
+    （已花掉的回测+解析算力不能丢）。此前测试只验了 AWAITING_REVIEW，CONFIRMING 态漏覆盖
+    （review finding I2）。这里补一个 CONFIRMING loop，断言 reset 后它仍为 CONFIRMING。
+    """
     _use_tmp_db(monkeypatch, tmp_path)
     training_loops_db.init_db()
     running = training_loops_db.create_loop(
@@ -78,11 +106,16 @@ def test_reset_interrupted(monkeypatch, tmp_path):
         {"start": "2020-01-01", "end": "2024-12-31", "base_cfg": {}, "max_rounds": 3})
     awaiting = training_loops_db.create_loop(
         {"start": "2020-01-01", "end": "2024-12-31", "base_cfg": {}, "max_rounds": 3})
+    confirming = training_loops_db.create_loop(
+        {"start": "2020-01-01", "end": "2024-12-31", "base_cfg": {}, "max_rounds": 3})
     training_loops_db.update_loop(running, status="RUNNING")
     training_loops_db.update_loop(analyzing, status="ANALYZING")
     training_loops_db.update_loop(awaiting, status="AWAITING_REVIEW")
+    training_loops_db.update_loop(confirming, status="CONFIRMING")
     n = training_loops_db.reset_interrupted()
     assert n == 2   # 仅 RUNNING/ANALYZING 被重置
     assert training_loops_db.get_loop(running)["status"] == "STOPPED"
     assert training_loops_db.get_loop(running)["error"] == "进程重启中断"
+    assert training_loops_db.get_loop(analyzing)["status"] == "STOPPED"  # ANALYZING 也在重置集
     assert training_loops_db.get_loop(awaiting)["status"] == "AWAITING_REVIEW"  # 不动
+    assert training_loops_db.get_loop(confirming)["status"] == "CONFIRMING"  # I2: CONFIRMING 不动
