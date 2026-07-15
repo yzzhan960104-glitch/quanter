@@ -47,8 +47,11 @@ def get_pro():
     global _token_index
     tokens = _proxy_tokens()
     if tokens:
-        token = tokens[_token_index % len(tokens)]
-        _token_index += 1
+        # 固定用 token[0]：实测多 token 权限不一（token[1] 对 ths_daily/index_weight/
+        # fund_*/daily_info 等大批接口「无权限」），轮询会间歇撞到权限不全的 token 致
+        # 全量下载随机失败。多 token 冗余需所有 token 权限等同才有意义——如需轮询，
+        # 先确保 .env 各 token 权限一致，再恢复 _token_index 轮询。
+        token = tokens[0]
         import tnskhdata as ts  # 代理：API 兼容 tushare，token 直传 pro_api
         return ts.pro_api(token)
     # 回退直连 tushare（TUSHARE_TOKEN，积分可能不足，仅兜底）
@@ -80,8 +83,8 @@ def ensure_token() -> str:
     global _token_index
     tokens = _proxy_tokens()
     if tokens:
-        token = tokens[_token_index % len(tokens)]
-        _token_index += 1
+        # 固定 token[0]，理由同 get_pro（多 token 权限不一，轮询致间歇失败）
+        token = tokens[0]
         import tnskhdata as ts
         ts.set_token(token)
         return token

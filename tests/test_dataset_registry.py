@@ -302,9 +302,9 @@ def fake_pro(monkeypatch):
     return fake
 
 
-# 原始宏观指标 8 数据集 key（LAKE_CONFIG key 与 TUSHARE_DATASETS key 一致）
+# 原始宏观指标 7 数据集 key（B 类合并后：szse/sse → mkt_daily 一个）
 MACRO_RAW_KEYS = ("cn_cpi", "cn_ppi", "cn_gdp", "cn_pmi", "shibor", "shibor_quote",
-                  "szse_daily", "sse_daily")
+                  "mkt_daily")
 
 
 def test_macro_source_changed_to_tushare():
@@ -321,19 +321,14 @@ def test_macro_source_changed_to_tushare():
 
 
 def test_macro_lakes_registered():
-    """8 个原始宏观指标湖必须在 LAKE_CONFIG['lakes'] 注册（前端可视 + reader 寻址）。
+    """7 个原始宏观指标湖必须在 LAKE_CONFIG['lakes'] 注册（前端可视 + reader 寻址）。
 
     What：cn_cpi/cn_ppi/cn_gdp/cn_pmi/shibor/shibor_quote 走 single+datetime 落 DatetimeIndex；
-          szse_daily/sse_daily 走 by=date 落 MultiIndex。8 湖均已在 Task 3-5 注册到
-          LAKE_CONFIG + TUSHARE_DATASETS，本测试守卫「不漏湖」。
-
-    Why key 用 szse_daily/sse_daily（非 mkt_daily_*）：LAKE_CONFIG 的 key 与 TUSHARE_DATASETS
-    key 一致（单一真相源），仅 lake 路径文件名用 mkt_daily_*.parquet（语义：市场宽度统计，
-    区别于个股 daily 湖）。brief 草稿写 mkt_daily_szse/mkt_daily_sse 是把「路径文件名」误当「key」，
-    此处按真相修正：断言 key 存在 + 路径文件名含 mkt_daily_。
+          mkt_daily 走 by=date 落 MultiIndex。B 类合并后（szse/sse → daily_info 合为 mkt_daily）
+          共 7 湖，本测试守卫「不漏湖 + 旧 szse/sse 已删」。
 
     Why 同时补 DATASET_REGISTRY 守卫：Task 3-5 只注册了 TUSHARE_DATASETS + LAKE_CONFIG（同步器 +
-    reader 用），DATASET_REGISTRY 缺元信息 → 前端表格看不到这 8 个资产。本测试一并钉死 DATASET_REGISTRY
+    reader 用），DATASET_REGISTRY 缺元信息 → 前端表格看不到这些资产。本测试一并钉死 DATASET_REGISTRY
     注册（与 Task 11 股票类对等：source=Tushare + market=宏观 + granularity + freshness_hours）。
     """
     for key in MACRO_RAW_KEYS:
@@ -351,11 +346,14 @@ def test_macro_lakes_registered():
         # 5) 必备字段完备（前端表格每列反射）
         for f in ("source", "market", "granularity", "script", "freshness_hours"):
             assert f in DATASET_REGISTRY[key], f"{key} DATASET_REGISTRY 缺字段 {f}"
-    # 交易所统计湖路径文件名必须含 mkt_daily_（区别于个股 daily 湖，防混淆）
-    assert "mkt_daily_szse" in LAKE_CONFIG["lakes"]["szse_daily"], \
-        "szse_daily 湖路径文件名应含 mkt_daily_szse（市场宽度统计语义）"
-    assert "mkt_daily_sse" in LAKE_CONFIG["lakes"]["sse_daily"], \
-        "sse_daily 湖路径文件名应含 mkt_daily_sse（市场宽度统计语义）"
+    # 交易所统计湖路径文件名必须含 mkt_daily（B 类合并后沪深合一，区别于个股 daily 湖）
+    assert "mkt_daily" in LAKE_CONFIG["lakes"]["mkt_daily"], \
+        "mkt_daily 湖路径文件名应含 mkt_daily（市场宽度统计语义）"
+    # 旧 szse_daily/sse_daily 湖必须已删（合并入 mkt_daily）
+    assert "szse_daily" not in LAKE_CONFIG["lakes"], "szse_daily 湖应删（合并入 mkt_daily）"
+    assert "sse_daily" not in LAKE_CONFIG["lakes"], "sse_daily 湖应删（合并入 mkt_daily）"
+    assert "szse_daily" not in DATASET_REGISTRY, "szse_daily 资产应删（合并入 mkt_daily）"
+    assert "sse_daily" not in DATASET_REGISTRY, "sse_daily 资产应删（合并入 mkt_daily）"
 
 
 # —— CreditRegime.compute 返值规则核实（core/macro_regime.py:133-171，构造方向性数据依据）——

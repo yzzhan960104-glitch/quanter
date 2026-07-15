@@ -142,6 +142,11 @@ def sync_dataset(key: str, start: str, end: str,
     传 key + 区间，分页细节由 cfg["by"] 决定。新增数据集零新增分支代码。
     """
     cfg = TUSHARE_DATASETS[key]
+    # 不可用数据集跳过（B 类·方法名错订正）：tnskhdata 代理对部分接口无支持
+    # （如 concept），配置层标 _unavailable 后此处检测跳过，不下载/不报错，打印提示。
+    if cfg.get("_unavailable"):
+        logger.warning("⚠️ %s 跳过同步（不可用）：%s", key, cfg["_unavailable"])
+        return
     api = cfg["api"]
     by = cfg["by"]
     date_col = cfg["date_col"]
@@ -186,11 +191,16 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
     # 避免 5000+ 标的逐个打日志。debug 级别默认不输出，仅排查时开启。
     if (cfg or {}).get("quota_type") == "special":
         logger.debug("%s 为特色数据（300/分独立通道，限流仍走统一 rate_limiter）", key)
+    # code_param：逐标的拉取时传给 API 的参数名（缺省 ts_code）。
+    # Why 显式配置：多数 Tushare 接口按 ts_code 拉标的，但部分接口参数名不同（如
+    # index_weight 用 index_code 拉指数成分权重）。缺省 ts_code 兼容既有数据集，仅
+    # 需改参数名的数据集在配置层声明 code_param，零改框架分支。
+    code_param = (cfg or {}).get("code_param", "ts_code")
     for ts_code in symbols:
         shard = os.path.join(shard_dir, f"{ts_code}.parquet")
         if resume and os.path.exists(shard):
             continue
-        kwargs = {"ts_code": ts_code, "start_date": sd, "end_date": ed}
+        kwargs = {code_param: ts_code, "start_date": sd, "end_date": ed}
         if fields:
             kwargs["fields"] = fields
         df = _fetch_with_guard(api, **kwargs)

@@ -9,14 +9,15 @@
 - **季/月/日频 format 推断**：_sync_single 按字符串形态分流（含 'Q' → PeriodIndex；
   6 位 → %Y%m；8 位 → %Y%m%d），format 错配会静默产出 NaT → dropna 清空整表。本测试
   守卫月频（cn_cpi month=YYYYMM）+ 季频（cn_gdp quarter=YYYYQ1）两条分支。
-- **交易所日级统计**：szse_daily/sse_daily by=date（市场级时序，symbol_col=trade_date，
-  symbol 层恒等于交易日），落 MultiIndex(date, symbol)，区别于宏观 single 的 DatetimeIndex。
+- **交易所日级统计**：mkt_daily（B 类合并：szse/sse → daily_info）by=date（市场级时序，
+  symbol_col=trade_date，symbol 层恒等于交易日），落 MultiIndex(date, symbol)，区别于宏观
+  single 的 DatetimeIndex。
 
 fixture 复制说明：与 test_tushare_datasets_etf.py 同——完整复制 autouse
 _isolate_tushare_registry + fake_pro fixture（conftest 未抽取，文件级作用域）。
 
-注：szse_daily/sse_daily 的 LAKE_CONFIG key 与 TUSHARE_DATASETS key 一致（szse_daily/sse_daily），
-仅 lake 路径用 mkt_daily_*.parquet（单一真相源：LAKE_CONFIG[key]==TUSHARE_DATASETS[key]['lake']）。
+注：mkt_daily 的 LAKE_CONFIG key 与 TUSHARE_DATASETS key 一致（mkt_daily），lake 路径
+mkt_daily.parquet（单一真相源：LAKE_CONFIG[key]==TUSHARE_DATASETS[key]['lake']）。
 """
 import copy
 import pandas as pd
@@ -91,9 +92,12 @@ def test_macro_cpi_ppi_gdp_pmi_registered():
         assert cfg["index_mode"] == "datetime", \
             f"{key} index_mode 必须为 datetime（宏观湖 DatetimeIndex）"
     # date_col 口径：月频 month / 季频 quarter（前视红线：宏观无 end_date，发布日即生效）
+    # ⚠️ cn_pmi 例外：API 返大写 MONTH 列（非小写 month），date_col=MONTH。
     assert TUSHARE_DATASETS["cn_gdp"]["date_col"] == "quarter", "cn_gdp 季频 date_col=quarter"
-    for key in ("cn_cpi", "cn_ppi", "cn_pmi"):
+    for key in ("cn_cpi", "cn_ppi"):
         assert TUSHARE_DATASETS[key]["date_col"] == "month", f"{key} 月频 date_col=month"
+    assert TUSHARE_DATASETS["cn_pmi"]["date_col"] == "MONTH", \
+        "cn_pmi 月频 date_col=MONTH（API 返大写列名，区别于 cn_cpi/ppi 的小写 month）"
 
 
 def test_shibor_datasets_registered():
@@ -106,30 +110,39 @@ def test_shibor_datasets_registered():
         assert cfg["date_col"] == "date", f"{key} date_col 应为 date"
 
 
-def test_szse_sse_daily_by_date_registered():
-    """szse_daily/sse_daily by=date 契约（市场级时序，date_col/symbol_col 均 trade_date）。"""
-    for key in ("szse_daily", "sse_daily"):
-        assert key in TUSHARE_DATASETS, f"{key} 未注册"
-        cfg = TUSHARE_DATASETS[key]
-        assert cfg["by"] == "date", f"{key} by 应为 date"
-        assert cfg["date_col"] == "trade_date", f"{key} date_col 应为 trade_date"
-        assert cfg["symbol_col"] == "trade_date", \
-            f"{key} symbol_col 应为 trade_date（市场级，无个股 symbol）"
-        # 不应有 index_mode（by=date 走 _build_multiindex，非 _sync_single）
-        assert "index_mode" not in cfg, f"{key} by=date 不应声明 index_mode"
+def test_mkt_daily_by_date_registered():
+    """mkt_daily（B 类合并：szse/sse → daily_info）by=date 契约（市场级时序，
+    date_col/symbol_col 均 trade_date）。
+
+    Why 合并：tnskhdata 无 szse_daily/sse_daily 方法，Tushare 真实接口 daily_info 返沪深
+    两市（exchange 列区分），原两数据集合并为 mkt_daily。旧 szse_daily/sse_daily key 必删。
+    """
+    assert "mkt_daily" in TUSHARE_DATASETS, "mkt_daily 未注册（B 类合并后）"
+    cfg = TUSHARE_DATASETS["mkt_daily"]
+    assert cfg["by"] == "date", "mkt_daily by 应为 date"
+    assert cfg["api"] == "daily_info", "mkt_daily api 应为 daily_info"
+    assert cfg["date_col"] == "trade_date", "mkt_daily date_col 应为 trade_date"
+    assert cfg["symbol_col"] == "trade_date", \
+        "mkt_daily symbol_col 应为 trade_date（市场级，无个股 symbol）"
+    assert "index_mode" not in cfg, "mkt_daily by=date 不应声明 index_mode"
+    # 旧 szse_daily/sse_daily 必须已删（B 类合并订正）
+    assert "szse_daily" not in TUSHARE_DATASETS, "szse_daily 应删除（合并入 mkt_daily）"
+    assert "sse_daily" not in TUSHARE_DATASETS, "sse_daily 应删除（合并入 mkt_daily）"
 
 
 def test_macro_lakes_registered():
-    """8 个宏观湖必须在 LAKE_CONFIG['lakes'] 注册且路径与 TUSHARE_DATASETS 一致。
+    """7 个宏观湖必须在 LAKE_CONFIG['lakes'] 注册且路径与 TUSHARE_DATASETS 一致。
 
-    注：szse_daily/sse_daily 的 LAKE_CONFIG key 用数据集名（szse_daily/sse_daily），
-    lake 路径用 mkt_daily_*.parquet——单一真相源 LAKE_CONFIG[key]==TUSHARE_DATASETS[key]['lake']。
+    注：B 类合并后 szse_daily/sse_daily 两湖合为 mkt_daily 一个（daily_info 接口返沪深两市）。
     """
     for key in ("cn_cpi", "cn_ppi", "cn_gdp", "cn_pmi", "shibor", "shibor_quote",
-                "szse_daily", "sse_daily"):
+                "mkt_daily"):
         assert key in LAKE_CONFIG["lakes"], f"{key} 未注册到 LAKE_CONFIG['lakes']"
         assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
             f"{key} LAKE_CONFIG 路径与 TUSHARE_DATASETS 不一致（单一真相源）"
+    # 旧 szse_daily/sse_daily 湖 key 必须已删（合并入 mkt_daily）
+    assert "szse_daily" not in LAKE_CONFIG["lakes"], "szse_daily 湖应删除（合并入 mkt_daily）"
+    assert "sse_daily" not in LAKE_CONFIG["lakes"], "sse_daily 湖应删除（合并入 mkt_daily）"
 
 
 def test_cn_cpi_lake_datetime_index(tmp_path, fake_pro, monkeypatch):
@@ -137,9 +150,12 @@ def test_cn_cpi_lake_datetime_index(tmp_path, fake_pro, monkeypatch):
 
     Why 端到端契约：_sync_single + index_mode=datetime 必须把 month 列解析为
     pd.DatetimeIndex 并 set_index。月频 YYYYMM 格式需 format 推断（非 %Y%m%d）。
+
+    ⚠️ 真实列对齐：删幻觉 yty_yoy（真实城镇同比为 town_yoy），含 nt_val/town_yoy。
     """
     fake_pro.set("cn_cpi", pd.DataFrame({
-        "month": ["202401", "202402"], "nt_yoy": [0.5, -0.3], "nt_mom": [0.1, 0.2]}))
+        "month": ["202401", "202402"], "nt_val": [100.5, 99.7],
+        "nt_yoy": [0.5, -0.3], "nt_mom": [0.1, 0.2], "town_yoy": [0.6, -0.2]}))
     monkeypatch.setitem(TUSHARE_DATASETS["cn_cpi"], "lake",
                         str(tmp_path / "cpi.parquet"))
     import data.tushare_sync as ts
@@ -183,28 +199,36 @@ def test_shibor_lake_datetime_index(tmp_path, fake_pro, monkeypatch):
     assert "1y" in df.columns
 
 
-def test_szse_daily_by_date(tmp_path, fake_pro, monkeypatch):
-    """szse_daily by=date：市场级时序，落 MultiIndex(date, symbol)，symbol=trade_date。
+def test_mkt_daily_by_date(tmp_path, fake_pro, monkeypatch):
+    """mkt_daily（daily_info）by=date：市场级时序，落 MultiIndex(date, symbol)，symbol=trade_date。
 
     Why monkeypatch _trade_days：by=date 走 _sync_by_date → _trade_days(start,end)，
     不 patch 会触达真实 trade_cal 网络。单日 mock 守卫 _build_multiindex 对
     symbol_col=trade_date 的处理（symbol 层恒等于 trade_date 字符串）。
+
+    ⚠️ 真实列对齐：daily_info 返 trade_date/ts_code/ts_name/com_count/total_share/
+    float_share/total_mv/float_mv/pe/exchange 等（沪深两市，exchange 列区分）。
     """
     import data.tushare_sync as ts
     monkeypatch.setattr(ts, "_trade_days", lambda s, e: ["20240105"])
-    fake_pro.set("szse_daily", pd.DataFrame({
-        "trade_date": ["20240105"], "issuer_num": [2000], "sec_num": [2500],
-        "total_share": [2e12], "total_value": [3e12], "pe": [20.5]}))
-    monkeypatch.setitem(TUSHARE_DATASETS["szse_daily"], "lake",
-                        str(tmp_path / "szse.parquet"))
-    monkeypatch.setitem(TUSHARE_DATASETS["szse_daily"], "shard_dir",
-                        str(tmp_path / "shards_szse"))
-    ts.sync_dataset("szse_daily", "2024-01-05", "2024-01-05", resume=False)
-    df = pd.read_parquet(TUSHARE_DATASETS["szse_daily"]["lake"])
-    assert df.index.names == ["date", "symbol"], "szse_daily 索引名错"
+    # daily_info：单日返沪深两市两条（exchange 区分）
+    fake_pro.set("daily_info", pd.DataFrame({
+        "trade_date": ["20240105", "20240105"], "ts_code": ["SSE", "SZSE"],
+        "ts_name": ["上海", "深圳"], "com_count": [2000, 2500],
+        "total_share": [4e12, 2e12], "float_share": [3.5e12, 1.8e12],
+        "total_mv": [5e13, 3e13], "float_mv": [4.5e13, 2.5e13],
+        "pe": [15.5, 20.5], "exchange": ["SSE", "SZSE"]}))
+    monkeypatch.setitem(TUSHARE_DATASETS["mkt_daily"], "lake",
+                        str(tmp_path / "mkt_daily.parquet"))
+    monkeypatch.setitem(TUSHARE_DATASETS["mkt_daily"], "shard_dir",
+                        str(tmp_path / "shards_mkt"))
+    ts.sync_dataset("mkt_daily", "2024-01-05", "2024-01-05", resume=False)
+    df = pd.read_parquet(TUSHARE_DATASETS["mkt_daily"]["lake"])
+    assert df.index.names == ["date", "symbol"], "mkt_daily 索引名错"
     # symbol 层恒等于 trade_date（市场级，无个股）
     assert "20240105" in df.index.get_level_values("symbol")
     assert "pe" in df.columns
+    assert "com_count" in df.columns
 
 
 # ---------------------------------------------------------------------------

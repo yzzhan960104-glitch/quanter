@@ -175,13 +175,17 @@ def test_fund_daily_by_symbol_vol_to_volume(tmp_path, fake_pro, monkeypatch):
 
 
 def test_fund_nav_by_symbol(tmp_path, fake_pro, monkeypatch):
-    """fund_nav by=symbol 落 MultiIndex(date, symbol)，date_col=nav_date。"""
+    """fund_nav by=symbol 落 MultiIndex(date, symbol)，date_col=nav_date。
+
+    ⚠️ 真实列对齐：删幻觉 accum_nav_rate，真实列含 ann_date/accum_div/adj_nav。
+    """
     import data.tushare_sync as ts
     fake_pro.set("fund_nav", pd.DataFrame({
         "ts_code": ["510300.SH", "510300.SH"],
+        "ann_date": ["20240105", "20240108"],
         "nav_date": ["20240105", "20240108"],
         "unit_nav": [4.15, 4.25], "accum_nav": [4.15, 4.25],
-        "accum_nav_rate": [0.0, 0.024]}))
+        "accum_div": [0.0, 0.024], "adj_nav": [4.15, 4.27]}))
     monkeypatch.setitem(TUSHARE_DATASETS["fund_nav"], "lake",
                         str(tmp_path / "etf_nav.parquet"))
     monkeypatch.setitem(TUSHARE_DATASETS["fund_nav"], "shard_dir",
@@ -199,12 +203,15 @@ def test_fund_portfolio_by_symbol_ann_date(tmp_path, fake_pro, monkeypatch):
     Why 端到端守卫 ann_date：落湖后 date 索引必须来自 ann_date（公告日），绝不能来自
     end_date（报告期）。本测试注入 ann_date=20240330/end_date=20231231 两列，落湖 date
     索引应为 2024-03-30（公告日）而非 2023-12-31（报告期）——若误用 end_date 索引立即红。
+
+    ⚠️ 真实列对齐：删幻觉 name/stk_value/stk_value_ratio，真实列含 mkv/stk_mkv_ratio/
+    stk_float_ratio（symbol 是重仓股代码）。
     """
     import data.tushare_sync as ts
     fake_pro.set("fund_portfolio", pd.DataFrame({
         "ts_code": ["510300.SH"], "ann_date": ["20240330"], "end_date": ["20231231"],
-        "symbol": ["600519.SH"], "name": ["贵州茅台"], "amount": [1e6],
-        "stk_value": [1.8e9], "stk_value_ratio": [6.5]}))
+        "symbol": ["600519.SH"], "mkv": [1.8e9], "amount": [1e6],
+        "stk_mkv_ratio": [6.5], "stk_float_ratio": [3.2]}))
     monkeypatch.setitem(TUSHARE_DATASETS["fund_portfolio"], "lake",
                         str(tmp_path / "etf_portfolio.parquet"))
     monkeypatch.setitem(TUSHARE_DATASETS["fund_portfolio"], "shard_dir",
@@ -220,13 +227,16 @@ def test_fund_portfolio_by_symbol_ann_date(tmp_path, fake_pro, monkeypatch):
 
 
 def test_fund_share_by_symbol(tmp_path, fake_pro, monkeypatch):
-    """fund_share by=symbol 落 MultiIndex(date, symbol)，date_col=trade_date。"""
+    """fund_share by=symbol 落 MultiIndex(date, symbol)，date_col=trade_date。
+
+    ⚠️ 真实列对齐（结构重写）：删幻觉 share_unissue/total_share/float_share，真实列为
+    fd_share（基金份额）/ fund_type / market。
+    """
     import data.tushare_sync as ts
     fake_pro.set("fund_share", pd.DataFrame({
         "ts_code": ["510300.SH", "510300.SH"],
         "trade_date": ["20240105", "20240108"],
-        "share_unissue": [0.0, 0.0], "total_share": [5e9, 5.1e9],
-        "float_share": [5e9, 5.1e9]}))
+        "fd_share": [5e9, 5.1e9], "fund_type": ["ETF", "ETF"], "market": ["E", "E"]}))
     monkeypatch.setitem(TUSHARE_DATASETS["fund_share"], "lake",
                         str(tmp_path / "etf_share.parquet"))
     monkeypatch.setitem(TUSHARE_DATASETS["fund_share"], "shard_dir",
@@ -235,7 +245,7 @@ def test_fund_share_by_symbol(tmp_path, fake_pro, monkeypatch):
                     symbols=["510300.SH"], resume=False)
     df = pd.read_parquet(TUSHARE_DATASETS["fund_share"]["lake"])
     assert df.index.names == ["date", "symbol"], "fund_share 索引名错误"
-    assert len(df) == 2 and "total_share" in df.columns
+    assert len(df) == 2 and "fd_share" in df.columns
 
 
 def test_load_etf_universe_filters_market_eft(fake_pro, monkeypatch):

@@ -215,18 +215,17 @@ LAKE_CONFIG["lakes"] = {
     "fund_nav": "data_lake/etf_nav.parquet",             # ETF 净值（by=symbol，MultiIndex date/symbol）
     "fund_portfolio": "data_lake/etf_portfolio.parquet", # ETF 持仓（by=symbol，date_col=ann_date 防前视）
     "fund_share": "data_lake/etf_share.parquet",         # ETF 份额变动（by=symbol，MultiIndex date/symbol）
-    # Plan C：宏观经济原始指标湖（8 湖独立新建，不复用现有 macro/moneyflow_hsgt 湖——语义不同）
+    # Plan C：宏观经济原始指标湖（独立新建，不复用现有 macro/moneyflow_hsgt 湖——语义不同）
     # shibor/shibor_quote 虽同源但粒度不同（全市场均值 vs 逐报价行），分湖避免覆盖。
-    # szse_daily/sse_daily 的 LAKE_CONFIG key 用数据集名（与 TUSHARE_DATASETS key 一致，单一真相源），
-    # 仅 lake 路径用 mkt_daily_* 前缀（语义：市场宽度统计，区别于个股 daily）。
+    # mkt_daily（B 类合并）：原 szse_daily/sse_daily 两湖合并为一个 mkt_daily
+    # （daily_info 接口返沪深两市，exchange 列区分），单一真相源 LAKE_CONFIG[key]==TUSHARE_DATASETS[key]['lake']。
     "cn_cpi": "data_lake/cn_cpi.parquet",           # CPI 月频原始（DatetimeIndex，tushare_sync 写）
     "cn_ppi": "data_lake/cn_ppi.parquet",           # PPI 月频原始
     "cn_gdp": "data_lake/cn_gdp.parquet",           # GDP 季频原始
     "cn_pmi": "data_lake/cn_pmi.parquet",           # PMI 月频原始
     "shibor": "data_lake/shibor.parquet",           # Shibor 日频均值（DatetimeIndex）
     "shibor_quote": "data_lake/shibor_quote.parquet",  # Shibor 逐报价行明细（DatetimeIndex + bank 数据列）
-    "szse_daily": "data_lake/mkt_daily_szse.parquet",  # 深交所日级成交统计（by=date）
-    "sse_daily": "data_lake/mkt_daily_sse.parquet",    # 上交所日级成交统计（by=date）
+    "mkt_daily": "data_lake/mkt_daily.parquet",  # 交易所日级成交统计（daily_info，沪深合并，by=date）
 }
 LAKE_CONFIG["default_lake"] = "daily"
 
@@ -386,12 +385,10 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "script": "scripts/sync_tushare.py", "schedule": "每日11:00", "freshness_hours": 24},
     "shibor_quote":    {"source": "Tushare", "market": "宏观", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日11:00", "freshness_hours": 24},
-    # —— C 组·交易所成交统计 2（市场宽度，by=date，tushare_sync 写）——
-    # LAKE_CONFIG key=szse_daily/sse_daily（与 TUSHARE_DATASETS 一致），lake 路径用 mkt_daily_*.parquet
-    # （单一真相源：LAKE_CONFIG[key]==TUSHARE_DATASETS[key]['lake']）。
-    "szse_daily":      {"source": "Tushare", "market": "宏观", "granularity": "1d",
-                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
-    "sse_daily":       {"source": "Tushare", "market": "宏观", "granularity": "1d",
+    # —— C 组·交易所成交统计 1（市场宽度，by=date，tushare_sync 写）——
+    # B 类合并：原 szse_daily/sse_daily 两数据集合为 mkt_daily（daily_info 接口返沪深两市，
+    # exchange 列区分）。LAKE_CONFIG key=mkt_daily（与 TUSHARE_DATASETS 一致，单一真相源）。
+    "mkt_daily":       {"source": "Tushare", "market": "宏观", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
 }
 
@@ -428,9 +425,12 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     },
     "fina_cashflow": {
         # 现金流量表（cashflow）：单标的全历史一次返，按 symbol 分页
+        # ⚠️ 事实订正（真 token 探测）：旧 fields 含幻觉列 net_profit_cash_flow /
+        # c_pay_acq_foroth_assets（API 不返回）→ 落湖后全 NaN。真实列见下
+        # （net_profit=净利润现金流影响 / finan_exp=财务费用 / c_fr_sale_sg=销售商品收到的现金）。
         "api": "cashflow", "by": "symbol",
         "date_col": "ann_date", "symbol_col": "ts_code",
-        "fields": "ts_code,ann_date,end_date,net_profit_cash_flow,c_pay_acq_foroth_assets",
+        "fields": "ts_code,ann_date,end_date,net_profit,finan_exp,c_fr_sale_sg",
         "lake": "data_lake/fina_cashflow.parquet",
     },
     "forecast": {
@@ -469,24 +469,32 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     # —— 龙虎榜（top_list/top_inst）：单日全市场，按 date 分页 ——
     # dragon_list 湖切 Tushare（原 akshare 源退役）；top_inst 机构席位单独湖。
     "top_list": {
+        # ⚠️ 事实订正：龙虎榜个股买卖额真实列名是 l_buy / l_sell（非 buy_amount/sell_amount）。
+        # l_amount=龙虎榜成交总额 / net_amount=净额 / amount=全市场成交额。
         "api": "top_list", "by": "date",
         "date_col": "trade_date", "symbol_col": "ts_code",
-        "fields": "ts_code,trade_date,name,close,pct_change,amount,net_amount,buy_amount,sell_amount",
+        "fields": "ts_code,trade_date,name,close,pct_change,amount,net_amount,l_buy,l_sell",
         "lake": "data_lake/dragon_list.parquet",  # 复用 dragon_list 湖（切 Tushare）
     },
     "top_inst": {
+        # ⚠️ 事实订正（结构重写）：config 原误配成 top_list 同款字段，实际 top_inst 是
+        # 「龙虎榜机构席位」明细——exalter=营业部/机构名 / buy,buy_rate=买入额及占比 /
+        # sell,sell_rate=卖出额及占比 / net_buy=净买入 / side=业务侧(E买F卖) / reason=上榜原因。
+        # 无 name/close/pct_change（那些是个股字段，营业部席位明细不返）。
         "api": "top_inst", "by": "date",
         "date_col": "trade_date", "symbol_col": "ts_code",
-        "fields": "ts_code,trade_date,name,close,pct_change,amount,net_amount,buy_amount,sell_amount",
+        "fields": "trade_date,ts_code,exalter,buy,buy_rate,sell,sell_rate,net_buy,side",
         "lake": "data_lake/top_inst.parquet",
     },
     # —— 融资融券（margin/margin_detail/margin_secs）——
     # margin（市场汇总，symbol_col=exchange_id 交易所）/ margin_detail（逐标的 ts_code）：by=date。
     # margin_secs（标的列表快照）：by=single，落扁平 DataFrame（非时序 MultiIndex）。
     "margin": {
+        # ⚠️ 事实订正：删幻觉列 rqchl（市场汇总接口不返回，仅 margin_detail 返），
+        # 新增 rzrqye(融资融券余额)/rqyl(融券余量)——真 token 探测确认的市场级列。
         "api": "margin", "by": "date",
         "date_col": "trade_date", "symbol_col": "exchange_id",
-        "fields": "exchange_id,trade_date,rzye,rzmre,rqye,rqmcl,rzche,rqchl",
+        "fields": "exchange_id,trade_date,rzye,rzmre,rzche,rqye,rqmcl,rzrqye,rqyl",
         "lake": "data_lake/margin.parquet",
     },
     "margin_detail": {
@@ -497,24 +505,29 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     },
     "margin_secs": {
         # 标的列表快照（单次拉全市场不分页）→ single 模式落扁平 DataFrame。
+        # ⚠️ 事实订正：删幻觉列 start_date（API 不返回），真实列为 trade_date+exchange。
         "api": "margin_secs", "by": "single",
-        "date_col": "start_date", "symbol_col": "ts_code",
-        "fields": "ts_code,name,start_date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,name,exchange",
         "lake": "data_lake/margin_secs.parquet",
     },
     # —— 北向资金（hsgt_top10/moneyflow_hsgt）：切 Tushare 替代 akshare sync_north_flow ——
     # hsgt_top10 当日十大成交股（有 ts_code，by=date），复用 north_flow 湖（切源）。
     "hsgt_top10": {
+        # ⚠️ 事实订正：删幻觉列 vol / north_direction（API 不返回）。真实列为
+        # close/change/rank/market_type/amount/net_amount/buy/sell。north_money 在
+        # moneyflow_hsgt 市场级接口里，hsgt_top10 只返个股十大成交明细。
         "api": "hsgt_top10", "by": "date",
         "date_col": "trade_date", "symbol_col": "ts_code",
-        "fields": "trade_date,name,ts_code,vol,amount,north_direction",
+        "fields": "trade_date,ts_code,name,close,rank,amount,net_amount,buy,sell",
         "lake": "data_lake/north_flow.parquet",  # 复用 north_flow 湖（切 Tushare）
     },
     # moneyflow_hsgt 市场级北/南向资金（无个股 symbol）→ single 扁平快照（非 MultiIndex）。
+    # ⚠️ 事实订正：删幻觉列 sgt_ss / sgt_sz（API 只返沪/深股通合计 hgt/sgt，不分沪深细分）。
     "moneyflow_hsgt": {
         "api": "moneyflow_hsgt", "by": "single",
         "date_col": "trade_date", "symbol_col": "trade_date",
-        "fields": "trade_date,ggt_ss,ggt_sz,sgt_ss,sgt_sz,north_money,south_money",
+        "fields": "trade_date,ggt_ss,ggt_sz,hgt,sgt,north_money,south_money",
         "lake": "data_lake/moneyflow_hsgt.parquet",
     },
     # —— 板块/概念（Plan A Task 7）：补 sector 的 Tushare 维度 ——
@@ -522,10 +535,15 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     # date_col 填 code 仅为占位（single 模式 _sync_single 不触碰索引，原样 to_parquet），
     # 概念字典本身是静态参照表，无时序索引语义。
     "concept": {
+        # ⚠️ 事实订正（B 类·方法名错）：tnskhdata 代理无任何概念接口
+        # （concept / stock_concept / concept_detail 均 No such method），本数据集不可下载。
+        # 标 _unavailable 由通用同步器 sync_dataset 检测后跳过并打印提示，不下载/不报错。
+        # 待 akshare 换源（akshare 有概念板块接口）后恢复。
         "api": "concept", "by": "single",
         "date_col": "code", "symbol_col": "code",
         "fields": "code,name",
         "lake": "data_lake/concept.parquet",
+        "_unavailable": "tnskhdata 无概念接口（concept/stock_concept/concept_detail 均 No such method），待 akshare 换源",
     },
     # ths_daily（同花顺板块指数日线）：单日全市场板块行情一次返（ts_code 为板块指数代码如 885572.TI，
     # 非个股）→ by=date 分页。symbol 从 ts_code 列取（Task 1 fix 已保证 by=date 不从文件名取 symbol）。
@@ -560,15 +578,19 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "index_code,con_code,trade_date,weight",
         "lake": "data_lake/index_weight.parquet",
     },
-    # index_member 指数成分股进出记录（纳入/剔除）：by=single 单次拉全量。
-    # date_col=in_date（纳入日）作时间索引候选；symbol_col=con_code（成分股）。
-    # ⚠️ 事实风险：tushare index_member 单次最多返 100 行（分批需循环），by=single 仅落首页 100 行，
-    # 全量成分进出历史需逐 index_code 循环或 offset 分页（本 brief by=single 为最小可用口径，
-    # 全量补数属后续优化）。当前 _sync_single 原样落盘（扁平 df，不重建时间索引）。
+    # index_member 指数成分权重（B 类·方法名错订正）：tnskhdata 无 index_member 方法
+    # （No such method），但 index_weight 方法可用且返回成分股权重。本数据集复用 index_weight
+    # 接口按 symbol（逐指数代码）拉全历史成分权重，date_col=trade_date（权重日，无公告概念，
+    # 无前视风险）。注意：此数据集不再是「成分股进出记录」（in_date/out_date 字段 index_weight
+    # 不返回），而是「成分权重时序」——业务上等价于逐指数的权重历史，与 index_weight
+    # （by=date 全市场当日）区别仅在分页口径（逐指数 vs 逐交易日）。
     "index_member": {
-        "api": "index_member", "by": "single",
-        "date_col": "in_date", "symbol_col": "con_code",
-        "fields": "index_code,con_code,con_name,in_date,out_date",
+        "api": "index_weight", "by": "symbol",
+        "date_col": "trade_date", "symbol_col": "con_code",
+        "fields": "index_code,con_code,trade_date,weight",
+        # code_param=index_code：index_weight 接口按指数代码拉取，参数名是 index_code
+        # （非通用 ts_code），在 _sync_by_symbol 用此参数名传指数代码。
+        "code_param": "index_code",
         "lake": "data_lake/index_member.parquet",
     },
     # —— 股东/解禁/停牌（Plan A Task 10）——
@@ -598,21 +620,27 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # 物理意图：解禁日前后存在系统性抛压（解禁股可流通），是事件驱动/回避策略关键信号。
         # date_col=ann_date（解禁公告日）—— float_date（实际解禁日）可能晚于公告，
         # 用 ann_date 索引保证回测只读到「市场已知」的解禁信息，无前视。
+        # ⚠️ 事实订正：删幻觉列 float_share_share（API 不返回），真实列含 float_ratio
+        # （解禁比例）/ holder_name（持有人）/ share_type（解禁类型）。
         "api": "share_float", "by": "date",
         "date_col": "ann_date", "symbol_col": "ts_code",
-        "fields": "ts_code,ann_date,float_share,float_date,float_share_share",
+        "fields": "ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type",
         "lake": "data_lake/share_float.parquet",
     },
     "suspend_d": {
         # 每日停复牌（suspend_d）：单日全市场一次返，按 date 分页。
-        # 物理意图：停牌期间无法交易，回测撮合层必须据此跳过；停牌原因（重大重组/
-        # 核查）是事件因子。date_col=ann_date（公告日）而非 suspend_date（实际停牌日）——
-        # 公告日是市场最早能预知停牌的时点，用 suspend_date 会把停牌信息「提前」落湖
-        # 造成前视。⚠️ 字段名以 Tushare Pro 官方为准：ann_reason/reason_type，
-        # brief 草稿的 suspend_reason/resume_reason 是旧版字段（已停用）。
+        # 物理意图：停牌期间无法交易，回测撮合层必须据此跳过；停牌时点（早盘/午盘）/
+        # 类型是事件因子。
+        # ⚠️ 事实订正（结构重写）：真 token 探测确认 API 仅返回 4 列
+        # （ts_code, trade_date, suspend_timing, suspend_type），不返回 ann_date /
+        # suspend_date / resume_date / ann_reason / reason_type（旧版字段已停用）。
+        # 前视防护降级：date_col 改 trade_date（停牌日）。理想应用 ann_date（公告日，
+        # 市场最早能预知停牌的时点），但 API 不返回 ann_date，只能用 trade_date（停牌
+        # 当日）——回测在停牌当日开盘前可能尚未感知，存在轻微前视残留，但停牌信息通常
+        # 盘前/盘中即时公告，用 trade_date 作降级索引可接受（停牌当日不撮合即可）。
         "api": "suspend_d", "by": "date",
-        "date_col": "ann_date", "symbol_col": "ts_code",
-        "fields": "ts_code,ann_date,suspend_date,resume_date,ann_reason,reason_type",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,suspend_timing,suspend_type",
         "lake": "data_lake/suspend_d.parquet",
     },
     # ===== ETF 专题（Plan B Task 1-5）：fund_basic/fund_daily/fund_nav/fund_portfolio/fund_share =====
@@ -646,27 +674,35 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # ETF 净值（fund_nav）：单位净值/累计净值，单 ETF 全历史一次返，按 symbol 分页。
         # Why date_col=nav_date：净值披露日（nav_date）即市场可感知净值的确切时点，
         #   无公告滞后前视风险（净值本身是披露产物，nav_date 即公开日）。
+        # ⚠️ 事实订正：删幻觉列 accum_nav_rate（API 不返回）。真实列含 ann_date（公告日）/
+        #   accum_div（累计分红）/ net_asset, total_netasset（净资产）/ adj_nav（复权净值）。
         "api": "fund_nav", "by": "symbol",
         "date_col": "nav_date", "symbol_col": "ts_code",
-        "fields": "ts_code,nav_date,unit_nav,accum_nav,accum_nav_rate",
+        "fields": "ts_code,ann_date,nav_date,unit_nav,accum_nav,accum_div,adj_nav",
         "lake": "data_lake/etf_nav.parquet",
     },
     "fund_portfolio": {
         # ETF 持仓（fund_portfolio）：前十大重仓股，按 symbol 分页。
         # ⚠️ 前视红线：date_col=ann_date（公告日），绝不用 end_date（报告期，如 20231231）。
         #   持仓数据公告滞后（季报/半年报披露窗口），end_date 早于 ann_date 数月，用 end_date 索引
-        #   会在报告期内提前看到持仓构成，构成前视偏差。brief Step 2 曾误用 end_date，Step 3 修正为 ann_date。
+        #   会在报告期内提前看到持仓构成，构成前视偏差。
+        # ⚠️ 事实订正（结构重写）：删幻觉列 name / stk_value / stk_value_ratio（API 不返回）。
+        #   真实列：symbol（重仓股代码）/ mkv（市值）/ stk_mkv_ratio（占股票市值比）/
+        #   stk_float_ratio（占流通股比）。原 stk_value 真实名为 mkv。
         "api": "fund_portfolio", "by": "symbol",
         "date_col": "ann_date", "symbol_col": "ts_code",
-        "fields": "ts_code,ann_date,end_date,symbol,name,amount,stk_value,stk_value_ratio",
+        "fields": "ts_code,ann_date,end_date,symbol,mkv,amount,stk_mkv_ratio,stk_float_ratio",
         "lake": "data_lake/etf_portfolio.parquet",
     },
     "fund_share": {
-        # ETF 份额变动（fund_share）：未流通/总份额/流通份额，按 symbol 分页。
+        # ETF 份额变动（fund_share）：按 symbol 分页。
         # Why date_col=trade_date：份额变动按交易日披露，trade_date 即公开可感知时点。
+        # ⚠️ 事实订正（结构重写）：删幻觉列 share_unissue / total_share / float_share
+        #   （API 不返回）。真实列为 fd_share（基金份额）/ fund_type（基金类型）/
+        #   market（市场）。fd_share 即当日总份额。
         "api": "fund_share", "by": "symbol",
         "date_col": "trade_date", "symbol_col": "ts_code",
-        "fields": "ts_code,trade_date,share_unissue,total_share,float_share",
+        "fields": "ts_code,trade_date,fd_share,fund_type,market",
         "lake": "data_lake/etf_share.parquet",
     },
     # —— C 组·宏观经济原始指标（Plan C Task 3：cn_cpi/ppi/gdp/pmi）——
@@ -678,10 +714,11 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     #   cn_cpi/cn_ppi/cn_pmi 月频 → date_col=month（YYYYMM），format 自动推断见 _sync_single
     #   cn_gdp 季频 → date_col=quarter（YYYYQ1），format 走 %YQ 季度解析分支
     "cn_cpi": {
-        # CPI 月频：nt_yoy 全国同比（核心通胀口径）/ nt_mom 环比 / yty_yoy 城镇同比
+        # CPI 月频：nt_yoy 全国同比（核心通胀口径）/ nt_mom 环比 / nt_val 全国当月值。
+        # ⚠️ 事实订正：删幻觉列 yty_yoy（API 不返回，城镇同比真实名为 town_yoy）。
         "api": "cn_cpi", "by": "single",
         "date_col": "month", "symbol_col": "month",
-        "fields": "month,nt_yoy,nt_mom,yty_yoy",
+        "fields": "month,nt_val,nt_yoy,nt_mom,town_yoy",
         "index_mode": "datetime",
         "lake": "data_lake/cn_cpi.parquet",
     },
@@ -703,10 +740,16 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "lake": "data_lake/cn_gdp.parquet",
     },
     "cn_pmi": {
-        # PMI 月频：制造业采购经理指数（50 为荣枯线）+ business_index_pmi 生产经营预期
+        # PMI 月频：制造业采购经理指数（50 为荣枯线）。
+        # ⚠️ 事实订正（结构重写）：cn_pmi 接口返回的不是中文指标名，而是 PMI 分项编码列。
+        # 旧 fields（month/manufacturing_pmi/business_index_pmi）全是幻觉——API 返回大写
+        # MONTH 列 + PMI010000（制造业 PMI 主指数）等编码列。date_col=MONTH（注意大写，
+        # API 列名如此，format 推断走 6 位月频分支）。fields 仅取核心主指数 PMI010000，
+        # 其余 60+ 分项编码（生产/新订单/库存/从业人员等）按需在下游补取，避免湖膨胀。
+        # 接口参数（start_m/end_m）仍用小写 month 语义（见探测脚本 PARAMS）。
         "api": "cn_pmi", "by": "single",
-        "date_col": "month", "symbol_col": "month",
-        "fields": "month,manufacturing_pmi,business_index_pmi",
+        "date_col": "MONTH", "symbol_col": "MONTH",
+        "fields": "MONTH,PMI010000",
         "index_mode": "datetime",
         "lake": "data_lake/cn_pmi.parquet",
     },
@@ -723,27 +766,29 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     },
     "shibor_quote": {
         # shibor_quote 逐报价行明细：bank 列作数据保留，date_col=date 落 DatetimeIndex
+        # ⚠️ 事实订正（结构重写）：shibor_quote 是双边报价（每个期限拆入 b / 拆出 a 两列），
+        # 非均值。旧 fields（on/1w/...单列）是 shibor 均值湖的字段，误抄过来。真实列为
+        # 各期限的 _b（拆入）/ _a（拆出）双列。date_col=date 落 DatetimeIndex。
         "api": "shibor_quote", "by": "single",
         "date_col": "date", "symbol_col": "date",
-        "fields": "date,bank,on,1w,2w,1m,3m,6m,9m,1y",
+        "fields": "date,bank,on_b,on_a,1w_b,1w_a,2w_b,2w_a,1m_b,1m_a,3m_b,3m_a,6m_b,6m_a,9m_b,9m_a,1y_b,1y_a",
         "index_mode": "datetime",
         "lake": "data_lake/shibor_quote.parquet",
     },
-    # —— C 组·交易所成交统计（Plan C Task 5：szse_daily/sse_daily）——
+    # —— C 组·交易所成交统计（Plan C Task 5，B 类合并订正：szse_daily/sse_daily → mkt_daily）——
     # 物理意图：交易所日级市值/PE/挂牌数是市场宽度（breadth）指标，宏观择时辅助。
-    # by=date：单日全市场汇总（无个股 symbol），date_col/symbol_col 均为 trade_date
-    # （市场级时序，落 MultiIndex(date, symbol) 但 symbol 层恒等于 trade_date，符合 by=date 契约）。
-    "szse_daily": {
-        "api": "szse_daily", "by": "date",
+    # ⚠️ 事实订正（B 类·方法名错 + 合并）：tnskhdata 无 szse_daily / sse_daily 方法
+    # （均 No such method），Tushare 真实接口是 daily_info（全市场交易所日级统计，含沪深两市，
+    # 由 exchange 列区分）。原两个数据集合并为一个 mkt_daily（api=daily_info），按 date 分页。
+    # daily_info 单日全市场汇总（ts_code=交易所代码如 SSE/SZSE），date_col/symbol_col 均
+    # trade_date（市场级时序，落 MultiIndex(date, symbol) 但 symbol 层恒等于 trade_date）。
+    # 真实列见 fields（com_count=上市公司数 / total_mv=总市值 / float_mv=流通市值 /
+    # trans_count=成交笔数 / pe=市盈率 / tr=换手率 / exchange=交易所）。
+    "mkt_daily": {
+        "api": "daily_info", "by": "date",
         "date_col": "trade_date", "symbol_col": "trade_date",
-        "fields": "trade_date,issuer_num,sec_num,total_share,total_value,pe",
-        "lake": "data_lake/mkt_daily_szse.parquet",
-    },
-    "sse_daily": {
-        "api": "sse_daily", "by": "date",
-        "date_col": "trade_date", "symbol_col": "trade_date",
-        "fields": "trade_date,issuer_num,sec_num,total_share,total_value,pe",
-        "lake": "data_lake/mkt_daily_sse.parquet",
+        "fields": "trade_date,ts_code,ts_name,com_count,total_share,float_share,total_mv,float_mv,pe,exchange",
+        "lake": "data_lake/mkt_daily.parquet",
     },
     # —— D 组·特色筹码（Plan A Task 9：cyq_perf，300/分独立通道）——
     # 物理意图：cyq_perf 是筹码分布及胜率（cost_5/15/50/85/95 五档成本 + weight_avg 平均成本
@@ -759,9 +804,11 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     #   Why 不按 300/分放宽：特色数据为低频批量任务，统一限流器已足够且与常规数据集
     #   共享桶，避免按通道各建一桶导致的阈值失真与复杂度膨胀。
     "cyq_perf": {
+        # ⚠️ 事实订正：五档成本列真实名为 cost_5pct/cost_15pct/cost_50pct/cost_85pct/cost_95pct
+        # （非 cost_5/cost_15/...，旧名是缩写幻觉，API 返回全名带 pct 后缀）。
         "api": "cyq_perf", "by": "symbol",
         "date_col": "trade_date", "symbol_col": "ts_code",
-        "fields": "ts_code,trade_date,his_low,his_high,cost_5,cost_15,cost_50,cost_85,cost_95,weight_avg,winner_rate",
+        "fields": "ts_code,trade_date,his_low,his_high,cost_5pct,cost_15pct,cost_50pct,cost_85pct,cost_95pct,weight_avg,winner_rate",
         "lake": "data_lake/cyq_perf.parquet",
         "quota_type": "special",  # 特色数据：300/分独立通道（纯日志标记，限流仍走统一 rate_limiter）
     },
