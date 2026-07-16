@@ -63,12 +63,13 @@ class TrainingLoopOrchestrator:
     # ---- 公开 API ----
     @property
     def active_loop_id(self) -> Optional[str]:
-        """当前活跃 loop_id（供 ReviewChatbotHandler 把 @消息路由到正确 loop）。
+        """当前活跃 loop_id（供 dws 桥把 @审核消息路由到正确 loop）。
 
-        物理定位：钉钉 stream handler 收到 @此机器人的消息时，需确定"喂给哪个 loop 的
-        submit_review"。concurrency=1 下同时只一个活跃 loop，取 list_active_loops 首个即可；
-        无活跃 loop 返 None（handler 据此忽略，防误触）。直接查 DB 而非缓存内存值——
-        保证多入口（API start / handler 收消息）看到的活跃态一致，避免内存态与 DB 漂移。
+        物理定位：@审核消息经 dws dev connect 桥（dingtalk_review_bridge.py →
+        POST /api/v1/training/review → orchestrator.submit_review）进来时，需确定"喂给
+        哪个 loop 的 submit_review"。concurrency=1 下同时只一个活跃 loop，取 list_active_loops
+        首个即可；无活跃 loop 返 None（dws 桥据此忽略，防误触）。直接查 DB 而非缓存内存值——
+        保证多入口（API start / dws 桥收消息）看到的活跃态一致，避免内存态与 DB 漂移。
         """
         active = training_loops_db.list_active_loops()
         return active[0]["loop_id"] if active else None

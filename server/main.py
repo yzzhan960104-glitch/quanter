@@ -97,13 +97,15 @@ async def lifespan(app: FastAPI):
             "lifespan 装配异步回测调度器异常（已忽略，cancel 端点将返 503）"
         )
 
-    # 启动：训练 loop 编排器 + 参数审查钉钉机器人（Spec 3 Task 7）
-    # Why 寄生 uvicorn（合「零守护进程」哲学）：orchestrator daemon 线程 + review bot stream
-    # 均寄生主进程，非独立 Celery/PM2。与上面 replay_scheduler / data sweep 同源。
+    # 启动：训练 loop 编排器 + webhook 推报告 notifier（Spec 3 Task 7）
+    # Why 寄生 uvicorn（合「零守护进程」哲学）：orchestrator daemon 线程寄生主进程，
+    # 非独立 Celery/PM2。与上面 replay_scheduler / data sweep 同源。
+    # （dws-migration Task 4 后不再起 dingtalk-stream 审核机器人；@审核改走 dws 桥，
+    # 见下方装配块注释。）
     # Why try/except 不阻断：凭证缺/库异常不应让整个 API 起不来——orchestrator 缺席时 training
     # API 端点返 503/空状态，但 uvicorn 仍可起（其他业务不受影响）。重启恢复靠 reset_interrupted()
     # 把残留 RUNNING/ANALYZING → STOPPED（进程崩溃/重启时清理半成品 loop）。
-    # 凭证软降级：REVIEW_* 未配 → _NoopNotifier（loop 可跑但无推送）+ 不起 review bot stream。
+    # 凭证软降级：REVIEW_* 未配 → _NoopNotifier（loop 可跑但无推送）。
     try:
         from caisen import training_loops_db
         from caisen.training_loop import TrainingLoopOrchestrator
@@ -111,7 +113,6 @@ async def lifespan(app: FastAPI):
             ReviewBotConfig,
             DingTalkNotifier,
             _NoopNotifier,
-            start_review_bot,
         )
         training_loops_db.init_db()                       # 建 training_loops 表（幂等）
         training_loops_db.reset_interrupted()             # 重启恢复：残留 RUNNING/ANALYZING → STOPPED
@@ -119,13 +120,9 @@ async def lifespan(app: FastAPI):
         _notifier = DingTalkNotifier(_review_cfg) if _review_cfg is not None else _NoopNotifier()
         app.state.training_orchestrator = TrainingLoopOrchestrator(_notifier)
         app.state.training_orchestrator.start_daemon()    # daemon 线程跑 _loop 状态机
-        # review bot stream 仅在凭证齐时起（凭证不齐 _NoopNotifier 下不起，软降级）
-        if _review_cfg is not None:
-            app.state.review_bot_task = start_review_bot(app, app.state.training_orchestrator)
-        else:
-            logging.getLogger(__name__).info(
-                "REVIEW_* 凭证未配，参数审查机器人软降级（loop 可跑但无人审推送）"
-            )
+        # @审核消息已改走 dws dev connect 桥（dingtalk_review_bridge.py →
+        # POST /api/v1/training/review），不再在此起 dingtalk-stream 审核机器人。
+        # 此处仅装配 webhook 推报告 notifier + orchestrator daemon，@接收由 dws 桥负责。
     except Exception:
         logging.getLogger(__name__).exception(
             "lifespan 装配训练 loop 异常（已忽略，training API 将降级）"
@@ -212,17 +209,14 @@ async def lifespan(app: FastAPI):
     _pool = getattr(app.state, "replay_pool", None)
     if _pool is not None:
         _pool.shutdown(wait=False)
-    # 销毁：训练 loop daemon + review bot stream（Spec 3 Task 7）
+    # 销毁：训练 loop daemon（Spec 3 Task 7）。@审核 stream 已在 dws-migration Task 4 删除，
+    # 不再有 review_bot_task 需要 cancel，shutdown 仅停 orchestrator daemon 线程。
     # Why getattr 防御：lifespan 装配块 try/except 隔离，装配失败时 state 上无此属性；
     # shutdown 路径必须对「未装配」也安全（不能因 training 装配失败而让整个 shutdown 崩）。
-    # stop_daemon 设 daemon 线程 stop 标志（线程自行退出，不 join 阻塞 uvicorn 退出）；
-    # review_bot_task 是 asyncio.Task，cancel 触发 stream 协作式取消。
+    # stop_daemon 设 daemon 线程 stop 标志（线程自行退出，不 join 阻塞 uvicorn 退出）。
     _orch = getattr(app.state, "training_orchestrator", None)
     if _orch is not None:
         _orch.stop_daemon()
-    _rbtask = getattr(app.state, "review_bot_task", None)
-    if _rbtask is not None:
-        _rbtask.cancel()
 
 
 # ============ 创建应用 ============
