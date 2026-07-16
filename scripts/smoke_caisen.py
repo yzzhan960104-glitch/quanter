@@ -154,16 +154,19 @@ def _build_detections_w_bottom() -> pd.DataFrame:
 
 
 def _inject_price_data(price_data: Dict[str, pd.DataFrame]) -> None:
-    """注入合成 price_data 到 data.price_loader.load_price_data（模拟生产 data_lake）。
+    """注入合成 price_data（模拟生产 data_lake）。
 
     物理意图：生产 data_lake 未接入时 load_price_data 返空 dict（run_scan 降级
     返空列表）；脚本注入合成 W 底序列，让 screener 能命中候选，验证 scan 端到端连通。
 
-    Step4e：_load_price_data 已从 caisen_service 抽到 data/price_loader.py（单源真理），
-    facade.scan 内部调 data.price_loader.load_price_data，故注入点改 data.price_loader。
+    注入点说明（Step4e 订正）：facade.py 顶部 `from data.price_loader import
+    load_price_data as _load_price_data_fn` 是【名字绑定】——import 时即捕获引用，
+    运行时 patch data.price_loader.load_price_data 不会更新 facade 的绑定（注入失效）。
+    故须直接 patch facade 的绑定名 _load_price_data_fn，facade._load_price_data 转发
+    时才能拿到 mock。这是 smoke 脚本自负其责的注入方式（facade 实现不动）。
     """
-    import data.price_loader as pl
-    pl.load_price_data = lambda symbols, date: price_data
+    import caisen.facade as facade_mod
+    facade_mod._load_price_data_fn = lambda symbols, date: price_data
 
 
 # ---------------------------------------------------------------------------
