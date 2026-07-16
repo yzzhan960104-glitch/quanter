@@ -354,6 +354,8 @@ class TestTimeoutExitSemantics:
         # entry_day=0；T+1(=1) 回踩触发（low<=10 且 high>=9.8）；其后收盘 9.9 缓慢阴跌。
         # entry_price=10.0；close=9.9 → profit=(9.9-10)/10=-0.01 < threshold 0.01 → 砍亏。
         # 全程不触止损(8.0)/止盈(12/14)。
+        # cfg: max_holding_bars=3 < trailing_activation_bars=5（默认），故 trailing 未激活，
+        # 超时点（持仓第3天 bars_held=3≥max_holding_bars=3）先于 trailing 触发 → timeout。
         closes = [10.5, 9.9] + [9.9] * 8
         highs = [11.0, 10.2] + [10.1] * 8
         lows = [10.0, 9.7] + [9.8] * 8
@@ -362,7 +364,8 @@ class TestTimeoutExitSemantics:
              "volume": [100] * 10, "amount": [1e8] * 10},
             index=pd.RangeIndex(10),
         )
-        hit = _simulate_one_trade(df, plan, entry_day=0, max_holding_bars=3)
+        cfg = StrategyConfig(max_holding_bars=3)
+        hit = _simulate_one_trade(df, plan, entry_day=0, cfg=cfg)
         assert hit is not None, "回踩应触发成交"
         assert hit["exit_reason"] == "timeout", (
             f"超时浮亏应 timeout 砍亏（B-3），实际 {hit['exit_reason']}"
@@ -385,6 +388,7 @@ class TestTimeoutExitSemantics:
             timeout_exit_threshold=0.01, shares=100, metadata={},
         )
         # 超时点收盘 10.2 → profit=(10.2-10)/10=0.02 ≥ 0.01 → 不砍亏，持有到末尾 still_open。
+        # cfg: max_holding_bars=3 < trailing_activation_bars=5（默认），trailing 未激活。
         closes = [10.5, 10.0] + [10.2] * 8
         highs = [11.0, 10.3] + [10.3] * 8
         lows = [10.0, 9.8] + [10.1] * 8
@@ -393,10 +397,115 @@ class TestTimeoutExitSemantics:
              "volume": [100] * 10, "amount": [1e8] * 10},
             index=pd.RangeIndex(10),
         )
-        hit = _simulate_one_trade(df, plan, entry_day=0, max_holding_bars=3)
+        cfg = StrategyConfig(max_holding_bars=3)
+        hit = _simulate_one_trade(df, plan, entry_day=0, cfg=cfg)
         assert hit is not None
         # 浮盈达标不砍亏 → 不应是 timeout（持有到末尾 still_open）
         assert hit["exit_reason"] != "timeout", "浮盈≥阈值不应砍亏"
+
+
+# ---------------------------------------------------------------------------
+# 3.6 Step4b 单源化：回测经 check_exit 离场 + 移动止盈（trailing）行为验证
+# ---------------------------------------------------------------------------
+class TestStep4bCheckExitSingleSource:
+    """Step4b 离场单源真理 + 回测引入移动止盈（用户决策）。
+
+    背景：Step4b 前回测 _simulate_one_trade 用独立内联离场逻辑（无移动止盈），
+    与实盘 check_exit（有移动止盈）构成双源真理。Step4b 抽 check_exit 至
+    caisen.engines.exit_logic，回测改调它——回测与实盘共用同一离场判定函数，
+    且引入移动止盈（trailing_to_breakeven 默认 True）。
+
+    用户决策（已确认）：接受回测结果变化（旧调优数据失效，换回测真实反映实盘）。
+
+    本测试类守护：
+      1) 单源同对象：_simulate_one_trade 经 caisen.engines.exit_logic.check_exit 离场
+         （源码层 is 同对象断言 + 行为层经 trailing 验证 check_exit 被实际调用）；
+      2) trailing 行为在回测中生效：持仓≥trailing_activation_bars 且浮亏时，
+         stop 上移至 entry，后续 K 线在 entry 处触发 stop_loss（而非持有到原 stop/超时）。
+    """
+
+    def test_simulate_uses_check_exit_single_source(self):
+        """_simulate_one_trade 经 caisen.engines.exit_logic.check_exit 离场（单源 is 断言）。
+
+        断言：caisen.engines.exit_logic.check_exit 与 caisen.infra.execution.check_exit
+        是同一函数对象（Step4b 抽出后 re-export 仅引用未复制）。这是「单源真理」的
+        源码层守护——任何路径取到的 check_exit 都指向 caisen/engines/exit_logic.py
+        的唯一实现。
+        """
+        from caisen.engines.exit_logic import check_exit as engine_check_exit
+        from caisen.infra.execution import check_exit as infra_check_exit
+        from caisen.execution import check_exit as legacy_check_exit   # 顶层垫片路径
+
+        assert engine_check_exit is infra_check_exit, (
+            "check_exit 双源：engines/exit_logic 与 infra/execution 不同源（re-export 应仅引用）"
+        )
+        assert engine_check_exit is legacy_check_exit, (
+            "check_exit 双源：engines/exit_logic 与 caisen.execution 顶层垫片不同源"
+        )
+
+    def test_simulate_trailing_activates_in_backtest(self):
+        """回测经 check_exit 引入移动止盈：持仓≥5天浮亏时 stop 上移至 entry，提前止损。
+
+        场景（max_holding_bars=15 > trailing_activation_bars=5，确保 trailing 先于超时）：
+            entry=10.0, stop=8.0（< entry），持仓后 close=9.5 缓慢阴跌（浮亏 5%）。
+            持仓 1-4 天：bars_held<5，trailing 未激活，stop=8.0，low 9.3>8 不触发止损；
+            持仓 5 天（bars_held=5≥trailing_activation_bars=5）：trailing 激活，
+              check_exit 把 stop 上移至 entry(10.0)，new_stop=10.0；
+              low=9.3 ≤ 上移后 stop=10.0 → 触发 STOP_LOSS（按 entry=10.0 记，rr=0）。
+
+        关键断言（用户决策引入的回测行为变化）：
+            - exit_reason == "stop_loss"（trailing 上移后在 entry 处止损，非 timeout/原 stop）；
+            - exit_price == pytest.approx(10.0)（上移后的 entry 止损价，非原 stop 8.0）；
+            - exit 发生在持仓第 5 天（trailing 激活日），而非持有到 max_holding_bars=15。
+
+        Step4b 前（内联离场无 trailing）：本场景会持有到 pos=15 超时砍亏（exit_reason=timeout，
+        exit_price=9.5，rr 负）。trailing 引入后变为 entry 处止损（rr≈0）——更早离场锁定本金，
+        这是用户接受的「回测对齐实盘」行为变化。
+        """
+        from caisen.backtest_replay import _simulate_one_trade
+        from caisen.plan import TradePlan
+
+        plan = TradePlan(
+            plan_id="trail", symbol="Z.SZ", pattern_type="w_bottom",
+            formed_at=pd.Timestamp("2024-01-01"),
+            breakout_price=10.0, neckline_price=10.0, bottom_price=8.0, H=2.0,
+            entry_upper=10.0, entry_lower=9.8,
+            stop_loss=8.0, take_profit=12.0, take_profit_2x=14.0,
+            rr_ratio=1.0, valid_until=pd.Timestamp("2024-01-05"),
+            max_holding_until=pd.Timestamp("2024-02-01"),
+            timeout_exit_threshold=0.01, shares=100, metadata={},
+        )
+        # T+1(=1) 回踩触发（low<=10 且 high>=9.8）；其后 close=9.5 阴跌浮亏。
+        # low=9.3 全程 > 原 stop 8.0（不触发原止损），< entry 10.0（trailing 激活后触发）。
+        # high=9.8 全程 < take_profit 12（不触发止盈）。故唯一可能离场 = trailing 激活后止损。
+        n = 20
+        closes = [10.5, 9.8] + [9.5] * (n - 2)
+        highs = [11.0, 10.2] + [9.8] * (n - 2)
+        lows = [10.0, 9.7] + [9.3] * (n - 2)
+        df = pd.DataFrame(
+            {"close": closes, "high": highs, "low": lows,
+             "volume": [100] * n, "amount": [1e8] * n},
+            index=pd.RangeIndex(n),
+        )
+        # max_holding_bars=15 > trailing_activation_bars=5（默认），确保 trailing 先于超时
+        cfg = StrategyConfig(max_holding_bars=15)
+        hit = _simulate_one_trade(df, plan, entry_day=0, cfg=cfg)
+        assert hit is not None, "回踩应触发成交"
+
+        # —— trailing 引入的核心行为变化 ——
+        assert hit["exit_reason"] == "stop_loss", (
+            f"trailing 激活后应在 entry 处 stop_loss 离场，实际 {hit['exit_reason']}。"
+            f"若为 timeout 则 trailing 未生效（check_exit 未被调用或 trailing 配置错误）。"
+        )
+        # exit_price 应为上移后的 entry（10.0），非原 stop（8.0）
+        assert hit["exit_price"] == pytest.approx(10.0, abs=1e-6), (
+            f"trailing 上移后止损价应为 entry=10.0，实际 {hit['exit_price']}"
+        )
+        # 持仓应在 trailing 激活日（持仓第 5 天 = pos=5，entry_pos=0，bars_held=5）离场
+        assert hit["holding_bars"] == 5, (
+            f"trailing 应在持仓≥trailing_activation_bars=5 首日（bars_held=5）触发，"
+            f"实际 holding_bars={hit['holding_bars']}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +710,7 @@ class TestReplayPerfAndReuse:
                 if sig == last_sig:
                     continue
                 last_sig = sig
-                hit = _simulate_one_trade(df, p, T, cfg.max_holding_bars)
+                hit = _simulate_one_trade(df, p, T, cfg)
                 if hit is not None:
                     manual_entries.append((hit["entry_day"], round(hit["entry_price"], 4)))
         manual_entries = sorted(manual_entries)

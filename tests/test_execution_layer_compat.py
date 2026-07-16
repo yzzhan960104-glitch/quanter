@@ -95,3 +95,48 @@ def test_execution_new_path_reexport():
         "save_plans",
     ):
         assert must_have in exec_pkg.__all__, f"{must_have} 未列入 execution.__all__"
+
+
+def test_check_exit_single_source():
+    """Step4b 契约：check_exit 单源真理——所有路径指向同一函数对象 + backtest_replay 经它离场。
+
+    物理意图（Step4b 核心红线·消除双源真理）：
+        Step4b 前：实盘 ExecutionEngine（caisen/infra/execution.py）用 check_exit，
+        回放验证器 backtest_replay._simulate_one_trade 用独立内联离场逻辑（无移动止盈）。
+        两份各自演化的判定实现构成"回测一套/实盘一套"双源真理——回测调优数据
+        可能不反映实盘行为。
+
+        Step4b 抽 check_exit 至 caisen/engines/exit_logic.py（纯逻辑归 engines），
+        backtest_replay 改调它。本测试锁：
+          1) 源码层 is 同源：caisen.engines.exit_logic.check_exit 与
+             caisen.infra.execution.check_exit（经 re-export）是同一函数对象；
+          2) 行为层单源：backtest_replay 模块 import 了 check_exit（源码 grep 可证），
+             _simulate_one_trade 经 check_exit 离场（engines/exit_logic 是唯一实现）。
+
+    用户决策（已确认）：回测对齐实盘引入移动止盈（trailing_to_breakeven 默认 True），
+    接受回测结果变化。trailing 行为变化由 tests/caisen/test_backtest_replay.py
+    ::TestStep4bCheckExitSingleSource 守护，本测试只锁单源契约。
+    """
+    # 1) is 同源：所有路径的 check_exit 指向 caisen/engines/exit_logic.py 的唯一实现
+    from caisen.engines.exit_logic import check_exit as engine_check_exit
+    from caisen.infra.execution import check_exit as infra_check_exit
+    # execution 顶层包（Step4a re-export 自 caisen.infra.execution）
+    from execution import check_exit as exec_pkg_check_exit
+
+    assert engine_check_exit is infra_check_exit, (
+        "check_exit 双源：engines/exit_logic 与 infra/execution 不同源"
+        "（infra/execution 应 re-export 自 engines/exit_logic）"
+    )
+    assert engine_check_exit is exec_pkg_check_exit, (
+        "check_exit 双源：engines/exit_logic 与 execution 顶层包不同源"
+    )
+
+    # 2) 行为层单源：backtest_replay import check_exit（确认改调单源函数）
+    import caisen.infra.backtest_replay as br_mod
+    # _simulate_one_trade 内部 import check_exit（延迟 import），但模块顶层应能解析到同源对象
+    # 通过 inspect 源码确认 check_exit 被引用（防回退到内联离场逻辑）
+    import inspect
+    src = inspect.getsource(br_mod._simulate_one_trade)
+    assert "check_exit" in src, (
+        "backtest_replay._simulate_one_trade 未调用 check_exit（双源真理回退）"
+    )

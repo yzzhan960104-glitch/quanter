@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Optional
 
 import pandas as pd
@@ -200,15 +201,16 @@ def replay(
                 continue
 
             # —— 对每个 plan 模拟 T+1 回踩成交 + 后续离场 ——
-            # 注：传 cfg.max_holding_bars 用于基于位置的持仓超时判定（RangeIndex 下
-            # plan.max_holding_until 的 Timestamp 会失真，故用位置计数更稳健）。
+            # 注：传 cfg 入 _simulate_one_trade，供 check_exit 读 trailing/max_holding/
+            # timeout_threshold（Step4b 单源化：离场判定统一调 check_exit，cfg 显式传，
+            # 不再隐式取 StrategyConfig 默认——确保调用方 cfg 的 trailing 设置生效）。
             for p in plans:
                 # 去重：同形态（neckline+bottom 不变）连续 T 日只模拟首次
                 sig = (round(p.neckline_price, 6), round(p.bottom_price, 6))
                 if sig == last_sig:
                     continue
                 last_sig = sig   # 标记该形态已处理（无论成交与否，后续重复跳过）
-                hit = _simulate_one_trade(df, p, T, cfg.max_holding_bars)
+                hit = _simulate_one_trade(df, p, T, cfg)
                 if hit is not None:
                     all_hits.append(hit)
         # symbol 处理完：进度上报（每 50 个 + 收尾一次），供异步任务观测完成百分比
@@ -256,14 +258,16 @@ def replay(
 # ---------------------------------------------------------------------------
 # 离场模拟（简化版：单笔全平，不做分级止盈/部分成交——Phase 3 完整状态机负责）
 # ---------------------------------------------------------------------------
-def _simulate_one_trade(df: pd.DataFrame, p, entry_day, max_holding_bars: int) -> Optional[dict]:
+def _simulate_one_trade(df: pd.DataFrame, p, entry_day, cfg) -> Optional[dict]:
     """对单个 TradePlan 模拟 T+1 回踩成交 + 后续止盈/止损/时间止损离场。
 
     参数：
-        df:               完整价格 DataFrame（含 T 及之后所有日，用于推进离场模拟）。
-        p:                TradePlan（含 entry/stop/take_profit/take_profit_2x）。
-        entry_day:        形态形成日 T（index label）。
-        max_holding_bars: 最大持仓周期（交易日数，从 entry_pos 起计）。
+        df:        完整价格 DataFrame（含 T 及之后所有日，用于推进离场模拟）。
+        p:         TradePlan（含 entry/stop/take_profit/take_profit_2x）。
+        entry_day: 形态形成日 T（index label）。
+        cfg:       StrategyConfig（check_exit 读 trailing_to_breakeven/
+                   trailing_activation_bars/max_holding_bars/timeout_exit_threshold；
+                   timeout_exit_threshold 实际优先取 plan 字段，见下方 cfg_view）。
 
     返回：
         命中 dict（含 formed_at/entry_price/exit_price/exit_reason/rr/holding_bars），
@@ -272,13 +276,21 @@ def _simulate_one_trade(df: pd.DataFrame, p, entry_day, max_holding_bars: int) -
     离场逻辑（逐日推进，优先级：stop_loss > take_profit_2x > take_profit > timeout）：
         T+1：若 low≤entry_upper 且 high≥entry_lower → 成交（entry_price=entry_upper）；
              同日若触 stop/take_profit_2x 则当日离场（保守：先判 stop，防日内闪崩）；
-        T+2..：逐日判 stop_loss（先）→ take_profit_2x → take_profit；
+        T+2..：逐日调 check_exit 判离场（移动止盈激活后 stop 上移至 entry 锁定本金）；
         超 max_holding_bars 且浮盈 < timeout_exit_threshold：时间止损砍亏（按当日 close 平）；
         若序列末尾仍未离场：still_open（按末根 close 记浮盈 rr）。
 
-    注：max_holding 用位置计数（entry_pos + max_holding_bars），不依赖 plan.max_holding_until
+    【Step4b 单源】离场判定统一调 caisen.engines.exit_logic.check_exit，消除与实盘
+    ExecutionEngine 的双源真理。引入移动止盈（trailing_to_breakeven 默认 True，用户
+    决策）：持仓 ≥ trailing_activation_bars(默认5) 且 stop<entry 时，check_exit 把判定
+    用 stop 上移至 entry，本循环据此更新本地 cur_stop（止损只上移），后续 K 线用上移
+    后的 stop 判定 → 浮亏单会在 entry 处提前止损离场（而非持有到原 stop 或超时）。
+    这是用户明确接受的回测行为变化（换回测真实反映实盘，旧调优数据失效）。
+
+    注：max_holding 用位置计数（entry_pos + cfg.max_holding_bars），不依赖 plan.max_holding_until
     的 Timestamp——RangeIndex 下 Timestamp 会失真，位置计数对任意 index 类型都稳健。
     """
+    max_holding_bars = cfg.max_holding_bars
     idx = df.index
     # entry_day 在 index 中的位置
     try:
@@ -302,6 +314,16 @@ def _simulate_one_trade(df: pd.DataFrame, p, entry_day, max_holding_bars: int) -
     entry_price = p.entry_upper
 
     # —— 后续逐日推进离场判定（T+1 当日也可离场，T+2..）——
+    # 【Step4b 单源】离场判定统一调 check_exit（caisen.engines.exit_logic），
+    # 消除回测独立离场逻辑与实盘的双源真理。check_exit 优先级链与原内联一致
+    # （stop_loss > take_profit_2x > take_profit > timeout），并引入移动止盈
+    # （trailing_to_breakeven 默认 True，用户决策——回测对齐实盘，接受回测结果变化）：
+    # 持仓 ≥ trailing_activation_bars(默认5) 且 stop<entry 时，check_exit 把判定用
+    # stop 上移至 entry（盈亏平衡），返回 new_stop=entry。本循环据此更新 cur_stop
+    # （止损只上移），后续 K 线用上移后的 stop 判定，使浮亏单提前在 entry 处止损离场
+    # （而非持有到原 stop 或超时）——这是用户接受的回测行为变化（更真实反映实盘）。
+    from caisen.engines.exit_logic import check_exit, ExitAction, ExitReason
+
     exit_price = None
     exit_reason = None
     exit_pos = None
@@ -309,49 +331,76 @@ def _simulate_one_trade(df: pd.DataFrame, p, entry_day, max_holding_bars: int) -
     # 基于位置的 max_holding 超时点（entry_pos + max_holding_bars，稳健于任意 index 类型）
     max_hold_pos = entry_pos + max_holding_bars
 
+    # 移动止盈本地状态：check_exit 激活 trailing 后返回 new_stop，本循环据此更新判定用
+    # 的 stop_loss（只上移）。p.stop_loss 是 TradePlan 不可变字段，故用 cur_stop 本地副本
+    # 跟踪上移，不污染原始 plan（同标的同 plan 不复用，故无副作用）。
+    cur_stop = p.stop_loss
+    # check_exit 读 cfg 的 trailing_to_breakeven / trailing_activation_bars /
+    # max_holding_bars / timeout_exit_threshold 四字段。trailing/max_holding 取入参 cfg
+    # （调用方 replay() 传入的 StrategyConfig，显式传——确保 trailing 设置生效，不隐式取默认）；
+    # timeout_exit_threshold 沿用 plan 字段（B-3 同口径：plan 自带阈值优先）。
+    # 用 SimpleNamespace 构造轻量 cfg 视图（仅暴露 check_exit 需要的四字段，清晰显式）。
+    cfg_view = SimpleNamespace(
+        trailing_to_breakeven=cfg.trailing_to_breakeven,
+        trailing_activation_bars=cfg.trailing_activation_bars,
+        max_holding_bars=max_holding_bars,   # cfg.max_holding_bars（位置计数用）
+        timeout_exit_threshold=p.timeout_exit_threshold,
+    )
+
     for pos in range(next_pos, len(idx)):
         row = df.iloc[pos]
         high = float(row["high"])
         low = float(row["low"])
         close = float(row["close"])
 
-        # 优先级 1：stop_loss（日内触及止损 → 立即平，记亏）
-        # 物理意图：止损是硬风控，优先于止盈（防日内闪崩穿止损后反弹的假象）。
-        if low <= p.stop_loss:
-            exit_price = p.stop_loss
+        # bars_held：从成交日起的持仓交易日数（T+1 成交 = bars_held 从 1 起计）
+        bars_held = pos - entry_pos
+
+        # check_exit 入参：pos dict（字段名适配 TradePlan→dict）+ bar dict
+        pos_dict = {
+            "entry": entry_price,
+            "stop": cur_stop,                    # 本地副本（移动止盈可能上移）
+            "take_profit": p.take_profit,
+            "take_profit_2x": p.take_profit_2x,
+        }
+        bar_dict = {"high": high, "low": low, "close": close}
+
+        decision = check_exit(pos_dict, bar_dict, bars_held=bars_held, cfg=cfg_view)
+
+        # —— 移动止盈：new_stop 有值 → 上移本地 cur_stop（止损只上移）——
+        # 注：trailing 激活当日 check_exit 可能同时返回 CLOSE（stop 上移后当根 low≤新 stop
+        # 即触发止损）。故无论 HOLD 还是 CLOSE，只要有 new_stop 就先上移 cur_stop，
+        # 确保 STOP_LOSS 的 exit_price 按上移后的止损价记（entry，盈亏平衡）。
+        if decision.new_stop is not None and decision.new_stop > cur_stop:
+            cur_stop = decision.new_stop   # 上移，后续判定/离场价用新 stop
+
+        # —— HOLD：继续持有（cur_stop 可能已上移，下一轮用新值）——
+        if decision.action == ExitAction.HOLD:
+            continue
+
+        # —— CLOSE：按 reason 决定 exit_price + 记录离场 ——
+        if decision.reason == ExitReason.STOP_LOSS:
+            exit_price = cur_stop          # 止损按（可能上移后的）止损价记
             exit_reason = "stop_loss"
-            exit_pos = pos
-            break
-
-        # 优先级 2：take_profit_2x（第二波满足主止盈位 → 平，记大盈）
-        # 物理意图：第二波满足是主要止盈目标，先于第一波检查（更优离场）。
-        if high >= p.take_profit_2x:
-            exit_price = p.take_profit_2x
+        elif decision.reason == ExitReason.TAKE_PROFIT:
+            # check_exit 不区分第一波/第二波，回退到 bar 触及的最优档判定 exit_price：
+            # 第二波先于第一波（与原内联优先级一致）——若 high≥2x 取 2x 价（大盈），
+            # 否则取第一波 take_profit 价。
+            if p.take_profit_2x is not None and high >= p.take_profit_2x:
+                exit_price = p.take_profit_2x
+            else:
+                exit_price = p.take_profit
             exit_reason = "take_profit"
-            exit_pos = pos
-            break
-
-        # 优先级 3：take_profit（第一波满足 → 平，记盈，简化单笔全平）
-        if high >= p.take_profit:
-            exit_price = p.take_profit
-            exit_reason = "take_profit"
-            exit_pos = pos
-            break
-
-        # 优先级 4：时间止损砍亏（持仓达 max_holding_bars 且浮盈 < timeout_exit_threshold → 离场）
-        # 【B-3 修复】与实盘 check_exit（execution.py:142-148）完全对齐：百分比分母
-        # (close-entry)/entry + profit<threshold→离场（砍亏）。
-        # 旧实现用 R 分母 unrealized>=threshold→锁盈是错误的：与实盘运算符/分母/意图全反，
-        # 且让超时浮亏单永不实现（继续持有到末尾记 still_open），系统性虚高回测胜率/盈亏比，
-        # 可能放行实盘亏损策略通过上线 gate。现统一为「超时浮盈不足即砍亏」的行业惯例。
-        if pos >= max_hold_pos:
-            profit = (close - entry_price) / entry_price   # 百分比，与 check_exit 同口径
-            if profit < p.timeout_exit_threshold:
-                exit_price = close
-                exit_reason = "timeout"
-                exit_pos = pos
-                break
-            # 浮盈 ≥ threshold：未达砍亏条件，继续持有
+        elif decision.reason == ExitReason.TIMEOUT:
+            exit_price = close              # 时间止损按当日 close 平
+            exit_reason = "timeout"
+        else:
+            # 兜底：reason=NONE 但 action=CLOSE 不应发生（check_exit 不会这样返回），
+            # 防御性按 close 记（不中断回测）。
+            exit_price = close
+            exit_reason = "timeout"
+        exit_pos = pos
+        break
 
     # —— 序列末尾仍未离场 → still_open（按末根 close 记浮盈）——
     if exit_price is None:
