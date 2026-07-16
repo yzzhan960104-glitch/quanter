@@ -65,9 +65,11 @@ def init_db(path: Optional[str] = None) -> None:
         )
 
 
-# 活跃 loop 状态集合（concurrency=1 守卫据此判定是否已有活跃 loop，正常 ≤1）。
-# 不含 IDLE/STOPPED/COMPLETED（这些不算"在跑"）；不含 AWAITING_REVIEW 之外的等待态。
-_ACTIVE_STATUSES = ("RUNNING", "ANALYZING", "AWAITING_REVIEW", "CONFIRMING")
+# 活跃 loop 状态集合（concurrency=1 守卫 + daemon 扫描推进都据此）。
+# 含 IDLE：daemon 首轮点火 IDLE→RUNNING 必须扫到 IDLE（2026-07-16 真跑暴露：原不含
+# IDLE 致 loop 卡 IDLE 永不推进，_step_once 的 IDLE 分支沦为死代码）。IDLE 也占
+# concurrency 名额（刚提交未启动也算占用，防并发提交多个 loop）。不含 STOPPED/COMPLETED（终态）。
+_ACTIVE_STATUSES = ("IDLE", "RUNNING", "ANALYZING", "AWAITING_REVIEW", "CONFIRMING")
 
 
 def _row_to_dict(row) -> dict:

@@ -29,8 +29,12 @@ from server.services.trading_service import export_trades
 
 logger = logging.getLogger(__name__)
 
-# 智谱 BigModel Chat Completions 端点（GLM-4 系列）
-GLM_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+# LLM 调用端点（2026-07-16 改走 z.ai Anthropic Messages 兼容端点）
+# Why z.ai /api/anthropic 而非智谱官方 open.bigmodel.cn：同一智谱 key 两端点计费池隔离——
+# paas/v4（智谱/OpenAI 格式）走按量余额池（已耗尽 code 1113），而 z.ai 的 /api/anthropic
+# （Anthropic Messages 格式）走「coding plan」订阅额度（实测 glm-5.2 可用）。Claude Code
+# 本身即经此端点跑 glm-5.2，故复用同条有余额的通路。请求格式见 _call_glm。
+GLM_URL = "https://api.z.ai/api/anthropic/v1/messages"
 # CSV/Prompt 截断阈值（防超长上下文 + 控成本）
 _MAX_CSV_CHARS = 8000
 _MAX_PROMPT_TAIL = 4000
@@ -77,23 +81,34 @@ def _assemble_prompt(
 
 
 def _call_glm(prompt: str, api_key: str, model: str, timeout: int = _LLM_TIMEOUT) -> str:
-    """同步调用智谱 GLM Chat Completions，返回模型文本。
+    """同步调用 LLM（z.ai Anthropic Messages 兼容端点）返回模型文本。
 
-    用 urllib 而非 requests/openai SDK：零新依赖，HTTP 细节（header/body/超时）显式可控。
-    任何网络/解析异常向上抛，由 diagnose 捕获走降级。
+    端点路由（2026-07-16）：走 GLM_URL = z.ai /api/anthropic/v1/messages，复用「coding plan」
+    订阅额度（非智谱官方按量余额池，后者已 code 1113 耗尽）。函数签名保持稳定，diagnose /
+    analyze_round / parse_review 等调用方零感知。
+
+    用 urllib（零新依赖，HTTP 细节显式可见）：
+    - 认证双投 x-api-key + Authorization: Bearer：z.ai AUTH_TOKEN 认 Bearer、标准 Anthropic
+      认 x-api-key，双投兼容两套鉴权约定。
+    - anthropic-version 头为 Anthropic 协议必填（2023-06-01）。
+    - max_tokens 必填（Anthropic 协议硬性要求），4096 覆盖训练报告/复盘正文长度。
+    任何网络/解析异常向上抛，由 diagnose / analyze_round / parse_review 捕获走降级。
     """
     body = json.dumps({
         "model": model,
+        "max_tokens": 4096,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
     }).encode("utf-8")
     req = urllib.request.Request(GLM_URL, data=body, method="POST")
+    req.add_header("x-api-key", api_key)
     req.add_header("Authorization", f"Bearer {api_key}")
     req.add_header("Content-Type", "application/json")
+    req.add_header("anthropic-version", "2023-06-01")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    # GLM 标准响应：choices[0].message.content
-    return data["choices"][0]["message"]["content"]
+    # Anthropic Messages 响应：content=[{type:"text", text:"..."}]，取首块文本
+    return data["content"][0]["text"]
 
 
 def _degraded_report(prompt: str, reason: str) -> str:

@@ -61,3 +61,12 @@ class TrainingLoopState(BaseModel):
     error: Optional[str] = None
     universe: Optional[List[str]] = None  # 此 loop 的标的池（跨轮固定），客户端展示"此 loop 的池"用
     created_at: Optional[str] = None       # 创建时间（created_at 降序排序/展示用）
+
+
+class TrainingReviewRequest(BaseModel):
+    """POST /training/review：dws bridge 转发的钉钉@审核文本（统一应用）。
+
+    物理定位：审查应用是「统一应用」，老 dingtalk-stream SDK 收不到@（根因：SDK 代际
+    不匹配），故改走 dws dev connect 收@ → bridge脚本HTTP转发到此 → orchestrator.submit_review。
+    """
+    text: str

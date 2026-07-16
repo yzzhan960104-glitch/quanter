@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from caisen import training_loops_db
 from caisen.training_loop import LoopBusyError
-from server.schemas.training import TrainingLoopState, TrainingStartRequest
+from server.schemas.training import TrainingLoopState, TrainingReviewRequest, TrainingStartRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/training", tags=["训练 loop"])
@@ -55,6 +55,23 @@ def start_training(body: TrainingStartRequest, request: Request) -> Dict[str, An
     except LoopBusyError as exc:
         raise HTTPException(422, str(exc))
     return {"loop_id": loop_id}
+
+
+@router.post("/review", summary="提交人审（dws bridge 转发钉钉@消息→submit_review）")
+def submit_review(body: TrainingReviewRequest, request: Request) -> Dict[str, Any]:
+    """dws dev connect 收到统一应用@消息 → bridge脚本HTTP转发 → orchestrator.submit_review。
+
+    物理定位：审查应用是「统一应用」，老 dingtalk-stream SDK 收不到@（根因：代际不匹配），
+    故改走 dws 桥：dws 用统一应用新机制收@（已实测通）→ scripts/dingtalk_review_bridge.py
+    转发到此端点。端点取当前活跃 loop（concurrency=1），无活跃 → 409。submit_review
+    唤醒 AWAITING_REVIEW，loop 后续 parse+回显+续跑，推送走 webhook（DingTalkNotifier）。
+    """
+    orch = _orch(request)
+    loop_id = orch.active_loop_id
+    if not loop_id:
+        raise HTTPException(409, "当前无活跃训练 loop（无可审核对象）")
+    orch.submit_review(loop_id, body.text)
+    return {"loop_id": loop_id, "received": True}
 
 
 @router.get("/{loop_id}", summary="loop 状态 + 历史轮次摘要", response_model=TrainingLoopState)
