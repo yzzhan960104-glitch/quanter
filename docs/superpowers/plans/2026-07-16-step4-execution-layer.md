@@ -40,7 +40,7 @@
 
 ---
 
-## Phase 4a · execution/ 骨架 + re-export（文件暂不动）
+## Task 4a · execution/ 骨架 + re-export（文件暂不动）
 
 **Files:** Create `execution/__init__.py`
 
@@ -50,7 +50,7 @@
 
 ---
 
-## Phase 4b · check_exit 单源化（消除双源真理·最高风险）
+## Task 4b · check_exit 单源化（消除双源真理·最高风险）
 
 **Files:**
 - Create `caisen/engines/exit_logic.py`（check_exit + ExitDecision/ExitAction/ExitReason 迁入）
@@ -68,7 +68,7 @@
 
 ---
 
-## Phase 4c · ExecutionEngine + replay + storage 物理迁入 execution/
+## Task 4c · ExecutionEngine + replay + storage 物理迁入 execution/
 
 **Files:** `git mv` caisen/infra/{execution,backtest_replay,replay_runs,replay_scheduler,replay_tasks_db,replay_worker,storage}.py → execution/
 
@@ -79,7 +79,7 @@
 
 ---
 
-## Phase 4d · 依赖反转（ExecutionEngine 去 server/trading_service）
+## Task 4d · 依赖反转（ExecutionEngine 去 server/trading_service）
 
 **Files:** Modify `execution/engine.py`（ExecutionEngine）、`server/services/trading_service.py`、可能新建 `execution/executor.py`
 
@@ -96,7 +96,7 @@
 
 ---
 
-## Phase 4e · 反向债/穿透收口 + 垫片清理
+## Task 4e · 反向债/穿透收口 + 垫片清理
 
 **Files:** Modify `caisen/infra/replay_worker.py`（迁后在 execution/replay_worker.py）、`server/api/v1/caisen.py:441`、`server/celery_app.py:44`、`server/services/caisen_service.py`、删 caisen 顶层垫片
 
@@ -107,7 +107,7 @@
 
 ---
 
-## Phase 4f · viz 迁横切 + caisen 收敛终检
+## Task 4f · viz 迁横切 + caisen 收敛终检
 
 **Files:** `git mv` caisen/infra/viz_{static,interactive}.py → viz/；删 caisen/infra（空）
 
