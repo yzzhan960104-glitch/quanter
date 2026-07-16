@@ -140,3 +140,98 @@ def test_check_exit_single_source():
     assert "check_exit" in src, (
         "backtest_replay._simulate_one_trade 未调用 check_exit（双源真理回退）"
     )
+
+
+def test_executor_interface_defined():
+    """Step4d 契约：execution/ 定义 ExecutionExecutor Protocol（依赖反转抽象接口）。
+
+    物理意图（Step4d 核心红线·依赖反转 DIP）：
+        ExecutionEngine 不再依赖 server.trading_service 具体类型，改依赖 execution/ 内部
+        定义的 ExecutionExecutor Protocol（typing.Protocol）。任何提供 get_status +
+        submit_order 鸭子类型的对象均可注入（生产 server.trading_service 模块 / 测试
+        MagicMock / 未来重写的执行核心）。本测试锁：
+          1) execution.execution.interfaces.ExecutionExecutor 存在且是 Protocol 子类；
+          2) execution 顶层包 re-export ExecutionExecutor（新路径 ``from execution import
+             ExecutionExecutor`` 可用）；
+          3) Protocol 声明了 ExecutionEngine 实际调用的两个方法契约（get_status / submit_order）。
+    """
+    # 1) 接口定义存在 + 是 Protocol
+    from execution.interfaces import ExecutionExecutor
+    from typing import Protocol
+    # Protocol 类的基底能通过 __mro__ 或基类检测识别（runtime_checkable 装饰后仍是 Protocol 子类）
+    assert ExecutionExecutor is not None, "ExecutionExecutor 未定义"
+    # typing.Protocol 在 Protocol 子类的基底（直接或间接）
+    bases = ExecutionExecutor.__mro__
+    assert any(b is Protocol or b.__name__ == "Protocol" for b in bases), (
+        "ExecutionExecutor 不是 typing.Protocol 子类（依赖反转抽象未正确定义）"
+    )
+
+    # 2) execution 顶层包 re-export ExecutionExecutor（新路径可用 + __all__ 锁契约）
+    from execution import ExecutionExecutor as ExecFromPkg
+    assert ExecFromPkg is ExecutionExecutor, (
+        "execution.ExecutionExecutor 与 execution.interfaces.ExecutionExecutor 不同源"
+        "（re-export 应引用未复制）"
+    )
+    import execution as exec_pkg
+    assert "ExecutionExecutor" in exec_pkg.__all__, (
+        "ExecutionExecutor 未列入 execution.__all__（抽象接口公开 API 表面未锁）"
+    )
+
+    # 3) Protocol 声明了 ExecutionEngine 调用的两个方法契约
+    # Protocol 的方法契约落在类 __dict__（Protocol 本身的方法定义，非实例）
+    assert "get_status" in ExecutionExecutor.__dict__, (
+        "ExecutionExecutor 缺 get_status 方法契约（ExecutionEngine 调用面未覆盖）"
+    )
+    assert "submit_order" in ExecutionExecutor.__dict__, (
+        "ExecutionExecutor 缺 submit_order 方法契约（ExecutionEngine 调用面未覆盖）"
+    )
+
+
+def test_execution_no_server_import():
+    """Step4d 契约：execution/ 零 ``import server``（strangler 红线·依赖方向单向）。
+
+    物理意图（Step4d 依赖反转 + design §3.1 单向依赖）：
+        execution/ 执行编排层绝不反向依赖 server/ 应用层。Step4d 反转 ExecutionEngine 对
+        server.trading_service 的依赖为 ExecutionExecutor Protocol 后，engine.py 不再感知
+        server 类型。本测试是 grep 绊线——扫描 execution/ 所有 .py 源码，确保无
+        ``from server...`` / ``import server`` 字样（反向依赖债复发即红）。
+
+    例外（4e 处理，本测试白名单）：
+        execution/replay_worker.py 的 ``from server.services.caisen_service import
+        _load_price_data, _merge_cfg`` 是 Step4 遗留反向债，Task 4e 专项收口。本测试
+        显式排除该文件（标注 4e 待处理），不掩盖——此处只锁 engine.py + 其它 execution
+        模块的 server 零依赖契约。
+    """
+    import os
+    import re
+
+    execution_dir = os.path.join(os.path.dirname(__file__), "..", "execution")
+    execution_dir = os.path.abspath(execution_dir)
+    assert os.path.isdir(execution_dir), f"execution/ 目录不存在：{execution_dir}"
+
+    # 反向 import server 的正则（from server / from server.x / import server / import server.x）
+    server_import_re = re.compile(r"^\s*(from\s+server|import\s+server)\b", re.MULTILINE)
+    # 已知 4e 遗留债白名单（文件相对路径 -> 简短原因）
+    _4E_WHITELIST = {
+        os.path.join("replay_worker.py"): "Step4e 待处理：caisen_service 反向债",
+    }
+
+    violations = []
+    for fname in sorted(os.listdir(execution_dir)):
+        if not fname.endswith(".py"):
+            continue
+        fpath = os.path.join(execution_dir, fname)
+        with open(fpath, "r", encoding="utf-8") as f:
+            src = f.read()
+        for m in server_import_re.finditer(src):
+            reason = _4E_WHITELIST.get(fname)
+            if reason:
+                # 白名单：记录但不视为违规（4e 专项收口）
+                continue
+            violations.append((fname, m.group(0).strip(), src.splitlines()[src[:m.start()].count('\n')]))
+
+    assert not violations, (
+        "execution/ 存在反向依赖 server（strangler 红线破坏）：\n"
+        + "\n".join(f"  {fn}:{ln} -> {line}" for fn, line, ln in violations)
+        + "\n（replay_worker.caisen_service 已白名单 4e 处理；其它必须反转）"
+    )

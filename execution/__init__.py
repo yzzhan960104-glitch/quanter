@@ -43,6 +43,13 @@
 from __future__ import annotations
 
 # ============================================================================
+# 执行器抽象接口（Step4d 依赖反转：ExecutionEngine 依赖此接口非 server.trading_service）
+# ============================================================================
+from .interfaces import (  # noqa: F401
+    ExecutionExecutor,
+)
+
+# ============================================================================
 # 引擎 + 离场纯函数（Step4c 批 A：物理迁入本包 execution/engine.py）
 # ExecutionEngine 状态机 + re-export 自 caisen.engines.exit_logic 的 check_exit（Step4b 单源）。
 # ============================================================================
@@ -142,6 +149,8 @@ from trading.risk_shield import (  # noqa: F401
 # 只列入"稳定执行原语"，私有/内部符号（_ 前缀）不导出。
 # ----------------------------------------------------------------------------
 __all__ = [
+    # 执行器抽象接口（Step4d 依赖反转）
+    "ExecutionExecutor",
     # 引擎 + 离场判定
     "ExecutionEngine",
     "check_exit",

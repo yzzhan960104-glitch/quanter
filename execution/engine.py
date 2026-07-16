@@ -48,7 +48,15 @@ from __future__ import annotations
 
 import logging
 
-from caisen import storage
+# —— Step4d 依赖反转：storage 改直 import execution.storage（消除 ``from caisen import
+#    storage`` 对 caisen 包的绕路，4c 遗留）。storage 物理实体本就在 execution/storage.py
+#    （Step4c 迁入），caisen.storage 仅是 sys.modules 别名垫片指过来——此处改直指真身，
+#    engine.py 不再绕 caisen 包。monkeypatch 测试改 patch execution.engine.storage 即可。
+from execution import storage
+# —— Step4d 依赖反转：ExecutionEngine 依赖本层 ExecutionExecutor Protocol（抽象接口），
+#    非 server.trading_service 具体类型。server.trading_service 模块鸭子类型满足此 Protocol
+#    （get_status / submit_order 签名一致），生产装配零改动注入即可（最小反转，不重写 trading_service）。
+from execution.interfaces import ExecutionExecutor
 # —— Step4b：离场纯函数 + 数据模型已抽至 caisen/engines/exit_logic.py（纯逻辑归 engines，
 #    消除 backtest_replay 双源真理）。此处 re-export 保旧路径 ``from caisen.infra.execution
 #    import check_exit, ExitDecision, ExitAction, ExitReason`` 零改动（strangler 铁律①）。
@@ -67,29 +75,46 @@ _logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# ExecutionEngine：盘中轮询编排（依赖 trading_service 注入，测试可 mock）
+# ExecutionEngine：盘中轮询编排（依赖 ExecutionExecutor 抽象接口注入，测试可 mock）
 # ============================================================================
 class ExecutionEngine:
     """盘中 beat 编排引擎：tick_pullback（ARMED→FILLED）+ tick_exit（FILLED→CLOSED）。
 
-    依赖注入（便于测试 mock）：
-        trading_service: 交易服务对象，需提供：
+    依赖注入（Step4d 反转：依赖抽象接口，非 server 层具体类型）：
+        trading_service: 执行器对象，须满足 ``ExecutionExecutor`` Protocol（execution.interfaces）：
             - get_status() -> dict（同步，返 {connected, locked, mode}）；
-            - submit_order(order, *, dry_run, confirm) -> dict（async，过 10 关风控 + EMT）。
+            - submit_order(order, *, dry_run, confirm) -> dict（async，过 10 关风控 + 网关真单）。
+          生产装配注入 ``server.services.trading_service`` 模块（鸭子类型满足，零改造）；
+          测试注入 ``MagicMock()`` / 自定义桩（tests/caisen/test_execution.py）。
+          Why Protocol：依赖反转（DIP）——ExecutionEngine 不感知 server 层类型，execution/
+          零 ``import server``（strangler 红线：execution 不反向依赖 server）。实盘逻辑后续
+          大改时，只要新实现满足 Protocol 即可无缝替换（开放-封闭）。
         cfg: StrategyConfig（check_exit 用离场参数 + check_pullback 用回踩区间）。
 
     设计原则（CLAUDE.md 极简）：
-        - 不在本层另造下单逻辑/风控规则——submit_order 复用 trading_service 完整链路；
+        - 不在本层另造下单逻辑/风控规则——submit_order 复用注入执行器的完整风控链路；
         - check_exit / check_pullback 是纯函数/纯方法（无 I/O），可独立单测；
         - tick_* 是 async 编排方法（I/O 边界），用 try/except 隔离单计划异常。
     """
 
-    def __init__(self, trading_service, cfg):
-        """注入 trading_service 与 cfg，绑定 storage 模块（便于 monkeypatch 测试）。"""
+    def __init__(
+        self,
+        trading_service: ExecutionExecutor,
+        cfg,
+    ):
+        """注入执行器（满足 ExecutionExecutor Protocol）与 cfg，绑定 storage 模块（便于 monkeypatch 测试）。
+
+        参数：
+            trading_service: ExecutionExecutor 实现（生产 server.trading_service 模块 / 测试 MagicMock）。
+            cfg: StrategyConfig（离场参数 + 回踩区间）。
+
+        注：参数名保留 trading_service（装配侧 scripts/celery_app/tests 全部 kwarg=trading_service
+            传参，改名会破坏既有调用方）。类型注解为 ExecutionExecutor（抽象接口），语义上即"执行器"。
+        """
         self.trading = trading_service
         self.cfg = cfg
-        # storage 在模块顶导入（from caisen import storage），测试用 monkeypatch
-        # 替换 caisen.execution.storage.load_plans/update_plan 隔离文件 I/O。
+        # storage 在模块顶导入（from execution import storage），测试用 monkeypatch
+        # 替换 execution.engine.storage.load_plans/update_plan 隔离文件 I/O。
 
     def check_pullback(self, plan: dict, quote: dict) -> bool:
         """ARMED→FILLED 触发判定：盘中触及回踩挂单区间 [entry_lower, entry_upper]。
