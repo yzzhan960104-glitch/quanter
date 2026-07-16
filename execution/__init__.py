@@ -43,9 +43,10 @@
 from __future__ import annotations
 
 # ============================================================================
-# 引擎 + 离场纯函数（caisen.infra.execution —— 4c 迁 execution/engine.py）
+# 引擎 + 离场纯函数（Step4c 批 A：物理迁入本包 execution/engine.py）
+# ExecutionEngine 状态机 + re-export 自 caisen.engines.exit_logic 的 check_exit（Step4b 单源）。
 # ============================================================================
-from caisen.infra.execution import (  # noqa: F401
+from .engine import (  # noqa: F401
     ExecutionEngine,
     check_exit,
     ExitDecision,
@@ -54,19 +55,19 @@ from caisen.infra.execution import (  # noqa: F401
 )
 
 # ============================================================================
-# 回放验证器（caisen.infra.backtest_replay —— 4c 迁 execution/replay.py）
+# 回放验证器（Step4c 批 B：物理迁入本包 execution/backtest_replay.py）
 # 单源真理契约：replay() 与 ExecutionEngine 共用 check_exit，杜绝双源真理（design §3.2）。
 # ============================================================================
-from caisen.infra.backtest_replay import (  # noqa: F401
+from .backtest_replay import (  # noqa: F401
     replay,
     ReplayReport,
     ReplayAborted,
 )
 
 # ============================================================================
-# 计划持久化 + 冷却黑名单（caisen.infra.storage —— 4c 迁 execution/storage.py）
+# 计划持久化 + 冷却黑名单（Step4c 批 A：物理迁入本包 execution/storage.py）
 # ============================================================================
-from caisen.infra.storage import (  # noqa: F401
+from .storage import (  # noqa: F401
     save_plans,
     load_plans,
     get_plan,
@@ -77,19 +78,19 @@ from caisen.infra.storage import (  # noqa: F401
 )
 
 # ============================================================================
-# 回放任务生命周期（worker / runs / tasks_db / scheduler）
-# 4c 迁 execution/replay_*.py（保留 caisen.infra 侧垫片兜底）。
+# 回放任务生命周期（Step4c 批 B：物理迁入本包 execution/replay_*.py）
+# 保留 caisen.infra 侧垫片兜底 ``from caisen.infra.replay_* import X`` 用法。
 # ============================================================================
-from caisen.infra.replay_worker import (  # noqa: F401
+from .replay_worker import (  # noqa: F401
     run_replay_worker,
 )
-from caisen.infra.replay_runs import (  # noqa: F401
+from .replay_runs import (  # noqa: F401
     save_run,
     list_runs,
     get_run,
     delete_run,
 )
-from caisen.infra.replay_tasks_db import (  # noqa: F401
+from .replay_tasks_db import (  # noqa: F401
     init_db,
     create_task,
     get_task,
@@ -104,7 +105,7 @@ from caisen.infra.replay_tasks_db import (  # noqa: F401
     delete_task,
     reset_running_to_failed,
 )
-from caisen.infra.replay_scheduler import (  # noqa: F401
+from .replay_scheduler import (  # noqa: F401
     ReplayScheduler,
 )
 
