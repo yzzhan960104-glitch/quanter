@@ -24,7 +24,8 @@ dingtalk-stream SDK 被动收。本模块仅保留 webhook 主动推报告（tra
   - 加签复用 core/notifier.py:DingTalkChannel._sign（HMAC-SHA256+base64+urlencode）。
   - errcode 校验复用 DingTalkChannel._validate_response（HTTP 200 + errcode!=0 才是真失败，
     钉钉群机器人最易静默丢失的真实失败模式）。
-  - 文本清洗复用 bridge/replier.clean_markdown_for_dingtalk（钉钉 Markdown 限制多）。
+  - 文本清洗 clean_markdown_for_dingtalk（原 bridge/replier.py，已内联本模块；
+    dws-migration Task 5 bridge/ 退役后切断 bridge 依赖）。
 
 全局红线：全中文注释；极简（urllib，复用现成加签/校验/清洗，不造轮子）。
 """
@@ -32,19 +33,54 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
 from typing import Optional
 
-# 复用现成设施：清洗（bridge）+ 加签/errcode 校验（core/notifier）
-from bridge.replier import clean_markdown_for_dingtalk
+# 复用现成设施：加签/errcode 校验（core/notifier）。
+# 注：原文本清洗函数 clean_markdown_for_dingtalk 从 bridge/replier.py 内联而来
+# （dws-migration Task 5：bridge/ 自研全退役，本模块是 clean_* 的唯一存活用户，
+# 故连同其依赖的 3 个正则常量一并内联，切断对 bridge 的依赖）。
 from core.notifier import DingTalkChannel
 
 logger = logging.getLogger(__name__)
 
 # webhook POST 超时（秒）。10s 足够（钉钉群机器人在国内 <1s 回包），过长会反拖 loop 主流程。
 _HTTP_TIMEOUT = 10
+
+# ================================================================
+# 钉钉 Markdown 文本清洗（原 bridge/replier.py，内联）
+# ================================================================
+# Why 清洗：钉钉群机器人 Markdown 仅支持 #/##/###、**粗**、*斜*、>引用、-列表、
+# [链接](url)、![图](url)；不支持 <font>、表格 |、---分隔线、复杂代码块。
+# 训练报告常含这些，直接发会被钉钉渲染成乱码或截断。
+# 钉钉不支持的 HTML 标签（剥离标签保留内文）
+_FONT_TAG = re.compile(r"<font[^>]*>(.*?)</font>", re.IGNORECASE | re.DOTALL)
+# 通用 HTML 标签清理（<br> 转换行，其余剥离；保留 b/strong/i/em/code）
+_OTHER_TAGS = re.compile(r"</?(?!b>|strong>|i>|em>|code>)[a-zA-Z][^>]*>")
+# Markdown 表格分隔行（|---|---|）。
+# 收紧正则：必须含至少一个 |（表格特征），避免误删纯分隔字符的正常文本行
+# （如 Markdown 的 --- 水平线、或 ": : : :" 这种无 | 文本）。
+# lookahead (?=.*\|) 保证行内至少一个 |，主匹配体只允许分隔字符。
+_TABLE_SEPARATOR = re.compile(r"^(?=.*\|)[\s:|-]+$", re.MULTILINE)
+
+
+def clean_markdown_for_dingtalk(text: str) -> str:
+    """剥离钉钉不支持的 Markdown / HTML，保留可渲染部分。
+
+    物理步骤：
+      1) <font>...</font> → 内文（钉钉不支持 color 标签）。
+      2) <br> → 换行；其余陌生 HTML 标签剥离（钉钉 Markdown 渲染器不认）。
+      3) 表格处理：保留数据行 | 作竖线视觉分隔（钉钉不渲染表格，"| a | b |"
+         比 " a  b " 可读），仅删分隔行（|---|---| 无信息量且钉钉原样显示成乱码）。
+    """
+    text = _FONT_TAG.sub(r"\1", text)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = _OTHER_TAGS.sub("", text)
+    text = _TABLE_SEPARATOR.sub("", text)
+    return text.strip()
 
 
 # ================================================================

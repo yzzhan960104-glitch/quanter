@@ -84,7 +84,7 @@ lightweight-charts>=2.0         # 交互式图表（PyPI 真名 lightweight-char
 # pandas-ta>=0.3.14b             # PyPI 装不上（py3.10 下无可用版本，0.4.x 要求 >=3.12），改用 pandas 显式 ATR/指标
 # trendln>=4.0.0                 # PyPI 装不上（最高仅 0.1.18，4.0.0 版本号不存在），改用 numpy polyfit 显式颈线/趋势线
 
-# ===== 钉钉远程驱动 Claude 旁路桥 =====
-# 钉钉官方 Stream SDK：WebSocket 长连接接收企业内部应用机器人消息（双向）。
-# 纯 Python，自带断线重连。本项目唯一为钉钉桥引入的依赖。
-dingtalk-stream>=0.20.0
+# ===== 钉钉远程驱动 Claude 旁路桥（dws-migration Task 5/6 已退役）=====
+# 原 dingtalk-stream>=0.20.0 已移除：bridge/ 自研全退役，两机器人改走 dws dev connect
+# （对话机器人 yzzhanCli 通用 → dws dev connect --channel claudecode；
+#  审查机器人 yzzhan参数优化 → dws 桥 + webhook 推报告）。SDK 无用户。
