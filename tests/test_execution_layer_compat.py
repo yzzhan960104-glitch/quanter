@@ -231,3 +231,98 @@ def test_execution_no_server_import():
         "execution/ 存在反向依赖 server（strangler 红线破坏）：\n"
         + "\n".join(f"  {fn}:{ln} -> {line}" for fn, line, ln in violations)
     )
+
+
+def test_caisen_business_modules_no_reverse_dependency():
+    """Step4f 契约：caisen 业务模块零反向依赖 execution/trading/server（收敛终检）。
+
+    物理意图（Step4f 收敛终检·design §3.1 单向依赖）：
+        caisen 作为【策略模型层】，业务核心（engines/optimize/facade/advisor）严禁反向
+        依赖【执行/服务层】execution/trading/server——这是分层架构的铁律。Step4 把
+        infra 整体迁出 caisen 至 execution/ + viz/ 后，本测试做 caisen 收敛终检：
+          - 扫描 caisen/engines + caisen/optimize + caisen/facade.py + caisen/advisor
+            四处【业务模块】的源码，确保无 ``from execution|trading|server`` / ``import
+            execution|trading|server`` 字样。
+          - 垫片除外：caisen 顶层垫片（caisen/plan.py / caisen/storage.py / caisen/
+            viz_*.py 等）+ caisen/infra/* 垫片是 strangler 过渡（转发 execution/viz），
+            属 caisen→execution 依赖但非业务反向，保留（4e 决定·消费者未切）。
+
+    已知历史债白名单（4f 终检时记录，非阻塞，待后续清理）：
+      - caisen/optimize/training_analyzer.py:18 ``from server.services.review_service
+        import _call_glm`` —— Step3.3 沉淀：复用 review_service 的 GLM urllib 调用
+        （零新依赖范式），属 Spec3 训练 AI 分析与 review_service 的【横切共享】，
+        非业务反向（分析器非策略核心）。后续如需彻底切，把 _call_glm 抽到 data/
+        或 utils/ 横切层即可。
+      - caisen/facade.py:59 ``from server.schemas.caisen import CandidatePlan...`` ——
+        Step2.1 facade 收口：facade 作为 caisen 模型层对外【唯一契约门面】，对 server
+        层暴露 Pydantic schema，是分层边界的【契约出口】（DTO 边界），属历史分层决策
+        而非反向债。彻底切需把 schemas/caisen.py 下沉到 caisen/ 内（独立 Task）。
+    """
+    import os
+    import re
+
+    # caisen 业务模块根目录（4 处）
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    business_roots = [
+        os.path.join(repo_root, "caisen", "engines"),
+        os.path.join(repo_root, "caisen", "optimize"),
+        os.path.join(repo_root, "caisen", "advisor"),
+    ]
+    business_files = [
+        os.path.join(repo_root, "caisen", "facade.py"),
+    ]
+    for root in business_roots:
+        assert os.path.isdir(root), f"业务模块目录不存在：{root}"
+        for fname in sorted(os.listdir(root)):
+            if fname.endswith(".py"):
+                business_files.append(os.path.join(root, fname))
+
+    # 反向 import execution|trading|server 的正则
+    reverse_re = re.compile(
+        r"^\s*(from\s+(execution|trading|server)|import\s+(execution|trading|server))\b",
+        re.MULTILINE,
+    )
+
+    # 4f 已知历史债白名单（非业务反向，标注保留待后续清理）
+    _4F_WHITELIST = {
+        # (相对路径, 行号): 原因
+        ("caisen", "optimize", "training_analyzer.py", 18): (
+            "复用 review_service._call_glm（GLM urllib 三级降级范式），Spec3 训练 AI "
+            "分析横切共享，非业务反向；彻底切需把 _call_glm 抽到 data/ 或 utils/。"
+        ),
+        ("caisen", "facade.py", 59): (
+            "facade 收口 server.schemas.caisen Pydantic schema 作为 DTO 边界出口，"
+            "属 Step2.1 分层决策；彻底切需把 schemas/caisen.py 下沉到 caisen/。"
+        ),
+    }
+
+    def _rel_parts(abs_path: str) -> tuple:
+        rel = os.path.relpath(abs_path, repo_root)
+        parts = tuple(rel.replace("\\", "/").split("/"))
+        return parts
+
+    violations = []
+    for fpath in business_files:
+        if not os.path.isfile(fpath):
+            continue
+        with open(fpath, "r", encoding="utf-8") as f:
+            src = f.read()
+        for m in reverse_re.finditer(src):
+            # 1-indexed 行号
+            line_no = src[:m.start()].count("\n") + 1
+            parts = _rel_parts(fpath)
+            key = parts + (line_no,)
+            if key in _4F_WHITELIST:
+                continue  # 白名单：已知历史债，记录不视为违规
+            violations.append(
+                (os.path.relpath(fpath, repo_root), line_no, m.group(0).strip())
+            )
+
+    assert not violations, (
+        "caisen 业务模块存在反向依赖 execution/trading/server（分层铁律破坏）：\n"
+        + "\n".join(
+            f"  {fn}:{ln} -> {line}" for fn, ln, line in violations
+        )
+        + "\n（caisen/infra + caisen 顶层垫片是 strangler 过渡除外；如新增反向 import "
+        "请评估是否应抽横切共享或下沉 schema）"
+    )

@@ -40,6 +40,10 @@ from execution.replay_runs import *  # noqa: F401,F403
 from execution.replay_tasks_db import *  # noqa: F401,F403
 from execution.replay_scheduler import *  # noqa: F401,F403
 from execution.replay_worker import *  # noqa: F401,F403
-# 批 C：2 个 viz_* 模块（横切可视化层，Step4 同迁出）。
-from caisen.infra.viz_static import *  # noqa: F401,F403
-from caisen.infra.viz_interactive import *  # noqa: F401,F403
+# 批 C：2 个 viz_* 模块（横切可视化层）。
+# Step4f 批 C：viz_static + viz_interactive 已从 caisen/infra/ 物理迁入横切 viz/ 顶层包。
+# 真身改在 viz.viz_static / viz.viz_interactive；caisen.infra.viz_* 降为转发垫片
+# （指向 viz.*）。预加载源随之改指 viz.*，使 caisen.viz_* 顶层垫片 → caisen.infra.viz_*
+# 垫片 → viz.viz_* 真身 三层同源（与批 A/B storage/execution/replay 同模式）。
+from viz.viz_static import *  # noqa: F401,F403
+from viz.viz_interactive import *  # noqa: F401,F403
