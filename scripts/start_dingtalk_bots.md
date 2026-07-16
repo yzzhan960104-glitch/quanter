@@ -12,9 +12,11 @@
 ### 1. bridge 对话机器人（yzzhanCli通用）
 ```bash
 dws dev connect --unified-app-id f0b2740f-c029-4b99-943c-58de139c7463 \
-  --channel claudecode --agent-memory --agent-approval-mode ask
+  --channel claudecode --agent-memory --agent-approval-mode ask \
+  --allowed-users <DINGTALK_ALLOWED_STAFF_IDS>
 ```
 - @yzzhanCli通用 → dws 收 → Claude Code 对话（--agent-memory 续聊）
+- --allowed-users：身份闸（.env 里 `DINGTALK_ALLOWED_STAFF_IDS` 白名单 staff_id，承接老 bridge safety 白名单 → dws 身份闸；省略 = 任何 @该机器人的钉钉用户都能驱动本机 Claude Code，bypassPermissions 全放行下属高危，必填）
 - --agent-approval-mode ask：审批闸（事前确认，替代老 Alarmer 事后告警）
 
 ### 2. 审查训练机器人（yzzhan参数优化）
