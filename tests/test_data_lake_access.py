@@ -60,14 +60,18 @@ def test_symbols_respects_lake_arg(tmp_path, monkeypatch):
 
 
 def test_load_price_data_assembles_and_converts_amount(tmp_path, monkeypatch):
-    """_load_price_data 接 reader：装配 {symbol:df} + amount×1000（千元→元）。"""
-    from server.services import caisen_service as svc
+    """load_price_data 接 reader：装配 {symbol:df} + amount×1000（千元→元）。
+
+    Step4e：_load_price_data 纯逻辑已从 caisen_service 抽到 data/price_loader.py 模块级
+    函数 load_price_data（消除 execution/replay_worker 反向依赖）。测试改调新单源位置。
+    """
+    from data.price_loader import load_price_data
     reader = _make_reader_with_daily(tmp_path, monkeypatch)
     monkeypatch.setattr("data.lake_reader.DataLakeReader.get_instance",
                         classmethod(lambda cls: reader))
 
     # date 取湖内某日（截到该日）
-    pd_data = svc._load_price_data(["000001.SZ"], "2024-01-03")
+    pd_data = load_price_data(["000001.SZ"], "2024-01-03")
 
     assert "000001.SZ" in pd_data
     df = pd_data["000001.SZ"]
@@ -79,22 +83,28 @@ def test_load_price_data_assembles_and_converts_amount(tmp_path, monkeypatch):
 
 
 def test_load_price_data_full_market_when_symbols_empty(tmp_path, monkeypatch):
-    """symbols=None/[] → 全市场枚举（reader.symbols）。"""
-    from server.services import caisen_service as svc
+    """symbols=None/[] → 全市场枚举（reader.symbols）。
+
+    Step4e：load_price_data 已抽到 data/price_loader.py（单源真理）。
+    """
+    from data.price_loader import load_price_data
     reader = _make_reader_with_daily(tmp_path, monkeypatch)
     monkeypatch.setattr("data.lake_reader.DataLakeReader.get_instance",
                         classmethod(lambda cls: reader))
 
-    pd_data = svc._load_price_data(None, "2024-01-03")   # None → 全市场
+    pd_data = load_price_data(None, "2024-01-03")   # None → 全市场
     assert set(pd_data.keys()) == {"000001.SZ", "600000.SH", "920982.BJ"}
 
-    pd_data2 = svc._load_price_data([], "2024-01-03")    # 空列表 → 全市场
+    pd_data2 = load_price_data([], "2024-01-03")    # 空列表 → 全市场
     assert set(pd_data2.keys()) == {"000001.SZ", "600000.SH", "920982.BJ"}
 
 
 def test_load_price_data_empty_when_reader_offline(monkeypatch):
-    """reader 未 load（离线/CI）→ 返空 dict（降级，不抛）。"""
-    from server.services import caisen_service as svc
+    """reader 未 load（离线/CI）→ 返空 dict（降级，不抛）。
+
+    Step4e：load_price_data 已抽到 data/price_loader.py（单源真理）。
+    """
+    from data.price_loader import load_price_data
     # ensure-load 会调 lakes()/load()；fake load 是 no-op（不改 loaded，模拟 load 失败）
     offline = type("R", (), {
         "loaded": False,
@@ -105,4 +115,4 @@ def test_load_price_data_empty_when_reader_offline(monkeypatch):
     monkeypatch.setattr("data.lake_reader.DataLakeReader.get_instance",
                         classmethod(lambda cls: offline))
 
-    assert svc._load_price_data(None, "2024-01-03") == {}
+    assert load_price_data(None, "2024-01-03") == {}

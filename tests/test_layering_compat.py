@@ -122,11 +122,23 @@ def test_caisen_subpackages_scaffold():
 # 防 Step4（及后续）迁移漏 caisen/__init__.py 预加载行 —— 一旦漏掉，from caisen import X
 # 会绑定到垫片壳子（而非真实模块），sys.modules 别名失效，monkeypatch 模块全局的测试
 # 会静默假绿（Task3.3/3.4 已踩此坑两次）。此绊线在 CI 层兜底，未来迁移漏预加载立即红。
+#
+# Step4e 垫片清理评估（2026-07-16）：
+#   全量 grep 显示每个 caisen 顶层垫片（plan/risk/config/storage/execution/backtest_replay/
+#   replay_runs/replay_tasks_db/replay_scheduler/replay_worker）均有大量活跃消费者
+#   （facade/execution/*/tests/scripts/server），strangler 红线「不强切消费者（波及面大的
+#   保留）」→ 【全部保留】。本绊线 cases 不删（无垫片被清）。infra 垫片（storage/execution/
+#   backtest_replay/replay_runs/replay_tasks_db/replay_scheduler/replay_worker）保留至 4f
+#   （viz 迁横切时一并收敛）。Step4e 收口的「真穿透」是 server/api + celery_app 改最终
+#   路径（见 test_execution_no_server_import + caisen.py/celery_app.py 改动），非删垫片。
 def test_shim_identity_tripwire():
     """迁移模块新旧路径必须同一对象（sys.modules 别名生效的前置断言）。"""
     import importlib
 
     # (旧路径顶层垫片, 新路径子包真身)
+    # 注：infra 系列（storage/execution/backtest_replay/replay_runs/replay_tasks_db）
+    #     真身 Step4c 已迁 execution/ 顶层包；此处新路径仍用 caisen.infra.X（infra 垫片
+    #     亦同源指向 execution.*，两层垫片同源兜底）。4f viz 迁时一并收敛 infra 垫片。
     cases = [
         # engines 策略本体
         ("caisen.plan", "caisen.engines.plan"),
@@ -137,7 +149,7 @@ def test_shim_identity_tripwire():
         ("caisen.training_loops_db", "caisen.optimize.training_loops_db"),
         ("caisen.training_loop", "caisen.optimize.training_loop"),
         ("caisen.training_dingtalk", "caisen.optimize.training_dingtalk"),
-        # infra 待迁（Step4 移出 caisen）
+        # infra 待迁（Step4 移出 caisen）—— Step4e 保留（消费者未切，波及面大）；4f 收敛
         ("caisen.storage", "caisen.infra.storage"),
         ("caisen.execution", "caisen.infra.execution"),
         ("caisen.backtest_replay", "caisen.infra.backtest_replay"),

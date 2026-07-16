@@ -41,8 +41,12 @@ from datetime import datetime
 from celery import Celery
 from celery.schedules import crontab
 
-from caisen.config import StrategyConfig
-from caisen.execution import ExecutionEngine
+# Step4e 穿透收口：原 ``from caisen.config / caisen.execution import`` 经 caisen 顶层
+# 垫片转发（穿透 caisen 包壳）。改最终路径 caisen.engines.config（StrategyConfig 真身）+
+# execution.engine（ExecutionEngine 真身，Step4c 已物理迁入 execution/ 顶层包），
+# 消除 server 层对 caisen 顶层垫片的穿透依赖。
+from caisen.engines.config import StrategyConfig
+from execution.engine import ExecutionEngine
 from config import CELERY_CONFIG
 from server.schemas.caisen import ScanRequest
 from server.services import caisen_service, trading_service

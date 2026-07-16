@@ -5,8 +5,8 @@
 Step4 将连同 storage/execution/replay_*/viz_* 整体迁出 caisen 包至独立的执行编排层。
 当前位置仅为 Step3 分层重构的中间态。
 
-注：本模块存在反向依赖债 ``from server.services.caisen_service import _load_price_data,
-_merge_cfg``（模型层→服务层），本 Task（Step3.4）不修，Step4 处理。
+Step4e 反向债已收口：_load_price_data/_merge_cfg 改 import data.price_loader 模块级函数
+（原 from server.services.caisen_service import 是 execution→server 反向依赖，Step2.2 过渡债）。
 
 物理定位：被 ProcessPoolExecutor submit 在子进程跑单次回测。
 - _init_worker：进程 initializer，加载 data_lake 一次（数 GB parquet），所有 task 复用。
@@ -30,7 +30,11 @@ from caisen import replay_tasks_db
 from caisen.backtest_replay import replay, ReplayAborted
 from caisen.risk import RiskManager
 # 模块级 import → _load_price_data/_merge_cfg 成为本模块属性（测试 monkeypatch 生效）。
-from server.services.caisen_service import _load_price_data, _merge_cfg
+# Step4e 反向债收口：原 ``from server.services.caisen_service import _load_price_data,
+# _merge_cfg`` 是 execution→server 反向依赖（Step2.2 过渡债）。现改 import data.price_loader
+# 的模块级函数（逻辑单源，与 facade 同源），消除反向依赖。alias 保持 _load_price_data /
+# _merge_cfg 模块名 → replay_worker._load_price_data 测试 monkeypatch 语义不变。
+from data.price_loader import load_price_data as _load_price_data, merge_cfg as _merge_cfg
 
 logger = logging.getLogger(__name__)
 

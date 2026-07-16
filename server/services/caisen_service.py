@@ -63,19 +63,9 @@ def delete_replay_run(run_id: str) -> bool:
     return _facade.delete_replay_run(run_id)
 
 
-# ── 兼容转发（strangler 过渡期模块级名字）──────────────────────────────────
-# replay_worker.py 模块级 `from server.services.caisen_service import
-# _load_price_data, _merge_cfg` 把这两个名字绑成 replay_worker 模块属性
-# （其测试 monkeypatch replay_worker._load_price_data 依赖此模块级名字语义）。
-# 编排逻辑已收口到 facade（实例方法），此处仅转发 facade 单例的对应方法，
-# 让 replay_worker 的 import 继续可用。Step3 replay_worker 迁 caisen/infra 时
-# 改依赖 facade，届时删此转发。
-# 注：facade 的 _load_price_data/_merge_cfg 是实例方法（首个参数 self），
-# 此处用 `_facade._load_price_data(symbols, date)` 调用已绑定实例的方法，
-# 签名对外呈现 (symbols, date) / (cfg_override)，与旧模块级函数签名一致。
-def _load_price_data(symbols, date):
-    return _facade._load_price_data(symbols, date)
-
-
-def _merge_cfg(cfg_override):
-    return _facade._merge_cfg(cfg_override)
+# ── Step4e 收口：_load_price_data/_merge_cfg 兼容转发块已删 ──────────────────
+# 原 Step2.2 为 replay_worker 的 ``from server.services.caisen_service import
+# _load_price_data, _merge_cfg``（execution→server 反向依赖过渡债）建的兼容转发块
+# 已删除——Step4e 把 _load_price_data/_merge_cfg 的纯逻辑抽到 data/price_loader.py
+# 模块级函数（与 facade 同源单源真理），replay_worker 改 import data.price_loader，
+# 反向依赖消除。caisen_service 现仅为 facade 薄壳（10 用例转发），不再持有兼容名字。

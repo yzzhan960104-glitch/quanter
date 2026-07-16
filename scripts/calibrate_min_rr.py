@@ -29,8 +29,8 @@ from caisen.config import StrategyConfig
 from caisen.risk import RiskManager
 from caisen import backtest_replay
 from data.lake_reader import DataLakeReader
+from data.price_loader import load_price_data as _load_price_data  # Step4e：从 caisen_service 抽到 data/price_loader（单源真理）
 from config import LAKE_CONFIG
-from server.services.caisen_service import _load_price_data
 
 
 def main(years: int, sample: int | None) -> None:

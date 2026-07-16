@@ -13,8 +13,8 @@ import replay_worker``，Python 必须 import 到真实的 ``caisen.infra.replay
 别名防反向 import 循环竞态）→ ``caisen.infra.replay_worker``（本垫片）
 → ``execution.replay_worker``（真身，Step4c 迁入 execution/）。
 
-注：实体模块内含反向依赖 ``from server.services.caisen_service import _load_price_data,
-_merge_cfg``（Step4d 处理），本垫片不改其实体逻辑。
+注：实体模块原内含反向依赖 ``from server.services.caisen_service import _load_price_data,
+_merge_cfg``（Step4e 已收口——改 import data.price_loader 模块级函数，消除反向依赖）。
 
 新代码请直接使用 ``from execution.replay_worker import ...``。
 """

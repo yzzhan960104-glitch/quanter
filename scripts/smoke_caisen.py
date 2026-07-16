@@ -154,13 +154,16 @@ def _build_detections_w_bottom() -> pd.DataFrame:
 
 
 def _inject_price_data(price_data: Dict[str, pd.DataFrame]) -> None:
-    """注入合成 price_data 到 caisen_service._load_price_data（模拟生产 data_lake）。
+    """注入合成 price_data 到 data.price_loader.load_price_data（模拟生产 data_lake）。
 
-    物理意图：生产 data_lake 未接入时 service._load_price_data 返空 dict（run_scan 降级
+    物理意图：生产 data_lake 未接入时 load_price_data 返空 dict（run_scan 降级
     返空列表）；脚本注入合成 W 底序列，让 screener 能命中候选，验证 scan 端到端连通。
+
+    Step4e：_load_price_data 已从 caisen_service 抽到 data/price_loader.py（单源真理），
+    facade.scan 内部调 data.price_loader.load_price_data，故注入点改 data.price_loader。
     """
-    import server.services.caisen_service as svc
-    svc._load_price_data = lambda symbols, date: price_data
+    import data.price_loader as pl
+    pl.load_price_data = lambda symbols, date: price_data
 
 
 # ---------------------------------------------------------------------------

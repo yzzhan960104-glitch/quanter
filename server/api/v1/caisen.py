@@ -218,11 +218,14 @@ async def get_chart_data(plan_id: str) -> Dict[str, Any]:
 
     # 尝试装配 price_data：生产 Phase 3+ 接 data_lake 后返回真实 OHLCV DataFrame；
     # 当前（Phase 3+ 未接）返回空 dict → 走 priceLines-only 降级路径。
+    # Step4e：_load_price_data 纯逻辑已从 caisen_service 抽到 data/price_loader.py（单源真理，
+    # 消除 execution/replay_worker 反向依赖 caisen_service 的过渡债）。
+    from data.price_loader import load_price_data
     symbol = plan_dict.get("symbol")
     formed_at = plan_dict.get("formed_at")
     chart_payload: Dict[str, Any] = {"candles": [], "markers": [], "priceLines": []}
     try:
-        price_data = caisen_service._load_price_data(
+        price_data = load_price_data(
             [symbol] if symbol else None,
             str(formed_at) if formed_at is not None else "",
         )
@@ -438,5 +441,8 @@ def get_config_schema() -> Dict[str, Any]:
         「当前生效规则清单」（description 即规则说明）。一处定义（caisen/config.py），
         前后端同源，杜绝参数漂移——前端不再硬编码参数名/范围。
     """
-    from caisen.config import StrategyConfig
+    # Step4e 穿透收口：原 ``from caisen.config import StrategyConfig`` 经 caisen 顶层
+    # 垫片转发（穿透 caisen 包壳）。改最终路径 caisen.engines.config（真身所在），
+    # 消除 server 层对 caisen 顶层垫片的穿透依赖。
+    from caisen.engines.config import StrategyConfig
     return StrategyConfig.model_json_schema()

@@ -196,11 +196,10 @@ def test_execution_no_server_import():
         server 类型。本测试是 grep 绊线——扫描 execution/ 所有 .py 源码，确保无
         ``from server...`` / ``import server`` 字样（反向依赖债复发即红）。
 
-    例外（4e 处理，本测试白名单）：
-        execution/replay_worker.py 的 ``from server.services.caisen_service import
-        _load_price_data, _merge_cfg`` 是 Step4 遗留反向债，Task 4e 专项收口。本测试
-        显式排除该文件（标注 4e 待处理），不掩盖——此处只锁 engine.py + 其它 execution
-        模块的 server 零依赖契约。
+    Step4e 收口：原 replay_worker.py 的 ``from server.services.caisen_service import
+    _load_price_data, _merge_cfg`` 反向债已收口——改 import data.price_loader 模块级
+    函数（逻辑与 facade 同源单源真理）。白名单已清空，本测试现锁 execution/ 全量零
+    ``import server``（无例外）。
     """
     import os
     import re
@@ -211,10 +210,8 @@ def test_execution_no_server_import():
 
     # 反向 import server 的正则（from server / from server.x / import server / import server.x）
     server_import_re = re.compile(r"^\s*(from\s+server|import\s+server)\b", re.MULTILINE)
-    # 已知 4e 遗留债白名单（文件相对路径 -> 简短原因）
-    _4E_WHITELIST = {
-        os.path.join("replay_worker.py"): "Step4e 待处理：caisen_service 反向债",
-    }
+    # Step4e 后白名单清空：replay_worker 反向债已收口，execution/ 全量零 import server。
+    _4E_WHITELIST: dict = {}
 
     violations = []
     for fname in sorted(os.listdir(execution_dir)):
@@ -226,12 +223,11 @@ def test_execution_no_server_import():
         for m in server_import_re.finditer(src):
             reason = _4E_WHITELIST.get(fname)
             if reason:
-                # 白名单：记录但不视为违规（4e 专项收口）
+                # 白名单：记录但不视为违规（保留例外）
                 continue
             violations.append((fname, m.group(0).strip(), src.splitlines()[src[:m.start()].count('\n')]))
 
     assert not violations, (
         "execution/ 存在反向依赖 server（strangler 红线破坏）：\n"
         + "\n".join(f"  {fn}:{ln} -> {line}" for fn, line, ln in violations)
-        + "\n（replay_worker.caisen_service 已白名单 4e 处理；其它必须反转）"
     )

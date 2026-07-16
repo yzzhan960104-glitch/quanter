@@ -9,8 +9,8 @@ Python 必须能 import 到真实的 ``caisen.replay_worker`` 模块对象。
 【同一模块对象】，保证 monkeypatch（如 _load_price_data/_merge_cfg 替换）等基于模块身份
 的操作在两条路径下完全等价（strangler 铁律①；Task3.2 沉淀）。
 
-注：实体模块内含反向依赖 ``from server.services.caisen_service import _load_price_data,
-_merge_cfg``（Step4d 处理），本垫片不改其实体逻辑。
+注：实体模块原内含反向依赖 ``from server.services.caisen_service import _load_price_data,
+_merge_cfg``（Step4e 已收口——改 import data.price_loader 模块级函数，消除反向依赖）。
 
 迁移链与垫片层级（Step4c 沉淀 · 防 execution→caisen 反向 import 循环）：
     本顶层垫片【直指真身】``execution.replay_worker``（单层别名），不经过
