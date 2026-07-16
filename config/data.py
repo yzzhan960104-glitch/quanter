@@ -84,9 +84,7 @@ LAKE_CONFIG["lakes"] = {
     "daily": "data_lake/a_shares_daily.parquet",          # 全市场日线（sync_data_lake 写）
     "daily_active": "data_lake/a_shares_active.parquet",   # 活跃池日线（sync_sector_daily 写，与 daily 分流防互覆盖）
     "minute": "data_lake/a_shares_1min.parquet",
-    "crypto": "data_lake/crypto_btc_1m.parquet",
     # P1 新增湖：parquet 缺失时 reader.load 离线降级（warning 不阻断启动）；sync 脚本就绪后落盘
-    "fundamentals": "data_lake/fundamentals.parquet",      # 基本面因子面板 pe/pb/roe...（sync_fundamentals 写）
     "north_flow": "data_lake/north_flow.parquet",          # 北向资金日频净流入（sync_north_flow 写）
     "dragon_list": "data_lake/dragon_list.parquet",        # 龙虎榜明细（sync_dragon_list 写）
     # 通用 Tushare 湖同步器（Plan A/B/C）落湖：key 与 TUSHARE_DATASETS 一一对应

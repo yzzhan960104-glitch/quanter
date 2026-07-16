@@ -52,10 +52,6 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                       "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
     "minute":        {"source": "JQData",  "market": "A股",  "granularity": "1m",
                       "script": "scripts/sync_jqdata_1min.py", "schedule": "每日18:00", "freshness_hours": 24},
-    "crypto":        {"source": "Binance", "market": "加密", "granularity": "1m",
-                      "script": "scripts/sync_binance_vision.py", "schedule": "每日",   "freshness_hours": 24},
-    "fundamentals":  {"source": "AKShare", "market": "A股",  "granularity": "日频",
-                      "script": "scripts/sync_fundamentals.py", "schedule": "每周",     "freshness_hours": 168},
     "north_flow":    {"source": "AKShare", "market": "A股",  "granularity": "1d",
                       "script": "scripts/sync_north_flow.py",  "schedule": "每日18:00", "freshness_hours": 24},
     "dragon_list":   {"source": "AKShare", "market": "A股",  "granularity": "1d",
@@ -142,6 +138,19 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     # —— 特色筹码 1（cyq_perf，300/分独立通道，日频）——
     "cyq_perf":        {"source": "Tushare", "market": "A股", "granularity": "1d",
+                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # —— ETF 专题 5（Plan B Task 6）—— fund_basic 列表快照 + fund_daily/nav/portfolio/share 逐标的
+    # 补注册到 DATASET_REGISTRY：Plan B 此前只注册 TUSHARE_DATASETS + LAKE_CONFIG，前端 DataLakeView
+    # 看不到这 5 个资产。lake_key 与 LAKE_CONFIG 一一对应（fund_daily→etf_daily.parquet 等，同名 key）。
+    "fund_basic":      {"source": "Tushare", "market": "基金", "granularity": "快照",
+                        "script": "scripts/sync_tushare.py", "schedule": "每月",     "freshness_hours": 730},
+    "fund_daily":      {"source": "Tushare", "market": "基金", "granularity": "1d",
+                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "fund_nav":        {"source": "Tushare", "market": "基金", "granularity": "1d",
+                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "fund_portfolio":  {"source": "Tushare", "market": "基金", "granularity": "季频",
+                        "script": "scripts/sync_tushare.py", "schedule": "每季报披露窗口", "freshness_hours": 2190},
+    "fund_share":      {"source": "Tushare", "market": "基金", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     # ============================================================================
     # Plan C Task 6：宏观经济原始指标数据集注册（8 湖，与 Task 11 股票类对等）

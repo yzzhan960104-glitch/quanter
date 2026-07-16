@@ -5,7 +5,7 @@
 - tnskhdata 是 tushare 的代理库（import tushare 改地址，API 完全兼容），积分更充足
   （10000 vs 直连账户常不足 2000，stock_basic/daily_basic 等接口需 2000+）。
 - 本 helper 由 TNSKHDATA_TOKEN 环境变量决定走代理还是直连，所有需要 pro 接口的地方
-  （sync_fundamentals / TushareDataFetcher）统一经此获取，避免 import 散落、便于切换。
+  （通用同步器 tushare_sync / TushareDataFetcher）统一经此获取，避免 import 散落、便于切换。
 - 凭证优先级：TNSKHDATA_TOKEN（代理）> TUSHARE_TOKEN（直连兜底，积分可能不足）。
 
 实测（2026-07，代理 10000 积分）：stock_basic/daily_basic/daily/fina_indicator/trade_cal

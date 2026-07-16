@@ -54,8 +54,6 @@ _DATASET_LABELS: Dict[str, str] = {
     "daily": "A股全市场日线",
     "daily_active": "A股活跃池日线",
     "minute": "A股分钟湖",
-    "crypto": "加密资产分钟湖",
-    "fundamentals": "基本面因子面板",
     "north_flow": "北向资金日频",
     "dragon_list": "龙虎榜明细",
 }
