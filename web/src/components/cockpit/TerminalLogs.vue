@@ -100,6 +100,8 @@ defineExpose({ _es, lines, paused })
   color: #f85149;
 }
 .lvl-warn {
-  color: #d29922;
+  /* 走业务 token：tokens.css 已定义 --qt-warn: #d29922（同值），零视觉变化。
+     抽 token 后，若后续警示色统一调整改一处即全站生效（CLAUDE.md 前端走 token 勿裸 hex）。 */
+  color: var(--qt-warn);
 }
 </style>

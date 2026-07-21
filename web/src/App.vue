@@ -22,7 +22,7 @@
 import { useRoute } from 'vue-router'
 import { computed, type Component } from 'vue'
 // 导航图标：EP 官方图标包，按需引入（非重型依赖，EP 生态标准配套）
-import { TrendCharts, MagicStick, DataBoard, Files, Monitor, DataAnalysis } from '@element-plus/icons-vue'
+import { TrendCharts, MagicStick, DataBoard, Files, Monitor, DataAnalysis, View } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const activeName = computed(() => route.path)
@@ -45,8 +45,11 @@ const researchNav: NavItem[] = [
   { to: '/review',     label: 'AI 复盘',    icon: MagicStick },
 ]
 
-// 右段：实盘（唯一真实下单的高危入口，分隔线区隔）
+// 右段：实盘（唯一真实下单的高危入口，分隔线区隔）。
+// 含「综合看板」(/cockpit)：观测俯瞰视角聚合心跳/资金/数据健康/流水/日志/回测对比，
+// 与「实盘中控」(/live，含真下单/撤单) 同段但只读。Task 12 新增入口。
 const liveNav: NavItem[] = [
+  { to: '/cockpit', label: '综合看板', icon: View },
   { to: '/live', label: '实盘中控', icon: Monitor },
 ]
 </script>

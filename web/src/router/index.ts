@@ -21,6 +21,8 @@ const ParamLabView = () => import('../views/ParamLabView.vue')
 const DashboardView = () => import('../views/DashboardView.vue')
 const DataLakeView = () => import('../views/DataLakeView.vue')
 const ReviewView = () => import('../views/ReviewView.vue')
+// 综合看板（Task 12 · 一期观测运营层前端收官）：聚合流水/日志/回测对比/心跳/资金/数据健康。
+const CockpitView = () => import('../views/CockpitView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -32,6 +34,8 @@ const router = createRouter({
     { path: '/lab', name: 'lab', component: ParamLabView },
     { path: '/dashboard', name: 'dashboard', component: DashboardView },
     { path: '/live', name: 'live', component: LiveCockpitView },
+    // 综合看板（Task 12）：实盘观测俯瞰入口，聚合心跳/资金/数据健康/流水/日志/回测对比。
+    { path: '/cockpit', name: 'cockpit', component: CockpitView },
     { path: '/data', name: 'data', component: DataLakeView },
     { path: '/review', name: 'review', component: ReviewView },
   ],
