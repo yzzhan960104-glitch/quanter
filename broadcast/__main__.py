@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -24,6 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 from broadcast.brief import build_daily_brief
+from broadcast.brief_trading import build_trading_brief
 from broadcast.push import push_brief
 from config import LAKE_CONFIG
 from data.lake_reader import DataLakeReader
@@ -156,19 +158,87 @@ def _write_last_broadcast(date: str) -> None:
 # Brief 构造器路由（market 既有；trading/data/strategy Task 3-5 接入）
 # ===========================================================================
 
+def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, dict]:
+    """取交易机器人当日快照四件套：(trades, asset, positions, status)。
+
+    Why 集中取数 + 兜底降级：
+    - __main__ 是同步 CLI，但 trading_service.get_asset/get_positions 是 async（网关
+      查询走 broker 回调/线程池）。用 asyncio.run 一次性并发取两个 async（单 event loop），
+      避免两次 asyncio.run 各启一个 loop 的开销。
+    - 网关未连接/取数失败：asset 传 None、positions 传 None，brief 自动降级文案，绝不抛
+      （trading 播报是观测层，断线不应阻断播报，而应如实把「断线」播出去）。
+    - status 始终可取（trading_service.get_status 同步，四态之一）。
+    - trades 走同步 query_trades（CSV 全表扫描，本身即降级契约：文件不存在返空列表）。
+    """
+    # 延迟 import：trading_service 顶层 import 了 core.notifier/trading.execution_gateway
+    # 等较重链路，且 __main__ 仅 trading 分支需要 → 放函数内，market/data/strategy 分支零负担。
+    from server.services import trading_service
+
+    # 同步取数：trades（CSV 流水）/ status（四态镜像）
+    try:
+        trades_payload = trading_service.query_trades(date, date, limit=100)
+        trades = list(trades_payload.get("trades", [])) if trades_payload else []
+    except Exception:
+        logger.warning("query_trades 取数失败，trading brief 成交节降级为空", exc_info=True)
+        trades = []
+    try:
+        status = trading_service.get_status() or {}
+    except Exception:
+        logger.warning("get_status 取数失败，trading brief 网关态降级为空", exc_info=True)
+        status = {}
+
+    # async 取数：asset / positions。单 event loop 并发取，失败兜底 None（brief 降级）。
+    async def _fetch_pair():
+        # gather + return_exceptions：任一异常转对象返回，不互相阻塞
+        return await asyncio.gather(
+            trading_service.get_asset(),
+            trading_service.get_positions(),
+            return_exceptions=True,
+        )
+
+    asset: dict | None = None
+    positions: list | None = None
+    try:
+        results = asyncio.run(_fetch_pair())
+    except RuntimeError as e:
+        # asyncio.run 在已有 event loop 的环境（如 Jupyter/某些测试）会抛 RuntimeError；
+        # 同步 CLI 正常不会触发，兜底日志 + 降级。
+        logger.warning("asyncio.run 取 asset/positions 失败（环境无新 event loop?）：%s", e)
+        results = []
+    except Exception:
+        logger.warning("取 asset/positions 异常，trading brief 资金/持仓节降级", exc_info=True)
+        results = []
+
+    if len(results) >= 2:
+        a, p = results[0], results[1]
+        # get_asset：无网关/未连接返 {}（falsy → brief 视为 None 降级，等价语义）
+        asset = a if (not isinstance(a, Exception) and a) else None
+        # get_positions：无网关/未连接 raise RuntimeError → 兜底 None
+        positions = None if isinstance(p, Exception) else (p or None)
+
+    return trades, asset, positions, status
+
+
 def _build_brief(bot: str, date: str, reader: DataLakeReader):
     """按机器人路由到对应 brief 构造器。
 
-    一期 Task 2 仅搭框架：market 走既有 build_daily_brief；其余三个抛
-    NotImplementedError，Task 3-5 各自接入时改 raise → 真实调用。
+    一期 Task 2 框架 + Task 3 trading 接入：market 走既有 build_daily_brief；
+    trading 走 build_trading_brief（注入式取数 + 纯函数渲染）；data/strategy 仍
+    NotImplementedError，Task 4-5 各自接入时改 raise → 真实调用。
     本函数集中路由，避免 main() 里散落 if/elif。
     """
     if bot == "market":
         # 既有行情播报 brief：return BriefResult(markdown=...)，调用链不变（回归红线）
         return build_daily_brief(date, reader=reader)
-    # 一期新增三机器人框架占位（Task 3-5 接入前不可调用，防误用）
+    if bot == "trading":
+        # 交易机器人：取数注入 → 纯函数渲染。取数失败任一项均降级，不阻断播报。
+        trades, asset, positions, status = _fetch_trading_snapshot(date)
+        return build_trading_brief(
+            date, trades=trades, asset=asset, positions=positions, status=status,
+        )
+    # 一期新增 data/strategy 机器人框架占位（Task 4-5 接入前不可调用，防误用）
     raise NotImplementedError(
-        f"bot={bot} 的 brief 构造器尚未实现（Task 3-5 接入）；本 Task 仅搭框架"
+        f"bot={bot} 的 brief 构造器尚未实现（Task 4-5 接入）；本 Task 仅搭框架"
     )
 
 
