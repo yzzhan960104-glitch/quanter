@@ -87,49 +87,22 @@ def _alert_drift(msg: str) -> None:
     敞口彻底失明。fire-and-forget 包 try-except 吞异常，与 qmt_gateway.
     _on_disconnect_fatal 同模式。
 
-    Why 通过模块顶层别名 _ensure_notifier_loaded()：
-    每次调用都重新解析 fire_and_forget/NotificationManager 的最新绑定——既支持
-    生产路径（首次延迟 import core.notifier 绑定到顶层别名），也支持测试路径
-    （monkeypatch reconcile_job.fire_and_forget / .NotificationManager 注入 mock），
-    不引入 sys.modules 黑魔法。
+    Why 函数级 import（不抽模块级哨兵）：
+    原实现用模块级 ``fire_and_forget = None`` + ``_ensure_notifier_loaded``
+    双别名哨兵仅为便利测试 monkeypatch，属过度设计（违反 Karpathy 反魔法硬
+    约束）。此处与 qmt_gateway._on_disconnect_fatal（见 qmt_gateway.py:530-573）
+    同模式：函数内直接 ``from core.notifier import ...`` 内联，零抽象。
+    测试通过 monkeypatch 真实模块 ``core.notifier.fire_and_forget`` /
+    ``core.notifier.NotificationManager`` 注入 mock（_alert_drift import 时即解析
+    到被 patch 的符号），语义完全等价。
     """
+    # 函数级 import：规避顶层循环依赖（notifier 初始化可能 import trading）；
+    # patch 真实模块 core.notifier.* 后，此处解析到的即 mock，测试可注入。
+    from core.notifier import NotificationManager, fire_and_forget
     try:
-        _ensure_notifier_loaded()
-        # 用全局 nonlocalnot 名字（非局部 import 符号），使 monkeypatch 生效。
-        fire_and_forget(  # noqa: F821 — 由 _ensure_notifier_loaded / monkeypatch 绑定
-            NotificationManager.get_default().notify_risk_event(msg, "WARN")  # noqa: F821
-        )
+        fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "WARN"))
     except Exception:
         logger.exception("盘后对账告警推送失败（已吞，不影响对账结果）")
-
-
-def _ensure_notifier_loaded() -> None:
-    """首次调用时把 core.notifier 的真实符号绑定到模块顶层别名。
-
-    幂等：若已绑定（或测试已 monkeypatch 设为非 None），直接跳过。
-    """
-    global fire_and_forget, NotificationManager
-    if fire_and_forget is not None and NotificationManager is not None:
-        return
-    # 延迟 import：与 qmt_gateway/emt_gateway 同模式，规避顶层循环依赖
-    # （notifier 初始化可能 import trading）。
-    from core.notifier import NotificationManager as _NM, fire_and_forget as _FF
-
-    # 只在尚未绑定时绑定，避免覆盖测试 monkeypatch 的 mock。
-    if fire_and_forget is None:
-        fire_and_forget = _FF
-    if NotificationManager is None:
-        NotificationManager = _NM
-
-
-# ============================================================================
-# 测试钩子：模块顶层别名，初始 None。
-# 生产路径下 _ensure_notifier_loaded 首次调用会把 core.notifier 的真实符号
-# 绑定到这里；测试通过 monkeypatch.setattr(reconcile_job, "fire_and_forget",
-# fake) 直接覆盖别名，_alert_drift 内解析到的是 mock，不真发钉钉。
-# ============================================================================
-fire_and_forget = None  # type: ignore[assignment]
-NotificationManager = None  # type: ignore[assignment]
 
 
 async def run_reconcile(
