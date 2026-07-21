@@ -1,10 +1,10 @@
-# Quanter —— 蔡森形态学量化研究平台
+# Quanter —— 颈线法量化研究平台
 
 ## 1. 项目定位
 
-Quanter 是一套面向 **A 股** 的量化研究平台，以**蔡森多空转折形态学（纯多头）**为主策略，配套参数训练、数据中心、实盘接入与远程协同：
+Quanter 是一套面向 **A 股** 的量化研究平台，以**颈线法形态学（纯多头）**为主策略，配套参数训练、数据中心、实盘接入与远程协同：
 
-- **主策略 · 蔡森形态学**：颈线等额累加、因果 ZigZag（无未来函数）、等幅测距，12 招权威结构（W 底 / 头肩顶 / 上升旗形 / 双假突破等）。详见 [`多空转折策略白皮书.md`](多空转折策略白皮书.md)。
+- **主策略 · 颈线法**：颈线聚集带定位 + 压制时长验证 + 挂单回踩进场 + 分级止盈（scripts/neckline_method_v0.py + neckline_backtest.py）。回测引擎与策略解耦（strategies/ 包 + Strategy Protocol），颈线法为唯一活跃策略。
 - **参数训练**：Parameter Lab 异步回测 + 参数扫描 + AI 分析闭环（GLM 驱动）。
 - **数据中心**：Tushare 通用同步器（20+ 数据集，配置驱动），AKShare / JQData 辅助。
 - **实盘接入**：东财 EMT 极速交易（MiniQMT 监管停用，按 env 路由 EMT/QMT gateway）。
@@ -195,7 +195,7 @@ specs（设计）/ plans（实现计划）均在 `docs/superpowers/`，按时间
 - **钉钉 claude 桥**：[design](docs/superpowers/specs/2026-07-12-dingtalk-claude-bridge-design.md) / [plan](docs/superpowers/plans/2026-07-12-dingtalk-claude-bridge.md)
 - **EMT 实盘接入**：[design](docs/superpowers/specs/2026-07-08-emt-broker-access-design.md)
 
-策略方法论权威参考：[`多空转折策略白皮书.md`](多空转折策略白皮书.md)（《多空转折一手抓》12 招完整映射）。
+策略方法论权威参考：[`颈线法形态学策略 · 完整技术文档`](docs/neckline-method.md)（颈线聚集带定位 + 压制验证 + 挂单回踩进场 + 分级止盈，当前唯一活跃策略）。
 
 执行轨迹（每 Task 的实现/审查/修复证据）见 `.superpowers/sdd/progress.md`。
 

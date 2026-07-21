@@ -28,6 +28,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -49,6 +50,13 @@ DEFAULTS = {
     "breakout_vol_mult": 1.5,  #    突破带量 1.5×近5日均量（复用 caisen）
     "min_rr": 1.5,             # ⑥ 盈亏比下限（恒 2.0，作 sanity 守卫）
     "max_h_atr": 4.0,          # ⑦ 形态深度上限 H/ATR（实证：浅形态胜率51% vs 深形态27%，深=暴跌反弹）
+    "stop_atr_mult": 1.0,      # ⑧ 止损 ATR 倍数（止损=颈线−N×ATR；参数化供迭代）
+    "tp_h_mult": 2.0,          # ⑨ 止盈2 的 H 倍数（止盈2=颈线+N×H；参数化供迭代）
+    "decay_tau": None,                 # ⑩ 颈线聚集时间衰减（日 exp(-dt/tau)）
+                                      #    方案A(2026-07-19)修颈线漂移(513130 0.812→0.750)✓ 但全市场净-3.2点
+                                      #    (29.4%→26.2%)：中小盘+3点(top100~400 10.3→13.3)但大盘拖累更大
+                                      #    (近期颈线=弱阻力，大盘控盘弱失效)。当前最优等权29.4%，暂回None。
+                                      #    颈线漂移问题真实但纯时间衰减非正解，留作后续(量加权或其他)。
 }
 
 
@@ -100,8 +108,8 @@ def local_maxima(values, w: int):
 # 颈线搜索：顶部高点聚集定位 + 压制时长验证
 # ============================================================================
 def search_neckline(highs, closes, atr_val: float, min_touches: int, min_supp: float,
-                    top_window: int = 3):
-    """颈线 = 【顶部高点聚集】的价位（定位）+ 【压制时长】验证（验证）。
+                    top_window: int = 3, decay_tau: float | None = None):
+    """颈线 = 【顶部高点聚集】的价位（时间衰减加权定位）+ 【压制时长】验证。
 
     两步，角色严格分离：
       ① 定位（颈线在哪）：取窗口内【顶部高点（局部极大值）】，找它们聚集在哪个
@@ -113,27 +121,59 @@ def search_neckline(highs, closes, atr_val: float, min_touches: int, min_supp: f
         c 越高 → close<c 越多 → 压制时长越大 → 选到窗口最高价附近，脱离真实阻力。
         压制时长只能当【验证】，不能当【选位标准】。选位必须用顶部聚集。
 
+    时间衰减加权（2026-07-19 方案A，修颈线漂移 bug）：
+        旧版等权聚集 Σ[顶部在±ATR带内]，固定窗口里旧高点（如 10-28 反弹顶，套牢盘
+        已割肉=失效阻力）和近期高点（套牢盘还在=有效阻力）等权，旧高点污染颈线 +
+        窗口滚动时颈线漂移（旧高点移出聚集中心，颈线下台阶"配合"假突破）。
+        改 exp(−Δt/τ) 加权：近期顶部权重高（套牢盘还在），旧顶部淡出（套牢盘割肉）。
+        Δt = 顶部到窗口末根（=当日）的天数，τ = 衰减常数（默认 30 日，主力近期记忆窗口）。
+        聚集选位用加权 score，但要求等权 touches ≥ min_touches（聚集足够性，防衰减后
+        单个近期顶部独占颈线）。decay_tau=None 退化为等权（兼容旧行为）。
+
     返回：(颈线价位 c, 压制时长 suppression)；无满足者返 (None, 0.0)。
     """
     n = len(highs)
     if n == 0:
         return None, 0.0
 
-    # ① 定位：顶部高点聚集
-    tops = local_maxima(highs, top_window)
+    # ① 定位：顶部高点的位置 + 值（需位置算 Δt，故内联 local_maxima 逻辑）
+    tops = []  # [(idx, value)]
+    for i in range(top_window, n - top_window):
+        left = highs[i - top_window:i]
+        right = highs[i + 1:i + top_window + 1]
+        if highs[i] >= left.max() and highs[i] >= right.max():
+            tops.append((i, float(highs[i])))
     if len(tops) < min_touches:
         return None, 0.0  # 顶部不够，连不成颈线
-    best_c, best_touches = None, 0
-    for c in tops:
-        # 该价位 ±ATR 带内的顶部高点数（聚集程度）
-        touches = sum(1 for t in tops if abs(t - c) <= atr_val)
-        if touches > best_touches:
-            best_c, best_touches = float(c), touches
-    if best_touches < min_touches or best_c is None:
-        return None, 0.0  # 聚集不够，无颈线
+    # 聚集选位：加权 score（近期主导）+ 等权 touches（聚集足够性阈值）
+    best_c, best_score = None, 0.0
+    for ci, c in tops:
+        touches_eq = 0
+        score = 0.0
+        for ti, t in tops:
+            if abs(t - c) <= atr_val:
+                touches_eq += 1
+                if decay_tau and decay_tau > 0:
+                    dt = (n - 1) - ti  # 距今（窗口末根 n-1 = 当日）天数
+                    score += math.exp(-dt / decay_tau)
+                else:
+                    score += 1.0
+        # 选位用加权 score（近期主导），但要求等权 touches ≥ min_touches（聚集足够）
+        if score > best_score and touches_eq >= min_touches:
+            best_c, best_score = float(c), score
+    if best_c is None:
+        return None, 0.0  # 无满足聚集足够性的价位
 
-    # ② 验证：压制时长
-    suppression = float((closes < best_c).sum() / n)
+    # ② 验证：压制时长（衰减加权，与聚集一致——近期 close 权重高，匹配近期颈线）
+    #    Why 衰减压制：衰减选近期颈线（如 0.750），但全窗口等权压制会把早期高点
+    #    （0.82>0.75 不算被压）算进分母拉低压制比例 → 近期颈线被误杀。衰减压制让
+    #    近期 close 主导（早期高点权重低），与近期颈线口径一致。
+    if decay_tau and decay_tau > 0:
+        weights = [math.exp(-((n - 1) - i) / decay_tau) for i in range(n)]
+        sup_num = sum(w for i, w in enumerate(weights) if closes[i] < best_c)
+        suppression = float(sup_num / sum(weights))
+    else:
+        suppression = float((closes < best_c).sum() / n)
     if suppression < min_supp:
         return None, 0.0  # 压制时长不足，颈线无效
     return best_c, suppression
@@ -168,9 +208,10 @@ def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=No
     closes_w = W["close"].values
     lows = W["low"]
 
-    # —— 1. 颈线搜索（顶部聚集定位 + 压制时长验证）——
+    # —— 1. 颈线搜索（顶部聚集定位 + 压制时长验证，时间衰减加权）——
     c_star, suppression = search_neckline(
-        highs, closes_w, atr_val, cfg["min_touches"], cfg["min_suppression"]
+        highs, closes_w, atr_val, cfg["min_touches"], cfg["min_suppression"],
+        decay_tau=cfg.get("decay_tau"),
     )
     if c_star is None:
         return None  # 无有效颈线（顶部不足 或 压制时长不足）
