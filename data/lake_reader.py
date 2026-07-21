@@ -139,6 +139,15 @@ class DataLakeReader:
         #   _lakes["macro"] 永远空 → CreditRegime.compute() 永远返 0 → 宏观否决失效。
         # - 其它索引形态：维持拒绝（语义不明，拒绝早失败优于静默错乱）。
         if isinstance(df.index, pd.MultiIndex):
+            # 防御：MultiIndex 但 names 无 "date"（如老 fundamentals/crypto 等废弃湖 names
+            # 异常），_normalize_and_sort 会 get_level_values("date") 抛 KeyError 直接阻断
+            # server 启动。与下方 line 160「非预期形态」同口径——降级跳过、记 error、不阻断
+            # 启动（离线模式：_lakes 不写该 key，查询返空 DF）。
+            if "date" not in df.index.names:
+                logger.error(
+                    "数据湖 %s MultiIndex 无 date 层（names=%s），跳过加载", key, list(df.index.names)
+                )
+                return
             df = self._normalize_and_sort(df)
             date_dtype = df.index.get_level_values("date").dtype
             self._lakes[key] = df
