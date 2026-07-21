@@ -23,8 +23,12 @@
       <el-table-column prop="symbol" label="标的" width="110" />
       <el-table-column label="方向" width="80">
         <template #default="{ row }">
+          <!-- 方向徽章：buy=红/danger（视觉警示买入动作）· sell=绿/success（视觉提示卖出动作）。
+               Why .toLowerCase() 双保险：后端 trading_service.query_trades 已规范化 direction
+               为小写口径（治本），此处再兜一层防御——若未来接其他数据源（如直读 CSV/gateway 原始
+               回报）回传大写 BUY/SELL，徽章颜色也不会被 'BUY' !== 'buy' 误判成 success（卖色）。 -->
           <el-tag
-            :type="row.direction === 'buy' ? 'danger' : 'success'"
+            :type="(row.direction || '').toLowerCase() === 'buy' ? 'danger' : 'success'"
             size="small"
           >
             {{ row.direction }}

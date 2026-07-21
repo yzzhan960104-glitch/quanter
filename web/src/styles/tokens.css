@@ -20,10 +20,11 @@
  *   --qt-up/down  A 股交易语义（红涨/绿跌，独立于 EP success/danger，绝不混用）
  *   --qt-accent   Quant 蓝主色（= --el-color-primary，业务层别名）
  *   --qt-warn     警示/模拟模式
+ *   --qt-terminal-*  终端主题色（bg/fg/error，GitHub-dark 配色，独立于业务涨跌/中性壳层）
  *   --qt-space-*  4/8 间距节奏
  *   --qt-radius*  圆角（sm/默认/lg）
  *   --qt-font-*   字体栈（Inter 优先，离线降级系统栈）
- *   --qt-fs-*     字号（title/body/caption）
+ *   --qt-fs-*     字号（title/body/caption））
  */
 html.dark {
   /* —— 中性壳层 —— */
@@ -53,6 +54,19 @@ html.dark {
   --qt-up: #ef5350;             /* 涨/正盈亏（A 股红） */
   --qt-down: #26a69a;           /* 跌/负盈亏（A 股绿） */
   --qt-warn: #d29922;           /* 警示/模拟模式/网关未装配 */
+
+  /* —— 终端主题色（GitHub-dark 配色，独立于业务 up/down 语义）——
+   * Why 独立命名 --qt-terminal-* 而非复用 --qt-up/down：
+   *   Cockpit 实时日志组件（TerminalLogs.vue）的「错误红」是 GitHub-dark 终端主题里的
+   *   ERROR 级别色（#f85149），与 A 股「涨红」(#ef5350) 字面相近但语义完全不同——
+   *   一个是「日志级别警示」、一个是「交易方向盈亏」。若混用 --qt-up，会让日志色随交易
+   *   涨跌色微调而漂移（运维查日志与量化研究调配色是两件事，解耦才符合单一真相源原则）。
+   *   背景/前景同理：#0d1117 / #c9d1d9 是 GitHub-dark 终端主题的标准三色，不属于业务
+   *   中性壳层（--qt-bg-* 是 TradingView 极夜黑系），故独立成 token 而非塞进 --qt-bg-*。
+   */
+  --qt-terminal-bg: #0d1117;    /* 终端画布底（GitHub-dark 标准黑） */
+  --qt-terminal-fg: #c9d1d9;    /* 终端默认前景文（GitHub-dark 默认浅灰） */
+  --qt-terminal-error: #f85149; /* ERROR 级别红（GitHub-dark 标准 error 色，区别于 A 股涨红 --qt-up） */
 
   /* —— 间距（4/8 节奏，消除此前 6/8/10/12/14/16px 六种散乱取值） —— */
   --qt-space-1: 4px;

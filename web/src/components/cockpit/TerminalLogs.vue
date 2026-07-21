@@ -85,19 +85,27 @@ defineExpose({ _es, lines, paused })
 .terminal {
   height: 320px;
   overflow-y: auto;
-  background: #0d1117;
+  /* 终端画布底：走 --qt-terminal-bg（GitHub-dark 标准黑 #0d1117，非业务中性壳层）。
+     抽 token 后，若后续换终端主题（如改成 Dracula/Solarized），改一处即全站生效
+     （CLAUDE.md 前端走 token 勿裸 hex）。 */
+  background: var(--qt-terminal-bg);
   padding: 8px;
   border-radius: 4px;
   font-size: 12px;
 }
 .terminal pre {
   margin: 0;
-  color: #c9d1d9;
+  /* 终端默认前景文：--qt-terminal-fg（GitHub-dark 浅灰 #c9d1d9，非业务 --qt-text-*）。
+     独立命名族原因见 tokens.css --qt-terminal-* 注释（日志色与交易语义解耦）。 */
+  color: var(--qt-terminal-fg);
   white-space: pre-wrap;
   word-break: break-all;
 }
 .lvl-error {
-  color: #f85149;
+  /* ERROR 级别红：--qt-terminal-error（GitHub-dark 标准 #f85149）。
+     Why 不复用 --qt-up：日志「ERROR 红」与 A 股「涨红」字面相近但语义完全不同，
+     混用会让日志色随交易涨跌色微调而漂移（详见 tokens.css 命名族注释）。 */
+  color: var(--qt-terminal-error);
 }
 .lvl-warn {
   /* 走业务 token：tokens.css 已定义 --qt-warn: #d29922（同值），零视觉变化。

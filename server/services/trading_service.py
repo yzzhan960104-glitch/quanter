@@ -261,6 +261,13 @@ def query_trades(
                     row[k] = float(row[k])
                 except (TypeError, ValueError):
                     pass
+            # direction 规范化为小写口径：CSV 落盘是大写（BUY/SELL/DRY_RUN_BUY/BLOCKED，
+            # 见 record_live_trade / submit_order 写盘点），但前端 TradesTable 用
+            # `row.direction === 'buy'` 小写精确匹配做买入红(danger)/卖出绿(success)着色。
+            # 若不在服务端统一小写化，BUY 行会被前端判为「非 buy」→ 错挂 success（卖色·绿），
+            # SELL 行才挂 danger（买色·红）—— 视觉警示与交易动作完全颠倒，是交易 UI 红线 bug。
+            # 与 brief_trading 的 `_dir` lambda 一致，消费者（前端/告警/复盘）一律拿小写口径。
+            row["direction"] = (row.get("direction") or "").lower()
             matched.append(row)
     total = len(matched)
     # 分页切片：在「过滤后全集」上做 offset/limit（total 仍是全集计数，前端按 total 渲染分页器）

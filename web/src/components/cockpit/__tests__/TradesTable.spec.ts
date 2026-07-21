@@ -45,14 +45,20 @@ class MockObserver {
 // 固定分页响应：两条相反方向的流水，覆盖 buy(danger)/sell(success) 徽章分支。
 // 注意 shares/price 用 number（对齐 TradeRecord 联合类型 number|string 的数值分支）。
 //
+// Why 大写 BUY/SELL 夹具：对齐生产契约——server/services/trading_service.py 的
+// record_live_trade/submit_order 落 CSV 是大写口径（BUY/SELL/DRY_RUN_BUY/BLOCKED）。
+// 现网在 query_trades 服务端已规范化为小写（治本），但 TradesTable.vue 模板内又加了
+// `.toLowerCase()` 双保险；此夹具故意用大写验证双保险兜得住，防未来接其他大写来源
+// （直读 CSV / 网关原始回报）时徽章颜色颠倒（final review I1 · 交易 UI 红线）。
+//
 // Why vi.hoisted：vi.mock 工厂被 vitest 提升到文件顶部执行，普通顶层 const 在工厂内
 // 引用会触发 TDZ（Cannot access before initialization）。vi.hoisted 让夹具与 mock
 // 一起提升，保证工厂执行时夹具已就绪。
 const { mockPage } = vi.hoisted(() => ({
   mockPage: {
     trades: [
-      { timestamp: '2026-07-21 09:35:00', symbol: '510300.SH', direction: 'buy', shares: 100, price: 4.0 },
-      { timestamp: '2026-07-21 10:00:00', symbol: '159915.SZ', direction: 'sell', shares: 100, price: 5.0 },
+      { timestamp: '2026-07-21 09:35:00', symbol: '510300.SH', direction: 'BUY', shares: 100, price: 4.0 },
+      { timestamp: '2026-07-21 10:00:00', symbol: '159915.SZ', direction: 'SELL', shares: 100, price: 5.0 },
     ],
     total: 2,
     limit: 100,
@@ -79,17 +85,20 @@ describe('TradesTable.vue', () => {
     // 两条标的均应出现在表格内。
     expect(w.text()).toContain('510300.SH')
     expect(w.text()).toContain('159915.SZ')
-    // 方向徽章文本：buy / sell。
-    expect(w.text()).toContain('buy')
-    expect(w.text()).toContain('sell')
+    // 方向徽章文本对齐生产契约大写口径（BUY/SELL 落盘，query_trades 规范化前的字面）。
+    expect(w.text()).toContain('BUY')
+    expect(w.text()).toContain('SELL')
   })
 
   it('buy 方向徽章为 danger、sell 方向徽章为 success', async () => {
+    // 生产契约防回归：夹具用大写 BUY/SELL（CSV 落盘口径），验证模板内 .toLowerCase()
+    // 双保险兜得住——第一行 BUY → danger（红·买入警示），第二行 SELL → success（绿·卖出提示）。
+    // 若有人误删 .toLowerCase()，此用例会立即红：BUY !== 'buy' → 全挂 success，断言失败。
     const w = mountTable()
     await flushPromises()
     const tags = w.findAllComponents({ name: 'ElTag' })
     expect(tags.length).toBeGreaterThanOrEqual(2)
-    // 按行序：第一行 buy → danger；第二行 sell → success。
+    // 按行序：第一行 BUY → danger；第二行 SELL → success。
     expect(tags[0].props('type')).toBe('danger')
     expect(tags[1].props('type')).toBe('success')
   })

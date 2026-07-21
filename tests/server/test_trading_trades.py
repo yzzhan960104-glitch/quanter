@@ -88,3 +88,30 @@ def test_query_trades_direction_case_insensitive(tmp_path, monkeypatch):
     # 大写 "SELL" 过滤 → 同样命中（双向兼容）
     r = trading_service.query_trades("2026-07-21", "2026-07-21", direction="SELL")
     assert r["total"] == 1 and r["trades"][0]["symbol"] == "159915.SZ"
+
+
+def test_query_trades_direction_normalized_to_lowercase(tmp_path, monkeypatch):
+    """返回的 direction 必须规范化为小写（final review I1 · 交易 UI 红线）。
+
+    生产落 CSV 是大写 BUY/SELL，但前端 TradesTable.vue 用 `row.direction === 'buy'`
+    小写精确匹配做方向徽章着色（buy=danger 红 / sell=success 绿）。若 query_trades
+    原样透传大写，BUY 行会被前端误判为「非 buy」→ 错挂 success（绿·卖色），
+    SELL 行才挂 danger（红·买色）—— 视觉警示与交易动作完全颠倒，是交易 UI 红线 bug。
+
+    本测试断言：即便 CSV 写盘是大写，query_trades 返回的 trades[].direction 也必须是小写，
+    保证服务端是方向口径的单一真相源（消费者一律拿小写）。
+    """
+    log = tmp_path / "live_trades.csv"
+    monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(log))
+    _write_csv(str(log), [
+        {"timestamp": "2026-07-21 09:35:00", "symbol": "510300.SH", "direction": "BUY",
+         "shares": 100, "price": 4.0, "strategy": "neckline", "rationale": "test"},
+        {"timestamp": "2026-07-21 10:00:00", "symbol": "159915.SZ", "direction": "SELL",
+         "shares": 100, "price": 5.0, "strategy": "neckline", "rationale": "tp"},
+    ])
+
+    r = trading_service.query_trades("2026-07-21", "2026-07-21")
+    assert r["total"] == 2
+    # 服务端必须把大写 BUY/SELL 规范化为小写，前端徽章着色口径才能对齐。
+    directions = {t["direction"] for t in r["trades"]}
+    assert directions == {"buy", "sell"}, f"direction 未规范化为小写: {directions}"
