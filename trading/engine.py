@@ -6,8 +6,9 @@
               → push 钉钉（待研究员确认）。本阶段绝不下单（机器只产计划，人审是闸）。
   pre_open  09:22 T 日开盘前：① 撤昨日遗留未成交单 ② 读已确认计划
               → 注入动态白名单（过关5）→ 挂限价买 + 止盈限价卖（逐单 try-except 兜底）。
-  stop_loss 每 5min 盘中：查 gw 真实持仓 + 现价，跌破止损价 → 发卖出单（qty 必须来自
-              gw 持仓，绝不硬编码——live 卖错数量 = 致命）。
+  stop_loss 每 5min 盘中：查 gw 真实持仓 + 现价（qmt_market_data.get_quote / xtdata），
+              跌破止损价 → 发卖出单（qty 必须来自 gw 持仓，绝不硬编码——live 卖错数量 = 致命）。
+              ⚠️ EMT 网关无 xtdata 行情源，止损链路 live 前需另接行情源（C1 follow-up）。
   post_close 15:30 盘后：对账（run_reconcile）+ 清动态白名单。熔断连线见 TODO（本 task 不做）。
 
 ============================================================================
@@ -45,6 +46,7 @@ from trading import (
     calendar,
     circuit_breaker,
     dynamic_whitelist,
+    qmt_market_data,
     reconcile_job,
     signal_runner,
     trading_plan,
@@ -77,7 +79,10 @@ def _trade_cfg() -> dict:
         # 颈线法 id_cfg 默认；实盘从 NecklineConfig 读（本引擎薄编排，不重算）
         "stop_atr_mult": float(os.getenv("TRADE_STOP_ATR_MULT", "2.0")),
         "tp_h_mult": float(os.getenv("TRADE_TP_H_MULT", "2.0")),
-        # 海龟 trailing 止损参数（compute_stop_price 用，本 task stop_loss_monitor 直接用计划 stop_price）
+        # 占位（M1）：海龟 trailing 动态止损参数——grace/step/floor 三件套本 task 未实际消费，
+        # compute_stop_price 盘后重算（Task2 已就绪）需 Task 10 在引擎状态层维护
+        # {symbol: stop_price} 并每日/盘中更新后注入 stop_loss_monitor；本 task 的
+        # stop_loss_monitor 直接用活跃计划里的静态 stop_prices，不涉及 trailing 动态更新。
         "grace": int(os.getenv("TRADE_STOPLOSS_GRACE_DAYS", "5")),
         "step": float(os.getenv("TRADE_STOPLOSS_STEP_ATR", "0.1")),
         "floor": float(os.getenv("TRADE_STOPLOSS_FLOOR", "0.5")),
@@ -105,6 +110,12 @@ async def _submit(order, *, confirm: bool = True) -> dict:
 
     Why dry_run 用 _mode() 而非参数注入：pre_open/stop_loss 都是「影子即整批不真单」
     语义，_mode 是进程级开关，逐单传参反而引入「单只切 live」的误操作面。
+
+    Why confirm 默认 True（I2）：引擎是**自动批量下单通道**，盘中无人工在场做二次确认；
+    风控由 risk_shield 10 关挡板（资金/涨跌停/白名单/熔断 lock_down）+ T-1 确认闸
+    （pre_open 必须研究员人工 confirmed=True 才挂单）+ 影子模式前置（≥5 天影子观测）
+    三层保障，**而非** confirm 开关——confirm 是 server 手动下单路径的防误触开关，
+    引擎通道若走 confirm=False 会导致批量挂单逐单等待人工点确认，盘中不可行。
     """
     from server.services.trading_service import submit_order as svc_submit
     return await svc_submit(order, dry_run=(_mode() == "dry_run"), confirm=confirm)
@@ -165,12 +176,14 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
 # 触发点 2：pre_open —— T 日开盘前：撤昨日单 + 检查确认闸 + 挂当日买单
 # ============================================================================
 async def pre_open(date: str) -> dict:
-    """T 日开盘前：撤昨日遗留未成交单 → 读已确认计划 → 注入白名单 → 逐单挂单。
+    """T 日开盘前：读已确认计划 → 撤昨日遗留未成交单 → 注入白名单 → 逐单挂单。
 
-    物理意图与时序（顺序不可调）：
-        ① 撤昨日未成交（scope #2）：避免昨日挂单与新计划叠加导致超额成交。
-           须在确认闸检查通过后、挂新单前执行（否则没确认也撤，破坏昨日已确认单）。
-        ② 确认闸检查（spec §2 红线）：未确认 → 一律不挂，返「计划未确认」。
+    物理意图与时序（顺序不可调，与代码实际执行顺序一致）：
+        ① 确认闸检查（spec §2 红线）：未确认 → 一律不挂，返「计划未确认」。
+           **必须最先做**——确认闸未通过即不应触达任何网关写操作（含撤昨日单），
+           否则会误撤昨日已确认单（研究员当日已审核，机器无权撤）。
+        ② 撤昨日未成交（scope #2）：避免昨日挂单与新计划叠加导致超额成交。
+           仅在 ① 确认闸通过后才撤，避免误撤昨日已确认单。
         ③ 注入动态白名单（Task5）：让当日计划标过关5，但仅在本 engine 进程内生效
            （独立进程不变量，见模块 docstring）。
         ④ 逐单挂单 + try-except 兜底（scope #7）：单标的挡板命中 raise 不炸整批。
@@ -180,6 +193,14 @@ async def pre_open(date: str) -> dict:
 
     Returns:
         {"submitted":<成功挂单数>, "mode":..., "reason"?:...}。
+
+    ⚠️ gw=None 行为诚实说明（I3）：
+        - **dry_run 模式**：gw=None 仍可继续挂单——submit_order 内部命中 dry_run
+          分支返 ``{"state":"DRY_RUN"}`` 不触达 gw，submitted 计数正常（影子观测用）。
+        - **live 模式**：gw=None 时 submit_order 会 ``raise RuntimeError``（缺网关），
+          被下方逐单 try-except 吞掉，**submitted=0**（全部失败）。
+        - **结论**：live 部署前**必须**确保 gateway 已连接（``get_gateway()`` 返非 None），
+          否则当日计划一支也挂不上。
     """
     plan = trading_plan.load_plan(date)
     if plan is None:
@@ -188,7 +209,7 @@ async def pre_open(date: str) -> dict:
         # 未确认绝不挂单（spec 红线）：宁可漏挂，不挂研究员未审核的单。
         return {"submitted": 0, "reason": "计划未确认，跳过挂单"}
 
-    # ① 撤昨日未成交（scope #2）：仅在确认闸通过后才撤，避免误撤昨日已确认单。
+    # ② 撤昨日未成交（scope #2）：仅在确认闸（①）通过后才撤，避免误撤昨日已确认单。
     gw = get_gateway()
     if gw is None:
         # gw 未装配：影子模式仍可挂 DRY_RUN（dry_run 命中不触达 gw）；真单模式下
@@ -202,11 +223,11 @@ async def pre_open(date: str) -> dict:
             # 撤单失败不阻塞挂单主路径（单笔失败已在 cancel_all 内被吞，此处兜整体异常）
             logger.exception("pre_open 撤昨日单整体异常（继续挂新单）")
 
-    # ② 注入动态白名单（Task5）：仅 engine 进程生效，server 进程不受影响。
+    # ③ 注入动态白名单（Task5）：仅 engine 进程生效，server 进程不受影响。
     symbols = {o["order"]["symbol"] for o in plan["orders"]}
     dynamic_whitelist.inject_dynamic_whitelist(symbols)
 
-    # ③ 逐单挂单 + raise 兜底（scope #7）
+    # ④ 逐单挂单 + raise 兜底（scope #7）
     from trading.execution_gateway import OrderRequest
     n_submitted = 0
     for o in plan["orders"]:
@@ -246,6 +267,13 @@ async def stop_loss_monitor(
     ⚠️ live 安全红线（scope #3）：卖出 qty **必须**来自 gw._fetch_broker_positions()
     返回的真实持仓，**绝不硬编码**——硬编码 100 会导致实盘卖错数量（致命）。
 
+    ⚠️ live 止损现价依赖（C1 fix）：现价统一从 ``trading.qmt_market_data.get_quote``
+    取 ``last_price``。**该接口底层是 xtdata.get_full_tick，仅在 miniQMT 通道可用时
+    返回有效快照**；**EMT 网关无 xtdata 行情源，止损链路 live 前必须另接行情源
+    （live 前必修 follow-up，切勿在未接行情源的 EMT 环境切 live）**。
+    若 ``get_quote`` 返 None 或 ``last_price`` 为 None/NaN，则该标的跳过止损检查
+    （无现价不能判断跌破）并记 warning，绝不发盲价卖出单。
+
     Args:
         stop_prices: {symbol: stop_price}。None 时由调用方（TradingEngine._stoploss）
                      从活跃计划读；本函数聚焦决策与下单，不耦合计划存储。
@@ -261,7 +289,8 @@ async def stop_loss_monitor(
       避免无流动性时段挂单致滑点失控。
     - gw._fetch_broker_positions 过滤了 can_use_volume==0 的 T+1 冻结仓——本语义
       与「只能卖可卖仓」天然对齐（T+1 当日买入不可卖）。
-    - 现价来源：优先 gw.get_price(symbol)；缺该方法时跳过该标的（不猜价）。
+    - 现价来源：``qmt_market_data.get_quote(sym)["last_price"]``；quote=None 或
+      last_price=None/NaN 记 warning 跳过（不猜价、不发盲单）。
     """
     # ① 盘中时段判定（Task1）
     if not calendar.is_intraday_session(datetime.now()):
@@ -291,19 +320,20 @@ async def stop_loss_monitor(
         sp = stop_prices.get(sym)
         if sp is None or qty <= 0:
             continue
-        # 现价：优先 gw.get_price；缺该方法记 warning 跳过（不猜价）
-        get_price = getattr(gw, "get_price", None)
-        if get_price is None:
-            logger.warning("stop_loss_monitor 跳过 %s：网关未实现 get_price", sym)
-            continue
+        # 现价（C1 fix）：统一走 qmt_market_data.get_quote，取 last_price。
+        # ⚠️ xtdata 通道（miniQMT）返快照；EMT 网关无 xtdata 行情源，live 前需另接行情源。
         try:
-            price = await get_price(sym) if asyncio.iscoroutinefunction(get_price) else get_price(sym)
+            quote = await qmt_market_data.get_quote(sym)
         except Exception:
-            logger.exception("stop_loss_monitor 拉现价失败 %s（跳过）", sym)
+            # get_quote 内部已捕获异常返 None，此处兜底防意外冒泡（绝不阻塞下一标的）
+            logger.exception("stop_loss_monitor 拉现价异常 %s（跳过）", sym)
+            continue
+        price = quote.get("last_price") if quote else None
+        if price is None or price != price:  # NaN check（price != price ⟺ isNaN）
+            # 现价缺失/NaN 绝不下卖出单：无价不能判断跌破（盲单 = 卖错价 = 致命）
+            logger.warning("stop_loss_monitor 跳过 %s：现价缺失（quote=%s），无法判定跌破", sym, quote)
             continue
         n_checked += 1
-        if price is None:
-            continue
         if price <= sp:
             # 跌破止损价：发卖出单。qty 来自 gw 真实持仓（绝不硬编码——scope #3 红线）。
             try:
@@ -459,6 +489,10 @@ class TradingEngine:
 
     async def _stoploss(self) -> None:
         """cron 包装：止损监控（盘中时段判定在 stop_loss_monitor 内）。
+
+        ⚠️ 现价依赖（C1 fix）：``stop_loss_monitor`` 现价走
+        ``trading.qmt_market_data.get_quote``（xtdata，miniQMT 通道可用）；
+        **EMT 网关无 xtdata 行情源，止损链路需另接行情源（live 前必修 follow-up）**。
 
         TODO(Task 10/follow-up)：从活跃计划 / 持仓状态机读当日 stop_prices map 注入。
         当前 stop_prices=None → stop_loss_monitor 内部返「无止损价配置」no-op。

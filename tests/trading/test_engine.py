@@ -175,7 +175,7 @@ def test_pre_open_submit_raise_continues(monkeypatch):
 
 
 # ============================================================================
-# 3. stop_loss_monitor：非盘中不操作 / dry_run 不真卖 / qty 来自 gw 持仓
+# 3. stop_loss_monitor：非盘中不操作 / dry_run 不真卖 / qty 来自 gw 持仓 / 现价走 qmt_market_data
 # ============================================================================
 def test_stop_loss_monitor_off_session_no_op(monkeypatch):
     """scope #3：非盘中时段 → reason 含「非盘中」，不调 gw、不调 _submit。"""
@@ -196,18 +196,34 @@ def test_stop_loss_monitor_off_session_no_op(monkeypatch):
 
 
 def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
-    """scope #3 + #5：盘中时段 dry_run 不真卖，qty 来自 gw._fetch_broker_positions。"""
+    """scope #3 + #5：盘中时段 dry_run 不真卖，qty 来自 gw._fetch_broker_positions。
+
+    现价源走 ``qmt_market_data.get_quote``（C1 fix）：monkeypatch 引擎内 ``qmt_market_data``
+    的 ``get_quote`` 返 ``{"last_price": <值>}`` 快照，构造「跌破 / 未跌破 / 现价缺失」
+    三类场景，断言：①dry_run 不真下单（_submit 返 DRY_RUN）；②只跌破的标的走 _submit；
+    ③现价缺失的标的不发盲单（C1 红线）。
+    """
     monkeypatch.setattr(engine.calendar, "is_intraday_session", lambda now: True)
 
-    # gw 持仓：A 跌破止损、B 未跌破
+    # gw 持仓：A 跌破止损 / B 未跌破 / C 现价缺失
     class _FakeGw:
         async def _fetch_broker_positions(self):
-            return {"A.SH": 300.0, "B.SH": 200.0}
-
-        async def get_price(self, sym):
-            return {"A.SH": 9.0, "B.SH": 21.0}[sym]
+            return {"A.SH": 300.0, "B.SH": 200.0, "C.SH": 150.0}
 
     monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+
+    # 现价快照（C1 fix 后现价源）：A=9.0（跌破 9.5）/ B=21.0（未跌破 19.0）/ C=None（缺失）
+    quote_map = {
+        "A.SH": {"last_price": 9.0, "high_limit": 11.0, "low_limit": 8.0},
+        "B.SH": {"last_price": 21.0, "high_limit": 23.0, "low_limit": 19.0},
+        "C.SH": None,  # 现价缺失：get_quote 返 None（如 xtdata 不可用 / EMT 无行情源）
+    }
+
+    async def _fake_get_quote(sym):
+        return quote_map[sym]
+
+    # monkeypatch 引擎里 import 的 qmt_market_data.get_quote 引用（C1 fix 后的现价入口）
+    monkeypatch.setattr(engine.qmt_market_data, "get_quote", _fake_get_quote)
 
     submitted = []
 
@@ -218,14 +234,47 @@ def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
 
     monkeypatch.setattr(engine, "_submit", _no_op_submit_dry)
 
-    # 止损价 map：A 止损 9.5（跌破 9.0）、B 止损 19.0（未跌破 21.0）
+    # 止损价 map：A=9.5（跌破 9.0）/ B=19.0（未跌破 21.0）/ C=9.0（但现价 None 无法判）
     result = asyncio.run(
-        engine.stop_loss_monitor(stop_prices={"A.SH": 9.5, "B.SH": 19.0})
+        engine.stop_loss_monitor(stop_prices={"A.SH": 9.5, "B.SH": 19.0, "C.SH": 9.0})
     )
     assert result["mode"] == "dry_run"
     assert result["stop_triggered"] == 1           # 只 A 触发
     # qty 必须来自持仓（300），不是魔法数 100（scope #3 live 安全红线）
     assert submitted == [("A.SH", 300.0, "sell")]
+    # checked=2（A+B 有价），C 现价缺失不发盲单（C1 红线：无价不判跌破）
+    assert result["checked"] == 2
+
+
+def test_stop_loss_monitor_nan_price_skipped(monkeypatch):
+    """C1 红线补充：last_price=NaN 视作现价缺失，跳过该标的（不发盲单）。"""
+    monkeypatch.setattr(engine.calendar, "is_intraday_session", lambda now: True)
+
+    class _FakeGw:
+        async def _fetch_broker_positions(self):
+            return {"X.SH": 100.0}
+
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+
+    async def _nan_quote(sym):
+        # last_price 为 NaN（脏数据）：price != price 判定为 NaN，应跳过
+        return {"last_price": float("nan")}
+
+    monkeypatch.setattr(engine.qmt_market_data, "get_quote", _nan_quote)
+
+    submitted = {"n": 0}
+
+    async def _no_submit(order, **kw):
+        submitted["n"] += 1
+        return {"state": "DRY_RUN"}
+
+    monkeypatch.setattr(engine, "_submit", _no_submit)
+
+    result = asyncio.run(
+        engine.stop_loss_monitor(stop_prices={"X.SH": 10.0})
+    )
+    assert submitted["n"] == 0     # NaN 不发盲单
+    assert result["checked"] == 0  # NaN 不计入 checked
 
 
 def test_stop_loss_monitor_no_gateway_logs_and_skips(monkeypatch):
