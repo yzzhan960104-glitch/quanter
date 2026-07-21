@@ -25,6 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 from broadcast.brief import build_daily_brief
+from broadcast.brief_data import build_data_brief
 from broadcast.brief_trading import build_trading_brief
 from broadcast.push import push_brief
 from config import LAKE_CONFIG
@@ -219,12 +220,61 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
     return trades, asset, positions, status
 
 
+def _fetch_data_snapshot() -> list[dict]:
+    """取数据机器人健康度快照：datasets 列表（与 GET /data/datasets 同源）。
+
+    Why 集中取数 + 兜底降级（与 _fetch_trading_snapshot 同纪律）：
+    - __main__ 是同步 CLI，data_service.list_datasets() 也是同步（纯读文件系统 + 内存湖，
+      无阻塞 IO），直接调用即可——无需 asyncio。
+    - 任一异常（DATASET_REGISTRY 未初始化/文件系统异常）均降级为空列表，brief 自动走
+      「无数据集」降级文案，绝不抛（数据观测层不应因取数失败而阻断播报）。
+    - 补 freshness_hours 字段：list_datasets() 原返字段含 latest_sync 但无实际 lag 小时，
+      brief build_data_brief 的「最老 lag」+「异常清单 lag」依赖此字段——这里从 latest_sync
+      ISO（UTC）解析为实际 age 小时（None 则不显示 lag，与 missing/failed 语义一致）。
+    """
+    # 延迟 import：data_service 顶层会触发 config 注册表 + DataLakeReader 耦合，
+    # market/trading 分支不需要 → 放函数内，避免无谓依赖加载。
+    from datetime import datetime, timezone
+    from server.services import data_service
+
+    try:
+        raw = data_service.list_datasets() or []
+    except Exception:
+        logger.warning("list_datasets 取数失败，data brief 降级为空列表", exc_info=True)
+        return []
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+    out: list[dict] = []
+    for item in raw:
+        # 只透传 brief 需要的字段（key/status/latest_sync），并按需补 freshness_hours（实际 lag）
+        latest_sync = item.get("latest_sync")
+        age_hours: float | None = None
+        if latest_sync:
+            try:
+                # list_datasets 写入格式 "%Y-%m-%d %H:%M:%S UTC"（data_service._now_iso 同款）
+                ts = datetime.strptime(latest_sync, "%Y-%m-%d %H:%M:%S UTC").replace(
+                    tzinfo=timezone.utc
+                ).timestamp()
+                age_hours = max(0.0, (now_ts - ts) / 3600.0)
+            except (ValueError, TypeError):
+                # latest_sync 格式异常 → 不显示 lag，brief 自动走「无 lag 数据」分支
+                age_hours = None
+        enriched = {
+            "key": item.get("key", "?"),
+            "status": item.get("status", "unknown"),
+        }
+        if age_hours is not None:
+            enriched["freshness_hours"] = age_hours
+        out.append(enriched)
+    return out
+
+
 def _build_brief(bot: str, date: str, reader: DataLakeReader):
     """按机器人路由到对应 brief 构造器。
 
-    一期 Task 2 框架 + Task 3 trading 接入：market 走既有 build_daily_brief；
-    trading 走 build_trading_brief（注入式取数 + 纯函数渲染）；data/strategy 仍
-    NotImplementedError，Task 4-5 各自接入时改 raise → 真实调用。
+    一期 Task 2 框架 + Task 3 trading + Task 4 data 接入：market 走既有
+    build_daily_brief；trading/data 走注入式取数 + 纯函数渲染；strategy 仍
+    NotImplementedError（Task 5 接入时改 raise → 真实调用）。
     本函数集中路由，避免 main() 里散落 if/elif。
     """
     if bot == "market":
@@ -236,9 +286,13 @@ def _build_brief(bot: str, date: str, reader: DataLakeReader):
         return build_trading_brief(
             date, trades=trades, asset=asset, positions=positions, status=status,
         )
-    # 一期新增 data/strategy 机器人框架占位（Task 4-5 接入前不可调用，防误用）
+    if bot == "data":
+        # 数据机器人：取 datasets 快照 → 纯函数渲染健康度文案。取数失败降级为空列表。
+        datasets = _fetch_data_snapshot()
+        return build_data_brief(date, datasets=datasets)
+    # strategy 占位（Task 5 接入前不可调用，防误用）
     raise NotImplementedError(
-        f"bot={bot} 的 brief 构造器尚未实现（Task 4-5 接入）；本 Task 仅搭框架"
+        f"bot={bot} 的 brief 构造器尚未实现（Task 5 strategy 接入）；本 Task 仅搭框架"
     )
 
 
