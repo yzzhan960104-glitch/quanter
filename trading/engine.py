@@ -152,6 +152,10 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
         stop_cfg={"stop_atr_mult": cfg["stop_atr_mult"], "tp_h_mult": cfg["tp_h_mult"]},
     )
     # 序列化为嵌套 dict（Task8 契约硬约束：order + stop_price + take_profit 三段）
+    # 透传 experiment_id/experiment_weight 归因（Task5 PlannedOrder 携带）：
+    # Why：report 阶段需按 experiment_id 聚合实验分组，归因字段必须随 order_dict
+    # 一起落盘到 trading_plan JSON，否则 Task8 拿不到实验归因的物理基础。
+    # 老计划（无归因字段）由 load_plan / report 阶段向后兼容归「未归因」桶，不在此处处理。
     order_dicts = [
         {
             "order": {
@@ -162,6 +166,8 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
             },
             "stop_price": o.stop_price,
             "take_profit": o.take_profit,
+            "experiment_id": o.experiment_id,           # 透传实验归因（Task5 → Task8 链路）
+            "experiment_weight": o.experiment_weight,   # 透传实验权重（Task8 加权聚合用）
         }
         for o in orders
     ]
