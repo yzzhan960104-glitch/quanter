@@ -26,6 +26,7 @@ import pandas as pd
 
 from broadcast.brief import build_daily_brief
 from broadcast.brief_data import build_data_brief
+from broadcast.brief_strategy import build_strategy_brief
 from broadcast.brief_trading import build_trading_brief
 from broadcast.push import push_brief
 from config import LAKE_CONFIG
@@ -269,12 +270,95 @@ def _fetch_data_snapshot() -> list[dict]:
     return out
 
 
+def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
+    """取策略机器人当日健康度快照三件套：(scan_count, param_iter_state, recent_runs)。
+
+    Why 集中取数 + 兜底降级（与 _fetch_trading_snapshot/_fetch_data_snapshot 同纪律）：
+    - 策略观测层**绝不阻塞播报**：任一取数异常均降级，brief 自动走「—」/「无记录」文案。
+    - **scan_count 不走 facade.scan**（全市场扫描重且不稳，可能几十秒~分钟级，钉钉播报
+      不能挂在这上面）：直接读 ``plans/<date>.json`` 的 ``len(plans)``（scan 落盘格式，
+      见 execution/storage.py docstring：``{date, plans: [...], n_plans: N}``），
+      零重活、稳。文件不存在（当日未扫描/周末）→ None（brief 降级「—」）。
+    - **param_iter_state 适配真实结构**：``logs/param_iter_state.json`` 真实结构是
+      ``{tried: {param_json: {ann, kelly, curve, ...}}}``，而 build_strategy_brief 期望
+      ``{best_annual, iter}`` 简字段——本函数负责适配：``best_annual = max(ann)``、
+      ``iter = len(tried)``，把适配逻辑收口在取数层（brief 纯函数保持极简）。文件不存在/
+      损坏/空 tried → None（brief 降级「—」）。
+    - **recent_runs**：``replay_runs/index.json`` 已是 list[{run_id, win_rate,
+      max_drawdown, annualized_return, ...}]，直接 json.load + 按创建序取最近 5 条。
+      文件不存在/损坏 → []。
+    """
+    import json
+
+    # ── scan_count：读 plans/<date>.json 的信号数（scan 落盘格式，零重活） ──
+    scan_count: int | None = None
+    try:
+        plans_path = Path("plans") / f"{date}.json"
+        if plans_path.exists():
+            with plans_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+            plans_list = payload.get("plans") if isinstance(payload, dict) else None
+            if isinstance(plans_list, list):
+                scan_count = len(plans_list)
+    except Exception:
+        # 文件损坏/JSON 解析失败 → None（brief 降级「—」），不阻断播报
+        logger.warning("读 plans/%s.json 失败，scan_count 降级为 None", date, exc_info=True)
+        scan_count = None
+
+    # ── param_iter_state：读 logs/param_iter_state.json，适配 {best_annual, iter} ──
+    param_iter_state: dict | None = None
+    try:
+        pi_path = Path("logs") / "param_iter_state.json"
+        if pi_path.exists():
+            with pi_path.open("r", encoding="utf-8") as f:
+                raw_pi = json.load(f)
+            tried = raw_pi.get("tried") if isinstance(raw_pi, dict) else None
+            if isinstance(tried, dict) and tried:
+                # 从 tried 字典每项的 metrics 里取 ann，求 max；轮数 = 已尝试参数组数
+                anns = [
+                    v.get("ann")
+                    for v in tried.values()
+                    if isinstance(v, dict) and isinstance(v.get("ann"), (int, float))
+                ]
+                if anns:
+                    param_iter_state = {
+                        "best_annual": max(anns),
+                        "iter": len(tried),
+                    }
+                # anns 空（所有项都没 ann 字段）→ param_iter_state 留 None，brief 降级
+    except Exception:
+        # 文件损坏/JSON 解析失败 → None（brief 降级「—」），不阻断播报
+        logger.warning("读 logs/param_iter_state.json 失败，param_iter 降级为 None", exc_info=True)
+        param_iter_state = None
+
+    # ── recent_runs：读 replay_runs/index.json，取最近 5 条摘要 ──
+    recent_runs: list = []
+    try:
+        idx_path = Path("replay_runs") / "index.json"
+        if idx_path.exists():
+            with idx_path.open("r", encoding="utf-8") as f:
+                raw_runs = json.load(f)
+            if isinstance(raw_runs, list):
+                # 按 created_at 降序（字符串 ISO 字典序 = 时间序）取最近 5 条；
+                # 缺 created_at 的条目排末尾（key=lambda 兜底空串，不抛）
+                recent_runs = sorted(
+                    raw_runs,
+                    key=lambda r: r.get("created_at", "") if isinstance(r, dict) else "",
+                    reverse=True,
+                )[:5]
+    except Exception:
+        # 文件不存在/损坏 → []（brief 渲染「近期无回测记录」），不阻断播报
+        logger.warning("读 replay_runs/index.json 失败，recent_runs 降级为空", exc_info=True)
+        recent_runs = []
+
+    return scan_count, param_iter_state, recent_runs
+
+
 def _build_brief(bot: str, date: str, reader: DataLakeReader):
     """按机器人路由到对应 brief 构造器。
 
-    一期 Task 2 框架 + Task 3 trading + Task 4 data 接入：market 走既有
-    build_daily_brief；trading/data 走注入式取数 + 纯函数渲染；strategy 仍
-    NotImplementedError（Task 5 接入时改 raise → 真实调用）。
+    一期 Task 2 框架 + Task 3 trading + Task 4 data + Task 5 strategy 全部接入：
+    market 走既有 build_daily_brief；trading/data/strategy 走注入式取数 + 纯函数渲染。
     本函数集中路由，避免 main() 里散落 if/elif。
     """
     if bot == "market":
@@ -290,10 +374,18 @@ def _build_brief(bot: str, date: str, reader: DataLakeReader):
         # 数据机器人：取 datasets 快照 → 纯函数渲染健康度文案。取数失败降级为空列表。
         datasets = _fetch_data_snapshot()
         return build_data_brief(date, datasets=datasets)
-    # strategy 占位（Task 5 接入前不可调用，防误用）
-    raise NotImplementedError(
-        f"bot={bot} 的 brief 构造器尚未实现（Task 5 strategy 接入）；本 Task 仅搭框架"
-    )
+    if bot == "strategy":
+        # 策略机器人：取信号数/参数迭代/近期回测三件套 → 纯函数渲染健康度文案。
+        # scan_count 不走 facade.scan（全市场扫描太重），改读 plans/<date>.json。
+        scan_count, param_iter_state, recent_runs = _fetch_strategy_snapshot(date)
+        return build_strategy_brief(
+            date,
+            scan_count=scan_count,
+            param_iter_state=param_iter_state,
+            recent_runs=recent_runs,
+        )
+    # 兜底：CLI argparse choices 已挡，这里是第二道防线
+    raise ValueError(f"未知 bot={bot}，支持：{SUPPORTED_BOTS}")
 
 
 # ===========================================================================
