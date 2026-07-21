@@ -35,6 +35,7 @@ from server.services.trading_service import (
     cancel_order as svc_cancel_order,
     get_orders,
     get_asset,
+    query_trades,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,26 @@ async def export_live_trades(
         headers={
             "Content-Disposition": f'attachment; filename="live_trades_{start}_{end}.csv"',
         },
+    )
+
+
+@router.get("/trades", summary="实盘流水分页查询")
+async def trades_endpoint(
+    start: str = Query(..., description="起 'YYYY-MM-DD'"),
+    end: str = Query(..., description="止 'YYYY-MM-DD'"),
+    symbol: str | None = Query(None, description="标的过滤（精确匹配，如 510300.SH）"),
+    direction: str | None = Query(None, description="方向过滤 buy/sell"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """分页查询 [start, end] 实盘成交流水（读 logs/live_trades.csv）。
+
+    返回 {trades, total, limit, offset}：trades 为当前页，total 为过滤后命中总数。
+    无日志文件 → 空结果（诚实空，不抛 404）。
+    Why run_in_threadpool：CSV 全表扫描是同步阻塞 IO，丢线程池避免阻塞事件循环。
+    """
+    return await run_in_threadpool(
+        query_trades, start, end, symbol, direction, limit, offset
     )
 
 

@@ -210,6 +210,61 @@ def export_trades(start: str, end: str) -> str:
     return buf.getvalue()
 
 
+def query_trades(
+    start: str,
+    end: str,
+    symbol: Optional[str] = None,
+    direction: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """分页查询实盘成交流水（logs/live_trades.csv）。
+
+    过滤维度（AND 关系）：
+    - 日期闭区间：按 timestamp 的日期前缀（YYYY-MM-DD）字典序比较，与 export_trades 同口径。
+    - symbol：精确匹配（标的代码全字串，如 "510300.SH"）。
+    - direction：精确匹配（"buy" / "sell"）。
+    分页：limit/offset 在「过滤后全集」上切片；total 始终是过滤后命中总数（前端据此渲染分页器）。
+    返回：{trades: [...], total: int, limit, offset}。
+    降级：文件不存在 → 空结果（诚实空，不抛），与 export_trades 保持一致。
+
+    Why limit 上限 1000：live_trades.csv 是单文件全表扫描（无索引），不设上限会被
+    前端误传大 limit 拖垮（CSV 读取 + Python 行迭代在数万行级别已明显延迟）；
+    1000 既覆盖看板单页可视上限，又给运维查最近一段留足空间。
+    Why 数值字段 float 转换：CSV 原生皆 str，前端 TS 类型期望 shares/price 为 number；
+    在服务端兜底转一次（转不动保留原串，让前端 parse 兜底而非整列空）。
+    """
+    # 入参兜底：limit 钳到 [1, 1000]，offset 钳到 >= 0（防前端传负/超大值）
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    if not os.path.exists(LIVE_TRADE_LOG):
+        # 诚实空：文件尚未生成（未成交过）→ 直接返空，不抛 FileNotFoundError
+        return {"trades": [], "total": 0, "limit": limit, "offset": offset}
+    matched: list = []
+    with open(LIVE_TRADE_LOG, "r", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            # 日期闭区间：timestamp 形如 "2026-07-21 09:35:00"，取日期前缀字典序比较
+            day = r.get("timestamp", "").split(" ")[0]
+            if not (start <= day <= end):
+                continue
+            if symbol and r.get("symbol") != symbol:
+                continue
+            if direction and r.get("direction") != direction:
+                continue
+            # 数值字段尽力转 float：转不动（空串/脏数据）保留原串，前端兜底
+            row = dict(r)
+            for k in ("shares", "price"):
+                try:
+                    row[k] = float(row[k])
+                except (TypeError, ValueError):
+                    pass
+            matched.append(row)
+    total = len(matched)
+    # 分页切片：在「过滤后全集」上做 offset/limit（total 仍是全集计数，前端按 total 渲染分页器）
+    page = matched[offset: offset + limit]
+    return {"trades": page, "total": total, "limit": limit, "offset": offset}
+
+
 def emergency_halt() -> dict:
     """一键熔断：置 lock_down + 告警。幂等。
 
