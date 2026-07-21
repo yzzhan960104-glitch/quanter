@@ -1,14 +1,16 @@
 # 实验系统（Experiment System）· 设计文档
 
-> **维护范围**：新增 `experiment/` 包 + `strategies/base.py` 协议扩展 + `execution/engine.py` 出场路由改造 + `execution/storage.py` plan 加归因字段 + 颈线法/cainen 实盘 scan 与出场适配
+> **维护范围**：新增 `experiment/` 包 + 注入 `trading/engine.py::_eod`（二期引擎 gap② 策略数据源）+ `trading/signal_runner.py` 归因透传 + `trading/trading_plan.py` plan 归因字段
 > **创建日期**：2026-07-22
-> **状态**：设计待审 → 实现计划（writing-plans）
+> **状态**：v2 · 基于二期引擎修订（v1 误基于旧 `execution/engine.py`，已作废执行侧）
+> **修订记录**：
+> - **v2（2026-07-22）**：master 合并二期引擎 `trading/` 包（`04f6c1c`）后，发现 v1 §6 + plan Task5-11 基于旧 `execution/engine.py`（盘中 tick 范式）错位。v2 保留配置中心核心（§3-5 + plan Task1-4），重写执行侧对接二期引擎 `trading/engine.py::_eod`（T-1 定计划 + APScheduler 四触发点）。ADR5-7 修正。
 
 ---
 
 ## 0. 一句话定位
 
-**实验系统是实盘下单的「策略版本配置中心」**：管理「在线实验版本 + 资金权重」，scan 时由 resolver 给出当前线上/灰度的 `(strategy_name, params, weight)` 列表，策略模块据此解析算法执行。线上参数以不可变快照锁定（保障交易质量），灰度以资金权重分流，版本与 plan 归因全持久化。
+**实验系统是实盘下单的「策略版本配置中心」**，也是二期引擎 `trading/engine.py::_eod` 的「策略数据源注入层」（二期引擎 gap②）：管理「在线实验版本 + 资金权重」，T-1 晚 `_eod` 经 `resolve_active()` 拿到当前线上/灰度的 `(strategy_name, params, weight)` 列表，遍历产信号。线上参数以不可变快照锁定（保障交易质量），灰度以资金权重分流，版本与 plan 归因全持久化。
 
 ---
 
@@ -16,22 +18,23 @@
 
 ### 1.1 触发场景
 
-即将开始 **miniQMT 虚拟盘** 真实下单（EMT 已废弃，见记忆订正）。实盘对「策略及参数稳定性」的要求远高于回测——回测里随手改 `EXEC_DEFAULTS` 重跑无代价，实盘改一个参数就可能导致全市场持仓逻辑剧变。
+即将开始 **miniQMT 虚拟盘** 真实下单（EMT 已废弃，见记忆订正）。二期引擎已铺好「T-1 定计划 + 开盘挂单 + 盘中止损监控 + 盘后对账」四触发点骨架，但其 `_eod` 当前 `signals=[]` 占位（`trading/__main__.py` 明确把「策略层数据源注入」留给上线集成阶段）。实盘对「策略及参数稳定性」要求远高于回测——回测里随手改参数重跑无代价，实盘改参数=全市场持仓逻辑剧变。
 
 ### 1.2 当前痛点（实盘链路盘点）
 
-- **参数硬编码**：当前实盘 scan 走 `caisen_service`，`StrategyConfig` 硬编码在 `caisen/facade.py`，无配置中心，改参数=改代码=手滑风险。
-- **`strategies/` 解耦红利未延伸到实盘**：2026-07-20 重构把策略与回测引擎解耦（`strategies/base.py` + `registry.py`），但**只被回测用**，实盘 scan 仍走 caisen 包老路；颈线法（唯一活跃策略）**还没进实盘 scan**。
-- **无版本/灰度/回滚概念**：grep 全仓零 `experiment/gray/feature_flag/canary` 命中。参数一改就覆盖，无审计、无灰度、无逃生通道。
-- **实盘出场引擎未解耦**：`execution/engine.py`（ExecutionEngine）的 `tick_exit` 硬调 caisen 的 `check_exit`，颈线法的分级止盈（tp1/tp2）+ trailing 移动止损无法在实盘表达。
+- **二期引擎 `_eod` 信号源缺位**（gap②）：`trading/engine.py::_eod` 当前 `signals=[]` 占位 + `TODO(Task 10): 注入 NecklineMethodStrategy`。无配置中心 → 注入即硬编码单策略单参数，手滑风险。
+- **`signal_runner` 硬编码单参数集**：`build_orders_from_signals` 签名固定 `capital/pos_cap/stop_cfg`，无实验版本/灰度/权重概念。
+- **无版本/灰度/回滚概念**：grep 全仓零 `experiment/gray/feature_flag` 命中。参数一改就覆盖，无审计、无灰度、无逃生通道。
+- **颈线法实盘 scan 未接通**：`strategies/neckline_method` 的 `scan_at` 只被回测用，二期引擎 `_eod` 还没调它产信号。
 
 ### 1.3 实验系统的职责边界
 
 | 做 | 不做 |
 |---|---|
-| 管理「在线实验版本 + 资金权重」（不可变快照 + 状态机 + 审计） | 不生成 plan、不下单（scan/execution 层的事） |
-| `resolve_active()` 给出当前生效 `(name, params, weight)` | 不记账、不管持仓归因（券商合并账户的虚拟记账是 execution 层职责） |
-| plan 落盘时携带 `experiment_id`+`weight` 归因字段 | 不实时算实验 PnL 指标（事后 `report` 命令离线扫 `plans/*.json` 聚合） |
+| 管理「在线实验版本 + 资金权重」（不可变快照 + 状态机 + 审计） | 不生成订单、不下单、不动出场（二期 engine/signal_runner/stop_loss 的事） |
+| `resolve_active()` 给出当前生效 `(name, params, weight)`；注入 `_eod` 的信号扫描 | 不做盘中出场决策（出场归二期 `stop_loss.compute_stop_price` + 柜台限价止盈） |
+| signal/plan 落盘时携带 `experiment_id`+`weight` 归因 | 不记账、不管持仓对账（二期 `reconcile_job` 的事） |
+| `report` 事后扫 `logs/trading_plans/plan_*.json` 按 `experiment_id` 聚合 | 不实时算 PnL 指标（离线聚合） |
 
 ---
 
@@ -40,17 +43,17 @@
 ### 2.1 MVP 目标
 
 1. **配置中心**：`experiment/` 独立包，SQLite 持久化（版本 + 审计），CLI 管理（create/promote/set-weight/archive/rollback/list/report）。
-2. **scan resolver 注入**：scan 启动调 `resolve_active()`，遍历在线实验 → `build_strategy` → 实盘 scan → 生成带 `experiment_id` 的 ARMED plan。
-3. **颈线法完整接入实盘 scan**：`strategies/neckline_method` 实现 `scan_live` + `to_armed_plan` + `check_pullback` + `check_exit`（复用回测 `simulate_exit` 内核）。
-4. **ExecutionEngine 出场路由解耦**：按 `plan.experiment_id` 路由到对应 Strategy 的 `check_exit`，caisen 零行为回归。
-5. **双链路验收**：Mock + miniQMT 虚拟盘都能跑通端到端（create exp → scan → plan → tick → FILLED/CLOSED，归因不断链）。
+2. **二期引擎 `_eod` 注入**：`trading/engine.py::_eod` 从 `signals=[]` 占位 → `resolve_active()` 遍历在线实验 → 每实验 `build_strategy(name, params).scan_at(...)` 产信号（带 `experiment_id`）。
+3. **signal_runner 归因 + 权重透传**：`build_orders_from_signals` 改造，资金按 `weight × total_capital` 分配，`PlannedOrder` + `trading_plan` orders 带 `experiment_id`+`experiment_weight`。
+4. **双链路验收**：影子模式（AUTO_TRADE_MODE=dry_run）+ miniQMT 虚拟盘都能跑通 T-1 `_eod` → 计划落盘 → 归因不断链。
 
 ### 2.2 非目标（MVP 外，follow-up）
 
-- Parameter Lab 冠军参数「一键发布」UI（MVP 用 CLI，参数从 ParamLab 复制粘贴）
-- 实时实验 PnL 看板 / 自动熔断 archive（MVP 仅 `report` 离线聚合 + 人工决策）
-- `execution/storage.py` 整体迁 SQLite（MVP plan 仍 JSON，仅加归因字段；storage 全迁独立立项）
-- caisen 阶段E 完整删除（颈线法已唯一活跃，caisen 代码保留作回归兜底）
+- Parameter Lab 冠军参数「一键发布」UI（MVP 用 CLI）
+- 实时实验 PnL 看板 / 自动熔断 archive（MVP 仅 `report` 离线聚合）
+- 二期引擎 gap①（post_close 熔断 equity 源）/ gap③（EMT 行情源）—— 非实验系统职责
+- 盘中分级止盈 tp1/tp2（二期引擎范式是柜台单档限价止盈 + 盘中被动止损，MVP 不引入盘中分级推进）
+- caisen 实盘接入（caisen 不在二期实盘路径，仅回测保留）
 
 ---
 
@@ -86,14 +89,13 @@ DRAFT ──promote(weight)──→ ACTIVE ──archive──→ ARCHIVED
   └──discard──→ (删除)    set-weight(不改status)    └──rollback──→ ACTIVE
 ```
 
-**合法迁移**：DRAFT→ACTIVE(promote)、ACTIVE→ARCHIVED(archive)、ARCHIVED→ACTIVE(rollback)、DRAFT→删除(discard)、ACTIVE 内 set-weight（不改 status）。
-**非法迁移一律拒绝**（如 ARCHIVED→DRAFT、已 ACTIVE 再 promote）。
+**合法迁移**：DRAFT→ACTIVE(promote)、ACTIVE→ARCHIVED(archive)、ARCHIVED→ACTIVE(rollback)、DRAFT→删除(discard)、ACTIVE 内 set-weight。**非法迁移一律拒绝**。
 
 ### 3.4 AuditLog（append-only）
 
 每次 create/promote/set-weight/archive/rollback/discard 写一条：`audit_id / timestamp / action / experiment_id / changed_fields(JSON，如 {"weight":[0.8,0.2]}) / operator / note`。
 
-### 3.5 SQLite Schema（`experiment/experiments.db`，复用 `execution/replay_tasks_db` 范式）
+### 3.5 SQLite Schema（`experiment/experiments.db`）
 
 ```sql
 CREATE TABLE experiment_version (
@@ -113,13 +115,13 @@ CREATE INDEX idx_audit_exp ON audit_log(experiment_id);
 
 并发写用 SQLite 事务（WAL 模式），`store.py` 每次 promote/set-weight 在单事务内完成「更新版本表 + 写审计」，失败整体回滚。
 
-### 3.6 plan 归因字段（`execution/storage.py` 加，底层 JSON 不动）
+### 3.6 plan 归因字段（落点：`trading/trading_plan.py`）
 
-`_plan_to_dict` / `_restore_plan_dict` 增加：
-- `experiment_id: str | None`（pre-experiment 老 plan 为 None，聚合时归「未归因」桶）
-- `experiment_weight: float | None`（plan 落盘时冻结的权重，CLI 改权重不影响已落盘 plan）
+二期引擎 plan 落 `logs/trading_plans/plan_<date>.json`，结构 `{"date", "confirmed", "orders":[...]}`，每个 order 是嵌套 dict `{"order":{symbol,qty,side,price}, "stop_price", "take_profit"}`。归因 = 给每个 order dict 加两字段：
+- `experiment_id: str | None`（pre-experiment 老 plan 为 None）
+- `experiment_weight: float | None`（落盘时冻结）
 
-归因聚合：`report` 命令扫 `plans/*.json` 按 `experiment_id` 分组算 PnL/胜率/回撤。
+`save_plan` 是 JSON 透传，归因字段由 `signal_runner.build_orders_from_signals` 产出时带上、`eod_plan` 透传。`report` 扫这些 plan 按 `experiment_id` 聚合。
 
 ---
 
@@ -130,9 +132,9 @@ CREATE INDEX idx_audit_exp ON audit_log(experiment_id);
 ```
 experiment/
   __init__.py     # 导出 resolve_active / 公开 API
-  models.py       # ExperimentVersion / AuditLog dataclass + ExperimentStatus 枚举 + 状态机校验
-  store.py        # SQLite 持久化（experiments.db），WAL + 事务，复用 replay_tasks_db 范式
-  resolver.py     # resolve_active() → [ActiveExperiment]；scan 唯一入口，实时读不缓存
+  models.py       # ExperimentVersion / AuditLog / ActiveExperiment + ExperimentStatus + 状态机校验
+  store.py        # SQLite 持久化（experiments.db），WAL + 事务
+  resolver.py     # resolve_active() → [ActiveExperiment]；_eod 唯一入口，实时读不缓存
   audit.py        # 变更审计写入 + 查询
   cli.py          # python -m experiment create|promote|set-weight|archive|rollback|list|report
 ```
@@ -141,39 +143,50 @@ experiment/
 
 ```
 strategies/ ←── build_strategy(name,params) ──← experiment/ (resolver, 只读 SQLite)
-   ↑                                              ↑
-   │ 实例化                                         │ 读
-scan_service (caisen_service 改造) ──resolve_active()──┘
-   │ 生成 ARMED plan（带 experiment_id + weight）
+   ↑ scan_at(识别内核)                            ↑ 读
+trading/engine.py::_eod（改造：signals=[]占位 → resolve 多实验遍历）── resolve_active() ──┘
+   │ 每实验 scan_at(params) → signals（带 experiment_id）
    ↓
-execution/storage.py (plans/<date>.json)  ← plan 落盘（加归因字段）
+trading/signal_runner.build_orders_from_signals（改造：weight×capital + 归因透传）
+   ↓ PlannedOrder（带 experiment_id + experiment_weight）
+trading/trading_plan.save_plan（orders 嵌套 dict 加归因）→ 确认闸
    ↓
-execution/engine.py (ExecutionEngine) ── 按 plan.experiment_id 路由 Strategy ──→ trading/ (Mock/QMT gateway)
+trading/engine.py：pre_open（柜台限价挂单）→ stop_loss_monitor（compute_stop_price 盘中监控）→ post_close（reconcile 对账）
+   ↓
+trading/qmt_gateway.py（miniQMT 虚拟盘）/ MockExecutionGateway（影子/dry_run）
 ```
 
-**`experiment/` 零依赖** strategies/execution/trading/server —— 纯配置层，可独立单元测试。scan_service 依赖 experiment（resolve）+ strategies（build_strategy）。
+**`experiment/` 零依赖** strategies/execution/trading/server —— 纯配置层。`trading/engine.py::_eod` 依赖 experiment（resolve）+ strategies（build_strategy/scan_at）。
 
-### 4.3 注入点
+### 4.3 注入点（二期引擎 gap②）
 
-`scan_service.run_scan(date)` 开头调 `resolver.resolve_active()`，结果为空则 fail-fast（无在线实验不下单）。
+`trading/engine.py::_eod`（当前 `signals=[]` 占位）→ 改造调 `resolve_active()` → 遍历在线实验 → 每实验 `build_strategy + scan_at` 产信号 → 合并传 `eod_plan`。
 
 ---
 
 ## 5. 数据流
 
-### 5.1 实盘 scan（schtasks/CLI 每日触发）
+### 5.1 T-1 信号扫描（二期引擎 `_eod` 触发点，15:35）
 
 ```
-scan_service.run_scan(date)
+trading/engine.py::_eod(date)
   ├─ 1. resolver.resolve_active()                      ← 实时读 SQLite，返 ACTIVE 且 weight>0
   │     → [ActiveExperiment(exp_id, strategy_name, params, weight), ...]
-  ├─ 2. for each ActiveExperiment:
+  │     空则 fail-fast（无在线实验，eod_plan 不产单）
+  ├─ 2. universe = _load_universe()                    ← 创板科创可交易标的（复用既有）
+  ├─ 3. for each ActiveExperiment:
   │     strategy = build_strategy(exp.strategy_name, cfg_override=exp.params)
-  │     for signal in strategy.scan_live(date):         ← 颈线法：聚集带突破+回踩挂单点
-  │       plan = strategy.to_armed_plan(signal, weight=exp.weight, experiment_id=exp.exp_id)
-  │       storage.save_plans(date, [plan])              ← 落 plans/<date>.json，带 exp_id+weight
-  ├─ 3. [人工/自动审核] storage.update_plan(plan_id, status="ARMED")
-  └─ 4. ExecutionEngine.tick_pullback/tick_exit → load_plans → 路由 Strategy 决策 → submit_order
+  │     for sym in universe:
+  │       for signal in strategy.scan_at(sym, df.loc[:date], date, state):
+  │         signal["experiment_id"] = exp.experiment_id     ← 归因标记
+  │         signal["experiment_weight"] = exp.weight
+  │         signals.append(signal)
+  ├─ 4. eod_plan(date, signals, atr_map, capital)      ← 二期引擎既有，signals 现在非空
+  │     → build_orders_from_signals（每实验 weight×capital 算 budget）→ PlannedOrder（带归因）
+  │     → trading_plan.save_plan（orders 嵌套 dict + 归因）→ push 钉钉等确认
+  └─ 5. [人工钉钉确认] → pre_open(09:22) 挂限价买 + 止盈限价卖
+        → stop_loss_monitor(盘中每5min) 跌破 stop_loss.compute_stop_price → 发卖
+        → post_close(15:30) reconcile 对账 + 重算次日止损
 ```
 
 ### 5.2 CLI 操作流
@@ -185,111 +198,132 @@ python -m experiment set-weight <exp_id> --weight 0.5       # 灰度扩量（记
 python -m experiment archive <old_prod_id>                  # 下线
 python -m experiment rollback <archived_id>                 # 回滚（ARCHIVED→ACTIVE）
 python -m experiment list [--status active]
-python -m experiment report --since 2026-07-01              # 归因聚合（扫 plans/*.json 按 exp_id）
+python -m experiment report --since 2026-07-01              # 扫 trading_plans/plan_*.json 按 exp_id 聚合
 ```
 
-### 5.3 权重热生效（零常驻进程）
+### 5.3 权重热生效（零常驻进程一致性问题）
 
-`resolve_active()` 每次 scan **实时读 SQLite 不缓存**。CLI 改权重 → 写 SQLite+审计 → **下一次 scan 自动生效**，无需重启。scan 是 schtasks/CLI 触发的短任务，天然无缓存一致性问题。
+`resolve_active()` 每次 `_eod`（每日 15:35 触发）**实时读 SQLite 不缓存**。CLI 改权重 → 写 SQLite+审计 → **次日 `_eod` 自动生效**。二期引擎是 APScheduler 常驻进程，但 `_eod` 每次触发都重读 SQLite，故无需 reload 机制。
 
 ### 5.4 一致性边界
 
-- **权重变更 vs in-flight plan**：plan 落盘时 `experiment_weight` **冻结**。CLI 改权重只影响之后新 scan 的 plan；已 ARMED/FILLED 的 plan 按落盘时权重执行到底。
-- **多实验同标的**：prod/candidate 都扫到标的 S → 各生成独立 plan（不同 exp_id）→ ExecutionEngine 分别消费。持仓合并是券商账户层的事，平台不管。
-- **weight=0**：resolve 过滤 `weight>0`，权重调 0 = 软下线（不 archive，留审计）。
+- **权重变更 vs in-flight plan**：plan 落盘时 `experiment_weight` **冻结**。CLI 改权重只影响之后 `_eod` 新产的 plan；已挂单/持仓按落盘时权重执行。
+- **多实验同标的**：prod/candidate 都扫到标的 S → 各产独立 signal（不同 exp_id）→ `signal_runner` 各自算 qty（weight×capital）→ 两笔独立 PlannedOrder。持仓合并是券商账户层的事（二期 `reconcile` 对账，平台不管）。
+- **weight=0**：resolve 过滤 `weight>0`，权重调 0 = 软下线。
 
 ---
 
-## 6. 颈线法实盘接入
+## 6. 实盘接入二期引擎（v2 重写：对接 `trading/engine.py::_eod`）
 
-### 6.1 架构决策：出场归策略侧（遵循 `strategies/base.py` 既有原则）
+### 6.1 注入点：二期引擎 `_eod` 的 gap②
 
-`base.py` 顶部钉死：「**出场逻辑归属：策略侧（核心架构决策）**……引擎不感知策略内部如何识别/进场/出场」。故出场适配**不靠 ExecutionEngine 学会颈线法**，而是**扩展 Strategy 协议**，颈线法/cainen 各自实现 tick 决策，ExecutionEngine 只调度。
+二期引擎 `trading/__main__.py` 顶部明确：「**本入口【不】做策略层数据源注入**……策略层→引擎层信号源集成 = 二期引擎上线集成阶段」。四触发点 `_eod/_pre_open/_stoploss/_post_close` 当前是安全 no-op（数据源空时优雅降级）。实验系统的核心职责 = **填上 `_eod` 的信号源注入**，把 `_eod` 从 `signals=[]` 占位变成 resolve 多实验产信号。
 
-### 6.2 Strategy 协议扩展（`strategies/base.py`，加 4 个实盘方法）
+### 6.2 `trading/engine.py::_eod` 改造（替换占位）
 
 ```python
-class Strategy(Protocol):
-    # —— 回测既有（不变）——
-    def precompute(self, symbol, full_df) -> dict: ...
-    def scan_at(self, symbol, df_T, T, strategy_state) -> list: ...
-    @property
-    def config_schema(self) -> type: ...
+# 改造前（当前）：
+async def _eod(self):
+    # TODO(Task 10): 注入 NecklineMethodStrategy + 拉 universe → signals + atr_map
+    await eod_plan(today, signals=[], atr_map={}, capital=...)
 
-    # —— 实盘新增 ——
-    def scan_live(self, date) -> list[Signal]: ...
-        # 实盘识别：复用 scan_at 的识别内核（detect_neckline_method + search_neckline），
-        # 只产出「聚集带突破 + 回踩挂单点」Signal，不模拟出场。
-
-    def to_armed_plan(self, signal, *, weight, experiment_id) -> dict: ...
-        # Signal → ARMED plan（挂单区间/shares/stop/tp1/tp2/trailing/max_wait，params 从 cfg 拿）
-
-    def check_pullback(self, plan, quote, bars_armed) -> PullbackDecision: ...
-        # ARMED 阶段：触及 [entry_lower,entry_upper]→FILLED；颈线法另含 max_wait 超时撤单
-
-    def check_exit(self, plan, bar, bars_held) -> ExitDecision: ...
-        # FILLED 阶段：颈线法 tp1部分+tp2全+trailing+超时；caisen 复用 exit_logic.check_exit
+# 改造后：
+async def _eod(self):
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not calendar.is_trading_day(today):
+        return
+    from experiment.resolver import resolve_active
+    from strategies.registry import build_strategy
+    experiments = resolve_active()
+    if not experiments:
+        logger.warning("_eod 无在线实验，跳过"); return   # fail-fast
+    universe = _load_universe()                           # 创板科创可交易标的
+    signals, atr_map = [], {}
+    for exp in experiments:
+        strategy = build_strategy(exp.strategy_name, cfg_override=exp.params)
+        for sym in universe:
+            df = _load_df_upto(sym, today)                # 无前视 .loc[:today]
+            for s in strategy.scan_at(sym, df, today, {}):
+                s["experiment_id"] = exp.experiment_id    # 归因标记
+                s["experiment_weight"] = exp.weight
+                signals.append(s)
+                atr_map[sym] = strategy.atr(sym)          # ATR 供 stop_loss 用
+    await eod_plan(today, signals, atr_map, capital=float(os.getenv("TRADE_CAPITAL","1_000_000")))
 ```
 
-**Signal 字段**：`symbol / neckline_price / H(形态高度) / ATR / breakout_date / 形成日 T`（颈线法识别内核输出）。
+**实现说明**：`_load_universe`/`_load_df_upto`/`strategy.atr` 的具体来源对齐 `strategies/neckline_method.py` 既有 `scan_at` 的数据加载方式（该文件 `scan_at` 已实现识别内核 + 数据加载，此处抽出复用）。
 
-### 6.3 决策对象扩展（支持分级平仓/撤单/trailing）
+### 6.3 `trading/signal_runner.py` 改造（资金权重 + 归因透传）
+
+`build_orders_from_signals` 当前用单一 `capital × pos_cap`。改造：signal 带 `experiment_weight`，budget = `experiment_weight × capital × pos_cap`；PlannedOrder 加 `experiment_id`/`experiment_weight`：
 
 ```python
-class PullbackAction:   ARMED_FILL | CANCEL_TIMEOUT | HOLD
-class ExitAction:       CLOSE_PORTION | CLOSE_ALL | UPDATE_STOP | HOLD
 @dataclass
-class ExitDecision:
-    action: ExitAction
-    portion: float = 1.0          # CLOSE_PORTION 时 = tp1_portion（如 0.5）
-    new_stop: float | None = None # trailing 收紧后的新止损
-    reason: str = ""              # stop_loss/take_profit_1/take_profit_2/trailing/timeout
+class PlannedOrder:
+    order: OrderRequest
+    stop_price: float
+    take_profit: float
+    neckline: float
+    experiment_id: str = ""        # 新增：归因
+    experiment_weight: float = 1.0 # 新增：冻结权重
+
+def build_orders_from_signals(signals, *, capital, pos_cap, atr_map, stop_cfg):
+    for s in signals:
+        weight = s.get("experiment_weight", 1.0)         # 每信号各自的权重
+        budget = capital * pos_cap * weight              # weight 落地
+        qty = int(budget / float(entry) / 100) * 100
+        ...
+        out.append(PlannedOrder(..., experiment_id=s.get("experiment_id",""),
+                                experiment_weight=weight))
 ```
 
-### 6.4 颈线法 `to_armed_plan` 字段映射
+`eod_plan` 产 order_dicts 时把 `experiment_id`/`experiment_weight` 透传到嵌套 dict，`trading_plan.save_plan` JSON 透传落盘。
 
-| ARMED plan 字段 | 来源（颈线法 EXEC_DEFAULTS） |
+### 6.4 出场：复用二期引擎既有（不另造 check_exit）
+
+颈线法出场在二期引擎已定型，实验系统**不动出场逻辑**：
+
+| 出场事件 | 二期引擎既有实现 | 实验系统 |
+|---|---|---|
+| **止盈** | `trading/engine.py::pre_open` 挂柜台限价卖单（`tp_h_mult × H`，T 日 09:22 开盘前挂） | 不动 |
+| **止损** | `trading/stop_loss.py::compute_stop_price`（trailing grace/step/floor，**已从 `simulate_exit` 迁出**，T-1 重算固定价，盘中 `stop_loss_monitor` 监控） | 不动 |
+| **盘中分级 tp1/tp2** | 二期引擎**无此范式**（柜台单档限价止盈 + 盘中被动止损） | MVP 不引入 |
+
+**v1 的 `check_exit`/`check_pullback`/tp1-tp2 分级推进 / `_exit_kernel` 全部作废**——二期 `stop_loss.compute_stop_price` 已经把 trailing 做掉了，颈线法出场范式是 T-1 定计划 + 柜台挂单，不是盘中 tick 推进。
+
+### 6.5 plan 归因落点：`trading/trading_plan.py` orders 嵌套 dict
+
+每个 order dict 加归因：
+```json
+{"order": {"symbol":"...", "qty":..., "side":"buy", "price":...},
+ "stop_price": ..., "take_profit": ...,
+ "experiment_id": "neckline_v6_20260722", "experiment_weight": 0.2}
+```
+`save_plan` JSON 透传（既有逻辑不改，归因字段由 signal_runner 产出时带）。`report` 扫 `logs/trading_plans/plan_*.json` 按 `experiment_id` 聚合。
+
+### 6.6 作废清单（v1 → v2）
+
+| v1 设计（基于旧 execution/engine.py） | v2 处置 |
 |---|---|
-| `entry_upper`/`entry_lower` | 颈线位回踩挂单区间（`buy_limit_atr_mult` × ATR） |
-| `shares` | `weight × 总资金 × pos_cap / entry_upper`（**资金权重在此落地**） |
-| `stop` | 颈线 − `stop_atr_mult` × ATR |
-| `take_profit`（tp2 全止盈） | 颈线 + `tp_h_mult` × H |
-| `take_profit_1`（tp1 部分） | 颈线 + `tp1_h_mult` × H |
-| `tp1_portion` | `tp1_portion`（如 0.5） |
-| `max_wait_bars` | `max_wait`（回踩挂单有效期，超时撤单） |
-| `trailing_grace/step/floor` | trailing 移动止损 3 维 |
-| `experiment_id`/`experiment_weight` | 归因 + 冻结权重 |
-
-**shares 计算的「总资金」来源**：scan_service 在调 `to_armed_plan` 前，从 `trading_service`/gateway 查询账户可用资金（miniQMT `queryAsset` / Mock `initial_cash`），作为 `total_capital` 注入；`shares = weight × total_capital × pos_cap / entry_upper`，向下取整到 100 股（A 股最小交易单位）。weight 在此落地为实际股数。
-
-### 6.5 颈线法 `check_exit`（= 回测 `simulate_exit` 实盘版）
-
-```
-优先级：stop_loss > tp1(部分,首次) > tp2(全平) > trailing 收紧 > max_holding 超时
-trailing：bars_held > grace → eff_mult = max(stop_mult − (bars_held−grace)×step, floor) → new_stop 上移
-```
-
-逻辑直接抽自 `scripts/neckline_backtest.py` 的 `simulate_exit`，**零重写**——复用同一离场内核，消除回测/实盘双源真理（呼应 `execution/engine.py` 顶部 `check_exit` 的「双源真理」红线）。
-
-### 6.6 ExecutionEngine 改造（`execution/engine.py`）
-
-- 启动时 `resolve_active()` 一次 → 每个实验 `build_strategy` → 缓存 `{experiment_id: strategy}`；params 不可变故缓存永久有效。若 ExecutionEngine 为常驻 beat 进程，CLI 改实验后需 reload（检测到新 ACTIVE 版本时增量 build 新 experiment_id、丢弃已 ARCHIVED 的）——MVP 若 scan+tick 为短任务则每次启动加载即可，常驻 reload 作为实现期决策
-- `tick_pullback`：`load_plans(ARMED)` → 按 `plan.experiment_id` 路由 → `strategy.check_pullback(plan, quote, bars_armed)`（替换当前硬编码 `check_pullback`）；`CANCEL_TIMEOUT` → update_plan(status=CANCELLED)
-- `tick_exit`：`load_plans(FILLED)` → `strategy.check_exit(...)`（替换当前 `check_exit` 调用）；`CLOSE_PORTION` → `submit_order(sell, qty=shares×portion)`；`UPDATE_STOP` → update_plan(stop=new_stop)
-- **caisen 零行为回归**：`strategies/caisen_pattern.py` 适配器的 `check_exit` 直接调 `caisen.engines.exit_logic.check_exit`，现有 caisen 实盘行为逐字保留；`check_pullback` 复用 engine 既有 `check_pullback` 几何判定（caisen 无 max_wait 撤单）
+| §6.2 Strategy 协议加 `scan_live/to_armed_plan/check_pullback/check_exit` | **作废**——二期用 `scan_at` + signal_runner，不需新协议方法 |
+| §6.5 颈线法 `check_exit`（`_exit_kernel` 复用 simulate_exit） | **作废**——二期 `stop_loss.compute_stop_price` 已迁出 trailing |
+| §6.6 `execution/engine.py` ExecutionEngine 改造（tick_pullback/tick_exit 路由） | **作废**——`execution/engine.py` 不在实盘路径，实盘走 `trading/engine.py` |
+| caisen 适配器 `check_exit` + 零回归守护 | **作废**——caisen 不在二期实盘路径 |
 
 ---
 
-## 7. 运行模式
+## 7. 运行模式（协同二期引擎 AUTO_TRADE_MODE 影子闸）
 
-实验系统**只发 plan，与下单模式无关**。下单模式由 ExecutionEngine 注入的 gateway 决定（现有 `ExecutionExecutor` Protocol + `get_gateway` + `submit_order(dry_run=)`——零新增）：
+实验系统**只产信号 plan，与下单模式无关**。下单由二期引擎 `_pre_open/_stoploss/_post_close` 执行，模式由 `AUTO_TRADE_MODE` env 决定（二期既有）：
 
-| 模式 | gateway | 用途 |
+| 模式 | gateway / 闸 | 用途 |
 |---|---|---|
-| **回测 Mock** | `MockExecutionGateway` | 链路验证、回归测试、开发、新实验预演 |
-| **miniQMT 虚拟盘** | `QmtExecutionGateway`（连 miniQMT 模拟账户，账号 `10110356`@100万，真实行情虚拟撮合） | 实盘前最后一关、灰度预演 |
+| **影子 dry_run** | `AUTO_TRADE_MODE=dry_run`（默认）+ MockExecutionGateway | 链路验证、新实验预演、回归测试 |
+| **miniQMT 虚拟盘** | `AUTO_TRADE_MODE=live` + QmtExecutionGateway（账号 `10110356`@100万模拟） | 实盘前最后一关、灰度预演 |
 
-**EMT 已废弃，不在支持范围**。`.venv310/Scripts/python` 跑 miniQMT（xtquant 绑 python310）。MVP 两条链路都要跑通端到端。
+**EMT 已废弃**，不在支持范围。`.venv310/Scripts/python` 跑 miniQMT（xtquant 绑 python310）。
+
+⚠️ **二期引擎 live 禁切红线**：当前 live 模式待 3 必修（post_close 熔断 equity 源 / 策略数据源注入 / EMT 行情源）。实验系统完成 §6 注入 = 解锁必修②（策略数据源注入），但①③仍需二期引擎补。MVP 验收用 dry_run 跑通，miniQMT 虚拟盘作为 live 前置验证（待二期 gap①③ 补全后再切 live）。
 
 ---
 
@@ -297,63 +331,69 @@ trailing：bars_held > grace → eff_mult = max(stop_mult − (bars_held−grace
 
 | 边界 | 处置 |
 |---|---|
-| **流动性行情** | scan 遇停牌/缺数据：`scan_live` 跳过该标的（颈线法识别内核已含停牌过滤）；下单走限价挂单回踩（不追涨，天然抗滑点） |
-| **接口状态机** | `resolve_active` SQLite 读失败 → scan **fail-fast**（无配置不下单）；CLI 改权重写失败 → 事务回滚审计不写；plan 落盘失败 → 整批回滚（不落半批） |
+| **流动性行情** | `_eod` scan 遇停牌/缺数据：`scan_at` 内部跳过；下单走柜台限价（pre_open 挂颈线+ATR，不追涨） |
+| **接口状态机** | `resolve_active` SQLite 读失败 → `_eod` fail-fast（无配置不产单）；CLI 改权重写失败 → 事务回滚审计不写 |
 | **资金守恒红线** | `promote`/`set-weight` 校验所有 ACTIVE 权重和 ≤ 1.0，超额拒绝 |
-| **策略敞口** | 新实验建议 promote 前 Mock 跑 N 天预演；`rollback` 一键恢复上个 prod；`weight=0` 软下线留审计 |
-| **撤单时序**（miniQMT 已知坑） | 盘后撤单柜台不处理（记忆载明 2026-07-21 实测），撤单完整闭环须在交易时段 9:30-15:00；`CANCEL_TIMEOUT` 决策须考虑此约束 |
-| **实验熔断** | MVP **不自动 archive**（防误杀），`report` 对连续亏损实验标红告警，人工决策 |
+| **策略敞口** | 新实验建议 promote 前 dry_run 跑 N 天；`rollback` 一键恢复；`weight=0` 软下线留审计 |
+| **撤单时序**（miniQMT 已知坑） | 盘后撤单柜台不处理（记忆 2026-07-21 实测），二期 `pre_open` 撤昨日未成交须在交易时段 |
+| **实验熔断** | MVP 不自动 archive，`report` 对连续亏损实验标红告警，人工决策 |
 
 ---
 
-## 9. 测试策略（新建 `tests/experiment/`）
+## 9. 测试策略（新建 `tests/experiment/` + 改造 `tests/trading/`）
 
-- **experiment/ 单元**：`test_models`（状态机合法/非法迁移 + 权重和校验）、`test_store`（SQLite CRUD + 审计 + 事务回滚 + 并发写 WAL）、`test_resolver`（只返 ACTIVE+weight>0 + params 不可变）、`test_cli`（命令端到端）、`test_audit`（changed_fields 旧→新）
-- **协议扩展**：`test_neckline_armed_plan`（Signal→plan 字段映射 + shares 按 weight）、`test_neckline_check_exit`（tp1 部分/tp2 全/trailing/超时，复用 simulate_exit 断言）、**`test_caisen_adapter_compat`**（caisen 适配器 check_exit 与老 `exit_logic.check_exit` 逐字一致——回归守护）
-- **ExecutionEngine 改造**：`test_engine_routing`（按 plan.experiment_id 路由）、`test_engine_close_portion`（qty=shares×portion）、**`test_engine_caisen_zero_regression`**（caisen plan 走新引擎行为逐字不变）
-- **端到端**：`test_e2e_scan_to_order`（create exp → scan_live → ARMED plan(带 exp_id) → tick(Mock) → FILLED → check_exit → CLOSED，exp_id 归因不断链）、`test_e2e_qmt_virtual`（miniQMT 虚拟盘同链路，交易时段跑）、`test_report`（扫 plans 按 exp_id 聚合 prod vs candidate）
+- **experiment/ 单元**（v1 保留）：`test_models`（状态机 + 权重和）、`test_store`（SQLite CRUD + 审计 + 事务）、`test_resolver`（只返 ACTIVE+weight>0）、`test_cli`（命令端到端）、`test_audit`
+- **_eod 注入测试**（v2 新）：`test_eod_resolves_experiments`（resolve → 每实验 scan_at → signals 带 exp_id）、`test_eod_failfast_no_active`（无在线实验不产单）
+- **signal_runner 归因测试**（v2 新）：`test_build_orders_weight_budget`（qty = weight×capital×pos_cap）、`test_planned_order_carries_experiment_id`
+- **trading_plan 归因测试**（v2 新）：`test_save_plan_preserves_experiment_attribution`（orders 嵌套 dict 带 exp_id 往返）、`test_old_plan_without_attribution`（向后兼容 None）
+- **端到端**（v2 改）：`test_e2e_eod_to_plan`（create exp → `_eod` resolve → scan_at → PlannedOrder(带 exp_id) → trading_plan 落盘 → 归因不断链，全程 dry_run）
+- **report**（v1 保留，落点改）：扫 `logs/trading_plans/plan_*.json` 按 exp_id 聚合
+
+**作废测试**（v1 的，不写）：颈线法 check_exit/tp1tp2 分级、caisen 适配器零回归、ExecutionEngine tick 路由。
 
 ---
 
 ## 10. 部署与调度
 
-- **scan 触发**：schtasks 每日盘前调 `scan_service.run_scan`（与 daily-brief/sync 同范式）
-- **ExecutionEngine beat**：盘中轮询 tick（接记忆「二期自动交易引擎」的 beat，或 schtasks 盘中触发）
-- **CLI 改实验**：人工随时，下次 scan 自动生效
+- **二期引擎常驻**：`python -m trading`（APScheduler 四 cron，`run_trading_engine.bat` schtasks 开机自启）
+- **`_eod` 触发**：`ENGINE_EOD_PLAN_CRON=35 15 * * 1-5`（T-1 晚 15:35），交易日判定由 `calendar.is_trading_day`
+- **CLI 改实验**：人工随时，次日 `_eod` 自动生效
 
 ---
 
 ## 11. 关键决策记录（ADR）
 
-- **ADR1**：在线版本+权重模型（非 prod/candidate 语义）——平台只懂「版本+权重」，消歧最简，支持灰度也支持多策略并存
-- **ADR2**：资金比例分流，平台不管持仓归因——A 股券商账户持仓无法物理隔离，归因记账下沉 execution 层，平台保持极简
-- **ADR3**：独立 `experiment/` 包 + SQLite，plan 仍 JSON 加归因字段——单一职责、零侵入 storage、风险隔离（storage 全迁 SQLite 独立立项）
-- **ADR4**：CLI + 状态机 + 审计 + rollback——与项目 schtasks/CLI 范式一致，低频操作无需 UI，审计是「保障交易质量」刚需
-- **ADR5**：出场归策略侧（遵循 `base.py`），扩展 Strategy 协议——不污染 ExecutionEngine，延续 2026-07-20 解耦原则
-- **ADR6**：颈线法 `check_exit` 复用 `simulate_exit` 内核——消除回测/实盘双源真理
-- **ADR7**：MVP 含颈线法完整接入实盘 scan——一次到位（用户决策），分两步实现（①识别→ARMED plan ②出场状态机适配）
-- **ADR8**：运行模式 Mock + miniQMT 虚拟盘（EMT 已废弃）——双链路验收
+- **ADR1**：在线版本+权重模型（非 prod/candidate 语义）——平台只懂「版本+权重」
+- **ADR2**：资金比例分流，平台不管持仓归因——A 股券商账户持仓无法物理隔离，归因记账下沉二期 reconcile
+- **ADR3**：独立 `experiment/` 包 + SQLite，plan 归因落 `trading_plan` orders（不动 execution/storage）
+- **ADR4**：CLI + 状态机 + 审计 + rollback
+- **ADR5（v2 修正）**：实验系统注入 `trading/engine.py::_eod`（二期引擎 gap② 策略数据源），**不改 `execution/engine.py`**（v1 误基于旧引擎，已作废）
+- **ADR6（v2 修正）**：出场复用二期 `stop_loss.compute_stop_price`（trailing 已迁出）+ 柜台限价止盈，**不另造 `check_exit`/`_exit_kernel`**（v1 与二期 stop_loss 重复，已作废）
+- **ADR7（v2 修正）**：MVP = 配置中心（Task1-4）+ 注入 `_eod`/signal_runner 归因（对接二期引擎），不碰盘中出场
+- **ADR8**：运行模式协同二期 `AUTO_TRADE_MODE`（dry_run 影子 + miniQMT 虚拟盘），EMT 已废弃
 
 ---
 
-## 12. MVP 验收标准
+## 12. MVP 验收标准（v2）
 
-1. `python -m experiment create/promote/set-weight/archive/rollback/list/report` 全部可用，状态机校验 + 审计正确
-2. Mock 链路端到端：create exp → scan_live → ARMED plan(带 exp_id+weight) → ExecutionEngine tick → FILLED → check_exit(tp1部分+tp2全) → CLOSED，归因不断链
-3. miniQMT 虚拟盘链路同上跑通（交易时段）
-4. caisen 零行为回归：`test_engine_caisen_zero_regression` + `test_caisen_adapter_compat` 全绿
-5. `report` 能按 experiment_id 聚合 prod vs candidate 的 PnL/胜率对比
-6. 权重和 > 1.0 的 promote/set-weight 被拒；权重变更下次 scan 生效；rollback 一键恢复
+1. `python -m experiment create/promote/set-weight/archive/rollback/list/report` 全可用，状态机 + 审计正确
+2. `_eod` 注入端到端（dry_run）：create exp → `_eod` resolve → 每实验 `scan_at(params)` → signals(带 exp_id) → `signal_runner` 产 PlannedOrder(weight×capital) → `trading_plan` 落盘(orders 带 exp_id) → 归因不断链
+3. miniQMT 虚拟盘链路同上跑通（待二期 gap①③ 补全后切 live 验证；MVP 用 dry_run + miniQMT 模拟账户 pre_open 挂单验证）
+4. `report` 按 `experiment_id` 聚合 prod vs candidate 的 PnL/胜率对比（扫 `trading_plans/plan_*.json`）
+5. 权重和 > 1.0 的 promote/set-weight 被拒；权重变更次日 `_eod` 生效；rollback 一键恢复
+6. 二期引擎既有 81 测试零回归（实验系统只注入 `_eod`，不动 pre_open/stop_loss/post_close）
+
+**v1 验收作废项**：caisen 零行为回归（caisen 不在实盘路径）、盘中 check_exit tp1/tp2 分级。
 
 ---
 
 ## 13. 风险与 follow-up
 
-- **ExecutionEngine 改造是 MVP 最大工作量**：tick 编排从「调 caisen 离场」改成「按 exp_id 路由 Strategy」，由 caisen 适配器逐字保留老行为兜底回归
-- **miniQMT 撤单时序坑**：盘后撤单不生效，`CANCEL_TIMEOUT` 须在交易时段验证
-- **Parameter Lab 一键发布 UI**：follow-up，MVP 手动复制参数到 CLI
-- **实时实验看板 / 自动熔断**：follow-up，MVP 仅离线 report
-- **`execution/storage.py` 全迁 SQLite**：独立立项，与实验系统解耦
-- **caisen 阶段E 完整删除**：follow-up，颈线法稳定运行后启动
+- **二期引擎 gap①③ 未补**：post_close 熔断 equity 源 + EMT 行情源。实验系统只解 gap②，miniQMT live 验收需待①③补全。
+- **scan_at 实盘数据加载**：`_load_universe`/`_load_df_upto` 需对齐颈线法既有加载（创板科创 universe + 前复权日线 .loc[:today] 无前视）
+- **多实验同标的 qty 叠加**：prod+candidate 同标的两笔 PlannedOrder，券商账户合并持仓——二期 reconcile 对账按总量，实验归因按 plan_id 事后拆（平台不管实时拆账）
+- **Parameter Lab 一键发布 UI**：follow-up
+- **实时实验看板 / 自动熔断**：follow-up
+- **盘中分级止盈 tp1/tp2**：二期引擎当前单档柜台止盈，若需 tp1 部分止盈要二期引擎扩 pre_open 挂单逻辑（非实验系统职责）
 
-链接 [[quanter-industrial-5epics]] [[quanter-backend-layering]] [[neckline-paramiter-baseline]] [[neckline-trailing-stop]]。
+链接 [[quanter-ops-layer-phase1]] [[quanter-industrial-5epics]] [[quanter-backend-layering]] [[neckline-paramiter-baseline]]。
