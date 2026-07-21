@@ -26,6 +26,7 @@ from typing import Optional
 from core.notifier import NotificationManager, fire_and_forget
 from server.core.config import PROJECT_ROOT
 from trading import qmt_market_data
+from trading.dynamic_whitelist import get_effective_whitelist
 from trading.execution_gateway import OrderRequest, OrderResult
 from trading.risk_shield import check_order
 
@@ -324,9 +325,18 @@ def _allow_live() -> bool:
 
 
 def _whitelist() -> set:
-    """标的白名单（逗号分隔 → set）。空配置 → 空集（一切标的被挡板拒）。"""
-    raw = os.getenv("QMT_SYMBOL_WHITELIST", "")
-    return {s.strip() for s in raw.split(",") if s.strip()}
+    """标的白名单（静态 env ∪ engine 动态注入）。
+
+    Why 改造前是纯 env 解析，现在委托 dynamic_whitelist.get_effective_whitelist()：
+    二期 engine 在 pre_open 把当日颈线法扫出的标的（创板/科创个股）临时注入白名单，
+    才能过 risk_shield 关5；盘后 post_close 清空。详见 trading/dynamic_whitelist.py。
+
+    跨进程语义：engine 与 server 是独立进程，_DYNAMIC 模块级全局只在 engine 进程内
+    有效——server（手动下单）进程内 _DYNAMIC 恒空，返回值 = 纯 env，与改造前完全等价
+    （向后兼容，前端手动下单语义不被 engine 内部状态污染）。
+    空配置 → 空集（一切标的被挡板拒）。
+    """
+    return get_effective_whitelist()
 
 
 def _max_amount() -> float:
