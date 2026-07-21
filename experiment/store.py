@@ -114,6 +114,16 @@ def promote(db_path: str, experiment_id: str, weight: float, operator: str,
         if row is None:
             raise ValueError(f"实验版本不存在: {experiment_id}")
         old_status = ExperimentStatus(row["status"])
+        # C1 资金守恒红线 / 状态机红线：promote 仅允许 DRAFT→ACTIVE。
+        # Why：_LEGAL_TRANSITIONS 同时含 (DRAFT,ACTIVE)=promote 与 (ARCHIVED,ACTIVE)=rollback，
+        # 单独 validate_transition 无法区分两种语义。若不在此显式拒绝，已归档版本（ARCHIVED）
+        # 会被 promote 当作 rollback 走通，绕开 rollback 的权重和校验（C2），构成资金守恒旁路。
+        # ARCHIVED 的恢复必须走 rollback（含权重和校验），不可借 promote 绕过。
+        if old_status != ExperimentStatus.DRAFT:
+            raise ValueError(
+                f"promote 仅 DRAFT→ACTIVE，当前 {old_status}"
+                f"（ARCHIVED 请用 rollback，含权重和校验）"
+            )
         if not validate_transition(old_status, ExperimentStatus.ACTIVE):
             raise ValueError(f"非法迁移: {old_status}→ACTIVE（experiment_id={experiment_id}）")
         if not validate_weight_sum(_active_versions(con), weight):
@@ -166,6 +176,17 @@ def _transition(db_path, experiment_id, target, operator, now, action) -> None:
         old_status = ExperimentStatus(row["status"])
         if not validate_transition(old_status, target):
             raise ValueError(f"非法迁移: {old_status}→{target}（{action}）")
+        # C2 资金守恒红线：rollback 目标 ACTIVE，须校验归档前 weight 加回后不超 1.0。
+        # Why：_transition 原本只调 validate_transition（状态机）不调 validate_weight_sum（资金守恒），
+        # 归档前 weight=0.4 的版本，在其他 ACTIVE 合计已达 1.0 时 rollback，
+        # 总权重将变 1.4，实盘 budget=capital×pos_cap×weight 会超配真实资金。
+        # 故在此处对 target=ACTIVE 的 rollback 显式加资金守恒校验。
+        if target == ExperimentStatus.ACTIVE:
+            if not validate_weight_sum(_active_versions(con), row["weight"]):
+                raise ValueError(
+                    f"rollback 后总权重将超 1.0（资金守恒）：当前 ACTIVE 合计 + "
+                    f"{row['weight']} > 1.0，先调低其他 ACTIVE 权重再 rollback"
+                )
         ts_col = {"ACTIVE": "activated_at", "ARCHIVED": "archived_at"}[target.value]
         con.execute(
             f"UPDATE experiment_version SET status=?, {ts_col}=? WHERE experiment_id=?",

@@ -61,17 +61,41 @@ def test_promote_rejects_weight_overflow(db):
         store.promote(db, "e2", weight=0.3, operator="cli", now="t")  # 0.8+0.3=1.1 > 1.0
 
 
-@pytest.mark.xfail(reason="v1 plan 自身矛盾：ARCHIVED→ACTIVE 在 _LEGAL_TRANSITIONS 中是 rollback "
-                          "合法路径，故 promote(ARCHIVED 版本) 通过状态机校验。需设计决策：promote "
-                          "是否应限定起点为 DRAFT（与 rollback 区分）。见 task-1-report.md NEEDS_CONTEXT。")
 def test_illegal_transition_rejected(db):
-    """ARCHIVED→DRAFT 非法迁移拒绝。"""
+    """ARCHIVED→ACTIVE 不应借 promote 绕过 rollback（C1 修后 promote 限 DRAFT 起点）。
+
+    Why：_LEGAL_TRANSITIONS 同时含 (DRAFT,ACTIVE)=promote 和 (ARCHIVED,ACTIVE)=rollback，
+    单纯状态机校验无法区分语义。promote 现显式拒绝非 DRAFT 起点，强制 ARCHIVED 走 rollback
+    （含权重和校验，见 test_rollback_rejects_weight_overflow）。
+    """
     store.create_version(db, _make("e1", weight=0.0), operator="cli")
     store.promote(db, "e1", weight=0.5, operator="cli", now="t")
     store.archive(db, "e1", operator="cli", now="t")
-    # 直接对已 ARCHIVED 再 promote（ACTIVE→ACTIVE 等效非法）应拒
-    with pytest.raises(ValueError):
+    # 直接对已 ARCHIVED 再 promote 应拒（C1：promote 仅 DRAFT→ACTIVE）
+    with pytest.raises(ValueError, match="DRAFT"):
         store.promote(db, "e1", weight=0.5, operator="cli", now="t")
+
+
+def test_rollback_rejects_weight_overflow(db):
+    """C2 资金守恒红线：rollback 后总权重将超 1.0 应被拒。
+
+    构造：v1(0.4) 归档 + v2(0.6)+v3(0.4) promote 到 ACTIVE 合计 1.0
+         → rollback v1 应 raise ValueError（0.4+1.0=1.4>1.0）。
+    Why：归档前 weight=0.4 的版本，在其他 ACTIVE 合计已达 1.0 时 rollback，
+         总权重变 1.4，实盘 budget=capital×pos_cap×weight 会超配真实资金。
+    """
+    # v1: DRAFT → promote weight=0.4 → archive（保留 weight=0.4 在行里）
+    store.create_version(db, _make("e1", version=1, weight=0.0), operator="cli")
+    store.promote(db, "e1", weight=0.4, operator="cli", now="t")
+    store.archive(db, "e1", operator="cli", now="t")
+    # v2/v3: 各 0.6/0.4，promote 后 ACTIVE 合计 = 1.0
+    store.create_version(db, _make("e2", version=2, weight=0.0), operator="cli")
+    store.promote(db, "e2", weight=0.6, operator="cli", now="t")
+    store.create_version(db, _make("e3", version=3, weight=0.0), operator="cli")
+    store.promote(db, "e3", weight=0.4, operator="cli", now="t")
+    # rollback v1：0.4（v1 归档前权重）+ 1.0（当前 ACTIVE 合计）= 1.4 > 1.0，应拒
+    with pytest.raises(ValueError, match="资金守恒"):
+        store.rollback(db, "e1", operator="cli", now="t2")
 
 
 def test_rollback_restores_active(db):
