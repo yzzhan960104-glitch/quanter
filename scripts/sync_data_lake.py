@@ -41,15 +41,32 @@ from data.resilience import tushare_breaker, tushare_rate_limiter
 from data._tushare_compat import get_pro, source_name
 
 
-def load_universe(pro) -> list[str]:
-    """pro.stock_basic 全市场在售标的（代理），剔名称含 'ST'/'退'。
+def load_universe(pro, include_delisted: bool = True) -> list[str]:
+    """全市场标的（含退市，消除幸存者偏差）。
 
     返回的 ts_code 已带 .SH/.SZ 后缀（Tushare 格式，与 daily 湖 symbol 一致）。
+
+    Why 含退市（include_delisted=True 默认，2026-07-19 修正幸存者偏差）：
+        之前 list_status='L' 只取在上市，a_shares_daily 实测 4976 标的全活到 2026，
+        退市标的（~338）被排除 → 幸存者偏差（回测系统性高估，近年段尤甚：
+        个股等权近年15.6%（幸存者）vs sw指数2.3%，差13点）。含 list_status='D'
+        退市标的，覆盖其退市前日线，让颈线法等回测覆盖退市标的（退市前暴跌的标的
+        进池子，反映真实亏损），消除偏差。
+
+    剔除口径：
+        在市(L)：剔名称含 ST/退（防 ST/退干扰实盘池）；
+        退市(D)：全保留（名称含'退'是退市标的的正常命名，不能剔，否则又回幸存者偏差）。
     """
-    df = pro.stock_basic(list_status="L", fields="ts_code,symbol,name,list_date")
-    mask = (~df["name"].str.contains("ST", na=False)) & \
-           (~df["name"].str.contains("退", na=False))
-    return df.loc[mask, "ts_code"].tolist()
+    df_L = pro.stock_basic(list_status="L", fields="ts_code,symbol,name")
+    df_L = df_L[
+        (~df_L["name"].str.contains("ST", na=False))
+        & (~df_L["name"].str.contains("退", na=False))
+    ]
+    codes = df_L["ts_code"].tolist()
+    if include_delisted:
+        df_D = pro.stock_basic(list_status="D", fields="ts_code,symbol,name")
+        codes += df_D["ts_code"].tolist()
+    return codes
 
 
 def _fetch_with_guard(pro, api_name: str, **kwargs) -> pd.DataFrame:

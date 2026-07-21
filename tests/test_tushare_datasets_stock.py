@@ -225,9 +225,12 @@ def test_task3to5_datasets_registered():
         assert key in LAKE_CONFIG["lakes"], f"{key} 未注册到 LAKE_CONFIG"
         assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
             f"{key} LAKE_CONFIG 与 TUSHARE_DATASETS 路径不一致"
-    # top_list 复用 dragon_list 湖（切源，不新增 key）
-    assert TUSHARE_DATASETS["top_list"]["lake"] == LAKE_CONFIG["lakes"]["dragon_list"], \
-        "top_list 应复用 dragon_list 湖（切 Tushare 替代 akshare sync_dragon_list）"
+    # top_list 代理不可用（2026-07-19 probe：tnskhdata 无此方法），标 _unavailable + 独立湖路径
+    # （不注册 LAKE_CONFIG——代理跑不通无数据，龙虎榜单用 dragon_list）
+    assert TUSHARE_DATASETS["top_list"]["lake"] == "data_lake/top_list.parquet", \
+        "top_list 应独立湖路径（复用废弃）"
+    assert "_unavailable" in TUSHARE_DATASETS["top_list"], \
+        "top_list 代理不可用应标 _unavailable"
 
 
 def test_moneyflow_top_list_by_date(tmp_path, fake_pro, monkeypatch):
@@ -244,10 +247,7 @@ def test_moneyflow_top_list_by_date(tmp_path, fake_pro, monkeypatch):
             "buy_sm_amount": [1e8, 2e8], "sell_sm_amount": [9e7, 1.5e8],
             "buy_elg_amount": [3e8, 4e8], "sell_elg_amount": [2e8, 3e8],
             "net_mf_amount": [1e7, 5e7]})),
-        "top_list": ("top_list", pd.DataFrame({
-            "ts_code": ["000001.SZ"], "trade_date": ["20240105"],
-            "name": ["平安银行"], "close": [10.5], "pct_change": [9.9],
-            "amount": [5e8], "net_amount": [1e8], "l_buy": [3e8], "l_sell": [2e8]})),
+        # top_list 原同测，2026-07-19 盘点后 _unavailable（代理无 top_list 方法），剔除
     }
     for key, (api, data) in cases.items():
         fake_pro.set(api, data)
@@ -288,31 +288,10 @@ def test_margin_by_date_and_secs_single(tmp_path, fake_pro, monkeypatch):
     assert len(secs) == 1 and "ts_code" in secs.columns  # 扁平 df（single 模式）
 
 
-def test_hsgt_top10_by_date_reuse_north_flow(tmp_path, fake_pro, monkeypatch):
-    """hsgt_top10 by=date 复用 north_flow 湖（切 Tushare 替代 akshare）。"""
-    import data.tushare_sync as ts
-    monkeypatch.setattr(ts, "_trade_days", lambda s, e: ["20240105"])
-    # ⚠️ 真实列对齐：API 返 close/rank/amount/net_amount/buy/sell（非旧幻觉 vol/north_direction）
-    fake_pro.set("hsgt_top10", pd.DataFrame({
-        "trade_date": ["20240105", "20240105"], "name": ["贵州茅台", "招商银行"],
-        "ts_code": ["600519.SH", "600036.SH"], "close": [1700.0, 35.0],
-        "rank": [1, 2], "amount": [1.8e9, 4e8], "net_amount": [9e8, 2e8],
-        "buy": [1.2e9, 3e8], "sell": [3e8, 1e8]}))
-    monkeypatch.setitem(TUSHARE_DATASETS["hsgt_top10"], "lake", str(tmp_path / "north.parquet"))
-    monkeypatch.setitem(TUSHARE_DATASETS["hsgt_top10"], "shard_dir", str(tmp_path / "shards_hsgt"))
-    ts.sync_dataset("hsgt_top10", "2024-01-05", "2024-01-05", resume=False)
-    df = pd.read_parquet(TUSHARE_DATASETS["hsgt_top10"]["lake"])
-    assert df.index.names == ["date", "symbol"]
-    assert {"600519.SH", "600036.SH"} == set(df.index.get_level_values("symbol"))
-
-
-def test_hsgt_top10_reuses_north_flow_config():
-    """hsgt_top10 配置层复用 north_flow 湖（切 Tushare 替代 akshare，不新增 LAKE_CONFIG key）。
-
-    Why 独立配置测试：端到端测试会 monkeypatch lake 到 tmp_path，无法断言原始配置契约。
-    复用关系是配置层不变量（hsgt_top10 是 north_flow 湖的 Tushare 生产者），单独钉死。
-    """
-    assert TUSHARE_DATASETS["hsgt_top10"]["lake"] == LAKE_CONFIG["lakes"]["north_flow"]
+# hsgt_top10 落湖/复用测试已删除（2026-07-19 盘点）：代理 tnskhdata 无 hsgt_top10 方法
+# （probe 实测 DataApi has no attribute），标 _unavailable 不再落湖。原"复用 north_flow 湖"
+# 设计废弃——北向总量用 moneyflow_hsgt.north_money。by=date 的 symbol_col 守卫由
+# test_moneyflow_top_list_by_date 覆盖（同 by=date 机制），删 hsgt_top10 测试不降覆盖。
 
 
 def test_moneyflow_hsgt_by_date(tmp_path, fake_pro, monkeypatch):
