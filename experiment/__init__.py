@@ -8,3 +8,4 @@ from experiment.models import (  # noqa: F401
     ExperimentStatus, ExperimentVersion, AuditLog, ActiveExperiment,
     validate_transition, validate_weight_sum,
 )
+from experiment.resolver import resolve_active  # noqa: F401
