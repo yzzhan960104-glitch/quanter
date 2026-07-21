@@ -60,6 +60,13 @@ redis>=5.0
 psutil>=5.9
 tqdm>=4.66
 
+# ===== 二期自动交易引擎：进程内 cron 调度 =====
+# APScheduler：AsyncIOScheduler 驱动 ENGINE_PRE_OPEN/STOPLOSS/POST_CLOSE/EOD_PLAN 四个
+# 定时任务（9:22 挂单 / 5min 止损巡检 / 15:30 盘后对账 / 15:35 T-1计划）。
+# 选 APScheduler 而非 Celery beat：单进程内嵌、免独立 broker、与 asyncio 引擎同环
+# 境共调度；二期引擎非分布式，Celery 已服务于回测异步队列，调度层无需再叠 beat。
+APScheduler>=3.10
+
 # ===== 宏观 CTA 究极重构：数据源切轨（替代 Tushare，引入 JQData 分钟级） =====
 # AKShare：开源 A 股/宏观/板块数据，无 Token 门槛，规避 Tushare 积分限制；
 # 锁定 1.18.64 是本会话已验证可用的版本，避免上游 API 字段漂移。
