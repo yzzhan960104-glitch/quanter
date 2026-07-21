@@ -223,7 +223,8 @@ def query_trades(
     过滤维度（AND 关系）：
     - 日期闭区间：按 timestamp 的日期前缀（YYYY-MM-DD）字典序比较，与 export_trades 同口径。
     - symbol：精确匹配（标的代码全字串，如 "510300.SH"）。
-    - direction：精确匹配（"buy" / "sell"）。
+    - direction：大小写不敏感匹配（"buy" / "sell"），以兼容生产 CSV 的大写口径
+      （record 流水落盘为 BUY/SELL/BLOCKED/DRY_RUN_*）。
     分页：limit/offset 在「过滤后全集」上切片；total 始终是过滤后命中总数（前端据此渲染分页器）。
     返回：{trades: [...], total: int, limit, offset}。
     降级：文件不存在 → 空结果（诚实空，不抛），与 export_trades 保持一致。
@@ -249,7 +250,9 @@ def query_trades(
                 continue
             if symbol and r.get("symbol") != symbol:
                 continue
-            if direction and r.get("direction") != direction:
+            # direction 过滤：大小写不敏感。CSV 大写口径（BUY/SELL），
+            # 前端/调用方传小写（"buy"/"sell"）亦能命中，避免前端 direction 过滤恒空。
+            if direction and (r.get("direction") or "").lower() != direction.lower():
                 continue
             # 数值字段尽力转 float：转不动（空串/脏数据）保留原串，前端兜底
             row = dict(r)

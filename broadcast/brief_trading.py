@@ -30,8 +30,14 @@ def build_trading_brief(
     gw_note = "" if mode == "live" else f"\n> ⚠️ 网关状态：{mode}（数据可能不全）"
 
     # 成交汇总
-    buys = [t for t in trades if t.get("direction") == "buy"]
-    sells = [t for t in trades if t.get("direction") == "sell"]
+    # Why 大小写不敏感 + DRY_RUN 归并：
+    # server/services/trading_service.py:432 落 CSV 的 direction 是**大写**口径
+    # （BUY/SELL/BLOCKED/DRY_RUN_BUY/DRY_RUN_SELL），而早期实现按小写精确匹配
+    # 会把生产 CSV 里的成交笔全部漏掉 → 成交笔数恒 0。故统一 .lower() 比较，
+    # 并把 DRY_RUN_BUY/DRY_RUN_SELL 分别归入「买/卖」成交口径（模拟盘成交也计数）。
+    _dir = lambda t: (t.get("direction") or "").lower()
+    buys = [t for t in trades if _dir(t) in ("buy", "dry_run_buy")]
+    sells = [t for t in trades if _dir(t) in ("sell", "dry_run_sell")]
     trade_lines = []
     for t in trades[:20]:  # 明细最多列 20 笔防刷屏
         sym = t.get("symbol", "?")

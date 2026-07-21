@@ -64,3 +64,27 @@ def test_query_trades_empty_log(tmp_path, monkeypatch):
     monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(tmp_path / "nope.csv"))
     r = trading_service.query_trades("2026-07-21", "2026-07-21")
     assert r["total"] == 0 and r["trades"] == []
+
+
+def test_query_trades_direction_case_insensitive(tmp_path, monkeypatch):
+    """direction 过滤大小写不敏感（跨 Task 1 latent 回归）。
+
+    生产落 CSV 的是大写口径（server/services/trading_service.py:432 写 BUY/SELL），
+    前端/调用方传小写 "buy" 亦应命中，避免 direction 过滤恒空。
+    """
+    log = tmp_path / "live_trades.csv"
+    monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(log))
+    _write_csv(str(log), [
+        {"timestamp": "2026-07-21 09:35:00", "symbol": "510300.SH", "direction": "BUY",
+         "shares": 100, "price": 4.0, "strategy": "neckline", "rationale": "test"},
+        {"timestamp": "2026-07-21 10:00:00", "symbol": "159915.SZ", "direction": "SELL",
+         "shares": 100, "price": 5.0, "strategy": "neckline", "rationale": "tp"},
+    ])
+
+    # 小写 "buy" 过滤 → 命中大写 BUY 那行（证明大小写不敏感）
+    r = trading_service.query_trades("2026-07-21", "2026-07-21", direction="buy")
+    assert r["total"] == 1 and r["trades"][0]["symbol"] == "510300.SH"
+
+    # 大写 "SELL" 过滤 → 同样命中（双向兼容）
+    r = trading_service.query_trades("2026-07-21", "2026-07-21", direction="SELL")
+    assert r["total"] == 1 and r["trades"][0]["symbol"] == "159915.SZ"
