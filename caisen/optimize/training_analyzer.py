@@ -90,20 +90,28 @@ class ParseError(Exception):
 _ACTIONS = ("rerun", "stop", "reset")
 
 
-def parse_review(text: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+def parse_review(text: str, cfg: Dict[str, Any], strategy_name: str = "caisen") -> Dict[str, Any]:
     """解析你的审核文本 → {cfg_override, action}。
 
-    值域护栏：cfg_override 经 StrategyConfig 整体校验——
+    值域护栏：cfg_override 经策略对应 config_schema 整体校验——
     非法字段名/超 ge/le 抛 ParseError（防 GLM 改不存在的字段或给越界值）。
+    strategy_name: "caisen"→StrategyConfig(33维) / "neckline"→NecklineConfig(18维)。
     GLM 不可用 → 降级抛 ParseError（message 含「请按 改 字段=值 重跑 格式」提示）。
     """
+    # 阶段C：按策略选 config_schema（颈线法 18 维 / caisen 形态 33 维）
+    if strategy_name == "neckline":
+        from strategies.neckline_schema import NecklineConfig
+        schema = NecklineConfig
+    else:
+        schema = StrategyConfig
+
     prompt = f"""你是参数解析器。把用户的中文审核意图解析为严格 JSON。
 
 ## 当前生效参数（cfg，含所有合法字段名与当前值）
 {json.dumps(cfg, ensure_ascii=False, default=str)}
 
 ## 合法字段名清单（只能改这些字段）
-{', '.join(StrategyConfig.model_fields.keys())}
+{', '.join(schema.model_fields.keys())}
 
 ## 用户审核文本
 {text}
@@ -140,15 +148,13 @@ def parse_review(text: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(cfg_override, dict):
         raise ParseError("cfg_override 必须是字段对象。")
 
-    # 2) 值域护栏：先校验字段名是否属于 StrategyConfig（防幻觉改不存在的字段），
-    #    再 StrategyConfig(**{**cfg, **cfg_override}) 合并后整体校验（含 ge/le）。
-    #    任一不通过 → ParseError（loop 回 AWAITING_REVIEW 重等审核，不污染训练状态）。
-    valid_fields = set(StrategyConfig.model_fields.keys())
+    # 2) 值域护栏：按策略 config_schema 校验字段名 + 合并后整体校验（含 ge/le）。
+    valid_fields = set(schema.model_fields.keys())
     illegal = set(cfg_override) - valid_fields
     if illegal:
-        raise ParseError(f"非法字段（不存在于 StrategyConfig）：{illegal}")
+        raise ParseError(f"非法字段（不存在于 {schema.__name__}）：{illegal}")
     try:
-        StrategyConfig(**{**cfg, **cfg_override})
+        schema(**{**cfg, **cfg_override})
     except ValidationError as exc:
         raise ParseError(f"cfg_override 值域非法：{exc}") from exc
 

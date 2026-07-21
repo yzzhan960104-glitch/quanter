@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""paramMeta.ts 中文映射 ↔ StrategyConfig 字段集 跨层同步守护（Spec 2 Task 3）。
+"""paramMeta.ts 中文映射 ↔ NecklineConfig 字段集 跨层同步守护（阶段D 重定向颈线法）。
 
 物理意图：paramMeta.ts 的 PARAM_META 是前端「中文标题+分组」单一真相源，必须覆盖
-StrategyConfig 全部字段，否则 /lab 参数面板/抽屉会漏字段或留英文键。本测试读 paramMeta.ts
-文本正则抽键，与 StrategyConfig.model_fields 双向比对——config.py 加字段时自动失败，
-强制 paramMeta.ts 同步补条目（防漂移）。
+NecklineConfig 全部字段（颈线法 18 维 = 识别层 11 + 执行层 7），否则 /lab 参数面板/抽屉
+会漏字段或留英文键。本测试读 paramMeta.ts 文本正则抽键，与 NecklineConfig.model_fields
+双向比对——neckline_schema.py 加字段时自动失败，强制 paramMeta.ts 同步补条目（防漂移）。
 """
 import re
 from pathlib import Path
 
-from caisen.config import StrategyConfig
+from strategies.neckline_schema import NecklineConfig
 
 PARAM_META_TS = Path(__file__).resolve().parents[1] / "web" / "src" / "components" / "lab" / "paramMeta.ts"
 
@@ -24,10 +24,10 @@ def _extract_param_meta_keys() -> set[str]:
     return set(re.findall(r"^\s{2}([A-Za-z_][A-Za-z0-9_]*):\s*\{", block, re.MULTILINE))
 
 
-def test_param_meta_covers_all_strategy_fields():
-    """PARAM_META 键集 == StrategyConfig 字段集（双向匹配，防漏/防孤儿）。"""
+def test_param_meta_covers_all_neckline_fields():
+    """PARAM_META 键集 == NecklineConfig 字段集（双向匹配，防漏/防孤儿）。"""
     assert PARAM_META_TS.exists(), f"paramMeta.ts 不存在：{PARAM_META_TS}"
-    cfg_fields = set(StrategyConfig.model_fields.keys())
+    cfg_fields = set(NecklineConfig.model_fields.keys())
     meta_keys = _extract_param_meta_keys()
     missing = cfg_fields - meta_keys          # config 有、paramMeta 漏（漏字段→面板缺项）
     orphan = meta_keys - cfg_fields           # paramMeta 有、config 无（拼写错/已删字段）

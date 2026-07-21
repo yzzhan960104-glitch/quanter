@@ -83,6 +83,10 @@ def test_new_stock_lakes_registered():
         assert ds_key in TUSHARE_DATASETS, \
             f"{ds_key} 未在 TUSHARE_DATASETS 注册（配置层缺失）"
 
+        # _unavailable 数据集（代理无接口，如 top_list/hsgt_top10）不落湖，跳过 lake 注册检查
+        if TUSHARE_DATASETS[ds_key].get("_unavailable"):
+            continue
+
         # 2) 落湖路径必须在 LAKE_CONFIG["lakes"] 注册（DataLakeReader 寻址依赖）
         #    反查：TUSHARE_DATASETS[ds_key]["lake"] 路径应能在 LAKE_CONFIG["lakes"].values() 找到
         lake_path = TUSHARE_DATASETS[ds_key]["lake"]
@@ -131,6 +135,9 @@ def test_lake_config_and_tushare_datasets_path_consistent():
     """
     # 反查：lake_path → LAKE_CONFIG key（用于复用湖场景下也能断言路径匹配）
     for ds_key in STOCK_TUSHARE_KEYS:
+        # _unavailable 数据集不落湖，跳过路径一致性检查
+        if TUSHARE_DATASETS[ds_key].get("_unavailable"):
+            continue
         tushare_lake = TUSHARE_DATASETS[ds_key]["lake"]
         assert tushare_lake in LAKE_CONFIG["lakes"].values(), \
             f"{ds_key}: TUSHARE_DATASETS lake {tushare_lake} 不在 LAKE_CONFIG['lakes'].values()"
@@ -193,38 +200,34 @@ def test_all_tushare_datasets_lakes_registered():
     「写了但读不到」的静默故障。ETF/宏观虽未进 DATASET_REGISTRY，但其湖路径必须在
     LAKE_CONFIG 注册（通用同步器 + reader 都靠它）。本断言一次性钉死全部 37 个数据集。
     """
+    # _unavailable 数据集（代理无接口，如 concept/top_list/hsgt_top10）不落湖，豁免 lake 注册检查
     missing_lakes = {
         k: spec["lake"]
         for k, spec in TUSHARE_DATASETS.items()
-        if spec["lake"] not in LAKE_CONFIG["lakes"].values()
+        if not spec.get("_unavailable")
+        and spec["lake"] not in LAKE_CONFIG["lakes"].values()
     }
     assert not missing_lakes, \
         f"TUSHARE_DATASETS 的 lake 路径未注册到 LAKE_CONFIG（reader 无法寻址）：{missing_lakes}"
 
 
-def test_parquet_path_resolves_reused_lake():
-    """复用湖数据集的 _parquet_path 必须返回物理湖路径（Finding 1 根治验证）。
+def test_parquet_path_unavailable_datasets_return_none():
+    """代理不可用数据集（top_list/hsgt_top10）_parquet_path 返 None（2026-07-19 盘点订正）。
 
-    What：top_list 复用 dragon_list 湖、hsgt_top10 复用 north_flow 湖。前端 list_datasets
-    经 _parquet_path(key) 寻址 parquet，若用数据集 key 直接索引 LAKE_CONFIG 会返 None →
-    status=missing（即便物理湖已同步）。本断言钉死 _parquet_path 经 lake_key fallback 后
-    返回物理湖路径（非 None）。
+    What：top_list/hsgt_top10 代理 tnskhdata 无方法（probe 实测 DataApi has no attribute），
+    原 lake_key 复用设计（top_list→dragon_list、hsgt_top10→north_flow）废弃——复用建立在
+    代理能跑通的假设上，实际跑不通。删 lake_key 后 _parquet_path 经 _lake_key fallback 到
+    数据集 key 自身，LAKE_CONFIG 无 top_list/hsgt_top10 → 返 None（诚实反映无物理湖）。
 
-    Why 在配置层测试而非端到端：_parquet_path 是 list_datasets 的热路径，单测覆盖最稳。
-    端到端需先同步 parquet（依赖 token/网络/配额），单测只验配置映射逻辑，零外部依赖。
+    Why 返 None 是对的：代理不可用 = 永远无数据，前端 list_datasets 标 missing 比假装读到
+    akshare 老数据（dragon_list hit / north_flow 24 行）更诚实。龙虎榜单用 dragon_list，
+    北向总量用 moneyflow_hsgt.north_money，均独立湖。
     """
-    # top_list → dragon_list 湖（复用，切 Tushare 替代 akshare）
-    assert _parquet_path("top_list") == LAKE_CONFIG["lakes"]["dragon_list"], \
-        f"_parquet_path('top_list') 应返回 dragon_list 湖路径，" \
-        f"实际 {_parquet_path('top_list')!r}"
-    assert _parquet_path("top_list") is not None, \
-        "_parquet_path('top_list') 返 None（lake_key fallback 失效，前端会误报 missing）"
-    # hsgt_top10 → north_flow 湖（复用，切 Tushare 替代 akshare）
-    assert _parquet_path("hsgt_top10") == LAKE_CONFIG["lakes"]["north_flow"], \
-        f"_parquet_path('hsgt_top10') 应返回 north_flow 湖路径，" \
-        f"实际 {_parquet_path('hsgt_top10')!r}"
-    assert _parquet_path("hsgt_top10") is not None, \
-        "_parquet_path('hsgt_top10') 返 None（lake_key fallback 失效，前端会误报 missing）"
+    # top_list/hsgt_top10：删 lake_key 后无 LAKE_CONFIG 映射 → None（代理不可用，无物理湖）
+    assert _parquet_path("top_list") is None, \
+        f"_parquet_path('top_list') 应返 None（代理不可用，无物理湖），实际 {_parquet_path('top_list')!r}"
+    assert _parquet_path("hsgt_top10") is None, \
+        f"_parquet_path('hsgt_top10') 应返 None（代理不可用，无物理湖），实际 {_parquet_path('hsgt_top10')!r}"
 
 
 def test_parquet_path_non_reused_lake_unchanged():
@@ -238,14 +241,14 @@ def test_parquet_path_non_reused_lake_unchanged():
     assert _parquet_path("fina_income") == LAKE_CONFIG["lakes"]["fina_income"], \
         f"_parquet_path('fina_income') 应返回 fina_income 自己的湖路径，" \
         f"实际 {_parquet_path('fina_income')!r}"
-    # daily：AKShare 旧湖（非 Tushare），同样应零回归
+    # daily：tushare 前复权日线（2026-07-19 订正 source：AKShare→Tushare），路径零回归
     assert _parquet_path("daily") == LAKE_CONFIG["lakes"]["daily"], \
         f"_parquet_path('daily') 应返回 daily 自己的湖路径，实际 {_parquet_path('daily')!r}"
-    # 守卫：lake_key 字段只应出现在复用湖数据集上（top_list/hsgt_top10），其余都不该有
-    # （防误加 lake_key 导致非复用湖被错误重定向）
+    # 守卫：lake_key 复用机制已废弃（2026-07-19 盘点：top_list/hsgt_top10 代理不可用，复用无意义），
+    # DATASET_REGISTRY 不应再有任何 lake_key 字段（防误加导致非复用湖被错误重定向）
     reused = {k for k, s in DATASET_REGISTRY.items() if "lake_key" in s}
-    assert reused == {"top_list", "hsgt_top10"}, \
-        f"仅 top_list/hsgt_top10 应声明 lake_key，实际声明者：{reused}"
+    assert reused == set(), \
+        f"lake_key 复用已废弃，不应有任何数据集声明 lake_key，实际声明者：{reused}"
 
 
 # ============================================================================

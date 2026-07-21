@@ -29,6 +29,8 @@ import os
 from caisen import replay_tasks_db
 from caisen.backtest_replay import replay, ReplayAborted
 from caisen.risk import RiskManager
+# 注意：strategies.caisen_pattern 不在模块级 import——会触发循环
+# （execution.__init__→replay_worker→strategies→caisen→execution）。改 run_replay_worker 内延迟 import。
 # 模块级 import → _load_price_data/_merge_cfg 成为本模块属性（测试 monkeypatch 生效）。
 # Step4e 反向债收口：原 ``from server.services.caisen_service import _load_price_data,
 # _merge_cfg`` 是 execution→server 反向依赖（Step2.2 过渡债）。现改 import data.price_loader
@@ -80,8 +82,7 @@ def run_replay_worker(task_id: str, abort_flag, progress_q, heartbeat_q) -> None
         if task is None:
             logger.warning("worker 任务不存在：task_id=%s", task_id)
             return
-        cfg = _merge_cfg(task["cfg_override"])
-        risk = RiskManager(cfg)
+        strategy_name = task.get("strategy_name", "caisen")
         # universe 已由 replay_tasks_db 从 universe_json 还原：None=全市场 / list=指定标的。
         price_data = _load_price_data(task["universe"], task["end"])
         if not price_data:
@@ -102,9 +103,19 @@ def run_replay_worker(task_id: str, abort_flag, progress_q, heartbeat_q) -> None
             except Exception:
                 pass   # Queue 故障不阻断回测（进度丢失可接受，最终结果不丢）
 
+        # 阶段C：按 strategy_name 构造策略。函数内 import 避免模块级循环
+        # （execution.__init__→replay_worker→strategies→caisen→execution）。
+        if strategy_name == "neckline":
+            from strategies.neckline_method import NecklineMethodStrategy
+            strategy = NecklineMethodStrategy(cfg_override=task.get("cfg_override"))
+        else:  # "caisen"（caisen 形态，阶段E 随形态代码删）
+            cfg = _merge_cfg(task["cfg_override"])
+            risk = RiskManager(cfg)
+            from strategies.caisen_pattern import CaisenPatternStrategy
+            strategy = CaisenPatternStrategy(cfg, risk, 1_000_000.0)
         report = replay(
-            price_data, cfg, risk,
-            start=task["start"], end=task["end"], aum=1_000_000.0,
+            price_data, strategy,
+            start=task["start"], end=task["end"],
             progress_cb=_progress, abort_cb=_abort,
         )
         # ReplayReport dataclass → __dict__ → JSON（default=str 兜底 Timestamp/numpy 类型）。

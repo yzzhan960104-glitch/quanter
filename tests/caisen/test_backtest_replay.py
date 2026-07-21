@@ -32,7 +32,21 @@ import pytest
 from caisen.config import StrategyConfig
 from caisen.risk import RiskManager
 from caisen.patterns.screener import PatternScreener
-from caisen.backtest_replay import replay, ReplayReport, ReplayAborted
+from caisen.backtest_replay import replay as _replay_orig, ReplayReport, ReplayAborted
+from strategies.caisen_pattern import CaisenPatternStrategy
+
+
+def replay(price_data, cfg, risk, *, start, end, aum=1e6, **kwargs):
+    """阶段A 兼容包装：旧签名 replay(data, cfg, rm, start=, end=, aum=) →
+    构造 CaisenPatternStrategy 注入解耦后的 replay。测试调用零改（保持旧签名）。"""
+    return _replay_orig(price_data, CaisenPatternStrategy(cfg, risk, aum),
+                        start=start, end=end, **kwargs)
+
+
+def _simulate_one_trade(df, p, entry_day, cfg):
+    """阶段A 兼容包装：_simulate_one_trade 已解耦为 CaisenPatternStrategy 方法。"""
+    _s = CaisenPatternStrategy(cfg, RiskManager(cfg), 1e6)
+    return _s._simulate_one_trade(df, p, entry_day, cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +352,6 @@ class TestTimeoutExitSemantics:
 
     def test_simulate_timeout_cuts_loser(self):
         """超时且浮亏 → timeout 离场 + 负 rr（砍亏），非 still_open 持有到末尾。"""
-        from caisen.backtest_replay import _simulate_one_trade
         from caisen.plan import TradePlan
 
         plan = TradePlan(
@@ -374,7 +387,6 @@ class TestTimeoutExitSemantics:
 
     def test_simulate_timeout_holds_when_profit_meets_threshold(self):
         """超时但浮盈 ≥ threshold → 不砍亏，继续持有（未达砍亏条件）。"""
-        from caisen.backtest_replay import _simulate_one_trade
         from caisen.plan import TradePlan
 
         plan = TradePlan(
@@ -462,7 +474,6 @@ class TestStep4bCheckExitSingleSource:
         exit_price=9.5，rr 负）。trailing 引入后变为 entry 处止损（rr≈0）——更早离场锁定本金，
         这是用户接受的「回测对齐实盘」行为变化。
         """
-        from caisen.backtest_replay import _simulate_one_trade
         from caisen.plan import TradePlan
 
         plan = TradePlan(
@@ -576,7 +587,7 @@ def test_replay_dedups_same_pattern_across_consecutive_T(monkeypatch):
     (neckline_price, bottom_price)，同形态只模拟首次。
     """
     import pandas as pd
-    from caisen import backtest_replay as br
+    from strategies import caisen_pattern as br  # 阶段A：PatternScreener 搬至此（解耦）
     from caisen import plan as plan_mod
     from caisen.plan import TradePlan
 
@@ -677,7 +688,6 @@ class TestReplayPerfAndReuse:
         confirm_bars 过滤或截断出错，入场集合会与金标准分歧。
         """
         from caisen import plan as plan_mod
-        from caisen.backtest_replay import _simulate_one_trade
 
         cfg = _mk_cfg()
         rm = RiskManager(cfg)

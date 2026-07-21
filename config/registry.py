@@ -46,12 +46,17 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                       "script": "scripts/sync_macro_credit.py", "schedule": "每月初",   "freshness_hours": 720},
     "sector":        {"source": "AKShare", "market": "板块", "granularity": "1d",
                       "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
-    "daily":         {"source": "AKShare", "market": "A股",  "granularity": "1d",
+    # daily（前复权日线）：sync_data_lake.py 实际用 tushare 代理 pro.daily + pro.adj_factor 重建前复权
+    # （非 AKShare——历史误标，2026-07-19 数据层盘点订正）。a_shares_daily.parquet 903 万行 tushare 源。
+    "daily":         {"source": "Tushare", "market": "A股",  "granularity": "1d",
                       "script": "scripts/sync_data_lake.py",   "schedule": "每日18:00", "freshness_hours": 24},
     "daily_active":  {"source": "AKShare", "market": "A股",  "granularity": "1d",
                       "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
     "minute":        {"source": "JQData",  "market": "A股",  "granularity": "1m",
                       "script": "scripts/sync_jqdata_1min.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # north_flow（akshare 北向资金净流入）：⚠️ moneyflow_hsgt.north_money 为北向总量权威源
+    # （tushare 全期 700 行可用），north_flow 为 akshare 冗余备份（24 行废弃态，近期未同步）。
+    # 保留 akshare client 能力（test_akshare_north_dragon 覆盖），不主动调度；北向总量读 moneyflow_hsgt。
     "north_flow":    {"source": "AKShare", "market": "A股",  "granularity": "1d",
                       "script": "scripts/sync_north_flow.py",  "schedule": "每日18:00", "freshness_hours": 24},
     "dragon_list":   {"source": "AKShare", "market": "A股",  "granularity": "1d",
@@ -95,9 +100,12 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     # top_list 复用 dragon_list 湖（切 Tushare 替代 akshare sync_dragon_list）。
     "moneyflow":       {"source": "Tushare", "market": "A股", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # top_list（龙虎榜个股明细）：⚠️ 代理 tnskhdata 无此方法（2026-07-19 probe 实测 DataApi has no
+    # attribute，间歇返字段不可靠），TUSHARE_DATASETS 标 _unavailable，前端展示但无数据。
+    # 原 lake_key=dragon_list 复用设计废弃——dragon_list（akshare hit 标记，brief.py 播报消费）语义
+    # 不同，且代理跑不通 top_list，复用无意义。龙虎榜单用 dragon_list，个股明细待 akshare 换源。
     "top_list":        {"source": "Tushare", "market": "A股", "granularity": "1d",
-                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24,
-                        "lake_key": "dragon_list"},  # 复用 dragon_list 湖（切 Tushare 替代 akshare）
+                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "top_inst":        {"source": "Tushare", "market": "A股", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     # —— 融资融券 3（margin/margin_detail 日频，margin_secs 静态快照）——
@@ -108,9 +116,11 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     "margin_secs":     {"source": "Tushare", "market": "A股", "granularity": "快照",
                         "script": "scripts/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
     # —— 北向资金 2（hsgt_top10 复用 north_flow 湖，切 Tushare 替代 akshare）——
+    # hsgt_top10（沪深港通十大成交股）：⚠️ 代理 tnskhdata 无此方法（同 top_list，probe 实测），_unavailable。
+    # 原 lake_key=north_flow 复用废弃——north_flow（akshare 北向总量，废弃态）语义不同。
+    # 北向总量改用 moneyflow_hsgt.north_money（全期 700 行可用），个股十大明细待换源。
     "hsgt_top10":      {"source": "Tushare", "market": "A股", "granularity": "1d",
-                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24,
-                        "lake_key": "north_flow"},  # 复用 north_flow 湖（切 Tushare 替代 akshare）
+                        "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "moneyflow_hsgt":  {"source": "Tushare", "market": "A股", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     # —— 板块 / 概念 2（concept 静态字典，ths_daily 板块指数日频）——
@@ -266,10 +276,14 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     "top_list": {
         # ⚠️ 事实订正：龙虎榜个股买卖额真实列名是 l_buy / l_sell（非 buy_amount/sell_amount）。
         # l_amount=龙虎榜成交总额 / net_amount=净额 / amount=全市场成交额。
+        # ⚠️ 代理不可用（2026-07-19 probe）：tnskhdata 无 top_list 方法（DataApi has no
+        #   attribute，间歇返字段不可靠），标 _unavailable，sync_dataset 跳过不下载。
+        #   龙虎榜单用 dragon_list（akshare hit，brief.py 播报消费），个股明细待 akshare 换源。
         "api": "top_list", "by": "date",
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "ts_code,trade_date,name,close,pct_change,amount,net_amount,l_buy,l_sell",
-        "lake": "data_lake/dragon_list.parquet",  # 复用 dragon_list 湖（切 Tushare）
+        "lake": "data_lake/top_list.parquet",
+        "_unavailable": "tnskhdata 代理无 top_list 方法（DataApi has no attribute），龙虎榜单用 dragon_list，待 akshare 换源",
     },
     "top_inst": {
         # ⚠️ 事实订正（结构重写）：config 原误配成 top_list 同款字段，实际 top_inst 是
@@ -312,13 +326,13 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         # ⚠️ 事实订正：删幻觉列 vol / north_direction（API 不返回）。真实列为
         # close/change/rank/market_type/amount/net_amount/buy/sell。north_money 在
         # moneyflow_hsgt 市场级接口里，hsgt_top10 只返个股十大成交明细。
-        # ⚠️ 实测局限（2026-07 probe）：buy/sell/net_amount 为代理近期降级字段——2023 历史
-        #   段全有值，2024+ tnskhdata 代理不再返（None 或缺列），落湖约 63% NaN。核心 amount
-        #   全期 0% NaN 可用。保留三字段不丢 2023 历史，下游北向明细分析须知近期缺值。
+        # ⚠️ 代理不可用（2026-07-19 probe）：tnskhdata 无 hsgt_top10 方法（DataApi has no
+        #   attribute），标 _unavailable。北向总量用 moneyflow_hsgt.north_money（全期 700 行）。
         "api": "hsgt_top10", "by": "date",
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "trade_date,ts_code,name,close,rank,amount,net_amount,buy,sell",
-        "lake": "data_lake/north_flow.parquet",  # 复用 north_flow 湖（切 Tushare）
+        "lake": "data_lake/hsgt_top10.parquet",
+        "_unavailable": "tnskhdata 代理无 hsgt_top10 方法（DataApi has no attribute），北向总量用 moneyflow_hsgt 替代",
     },
     # moneyflow_hsgt 市场级北/南向资金（无个股 symbol）→ by=date 逐日拉（市场级时序）。
     # ⚠️ quick 批订正（by=single → by=date）：原 single 模式 _sync_single 只传 fields 不传

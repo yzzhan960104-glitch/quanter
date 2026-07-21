@@ -43,6 +43,7 @@ from pydantic import ValidationError
 # ── caisen 内部 8 处穿透符号（facade 收口，server 不再直接 import 这些）──
 from caisen import plan as plan_mod
 from caisen import backtest_replay
+from strategies.caisen_pattern import CaisenPatternStrategy  # 阶段A：策略适配器（回测引擎解耦）
 from caisen import replay_runs
 from caisen import replay_tasks_db
 from caisen import storage
@@ -398,9 +399,11 @@ class CaisenFacade:
                             req.start, req.end, req.universe)
                 return self._empty_replay_report()
 
+            # 阶段A：策略解耦——构造 CaisenPatternStrategy 注入 replay（行为零变化）
+            strategy = CaisenPatternStrategy(cfg, risk, self._DEFAULT_AUM)
             report = backtest_replay.replay(
-                price_data, cfg, risk,
-                start=req.start, end=req.end, aum=self._DEFAULT_AUM,
+                price_data, strategy,
+                start=req.start, end=req.end,
             )
             response = ReplayReportResponse(
                 n_hits=report.n_hits,

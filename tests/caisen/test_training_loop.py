@@ -87,7 +87,7 @@ def test_confirm_rerun_accumulates_cfg(orch, monkeypatch):
     from caisen import training_loops_db
     training_loops_db.update_loop(loop_id, status="AWAITING_REVIEW", current_round=1)
     monkeypatch.setattr(training_loop.training_analyzer, "parse_review",
-                        lambda t, c: {"cfg_override": {"max_holding_bars": 20}, "action": "rerun"})
+                        lambda t, c, **kw: {"cfg_override": {"max_holding_bars": 20}, "action": "rerun"})
 
     # 起一个线程模拟你两次回复：第一次触发 _confirm（parse 后回显），第二次「确认」落库。
     # _POLL_INTERVAL 默认 3s，测试里把它压到 0.05 让 wait 超时快、唤醒响应快（不硬等 3s）。
@@ -222,7 +222,7 @@ def test_full_roundtrip_with_dingtalk_notifier(monkeypatch, tmp_path):
     monkeypatch.setattr(training_loop.training_analyzer, "analyze_round",
                         lambda r, c, h: "报告")
     monkeypatch.setattr(training_loop.training_analyzer, "parse_review",
-                        lambda t, c: {"cfg_override": {"min_rr_ratio": 2.0}, "action": "rerun"})
+                        lambda t, c, **kw: {"cfg_override": {"min_rr_ratio": 2.0}, "action": "rerun"})
 
     # ---- 5) 起训练 loop（max_rounds=3，首轮 RUNNING→…→AWAITING_REVIEW）----
     loop_id = o.start({"start": "2020-01-01", "end": "2024-12-31",

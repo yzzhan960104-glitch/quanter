@@ -189,6 +189,7 @@ class TrainingLoopOrchestrator:
             "start": loop["start"], "end": loop["end"],
             "universe": loop["universe"],
             "cfg_override": loop["current_cfg"],
+            "strategy_name": loop.get("strategy_name", "neckline"),  # 阶段C：默认颈线法
         })
         # 轮询等终态（带 stop 检查，避免你 stop 后还死等）
         # 两道 stop 感知：(1) daemon 级 _stop_flag（lifespan 关闭）；(2) 本 loop 级 DB STOPPED
@@ -303,7 +304,9 @@ class TrainingLoopOrchestrator:
         """
         loop = training_loops_db.get_loop(loop_id)
         try:
-            parsed = training_analyzer.parse_review(text, loop["current_cfg"])
+            parsed = training_analyzer.parse_review(
+                text, loop["current_cfg"],
+                strategy_name=loop.get("strategy_name", "neckline"))
         except training_analyzer.ParseError as e:
             # 解析失败/非法 → 回显报错，回 AWAITING_REVIEW 重等（不污染状态）
             training_loops_db.update_loop(loop_id, status="AWAITING_REVIEW")
