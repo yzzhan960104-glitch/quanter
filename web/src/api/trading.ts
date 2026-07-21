@@ -138,3 +138,36 @@ export function getOrders(): Promise<{ orders: OrderRow[] }> {
 export function getAsset(): Promise<{ asset: Asset }> {
   return apiClient.get('/api/v1/trading/asset', { timeout: 10000 })
 }
+
+// ============ 一期观测运营层：流水查询 ============
+
+/** 单笔实盘流水行（对齐后端 LIVE_TRADE_COLUMNS + query_trades 返回）。 */
+export interface TradeRecord {
+  timestamp: string
+  symbol: string
+  direction: string             // buy / sell / 其他状态字
+  shares: number | string
+  price: number | string
+  strategy?: string
+  rationale?: string
+}
+
+/** GET /trades 响应（分页）。 */
+export interface TradesPage {
+  trades: TradeRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** GET /trading/trades：分页查询实盘流水（按日期/标的/方向过滤）。 */
+export function queryTrades(params: {
+  start: string
+  end: string
+  symbol?: string
+  direction?: string
+  limit?: number
+  offset?: number
+}): Promise<TradesPage> {
+  return apiClient.get('/api/v1/trading/trades', { params, timeout: 15000 })
+}
