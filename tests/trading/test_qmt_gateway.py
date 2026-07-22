@@ -167,3 +167,124 @@ def test_query_asset_locked_returns_empty(monkeypatch):
     gw._lock_down = True
     result = asyncio.run(gw.query_asset())
     assert result == {}
+
+
+# === T4: query_orders / query_trades（主动查询，subscribe 兜底 + 对账强化）=====
+
+class _FakeOrder:
+    """模拟 XtOrder（xttrader.md「委托查询」返回结构）。
+
+    字段对齐 xtquant.xttype.XtOrder：order_id/stock_code/order_type/order_volume/
+    price/traded_volume/traded_price/order_status/status_msg/order_remark。
+    order_status=56 即 _QMT_ORDER_SUCCEEDED，映射 OrderState.FILLED。
+    """
+    def __init__(self):
+        self.order_id = 100
+        self.stock_code = "600000.SH"
+        self.order_type = 23
+        self.order_volume = 1000
+        self.price = 10.5
+        self.traded_volume = 1000
+        self.traded_price = 10.5
+        self.order_status = 56  # SUCCEEDED → FILLED
+        self.status_msg = ""
+        self.order_remark = "test"
+
+
+class _FakeTrade:
+    """模拟 XtTrade（xttrader.md「成交查询」返回结构）。
+
+    字段对齐 xtquant.xttype.XtTrade：order_id/stock_code/traded_volume/traded_price/
+    traded_amount/traded_time。
+    """
+    def __init__(self):
+        self.order_id = 100
+        self.stock_code = "600000.SH"
+        self.traded_volume = 1000
+        self.traded_price = 10.5
+        self.traded_amount = 10500.0
+        self.traded_time = 20260722093000
+
+
+class _FakeTraderOrders:
+    """模拟 self._trader 的委托/成交查询（忽略 account，只返注入的 orders/trades）。"""
+    def __init__(self, orders, trades):
+        self._orders = orders
+        self._trades = trades
+
+    def query_stock_orders(self, account, cancelable_only=False):
+        # 忽略 account / cancelable_only（测试仅断言返值标准化）
+        return self._orders
+
+    def query_stock_trades(self, account):
+        # 忽略 account
+        return self._trades
+
+
+def test_query_orders_normalizes(monkeypatch):
+    """query_stock_orders 返 list[XtOrder] → 标准化 list[dict]（state 用 _map_qmt_status().name）。
+
+    Why state 走 _map_qmt_status().name：与 on_stock_order 回调一致的状态语义
+    （56 → FILLED），让 T5 subscribe 兜底惰性同步与回调流水共用同一口径。
+    """
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderOrders([_FakeOrder()], None)
+    gw._account = object()
+    gw._connected = True
+    result = asyncio.run(gw.query_orders())
+    assert len(result) == 1
+    o = result[0]
+    assert o["order_id"] == 100
+    assert o["stock_code"] == "600000.SH"
+    assert o["order_volume"] == 1000
+    assert "state" in o          # _map_qmt_status(56) -> FILLED
+    assert o["state"] == "FILLED"
+
+
+def test_query_orders_none_returns_empty(monkeypatch):
+    """query_stock_orders/query_stock_trades 返 None（查询失败/当日空）→ 返 []。
+
+    Why 降级语义对齐 query_asset 的 {} 空降级：调用方（T5 惰性同步 / 二期盘后对账）
+    按 [] 降级，不抛异常、不脏读。
+    """
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderOrders(None, None)
+    gw._account = object()
+    gw._connected = True
+    assert asyncio.run(gw.query_orders()) == []
+    assert asyncio.run(gw.query_trades()) == []
+
+
+def test_query_orders_locked_returns_empty(monkeypatch):
+    """网关锁定（断线保护）→ query_orders 返 []（与 query_asset 同口径防脏读）。"""
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderOrders([_FakeOrder()], None)
+    gw._account = object()
+    gw._connected = True
+    gw._lock_down = True
+    assert asyncio.run(gw.query_orders()) == []
+
+
+def test_query_trades_normalizes(monkeypatch):
+    """query_stock_trades 返 list[XtTrade] → 标准化 list[dict]（traded_amount 等字段 float 防 None/NaN）。"""
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderOrders(None, [_FakeTrade()])
+    gw._account = object()
+    gw._connected = True
+    result = asyncio.run(gw.query_trades())
+    assert len(result) == 1
+    t = result[0]
+    assert t["order_id"] == 100
+    assert t["stock_code"] == "600000.SH"
+    assert t["traded_volume"] == 1000
+    assert t["traded_amount"] == 10500.0
+
+
+def test_query_trades_locked_returns_empty(monkeypatch):
+    """网关锁定 → query_trades 返 []（与 query_orders 同口径防脏读）。"""
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderOrders(None, [_FakeTrade()])
+    gw._account = object()
+    gw._connected = True
+    gw._lock_down = True
+    assert asyncio.run(gw.query_trades()) == []

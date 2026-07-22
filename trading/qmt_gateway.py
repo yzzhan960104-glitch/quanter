@@ -421,6 +421,108 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             "market_value": float(getattr(asset, "market_value", 0.0) or 0.0),
         }
 
+    # ---------------------------------------------------------- 委托/成交查询
+    async def query_orders(self, cancelable_only: bool = False) -> list[dict[str, Any]]:
+        """查询当日委托（投线程池调 query_stock_orders），返标准化 dict 列表。
+
+        用途（Why 主动查询，非主推替代）：
+        - subscribe 失败兜底（T5 惰性同步 _orders）：connect 时 sub_rc!=0 主推缺失，
+          本方法是订单状态盲区的唯一回填路径；
+        - 二期盘后对账强化：不止持仓对账，还能对委托流水做完整性核对（缺单/漏单
+          与本地 _orders 的差分）。
+
+        字段映射（xttrader.md XtOrder）：
+        - order_id/stock_code/order_type/order_volume/price/traded_volume/
+          traded_price/order_status/status_msg/order_remark 原样透出；
+        - 额外补 state 字段：_map_qmt_status(order_status).name，与 on_stock_order
+          回调同源映射（让 T5 惰性同步与回调流水共用同一状态口径）。
+
+        降级语义（Why None/异常/锁定 → 返 []，对齐 query_asset 的 {} 降级口径）：
+        - None：query_stock_orders 查询失败/当日无委托均返 None（不可区分），返 []
+          让调用方按空降级；
+        - 异常/超时：柜台无响应时 wait_for 抛 TimeoutError，返 [] 不让上层崩；
+        - 锁定：断线/账号 DISABLEBYSYS 窗口期可能返陈旧快照，与 submit_order
+          同口径直接返 [] 防脏读。
+
+        Why 复用 run_in_executor + wait_for：query_stock_orders 是同步阻塞的 C++
+        调用（与 query_stock_asset 同型），直调会卡死事件循环；用既有模式投
+        线程池 + _ORDER_TIMEOUT 超时兜底，零新依赖（Karpathy 极简）。
+
+        Args:
+            cancelable_only: True=只返可撤单（未到终态）；False=全量。透传给
+                query_stock_orders 的同名参数。
+        """
+        # 连接前置：loop/trader/account 任一缺失即视为未连接，返 [] 防空指针
+        if self._loop is None or self._trader is None or self._account is None:
+            return []
+        # 锁定（断线/账号 fatal）→ 返 [] 防脏读（与 query_asset / submit_order 同口径）
+        if self._lock_down:
+            return []
+        try:
+            # lambda 闭包捕获 cancelable_only，投线程池同步执行后 await 拿结果
+            orders = await asyncio.wait_for(
+                self._loop.run_in_executor(
+                    None, lambda: self._trader.query_stock_orders(
+                        self._account, cancelable_only)),
+                timeout=_ORDER_TIMEOUT,
+            )
+        except Exception as exc:
+            # 超时/异常不抛——让上层（T5/对账）按 [] 降级
+            logger.exception("QMT query_stock_orders 异常/超时(>%ss)：%s", _ORDER_TIMEOUT, exc)
+            return []
+        if not orders:
+            # None 或空列表统一返 []（None 即查询失败/当日无委托，二者不可区分）
+            return []
+        # getattr(o, "xxx", 默认) 防缺字段；float 字段 `or 0.0` 防 None/NaN
+        return [{
+            "order_id": getattr(o, "order_id", 0),
+            "stock_code": getattr(o, "stock_code", ""),
+            "order_type": getattr(o, "order_type", 0),
+            "order_volume": getattr(o, "order_volume", 0),
+            "price": float(getattr(o, "price", 0.0) or 0.0),
+            "traded_volume": getattr(o, "traded_volume", 0),
+            "traded_price": float(getattr(o, "traded_price", 0.0) or 0.0),
+            "order_status": getattr(o, "order_status", 255),
+            # state 与 on_stock_order 回调同源映射（56→FILLED 等），保证状态语义一致
+            "state": _map_qmt_status(getattr(o, "order_status", 255)).name,
+            "status_msg": getattr(o, "status_msg", ""),
+            "order_remark": getattr(o, "order_remark", ""),
+        } for o in orders]
+
+    async def query_trades(self) -> list[dict[str, Any]]:
+        """查询当日成交（投线程池调 query_stock_trades），返标准化 dict 列表。
+
+        用途与降级语义同 query_orders：subscribe 失败兜底 + 二期盘后成交对账；
+        None/异常/锁定 → 返 []（对齐 query_asset/query_orders 的降级口径）。
+
+        字段映射（xttrader.md XtTrade）：order_id/stock_code/traded_volume/
+        traded_price/traded_amount/traded_time；traded_price/traded_amount 为 float
+        字段，用 `or 0.0` 防 None/NaN 脏数据导致对账聚合异常。
+        """
+        if self._loop is None or self._trader is None or self._account is None:
+            return []
+        if self._lock_down:
+            return []
+        try:
+            trades = await asyncio.wait_for(
+                self._loop.run_in_executor(
+                    None, lambda: self._trader.query_stock_trades(self._account)),
+                timeout=_ORDER_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.exception("QMT query_stock_trades 异常/超时(>%ss)：%s", _ORDER_TIMEOUT, exc)
+            return []
+        if not trades:
+            return []
+        return [{
+            "order_id": getattr(t, "order_id", 0),
+            "stock_code": getattr(t, "stock_code", ""),
+            "traded_volume": getattr(t, "traded_volume", 0),
+            "traded_price": float(getattr(t, "traded_price", 0.0) or 0.0),
+            "traded_amount": float(getattr(t, "traded_amount", 0.0) or 0.0),
+            "traded_time": getattr(t, "traded_time", 0),
+        } for t in trades]
+
     # -------------------------------------------------------------- 下单
     async def submit_order(self, order: OrderRequest) -> OrderResult:
         """
