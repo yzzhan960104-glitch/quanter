@@ -24,9 +24,13 @@ def test_get_quotes_batch_returns_dict(monkeypatch):
     Why 断言透传 list：xtdata.get_full_tick 原生支持 list 入参（xtdata.html 契约），
     若实现错误地拆成多次单只调用，线程池调用数 N→1 优化失效（本 task 核心目标）。
     """
+    # xtquant 真实契约：get_full_tick 返【驼峰】字段（lastPrice/lastClose），
+    # 涨跌停不在 tick 里、由 get_instrument_detail 单独提供（UpStopPrice/DownStopPrice）。
+    # 本组 mock 必须对齐该契约——否则「单测绿但真柜台字段名对不上」的回归会再次潜伏。
+    qmt_market_data._LIMIT_PRICE_CACHE.clear()
     fake_tick = {
-        "600000.SH": {"last_price": 10.5, "high_limit": 11.5, "low_limit": 9.5},
-        "000001.SZ": {"last_price": 15.2, "high_limit": 16.7, "low_limit": 13.7},
+        "600000.SH": {"lastPrice": 10.5, "lastClose": 9.5},
+        "000001.SZ": {"lastPrice": 15.2, "lastClose": 14.0},
     }
     monkeypatch.setattr(qmt_market_data, "_XTDATA_AVAILABLE", True)
     captured: dict = {}
@@ -36,6 +40,12 @@ def test_get_quotes_batch_returns_dict(monkeypatch):
             captured["symbols"] = symbols
             return fake_tick
 
+        _LIMIT = {"600000.SH": (11.5, 9.5), "000001.SZ": (16.7, 13.7)}
+
+        def get_instrument_detail(self, code):
+            hi, lo = self._LIMIT.get(code, (None, None))
+            return {"UpStopPrice": hi, "DownStopPrice": lo}
+
     monkeypatch.setattr(qmt_market_data, "xtdata", _FakeXtdata())
 
     result = asyncio.run(qmt_market_data.get_quotes(["600000.SH", "000001.SZ"]))
@@ -43,8 +53,13 @@ def test_get_quotes_batch_returns_dict(monkeypatch):
     # 原生 list 透传（核心优化点：1 次调用而非 N 次）
     assert captured["symbols"] == ["600000.SH", "000001.SZ"]
     assert set(result.keys()) == {"600000.SH", "000001.SZ"}
+    # 归一化：驼峰 lastPrice → 下划线 last_price；lastClose → pre_close
     assert result["600000.SH"]["last_price"] == 10.5
+    assert result["600000.SH"]["pre_close"] == 9.5
+    # 涨跌停从 instrument_detail 注入（risk_shield 第9关依赖）
+    assert result["600000.SH"]["high_limit"] == 11.5
     assert result["000001.SZ"]["last_price"] == 15.2
+    assert result["000001.SZ"]["high_limit"] == 16.7
 
 
 # ============================================================================
@@ -58,10 +73,14 @@ def test_get_quotes_missing_symbol_is_none(monkeypatch):
     否则下游 ``quotes[sym]`` 抛 KeyError 阻断整个止损监控循环（致命）。
     """
     monkeypatch.setattr(qmt_market_data, "_XTDATA_AVAILABLE", True)
+    qmt_market_data._LIMIT_PRICE_CACHE.clear()
 
     class _FakeXtdata:
         def get_full_tick(self, symbols):
-            return {"600000.SH": {"last_price": 10.5}}  # 缺 000001.SZ
+            return {"600000.SH": {"lastPrice": 10.5}}  # 缺 000001.SZ
+
+        def get_instrument_detail(self, code):
+            return {"UpStopPrice": 11.5, "DownStopPrice": 9.5}
 
     monkeypatch.setattr(qmt_market_data, "xtdata", _FakeXtdata())
 
@@ -137,12 +156,16 @@ def test_get_quote_delegates_to_get_quotes(monkeypatch):
     无需改签名即可复用批量逻辑，消除两份并行实现（维护成本/一致性风险）。
     """
     monkeypatch.setattr(qmt_market_data, "_XTDATA_AVAILABLE", True)
+    qmt_market_data._LIMIT_PRICE_CACHE.clear()
     captured: dict = {}
 
     class _FakeXtdata:
         def get_full_tick(self, symbols):
             captured["symbols"] = symbols
-            return {"600000.SH": {"last_price": 10.5}}
+            return {"600000.SH": {"lastPrice": 10.5}}
+
+        def get_instrument_detail(self, code):
+            return {"UpStopPrice": 11.5, "DownStopPrice": 9.5}
 
     monkeypatch.setattr(qmt_market_data, "xtdata", _FakeXtdata())
 
@@ -150,7 +173,8 @@ def test_get_quote_delegates_to_get_quotes(monkeypatch):
 
     # 委托验证：底层以 list 形式调 get_full_tick（批量路径）
     assert captured["symbols"] == ["600000.SH"]
-    assert result == {"last_price": 10.5}
+    # 归一化后为完整字段 dict；只断言单只委托语义（last_price 透传到位）
+    assert result is not None and result["last_price"] == 10.5
 
 
 def test_get_quote_missing_returns_none(monkeypatch):
