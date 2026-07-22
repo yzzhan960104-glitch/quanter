@@ -1,49 +1,37 @@
-"""蔡森多空转折形态学流水线（纯多头）。
+"""caisen 包入口（Layer2 解耦·Task 1.3 后瘦身壳）。
 
-Step3 分包后：策略本体在 engines/、参数优化在 optimize/、执行/存储/回放在 infra/、
-AI 决策预留 advisor/。本 __init__ re-export 旧顶层路径，保证 ``from caisen import ...``
-等历史用法零改动（strangler 铁律①）。
+物理现状（Task 1.3 caisen 形态完整退役后）：
+    - engines/：plan/risk/config/patterns 全删（caisen 形态 W底/头肩/三角形退役），
+      exit_logic 已迁 execution/exit_logic.py（Task 1.2）。engines 现为空壳子包。
+    - optimize/：保留（generic 参数训练，颈线法经 training_loop 使用，stage 4 迁出 caisen）。
+    - infra/：保留垫片转发（replay_*/backtest_replay 真身在 execution/，viz_* 真身在 viz/）。
+    - advisor/：保留（如有）。
+    - 顶层垫片：config.py/risk.py/plan.py/patterns/ 已删（真身全删）；storage.py/execution.py/
+      backtest_replay.py/replay_*.py/viz_*.py/training_*.py 保留垫片转发（Task 1.4 处理）。
 
-注：``from caisen.config import X`` / ``from caisen.plan import X`` 这种【绝对模块路径】
-不能只靠 __init__ 属性赋值兜底——Python 必须找到物理模块 caisen/config.py 才能解析。
-故 caisen/ 顶层保留 1 行转发垫片模块（config.py / plan.py / risk.py），转发到 engines/ 新位置。
-本 __init__ 的 re-export 主要服务 ``from caisen import StrategyConfig`` 这种包级取属性用法。
+本 __init__ 仅做必要预加载（strangler 铁律①·保 ``from caisen import X`` 历史用法）：
+    - optimize training_*：使顶层 caisen.training_* 垫片绑定同源真实模块。
+    - execution replay_* + viz viz_*：使顶层垫片绑定同源真实模块。
+    不再 re-export engines.plan/risk/config/patterns（已删）与 execution.storage/engine
+    （Task 1.3 #3 全删）。
 """
-# 旧顶层路径 re-export（物理文件已迁入 engines/，此处转发）
-from caisen.engines.plan import *  # noqa: F401,F403
-from caisen.engines.risk import *  # noqa: F401,F403
-from caisen.engines.config import StrategyConfig  # noqa: F401
+# Task 1.3：engines plan/risk/config/patterns 全删，不再 re-export。
 # Step3.3：optimize training_* 物理迁移后，预先触发 caisen.optimize.training_* 的真实模块
 # 进入 sys.modules，使顶层 caisen.training_* 垫片的 sys.modules 别名在「垫片先于 optimize 包
 # 被导入」的顺序下仍能绑定到同一真实模块对象（否则 from caisen import training_analyzer 会
-# 绑定到垫片壳子，monkeypatch caisen.training_analyzer._call_glm 失效）。与 engines 同模式。
+# 绑定到垫片壳子，monkeypatch caisen.training_analyzer._call_glm 失效）。
 from caisen.optimize.training_analyzer import *  # noqa: F401,F403
 from caisen.optimize.training_loops_db import *  # noqa: F401,F403
 from caisen.optimize.training_loop import *  # noqa: F401,F403
 from caisen.optimize.training_dingtalk import *  # noqa: F401,F403
-# Step3.4：infra storage/execution/replay_*/viz_* 物理迁移后，预先触发【真实模块】进入
-# sys.modules，使顶层 caisen.<infra> 垫片的 sys.modules 别名在「垫片先于 infra 包被导入」
-# 的顺序下仍能绑定到同一真实模块对象（与 engines/optimize 同模式）。
-# Task3.3 沉淀：凡被 ``from caisen import X`` 引用的迁移模块须同步加预加载行。
-#
-# Step4c 批 A：storage + execution（engine）已从 caisen/infra/ 物理迁入 execution/ 顶层包。
-# 真身改在 execution.storage / execution.engine；caisen.infra.storage / caisen.infra.execution
-# 降为转发垫片（指向 execution.*）。预加载源随之改指 execution.*，使 caisen.storage /
-# caisen.execution 顶层垫片 → caisen.infra.* 垫片 → execution.* 真身 三层同源。
-from execution.storage import *  # noqa: F401,F403
-from execution.engine import *  # noqa: F401,F403
-# 批 B：5 个 replay_* 模块。facade 依赖 backtest_replay/replay_runs/replay_tasks_db 三个名。
-# Step4c 批 B：5 个 replay 模块已从 caisen/infra/ 物理迁入 execution/。真身在 execution.*；
-# caisen.infra.* 降为转发垫片。预加载源改指 execution.*（与批 A storage/execution 同模式）。
+# Step4c 批 B：5 个 replay_* 模块。真身在 execution/；caisen.infra.* 降为转发垫片。
+# Task 1.3：execution.engine + execution.storage 已删（caisen 形态执行链退役），不再 re-export。
+# 预加载源保留 execution.backtest_replay/replay_*/viz.viz_*（颈线法异步回测基础设施保留）。
 from execution.backtest_replay import *  # noqa: F401,F403
 from execution.replay_runs import *  # noqa: F401,F403
 from execution.replay_tasks_db import *  # noqa: F401,F403
 from execution.replay_scheduler import *  # noqa: F401,F403
 from execution.replay_worker import *  # noqa: F401,F403
-# 批 C：2 个 viz_* 模块（横切可视化层）。
-# Step4f 批 C：viz_static + viz_interactive 已从 caisen/infra/ 物理迁入横切 viz/ 顶层包。
-# 真身改在 viz.viz_static / viz.viz_interactive；caisen.infra.viz_* 降为转发垫片
-# （指向 viz.*）。预加载源随之改指 viz.*，使 caisen.viz_* 顶层垫片 → caisen.infra.viz_*
-# 垫片 → viz.viz_* 真身 三层同源（与批 A/B storage/execution/replay 同模式）。
+# 批 C：2 个 viz_* 模块（横切可视化层，真身在 viz/）。
 from viz.viz_static import *  # noqa: F401,F403
 from viz.viz_interactive import *  # noqa: F401,F403

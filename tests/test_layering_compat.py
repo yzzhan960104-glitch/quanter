@@ -57,22 +57,14 @@ def test_notifier_legacy_and_new_path():
 
 
 # ============================================================================
-# Step 3a 契约：四子包可 import，旧路径仍可用（新旧并存）
+# Step 3a 契约：caisen 子包可 import（Task 1.3 后瘦身态）
 # ============================================================================
-# 注：原 Step 2 / Step 2.2 两个 caisen facade/service 用例契约
-# （test_facade_exposes_ten_use_cases + test_caisen_service_no_longer_penetrates_
-# caisen_internals）随 Task 1.1「server 拆除」一并删——server/services/caisen_service.py
-# 全删、caisen/facade.py 在 schemas.caisen 删后 import 即崩（Task 1.3 删 facade）。
-# 这两个测试是 caisen facade/service 的耦合契约，facade/service 退役后无义。
-# 授权：caisen-retire-inventory §3.10 line182「tests/test_layering_compat.py:60-103
-# （facade 10 用例 + caisen_service 不穿透断言，facade/service 删后整段删）」。
-def test_caisen_subpackages_scaffold():
-    import caisen.engines, caisen.optimize, caisen.infra, caisen.advisor  # noqa: F401
-    from caisen.engines import StrategyConfig, PatternScreener  # 新路径
-    from caisen.config import StrategyConfig as SC_old  # 旧路径仍可用
-    from caisen.patterns.screener import PatternScreener as PS_old
-    assert StrategyConfig is SC_old
-    assert PatternScreener is PS_old
+# 注：原 test_caisen_subpackages_scaffold（断言 caisen.engines StrategyConfig/PatternScreener
+# + caisen.config + caisen.patterns.screener 可 import）随 Task 1.3「caisen 形态退役」删——
+# StrategyConfig/PatternScreener/caisen.config/caisen.patterns 已全删（真身 + 垫片）。
+# Task 1.3 后 caisen 包仅余 optimize（参数训练）+ infra（replay_*/viz_* 垫片）+ advisor +
+# 空壳 engines。此处的子包可 import 契约改由 test_shim_identity_tripwire 间接覆盖。
+# 授权：caisen-retire-inventory §3.10 line182 + §8 裁决（#1/#2/#3/#10/#11 全删）。
 
 
 # ============================================================================
@@ -83,44 +75,35 @@ def test_caisen_subpackages_scaffold():
 # 会绑定到垫片壳子（而非真实模块），sys.modules 别名失效，monkeypatch 模块全局的测试
 # 会静默假绿（Task3.3/3.4 已踩此坑两次）。此绊线在 CI 层兜底，未来迁移漏预加载立即红。
 #
-# Step4e 垫片清理评估（2026-07-16）：
-#   全量 grep 显示每个 caisen 顶层垫片（plan/risk/config/storage/execution/backtest_replay/
-#   replay_runs/replay_tasks_db/replay_scheduler/replay_worker）均有大量活跃消费者
-#   （facade/execution/*/tests/scripts/server），strangler 红线「不强切消费者（波及面大的
-#   保留）」→ 【全部保留】。本绊线 cases 不删（无垫片被清）。infra 垫片（storage/execution/
-#   backtest_replay/replay_runs/replay_tasks_db/replay_scheduler/replay_worker）保留至 4f
-#   （viz 迁横切时一并收敛）。Step4e 收口的「真穿透」是 server/api + celery_app 改最终
-#   路径（见 test_execution_no_server_import + caisen.py/celery_app.py 改动），非删垫片。
+# Task 1.3（caisen 形态退役）评估：
+#   全量 grep 显示 caisen 顶层垫片（plan/risk/config/patterns/）随真身删除一并删除
+#   （无消费者）；存活的 optimize training_* / infra replay_*+viz_* / backtest_replay 垫片
+#   仍有活跃消费者（training_loop/server/api/tests），strangler 红线「不强切消费者」→ 保留。
+#   本绊线 cases 表移除 plan/risk/config/patterns/storage/execution（已删），保留存活垫片。
 def test_shim_identity_tripwire():
-    """迁移模块新旧路径必须同一对象（sys.modules 别名生效的前置断言）。"""
+    """迁移模块新旧路径必须同一对象（sys.modules 别名生效的前置断言）。
+
+    Task 1.3：cases 表瘦身——caisen 形态相关垫片（plan/risk/config/patterns/storage/
+    execution）已随真身删除，不再列入。仅保留 optimize training_* + infra replay_*/viz_*
+    + backtest_replay 等存活垫片的同源断言。
+    """
     import importlib
 
     # (旧路径顶层垫片, 新路径子包真身)
-    # 注：infra 系列（storage/execution/backtest_replay/replay_runs/replay_tasks_db）
-    #     真身 Step4c 已迁 execution/ 顶层包；此处新路径仍用 caisen.infra.X（infra 垫片
-    #     亦同源指向 execution.*，两层垫片同源兜底）。4f viz 迁时一并收敛 infra 垫片。
     cases = [
-        # engines 策略本体
-        ("caisen.plan", "caisen.engines.plan"),
-        ("caisen.risk", "caisen.engines.risk"),
-        ("caisen.config", "caisen.engines.config"),
-        # optimize 参数优化
+        # optimize 参数优化（Task 1.3：保留，颈线法经 training_loop 用）
         ("caisen.training_analyzer", "caisen.optimize.training_analyzer"),
         ("caisen.training_loops_db", "caisen.optimize.training_loops_db"),
         ("caisen.training_loop", "caisen.optimize.training_loop"),
         ("caisen.training_dingtalk", "caisen.optimize.training_dingtalk"),
-        # infra 待迁（Step4 移出 caisen）—— Step4e 保留（消费者未切，波及面大）；4f 收敛
-        ("caisen.storage", "caisen.infra.storage"),
-        ("caisen.execution", "caisen.infra.execution"),
+        # infra 垫片（Task 1.3：颈线法异步回测基础设施保留）
         ("caisen.backtest_replay", "caisen.infra.backtest_replay"),
         ("caisen.replay_runs", "caisen.infra.replay_runs"),
         ("caisen.replay_tasks_db", "caisen.infra.replay_tasks_db"),
-        # patterns 子模块（Step3.2 整子包迁移）
-        ("caisen.patterns.screener", "caisen.engines.patterns.screener"),
-        ("caisen.patterns.registry", "caisen.engines.patterns.registry"),
     ]
     # viz_static/viz_interactive/replay_scheduler/replay_worker 未列入（重型/反向依赖 import），
-    # 其同源由专项测试（test_screener PATTERNS patch 等）间接覆盖；新增迁移须补入此表。
+    # 其同源由专项测试间接覆盖；新增迁移须补入此表。
+    # Task 1.3：plan/risk/config/patterns/storage/execution 垫片已删，不在表中。
     for old, new in cases:
         m_old = importlib.import_module(old)
         m_new = importlib.import_module(new)

@@ -49,14 +49,13 @@ from .interfaces import (  # noqa: F401
 )
 
 # ============================================================================
-# 引擎 + 离场纯函数（Step4c 批 A：物理迁入本包 execution/engine.py）
-# ExecutionEngine 状态机；check_exit/ExitAction/ExitReason/ExitDecision 由
-# execution/exit_logic.py 直接 re-export（Task 1.2：caisen 形态退役·exit_logic 由
-# caisen/engines 迁入 execution 包，单源 is 同源契约源头改指本包子模块）。
+# 离场纯函数（Task 1.2：caisen 形态退役·exit_logic 由 caisen/engines 迁入 execution 包，
+# 单源 is 同源契约源头改指本包子模块）。
+# Task 1.3（#3 全删）：ExecutionEngine（execution/engine.py）+ storage（execution/
+# storage.py）随 caisen 形态执行链路整体退役。本 __init__ 不再 re-export ExecutionEngine
+# / save_plans / load_plans 等执行仓储符号（模块已删）。check_exit/Exit* 保留（颈线法
+# 回测与未来实盘共用单源离场判定）。
 # ============================================================================
-from .engine import (  # noqa: F401
-    ExecutionEngine,
-)
 from .exit_logic import (  # noqa: F401
     check_exit,
     ExitDecision,
@@ -75,21 +74,11 @@ from .backtest_replay import (  # noqa: F401
 )
 
 # ============================================================================
-# 计划持久化 + 冷却黑名单（Step4c 批 A：物理迁入本包 execution/storage.py）
-# ============================================================================
-from .storage import (  # noqa: F401
-    save_plans,
-    load_plans,
-    get_plan,
-    update_plan,
-    load_active_plans,
-    add_to_cooldown,
-    in_cooldown,
-)
-
-# ============================================================================
 # 回放任务生命周期（Step4c 批 B：物理迁入本包 execution/replay_*.py）
 # 保留 caisen.infra 侧垫片兜底 ``from caisen.infra.replay_* import X`` 用法。
+# Task 1.3：storage/engine 已删（caisen 形态执行链退役），但回测异步基础设施
+# （replay_worker/replay_runs/replay_tasks_db/replay_scheduler）保留——颈线法经
+# training_loop → replay_tasks_db → replay_scheduler → replay_worker 使用。
 # ============================================================================
 from .replay_worker import (  # noqa: F401
     run_replay_worker,
@@ -151,8 +140,7 @@ from trading.risk_shield import (  # noqa: F401
 __all__ = [
     # 执行器抽象接口（Step4d 依赖反转）
     "ExecutionExecutor",
-    # 引擎 + 离场判定
-    "ExecutionEngine",
+    # 离场判定（Task 1.2 单源：exit_logic 迁 execution 包）
     "check_exit",
     "ExitDecision",
     "ExitAction",
@@ -161,15 +149,7 @@ __all__ = [
     "replay",
     "ReplayReport",
     "ReplayAborted",
-    # 计划持久化 + 冷却
-    "save_plans",
-    "load_plans",
-    "get_plan",
-    "update_plan",
-    "load_active_plans",
-    "add_to_cooldown",
-    "in_cooldown",
-    # 回放任务生命周期
+    # 回放任务生命周期（颈线法异步回测基础设施）
     "run_replay_worker",
     "save_run",
     "list_runs",

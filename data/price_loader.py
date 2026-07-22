@@ -4,28 +4,19 @@
 物理意图（Step4e 反向债收口）：
     原 ``CaisenFacade._load_price_data`` / ``CaisenFacade._merge_cfg`` 是 facade 实例方法，
     但二者【不使用任何 self 状态】（_merge_cfg 完全无 self；_load_price_data 仅用模块级
-    logger）。execution/replay_worker.py 的反向依赖 ``from server.services.caisen_service
-    import _load_price_data, _merge_cfg``（模型层 execution → 服务层 server，Step2.2 过渡债）
-    靠这两个 facade 实例方法的兼容转发维持。
+    logger）。Step4e 把二者的【纯逻辑】抽到本模块（data/price_loader.py）成为模块级函数，
+    消除 execution/replay_worker.py 对 server.services.caisen_service 的反向依赖。
 
-    Step4e 把二者的【纯逻辑】抽到本模块（data/price_loader.py）成为模块级函数：
-        - facade 调本模块（消除 facade 私有方法的双份真理）；
-        - replay_worker 改 ``from data.price_loader import load_price_data as _load_price_data,
-          merge_cfg as _merge_cfg``（模块级名字，保 replay_worker._load_price_data 测试
-          monkeypatch 语义；同时去 caisen_service 反向依赖）；
-        - caisen_service 删 _load_price_data/_merge_cfg 兼容转发块（Step2.2 过渡债消除）。
+Layer2 解耦·Task 1.3（caisen 形态退役）：
+    caisen/facade.py 已删（caisen 形态整体退役）。本模块保留为 generic 数据装配工具：
+      - load_price_data：策略中立（从 data_lake 装配时序），所有策略共用。
+      - merge_cfg：按 strategy_name 选 pydantic schema 做 cfg_override 校验（Task 1.3
+        从硬编码 StrategyConfig 改为 generic；caisen 形态退役后仅颈线法 NecklineConfig）。
 
-搬运纪律（strangler 红线·逻辑零改动）：
-    本文件函数体【逐行原样搬】自 caisen/facade.py 的 _load_price_data / _merge_cfg，仅做：
-        ① def f(self, args) → def f(args)（去 self）；
-        ② facade 内 self._merge_cfg / self._load_price_data 调用点改调本模块函数；
-        ③ logger 改 ``logging.getLogger("data.price_loader")``（模块级，与 facade logger 同级）。
-    算法 / 参数 / 异常处理 / 降级逻辑 / 注释【一字不改】。
-
-定位选择（为什么放 data/ 不放 caisen/）：
+定位选择（为什么放 data/）：
     load_price_data 的物理职责是「从 data_lake 装配时序」，依赖 data.lake_reader +
-    config.LAKE_CONFIG，归属 data/ 层最自然（caisen 是消费方）。merge_cfg 是 cfg 装配
-    工具，随 load_price_data 同搬（worker 二者一起 import）。
+    config.LAKE_CONFIG，归属 data/ 层最自然。merge_cfg 是 cfg 装配工具，随 load_price_data
+    同搬（worker 二者一起 import）。
 """
 from __future__ import annotations
 
@@ -35,18 +26,37 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-# 注：StrategyConfig 的 import 故意延迟到 merge_cfg 函数内部（不放模块顶）。原因：
-# data.price_loader 位于 data/ 包（与 caisen/ 平级），模块顶 ``from caisen.engines.config
-# import StrategyConfig`` 会触发 caisen/__init__.py 全量初始化 → caisen.optimize →
-# caisen.infra.replay_tasks_db → caisen.infra.storage → execution/__init__ →
-# execution.replay_worker → ``from data.price_loader import load_price_data`` 形成循环
-# （data.price_loader 半初始化时被反向 import）。延迟到函数体内打破循环——首次调
-# merge_cfg 时 caisen 包已完全初始化，StrategyConfig 可安全取到。load_price_data 本身
-# 不依赖 StrategyConfig，不受影响。
+# 注：merge_cfg 的 schema import 故意延迟到函数体内（不放模块顶）。原因：
+# data.price_loader 位于 data/ 包（与 strategies/ 平级），模块顶 import 任一策略 schema
+# 可能触发 strategies 包初始化链的反向依赖。延迟到函数体内打破潜在循环——首次调
+# merge_cfg 时各包已完全初始化，schema 可安全取到。load_price_data 本身不依赖 schema，
+# 不受影响。
+#
+# Task 1.3（Layer2 解耦·caisen 形态退役）：原 merge_cfg 硬编码 caisen StrategyConfig
+# 做 cfg_override 校验。caisen 形态退役后 StrategyConfig 已删，merge_cfg 改为按
+# strategy_name 动态选 schema（当前仅 NecklineConfig；未来新增策略在 _SCHEMA_FOR_STRATEGY
+# 注册即可）。这是本任务唯一逻辑改动——保持颈线法异步路径能用（replay_worker neckline
+# 分支 cfg_override 透传给策略，不直接调 merge_cfg，但 merge_cfg 作为 generic cfg 装配
+# 工具保留，供未来需要默认值合并的路径复用）。
 
 
 # 模块级 logger：装配异常走 debug（不污染 prod 日志，但可调试追溯）
 logger = logging.getLogger("data.price_loader")
+
+
+def _select_schema(strategy_name: str):
+    """按 strategy_name 选对应的 pydantic config schema（延迟 import 打破循环）。
+
+    Task 1.3：caisen 形态退役后仅颈线法活跃。未来新增策略在此注册即可（每策略一个
+    pydantic BaseModel schema）。未知 strategy_name → 抛 ValueError（防静默用错 schema
+    校验出"假合法"的 cfg_override）。
+    """
+    if strategy_name == "neckline":
+        from strategies.neckline_schema import NecklineConfig
+        return NecklineConfig
+    raise ValueError(
+        f"未知 strategy_name={strategy_name!r}，无对应 config schema"
+        "（caisen 形态已退役，当前仅支持 'neckline'）")
 
 
 def load_price_data(symbols: Optional[List[str]], date: str) -> Dict[str, pd.DataFrame]:
@@ -110,36 +120,41 @@ def load_price_data(symbols: Optional[List[str]], date: str) -> Dict[str, pd.Dat
     return price_data
 
 
-def merge_cfg(cfg_override: Dict[str, Any]) -> "StrategyConfig":
-    """默认 StrategyConfig + cfg_override 增量合并（extra=forbid 动态子类全字段校验）。
+def merge_cfg(cfg_override: Dict[str, Any], strategy_name: str = "neckline"):
+    """默认 config schema + cfg_override 增量合并（extra=forbid 动态子类全字段校验）。
 
     物理意图：用户传入 cfg_override（如 {"min_rr_ratio": 1.5}）增量覆盖默认配置，
-    不修改全局默认 cfg 实例（每次重新 model_validate 构造新对象）。
+    不修改全局默认 cfg 实例（每次重新 model_validate 构造新对象）。schema 按 strategy_name
+    动态选择（Task 1.3：caisen 形态退役，当前仅颈线法 NecklineConfig）。
 
-    防御性（Task 3 review I-1 校准）：
+    防御性（Task 3 review I-1 校准，Task 1.3 schema 解耦）：
         Pydantic v2 有两个静默陷阱会掩盖非法 cfg_override：
           (1) `model_copy(update=...)` 是【不触发校验】的浅拷贝——未知字段名会被
               静默当作新属性附加，不抛 ValidationError；
           (2) `model_validate` 的默认 extra="ignore" 会静默丢弃未知字段名。
           二者都会让"cfg_override 字段名拼错"（如 {"min_rr_ration": 1.5}）被前端
           误当作"无候选"而非"参数错误"，掩盖配置 Bug。
-          故此函数构建一个 extra="forbid" 的动态子类（_ForbidExtraConfig）做全字段
-          校验——未知字段 / 类型不匹配 / 约束违反（ge/le）统一抛 ValidationError。
-          facade 层不静默吞，让其上抛路由层转 422（参数错误）。
+          故此函数构建一个 extra="forbid" 的动态子类做全字段校验——未知字段 / 类型
+          不匹配 / 约束违反（ge/le）统一抛 ValidationError。调用方不静默吞，让其上抛
+          路由层转 422（参数错误）。
+
+    参数：
+        cfg_override:  参数覆盖 dict（键必须在该策略 config schema 的 model_fields 内）。
+        strategy_name: 策略名（决定选哪个 pydantic schema 做校验，默认 "neckline"）。
     """
-    # 延迟 import 打破 data.price_loader ↔ caisen 循环（见模块顶注释）。
-    from caisen.engines.config import StrategyConfig
+    # 延迟 import 打破 data.price_loader ↔ strategies 循环（见模块顶注释）。
     from pydantic import ConfigDict, create_model
 
-    base = StrategyConfig()
+    schema = _select_schema(strategy_name)
+    base = schema()
     if not cfg_override:
         return base
     # extra="forbid" 动态子类：Pydantic v2 默认 extra="ignore" 静默丢弃未知字段，
     # 故临时开 forbid 才能让拼错字段名 → ValidationError 透传路由层转 422。
-    # 用 create_model 生成子类保持 StrategyConfig 全部字段/约束不变，仅叠加 forbid。
+    # 用 create_model 生成子类保持 schema 全部字段/约束不变，仅叠加 forbid。
     _ForbidExtra = create_model(
         "_ForbidExtraConfig",
-        __base__=StrategyConfig,
+        __base__=schema,
         __config__=ConfigDict(extra="forbid"),
     )
     merged: Dict[str, Any] = {**base.model_dump(), **cfg_override}

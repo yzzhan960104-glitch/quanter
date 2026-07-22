@@ -26,9 +26,9 @@ def build_strategy(name: str, cfg_override: Optional[dict] = None, **kwargs) -> 
     """按名字实例化策略。
 
     参数：
-        name:          策略名（"caisen"=caisen 形态，"neckline"=颈线法）。
+        name:          策略名（"neckline"=颈线法）。
         cfg_override:  参数覆盖 dict（键必须在该策略 config_schema 的 model_fields 内）。
-        **kwargs:      其他构造参数（caisen 需 risk/aum/trading_calendar）。
+        **kwargs:      其他构造参数。
     """
     if name not in _STRATEGY_REGISTRY:
         raise ValueError(f"未知策略: {name}（已注册: {list(_STRATEGY_REGISTRY)})")

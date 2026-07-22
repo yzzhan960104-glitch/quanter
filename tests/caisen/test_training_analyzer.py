@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""training_analyzer 分析/解析单测。mock _call_glm 不真调 GLM。"""
+"""training_analyzer 分析/解析单测。mock _call_glm 不真调 GLM。
+
+Task 1.3（caisen 形态退役）：parse_review 默认 strategy_name 改 "neckline"，schema 改用
+NecklineConfig（18 维）。本测试 cfg 字段对齐 NecklineConfig（min_rr / max_holding 等），
+不再用 caisen 形态字段（min_rr_ratio / max_holding_bars）。
+"""
 import json
 from unittest.mock import patch
 
@@ -7,8 +12,9 @@ from caisen import training_analyzer
 
 
 _REPORT = {"n_hits": 12, "win_rate": 0.58, "avg_rr": 1.7, "max_drawdown": -0.14,
-           "annualized_return": 0.22, "pattern_dist": {"w_bottom": 8}}
-_CFG = {"min_rr_ratio": 1.5, "max_holding_bars": 15}
+           "annualized_return": 0.22, "pattern_dist": {"neckline": 8}}
+# NecklineConfig 字段（Task 1.3：caisen 形态 min_rr_ratio/max_holding_bars → 颈线法 min_rr/max_holding）
+_CFG = {"min_rr": 1.5, "max_holding": 15}
 
 
 def test_analyze_round_assembles_prompt_and_returns_report(monkeypatch):
@@ -24,7 +30,7 @@ def test_analyze_round_assembles_prompt_and_returns_report(monkeypatch):
     m.assert_called_once()
     prompt = m.call_args.args[0]
     assert "12" in prompt          # 当前轮 n_hits 进 prompt
-    assert "min_rr_ratio" in prompt  # 当前 cfg 进 prompt
+    assert "min_rr" in prompt      # 当前 cfg 进 prompt
 
 
 def test_analyze_round_degrades_without_glm_key(monkeypatch):
@@ -39,11 +45,11 @@ def test_analyze_round_degrades_without_glm_key(monkeypatch):
 def test_parse_review_extracts_cfg_override_and_action(monkeypatch):
     """正常：GLM 返回合法 JSON → 解析出 cfg_override + action=rerun。"""
     monkeypatch.setenv("GLM_API_KEY", "fake-key-for-mock")
-    glm_out = json.dumps({"cfg_override": {"min_rr_ratio": 2.0}, "action": "rerun"})
+    glm_out = json.dumps({"cfg_override": {"min_rr": 2.0}, "action": "rerun"})
     with patch.object(training_analyzer, "_call_glm", return_value=glm_out):
         result = training_analyzer.parse_review("min_rr 提到2.0 重跑", _CFG)
     assert result["action"] == "rerun"
-    assert result["cfg_override"] == {"min_rr_ratio": 2.0}
+    assert result["cfg_override"] == {"min_rr": 2.0}
 
 
 def test_parse_review_rejects_invalid_field(monkeypatch):
@@ -59,13 +65,13 @@ def test_parse_review_rejects_invalid_field(monkeypatch):
 
 
 def test_parse_review_rejects_out_of_range(monkeypatch):
-    """值域护栏：neckline_height_multiple 超出 schema 约束(ge=1 le=4) → 抛 ParseError。"""
+    """值域护栏：tp1_portion 超出 schema 约束(ge=0 le=1) → 抛 ParseError。"""
     monkeypatch.setenv("GLM_API_KEY", "fake-key-for-mock")
-    glm_out = json.dumps({"cfg_override": {"neckline_height_multiple": 99}, "action": "rerun"})
+    glm_out = json.dumps({"cfg_override": {"tp1_portion": 99}, "action": "rerun"})
     with patch.object(training_analyzer, "_call_glm", return_value=glm_out):
         try:
-            training_analyzer.parse_review("级数改99", _CFG)
-            assert False, "应抛 ParseError（超 le=4）"
+            training_analyzer.parse_review("止盈1比例改99", _CFG)
+            assert False, "应抛 ParseError（超 le=1）"
         except training_analyzer.ParseError:
             pass
 

@@ -2,11 +2,15 @@
 """caisen.replay_worker 异步回测 worker 进程入口（Spec 1 · Task 3）。
 
 （待迁·Step4 移出 caisen 包至执行编排层）本模块当前物理位于 caisen/infra/ 过渡子包，
-Step4 将连同 storage/execution/replay_*/viz_* 整体迁出 caisen 包至独立的执行编排层。
+Step4 将连同 replay_*/backtest_replay 整体迁出 caisen 包至独立的执行编排层。
 当前位置仅为 Step3 分层重构的中间态。
 
-Step4e 反向债已收口：_load_price_data/_merge_cfg 改 import data.price_loader 模块级函数
+Step4e 反向债已收口：_load_price_data 改 import data.price_loader 模块级函数
 （原 from server.services.caisen_service import 是 execution→server 反向依赖，Step2.2 过渡债）。
+
+Layer2 解耦·Task 1.3：caisen 形态（W底/头肩/三角形）完整退役。run_replay_worker 内
+caisen 分支（_merge_cfg + RiskManager + CaisenPatternStrategy）随之删除，仅保留颈线法
+分支。_merge_cfg import 一并删（caisen 形态专属 cfg 装配，颈线法策略内部自理 cfg_override）。
 
 物理定位：被 ProcessPoolExecutor submit 在子进程跑单次回测。
 - _init_worker：进程 initializer，加载 data_lake 一次（数 GB parquet），所有 task 复用。
@@ -15,10 +19,9 @@ Step4e 反向债已收口：_load_price_data/_merge_cfg 改 import data.price_lo
   progress 经 Queue 回报主进程（主进程单点写 DB，避免跨进程 SQLite 锁）。
 
 可测试性（关键）：
-    _load_price_data/_merge_cfg 从 caisen_service 【模块级】import，成为本模块属性，
+    _load_price_data 从 data.price_loader【模块级】import，成为本模块属性，
     测试 monkeypatch replay_worker._load_price_data 即生效。若改成函数内
     `from ... import`，每次调用重新绑定到源模块，monkeypatch 本模块属性将失效。
-    无循环 import：caisen_service 依赖 backtest_replay/storage 等，不反向依赖 replay_worker。
 """
 from __future__ import annotations
 
@@ -28,15 +31,16 @@ import os
 
 from caisen import replay_tasks_db
 from caisen.backtest_replay import replay, ReplayAborted
-from caisen.risk import RiskManager
-# 注意：strategies.caisen_pattern 不在模块级 import——会触发循环
+# 注意：strategies.neckline_method 不在模块级 import——会触发循环
 # （execution.__init__→replay_worker→strategies→caisen→execution）。改 run_replay_worker 内延迟 import。
-# 模块级 import → _load_price_data/_merge_cfg 成为本模块属性（测试 monkeypatch 生效）。
-# Step4e 反向债收口：原 ``from server.services.caisen_service import _load_price_data,
-# _merge_cfg`` 是 execution→server 反向依赖（Step2.2 过渡债）。现改 import data.price_loader
-# 的模块级函数（逻辑单源，与 facade 同源），消除反向依赖。alias 保持 _load_price_data /
-# _merge_cfg 模块名 → replay_worker._load_price_data 测试 monkeypatch 语义不变。
-from data.price_loader import load_price_data as _load_price_data, merge_cfg as _merge_cfg
+# 模块级 import → _load_price_data 成为本模块属性（测试 monkeypatch 生效）。
+# Step4e 反向债收口：原 ``from server.services.caisen_service import _load_price_data``
+# 是 execution→server 反向依赖（Step2.2 过渡债）。现改 import data.price_loader 的模块级
+# 函数（逻辑单源，与 facade 同源），消除反向依赖。alias 保持 _load_price_data 模块名 →
+# replay_worker._load_price_data 测试 monkeypatch 语义不变。
+# Task 1.3：caisen 形态退役，_merge_cfg（caisen cfg 装配）已删，颈线法 cfg_override
+# 由 NecklineMethodStrategy 内部 NecklineConfig 自理，不再走 merge_cfg。
+from data.price_loader import load_price_data as _load_price_data
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +86,7 @@ def run_replay_worker(task_id: str, abort_flag, progress_q, heartbeat_q) -> None
         if task is None:
             logger.warning("worker 任务不存在：task_id=%s", task_id)
             return
-        strategy_name = task.get("strategy_name", "caisen")
+        strategy_name = task.get("strategy_name", "neckline")
         # universe 已由 replay_tasks_db 从 universe_json 还原：None=全市场 / list=指定标的。
         price_data = _load_price_data(task["universe"], task["end"])
         if not price_data:
@@ -105,14 +109,17 @@ def run_replay_worker(task_id: str, abort_flag, progress_q, heartbeat_q) -> None
 
         # 阶段C：按 strategy_name 构造策略。函数内 import 避免模块级循环
         # （execution.__init__→replay_worker→strategies→caisen→execution）。
+        # Task 1.3：caisen 形态分支已删（W底/头肩/三角形退役），仅保留颈线法。
         if strategy_name == "neckline":
             from strategies.neckline_method import NecklineMethodStrategy
             strategy = NecklineMethodStrategy(cfg_override=task.get("cfg_override"))
-        else:  # "caisen"（caisen 形态，阶段E 随形态代码删）
-            cfg = _merge_cfg(task["cfg_override"])
-            risk = RiskManager(cfg)
-            from strategies.caisen_pattern import CaisenPatternStrategy
-            strategy = CaisenPatternStrategy(cfg, risk, 1_000_000.0)
+        else:
+            # 未知策略名 → 显式 FAILED（防 Task 1.3 后旧 task 残留 strategy_name="caisen"
+            # 被静默跑空回测伪装 SUCCESS，掩盖退役后死任务）。
+            replay_tasks_db.mark_failed(
+                task_id, f"未知策略 strategy_name={strategy_name!r}"
+                "（caisen 形态已退役，当前仅支持 'neckline'）")
+            return
         report = replay(
             price_data, strategy,
             start=task["start"], end=task["end"],

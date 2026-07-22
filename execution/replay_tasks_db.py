@@ -72,7 +72,7 @@ def init_db(path: Optional[str] = None) -> None:
                 universe_n     INTEGER,       -- -1=全市场；正数=标的个数（列表长度）
                 universe_json  TEXT,           -- 完整 symbol 列表（null=全市场），worker 还原装配用
                 cfg_override   TEXT,
-                strategy_name  TEXT DEFAULT 'caisen',  -- 阶段C：策略名（caisen/neckline），老库迁移补
+                strategy_name  TEXT DEFAULT 'neckline',  -- Task 1.3：caisen 形态退役，默认改颈线法（原 'caisen'）
                 error          TEXT,
                 report_json    TEXT,
                 started_at     TEXT,
@@ -84,10 +84,11 @@ def init_db(path: Optional[str] = None) -> None:
             """
         )
         # 列迁移（老库无 strategy_name 列）：PRAGMA 检查 + ALTER 补列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）
+        # Task 1.3：默认改 'neckline'（caisen 形态退役）
         cols = {r[1] for r in conn.execute("PRAGMA table_info(replay_tasks)")}
         if "strategy_name" not in cols:
             conn.execute(
-                "ALTER TABLE replay_tasks ADD COLUMN strategy_name TEXT DEFAULT 'caisen'")
+                "ALTER TABLE replay_tasks ADD COLUMN strategy_name TEXT DEFAULT 'neckline'")
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -118,7 +119,7 @@ def create_task(req: dict, path: Optional[str] = None) -> str:
             (task_id, _now_iso(), req.get("start"), req.get("end"),
              universe_n, json.dumps(universe),
              json.dumps(req.get("cfg_override") or {}, ensure_ascii=False),
-             req.get("strategy_name", "caisen")),
+             req.get("strategy_name", "neckline")),  # Task 1.3：caisen 形态退役，默认颈线法
         )
     return task_id
 

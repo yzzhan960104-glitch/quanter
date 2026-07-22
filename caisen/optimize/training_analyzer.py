@@ -76,8 +76,6 @@ def analyze_round(report: Dict[str, Any], cfg: Dict[str, Any],
 
 from pydantic import ValidationError
 
-from caisen.config import StrategyConfig
-
 
 class ParseError(Exception):
     """审核文本解析失败（GLM 返回非 JSON / 字段非法 / 超值域）。
@@ -90,20 +88,22 @@ class ParseError(Exception):
 _ACTIONS = ("rerun", "stop", "reset")
 
 
-def parse_review(text: str, cfg: Dict[str, Any], strategy_name: str = "caisen") -> Dict[str, Any]:
+def parse_review(text: str, cfg: Dict[str, Any], strategy_name: str = "neckline") -> Dict[str, Any]:
     """解析你的审核文本 → {cfg_override, action}。
 
     值域护栏：cfg_override 经策略对应 config_schema 整体校验——
     非法字段名/超 ge/le 抛 ParseError（防 GLM 改不存在的字段或给越界值）。
-    strategy_name: "caisen"→StrategyConfig(33维) / "neckline"→NecklineConfig(18维)。
+    strategy_name: "neckline"→NecklineConfig(18维)。
+    Task 1.3（caisen 形态退役）：caisen 分支（StrategyConfig 33维）已删，当前仅颈线法。
     GLM 不可用 → 降级抛 ParseError（message 含「请按 改 字段=值 重跑 格式」提示）。
     """
-    # 阶段C：按策略选 config_schema（颈线法 18 维 / caisen 形态 33 维）
+    # 阶段C：按策略选 config_schema（Task 1.3：仅颈线法 NecklineConfig 18 维）
     if strategy_name == "neckline":
         from strategies.neckline_schema import NecklineConfig
         schema = NecklineConfig
     else:
-        schema = StrategyConfig
+        raise ParseError(
+            f"未知 strategy_name={strategy_name!r}（caisen 形态已退役，当前仅支持 'neckline'）")
 
     prompt = f"""你是参数解析器。把用户的中文审核意图解析为严格 JSON。
 
