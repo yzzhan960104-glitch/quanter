@@ -16,7 +16,7 @@ trading/execution_gateway.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 
 @dataclass(frozen=True)
@@ -168,8 +168,15 @@ class BaseExecutionGateway(ABC):
         """撤单。已成交单应返回当前终态而非抛错（幂等语义）。"""
 
     @abstractmethod
-    async def _fetch_broker_positions(self) -> Mapping[str, float]:
-        """子类实现：从券商拉取真实持仓 {symbol: qty}（模板方法的可变点）。"""
+    async def _fetch_broker_positions(self) -> Mapping[str, Any]:
+        """子类实现：从券商拉取真实持仓（模板方法的可变点）。
+
+        返回形态（T7 后双形态，消费者须 isinstance 防御）：
+        - Mock/EMT 子类：{symbol: qty(float)}（老契约）
+        - QMT 子类（T7 扩展）：{symbol: {volume, avg_price, open_price, yesterday_volume}}
+        sync_positions 模板方法扁平化为 {symbol: float} 再传 reconcile（契约不变）；
+        其他消费者按需读原始返回的扩展字段。
+        """
 
     async def sync_positions(
         self,
