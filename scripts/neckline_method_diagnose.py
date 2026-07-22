@@ -11,10 +11,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 import pandas as pd
-from neckline_method_v0 import compute_atr, search_neckline, local_minima, DEFAULTS
+from strategies.neckline.method_v0 import compute_atr, search_neckline, local_minima, DEFAULTS
 
 
 def main():

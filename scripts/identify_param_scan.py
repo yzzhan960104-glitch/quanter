@@ -8,8 +8,8 @@ import os, sys, itertools
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
-from neckline_method_v0 import detect_neckline_method, DEFAULTS, compute_atr
-from neckline_backtest import simulate_exit, dedup_signals
+from strategies.neckline.method_v0 import detect_neckline_method, DEFAULTS, compute_atr
+from strategies.neckline.backtest import simulate_exit, dedup_signals
 
 lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 syms = lake.index.get_level_values("symbol").unique().tolist()

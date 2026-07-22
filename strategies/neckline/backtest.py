@@ -12,20 +12,17 @@
 盈亏比由形态深度 H/ATR 决定。
 
 用法：
-    PYTHONIOENCODING=utf-8 python -u scripts/neckline_backtest.py
+    PYTHONIOENCODING=utf-8 python -u strategies/neckline/backtest.py
 """
 from __future__ import annotations
-
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import math
 
 import pandas as pd
-from neckline_method_v0 import detect_neckline_method, DEFAULTS, compute_atr
+
+# 本模块原在 scripts/（平级 from neckline_method_v0），Layer2 Task 1.5 收口进 strategies/neckline/
+# 子包后改相对 import（同包内 .method_v0）。
+from .method_v0 import detect_neckline_method, DEFAULTS, compute_atr
 
 
 # 持有期参数（用户规则，可调）—— 保留为向后兼容常量

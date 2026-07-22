@@ -30,20 +30,19 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-# scripts/ 无 __init__.py（namespace 包），直接把该目录加 sys.path 最稳——与
-# tests/test_check_ports.py 同范式。加后方可 `from neckline_backtest import ...`
-# （neckline_backtest.py 顶部 `from neckline_method_v0 import ...` 也依赖此 path）。
-_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+# 颈线法算法已收口进 strategies/neckline/ 子包（Layer2 Task 1.5），
+# 不再加 scripts/ 到 sys.path——改走包 import（项目根在 pytest rootdir 即 sys.path）。
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-from neckline_backtest import (  # noqa: E402
+from strategies.neckline.backtest import (  # noqa: E402
     simulate_exit,
     kelly_metrics,
     dedup_signals,
     EXEC_DEFAULTS,
 )
-from neckline_method_v0 import DEFAULTS  # noqa: E402  （确保 import 链可达）
+from strategies.neckline.method_v0 import DEFAULTS  # noqa: E402  （确保 import 链可达）
 
 
 # ============================================================================
@@ -228,7 +227,7 @@ def test_risk_metrics_sharpe_and_drawdown():
     断言：正夏普（正期望）、回撤 ∈ (0,1)（有回撤未爆仓）、ann 与 kelly_metrics 完全一致
     （证明 risk_metrics 复用了 kelly_metrics 的 sampling，前三维同源）。
     """
-    from neckline_backtest import risk_metrics, kelly_metrics
+    from strategies.neckline.backtest import risk_metrics, kelly_metrics
     pnls = [2.0, 2.0, -1.0] * 60     # 180 笔
     dates = pd.date_range("2024-01-01", "2025-01-01", periods=len(pnls))
     kelly, curve, ann, sharpe, max_dd = risk_metrics(pnls, dates)

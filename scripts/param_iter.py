@@ -26,8 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
-from neckline_method_v0 import DEFAULTS
-from neckline_backtest import scan_symbol, kelly_metrics, risk_metrics, EXEC_DEFAULTS
+from strategies.neckline.method_v0 import DEFAULTS
+from strategies.neckline.backtest import scan_symbol, kelly_metrics, risk_metrics, EXEC_DEFAULTS
 
 
 # ===== 21 维参数空间（识别层 id=DEFAULTS / 执行层 exec=EXEC_DEFAULTS）=====

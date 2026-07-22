@@ -16,10 +16,10 @@
 固定输入（确定性三要素，零随机性）：
     ① 标的：3 只创板科创代表（300750.SZ 宁德时代 / 688981.SH 中芯国际 / 301269.SZ 华大智造），
        均经 data_lake 核验为可交易（近30日均成交额≥1亿），且历史长度充足（≥900 根）。
-    ② 识别层：neckline_method_v0.DEFAULTS（11 维，未 update，原样默认）。
-    ③ 执行层：neckline_backtest.EXEC_DEFAULTS（10 维，未 update，原样默认）。
+    ② 识别层：strategies.neckline.method_v0.DEFAULTS（11 维，未 update，原样默认）。
+    ③ 执行层：strategies.neckline.backtest.EXEC_DEFAULTS（10 维，未 update，原样默认）。
 
-镜像 param_iter.py 的 import 模式（sibling import）：
+镜像 param_iter.py 的 import 模式（包 import）：
     `scan_symbol` 读全局 DEFAULTS/EXEC_DEFAULTS，与 param_iter.run_one 同口径。
 
 用法：
@@ -36,13 +36,12 @@ import argparse
 import hashlib
 from datetime import datetime, timezone
 
-# 项目根 + scripts/ 加入 sys.path（镜像 param_iter.py 的 sibling import 模式）
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 项目根加入 sys.path（颈线法已收口进 strategies/neckline/，包 import 解析需要根在 path）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
-from neckline_method_v0 import DEFAULTS  # noqa: E402
-from neckline_backtest import scan_symbol, kelly_metrics, EXEC_DEFAULTS  # noqa: E402
+from strategies.neckline.method_v0 import DEFAULTS  # noqa: E402
+from strategies.neckline.backtest import scan_symbol, kelly_metrics, EXEC_DEFAULTS  # noqa: E402
 
 
 # ============================================================================
@@ -52,10 +51,10 @@ GOLDEN_SYMBOLS = ["300750.SZ", "688981.SH", "301269.SZ"]
 LAKE_PATH = "data_lake/a_shares_daily.parquet"
 GOLDEN_PATH = "tests/_golden/neckline_baseline.json"
 
-# scan_symbol 来源标注（import 路径会随阶段 1 收口变，数值不变——这是要守的不变量）
+# scan_symbol 来源标注（Layer2 Task 1.5 收口进 strategies/neckline/ 子包，数值不变——这是要守的不变量）
 SCAN_SYMBOL_SOURCE = (
-    "scripts/neckline_backtest.py::scan_symbol "
-    "(阶段1 收口进 strategies/neckline/ 后改 from strategies.neckline.backtest import scan_symbol)"
+    "strategies/neckline/backtest.py::scan_symbol "
+    "(Layer2 Task 1.5 收口：scripts/neckline_*.py → strategies/neckline/，per_symbol 数值逐位不变)"
 )
 
 

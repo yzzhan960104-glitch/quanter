@@ -3,7 +3,7 @@
 从 v5 trades 筛 2026+stop_loss，算每笔浮盈，挑两类极端，详细复现走势。
 """
 import pandas as pd
-from neckline_method_v0 import compute_atr
+from strategies.neckline.method_v0 import compute_atr
 
 lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 t = pd.read_csv("logs/neckline_fullscan_trades.csv")

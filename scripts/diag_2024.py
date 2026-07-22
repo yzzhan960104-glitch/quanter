@@ -6,7 +6,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
-from neckline_method_v0 import compute_atr, search_neckline
+from strategies.neckline.method_v0 import compute_atr, search_neckline
 
 lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 df = lake.xs("000001.SZ", level="symbol").sort_index()

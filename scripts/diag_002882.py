@@ -3,7 +3,7 @@
 输出：窗口区间 / 命中颈线的顶部K线日期 / 颈线压制 / 突破日 / 买入日 / 买卖止盈止损 / 后续走势。
 """
 import pandas as pd
-from neckline_method_v0 import compute_atr, local_minima, DEFAULTS
+from strategies.neckline.method_v0 import compute_atr, local_minima, DEFAULTS
 
 lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 df = lake.xs("002882.SZ", level="symbol").sort_index()

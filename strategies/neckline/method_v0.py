@@ -24,18 +24,13 @@
     - 窗口最低点强制纳入底部集合（anchor）。
 
 用法：
-    PYTHONIOENCODING=utf-8 python -u scripts/neckline_method_v0.py
+    PYTHONIOENCODING=utf-8 python -u strategies/neckline/method_v0.py
 """
 from __future__ import annotations
 
 import math
-import os
-import sys
 
 import pandas as pd
-
-# 加项目根到 sys.path（脚本可从任意 cwd 运行）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ============================================================================

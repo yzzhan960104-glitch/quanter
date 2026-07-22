@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """颈线法策略适配器（NecklineMethodStrategy · 阶段B）。
 
-挂 scripts/neckline_method_v0.py + scripts/neckline_backtest.py 到 strategies/ 包，
 经 Strategy 接口接入解耦后的回测引擎。颈线法的进场/出场是完整状态机（simulate_exit：
 挂单回踩 + max_wait + cancel_on 撤单 + 分级止盈 tp1/tp2 + 超时），scan_at 一站式产出
 trade dict（出场逻辑归策略侧，引擎零感知）。
+
+算法本体收口于 strategies/neckline/ 子包（method_v0 识别层 + backtest 执行层），
+本适配器从 .neckline 子包 import 算法原语（Layer2 Task 1.5 收口）。
 
 与 caisen 形态的语义差异（已在 scan_at 处理）：
     - 信号去重：颈线法用 cooldown 交易日窗（caisen 用 neckline+bottom 价对签名）
@@ -14,19 +16,13 @@ trade dict（出场逻辑归策略侧，引擎零感知）。
 """
 from __future__ import annotations
 
-import os
-import sys
-
 import pandas as pd
 
-# scripts/ 加入 sys.path（neckline_method_v0/neckline_backtest 在 scripts/）
-_PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SCRIPTS = os.path.join(_PROJ_ROOT, "scripts")
-if _SCRIPTS not in sys.path:
-    sys.path.insert(0, _SCRIPTS)
-
-from neckline_method_v0 import detect_neckline_method, DEFAULTS, compute_atr  # noqa: E402
-from neckline_backtest import simulate_exit, EXEC_DEFAULTS  # noqa: E402
+# 颈线法算法原挂 scripts/neckline_method_v0 + scripts/neckline_backtest（靠 sys.path hack
+# 挂载），Layer2 Task 1.5 收口进 strategies/neckline/ 子包后改本包相对 import——
+# sys.path hack 已彻底删除。决策逻辑零改动。
+from .neckline.method_v0 import detect_neckline_method, DEFAULTS, compute_atr
+from .neckline.backtest import simulate_exit, EXEC_DEFAULTS
 
 from .neckline_schema import NecklineConfig
 from .registry import register_strategy

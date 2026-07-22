@@ -8,7 +8,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
-from neckline_backtest import scan_symbol
+from strategies.neckline.backtest import scan_symbol
 
 lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 syms = lake.index.get_level_values("symbol").unique().tolist()

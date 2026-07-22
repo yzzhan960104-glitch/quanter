@@ -28,14 +28,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-# scripts/ 无 __init__.py（namespace 包），直接加 sys.path（与 test_neckline_core 同范式）
-_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+# 颈线法算法已收口进 strategies/neckline/ 子包（Layer2 Task 1.5），
+# 不再加 scripts/ 到 sys.path——改走包 import（项目根在 pytest rootdir 即 sys.path）。
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-import neckline_backtest as nb  # noqa: E402  （monkeypatch scan_symbol 的 detect 用）
-from neckline_backtest import scan_symbol  # noqa: E402
-from neckline_method_v0 import (  # noqa: E402
+from strategies.neckline import backtest as nb  # noqa: E402  （monkeypatch scan_symbol 的 detect 用）
+from strategies.neckline import scan_symbol  # noqa: E402
+from strategies.neckline.method_v0 import (  # noqa: E402
     detect_neckline_method,
     search_neckline,
     local_minima,
@@ -268,7 +269,7 @@ def test_scan_symbol_matches_strategy(monkeypatch):
     守护 param_iter 直调 scan_symbol 与 execution 经 scan_at 不分叉——任何 simulate_exit/
     去重逻辑改动若导致两侧不一致，本测试即失败。
     """
-    import neckline_backtest as nb
+    from strategies.neckline import backtest as nb
     import strategies.neckline_method as nm
     from strategies.neckline_method import NecklineMethodStrategy
 
@@ -289,7 +290,7 @@ def test_scan_symbol_matches_strategy(monkeypatch):
             return fake_res
         return None
 
-    # 两处 import 绑定都要 patch（scan_symbol 在 neckline_backtest，scan_at 在 strategies）
+    # 两处 import 绑定都要 patch（scan_symbol 在 strategies.neckline.backtest，scan_at 在 strategies）
     monkeypatch.setattr(nb, "detect_neckline_method", fake_detect)
     monkeypatch.setattr(nm, "detect_neckline_method", fake_detect)
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-22T15:36:47.640674+00:00",
-  "scan_symbol_source": "scripts/neckline_backtest.py::scan_symbol (阶段1 收口进 strategies/neckline/ 后改 from strategies.neckline.backtest import scan_symbol)",
+  "captured_at_utc": "2026-07-22T17:44:57.452068+00:00",
+  "scan_symbol_source": "strategies/neckline/backtest.py::scan_symbol (Layer2 Task 1.5 收口：scripts/neckline_*.py → strategies/neckline/，per_symbol 数值逐位不变)",
   "symbols": [
     "300750.SZ",
     "688981.SH",
