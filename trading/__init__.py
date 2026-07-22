@@ -1,6 +1,18 @@
 """真实交易模块：QMT 对接、订单状态机、风控挡板。
 
-职责：
+Layer2 阶段5 五层定型（spec §3.5）内部结构：
+    trading/
+    ├─ types/        ① 纯数据契约（OrderState 枚举等 · 零外部依赖单源）
+    ├─ compute/      ② 纯决策函数（止损/风控/离场/对账 · functional core · 阶段2 done）
+    ├─ state/        ③ reducer 式状态机（薄壳 · 颈线法靠 broker 跟踪状态 · 暂无实质内容）
+    ├─ io/           ④ 副作用壳（下单/撤单/查持仓/查行情/熔断撤单 · 只调broker+data+types）
+    └─ orchestrate/  ⑤ 编排（eod_plan/pre_open/stop_loss/post_close 四触发点 · 只连线不判定）
+
+    顶层 engine.py 留根（保 tests/trading/test_engine.py 等 monkeypatch
+    engine.calendar/circuit_breaker/qmt_market_data/reconcile_job 模块级属性兼容），
+    orchestrate/ 作门面 re-export 四触发点 + TradingEngine。
+
+职责（历史描述 · 仍成立）：
 1. 订单状态机（处理断线、限频、部分成交）
 2. QMT 实盘执行网关（xtquant 异步封装）
 3. 风控挡板（纯函数，下单前 10 关校验）
