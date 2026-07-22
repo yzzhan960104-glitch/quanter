@@ -89,6 +89,52 @@ def _trade_cfg() -> dict:
     }
 
 
+# ============================================================================
+# 策略数据源辅助（二期 gap② · _eod 从 data_lake 加载 universe + 单 symbol 前复权日线）
+# ============================================================================
+def _load_universe() -> list:
+    """加载创板科创可交易标的池（300/301/688/689 开头）。
+
+    物理意图：复用 data_lake/a_shares_daily.parquet（MultiIndex date,symbol，全市场
+    5 年前复权日线），按 symbol 前缀过滤创板科创。
+
+    Why 收窄创板科创（不扫全市场）：
+        颈线法 param_iter 基线口径（记忆 neckline-paramiter-baseline）——创板科创
+        20cm 涨跌幅 + 流动性结构更契合颈线法形态学假设；主板/北交所不在该策略可交易池。
+        实际环境若需扩池，按实际前缀在此调整（spec 红线：本过滤口径变更需同步基线重算）。
+    """
+    import pandas as pd
+    # 相对 cwd 读 parquet（二期引擎常驻进程 cwd = 仓库根，与 scripts/market_breadth 同范式）
+    lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
+    syms = lake.index.get_level_values("symbol").unique().tolist()
+    return [s for s in syms if s.split(".")[0].startswith(("300", "301", "688", "689"))]
+
+
+def _load_df_upto(symbol: str, date: str):
+    """加载 symbol 截至 date 的前复权日线（严格因果 .loc[:date] · 无前视）。
+
+    Args:
+        symbol: 形如 "300001.SZ"（与 data_lake MultiIndex level="symbol" 一致）。
+        date:   截断日（YYYY-MM-DD，_eod 传 T-1 收盘日）。
+
+    Returns:
+        该 symbol 截至 date（含 date）的前复权日线 DataFrame（OHLCV，DatetimeIndex）；
+        symbol 不在 data_lake → 返 None（调用方 None-check 跳过）。
+
+    Why xs+sort_index+loc：
+        - xs(level="symbol") 取单 symbol 切片（MultiIndex 标准范式）；
+        - sort_index 保时间升序（ATR/MA 等时序算子前提）；
+        - .loc[:date] 闭区间截断，防 today 之后的 K 线泄漏（前视偏差 = 回测致命）。
+    """
+    import pandas as pd
+    lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
+    try:
+        return lake.xs(symbol, level="symbol").sort_index().loc[:date]
+    except KeyError:
+        # symbol 不在 data_lake（新上市/退市/代码漂移）→ 返 None，调用方跳过
+        return None
+
+
 def get_gateway():
     """惰性取交易网关单例（透传 trading_service.get_gateway）。
 
@@ -474,17 +520,66 @@ class TradingEngine:
 
     # ----- cron 包装：交易日判定 + 转调 async 触发函数 -----
     async def _eod(self) -> None:
-        """cron 包装：节假日跳过，交易日调 eod_plan。
+        """cron 包装：节假日跳过；交易日 resolve 多实验 + scan_live 产信号 → eod_plan。
 
-        信号扫描的 NecklineMethodStrategy 装配由 Task 10 ``__main__`` 注入（本类
-        聚焦调度，不耦合策略实例化）；当前默认空信号占位，待 Task 10 接通。
+        物理意图（二期 gap② 策略数据源）：
+            T-1 晚 15:35 触发——从实验配置中心读当前所有在线实验（status=ACTIVE+weight>0），
+            按每实验的 strategy_name+params 装配策略实例，对创板科创可交易池逐 symbol
+            调 scan_live(df_upto 截至 today) 产【当日新突破】信号，注入实验归因字段后
+            透传 eod_plan 落盘（confirmed=False 待人审）。
+
+        无前视契约（spec 红线）：
+            df_upto 由 _load_df_upto 截断于 today（.loc[:date]），不含 today 之后任何 K 线；
+            ATR 在 scan_live 内对齐 df_upto 末根计算，严格因果。
+
+        fail-fast 红线：
+            无在线实验 → 直接 return，不调 eod_plan（避免空实验下仍触发钉钉推送/落空计划）。
+
+        Why 信号注入归因字段（experiment_id/experiment_weight）：
+            signal_runner.build_orders_from_signals 已从 s.get("experiment_weight", 1.0)
+            读权重、从 s.get("experiment_id") 读归因透传到 PlannedOrder——本函数只需在
+            scan_live 返回的 signal dict 上补齐两字段即可复用既有归因链路（Task5/6 已就绪）。
         """
         today = datetime.now().strftime("%Y-%m-%d")
         if not calendar.is_trading_day(today):
             logger.info("eod_plan 跳过：今日非交易日 %s", today)
             return
-        # TODO(Task 10): 注入 NecklineMethodStrategy + 拉当日 universe → signals + atr_map
-        await eod_plan(today, signals=[], atr_map={}, capital=float(os.getenv("TRADE_CAPITAL", "1_000_000")))
+        # 局部 import（避免顶层拉起 experiment/strategies 子系统，保持引擎薄编排）：
+        from experiment.resolver import resolve_active
+        from strategies.registry import build_strategy
+
+        experiments = resolve_active()
+        if not experiments:
+            # fail-fast：无在线实验 → 不触达 eod_plan（spec §2 确认闸前置约束）
+            logger.warning("_eod 无在线实验，跳过（fail-fast）")
+            return
+
+        universe = _load_universe()
+        signals: list = []
+        atr_map: dict = {}
+        # 逐实验 × 逐 symbol 扫信号；单 symbol scan_live 异常仅 warn 跳过，不炸整批
+        for exp in experiments:
+            strategy = build_strategy(exp.strategy_name, cfg_override=exp.params)
+            for sym in universe:
+                df_upto = _load_df_upto(sym, today)
+                # 历史不足（<60 行）跳过：颈线 window+ATR 窗口需足够样本，否则识别失真
+                if df_upto is None or len(df_upto) < 60:
+                    continue
+                try:
+                    for s in strategy.scan_live(sym, df_upto, today):
+                        # 注入实验归因字段（signal_runner/PlannedOrder 透传链路依赖）
+                        s["experiment_id"] = exp.experiment_id
+                        s["experiment_weight"] = exp.weight
+                        signals.append(s)
+                        # atr_map：build_orders_from_signals 算止损=颈线−N×ATR 用
+                        atr_map[sym] = s.get("atr", 0.0)
+                except Exception as e:  # noqa: BLE001 单标的挡板（scope #7 兜底）
+                    logger.warning("_eod scan_live %s 异常跳过: %s", sym, e)
+
+        await eod_plan(
+            today, signals, atr_map,
+            capital=float(os.getenv("TRADE_CAPITAL", "1_000_000")),
+        )
 
     async def _pre_open(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
