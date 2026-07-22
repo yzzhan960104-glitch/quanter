@@ -45,3 +45,43 @@ def test_signal_without_attribution_defaults_weight_one():
     orders = build_orders_from_signals([s], capital=1_000_000, pos_cap=0.05,
         atr_map={"000001.SZ": 0.5}, stop_cfg={"stop_atr_mult": 2.0, "tp_h_mult": 2.0})
     assert orders[0].experiment_weight == 1.0 and orders[0].experiment_id == ""
+
+
+# ---------------------------------------------------------------------------
+# C2 · final-fix：多实验同标的 atr_map 覆盖 → 各 PlannedOrder 必须用各自 signal atr
+# ---------------------------------------------------------------------------
+def test_per_experiment_atr_no_collision():
+    """两条 signal 同标的不同 atr，atr_map 只留最后写入——各 PlannedOrder.stop_price
+    必须用各自 signal 自身 atr，不能被 atr_map 的覆盖值串到一起。
+
+    物理意图（C2 缺陷）：_eod 内 ``atr_map[sym] = s["atr"]`` 多实验同标的灰度时被
+    最后写入的实验覆盖，signal_runner 读共享 atr_map 算 ``stop_price = neckline -
+    stop_mult × atr`` → e1 的止损用了 e2 的 ATR，实盘风险参数错配（违反 spec §0
+    「参数以不可变快照锁定」）。修复契约：优先用 signal 自身 atr，fallback atr_map。
+    """
+    # 同标的两 signal，atr 各 0.4 / 0.8；共享 atr_map 模拟 _eod 灰度覆盖
+    # （e2 后写入 → atr_map["000001.SZ"] 被覆盖成 0.8，e1 的 atr 在 map 里被淹没）
+    s1 = {"symbol": "000001.SZ", "entry_price": 10.0, "neckline": 10.5, "bottom": 9.5,
+          "atr": 0.4, "experiment_id": "e1", "experiment_weight": 0.5}
+    s2 = {"symbol": "000001.SZ", "entry_price": 10.0, "neckline": 10.5, "bottom": 9.5,
+          "atr": 0.8, "experiment_id": "e2", "experiment_weight": 0.5}
+    # atr_map 模拟 _eod 写入：s2 后写覆盖 s1（仅留 0.8）
+    atr_map = {"000001.SZ": 0.8}
+
+    orders = build_orders_from_signals(
+        [s1, s2], capital=1_000_000, pos_cap=0.05,
+        atr_map=atr_map, stop_cfg={"stop_atr_mult": 2.0, "tp_h_mult": 2.0},
+    )
+    assert len(orders) == 2
+
+    # 修复前：两 order stop_price 都 = 10.5 - 2.0 × 0.8 = 8.9（e1 被 e2 串味）
+    # 修复后：e1 = 10.5 - 2.0 × 0.4 = 9.7；e2 = 10.5 - 2.0 × 0.8 = 8.9（各自不串）
+    assert orders[0].experiment_id == "e1"
+    assert orders[1].experiment_id == "e2"
+    assert orders[0].stop_price == pytest.approx(10.5 - 2.0 * 0.4), \
+        "e1 stop_price 必须用自身 atr=0.4，不能被 atr_map 的覆盖值串成 0.8（C2 归因错配）"
+    assert orders[1].stop_price == pytest.approx(10.5 - 2.0 * 0.8), \
+        "e2 stop_price 用自身 atr=0.8"
+    # 反向断言：两 stop_price 必须不同（若相同则证明被串）
+    assert orders[0].stop_price != orders[1].stop_price, \
+        "同标的不同实验的 stop_price 必须不同（C2 归因不串红线）"

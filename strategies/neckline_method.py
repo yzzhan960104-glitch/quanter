@@ -167,7 +167,14 @@ class NecklineMethodStrategy:
         # 内部窗口语义未来变化（如支持历史日回溯）时把旧信号当新信号重吐占仓。
         # detect 没有 breakout_date 字段——突破日即 res["formed_at"]（=W.index[-1]）。
         breakout_date = res.get("formed_at")
-        if breakout_date != date:
+        # 防类型混淆（C1 · final-fix）：detect 返 formed_at 是 pd.Timestamp
+        # （来自 df_upto 的 DatetimeIndex），_eod 传来的 date 是 str（strftime 出来）。
+        # pandas 的 __ne__ 不像 __eq__ 做字符串解析，Timestamp != str 恒 True →
+        # 所有真实信号会被当历史信号丢弃 → _eod 从不产信号 → 实盘静默死亡（从不交易）。
+        # 反过来 str(Timestamp) 会带时间分量（"2026-07-21 00:00:00"）与短 ISO 不等，
+        # 仍会误判。两侧统一用 pd.Timestamp(...).strftime("%Y-%m-%d") 归一为短 ISO
+        # 比较才在 str / Timestamp / datetime 等任意类型组合下都能正确做物理同日判定。
+        if pd.Timestamp(breakout_date).strftime("%Y-%m-%d") != pd.Timestamp(date).strftime("%Y-%m-%d"):
             return []
 
         # Signal dict（实盘纯识别字段集，不掺 simulate_exit 的出场字段）。

@@ -145,3 +145,39 @@ def test_scan_live_only_today_breakout(strategy):
 
     assert signals == [], "非当日突破不应吐信号"
     assert strategy._sim_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Case 4（C1 · final-fix）：_eod 真实调用约定——date 传 str，detect 返 Timestamp
+# ---------------------------------------------------------------------------
+# 物理意图（C1 缺陷）：scan_live 内 `breakout_date != date` 比较，左侧 res["formed_at"]
+# 是 pd.Timestamp（df_upto 的 DatetimeIndex），右侧是 _eod 传来的 str
+# （datetime.now().strftime("%Y-%m-%d")）。pandas 的 __ne__ 不像 __eq__ 做字符串解析，
+# Timestamp != str 恒 True → 过滤器总触发 → 所有真实信号被当历史信号丢弃 →
+# 实盘静默死亡（_eod 从不产信号，从不交易）。
+#
+# 修复契约：比较前统一两侧类型为 ISO 日期字符串，Timestamp 一致日 str 不再被误判。
+# 本 case 直接复刻 _eod 真实调用约定（date 是 str），是修复前的回归红线。
+def test_scan_live_with_string_date_from_eod(strategy):
+    """_eod 传 str 形式 date（"2026-07-21"），detect 返 Timestamp——应仍能识别为当日突破。
+
+    修复前：breakout_date（Timestamp）!= date（str）恒 True → 信号被丢弃 → 返 0（bug）。
+    修复后：两侧统一 ISO 日期字符串比较 → 返 1 条（绿）。
+    """
+    T_str = "2026-07-21"   # _eod 真实调用约定：date 是 strftime 出来的 str
+    strategy._detect_return = {
+        "formed_at": pd.Timestamp("2026-07-21"),  # detect 返的是 Timestamp（df_upto DatetimeIndex）
+        "neckline": 10.0,
+        "bottom": 9.0,
+        "entry": 10.0,
+        "atr": 0.5,
+    }
+    df_upto = _mk_df_upto(pd.Timestamp("2026-07-21"))
+
+    signals = strategy.scan_live("600000.SH", df_upto, T_str)
+
+    # 修复前：len == 0（bug · 实盘静默死亡）
+    # 修复后：len == 1（当日突破被正确识别）
+    assert len(signals) == 1, "str date 与 Timestamp formed_at 同日应识别为当日突破（C1）"
+    assert signals[0]["symbol"] == "600000.SH"
+    assert strategy._sim_calls == 0

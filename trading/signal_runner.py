@@ -58,8 +58,15 @@ def build_orders_from_signals(
         entry = s.get("entry_price")
         neckline = s.get("neckline")
         bottom = s.get("bottom")
-        # ATR 缺失/NaN 时直接跳过，避免后续数学运算抛 TypeError/ZeroDivision
-        atr = atr_map.get(sym) if sym else None
+        # ATR 取值（C2 · final-fix）：优先用 signal 自身 atr，fallback atr_map。
+        # Why 优先 signal atr：_eod 内 ``atr_map[sym] = s["atr"]`` 多实验同标的灰度时
+        # 被最后写入的实验覆盖 → 共享 atr_map 已无法按实验区分 ATR。signal dict 已
+        # 携带各自的 s["atr"]（Task 7a scan_live 返回），用 signal 自身 atr 才能保证
+        # 每个 PlannedOrder.stop_price 用各自实验的 ATR（spec §0「参数以不可变快照锁定」
+        # —— 红线：止损价是实盘风险参数，跨实验串味 = 风险归因错配）。
+        # 老链路 signal 无 atr 字段 → 退回 atr_map（向后兼容，零回归）。
+        sig_atr = s.get("atr")
+        atr = sig_atr if sig_atr is not None else (atr_map.get(sym) if sym else None)
         if not sym or entry is None or neckline is None or bottom is None or atr is None:
             continue
         # 实验归因：取每信号各自的权重（灰度分流）；缺省 1.0 = 满仓口径，向后兼容

@@ -208,3 +208,49 @@ def test_eod_skips_short_history(monkeypatch):
 
     assert captured["called"] is True
     assert captured["signals"] == []
+
+
+# ============================================================================
+# 4. I1 · final-fix：_load_df_upto 真实 .loc[:date] 切片无前视直测（不 mock）
+# ============================================================================
+def test_load_df_upto_no_lookahead():
+    """直接对真实 `_load_df_upto` 测 ``.loc[:date]`` 闭区间切片（date 是 str）。
+
+    物理意图（I1 红线）：本文件其它 case 全部 mock ``_load_df_upto``，故
+    ``lake.xs(symbol).sort_index().loc[:date]``（date 是 str）从未对真实
+    ``datetime64[ns]`` MultiIndex 测过。无前视是回测/实盘的致命红线（CLAUDE.md），
+    若 pandas ``.loc[:str_date]`` 行为变化（如改为开区间、或字符串解析失败），
+    所有依赖它的策略信号都会被静默污染——必须直接测试。
+
+    断言三连：
+        ① 含 date 当日（闭区间）；
+        ② 排除 date+1（防未来 K 线泄漏）；
+        ③ 返回 df 的 index.max() <= Timestamp(date)（无前视铁证）。
+    """
+    # 构造合成 datetime64[ns] MultiIndex(date,symbol) lake（不 mock）
+    dates = pd.date_range("2026-07-18", periods=5, freq="D")  # 18~22 共 5 个交易日
+    rows = []
+    for d in dates:
+        # 同日塞两个 symbol，验证 xs(level="symbol") 正确取片
+        for sym in ("300001.SZ", "688001.SH"):
+            rows.append((d, sym, 10.0, 10.5, 9.5, 10.2, 1000))
+    lake = pd.DataFrame(
+        rows, columns=["date", "symbol", "open", "high", "low", "close", "volume"]
+    ).set_index(["date", "symbol"])
+
+    # 直接调真实 _load_df_upto（date 是 str，模拟 _eod 真实调用约定）
+    df_upto = engine._load_df_upto(lake, "300001.SZ", "2026-07-21")
+
+    # ① 必须返回 DataFrame（非 None）
+    assert df_upto is not None, "300001.SZ 在 lake 中应能 xs 取片成功"
+    # ② 含 date 当日 K 线（.loc[:date] 是闭区间）
+    assert pd.Timestamp("2026-07-21") in df_upto.index, "loc[:date] 应含 date 当日（闭区间）"
+    # ③ 排除 date+1（无前视红线 · 核心断言）
+    assert pd.Timestamp("2026-07-22") not in df_upto.index, "loc[:date] 不应含 date 之后（无前视）"
+    # ④ index.max() <= Timestamp(date)（无前视铁证 · pandas 行为兜底）
+    assert df_upto.index.max() <= pd.Timestamp("2026-07-21"), \
+        "df_upto.index.max() 必须 <= date（无前视红线）"
+    # ⑤ 只取到指定 symbol（xs level 切片正确，不串号）
+    #    DatetimeIndex 单 level 后 .index 不再有 symbol level，靠行数核验
+    #    （18~21 共 4 个交易日，每日该 symbol 1 行 → 4 行）
+    assert len(df_upto) == 4, f"截至 2026-07-21（含）应有 4 根 K 线，实际 {len(df_upto)}"
