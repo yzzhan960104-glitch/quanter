@@ -355,6 +355,72 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         logger.debug("QMT 对账拉取完成：有效持仓 %d 只", len(cleaned))
         return cleaned
 
+    # ---------------------------------------------------------- 资产查询
+    async def query_asset(self) -> dict[str, Any]:
+        """
+        查询资金资产，返标准化 dict（投线程池调 query_stock_asset）。
+
+        返回结构（4 字段，与一期 trading_service.get_asset 的 QMT 内联分支 +
+        EMT _fetch_asset + 前端 Asset 类型完全对齐）::
+
+            {"account_id": str, "cash": float, "total_asset": float, "market_value": float}
+
+        Why 4 字段对齐：一期/前端已建立的资产契约就是这 4 字段；frozen_cash 虽然
+        XtAsset 里有，但前端不展示、调用方不消费，按 YAGNI 不透出（不破坏对外契约）。
+
+        Why 异常/None/锁定 → 返 {}：
+        - None：xttrader.md 明确 query_stock_asset 查询失败/无资产均返 None，二者
+          不可区分，统一返 {} 让调用方按「资产缺失」降级（与一期 get_asset 一致）；
+        - 异常/超时：柜台无响应或网络抖动时 wait_for 抛 TimeoutError，返 {} 让
+          二期 circuit_breaker 跳过当日损失检查（跳过≠熔断，避免误触发强平）；
+        - 锁定：断线/账号 DISABLEBYSYS 窗口期内 query_stock_asset 可能返回陈旧
+          快照，若透出会让熔断基于错乱 equity 误判，故与 submit_order 同口径直接返 {}。
+
+        Why 复用 run_in_executor + wait_for：query_stock_asset 是同步阻塞的 C++
+        调用（与 query_stock_positions 同型），直调会卡死事件循环；用既有模式
+        投线程池 + _ORDER_TIMEOUT 超时兜底，零新依赖（Karpathy 极简）。
+
+        Why _lock_down 判定在前、连接判定在后：锁定态下即使 _connected=True 也
+        必须返 {}（陈旧快照风险）；连接缺失（_trader/_account/_loop 任一为 None）
+        本身也不会触发锁定，这里用先锁后连的顺序保持与 submit_order 同语义。
+
+        双消费者（增量不重构）：
+        - 一期 trading_service.get_asset 的 QMT 内联分支【保持不动】（它已直接
+          内联调 query_stock_asset，重构超出本 task scope）；
+        - 本方法主要供二期 circuit_breaker.check_daily_loss_limit 消费
+          result["total_asset"] 作为 equity，解锁「二期 live 必修 gap①」
+          post_close 熔断连线（此前 circuit_breaker 卡在「无 equity 源」）。
+        未来可统一双网关口径（follow-up，非本 task scope）。
+        """
+        # 连接前置：loop/trader/account 任一缺失即视为未连接，返 {} 防空指针
+        if self._loop is None or self._trader is None or self._account is None:
+            return {}
+        # 锁定（断线/账号 fatal）→ 返 {} 防脏读（与 submit_order 同口径熔断）
+        if self._lock_down:
+            logger.warning("QMT 网关已锁定，query_asset 返空（断线保护，防脏读）")
+            return {}
+        try:
+            # 投线程池 + wait_for 超时兜底（与 _fetch_broker_positions / submit_order 同模式）
+            asset = await asyncio.wait_for(
+                self._loop.run_in_executor(
+                    None, lambda: self._trader.query_stock_asset(self._account)),
+                timeout=_ORDER_TIMEOUT,
+            )
+        except Exception as exc:
+            # 超时/异常不抛——让 circuit_breaker 跳过当日损失检查（跳过≠熔断）
+            logger.exception("QMT query_stock_asset 异常/超时(>%ss)：%s", _ORDER_TIMEOUT, exc)
+            return {}
+        if asset is None:
+            # xttrader.md：查询失败/无资产均返 None，统一返 {} 让调用方按缺失降级
+            return {}
+        # float(x or 0.0) 双保险：防 None（缺字段）/ NaN（脏数据）导致下游聚合异常
+        return {
+            "account_id": str(getattr(asset, "account_id", "") or ""),
+            "cash": float(getattr(asset, "cash", 0.0) or 0.0),
+            "total_asset": float(getattr(asset, "total_asset", 0.0) or 0.0),
+            "market_value": float(getattr(asset, "market_value", 0.0) or 0.0),
+        }
+
     # -------------------------------------------------------------- 下单
     async def submit_order(self, order: OrderRequest) -> OrderResult:
         """
