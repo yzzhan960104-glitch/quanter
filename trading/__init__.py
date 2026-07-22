@@ -11,7 +11,8 @@
 ExecutionExecutor Protocol（依赖反转抽象）迁 trading/protocols.py（spec §5）。
 """
 
-from .order_state import OrderStateMachine, OrderState
+from .order_state import OrderStateMachine
+from .types import OrderState
 
 
 # ============================================================================

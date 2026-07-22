@@ -249,3 +249,13 @@ def test_breaker_single_source() -> None:
 def test_order_request_single_source() -> None:
     a = _get("trading.compute.types", "OrderRequest")
     assert a is _get("trading.execution_gateway", "OrderRequest")
+
+
+def test_order_state_enum_single_source() -> None:
+    """OrderState 枚举单源契约（Layer2 阶段5 · 真身迁 trading/types/order_state.py）。
+
+    三入口同源：types（新源）/ order_state（旧模块垫片 re-export）/ trading 包级导出。
+    """
+    a = _get("trading.types.order_state", "OrderState")
+    assert a is _get("trading.order_state", "OrderState")
+    assert a is _get("trading", "OrderState")

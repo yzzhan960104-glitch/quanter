@@ -1,39 +1,28 @@
 """订单状态机
 
 职责：
-1. 定义订单状态
-2. 管理状态迁移
+1. 定义订单状态（OrderState 枚举 · Layer2 阶段5 迁 trading/types/order_state.py 单源）
+2. 管理状态迁移（OrderStateMachine · 有状态可变对象 · imperative shell 域）
 3. 处理异常情况（断线、限频、部分成交）
 
 设计原则：
 - 有限状态机（FSM）模式
 - 显式状态迁移（不隐式跳转）
 - 防范非法状态迁移
+
+Layer2 阶段5 五层定型（spec §3.5）：
+    OrderState 纯枚举已迁 trading/types/order_state.py（零依赖纯数据契约单源）。
+    本文件 re-export 该枚举 + 保留 OrderStateMachine（有状态机 · imperative shell，
+    不进 functional core）+ 出场逻辑纯函数垫片 re-export（trading.compute.stop）。
+    既有 ``from trading.order_state import OrderState, OrderStateMachine,
+    check_stop_loss`` 调用零改动继续可用。
 """
-from enum import Enum, auto
+from enum import auto  # noqa: F401  保既有 ``OrderState.PENDING == auto()`` 风格引用兼容
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 
-
-class OrderState(Enum):
-    """
-    订单状态枚举
-
-    状态迁移路径：
-    PENDING -> SUBMITTED -> PARTIAL_FILLED -> FILLED
-    PENDING -> SUBMITTED -> CANCELLED
-    PENDING -> SUBMITTED -> REJECTED
-    PENDING -> SUBMITTED -> PARTIAL_FILLED -> PARTIAL_CANCELLED -> FILLED
-    ANY -> FAILED（异常处理）
-    """
-    PENDING = auto()           # 待提交
-    SUBMITTED = auto()         # 已提交
-    PARTIAL_FILLED = auto()    # 部分成交
-    FILLED = auto()            # 完全成交
-    CANCELLED = auto()         # 已取消
-    PARTIAL_CANCELLED = auto() # 部分取消
-    REJECTED = auto()          # 已拒绝
-    FAILED = auto()            # 失败（异常）
+# OrderState 纯枚举 re-export（Layer2 阶段5 · 真身迁 trading/types/order_state.py）。
+from trading.types.order_state import OrderState  # noqa: F401
 
 
 class OrderStateMachine:
