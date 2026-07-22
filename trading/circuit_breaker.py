@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # 终态订单集合（与 qmt_gateway.cleanup_orders 逐字同源）。
 #
 # Why 必须用 OrderState 枚举集，而不是字符串集：
-# - 真实网关（QmtExecutionGateway/EmtExecutionGateway）的 ``_orders`` 流水里，
+# - 真实网关（QmtExecutionGateway）的 ``_orders`` 流水里，
 #   ``rec["state"]`` 全部是 ``OrderState`` 枚举（由 ``_map_qmt_status`` 返回、
 #   或在 on_stock_trade/on_order_error/on_cancel_error 直接赋枚举）。
 # - 若此处用字符串集 ``{"FILLED", ...}``，则 ``OrderState.FILLED not in {...}``
@@ -81,7 +81,7 @@ async def cancel_all_open_orders(gw: Any) -> int:
 
     参数：
         gw: 执行网关实例，需暴露 ``_orders: dict[str, dict]``（与
-            QmtExecutionGateway/EmtExecutionGateway 同口径）与 async
+            QmtExecutionGateway 同口径）与 async
             ``cancel_order(order_id)``。
 
     返回：

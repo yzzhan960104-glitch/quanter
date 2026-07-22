@@ -21,7 +21,6 @@ def test_execution_layer_legacy_paths_importable():
     # trading 现有（执行原语，Step4 保留）
     from trading.execution_gateway import BaseExecutionGateway  # noqa: F401
     from trading.risk_shield import check_order  # noqa: F401
-    from trading.emt_gateway import EmtExecutionGateway  # noqa: F401
     from trading.qmt_gateway import QmtExecutionGateway  # noqa: F401
     # check_exit 当前位置（Step4b 抽到 engines/exit_logic 后经兜底仍可用）
     from caisen.infra.execution import check_exit, ExitDecision  # noqa: F401
@@ -55,7 +54,6 @@ def test_execution_new_path_reexport():
         MockExecutionGateway,
         OrderRequest,
         OrderResult,
-        EmtExecutionGateway,
         QmtExecutionGateway,
         check_order,
         RiskDecision,
@@ -70,7 +68,6 @@ def test_execution_new_path_reexport():
     )
     from trading.execution_gateway import BaseExecutionGateway as LegacyBaseGateway
     from trading.risk_shield import check_order as legacy_check_order
-    from trading.emt_gateway import EmtExecutionGateway as LegacyEmtGateway
     from trading.qmt_gateway import QmtExecutionGateway as LegacyQmtGateway
 
     assert ExecutionEngine is LegacyEngine, "ExecutionEngine 新旧路径不同源（re-export 复制了对象）"
@@ -78,7 +75,6 @@ def test_execution_new_path_reexport():
     assert ExitDecision is LegacyExitDecision, "ExitDecision 新旧路径不同源"
     assert BaseExecutionGateway is LegacyBaseGateway, "BaseExecutionGateway 新旧路径不同源"
     assert check_order is legacy_check_order, "check_order 新旧路径不同源"
-    assert EmtExecutionGateway is LegacyEmtGateway, "EmtExecutionGateway 新旧路径不同源"
     assert QmtExecutionGateway is LegacyQmtGateway, "QmtExecutionGateway 新旧路径不同源"
 
     # 3) __all__ 公开 API 表面非空（4c 物理迁移核对基线）
@@ -89,7 +85,6 @@ def test_execution_new_path_reexport():
         "check_exit",
         "check_order",
         "BaseExecutionGateway",
-        "EmtExecutionGateway",
         "QmtExecutionGateway",
         "replay",
         "save_plans",

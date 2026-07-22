@@ -35,9 +35,8 @@
               add_to_cooldown, in_cooldown
     - 回放任务/调度：run_replay_worker, ReplayScheduler, save_run, list_runs, get_run,
                      delete_run, init_db, create_task, get_task, list_tasks 等
-    - 三执行态网关：BaseExecutionGateway, MockExecutionGateway, OrderRequest, OrderResult,
-                    reconcile, PositionDrift, ReconciliationResult, EmtExecutionGateway,
-                    QmtExecutionGateway
+    - 两执行态网关：BaseExecutionGateway, MockExecutionGateway, OrderRequest, OrderResult,
+                    reconcile, PositionDrift, ReconciliationResult, QmtExecutionGateway
     - 风控挡板：check_order, RiskDecision
 """
 from __future__ import annotations
@@ -117,7 +116,7 @@ from .replay_scheduler import (  # noqa: F401
 )
 
 # ============================================================================
-# 三执行态网关（trading.execution_gateway —— Mock/EMT/QMT 三个网关 + 订单原语）
+# 两执行态网关（trading.execution_gateway —— Mock/QMT 两个网关 + 订单原语）
 # 物理位置保留 trading/（执行原语层，Step4 不迁入 execution 包，design §3.1）。
 # ============================================================================
 from trading.execution_gateway import (  # noqa: F401
@@ -128,9 +127,6 @@ from trading.execution_gateway import (  # noqa: F401
     reconcile,
     PositionDrift,
     ReconciliationResult,
-)
-from trading.emt_gateway import (  # noqa: F401
-    EmtExecutionGateway,
 )
 from trading.qmt_gateway import (  # noqa: F401
     QmtExecutionGateway,
@@ -197,7 +193,6 @@ __all__ = [
     "reconcile",
     "PositionDrift",
     "ReconciliationResult",
-    "EmtExecutionGateway",
     "QmtExecutionGateway",
     # 风控挡板
     "check_order",

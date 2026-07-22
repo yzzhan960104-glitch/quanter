@@ -123,7 +123,7 @@ def test_fire_and_forget_runs_coroutine_in_background():
 def test_fire_and_forget_inside_running_loop_executes_coro():
     """loop 内（async 上下文）调 fire_and_forget 也应执行协程。
 
-    回归 emt_gateway._reconnect 场景：async 函数内调 fire_and_forget，验证新 daemon
+    回归网关 _reconnect 场景：async 函数内调 fire_and_forget，验证新 daemon
     线程 asyncio.run 在 loop 上下文仍正常跑（不抛 RuntimeError 吞协程）。
     若此测试 FAIL，说明 fire_and_forget 需改自适应（loop 内 create_task）。
     """

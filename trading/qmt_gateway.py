@@ -33,11 +33,11 @@ from trading.order_state import OrderState
 
 logger = logging.getLogger(__name__)
 
-# 断线自动重连退避序列（秒，指数退避，B-8）：与 emt_gateway 同口径，最多 5 次。
+# 断线自动重连退避序列（秒，指数退避，B-8）：最多 5 次。
 # Why 有上限：无限重连刷爆柜台登录限频；耗尽后保持锁态 + 告警等人工介入。
 _RECONNECT_BACKOFFS: tuple[int, ...] = (2, 4, 8, 16, 30)
 
-# 网关调用超时（#9）：与 emt_gateway 同口径——connect/submit/cancel 经 run_in_executor 投
+# 网关调用超时（#9）：connect/submit/cancel 经 run_in_executor 投
 # 线程池，须 asyncio.wait_for 兜底防柜台无响应永久阻塞事件循环。固有限制：超时仅放弃等待，
 # 底层线程仍在跑（Python 无法真 kill 线程），事件循环不卡死即可。
 _CONNECT_TIMEOUT: float = 30.0   # start/connect/subscribe 含网络握手，30s 兜底

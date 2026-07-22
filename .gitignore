@@ -60,9 +60,6 @@ __pycache__/
 venv/
 .venv*/
 .env
-# EMT SDK 二进制库 + 压缩包（外部下载，不入库；doc/test 文本可入库）
-emt_api_python/lib/
-EMT_API_Python_*.zip
 
 # ========================
 # IDE & 本地配置
@@ -94,9 +91,7 @@ logs/
 .tokensave/
 
 xtquant
-emt_api_python
 xtquant_250807.rar
-EMT_API_Python_V2.27.0.zip
 scripts/pages/
 
 # 书籍扫描版(版权+大文件)

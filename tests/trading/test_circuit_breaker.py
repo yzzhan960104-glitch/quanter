@@ -6,7 +6,7 @@
 2. ``cancel_all_open_orders``：撤所有未终态单（补全 emergency_halt 漏洞）。
 
 Why 类型契约要反映真实网关：
-- 真实 ``QmtExecutionGateway``/``EmtExecutionGateway`` 的 ``_orders`` 流水里
+- 真实 ``QmtExecutionGateway`` 的 ``_orders`` 流水里
   ``rec["state"]`` 全部是 ``OrderState`` 枚举（见 ``qmt_gateway._map_qmt_status``
   与 ``cleanup_orders`` 的终态集）；本测试的 FakeGW 必须用枚举构造，否则
   会落入「字符串自洽的假世界」，无法暴露终态集误用字符串导致的误撤单 bug。

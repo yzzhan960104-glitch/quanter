@@ -51,31 +51,20 @@ _gateway_singleton: Optional[object] = None
 
 
 def get_gateway() -> Optional[object]:
-    """懒构造交易网关单例（Phase 1.5：EMT 优先，QMT 回退，都无则 None）。
+    """懒构造交易网关单例（QMT 唯一；EMT 已于 2026-07 废弃移除）。
 
     优先级：
-    1. EMT 凭证（EMT_USER/EMT_PASSWORD）齐全 → EmtExecutionGateway
-    2. QMT 凭证（QMT_USERDATA_PATH/QMT_ACCOUNT_ID）齐全 → QmtExecutionGateway
-    3. 都无 → None（Cockpit 走 unavailable 降级态）
+    1. QMT 凭证（QMT_USERDATA_PATH/QMT_ACCOUNT_ID）齐全 → QmtExecutionGateway
+    2. 无凭证 → None（Cockpit 走 unavailable 降级态）
 
-    Why 懒构造不在 import 期：EMT 的 vnemttrader / QMT 的 xtquant 都是 Windows C++
-    扩展，开发机/CI 无相应包时 import 会触发 ImportError；放函数内 + try/except 让
-    无 SDK 环境也能正常 import trading_service（仅 get_gateway 返 None）。
+    Why 懒构造不在 import 期：QMT 的 xtquant 是 Windows C++ 扩展，开发机/CI
+    无该包时 import 会触发 ImportError；放函数内 + try/except 让无 SDK 环境
+    也能正常 import trading_service（仅 get_gateway 返 None）。
     """
     global _gateway_singleton
     if _gateway_singleton is not None:
         return _gateway_singleton
-    # 优先 EMT（Phase 1.5 主用券商，MiniQMT 因监管停用后改用）
-    if os.environ.get("EMT_USER") and os.environ.get("EMT_PASSWORD"):
-        try:
-            from trading.emt_gateway import EmtExecutionGateway
-            _gateway_singleton = EmtExecutionGateway()
-            logger.info("EMT 网关单例已构造（未 connect）user=%s",
-                        os.environ.get("EMT_USER"))
-            return _gateway_singleton
-        except Exception as e:
-            logger.warning("EMT 网关构造失败（无 vnemttrader?），尝试 QMT：%s", e)
-    # 回退 QMT（Phase 1 既有，MiniQMT 监管可用时）
+    # QMT（miniQMT 模拟盘，唯一在用券商；EMT 已废弃移除）
     if os.environ.get("QMT_USERDATA_PATH") and os.environ.get("QMT_ACCOUNT_ID"):
         try:
             from trading.qmt_gateway import QmtExecutionGateway
@@ -86,7 +75,7 @@ def get_gateway() -> Optional[object]:
         except Exception as e:
             logger.warning("QMT 网关构造失败（无 xtquant?），走 unavailable：%s", e)
             return None
-    logger.info("无 EMT/QMT 凭证，trading_service 走 unavailable 模式")
+    logger.info("无 QMT 凭证，trading_service 走 unavailable 模式")
     return None
 
 
@@ -384,7 +373,7 @@ async def connect_gateway() -> None:
     """
     gw = get_gateway()
     if gw is None:
-        raise RuntimeError("交易网关未装配（unavailable），请配置 EMT_USER/EMT_PASSWORD 或 QMT_USERDATA_PATH/QMT_ACCOUNT_ID")
+        raise RuntimeError("交易网关未装配（unavailable），请配置 QMT_USERDATA_PATH/QMT_ACCOUNT_ID")
     await gw.connect()
 
 
