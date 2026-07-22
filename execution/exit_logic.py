@@ -27,8 +27,9 @@
 
 迁移纪律（strangler 红线）：
     check_exit 逻辑【零改动】（含移动止盈 trailing 逻辑），只搬位置。
-    caisen/infra/execution.py 改 re-export 自本模块（sys.modules 别名垫片保
-    ``from caisen.infra.execution import check_exit`` 旧路径同对象，Step3 模式）。
+    caisen/infra/execution.py 已随 caisen 形态执行链退役删除（Task 1.3 #3）。
+    旧路径 ``from caisen.infra.execution import check_exit`` 不再可用，统一走
+    ``from execution.exit_logic import check_exit``（单源）。
 """
 from __future__ import annotations
 
@@ -90,7 +91,10 @@ def check_exit(pos: dict, bar: dict, bars_held: int, cfg) -> ExitDecision:
                    - take_profit:  第一波满足价（止盈目标）。
         bar:       当根 K 线 dict，必含 high/low/close。
         bars_held: 持仓交易日数（用于移动止盈激活 + 时间止损判定）。
-        cfg:       StrategyConfig，用 trailing_to_breakeven / trailing_activation_bars /
+        cfg:       鸭子类型配置对象（属性访问 ``cfg.trailing_to_breakeven`` 形态；
+                   NecklineConfig dataclass 或其他具同名属性的对象均可，原 caisen
+                   StrategyConfig 已随形态退役删除，此处不绑死类型），用
+                   trailing_to_breakeven / trailing_activation_bars /
                    max_holding_bars / timeout_exit_threshold 四个字段。
 
     返回：

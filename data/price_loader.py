@@ -34,7 +34,7 @@ import pandas as pd
 #
 # Task 1.3（Layer2 解耦·caisen 形态退役）：原 merge_cfg 硬编码 caisen StrategyConfig
 # 做 cfg_override 校验。caisen 形态退役后 StrategyConfig 已删，merge_cfg 改为按
-# strategy_name 动态选 schema（当前仅 NecklineConfig；未来新增策略在 _SCHEMA_FOR_STRATEGY
+# strategy_name 动态选 schema（当前仅 NecklineConfig；未来新增策略在 _select_schema
 # 注册即可）。这是本任务唯一逻辑改动——保持颈线法异步路径能用（replay_worker neckline
 # 分支 cfg_override 透传给策略，不直接调 merge_cfg，但 merge_cfg 作为 generic cfg 装配
 # 工具保留，供未来需要默认值合并的路径复用）。

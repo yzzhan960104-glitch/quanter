@@ -61,7 +61,8 @@ DEFAULTS = {
 
 
 # ============================================================================
-# 基元：ATR（与 caisen.patterns.zigzag_causal.compute_atr 同口径，自写避免依赖）
+# 基元：ATR（自写避免依赖；原 caisen.patterns.zigzag_causal.compute_atr 同口径，
+#       该模块已随 caisen 形态退役删除）
 # ============================================================================
 def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series,
                 window: int = 14) -> pd.Series:
