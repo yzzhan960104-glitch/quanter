@@ -22,7 +22,7 @@ from caisen.risk import RiskManager
 from caisen.patterns.screener import PatternScreener
 from caisen import plan as plan_mod
 from caisen.patterns.zigzag_causal import causal_pivots, compute_atr
-from caisen.engines.exit_logic import check_exit, ExitAction, ExitReason
+from execution.exit_logic import check_exit, ExitAction, ExitReason  # Task 1.2：exit_logic 迁 execution 包（caisen_pattern 本任务临时保绿，Task 1.3 整删）
 
 from .base import TRADE_REQUIRED_KEYS
 from .registry import register_strategy

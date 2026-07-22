@@ -113,7 +113,7 @@ def test_check_exit_single_source():
     ::TestStep4bCheckExitSingleSource 守护，本测试只锁单源契约。
     """
     # 1) is 同源：所有路径的 check_exit 指向 caisen/engines/exit_logic.py 的唯一实现
-    from caisen.engines.exit_logic import check_exit as engine_check_exit
+    from execution.exit_logic import check_exit as engine_check_exit
     from caisen.infra.execution import check_exit as infra_check_exit
     # execution 顶层包（Step4a re-export 自 caisen.infra.execution）
     from execution import check_exit as exec_pkg_check_exit

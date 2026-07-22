@@ -57,12 +57,13 @@ from execution import storage
 #    非 server.trading_service 具体类型。server.trading_service 模块鸭子类型满足此 Protocol
 #    （get_status / submit_order 签名一致），生产装配零改动注入即可（最小反转，不重写 trading_service）。
 from execution.interfaces import ExecutionExecutor
-# —— Step4b：离场纯函数 + 数据模型已抽至 caisen/engines/exit_logic.py（纯逻辑归 engines，
+# —— Step4b：离场纯函数 + 数据模型抽至 execution/exit_logic.py（纯逻辑归执行层，
 #    消除 backtest_replay 双源真理）。此处 re-export 保旧路径 ``from caisen.infra.execution
 #    import check_exit, ExitDecision, ExitAction, ExitReason`` 零改动（strangler 铁律①）。
-#    is 同源：本模块 check_exit 与 caisen.engines.exit_logic.check_exit 是同一函数对象
+#    is 同源：本模块 check_exit 与 execution.exit_logic.check_exit 是同一函数对象
 #    （re-export 仅引用未复制），tests/test_execution_layer_compat.py 守护此契约。
-from caisen.engines.exit_logic import (  # noqa: F401
+#    （Task 1.2：caisen 形态退役·exit_logic 由 caisen/engines 迁入 execution 包。）
+from execution.exit_logic import (  # noqa: F401
     check_exit,
     ExitAction,
     ExitReason,

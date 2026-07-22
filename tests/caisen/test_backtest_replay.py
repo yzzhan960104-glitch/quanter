@@ -444,7 +444,7 @@ class TestStep4bCheckExitSingleSource:
         源码层守护——任何路径取到的 check_exit 都指向 caisen/engines/exit_logic.py
         的唯一实现。
         """
-        from caisen.engines.exit_logic import check_exit as engine_check_exit
+        from execution.exit_logic import check_exit as engine_check_exit
         from caisen.infra.execution import check_exit as infra_check_exit
         from caisen.execution import check_exit as legacy_check_exit   # 顶层垫片路径
 

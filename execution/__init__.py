@@ -50,10 +50,14 @@ from .interfaces import (  # noqa: F401
 
 # ============================================================================
 # 引擎 + 离场纯函数（Step4c 批 A：物理迁入本包 execution/engine.py）
-# ExecutionEngine 状态机 + re-export 自 caisen.engines.exit_logic 的 check_exit（Step4b 单源）。
+# ExecutionEngine 状态机；check_exit/ExitAction/ExitReason/ExitDecision 由
+# execution/exit_logic.py 直接 re-export（Task 1.2：caisen 形态退役·exit_logic 由
+# caisen/engines 迁入 execution 包，单源 is 同源契约源头改指本包子模块）。
 # ============================================================================
 from .engine import (  # noqa: F401
     ExecutionEngine,
+)
+from .exit_logic import (  # noqa: F401
     check_exit,
     ExitDecision,
     ExitAction,
