@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pandas as pd
+
 # scripts/ 加入 sys.path（neckline_method_v0/neckline_backtest 在 scripts/）
 _PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SCRIPTS = os.path.join(_PROJ_ROOT, "scripts")
@@ -120,4 +122,65 @@ class NecklineMethodStrategy:
             # 颈线法附加字段（详情展示用，统计层不依赖）
             "neckline": sim.get("neckline"),
             "avg_pnl_pct": sim.get("avg_pnl_pct"),
+        }]
+
+    def scan_live(self, symbol: str, df_upto, date) -> list:
+        """实盘纯识别：调 detect_neckline_method（df_upto 截至 date），**不调 simulate_exit**。
+
+        与 scan_at 的物理差异（Why 拆两入口）：
+            - scan_at 是【回测一站式】：detect + simulate_exit 推进未来 K 线模拟出场
+              （simulate_exit 从 T_pos 向前吃 max_holding 根，回测允许读未来）。
+            - scan_live 是【实盘纯识别】：只识别形态，不模拟出场。实盘 T-1 晚 _eod 调用时
+              根本没有"未来 K 线"可用（未来还没发生），出场由二期引擎 pre_open / stop_loss_monitor
+              在交易时段实时做，不需要回测模拟。
+
+        无前视契约：
+            df_upto 由 Task7b 的 _eod 从 data_lake 加载该 symbol 截至 date 的前复权日线
+            （截断于 date，不含 date 之后），atr 也在 df_upto 上算——严格因果。
+
+        参数：
+            symbol: 标的代码（归因用）
+            df_upto: 该 symbol 截至 date 的前复权日线 DataFrame（OHLCV，index 为 DatetimeIndex）
+            date: 当前识别日（_eod 传入 T-1 收盘日）
+
+        返回：
+            Signal dict 列表（仅当日突破的），字段供 signal_runner 消费：
+                symbol / formed_at / breakout_date / neckline / bottom / entry_price / atr
+            突破日非当日（res["formed_at"] != date）→ 返 []（只挂当日新信号，防历史重吐）。
+        """
+        # ATR 全序列预算（窗口对齐 id_cfg["window"]，与 scan_at / precompute 同口径）。
+        # 物理意图：颈线在 window 天形成，衡量其波动尺度也用 window 天，而非写死 14 天。
+        # 截至此处仅用 df_upto（无前视），末根即 date 当日的 ATR。
+        atr_full = compute_atr(
+            df_upto["high"], df_upto["low"], df_upto["close"], window=self.id_cfg["window"]
+        )
+
+        # 识别：detect_neckline_method（df_upto 截至 date，atr_series 末根对齐）。
+        # detect 仅在末根突破时返回（内部 close_T = W["close"].iloc[-1] > c_star 才命中），
+        # 故 res["formed_at"] == df_upto.index[-1] == date（正常路径）。
+        res = detect_neckline_method(df_upto, self.id_cfg, atr_series=atr_full)
+        if res is None:
+            return []
+
+        # 当日突破过滤（防御层）：只挂当日新信号。
+        # Why：detect 物理上只在末根突破时返，此处等于 date 是常态；但显式校验防 detect
+        # 内部窗口语义未来变化（如支持历史日回溯）时把旧信号当新信号重吐占仓。
+        # detect 没有 breakout_date 字段——突破日即 res["formed_at"]（=W.index[-1]）。
+        breakout_date = res.get("formed_at")
+        if breakout_date != date:
+            return []
+
+        # Signal dict（实盘纯识别字段集，不掺 simulate_exit 的出场字段）。
+        # entry_price：优先取 res["entry"]（= 颈线价 c_star 挂单回踩进场），
+        # 缺则用 neckline 近似（c_star 本身即颈线，entry 默认 == neckline，兜底防 detect 返回体未来缺 entry）。
+        # atr：用 atr_full 末值（对齐 date 当日，供二期引擎算止损=颈线−N×ATR 用）。
+        return [{
+            "symbol": symbol,
+            "signal_type": "neckline",
+            "formed_at": res.get("formed_at"),
+            "breakout_date": res.get("formed_at"),
+            "neckline": res.get("neckline"),
+            "bottom": res.get("bottom"),
+            "entry_price": res.get("entry") if res.get("entry") is not None else res.get("neckline"),
+            "atr": float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else res.get("atr"),
         }]
