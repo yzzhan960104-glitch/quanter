@@ -198,10 +198,11 @@ def test_stop_loss_monitor_off_session_no_op(monkeypatch):
 def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
     """scope #3 + #5：盘中时段 dry_run 不真卖，qty 来自 gw._fetch_broker_positions。
 
-    现价源走 ``qmt_market_data.get_quote``（C1 fix）：monkeypatch 引擎内 ``qmt_market_data``
-    的 ``get_quote`` 返 ``{"last_price": <值>}`` 快照，构造「跌破 / 未跌破 / 现价缺失」
-    三类场景，断言：①dry_run 不真下单（_submit 返 DRY_RUN）；②只跌破的标的走 _submit；
-    ③现价缺失的标的不发盲单（C1 红线）。
+    现价源走 ``qmt_market_data.get_quotes``（C1 fix + T3 批量优化）：monkeypatch 引擎内
+    ``qmt_market_data`` 的 ``get_quotes`` 返 ``{symbol: {last_price: <值>} 或 None}`` 批量快照，
+    构造「跌破 / 未跌破 / 现价缺失」三类场景，断言：①dry_run 不真下单（_submit 返 DRY_RUN）；
+    ②只跌破的标的走 _submit；③现价缺失的标的不发盲单（C1 红线）；
+    ④批量调用 1 次（T3 核心：N 次 get_quote → 1 次 get_quotes）。
     """
     monkeypatch.setattr(engine.calendar, "is_intraday_session", lambda now: True)
 
@@ -212,18 +213,22 @@ def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
 
     monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
 
-    # 现价快照（C1 fix 后现价源）：A=9.0（跌破 9.5）/ B=21.0（未跌破 19.0）/ C=None（缺失）
+    # 现价快照（C1 fix + T3 批量后现价源）：A=9.0（跌破 9.5）/ B=21.0（未跌破 19.0）/ C=None（缺失）
     quote_map = {
         "A.SH": {"last_price": 9.0, "high_limit": 11.0, "low_limit": 8.0},
         "B.SH": {"last_price": 21.0, "high_limit": 23.0, "low_limit": 19.0},
-        "C.SH": None,  # 现价缺失：get_quote 返 None（如 xtdata 不可用 / EMT 无行情源）
+        "C.SH": None,  # 现价缺失：get_quotes 返 None（如 xtdata 不可用 / EMT 无行情源）
     }
+    quotes_calls = {"n": 0, "symbols": None}
 
-    async def _fake_get_quote(sym):
-        return quote_map[sym]
+    async def _fake_get_quotes(symbols):
+        # T3 批量断言：一次传入全部持仓 symbol（N→1 核心优化点）
+        quotes_calls["n"] += 1
+        quotes_calls["symbols"] = list(symbols)
+        return {s: quote_map.get(s) for s in symbols}
 
-    # monkeypatch 引擎里 import 的 qmt_market_data.get_quote 引用（C1 fix 后的现价入口）
-    monkeypatch.setattr(engine.qmt_market_data, "get_quote", _fake_get_quote)
+    # monkeypatch 引擎里 import 的 qmt_market_data.get_quotes 引用（T3 批量后的现价入口）
+    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_get_quotes)
 
     submitted = []
 
@@ -244,6 +249,9 @@ def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
     assert submitted == [("A.SH", 300.0, "sell")]
     # checked=2（A+B 有价），C 现价缺失不发盲单（C1 红线：无价不判跌破）
     assert result["checked"] == 2
+    # T3 批量断言：get_quotes 只调 1 次（N→1 核心优化点），且传入全部持仓 symbol
+    assert quotes_calls["n"] == 1
+    assert set(quotes_calls["symbols"]) == {"A.SH", "B.SH", "C.SH"}
 
 
 def test_stop_loss_monitor_nan_price_skipped(monkeypatch):
@@ -256,11 +264,11 @@ def test_stop_loss_monitor_nan_price_skipped(monkeypatch):
 
     monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
 
-    async def _nan_quote(sym):
+    async def _nan_quotes(symbols):
         # last_price 为 NaN（脏数据）：price != price 判定为 NaN，应跳过
-        return {"last_price": float("nan")}
+        return {s: {"last_price": float("nan")} for s in symbols}
 
-    monkeypatch.setattr(engine.qmt_market_data, "get_quote", _nan_quote)
+    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _nan_quotes)
 
     submitted = {"n": 0}
 

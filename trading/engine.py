@@ -331,12 +331,13 @@ async def stop_loss_monitor(
     ⚠️ live 安全红线（scope #3）：卖出 qty **必须**来自 gw._fetch_broker_positions()
     返回的真实持仓，**绝不硬编码**——硬编码 100 会导致实盘卖错数量（致命）。
 
-    ⚠️ live 止损现价依赖（C1 fix）：现价统一从 ``trading.qmt_market_data.get_quote``
-    取 ``last_price``。**该接口底层是 xtdata.get_full_tick，仅在 miniQMT 通道可用时
-    返回有效快照**；**EMT 网关无 xtdata 行情源，止损链路 live 前必须另接行情源
-    （live 前必修 follow-up，切勿在未接行情源的 EMT 环境切 live）**。
-    若 ``get_quote`` 返 None 或 ``last_price`` 为 None/NaN，则该标的跳过止损检查
-    （无现价不能判断跌破）并记 warning，绝不发盲价卖出单。
+    ⚠️ live 止损现价依赖（C1 fix + T3 批量）：现价统一从
+    ``trading.qmt_market_data.get_quotes(list(positions.keys()))`` 批量取 ``last_price``。
+    **该接口底层是 xtdata.get_full_tick，仅在 miniQMT 通道可用时返回有效快照**；
+    **EMT 网关无 xtdata 行情源，止损链路 live 前必须另接行情源（live 前必修 follow-up，
+    切勿在未接行情源的 EMT 环境切 live）**。
+    若 ``get_quotes`` 返回的某标的 quote 为 None 或 ``last_price`` 为 None/NaN，
+    则该标的跳过止损检查（无现价不能判断跌破）并记 warning，绝不发盲价卖出单。
 
     Args:
         stop_prices: {symbol: stop_price}。None 时由调用方（TradingEngine._stoploss）
@@ -376,22 +377,21 @@ async def stop_loss_monitor(
         logger.exception("stop_loss_monitor 查持仓失败（拒发任何卖出单）")
         return {"checked": 0, "reason": "查持仓异常，拒发卖出单"}
 
-    # ③ 逐标的：拉现价 → 决策 → 下卖出单（qty 来自持仓 dict）
+    # ③ 批量取所有持仓现价（T3 优化）：一次性 get_quotes 替代循环单只 get_quote。
+    #   Why 批量：N 只持仓原 N 次 get_full_tick 线程池调用 → 1 次（原生 list 入参，
+    #   xtdata.html 契约），减少 GIL 切换与 C++ 调用开销；颈线法盘中 5min 巡查场景下
+    #   显著降低行情查询延迟（极端行情下高频止损检查更及时）。
+    #   ⚠️ xtdata 通道（miniQMT）返快照；EMT 网关无 xtdata 行情源，live 前需另接行情源。
     from trading.execution_gateway import OrderRequest
+    quotes = await qmt_market_data.get_quotes(list(positions.keys()))
     n_triggered = 0
     n_checked = 0
     for sym, qty in positions.items():
         sp = stop_prices.get(sym)
         if sp is None or qty <= 0:
             continue
-        # 现价（C1 fix）：统一走 qmt_market_data.get_quote，取 last_price。
-        # ⚠️ xtdata 通道（miniQMT）返快照；EMT 网关无 xtdata 行情源，live 前需另接行情源。
-        try:
-            quote = await qmt_market_data.get_quote(sym)
-        except Exception:
-            # get_quote 内部已捕获异常返 None，此处兜底防意外冒泡（绝不阻塞下一标的）
-            logger.exception("stop_loss_monitor 拉现价异常 %s（跳过）", sym)
-            continue
+        # 现价（C1 fix + T3 批量）：从批量 dict 读，不再循环单只 get_quote。
+        quote = quotes.get(sym)
         price = quote.get("last_price") if quote else None
         if price is None or price != price:  # NaN check（price != price ⟺ isNaN）
             # 现价缺失/NaN 绝不下卖出单：无价不能判断跌破（盲单 = 卖错价 = 致命）
