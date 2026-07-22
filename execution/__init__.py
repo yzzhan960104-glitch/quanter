@@ -49,14 +49,15 @@ from .interfaces import (  # noqa: F401
 )
 
 # ============================================================================
-# 离场纯函数（Task 1.2：caisen 形态退役·exit_logic 由 caisen/engines 迁入 execution 包，
-# 单源 is 同源契约源头改指本包子模块）。
+# 离场纯函数（Layer2 阶段2：check_exit 物理定义迁 trading/compute/exit.py）。
+# 本包经两层 re-export 指向同一函数对象（is 同源契约）：
+#   execution.__init__ → trading.compute.exit.check_exit（单源）
+#   execution.exit_logic（垫片）→ trading.compute.exit.check_exit（兜底旧路径）
 # Task 1.3（#3 全删）：ExecutionEngine（execution/engine.py）+ storage（execution/
-# storage.py）随 caisen 形态执行链路整体退役。本 __init__ 不再 re-export ExecutionEngine
-# / save_plans / load_plans 等执行仓储符号（模块已删）。check_exit/Exit* 保留（颈线法
+# storage.py）随 caisen 形态执行链路整体退役。check_exit/Exit* 保留（颈线法
 # 回测与未来实盘共用单源离场判定）。
 # ============================================================================
-from .exit_logic import (  # noqa: F401
+from trading.compute.exit import (  # noqa: F401
     check_exit,
     ExitDecision,
     ExitAction,

@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 """安全熔断（日亏上限 + 撤未终态单补全）。
 
+Layer2 阶段2 职责切分（functional core / imperative shell）：
+- 【纯判定】``check_daily_loss_limit``（日亏判定）已迁至 trading/compute/breaker.py
+  （functional core），本模块经垫片 re-export 转发——既有
+  ``from trading.circuit_breaker import check_daily_loss_limit`` 调用零改动。
+- 【I/O 域】``cancel_all_open_orders``（撤销网关未终态单——await cancel_order
+  调用券商 I/O）保留在本模块（执行/副作用域），不进 compute。
+
 Why 独立模块：
 - 一期 ``emergency_halt`` 只原子置 ``_lock_down``（拒新单）但**不撤已挂未成交单**
   ——断线/熔断时未终态单敞口失控，柜台仍可能继续推进成交，是实盘里最危险的
   「静默裸奔」状态（策略层以为已熔断、底层仍挂着单子）。
-- 本模块补这一条路径：提供 ``check_daily_loss_limit``（日亏判定）与
-  ``cancel_all_open_orders``（撤所有未终态单）两个工具函数，供二期引擎
-  post_close（盘后）触发点与其他风险事件调用。
+- 本模块补这一条路径：提供 ``check_daily_loss_limit``（日亏判定，纯函数迁 compute）
+  与 ``cancel_all_open_orders``（撤所有未终态单，副作用留此处）两个工具函数，
+  供二期引擎 post_close（盘后）触发点与其他风险事件调用。
 
 物理意图（Why 风控阈值定 -3%）：
 - 日内 3% 权益回撤在 A 股单一策略层已属显著异常（多数交易日波动远小于此），
@@ -17,10 +24,11 @@ Why 独立模块：
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 from trading.order_state import OrderState
+# 纯判定函数 re-export（strangler 铁律① · 垫片）——物理定义迁 trading/compute/breaker.py
+from trading.compute.breaker import check_daily_loss_limit  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -41,39 +49,6 @@ _TERMINAL: frozenset[OrderState] = frozenset({
     OrderState.FAILED,
     OrderState.PARTIAL_CANCELLED,
 })
-
-
-def check_daily_loss_limit(
-    start_equity: float,
-    curr_equity: float,
-    *,
-    limit: float | None = None,
-) -> bool:
-    """判定日内权益回撤是否触及熔断上限。
-
-    参数：
-        start_equity: 当日开盘基线权益（如前一日收盘总资产）。
-        curr_equity:  当前实时权益（盘中最新总资产）。
-        limit:        负数熔断阈值，如 ``-0.03`` 表示亏 3% 即熔断；
-                      None 则读 env ``CIRCUIT_DAILY_LOSS_LIMIT``，缺省 -0.03。
-
-    返回：
-        True 表示已触及/穿透熔断线，应进入熔断流程（lock_down + 撤单 + 告警）。
-
-    边界：
-    - ``start_equity <= 0`` 直接返回 False——既防除零，也表达「无有效基线权益
-      时不应贸然触发熔断」（如冷启动首日未拿到准确基线，让引擎继续运行由
-      其他维度兜底，避免除零异常使整条熔断链路失效）。
-    - 采用 ``<=`` 而非 ``<``：恰触阈值即触发，风控宁可早一拍停手也不容忍
-      边界继续裸奔（与 order_state.check_stop_loss 的判定口径对称）。
-    """
-    if limit is None:
-        # env 缺省 -0.03：未显式配置时采用保守默认，避免线上裸奔。
-        limit = float(os.getenv("CIRCUIT_DAILY_LOSS_LIMIT", "-0.03"))
-    if start_equity <= 0:
-        return False
-    pnl_pct = (curr_equity - start_equity) / start_equity
-    return pnl_pct <= limit
 
 
 async def cancel_all_open_orders(gw: Any) -> int:

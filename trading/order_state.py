@@ -265,76 +265,18 @@ class OrderStateMachine:
         self.order_info = None
 
 
-# ============ 出场逻辑（纯函数，可独立单测）============
+# ============ 出场逻辑纯函数：垫片 re-export（Layer2 阶段2 · strangler 铁律①）============
 #
-# 设计意图（Why）：
-# 三道出场闸门——固定止损、固定止盈、ATR 移动止损——构成策略资金曲线的「物理护栏」。
-# 它们均为无副作用纯函数：输入相同即输出相同，便于在回测/实盘两条路径上共享同一份
-# 风控裁决，杜绝「回测跑得对、实盘因复制粘贴改坏一个阈值而裸奔」的经典翻车。
+# 三道出场闸门（check_stop_loss / check_take_profit / update_trailing_stop）原嵌在本
+# 订单状态机模块——但它们是【纯函数】（无副作用、无状态、仅数学判定），归位 functional
+# core（trading/compute/stop.py）后回测与实盘共用同一份风控裁决，杜绝「回测跑得对、
+# 实盘因复制粘贴改坏一个阈值而裸奔」的经典翻车。
 #
-# 物理意义补充：
-# - 止损/止盈采用「触碰即触发」的硬阈值，对应实盘止损单（stop order）的挂单逻辑：
-#   一旦最新价穿越阈值，即刻判定离场，避免依赖收盘价造成的「跳空击穿后才反应」。
-# - 移动止损只上移不下移：浮盈一旦兑现为新高，止损线即「锁定」在该高位下方一定
-#   距离（atr*k）。即使随后价格回撤，止损线也绝不回退——这是趋势跟踪类策略
-#   「让利润奔跑、把利润留住」的核心机制；若允许下移，则相当于把已实现的浮盈
-#   重新暴露给风险，违背移动止损初衷。
-
-
-def check_stop_loss(entry: float, price: float, pct: float) -> bool:
-    """固定止损：当最新价 price ≤ 入场价 entry*(1-pct) 时触发离场。
-
-    参数：
-        entry: 开仓均价（成本基准）。
-        price: 当前最新成交价（用于判定是否跌穿止损线）。
-        pct:   止损百分比，如 0.05 表示跌 5% 即止损。
-
-    返回：
-        True 表示已触及/跌穿止损线，应立即平仓。
-
-    边界说明：
-        采用 <= 而非 <，确保价格恰好等于止损线时也触发——
-        风控宁可「多平一单」也不容忍「阈值附近继续持仓博反弹」。
-    """
-    return price <= entry * (1.0 - pct)
-
-
-def check_take_profit(entry: float, price: float, pct: float) -> bool:
-    """固定止盈：当最新价 price ≥ 入场价 entry*(1+pct) 时触发离场。
-
-    参数：
-        entry: 开仓均价（成本基准）。
-        price: 当前最新成交价（用于判定是否涨破止盈线）。
-        pct:   止盈百分比，如 0.05 表示涨 5% 即止盈。
-
-    返回：
-        True 表示已触及/涨破止盈线，应平仓兑现利润。
-
-    边界说明：
-        采用 >= 触发，与 check_stop_loss 的 <= 对称——
-        阈值线上下穿越一律视为已达成条件，规避「卡在阈值未成交」的状态机悬挂。
-    """
-    return price >= entry * (1.0 + pct)
-
-
-def update_trailing_stop(high: float, atr: float, k: float, prev_stop: float) -> float:
-    """ATR 移动止损：依据本轮最高价动态抬升止损线，只上移不下移。
-
-    公式：new_stop = high - atr * k
-
-    参数：
-        high:      本观察窗口（如一根 K 线或一次 Tick 聚合）的最高价。
-        atr:       当前 ATR（平均真实波幅），用于刻画波动幅度。
-        k:         ATR 乘数，决定止损线离高价的「呼吸距离」；k 越大越宽松。
-        prev_stop: 上一轮已锁定的止损线（首轮可传 0.0 或极小值）。
-
-    返回：
-        更新后的止损价（≥ prev_stop，永不回退）。
-
-    核心约束（只上移不下移）：
-        若本轮新高回撤导致 new_stop < prev_stop，说明这只是普通波动而非趋势破坏，
-        此时仍沿用 prev_stop——既避免止损线被噪声拉低，又锁住此前浮盈。
-        max(new_stop, prev_stop) 一行实现，显式且无状态。
-    """
-    new_stop = high - atr * k
-    return max(new_stop, prev_stop)
+# 物理意义保留在 compute/stop.py 模块/函数 docstring（strangler 红线① · 逻辑零改动）。
+# 本文件 re-export 保持既有 ``from trading.order_state import check_stop_loss, ...``
+# 调用零改动继续可用；is 同源契约由 tests/test_compute_purity.py 守护。
+from trading.compute.stop import (  # noqa: F401
+    check_stop_loss,
+    check_take_profit,
+    update_trailing_stop,
+)
