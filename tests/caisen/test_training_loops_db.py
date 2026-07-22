@@ -6,7 +6,7 @@
 import json
 from pathlib import Path
 
-from caisen import training_loops_db
+from backtest.optimize import training_loops_db
 
 
 def _use_tmp_db(monkeypatch, tmp_path):

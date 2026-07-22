@@ -15,7 +15,7 @@
 import json
 from unittest.mock import MagicMock
 
-from caisen import training_dingtalk
+from backtest.optimize import training_dingtalk
 
 
 # -------------------- 配置装配 --------------------

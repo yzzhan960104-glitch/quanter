@@ -8,7 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-from caisen import replay_tasks_db
+from backtest import tasks_db as replay_tasks_db
 
 # importlib 加载迁移脚本（scripts/ 非包；exec 时其顶部 sys.path.insert 项目根让 from caisen 可达）
 _SPEC = importlib.util.spec_from_file_location(

@@ -10,7 +10,8 @@ import multiprocessing as mp
 import pandas as pd
 import pytest
 
-from caisen import replay_tasks_db, replay_worker
+from backtest import tasks_db as replay_tasks_db
+from backtest import worker as replay_worker
 
 
 @pytest.fixture

@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime
 
 from trading import OrderStateMachine, OrderState
-from trading import MockBroker
+from backtest import MockBroker
 
 
 class TestOrderStateMachine:

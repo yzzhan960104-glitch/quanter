@@ -24,7 +24,7 @@ import sys
 # 脚本在 scripts/，项目根在上一级——加入 sys.path 让 `from caisen import` 可达。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from caisen import replay_tasks_db  # noqa: E402（sys.path 调整在 import 前，故禁用告警）
+from backtest import tasks_db as replay_tasks_db  # noqa: E402（sys.path 调整在 import 前，故禁用告警）
 
 
 def migrate(runs_dir: str = "replay_runs", db_path: str = "data/replay_tasks.db") -> int:

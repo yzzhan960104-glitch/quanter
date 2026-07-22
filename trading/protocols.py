@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
-"""执行编排层抽象接口（Step4 · Task 4d · 依赖反转）。
+"""执行器抽象接口（Layer2 阶段4 · spec §5 依赖反转 Protocol）。
 
-物理意图（design §3.3 依赖反转 + CLAUDE.md 显式至上 / 拒绝黑盒）：
-    Step4d 把 ExecutionEngine 对 server.services.trading_service 的反向依赖【反转】为
-    对本层抽象接口 ``ExecutionExecutor`` 的依赖。ExecutionEngine 不再持有/感知 server 层
-    具体类型，只依赖 execution/ 内定义的 Protocol——任何提供 get_status + submit_order
-    鸭子类型的对象（生产：server.trading_service 模块；测试：MagicMock / 自定义桩；
-    未来：重写后的实盘执行核心）均可注入。
+物理定位：
+    Layer2 阶段4 execution 包解散后，本 Protocol 由 execution/interfaces.py 迁入
+    trading/protocols.py（spec §5 依赖反转 Protocol 归交易层）。ExecutionEngine
+    （原 caisen 形态执行链）已在 Task 1.3 退役删除，本 Protocol 现为【孤儿契约】——
+    无活跃消费者，但保留作为未来实盘 reducer 的依赖反转抽象（任何提供 get_status +
+    submit_order 鸭子类型的对象均可注入：生产 server.trading_service / 测试 MagicMock）。
+
+原 Step4d 物理意图（design §3.3 依赖反转 + CLAUDE.md 显式至上 / 拒绝黑盒）：
+    把 ExecutionEngine 对 server.services.trading_service 的反向依赖【反转】为对
+    本抽象接口 ``ExecutionExecutor`` 的依赖。
 
 为什么是 Protocol（PEP 544 typing.Protocol）而非 ABC：
     - 鸭子类型 + 零侵入：server.trading_service 现有模块对象【已天然满足】此 Protocol

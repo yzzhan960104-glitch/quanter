@@ -144,15 +144,14 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
 @pytest.mark.parametrize(
     "module_path, attr",
     [
-        # check_exit：三入口同源（compute / execution 包 / exit_logic 垫片）
+        # check_exit：双入口同源（compute / compute 包 re-export）
+        # Layer2 阶段4：execution 包解散，execution/execution.exit_logic 入口移除；
+        # check_exit 真身单源在 trading.compute.exit，由 compute 包 re-export。
         ("trading.compute.exit", "check_exit"),
-        ("execution", "check_exit"),
-        ("execution.exit_logic", "check_exit"),
         ("trading.compute", "check_exit"),
-        # check_order：三入口同源（compute / risk_shield 垫片 / execution 包）
+        # check_order：双入口同源（compute / risk_shield 垫片）
         ("trading.compute.risk", "check_order"),
         ("trading.risk_shield", "check_order"),
-        ("execution", "check_order"),
         ("trading.compute", "check_order"),
         # build_orders_from_signals：双入口同源（compute / signal_runner 垫片）
         ("trading.compute.plan", "build_orders_from_signals"),
@@ -167,25 +166,21 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
         ("trading.order_state", "check_take_profit"),
         ("trading.compute.stop", "update_trailing_stop"),
         ("trading.order_state", "update_trailing_stop"),
-        # reconcile：三入口同源（compute / execution_gateway / execution 包）
+        # reconcile：双入口同源（compute / execution_gateway）
         ("trading.compute.reconcile", "reconcile"),
         ("trading.execution_gateway", "reconcile"),
-        ("execution", "reconcile"),
         ("trading.compute", "reconcile"),
         # check_daily_loss_limit：双入口同源（compute / circuit_breaker 垫片）
         ("trading.compute.breaker", "check_daily_loss_limit"),
         ("trading.circuit_breaker", "check_daily_loss_limit"),
         ("trading.compute", "check_daily_loss_limit"),
-        # OrderRequest：三入口同源（compute.types / execution_gateway / execution 包）
+        # OrderRequest：双入口同源（compute.types / execution_gateway）
         ("trading.compute.types", "OrderRequest"),
         ("trading.execution_gateway", "OrderRequest"),
-        ("execution", "OrderRequest"),
         ("trading.compute", "OrderRequest"),
         # 伴随 dataclass（ExitDecision / RiskDecision / PlannedOrder / ReconciliationResult）
         ("trading.compute.exit", "ExitDecision"),
-        ("execution", "ExitDecision"),
         ("trading.compute.risk", "RiskDecision"),
-        ("execution", "RiskDecision"),
         ("trading.compute.plan", "PlannedOrder"),
         ("trading.signal_runner", "PlannedOrder"),
         ("trading.compute.reconcile", "ReconciliationResult"),
@@ -211,15 +206,12 @@ def _get(module_path: str, attr: str):
 
 def test_check_exit_single_source() -> None:
     a = _get("trading.compute.exit", "check_exit")
-    assert a is _get("execution", "check_exit")
-    assert a is _get("execution.exit_logic", "check_exit")
     assert a is _get("trading.compute", "check_exit")
 
 
 def test_check_order_single_source() -> None:
     a = _get("trading.compute.risk", "check_order")
     assert a is _get("trading.risk_shield", "check_order")
-    assert a is _get("execution", "check_order")
     assert a is _get("trading.compute", "check_order")
 
 
@@ -247,7 +239,6 @@ def test_order_state_stops_single_source() -> None:
 def test_reconcile_single_source() -> None:
     a = _get("trading.compute.reconcile", "reconcile")
     assert a is _get("trading.execution_gateway", "reconcile")
-    assert a is _get("execution", "reconcile")
 
 
 def test_breaker_single_source() -> None:
@@ -258,4 +249,3 @@ def test_breaker_single_source() -> None:
 def test_order_request_single_source() -> None:
     a = _get("trading.compute.types", "OrderRequest")
     assert a is _get("trading.execution_gateway", "OrderRequest")
-    assert a is _get("execution", "OrderRequest")

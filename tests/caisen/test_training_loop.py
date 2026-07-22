@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from caisen import training_loop
-from caisen import training_dingtalk   # 端到端测试 mock 其 urllib.request.urlopen（真 webhook 通道）
-from caisen.training_loop import TrainingLoopOrchestrator, LoopBusyError
+from backtest.optimize import training_loop
+from backtest.optimize import training_dingtalk   # 端到端测试 mock 其 urllib.request.urlopen（真 webhook 通道）
+from backtest.optimize.training_loop import TrainingLoopOrchestrator, LoopBusyError
 
 
 class FakeNotifier:
@@ -65,7 +65,7 @@ def test_start_rejects_second_active_loop(orch):
     o, _ = orch
     o.start({"start": "2020-01-01", "end": "2024-12-31", "base_cfg": {}, "max_rounds": 3})
     # 手动把第一个标活跃（start 落 IDLE，不在 list_active_loops 里）
-    from caisen import training_loops_db
+    from backtest.optimize import training_loops_db
     lid = training_loops_db.list_loops()[0]["loop_id"]
     training_loops_db.update_loop(lid, status="RUNNING")
     with pytest.raises(LoopBusyError):
@@ -84,7 +84,7 @@ def test_confirm_rerun_accumulates_cfg(orch, monkeypatch):
     loop_id = o.start({"start": "2020-01-01", "end": "2024-12-31", "base_cfg": {"min_rr_ratio": 1.5},
                        "max_rounds": 3})
     # 直接置 AWAITING_REVIEW 模拟已到人审关卡（跳过回测链路，聚焦 CONFIRMING）
-    from caisen import training_loops_db
+    from backtest.optimize import training_loops_db
     training_loops_db.update_loop(loop_id, status="AWAITING_REVIEW", current_round=1)
     monkeypatch.setattr(training_loop.training_analyzer, "parse_review",
                         lambda t, c, **kw: {"cfg_override": {"max_holding_bars": 20}, "action": "rerun"})
@@ -136,7 +136,7 @@ def test_stop_interrupts_running_round(orch, monkeypatch):
 
     o._step_once(loop_id)   # IDLE→RUNNING→_handle_running 轮询 → 被 stop 中断退出
 
-    from caisen import training_loops_db
+    from backtest.optimize import training_loops_db
     loop = training_loops_db.get_loop(loop_id)
     assert loop["status"] == "STOPPED"          # stop() 落库的终态
     assert loop["history"] == []                 # 无 phantom：未 append 任何轮次摘要
@@ -207,7 +207,7 @@ def test_full_roundtrip_with_dingtalk_notifier(monkeypatch, tmp_path):
         return resp
     monkeypatch.setattr(training_dingtalk.urllib.request, "urlopen", fake_urlopen)
 
-    from caisen.training_dingtalk import DingTalkNotifier, ReviewBotConfig
+    from backtest.optimize.training_dingtalk import DingTalkNotifier, ReviewBotConfig
     cfg = ReviewBotConfig.from_env()
     assert cfg is not None, "REVIEW_* 环境变量装配失败，DingTalkNotifier 无法构造"
     notifier = DingTalkNotifier(cfg)

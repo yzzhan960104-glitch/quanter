@@ -45,7 +45,7 @@ def test_start_returns_loop_id():
 
 def test_start_rejects_when_busy():
     """已有活跃 loop → orchestrator.start 抛 LoopBusyError → HTTP 422。"""
-    from caisen.training_loop import LoopBusyError
+    from backtest.optimize.training_loop import LoopBusyError
     orch = MagicMock()
     orch.start.side_effect = LoopBusyError("busy")
     client = _app_with_fake_orch(orch)

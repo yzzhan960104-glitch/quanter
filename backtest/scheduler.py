@@ -21,7 +21,7 @@ import multiprocessing as mp
 import threading
 from datetime import datetime
 
-from caisen import replay_tasks_db
+from backtest import tasks_db as replay_tasks_db
 
 logger = logging.getLogger(__name__)
 
@@ -180,5 +180,5 @@ class ReplayScheduler:
     @staticmethod
     def _import_worker():
         """生产路径：惰性 import run_replay_worker（避免模块加载期循环依赖）。"""
-        from caisen.replay_worker import run_replay_worker
+        from backtest.worker import run_replay_worker
         return run_replay_worker

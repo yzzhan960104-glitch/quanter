@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from caisen import replay_tasks_db, replay_scheduler
+from backtest import tasks_db as replay_tasks_db
+from backtest import scheduler as replay_scheduler
 
 
 class _FakePool:

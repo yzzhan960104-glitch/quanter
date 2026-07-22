@@ -20,8 +20,8 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Request
 
-from caisen import training_loops_db
-from caisen.training_loop import LoopBusyError
+from backtest.optimize import training_loops_db
+from backtest.optimize.training_loop import LoopBusyError
 from server.schemas.training import TrainingLoopState, TrainingReviewRequest, TrainingStartRequest
 
 logger = logging.getLogger(__name__)

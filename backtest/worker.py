@@ -29,8 +29,8 @@ import json
 import logging
 import os
 
-from caisen import replay_tasks_db
-from caisen.backtest_replay import replay, ReplayAborted
+from backtest import tasks_db as replay_tasks_db
+from backtest.replay import replay, ReplayAborted
 # 注意：strategies.neckline_method 不在模块级 import——会触发循环
 # （execution.__init__→replay_worker→strategies→caisen→execution）。改 run_replay_worker 内延迟 import。
 # 模块级 import → _load_price_data 成为本模块属性（测试 monkeypatch 生效）。

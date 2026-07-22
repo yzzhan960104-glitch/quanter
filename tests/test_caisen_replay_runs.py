@@ -29,7 +29,7 @@ import re
 
 import pytest
 
-from caisen import replay_runs
+from backtest import runs as replay_runs
 
 
 # ---------------------------------------------------------------------------

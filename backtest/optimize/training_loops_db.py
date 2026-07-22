@@ -15,11 +15,9 @@ import json
 import uuid
 from typing import Optional
 
-# Step3.4 follow-up：replay_tasks_db 已迁 caisen/infra/。``from caisen.replay_tasks_db import name``
-# 这种【绝对模块路径+取属性】形式在循环 import 下会绑到顶层垫片（caisen/__init__ 触发 optimize
-# 时，infra 预加载行尚未执行，垫片 sys.modules 替换来不及对 from-import 生效），故直接走
-# 物理新路径 caisen.infra.replay_tasks_db（与 replay_tasks_db 实体同对象，零行为差异）。
-from caisen.infra.replay_tasks_db import _DEFAULT_DB_PATH, _connect, _now_iso
+# Layer2 阶段4：tasks_db 真身已迁 backtest/tasks_db.py（caisen/optimize 包整体迁入
+# backtest/optimize/）。本包内同源直引，不再经 caisen 垫片链（execution/caisen 已解散）。
+from backtest.tasks_db import _DEFAULT_DB_PATH, _connect, _now_iso
 
 
 def _resolve(path: Optional[str]) -> str:

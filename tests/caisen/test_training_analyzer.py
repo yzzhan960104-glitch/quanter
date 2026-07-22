@@ -8,7 +8,7 @@ NecklineConfig（18 维）。本测试 cfg 字段对齐 NecklineConfig（min_rr 
 import json
 from unittest.mock import patch
 
-from caisen import training_analyzer
+from backtest.optimize import training_analyzer
 
 
 _REPORT = {"n_hits": 12, "win_rate": 0.58, "avg_rr": 1.7, "max_drawdown": -0.14,

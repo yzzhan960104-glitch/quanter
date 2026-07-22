@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from .order_state import OrderStateMachine, OrderState
+from trading.order_state import OrderStateMachine, OrderState
 import time
 
 

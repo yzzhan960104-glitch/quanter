@@ -1,14 +1,16 @@
 """真实交易模块：QMT 对接、订单状态机、风控挡板。
 
 职责：
-1. Mock 交易模拟层（第一优先级）
-2. 订单状态机（处理断线、限频、部分成交）
-3. QMT 实盘执行网关（xtquant 异步封装）
-4. 风控挡板（纯函数，下单前 10 关校验）
-5. 保证金敞口监控
+1. 订单状态机（处理断线、限频、部分成交）
+2. QMT 实盘执行网关（xtquant 异步封装）
+3. 风控挡板（纯函数，下单前 10 关校验）
+4. 保证金敞口监控
+
+注：Mock 交易模拟层（MockBroker）Layer2 阶段4 已迁 backtest/mock_broker.py（回测撮合
+专属，与交易层分离——回测求变、交易求稳）。消费者改 ``from backtest import MockBroker``。
+ExecutionExecutor Protocol（依赖反转抽象）迁 trading/protocols.py（spec §5）。
 """
 
-from .mock_broker import MockBroker
 from .order_state import OrderStateMachine, OrderState
 
 
@@ -34,7 +36,6 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "MockBroker",
     "OrderStateMachine",
     "OrderState",
     "QmtExecutionGateway",

@@ -26,11 +26,10 @@
 迁移纪律（strangler 红线）：
     check_exit 逻辑【零改动】（含移动止盈 trailing 逻辑），只搬位置。
     Layer2 阶段2：从 execution/exit_logic.py 物理迁入 trading/compute/exit.py
-    （git mv 保 is 同源）。旧路径经垫片兜底：
-      - ``from execution.exit_logic import check_exit`` → execution/exit_logic.py 垫片
-      - ``from execution import check_exit`` → execution/__init__.py re-export 改指
-    三处入口（compute.exit / exit_logic 垫片 / execution 包）均指【同一函数对象】
-    （is 同源契约，见 tests/test_compute_purity.py + 同源冒烟）。
+    （git mv 保 is 同源）。Layer2 阶段4：execution 包整体解散，exit_logic 垫片 +
+    execution/__init__ re-export 一并删除——check_exit 现单源于 trading.compute.exit，
+    经 trading.compute 包 re-export 暴露。回测侧 backtest.replay 经本函数离场
+    （杀手不变量：回测与未来实盘 reducer 共用同一判定，杜绝双源真理）。
 """
 from __future__ import annotations
 

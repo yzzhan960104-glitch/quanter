@@ -81,7 +81,9 @@ async def lifespan(app: FastAPI):
     # cancel 端点返 503，async 提交仍写 PENDING（下次启动调度器 poll 派发，不丢任务）。
     try:
         from concurrent.futures import ProcessPoolExecutor
-        from caisen import replay_tasks_db, replay_worker, replay_scheduler
+        from backtest import tasks_db as replay_tasks_db
+        from backtest import worker as replay_worker
+        from backtest import scheduler as replay_scheduler
         replay_tasks_db.init_db()                       # 建表（幂等）
         app.state.replay_pool = ProcessPoolExecutor(
             max_workers=1, initializer=replay_worker._init_worker)   # concurrency=1 串行
@@ -103,9 +105,9 @@ async def lifespan(app: FastAPI):
     # 把残留 RUNNING/ANALYZING → STOPPED（进程崩溃/重启时清理半成品 loop）。
     # 凭证软降级：REVIEW_* 未配 → _NoopNotifier（loop 可跑但无推送）。
     try:
-        from caisen import training_loops_db
-        from caisen.training_loop import TrainingLoopOrchestrator
-        from caisen.training_dingtalk import (
+        from backtest.optimize import training_loops_db
+        from backtest.optimize.training_loop import TrainingLoopOrchestrator
+        from backtest.optimize.training_dingtalk import (
             ReviewBotConfig,
             DingTalkNotifier,
             _NoopNotifier,

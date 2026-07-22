@@ -57,57 +57,11 @@ def test_notifier_legacy_and_new_path():
 
 
 # ============================================================================
-# Step 3a 契约：caisen 子包可 import（Task 1.3 后瘦身态）
+# Step 3a 契约：caisen 子包可 import —— 已随 Layer2 阶段4 caisen 包解散退役
 # ============================================================================
-# 注：原 test_caisen_subpackages_scaffold（断言 caisen.engines StrategyConfig/PatternScreener
-# + caisen.config + caisen.patterns.screener 可 import）随 Task 1.3「caisen 形态退役」删——
-# StrategyConfig/PatternScreener/caisen.config/caisen.patterns 已全删（真身 + 垫片）。
-# Task 1.3 后 caisen 包仅余 optimize（参数训练）+ infra（replay_*/viz_* 垫片）+ advisor +
-# 空壳 engines。此处的子包可 import 契约改由 test_shim_identity_tripwire 间接覆盖。
-# 授权：caisen-retire-inventory §3.10 line182 + §8 裁决（#1/#2/#3/#10/#11 全删）。
-
-
-# ============================================================================
-# 垫片同源绊线（final whole-branch review Rec#5）
-# ============================================================================
-# 物理意图：所有迁移模块的「旧路径顶层垫片」与「新路径子包真身」必须为同一模块对象。
-# 防 Step4（及后续）迁移漏 caisen/__init__.py 预加载行 —— 一旦漏掉，from caisen import X
-# 会绑定到垫片壳子（而非真实模块），sys.modules 别名失效，monkeypatch 模块全局的测试
-# 会静默假绿（Task3.3/3.4 已踩此坑两次）。此绊线在 CI 层兜底，未来迁移漏预加载立即红。
-#
-# Task 1.3（caisen 形态退役）评估：
-#   全量 grep 显示 caisen 顶层垫片（plan/risk/config/patterns/）随真身删除一并删除
-#   （无消费者）；存活的 optimize training_* / infra replay_*+viz_* / backtest_replay 垫片
-#   仍有活跃消费者（training_loop/server/api/tests），strangler 红线「不强切消费者」→ 保留。
-#   本绊线 cases 表移除 plan/risk/config/patterns/storage/execution（已删），保留存活垫片。
-def test_shim_identity_tripwire():
-    """迁移模块新旧路径必须同一对象（sys.modules 别名生效的前置断言）。
-
-    Task 1.3：cases 表瘦身——caisen 形态相关垫片（plan/risk/config/patterns/storage/
-    execution）已随真身删除，不再列入。仅保留 optimize training_* + infra replay_*/viz_*
-    + backtest_replay 等存活垫片的同源断言。
-    """
-    import importlib
-
-    # (旧路径顶层垫片, 新路径子包真身)
-    cases = [
-        # optimize 参数优化（Task 1.3：保留，颈线法经 training_loop 用）
-        ("caisen.training_analyzer", "caisen.optimize.training_analyzer"),
-        ("caisen.training_loops_db", "caisen.optimize.training_loops_db"),
-        ("caisen.training_loop", "caisen.optimize.training_loop"),
-        ("caisen.training_dingtalk", "caisen.optimize.training_dingtalk"),
-        # infra 垫片（Task 1.3：颈线法异步回测基础设施保留）
-        ("caisen.backtest_replay", "caisen.infra.backtest_replay"),
-        ("caisen.replay_runs", "caisen.infra.replay_runs"),
-        ("caisen.replay_tasks_db", "caisen.infra.replay_tasks_db"),
-    ]
-    # viz_static/viz_interactive/replay_scheduler/replay_worker 未列入（重型/反向依赖 import），
-    # 其同源由专项测试间接覆盖；新增迁移须补入此表。
-    # Task 1.3：plan/risk/config/patterns/storage/execution 垫片已删，不在表中。
-    for old, new in cases:
-        m_old = importlib.import_module(old)
-        m_new = importlib.import_module(new)
-        assert m_old is m_new, (
-            f"垫片同源绊线失败: {old} is not {new} —— "
-            f"检查 caisen/__init__.py 是否有为该模块的预加载行缺失或失效"
-        )
+# 注：原 test_caisen_subpackages_scaffold + test_shim_identity_tripwire 随 Layer2 阶段4
+# 「execution/caisen 包解散 + 回测独立成 backtest/」整体删除——caisen 包不复存在，
+# 顶层垫片 + infra 垫片全删，颈线法异步回测真身迁 backtest/（optimize→backtest.optimize、
+# replay_*→backtest.tasks_db/worker/scheduler/runs）。垫片同源契约使命终结（无垫片可守）。
+# 同源不变量现由 test_compute_purity.py（trading.compute 纯净 + 多入口同源）独立守护。
+# 授权：Layer2 阶段4 spec §3.6/§5。
