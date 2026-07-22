@@ -434,8 +434,14 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         字段映射（xttrader.md XtOrder）：
         - order_id/stock_code/order_type/order_volume/price/traded_volume/
           traded_price/order_status/status_msg/order_remark 原样透出；
-        - 额外补 state 字段：_map_qmt_status(order_status).name，与 on_stock_order
-          回调同源映射（让 T5 惰性同步与回调流水共用同一状态口径）。
+        - 额外补 state 字段：_map_qmt_status(order_status) 返 **OrderState 枚举**
+          （非字符串），与 on_stock_order 回调存 _orders 的 state 同型，亦与
+          circuit_breaker._TERMINAL（frozenset[OrderState]）同型。T5 惰性同步
+          merge _orders 时直接可用无需类型转换；保持 _orders 枚举一致性，避免
+          circuit_breaker 终态判定踩「枚举≠字符串、OrderState.FILLED not in
+          {...字符串...} 恒 True → 已成交单被误判非终态」陷阱。对外 JSON 序列化
+          （如未来 GET /orders）留 API 层处理（一期 get_orders 已 dict 化 _orders
+          有先例）。
 
         降级语义（Why None/异常/锁定 → 返 []，对齐 query_asset 的 {} 降级口径）：
         - None：query_stock_orders 查询失败/当日无委托均返 None（不可区分），返 []
@@ -484,7 +490,14 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             "traded_price": float(getattr(o, "traded_price", 0.0) or 0.0),
             "order_status": getattr(o, "order_status", 255),
             # state 与 on_stock_order 回调同源映射（56→FILLED 等），保证状态语义一致
-            "state": _map_qmt_status(getattr(o, "order_status", 255)).name,
+            # Why 返 OrderState 枚举（非 .name 字符串）：query_orders 当前唯一消费者
+            # 是 T5 惰性同步 merge _orders（内部枚举世界）；返枚举与 _orders 内部
+            # state 类型对齐，T5 直接 merge 安全无类型转换；circuit_breaker._TERMINAL
+            # 是 frozenset[OrderState]（枚举集），若 state 为字符串会触发
+            # OrderState.FILLED not in {"FILLED",...} 恒 True → 已成交单误判非终态
+            # 陷阱。对外 JSON 序列化（如未来 GET /orders）留 API 层处理（一期
+            # get_orders 已 dict 化 _orders 有先例）。
+            "state": _map_qmt_status(getattr(o, "order_status", 255)),
             "status_msg": getattr(o, "status_msg", ""),
             "order_remark": getattr(o, "order_remark", ""),
         } for o in orders]

@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from trading import qmt_gateway
+from trading.order_state import OrderState
 from trading.qmt_gateway import QmtExecutionGateway
 
 
@@ -222,10 +223,12 @@ class _FakeTraderOrders:
 
 
 def test_query_orders_normalizes(monkeypatch):
-    """query_stock_orders 返 list[XtOrder] → 标准化 list[dict]（state 用 _map_qmt_status().name）。
+    """query_stock_orders 返 list[XtOrder] → 标准化 list[dict]（state 返 OrderState 枚举）。
 
-    Why state 走 _map_qmt_status().name：与 on_stock_order 回调一致的状态语义
-    （56 → FILLED），让 T5 subscribe 兜底惰性同步与回调流水共用同一口径。
+    Why state 返 OrderState 枚举（非 .name 字符串）：与 on_stock_order 回调存
+    _orders 的 state 同型，亦与 circuit_breaker._TERMINAL（frozenset[OrderState]）
+    同型；T5 惰性同步 merge _orders 时直接可用，消除类型转换埋点，避免 circuit_breaker
+    终态判定踩「枚举≠字符串」陷阱（OrderState.FILLED not in {...字符串...} 恒 True）。
     """
     gw = _make_gw_with_fake_loop(monkeypatch)
     gw._trader = _FakeTraderOrders([_FakeOrder()], None)
@@ -237,8 +240,8 @@ def test_query_orders_normalizes(monkeypatch):
     assert o["order_id"] == 100
     assert o["stock_code"] == "600000.SH"
     assert o["order_volume"] == 1000
-    assert "state" in o          # _map_qmt_status(56) -> FILLED
-    assert o["state"] == "FILLED"
+    assert "state" in o          # _map_qmt_status(56) -> OrderState.FILLED
+    assert o["state"] == OrderState.FILLED
 
 
 def test_query_orders_none_returns_empty(monkeypatch):
