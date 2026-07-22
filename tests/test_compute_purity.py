@@ -259,3 +259,13 @@ def test_order_state_enum_single_source() -> None:
     a = _get("trading.types.order_state", "OrderState")
     assert a is _get("trading.order_state", "OrderState")
     assert a is _get("trading", "OrderState")
+
+
+def test_cancel_all_open_orders_single_source() -> None:
+    """cancel_all_open_orders 单源契约（Layer2 阶段5 · 副作用迁 trading/io/breaker.py）。
+
+    双入口同源：io.breaker（新源·副作用壳）/ circuit_breaker（旧模块垫片 re-export）。
+    纯判定 check_daily_loss_limit 仍单源在 compute.breaker（见 test_breaker_single_source）。
+    """
+    a = _get("trading.io.breaker", "cancel_all_open_orders")
+    assert a is _get("trading.circuit_breaker", "cancel_all_open_orders")
