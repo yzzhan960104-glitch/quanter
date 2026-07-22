@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """海龟 trailing 止损离散纯函数单测（Task 2）+ should_trigger_stop 拆解单测（阶段5）。"""
-from trading.stop_loss import compute_stop_price
+from trading.compute.stop import compute_stop_price  # Layer2 阶段6：直指 functional core 真身（stop_loss 垫片已删）
 from trading.compute.stop import should_trigger_stop
 
 

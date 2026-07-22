@@ -31,6 +31,16 @@
 注：test_compute_purity.py（阶段2 建）保留为 compute 子集专用契约（含 is 同源断言），
 本文件是其全包泛化版——两者互补，不重复（compute_purity 守 is 同源，layer_contract
 守跨包铁律）。
+
+Layer2 阶段6 垫片清/留决策（spec §7 strangler 铁律①）：
+    已删（消费点≤2 且无 monkeypatch，消费点迁真身）：
+      - trading/risk_shield.py    → 真身 trading.compute.risk（server/trading_service + test_risk_shield 迁）
+      - trading/stop_loss.py      → 真身 trading.compute.stop（test_stop_loss 迁）
+      - trading/circuit_breaker.py → 真身 trading.compute.breaker + trading.io.breaker（零外部消费）
+    保留（消费点多/有 monkeypatch/hybrid 真身，留 stage6 follow-up）：
+      - trading/signal_runner.py     → 真身 trading.compute.plan（engine.py + 4 tests 含 e2e 不 mock）
+      - trading/execution_gateway.py → 真身 broker.base/mock + compute.reconcile/types（20+ 消费 spec §101）
+      - trading/order_state.py       → hybrid：OrderStateMachine 真身 + OrderState/check_* re-export（broker/backtest 依赖枚举）
 """
 from __future__ import annotations
 
@@ -226,20 +236,20 @@ def test_strategies_no_trade_dependency() -> None:
 # trading.types / trading.order_state（OrderState 枚举）/ data。
 # 禁止：trading 的任何【编排/状态/风控判定】模块——broker 不应反向依赖交易编排，
 # 否则形成 trading↔broker 循环依赖。
+# 注：Layer2 阶段6 已删 risk_shield/stop_loss/circuit_breaker 垫片，故此处不再
+# 列这三者（路径已不存在，broker 无法 import）。signal_runner 垫片保留（消费多），
+# 故仍列为禁止子路径——防 broker 反向依赖。
 _BROKER_FORBIDDEN_SUBPATHS = (
     "trading.engine",
     "trading.orchestrate",
     "trading.signal_runner",
     "trading.dynamic_whitelist",
-    "trading.risk_shield",
-    "trading.stop_loss",
-    "trading.circuit_breaker",
 )
 
 
 def test_broker_no_reverse_trade_dependency() -> None:
-    """铁律 3：broker/ 零 trading.engine/orchestrate/signal_runner/dynamic_whitelist/
-    risk_shield/stop_loss/circuit_breaker 反向依赖。
+    """铁律 3：broker/ 零 trading.engine/orchestrate/signal_runner/dynamic_whitelist
+    反向依赖。
 
     物理意义：broker 是 I/O 适配层（下单/撤单/查持仓的券商封装），它不应反向
     依赖交易的编排逻辑。允许 broker import trading.compute.types（OrderRequest
@@ -248,6 +258,9 @@ def test_broker_no_reverse_trade_dependency() -> None:
 
     违反此铁律会形成 trading↔broker 循环依赖，导致 import 炸全仓（如早期
     trading/__init__.py eager import broker.qmt 触发的 partially-initialized 循环）。
+
+    Layer2 阶段6 变更：risk_shield/stop_loss/circuit_breaker 垫片已删（路径不存在，
+    无需列入禁止）；signal_runner 垫片保留故仍禁。
     """
     # 注意：broker 的 forbidden_roots 为空——broker 允许 import trading（但仅限
     # 纯契约子路径），所以只用 forbidden_subpaths 精确拦截编排模块。

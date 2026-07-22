@@ -149,32 +149,30 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
         # check_exit 真身单源在 trading.compute.exit，由 compute 包 re-export。
         ("trading.compute.exit", "check_exit"),
         ("trading.compute", "check_exit"),
-        # check_order：双入口同源（compute / risk_shield 垫片）
+        # check_order：真身单源在 trading.compute.risk（Layer2 阶段6 risk_shield 垫片已删）
         ("trading.compute.risk", "check_order"),
-        ("trading.risk_shield", "check_order"),
         ("trading.compute", "check_order"),
-        # build_orders_from_signals：双入口同源（compute / signal_runner 垫片）
+        # build_orders_from_signals：双入口同源（compute / signal_runner 垫片·阶段6 保留）
         ("trading.compute.plan", "build_orders_from_signals"),
         ("trading.signal_runner", "build_orders_from_signals"),
         ("trading.compute", "build_orders_from_signals"),
-        # stop 系列：compute / 原模块垫片
+        # stop 系列：compute / order_state 垫片（阶段6 保留，OrderStateMachine 真身所在）
         ("trading.compute.stop", "compute_stop_price"),
-        ("trading.stop_loss", "compute_stop_price"),
         ("trading.compute.stop", "check_stop_loss"),
         ("trading.order_state", "check_stop_loss"),
         ("trading.compute.stop", "check_take_profit"),
         ("trading.order_state", "check_take_profit"),
         ("trading.compute.stop", "update_trailing_stop"),
         ("trading.order_state", "update_trailing_stop"),
-        # reconcile：双入口同源（compute / execution_gateway）
+        # reconcile：双入口同源（compute / execution_gateway·阶段6 保留 20+ 消费）
         ("trading.compute.reconcile", "reconcile"),
         ("trading.execution_gateway", "reconcile"),
         ("trading.compute", "reconcile"),
-        # check_daily_loss_limit：双入口同源（compute / circuit_breaker 垫片）
+        # check_daily_loss_limit：真身单源在 trading.compute.breaker
+        # （Layer2 阶段6 circuit_breaker 垫片已删，cancel_all_open_orders 真身在 io.breaker）
         ("trading.compute.breaker", "check_daily_loss_limit"),
-        ("trading.circuit_breaker", "check_daily_loss_limit"),
         ("trading.compute", "check_daily_loss_limit"),
-        # OrderRequest：双入口同源（compute.types / execution_gateway）
+        # OrderRequest：双入口同源（compute.types / execution_gateway·阶段6 保留）
         ("trading.compute.types", "OrderRequest"),
         ("trading.execution_gateway", "OrderRequest"),
         ("trading.compute", "OrderRequest"),
@@ -210,8 +208,8 @@ def test_check_exit_single_source() -> None:
 
 
 def test_check_order_single_source() -> None:
+    # Layer2 阶段6：risk_shield 垫片已删，真身单源 trading.compute.risk + compute 包 re-export
     a = _get("trading.compute.risk", "check_order")
-    assert a is _get("trading.risk_shield", "check_order")
     assert a is _get("trading.compute", "check_order")
 
 
@@ -222,10 +220,9 @@ def test_build_orders_single_source() -> None:
 
 
 def test_compute_stop_price_single_source() -> None:
-    assert (
-        _get("trading.compute.stop", "compute_stop_price")
-        is _get("trading.stop_loss", "compute_stop_price")
-    )
+    # Layer2 阶段6：stop_loss 垫片已删，真身单源 trading.compute.stop + compute 包 re-export
+    a = _get("trading.compute.stop", "compute_stop_price")
+    assert a is _get("trading.compute", "compute_stop_price")
 
 
 def test_order_state_stops_single_source() -> None:
@@ -242,8 +239,9 @@ def test_reconcile_single_source() -> None:
 
 
 def test_breaker_single_source() -> None:
+    # Layer2 阶段6：circuit_breaker 垫片已删，check_daily_loss_limit 真身单源 trading.compute.breaker
     a = _get("trading.compute.breaker", "check_daily_loss_limit")
-    assert a is _get("trading.circuit_breaker", "check_daily_loss_limit")
+    assert a is _get("trading.compute", "check_daily_loss_limit")
 
 
 def test_order_request_single_source() -> None:
@@ -264,11 +262,12 @@ def test_order_state_enum_single_source() -> None:
 def test_cancel_all_open_orders_single_source() -> None:
     """cancel_all_open_orders 单源契约（Layer2 阶段5 · 副作用迁 trading/io/breaker.py）。
 
-    双入口同源：io.breaker（新源·副作用壳）/ circuit_breaker（旧模块垫片 re-export）。
+    Layer2 阶段6：circuit_breaker 垫片已删，cancel_all_open_orders 真身单源在
+    trading.io.breaker（副作用壳），经 trading.io 包 re-export。
     纯判定 check_daily_loss_limit 仍单源在 compute.breaker（见 test_breaker_single_source）。
     """
     a = _get("trading.io.breaker", "cancel_all_open_orders")
-    assert a is _get("trading.circuit_breaker", "cancel_all_open_orders")
+    assert a is _get("trading.io", "cancel_all_open_orders")
 
 
 def test_should_trigger_stop_single_source() -> None:

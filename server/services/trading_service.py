@@ -28,7 +28,7 @@ from server.core.config import PROJECT_ROOT
 from trading import qmt_market_data
 from trading.dynamic_whitelist import get_effective_whitelist
 from trading.execution_gateway import OrderRequest, OrderResult
-from trading.risk_shield import check_order
+from trading.compute.risk import check_order  # Layer2 阶段6：直指 functional core 真身（risk_shield 垫片已删）
 
 logger = logging.getLogger(__name__)
 

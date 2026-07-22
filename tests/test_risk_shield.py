@@ -7,7 +7,7 @@
 import pytest
 
 from trading.execution_gateway import OrderRequest
-from trading.risk_shield import RiskDecision, check_order
+from trading.compute.risk import RiskDecision, check_order  # Layer2 阶段6：直指 functional core 真身（risk_shield 垫片已删）
 
 
 def _order(**kw):
