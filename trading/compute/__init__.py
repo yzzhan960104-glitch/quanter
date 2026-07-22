@@ -11,7 +11,7 @@
     - risk_shield       垫片 re-export compute.risk（保留旧路径兼容）
     - signal_runner     垫片 re-export compute.plan（保留旧路径兼容）
     - stop_loss         垫片 re-export compute.stop（保留旧路径兼容）
-    - circuit_breaker   I/O（cancel_all_open_orders）+ 垫片 re-export compute.breaker
+    - circuit_breaker   垫片 re-export（cancel_all→io.breaker + check_daily_loss_limit←compute.breaker）
 
     零外部依赖不变量（由 tests/test_compute_purity.py 守护）：
     本子包下所有 .py 仅可 import：标准库 / pandas / numpy / dataclasses /
@@ -65,6 +65,7 @@ from trading.compute.stop import (  # noqa: F401
     check_stop_loss,
     check_take_profit,
     update_trailing_stop,
+    should_trigger_stop,
 )
 
 # ============================================================================
@@ -108,6 +109,7 @@ __all__ = [
     "check_stop_loss",
     "check_take_profit",
     "update_trailing_stop",
+    "should_trigger_stop",
     # 持仓对账
     "reconcile",
     "PositionDrift",

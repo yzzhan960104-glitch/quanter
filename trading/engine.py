@@ -54,6 +54,7 @@ from trading import (
     trading_plan,
 )
 from trading.signal_runner import build_orders_from_signals
+from trading.compute.stop import should_trigger_stop
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +404,11 @@ async def stop_loss_monitor(
             logger.warning("stop_loss_monitor 跳过 %s：现价缺失（quote=%s），无法判定跌破", sym, quote)
             continue
         n_checked += 1
-        if price <= sp:
+        # 跌破判定（Layer2 阶段5 · 四缠拆解）：业务判定下推 compute.should_trigger_stop
+        # 纯函数（functional core 单源），本编排层只调 compute 拿结果决定走哪条支路。
+        # 物理零改：原 ``if price <= sp`` 与 should_trigger_stop(price, sp) 逐字同义
+        # （都是 <= 触发，阈值线上下穿越一律触发防状态机悬挂）。
+        if should_trigger_stop(price, sp):
             # 跌破止损价：发卖出单。qty 来自 gw 真实持仓（绝不硬编码——scope #3 红线）。
             try:
                 result = await _submit(

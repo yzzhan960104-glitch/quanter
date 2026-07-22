@@ -269,3 +269,13 @@ def test_cancel_all_open_orders_single_source() -> None:
     """
     a = _get("trading.io.breaker", "cancel_all_open_orders")
     assert a is _get("trading.circuit_breaker", "cancel_all_open_orders")
+
+
+def test_should_trigger_stop_single_source() -> None:
+    """should_trigger_stop 单源契约（Layer2 阶段5 · stop_loss_monitor 四缠拆出）。
+
+    双入口同源：compute.stop（真源·functional core）/ compute 包 re-export。
+    从 engine.stop_loss_monitor 的 ``if price <= sp`` 下推到 compute 纯判定。
+    """
+    a = _get("trading.compute.stop", "should_trigger_stop")
+    assert a is _get("trading.compute", "should_trigger_stop")

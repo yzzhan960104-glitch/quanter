@@ -68,6 +68,34 @@ def check_stop_loss(entry: float, price: float, pct: float) -> bool:
     return price <= entry * (1.0 - pct)
 
 
+def should_trigger_stop(price: float, stop_price: float) -> bool:
+    """绝对止损价触发判定（Layer2 阶段5 · 从 stop_loss_monitor 四缠拆出）。
+
+    物理意图：
+        实盘 stop_loss_monitor 盘中巡检用的是【绝对止损价】（计划里写死的
+        stop_price，已由 compute_stop_price 盘后算好），而非百分比——本函数把
+        ``if price <= sp:`` 这条业务判定从编排层（engine.stop_loss_monitor）下推到
+        functional core，使「判跌破」与「查价查仓/下单/调度」物理分离。
+
+    与 check_stop_loss 的区别：
+        - check_stop_loss：用 entry × (1-pct) 算阈值（百分比止损，回测路径用）；
+        - should_trigger_stop：直接比绝对价（实盘 stop_prices map 已是绝对价，无需再算）。
+        两者都是 <= 触发（阈值线上下穿越一律视为触发，防状态机悬挂）。
+
+    参数：
+        price:       当前最新价（来自 io.quotes.fetch_quotes 的 last_price）。
+        stop_price:  绝对止损价（来自活跃计划的 stop_prices map）。
+
+    返回：
+        True 表示已跌穿止损线，应发卖出单。
+
+    ⚠️ 调用前防御（编排层职责，不在本函数内）：
+        price 为 None/NaN 时编排层应跳过（无价不能判跌破），绝不传 NaN 进本函数——
+        NaN <= 任何数 在 IEEE 754 下恒为 False，会静默漏判（盲单 = 卖错价 = 致命）。
+    """
+    return price <= stop_price
+
+
 def check_take_profit(entry: float, price: float, pct: float) -> bool:
     """固定止盈：当最新价 price ≥ 入场价 entry*(1+pct) 时触发离场。
 

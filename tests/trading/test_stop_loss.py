@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""海龟 trailing 止损离散纯函数单测（Task 2）。"""
+"""海龟 trailing 止损离散纯函数单测（Task 2）+ should_trigger_stop 拆解单测（阶段5）。"""
 from trading.stop_loss import compute_stop_price
+from trading.compute.stop import should_trigger_stop
 
 
 def test_grace_period_uses_base_stop():
@@ -33,3 +34,21 @@ def test_grace_zero_degrades_fixed():
     stop = compute_stop_price(neckline=10.0, atr=0.5, holding_days=99,
                               stop_atr_mult=2.0, grace=0, step=0.1, floor=0.5)
     assert abs(stop - 9.0) < 1e-9
+
+
+# ============================================================================
+# should_trigger_stop 单测（Layer2 阶段5 · 从 stop_loss_monitor 四缠拆出的纯判定）
+# ============================================================================
+def test_should_trigger_stop_below_threshold():
+    """现价 < 止损价 → 触发（<= 语义，跌破即平仓）。"""
+    assert should_trigger_stop(price=9.49, stop_price=9.50) is True
+
+
+def test_should_trigger_stop_at_threshold():
+    """现价 == 止损价 → 触发（<= 非 <，阈值线上下穿越一律视为触发防状态机悬挂）。"""
+    assert should_trigger_stop(price=9.50, stop_price=9.50) is True
+
+
+def test_should_trigger_stop_above_threshold():
+    """现价 > 止损价 → 不触发（仍在止损线之上，继续持有）。"""
+    assert should_trigger_stop(price=9.51, stop_price=9.50) is False
