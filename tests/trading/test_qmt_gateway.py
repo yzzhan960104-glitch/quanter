@@ -3,9 +3,13 @@
 import asyncio
 import pytest
 
-from trading import qmt_gateway
+# Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）。
+# patch 内部全局（_alert_account_status/_XTQUANT_AVAILABLE/XtQuantTrader/xtconstant/
+# _QMT_* 字面量等）须指真身模块，trading.qmt_gateway 垫片的 re-export 副本与真身
+# 非同一对象，patch 垫片无效。
+from broker import qmt as qmt_gateway
 from trading.order_state import OrderState
-from trading.qmt_gateway import QmtExecutionGateway
+from broker.qmt import QmtExecutionGateway
 
 
 class _FakeLoop:

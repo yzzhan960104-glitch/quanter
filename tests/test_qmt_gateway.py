@@ -13,8 +13,11 @@ import types
 
 import pytest
 
-from trading import qmt_gateway
-from trading.qmt_gateway import QmtExecutionGateway, _map_qmt_status, _assert_status_contract
+# Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）。
+# patch 内部全局（_CONNECT_TIMEOUT/_ORDER_TIMEOUT/XtQuantTrader 等）须指真身模块，
+# trading.qmt_gateway 垫片的 re-export 副本与真身非同一对象，patch 垫片无效。
+from broker import qmt as qmt_gateway
+from broker.qmt import QmtExecutionGateway, _map_qmt_status, _assert_status_contract
 from trading.execution_gateway import OrderRequest
 from trading.order_state import OrderState
 

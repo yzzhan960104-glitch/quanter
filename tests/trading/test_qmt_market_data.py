@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 
-from trading import qmt_market_data
+# Layer2 阶段3：真身迁 broker.qmt_quote（原 trading.qmt_market_data）。
+# patch 内部全局（xtdata/_XTDATA_AVAILABLE/_LIMIT_PRICE_CACHE）须指真身模块，
+# trading.qmt_market_data 垫片的 re-export 副本与真身非同一对象，patch 垫片无效。
+from broker import qmt_quote as qmt_market_data
 
 
 # ============================================================================

@@ -1,27 +1,44 @@
 """
 trading/execution_gateway.py
 ============================
-实盘执行抽象层（I/O 域）。
+【Layer2 阶段 3 · strangler 铁律① · 兼容垫片】
 
-职责切分（Layer2 阶段2 · functional core / imperative shell）：
-- 【纯决策】reconcile / PositionDrift / ReconciliationResult / OrderRequest 已迁至
-  trading/compute/（reconcile.py / types.py），本模块经垫片 re-export 转发——
-  既有 ``from trading.execution_gateway import reconcile, OrderRequest`` 调用零改动。
-- 【I/O 域】OrderResult（依赖 OrderState 状态机枚举）+ BaseExecutionGateway /
-  MockExecutionGateway（异步网关、连接管理、持仓拉取）保留在本模块（执行编排层）。
+物理真身已迁 broker 叶子包：
+- ``BaseExecutionGateway`` / ``OrderResult`` → ``broker/base.py``
+- ``MockExecutionGateway`` → ``broker/mock.py``
+- ``QmtExecutionGateway`` → ``broker/qmt.py``（原 qmt_gateway.py）
 
-设计哲学（CLAUDE.md Karpathy 极简原则）：对账纯逻辑用纯函数 + dataclass 平铺
-实现，不引入事件/ORM 黑盒；向量化思路以单遍遍历并集 + 显式分类完成。
+本模块【仅 re-export 转发】，保既有全仓 20+ 处
+``from trading.execution_gateway import reconcile, OrderRequest, BaseExecutionGateway,
+MockExecutionGateway, OrderResult, ...`` 调用零改动可用。
+
+re-export 三源：
+1. broker 叶子（base/mock）：执行抽象 + Mock 实现；
+2. trading.compute.reconcile（阶段2 functional core）：reconcile / PositionDrift /
+   ReconciliationResult —— 【风控对账语义留 trading/compute/，不进 broker】；
+3. trading.compute.types（阶段2 functional core）：OrderRequest dataclass。
+
+设计哲学（CLAUDE.md strangler 模式）：剥真身到 broker 后，旧路径作纯垫片兜底，
+让消费点按「最小改动」自行决定何时改指 broker.*，而非一刀切炸全仓调用方。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Mapping
+# ============================================================================
+# broker 叶子 re-export（Layer2 阶段3 真身迁移目标）
+# ============================================================================
+from broker.base import (  # noqa: F401
+    BaseExecutionGateway,
+    OrderResult,
+)
+from broker.mock import (  # noqa: F401
+    MockExecutionGateway,
+)
 
 # ============================================================================
-# 纯决策 re-export（Layer2 阶段2 · strangler 铁律① · 垫片）
-# 物理定义已迁 functional core（trading/compute/）。下方 re-export 保证既有
+# 纯决策 re-export（Layer2 阶段2 · functional core · 垫片）
+# 物理定义在 trading/compute/（reconcile.py / types.py）。下方 re-export 保证既有
 # ``from trading.execution_gateway import reconcile, OrderRequest, ...`` 调用零改动。
+# reconcile 真身【刻意留 trading/compute/】不进 broker：对账是风控语义，非执行语义。
 # ============================================================================
 from trading.compute.reconcile import (  # noqa: F401
     reconcile,
@@ -34,159 +51,11 @@ from trading.compute.types import (  # noqa: F401
 
 
 # ============================================================================
-# 实盘执行网关抽象基类 + Mock 参考实现（Task 5）
-# ============================================================================
-from abc import ABC, abstractmethod
-
-from trading.order_state import OrderState
-
-
-@dataclass(frozen=True)
-class OrderResult:
-    """下单/撤单结果，复用既有 OrderState 状态机契约。
-
-    Why 复用 OrderState：实盘订单的状态迁移（PENDING→SUBMITTED→FILLED/
-    PARTIAL_FILLED/CANCELLED/REJECTED）已由 trading.order_state.OrderStateMachine
-    严格约束，网关层不应另造一套状态词汇，避免双源真理（dual source of truth）。
-    """
-
-    order_id: str
-    state: OrderState
-    filled_qty: float = 0.0
-    avg_price: float | None = None
-    message: str = ""
-
-
-class BaseExecutionGateway(ABC):
-    """
-    实盘执行网关抽象基类（全异步）。
-
-    拷问边界（CLAUDE.md 接口与状态机红线）：
-    - submit_order/cancel_order 在子类实现时必须幂等可重试；部分成交
-      （PARTIAL_FILLED）须经 OrderStateMachine 合法迁移，不得越权改状态。
-    - sync_positions 是风控核心：先取券商真实持仓，再与本地理论持仓对账，
-      返回 ReconciliationResult 供上层决策（差异超阈值 → 触发 notifier）。
-    - 真实 QMT 适配由子类实现 _fetch_broker_positions 与底层下单；本基类
-      **不含**任何券商 API 调用，杜绝幻觉参数（CLAUDE.md 事实审查）。
-
-    为什么全异步：实盘 Tick/订单回调天然事件驱动，异步事件循环可统一承载
-    行情推送、订单回报、定时对账三类 I/O，避免多线程竞态。
-    """
-
-    @abstractmethod
-    async def connect(self) -> None:
-        """建立并保活券商连接（子类须含断线重连与限频退避策略）。"""
-
-    @abstractmethod
-    async def disconnect(self) -> None:
-        """优雅断开，释放连接与会话资源。"""
-
-    @abstractmethod
-    async def submit_order(self, order: OrderRequest) -> OrderResult:
-        """提交订单，返回含 OrderState 的结果。"""
-
-    @abstractmethod
-    async def cancel_order(self, order_id: str) -> OrderResult:
-        """撤单。已成交单应返回当前终态而非抛错（幂等语义）。"""
-
-    @abstractmethod
-    async def _fetch_broker_positions(self) -> Mapping[str, Any]:
-        """子类实现：从券商拉取真实持仓（模板方法的可变点）。
-
-        返回形态（T7 后双形态，消费者须 isinstance 防御）：
-        - Mock/EMT 子类：{symbol: qty(float)}（老契约）
-        - QMT 子类（T7 扩展）：{symbol: {volume, avg_price, open_price, yesterday_volume}}
-        sync_positions 模板方法扁平化为 {symbol: float} 再传 reconcile（契约不变）；
-        其他消费者按需读原始返回的扩展字段。
-        """
-
-    async def sync_positions(
-        self,
-        local_positions: Mapping[str, float],
-        tolerance: float = 0.0,
-    ) -> ReconciliationResult:
-        """
-        对账模板方法（Template Method）：取券商持仓 → 与本地比对。
-
-        Why 模板方法而非抽象：对账流程「拉取 → 比对 → 返回结构化差异」是
-        跨所有券商不变的算法骨架，唯一变化点是「如何拉取券商持仓」，故把
-        变化点下沉为 _fetch_broker_positions 抽象方法，骨架固化在基类，
-        杜绝子类漏改对账逻辑或绕过 tolerance 红线。
-        """
-        broker_positions = await self._fetch_broker_positions()
-        # T7 扁平化：QMT _fetch_broker_positions 返 {sym: {volume, avg_price, ...}}，
-        # 对账只关心 volume，扁平化为 {sym: float} 再传 reconcile。
-        # Why 保持 reconcile 契约：reconcile(local, broker) 双方都是 {sym: float}，
-        # 改 reconcile 契约会波及 mock/EMT/所有调用方，违反「最小改动」——故在
-        # sync_positions 这一层做扁平化适配，扩展字段（avg_price 等）供其他消费者
-        # 按需读 _fetch_broker_positions() 原始返回。
-        # Why isinstance 防御：Mock/EMT 的 _fetch_broker_positions 仍返 {sym: float}，
-        # isinstance 判断 next(iter(values)) 是否 dict，是 → 扁平化，否 → 原样透传，
-        # 兼容 QMT（dict）/ Mock+EMT（float）双形态。
-        if broker_positions and isinstance(next(iter(broker_positions.values()), None), dict):
-            broker_positions = {s: p["volume"] for s, p in broker_positions.items()}
-        return reconcile(local_positions, broker_positions, tolerance)
-
-
-class MockExecutionGateway(BaseExecutionGateway):
-    """
-    Mock 参考实现：用内存 dict 模拟券商持仓，可注入漂移用于测试对账逻辑。
-
-    生产环境用 QMTExecutionGateway(BaseExecutionGateway) 替换——其底层对接
-    xtquant（同步 API + 回调推送），子类内用 ``loop.run_in_executor`` 把同步
-    调用包裹到线程池即可与异步基类契合；**xtquant 的具体函数签名、参数名、
-    回调注册时机须以 QMT/迅投官方文档为准，本计划不臆造任何字段**。
-
-    Mock 行为约定（与真实券商的差异，测试时需知晓）：
-    - submit_order 假设全额即时成交（跳过 PENDING→SUBMITTED→FILLED 链路），
-      真实场景须由 OrderStateMachine 处理部分成交与超时；
-    - 不模拟滑点、不模拟撤单拒绝、不模拟断线，这些由真实子类负责。
-    """
-
-    def __init__(self, initial_broker_positions: Mapping[str, float] | None = None) -> None:
-        # 券商侧持仓（可被测试注入初始漂移，模拟外部成交/丢单等失配场景）
-        self._broker_positions: dict[str, float] = dict(initial_broker_positions or {})
-        self._connected = False
-        self._seq = 0  # 自增序号，仅用于生成 Mock 单号
-
-    async def connect(self) -> None:
-        # Mock 连接恒成功；真实子类在此建立 session、登录、订阅回报。
-        self._connected = True
-
-    async def disconnect(self) -> None:
-        self._connected = False
-
-    async def _fetch_broker_positions(self) -> Mapping[str, float]:
-        # 返回副本，避免上层误改 Mock 内部状态（防御性拷贝）。
-        return dict(self._broker_positions)
-
-    async def submit_order(self, order: OrderRequest) -> OrderResult:
-        if not self._connected:
-            # 未连接直接拒单，对应实盘中 session 失效不应静默下单。
-            return OrderResult(order_id=order.order_id or "", state=OrderState.REJECTED, message="未连接")
-        # Mock 假设全额成交（真实场景须经 OrderStateMachine 处理部分成交/超时）。
-        delta = order.qty if order.side == "buy" else -order.qty
-        self._broker_positions[order.symbol] = self._broker_positions.get(order.symbol, 0.0) + delta
-        self._seq += 1
-        return OrderResult(
-            order_id=order.order_id or f"MOCK-{self._seq}",
-            state=OrderState.FILLED,
-            filled_qty=order.qty,
-            avg_price=order.price,
-        )
-
-    async def cancel_order(self, order_id: str) -> OrderResult:
-        # Mock 不支持撤已成交单，直接回 CANCELLED 终态（真实子类须查询当前状态）。
-        return OrderResult(order_id=order_id, state=OrderState.CANCELLED, message="mock 撤单")
-
-
-# ============================================================================
 # 注：宏观一票否决网关（VetoedError / MacroAwareGateway）已于 B-7 修复时移除。
 # 原实现（Task 14 宏观 CTA Epic 3）存在三重缺陷：① 不继承 BaseExecutionGateway；
 # ② submit_order 同步签名 (order, regime) 与基类 async(order) 不兼容；③ 就地改写
 # frozen OrderRequest.quantity 会抛 FrozenInstanceError。蔡森专精化（Phase 1）已删除
 # 宏观 CTA 策略，当前唯一策略 caisen 为纯价量形态学、不消费 CreditRegime，该死代码
-# 零生产接入（仅文档/单测引用）。按 YAGNI 删除；若重启宏观风控，须重新设计为正确的
+# 零生产接入（仅文档/单测引用）。按 YGNI 删除；若重启宏观风控，须重新设计为正确的
 # BaseExecutionGateway 子类（async submit_order、返回新 OrderRequest 而非就地改 frozen）。
 # ============================================================================
-
