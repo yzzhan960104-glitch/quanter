@@ -380,3 +380,124 @@ def test_sync_orders_if_stale_noop_when_push_available(monkeypatch):
     n = asyncio.run(gw._sync_orders_if_stale())
     assert called["query_orders"] == 0
     assert n == 0  # no-op 返 0
+
+
+# =============================================================================
+# T6: _assert_status_contract 补全 11 态 + ACC 校验 + cancel_order 非终态 message
+# =============================================================================
+
+def test_assert_status_contract_validates_all_11_order_states(monkeypatch):
+    """_assert_status_contract 应覆盖 11 个 order 状态字面量（不止现有 7 个）。
+
+    Why 必要：T1/T2 后 order 状态扩展到 11 个（+PARTSUCC_CANCEL=52/REPORTED_CANCEL=51
+    /WAIT_REPORTING=49/UNKNOWN=255），但现有契约只校验 7 个——缺校验的 4 个一旦在
+    xtquant 升级中漂移，_map_qmt_status 会静默错判状态（致命）。本用例构造假
+    xtconstant 全 11 态一致 → 通过；再故意漂移 PART_CANCEL → fail-fast RuntimeError。
+    """
+    monkeypatch.setattr(qmt_gateway, "_XTQUANT_AVAILABLE", True)
+
+    class _FakeXtconst:
+        # 全 11 态与模块字面量一致
+        ORDER_JUNK = qmt_gateway._QMT_ORDER_JUNK
+        ORDER_SUCCEEDED = qmt_gateway._QMT_ORDER_SUCCEEDED
+        ORDER_PART_SUCC = qmt_gateway._QMT_ORDER_PART_SUCC
+        ORDER_CANCELED = qmt_gateway._QMT_ORDER_CANCELED
+        ORDER_PART_CANCEL = qmt_gateway._QMT_ORDER_PART_CANCEL
+        ORDER_PARTSUCC_CANCEL = qmt_gateway._QMT_ORDER_PARTSUCC_CANCEL
+        ORDER_REPORTED_CANCEL = qmt_gateway._QMT_ORDER_REPORTED_CANCEL
+        ORDER_REPORTED = qmt_gateway._QMT_ORDER_REPORTED
+        ORDER_WAIT_REPORTING = qmt_gateway._QMT_ORDER_WAIT_REPORTING
+        ORDER_UNREPORTED = qmt_gateway._QMT_ORDER_UNREPORTED
+        ORDER_UNKNOWN = qmt_gateway._QMT_ORDER_UNKNOWN
+        # ACC 态也需齐备（ACC 校验同一调用，否则 AttributeError）
+        ACCOUNT_STATUS_INVALID = qmt_gateway._QMT_ACC_INVALID
+        ACCOUNT_STATUS_OK = qmt_gateway._QMT_ACC_OK
+        ACCOUNT_STATUS_WAITING_LOGIN = qmt_gateway._QMT_ACC_WAITING_LOGIN
+        ACCOUNT_STATUSING = qmt_gateway._QMT_ACC_LOGINING  # 注意 STATUSING 命名差异
+        ACCOUNT_STATUS_FAIL = qmt_gateway._QMT_ACC_FAIL
+        ACCOUNT_STATUS_INITING = qmt_gateway._QMT_ACC_INITING
+        ACCOUNT_STATUS_CORRECTING = qmt_gateway._QMT_ACC_CORRECTING
+        ACCOUNT_STATUS_CLOSED = qmt_gateway._QMT_ACC_CLOSED
+        ACCOUNT_STATUS_ASSIS_FAIL = qmt_gateway._QMT_ACC_ASSIS_FAIL
+        ACCOUNT_STATUS_DISABLEBYSYS = qmt_gateway._QMT_ACC_DISABLE_BYSYS  # 无下划线 BYSYS
+        ACCOUNT_STATUS_DISABLEBYUSER = qmt_gateway._QMT_ACC_DISABLE_BYUSER
+
+    monkeypatch.setattr(qmt_gateway, "xtconstant", _FakeXtconst)
+    # 全 11 态一致 → 不抛
+    qmt_gateway._assert_status_contract()
+    # 故意漂移 ORDER_PART_CANCEL → fail-fast
+    _FakeXtconst.ORDER_PART_CANCEL = 999
+    with pytest.raises(RuntimeError, match="xtconstant 枚举契约漂移"):
+        qmt_gateway._assert_status_contract()
+
+
+def test_assert_status_contract_validates_all_11_account_states(monkeypatch):
+    """_assert_status_contract 应同步校验 11 个 ACCOUNT_STATUS 字面量（T1 新增防漂移）。
+
+    Why 必要：T1 新增 _QMT_ACC_* 10+1=11 个字面量，与 order 状态同受版本漂移风险
+    （账号状态若错乱，on_account_status 会误锁/漏锁网关，直接影响熔断与发单）。
+    本用例构造假 xtconstant 全 11 态 ACC 一致 → 通过；再漂移 DISABLEBYSYS → fail-fast。
+    重点覆盖命名差异：ACCOUNT_STATUSING（非 LOGIN）/ DISABLEBYSYS（非 DISABLE_BYSYS）。
+    """
+    monkeypatch.setattr(qmt_gateway, "_XTQUANT_AVAILABLE", True)
+
+    class _FakeXtconst:
+        # order 态齐备（同调用流程，防 AttributeError）
+        ORDER_JUNK = qmt_gateway._QMT_ORDER_JUNK
+        ORDER_SUCCEEDED = qmt_gateway._QMT_ORDER_SUCCEEDED
+        ORDER_PART_SUCC = qmt_gateway._QMT_ORDER_PART_SUCC
+        ORDER_CANCELED = qmt_gateway._QMT_ORDER_CANCELED
+        ORDER_PART_CANCEL = qmt_gateway._QMT_ORDER_PART_CANCEL
+        ORDER_PARTSUCC_CANCEL = qmt_gateway._QMT_ORDER_PARTSUCC_CANCEL
+        ORDER_REPORTED_CANCEL = qmt_gateway._QMT_ORDER_REPORTED_CANCEL
+        ORDER_REPORTED = qmt_gateway._QMT_ORDER_REPORTED
+        ORDER_WAIT_REPORTING = qmt_gateway._QMT_ORDER_WAIT_REPORTING
+        ORDER_UNREPORTED = qmt_gateway._QMT_ORDER_UNREPORTED
+        ORDER_UNKNOWN = qmt_gateway._QMT_ORDER_UNKNOWN
+        # 全 11 ACC 态与模块字面量一致（注意命名差异：STATUSING/DISABLEBYSYS）
+        ACCOUNT_STATUS_INVALID = qmt_gateway._QMT_ACC_INVALID
+        ACCOUNT_STATUS_OK = qmt_gateway._QMT_ACC_OK
+        ACCOUNT_STATUS_WAITING_LOGIN = qmt_gateway._QMT_ACC_WAITING_LOGIN
+        ACCOUNT_STATUSING = qmt_gateway._QMT_ACC_LOGINING
+        ACCOUNT_STATUS_FAIL = qmt_gateway._QMT_ACC_FAIL
+        ACCOUNT_STATUS_INITING = qmt_gateway._QMT_ACC_INITING
+        ACCOUNT_STATUS_CORRECTING = qmt_gateway._QMT_ACC_CORRECTING
+        ACCOUNT_STATUS_CLOSED = qmt_gateway._QMT_ACC_CLOSED
+        ACCOUNT_STATUS_ASSIS_FAIL = qmt_gateway._QMT_ACC_ASSIS_FAIL
+        ACCOUNT_STATUS_DISABLEBYSYS = qmt_gateway._QMT_ACC_DISABLE_BYSYS
+        ACCOUNT_STATUS_DISABLEBYUSER = qmt_gateway._QMT_ACC_DISABLE_BYUSER
+
+    monkeypatch.setattr(qmt_gateway, "xtconstant", _FakeXtconst)
+    # 全 11 ACC 态一致 → 不抛
+    qmt_gateway._assert_status_contract()
+    # 故意漂移 ACCOUNT_STATUS_DISABLEBYSYS → fail-fast（T1 新增 fatal 状态，漂移最危险）
+    _FakeXtconst.ACCOUNT_STATUS_DISABLEBYSYS = 999
+    with pytest.raises(RuntimeError, match="xtconstant 枚举契约漂移"):
+        qmt_gateway._assert_status_contract()
+
+
+def test_cancel_order_message_marks_non_terminal(monkeypatch):
+    """cancel_order rc==0 的 message 应明示「最终态以 on_stock_order 推送 CANCELLED 为准」。
+
+    Why 必要：rc==0 仅表「撤单指令已成功发出」，非订单终态——柜台可能因订单已成交 /
+    已撤而撤单失败，最终态由 on_stock_order 回调推送 CANCELLED 才算数。原 message
+    「等待回报确认」语义含糊，上层易误读为「撤单已成功」。新 message 显式标注非终态
+    + 推送锚点，杜绝误读。
+    """
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._connected = True
+    gw._lock_down = False
+    gw._account = object()
+
+    class _FakeTrader:
+        def cancel_order_stock(self, account, oid):
+            return 0  # 撤单指令成功发出（非终态）
+
+    gw._trader = _FakeTrader()
+    gw._seq_to_real = {100: 999}  # seq(int)→真实 order_id 映射齐备（_seq_to_real 键为 int）
+    result = asyncio.run(gw.cancel_order("100"))
+    # rc==0 仍维持 CANCELLED state（主链路不变，只改 message 文案）
+    assert result.state.name == "CANCELLED"
+    # message 明示非终态 + 推送锚点 on_stock_order
+    assert "on_stock_order" in result.message
+    assert "非终态" in result.message

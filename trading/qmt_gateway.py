@@ -148,22 +148,62 @@ def _assert_status_contract() -> None:
     Why 必要：状态映射错乱在实盘里是最隐蔽的致命 bug——把「废单」误判成「已成」
     会导致策略以为建仓成功而真实敞口为零，反之亦然。xtquant 升级若改了枚举值，
     这里的强校验会在 connect 阶段直接 fail-fast，而非上线后慢性中毒。
+
+    校验范围（T6 补全）：
+    - order 11 态全量（原 7 态 + PARTSUCC_CANCEL/REPORTED_CANCEL/WAIT_REPORTING/UNKNOWN），
+      任一漂移会让 _map_qmt_status 状态映射错乱（致命）；
+    - account 11 态全量（T1 新增 _QMT_ACC_*），任一漂移会让 on_account_status 误锁/漏锁
+      网关（DISABLEBYSYS 漂移=该熔断不熔断，致命程度同 order）。
+
+    Why ACC 同款校验：T1 加字面量时仅加了内部映射，未纳入连接期一致性校验，与 order
+    同受 xtquant 版本漂移风险；对称补全后，order 与 acc 字面量漂移均在 connect 阶段
+    fail-fast，不留单边盲区。
+
+    命名差异说明（xtconstant 真实命名，非笔误，Why 显式注释防误改）：
+    - ACCOUNT_STATUSING（无 LOGIN 后缀）↔ _QMT_ACC_LOGINING；
+    - ACCOUNT_STATUS_DISABLEBYSYS（无下划线 BYSYS）↔ _QMT_ACC_DISABLE_BYSYS；
+    - ACCOUNT_STATUS_DISABLEBYUSER ↔ _QMT_ACC_DISABLE_BYUSER。
     """
     if not _XTQUANT_AVAILABLE:
         return  # 无 xtquant 时无对象可校验，由 _ensure_xtquant 在连接处拦
+    # --- order 11 态契约（订单状态映射锚点）---
     expected = {
         "ORDER_JUNK": _QMT_ORDER_JUNK,
         "ORDER_SUCCEEDED": _QMT_ORDER_SUCCEEDED,
         "ORDER_PART_SUCC": _QMT_ORDER_PART_SUCC,
         "ORDER_CANCELED": _QMT_ORDER_CANCELED,
         "ORDER_PART_CANCEL": _QMT_ORDER_PART_CANCEL,
+        "ORDER_PARTSUCC_CANCEL": _QMT_ORDER_PARTSUCC_CANCEL,
+        "ORDER_REPORTED_CANCEL": _QMT_ORDER_REPORTED_CANCEL,
         "ORDER_REPORTED": _QMT_ORDER_REPORTED,
+        "ORDER_WAIT_REPORTING": _QMT_ORDER_WAIT_REPORTING,
         "ORDER_UNREPORTED": _QMT_ORDER_UNREPORTED,
+        "ORDER_UNKNOWN": _QMT_ORDER_UNKNOWN,
     }
+    # --- account 11 态契约（账号状态熔断锚点，T1 新增字面量对称校验）---
+    expected_acc = {
+        "ACCOUNT_STATUS_INVALID": _QMT_ACC_INVALID,
+        "ACCOUNT_STATUS_OK": _QMT_ACC_OK,
+        "ACCOUNT_STATUS_WAITING_LOGIN": _QMT_ACC_WAITING_LOGIN,
+        "ACCOUNT_STATUSING": _QMT_ACC_LOGINING,  # xtconstant 无 LOGIN 后缀，是 STATUSING
+        "ACCOUNT_STATUS_FAIL": _QMT_ACC_FAIL,
+        "ACCOUNT_STATUS_INITING": _QMT_ACC_INITING,
+        "ACCOUNT_STATUS_CORRECTING": _QMT_ACC_CORRECTING,
+        "ACCOUNT_STATUS_CLOSED": _QMT_ACC_CLOSED,
+        "ACCOUNT_STATUS_ASSIS_FAIL": _QMT_ACC_ASSIS_FAIL,
+        "ACCOUNT_STATUS_DISABLEBYSYS": _QMT_ACC_DISABLE_BYSYS,  # xtconstant 无下划线 BYSYS
+        "ACCOUNT_STATUS_DISABLEBYUSER": _QMT_ACC_DISABLE_BYUSER,
+    }
+    # 同款漂移检测：getattr 取真实 xtconstant 值，缺失（None）跳过、存在但 ≠ 字面量 → 漂移
     drifted = [f"{n}={getattr(xtconstant, n)}≠{v}" for n, v in expected.items()
                if getattr(xtconstant, n, None) is not None and getattr(xtconstant, n) != v]
-    if drifted:
-        raise RuntimeError(f"xtconstant 枚举契约漂移：{drifted}，请核对 xttrader.md 后更新本模块")
+    drifted_acc = [f"{n}={getattr(xtconstant, n)}≠{v}" for n, v in expected_acc.items()
+                   if getattr(xtconstant, n, None) is not None and getattr(xtconstant, n) != v]
+    if drifted or drifted_acc:
+        raise RuntimeError(
+            f"xtconstant 枚举契约漂移：order={drifted} acc={drifted_acc}，"
+            f"请核对 xttrader.md 后更新本模块"
+        )
 
 
 def _alert_account_status(gw, status_int: int, level: str) -> None:
@@ -721,9 +761,13 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
                                message=f"撤单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
 
         if rc == 0:
-            # 撤单指令已发出，最终状态以 on_stock_order 推送的 CANCELLED 为准
+            # rc==0 仅表「撤单指令已成功发出」，非订单终态——柜台可能因订单已成交 /
+            # 已撤而后续撤单失败（由 on_cancel_error / on_stock_order 推送推进）。
+            # 最终态以 on_stock_order 主推的 CANCELLED 为准；message 显式标注非终态，
+            # 防上层（engine/策略）误读为「撤单已成功」而错算敞口（风控拷问：敞口
+            # 错算=重复发单或漏对冲，实盘致命）。
             return OrderResult(order_id=order_id, state=OrderState.CANCELLED,
-                               message="撤单指令已发出，等待回报确认")
+                               message="撤单指令已发出（非终态），最终态以 on_stock_order 推送 CANCELLED 为准")
         return OrderResult(order_id=order_id, state=OrderState.FAILED,
                            message=f"撤单失败 rc={rc}")
 
