@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """二期自动交易引擎：APScheduler 四触发点编排 + 影子模式分流。
 
-物理意图（四触发点的真实业务节奏）：
-  eod_plan  15:35 T-1 晚：扫颈线法信号 → build_orders → save_plan（confirmed=False）
+物理意图（四触发点的真实业务节奏 · 术语对齐 T 日盘后扫盘 → T+1 执行）：
+  eod_plan  15:35 T 日盘后：扫颈线法信号 → build_orders → save_plan（confirmed=False）
               → push 钉钉（待研究员确认）。本阶段绝不下单（机器只产计划，人审是闸）。
+              次日（T+1 日）pre_open 才挂单执行。
   pre_open  09:22 T 日开盘前：① 撤昨日遗留未成交单 ② 读已确认计划
               → 注入动态白名单（过关5）→ 挂限价买 + 止盈限价卖（逐单 try-except 兜底）。
   stop_loss 每 5min 盘中：查 gw 真实持仓 + 现价（qmt_market_data.get_quote / xtdata），
@@ -92,42 +93,50 @@ def _trade_cfg() -> dict:
 # ============================================================================
 # 策略数据源辅助（二期 gap② · _eod 从 data_lake 加载 universe + 单 symbol 前复权日线）
 # ============================================================================
-def _load_universe() -> list:
+def _load_universe(lake) -> list:
     """加载创板科创可交易标的池（300/301/688/689 开头）。
 
     物理意图：复用 data_lake/a_shares_daily.parquet（MultiIndex date,symbol，全市场
     5 年前复权日线），按 symbol 前缀过滤创板科创。
+
+    ⚠️ 性能不变量（Task 7b fix · 性能阻断级修复）：
+        本函数**绝不 read_parquet**——lake 由调用方（``_eod``）入口一次性读入后注入，
+        全创板科创 1993 个标的共用同一份 DataFrame。
+        历史 bug：每个 symbol 都重读 455MB parquet（1.75s/次）→ 58 分钟纯 I/O，
+        15:35 的 ``_eod`` 根本无法在合理窗口完成。复用 lake 后整体扫描降至秒级。
 
     Why 收窄创板科创（不扫全市场）：
         颈线法 param_iter 基线口径（记忆 neckline-paramiter-baseline）——创板科创
         20cm 涨跌幅 + 流动性结构更契合颈线法形态学假设；主板/北交所不在该策略可交易池。
         实际环境若需扩池，按实际前缀在此调整（spec 红线：本过滤口径变更需同步基线重算）。
     """
-    import pandas as pd
-    # 相对 cwd 读 parquet（二期引擎常驻进程 cwd = 仓库根，与 scripts/market_breadth 同范式）
-    lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
+    # lake 已由 _eod 入口 read_parquet 一次注入，此处仅做 symbol 前缀过滤（零 I/O）
     syms = lake.index.get_level_values("symbol").unique().tolist()
     return [s for s in syms if s.split(".")[0].startswith(("300", "301", "688", "689"))]
 
 
-def _load_df_upto(symbol: str, date: str):
-    """加载 symbol 截至 date 的前复权日线（严格因果 .loc[:date] · 无前视）。
+def _load_df_upto(lake, symbol: str, date: str):
+    """从已加载的 lake 取 symbol 截至 date 的前复权日线（严格因果 .loc[:date] · 无前视）。
 
     Args:
+        lake:   ``_eod`` 入口一次性 ``pd.read_parquet`` 读入的 data_lake DataFrame
+                （MultiIndex date,symbol）。本函数**不 read_parquet**，避免每 symbol 重读。
         symbol: 形如 "300001.SZ"（与 data_lake MultiIndex level="symbol" 一致）。
-        date:   截断日（YYYY-MM-DD，_eod 传 T-1 收盘日）。
+        date:   截断日（YYYY-MM-DD，_eod 传 T 日盘后日 today——见下方术语说明）。
 
     Returns:
         该 symbol 截至 date（含 date）的前复权日线 DataFrame（OHLCV，DatetimeIndex）；
         symbol 不在 data_lake → 返 None（调用方 None-check 跳过）。
+
+    ⚠️ 性能不变量（Task 7b fix）：
+        本函数**绝不 read_parquet**——从传入的 lake 做 xs 切片，全创板科创 universe
+        复用同一份 DataFrame，1993 次 xs 从 1993 次 disk read 降为纯内存索引（毫秒级）。
 
     Why xs+sort_index+loc：
         - xs(level="symbol") 取单 symbol 切片（MultiIndex 标准范式）；
         - sort_index 保时间升序（ATR/MA 等时序算子前提）；
         - .loc[:date] 闭区间截断，防 today 之后的 K 线泄漏（前视偏差 = 回测致命）。
     """
-    import pandas as pd
-    lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
     try:
         return lake.xs(symbol, level="symbol").sort_index().loc[:date]
     except KeyError:
@@ -168,18 +177,21 @@ async def _submit(order, *, confirm: bool = True) -> dict:
 
 
 # ============================================================================
-# 触发点 1：eod_plan —— T-1 晚扫信号、落计划、推钉钉（不真下单）
+# 触发点 1：eod_plan —— T 日盘后扫信号、落计划、推钉钉（不真下单）
 # ============================================================================
 async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> dict:
-    """T-1 晚：颈线法信号 → 计划落盘（confirmed=False） → 推钉钉等研究员确认。
+    """T 日盘后：颈线法信号 → 计划落盘（confirmed=False） → 推钉钉等研究员确认。
 
-    物理意图：机器批量扫信号易受数据瑕疵/前视偏差/极端行情误判，T-1 晚必须给人
-    一次否决机会——故本函数只产计划不下单（spec §2 确认闸红线）。
+    物理意图（术语对齐物理时序 · Task 7b fix）：
+        本函数由 ``_eod`` 在 **T 日盘后 15:35** 调用，扫 T 日新突破信号，产 T+1 日
+        生效计划；机器批量扫信号易受数据瑕疵/前视偏差/极端行情误判，T 日盘后必须给人
+        一次否决机会——故本函数只产计划不下单（spec §2 确认闸红线）。
 
     Args:
-        date:     T 日（计划生效日），如 "2026-07-22"。
+        date:     T+1 日（计划生效日），如 "2026-07-22"。由 _eod 传 today（T 日），
+                  物理上计划在 T+1 日 pre_open 挂单执行。
         signals:  NecklineMethodStrategy.scan_at 返回的 trade dict 列表。
-        atr_map:  {symbol: ATR}，缺 ATR 的标的在 build 阶段被跳过（不抛）。
+        atr_map:  {symbol: ATR}，缺 ATR 的标的（_eod 已过滤）在 build 阶段被跳过（不抛）。
         capital:  总资金（仓位 cap 计算基准）。
 
     Returns:
@@ -481,8 +493,8 @@ class TradingEngine:
     独立进程内构造**，绝不在 server 进程内实例化（否则 dynamic_whitelist._DYNAMIC
     模块级全局会污染 server 手动下单路径，破坏 server 行为向后兼容）。
 
-    四 cron（Task4 已配 env，缺省值对齐 A 股交易日历）：
-        eod_plan   15:35 周一-五  T-1 晚扫信号 + 落计划 + 推钉钉
+    四 cron（Task4 已配 env，缺省值对齐 A 股交易日历 · 术语对齐 T 日盘后扫盘）：
+        eod_plan   15:35 周一-五  T 日盘后扫信号 + 落计划 + 推钉钉（T+1 执行）
         pre_open   09:22 周一-五  T 日开盘前撤昨日 + 挂当日单
         stop_loss  */5  9-14 周一-五  盘中每 5 分钟止损监控
         post_close 15:30 周一-五  盘后对账 + 清白名单
@@ -522,11 +534,22 @@ class TradingEngine:
     async def _eod(self) -> None:
         """cron 包装：节假日跳过；交易日 resolve 多实验 + scan_live 产信号 → eod_plan。
 
-        物理意图（二期 gap② 策略数据源）：
-            T-1 晚 15:35 触发——从实验配置中心读当前所有在线实验（status=ACTIVE+weight>0），
-            按每实验的 strategy_name+params 装配策略实例，对创板科创可交易池逐 symbol
-            调 scan_live(df_upto 截至 today) 产【当日新突破】信号，注入实验归因字段后
-            透传 eod_plan 落盘（confirmed=False 待人审）。
+        物理意图（二期 gap② 策略数据源 · 术语对齐物理时序）：
+            **T 日盘后 15:35 触发**——从实验配置中心读当前所有在线实验
+            （status=ACTIVE+weight>0），按每实验的 strategy_name+params 装配策略实例，
+            对创板科创可交易池逐 symbol 调 scan_live(df_upto 截至 T 日 today) 产
+            【T 日新突破】信号，注入实验归因字段后透传 eod_plan 落盘（confirmed=False
+            待研究员人审），次日（T+1 日开盘前 pre_open）挂单执行。
+
+            ⚠️ 术语对齐（Task 7b fix · 别再误称「T-1 收盘日」）：
+                传入的 ``today`` 即 T 日本身（cron 在 T 日 15:35 触发，扫 T 日盘后突破），
+                计划生效日 = T+1。早期注释里的「T-1 收盘日」语义混淆，统一改为「T 日盘后」。
+
+        ⚠️ 性能不变量（Task 7b fix · 阻断级修复）：
+            data_lake/a_shares_daily.parquet（455MB，全市场 5 年）在本函数**入口只读一次**，
+            传给 _load_universe(lake) 与 _load_df_upto(lake, sym, today) 复用。
+            历史 bug：每 symbol 各 read_parquet 一次（1.75s × 1993 标的 = 58 分钟纯 I/O），
+            15:35 的 _eod 根本无法在合理窗口完成；复用 lake 后整体降至秒级。
 
         无前视契约（spec 红线）：
             df_upto 由 _load_df_upto 截断于 today（.loc[:date]），不含 today 之后任何 K 线；
@@ -545,6 +568,7 @@ class TradingEngine:
             logger.info("eod_plan 跳过：今日非交易日 %s", today)
             return
         # 局部 import（避免顶层拉起 experiment/strategies 子系统，保持引擎薄编排）：
+        import pandas as pd
         from experiment.resolver import resolve_active
         from strategies.registry import build_strategy
 
@@ -554,14 +578,19 @@ class TradingEngine:
             logger.warning("_eod 无在线实验，跳过（fail-fast）")
             return
 
-        universe = _load_universe()
+        # ⚠️ 性能红线（Task 7b fix）：data_lake 入口只读一次，全 universe 复用同一份
+        # DataFrame。455MB parquet 单次 read ≈ 1.75s；历史每 symbol 重读致 1993 × 1.75s
+        # ≈ 58 分钟纯 I/O，_eod 在 15:35 窗口完全无法完成。lake 复用后降为单次 disk read。
+        lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
+
+        universe = _load_universe(lake)
         signals: list = []
         atr_map: dict = {}
         # 逐实验 × 逐 symbol 扫信号；单 symbol scan_live 异常仅 warn 跳过，不炸整批
         for exp in experiments:
             strategy = build_strategy(exp.strategy_name, cfg_override=exp.params)
             for sym in universe:
-                df_upto = _load_df_upto(sym, today)
+                df_upto = _load_df_upto(lake, sym, today)
                 # 历史不足（<60 行）跳过：颈线 window+ATR 窗口需足够样本，否则识别失真
                 if df_upto is None or len(df_upto) < 60:
                     continue
@@ -571,8 +600,12 @@ class TradingEngine:
                         s["experiment_id"] = exp.experiment_id
                         s["experiment_weight"] = exp.weight
                         signals.append(s)
-                        # atr_map：build_orders_from_signals 算止损=颈线−N×ATR 用
-                        atr_map[sym] = s.get("atr", 0.0)
+                        # ⚠️ atr 防御（Task 7b fix · Minor）：缺 atr（None/0/NaN）不建项。
+                        # Why：build_orders_from_signals 算 stop_price = neckline − N×ATR，
+                        # 若 atr=0.0 → stop_price = neckline，产「止损价=颈线价」的废单
+                        # （等于把买入价直接挂止损价、不止损），不如让 build 阶段干净跳过。
+                        if s.get("atr"):
+                            atr_map[sym] = s["atr"]
                 except Exception as e:  # noqa: BLE001 单标的挡板（scope #7 兜底）
                     logger.warning("_eod scan_live %s 异常跳过: %s", sym, e)
 

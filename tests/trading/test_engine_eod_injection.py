@@ -2,7 +2,9 @@
 """_eod 注入 resolve_active+scan_live 单测（Task 7b · 二期 gap② 策略数据源）。
 
 测试边界（控制器 scope #5 · 不真读 parquet / 不真起 schtasks）：
-- monkeypatch ``engine._load_universe`` / ``engine._load_df_upto`` 跳过真读 data_lake；
+- monkeypatch ``engine._load_universe`` / ``engine._load_df_upto`` 适配 lake 参数签名
+  （Task 7b fix 后两者均接收 ``lake`` DataFrame 由 _eod 入口一次性注入，本层 mock 成
+  返固定 symbol 列表 / mock df，不再 mock read_parquet——保持单测在「不触盘」边界）；
 - monkeypatch ``experiment.resolver.resolve_active`` 返受控实验集；
 - monkeypatch ``strategies.registry.build_strategy`` 返 mock strategy（受控 scan_live 输出）；
 - monkeypatch ``engine.calendar.is_trading_day`` 恒真（避开节假日判定）；
@@ -36,6 +38,15 @@ def _isolate_plan_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
     # 拦截真发钉钉（网络副作用隔离）
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
+    # 拦截 data_lake 真 read_parquet（Task 7b fix 后 _eod 入口仍会读一次 lake 作为
+    # universe / df_upto 的共享源；本测试聚焦注入链路而非真盘数据，故 monkeypatch
+    # pandas.read_parquet 返一个空 placeholder DataFrame，避免 455MB disk read）。
+    # _load_universe / _load_df_upto 已被各 case 单独 monkeypatch，不消费此 placeholder。
+    import pandas as _pd
+    monkeypatch.setattr(
+        _pd, "read_parquet",
+        lambda *a, **kw: _pd.DataFrame(),
+    )
 
 
 # ============================================================================
@@ -81,11 +92,12 @@ def test_eod_resolves_experiments_and_tags_signals(monkeypatch):
         lambda name, cfg_override=None, **kw: _MockStrategy(),
     )
 
-    # ③ 受控 universe（不走真读 parquet）
-    monkeypatch.setattr(engine, "_load_universe", lambda: ["300001.SZ", "688001.SH"])
+    # ③ 受控 universe（不走真读 parquet）——Task 7b fix 后签名加 lake 参数
+    monkeypatch.setattr(engine, "_load_universe", lambda lake: ["300001.SZ", "688001.SH"])
 
     # ④ 受控 df_upto（≥60 行的空 OHLCV 骨架，scan_live 已被 mock 不真用字段）
-    def _fake_load_df_upto(symbol, date):
+    # Task 7b fix 后签名变为 (lake, symbol, date)，lake 由 _eod 入口注入（此处忽略）
+    def _fake_load_df_upto(lake, symbol, date):
         idx = pd.date_range("2026-01-01", periods=80, freq="D")
         return pd.DataFrame(
             {"open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0, "volume": 1000},
@@ -170,10 +182,10 @@ def test_eod_skips_short_history(monkeypatch):
         lambda name, cfg_override=None, **kw: _ShouldNotScan(),
     )
 
-    monkeypatch.setattr(engine, "_load_universe", lambda: ["300001.SZ"])
+    monkeypatch.setattr(engine, "_load_universe", lambda lake: ["300001.SZ"])
 
-    # 返 <60 行（断言 < 60 即跳过）
-    def _short_df(symbol, date):
+    # 返 <60 行（断言 < 60 即跳过）——Task 7b fix 后签名 (lake, symbol, date)
+    def _short_df(lake, symbol, date):
         idx = pd.date_range("2026-01-01", periods=30, freq="D")
         return pd.DataFrame(
             {"open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0, "volume": 1000},
