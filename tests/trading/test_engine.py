@@ -121,7 +121,7 @@ def test_pre_open_cancels_yesterday_open_orders(monkeypatch):
         cancelled["n"] += 1
         return 0
 
-    monkeypatch.setattr(engine.circuit_breaker, "cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
 
     asyncio.run(engine.pre_open("2099-01-02"))
@@ -139,7 +139,7 @@ def test_pre_open_skip_cancel_when_no_gateway(monkeypatch):
         cancelled["n"] += 1
         return 0
 
-    monkeypatch.setattr(engine.circuit_breaker, "cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(engine, "get_gateway", lambda: None)  # 网关未装配
 
     result = asyncio.run(engine.pre_open("2099-01-02"))  # 不应抛
@@ -158,7 +158,7 @@ def test_pre_open_submit_raise_continues(monkeypatch):
     trading_plan.confirm_plan("2099-01-02")
 
     monkeypatch.setattr(engine, "get_gateway", lambda: object())
-    monkeypatch.setattr(engine.circuit_breaker, "cancel_all_open_orders",
+    monkeypatch.setattr(engine, "_cancel_all_open_orders",
                         _no_op_cancel)
 
     calls = []

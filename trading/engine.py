@@ -46,13 +46,13 @@ from typing import Any, Mapping, Optional
 
 from trading import (
     calendar,
-    circuit_breaker,
     dynamic_whitelist,
     qmt_market_data,
     reconcile_job,
     signal_runner,
     trading_plan,
 )
+from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 from trading.signal_runner import build_orders_from_signals
 from trading.compute.stop import should_trigger_stop
 
@@ -284,7 +284,7 @@ async def pre_open(date: str) -> dict:
         logger.warning("pre_open 撤昨日单跳过：交易网关未装配（gw=None）")
     else:
         try:
-            n_cancelled = await circuit_breaker.cancel_all_open_orders(gw)
+            n_cancelled = await _cancel_all_open_orders(gw)
             logger.info("pre_open 撤昨日未成交单 %s 笔", n_cancelled)
         except Exception:
             # 撤单失败不阻塞挂单主路径（单笔失败已在 cancel_all 内被吞，此处兜整体异常）
@@ -461,7 +461,7 @@ async def post_close(
         TODO(live 前必修)：定 equity 来源（如 gw.query_asset 或新增 get_equity 接口）
         后，在此处串联：
             1) check_daily_loss_limit(start_equity, curr_equity) → True 即熔断
-            2) circuit_breaker.cancel_all_open_orders(gw) 撤所有未终态单
+            2) io.breaker.cancel_all_open_orders(gw) 撤所有未终态单
             3) trading_service.emergency_halt() 置 lock_down + 告警
         无上述三步，post_close 不算完成 live 准入。
     """

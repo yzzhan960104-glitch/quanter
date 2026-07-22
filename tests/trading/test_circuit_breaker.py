@@ -14,8 +14,23 @@ Why 类型契约要反映真实网关：
 import asyncio
 import os
 
-from trading import circuit_breaker as cb
+# Layer2 阶段6：circuit_breaker 垫片已删，两个被测函数的真身分别在：
+# - check_daily_loss_limit → trading.compute.breaker（纯判定 functional core）
+# - cancel_all_open_orders → trading.io.breaker（撤单副作用壳）
+# 本测试用 cb 别名聚合两者，保持测试体内 cb.check_daily_loss_limit /
+# cb.cancel_all_open_orders 调用零改动（语义仍是「熔断」工具函数对）。
+from trading.compute.breaker import check_daily_loss_limit as _check_loss
+from trading.io.breaker import cancel_all_open_orders as _cancel_all
 from trading.order_state import OrderState
+
+
+class _CBShim:
+    """聚合 compute.breaker + io.breaker 两真身的熔断工具对（兼容旧 cb 别名）。"""
+    check_daily_loss_limit = staticmethod(_check_loss)
+    cancel_all_open_orders = staticmethod(_cancel_all)
+
+
+cb = _CBShim
 
 
 # ----------------------------------------------------------------- 日亏熔断
