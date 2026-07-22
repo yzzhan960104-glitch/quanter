@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import replace as _dc_replace
 from datetime import datetime
 from typing import Any, Mapping, Optional
 
@@ -190,7 +191,8 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
     Args:
         date:     T+1 日（计划生效日），如 "2026-07-22"。由 _eod 传 today（T 日），
                   物理上计划在 T+1 日 pre_open 挂单执行。
-        signals:  NecklineMethodStrategy.scan_at 返回的 trade dict 列表。
+        signals:  NecklineMethodStrategy.scan_live 返回的 list[Signal]（Layer2 阶段1 后为
+                  frozen dataclass，_eod 已用 dataclasses.replace 注入实验归因字段）。
         atr_map:  {symbol: ATR}，缺 ATR 的标的（_eod 已过滤）在 build 阶段被跳过（不抛）。
         capital:  总资金（仓位 cap 计算基准）。
 
@@ -599,16 +601,23 @@ class TradingEngine:
                     continue
                 try:
                     for s in strategy.scan_live(sym, df_upto, today):
-                        # 注入实验归因字段（signal_runner/PlannedOrder 透传链路依赖）
-                        s["experiment_id"] = exp.experiment_id
-                        s["experiment_weight"] = exp.weight
+                        # 注入实验归因字段（signal_runner/PlannedOrder 透传链路依赖）。
+                        # Layer2 阶段1：scan_live 现返 frozen Signal dataclass，原地赋值
+                        # ``s["x"]=...`` 会抛 FrozenInstanceError；用 dataclasses.replace
+                        # 产出带归因的新 Signal（spec §0「参数以不可变快照锁定」红线，
+                        # 止损价是实盘风险参数，跨实验串味 = 风险归因错配，故 Signal 不可变）。
+                        s = _dc_replace(
+                            s,
+                            experiment_id=exp.experiment_id,
+                            experiment_weight=exp.weight,
+                        )
                         signals.append(s)
                         # ⚠️ atr 防御（Task 7b fix · Minor）：缺 atr（None/0/NaN）不建项。
                         # Why：build_orders_from_signals 算 stop_price = neckline − N×ATR，
                         # 若 atr=0.0 → stop_price = neckline，产「止损价=颈线价」的废单
                         # （等于把买入价直接挂止损价、不止损），不如让 build 阶段干净跳过。
-                        if s.get("atr"):
-                            atr_map[sym] = s["atr"]
+                        if s.atr:
+                            atr_map[sym] = s.atr
                 except Exception as e:  # noqa: BLE001 单标的挡板（scope #7 兜底）
                     logger.warning("_eod scan_live %s 异常跳过: %s", sym, e)
 

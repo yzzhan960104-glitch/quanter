@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """颈线法信号 → 下单计划转换（Task 3，Task 5 扩展实验归因 + 资金权重）。
 
-把 NecklineMethodStrategy.scan_at 返回的 trade dict 转成 PlannedOrder（OrderRequest + 止损/止盈价）。
+把 NecklineMethodStrategy.scan_live 返回的 Signal dataclass 转成 PlannedOrder（OrderRequest + 止损/止盈价）。
 仓位：capital × pos_cap × experiment_weight / entry_price，向下取整到 100 整手（A 股）。
 止损/止盈：颈线基准 + ATR/H（与 simulate_exit 同口径）。
+
+Layer2 阶段1：信号入参从 ``list[dict]`` 收敛为 ``list[Signal]``（frozen dataclass），
+本函数改读 ``signal.symbol / signal.entry_price / ...`` 属性，去字符串键访问。
 
 实验归因（Task 5）：
 - PlannedOrder 新增 experiment_id / experiment_weight 两个默认值字段，把实验系统的
@@ -15,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from trading.execution_gateway import OrderRequest
+from strategies.signal import Signal
 
 
 @dataclass
@@ -34,7 +38,7 @@ class PlannedOrder:
 
 
 def build_orders_from_signals(
-    signals: list[dict],
+    signals: list[Signal],
     *,
     capital: float,
     pos_cap: float,
@@ -43,9 +47,14 @@ def build_orders_from_signals(
 ) -> list[PlannedOrder]:
     """信号列表 → PlannedOrder 列表。缺 ATR/数据异常的跳过（不抛）。
 
+    Layer2 阶段1：signals 改为 ``list[Signal]``（frozen dataclass），本函数读
+    ``signal.symbol / signal.entry_price / ...`` 属性。归因字段（experiment_id /
+    experiment_weight）由 Signal 默认值保证（""/ 1.0），_eod 用 dataclasses.replace
+    注入。
+
     资金分配（Task 5）：budget = capital × pos_cap × experiment_weight
     - 每个信号按各自 experiment_weight 分流资金额度（灰度权重在此落地为实际手数）；
-    - 老信号无 experiment_weight → 默认 1.0，budget 与原口径完全一致（向后兼容）。
+    - 老信号无 experiment_weight → Signal 默认 1.0，budget 与原口径完全一致（向后兼容）。
 
     Why 跳过而非抛错：自动交易引擎在盘后批处理多只标的时，单只缺 ATR/数据异常
     不应中断整批；此处静默跳过，由上层日志记录后人工补救。
@@ -54,23 +63,23 @@ def build_orders_from_signals(
     tp_mult = stop_cfg.get("tp_h_mult", 2.0)
     out: list[PlannedOrder] = []
     for s in signals:
-        sym = s.get("symbol")
-        entry = s.get("entry_price")
-        neckline = s.get("neckline")
-        bottom = s.get("bottom")
+        sym = s.symbol
+        entry = s.entry_price
+        neckline = s.neckline
+        bottom = s.bottom
         # ATR 取值（C2 · final-fix）：优先用 signal 自身 atr，fallback atr_map。
-        # Why 优先 signal atr：_eod 内 ``atr_map[sym] = s["atr"]`` 多实验同标的灰度时
-        # 被最后写入的实验覆盖 → 共享 atr_map 已无法按实验区分 ATR。signal dict 已
-        # 携带各自的 s["atr"]（Task 7a scan_live 返回），用 signal 自身 atr 才能保证
+        # Why 优先 signal atr：_eod 内 ``atr_map[sym] = s.atr`` 多实验同标的灰度时
+        # 被最后写入的实验覆盖 → 共享 atr_map 已无法按实验区分 ATR。Signal 已
+        # 携带各自的 s.atr（Task 7a scan_live 返回），用 signal 自身 atr 才能保证
         # 每个 PlannedOrder.stop_price 用各自实验的 ATR（spec §0「参数以不可变快照锁定」
         # —— 红线：止损价是实盘风险参数，跨实验串味 = 风险归因错配）。
         # 老链路 signal 无 atr 字段 → 退回 atr_map（向后兼容，零回归）。
-        sig_atr = s.get("atr")
+        sig_atr = s.atr
         atr = sig_atr if sig_atr is not None else (atr_map.get(sym) if sym else None)
         if not sym or entry is None or neckline is None or bottom is None or atr is None:
             continue
-        # 实验归因：取每信号各自的权重（灰度分流）；缺省 1.0 = 满仓口径，向后兼容
-        weight = s.get("experiment_weight", 1.0)
+        # 实验归因：取每信号各自的权重（灰度分流）；Signal 默认 1.0 = 满仓口径，向后兼容
+        weight = s.experiment_weight
         # 仓位：capital × pos_cap × weight / entry，向下取整到 100 整手（A 股 1 手=100 股）
         # Why weight 放进 budget：让小权重实验也按整手规则下沉，避免 0~100 股的零股废单；
         # 同权重跨标的资金额度可直接比较，便于回测/实盘对齐归因口径。
@@ -88,8 +97,8 @@ def build_orders_from_signals(
         out.append(PlannedOrder(
             order=OrderRequest(symbol=sym, qty=float(qty), side="buy", price=float(entry)),
             stop_price=stop_price, take_profit=take_profit, neckline=float(neckline),
-            # 归因透传：experiment_id 缺省 ""（老链路），experiment_weight 已在 budget 落地
-            experiment_id=s.get("experiment_id", ""),
+            # 归因透传：experiment_id Signal 默认 ""（老链路），experiment_weight 已在 budget 落地
+            experiment_id=s.experiment_id,
             experiment_weight=weight,
         ))
     return out

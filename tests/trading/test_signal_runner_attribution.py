@@ -8,14 +8,17 @@
 """
 import pytest
 
+from strategies.signal import Signal
 from trading.signal_runner import PlannedOrder, build_orders_from_signals
 
 
 def _signal(symbol="000001.SZ", entry=10.0, neckline=10.5, bottom=9.5,
-            exp_id="e1", weight=0.2):
-    """构造带实验归因的颈线法信号 dict。"""
-    return {"symbol": symbol, "entry_price": entry, "neckline": neckline,
-            "bottom": bottom, "experiment_id": exp_id, "experiment_weight": weight}
+            exp_id="e1", weight=0.2, atr=None):
+    """构造带实验归因的颈线法 Signal（Layer2 阶段1 后 dict → Signal dataclass）。"""
+    return Signal(
+        symbol=symbol, entry_price=entry, neckline=neckline,
+        bottom=bottom, experiment_id=exp_id, experiment_weight=weight, atr=atr,
+    )
 
 
 def test_planned_order_carries_experiment_id():
@@ -41,7 +44,7 @@ def test_budget_scaled_by_weight():
 
 def test_signal_without_attribution_defaults_weight_one():
     """老 signal（无 experiment_weight）默认 weight=1.0，experiment_id=""（向后兼容）。"""
-    s = {"symbol": "000001.SZ", "entry_price": 10.0, "neckline": 10.5, "bottom": 9.5}
+    s = Signal(symbol="000001.SZ", entry_price=10.0, neckline=10.5, bottom=9.5)
     orders = build_orders_from_signals([s], capital=1_000_000, pos_cap=0.05,
         atr_map={"000001.SZ": 0.5}, stop_cfg={"stop_atr_mult": 2.0, "tp_h_mult": 2.0})
     assert orders[0].experiment_weight == 1.0 and orders[0].experiment_id == ""
@@ -61,10 +64,10 @@ def test_per_experiment_atr_no_collision():
     """
     # 同标的两 signal，atr 各 0.4 / 0.8；共享 atr_map 模拟 _eod 灰度覆盖
     # （e2 后写入 → atr_map["000001.SZ"] 被覆盖成 0.8，e1 的 atr 在 map 里被淹没）
-    s1 = {"symbol": "000001.SZ", "entry_price": 10.0, "neckline": 10.5, "bottom": 9.5,
-          "atr": 0.4, "experiment_id": "e1", "experiment_weight": 0.5}
-    s2 = {"symbol": "000001.SZ", "entry_price": 10.0, "neckline": 10.5, "bottom": 9.5,
-          "atr": 0.8, "experiment_id": "e2", "experiment_weight": 0.5}
+    s1 = Signal(symbol="000001.SZ", entry_price=10.0, neckline=10.5, bottom=9.5,
+                atr=0.4, experiment_id="e1", experiment_weight=0.5)
+    s2 = Signal(symbol="000001.SZ", entry_price=10.0, neckline=10.5, bottom=9.5,
+                atr=0.8, experiment_id="e2", experiment_weight=0.5)
     # atr_map 模拟 _eod 写入：s2 后写覆盖 s1（仅留 0.8）
     atr_map = {"000001.SZ": 0.8}
 

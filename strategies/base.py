@@ -17,8 +17,16 @@ from typing import Protocol, runtime_checkable
 import pandas as pd
 
 
-# 标准 trade dict 必填字段（引擎 _compute_stats 依赖；策略 scan_at 返回的每个 dict 必须含）
-# 字段物理意图见各策略实现；引擎统计层只读这些键，不感知策略种类。
+# 标准 Signal 必填字段集（向后兼容常量 · Layer2 阶段1 后由 Signal dataclass 取代）。
+#
+# 历史定位：trade dict 字段完整性契约（引擎 _compute_stats 只读这些键）。
+# 现状（2026-07-23 · Layer2 阶段1）：scan_at 已返 ``list[Signal]``（frozen dataclass），
+# 字段集固化在 ``strategies/signal.Signal`` 类定义里（含回测 TRADE_REQUIRED_KEYS +
+# scan_live 实盘字段 + 实验归因），此 set 保留供：
+#   ① 向后兼容（外部模块仍 from strategies import TRADE_REQUIRED_KEYS）；
+#   ② 文档查阅（一眼看清回测侧必填字段最小集）；
+#   ③ 未来若需运行时校验 Signal 是否填齐回测必填项，可基于此 set 派生。
+# 新代码不应依赖此 set 做字段判断，应直接读 Signal 属性（类型安全）。
 TRADE_REQUIRED_KEYS = {
     "symbol",          # 标的代码
     "signal_type",     # 信号类型（caisen: w_bottom/head_shoulder/...；颈线法: neckline）
@@ -63,7 +71,7 @@ class Strategy(Protocol):
     ) -> list:
         """对单 symbol 在 T 日做"识别 + 进场 + 出场"完整闭环。
 
-        返回 T 日成交的 trade dict 列表（0~N 个，每个含 TRADE_REQUIRED_KEYS）。
+        返回 T 日成交的 ``list[Signal]``（0~N 个，每个填齐 TRADE_REQUIRED_KEYS 对应字段）。
         未触发/未成交/被去重跳过 → 返回空列表。引擎把所有非空 hit 汇入统计。
 
         df_T：严格无前视（= df.loc[:T]）。strategy_state：precompute 初始化，可跨 T 更新。

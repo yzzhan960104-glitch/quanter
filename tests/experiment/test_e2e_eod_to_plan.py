@@ -93,17 +93,19 @@ def _make_mock_strategy_factory(captured_signals=None):
     """构造 ``build_strategy`` 的 mock 替代函数。
 
     Args:
-        captured_signals: 可选 list，strategy.scan_live 被调时会 append 进该 list，
+        captured_signals: 可选 list，strategy.scan_live 被调时会 append 进该 list,
                           供测试断言「scan_live 真被 _eod 调用且收到正确入参」。
 
     物理意图：模拟 strategies/neckline_method.scan_live 的字段契约（ NecklineMethodStrategy
-    实例方法 ``scan_live(symbol, df_upto, date) -> list[dict]``），只对 1 个标的返 1 条
-    信号，便于精准断言归因字段注入。
+    实例方法 ``scan_live(symbol, df_upto, date) -> list[Signal]``，Layer2 阶段1 后返
+    Signal dataclass），只对 1 个标的返 1 条信号，便于精准断言归因字段注入。
 
     返回的 mock strategy 与真实策略的字段对齐：
-        {symbol, signal_type, formed_at, breakout_date, neckline, bottom, entry_price, atr}
+        Signal(symbol, signal_type, formed_at, breakout_date, neckline, bottom, entry_price, atr)
     其中 ``atr`` 字段 _eod 会读并建 atr_map（缺 atr 不建项，signal_runner 会跳过该 symbol）。
     """
+    from strategies.signal import Signal
+
     class _MockStrategy:
         def __init__(self, *args, **kwargs):
             pass
@@ -114,16 +116,16 @@ def _make_mock_strategy_factory(captured_signals=None):
             # 只对 300001.SZ 返信号（其他标的返空，验证归因只挂到真信号上）
             if symbol != "300001.SZ":
                 return []
-            return [{
-                "symbol": symbol,
-                "signal_type": "neckline",
-                "formed_at": date,
-                "breakout_date": date,
-                "neckline": 10.5,
-                "bottom": 9.5,
-                "entry_price": 10.0,
-                "atr": 0.5,  # 非 None/0/NaN，_eod 会建 atr_map[symbol]=0.5
-            }]
+            return [Signal(
+                symbol=symbol,
+                signal_type="neckline",
+                formed_at=date,
+                breakout_date=date,
+                neckline=10.5,
+                bottom=9.5,
+                entry_price=10.0,
+                atr=0.5,  # 非 None/0/NaN，_eod 会建 atr_map[symbol]=0.5
+            )]
 
     def _factory(name, cfg_override=None, **kwargs):
         return _MockStrategy()
@@ -233,9 +235,10 @@ def test_e2e_attribution_chain(db, tmp_path, monkeypatch):
     signals = captured.get("signals", [])
     assert len(signals) == 1, "300001.SZ 应产 1 条信号（688001.SH 无信号）"
     s = signals[0]
-    assert s["symbol"] == "300001.SZ"
-    assert s["experiment_id"] == "e1",         "归因字段 experiment_id 未注入 signal"
-    assert s["experiment_weight"] == 1.0,      "归因字段 experiment_weight 未注入 signal"
+    # Layer2 阶段1：signals 现为 list[Signal]（frozen dataclass），读属性验证归因注入
+    assert s.symbol == "300001.SZ"
+    assert s.experiment_id == "e1",         "归因字段 experiment_id 未注入 signal"
+    assert s.experiment_weight == 1.0,      "归因字段 experiment_weight 未注入 signal"
 
     # 5.3 atr_map 建立（key=symbol, value=signal atr，build_orders 据此算 stop_price）
     assert captured["atr_map"].get("300001.SZ") == 0.5
@@ -285,6 +288,8 @@ def test_e2e_multi_experiment_attribution_split(db, monkeypatch):
 
     # ② mock 策略：对每实验的 300001.SZ 都返信号（atr=0.5）
     # 把每条 signal 打上「来自哪个实验」的内嵌标记（_eod 会随后覆盖 experiment_id）
+    from strategies.signal import Signal
+
     class _SplitStrategy:
         def __init__(self, *args, **kwargs):
             pass
@@ -292,11 +297,11 @@ def test_e2e_multi_experiment_attribution_split(db, monkeypatch):
         def scan_live(self, symbol, df_upto, date):
             if symbol != "300001.SZ":
                 return []
-            return [{
-                "symbol": symbol, "signal_type": "neckline",
-                "formed_at": date, "breakout_date": date,
-                "neckline": 10.5, "bottom": 9.5, "entry_price": 10.0, "atr": 0.5,
-            }]
+            return [Signal(
+                symbol=symbol, signal_type="neckline",
+                formed_at=date, breakout_date=date,
+                neckline=10.5, bottom=9.5, entry_price=10.0, atr=0.5,
+            )]
 
     monkeypatch.setattr(
         "strategies.registry.build_strategy",
@@ -332,7 +337,7 @@ def test_e2e_multi_experiment_attribution_split(db, monkeypatch):
     orders = captured["orders"]
     assert len(signals) == 2 and len(orders) == 2
 
-    sig_eids = {s["experiment_id"] for s in signals}
+    sig_eids = {s.experiment_id for s in signals}
     ord_eids = {o.experiment_id for o in orders}
     assert sig_eids == {"e1", "e2"}, "signal 归因应覆盖两实验"
     assert ord_eids == {"e1", "e2"}, "PlannedOrder 归因应覆盖两实验（不串号）"

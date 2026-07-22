@@ -67,7 +67,9 @@ def test_eod_resolves_experiments_and_tags_signals(monkeypatch):
         "experiment.resolver.resolve_active", lambda db_path=None: [fake_exp]
     )
 
-    # ② mock strategy：scan_live 返 1 条信号（字段契约对齐 strategies/neckline_method.scan_live）
+    # ② mock strategy：scan_live 返 1 条 Signal（字段契约对齐 strategies/neckline_method.scan_live）
+    from strategies.signal import Signal
+
     class _MockStrategy:
         def __init__(self, *a, **kw):
             pass
@@ -76,16 +78,16 @@ def test_eod_resolves_experiments_and_tags_signals(monkeypatch):
             # 只对 300001.SZ 返信号（验证归因字段注入）
             if symbol != "300001.SZ":
                 return []
-            return [{
-                "symbol": symbol,
-                "signal_type": "neckline",
-                "formed_at": date,
-                "breakout_date": date,
-                "neckline": 10.5,
-                "bottom": 9.5,
-                "entry_price": 10.0,
-                "atr": 0.25,
-            }]
+            return [Signal(
+                symbol=symbol,
+                signal_type="neckline",
+                formed_at=date,
+                breakout_date=date,
+                neckline=10.5,
+                bottom=9.5,
+                entry_price=10.0,
+                atr=0.25,
+            )]
 
     monkeypatch.setattr(
         "strategies.registry.build_strategy",
@@ -126,9 +128,10 @@ def test_eod_resolves_experiments_and_tags_signals(monkeypatch):
     signals = captured.get("signals", [])
     assert len(signals) == 1
     s = signals[0]
-    assert s["symbol"] == "300001.SZ"
-    assert s["experiment_id"] == "exp-001"      # 归因字段注入
-    assert s["experiment_weight"] == 0.3        # 权重字段注入
+    # Layer2 阶段1：signals 现为 list[Signal]（frozen dataclass），读属性验证归因注入
+    assert s.symbol == "300001.SZ"
+    assert s.experiment_id == "exp-001"      # 归因字段注入（_eod 用 dataclasses.replace）
+    assert s.experiment_weight == 0.3        # 权重字段注入
     # atr_map 同步建立（key=symbol, value=信号 atr）
     assert captured["atr_map"].get("300001.SZ") == 0.25
 

@@ -65,13 +65,16 @@ def test_eod_plan_dry_run_no_real_order(monkeypatch):
 
 def test_eod_plan_produces_nested_orders(monkeypatch):
     """scope #1：eod_plan 生产的 orders 必须是嵌套结构（与 Task8 push 一致）。"""
+    from strategies.signal import Signal
+
     monkeypatch.setattr(engine, "_submit", _no_op_submit)
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
 
-    signal = [{
-        "symbol": "600000.SH", "entry_price": 10.0,
-        "neckline": 10.5, "bottom": 9.5,
-    }]
+    # Layer2 阶段1：signals 改为 list[Signal]（frozen dataclass）
+    signal = [Signal(
+        symbol="600000.SH", entry_price=10.0,
+        neckline=10.5, bottom=9.5,
+    )]
     asyncio.run(
         engine.eod_plan("2099-01-01", signals=signal,
                         atr_map={"600000.SH": 0.2}, capital=1_000_000)

@@ -26,6 +26,9 @@ from .neckline.backtest import simulate_exit, EXEC_DEFAULTS
 
 from .neckline_schema import NecklineConfig
 from .registry import register_strategy
+# Layer2 阶段1：scan_at / scan_live 统一返 list[Signal]（frozen dataclass），
+# 替代散落多处的 dict 字符串键访问。决策逻辑零改动，只改返回封装。
+from .signal import Signal
 
 # 识别层 / 执行层 键集（cfg_override 拆分用）
 _NECKLINE_ID_KEYS = (
@@ -64,7 +67,11 @@ class NecklineMethodStrategy:
         return {"atr_full": atr_full, "full_df": full_df}
 
     def scan_at(self, symbol: str, df_T, T, strategy_state: dict) -> list:
-        """对单 symbol 在 T 日：detect_neckline_method → simulate_exit → 标准 trade dict。
+        """对单 symbol 在 T 日：detect_neckline_method → simulate_exit → Signal 列表。
+
+        Layer2 阶段1：返回 ``list[Signal]``（frozen dataclass）替代 trade dict。
+        _compute_stats 改读 Signal 属性；旧字段集（TRADE_REQUIRED_KEYS）逐位映射到
+        Signal 同名字段，决策逻辑零改动。
 
         严格无前视：detect 用 df_T（=df.loc[:T]）；atr 用预算全序列 .iloc[:T_pos+1] 截断。
         cooldown 去重：相邻信号（T_pos 差 < cooldown）只处理首次。
@@ -104,24 +111,28 @@ class NecklineMethodStrategy:
         else:
             rr = sim["avg_pnl_pct"] / 100.0
 
-        return [{
-            "symbol": symbol,
-            "signal_type": "neckline",
-            "formed_at": T,
-            "entry_date": sim.get("buy_date", T),
-            "entry_price": sim["entry"],
-            "exit_date": sim.get("exit_date"),
-            "exit_price": sim.get("exit_price"),
-            "exit_reason": sim["exit_reason"],
-            "rr": rr,
-            "holding_bars": sim.get("holding_bars", 0),
+        return [Signal(
+            symbol=symbol,
+            signal_type="neckline",
+            formed_at=T,
+            entry_date=sim.get("buy_date", T),
+            entry_price=sim["entry"],
+            exit_date=sim.get("exit_date"),
+            exit_price=sim.get("exit_price"),
+            exit_reason=sim["exit_reason"],
+            rr=rr,
+            holding_bars=sim.get("holding_bars", 0),
             # 颈线法附加字段（详情展示用，统计层不依赖）
-            "neckline": sim.get("neckline"),
-            "avg_pnl_pct": sim.get("avg_pnl_pct"),
-        }]
+            neckline=sim.get("neckline"),
+            avg_pnl_pct=sim.get("avg_pnl_pct"),
+        )]
 
     def scan_live(self, symbol: str, df_upto, date) -> list:
         """实盘纯识别：调 detect_neckline_method（df_upto 截至 date），**不调 simulate_exit**。
+
+        Layer2 阶段1：返回 ``list[Signal]``（frozen dataclass）替代 signal dict。
+        实验归因字段（experiment_id/experiment_weight）由 _eod 用 ``dataclasses.replace``
+        注入到返回的 Signal 上——scan_live 本身不填（保持满仓默认）。
 
         与 scan_at 的物理差异（Why 拆两入口）：
             - scan_at 是【回测一站式】：detect + simulate_exit 推进未来 K 线模拟出场
@@ -140,7 +151,7 @@ class NecklineMethodStrategy:
             date: 当前识别日（_eod 传入 T-1 收盘日）
 
         返回：
-            Signal dict 列表（仅当日突破的），字段供 signal_runner 消费：
+            Signal 列表（仅当日突破的），识别字段供 signal_runner 消费：
                 symbol / formed_at / breakout_date / neckline / bottom / entry_price / atr
             突破日非当日（res["formed_at"] != date）→ 返 []（只挂当日新信号，防历史重吐）。
         """
@@ -173,17 +184,17 @@ class NecklineMethodStrategy:
         if pd.Timestamp(breakout_date).strftime("%Y-%m-%d") != pd.Timestamp(date).strftime("%Y-%m-%d"):
             return []
 
-        # Signal dict（实盘纯识别字段集，不掺 simulate_exit 的出场字段）。
+        # Signal dataclass（实盘纯识别字段集，不掺 simulate_exit 的出场字段）。
         # entry_price：优先取 res["entry"]（= 颈线价 c_star 挂单回踩进场），
         # 缺则用 neckline 近似（c_star 本身即颈线，entry 默认 == neckline，兜底防 detect 返回体未来缺 entry）。
         # atr：用 atr_full 末值（对齐 date 当日，供二期引擎算止损=颈线−N×ATR 用）。
-        return [{
-            "symbol": symbol,
-            "signal_type": "neckline",
-            "formed_at": res.get("formed_at"),
-            "breakout_date": res.get("formed_at"),
-            "neckline": res.get("neckline"),
-            "bottom": res.get("bottom"),
-            "entry_price": res.get("entry") if res.get("entry") is not None else res.get("neckline"),
-            "atr": float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else res.get("atr"),
-        }]
+        return [Signal(
+            symbol=symbol,
+            signal_type="neckline",
+            formed_at=res.get("formed_at"),
+            breakout_date=res.get("formed_at"),
+            neckline=res.get("neckline"),
+            bottom=res.get("bottom"),
+            entry_price=res.get("entry") if res.get("entry") is not None else res.get("neckline"),
+            atr=float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else res.get("atr"),
+        )]

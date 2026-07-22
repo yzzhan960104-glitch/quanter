@@ -94,15 +94,16 @@ def test_scan_live_returns_signal_without_simulate_exit(strategy):
     assert len(signals) == 1
 
     sig = signals[0]
-    assert sig["symbol"] == "600000.SH"
-    assert sig["neckline"] == 10.0
-    assert sig["bottom"] == 9.0
+    # Layer2 阶段1：scan_live 返 list[Signal]（frozen dataclass），读属性
+    assert sig.symbol == "600000.SH"
+    assert sig.neckline == 10.0
+    assert sig.bottom == 9.0
     # entry_price 取 res["entry"]，缺则用 neckline 近似（此处 res 有 entry）
-    assert sig["entry_price"] == 10.0
+    assert sig.entry_price == 10.0
     # atr 用 atr_full 末值（df_upto 全 ATR 末根）
-    assert "atr" in sig
+    assert sig.atr is not None
     # formed_at / breakout_date 字段供 signal_runner 消费
-    assert sig["formed_at"] == T
+    assert sig.formed_at == T
 
 
 # ---------------------------------------------------------------------------
@@ -179,5 +180,5 @@ def test_scan_live_with_string_date_from_eod(strategy):
     # 修复前：len == 0（bug · 实盘静默死亡）
     # 修复后：len == 1（当日突破被正确识别）
     assert len(signals) == 1, "str date 与 Timestamp formed_at 同日应识别为当日突破（C1）"
-    assert signals[0]["symbol"] == "600000.SH"
+    assert signals[0].symbol == "600000.SH"
     assert strategy._sim_calls == 0

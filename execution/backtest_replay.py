@@ -200,7 +200,9 @@ def _compute_stats(hits: list) -> dict:
         }
 
     n = len(hits)
-    rrs = [float(h["rr"]) for h in hits]
+    # Layer2 阶段1：hits 现为 list[Signal]（frozen dataclass），改读属性替代 dict 键访问。
+    # Signal 字段都有默认值（None / 0 / ""），rr/holding_bars 等数值字段 None 兜底为 0。
+    rrs = [float(h.rr) for h in hits]
     wins = sum(1 for r in rrs if r > 0)
 
     # 累计 rr 曲线 → 最大回撤（peak-to-trough）
@@ -220,13 +222,13 @@ def _compute_stats(hits: list) -> dict:
     # 信号类型分布（阶段A：兼容 caisen 的 pattern_type；阶段D 统一 signal_type）
     pattern_dist: dict = {}
     for h in hits:
-        pt = h.get("signal_type") or h.get("pattern_type", "unknown")
+        pt = h.signal_type or getattr(h, "pattern_type", None) or "unknown"
         pattern_dist[pt] = pattern_dist.get(pt, 0) + 1
 
     # 月度收益：按 entry_date 月份聚合 rr
     monthly_returns: dict = {}
     for h in hits:
-        ed = h.get("entry_date")
+        ed = h.entry_date
         if ed is None:
             continue
         try:
@@ -234,10 +236,10 @@ def _compute_stats(hits: list) -> dict:
             key = f"{ts.year}-{ts.month:02d}"
         except Exception:
             continue   # 非法日期跳过（不污染聚合）
-        monthly_returns[key] = monthly_returns.get(key, 0.0) + float(h["rr"])
+        monthly_returns[key] = monthly_returns.get(key, 0.0) + float(h.rr)
 
     # 平均持仓天数
-    avg_holding = sum(float(h.get("holding_bars", 0)) for h in hits) / n
+    avg_holding = sum(float(h.holding_bars or 0) for h in hits) / n
 
     # 买卖流水 trades + 资金曲线 equity_curve（按 exit_date 排序）
     # equity 模型：固定 RISK_FRAC=0.01（每笔冒 AUM 的 1% 风险，盈亏按 rr 放大），
@@ -250,18 +252,18 @@ def _compute_stats(hits: list) -> dict:
         return str(v)
 
     RISK_FRAC = 0.01
-    sorted_hits = sorted(hits, key=lambda h: str(h.get("exit_date", "")))
+    sorted_hits = sorted(hits, key=lambda h: str(h.exit_date or ""))
     trades = [
         {
-            "symbol": h.get("symbol"),
-            "signal_type": h.get("signal_type") or h.get("pattern_type"),
-            "entry_date": _iso(h.get("entry_date")),
-            "entry_price": h.get("entry_price"),
-            "exit_date": _iso(h.get("exit_date")),
-            "exit_price": h.get("exit_price"),
-            "exit_reason": h.get("exit_reason"),
-            "rr": h.get("rr"),
-            "holding_bars": h.get("holding_bars"),
+            "symbol": h.symbol,
+            "signal_type": h.signal_type or getattr(h, "pattern_type", None),
+            "entry_date": _iso(h.entry_date),
+            "entry_price": h.entry_price,
+            "exit_date": _iso(h.exit_date),
+            "exit_price": h.exit_price,
+            "exit_reason": h.exit_reason,
+            "rr": h.rr,
+            "holding_bars": h.holding_bars,
         }
         for h in sorted_hits
     ]
@@ -269,11 +271,11 @@ def _compute_stats(hits: list) -> dict:
     eq = 1.0
     run_rr = 0.0
     for h in sorted_hits:
-        rr = float(h.get("rr", 0.0))
+        rr = float(h.rr or 0.0)
         run_rr += rr
         eq *= (1.0 + rr * RISK_FRAC)
         equity_curve.append({
-            "date": _iso(h.get("exit_date")),
+            "date": _iso(h.exit_date),
             "cumulative_rr": run_rr,
             "equity": eq,
         })

@@ -308,7 +308,8 @@ def test_scan_symbol_matches_strategy(monkeypatch):
     # 断言双轨一致：成交笔数 + 关键字段对齐
     assert len(filled_A) == len(hits_B) == 1
     a, b = filled_A[0], hits_B[0]
-    assert a["signal_date"] == pd.Timestamp(b["formed_at"]).date()
-    assert a["entry"] == b["entry_price"]
-    assert a["exit_date"] == b["exit_date"]
-    assert a["exit_reason"] == b["exit_reason"]
+    # Layer2 阶段1：hits_B 现为 list[Signal]（frozen dataclass），读属性验证字段对齐
+    assert a["signal_date"] == pd.Timestamp(b.formed_at).date()
+    assert a["entry"] == b.entry_price
+    assert a["exit_date"] == b.exit_date
+    assert a["exit_reason"] == b.exit_reason
