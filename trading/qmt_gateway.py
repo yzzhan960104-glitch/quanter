@@ -90,6 +90,27 @@ _QMT_ORDER_WAIT_REPORTING = 49    # 待报            -> SUBMITTED
 _QMT_ORDER_UNREPORTED = 48        # 未报            -> SUBMITTED
 _QMT_ORDER_UNKNOWN = 255          # 未知            -> SUBMITTED（不冒进终态）
 
+# === QMT 账号状态整数契约（来源：xttrader.md「账号状态 account_status」表）=========
+# Why 字面量不用 xtconstant.ACCOUNT_STATUS_*：同 order_status，防 xtquant 版本漂移 +
+# 无 xtquant 环境仍可 import。_assert_status_contract 连接时校验（T6 补全）。
+_QMT_ACC_INVALID = -1         # 无效           -> 锁 + 告警
+_QMT_ACC_OK = 0               # 正常           -> 清锁
+_QMT_ACC_WAITING_LOGIN = 1    # 连接中         -> log
+_QMT_ACC_LOGINING = 2         # 登录中         -> log
+_QMT_ACC_FAIL = 3             # 登录失败       -> 锁 + 告警
+_QMT_ACC_INITING = 4          # 初始化中       -> log
+_QMT_ACC_CORRECTING = 5       # 数据刷新校正中 -> log（校正完有新推送）
+_QMT_ACC_CLOSED = 6           # 收盘后         -> 不锁（正常）
+_QMT_ACC_ASSIS_FAIL = 7       # 穿透副链接断开 -> 锁 + 告警
+_QMT_ACC_DISABLE_BYSYS = 8    # 系统停用（密码错误超限）-> 锁 + 告警
+_QMT_ACC_DISABLE_BYUSER = 9   # 用户停用       -> 锁 + 告警
+
+# 应触发熔断锁 + 告警的账号状态集合（账号级故障，on_disconnected 捕获不到）
+_QMT_ACC_FATAL = frozenset({
+    _QMT_ACC_INVALID, _QMT_ACC_FAIL, _QMT_ACC_ASSIS_FAIL,
+    _QMT_ACC_DISABLE_BYSYS, _QMT_ACC_DISABLE_BYUSER,
+})
+
 # 上层注入的回报回调签名：接收解析后的 dict，返回 Awaitable（由主线程 create_task 调度）
 OrderUpdateCallback = Callable[[Mapping[str, Any]], Awaitable[None]]
 
@@ -143,6 +164,19 @@ def _assert_status_contract() -> None:
                if getattr(xtconstant, n, None) is not None and getattr(xtconstant, n) != v]
     if drifted:
         raise RuntimeError(f"xtconstant 枚举契约漂移：{drifted}，请核对 xttrader.md 后更新本模块")
+
+
+def _alert_account_status(gw, status_int: int, level: str) -> None:
+    """主线程：账号状态告警（fire_and_forget 跨线程安全，链路异常吞不影响主路径）。
+
+    与 _on_disconnect_fatal 同通道，复用 core.notifier（infra.notifier 别名垫片）。
+    """
+    try:
+        from core.notifier import NotificationManager, fire_and_forget
+        fire_and_forget(NotificationManager.get_default().notify_risk_event(
+            f"QMT 账号状态异常 status={status_int} account={gw._account_id}，网关已锁定", level))
+    except Exception:
+        pass
 
 
 class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[misc]
@@ -596,6 +630,39 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         except Exception:
             # 回调线程异常绝不能冒泡到 C++（会导致 xtquant 内部崩溃）
             logger.exception("on_disconnected 处理异常，已吞并以保护 C++ 线程")
+
+    def on_account_status(self, status: Any) -> None:
+        """账号状态变动推送（C++ 线程）：解析 status_int → 投递主线程。
+
+        Why 独立于 on_disconnected：disconnected 是连接级（socket 断），account_status
+        是账号级（账号被系统停用/登录失败/穿透副链断开，socket 可能仍在）。账号被
+        DISABLEBYSYS（密码错误超限）时 on_disconnected 不一定触发，必须靠本回调感知，
+        否则网关以为连着继续发废单。
+        """
+        try:
+            status_int = int(getattr(status, "status", -1))
+            self._loop.call_soon_threadsafe(self._on_account_status_change, status_int)  # type: ignore[union-attr]
+        except Exception:
+            logger.exception("on_account_status 解析异常，已吞并以保护 C++ 线程")
+
+    def _on_account_status_change(self, status_int: int) -> None:
+        """主线程：按 8 态锁策略处理账号状态（由 on_account_status 投递）。
+
+        - fatal 态（INVALID/FAIL/ASSIS_FAIL/DISABLEBYSYS/DISABLEBYUSER）：锁 + ERROR 告警
+        - OK(0)：清锁（账号恢复正常）
+        - CLOSED(6)：不锁（收盘后正常）
+        - 中间态（WAITING_LOGIN/LOGINING/INITING/CORRECTING）：只 log，等后续推送
+        """
+        if status_int in _QMT_ACC_FATAL:
+            self._lock_down = True
+            logger.critical("【QMT 账号异常】status=%s account=%s 网关已锁定", status_int, self._account_id)
+            _alert_account_status(self, status_int, "ERROR")
+        elif status_int == _QMT_ACC_OK:
+            self._lock_down = False
+            logger.info("QMT 账号状态 OK account=%s，已清锁", self._account_id)
+        else:
+            # WAITING_LOGIN/LOGINING/INITING/CORRECTING/CLOSED 等非 fatal 态只 log
+            logger.info("QMT 账号状态变动 status=%s account=%s（非 fatal，不锁）", status_int, self._account_id)
 
     def on_stock_order(self, order: Any) -> None:
         """委托状态变动推送（C++ 线程）：解析为内部 dict 后投递主线程。"""
