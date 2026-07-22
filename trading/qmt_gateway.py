@@ -376,9 +376,10 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         logger.info("QMT 网关已断开 account=%s", self._account_id)
 
     # ---------------------------------------------------------- 持仓对账
-    async def _fetch_broker_positions(self) -> Mapping[str, float]:
+    async def _fetch_broker_positions(self) -> Mapping[str, Mapping[str, Any]]:
         """
-        拉取券商真实持仓并清洗为 {stock_code: volume}（模板方法 _fetch_broker_positions 实现）。
+        拉取券商真实持仓并清洗为 {stock_code: {volume, avg_price, open_price, yesterday_volume}}
+        （模板方法 _fetch_broker_positions 实现，T7 扩展字段）。
 
         边界与清洗（Grill Me）：
         - query_stock_positions 返回 None：文档明确「查询失败或当日持仓为空」均返回
@@ -388,6 +389,20 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
           调用方契约过滤「废弃持仓」，意味着本网关对账口径是【可操作持仓】而非【全量
           持仓】。若策略层需要全量敞口对账，应另起查询口径，不可复用本返回值。
         - volume 转 float：QMT 返回 int（股数），对外契约统一 float 以兼容碎股/债券张数。
+        - 扩展字段（T7，Why 增量透出）：
+          * avg_price 成本价 —— 供浮盈对账（market_value - avg_price*volume），
+            原契约只有 volume 只能量敞口不能量盈亏，二期浮盈增强需此字段；
+          * open_price 开仓价 —— 与 avg_price 区分（加减仓后 avg 摊薄，open 不变），
+            供建仓成本回溯与归因分析；
+          * yesterday_volume 昨夜股 —— T+1 判断强化（今日买入不可卖，但昨日持仓可卖），
+            与 can_use_volume==0 过滤形成双保险（can_use 是柜台给的可卖数，yesterday
+            是端到端语义校验，两者通常一致，分歧时为脏数据早期告警）。
+
+        ⚠️ 破坏性变更：返回结构从 {sym: float} 变为 {sym: dict}。所有读 positions[sym]
+        当 float 的消费者必须迁移到 positions[sym]["volume"]。已迁移（T7）：
+        - BaseExecutionGateway.sync_positions 内扁平化（保 reconcile 契约不变）；
+        - engine.stop_loss_monitor qty 读取；
+        - trading_service.get_positions 取 volume 子键。
         """
         if self._loop is None or self._trader is None or self._account is None:
             raise RuntimeError("QMT 网关未连接，无法对账（请先 await connect()）")
@@ -401,12 +416,21 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             logger.warning("query_stock_positions 返回 None（查询失败或当日无持仓）")
             return {}
 
-        cleaned: dict[str, float] = {}
+        cleaned: dict[str, dict[str, Any]] = {}
         for p in positions:
             # 过滤可用为 0 的废弃持仓（已平仓残留 / T+1 冻结不可操作仓）
             if getattr(p, "can_use_volume", 0) == 0:
                 continue
-            cleaned[p.stock_code] = float(p.volume)
+            cleaned[p.stock_code] = {
+                # volume 主可用量（可卖持仓，消费者扁平化时取此键）
+                "volume": float(getattr(p, "volume", 0)),
+                # avg_price 成本价（浮盈对账：market_value - avg_price*volume）
+                "avg_price": float(getattr(p, "avg_price", 0.0) or 0.0),
+                # open_price 开仓价（与 avg_price 区分，建仓成本回溯）
+                "open_price": float(getattr(p, "open_price", 0.0) or 0.0),
+                # yesterday_volume 昨夜股（T+1 可卖判断双保险，int 股数）
+                "yesterday_volume": int(getattr(p, "yesterday_volume", 0) or 0),
+            }
         logger.debug("QMT 对账拉取完成：有效持仓 %d 只", len(cleaned))
         return cleaned
 

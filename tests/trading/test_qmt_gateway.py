@@ -501,3 +501,76 @@ def test_cancel_order_message_marks_non_terminal(monkeypatch):
     # message 明示非终态 + 推送锚点 on_stock_order
     assert "on_stock_order" in result.message
     assert "非终态" in result.message
+
+
+# =============================================================================
+# T7: _fetch_broker_positions 扩展返回结构（成本价/开仓价/昨夜股）
+# ============================================================================
+
+class _FakePosition:
+    """模拟 XtPosition（xttrader.md「持仓查询」返回结构）。
+
+    字段对齐 xtquant.xttype.XtPosition：stock_code/volume/can_use_volume/open_price/
+    avg_price/market_value/frozen_volume/on_road_volume/yesterday_volume。
+    can_use_volume==0 表示 T+1 冻结 / 废弃仓，_fetch_broker_positions 须过滤。
+    """
+    def __init__(self, stock_code, volume, can_use, avg_price, open_price, yesterday):
+        self.stock_code = stock_code
+        self.volume = volume
+        self.can_use_volume = can_use
+        self.avg_price = avg_price
+        self.open_price = open_price
+        self.yesterday_volume = yesterday
+
+
+class _FakeTraderPositions:
+    """模拟 self._trader，query_stock_positions 返注入的持仓列表。"""
+    def __init__(self, positions):
+        self._positions = positions
+
+    def query_stock_positions(self, account):
+        # 忽略 account（测试仅断言返值结构）
+        return self._positions
+
+
+def test_fetch_broker_positions_returns_extended_dict(monkeypatch):
+    """返 {sym: {volume, avg_price, open_price, yesterday_volume}}（扩展字段）。
+
+    Why 扩展：成本价/开仓价供浮盈对账增强，昨夜股供 T+1 判断强化——二期对账增强
+    需要这些字段；原契约只返 volume 不够用（断口：浮盈计算无成本价 = 只能量敞口
+    不能量盈亏）。返 dict-of-dict 是破坏性变更，所有消费者需迁移（见 sync_positions
+    扁平化 + stop_loss_monitor qty 读取 + trading_service.get_positions）。
+    """
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderPositions([
+        _FakePosition("600000.SH", 1000, 1000, 10.0, 10.0, 1000),  # 可卖
+        _FakePosition("000001.SZ", 500, 0, 15.0, 15.0, 0),         # T+1 冻结（过滤）
+    ])
+    gw._account = object()
+    gw._connected = True
+    result = asyncio.run(gw._fetch_broker_positions())
+    # can_use_volume==0 过滤（口径不变），只剩 600000.SH
+    assert "000001.SZ" not in result
+    pos = result["600000.SH"]
+    # 新契约：dict-of-dict（非 float）
+    assert pos["volume"] == 1000
+    assert pos["avg_price"] == 10.0
+    assert pos["open_price"] == 10.0
+    assert pos["yesterday_volume"] == 1000
+
+
+def test_fetch_broker_positions_volume_is_primary(monkeypatch):
+    """volume 仍是主可用量（can_use_volume==0 过滤不变）。
+
+    Why 向后兼容断言：volume 是 sync_positions 扁平化 / stop_loss qty 读取的主键，
+    扩展结构后必须保证 volume 仍可正确读到（破坏性变更不影响主对账/止损链路）。
+    """
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderPositions([
+        _FakePosition("600000.SH", 2000, 2000, 10.0, 10.0, 2000),
+    ])
+    gw._account = object()
+    gw._connected = True
+    result = asyncio.run(gw._fetch_broker_positions())
+    # volume 子键仍是主可用量（消费者扁平化读这个键）
+    assert result["600000.SH"]["volume"] == 2000

@@ -114,8 +114,8 @@ async def main():
     _ok(isinstance(asset.get("total_asset"), (int, float)) if asset else False,
         f"total_asset 是数值（二期熔断 equity 源）：{asset.get('total_asset')}")
 
-    # --- 步骤 3：query_positions（既有 _fetch_broker_positions）---
-    if _step("步骤 3: query_positions（既有 · 期望 {symbol: volume} 持仓，空也 OK）"):
+    # --- 步骤 3：query_positions（既有 _fetch_broker_positions，T7 扩展为 {symbol: {volume, avg_price, open_price, yesterday_volume}}）---
+    if _step("步骤 3: query_positions（既有 · 期望 {symbol: {volume, ...}} 持仓，空也 OK）"):
         return
     positions = await gw._fetch_broker_positions()
     print(f"  持仓（{len(positions)} 只）：{positions}")

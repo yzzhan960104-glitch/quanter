@@ -125,7 +125,11 @@ async def get_positions() -> list:
         raise RuntimeError("交易网关未装配（unavailable）")
     if getattr(gw, "is_locked", False) or not getattr(gw, "_connected", False):
         raise RuntimeError("交易网关未连接或已锁定，拒绝对账")
-    raw = await gw._fetch_broker_positions()   # {stock_code: volume}
+    raw = await gw._fetch_broker_positions()
+    # T7：raw 形态可能是 {sym: float}（Mock/EMT）或 {sym: {volume, ...}}（QMT），
+    # 统一扁平化取 volume 供本路由消费（与 sync_positions 扁平化同型 isinstance 防御）。
+    if raw and isinstance(next(iter(raw.values()), None), dict):
+        raw = {s: p["volume"] for s, p in raw.items()}
     if not raw:
         return []
     # 层级五·持仓富化：join 归因注册表，附 strategy/entry_rationale（未登记则 None，前端显示 '—'）。

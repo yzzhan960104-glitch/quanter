@@ -185,6 +185,17 @@ class BaseExecutionGateway(ABC):
         杜绝子类漏改对账逻辑或绕过 tolerance 红线。
         """
         broker_positions = await self._fetch_broker_positions()
+        # T7 扁平化：QMT _fetch_broker_positions 返 {sym: {volume, avg_price, ...}}，
+        # 对账只关心 volume，扁平化为 {sym: float} 再传 reconcile。
+        # Why 保持 reconcile 契约：reconcile(local, broker) 双方都是 {sym: float}，
+        # 改 reconcile 契约会波及 mock/EMT/所有调用方，违反「最小改动」——故在
+        # sync_positions 这一层做扁平化适配，扩展字段（avg_price 等）供其他消费者
+        # 按需读 _fetch_broker_positions() 原始返回。
+        # Why isinstance 防御：Mock/EMT 的 _fetch_broker_positions 仍返 {sym: float}，
+        # isinstance 判断 next(iter(values)) 是否 dict，是 → 扁平化，否 → 原样透传，
+        # 兼容 QMT（dict）/ Mock+EMT（float）双形态。
+        if broker_positions and isinstance(next(iter(broker_positions.values()), None), dict):
+            broker_positions = {s: p["volume"] for s, p in broker_positions.items()}
         return reconcile(local_positions, broker_positions, tolerance)
 
 

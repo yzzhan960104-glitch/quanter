@@ -371,7 +371,7 @@ async def stop_loss_monitor(
         return {"checked": 0, "reason": "无止损价配置（stop_prices 空）"}
 
     try:
-        positions = await gw._fetch_broker_positions()  # {symbol: 可卖持仓 qty}
+        positions = await gw._fetch_broker_positions()  # {symbol: {volume, ...}}（T7 扩展）
     except Exception:
         # 持仓查询失败绝不下卖出单（敞口未明即操作 = 盲卖，违反风控）
         logger.exception("stop_loss_monitor 查持仓失败（拒发任何卖出单）")
@@ -386,7 +386,10 @@ async def stop_loss_monitor(
     quotes = await qmt_market_data.get_quotes(list(positions.keys()))
     n_triggered = 0
     n_checked = 0
-    for sym, qty in positions.items():
+    # T7：positions 现为 {sym: {volume, avg_price, ...}}（dict-of-dict），qty 取 volume 子键。
+    # 旧契约 {sym: float} 已废弃；真实 QmtExecutionGateway._fetch_broker_positions 返新契约。
+    for sym, pos in positions.items():
+        qty = pos["volume"] if isinstance(pos, dict) else pos  # 兼容老 mock 返 float
         sp = stop_prices.get(sym)
         if sp is None or qty <= 0:
             continue
