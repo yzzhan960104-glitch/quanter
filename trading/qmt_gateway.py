@@ -240,6 +240,14 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # on_disconnected/emergency_halt 置 True，风控层据此熔断。
         self._lock_down: bool = False
 
+        # 主推可用性标志（T5）：subscribe 成功保持 True，失败置 False（订单状态靠主动查询兜底）。
+        # Why 单列：subscribe 失败时 connect 仍可能成功（socket 通），但拿不到
+        # on_stock_order 主推，订单状态进入「盲区」——上层 engine 须靠本标志在触发点
+        # 前（pre_open/stop_loss_monitor 等）调 _sync_orders_if_stale 主动 query_orders
+        # 补全 _orders。若不单列而只 warning，上层无法区分「主推正常」与「需兜底」，
+        # 惰性同步会误触（撞柜台限频）或漏触（盲区持久化）。
+        self._main_push_available: bool = True
+
         # seq ↔ 真实 order_id ↔ 客户端单号 的三向映射（撤单与回报匹配的唯一依据）
         self._seq_to_real: dict[int, int] = {}     # seq -> QMT 柜台真实 order_id
         self._seq_to_client: dict[int, str] = {}   # seq -> 调用方透传的客户端单号
@@ -302,11 +310,18 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
                 f"请确认 MiniQMT 客户端已启动且 userdata_mini 路径正确：{self._userdata_path}"
             )
         if sub_rc != 0:
-            # subscribe 失败不致命但危险：拿不到主推回报，订单状态只能靠主动查询
+            # subscribe 失败不致命但危险：拿不到主推回报（on_stock_order/on_stock_trade），
+            # 订单状态进入盲区。置 _main_push_available=False 让上层在触发点前靠
+            # _sync_orders_if_stale 主动 query_orders 兜底（T5 决策：不引入后台轮询，
+            # 只在触发点前惰性补全，避免新调度复杂度 + 撞柜台限频）。
+            self._main_push_available = False
             logger.warning(
-                "QMT subscribe 返回 %s（0=成功，-1=失败），委托/成交主推可能缺失，"
-                "订单状态将退化为主动查询模式", sub_rc
+                "QMT subscribe 返回 %s（0=成功，-1=失败），委托/成交主推缺失，"
+                "订单状态将退化为主动查询模式（_sync_orders_if_stale 触发点前补全）", sub_rc
             )
+        else:
+            # subscribe 成功：主推正常（含重连成功后重新 subscribe 的恢复路径）。
+            self._main_push_available = True
 
         self._connected = True
         self._lock_down = False  # 连接成功，解除发单锁定
@@ -535,6 +550,63 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             "traded_amount": float(getattr(t, "traded_amount", 0.0) or 0.0),
             "traded_time": getattr(t, "traded_time", 0),
         } for t in trades]
+
+    # ----------------------------------------------------- 主推不可用惰性兜底
+    async def _sync_orders_if_stale(self) -> int:
+        """主推不可用时惰性同步订单状态（subscribe 失败兜底，T5）。
+
+        策略：
+        - _main_push_available=True（subscribe 成功，主推正常）→ no-op 返 0；
+        - _main_push_available=False（subscribe 失败，主推缺失）→ 调 query_orders
+          主动拉当日委托，逐条 merge 进 self._orders，返同步的笔数。
+
+        Why 惰性而非后台定时轮询：
+        - 引入后台轮询会带来新调度复杂度（生命周期管理 / 关停时序 / 与断线重连的
+          竞态），且颈线法触发点本就低频（pre_open/stop_loss_monitor），触发点前
+          补全足以覆盖盲区风险，查询开销可接受；
+        - 主推可用时直接 no-op，零开销——避免误触主推正常场景的 query_stock_orders
+          （可能撞柜台限频，与 query_asset 同型降级风险）。
+
+        调用时机（由上层 engine 决定，非本网关职责）：
+        pre_open / stop_loss_monitor 等依赖 _orders 状态的触发点前，上层先
+        await 本方法兜底。engine 接入是消费者逻辑，留 follow-up（本 task 只提供
+        方法 + 标志）。
+
+        state 类型契约（T4 fix 已对齐）：query_orders 返的 state 已是 OrderState
+        枚举（非 .name 字符串），与 _process_order_update 写的 _orders 枚举世界 +
+        circuit_breaker._TERMINAL（frozenset[OrderState]）同型。本方法直接透传
+        merge，**不做类型转换**——若未来 query_orders 改返字符串，circuit_breaker
+        会踩「OrderState.FILLED not in {...字符串...} 恒 True → 已成交单误判非终态」
+        陷阱，那时应在 query_orders 侧修，非本方法。
+
+        返回：同步进 self._orders 的笔数（主推可用/查询异常时返 0）。
+        """
+        if self._main_push_available:
+            # 主推正常：_orders 已被 on_stock_order 回调实时推进，无需查询
+            return 0
+        try:
+            # 复用 T4 的 query_orders（cancelable_only=False 全量委托，含已终态）
+            orders = await self.query_orders()
+        except Exception:
+            # query_orders 内部异常已吞并返 []，这里是双保险（如 monkeypatch 注入
+            # 异常时）；本轮跳过，不阻塞触发点主流程
+            logger.exception("_sync_orders_if_stale 查询失败，本轮跳过")
+            return 0
+        n = 0
+        for o in orders:
+            # order_id 统一转 str 做 key（与 _process_order_update 同口径）
+            oid = str(o.get("order_id", ""))
+            if not oid:
+                continue
+            # rec 结构与 _process_order_update 写的兼容：state 透传（枚举直接用，
+            # 不转换），_gc_ts 补 GC 时间戳（#10 终态单超期清理基准）
+            rec = dict(o)
+            rec["_gc_ts"] = time.time()
+            self._orders[oid] = rec
+            n += 1
+        if n:
+            logger.info("惰性同步补全 %s 笔委托（主推不可用兜底）", n)
+        return n
 
     # -------------------------------------------------------------- 下单
     async def submit_order(self, order: OrderRequest) -> OrderResult:

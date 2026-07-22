@@ -291,3 +291,92 @@ def test_query_trades_locked_returns_empty(monkeypatch):
     gw._connected = True
     gw._lock_down = True
     assert asyncio.run(gw.query_trades()) == []
+
+
+# === T5: subscribe 失败惰性查询兜底 =============================================
+# 场景：connect 时 subscribe 返 -1，连接本身成功（socket 通）但拿不到 on_stock_order
+# 主推，订单状态进入「盲区」。对策：①connect 时标记 _main_push_available=False；
+# ②上层 engine 在触发点前调 _sync_orders_if_stale 主动 query_orders 补全 _orders。
+# 本组测试覆盖：connect 标记 / True no-op / False 同步 _orders。
+
+def test_connect_subscribe_fail_marks_main_push_unavailable(monkeypatch):
+    """subscribe 返 -1 → _main_push_available=False（不再只 warning）。
+
+    Why 单列标志：subscribe 失败时 connect 仍可能成功（socket 通），但拿不到
+    on_stock_order 主推，订单状态盲区——上层须靠 _sync_orders_if_stale 在触发点
+    前主动 query_orders 补全 _orders。若仅 warning 不留标志位，上层无法区分
+    「主推正常」与「主推不可用需兜底」，惰性同步会误触或漏触。
+    """
+    monkeypatch.setenv("QMT_USERDATA_PATH", "D:\\fake")
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "1000000365")
+    # mock xtquant 可用 + connect/subscribe 行为
+    monkeypatch.setattr(qmt_gateway, "_XTQUANT_AVAILABLE", True)
+
+    class _FakeTrader:
+        """start/connect/subscribe/register_callback 同步调用（connect 内部投线程池）。"""
+        def start(self):  # 真实 start 同步阻塞，测试里直接 no-op
+            pass
+        def register_callback(self, cb):  # connect 必调；测试里无主推可不记
+            pass
+        def connect(self):  # 连接成功
+            return 0
+        def subscribe(self, account):  # 订阅失败：主推不可用
+            return -1
+
+    monkeypatch.setattr(qmt_gateway, "XtQuantTrader", lambda path, sid: _FakeTrader())
+    monkeypatch.setattr(qmt_gateway, "StockAccount", lambda acc: object())
+    gw = QmtExecutionGateway()
+    asyncio.run(gw.connect())
+    assert gw._main_push_available is False
+    assert gw._connected is True  # 连接成功，只是主推不可用
+
+
+def test_sync_orders_if_stale_calls_query_orders_when_unavailable(monkeypatch):
+    """_main_push_available=False → _sync_orders_if_stale 调 query_orders 补 _orders。
+
+    核心契约：query_orders 返回的 state 已是 OrderState 枚举（T4 fix），本方法
+    直接透传 merge 进 _orders，不做类型转换——与 _process_order_update 写的 _orders
+    结构兼容，circuit_breaker._TERMINAL（frozenset[OrderState]）判定安全。
+    """
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._main_push_available = False
+    gw._account = object()
+    gw._connected = True
+    called = {"query_orders": 0}
+
+    async def fake_query_orders(cancelable_only=False):
+        called["query_orders"] += 1
+        # state 故意用 OrderState 枚举（对齐 T4 真实返值，非字符串）
+        return [{"order_id": 100, "stock_code": "600000.SH",
+                 "state": OrderState.FILLED, "order_status": 56,
+                 "order_volume": 1000, "traded_volume": 1000,
+                 "traded_price": 10.5, "price": 10.5, "status_msg": "",
+                 "order_remark": "", "order_type": 23}]
+
+    gw.query_orders = fake_query_orders
+    n = asyncio.run(gw._sync_orders_if_stale())
+    assert called["query_orders"] == 1
+    assert n == 1
+    assert gw._orders.get("100") is not None  # 同步进 _orders
+    # state 透传，未做类型转换（仍是 OrderState 枚举）
+    assert gw._orders["100"]["state"] == OrderState.FILLED
+
+
+def test_sync_orders_if_stale_noop_when_push_available(monkeypatch):
+    """_main_push_available=True → 不查（主推正常，无需兜底）。
+
+    Why no-op：主推正常时 _orders 已被 on_stock_order 回调实时推进，主动查询
+    只会增加柜台无谓负担（可能撞限频）；惰性同步仅在「主推不可用」时触发。
+    """
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._main_push_available = True
+    called = {"query_orders": 0}
+
+    async def fake_query_orders(cancelable_only=False):
+        called["query_orders"] += 1
+        return []
+
+    gw.query_orders = fake_query_orders
+    n = asyncio.run(gw._sync_orders_if_stale())
+    assert called["query_orders"] == 0
+    assert n == 0  # no-op 返 0
