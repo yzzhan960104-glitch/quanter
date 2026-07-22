@@ -57,55 +57,15 @@ def test_notifier_legacy_and_new_path():
 
 
 # ============================================================================
-# Step 2 契约：facade 10 用例齐备（caisen 内部穿透收口到 CaisenFacade）
-# ============================================================================
-def test_facade_exposes_ten_use_cases():
-    """CaisenFacade 封装 10 个对外用例，签名与 caisen_service 对齐。
-
-    design §6.3：caisen/ 包对 server 层的唯一对外契约是 caisen.facade.CaisenFacade，
-    后续内部分包重组（Task 3）对 server 不可见——本断言钉死 10 方法齐备。
-    """
-    from caisen.facade import CaisenFacade
-    methods = ["scan", "list_plans", "approve_plan", "activate_plan", "get_plan",
-               "replay", "replay_async", "list_replay_runs", "get_replay_run",
-               "delete_replay_run"]
-    for m in methods:
-        assert callable(getattr(CaisenFacade, m)), f"facade 缺方法 {m}"
-
-
-# ============================================================================
-# Step 2.2 契约：caisen_service 降级 facade 薄壳后，不再穿透 caisen 内部
-# ============================================================================
-def test_caisen_service_no_longer_penetrates_caisen_internals():
-    """caisen_service.py 已整文件替换为 facade 转发薄壳——读源码断言 8 个
-    caisen 内部穿透 import 子串全部消失（duplication 消除终点）。
-
-    design §6.3：Step2.2 收敛步——Task2.1 建的 facade 在此被 service 持有，
-    service 不再直连 caisen 内部 8 个子模块（plan/storage/backtest_replay/
-    replay_runs/replay_tasks_db/patterns/risk/config）。后续 caisen 内部分包
-    重组（Task 3）对 server 层完全不可见。
-    """
-    import server.services.caisen_service as mod
-    src = open(mod.__file__, encoding="utf-8").read()
-    forbidden = [
-        "from caisen import plan",
-        "from caisen import backtest_replay",
-        "from caisen import replay_runs",
-        "from caisen import replay_tasks_db",
-        "from caisen import storage",
-        "from caisen.config import",
-        "from caisen.patterns.screener import",
-        "from caisen.risk import",
-    ]
-    for needle in forbidden:
-        assert needle not in src, (
-            f"caisen_service.py 仍含穿透 import：{needle!r}（Step2.2 应已降级为 facade 薄壳）"
-        )
-
-
-# ============================================================================
 # Step 3a 契约：四子包可 import，旧路径仍可用（新旧并存）
 # ============================================================================
+# 注：原 Step 2 / Step 2.2 两个 caisen facade/service 用例契约
+# （test_facade_exposes_ten_use_cases + test_caisen_service_no_longer_penetrates_
+# caisen_internals）随 Task 1.1「server 拆除」一并删——server/services/caisen_service.py
+# 全删、caisen/facade.py 在 schemas.caisen 删后 import 即崩（Task 1.3 删 facade）。
+# 这两个测试是 caisen facade/service 的耦合契约，facade/service 退役后无义。
+# 授权：caisen-retire-inventory §3.10 line182「tests/test_layering_compat.py:60-103
+# （facade 10 用例 + caisen_service 不穿透断言，facade/service 删后整段删）」。
 def test_caisen_subpackages_scaffold():
     import caisen.engines, caisen.optimize, caisen.infra, caisen.advisor  # noqa: F401
     from caisen.engines import StrategyConfig, PatternScreener  # 新路径

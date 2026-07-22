@@ -37,10 +37,6 @@ from server.api.v1.logs import (
 from server.api.v1.macro import router as macro_router
 # 实盘交易（优雅降级真接 QMT；无 xtquant/缺凭证时 /status 返 unavailable，不阻断 lifespan）
 from server.api.v1.trading import router as trading_router
-# 蔡森形态学流水线 REST 路由（Phase 3 Task 4）：scan/plans/activate/chart/positions/replay，
-# 调 caisen_service 编排层 + storage 持久化，异常三类（KeyError→404/ValidationError→422/
-# ValueError→422）路由层转译。NaN 经 StrictJSONResponse 早抛。
-from server.api.v1.caisen import router as caisen_router
 # AI 参数训练 loop 路由（Spec 3 Task 6）：start/get/list/submit_review 四端点，
 # 驱动 orchestrator 状态机（CREATED→RUNNING→ANALYZING→AWAITING_REVIEW→…→DONE）。
 # 钉钉审核进程内调 handler 不走 HTTP；此 router 仅对外暴露状态查询 + 启停 + 审核提交。
@@ -255,10 +251,6 @@ app.include_router(macro_router, prefix="/api/v1")
 # 实盘交易路由（优雅降级真接 QMT；lifespan 不自动 connect，单例 lazy 构造）
 # 【B-1】路由级鉴权：下单/熔断/连接等敏感端点强制 require_write（token 未配置=开发放行）。
 app.include_router(trading_router, prefix="/api/v1", dependencies=[Depends(require_write)])
-# 蔡森形态学流水线 REST 路由（Phase 3 Task 4）：7 端点 + 异常映射（KeyError→404/
-# ValidationError→422/ValueError→422），算法/IO 异常 service 层已降级返空结果。
-# 含 scan/activate/审核等可触发真实下单流程的端点，路由级鉴权保护。
-app.include_router(caisen_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 # AI 参数训练 loop（Spec 3 Task 7）：start/get/list/submit_review 四端点。
 # 训练提交/审核提交是写操作（落库 + 触发回测子进程），路由级鉴权保护；
 # 钉钉审核 handler 进程内调 orchestrator 不走 HTTP，不受 require_write 限制。
