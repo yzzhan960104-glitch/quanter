@@ -3,7 +3,7 @@
 
 设计意图（反黑盒测试）：
 - fake_pro 替身 mock 掉 get_pro / tushare_rate_limiter / tushare_breaker，使测试
-  **完全不依赖真 Tushare token / 网络环境**（开发机可能未配 TNSKHDATA_TOKEN），
+  **完全不依赖真 Tushare token / 网络环境**（开发机可能未配 TUSHARE_TOKEN），
   仅验证同步器的分页/断点/落湖逻辑正确性。
 - 通过 TUSHARE_DATASETS[key] 临时覆盖落湖路径到 tmp_path，保证测试隔离无副作用。
 """

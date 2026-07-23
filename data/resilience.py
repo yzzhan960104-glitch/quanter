@@ -270,7 +270,7 @@ class RateLimiter:
 
 # ============ 模块级单例（fetcher 共享，避免每次新建桶/熔断器）============
 # 限频策略：突发容量 + 持续 QPS，依据各数据源官方限频量级保守取值。
-# Tushare 降速（全量下载诊断）：tnskhdata 代理对大数据接口（by=date 全市场逐日，单日
+# Tushare 降速（全量下载诊断）：tushare 对大数据接口（by=date 全市场逐日，单日
 # 5090 行）有服务端限频，原 60/分（capacity=5, refill_rate=1.0）连续拉会撞 "Rate limit
 # temporarily busy"。降到 ~20/分（refill_rate=0.33 token/s）+ 小桶 capacity=3 避免突发
 # 撞限频。20/分实测稳定推进（单接口退避重试后可恢复）。若仍撞则进一步降到 10/分。

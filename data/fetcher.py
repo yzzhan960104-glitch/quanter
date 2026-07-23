@@ -694,15 +694,16 @@ class TushareDataFetcher(DataFetcher):
         异常：
             ValueError: Token 缺失时抛出
         """
-        # 优先代理 tnskhdata（10000 积分，TNSKHDATA_TOKEN），回退直连 tushare（token 参数）。
-        # token 参数仅直连兜底时生效；代理模式下由 .env TNSKHDATA_TOKEN 决定，忽略此参数。
+        # 纯直连 tushare（2026-07-24 废弃 tnskhdata 代理）：token 由 _tushare_compat.get_pro
+        # 经 config.get_credential 统一读取（.env 的 TUSHARE_TOKEN），忽略本构造参数的
+        # 旧代理分支语义。token 参数仅为向后兼容保留，实际不参与初始化决策。
         try:
             from data._tushare_compat import get_pro, source_name
             self._pro = get_pro()
             logger.info("Tushare Pro API 客户端初始化成功（源=%s）", source_name())
         except ImportError:
             raise ImportError(
-                "tushare/tnskhdata 均未安装。请执行：pip install tushare tnskhdata"
+                "tushare 未安装。请执行：pip install tushare"
             )
         except Exception as e:
             raise ConnectionError(

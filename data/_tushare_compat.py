@@ -1,100 +1,62 @@
 # -*- coding: utf-8 -*-
-"""统一 Tushare pro 接口入口：优先代理 tnskhdata（10000 积分），回退直连 tushare。
+"""统一 Tushare pro 接口入口：纯直连 tushare 官方 SDK。
 
-设计意图（反黑盒 + 可回退）：
-- tnskhdata 是 tushare 的代理库（import tushare 改地址，API 完全兼容），积分更充足
-  （10000 vs 直连账户常不足 2000，stock_basic/daily_basic 等接口需 2000+）。
-- 本 helper 由 TNSKHDATA_TOKEN 环境变量决定走代理还是直连，所有需要 pro 接口的地方
-  （通用同步器 tushare_sync / TushareDataFetcher）统一经此获取，避免 import 散落、便于切换。
-- 凭证优先级：TNSKHDATA_TOKEN（代理）> TUSHARE_TOKEN（直连兜底，积分可能不足）。
+历史（Why 纯直连）：
+- 2026-07 之前曾用 tnskhdata 代理库（import tushare 改地址、API 兼容，10000 积分）
+  作为 tushare pro 主通道，直连 tushare 兜底。当时积分受限（直连账户 <2000，
+  stock_basic/daily_basic 等接口需 2000+），故引入代理 + 多 token 轮询/冗余。
+- 2026-07-24 代理 token 失效 + 直连 tushare 已切到新 token（积分充足、直接走官方
+  API），代理双轨彻底废弃。本 helper 删代理实现（_proxy_tokens/_use_proxy/_token_index/
+  import tnskhdata/双轨分支），简化为纯直连 tushare SDK，单一来源、零分叉。
 
-实测（2026-07，代理 10000 积分）：stock_basic/daily_basic/daily/fina_indicator/trade_cal
-全部解锁，全市场 5534 标的可拉。
+铁律：``get_pro`` / ``source_name`` / ``ts_module`` / ``ensure_token`` 4 函数签名
+**保持不变**——它们被 calendar / tushare_sync / TushareDataFetcher / 各 sync 脚本
+多处调用，签名变更会扩散冲击。本文件只换「实现内核」、不换「对外契约」。
 """
 from __future__ import annotations
 
-import os
-
-
-def _proxy_tokens() -> list[str]:
-    """代理 token 列表（TNSKHDATA_TOKEN 逗号分隔，支持多 token 负载均衡/冗余）。
-
-    Why 多 token：单一代理 token 存在限频/失效风险，多 token 轮询分散压力 + 互为冗余；
-    环境变量逗号分隔便于运维增删（主,备），无需改代码。
-    """
-    raw = os.getenv("TNSKHDATA_TOKEN", "").strip()
-    return [t.strip() for t in raw.split(",") if t.strip()]
-
-
-def _use_proxy() -> bool:
-    """是否走代理 tnskhdata（至少一个代理 token 配置即启用）。"""
-    return len(_proxy_tokens()) > 0
-
-
-# 模块级轮询索引：多 token 轮询分散限频压力 + 单 token 失效自动切下一个
-_token_index = 0
+from config import get_credential
+import tushare as ts
 
 
 def get_pro():
-    """返回 tushare pro 接口（代理多 token 轮询，回退直连 tushare）。
+    """返回 tushare pro 接口实例（纯直连 tushare 官方 SDK）。
 
-    多 token 轮询：每次 get_pro 取下一个 token（_token_index 递增取模），分散限频压力。
-    单 token 失效时，调用方重新 get_pro 即自动切下一个（无需重启）。
-
-    返回 pro 实例：pro.stock_basic / pro.daily_basic / pro.daily / pro.fina_indicator /
-    pro.trade_cal ... 代理与直连 API 完全兼容，调用方无感知。
+    Why 直连：2026-07-24 废弃代理后唯一通道，token 走 config.get_credential 统一
+    凭证层（与 .env 的 TUSHARE_TOKEN 一致），set_token 后 pro_api 取实例。
+    调用方（tushare_sync / TushareDataFetcher 等）通过 ``pro.stock_basic`` /
+    ``pro.daily`` / ``pro.daily_basic`` 等访问，对代理/直连无感知。
     """
-    global _token_index
-    tokens = _proxy_tokens()
-    if tokens:
-        # 固定用 token[0]：实测多 token 权限不一（token[1] 对 ths_daily/index_weight/
-        # fund_*/daily_info 等大批接口「无权限」），轮询会间歇撞到权限不全的 token 致
-        # 全量下载随机失败。多 token 冗余需所有 token 权限等同才有意义——如需轮询，
-        # 先确保 .env 各 token 权限一致，再恢复 _token_index 轮询。
-        token = tokens[0]
-        import tnskhdata as ts  # 代理：API 兼容 tushare，token 直传 pro_api
-        return ts.pro_api(token)
-    # 回退直连 tushare（TUSHARE_TOKEN，积分可能不足，仅兜底）
-    from config import get_credential
-    import tushare as ts
     ts.set_token(get_credential("tushare", "token"))
     return ts.pro_api()
 
 
 def ts_module():
-    """返回底层 ts 模块（tnskhdata 或 tushare），供需要 ts.xxx 静态方法（如 pro_bar）的场景。
+    """返回底层 tushare 模块，供需要 ts.xxx 静态方法（如 pro_bar）的场景使用。
 
-    Why 单独导出模块：pro_bar 等接口在 ts 模块上而非 pro 实例上（pro_api 返回的 DataApi
-    无 pro_bar 方法），调用方需直接拿 ts 模块。
+    Why 单独导出模块：pro_bar 等接口挂在 ts 模块上、而非 pro 实例上（pro_api 返回
+    的 DataApi 无 pro_bar 方法），调用方需直接拿 ts 模块才能调 ts.pro_bar。
+    纯直连后恒返 tushare 模块。
     """
-    if _use_proxy():
-        import tnskhdata as ts
-        return ts
-    import tushare as ts
     return ts
 
 
 def ensure_token() -> str:
-    """设置 ts 模块全局 token（供 pro_bar 等模块级函数），返回所用 token。
+    """设置 tushare 模块全局 token（供 pro_bar 等模块级函数），返回 token。
 
-    Why 单独提供：pro_bar 是 ts 模块级函数（用全局 token，非 pro 实例方法），调 ts.pro_bar
-    前必须 set_token；本函数用当前轮询 token 配置，保证代理/直连一致 + 多 token 轮询。
+    Why 单独提供：pro_bar 是 ts 模块级函数（用全局 token、非 pro 实例方法），
+    调 ts.pro_bar 前必须 set_token；本函数用 config 凭证层 token，保证与
+    get_pro / ts_module 三者 token 口径一致。
     """
-    global _token_index
-    tokens = _proxy_tokens()
-    if tokens:
-        # 固定 token[0]，理由同 get_pro（多 token 权限不一，轮询致间歇失败）
-        token = tokens[0]
-        import tnskhdata as ts
-        ts.set_token(token)
-        return token
-    from config import get_credential
-    import tushare as ts
     token = get_credential("tushare", "token")
     ts.set_token(token)
     return token
 
 
 def source_name() -> str:
-    """当前数据源名（'tnskhdata' 代理 或 'tushare' 直连），供日志/展示。"""
-    return "tnskhdata" if _use_proxy() else "tushare"
+    """当前数据源名（恒返 ``'tushare'``），供日志/展示统一标识。
+
+    Why 恒返：2026-07-24 废弃代理后不再有双轨，source 仅 tushare 一源；保留函数
+    形态以兼容已有调用方（fetcher/sync 脚本日志），未来引入多源再扩展。
+    """
+    return "tushare"
