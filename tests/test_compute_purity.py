@@ -156,14 +156,15 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
         # （Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，双源契约随之退役）
         ("trading.compute.plan", "build_orders_from_signals"),
         ("trading.compute", "build_orders_from_signals"),
-        # stop 系列：compute / order_state 垫片（阶段6 保留，OrderStateMachine 真身所在）
+        # stop 系列：compute.stop 真身 + compute 包 re-export（Layer2 follow-up #4c：order_state 垫片已删，
+        # 双源 is 契约退役，仅守 compute.stop↔compute 包级 re-export 同源）
         ("trading.compute.stop", "compute_stop_price"),
         ("trading.compute.stop", "check_stop_loss"),
-        ("trading.order_state", "check_stop_loss"),
+        ("trading.compute", "check_stop_loss"),
         ("trading.compute.stop", "check_take_profit"),
-        ("trading.order_state", "check_take_profit"),
+        ("trading.compute", "check_take_profit"),
         ("trading.compute.stop", "update_trailing_stop"),
-        ("trading.order_state", "update_trailing_stop"),
+        ("trading.compute", "update_trailing_stop"),
         # reconcile：双入口同源（compute / compute 包 re-export）
         # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，双源 is 契约退役，
         # 仅留 compute.reconcile↔compute 包级同源（20+ 消费已迁直指 compute.reconcile 真身）
@@ -225,11 +226,13 @@ def test_compute_stop_price_single_source() -> None:
 
 
 def test_order_state_stops_single_source() -> None:
+    # Layer2 follow-up #4c：order_state 垫片 re-export 已删（出场纯函数单源 compute.stop），
+    # 双源 is 契约退役，仅守 compute.stop↔compute 包级 re-export 同源（消费点已直指 compute.stop）
     for fn in ("check_stop_loss", "check_take_profit", "update_trailing_stop"):
         assert (
             _get("trading.compute.stop", fn)
-            is _get("trading.order_state", fn)
-        ), f"{fn} 双源"
+            is _get("trading.compute", fn)
+        ), f"{fn} compute 包 re-export 与 stop 真身不同源"
 
 
 def test_reconcile_single_source() -> None:
@@ -255,10 +258,10 @@ def test_order_request_single_source() -> None:
 def test_order_state_enum_single_source() -> None:
     """OrderState 枚举单源契约（Layer2 阶段5 · 真身迁 trading/types/order_state.py）。
 
-    三入口同源：types（新源）/ order_state（旧模块垫片 re-export）/ trading 包级导出。
+    双入口同源：types（单源）/ trading 包级导出。
+    Layer2 follow-up #4c：order_state 旧模块 re-export 已删，三源退化为双源。
     """
     a = _get("trading.types.order_state", "OrderState")
-    assert a is _get("trading.order_state", "OrderState")
     assert a is _get("trading", "OrderState")
 
 

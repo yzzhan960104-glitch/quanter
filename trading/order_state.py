@@ -1,28 +1,23 @@
-"""订单状态机
+"""订单状态机（OrderStateMachine · imperative shell 域）
 
 职责：
-1. 定义订单状态（OrderState 枚举 · Layer2 阶段5 迁 trading/types/order_state.py 单源）
-2. 管理状态迁移（OrderStateMachine · 有状态可变对象 · imperative shell 域）
-3. 处理异常情况（断线、限频、部分成交）
+1. 管理订单状态迁移（OrderStateMachine · 有状态可变对象 · 不进 functional core）
+2. 处理异常情况（断线、限频、部分成交 · 终态封闭不可逆）
 
 设计原则：
 - 有限状态机（FSM）模式
 - 显式状态迁移（不隐式跳转）
 - 防范非法状态迁移
 
-Layer2 阶段5 五层定型（spec §3.5）：
-    OrderState 纯枚举已迁 trading/types/order_state.py（零依赖纯数据契约单源）。
-    本文件 re-export 该枚举 + 保留 OrderStateMachine（有状态机 · imperative shell，
-    不进 functional core）+ 出场逻辑纯函数垫片 re-export（trading.compute.stop）。
-    既有 ``from trading.order_state import OrderState, OrderStateMachine,
-    check_stop_loss`` 调用零改动继续可用。
+Layer2 follow-up #4c 定型（spec §3.5）：
+    OrderState 纯枚举单源在 trading/types/order_state.py（``from trading.types.order_state import OrderState``）。
+    出场逻辑纯函数（check_stop_loss / check_take_profit / update_trailing_stop）
+    单源在 trading/compute/stop.py（``from trading.compute.stop import ...``）。
+    本文件只保留 OrderStateMachine（有状态 imperative shell · 状态机真身）。
 """
-from enum import auto  # noqa: F401  保既有 ``OrderState.PENDING == auto()`` 风格引用兼容
+from trading.types.order_state import OrderState
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
-
-# OrderState 纯枚举 re-export（Layer2 阶段5 · 真身迁 trading/types/order_state.py）。
-from trading.types.order_state import OrderState  # noqa: F401
 
 
 class OrderStateMachine:
@@ -252,20 +247,3 @@ class OrderStateMachine:
         self.current_state = OrderState.PENDING
         self.order_id = None
         self.order_info = None
-
-
-# ============ 出场逻辑纯函数：垫片 re-export（Layer2 阶段2 · strangler 铁律①）============
-#
-# 三道出场闸门（check_stop_loss / check_take_profit / update_trailing_stop）原嵌在本
-# 订单状态机模块——但它们是【纯函数】（无副作用、无状态、仅数学判定），归位 functional
-# core（trading/compute/stop.py）后回测与实盘共用同一份风控裁决，杜绝「回测跑得对、
-# 实盘因复制粘贴改坏一个阈值而裸奔」的经典翻车。
-#
-# 物理意义保留在 compute/stop.py 模块/函数 docstring（strangler 红线① · 逻辑零改动）。
-# 本文件 re-export 保持既有 ``from trading.order_state import check_stop_loss, ...``
-# 调用零改动继续可用；is 同源契约由 tests/test_compute_purity.py 守护。
-from trading.compute.stop import (  # noqa: F401
-    check_stop_loss,
-    check_take_profit,
-    update_trailing_stop,
-)

@@ -21,7 +21,7 @@ import os
 # cb.cancel_all_open_orders 调用零改动（语义仍是「熔断」工具函数对）。
 from trading.compute.breaker import check_daily_loss_limit as _check_loss
 from trading.io.breaker import cancel_all_open_orders as _cancel_all
-from trading.order_state import OrderState
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 
 class _CBShim:

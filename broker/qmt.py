@@ -32,7 +32,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 # OrderRequest 是 functional core dataclass（trading.compute.types，阶段2 抽出）。
 from broker.base import BaseExecutionGateway, OrderResult
 from trading.compute.types import OrderRequest
-from trading.order_state import OrderState
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 logger = logging.getLogger(__name__)
 

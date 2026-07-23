@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from trading.order_state import OrderStateMachine, OrderState
+from trading.order_state import OrderStateMachine  # 真身（imperative shell 状态机）
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：枚举改指 types 真身
 import time
 
 

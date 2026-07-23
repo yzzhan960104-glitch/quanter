@@ -8,7 +8,7 @@ from broker.base import BaseExecutionGateway
 from broker.mock import MockExecutionGateway
 from trading.compute.reconcile import reconcile, ReconciliationResult
 from trading.compute.types import OrderRequest
-from trading.order_state import OrderState
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 
 def test_reconcile_all_match():

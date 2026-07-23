@@ -8,7 +8,7 @@ import pytest
 # _QMT_* 字面量等）须指真身模块，trading.qmt_gateway 垫片的 re-export 副本与真身
 # 非同一对象，patch 垫片无效。
 from broker import qmt as qmt_gateway
-from trading.order_state import OrderState
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 from broker.qmt import QmtExecutionGateway
 
 

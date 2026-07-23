@@ -41,7 +41,7 @@ except ImportError:
 from trading.qmt_gateway import QmtExecutionGateway
 from trading import qmt_market_data
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
-from trading.order_state import OrderState
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 _results = []
 _push = {"order": 0, "trade": 0, "order_error": 0, "cancel_error": 0, "async_response": 0}

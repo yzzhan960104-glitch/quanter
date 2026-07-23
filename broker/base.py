@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from trading.compute.types import OrderRequest
-from trading.order_state import OrderState
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 if TYPE_CHECKING:
     # 仅类型注解用，运行时不 import（避开 broker.base → trading.compute.reconcile

@@ -9,7 +9,8 @@
 """
 import pytest
 
-from trading.order_state import OrderState, OrderStateMachine
+from trading.order_state import OrderStateMachine  # 真身（imperative shell 状态机）
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：枚举改指 types 真身
 
 
 def test_fail_from_pending_allowed():

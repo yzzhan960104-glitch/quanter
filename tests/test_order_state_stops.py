@@ -5,7 +5,7 @@
 - 固定止盈：价格涨破 entry*(1+pct) 触发
 - ATR 移动止损：stop = high - atr*k，只上移不下移（锁浮盈）
 """
-from trading.order_state import check_stop_loss, check_take_profit, update_trailing_stop
+from trading.compute.stop import check_stop_loss, check_take_profit, update_trailing_stop  # Layer2 follow-up #4c：出场纯函数改指 compute.stop 真身
 
 
 def test_stop_loss_triggers_below_threshold():

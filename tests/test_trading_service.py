@@ -111,12 +111,12 @@ def _fake_gw_connected():
         async def submit_order(self, order):
             self.submit_calls.append(order)
             from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：垫片已删，直指 broker.base 真身
-            from trading.order_state import OrderState
+            from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
             return OrderResult(order_id="100", state=OrderState.SUBMITTED, message="ok")
 
         async def cancel_order(self, order_id):
             from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：垫片已删，直指 broker.base 真身
-            from trading.order_state import OrderState
+            from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
             return OrderResult(order_id=order_id, state=OrderState.CANCELLED, message="ok")
     return _FakeGW()
 

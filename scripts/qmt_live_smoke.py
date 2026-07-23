@@ -47,7 +47,7 @@ except ImportError:
 from trading.qmt_gateway import QmtExecutionGateway
 from trading import qmt_market_data
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
-from trading.order_state import OrderState
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 
 # === 回调推送观察（注册到 gw，主线程 create_task 调度）=========================

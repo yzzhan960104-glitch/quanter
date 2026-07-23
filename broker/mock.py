@@ -21,7 +21,7 @@ from typing import Any, Mapping, Optional
 
 from broker.base import BaseExecutionGateway, OrderResult
 from trading.compute.types import OrderRequest
-from trading.order_state import OrderState
+from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 
 class MockExecutionGateway(BaseExecutionGateway):

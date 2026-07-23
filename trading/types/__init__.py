@@ -13,10 +13,11 @@
 
 单源契约（strangler 铁律①：搬迁非复制）：
     OrderState 原物理定义在 trading/order_state.py（与 OrderStateMachine 状态机混居）。
-    本阶段把纯枚举迁到 types/order_state.py（领域契约单源），order_state.py 反向
-    ``from trading.types.order_state import OrderState`` re-export——所有既有
-    ``from trading.order_state import OrderState`` / ``from trading import OrderState``
-    调用零改动继续可用（tests/test_compute_purity.py is 同源契约守护）。
+    阶段5 把纯枚举迁到 types/order_state.py（领域契约单源），order_state.py 曾反向
+    ``from trading.types.order_state import OrderState`` re-export 供过渡期零改动调用。
+    Layer2 follow-up #4c：order_state.py 该 re-export 已删，消费点直指
+    ``from trading.types.order_state import OrderState`` / ``from trading import OrderState``
+    （tests/test_compute_purity.py is 同源契约守护）。
 
 依赖不变量（test_compute_purity.py 守护）：
     trading.types.* 的 import 仅允许：stdlib / numpy / pandas / strategies /
