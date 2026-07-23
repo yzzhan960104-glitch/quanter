@@ -20,7 +20,6 @@ import json
 import time
 import argparse
 import random
-import copy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -144,47 +143,46 @@ def params_key(params):
 
 
 def run_one(params, universe, breadth=None):
-    """跑一组参数：识别层 set DEFAULTS、执行层 set EXEC_DEFAULTS，遍历 universe 算凯利年化。
+    """跑一组参数：显式构造 id_cfg/exec_cfg 传入 scan_symbol，遍历 universe 算凯利年化。
 
     breadth: 可选 market_breadth Series（P1-c 宽度顺势加权）。非空时信号日 breadth≥0.4
         → avg_pnl×1.5（等效加仓 1.5×，研究验证 memory 2024 +1.95→+5.43%；research 用途，
         筹效突破 pos_cap，实盘需另调 cap 或加权方式）。
-    返回 (年化, 凯利, 曲线, 笔数, 夏普, 回撤)。临时改全局，finally 恢复（单进程安全）。
+    返回 (年化, 凯利, 曲线, 笔数, 夏普, 回撤)。
+
+    重构（2026-07-23 Task 5 #2a）：去全局 mutation（原 DEFAULTS.update/EXEC_DEFAULTS.update
+    + try/finally 恢复），改显式构造 id_cfg/exec_cfg 传入 scan_symbol。scan_symbol 的
+    id_cfg 默认 {**DEFAULTS, window:window} 会拷贝全局——显式传则绕过全局，与原 update
+    全局后 scan_symbol 拷贝全局的行为逐字等价（detect_neckline_method 只读传入 cfg，
+    不读全局 DEFAULTS）。零全局可变状态 → 单/多进程皆安全，无需恢复。
     """
     id_params = {k: params[k] for k, lay, _ in PARAM_SPACE if lay == "id"}
     exec_params = {k: params[k] for k, lay, _ in PARAM_SPACE if lay == "exec"}
-
-    orig_id = copy.deepcopy(DEFAULTS)
-    orig_exec = copy.deepcopy(EXEC_DEFAULTS)
-    DEFAULTS.update(id_params)
-    EXEC_DEFAULTS.update(exec_params)
-    try:
-        all_filled = []
-        window = DEFAULTS["window"]
-        exec_cfg = EXEC_DEFAULTS   # scan_symbol 读此全局（已 update）
-        for sym, sym_df in universe.items():
-            try:
-                filled, _n_sig, _n_skip = scan_symbol(sym_df, window, exec=exec_cfg)
-                for r in filled:
-                    r["symbol"] = sym
-                all_filled.extend(filled)
-            except Exception:
-                continue
-        if not all_filled:
-            return -1.0, 0.0, 1.0, 0, 0.0, 0.0
-        # P1-c 宽度顺势加权（可选）：信号日 breadth≥0.4 → avg_pnl×1.5（等效加仓）
-        if breadth is not None:
-            for r in all_filled:
-                bd = _breadth_at(breadth, r["signal_date"])
-                if bd is not None and bd >= 0.4:
-                    r["avg_pnl_pct"] *= 1.5
-        pnls = [r["avg_pnl_pct"] for r in all_filled]
-        dates = [pd.to_datetime(r["signal_date"]) for r in all_filled]
-        kelly, curve, ann, sharpe, max_dd = risk_metrics(pnls, dates)
-        return ann, kelly, curve, len(all_filled), sharpe, max_dd
-    finally:
-        DEFAULTS.clear(); DEFAULTS.update(orig_id)        # 恢复识别层
-        EXEC_DEFAULTS.clear(); EXEC_DEFAULTS.update(orig_exec)  # 恢复执行层
+    # 显式构造识别层/执行层 cfg 传入 scan_symbol（不再 mutation 全局 DEFAULTS/EXEC_DEFAULTS）。
+    id_cfg = {**DEFAULTS, **id_params}
+    exec_cfg = {**EXEC_DEFAULTS, **exec_params}
+    window = id_cfg["window"]
+    all_filled = []
+    for sym, sym_df in universe.items():
+        try:
+            filled, _n_sig, _n_skip = scan_symbol(sym_df, window, exec=exec_cfg, id_cfg=id_cfg)
+            for r in filled:
+                r["symbol"] = sym
+            all_filled.extend(filled)
+        except Exception:
+            continue
+    if not all_filled:
+        return -1.0, 0.0, 1.0, 0, 0.0, 0.0
+    # P1-c 宽度顺势加权（可选）：信号日 breadth≥0.4 → avg_pnl×1.5（等效加仓）
+    if breadth is not None:
+        for r in all_filled:
+            bd = _breadth_at(breadth, r["signal_date"])
+            if bd is not None and bd >= 0.4:
+                r["avg_pnl_pct"] *= 1.5
+    pnls = [r["avg_pnl_pct"] for r in all_filled]
+    dates = [pd.to_datetime(r["signal_date"]) for r in all_filled]
+    kelly, curve, ann, sharpe, max_dd = risk_metrics(pnls, dates)
+    return ann, kelly, curve, len(all_filled), sharpe, max_dd
 
 
 def load_state():

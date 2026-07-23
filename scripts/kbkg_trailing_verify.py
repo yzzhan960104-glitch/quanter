@@ -67,12 +67,14 @@ print(f"\n创板+科创 2025-10+ {len(universe)}只", flush=True)
 
 
 def run(lbl, exec_p):
-    DEFAULTS.update(id_p); EXEC_DEFAULTS.update(exec_p)
+    # 显式构造 id_cfg/exec_cfg 传入 scan_symbol（去全局 mutation，与 param_iter.run_one 同口径）。
+    id_cfg = {**DEFAULTS, **id_p}
+    exec_cfg = {**EXEC_DEFAULTS, **exec_p}
     all_filled = []
     t0 = time.time()
     for sym, df in universe.items():
         try:
-            filled, _, _ = scan_symbol(df, id_p["window"], exec=EXEC_DEFAULTS)
+            filled, _, _ = scan_symbol(df, id_cfg["window"], exec=exec_cfg, id_cfg=id_cfg)
             all_filled.extend(filled)
         except Exception:
             continue
