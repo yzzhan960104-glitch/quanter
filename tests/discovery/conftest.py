@@ -26,13 +26,27 @@ def synth_sym_df():
 
 @pytest.fixture
 def champion_params():
-    """当前 param_iter 冠军参数（state.json best，21 维）。供 oos 集成测试用。"""
+    """当前 param_iter 冠军参数（21 维）。供 oos 集成测试用。
+
+    运行时从 logs/param_iter_state.json 读 state["best"]——硬编码会与 state 漂移
+    （曾因硬编码 ≠ best 致 slow 测试 outer ann 失真：硬编码 13.4% vs 真 best ~145%+）。
+    state 不存在时 fallback 到下方占位（值对齐最近一次 state best，仅作占位，
+    正常开发环境 state.json 总存在）。
+    """
+    import json
+    import os
+
+    state_file = "logs/param_iter_state.json"
+    if os.path.exists(state_file):
+        with open(state_file, encoding="utf-8") as f:
+            return json.load(f)["best"]
+    # fallback（无 state 时占位；值对齐最近一次 state best）
     return {
         "window": 80, "min_touches": 2, "min_suppression": 0.5,
-        "local_extrema_window": 5, "min_bottoms": 2, "breakout_vol_mult": 1.0,
-        "min_rr": 1.0, "max_h_atr": 5.0, "stop_atr_mult": 1.0, "tp_h_mult": 2.5,
-        "decay_tau": 60,
-        "max_holding": 20, "max_wait": 3, "cooldown": 8, "buy_limit_atr_mult": 1.0,
-        "tp1_h_mult": 0.5, "tp1_portion": 0.3, "cancel_thresh_mult": None,
-        "trailing_grace": 0, "trailing_step": 0.05, "trailing_floor": 0.0,
+        "local_extrema_window": 3, "min_bottoms": 3, "breakout_vol_mult": 1.0,
+        "min_rr": 2.0, "max_h_atr": 4.0, "stop_atr_mult": 1.5, "tp_h_mult": 1.5,
+        "decay_tau": 30,
+        "max_holding": 15, "max_wait": 8, "cooldown": 5, "buy_limit_atr_mult": 1.5,
+        "tp1_h_mult": 1.5, "tp1_portion": 0.3, "cancel_thresh_mult": 2.0,
+        "trailing_grace": 0, "trailing_step": 0.15, "trailing_floor": 0.0,
     }
