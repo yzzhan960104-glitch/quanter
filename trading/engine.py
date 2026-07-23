@@ -568,6 +568,14 @@ class TradingEngine:
             id="post_close",
         )
 
+        # 成交回调链路状态（Task 10 · 修 G5）：
+        #   _tp_placed：已挂止盈的 symbol 集合（幂等防重挂——部分成交多次回报/柜台重推
+        #               不应重复挂止盈卖单，否则同笔持仓挂 N 张卖单 → 超卖敞口致命）。
+        #   _gw：交易网关引用（_order_direction 查 gw._orders[order_id].order_type 判买卖方向）。
+        #        Task 11 在 gw.connect 注册 _on_order_update 回调时同步注入，本 task 仅声明槽位。
+        self._tp_placed: set[str] = set()
+        self._gw: Any = None
+
     # ----- cron 包装：交易日判定 + 转调 async 触发函数 -----
     async def _eod(self) -> None:
         """cron 包装：节假日跳过；交易日 resolve 多实验 + scan_live 产信号 → eod_plan。
@@ -733,6 +741,212 @@ class TradingEngine:
             logger.info("post_close 跳过：今日非交易日 %s", today)
             return
         await post_close(today)
+
+    # ----- 成交回报 handler（Task 10 · 修 G5：成交回调链路）-----
+    async def _handle_order_update(self, update: Mapping[str, Any]) -> None:
+        """成交回报 handler（由 Task 11 的 ``_on_order_update`` 经 ``create_task`` 调度，
+        主线程事件循环执行）。
+
+        物理意图（spec §6.2 C1，三连）：
+            on_stock_trade 回调推送 ``kind=="trade"`` 的成交回报（含真实成交价/量/时间，
+            非下单时的预估价），本 handler 顺序执行三件事：
+              a. ``record_live_trade`` 补写成交回报日志（CSV，Layer 6 LLM 复盘数据源）；
+              b. ``notify_trade_event`` 推钉钉成交通知（fire_and_forget 异步不阻塞回调链）；
+              c. 买单成交 + 未挂止盈 → ``_place_take_profit`` 挂限价止盈卖单
+                 （Phase1 简化版：单一固定止盈价、全额；Phase2 升级为分级状态机复刻
+                 simulate_exit 的 tp1 部分量 + tp2 剩余量）。
+
+        幂等红线（``_tp_placed``）：
+            on_stock_trade 在部分成交 / 柜台重推时会多次推送同一 order_id 的 trade 回报。
+            若每次都重挂止盈卖单 → 同笔持仓挂 N 张卖单 → 超卖敞口致命。故以 symbol 为
+            key 标记已挂止盈，二次回报命中即跳过（``symbol in self._tp_placed``）。
+
+        线程安全：
+            本方法 async，由主线程 ``create_task`` 调度（Task 11 用
+            ``call_soon_threadsafe`` 把网关回调线程的 update 投递回主事件循环）。
+            钉钉通知走 ``fire_and_forget``（独立 daemon 线程跑 asyncio.run），不阻塞
+            回调链——网关回调线程若被 IM 网络延迟阻塞，会反压柜台行情推送。
+
+        边界与降级（Grill Me）：
+            - ``kind != "trade"`` 直接 return（order/order_error 由风控层负责，本 handler
+              只处理真实成交）；
+            - symbol 缺失或 traded_volume<=0 直接 return（脏数据/撤单回报不应触达写日志
+              和挂止盈，否则会把废回报当真实成交落账）；
+            - 三连各自 try-except 兜底：任一环节失败（日志写盘失败/钉钉网络故障/止盈挂单
+              被风控挡板拒）只记日志，不阻塞后续环节（日志失败仍要通知，通知失败仍要挂止盈）；
+            - ``_order_direction`` 返 None（查不到订单方向）时保守按 ``"TRADE"`` 落日志、
+              不挂止盈（不误判买卖方向 → 不误挂止盈）。
+        """
+        kind = update.get("kind")
+        if kind != "trade":
+            return  # 仅处理成交回报（order/order_error 由风控层负责，不在本 handler 范围）
+        symbol = update.get("stock_code", "")
+        qty = update.get("traded_volume", 0)
+        price = update.get("traded_price", 0.0)
+        order_id = str(update.get("order_id", ""))
+        if not symbol or qty <= 0:
+            # 脏数据/撤单回报（traded_volume=0）不应落账或挂止盈，直接跳过
+            return
+
+        # 判定方向（BUY/SELL/None）——日志与挂止盈决策都依赖
+        direction = self._order_direction(order_id)
+
+        # a. 成交日志补写（用真实成交价/量，非下单预估价；Layer 6 LLM 复盘数据源）
+        try:
+            from server.services.trading_service import record_live_trade
+            record_live_trade(
+                symbol,
+                direction or "TRADE",  # 方向未知时落 "TRADE"（保守中性，不误判买卖）
+                float(qty),
+                float(price),
+                strategy="neckline",
+                rationale=f"成交回报@{update.get('traded_time')}",
+            )
+        except Exception:
+            # 日志写盘失败不阻塞通知/挂止盈（三连各自独立降级，互不阻断）
+            logger.exception("成交日志补写失败 symbol=%s（不影响后续通知/挂止盈）", symbol)
+
+        # b. 钉钉成交通知（fire_and_forget 不阻塞回调链；钉钉软降级在 _broadcast 内兜底）
+        try:
+            # ⚠️ 走 infra.notifier 真身（core.notifier 是 strangler 转发垫片，broker/qmt
+            # 同口径用 core.notifier；此处直指 infra 真身，避免垫片未来下线后隐性断链）。
+            from infra.notifier import NotificationManager, fire_and_forget
+            fire_and_forget(NotificationManager.get_default().notify_trade_event(
+                symbol, direction or "TRADE", float(qty), float(price),
+            ))
+        except Exception:
+            logger.exception("成交通知发送失败 symbol=%s（不影响后续挂止盈）", symbol)
+
+        # c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（幂等 _tp_placed 防重挂）
+        #    卖单成交（direction=="SELL"）无需挂止盈（卖出即离场，无持仓可止盈）。
+        #    方向未知（None）保守不挂——宁可漏挂止盈让人工补，也不误把卖单当买单挂反方向单。
+        #
+        # 幂等关键设计（Why 在 _handle_order_update 标记，不在 _place_take_profit 内标记）：
+        #   ``_tp_placed.add(symbol)`` 必须在**调度点**完成（即此处，调 _place_take_profit
+        #   之前/之后都可，但必须在 _handle_order_update 同步路径里），**不能**下沉到
+        #   ``_place_take_profit`` 内部 —— 否则：
+        #     1. 部分成交重推时，_place_take_profit 还没跑完（await 中）就被第二次回报
+        #        重入，_tp_placed 仍空 → 二次重挂 → 超卖；
+        #     2. 单测 mock 掉 _place_take_profit 时，标记永远不会被写入，幂等链路无法验证。
+        #   Phase1 语义：「该 symbol 已调度挂止盈」即视为已处理（一票通行），后续重推一律
+        #   跳过；_place_take_profit 内部若真挂失败（风控拒/网关断），由告警人工补挂，
+        #   不靠 _tp_placed 之外的重试计数（重试限频是 Phase2 议题）。
+        if direction == "BUY" and symbol not in self._tp_placed:
+            self._tp_placed.add(symbol)  # 调度点幂等标记（先占位，防 await 期间重入重挂）
+            try:
+                await self._place_take_profit(symbol, qty, price, order_id)
+            except Exception:
+                # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
+                # 注意：此处不回滚 _tp_placed（保留已调度标记，防重推再挂；真失败由人工补）。
+                logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)
+
+    def _order_direction(self, order_id: str) -> Optional[str]:
+        """从 ``gw._orders`` 查订单方向（BUY/SELL）。
+
+        物理意图：
+            成交回报 ``update`` 只含 order_id 与成交价量，**不含下单时声明的买卖方向**。
+            必须回查 ``gw._orders[order_id].order_type`` 拿下单时记录的方向枚举
+            （下单瞬间由 broker/qmt.py ``_place_order`` 写入 _orders 字典），才能判定
+            本次成交是买单（需挂止盈）还是卖单（无需挂止盈）。
+
+        order_type 枚举（xtconstant 契约，与 broker/qmt.py:724 同源）：
+            - ``xtconstant.STOCK_BUY = 23``  → 返 "BUY"
+            - ``xtconstant.STOCK_SELL = 24`` → 返 "SELL"
+            - 其它/缺失 → 返 None（保守，不误挂止盈）
+
+        Args:
+            order_id: 成交回报里的订单 ID（str；gw._orders 的 key 在 broker/qmt.py 内
+                      既可能是 seq 也可能是 real order_id，本处按 str(update["order_id"]) 查）。
+
+        Returns:
+            "BUY" / "SELL" / None。None 时调用方（_handle_order_update）保守按 "TRADE"
+            落日志、跳过挂止盈（不猜方向 → 不误挂反方向单）。
+
+        ⚠️ 测试环境兜底（ImportError）：
+            xtconstant 来自 xtquant SDK，CI/单测环境无 xtquant 时 ``from xtquant import
+            xtconstant`` 抛 ImportError——此处兜底硬编码 23/24（与 conftest.py 的假
+            xtconstant 同值），保证单测可跑。生产环境（miniQMT 通道）xtquant 必装，
+            兜底分支不会触达。
+        """
+        # gw 可能未装配（Task 11 未注入 _gw）——getattr 兜底返 {} 不抛
+        orders = getattr(self._gw, "_orders", {}) if self._gw else {}
+        rec = orders.get(order_id, {})
+        # order_type 用 xtconstant 常量比较（绝不硬编码魔法数字到比较表达式里——
+        # 兜底 23/24 只在 ImportError 时启用，生产环境走 xtconstant.STOCK_BUY/SELL 真值）
+        try:
+            from xtquant import xtconstant  # 与 broker/qmt.py:61 同源导入路径
+            STOCK_BUY = xtconstant.STOCK_BUY
+            STOCK_SELL = xtconstant.STOCK_SELL
+        except ImportError:
+            # CI/单测无 xtquant：兜底硬编码（与 tests/conftest.py 假 xtconstant 同值）
+            STOCK_BUY, STOCK_SELL = 23, 24
+        ot = rec.get("order_type")
+        if ot == STOCK_BUY:
+            return "BUY"
+        if ot == STOCK_SELL:
+            return "SELL"
+        return None
+
+    async def _place_take_profit(self, symbol: str, filled_qty: float,
+                                 fill_price: float, order_id: str) -> None:
+        """挂限价止盈卖单（Phase1 简化版：单一固定止盈价、全额）。
+
+        物理意图：
+            买单成交后立刻挂一张限价卖单在止盈价——买单一旦成交即转为持仓，需主动
+            挂止盈单等待触发（颈线法 take_profit 来自计划落盘时的 tp_h_mult×H 计算）。
+            Phase2 升级为分级状态机（tp1 卖部分量锁利 + tp2 卖剩余量，复刻 simulate_exit）。
+
+        止盈价来源（与 pre_open / stop_loss 同一张活跃计划，单源一致）：
+            ``trading_plan.load_plan(today).orders[i].take_profit``（当日 confirmed 计划，
+            pre_open 挂买单时同一张计划里就有 take_profit 字段，保证买卖单止盈价同源）。
+
+        数量来源（scope #3 红线同源）：
+            ``filled_qty`` 用成交回报里的**实际成交量**（``traded_volume``），**非计划全量**。
+            部分成交时若用计划全量挂止盈 → 卖超过实际持仓 = 超卖敞口致命（与 stop_loss
+            ``qty 必须来自 gw 持仓``同一条 live 安全红线）。
+
+        幂等（``_tp_placed``）：
+            **标记在调度点 ``_handle_order_update`` 完成**（不在本方法内），先占位防
+            ``await`` 期间部分成交重推重入重挂。本方法只负责读计划止盈价 + _submit 挂单 +
+            结果观测日志，不写 ``_tp_placed``（单一写入点 = 幂等可测可证）。
+
+        Args:
+            symbol:      成交标的（如 "300001.SZ"）。
+            filled_qty:  实际成交量（股，来自成交回报 traded_volume，非计划全量）。
+            fill_price:  实际成交均价（仅用于日志可观测，不参与挂单价计算）。
+            order_id:    触发本次止盈的成交回报 order_id（仅用于日志归因）。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        plan = trading_plan.load_plan(today)
+        if not plan:
+            logger.warning("挂止盈跳过：无活跃计划 symbol=%s（计划未落盘/已失效）", symbol)
+            return
+        # 从计划 orders 里查该 symbol 的 take_profit（与 pre_open 挂买单同一张计划同源）
+        tp = None
+        for o in plan.get("orders", []):
+            if (o.get("order") or {}).get("symbol") == symbol:
+                tp = o.get("take_profit")
+                break
+        if tp is None or tp <= 0:
+            # 计划缺止盈价（数据瑕疵/手工计划）→ 不挂盲单，告警人工补
+            logger.warning("挂止盈跳过：无止盈价配置 symbol=%s（计划缺 take_profit）", symbol)
+            return
+
+        # 挂限价止盈卖单（confirm=True 同 pre_open，引擎是自动批量通道，盘中无人工二次确认）
+        from trading.compute.types import OrderRequest
+        result = await _submit(
+            OrderRequest(symbol=symbol, qty=int(filled_qty), side="sell", price=tp),
+            confirm=True,
+        )
+        if result.get("state") not in ("REJECTED", "FAILED"):
+            # 幂等标记在调用方 _handle_order_update 已先占位，此处只记成功观测日志
+            logger.info("【止盈单已挂】%s %s股 @%s（触发成交价=%s order_id=%s）",
+                        symbol, int(filled_qty), tp, fill_price, order_id)
+        else:
+            # 挂单失败（资金不足/涨跌停/白名单拒）→ 调用方 _tp_placed 已占位不再重挂，
+            # 真失败由告警人工补（Phase1 不做自动重试限频，避免与柜台频控冲突）
+            logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
+                           symbol, result.get("state"), result.get("message"))
 
     # ----- 生命周期 -----
     def start(self) -> None:
