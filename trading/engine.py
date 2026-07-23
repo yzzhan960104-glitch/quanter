@@ -2,9 +2,11 @@
 """二期自动交易引擎：APScheduler 四触发点编排 + 影子模式分流。
 
 物理意图（四触发点的真实业务节奏 · 术语对齐 T 日盘后扫盘 → T+1 执行）：
-  eod_plan  15:35 T 日盘后：扫颈线法信号 → build_orders → save_plan（confirmed=False）
+  eod_plan  19:00 T 日盘后：扫颈线法信号 → build_orders → save_plan（confirmed=False）
               → push 钉钉（待研究员确认）。本阶段绝不下单（机器只产计划，人审是闸）。
               次日（T+1 日）pre_open 才挂单执行。
+              ⚠️ 非 15:35：须等 18:00 增量采集落湖 + 18:30 数据检查点② 通过，否则用
+              T-1 数据算 T+1 计划（时序 bug · Task6 修复）。
   pre_open  09:22 T 日开盘前：① 撤昨日遗留未成交单 ② 读已确认计划
               → 注入动态白名单（过关5）→ 挂限价买 + 止盈限价卖（逐单 try-except 兜底）。
   stop_loss 每 5min 盘中：查 gw 真实持仓 + 现价（qmt_market_data.get_quote / xtdata），
@@ -105,7 +107,7 @@ def _load_universe(lake) -> list:
         本函数**绝不 read_parquet**——lake 由调用方（``_eod``）入口一次性读入后注入，
         全创板科创 1993 个标的共用同一份 DataFrame。
         历史 bug：每个 symbol 都重读 455MB parquet（1.75s/次）→ 58 分钟纯 I/O，
-        15:35 的 ``_eod`` 根本无法在合理窗口完成。复用 lake 后整体扫描降至秒级。
+        19:00 的 ``_eod`` 根本无法在合理窗口完成。复用 lake 后整体扫描降至秒级。
 
     Why 收窄创板科创（不扫全市场）：
         颈线法 param_iter 基线口径（记忆 neckline-paramiter-baseline）——创板科创
@@ -185,7 +187,8 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
     """T 日盘后：颈线法信号 → 计划落盘（confirmed=False） → 推钉钉等研究员确认。
 
     物理意图（术语对齐物理时序 · Task 7b fix）：
-        本函数由 ``_eod`` 在 **T 日盘后 15:35** 调用，扫 T 日新突破信号，产 T+1 日
+        本函数由 ``_eod`` 在 **T 日盘后 19:00** 调用（Task6 时序修复：原 15:35 因增量
+        采集 @18:00 尚未落湖致读到 T-1 数据，挪 19:00 等数据落湖 + 检查点② 通过），扫 T 日新突破信号，产 T+1 日
         生效计划；机器批量扫信号易受数据瑕疵/前视偏差/极端行情误判，T 日盘后必须给人
         一次否决机会——故本函数只产计划不下单（spec §2 确认闸红线）。
 
@@ -504,7 +507,9 @@ class TradingEngine:
     模块级全局会污染 server 手动下单路径，破坏 server 行为向后兼容）。
 
     四 cron（Task4 已配 env，缺省值对齐 A 股交易日历 · 术语对齐 T 日盘后扫盘）：
-        eod_plan   15:35 周一-五  T 日盘后扫信号 + 落计划 + 推钉钉（T+1 执行）
+        eod_plan   19:00 周一-五  T 日盘后扫信号 + 落计划 + 推钉钉（T+1 执行）
+                          ⚠️ 非 15:35：18:00 增量采集 + 18:30 检查点② 通过后才扫，
+                          否则读到 T-1 数据算 T+1 计划（时序 bug · Task6 修复）
         pre_open   09:22 周一-五  T 日开盘前撤昨日 + 挂当日单
         stop_loss  */5  9-14 周一-五  盘中每 5 分钟止损监控
         post_close 15:30 周一-五  盘后对账 + 清白名单
@@ -521,7 +526,12 @@ class TradingEngine:
         # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
         self.sched.add_job(
             self._eod, CronTrigger.from_crontab(
-                os.getenv("ENGINE_EOD_PLAN_CRON", "35 15 * * 1-5")),
+                # ⚠️ 时序修复（Task6）：15:35 → 19:00。原 15:35 触发时 T 日增量行情
+                # 尚未落湖（@18:00 sync_all_tushare 才跑增量采集 + @18:30 数据检查点②
+                # 才验通过），_eod 读到的仍是 T-1 数据 → 用 T-1 收盘算 T+1 计划 = 时序 bug。
+                # 挪到 19:00 既等足 18:00 增量落湖 + 18:30 检查点② 通过，又留足窗口在
+                # T+1 日 09:22 pre_open 前完成扫盘 + 人审确认（confirmed=False 闸）。
+                os.getenv("ENGINE_EOD_PLAN_CRON", "0 19 * * 1-5")),
             id="eod_plan",
         )
         self.sched.add_job(
@@ -545,21 +555,26 @@ class TradingEngine:
         """cron 包装：节假日跳过；交易日 resolve 多实验 + scan_live 产信号 → eod_plan。
 
         物理意图（二期 gap② 策略数据源 · 术语对齐物理时序）：
-            **T 日盘后 15:35 触发**——从实验配置中心读当前所有在线实验
+            **T 日盘后 19:00 触发**——从实验配置中心读当前所有在线实验
             （status=ACTIVE+weight>0），按每实验的 strategy_name+params 装配策略实例，
             对创板科创可交易池逐 symbol 调 scan_live(df_upto 截至 T 日 today) 产
             【T 日新突破】信号，注入实验归因字段后透传 eod_plan 落盘（confirmed=False
             待研究员人审），次日（T+1 日开盘前 pre_open）挂单执行。
 
             ⚠️ 术语对齐（Task 7b fix · 别再误称「T-1 收盘日」）：
-                传入的 ``today`` 即 T 日本身（cron 在 T 日 15:35 触发，扫 T 日盘后突破），
+                传入的 ``today`` 即 T 日本身（cron 在 T 日 19:00 触发，扫 T 日盘后突破），
                 计划生效日 = T+1。早期注释里的「T-1 收盘日」语义混淆，统一改为「T 日盘后」。
+            ⚠️ 时序修复（Task6）：
+                cron 由 15:35 挪 19:00——原 15:35 触发时 T 日增量行情（@18:00 sync_all_tushare）
+                尚未落湖、@18:30 数据检查点② 未验通过，_eod 读到的是 T-1 数据，用 T-1 收盘
+                算 T+1 计划 = 时序 bug。19:00 既等足数据落湖 + 检查点② 通过，又留足窗口在
+                T+1 日 09:22 pre_open 前完成扫盘 + 人审确认。
 
         ⚠️ 性能不变量（Task 7b fix · 阻断级修复）：
             data_lake/a_shares_daily.parquet（455MB，全市场 5 年）在本函数**入口只读一次**，
             传给 _load_universe(lake) 与 _load_df_upto(lake, sym, today) 复用。
             历史 bug：每 symbol 各 read_parquet 一次（1.75s × 1993 标的 = 58 分钟纯 I/O），
-            15:35 的 _eod 根本无法在合理窗口完成；复用 lake 后整体降至秒级。
+            19:00 的 _eod 根本无法在合理窗口完成；复用 lake 后整体降至秒级。
 
         无前视契约（spec 红线）：
             df_upto 由 _load_df_upto 截断于 today（.loc[:date]），不含 today 之后任何 K 线；
@@ -590,7 +605,7 @@ class TradingEngine:
 
         # ⚠️ 性能红线（Task 7b fix）：data_lake 入口只读一次，全 universe 复用同一份
         # DataFrame。455MB parquet 单次 read ≈ 1.75s；历史每 symbol 重读致 1993 × 1.75s
-        # ≈ 58 分钟纯 I/O，_eod 在 15:35 窗口完全无法完成。lake 复用后降为单次 disk read。
+        # ≈ 58 分钟纯 I/O，_eod 在 19:00 窗口完全无法完成。lake 复用后降为单次 disk read。
         lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 
         universe = _load_universe(lake)
