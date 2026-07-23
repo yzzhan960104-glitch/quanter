@@ -38,3 +38,33 @@ def test_checkpoint2_t_fail_after_deadline_melts():
         r = run_check("t2", keys=("daily",), deadline_hour=20)
     assert r["ok"] is False
     assert r["melted"] is True
+
+
+def test_checkpoint2_multi_round_resync_then_pass():
+    """检查点②：多轮重采验证 15min 节流 + 跨轮重采后 PASS。
+
+    场景：第1轮重采后重检仍 fail → time.sleep(15*60) 节流 → 第2轮重采后重检 ok。
+    核实点：
+      ① time.sleep 被调一次且参数=900s（15min 节流，非忙轮询）；
+      ② sync_one_key 调两次（两轮各重采一次）；
+      ③ 最终 return ok=True（重采收敛后不熔断）。
+    _now 调用序列（每轮 while 条件 1 次 + sleep 前 1 次，PASS 轮不 sleep）：
+      ["18:30"(第1轮 while), "18:30"(第1轮 sleep 前), "18:45"(第2轮 while)]
+    check_freshness side_effect：[初始 fail, 第1轮重检 fail, 第2轮重检 ok]。
+    """
+    from data.freshness import FreshnessResult
+    fail = FreshnessResult("daily", False, "2026-07-22", "2026-07-23", "陈旧")
+    ok = FreshnessResult("daily", True, "2026-07-23", "2026-07-23", "PASS")
+    sleep = MagicMock()
+    sync = MagicMock(return_value=(True, "ok"))
+    with patch("scripts.run_data_check.check_freshness", side_effect=[fail, fail, ok]), \
+         patch("scripts.run_data_check.sync_one_key", sync), \
+         patch("scripts.run_data_check.time.sleep", side_effect=lambda _: None) as mock_sleep, \
+         patch("scripts.run_data_check._now",
+               side_effect=["18:30", "18:30", "18:45"]):
+        r = run_check("t2", keys=("daily",), deadline_hour=20)
+    assert r["ok"] is True
+    assert r["melted"] is False
+    assert sync.call_count == 2  # 两轮各重采一次
+    assert mock_sleep.call_count == 1  # 仅第1轮 sleep 节流（第2轮 PASS 直接 return）
+    assert mock_sleep.call_args.args == (900,)  # 15*60=900s

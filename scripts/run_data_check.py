@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 import sys
+import io
+import time
 import logging
 from datetime import datetime
 
@@ -34,7 +36,6 @@ def _resync_key(key: str) -> tuple[bool, str]:
     注意 sync_one_key 在模块级 import（见文件头注释），测试通过 patch
     "scripts.run_data_check.sync_one_key" 隔离真实采集。
     """
-    import io
     today_str = datetime.today().strftime("%Y-%m-%d")
     return sync_one_key(key, today_str, fallback_years=3, max_days=None, log=io.StringIO())
 
@@ -95,6 +96,12 @@ def run_check(
         results = [check_freshness(k, expected) for k in keys]
         if all(r.ok for r in results):
             return {"ok": True, "melted": False, "details": [r.message for r in results]}
+        # 未全 PASS：sleep 15min 再下一轮。
+        # why：Tushare 盘后数据落盘有延迟，密集轮询既无效又会撞限频/积分扣减；
+        #      brief「每15min重采」即此物理语义（进程内 sleep，schtasks 只负责 18:30 单次拉起）。
+        # sleep 前再判一次 deadline：避免最后一轮 sleep 窗口超过熔断截止时间。
+        if _now() < f"{deadline_hour:02d}:00":
+            time.sleep(15 * 60)
 
     # 超 deadline 仍 FAIL → 熔断
     melt_msg = (f"【数据熔断】检查点②超时({deadline_hour}:00)仍缺 T 日数据："
