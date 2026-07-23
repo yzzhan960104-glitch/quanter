@@ -103,11 +103,18 @@ def get_status() -> dict:
 
 
 async def get_positions() -> list:
-    """聚合底层真实持仓 → [{symbol, qty, market_value, pnl}]。
+    """聚合底层真实持仓 → [{symbol, qty, market_value, pnl, strategy, entry_rationale}]。
 
-    pnl = market_value - open_cost（累计浮盈；XtPosition 不带昨收，无法算"今日"盈亏，
-    务实口径见 spec 偏差记录）。第一版 market_value/pnl 走 None（未查行情，前端中性灰），
-    仅返 symbol/qty，避免引入额外行情查询接口。
+    pnl = (last_price - avg_price) × qty（累计浮盈；XtPosition 不带昨收，无法算"今日"
+    盈亏，务实口径见 spec 偏差记录）。
+    market_value = last_price × qty（按现价估值持仓总市值）。
+
+    Task12 修 G6（原第一版 pnl/market_value 恒 None）：持仓查询后批量
+    ``qmt_market_data.get_quotes(syms)`` 取现价逐仓算浮盈。**盲价防御红线**：
+    现价缺失（行情源对该标的返 None / NaN）或 avg_price 缺失 → pnl/market_value 一律
+    返 None，绝不拿前一收盘价或脏数据「猜」浮盈（量化交易审计合规红线：浮盈错估
+    会误导风控阈值与研究员人审，宁可显式空值也不用不实数据填值）。
+
     未连接/锁定 → raise RuntimeError（路由层转 409）；无网关 → raise（路由层转 503）。
     """
     gw = get_gateway()
@@ -116,25 +123,64 @@ async def get_positions() -> list:
     if getattr(gw, "is_locked", False) or not getattr(gw, "_connected", False):
         raise RuntimeError("交易网关未连接或已锁定，拒绝对账")
     raw = await gw._fetch_broker_positions()
-    # T7：raw 形态可能是 {sym: float}（Mock/EMT）或 {sym: {volume, ...}}（QMT），
-    # 统一扁平化取 volume 供本路由消费（与 sync_positions 扁平化同型 isinstance 防御）。
+    # T7：raw 形态可能是 {sym: float}（Mock/EMT）或 {sym: {volume, avg_price, ...}}（QMT）。
+    # 扁平化同时保留 avg_price（Task12：算浮盈必需 avg_price，早期扁平化只取 volume 丢了
+    # avg_price，致 pnl 无从计算——此处补回）。形态统一为 {sym: {"volume":v, "avg_price":a}}，
+    # 与 sync_positions 扁平化同型 isinstance 防御。
     if raw and isinstance(next(iter(raw.values()), None), dict):
-        raw = {s: p["volume"] for s, p in raw.items()}
+        raw = {
+            s: {
+                "volume": p.get("volume", 0.0),
+                "avg_price": p.get("avg_price"),
+            }
+            for s, p in raw.items()
+        }
+    else:
+        # {sym: float} 形态（Mock/EMT 无 avg_price）→ 补 None 占位，保持下游统一访问
+        raw = {s: {"volume": p, "avg_price": None} for s, p in (raw or {}).items()}
     if not raw:
         return []
-    # 层级五·持仓富化：join 归因注册表，附 strategy/entry_rationale（未登记则 None，前端显示 '—'）。
-    # market_value/pnl 仍 None（第一版未查行情）；契约形状就位，待行情查询接入后填充。
-    return [
-        {
+
+    # Task12 · 批量取现价算浮盈（修 pnl/market_value=None G6）：
+    # ``qmt_market_data.get_quotes`` 一次批量调 ``xtdata.get_full_tick(syms)``，比逐仓
+    # 单查 N→1 次 C++ 调用（与 stop_loss_monitor 同口径优化）。返回 {sym: tick_dict | None}，
+    # 缺失标的显式 None（盲价防御下游分支据此判 None）。
+    syms = list(raw.keys())
+    quotes: dict = {}
+    if syms:
+        try:
+            quotes = await qmt_market_data.get_quotes(syms)
+        except Exception:
+            # 行情查询整体异常（xtdata 不可用/网络故障）→ 全 None 降级，绝不阻断持仓查询主路径
+            # （持仓 symbol/qty 是真相，浮盈是衍生——宁可空 pnl 也不能让 Cockpit 持仓表整页 500）。
+            logger.exception("取现价失败，pnl/market_value 将为 None（不猜价）")
+
+    result = []
+    for sym, pos in raw.items():
+        qty = float(pos["volume"])
+        avg = pos.get("avg_price")
+        tick = quotes.get(sym)
+        # tick 形态可能为 None（缺失）或 dict（含 last_price 等驼峰字段）
+        last = tick.get("last_price") if isinstance(tick, dict) else None
+        # 盲价防御三连：last 缺失(None) / last 是 NaN(last!=last) / avg 缺失 → 一律 None。
+        # NaN 防御：xtdata 在停牌/异常 tick 时偶发返 float('nan')，NaN 参与运算会污染
+        # 整列（NaN × 100 仍 NaN），必须在算术前拦截。
+        if last is None or avg is None or last != last:
+            market_value, pnl = None, None
+        else:
+            market_value = float(last) * qty
+            pnl = (float(last) - float(avg)) * qty
+        # 层级五·持仓富化：join 归因注册表，附 strategy/entry_rationale（未登记则 None，
+        # 前端显示 '—'）。富化逻辑与 Task5 完全一致，本次仅补现价查询与 pnl 计算。
+        result.append({
             "symbol": str(sym),
-            "qty": float(qty),
-            "market_value": None,
-            "pnl": None,
+            "qty": qty,
+            "market_value": market_value,
+            "pnl": pnl,
             "strategy": _position_attribution.get(sym, {}).get("strategy"),
             "entry_rationale": _position_attribution.get(sym, {}).get("rationale"),
-        }
-        for sym, qty in raw.items()
-    ]
+        })
+    return result
 
 
 def record_position_attribution(symbol: str, strategy: str, rationale: str = "") -> None:

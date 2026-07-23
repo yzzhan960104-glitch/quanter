@@ -671,6 +671,80 @@ class TradingEngine:
             today, signals, atr_map,
             capital=float(os.getenv("TRADE_CAPITAL", "1_000_000")),
         )
+        # Task12 · 持仓盈亏播报（spec §6.2 C4 / 子诉求 1<2>）：eod_plan 落盘+推钉钉后，
+        # 把当前持仓逐仓浮盈 + 总资产推一次群播报，让研究员在 19:00 一次性看到「今日计划 +
+        # 当前持仓盈亏全貌」。放在 eod_plan 之后、独立 try-except 软降级——盈亏播报失败
+        # 绝不阻断 eod_plan 主流程（计划已落盘，研究员次日 pre_open 仍可挂单执行）。
+        await self._broadcast_positions_pnl()
+
+    async def _broadcast_positions_pnl(self) -> None:
+        """播报当前持仓盈亏全貌（总资产 + 逐仓浮盈 + 盈亏汇总）。
+
+        物理意图（spec §6.2 C4，19:00 eod_plan 收尾播报）：
+            研究员在 19:00 收到 eod_plan（次日计划）后，紧接着收到一条「当前持仓 +
+            浮盈」播报——一日闭环的盈亏可见性。内容三段：
+              a. 总资产（gw.query_asset.total_asset）作 head；
+              b. 逐仓浮盈（get_positions 富化后的 pnl，带 +/- 前缀，盲价标的显示 N/A）；
+              c. 空仓特判 → 显式「空仓」（不混淆「无持仓」与「播报失败」）。
+
+        软降级红线（绝不阻断 eod）：
+            整方法 try-except 兜底——网关未连接 / query_asset 异常 / get_positions
+            抛错 / 钉钉网络故障 → 仅 logger.exception 记录，不上抛、不影响 eod_plan
+            已落盘的计划。播报是「锦上添花」而非「关键路径」，与 fire_and_forget 同语义。
+        """
+        try:
+            # 局部 import：避免顶层拉起 server/infra 子系统（与 _eod 内 experiment/strategies
+            # 局部 import 同口径，保持引擎薄编排）。
+            from server.services.trading_service import get_positions
+            from infra.notifier import NotificationManager, fire_and_forget
+
+            gw = get_gateway()
+            # query_asset 总资产：网关缺失/未连接/异常 → 走 {} 降级（head 显示 0，不阻断）。
+            asset: dict = {}
+            if gw is not None:
+                try:
+                    asset = await gw.query_asset() or {}
+                except Exception as e:  # noqa: BLE001 总资产软降级
+                    logger.warning("_broadcast_positions_pnl query_asset 失败（head 显示 0）：%s", e)
+                    asset = {}
+            total = float(asset.get("total_asset", 0.0) or 0.0)
+
+            positions = await get_positions()
+
+            # 汇总浮盈：仅累加 pnl 非 None 的仓位（盲价仓位跳过，避免 None + 数值 TypeError）。
+            total_pnl = 0.0
+            pnl_known = 0
+            for p in positions:
+                pnl = p.get("pnl")
+                if pnl is not None:
+                    total_pnl += float(pnl)
+                    pnl_known += 1
+
+            lines = [f"## 💼 持仓盈亏播报（总资产 {total:.0f}）"]
+            if not positions:
+                lines.append("- 空仓")
+            else:
+                for p in positions:
+                    pnl = p.get("pnl")
+                    qty = p.get("qty")
+                    # pnl 非 None → 带 +/- 前缀浮盈；None → N/A（盲价防御语义对齐 get_positions）
+                    pnl_mark = f"{pnl:+.0f}" if pnl is not None else "N/A"
+                    qty_str = f"{qty:.0f}股" if isinstance(qty, (int, float)) else "?股"
+                    lines.append(f"- {p['symbol']} {qty_str} 浮盈{pnl_mark}")
+                # 汇总行：已估值仓位 N/总 M，累计浮盈（盲价仓位不计入累计，防误导）
+                lines.append(
+                    f"- 汇总：已估值 {pnl_known}/{len(positions)} 仓，"
+                    f"累计浮盈 {total_pnl:+.0f}"
+                )
+            msg = "\n".join(lines)
+
+            # fire_and_forget：钉钉异步投递 daemon 线程，网络延迟不阻塞 eod 主线程。
+            # notify_risk_event 用 INFO 级（持仓播报是业务流水，非风险告警，与 notify_trade_event
+            # 同语义层——但本期复用 risk_event 通道避免新增通道，level=INFO 前缀 ℹ️ 区分）。
+            fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "INFO"))
+        except Exception:
+            # 顶层兜底：任何未预期异常（含 get_gateway import 失败）都软降级，绝不阻断 eod。
+            logger.exception("持仓盈亏播报失败（不影响 eod_plan 主流程）")
 
     async def _pre_open(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
