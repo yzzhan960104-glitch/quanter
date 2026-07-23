@@ -131,14 +131,14 @@ Layer 1:  data (被所有人依赖)
   - `post_close` 熔断**未连线**（`check_daily_loss_limit`+`cancel_all_open_orders`+`emergency_halt` 三步缺 equity 数据源未串，live 前必修）。
   - 状态机非 reducer 式：`execution/engine.py` 的 `tick_pullback`/`tick_exit` 把"读storage+查行情+判定+下单+写storage"混在一个 async 方法，判定纯但状态推进与 broker I/O 耦合。
 
-### §3.6 回测 `backtest`（独立 + 收口双源）
+### §3.6 回测 `backtest`（独立 + 内核同源）
 
 - **职责**：历史回放验证 + 参数训练。变动频繁部分（driver/撮合/统计/参数搜索）集中于此，与交易稳定性隔离。
 - **现状**：driver（`execution/backtest_replay.py`，干净、只依赖 `strategies.base.Strategy`）与盘中执行状态机同包；统计内联 driver；`param_iter.py`/`identify_param_scan.py` 直调 `neckline_backtest.scan_symbol`——**识别+模拟内核已同源**（Signal dataclass + `scan_symbol` 参数化，Task 1.6 收口，`test_scan_symbol_matches_strategy` 守护 `scan_symbol`≡`scan_at`）；统计层有意分轨（param_iter kelly 调参目标函数 vs replay CAGR 展示统计）—— 非债。全局 mutation 传参债已清（follow-up 2026-07-23 §3.2）。
 - **迁移来源 → 目标**（拆 execution 包）：
   - `execution/backtest_replay.py`+`replay_worker.py`+`replay_scheduler.py`+`replay_tasks_db.py`+`replay_runs.py` → `backtest/`
   - `caisen/optimize/`（training_loop/training_analyzer/training_loops_db/training_dingtalk）→ `backtest/optimize/`（D5，参数训练归此）
-  - `scripts/param_iter.py`+`identify_param_scan.py`+`calibrate_min_rr.py` → 收口走 driver，消灭双源路径
+  - `scripts/param_iter.py`+`identify_param_scan.py`+`calibrate_min_rr.py`：param_iter/identify 内核已同源（Task 1.6 `scan_symbol`≡`scan_at`，由 `test_scan_symbol_matches_strategy` 守护）；统计层有意分轨（param_iter kelly 调参 vs replay CAGR 展示，非债）；全局 mutation 传参债已清（见 follow-up 2026-07-23 §3.2）。calibrate_min_rr 走同一内核
   - `trading/mock_broker.py`（同步撮合）→ `backtest/`（回测撮合用）
 - **死包回收**：`backtest/` 现是 0 文件空壳（残留 `__pycache__`），名字直接复用，先 `git rm -r backtest/__pycache__`。
 - **依赖**：`trading.compute`（单向）+ `strategies`（信号）+ `data`（历史 bar）。**禁止** import 整个 `trading/engine` 或 `execution`（盘中执行）。
@@ -219,7 +219,7 @@ Layer 1:  data (被所有人依赖)
 
 **阶段 4 · 拆 execution + 回测独立**
 - 回测 5 文件 → `backtest/`；`caisen/optimize` → `backtest/optimize/`（D5）；`mock_broker.py` → `backtest/`
-- `param_iter`/`identify_param_scan`/`calibrate_min_rr` 收口走 driver，消灭双源路径
+- `param_iter`/`identify_param_scan`/`calibrate_min_rr`：内核已同源（Task 1.6，`test_scan_symbol_matches_strategy` 守护）；统计层有意分轨非债；全局 mutation 传参债已清（见 §3.6 现状句与 follow-up 2026-07-23 §3.2）
 - `execution/engine.py`+`storage.py` → `trading/state/`（reducer 化起步）
 - 解散 `execution/` 包，留垫片
 - 验证：回测独立成包、回测↔交易只通过 `trading.compute`
