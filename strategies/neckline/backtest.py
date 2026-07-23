@@ -287,8 +287,10 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
     id_cfg: 识别层参数（见 DEFAULTS），None 用 {**DEFAULTS, window:window}。
         P1-b（2026-07-21）：参数化识别层，消除与 strategies/NecklineMethodStrategy.scan_at
         的双轨分叉（scan_symbol 此前硬编码全局 DEFAULTS、scan_at 参数化；现两侧都参数化，
-        由 test_scan_symbol_matches_strategy 守护一致）。param_iter 不传 id_cfg（用默认
-        读全局 DEFAULTS，run_one update 全局，行为不变）。
+        由 test_scan_symbol_matches_strategy 守护一致）。Layer2 #2a（2026-07-23）去全局
+        mutation 后：param_iter.run_one 已显式构造 id_cfg 传入（不再靠 DEFAULTS.update
+        全局 patch），driver 路径由 NecklineMethodStrategy.scan_at 经 self.id_cfg 传入；
+        两侧均显式透传，simulate_exit 亦经 id_cfg 显式接收（不读全局）。
     """
     if exec is None:
         exec = EXEC_DEFAULTS

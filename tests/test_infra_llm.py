@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """infra/llm 端口与工厂契约：Protocol 形状 + 工厂按 env 选实现 + 凭证缺失抛 LLMConfigError。"""
-import os
 import pytest
-from unittest.mock import patch
 
 
 def test_llm_client_protocol_call_signature():
