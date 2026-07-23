@@ -82,13 +82,47 @@ def _print_segment(name, m):
           f"夏普{m['sharpe']:>5.2f}  回撤{m['max_dd']*100:>5.1f}%  {m['n']:>5}笔")
 
 
+def cmd_verify(args):
+    """邻域稳定性 + 基线对照验收闸（spec §12 ⑤⑥）。
+
+    物理意图：oos 固化了冠军的 2026 去偏水平（L1 验收锚），但"一组参数出高 calmar"
+    可能是过拟合尖峰——本命令在冠军 21 维邻域 ±perturb 扰动采样，看 outer calmar 是否
+    稳健（高原放行）还是塌掉（孤峰否决）。叠加基线对照（state best_ann 全段 vs outer 2026）
+    给人审一个"去偏幅度"的直觉（spec §1.4 漂移实证）。
+    Plan 1 手动验收：判定结果打印不进排序（排序留 Plan 3 搜索）。
+    """
+    from discovery.neighborhood import neighborhood_stability
+    universe, meta = freeze()
+    split = holdout_split(args.embargo)
+    with open(STATE_FILE, encoding="utf-8") as f:
+        state = json.load(f)
+    params = state["best"]
+    print(f"=== discovery verify：邻域稳定性 + 基线对照（snapshot={meta.snapshot_hash}）===")
+    stab = neighborhood_stability(params, universe, split,
+                                  perturb=args.perturb, n_samples=args.n_samples)
+    print(f"冠军 outer: calmar={stab['base_calmar']:.2f} ann={stab['base_outer']['ann']*100:.1f}% "
+          f"夏普{stab['base_outer']['sharpe']:.2f} 回撤{stab['base_outer']['max_dd']*100:.1f}%")
+    print(f"邻域 {args.n_samples}×±{args.perturb:.0%} 扰动 calmar: "
+          f"mean={stab['neighbor_mean']:.2f} std={stab['std']:.2f}")
+    verdict = "是（高原稳健，放行）" if stab["is_plateau"] else "否（孤峰，spec §12⑥ 否决——冠军是过拟合尖峰）"
+    print(f"邻域稳定性判定: {verdict}")
+    print(f"基线对照: state best_ann(全段)={state.get('best_ann', 0)*100:.1f}% "
+          f"vs outer 2026 ann={stab['base_outer']['ann']*100:.1f}% "
+          f"（去偏幅度见 spec §1.4）")
+
+
 def main(argv=None):
-    """cli 入口：子命令派发。argv=None 走 sys.argv（python -m discovery oos）。"""
+    """cli 入口：子命令派发。argv=None 走 sys.argv（python -m discovery {oos,verify}）。"""
     ap = argparse.ArgumentParser(prog="discovery")
     sub = ap.add_subparsers(dest="cmd", required=True)
     ap_oos = sub.add_parser("oos", help="当前冠军 2026 去偏评估（L1 验收锚）")
     ap_oos.add_argument("--embargo", type=int, default=5, help="inner→outer embargo 天数")
     ap_oos.set_defaults(func=cmd_oos)
+    ap_v = sub.add_parser("verify", help="邻域稳定性 + 基线对照验收闸")
+    ap_v.add_argument("--embargo", type=int, default=5)
+    ap_v.add_argument("--perturb", type=float, default=0.15, help="邻域扰动幅度（默认 15%%）")
+    ap_v.add_argument("--n-samples", type=int, default=5, dest="n_samples")
+    ap_v.set_defaults(func=cmd_verify)
     args = ap.parse_args(argv)
     args.func(args)
 
