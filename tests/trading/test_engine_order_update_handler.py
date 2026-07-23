@@ -119,3 +119,58 @@ def test_buy_fill_places_take_profit_once_idempotent():
         asyncio.run(eng._handle_order_update(update))  # 重复回报（部分成交重推/柜台重推）
     # 幂等断言：_place_take_profit 只被调一次（防超卖敞口）
     tp.assert_called_once()
+
+
+def test_place_take_profit_truncates_fractional_qty_to_int():
+    """``_place_take_profit`` 用 ``int(filled_qty)`` 截断部分成交的零股（A 股整手红线）。
+
+    物理意图（A 股整手约束 · spec §6.2 C1 数量来源）：
+        成交回报 ``traded_volume`` 在柜台部分成交回报里可能带小数（如 100.5，源于
+        柜台内部整股+零股混合计量或行情推送精度）。A 股卖出**必须整手**（100 股整数倍，
+        北交所/科创板保留 1 股粒度但仍须整数）——若把 100.5 直接喂给 broker 下单接口，
+        轻则 broker 拒单（无效数量），重则部分柜台按 100.5 解释成 10050 股致超卖敞口。
+        故 ``_place_take_profit`` 内 ``OrderRequest(qty=int(filled_qty), ...)`` 是
+        live 安全红线（与 stop_loss ``qty 必须来自 gw 持仓整手``同源）。
+
+    断言：
+        patch 真实 ``_submit``（非 patch ``_place_take_profit``），调
+        ``_handle_order_update`` 传 traded_volume=100.5，断言 ``_submit`` 收到的
+        ``OrderRequest.qty == 100``（int 截断，非 100.5 也非 10050）。
+    """
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    update = {
+        "kind": "trade",
+        "order_id": "456",
+        "stock_code": "300002.SZ",
+        "traded_volume": 100.5,   # 带小数的部分成交（柜台精度产物）
+        "traded_price": 11.0,
+        "state": "FILLED",
+    }
+    plan = {
+        "confirmed": True,
+        "orders": [
+            {
+                "order": {"symbol": "300002.SZ", "qty": 100, "side": "buy", "price": 10.8},
+                "stop_price": 10.0,
+                "take_profit": 12.5,
+            }
+        ],
+    }
+    gw = MagicMock()
+    gw._orders = {"456": {"order_type": 23}}  # 23=STOCK_BUY（买单触发挂止盈）
+    eng._gw = gw
+    # patch 真身路径（同既有 test_buy_fill_places_take_profit_once_idempotent）：
+    #   - ``_submit`` patch 成 AsyncMock 拦截真实下单（拿到 OrderRequest 检查 qty）；
+    #   - ``trading.engine.trading_plan.load_plan`` 返含 take_profit 的计划；
+    #   - record_live_trade / NotificationManager patch 掉日志与通知副作用。
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("server.services.trading_service.record_live_trade"), \
+         patch("infra.notifier.NotificationManager"), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._handle_order_update(update))
+    # _submit 必被调一次（挂止盈）；OrderRequest.qty 必须 == 100（int 截断零股）
+    submit_mock.assert_called_once()
+    order_req = submit_mock.call_args.args[0]
+    assert order_req.qty == 100          # int(100.5) == 100（A 股整手红线）
+    assert isinstance(order_req.qty, int)  # 类型必须是 int（防 broker 按 float 解释成 10050）

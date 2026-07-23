@@ -41,9 +41,13 @@ def _resync_key(key: str) -> tuple[bool, str]:
 
 
 def _alert(msg: str, level: str = "WARN") -> None:
-    """钉钉告警（fire_and_forget，失败软降级）。"""
+    """钉钉告警（fire_and_forget，失败软降级）。
+
+    ⚠️ import 走 ``infra.notifier`` 真身（与 Task10 engine.py handler 同口径）；
+       ``core.notifier`` 是 strangler 转发垫片，未来下线后会隐性断链，故直指 infra 真身。
+    """
     try:
-        from core.notifier import NotificationManager, fire_and_forget
+        from infra.notifier import NotificationManager, fire_and_forget
         fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, level))
     except Exception:
         logger.exception("告警发送失败（不影响检查主流程）")

@@ -573,6 +573,16 @@ class TradingEngine:
         #               不应重复挂止盈卖单，否则同笔持仓挂 N 张卖单 → 超卖敞口致命）。
         #   _gw：交易网关引用（_order_direction 查 gw._orders[order_id].order_type 判买卖方向）。
         #        Task 11 在 gw.connect 注册 _on_order_update 回调时同步注入，本 task 仅声明槽位。
+        #
+        # ⚠️ _tp_placed 仅进程内存（不持久化）：
+        #   常驻进程重启（断电/崩溃恢复/OOM kill 后 systemd 拉起）后该集合清空——若 broker
+        #   断线重连后重推历史 trade 回报（miniQMT connect 时同步推送当日 _orders 与成交），
+        #   已挂止盈的买单会再次命中「symbol not in _tp_placed」分支 → 重复挂止盈卖单
+        #   （spec §8 幂等红线的已知缺口）。
+        #   Phase2 / 生产级准入必修：把 _tp_placed 持久化到 trading_plan JSON（或独立
+        #   tp_state.json），_handle_order_update 启动时加载、挂单成功后写盘。
+        #   Phase1 dry_run（影子模式）：风控极低——dry_run 命中不真下单，重复挂的止盈单
+        #   也走 DRY_RUN 分支不触达 broker，最多多几条「止盈单已挂」日志，无敞口风险。
         self._tp_placed: set[str] = set()
         self._gw: Any = None
 
@@ -729,7 +739,11 @@ class TradingEngine:
                     qty = p.get("qty")
                     # pnl 非 None → 带 +/- 前缀浮盈；None → N/A（盲价防御语义对齐 get_positions）
                     pnl_mark = f"{pnl:+.0f}" if pnl is not None else "N/A"
-                    qty_str = f"{qty:.0f}股" if isinstance(qty, (int, float)) else "?股"
+                    # qty 恒为 float（trading_service.get_positions 契约返回 float volume；
+                    # T7 扩展后仍富化为 float）。历史「?股」else 分支是死代码——
+                    # 真出现非数值 qty 会在上方 get_positions 富化阶段就抛 TypeError，
+                    # 不可能安静地流到此格式化语句，故无条件按 float 格式化。
+                    qty_str = f"{qty:.0f}股"
                     lines.append(f"- {p['symbol']} {qty_str} 浮盈{pnl_mark}")
                 # 汇总行：已估值仓位 N/总 M，累计浮盈（盲价仓位不计入累计，防误导）
                 lines.append(

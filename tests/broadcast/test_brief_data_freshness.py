@@ -14,17 +14,19 @@ from data.freshness import FreshnessResult
 def test_brief_includes_freshness_section_when_provided():
     """传入 freshness 结果 → 播报 markdown 含实时性段。
 
-    校验三要素之一即判通过（任一命中即证明实时性段渲染成功）：
-    - 中文小节标题「实时性」（钉钉可读、和健康度节区分）
-    - PASS 文案（FreshnessResult.message 含 PASS 子串）
-    - 期望/最新日（让运营一眼看清 T/T-1 到没到）
+    精确断言（Phase1 final review · 收紧三选一宽松断言）：
+    - 段标题「**数据实时性**」命中（brief_data.py:67 实际渲染文案，markdown 加粗星号
+      也作子串匹配的一部分——证明实时性段确实被渲染，而非靠尾部日期兜底误绿）；
+    - 期望日 2026-07-23 命中（证明 FreshnessResult.expected_date 透传到文案）。
+    两者同时成立才算 freshness 段真正渲染成功——原「实时性 or PASS or 日期」三选一
+    会因健康度段里也有日期而误绿（健康度 head 行就含 date），收紧后消除该假阳性。
     """
     datasets = [{"key": "daily", "name": "A股日线", "status": "healthy"}]
     # FreshnessResult 字段顺序：(key, ok, latest_date, expected_date, message)
     freshness = [FreshnessResult("daily", True, "2026-07-23", "2026-07-23", "PASS")]
     result = build_data_brief("2026-07-23", datasets=datasets, freshness=freshness)
     md = result.markdown
-    assert "实时性" in md or "PASS" in md or "2026-07-23" in md
+    assert "**数据实时性**" in md and "2026-07-23" in md
 
 
 def test_brief_works_without_freshness_backward_compat():
