@@ -6,8 +6,12 @@ infra/notifier.py
 异步单例多通道预警通知管理器。
 
 通道解耦：NotificationChannel 抽象 → TelegramChannel / WeComChannel 具体实现。
-NotificationManager.notify_risk_event(msg, level) 用 asyncio.gather 并发推送所有通道，
-单通道异常软降级（记日志、不阻塞其它通道）——避免一个 IM 故障导致整条预警链失效。
+NotificationManager 两类对外通知共享同一并发广播内核 _broadcast（asyncio.gather，
+单通道异常软降级，避免一个 IM 故障导致整条链失效）：
+  - notify_risk_event(msg, level)：风控告警，⚠️/❌/🚨 前缀（语义=风险需介入）；
+  - notify_trade_event(symbol, direction, qty, price)：成交通知，💰【成交】前缀
+    （语义=业务流水播报，来自 on_stock_trade 回调每笔成交）。
+前缀分层让研究员在群里一眼区分「业务流水」与「风险红线」，避免高频成交淹没风控告警。
 
 凭证来源：.env / 系统环境变量，**绝不硬编码 token**。
 触发场景（由调用方决定，本模块只负责可靠投递）：
@@ -121,14 +125,24 @@ class NotificationManager:
         self._channels.clear()
         self._configured = False
 
-    async def notify_risk_event(self, msg: str, level: RiskLevel = "INFO") -> list:
-        """并发推送所有通道；单通道异常被捕获记日志，不向外抛。"""
-        prefix = _LEVEL_PREFIX.get(level, "")
-        text = f"{prefix} {msg}" if prefix else msg
+    async def _broadcast(self, text: str) -> list:
+        """并发投递 text 到所有通道；单通道异常软降级（记日志、不向外抛）。
+
+        Why 抽公共内核（DRY）：notify_risk_event（风控告警）与 notify_trade_event
+        （成交通知）的「并发 gather + return_exceptions=True + 失败记日志」语义
+        完全一致，差异仅在前缀/正文格式化。若两处各写一份 asyncio.gather，未来
+        调整广播策略（如加熔断、加限频退避）必须同步改两处，极易漏改分叉。抽到
+        一个 _broadcast 内核，格式化由各自调用方负责，广播内核单源维护。
+
+        Args:
+            text: 已拼好（含前缀）的完整正文。调用方负责前缀与业务字段格式化。
+        Returns:
+            与 self._channels 等长的结果列表（成功为 None，失败为 Exception 实例）。
+        """
         if not self._channels:
             logger.debug("NotificationManager 无可用通道，跳过：%s", text)
             return []
-        # return_exceptions=True → 单通道失败不中断其它
+        # return_exceptions=True → 单通道失败不中断其它通道的投递
         results = await asyncio.gather(
             *(ch.send(text) for ch in self._channels), return_exceptions=True
         )
@@ -136,6 +150,54 @@ class NotificationManager:
             if isinstance(res, Exception):
                 logger.error("通知通道 %s 投递失败：%s", type(ch).__name__, res)
         return results
+
+    async def notify_risk_event(self, msg: str, level: RiskLevel = "INFO") -> list:
+        """风控告警：按 level 加 ⚠️/❌/🚨/ℹ️ 前缀，并发推送所有通道。
+
+        单通道异常被捕获记日志，不向外抛。广播内核见 _broadcast（DRY 单源）。
+        """
+        prefix = _LEVEL_PREFIX.get(level, "")
+        text = f"{prefix} {msg}" if prefix else msg
+        return await self._broadcast(text)
+
+    async def notify_trade_event(
+        self,
+        symbol: str,
+        direction: str,
+        qty: float,
+        price: float,
+        *,
+        extra: str = "",
+    ) -> list:
+        """成交通知（每笔成交推钉钉/IM）。
+
+        与 notify_risk_event 的核心区分：
+          - 风控告警用 ⚠️/❌/🚨 前缀，语义=「风险/异常需研究员介入」；
+          - 成交通知用 💰【成交】前缀，语义=「业务流水播报」（来自 on_stock_trade
+            回调的每笔成交）。
+        物理意图：群里消息密度高时，研究员需一眼区分「业务流水」与「风险告警」，
+        避免高频成交播报淹没真正的风控红线（如熔断/最大回撤）。两类前缀分层后，
+        风控告警天然带高视觉权重，成交流水保持中性播报。
+
+        Args:
+            symbol: 标的代码（如 300001.SZ），来自成交回调。
+            direction: 方向（BUY/SELL，亦容忍 buy/sell 小写）。
+            qty: 成交数量（股）。
+            price: 成交均价。
+            extra: 附加业务上下文（如 "tp=12.0|exp=baseline_v6"），透传到正文末尾。
+        Returns:
+            与 self._channels 等长的结果列表（语义同 notify_risk_event）。
+        """
+        # 方向中文化：BUY→买入，其余（SELL）→卖出；upper() 容忍大小写混用
+        arrow = "买入" if direction.upper() == "BUY" else "卖出"
+        # 正文逐字包含 symbol/qty/price 四要素 + 中文方向标签 + 原始方向串（保留
+        # BUY/SELL 字面以便程序对账），extra 非空时追加到末尾（管道分隔）
+        msg = (
+            f"💰【成交】{arrow} {symbol} {qty}股 @ {price}\n"
+            f"方向: {direction}{(' | ' + extra) if extra else ''}"
+        )
+        # 复用风控告警的并发广播内核（DRY：单源 gather + 软降级日志）
+        return await self._broadcast(msg)
 
 
 def build_default_manager() -> NotificationManager:
