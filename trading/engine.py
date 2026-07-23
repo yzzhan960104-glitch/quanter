@@ -672,7 +672,18 @@ class TradingEngine:
         await pre_open(today)
 
     async def _stoploss(self) -> None:
-        """cron 包装：止损监控（盘中时段判定在 stop_loss_monitor 内）。
+        """IntervalTrigger 包装：止损监控（盘中时段判定在 stop_loss_monitor 内）。
+
+        ⚠️ 交易日守卫（Task 8 fix · review I1）：
+            Task 8 把 stop_loss job 从 cron ``*/5 9-14 * * 1-5`` 迁到
+            ``IntervalTrigger(seconds=30)``——IntervalTrigger **无工作日过滤**，
+            旧 cron 的 ``1-5``（周一至周五）约束在迁移中丢失，导致周末 9:30-15:00 时段
+            也会触发本方法（``is_intraday_session`` 只查时间不查工作日，兜不住）。
+            故此处显式 ``calendar.is_trading_day`` 守卫，与 ``_eod``/``_pre_open``/
+            ``_post_close`` 同口径——非交易日整体跳过，不查 plan、不调 monitor。
+            （周末虽无交易路径、load_plan→None→空 stop_prices→no-op，影响低；但 live
+            前必修：避免无谓的 plan/monitor 调用 + docstring「时段约束下放 monitor 兜底」
+            在 interval 触发器下不成立。）
 
         注入 stop_prices（Task 7 · 修现状 None 空转）：
             从当日活跃计划（``trading_plan.load_plan(today)``）读 ``{symbol: stop_price}``
@@ -695,6 +706,11 @@ class TradingEngine:
             需在盘中按持仓最高价动态更新 stop_prices map，属另一个 follow-up，不在本 task 内。
         """
         today = datetime.now().strftime("%Y-%m-%d")
+        # 交易日守卫（Task 8 fix · review I1）：IntervalTrigger 无 1-5 工作日过滤，
+        # 必须显式 is_trading_day，否则周末盘中时段会空跑（与 eod/pre_open/post_close 同口径）。
+        if not calendar.is_trading_day(today):
+            logger.info("stop_loss 跳过：今日非交易日 %s", today)
+            return
         plan = trading_plan.load_plan(today)
         stop_prices: dict[str, float] = {}
         # 仅在 confirmed 计划下抽取（confirmed=False 是人审闸——研究员未确认就不监控止损，

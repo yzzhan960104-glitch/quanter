@@ -63,3 +63,21 @@ def test_stoploss_no_plan_injects_none():
         asyncio.run(eng._stoploss())
     _, kwargs = mon.call_args
     assert kwargs.get("stop_prices") in (None, {})
+
+
+def test_stoploss_skips_non_trading_day():
+    """非交易日 _stoploss 直接返回，不查 plan 不调 monitor（Task 8 fix · review I1）。
+
+    物理意图：旧 stop_loss cron ``*/5 9-14 * * 1-5`` 的 ``1-5`` 限制工作日；Task 8
+    迁 IntervalTrigger(seconds=30) 后丢掉工作日过滤，周末盘中时段也会触发。
+    守卫补在 _stoploss 顶部（与 _eod/_pre_open/_post_close 同口径 is_trading_day），
+    非交易日不查 plan、不调 monitor——避免无谓调用 + 不依赖 monitor 内 is_intraday_session
+    兜底（该兜底只查时间不查工作日，挡不住周末）。
+    """
+    eng = TradingEngine()
+    with patch("trading.engine.calendar.is_trading_day", return_value=False), \
+         patch("trading.engine.trading_plan.load_plan") as lp, \
+         patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:
+        asyncio.run(eng._stoploss())
+    lp.assert_not_called()    # 非交易日不查 plan
+    mon.assert_not_called()   # 非交易日不调 monitor
