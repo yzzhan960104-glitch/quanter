@@ -21,7 +21,8 @@ Layer2 阶段1：信号入参从 ``list[dict]`` 收敛为 ``list[Signal]``（fro
   便于 Task 8 report 按实验聚合 PnL，以及灰度阶段同时跑多版本但各自只占一部分仓位。
 
 迁移纪律（strangler 红线①）：函数逻辑【零改动】，只搬位置（trading/signal_runner.py
-→ trading/compute/plan.py）。原 trading/signal_runner.py 留垫片 re-export
+→ trading/compute/plan.py）。原 trading/signal_runner.py 垫片已在 Layer2 阶段6
+follow-up #4a 删除——所有消费点（engine.py + 3 tests 含 e2e）已改指真身
 ``from trading.compute.plan import build_orders_from_signals, PlannedOrder``。
 """
 from __future__ import annotations

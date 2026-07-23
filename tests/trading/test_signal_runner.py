@@ -4,7 +4,8 @@
 Layer2 阶段1：signals 改为 list[Signal]（frozen dataclass），测试构造 Signal 替代 dict。
 """
 from strategies.signal import Signal
-from trading.signal_runner import build_orders_from_signals, PlannedOrder
+# Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，改指真身 trading.compute.plan
+from trading.compute.plan import build_orders_from_signals, PlannedOrder
 
 
 def test_build_orders_position_sizing():

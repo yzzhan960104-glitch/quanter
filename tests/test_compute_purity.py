@@ -152,9 +152,9 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
         # check_order：真身单源在 trading.compute.risk（Layer2 阶段6 risk_shield 垫片已删）
         ("trading.compute.risk", "check_order"),
         ("trading.compute", "check_order"),
-        # build_orders_from_signals：双入口同源（compute / signal_runner 垫片·阶段6 保留）
+        # build_orders_from_signals：真身单源 trading.compute.plan
+        # （Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，双源契约随之退役）
         ("trading.compute.plan", "build_orders_from_signals"),
-        ("trading.signal_runner", "build_orders_from_signals"),
         ("trading.compute", "build_orders_from_signals"),
         # stop 系列：compute / order_state 垫片（阶段6 保留，OrderStateMachine 真身所在）
         ("trading.compute.stop", "compute_stop_price"),
@@ -180,7 +180,6 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
         ("trading.compute.exit", "ExitDecision"),
         ("trading.compute.risk", "RiskDecision"),
         ("trading.compute.plan", "PlannedOrder"),
-        ("trading.signal_runner", "PlannedOrder"),
         ("trading.compute.reconcile", "ReconciliationResult"),
         ("trading.execution_gateway", "ReconciliationResult"),
         ("trading.compute.reconcile", "PositionDrift"),
@@ -214,8 +213,9 @@ def test_check_order_single_source() -> None:
 
 
 def test_build_orders_single_source() -> None:
+    # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，真身单源 trading.compute.plan +
+    # compute 包 re-export（双源 is 契约退役，仅守 compute 包级 re-export 同源）
     a = _get("trading.compute.plan", "build_orders_from_signals")
-    assert a is _get("trading.signal_runner", "build_orders_from_signals")
     assert a is _get("trading.compute", "build_orders_from_signals")
 
 

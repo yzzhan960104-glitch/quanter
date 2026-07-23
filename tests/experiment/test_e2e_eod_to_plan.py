@@ -206,8 +206,9 @@ def test_e2e_attribution_chain(db, tmp_path, monkeypatch):
         captured["signals"] = signals
         captured["atr_map"] = atr_map
         captured["capital"] = capital
-        # 真跑 signal_runner（Task 5 归因透传链路），用 _trade_cfg 缺省口径
-        from trading.signal_runner import build_orders_from_signals
+        # 真跑 compute.plan 真身（Task 5 归因透传链路），用 _trade_cfg 缺省口径
+        # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
+        from trading.compute.plan import build_orders_from_signals
         captured["orders"] = build_orders_from_signals(
             signals,
             capital=capital,
@@ -319,7 +320,8 @@ def test_e2e_multi_experiment_attribution_split(db, monkeypatch):
     captured = {}
 
     async def _fake_eod_plan(date, signals, atr_map, capital):
-        from trading.signal_runner import build_orders_from_signals
+        # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
+        from trading.compute.plan import build_orders_from_signals
         captured["signals"] = signals
         captured["orders"] = build_orders_from_signals(
             signals, capital=capital, pos_cap=0.05, atr_map=atr_map,

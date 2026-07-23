@@ -9,7 +9,8 @@
 import pytest
 
 from strategies.signal import Signal
-from trading.signal_runner import PlannedOrder, build_orders_from_signals
+# Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，改指真身 trading.compute.plan
+from trading.compute.plan import PlannedOrder, build_orders_from_signals
 
 
 def _signal(symbol="000001.SZ", entry=10.0, neckline=10.5, bottom=9.5,

@@ -49,11 +49,11 @@ from trading import (
     dynamic_whitelist,
     qmt_market_data,
     reconcile_job,
-    signal_runner,
     trading_plan,
 )
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
-from trading.signal_runner import build_orders_from_signals
+# Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
+from trading.compute.plan import build_orders_from_signals
 from trading.compute.stop import should_trigger_stop
 
 logger = logging.getLogger(__name__)
