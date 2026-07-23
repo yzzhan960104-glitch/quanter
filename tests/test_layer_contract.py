@@ -22,8 +22,9 @@
        dynamic_whitelist/risk_shield/stop_loss/circuit_breaker（无反向依赖交易编排）。
        允许 trading.compute / trading.types / trading.order_state（纯契约）/ data。
     4. backtest：回测层，零 trading.engine/orchestrate/broker/execution（回测只经
-       compute/strategies/data）。已知白名单：backtest/optimize/training_analyzer
-       → server.services.review_service（AI 分析横切，stage6 follow-up 收口）。
+       compute/strategies/data/infra）。AI 分析横切走 infra/llm（Layer2 follow-up #3
+       已收口：原 backtest→server.services.review_service 反向依赖下沉为 backtest→infra
+       正向依赖，故不再需 training_analyzer 白名单）。
     5. experiment：纯配置叶子，零任何 Layer2 兄弟（trading/strategies/broker/
        backtest/caisen/execution）+ server。
     6. trading/io + trading/orchestrate：禁业务判定（启发式 grep，warning 不 fail）。
@@ -278,33 +279,39 @@ def test_broker_no_reverse_trade_dependency() -> None:
 # ============================================================================
 
 # 回测层黑名单：回测只经 trading.compute（纯决策）/ trading.types / trading.order_state
-# （纯契约）/ strategies（策略）/ data（数据）。禁止 broker/execution（实盘执行）/
-# trading.engine/orchestrate（实盘编排）——回测求变、实盘求稳，物理隔离。
+# （纯契约）/ strategies（策略）/ data（数据）/ infra（外部依赖适配层，如 LLM/通知）。
+# 禁止 broker/execution（实盘执行）/ trading.engine/orchestrate（实盘编排）——
+# 回测求变、实盘求稳，物理隔离。
 _BACKTEST_FORBIDDEN_ROOTS = {"broker", "execution"}
 _BACKTEST_FORBIDDEN_SUBPATHS = ("trading.engine", "trading.orchestrate")
-# 已知白名单（spec §7.4）：backtest/optimize/training_analyzer → server.services.review_service
-# 是 AI 分析横切依赖（GLM 调用），stage6 follow-up 收口目标。测试显式 allowlist，
-# 防止它假装通过，同时让它显眼（一旦收口，从此 allowlist 移除即可让契约收紧）。
-_BACKTEST_ALLOWLIST = ("backtest/optimize/training_analyzer.py",)
+# 注：原 _BACKTEST_ALLOWLIST（豁免 backtest/optimize/training_analyzer →
+# server.services.review_service 的 AI 横切依赖）已在 Layer2 follow-up #3 收口后
+# 删除——training_analyzer 改走 infra/llm，不再 import server，契约随之收紧。
+# 历史 stage6 的 allowlist 设计（让收口目标显眼）已完成它的使命：现在 backtest
+# 零 server 依赖被本契约硬守护，任何回流会立即 fail。
 
 
 def test_backtest_no_live_execution_dependency() -> None:
-    """铁律 4：backtest/ 零 trading.engine/orchestrate/broker/execution 依赖（含白名单说明）。
+    """铁律 4：backtest/ 零 trading.engine/orchestrate/broker/execution 依赖。
 
     物理意义：回测是「历史的离线重放」，必须与实盘执行物理隔离——回测经
     MockBroker 撮合，实盘经 broker.qmt 下单。一旦回测 import broker，回测就
     可能误触真实下单（灾难性）。
 
-    已知白名单：``backtest/optimize/training_analyzer.py`` import
-    ``server.services.review_service``（AI 分析横切，调 GLM 做训练结果分析）——
-    这是 stage6 follow-up 的收口目标，测试显式 allowlist 让它可见。
+    允许的正向依赖：trading.compute / trading.types / trading.order_state（纯契约）/
+    strategies（策略）/ data（数据）/ infra（外部依赖适配层——LLM/通知等横切，
+    与 data 同属「外部世界适配」，不构成实盘执行反向依赖）。
+
+    Layer2 follow-up #3 变更：原 ``backtest/optimize/training_analyzer.py`` 反向
+    import ``server.services.review_service`` 的 AI 横切依赖已收口为
+    ``infra.llm``（ports & adapters）——backtest→infra 是合法正向依赖，本测试
+    自动放行；同时不再需要 allowlist 豁免（契约较 stage6 更紧）。
     """
     violations = _check_forbidden(
         REPO_ROOT / "backtest",
         "backtest",
         _BACKTEST_FORBIDDEN_ROOTS,
         forbidden_subpaths=_BACKTEST_FORBIDDEN_SUBPATHS,
-        allowlist_files=_BACKTEST_ALLOWLIST,
     )
     assert not violations, "\n".join(violations)
 

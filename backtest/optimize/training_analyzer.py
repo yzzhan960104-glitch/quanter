@@ -1,25 +1,24 @@
 # -*- coding: utf-8 -*-
-"""caisen.training_analyzer 训练 loop 的 AI 分析/解析（Spec 3 §6）。
+"""training_analyzer 训练 loop 的 AI 分析/解析（Spec 3 §6）。
 
-零新依赖：复用 server.services.review_service._call_glm（urllib 调 GLM，三级降级范式）。
-- analyze_round：当前轮统计 + 当前 cfg + 历史几轮摘要 → GLM → 自然语言 Markdown 报告。
-- parse_review：你的审核文本 + 当前 cfg + 字段 schema → GLM → {cfg_override, action}。
+LLM 调用走 infra/llm 外部依赖适配层（ports & adapters）：本模块与
+server.services.review_service 均改为依赖 infra（合法单向），不再反向 import server。
+- analyze_round：当前轮统计 + 当前 cfg + 历史几轮摘要 → LLM → 自然语言 Markdown 报告。
+- parse_review：你的审核文本 + 当前 cfg + 字段 schema → LLM → {cfg_override, action}。
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Dict, List
 
-# 复用 review_service 的 GLM 调用（urllib，零新依赖）——同进程 import 安全（无循环）。
-# 模块级 import：使 _call_glm 成为本模块属性，测试 patch.object(training_analyzer, "_call_glm", ...)
-# 才能生效；若写成函数内 from ... import 会每次重绑定到源模块，monkeypatch 本模块失效。
-from server.services.review_service import _call_glm
+# LLM 调用走 infra/llm 外部依赖适配层（ports & adapters）。
+# 模块级 import get_llm_client：使本模块持有该函数引用，测试 patch.object
+# (training_analyzer, "get_llm_client", ...) 生效（与原 patch _call_glm 同理）。
+from infra.llm import get_llm_client
+from infra.llm.base import LLMConfigError
 
 logger = logging.getLogger(__name__)
-
-_LLM_TIMEOUT = 60
 
 
 def _stats_block(report: Dict[str, Any]) -> str:
@@ -62,15 +61,13 @@ def analyze_round(report: Dict[str, Any], cfg: Dict[str, Any],
 （给出具体字段+数值方向，如「min_rr_ratio 提到 2.0」「max_holding_bars 放宽到 20」，但不要给死命令，由人审决定）
 
 请直接输出报告正文。"""
-    api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
-    if not api_key:
-        logger.info("GLM 凭证未配置，analyze_round 走降级（附原始统计）")
-        return f"## ⚠️ AI 分析降级（GLM 凭证未配置）\n\n附本轮原始统计供人手判断：\n\n```\n{stats}\n```"
+    # LLM 调用走 infra/llm 工厂；凭证缺失(LLMConfigError)或调用失败统一降级，
+    # 训练 loop 不应因 LLM 抖动中断（语义同原 _call_glm 异常向上抛）。
     try:
-        return _call_glm(prompt, api_key, os.getenv("GLM_MODEL", "glm-4"), _LLM_TIMEOUT)
+        return get_llm_client().call(prompt)
     except Exception as exc:
         logger.warning("analyze_round GLM 调用失败，降级：%s", exc)
-        return (f"## ⚠️ AI 分析降级（GLM 调用失败：{type(exc).__name__}）\n\n"
+        return (f"## ⚠️ AI 分析降级（GLM 不可用：{type(exc).__name__}）\n\n"
                 f"附本轮原始统计供人手判断：\n\n```\n{stats}\n```")
 
 
@@ -123,11 +120,10 @@ def parse_review(text: str, cfg: Dict[str, Any], strategy_name: str = "neckline"
 - cfg_override 只能含上面合法字段名；不改的字段不要出现在 cfg_override 里。
 - action 只能是 "rerun"（改参重跑）、"stop"（停止训练）、"reset"（重置回基准 cfg 重跑）。
 - 若用户只说停止，cfg_override 给空 {{}}。"""
-    api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
-    if not api_key:
-        raise ParseError("GLM 凭证未配置，请按 `改 字段=值 重跑` 格式手动说明。")
     try:
-        raw = _call_glm(prompt, api_key, os.getenv("GLM_MODEL", "glm-4"), _LLM_TIMEOUT)
+        raw = get_llm_client().call(prompt)
+    except LLMConfigError as exc:
+        raise ParseError("GLM 凭证未配置，请按 `改 字段=值 重跑` 格式手动说明。") from exc
     except Exception as exc:
         raise ParseError(f"GLM 调用失败：{type(exc).__name__}") from exc
 

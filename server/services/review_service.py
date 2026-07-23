@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""层级六·AI 复盘服务：Prompt 组装 + GLM 调用 + 降级。
+"""层级六·AI 复盘服务：Prompt 组装 + LLM 调用 + 降级。
 
-设计哲学（Karpathy 极简 + 反黑盒）：
-- LLM 调用用标准库 urllib（零新依赖，不引 openai/langchain 黑盒），HTTP 细节显式可见。
-- 凭证 GLM_API_KEY/ZHIPU_API_KEY 走环境变量（.env），绝不硬编码。
+设计哲学（Karpathy 极简 + ports & adapters）：
+- LLM 调用经 infra/llm 工厂（get_llm_client().call），HTTP/凭证/端点细节内化到
+  infra/llm/glm.py.GlmClient（仍用标准库 urllib，零新依赖、不引 openai/langchain 黑盒）；
+  本模块只保留 review 业务：Prompt 组装 + 三级降级。
+- 凭证 GLM_API_KEY/ZHIPU_API_KEY 走环境变量（.env），由 GlmClient 读取，绝不硬编码。
 - 三级降级（绝不阻断）：
     1) GLM_API_KEY 缺失 → 返回结构化上下文摘要（报告可读，标注降级原因）。
     2) GLM 调用失败（网络/超时/限频）→ 同样降级为上下文摘要 + 失败原因。
@@ -13,7 +15,7 @@
 - Prompt 注入：用户提供的 csv_text 被限定在 ```csv 代码块内，且系统指令在前；
   策略名/参数经 json.dumps 序列化，降低注入风险。
 - 超长上下文：csv_text 截断到 8000 字符（GLM context 上限保护），截断时标注原长度。
-- 超时阻断：urlopen timeout=60s；超时走降级，不挂起请求。
+- 超时阻断：infra/llm 内 urlopen timeout=60s；超时走降级，不挂起请求。
 """
 from __future__ import annotations
 
@@ -21,24 +23,21 @@ import json
 import logging
 import os
 import urllib.error
-import urllib.request
 from typing import Any, Dict, Optional
 
+from infra.llm import get_llm_client
+from infra.llm.base import LLMConfigError
 from server.schemas.review import ReviewRequest, ReviewReport
 from server.services.trading_service import export_trades
 
 logger = logging.getLogger(__name__)
 
-# LLM 调用端点（2026-07-16 改走 z.ai Anthropic Messages 兼容端点）
-# Why z.ai /api/anthropic 而非智谱官方 open.bigmodel.cn：同一智谱 key 两端点计费池隔离——
-# paas/v4（智谱/OpenAI 格式）走按量余额池（已耗尽 code 1113），而 z.ai 的 /api/anthropic
-# （Anthropic Messages 格式）走「coding plan」订阅额度（实测 glm-5.2 可用）。Claude Code
-# 本身即经此端点跑 glm-5.2，故复用同条有余额的通路。请求格式见 _call_glm。
-GLM_URL = "https://api.z.ai/api/anthropic/v1/messages"
+# LLM 调用走 infra/llm 外部依赖适配层（ports & adapters）：端点 GLM_URL / urllib 细节 /
+# 凭证读取已下沉到 infra/llm/glm.py.GlmClient。本模块只保留 Prompt 组装 + 三级降级
+# （review 业务）。原 z.ai /api/anthropic 端点路由说明亦随 _call_glm 一并下沉至 GlmClient。
 # CSV/Prompt 截断阈值（防超长上下文 + 控成本）
 _MAX_CSV_CHARS = 8000
 _MAX_PROMPT_TAIL = 4000
-_LLM_TIMEOUT = 60
 
 
 def _assemble_prompt(
@@ -80,37 +79,6 @@ def _assemble_prompt(
 请直接输出报告正文，不要重复输入数据。"""
 
 
-def _call_glm(prompt: str, api_key: str, model: str, timeout: int = _LLM_TIMEOUT) -> str:
-    """同步调用 LLM（z.ai Anthropic Messages 兼容端点）返回模型文本。
-
-    端点路由（2026-07-16）：走 GLM_URL = z.ai /api/anthropic/v1/messages，复用「coding plan」
-    订阅额度（非智谱官方按量余额池，后者已 code 1113 耗尽）。函数签名保持稳定，diagnose /
-    analyze_round / parse_review 等调用方零感知。
-
-    用 urllib（零新依赖，HTTP 细节显式可见）：
-    - 认证双投 x-api-key + Authorization: Bearer：z.ai AUTH_TOKEN 认 Bearer、标准 Anthropic
-      认 x-api-key，双投兼容两套鉴权约定。
-    - anthropic-version 头为 Anthropic 协议必填（2023-06-01）。
-    - max_tokens 必填（Anthropic 协议硬性要求），4096 覆盖训练报告/复盘正文长度。
-    任何网络/解析异常向上抛，由 diagnose / analyze_round / parse_review 捕获走降级。
-    """
-    body = json.dumps({
-        "model": model,
-        "max_tokens": 4096,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-    }).encode("utf-8")
-    req = urllib.request.Request(GLM_URL, data=body, method="POST")
-    req.add_header("x-api-key", api_key)
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("anthropic-version", "2023-06-01")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    # Anthropic Messages 响应：content=[{type:"text", text:"..."}]，取首块文本
-    return data["content"][0]["text"]
-
-
 def _degraded_report(prompt: str, reason: str) -> str:
     """降级报告：LLM 不可用时，把已组装的上下文摘要输出（供人工/外部 LLM 分析）。"""
     return (
@@ -146,23 +114,19 @@ def diagnose(req: ReviewRequest) -> ReviewReport:
     # 2) 组装 Prompt
     prompt = _assemble_prompt(csv_text, req.strategy_name, req.strategy_params, req.metrics)
 
-    # 3) 取凭证 + 模型（凭证隔离：仅从环境变量读，绝不硬编码）
-    api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
+    # 3) 调 LLM（走 infra/llm 工厂；凭证缺失/调用失败统一降级，绝不抛 500 阻断请求）。
+    #    旧版前置 ``if not api_key`` 已合并为异常驱动：GlmClient.call 在缺凭证时抛
+    #    LLMConfigError，此处同 try/except 捕获走降级——逻辑等价但分支收敛为一处。
     model = os.getenv("GLM_MODEL", "glm-4")
-
-    # 4) 缺凭证 → 降级（上下文摘要）
-    if not api_key:
-        logger.info("GLM_API_KEY 未配置，复盘走降级模式（上下文摘要）")
-        return ReviewReport(
-            ok=True, degraded=True, model=None,
-            report=_degraded_report(prompt, "GLM_API_KEY / ZHIPU_API_KEY 未配置"),
-            reason="GLM 凭证未配置",
-        )
-
-    # 5) 调用 GLM（失败走降级，绝不抛 500 阻断请求）
     try:
-        report = _call_glm(prompt, api_key, model)
+        report = get_llm_client().call(prompt)
         return ReviewReport(ok=True, degraded=False, model=model, report=report)
+    except LLMConfigError as exc:
+        reason = "GLM 凭证未配置"
+        logger.info("复盘走降级模式（上下文摘要）：%s", exc)
+        return ReviewReport(ok=True, degraded=True, model=None,
+                            report=_degraded_report(prompt, "GLM_API_KEY / ZHIPU_API_KEY 未配置"),
+                            reason=reason)
     except urllib.error.HTTPError as exc:
         reason = f"GLM HTTP {exc.code}：{exc.reason}"
         logger.warning("GLM 调用 HTTP 错误：%s", reason)
