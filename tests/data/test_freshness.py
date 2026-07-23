@@ -39,3 +39,27 @@ def test_freshness_fail_when_parquet_missing(tmp_path):
     r = check_freshness("daily", "2026-07-23", lake_dir=str(tmp_path))
     assert r.ok is False
     assert "缺失" in r.message or "不存在" in r.message
+
+
+def test_freshness_fail_when_parquet_corrupt(tmp_path):
+    """parquet 内容损坏（读异常）→ 被 except 兜住返 FAIL，不抛异常（review I1）。"""
+    # 物理意图：模拟落湖文件被截断/半写坏，read_parquet 必然抛异常；
+    # 防御点：除零/脏数据/IO 错误都不得击穿检查器，必须降级为 FAIL + None + 告警 message。
+    (tmp_path / "a_shares_daily.parquet").write_bytes(b"not a parquet")
+    r = check_freshness("daily", "2026-07-23", lake_dir=str(tmp_path))
+    assert r.ok is False
+    assert r.latest_date is None
+    assert "异常" in r.message  # 命中「读最新日期异常」分支
+
+
+def test_freshness_pass_when_single_level_datetimeindex(tmp_path):
+    """单级 DatetimeIndex（非 MultiIndex）→ 走 fallback dates=idx 分支正确取最新日（review M1）。"""
+    # 物理意图：某些上游落湖可能不 set_index 多列，仅以 DatetimeIndex 为索引；
+    # fallback 分支（else: dates = idx）须保证该形态仍能取到 max date，不能只认 MultiIndex。
+    import pandas as pd
+    dates = pd.date_range("2026-07-01", "2026-07-23", freq="B")
+    df = pd.DataFrame({"close": 10.0}, index=dates)  # 单级 DatetimeIndex
+    df.to_parquet(tmp_path / "a_shares_daily.parquet")
+    r = check_freshness("daily", "2026-07-23", lake_dir=str(tmp_path))
+    assert r.ok is True
+    assert r.latest_date == "2026-07-23"
