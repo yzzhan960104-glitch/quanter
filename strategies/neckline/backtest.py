@@ -306,7 +306,15 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
     filled = []
     n_skip = 0
     for sig_idx, res in signals:
-        sim = simulate_exit(sym_df, sig_idx, res["neckline"], res["bottom"], res["atr"], exec=exec)
+        # 显式透传 id_cfg（Critical C1 修复·Layer2 #2a 去 mutation 后的正确性补强）：
+        # 旧版靠 param_iter.run_one 的 DEFAULTS.update(id_params) 全局 mutation，让
+        # simulate_exit 默认 id_cfg=None → 读"已 patch 的全局"。去 mutation 后全局变纯净，
+        # 若不显式传，simulate_exit 会退化用 DEFAULTS 默认 stop_atr_mult=1.0/tp_h_mult=2.0，
+        # 悄悄丢弃 param_iter 搜到的非默认档（偷改目标函数，违反 spec #2 + golden 零漂移
+        # 等价红线——默认参数下 1.0/2.0==DEFAULTS 故 golden 漏报）。此处转发 = 基线 mutation
+        # 语义的真等价（与 run_one 旧版 update 后 simulate_exit 读到的值字面相同）。
+        sim = simulate_exit(sym_df, sig_idx, res["neckline"], res["bottom"], res["atr"],
+                            exec=exec, id_cfg=id_cfg)
         if sim is None:
             continue
         if sim["exit_reason"] in ("skip_no_pullback", "skip_target_met"):

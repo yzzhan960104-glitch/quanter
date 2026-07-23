@@ -38,11 +38,13 @@ if str(_ROOT) not in sys.path:
 
 from strategies.neckline.backtest import (  # noqa: E402
     simulate_exit,
+    scan_symbol,
     kelly_metrics,
     dedup_signals,
     EXEC_DEFAULTS,
 )
 from strategies.neckline.method_v0 import DEFAULTS  # noqa: E402  （确保 import 链可达）
+from strategies.neckline import backtest as neckline_backtest  # noqa: E402  （monkeypatch 入口）
 
 
 # ============================================================================
@@ -256,3 +258,108 @@ def test_dedup_signals_cooldown():
 def test_dedup_signals_empty():
     """空信号列表 → 空结果（防 None/异常）。"""
     assert dedup_signals([], cooldown=5) == []
+
+
+# ============================================================================
+# scan_symbol · id_cfg 透传（去全局 mutation 后的正确性守护）
+# ============================================================================
+# 物理意图（Why 本组测试存在 · Critical C1 回归守护）：
+#     历史上 param_iter.run_one 用 DEFAULTS.update(id_params) 全局 mutation 让
+#     simulate_exit 经默认回退读到"已 patch 的全局"。Layer2 #2a 去 mutation 后，
+#     simulate_exit 默认 id_cfg=None → 读【纯净全局 DEFAULTS】。scan_symbol 在
+#     backtest.py:309 调 simulate_exit 时【必须显式透传 id_cfg】——否则 param_iter
+#     搜到的 stop_atr_mult/tp_h_mult（非默认档）会被悄悄丢弃，退化用 DEFAULTS
+#     默认 1.0/2.0，等于偷改了目标函数（违反 spec #2「不动目标函数」+ golden 零漂移
+#     等价红线）。golden 默认参数下 1.0/2.0 == DEFAULTS 故漏报；非默认档即出错。
+#
+#     test_scan_symbol_forwards_id_cfg：证 scan_symbol 把 id_cfg 真传给 simulate_exit
+#         （monkeypatch 捕获——修前 RED，修后 GREEN；bug 的直接证据）。
+#     test_simulate_exit_id_cfg_overrides_stop_and_tp：证 simulate_exit 用非默认 id_cfg
+#         时 base_stop/tp2 反映 id_cfg 而非全局 DEFAULTS（simulate_exit 本身正确，
+#         用作 scan_symbol 透传的语义锚——证明透传过去的值确实生效）。
+def test_scan_symbol_forwards_id_cfg(monkeypatch):
+    """scan_symbol(id_cfg=非默认) 必须把该 id_cfg 透传给 simulate_exit（C1 bug 守护）。
+
+    去全局 mutation 后，scan_symbol 若不显式传 id_cfg 给 simulate_exit，simulate_exit
+    会读【纯净全局 DEFAULTS】（stop_atr_mult=1.0/tp_h_mult=2.0），丢弃调用方传入的非
+    默认档。本测试 monkeypatch simulate_exit 捕获 scan_symbol 实际传入的 id_cfg，
+    断言其 == 调用方传入的非默认 cfg（而非 DEFAULTS）。
+
+    修前（backtest.py:309 不传 id_cfg）：simulate_exit 收到 id_cfg=None → 读 DEFAULTS → FAIL。
+    修后（:309 加 id_cfg=id_cfg）：simulate_exit 收到调用方的非默认 cfg → PASS。
+    """
+    # 构造一份"会触发至少一个 detect_neckline_method 识别 + 进 simulate_exit"的合成 df。
+    # 直接复用真实 lake 标的 300750.SZ 一段（detect 已知能识别颈线法，避免合成形态失真）。
+    lake_path = _ROOT / "data_lake" / "a_shares_daily.parquet"
+    if not lake_path.exists():
+        pytest.skip("data_lake 缺失，跳过 scan_symbol 端到端守护（CI 无数据环境）")
+    lake = pd.read_parquet(lake_path)
+    try:
+        sym_df = lake.xs("300750.SZ", level="symbol").sort_index()
+    except KeyError:
+        pytest.skip("300750.SZ 不在 data_lake，跳过 scan_symbol 端到端守护")
+    window = DEFAULTS["window"]
+
+    # 非默认 id_cfg：stop_atr_mult=1.5 / tp_h_mult=2.5（与 DEFAULTS 1.0/2.0 显著不同，
+    # 一旦 scan_symbol 漏传即退化用默认，捕获到的 id_cfg 会是 None 或 DEFAULTS 副本）。
+    non_default_cfg = {**DEFAULTS, "stop_atr_mult": 1.5, "tp_h_mult": 2.5}
+
+    captured = {}  # 捕获 scan_symbol 调 simulate_exit 时实际传入的 id_cfg
+
+    def fake_simulate_exit(sym_df, signal_idx, c_star, bottom, atr_val,
+                           exec=None, id_cfg=None):
+        # 只在首次调用记录（多次信号取首即可证明转发路径）
+        if "id_cfg" not in captured:
+            captured["id_cfg"] = id_cfg
+        # 透传真身跑真实逻辑（不破坏 scan_symbol 流程，让它自然产出 filled 列表）
+        return simulate_exit(sym_df, signal_idx, c_star, bottom, atr_val,
+                             exec=exec, id_cfg=id_cfg)
+
+    # monkeypatch backtest 模块里的 simulate_exit 名字（scan_symbol 经模块全局名引用它）
+    monkeypatch.setattr(neckline_backtest, "simulate_exit", fake_simulate_exit)
+
+    scan_symbol(sym_df, window, id_cfg=non_default_cfg)
+
+    assert "id_cfg" in captured, "scan_symbol 未触发任何 simulate_exit 调用（数据问题，测试无效）"
+    forwarded = captured["id_cfg"]
+    # 核心：透传的 id_cfg 必须是调用方的非默认 cfg，而非 None/DEFAULTS
+    assert forwarded is not None, (
+        "scan_symbol 未透传 id_cfg → simulate_exit 收到 None 退化读纯净全局 DEFAULTS（C1 bug）"
+    )
+    assert forwarded.get("stop_atr_mult") == 1.5, (
+        f"scan_symbol 透传的 stop_atr_mult={forwarded.get('stop_atr_mult')!r} ≠ 1.5"
+        "（id_cfg 未正确转发，simulate_exit 退化读默认 1.0）"
+    )
+    assert forwarded.get("tp_h_mult") == 2.5, (
+        f"scan_symbol 透传的 tp_h_mult={forwarded.get('tp_h_mult')!r} ≠ 2.5"
+        "（id_cfg 未正确转发，simulate_exit 退化读默认 2.0）"
+    )
+
+
+def test_simulate_exit_id_cfg_overrides_stop_and_tp():
+    """simulate_exit 用非默认 id_cfg 时 base_stop/tp2 反映 id_cfg 而非全局 DEFAULTS。
+
+    语义锚：证明一旦 scan_symbol 把非默认 id_cfg 透传过来，simulate_exit 确实用它
+    （而非全局默认）算止损/止盈。这是 scan_symbol_forwards_id_cfg 的"值生效"补强。
+
+    场景：c*=100 / bottom=90 / H=10 / ATR=2，id_cfg stop_atr_mult=1.5 / tp_h_mult=2.5
+      base_stop = 100 − 1.5·2 = 97    （默认 1.0 则 98）
+      tp2       = 100 + 2.5·10 = 125  （默认 2.0 则 120）
+    构造成交后 stop_loss 触发，断言 entry/risk_pct/tp2 字段反映非默认 id_cfg。
+    """
+    df = _ohlc([
+        (100, 101, 99, 100.5, 1000),   # bar0 信号
+        (102, 103, 102, 102.5, 1000),  # bar1 low=102≤buy_limit=102 成交 entry=102
+        (99, 100, 96, 97, 1000),       # bar2 low=96≤base_stop=97 → stop_loss
+    ])
+    non_default_cfg = {**DEFAULTS, "stop_atr_mult": 1.5, "tp_h_mult": 2.5}
+    res = simulate_exit(df, 0, C_STAR, BOTTOM, ATR, id_cfg=non_default_cfg)
+    # tp2 必须是 125（2.5×H），证明 tp_h_mult 生效（默认 2.0 会得 120）
+    assert res["tp2"] == 125.0, f"tp2={res['tp2']} ≠ 125（tp_h_mult=2.5 未生效）"
+    # base_stop=97 → risk_pct = (102−97)/102·100 ≈ 4.90（默认 stop_atr_mult=1.0 会得 98 → 3.92）
+    assert res["risk_pct"] == round((102 - 97) / 102 * 100, 2), (
+        f"risk_pct={res['risk_pct']} ≠ 预期（base_stop 用 stop_atr_mult=1.5 → 97）"
+    )
+    # stop_loss 触发价 = base_stop = 97 → avg_pnl = (97−102)/102 = −4.90%
+    assert res["exit_reason"] == "stop_loss"
+    assert res["avg_pnl_pct"] == round((97 - 102) / 102 * 100, 2)
