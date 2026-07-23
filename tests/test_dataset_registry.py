@@ -214,10 +214,11 @@ def test_all_tushare_datasets_lakes_registered():
 def test_parquet_path_unavailable_datasets_return_none():
     """代理不可用数据集（top_list/hsgt_top10）_parquet_path 返 None（2026-07-19 盘点订正）。
 
-    What：top_list/hsgt_top10 代理 tnskhdata 无方法（probe 实测 DataApi has no attribute），
-    原 lake_key 复用设计（top_list→dragon_list、hsgt_top10→north_flow）废弃——复用建立在
-    代理能跑通的假设上，实际跑不通。删 lake_key 后 _parquet_path 经 _lake_key fallback 到
-    数据集 key 自身，LAKE_CONFIG 无 top_list/hsgt_top10 → 返 None（诚实反映无物理湖）。
+    What：top_list/hsgt_top10 tushare 无此方法（probe 实测 DataApi has no attribute，
+    2026-07-19 代理口径首次暴露，纯直连后该接口缺口仍在），原 lake_key 复用设计
+    （top_list→dragon_list、hsgt_top10→north_flow）废弃——复用建立在此接口能跑通的假设上，
+    实际跑不通。删 lake_key 后 _parquet_path 经 _lake_key fallback 到数据集 key 自身，
+    LAKE_CONFIG 无 top_list/hsgt_top10 → 返 None（诚实反映无物理湖）。
 
     Why 返 None 是对的：代理不可用 = 永远无数据，前端 list_datasets 标 missing 比假装读到
     akshare 老数据（dragon_list hit / north_flow 24 行）更诚实。龙虎榜单用 dragon_list，

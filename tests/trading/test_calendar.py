@@ -27,9 +27,9 @@ def test_is_intraday_session():
 def test_fetch_trade_cal_uses_tushare_compat_get_pro(tmp_path):
     """fetch_trade_cal 走 data._tushare_compat.get_pro（Phase 1.5 任务5 统一凭证入口）。
 
-    Why 此测试存在：原 calendar 自己读 os.getenv(TUSHARE_TOKEN)/TNSKHDATA_TOKEN 与
-    _tushare_compat 口径分叉，直连 tushare 切换后会读错 token。固化「calendar 走
-    get_pro」契约防止回归到自读 env 的旧分叉。
+    Why 此测试存在：原 calendar 自己读 os.getenv(TUSHARE_TOKEN) 与 _tushare_compat
+    口径分叉，直连 tushare 切换后会读错 token。固化「calendar 走 get_pro」契约防止
+    回归到自读 env 的旧分叉。
     """
     cache = tmp_path / "trade_cal_2026.json"
     # 构造 pro.trade_cal 返两交易日（is_open=1）+ 一非交易日

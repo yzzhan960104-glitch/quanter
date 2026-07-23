@@ -24,11 +24,11 @@ def fetch_trade_cal(year: int) -> list[str]:
     """拉 Tushare 某年交易日历，缓存 logs/trade_cal_<year>.json。失败返空 list（降级）。
 
     token 读取统一走 ``data._tushare_compat.get_pro``（Phase 1.5 任务5 修复）：
-      - 原 calendar 自己读 os.getenv(TUSHARE_TOKEN)/os.getenv(TNSKHDATA_TOKEN) 与
-        _tushare_compat 的「TNSKHDATA 代理优先 / TUSHARE 直连兜底」口径不一致，
-        直连 tushare 切换（2026-07-24）后 calendar 仍按老口径可能漏读/读错 token。
-      - 统一走 get_pro 后：代理/直连/token 轮询/未来 provider 切换全在一处，
-        calendar 不再关心凭证细节（守 Layer2 §7 单一职责：凭证归 _tushare_compat）。
+      - 原 calendar 自己读 os.getenv(TUSHARE_TOKEN) 与 _tushare_compat 的凭证读取
+        口径不一致，直连 tushare 切换（2026-07-24，代理 tnskhdata 废弃后纯直连）后
+        calendar 仍按老口径可能漏读/读错 token。
+      - 统一走 get_pro 后：token 读取/未来 provider 切换全在一处，calendar 不再
+        关心凭证细节（守 Layer2 §7 单一职责：凭证归 _tushare_compat）。
     weekday 兜底仅在 get_pro 抛异常（无 token / 网络失败 / tushare 缺失）时触发。
     """
     cache = _cache_path(year)

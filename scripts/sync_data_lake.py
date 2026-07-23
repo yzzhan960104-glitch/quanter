@@ -1,11 +1,11 @@
 """数据湖批量同步 CLI：全市场（剔除 ST/退市）过去 N 年日线【前复权】OHLCV。
 
-数据源：代理 tnskhdata（10000 积分）的 pro.daily + pro.adj_factor，手动重建前复权。
+数据源：tushare 直连（pro.daily + pro.adj_factor），手动重建前复权。
+2026-07-24 废弃 tnskhdata 代理后纯直连 tushare 官方 API（积分充足）。
 
-Why 不用 pro_bar：pro_bar 是 ts 模块级函数（走 tushare 直连地址），代理只改 pro_api 地址，
-pro_bar 不走代理（代理 token 在直连地址无效，实测『没有接口(daily)权限』）。改用 daily（不复权）
-+ adj_factor（复权因子）重建前复权：price_qfq = price_raw × adj_factor / adj_factor_latest。
-两条接口都走 pro_api 代理，稳定可用，绕过 AKShare 网络瞬态。
+Why 不用 pro_bar：早期代理口径下 pro_bar 不走代理 token；现纯直连后 pro_bar 仍可走，
+但 daily + adj_factor 重建路径已验证稳定可用（绕过 AKShare 网络瞬态），保持不变：
+price_qfq = price_raw × adj_factor / adj_factor_latest。
 
 前复权公式：以区间最新交易日为基准（adj_factor_latest），历史价 = 原始价 × adj_factor / latest。
 基准日（最新）价 = 原始价（adj/adjj_latest = 1），历史价向下调整消除除权断崖，与 pro_bar(qfq) 同语义。

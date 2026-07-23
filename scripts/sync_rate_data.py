@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""利率 / 货币供应数据补采（代理 tnskhdata · token[0] 固定）。
+"""利率 / 货币供应数据补采（tushare 直连）。
 
 为四层动能评分 · A股动能层【宏观流动性子模块】补数据：
   - shibor:     Shibor 利率 on/1w/.../1y（日频）—— 补全 2016-2026（现有仅 2023-07 起，缺熊市段）
   - cn_m:       货币供应量 M0/M1/M2 + 同比/环比（月频）—— 新采，m2_yoy = 央行水龙头
   - shibor_lpr: LPR 贷款基础利率 1y/5y（日频）—— 新采，实体融资成本
 
-代理缺 cn_sf(社融)/yc_cb(国债)/usb_yield(美债)：探测均 No such method（probe_rate_fields.py）。
+tushare 缺 cn_sf(社融)/yc_cb(国债)/usb_yield(美债)：探测均 No such method（probe_rate_fields.py）。
 替代项：M1-M2 剪刀差（cn_m.m1_yoy−m2_yoy，实体活性 vs 金融空转）替代社融动能；
        Shibor 期限利差（1y−on，银行间长短端）替代国债期限利差。不阻塞评分。
 
