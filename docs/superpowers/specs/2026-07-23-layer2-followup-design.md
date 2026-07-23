@@ -1,6 +1,6 @@
 # Layer 2 解耦 Follow-up 设计 · 三项 DEFER 收尾
 
-> **状态：🟡 草案【待用户复审】（2026-07-23）**
+> **状态：🟢 已实施（2026-07-23，commits 见 progress.md Task 1-7）**
 > 本文件是 `feat/layer2-decouple` 主线（19 commits、零回归、净删 13728 行）合并前的**三项 DEFER follow-up 收尾设计**。
 > 上游总纲：`docs/superpowers/specs/2026-07-22-layer2-decoupling-design.md`；账本：`.superpowers/sdd/progress.md`。
 > 续聊入口：从「§5 验证策略」+「§6 实施顺序」读起。

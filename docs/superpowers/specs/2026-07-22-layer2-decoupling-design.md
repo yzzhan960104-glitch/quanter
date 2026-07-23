@@ -134,7 +134,7 @@ Layer 1:  data (被所有人依赖)
 ### §3.6 回测 `backtest`（独立 + 收口双源）
 
 - **职责**：历史回放验证 + 参数训练。变动频繁部分（driver/撮合/统计/参数搜索）集中于此，与交易稳定性隔离。
-- **现状**：driver（`execution/backtest_replay.py`，干净、只依赖 `strategies.base.Strategy`）与盘中执行状态机同包；统计内联 driver；`param_iter.py`/`identify_param_scan.py` **绕开 driver** 直调 `neckline_backtest.scan_symbol`（双源路径隐患）。
+- **现状**：driver（`execution/backtest_replay.py`，干净、只依赖 `strategies.base.Strategy`）与盘中执行状态机同包；统计内联 driver；`param_iter.py`/`identify_param_scan.py` 直调 `neckline_backtest.scan_symbol`——**识别+模拟内核已同源**（Signal dataclass + `scan_symbol` 参数化，Task 1.6 收口，`test_scan_symbol_matches_strategy` 守护 `scan_symbol`≡`scan_at`）；统计层有意分轨（param_iter kelly 调参目标函数 vs replay CAGR 展示统计）—— 非债。全局 mutation 传参债已清（follow-up 2026-07-23 §3.2）。
 - **迁移来源 → 目标**（拆 execution 包）：
   - `execution/backtest_replay.py`+`replay_worker.py`+`replay_scheduler.py`+`replay_tasks_db.py`+`replay_runs.py` → `backtest/`
   - `caisen/optimize/`（training_loop/training_analyzer/training_loops_db/training_dingtalk）→ `backtest/optimize/`（D5，参数训练归此）
@@ -301,7 +301,7 @@ trading ─► experiment / strategies / broker / data
 ### §8.4 T1 守护的三条关键不变量（数值一致 = 不变量未被破坏）
 
 - **阶段 2 · `check_exit` is 同源**：回测 `simulate_exit` 与实盘出场共用同一函数对象 → T1 数值一致。破坏同源 = 数值漂移。
-- **阶段 4 · driver 收口**：`param_iter`/`identify_param_scan` 改走 driver（消灭双源路径）→ T1 数值一致。
+- **阶段 4 · 内核同源（统计层分轨是设计）**：识别+模拟内核同源由 `test_scan_symbol_matches_strategy` + `test_param_iter_kernel_same_source` 守护（Signal dataclass + `scan_symbol` 参数化，Task 1.6 收口）；统计层分轨是设计（param_iter kelly 调参 vs replay CAGR 展示）。T1 golden 守 param_iter 改传参后数值零漂移。
 - **阶段 1 · Signal dataclass 收敛**：`scan_at`/`scan_live` 字段统一 → T1 数值一致 + T3 Lab 前端不炸。
 
 ---
@@ -328,7 +328,7 @@ trading ─► experiment / strategies / broker / data
 ## §10 待裁决 / 待确认遗留（边迁边定）
 
 1. **颈线法是否复用 `caisen.engines.risk.RiskManager`**：`micro_filter`/`liquidity_filter`/`macro_position_coef` 是 caisen 形态筛选用。颈线法走 `build_orders_from_signals`，疑似不用。若不用 → 随 caisen 形态退役删；若用 → 抽进 compute。**阶段 1 起步时核实**。
-2. **颈线法出场双源收口方式**：回测 `simulate_exit`（K 线 high/low 判定）与实盘 `pre_open+stop_loss_monitor`（挂限价单+盘中固定止损价）语义不同，共用纯函数要抽象到什么粒度（完整复用 `check_exit` 还是只共享止损价计算）。**阶段 2 设计**。
+2. **颈线法出场双源收口方式** · **🟢 已定案（2026-07-23）**：已由 Task 1.6 Signal dataclass + `scan_symbol` 参数化收口**内核**（识别+模拟同源，`test_scan_symbol_matches_strategy` 守护 `scan_symbol`≡`scan_at`）；统计层分轨定案（param_iter kelly 调参 vs replay CAGR 展示，有意分轨非债）。原「回测 `simulate_exit`（K 线 high/low 判定）与实盘 `pre_open+stop_loss_monitor` 语义不同」语境已被重新定义——内核同源即收口达成，统计层差异是业务诉求而非债。详见 follow-up 2026-07-23 §3。
 3. **`post_close` 熔断数据源**：`check_daily_loss_limit` 需要 equity，但 broker 无 `get_equity` 接口。补在 broker.base 还是走 data 查账户快照。**阶段 3/5**。
 4. **`viz/`（可视化）归属**：caisen 的 `viz_static`/`viz_interactive` 是横切可视化层，不在五模块内。倾向归 Layer 3（机器人/后台展示）或独立 viz 模块。**阶段 6 收尾定**。
 5. **Layer 2/Layer 3 防腐层**：`server/` 直 import `trading.risk_shield`/`dynamic_whitelist`/`execution_gateway`/`caisen.facade` 是 `caisen↔server` 循环根因。属 Layer 3 后台防腐层债，**不在本 Layer 2 设计范围**，但阶段 6 须立防腐层收口。
