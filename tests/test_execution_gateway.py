@@ -3,13 +3,11 @@ import asyncio
 
 import pytest
 
-from trading.execution_gateway import (
-    BaseExecutionGateway,
-    MockExecutionGateway,
-    OrderRequest,
-    reconcile,
-    ReconciliationResult,
-)
+# Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，按符号真身改指（无逻辑改动）
+from broker.base import BaseExecutionGateway
+from broker.mock import MockExecutionGateway
+from trading.compute.reconcile import reconcile, ReconciliationResult
+from trading.compute.types import OrderRequest
 from trading.order_state import OrderState
 
 

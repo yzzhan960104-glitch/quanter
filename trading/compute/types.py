@@ -10,12 +10,12 @@
 单源契约（strangler 铁律①：搬迁非复制）：
     OrderRequest 原物理定义在 trading/execution_gateway.py，被 risk_shield.check_order
     / signal_runner.build_orders_from_signals / 实盘执行链路大量共享。本阶段把其纯
-    dataclass 主体迁到本模块（compute 自洽，无 execution 反向依赖），execution_gateway
-    反向 ``from trading.compute.types import OrderRequest`` re-export——所有既有
-    ``from trading.execution_gateway import OrderRequest`` 调用零改动继续可用。
+    dataclass 主体迁到本模块（compute 自洽，无 execution 反向依赖）。Layer2 阶段6
+    follow-up #4b 已删 execution_gateway 垫片，全仓消费点已直指
+    ``from trading.compute.types import OrderRequest`` 真身。
 
     Why OrderResult 不进 compute：它字段含 OrderState 枚举（trading.order_state，
-    状态机领域），属"执行态"而非"决策态"——留在 execution_gateway（I/O 域）。
+    状态机领域），属"执行态"而非"决策态"——留在 broker.base（I/O 域）。
 """
 from __future__ import annotations
 

@@ -18,7 +18,7 @@ import pytest
 # trading.qmt_gateway 垫片的 re-export 副本与真身非同一对象，patch 垫片无效。
 from broker import qmt as qmt_gateway
 from broker.qmt import QmtExecutionGateway, _map_qmt_status, _assert_status_contract
-from trading.execution_gateway import OrderRequest
+from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from trading.order_state import OrderState
 
 # qmt_gateway.XtQuantTrader 就是 conftest 注入的 FakeXtQuantTrader 类对象

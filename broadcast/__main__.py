@@ -172,8 +172,9 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
     - status 始终可取（trading_service.get_status 同步，四态之一）。
     - trades 走同步 query_trades（CSV 全表扫描，本身即降级契约：文件不存在返空列表）。
     """
-    # 延迟 import：trading_service 顶层 import 了 core.notifier/trading.execution_gateway
-    # 等较重链路，且 __main__ 仅 trading 分支需要 → 放函数内，market/data/strategy 分支零负担。
+    # 延迟 import：trading_service 顶层 import 了 core.notifier/broker.base/
+    # trading.compute.types 等较重链路，且 __main__ 仅 trading 分支需要 → 放函数内，
+    # market/data/strategy 分支零负担。
     from server.services import trading_service
 
     # 同步取数：trades（CSV 流水）/ status（四态镜像）

@@ -68,7 +68,7 @@ class ExecutionExecutor(Protocol):
             返回 {order_id, state, message}；非 dry_run 挡板命中 raise RuntimeError。
             state 语义：FILLED/PARTIAL_FILLED（真实成交）/ REJECTED/FAILED（废单）/
             SUBMITTED（限价单排队）/ DRY_RUN（模拟）。
-            order 类型：trading.execution_gateway.OrderRequest（execution 经延迟 import 引入）。
+            order 类型：trading.compute.types.OrderRequest（execution 经延迟 import 引入）。
     """
 
     def get_status(self) -> dict:
@@ -85,7 +85,7 @@ class ExecutionExecutor(Protocol):
         """下单（过 risk_shield 10 关风控 + 网关真单）。返 {order_id, state, message}。
 
         order 类型注解为 Any（而非 OrderRequest）：避免本接口模块反向 import
-        trading.execution_gateway（保持 execution.interfaces 零外部依赖，纯抽象）。
+        trading.compute.types（保持 execution.interfaces 零外部依赖，纯抽象）。
         ExecutionEngine 调用方在 tick_* 内延迟 import OrderRequest 构造 order 后注入。
         """
         ...

@@ -312,7 +312,7 @@ def test_stop_loss_monitor_no_gateway_logs_and_skips(monkeypatch):
 # ============================================================================
 def test_post_close_runs_reconcile(monkeypatch):
     """post_close：传 gw + local_positions 时调 run_reconcile，返 drift 标志。"""
-    from trading.execution_gateway import ReconciliationResult
+    from trading.compute.reconcile import ReconciliationResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.reconcile 真身
 
     class _FakeGw:
         async def _fetch_broker_positions(self):

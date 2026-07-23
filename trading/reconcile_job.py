@@ -2,7 +2,7 @@
 """盘后对账（持仓数量 本地 vs 券商，偏差超阈值钉钉告警）。
 
 模块定位（Karpathy 极简原则）：
-- 本模块是「调度 + 偏差告警」的薄封装，对账纯逻辑在 trading.execution_gateway.reconcile()
+- 本模块是「调度 + 偏差告警」的薄封装，对账纯逻辑在 trading.compute.reconcile.reconcile()
   纯函数里（已由 tests/trading/test_circuit_breaker.py 等覆盖）。
 - 我们**不重复造对账逻辑**——BaseExecutionGateway.sync_positions 模板方法已固化
   「拉券商 → reconcile → 返结构化差异」的算法骨架，唯一变化点 _fetch_broker_positions
@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Mapping
 
-from trading.execution_gateway import PositionDrift, ReconciliationResult
+from trading.compute.reconcile import PositionDrift, ReconciliationResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.reconcile 真身
 
 logger = logging.getLogger(__name__)
 

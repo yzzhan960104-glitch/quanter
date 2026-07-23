@@ -6,7 +6,7 @@
 """
 import pytest
 
-from trading.execution_gateway import OrderRequest
+from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from trading.compute.risk import RiskDecision, check_order  # Layer2 阶段6：直指 functional core 真身（risk_shield 垫片已删）
 
 

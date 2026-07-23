@@ -7,11 +7,13 @@
 
     与 trading/ 顶层其他模块的职责切分（functional core / imperative shell）：
     - compute/*         纯判定/计算（本子包，零外部 I/O 依赖）
-    - execution_gateway 网关 I/O（连接、下单、撤单、持仓拉取）——决策已下沉 compute
-    - risk_shield       垫片 re-export compute.risk（保留旧路径兼容）
-    - signal_runner     垫片 re-export compute.plan（保留旧路径兼容）
-    - stop_loss         垫片 re-export compute.stop（保留旧路径兼容）
-    - circuit_breaker   垫片 re-export（cancel_all→io.breaker + check_daily_loss_limit←compute.breaker）
+    - broker/*          网关 I/O（连接、下单、撤单、持仓拉取）——决策已下沉 compute
+    - execution_gateway 垫片已删（Layer2 阶段6 follow-up #4b）：符号单源 broker.base/mock +
+                        compute.reconcile/types，全仓消费点直指真身
+    - risk_shield       垫片已删（Layer2 阶段6）：符号单源 compute.risk
+    - signal_runner     垫片已删（Layer2 阶段6 follow-up #4a）：符号单源 compute.plan
+    - stop_loss         垫片已删（Layer2 阶段6）：符号单源 compute.stop
+    - circuit_breaker   垫片已删（Layer2 阶段6）：cancel_all→io.breaker + check_daily_loss_limit←compute.breaker
 
     零外部依赖不变量（由 tests/test_compute_purity.py 守护）：
     本子包下所有 .py 仅可 import：标准库 / pandas / numpy / dataclasses /

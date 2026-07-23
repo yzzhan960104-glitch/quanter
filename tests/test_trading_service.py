@@ -110,12 +110,12 @@ def _fake_gw_connected():
 
         async def submit_order(self, order):
             self.submit_calls.append(order)
-            from trading.execution_gateway import OrderResult
+            from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：垫片已删，直指 broker.base 真身
             from trading.order_state import OrderState
             return OrderResult(order_id="100", state=OrderState.SUBMITTED, message="ok")
 
         async def cancel_order(self, order_id):
-            from trading.execution_gateway import OrderResult
+            from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：垫片已删，直指 broker.base 真身
             from trading.order_state import OrderState
             return OrderResult(order_id=order_id, state=OrderState.CANCELLED, message="ok")
     return _FakeGW()
@@ -143,7 +143,7 @@ def test_submit_order_dry_run_records_and_returns(monkeypatch):
     挡板跳过涨跌停关（dry_run 在第 2 关即命中，根本到不了第 9 关）。
     """
     from server.services import trading_service
-    from trading.execution_gateway import OrderRequest
+    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
@@ -162,7 +162,7 @@ def test_submit_order_dry_run_records_and_returns(monkeypatch):
 def test_submit_order_blocked_raises(monkeypatch):
     """挡板命中（白名单外）→ raise RuntimeError + 落 BLOCKED 流水。"""
     from server.services import trading_service
-    from trading.execution_gateway import OrderRequest
+    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
@@ -183,7 +183,7 @@ def test_submit_order_blocked_raises(monkeypatch):
 def test_submit_order_live_calls_gateway(monkeypatch):
     """dry_run=False + 全过 → 调网关 submit_order。"""
     from server.services import trading_service
-    from trading.execution_gateway import OrderRequest
+    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
@@ -207,7 +207,7 @@ def test_submit_order_live_records_audit(monkeypatch):
     logs/live_trades.csv 中完全缺失，违反审计合规红线。
     """
     from server.services import trading_service
-    from trading.execution_gateway import OrderRequest
+    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
@@ -236,7 +236,7 @@ def test_submit_order_live_records_audit(monkeypatch):
 def test_submit_order_disconnected_blocks(monkeypatch):
     """网关未连接 → 挡板 connection 关命中。"""
     from server.services import trading_service
-    from trading.execution_gateway import OrderRequest
+    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
     gw._connected = False

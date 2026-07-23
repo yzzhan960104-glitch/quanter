@@ -11,9 +11,9 @@
 实现，不引入事件/ORM 黑盒；向量化思路以单遍遍历并集 + 显式分类完成。
 
 迁移纪律（strangler 红线①）：函数逻辑【零改动】，只搬位置（trading/
-execution_gateway.py → trading/compute/reconcile.py）。原 trading/execution_gateway.py
-保留 I/O 部分（BaseExecutionGateway 等），reconcile/PositionDrift/ReconciliationResult
-经垫片 re-export，既有 ``from trading.execution_gateway import reconcile`` 调用零改动。
+execution_gateway.py → trading/compute/reconcile.py）。Layer2 阶段6 follow-up #4b
+已删 execution_gateway 垫片，reconcile/PositionDrift/ReconciliationResult 单源在本模块——
+全仓消费点已直指 ``from trading.compute.reconcile import reconcile`` 真身。
 """
 from __future__ import annotations
 

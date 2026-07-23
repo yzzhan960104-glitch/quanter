@@ -16,7 +16,7 @@ import asyncio
 import pytest
 
 from trading import reconcile_job
-from trading.execution_gateway import reconcile
+from trading.compute.reconcile import reconcile  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.reconcile 真身
 
 
 class FakeGW:

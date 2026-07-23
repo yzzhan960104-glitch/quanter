@@ -25,9 +25,10 @@ from typing import Optional
 
 from core.notifier import NotificationManager, fire_and_forget
 from server.core.config import PROJECT_ROOT
+from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 broker.base 真身
 from trading import qmt_market_data
 from trading.dynamic_whitelist import get_effective_whitelist
-from trading.execution_gateway import OrderRequest, OrderResult
+from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from trading.compute.risk import check_order  # Layer2 阶段6：直指 functional core 真身（risk_shield 垫片已删）
 
 logger = logging.getLogger(__name__)

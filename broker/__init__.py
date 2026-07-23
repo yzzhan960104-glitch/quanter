@@ -3,8 +3,9 @@
 
 物理定位：本包是剥自 trading/ 的【干净执行叶子】，承载「下单 + 撤单 + 查持仓 +
 查资金 + 实时行情 + 行情清洗 + Mock 网关」全执行域。零反向依赖 trading 编排
-（trading.engine / orchestrate / signal_runner / risk_shield / stop_loss /
-circuit_breaker / dynamic_whitelist 等一律不 import）。
+（trading.engine / orchestrate / dynamic_whitelist 等一律不 import；
+signal_runner/risk_shield/stop_loss/circuit_breaker/execution_gateway 等垫片
+均已删，路径不存在）。
 
 允许的依赖方向（单向，无循环）：
 - broker → trading.compute.*（functional core：reconcile 纯函数 / OrderRequest dataclass）
@@ -23,10 +24,11 @@ circuit_breaker / dynamic_whitelist 等一律不 import）。
   git mv 自 trading/qmt_market_data.py）；
 - ``broker.mock``：MockExecutionGateway（内存 Mock，spec §3.3 新增抽象的占位实现）。
 
-兼容垫片（strangler 铁律①）：既有 20+ 处 ``from trading.execution_gateway import X``
-/ ``from trading.qmt_gateway import Y`` / ``from trading import qmt_market_data``
-调用零改动——trading 侧三处垫片 re-export 本包符号（见 trading/execution_gateway.py、
-trading/qmt_gateway.py、trading/qmt_market_data.py）。
+兼容垫片（strangler 铁律①）：既有 ``from trading.qmt_gateway import Y`` /
+``from trading import qmt_market_data`` 调用零改动——trading 侧两处垫片 re-export
+本包符号（见 trading/qmt_gateway.py、trading/qmt_market_data.py）。
+注：trading/execution_gateway.py 垫片已于 Layer2 阶段6 follow-up #4b 删除，
+原 20+ 消费点已按符号直指 broker.base/mock + trading.compute.reconcile/types 真身。
 """
 from __future__ import annotations
 

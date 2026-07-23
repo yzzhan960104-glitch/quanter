@@ -23,7 +23,7 @@ from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from pydantic import BaseModel
-from trading.execution_gateway import OrderRequest
+from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from server.services.trading_service import (
     emergency_halt,
     export_trades,

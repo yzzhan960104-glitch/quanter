@@ -164,26 +164,25 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
         ("trading.order_state", "check_take_profit"),
         ("trading.compute.stop", "update_trailing_stop"),
         ("trading.order_state", "update_trailing_stop"),
-        # reconcile：双入口同源（compute / execution_gateway·阶段6 保留 20+ 消费）
+        # reconcile：双入口同源（compute / compute 包 re-export）
+        # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，双源 is 契约退役，
+        # 仅留 compute.reconcile↔compute 包级同源（20+ 消费已迁直指 compute.reconcile 真身）
         ("trading.compute.reconcile", "reconcile"),
-        ("trading.execution_gateway", "reconcile"),
         ("trading.compute", "reconcile"),
         # check_daily_loss_limit：真身单源在 trading.compute.breaker
         # （Layer2 阶段6 circuit_breaker 垫片已删，cancel_all_open_orders 真身在 io.breaker）
         ("trading.compute.breaker", "check_daily_loss_limit"),
         ("trading.compute", "check_daily_loss_limit"),
-        # OrderRequest：双入口同源（compute.types / execution_gateway·阶段6 保留）
+        # OrderRequest：双入口同源（compute.types / compute 包 re-export）
+        # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，双源 is 契约退役
         ("trading.compute.types", "OrderRequest"),
-        ("trading.execution_gateway", "OrderRequest"),
         ("trading.compute", "OrderRequest"),
         # 伴随 dataclass（ExitDecision / RiskDecision / PlannedOrder / ReconciliationResult）
         ("trading.compute.exit", "ExitDecision"),
         ("trading.compute.risk", "RiskDecision"),
         ("trading.compute.plan", "PlannedOrder"),
         ("trading.compute.reconcile", "ReconciliationResult"),
-        ("trading.execution_gateway", "ReconciliationResult"),
         ("trading.compute.reconcile", "PositionDrift"),
-        ("trading.execution_gateway", "PositionDrift"),
     ],
 )
 def test_all_entry_points_resolvable(module_path: str, attr: str) -> None:
@@ -234,8 +233,10 @@ def test_order_state_stops_single_source() -> None:
 
 
 def test_reconcile_single_source() -> None:
+    # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，双源 is 契约退役，
+    # 仅守 compute.reconcile↔compute 包级 re-export 同源（消费点已直指 compute.reconcile）
     a = _get("trading.compute.reconcile", "reconcile")
-    assert a is _get("trading.execution_gateway", "reconcile")
+    assert a is _get("trading.compute", "reconcile")
 
 
 def test_breaker_single_source() -> None:
@@ -245,8 +246,10 @@ def test_breaker_single_source() -> None:
 
 
 def test_order_request_single_source() -> None:
+    # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，双源 is 契约退役，
+    # 仅守 compute.types↔compute 包级 re-export 同源（消费点已直指 compute.types）
     a = _get("trading.compute.types", "OrderRequest")
-    assert a is _get("trading.execution_gateway", "OrderRequest")
+    assert a is _get("trading.compute", "OrderRequest")
 
 
 def test_order_state_enum_single_source() -> None:

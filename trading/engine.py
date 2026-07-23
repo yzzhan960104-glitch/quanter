@@ -295,7 +295,7 @@ async def pre_open(date: str) -> dict:
     dynamic_whitelist.inject_dynamic_whitelist(symbols)
 
     # ④ 逐单挂单 + raise 兜底（scope #7）
-    from trading.execution_gateway import OrderRequest
+    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
     n_submitted = 0
     for o in plan["orders"]:
         od = o["order"]
@@ -385,7 +385,7 @@ async def stop_loss_monitor(
     #   xtdata.html 契约），减少 GIL 切换与 C++ 调用开销；颈线法盘中 5min 巡查场景下
     #   显著降低行情查询延迟（极端行情下高频止损检查更及时）。
     #   ⚠️ xtdata 通道（miniQMT）返快照；EMT 网关无 xtdata 行情源，live 前需另接行情源。
-    from trading.execution_gateway import OrderRequest
+    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
     quotes = await qmt_market_data.get_quotes(list(positions.keys()))
     n_triggered = 0
     n_checked = 0

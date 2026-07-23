@@ -39,8 +39,8 @@ Layer2 阶段6 垫片清/留决策（spec §7 strangler 铁律①）：
       - trading/stop_loss.py      → 真身 trading.compute.stop（test_stop_loss 迁）
       - trading/circuit_breaker.py → 真身 trading.compute.breaker + trading.io.breaker（零外部消费）
       - trading/signal_runner.py  → 真身 trading.compute.plan（engine.py + 3 tests 含 e2e 迁，#4a 收口）
+      - trading/execution_gateway.py → 真身 broker.base/mock + compute.reconcile/types（20+ 消费按符号迁 4 目标，#4b 收口）
     保留（消费点多/有 monkeypatch/hybrid 真身，留 stage6 follow-up）：
-      - trading/execution_gateway.py → 真身 broker.base/mock + compute.reconcile/types（20+ 消费 spec §101）
       - trading/order_state.py       → hybrid：OrderStateMachine 真身 + OrderState/check_* re-export（broker/backtest 依赖枚举）
 """
 from __future__ import annotations
