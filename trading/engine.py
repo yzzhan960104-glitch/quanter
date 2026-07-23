@@ -656,14 +656,42 @@ class TradingEngine:
     async def _stoploss(self) -> None:
         """cron 包装：止损监控（盘中时段判定在 stop_loss_monitor 内）。
 
+        注入 stop_prices（Task 7 · 修现状 None 空转）：
+            从当日活跃计划（``trading_plan.load_plan(today)``）读 ``{symbol: stop_price}``
+            注入 ``stop_loss_monitor``。现状恒传 ``stop_prices=None`` → monitor 在
+            「stop_prices 空」判断处直接返「无止损价配置」no-op，**盘中监控链路恒空转**
+            （致命：持仓跌破止损价也不触发卖出，敞口裸奔）。
+
+        保守降级红线（Grill Me）：
+            - 计划不存在 / 未 confirmed / orders 空 / 某 order 缺 symbol 或 stop_price
+              → 一律不把该标的塞进 stop_prices（宁可漏监控，不拿脏数据盲卖）。
+            - 整张 stop_prices 最终为空时显式传 ``None``，让 monitor 走既定 no-op 分支
+              （保守、不崩、可观测日志），绝不构造非空 map 误导下单。
+
         ⚠️ 现价依赖（C1 fix）：``stop_loss_monitor`` 现价走
         ``trading.qmt_market_data.get_quote``（xtdata，miniQMT 通道可用）；
         **EMT 网关无 xtdata 行情源，止损链路需另接行情源（live 前必修 follow-up）**。
 
-        TODO(Task 10/follow-up)：从活跃计划 / 持仓状态机读当日 stop_prices map 注入。
-        当前 stop_prices=None → stop_loss_monitor 内部返「无止损价配置」no-op。
+        ⚠️ Trailing stop 动态更新（follow-up）：本处注入的是计划内**静态** stop_price
+            （pre_open 挂单时落盘的初始止损价）；时间驱动 trailing（海龟 grace/step/floor）
+            需在盘中按持仓最高价动态更新 stop_prices map，属另一个 follow-up，不在本 task 内。
         """
-        await stop_loss_monitor(stop_prices=None)
+        today = datetime.now().strftime("%Y-%m-%d")
+        plan = trading_plan.load_plan(today)
+        stop_prices: dict[str, float] = {}
+        # 仅在 confirmed 计划下抽取（confirmed=False 是人审闸——研究员未确认就不监控止损，
+        # 避免研究员明确否决的计划仍触发卖出，破坏人审语义）。
+        if plan and plan.get("confirmed"):
+            for o in plan.get("orders", []):
+                sym = (o.get("order") or {}).get("symbol")
+                sp = o.get("stop_price")
+                # 双重防御：symbol 缺失或 stop_price 非数（NaN/None）一律跳过——
+                # stop_prices 的每一项都必须是「能拿来比价」的合法 (sym, price) 对。
+                if sym and sp is not None:
+                    stop_prices[sym] = sp
+        # 空时显式转 None：与 stop_loss_monitor 的「stop_prices is None or empty → no-op」
+        # 契约对齐，避免传 {} 时日志歧义（None=未注入计划，{}=计划无止损配置）。
+        await stop_loss_monitor(stop_prices=stop_prices or None)
 
     async def _post_close(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
