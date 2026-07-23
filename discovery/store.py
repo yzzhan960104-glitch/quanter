@@ -90,13 +90,19 @@ def trial_id_of(params, snapshot_hash, seed=0):
 
 
 def write_snapshot(conn, meta):
-    """落 snapshot 表（INSERT OR REPLACE upsert）。meta: SnapshotMeta。"""
-    conn.execute(
-        "INSERT OR REPLACE INTO snapshot "
-        "(snapshot_hash, universe_def, universe_count, date_range, lake_start, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (meta.snapshot_hash, meta.universe_def, meta.universe_count,
-         meta.date_range, meta.lake_start, _now_iso()))
+    """落 snapshot 表（INSERT OR REPLACE upsert）。meta: SnapshotMeta。
+
+    单点写锁包裹 execute，与 write_trial 对称：Plan 1 单写者场景虽安全，但 Plan 2 并发
+    搜索时多 worker 会触 write_snapshot（跨线程 upsert 未串行化会破坏 ADR6 单点写一致性，
+    spec §8 拷问②）。锁粒度同 write_trial——模块级单锁。
+    """
+    with _write_lock:
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshot "
+            "(snapshot_hash, universe_def, universe_count, date_range, lake_start, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (meta.snapshot_hash, meta.universe_def, meta.universe_count,
+             meta.date_range, meta.lake_start, _now_iso()))
 
 
 def write_trial(conn, trial_id, params, snapshot_hash, engine_hash, split,
