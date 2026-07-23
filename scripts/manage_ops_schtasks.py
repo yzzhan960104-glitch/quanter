@@ -30,6 +30,16 @@ BOT_TIME_ENV = {
     "data": ("DATA_BRIEF_TIME", "17:00"),
 }
 
+# 数据检查点任务（auto-trading-rehearsal Task 4）
+# Why 独立 list 不复用 bot dict：检查点 bat 命名 run_data_check_t1/t2.bat（非 run_{bot}_brief.bat
+# 套路），且时间硬编码不读 .env（17:00 查T-1 / 18:30 查T 是 brainstorm 钉死的双检查点时序，
+# 调度漂移会破坏"盘前 T-1 告警 → 盘后 T 重采熔断"语义，故不做 env 化）。
+DATA_CHECK_TASKS = [
+    # (任务名, 时间, bat 相对路径)
+    ("QuanterDataCheckT1", "17:00", "scripts\\run_data_check_t1.bat"),
+    ("QuanterDataCheckT2", "18:30", "scripts\\run_data_check_t2.bat"),
+]
+
 
 def _load_env() -> None:
     try:
@@ -61,17 +71,31 @@ def _schtasks(args: list[str]) -> int:
 
 
 def register() -> None:
-    """幂等注册：先 /Delete /F（不存在也返回 0，不报错）再 /Create /F 覆盖。"""
+    """幂等注册：先 /Delete /F（不存在也返回 0，不报错）再 /Create /F 覆盖。
+
+    覆盖两类任务：bot 播报（3 个，读 .env 时间）+ 数据检查点（2 个，硬编码时间）。
+    """
+    # bot 播报任务
     for c in build_register_commands():
         _schtasks(["/Delete", "/TN", c["task"], "/F"])  # 幂等：先删
         rc = _schtasks(["/Create", "/SC", "DAILY", "/TN", c["task"],
                         "/TR", c["bat"], "/ST", c["time"], "/F"])
         print(f"{'OK' if rc == 0 else 'FAIL'} {c['task']} @ {c['time']} → {c['bat']}")
+    # 数据检查点任务
+    for task, t, bat_rel in DATA_CHECK_TASKS:
+        bat = str(ROOT / bat_rel)
+        _schtasks(["/Delete", "/TN", task, "/F"])  # 幂等：先删
+        rc = _schtasks(["/Create", "/SC", "DAILY", "/TN", task,
+                        "/TR", bat, "/ST", t, "/F"])
+        print(f"{'OK' if rc == 0 else 'FAIL'} {task} @ {t} → {bat}")
 
 
 def unregister() -> None:
-    """一键清退 3 个任务（删除是幂等的，不存在不报错）。"""
+    """一键清退全部任务（删除是幂等的，不存在不报错）。"""
     for task in TASK_NAMES.values():
+        _schtasks(["/Delete", "/TN", task, "/F"])
+        print(f"deleted {task}")
+    for task, _, _ in DATA_CHECK_TASKS:
         _schtasks(["/Delete", "/TN", task, "/F"])
         print(f"deleted {task}")
 
@@ -81,6 +105,8 @@ def list_tasks() -> None:
     subprocess.run(["schtasks", "/Query", "/TN", "QuanterTradingBrief"], check=False)
     subprocess.run(["schtasks", "/Query", "/TN", "QuanterStrategyBrief"], check=False)
     subprocess.run(["schtasks", "/Query", "/TN", "QuanterDataBrief"], check=False)
+    for task, _, _ in DATA_CHECK_TASKS:
+        subprocess.run(["schtasks", "/Query", "/TN", task], check=False)
 
 
 def rerun(bot: str) -> None:

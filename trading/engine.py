@@ -2,9 +2,11 @@
 """二期自动交易引擎：APScheduler 四触发点编排 + 影子模式分流。
 
 物理意图（四触发点的真实业务节奏 · 术语对齐 T 日盘后扫盘 → T+1 执行）：
-  eod_plan  15:35 T 日盘后：扫颈线法信号 → build_orders → save_plan（confirmed=False）
+  eod_plan  19:00 T 日盘后：扫颈线法信号 → build_orders → save_plan（confirmed=False）
               → push 钉钉（待研究员确认）。本阶段绝不下单（机器只产计划，人审是闸）。
               次日（T+1 日）pre_open 才挂单执行。
+              ⚠️ 非 15:35：须等 18:00 增量采集落湖 + 18:30 数据检查点② 通过，否则用
+              T-1 数据算 T+1 计划（时序 bug · Task6 修复）。
   pre_open  09:22 T 日开盘前：① 撤昨日遗留未成交单 ② 读已确认计划
               → 注入动态白名单（过关5）→ 挂限价买 + 止盈限价卖（逐单 try-except 兜底）。
   stop_loss 每 5min 盘中：查 gw 真实持仓 + 现价（qmt_market_data.get_quote / xtdata），
@@ -105,7 +107,7 @@ def _load_universe(lake) -> list:
         本函数**绝不 read_parquet**——lake 由调用方（``_eod``）入口一次性读入后注入，
         全创板科创 1993 个标的共用同一份 DataFrame。
         历史 bug：每个 symbol 都重读 455MB parquet（1.75s/次）→ 58 分钟纯 I/O，
-        15:35 的 ``_eod`` 根本无法在合理窗口完成。复用 lake 后整体扫描降至秒级。
+        19:00 的 ``_eod`` 根本无法在合理窗口完成。复用 lake 后整体扫描降至秒级。
 
     Why 收窄创板科创（不扫全市场）：
         颈线法 param_iter 基线口径（记忆 neckline-paramiter-baseline）——创板科创
@@ -185,7 +187,8 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
     """T 日盘后：颈线法信号 → 计划落盘（confirmed=False） → 推钉钉等研究员确认。
 
     物理意图（术语对齐物理时序 · Task 7b fix）：
-        本函数由 ``_eod`` 在 **T 日盘后 15:35** 调用，扫 T 日新突破信号，产 T+1 日
+        本函数由 ``_eod`` 在 **T 日盘后 19:00** 调用（Task6 时序修复：原 15:35 因增量
+        采集 @18:00 尚未落湖致读到 T-1 数据，挪 19:00 等数据落湖 + 检查点② 通过），扫 T 日新突破信号，产 T+1 日
         生效计划；机器批量扫信号易受数据瑕疵/前视偏差/极端行情误判，T 日盘后必须给人
         一次否决机会——故本函数只产计划不下单（spec §2 确认闸红线）。
 
@@ -504,24 +507,41 @@ class TradingEngine:
     模块级全局会污染 server 手动下单路径，破坏 server 行为向后兼容）。
 
     四 cron（Task4 已配 env，缺省值对齐 A 股交易日历 · 术语对齐 T 日盘后扫盘）：
-        eod_plan   15:35 周一-五  T 日盘后扫信号 + 落计划 + 推钉钉（T+1 执行）
+        eod_plan   19:00 周一-五  T 日盘后扫信号 + 落计划 + 推钉钉（T+1 执行）
+                          ⚠️ 非 15:35：18:00 增量采集 + 18:30 检查点② 通过后才扫，
+                          否则读到 T-1 数据算 T+1 计划（时序 bug · Task6 修复）
         pre_open   09:22 周一-五  T 日开盘前撤昨日 + 挂当日单
-        stop_loss  */5  9-14 周一-五  盘中每 5 分钟止损监控
+        stop_loss  每 30s（IntervalTrigger，Task8：cron 不支持秒级；时段约束在 monitor 兜底）
         post_close 15:30 周一-五  盘后对账 + 清白名单
 
     每个 job 先过 calendar.is_trading_day 判交易日（节假日整体跳过）。
     """
 
     def __init__(self) -> None:
-        """装配 AsyncIOScheduler + 四 cron job（不 start）。"""
+        """装配 AsyncIOScheduler + 四 job（不 start）。
+
+        ⚠️ 触发器形态分轨（Task8）：
+            eod_plan / pre_open / post_close：分钟粒度 CronTrigger（标准 5 字段）。
+            stop_loss：**IntervalTrigger（秒级）**——cron 最小粒度是分钟，
+            30s 巡检必须用 interval。时段约束（9:30-11:30 / 13:00-15:00）下放给
+            ``stop_loss_monitor`` 内 ``calendar.is_intraday_session`` 兜底，
+            非盘中由 monitor 直接 no-op（不在 trigger 层做时段过滤，避免 interval
+            在午休 / 盘后空跑也只是命中 no-op，零副作用）。
+        """
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
 
         self.sched = AsyncIOScheduler()
         # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
         self.sched.add_job(
             self._eod, CronTrigger.from_crontab(
-                os.getenv("ENGINE_EOD_PLAN_CRON", "35 15 * * 1-5")),
+                # ⚠️ 时序修复（Task6）：15:35 → 19:00。原 15:35 触发时 T 日增量行情
+                # 尚未落湖（@18:00 sync_all_tushare 才跑增量采集 + @18:30 数据检查点②
+                # 才验通过），_eod 读到的仍是 T-1 数据 → 用 T-1 收盘算 T+1 计划 = 时序 bug。
+                # 挪到 19:00 既等足 18:00 增量落湖 + 18:30 检查点② 通过，又留足窗口在
+                # T+1 日 09:22 pre_open 前完成扫盘 + 人审确认（confirmed=False 闸）。
+                os.getenv("ENGINE_EOD_PLAN_CRON", "0 19 * * 1-5")),
             id="eod_plan",
         )
         self.sched.add_job(
@@ -529,9 +549,17 @@ class TradingEngine:
                 os.getenv("ENGINE_PRE_OPEN_CRON", "22 9 * * 1-5")),
             id="pre_open",
         )
+        # stop_loss：盘中每 N 秒巡检（海龟时间驱动移动止损 grace/step/floor 在此触发）。
+        # ⚠️ Task8：cron `*/5 9-14`（5min）→ IntervalTrigger(seconds=30)。
+        # Why interval：cron 最小粒度是分钟，30s 必须 interval。原 `9-14` 时段约束
+        # 下放给 ``stop_loss_monitor`` 内 ``calendar.is_intraday_session``（9:30-11:30 /
+        # 13:00-15:00）——trigger 全天每 30s 触发，非盘中由 monitor 内 no-op 兜底。
+        # ⚠️ ENGINE_STOPLOSS_INTERVAL_SECONDS：30s 目标，**spec §10 限频实测后定终值**——
+        # 若 miniQMT 模拟盘连续 get_quotes+query_stock_positions 撞柜台限流，上调 60s。
+        stoploss_seconds = int(os.getenv("ENGINE_STOPLOSS_INTERVAL_SECONDS", "30"))
         self.sched.add_job(
-            self._stoploss, CronTrigger.from_crontab(
-                os.getenv("ENGINE_STOPLOSS_CRON", "*/5 9-14 * * 1-5")),
+            self._stoploss,
+            IntervalTrigger(seconds=stoploss_seconds),
             id="stop_loss",
         )
         self.sched.add_job(
@@ -540,26 +568,49 @@ class TradingEngine:
             id="post_close",
         )
 
+        # 成交回调链路状态（Task 10 · 修 G5）：
+        #   _tp_placed：已挂止盈的 symbol 集合（幂等防重挂——部分成交多次回报/柜台重推
+        #               不应重复挂止盈卖单，否则同笔持仓挂 N 张卖单 → 超卖敞口致命）。
+        #   _gw：交易网关引用（_order_direction 查 gw._orders[order_id].order_type 判买卖方向）。
+        #        Task 11 在 gw.connect 注册 _on_order_update 回调时同步注入，本 task 仅声明槽位。
+        #
+        # ⚠️ _tp_placed 仅进程内存（不持久化）：
+        #   常驻进程重启（断电/崩溃恢复/OOM kill 后 systemd 拉起）后该集合清空——若 broker
+        #   断线重连后重推历史 trade 回报（miniQMT connect 时同步推送当日 _orders 与成交），
+        #   已挂止盈的买单会再次命中「symbol not in _tp_placed」分支 → 重复挂止盈卖单
+        #   （spec §8 幂等红线的已知缺口）。
+        #   Phase2 / 生产级准入必修：把 _tp_placed 持久化到 trading_plan JSON（或独立
+        #   tp_state.json），_handle_order_update 启动时加载、挂单成功后写盘。
+        #   Phase1 dry_run（影子模式）：风控极低——dry_run 命中不真下单，重复挂的止盈单
+        #   也走 DRY_RUN 分支不触达 broker，最多多几条「止盈单已挂」日志，无敞口风险。
+        self._tp_placed: set[str] = set()
+        self._gw: Any = None
+
     # ----- cron 包装：交易日判定 + 转调 async 触发函数 -----
     async def _eod(self) -> None:
         """cron 包装：节假日跳过；交易日 resolve 多实验 + scan_live 产信号 → eod_plan。
 
         物理意图（二期 gap② 策略数据源 · 术语对齐物理时序）：
-            **T 日盘后 15:35 触发**——从实验配置中心读当前所有在线实验
+            **T 日盘后 19:00 触发**——从实验配置中心读当前所有在线实验
             （status=ACTIVE+weight>0），按每实验的 strategy_name+params 装配策略实例，
             对创板科创可交易池逐 symbol 调 scan_live(df_upto 截至 T 日 today) 产
             【T 日新突破】信号，注入实验归因字段后透传 eod_plan 落盘（confirmed=False
             待研究员人审），次日（T+1 日开盘前 pre_open）挂单执行。
 
             ⚠️ 术语对齐（Task 7b fix · 别再误称「T-1 收盘日」）：
-                传入的 ``today`` 即 T 日本身（cron 在 T 日 15:35 触发，扫 T 日盘后突破），
+                传入的 ``today`` 即 T 日本身（cron 在 T 日 19:00 触发，扫 T 日盘后突破），
                 计划生效日 = T+1。早期注释里的「T-1 收盘日」语义混淆，统一改为「T 日盘后」。
+            ⚠️ 时序修复（Task6）：
+                cron 由 15:35 挪 19:00——原 15:35 触发时 T 日增量行情（@18:00 sync_all_tushare）
+                尚未落湖、@18:30 数据检查点② 未验通过，_eod 读到的是 T-1 数据，用 T-1 收盘
+                算 T+1 计划 = 时序 bug。19:00 既等足数据落湖 + 检查点② 通过，又留足窗口在
+                T+1 日 09:22 pre_open 前完成扫盘 + 人审确认。
 
         ⚠️ 性能不变量（Task 7b fix · 阻断级修复）：
             data_lake/a_shares_daily.parquet（455MB，全市场 5 年）在本函数**入口只读一次**，
             传给 _load_universe(lake) 与 _load_df_upto(lake, sym, today) 复用。
             历史 bug：每 symbol 各 read_parquet 一次（1.75s × 1993 标的 = 58 分钟纯 I/O），
-            15:35 的 _eod 根本无法在合理窗口完成；复用 lake 后整体降至秒级。
+            19:00 的 _eod 根本无法在合理窗口完成；复用 lake 后整体降至秒级。
 
         无前视契约（spec 红线）：
             df_upto 由 _load_df_upto 截断于 today（.loc[:date]），不含 today 之后任何 K 线；
@@ -590,7 +641,7 @@ class TradingEngine:
 
         # ⚠️ 性能红线（Task 7b fix）：data_lake 入口只读一次，全 universe 复用同一份
         # DataFrame。455MB parquet 单次 read ≈ 1.75s；历史每 symbol 重读致 1993 × 1.75s
-        # ≈ 58 分钟纯 I/O，_eod 在 15:35 窗口完全无法完成。lake 复用后降为单次 disk read。
+        # ≈ 58 分钟纯 I/O，_eod 在 19:00 窗口完全无法完成。lake 复用后降为单次 disk read。
         lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 
         universe = _load_universe(lake)
@@ -630,6 +681,84 @@ class TradingEngine:
             today, signals, atr_map,
             capital=float(os.getenv("TRADE_CAPITAL", "1_000_000")),
         )
+        # Task12 · 持仓盈亏播报（spec §6.2 C4 / 子诉求 1<2>）：eod_plan 落盘+推钉钉后，
+        # 把当前持仓逐仓浮盈 + 总资产推一次群播报，让研究员在 19:00 一次性看到「今日计划 +
+        # 当前持仓盈亏全貌」。放在 eod_plan 之后、独立 try-except 软降级——盈亏播报失败
+        # 绝不阻断 eod_plan 主流程（计划已落盘，研究员次日 pre_open 仍可挂单执行）。
+        await self._broadcast_positions_pnl()
+
+    async def _broadcast_positions_pnl(self) -> None:
+        """播报当前持仓盈亏全貌（总资产 + 逐仓浮盈 + 盈亏汇总）。
+
+        物理意图（spec §6.2 C4，19:00 eod_plan 收尾播报）：
+            研究员在 19:00 收到 eod_plan（次日计划）后，紧接着收到一条「当前持仓 +
+            浮盈」播报——一日闭环的盈亏可见性。内容三段：
+              a. 总资产（gw.query_asset.total_asset）作 head；
+              b. 逐仓浮盈（get_positions 富化后的 pnl，带 +/- 前缀，盲价标的显示 N/A）；
+              c. 空仓特判 → 显式「空仓」（不混淆「无持仓」与「播报失败」）。
+
+        软降级红线（绝不阻断 eod）：
+            整方法 try-except 兜底——网关未连接 / query_asset 异常 / get_positions
+            抛错 / 钉钉网络故障 → 仅 logger.exception 记录，不上抛、不影响 eod_plan
+            已落盘的计划。播报是「锦上添花」而非「关键路径」，与 fire_and_forget 同语义。
+        """
+        try:
+            # 局部 import：避免顶层拉起 server/infra 子系统（与 _eod 内 experiment/strategies
+            # 局部 import 同口径，保持引擎薄编排）。
+            from server.services.trading_service import get_positions
+            from infra.notifier import NotificationManager, fire_and_forget
+
+            gw = get_gateway()
+            # query_asset 总资产：网关缺失/未连接/异常 → 走 {} 降级（head 显示 0，不阻断）。
+            asset: dict = {}
+            if gw is not None:
+                try:
+                    asset = await gw.query_asset() or {}
+                except Exception as e:  # noqa: BLE001 总资产软降级
+                    logger.warning("_broadcast_positions_pnl query_asset 失败（head 显示 0）：%s", e)
+                    asset = {}
+            total = float(asset.get("total_asset", 0.0) or 0.0)
+
+            positions = await get_positions()
+
+            # 汇总浮盈：仅累加 pnl 非 None 的仓位（盲价仓位跳过，避免 None + 数值 TypeError）。
+            total_pnl = 0.0
+            pnl_known = 0
+            for p in positions:
+                pnl = p.get("pnl")
+                if pnl is not None:
+                    total_pnl += float(pnl)
+                    pnl_known += 1
+
+            lines = [f"## 💼 持仓盈亏播报（总资产 {total:.0f}）"]
+            if not positions:
+                lines.append("- 空仓")
+            else:
+                for p in positions:
+                    pnl = p.get("pnl")
+                    qty = p.get("qty")
+                    # pnl 非 None → 带 +/- 前缀浮盈；None → N/A（盲价防御语义对齐 get_positions）
+                    pnl_mark = f"{pnl:+.0f}" if pnl is not None else "N/A"
+                    # qty 恒为 float（trading_service.get_positions 契约返回 float volume；
+                    # T7 扩展后仍富化为 float）。历史「?股」else 分支是死代码——
+                    # 真出现非数值 qty 会在上方 get_positions 富化阶段就抛 TypeError，
+                    # 不可能安静地流到此格式化语句，故无条件按 float 格式化。
+                    qty_str = f"{qty:.0f}股"
+                    lines.append(f"- {p['symbol']} {qty_str} 浮盈{pnl_mark}")
+                # 汇总行：已估值仓位 N/总 M，累计浮盈（盲价仓位不计入累计，防误导）
+                lines.append(
+                    f"- 汇总：已估值 {pnl_known}/{len(positions)} 仓，"
+                    f"累计浮盈 {total_pnl:+.0f}"
+                )
+            msg = "\n".join(lines)
+
+            # fire_and_forget：钉钉异步投递 daemon 线程，网络延迟不阻塞 eod 主线程。
+            # notify_risk_event 用 INFO 级（持仓播报是业务流水，非风险告警，与 notify_trade_event
+            # 同语义层——但本期复用 risk_event 通道避免新增通道，level=INFO 前缀 ℹ️ 区分）。
+            fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "INFO"))
+        except Exception:
+            # 顶层兜底：任何未预期异常（含 get_gateway import 失败）都软降级，绝不阻断 eod。
+            logger.exception("持仓盈亏播报失败（不影响 eod_plan 主流程）")
 
     async def _pre_open(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -639,16 +768,60 @@ class TradingEngine:
         await pre_open(today)
 
     async def _stoploss(self) -> None:
-        """cron 包装：止损监控（盘中时段判定在 stop_loss_monitor 内）。
+        """IntervalTrigger 包装：止损监控（盘中时段判定在 stop_loss_monitor 内）。
+
+        ⚠️ 交易日守卫（Task 8 fix · review I1）：
+            Task 8 把 stop_loss job 从 cron ``*/5 9-14 * * 1-5`` 迁到
+            ``IntervalTrigger(seconds=30)``——IntervalTrigger **无工作日过滤**，
+            旧 cron 的 ``1-5``（周一至周五）约束在迁移中丢失，导致周末 9:30-15:00 时段
+            也会触发本方法（``is_intraday_session`` 只查时间不查工作日，兜不住）。
+            故此处显式 ``calendar.is_trading_day`` 守卫，与 ``_eod``/``_pre_open``/
+            ``_post_close`` 同口径——非交易日整体跳过，不查 plan、不调 monitor。
+            （周末虽无交易路径、load_plan→None→空 stop_prices→no-op，影响低；但 live
+            前必修：避免无谓的 plan/monitor 调用 + docstring「时段约束下放 monitor 兜底」
+            在 interval 触发器下不成立。）
+
+        注入 stop_prices（Task 7 · 修现状 None 空转）：
+            从当日活跃计划（``trading_plan.load_plan(today)``）读 ``{symbol: stop_price}``
+            注入 ``stop_loss_monitor``。现状恒传 ``stop_prices=None`` → monitor 在
+            「stop_prices 空」判断处直接返「无止损价配置」no-op，**盘中监控链路恒空转**
+            （致命：持仓跌破止损价也不触发卖出，敞口裸奔）。
+
+        保守降级红线（Grill Me）：
+            - 计划不存在 / 未 confirmed / orders 空 / 某 order 缺 symbol 或 stop_price
+              → 一律不把该标的塞进 stop_prices（宁可漏监控，不拿脏数据盲卖）。
+            - 整张 stop_prices 最终为空时显式传 ``None``，让 monitor 走既定 no-op 分支
+              （保守、不崩、可观测日志），绝不构造非空 map 误导下单。
 
         ⚠️ 现价依赖（C1 fix）：``stop_loss_monitor`` 现价走
         ``trading.qmt_market_data.get_quote``（xtdata，miniQMT 通道可用）；
         **EMT 网关无 xtdata 行情源，止损链路需另接行情源（live 前必修 follow-up）**。
 
-        TODO(Task 10/follow-up)：从活跃计划 / 持仓状态机读当日 stop_prices map 注入。
-        当前 stop_prices=None → stop_loss_monitor 内部返「无止损价配置」no-op。
+        ⚠️ Trailing stop 动态更新（follow-up）：本处注入的是计划内**静态** stop_price
+            （pre_open 挂单时落盘的初始止损价）；时间驱动 trailing（海龟 grace/step/floor）
+            需在盘中按持仓最高价动态更新 stop_prices map，属另一个 follow-up，不在本 task 内。
         """
-        await stop_loss_monitor(stop_prices=None)
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 交易日守卫（Task 8 fix · review I1）：IntervalTrigger 无 1-5 工作日过滤，
+        # 必须显式 is_trading_day，否则周末盘中时段会空跑（与 eod/pre_open/post_close 同口径）。
+        if not calendar.is_trading_day(today):
+            logger.info("stop_loss 跳过：今日非交易日 %s", today)
+            return
+        plan = trading_plan.load_plan(today)
+        stop_prices: dict[str, float] = {}
+        # 仅在 confirmed 计划下抽取（confirmed=False 是人审闸——研究员未确认就不监控止损，
+        # 避免研究员明确否决的计划仍触发卖出，破坏人审语义）。
+        if plan and plan.get("confirmed"):
+            for o in plan.get("orders", []):
+                sym = (o.get("order") or {}).get("symbol")
+                sp = o.get("stop_price")
+                # 双重防御：symbol 缺失或 stop_price 非数（NaN/None）一律跳过——
+                # stop_prices 的每一项都必须是「能拿来比价」的合法 (sym, price) 对。
+                if sym and sp is not None:
+                    stop_prices[sym] = sp
+        # 空时显式转 None：与 stop_loss_monitor 的「stop_prices is None or empty → no-op」
+        # 契约对齐，避免传 {} 时日志歧义（None=未注入计划，{}=计划无止损配置）。
+        await stop_loss_monitor(stop_prices=stop_prices or None)
 
     async def _post_close(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -656,6 +829,212 @@ class TradingEngine:
             logger.info("post_close 跳过：今日非交易日 %s", today)
             return
         await post_close(today)
+
+    # ----- 成交回报 handler（Task 10 · 修 G5：成交回调链路）-----
+    async def _handle_order_update(self, update: Mapping[str, Any]) -> None:
+        """成交回报 handler（由 Task 11 的 ``_on_order_update`` 经 ``create_task`` 调度，
+        主线程事件循环执行）。
+
+        物理意图（spec §6.2 C1，三连）：
+            on_stock_trade 回调推送 ``kind=="trade"`` 的成交回报（含真实成交价/量/时间，
+            非下单时的预估价），本 handler 顺序执行三件事：
+              a. ``record_live_trade`` 补写成交回报日志（CSV，Layer 6 LLM 复盘数据源）；
+              b. ``notify_trade_event`` 推钉钉成交通知（fire_and_forget 异步不阻塞回调链）；
+              c. 买单成交 + 未挂止盈 → ``_place_take_profit`` 挂限价止盈卖单
+                 （Phase1 简化版：单一固定止盈价、全额；Phase2 升级为分级状态机复刻
+                 simulate_exit 的 tp1 部分量 + tp2 剩余量）。
+
+        幂等红线（``_tp_placed``）：
+            on_stock_trade 在部分成交 / 柜台重推时会多次推送同一 order_id 的 trade 回报。
+            若每次都重挂止盈卖单 → 同笔持仓挂 N 张卖单 → 超卖敞口致命。故以 symbol 为
+            key 标记已挂止盈，二次回报命中即跳过（``symbol in self._tp_placed``）。
+
+        线程安全：
+            本方法 async，由主线程 ``create_task`` 调度（Task 11 用
+            ``call_soon_threadsafe`` 把网关回调线程的 update 投递回主事件循环）。
+            钉钉通知走 ``fire_and_forget``（独立 daemon 线程跑 asyncio.run），不阻塞
+            回调链——网关回调线程若被 IM 网络延迟阻塞，会反压柜台行情推送。
+
+        边界与降级（Grill Me）：
+            - ``kind != "trade"`` 直接 return（order/order_error 由风控层负责，本 handler
+              只处理真实成交）；
+            - symbol 缺失或 traded_volume<=0 直接 return（脏数据/撤单回报不应触达写日志
+              和挂止盈，否则会把废回报当真实成交落账）；
+            - 三连各自 try-except 兜底：任一环节失败（日志写盘失败/钉钉网络故障/止盈挂单
+              被风控挡板拒）只记日志，不阻塞后续环节（日志失败仍要通知，通知失败仍要挂止盈）；
+            - ``_order_direction`` 返 None（查不到订单方向）时保守按 ``"TRADE"`` 落日志、
+              不挂止盈（不误判买卖方向 → 不误挂止盈）。
+        """
+        kind = update.get("kind")
+        if kind != "trade":
+            return  # 仅处理成交回报（order/order_error 由风控层负责，不在本 handler 范围）
+        symbol = update.get("stock_code", "")
+        qty = update.get("traded_volume", 0)
+        price = update.get("traded_price", 0.0)
+        order_id = str(update.get("order_id", ""))
+        if not symbol or qty <= 0:
+            # 脏数据/撤单回报（traded_volume=0）不应落账或挂止盈，直接跳过
+            return
+
+        # 判定方向（BUY/SELL/None）——日志与挂止盈决策都依赖
+        direction = self._order_direction(order_id)
+
+        # a. 成交日志补写（用真实成交价/量，非下单预估价；Layer 6 LLM 复盘数据源）
+        try:
+            from server.services.trading_service import record_live_trade
+            record_live_trade(
+                symbol,
+                direction or "TRADE",  # 方向未知时落 "TRADE"（保守中性，不误判买卖）
+                float(qty),
+                float(price),
+                strategy="neckline",
+                rationale=f"成交回报@{update.get('traded_time')}",
+            )
+        except Exception:
+            # 日志写盘失败不阻塞通知/挂止盈（三连各自独立降级，互不阻断）
+            logger.exception("成交日志补写失败 symbol=%s（不影响后续通知/挂止盈）", symbol)
+
+        # b. 钉钉成交通知（fire_and_forget 不阻塞回调链；钉钉软降级在 _broadcast 内兜底）
+        try:
+            # ⚠️ 走 infra.notifier 真身（core.notifier 是 strangler 转发垫片，broker/qmt
+            # 同口径用 core.notifier；此处直指 infra 真身，避免垫片未来下线后隐性断链）。
+            from infra.notifier import NotificationManager, fire_and_forget
+            fire_and_forget(NotificationManager.get_default().notify_trade_event(
+                symbol, direction or "TRADE", float(qty), float(price),
+            ))
+        except Exception:
+            logger.exception("成交通知发送失败 symbol=%s（不影响后续挂止盈）", symbol)
+
+        # c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（幂等 _tp_placed 防重挂）
+        #    卖单成交（direction=="SELL"）无需挂止盈（卖出即离场，无持仓可止盈）。
+        #    方向未知（None）保守不挂——宁可漏挂止盈让人工补，也不误把卖单当买单挂反方向单。
+        #
+        # 幂等关键设计（Why 在 _handle_order_update 标记，不在 _place_take_profit 内标记）：
+        #   ``_tp_placed.add(symbol)`` 必须在**调度点**完成（即此处，调 _place_take_profit
+        #   之前/之后都可，但必须在 _handle_order_update 同步路径里），**不能**下沉到
+        #   ``_place_take_profit`` 内部 —— 否则：
+        #     1. 部分成交重推时，_place_take_profit 还没跑完（await 中）就被第二次回报
+        #        重入，_tp_placed 仍空 → 二次重挂 → 超卖；
+        #     2. 单测 mock 掉 _place_take_profit 时，标记永远不会被写入，幂等链路无法验证。
+        #   Phase1 语义：「该 symbol 已调度挂止盈」即视为已处理（一票通行），后续重推一律
+        #   跳过；_place_take_profit 内部若真挂失败（风控拒/网关断），由告警人工补挂，
+        #   不靠 _tp_placed 之外的重试计数（重试限频是 Phase2 议题）。
+        if direction == "BUY" and symbol not in self._tp_placed:
+            self._tp_placed.add(symbol)  # 调度点幂等标记（先占位，防 await 期间重入重挂）
+            try:
+                await self._place_take_profit(symbol, qty, price, order_id)
+            except Exception:
+                # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
+                # 注意：此处不回滚 _tp_placed（保留已调度标记，防重推再挂；真失败由人工补）。
+                logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)
+
+    def _order_direction(self, order_id: str) -> Optional[str]:
+        """从 ``gw._orders`` 查订单方向（BUY/SELL）。
+
+        物理意图：
+            成交回报 ``update`` 只含 order_id 与成交价量，**不含下单时声明的买卖方向**。
+            必须回查 ``gw._orders[order_id].order_type`` 拿下单时记录的方向枚举
+            （下单瞬间由 broker/qmt.py ``_place_order`` 写入 _orders 字典），才能判定
+            本次成交是买单（需挂止盈）还是卖单（无需挂止盈）。
+
+        order_type 枚举（xtconstant 契约，与 broker/qmt.py:724 同源）：
+            - ``xtconstant.STOCK_BUY = 23``  → 返 "BUY"
+            - ``xtconstant.STOCK_SELL = 24`` → 返 "SELL"
+            - 其它/缺失 → 返 None（保守，不误挂止盈）
+
+        Args:
+            order_id: 成交回报里的订单 ID（str；gw._orders 的 key 在 broker/qmt.py 内
+                      既可能是 seq 也可能是 real order_id，本处按 str(update["order_id"]) 查）。
+
+        Returns:
+            "BUY" / "SELL" / None。None 时调用方（_handle_order_update）保守按 "TRADE"
+            落日志、跳过挂止盈（不猜方向 → 不误挂反方向单）。
+
+        ⚠️ 测试环境兜底（ImportError）：
+            xtconstant 来自 xtquant SDK，CI/单测环境无 xtquant 时 ``from xtquant import
+            xtconstant`` 抛 ImportError——此处兜底硬编码 23/24（与 conftest.py 的假
+            xtconstant 同值），保证单测可跑。生产环境（miniQMT 通道）xtquant 必装，
+            兜底分支不会触达。
+        """
+        # gw 可能未装配（Task 11 未注入 _gw）——getattr 兜底返 {} 不抛
+        orders = getattr(self._gw, "_orders", {}) if self._gw else {}
+        rec = orders.get(order_id, {})
+        # order_type 用 xtconstant 常量比较（绝不硬编码魔法数字到比较表达式里——
+        # 兜底 23/24 只在 ImportError 时启用，生产环境走 xtconstant.STOCK_BUY/SELL 真值）
+        try:
+            from xtquant import xtconstant  # 与 broker/qmt.py:61 同源导入路径
+            STOCK_BUY = xtconstant.STOCK_BUY
+            STOCK_SELL = xtconstant.STOCK_SELL
+        except ImportError:
+            # CI/单测无 xtquant：兜底硬编码（与 tests/conftest.py 假 xtconstant 同值）
+            STOCK_BUY, STOCK_SELL = 23, 24
+        ot = rec.get("order_type")
+        if ot == STOCK_BUY:
+            return "BUY"
+        if ot == STOCK_SELL:
+            return "SELL"
+        return None
+
+    async def _place_take_profit(self, symbol: str, filled_qty: float,
+                                 fill_price: float, order_id: str) -> None:
+        """挂限价止盈卖单（Phase1 简化版：单一固定止盈价、全额）。
+
+        物理意图：
+            买单成交后立刻挂一张限价卖单在止盈价——买单一旦成交即转为持仓，需主动
+            挂止盈单等待触发（颈线法 take_profit 来自计划落盘时的 tp_h_mult×H 计算）。
+            Phase2 升级为分级状态机（tp1 卖部分量锁利 + tp2 卖剩余量，复刻 simulate_exit）。
+
+        止盈价来源（与 pre_open / stop_loss 同一张活跃计划，单源一致）：
+            ``trading_plan.load_plan(today).orders[i].take_profit``（当日 confirmed 计划，
+            pre_open 挂买单时同一张计划里就有 take_profit 字段，保证买卖单止盈价同源）。
+
+        数量来源（scope #3 红线同源）：
+            ``filled_qty`` 用成交回报里的**实际成交量**（``traded_volume``），**非计划全量**。
+            部分成交时若用计划全量挂止盈 → 卖超过实际持仓 = 超卖敞口致命（与 stop_loss
+            ``qty 必须来自 gw 持仓``同一条 live 安全红线）。
+
+        幂等（``_tp_placed``）：
+            **标记在调度点 ``_handle_order_update`` 完成**（不在本方法内），先占位防
+            ``await`` 期间部分成交重推重入重挂。本方法只负责读计划止盈价 + _submit 挂单 +
+            结果观测日志，不写 ``_tp_placed``（单一写入点 = 幂等可测可证）。
+
+        Args:
+            symbol:      成交标的（如 "300001.SZ"）。
+            filled_qty:  实际成交量（股，来自成交回报 traded_volume，非计划全量）。
+            fill_price:  实际成交均价（仅用于日志可观测，不参与挂单价计算）。
+            order_id:    触发本次止盈的成交回报 order_id（仅用于日志归因）。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        plan = trading_plan.load_plan(today)
+        if not plan:
+            logger.warning("挂止盈跳过：无活跃计划 symbol=%s（计划未落盘/已失效）", symbol)
+            return
+        # 从计划 orders 里查该 symbol 的 take_profit（与 pre_open 挂买单同一张计划同源）
+        tp = None
+        for o in plan.get("orders", []):
+            if (o.get("order") or {}).get("symbol") == symbol:
+                tp = o.get("take_profit")
+                break
+        if tp is None or tp <= 0:
+            # 计划缺止盈价（数据瑕疵/手工计划）→ 不挂盲单，告警人工补
+            logger.warning("挂止盈跳过：无止盈价配置 symbol=%s（计划缺 take_profit）", symbol)
+            return
+
+        # 挂限价止盈卖单（confirm=True 同 pre_open，引擎是自动批量通道，盘中无人工二次确认）
+        from trading.compute.types import OrderRequest
+        result = await _submit(
+            OrderRequest(symbol=symbol, qty=int(filled_qty), side="sell", price=tp),
+            confirm=True,
+        )
+        if result.get("state") not in ("REJECTED", "FAILED"):
+            # 幂等标记在调用方 _handle_order_update 已先占位，此处只记成功观测日志
+            logger.info("【止盈单已挂】%s %s股 @%s（触发成交价=%s order_id=%s）",
+                        symbol, int(filled_qty), tp, fill_price, order_id)
+        else:
+            # 挂单失败（资金不足/涨跌停/白名单拒）→ 调用方 _tp_placed 已占位不再重挂，
+            # 真失败由告警人工补（Phase1 不做自动重试限频，避免与柜台频控冲突）
+            logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
+                           symbol, result.get("state"), result.get("message"))
 
     # ----- 生命周期 -----
     def start(self) -> None:

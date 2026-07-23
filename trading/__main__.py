@@ -81,9 +81,35 @@ async def _run_forever() -> None:
     """
     # 惰性 import：避免模块顶层 import 触发 trading 包重链（test 导入本模块时不
     # 应连带拉起 engine 依赖链；engine.py 顶层 import apscheduler 等）。
-    from trading.engine import TradingEngine
+    from trading.engine import TradingEngine, get_gateway
 
     eng = TradingEngine()
+
+    # ----------------------------------------------------------------------
+    # 连接网关 + 注册成交回报回调（修 G5 根因：原 __main__ 既不 connect 也不
+    # set_order_update_callback，导致 Task10 写的 _handle_order_update 永不被触发，
+    # QMT 异步成交回报无法回流到 engine._orders / 钉钉 / 自动止盈挂单链路）。
+    #
+    # Why 在 eng.start() 之前：APScheduler 一旦 start，下一个 cron 触发点（如
+    # stoploss_monitor）就可能进 place_order → 需要回调链路已就绪；故 connect +
+    # 注入 callback 必须先于 scheduler 启动，保证任何触发点跑时回调链已通。
+    #
+    # Why 异常兜底不抛：连接失败时仍让 cron 起来——触发点内部 get_gateway() 会
+    # 再次惰性取单例做兜底判空（None 时走 dry_run 分支），这里只打 exception 不
+    # 阻断 APScheduler 装配，避免「网关短时连不上」直接让整个常驻进程退出。
+    # ----------------------------------------------------------------------
+    gw = get_gateway()
+    if gw is not None:
+        try:
+            await gw.connect()  # async：内部 run_in_executor 包 xtquant C++ 阻塞 connect
+            gw.set_order_update_callback(eng._handle_order_update)  # sync 注入成交回报回调
+            eng._gw = gw  # 供 handler 反查 _orders 判 BUY/SELL side（见 engine._side_from_update）
+            logger.info("网关已连接 + 成交回调已注册")
+        except Exception:
+            logger.exception("网关连接失败（cron 仍启动，触发点内部 get_gateway 兜底）")
+    else:
+        logger.warning("未装配网关（AUTO_TRADE_MODE=dry_run 影子模式，回调链路不生效）")
+
     eng.start()  # 注册四 cron job + 启动 AsyncIOScheduler（不阻塞）
     try:
         while True:

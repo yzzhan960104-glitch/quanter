@@ -271,6 +271,52 @@ def _fetch_data_snapshot() -> list[dict]:
     return out
 
 
+def _fetch_data_freshness() -> list:
+    """取数据机器人实时性快照：FreshnessResult 列表（双口径播报的第二口径）。
+
+    物理意图（Task5）：健康度只看 parquet mtime（被动，会被「刚重写但内容是旧数据」骗过）；
+    本函数主动比对「交易日历期望日 vs 数据湖内容最新日」，回答 T/T-1 数据到没到。
+
+    Why 收口在此（而非 build_data_brief 内部）：
+    - 保持 brief_data.build_data_brief 为纯函数（freshness 作为注入式参数，可单测、可降级）。
+    - 取数涉及交易日历 + 文件系统读 parquet，属 IO/计算边界，归 __main__ 取数层（与
+      _fetch_data_snapshot/_fetch_trading_snapshot 同纪律）。
+
+    Why 只查 ("daily",)：
+    - 颈线法核心依赖以 daily 为主（见 data/freshness.py:_KEY_TO_PARQUET 注释），其余湖
+      按需在后续检查点②扩展；本期先收 daily 这一根主线。
+    - 每次 read_parquet 大文件开销 ~1.75s（455MB），收窄到 daily 单 key 控制单次播报成本。
+
+    兜底降级（数据观测层绝不阻塞播报）：
+    - expected_latest_trade_day 异常 → 返空列表（build_data_brief 视 freshness 为空跳过该段）。
+    - check_freshness 单 key 异常 → 该 key 不进列表（其余 key 照常，不让单点失败拖垮整段）。
+    """
+    # 延迟 import：trading.calendar 触发交易日历加载，data.freshness 触发 pandas read_parquet
+    # 链路，仅 data 分支需要 → 放函数内，market/trading/strategy 分支零负担。
+    from datetime import datetime
+
+    from data.freshness import check_freshness
+    from trading.calendar import expected_latest_trade_day
+
+    try:
+        expected = expected_latest_trade_day(datetime.now())
+    except Exception:
+        # 交易日历异常（极端长假/registry 失效）→ 降级跳过整段实时性，不阻断播报
+        logger.warning("expected_latest_trade_day 失败，data brief 实时性段降级跳过",
+                       exc_info=True)
+        return []
+
+    out: list = []
+    for key in ("daily",):
+        try:
+            out.append(check_freshness(key, expected))
+        except Exception:
+            # 单 key 失败仅跳过该 key（不让 daily 一个点的异常拖垮整段实时性播报）
+            logger.warning("check_freshness(%s, %s) 异常，该 key 跳过实时性段",
+                           key, expected, exc_info=True)
+    return out
+
+
 def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
     """取策略机器人当日健康度快照三件套：(scan_count, param_iter_state, recent_runs)。
 
@@ -373,8 +419,11 @@ def _build_brief(bot: str, date: str, reader: DataLakeReader):
         )
     if bot == "data":
         # 数据机器人：取 datasets 快照 → 纯函数渲染健康度文案。取数失败降级为空列表。
+        # Task5 并入实时性口径：双口径播报（mtime 健康度 + 内容最新日实时性），
+        # 主动比对交易日历期望日 vs 数据湖内容最新日，回答「T/T-1 数据到没到」。
         datasets = _fetch_data_snapshot()
-        return build_data_brief(date, datasets=datasets)
+        freshness = _fetch_data_freshness()
+        return build_data_brief(date, datasets=datasets, freshness=freshness)
     if bot == "strategy":
         # 策略机器人：取信号数/参数迭代/近期回测三件套 → 纯函数渲染健康度文案。
         # scan_count 不走 facade.scan（全市场扫描太重），改读 plans/<date>.json。

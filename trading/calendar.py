@@ -70,3 +70,28 @@ def is_intraday_session(now: datetime) -> bool:
     """是否 A 股盘中（9:30-11:30 / 13:00-15:00）。"""
     t = now.time()
     return (time(9, 30) <= t < time(11, 30)) or (time(13, 0) <= t < time(15, 0))
+
+
+# 物理意图：数据实时性检查的期望锚点——盘后查 T 数据是否落湖，盘前查 T-1 是否齐全。
+# 决策口径：now >= 15:00 且今天是交易日 → 期望今天（收盘数据清算后应落湖）；
+#           否则 → 回溯最近一个交易日（最多 10 自然日，覆盖长假）。
+def expected_latest_trade_day(now: datetime) -> str:
+    """期望最新交易日（数据湖应含此日完整数据）。
+
+    Args:
+        now: 当前时刻。
+
+    Returns:
+        YYYY-MM-DD。盘后交易日→今天；否则→上一个交易日；全非交易日兜底 today。
+    """
+    from datetime import timedelta
+    today = now.strftime("%Y-%m-%d")
+    # 盘后（15:00 之后）且今天交易日 → 期望今天
+    if now.time() >= time(15, 0) and is_trading_day(today):
+        return today
+    # 否则回溯找上一个交易日（最多 10 自然日，覆盖长假 + 周末）
+    for i in range(1, 11):
+        prev = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        if is_trading_day(prev):
+            return prev
+    return today  # 兜底：窗口内无交易日（极端长假），返 today 让检查自然 FAIL 告警
