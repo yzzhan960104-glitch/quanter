@@ -29,3 +29,24 @@ def test_register_command_builder(monkeypatch):
 def test_task_names_complete():
     names = m.TASK_NAMES
     assert set(names.values()) == {"QuanterTradingBrief", "QuanterStrategyBrief", "QuanterDataBrief"}
+
+
+def test_data_check_tasks_cover_t1_t2_and_daily_incremental():
+    """DATA_CHECK_TASKS 含检查点①② + daily 增量（Phase 1.5 任务3）。
+
+    核实点：
+      ① 任务名集合含 QuanterDailyIncremental（@17:30 拉 daily）；
+      ② 时序：daily @17:30 介于 T1 @17:00 / T2 @18:30 之间（拉新 → 检查 的链路顺序）；
+      ③ bat 路径指向 scripts\\run_daily_incremental.bat。
+    """
+    by_name = {t: (time, bat) for t, time, bat in m.DATA_CHECK_TASKS}
+    assert "QuanterDataCheckT1" in by_name
+    assert "QuanterDataCheckT2" in by_name
+    assert "QuanterDailyIncremental" in by_name
+    # 时序断言：daily @17:30 早于 T2 @18:30（拉新先于检查的物理约束）
+    t1 = by_name["QuanterDataCheckT1"][0]
+    daily = by_name["QuanterDailyIncremental"][0]
+    t2 = by_name["QuanterDataCheckT2"][0]
+    assert t1 < daily < t2
+    # bat 路径
+    assert by_name["QuanterDailyIncremental"][1].endswith("run_daily_incremental.bat")

@@ -30,13 +30,18 @@ BOT_TIME_ENV = {
     "data": ("DATA_BRIEF_TIME", "17:00"),
 }
 
-# 数据检查点任务（auto-trading-rehearsal Task 4）
-# Why 独立 list 不复用 bot dict：检查点 bat 命名 run_data_check_t1/t2.bat（非 run_{bot}_brief.bat
-# 套路），且时间硬编码不读 .env（17:00 查T-1 / 18:30 查T 是 brainstorm 钉死的双检查点时序，
-# 调度漂移会破坏"盘前 T-1 告警 → 盘后 T 重采熔断"语义，故不做 env 化）。
+# 数据检查点 + 日频增量任务（auto-trading-rehearsal Task 4 + Phase 1.5 任务3）
+# Why 独立 list 不复用 bot dict：这些 bat 命名 run_data_check_t1/t2.bat /
+# run_daily_incremental.bat（非 run_{bot}_brief.bat 套路），且时间硬编码不读 .env
+# （17:00 查T-1 / 17:30 拉当日 daily / 18:30 查T 是 brainstorm 钉死的盘后时序，
+# 调度漂移会破坏「拉新 daily → 检查点② 验 T 数据」链路，故不做 env 化）。
+# ⚠️ 时序约束：daily_incremental @17:30 必须早于 DataCheckT2 @18:30——检查点②重采 daily
+#    走 sync_daily_incremental（Phase 1.5 任务1 分流），daily 增量调度先跑保证 T 日数据
+#    落湖，检查点② 多为一次过 PASS 不进重采熔断窗口。
 DATA_CHECK_TASKS = [
     # (任务名, 时间, bat 相对路径)
     ("QuanterDataCheckT1", "17:00", "scripts\\run_data_check_t1.bat"),
+    ("QuanterDailyIncremental", "17:30", "scripts\\run_daily_incremental.bat"),
     ("QuanterDataCheckT2", "18:30", "scripts\\run_data_check_t2.bat"),
 ]
 

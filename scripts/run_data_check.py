@@ -20,6 +20,11 @@ from trading.calendar import expected_latest_trade_day
 # 才能隔离真实采集，故必须把名字绑到模块命名空间。sync_incremental 模块本身 import 轻量
 # （tushare 是其内部延迟 import），不会拖慢本入口启动。
 from scripts.sync_incremental import sync_one_key
+# daily 日频增量采集器（Phase 1.5 数据链路闭环）：
+# 模块级 import 同样为测试可 patch "scripts.run_data_check.sync_daily_incremental" 隔离真实采集。
+# Why 单独 import 而非懒加载：sync_daily_incremental 内部延迟 import pandas/tushare，
+# 本入口启动时仅 import 该函数对象，不触发重依赖加载，与 sync_one_key 等价轻量。
+from scripts.sync_daily_incremental import sync_daily_incremental
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +35,29 @@ def _now() -> str:
 
 
 def _resync_key(key: str) -> tuple[bool, str]:
-    """重采单个数据集（调 sync_incremental.sync_one_key）。
+    """重采单个数据集（按 key 分流）。
 
     ⚠️ key 是 registry 语义 key（如 "daily"），不是 parquet 文件名（如 "a_shares_daily"）。
-    注意 sync_one_key 在模块级 import（见文件头注释），测试通过 patch
-    "scripts.run_data_check.sync_one_key" 隔离真实采集。
+
+    分流语义（Phase 1.5 数据链路闭环修复）：
+      - key == "daily"：A股日线原无日频增量机制（sync_incremental quick 批不含 daily），
+        走 sync_daily_incremental（分页批量 raw daily + adj_factor 重建前复权）。返 str
+        → 包成 (True, msg) 统一外层契约；异常包成 (False, str(e)) 不向主流程泄。
+      - 其他 key：走原 sync_one_key 逻辑（registry 通用增量 quick/slow 批）。
+
+    Why 不在 sync_incremental 加 daily：daily 全市场 ~5500 标的，分页批量（limit=500
+    绕过 ConnectionReset）+ adj_factor 重建前复权是独立物理路径，与 sync_incremental
+    按 key 轮询的模式不兼容；独立脚本 + 分流是最直白的边界（守 Layer2 §7 单一职责）。
     """
+    if key == "daily":
+        # daily 日频增量：sync_daily_incremental 返 str（含新交易日/除权标注），
+        # 分流层负责包成 tuple 统一外层契约，异常吞掉返 (False, msg)。
+        try:
+            msg = sync_daily_incremental()
+            return True, msg
+        except Exception as e:
+            return False, str(e)
+    # 非 daily：原 sync_one_key 逻辑（fallback_years=3 / max_days=None 与 brainstorm 钉死一致）
     today_str = datetime.today().strftime("%Y-%m-%d")
     return sync_one_key(key, today_str, fallback_years=3, max_days=None, log=io.StringIO())
 
