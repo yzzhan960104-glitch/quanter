@@ -511,16 +511,26 @@ class TradingEngine:
                           ⚠️ 非 15:35：18:00 增量采集 + 18:30 检查点② 通过后才扫，
                           否则读到 T-1 数据算 T+1 计划（时序 bug · Task6 修复）
         pre_open   09:22 周一-五  T 日开盘前撤昨日 + 挂当日单
-        stop_loss  */5  9-14 周一-五  盘中每 5 分钟止损监控
+        stop_loss  每 30s（IntervalTrigger，Task8：cron 不支持秒级；时段约束在 monitor 兜底）
         post_close 15:30 周一-五  盘后对账 + 清白名单
 
     每个 job 先过 calendar.is_trading_day 判交易日（节假日整体跳过）。
     """
 
     def __init__(self) -> None:
-        """装配 AsyncIOScheduler + 四 cron job（不 start）。"""
+        """装配 AsyncIOScheduler + 四 job（不 start）。
+
+        ⚠️ 触发器形态分轨（Task8）：
+            eod_plan / pre_open / post_close：分钟粒度 CronTrigger（标准 5 字段）。
+            stop_loss：**IntervalTrigger（秒级）**——cron 最小粒度是分钟，
+            30s 巡检必须用 interval。时段约束（9:30-11:30 / 13:00-15:00）下放给
+            ``stop_loss_monitor`` 内 ``calendar.is_intraday_session`` 兜底，
+            非盘中由 monitor 直接 no-op（不在 trigger 层做时段过滤，避免 interval
+            在午休 / 盘后空跑也只是命中 no-op，零副作用）。
+        """
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
 
         self.sched = AsyncIOScheduler()
         # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
@@ -539,9 +549,17 @@ class TradingEngine:
                 os.getenv("ENGINE_PRE_OPEN_CRON", "22 9 * * 1-5")),
             id="pre_open",
         )
+        # stop_loss：盘中每 N 秒巡检（海龟时间驱动移动止损 grace/step/floor 在此触发）。
+        # ⚠️ Task8：cron `*/5 9-14`（5min）→ IntervalTrigger(seconds=30)。
+        # Why interval：cron 最小粒度是分钟，30s 必须 interval。原 `9-14` 时段约束
+        # 下放给 ``stop_loss_monitor`` 内 ``calendar.is_intraday_session``（9:30-11:30 /
+        # 13:00-15:00）——trigger 全天每 30s 触发，非盘中由 monitor 内 no-op 兜底。
+        # ⚠️ ENGINE_STOPLOSS_INTERVAL_SECONDS：30s 目标，**spec §10 限频实测后定终值**——
+        # 若 miniQMT 模拟盘连续 get_quotes+query_stock_positions 撞柜台限流，上调 60s。
+        stoploss_seconds = int(os.getenv("ENGINE_STOPLOSS_INTERVAL_SECONDS", "30"))
         self.sched.add_job(
-            self._stoploss, CronTrigger.from_crontab(
-                os.getenv("ENGINE_STOPLOSS_CRON", "*/5 9-14 * * 1-5")),
+            self._stoploss,
+            IntervalTrigger(seconds=stoploss_seconds),
             id="stop_loss",
         )
         self.sched.add_job(
