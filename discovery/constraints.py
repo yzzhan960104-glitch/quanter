@@ -43,6 +43,11 @@ def normalize_params(params):
     - trailing_grace=0 时 step/floor 强制 OFF 基线（耦合1，trailing 不生效，搜它们白跑）。
     - trailing_grace>0 时 step/floor 保留（trailing 激活，搜索有效）。
     返回新 dict（不改原 params，纯函数）。
+
+    # 耦合5（suppression↔decay_tau，spec §7.1）厘清（design 决策5）：
+    # 代码实证（method_v0.py:163-173）二者独立可调——decay_tau=None 等权时 suppression 仍
+    # 生效，spec 原文"捆绑调"语义退化为"都可调"。凭空裁剪会误杀合法组合，故 Plan 3 仅文档
+    # 厘清，不在 normalize/is_feasible 强制捆绑（与耦合1-4 的硬裁剪区分）。
     """
     p = dict(params)
     p["min_rr"] = DEAD_MIN_RR

@@ -99,3 +99,30 @@ def test_eval_batch_real_pool(champion_params):
     assert len(non_none) >= 1
     for params_back, res in non_none:
         assert "inner" in res and "outer" in res
+
+
+def test_eval_worker_coupling6_empty_trades_returns_none(monkeypatch, champion_params, synth_sym_df):
+    """耦合6 runtime 裁剪（design 决策6）：evaluate 返回 n_total==0（挂单区间全空退化）→ None。
+
+    spec §7.1 耦合6 buy_limit<cancel×H/ATR 依赖 runtime H/ATR（每标的每信号点不同），
+    采样期无法静态判（Plan 2 收窄理由）。worker 拿 universe 后用 n_total==0 作代理：
+    全 universe 无交易 = params 挂单区间全空退化。完整逐信号点裁剪需内核（ADR8 零改动），
+    discovery 层只做 n_total=0 代理。
+    """
+    from discovery import worker
+    from discovery.split import HoldoutSplit, Segment
+    from datetime import date
+
+    class FakeMeta:
+        snapshot_hash = "fakehash"
+        universe_count = 1
+    monkeypatch.setattr(worker, "freeze", lambda lake_start="2025-01-01": ({"300001.SZ": synth_sym_df}, FakeMeta()))
+    monkeypatch.setattr(worker, "holdout_split", lambda embargo_days=5: HoldoutSplit(
+        Segment("i", date(2025, 1, 1), date(2025, 12, 31)),
+        Segment("o", date(2026, 1, 1), date(2026, 12, 31)), embargo_days))
+    # monkeypatch evaluate 返回 n_total=0（挂单区间全空退化）
+    monkeypatch.setattr(worker, "evaluate", lambda p, u, s: {"inner": {"ann": 0}, "outer": {"ann": 0}, "n_total": 0})
+
+    worker._init_worker("2025-01-01", 5)
+    out = worker._eval_worker(champion_params)
+    assert out is None   # 耦合6 runtime 裁剪

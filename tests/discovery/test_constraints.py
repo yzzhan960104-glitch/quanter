@@ -88,3 +88,20 @@ def test_filter_feasible_keeps_legal_drops_illegal():
     assert kept[0]["min_rr"] == 2.0          # normalize 已固定死参数
     assert kept[0]["window"] == 80
     # 第3条 grace=0 本应被 normalize 救回 trailing，但 cancel<tp1 仍非法 → 被滤
+
+
+def test_coupling5_suppression_decay_tau_independent():
+    """耦合5（design 决策5）：suppression/decay_tau 独立可调，normalize 不强行捆绑。
+
+    代码实证（method_v0.py:163-173）：decay_tau=None 等权时 suppression 仍生效；spec §7.1
+    '捆绑调'语义已退化为'都可调'——凭空裁剪误杀合法组合，故 Plan 3 仅厘清不裁。
+    """
+    from discovery.constraints import normalize_params
+    # decay_tau=None（等权）+ suppression 非 0 → 都保留
+    p = normalize_params({"min_suppression": 0.5, "decay_tau": None})
+    assert p["min_suppression"] == 0.5
+    assert p["decay_tau"] is None
+    # decay_tau=30 + suppression=0 → 也都保留（不强制捆绑）
+    p2 = normalize_params({"min_suppression": 0.0, "decay_tau": 30})
+    assert p2["decay_tau"] == 30
+    assert p2["min_suppression"] == 0.0

@@ -43,16 +43,22 @@ def _init_worker(lake_start="2025-01-01", embargo_days=5):
 
 
 def _eval_worker(params):
-    """Pool.map 调用：评估单组 params，返回 (params, result_dict) 或 None（异常）。
+    """Pool.map 调用：评估单组 params，返回 (params, result_dict) 或 None（异常/退化）。
 
     顶层定义（可 pickle）。读 _WORKER_STATE（initializer 设的 universe/split），调
-    objective.evaluate。异常捕获返回 None——主进程 filter null，单 trial 失败不影响 run
-    （spec §8 拷问②：worker 崩溃 → 单 trial 标 failed，run 继续，不拖垮整批）。
+    objective.evaluate。两类返回 None：
+    1. 异常（spec §8 拷问②：worker 崩溃 → 单 trial 标 failed，run 继续）。
+    2. 耦合6 runtime 裁剪（design 决策6，spec §7.1）：n_total==0 = 全 universe 挂单区间
+       全空（params 退化）→ None。完整逐信号点裁剪需内核（ADR8 零改动），discovery 层
+       只做 n_total=0 代理。
     """
     if not _WORKER_STATE["ready"]:
         return None
     try:
         res = evaluate(params, _WORKER_STATE["universe"], _WORKER_STATE["split"])
+        # 耦合6 runtime 裁剪：n_total==0 = 挂单区间全空退化（spec §7.1 耦合6 代理）
+        if res.get("n_total", 0) == 0:
+            return None
         return (params, res)
     except Exception:
         return None
