@@ -66,3 +66,27 @@ def test_expected_improvement_positive_when_growing():
         def __init__(self, vs): self.trials = [FT(v) for v in vs]
     s = FS([0.1, 0.3, 0.5, 0.7, 0.9])
     assert expected_improvement(s, window=5) > 0.0
+
+
+def test_snap_to_candidates_nearest_numeric():
+    """越界数值 snap 到候选档最近邻（0.0→0.05）。"""
+    from discovery.search import _snap_to_candidates
+    space = [("trailing_step", [0.05, 0.1, 0.15])]
+    assert _snap_to_candidates({"trailing_step": 0.0}, space)["trailing_step"] == 0.05
+    assert _snap_to_candidates({"trailing_step": 0.12}, space)["trailing_step"] == 0.1
+
+
+def test_snap_to_candidates_passthrough_in_range():
+    """候选档内的值原样返回。"""
+    from discovery.search import _snap_to_candidates
+    space = [("window", [40, 60, 80])]
+    assert _snap_to_candidates({"window": 60}, space)["window"] == 60
+
+
+def test_tpe_search_enqueues_snapped_seed_no_crash():
+    """normalize 越界 seed（trailing_step=0.0）enqueue 不 crash（snap 兜底）。"""
+    from discovery.search import tpe_search
+    space = [("trailing_step", [0.05, 0.1, 0.15])]
+    obj = lambda p: p["trailing_step"]
+    params, study = tpe_search([{"trailing_step": 0.0}], obj, n_trials=3, seed=42, param_space=space)
+    assert len(params) == 4   # 1 seed(snapped) + 3 tpe，不 crash

@@ -22,6 +22,29 @@ import optuna
 DEFAULT_N_TPE_TRIALS = 20
 
 
+def _nearest_in_candidates(v, cands):
+    """v 映射到 cands 最近邻（normalize 执行值如 0.0/2.0 可能越界 optuna choices，enqueue 前兜底）。
+
+    物理意图：normalize_params 把 trailing_step=0.0（grace=0 不激活哨兵）/min_rr=2.0（死参）
+    等执行值固定，但这些值可能不在 PARAM_SPACE 候选档内。optuna suggest_categorical 要求
+    enqueue 值 ∈ choices，越界则 ValueError。snap 到最近邻候选档——TPE 只在候选档空间采样，
+    真实执行语义由 evaluate 内 simulate_exit 的 grace>0 AND step>0 条件保证（grace=0 时
+    step 不论候选档值都不激活），故 snap 不改物理行为。
+    """
+    if v in cands:
+        return v
+    # 数值最近邻（排除 bool，bool 是 int 子类）
+    numeric = [c for c in cands if isinstance(c, (int, float)) and not isinstance(c, bool)]
+    if numeric and isinstance(v, (int, float)) and not isinstance(v, bool):
+        return min(numeric, key=lambda c: abs(c - v))
+    return cands[0]   # None/分类越界兜底首档
+
+
+def _snap_to_candidates(params, param_space):
+    """把 params 每维值 snap 到候选档（enqueue 前调用，防 normalize 越界值 crash）。"""
+    return {k: _nearest_in_candidates(params.get(k), cands) for k, cands in param_space}
+
+
 def tpe_search(seed_params, objective_fn, n_trials=DEFAULT_N_TPE_TRIALS,
                seed=42, param_space=None):
     """optuna TPESampler 序贯优化 + Sobol warm start。
@@ -42,9 +65,10 @@ def tpe_search(seed_params, objective_fn, n_trials=DEFAULT_N_TPE_TRIALS,
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
-    # warm start：enqueue Plan 2 Sobol 点（TPE 从已知覆盖起点序贯，不重复铺覆盖）
+    # warm start：enqueue Plan 2 Sobol 点（snap 到候选档——normalize 越界值如 trailing_step=0.0
+    # 不在 choices 内，optuna suggest_categorical 会 ValueError，故 enqueue 前 snap 最近邻）
     for p in seed_params:
-        study.enqueue_trial(p)
+        study.enqueue_trial(_snap_to_candidates(p, param_space))
 
     def obj(trial):
         # 离散档采样（enqueue 的 trial 用既有值，suggest_categorical 声明 search space）
