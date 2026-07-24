@@ -114,20 +114,25 @@ def run(keys: list[str], since: Optional[str], end: Optional[str],
         if start is None:
             continue
         symbols = None
-        # dry-run / limit：by=symbol 类缩到小样例（保护配额，验证字段）
-        if limit or dry_run:
+        cfg_by = TUSHARE_DATASETS[key].get("by")
+        # dry-run / limit：仅 by=symbol 类缩到小样例（保护配额，验证字段）。
+        # Why 按 cfg_by 判断而非 symbols is None：resolve_symbols 对 by=date/single（无 universe）
+        # 会走默认 stock 分支返股票列表（非 None），导致旧逻辑 `if dry_run and symbols is None`
+        # 失效——by=date dry-run 不限日会跑全区间烧配额。按 cfg_by 精确分流。
+        if (limit or dry_run) and cfg_by == "symbol":
             from data.tushare_sync import resolve_symbols
             try:
                 symbols = resolve_symbols(key, limit=limit or (2 if dry_run else None))
             except Exception:
-                symbols = None  # by=date/single 不需 symbols，忽略
-        if dry_run and symbols is None:
-            # by=date/single dry-run：限 1 日（缩 end 到 since+1天）
+                symbols = None
+        if dry_run and cfg_by == "date":
+            # by=date dry-run：限 1 日（缩 end 到 since+1天），验证字段真实性
             try:
                 d1 = (pd.Timestamp(start) + timedelta(days=1)).strftime("%Y-%m-%d")
                 end_w = min(end_w, d1)
             except Exception:
                 pass
+        # by=single dry-run：不限（一次请求小数据，如 stock_basic/hs_const 全量列表）
         t0 = time.time()
         try:
             sync_dataset(key, start, end_w, symbols=symbols, resume=resume)

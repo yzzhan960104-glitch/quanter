@@ -59,11 +59,21 @@ def test_moneyflow_归特色桶():
     assert TUSHARE_DATASETS["moneyflow"]["quota_type"] == "special"
 
 
-def test_cyq_chips_按日分页():
-    """cyq_chips 逐价位分布，by=date 单日全市场一次返（数据量大，按日分片）。"""
+def test_cyq_chips_逐标的分页():
+    """cyq_chips 接口要求 ts_code（Task 11 dry-run 订正：by=date→by=symbol）。"""
     cfg = TUSHARE_DATASETS["cyq_chips"]
-    assert cfg["by"] == "date"
+    assert cfg["by"] == "symbol", "cyq_chips 接口要求 ts_code，应 by=symbol"
+    assert cfg["universe"] == "stock"
     assert "price" in cfg["fields"] and "percent" in cfg["fields"]
+
+
+def test_stk_factor_pro_fields带bfq后缀():
+    """stk_factor_pro 列名带 _bfq/_hfq/_qfq 后缀（Task 11 dry-run 订正幻觉列）。"""
+    cfg = TUSHARE_DATASETS["stk_factor_pro"]
+    # 订正后用 _bfq（不复权）版本，非裸 macd/rsi_6/cci
+    assert "macd_bfq" in cfg["fields"] and "macd" not in cfg["fields"].split(","), \
+        "stk_factor_pro 用 macd_bfq（非裸 macd，原是幻觉列）"
+    assert "cci_bfq" in cfg["fields"] and "rsi_bfq_6" in cfg["fields"]
 
 
 # ============ Task 7：OHLCV 前复权三频 ============

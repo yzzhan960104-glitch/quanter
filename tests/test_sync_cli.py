@@ -45,19 +45,19 @@ def test_select_keys_指定keys():
 
 
 def test_run_单key失败不中断后续(monkeypatch):
-    """fail-soft：某 key 抛异常，后续 key 仍跑，汇总 exit code=1。"""
+    """fail-soft：某 key 抛异常，后续 key 仍跑，汇总 exit code=1。用真实注册表 key（run 访问 cfg）。"""
     calls = []
     def fake_sync(key, start, end, **kw):
         calls.append(key)
-        if key == "bad":
+        if key == "moneyflow":
             raise RuntimeError("故意失败")
     monkeypatch.setattr("data.sync_cli.sync_dataset", fake_sync)
-    rc = run(keys=["good1", "bad", "good2"], since="2021-01-01", end="2021-01-02")
+    rc = run(keys=["stock_basic", "moneyflow", "hs_const_sh"], since="2021-01-01", end="2021-01-02")
     assert rc == 1  # 部分失败
-    assert calls == ["good1", "bad", "good2"]  # bad 之后 good2 仍执行
+    assert calls == ["stock_basic", "moneyflow", "hs_const_sh"]  # moneyflow 失败后 hs_const_sh 仍执行
 
 
 def test_run_全成功返0(monkeypatch):
     monkeypatch.setattr("data.sync_cli.sync_dataset", lambda key, start, end, **kw: None)
-    rc = run(keys=["a", "b"], since="2021-01-01", end="2021-01-02")
+    rc = run(keys=["stock_basic", "hs_const_sh"], since="2021-01-01", end="2021-01-02")
     assert rc == 0

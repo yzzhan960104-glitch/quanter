@@ -398,24 +398,24 @@ def test_ths_daily_by_date(tmp_path, fake_pro, monkeypatch):
     assert syms == {"885572.TI", "885538.TI"}, "ths_daily symbol 不在 ts_code 列"
 
 
-def test_concept_restored_syncs(tmp_path, fake_pro, monkeypatch):
-    """concept 恢复同步（2026-07-25 订正：原 _unavailable 已删，直连可用）。
+def test_concept_unavailable_skipped(tmp_path, fake_pro, monkeypatch):
+    """concept 标 _unavailable 时跳过（2026-07-25 Task 11 dry-run：直连积分不足仍不可用）。
 
-    Why 订正：tnskhdata 代理 2026-07-24 废弃后纯直连 tushare 官方 SDK，concept 接口可用，
-    Plan Task 4 删除 _unavailable 恢复同步。本测试守卫新决策：concept 不再 _unavailable，
-    sync_dataset 会真实消费 fake_pro 注入的数据并落盘 parquet。
+    Why 守卫：代理废弃后纯直连 tushare，但 concept 接口服务端仍返「无正确的接口名」
+    （hasattr True 但调用失败，积分不足/接口下线）。Task 11 dry-run 探测确认，标 _unavailable
+    跳过。Task 4 曾误删 _unavailable（以为代理废弃即可用），dry-run 订正加回。
     """
     import data.tushare_sync as ts
     import os
-    # concept 不再标 _unavailable（守卫新决策）
-    assert not TUSHARE_DATASETS["concept"].get("_unavailable"), \
-        "concept 应已删 _unavailable（代理废弃直连可用）"
+    # concept 必须标 _unavailable（直连积分不足）
+    assert TUSHARE_DATASETS["concept"].get("_unavailable"), \
+        "concept 必须标 _unavailable（直连积分不足，服务端返「无正确的接口名」）"
     fake_pro.set("concept", pd.DataFrame({"code": ["TS2"], "name": ["新能源汽车"]}))
     lake = str(tmp_path / "concept.parquet")
     monkeypatch.setitem(TUSHARE_DATASETS["concept"], "lake", lake)
     ts.sync_dataset("concept", "2024-01-05", "2024-12-31", resume=False)
-    # 恢复同步后应落盘 parquet
-    assert os.path.exists(lake), "concept 恢复同步后应落盘 parquet"
+    # _unavailable 时跳过，不落盘
+    assert not os.path.exists(lake), "concept 标 _unavailable 后不应落盘 parquet"
 
 
 def test_index_datasets_registered():
