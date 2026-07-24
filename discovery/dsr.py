@@ -14,8 +14,11 @@ test 段），但没防"选 bias"——即便完全不偷看，在 M 组参数�
 那就承认"相对最优"在该数据量下不可辨识，而非硬选。本模块只算 DSR 值，判定（显著/运气）
 留给调用方按阈值 + 诚实报告。
 
-反魔法（ADR4）：逆正态 CDF 用 Ackhard 算法纯 Python 实现（math.erf 有，inverse erf 无），
-不引 scipy。数学公开（López de Prado 2014 "The Deflated Sharpe Fund"）。
+反魔法（ADR4）：逆正态 CDF 用 Acklam 算法纯 Python 实现（math.erf 有，inverse erf 无），
+不引 scipy。
+- 逆正态逼近：Peter J. Acklam 1996（独立公开的有理逼近算法，与 López de Prado 无关）。
+- DSR 闭式公式：López de Prado 2014 "The Deflated Sharpe Fund"（仅消费 Acklam 算法作为 Φ^{-1}）。
+两者是独立来源，本文档分别归属，避免把 Acklam 误挂在 López de Prado 名下。
 """
 import math
 
@@ -26,11 +29,16 @@ def _norm_cdf(x):
 
 
 def _norm_ppf(p):
-    """标准正态逆 CDF Φ^{-1}(p)（Ackhard 算法，纯 Python 无 scipy 依赖）。
+    """标准正态逆 CDF Φ^{-1}(p)（Acklam 算法，纯 Python 无 scipy 依赖）。
 
-    p ∈ (0,1) → x。绝对误差 < 1e-9（Ackhard 1996 有理逼近，金融工程标准实现）。
+    p ∈ (0,1) → x。本实现客观精度（与 scipy.stats.norm.ppf 全区间对照实测）：
+      - 最大绝对误差 ~2.2e-9（p→尾段，如 p=0.02425/0.97575）
+      - 最大相对误差 ~1.1e-9（与 Acklam 1996 公开保证 < 1.15e-9 吻合）
+
+    说明：此处只陈述算法客观精度事实，不耦合测试阈值口径。测试阈值（5e-9 绝对）是
+    基于"实测 max abs err 2.2e-9 + 浮点余量"的工程取值，独立于本算法精度陈述。
     """
-    # Ackhard 系数（常量，公开算法）
+    # Acklam 系数（常量，公开算法）
     a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
          1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
     b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
