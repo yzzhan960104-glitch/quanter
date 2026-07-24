@@ -181,9 +181,11 @@ def _fetch_with_guard(api_name: str, *, quota_type: str = "basic", **kwargs) -> 
 
 新增 `universe="concept"` 分支：从 `data_lake/concept.parquet` 读概念 id 列表，供 `concept_detail` 的 `by=symbol`（code_param=id）消费。
 
-### 4.4 OHLCV 前复权管道（`_sync_ohlcv_qfq`，新增到 `data/tushare_sync.py`）
+### 4.4 OHLCV 前复权管道（`_sync_by_symbol` 增强 `adj_api` 参数）
 
-**物理意图**：把 `sync_data_lake.fetch_qfq` + `sync_daily_incremental.sync_daily_incremental` 的前复权逻辑提炼为通用分支，支持 daily/weekly/monthly 三频。
+**实现优化（2026-07-25 写 plan 时订正）**：原 spec 设想新增独立 `by="ohlcv_qfq"` 分支，但读 `sync_data_lake.fetch_qfq:99-132` 后确认它是 **by=symbol 范式**（逐标的拉 daily+adj_factor 重建前复权，shard 按标的，与 `a_shares_daily.parquet` 生产方式一致）。为保持字节级一致 + 更 DRY，改为**给 `_sync_by_symbol` 加 `adj_api` 可选参数**：检测到 `cfg["adj_api"]` 就额外拉 adj_factor 并按 `raw × adj / latest` 重建价格列，复用现有 shard/断点续传/`_build_multiindex` 逻辑，零新增分支（符合"配置驱动、零新增分支"纪律）。
+
+**物理意图**：把 `sync_data_lake.fetch_qfq` 的前复权逻辑提炼进通用 `_sync_by_symbol`，支持 daily/weekly/monthly 三频。
 
 **核心算法（与既有 `a_shares_daily.parquet` 字节级一致）**：
 ```
