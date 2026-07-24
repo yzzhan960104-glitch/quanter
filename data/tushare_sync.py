@@ -307,6 +307,32 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
         df = _fetch_with_guard(api, quota_type=(cfg or {}).get("quota_type", "basic"), **kwargs)
         if df.empty:
             continue
+        # —— adj_api 前复权增强（daily/weekly/monthly，2026-07-25 Plan Task 3）——
+        # 物理意图：照搬 sync_data_lake.fetch_qfq，price_qfq = raw × adj / latest（latest=区间最新），
+        # 与 a_shares_daily.parquet（fetch_qfq 生产）字节级一致。volume/amount 不复权
+        # （除权不影响成交额口径）。latest 取区间最新 adj_factor，基准日（最新日）价 = 原始价
+        # （adj/latest=1），历史价向下调整消除除权断崖，与 pro_bar(qfq) 同语义。
+        adj_api = (cfg or {}).get("adj_api")
+        if adj_api:
+            adj_kwargs = {code_param: ts_code}
+            if not (cfg or {}).get("no_date_filter"):
+                adj_kwargs["start_date"] = sd
+                adj_kwargs["end_date"] = ed
+            adj_df = _fetch_with_guard(
+                adj_api, quota_type=(cfg or {}).get("quota_type", "basic"),
+                fields="ts_code,trade_date,adj_factor", **adj_kwargs)
+            if not adj_df.empty:
+                adj_df["trade_date"] = pd.to_datetime(adj_df["trade_date"], format="%Y%m%d", errors="coerce")
+                df_dt = pd.to_datetime(df[date_col], format="%Y%m%d", errors="coerce")
+                adj_map = dict(zip(adj_df["trade_date"], adj_df["adj_factor"]))
+                adj_series = df_dt.map(adj_map)
+                latest_adj = adj_df.sort_values("trade_date")["adj_factor"].iloc[-1]
+                if pd.isna(latest_adj) or latest_adj == 0:
+                    latest_adj = 1.0
+                for col in ("open", "high", "low", "close"):
+                    if col in df.columns:
+                        df[col] = df[col].astype(float) * adj_series.astype(float) / float(latest_adj)
+        # —— adj_api 前复权增强结束 ——
         df = _cleanse(df, date_col)
         if rename:
             df = df.rename(columns=rename)  # 列名归一（如 fund_daily vol→volume）
