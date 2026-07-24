@@ -361,7 +361,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "date_col": "code", "symbol_col": "code",
         "fields": "code,name",
         "lake": "data_lake/concept.parquet",
-        "_unavailable": "tnskhdata 无概念接口（concept/stock_concept/concept_detail 均 No such method），待 akshare 换源",
+        "quota_type": "basic",  # 2026-07-25：原 _unavailable（代理无 concept 方法）已过时——代理废弃纯直连，删 _unavailable 恢复同步；Task 11 dry-run 重探测真实可用性
     },
     # ths_daily（同花顺板块指数日线）：单日全市场板块行情一次返（ts_code 为板块指数代码如 885572.TI，
     # 非个股）→ by=date 分页。symbol 从 ts_code 列取（Task 1 fix 已保证 by=date 不从文件名取 symbol）。

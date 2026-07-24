@@ -504,6 +504,24 @@ def _load_etf_universe() -> list[str]:
     return df["ts_code"].tolist()
 
 
+def _load_concept_ids() -> list[str]:
+    """概念 id 列表（从已落湖的 concept.parquet 读，供 concept_detail 的 by=symbol 消费）。
+
+    Why 从湖读而非即时拉 concept 接口：concept（概念字典）是 concept_detail 的前置依赖，
+    落湖后复用零额外配额；且 concept 接口静态，即时拉与读湖等价但后者省一次请求。
+    Why 湖不存在返空：concept 未同步时 concept_detail 无标的可拉，返空让 _sync_by_symbol
+    的 symbols=[] 自然跳过（for 空列表不执行），不抛异常阻断编排（编排脚本可先跑 concept
+    再跑 concept_detail，resolve_symbols 在 concept_detail 时读已落湖的 concept）。
+    """
+    lake = os.path.join("data_lake", "concept.parquet")
+    if not os.path.exists(lake):
+        logger.warning("concept.parquet 不存在，concept_detail 无概念 id 可拉（请先同步 concept）")
+        return []
+    df = pd.read_parquet(lake)
+    code_col = "code" if "code" in df.columns else df.columns[0]
+    return df[code_col].astype(str).tolist()
+
+
 # A 股核心宽基指数（覆盖主流规模/板块风格）。指数类数据集（index_daily/index_member）
 # 的标的池——固定常量，无需也不应从股票/基金接口拉（与 _load_universe 股票池语义隔离）。
 CORE_INDEX_CODES: list[str] = [
@@ -537,6 +555,8 @@ def resolve_symbols(key: str, limit: Optional[int] = None) -> list[str]:
         syms = _load_etf_universe()
     elif universe == "index":
         syms = list(CORE_INDEX_CODES)
+    elif universe == "concept":
+        syms = _load_concept_ids()
     else:  # stock（含缺省）
         syms = _load_universe()
     if limit:
