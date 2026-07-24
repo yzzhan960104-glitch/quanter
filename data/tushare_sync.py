@@ -23,7 +23,12 @@ import pandas as pd
 
 from config import TUSHARE_DATASETS, LAKE_CONFIG
 from data._tushare_compat import get_pro, source_name
-from data.resilience import tushare_breaker, tushare_rate_limiter
+from data.resilience import (
+    tushare_breaker,
+    tushare_rate_limiter_basic,
+    tushare_rate_limiter_special,
+    tushare_rate_limiter,  # 别名=basic，向后兼容既有测试 mock tushare_sync.tushare_rate_limiter
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +68,12 @@ def _classify_exc(e: Exception) -> str:
     return "unknown"
 
 
-def _fetch_with_guard(api_name: str, **kwargs) -> pd.DataFrame:
+def _fetch_with_guard(api_name: str, *, quota_type: str = "basic", **kwargs) -> pd.DataFrame:
     """限频 + 熔断 + 异常分类包装的 pro 接口调用，空数据/失败返空 DF。
+
+    quota_type（2026-07-25 双桶改造）：basic 走 500/min 基础桶，special 走 300/min 特色桶。
+    缺省 basic（向后兼容未显式声明的数据集 + 旧调用）。三态处理（瞬时态/持久态/未知态）
+    与异常分类逻辑不变，见 _classify_exc。
 
     三态处理（关键修复：瞬时态限频改指数退避重试，而非原直接 record_failure 返空）：
       - transient（限频/超时/断网）：指数退避重试（2/4/8/16/32s），重试期间**不**
@@ -82,8 +91,11 @@ def _fetch_with_guard(api_name: str, **kwargs) -> pd.DataFrame:
     也不 record_success —— 空数据不污染熔断计数，原逻辑保持）。
     """
     pro = get_pro()
-    # 限频令牌桶：阻塞至令牌可用（桶容量+匀速补充已由 RateLimiter 管控，此处只扣 1）
-    tushare_rate_limiter.acquire(1.0)
+    # 限频令牌桶：按 quota_type 选桶（基础500/特色300），阻塞至令牌可用。
+    # Why 按数据集类别选桶：Tushare 官方按接口分两档配额，特色数据（资金/筹码/因子）走 300/min
+    # 独立桶，避免与基础行情（500/min）争抢导致特色接口被基础接口挤占限频。
+    limiter = tushare_rate_limiter_special if quota_type == "special" else tushare_rate_limiter_basic
+    limiter.acquire(1.0)
 
     # 熔断 OPEN 冷却重试：allow_request False 时不直接返空，sleep recovery_timeout
     # 让 breaker 自动转 HALF_OPEN，再走一次完整重试链（最多 _BREAKER_OPEN_WAIT_RETRIES 次）。
@@ -292,7 +304,7 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
             kwargs["end_date"] = ed
         if fields:
             kwargs["fields"] = fields
-        df = _fetch_with_guard(api, **kwargs)
+        df = _fetch_with_guard(api, quota_type=(cfg or {}).get("quota_type", "basic"), **kwargs)
         if df.empty:
             continue
         df = _cleanse(df, date_col)
@@ -322,7 +334,7 @@ def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, ou
         kwargs = {"trade_date": td}
         if fields:
             kwargs["fields"] = fields
-        df = _fetch_with_guard(api, **kwargs)
+        df = _fetch_with_guard(api, quota_type=(cfg or {}).get("quota_type", "basic"), **kwargs)
         if df.empty:
             continue
         df = _cleanse(df, date_col)
@@ -379,7 +391,7 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
     if (cfg or {}).get("date_range") and start and end:
         kwargs["start_date"] = start.replace("-", "")
         kwargs["end_date"] = end.replace("-", "")
-    df = _fetch_with_guard(api, **kwargs)
+    df = _fetch_with_guard(api, quota_type=(cfg or {}).get("quota_type", "basic"), **kwargs)
     if df.empty:
         logger.warning("%s 数据为空，跳过", key)
         return
