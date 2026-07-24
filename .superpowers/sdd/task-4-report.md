@@ -1,117 +1,110 @@
-# Task 4 报告：删审查机器人老 stream 死代码（@接收改 dws 桥）
+# Task 4 报告：cli daemon 子命令 + 包自包含 schtasks 注册（Plan 4 L4）
 
-**分支**：`bridge-dws-migration`
-**日期**：2026-07-16
-**状态**：DONE
-
-> 注：本报告覆盖之前的「Task 4 创建审查机器人」报告（同名文件）。那次创建了 webhook 推 +
-> stream 收审核双通道；本次 dws-migration Task 4 是删除其中的 stream 收审核死代码。
-
-## 背景
-
-审查机器人（yzzhan 参数优化，统一应用 dingbabujxcelmssmdpn）的 @接收已于 2026-07-16
-改走 dws dev connect 桥（`scripts/dingtalk_review_bridge.py` → POST `/api/v1/training/review`
-→ `orchestrator.submit_review`）。因此 `caisen/optimize/training_dingtalk.py` 里老的
-`dingtalk-stream` SDK 收审核代码（ReviewChatbotHandler / start_review_bot / _run_stream /
-import dingtalk_stream）变为死代码，本任务负责删除。
+## status
+✅ DONE（GREEN，零回归，已 commit）
 
 ## 做了什么
 
-### 1. `caisen/optimize/training_dingtalk.py`
-- **顶部 docstring 重写**：原「webhook + stream 双通道」改为「@审核改走 dws 桥，本模块仅保留
-  webhook 推报告」。说明清楚保留了 ReviewBotConfig / DingTalkNotifier / _NoopNotifier 三个实体，
-  以及 `ReviewBotConfig.from_env` 的「app_key/secret/staff 三件套缺一 → None」软降级门控
-  **故意不改**（避免连锁影响 lifespan 与既有测试断言）。
-- **删除死代码**（原 line 173-末尾）：
-  - `import dingtalk_stream` / `from dingtalk_stream import AckMessage, ChatbotMessage`
-  - `class ReviewChatbotHandler(dingtalk_stream.ChatbotHandler)`
-  - `async def _run_stream`
-  - `def start_review_bot`
-- **清理未用 import**：`asyncio`（仅 _run_stream/start_review_bot 用过）、`typing.Any`
-  （仅 _dispatch/start_review_bot 签名用过）一并删除。保留 `json`/`urllib.request`/`urllib.error`
-  /`Optional`（DingTalkNotifier + from_env 仍用）。
-- **ReviewBotConfig docstring 轻量更新**：`app_key/app_secret` 标注为「历史遗留字段，实际推送
-  链路不读它们」，避免与删除 stream 后的事实矛盾。
-- 文件从 288 行 → 170 行。
+### 代码（4 新增 + 3 改动）
 
-### 2. `server/main.py`（lifespan）
-- **import 段**：`from caisen.training_dingtalk import (...)` 去掉 `start_review_bot`
-  （保留 ReviewBotConfig / DingTalkNotifier / _NoopNotifier）。
-- **startup 装配块**：删 `if _review_cfg is not None: app.state.review_bot_task =
-  start_review_bot(...)` 整个分支 + 对应的 else info 日志；保留
-  `app.state.training_orchestrator = TrainingLoopOrchestrator(_notifier)` +
-  `start_daemon()`。新增注释说明 @审核改走 dws 桥、此处只装 webhook notifier + daemon。
-- **shutdown 段**：删 `_rbtask = getattr(..., "review_bot_task", None); if _rbtask: _rbtask.cancel()`，
-  保留 `_orch.stop_daemon()`。注释同步更新（不再有 review_bot_task 需要 cancel）。
-- **startup 注释块顶部**：把「orchestrator daemon 线程 + review bot stream 均寄生主进程」
-  改为「orchestrator daemon 线程寄生主进程；dws-migration Task 4 后不再起 stream 审核机器人」。
+#### 1. `discovery/schtasks.py`（新，包自包含调度）
+discovery 包内自治的 Windows 任务计划程序注册器，不依赖 scripts/（后续 scripts 废弃
+时不受影响），与 broadcast（scripts/manage_ops_schtasks）解耦——两者调度对象/时序
+无关（broadcast 是盘后播报 15:30-17:30，daemon 是 02:00 跑批）。
 
-### 3. `tests/caisen/test_training_dingtalk.py`
-- 删除 ReviewChatbotHandler / start_review_bot / _run_stream 相关测试：
-  - `_make_sdk_msg` helper
-  - `test_chatbot_handler_whitelist_and_wake`
-  - `test_chatbot_handler_strips_at_prefix`
-  - `test_chatbot_handler_no_active_loop_no_submit`
-  - `test_chatbot_handler_process_acks_immediately`
-  - `test_start_review_bot_soft_degrade_when_no_creds`
-  - `test_start_review_bot_starts_task_when_creds_ok`
-- 保留：`test_review_bot_config_from_env_*`（2）、`test_notifier_*`（4）、
-  `test_noop_notifier_does_nothing`（1）= 共 7 个测试（含 _mock_urlopen/_set_review_env helper）。
-- 顶部 docstring 更新为「@审核改走 dws 桥」迁移说明。
+- `DAEMON_TASK_NAME="QuanterDiscoveryDaemon"` / `DAEMON_TIME="02:00"` /
+  `DAEMON_BAT=<pkg>/discovery/run_daemon.bat` 三常量。Why 02:00：避开 17:00-18:30
+  data_check/daily_incremental 时序，选低负载深夜跑批（spec §5.2/§10）。
+- `build_register_commands() -> list[dict]`：纯函数返 task/time/bat/bot 四键映射。
+  Why 拆纯函数：让单测不触发 subprocess（不污染真实 Windows 任务计划程序）即可
+  验证常量→命令映射回归。
+- `_schtasks(args) -> int`：subprocess 封装（capture_output 防中文乱码打屏）。
+- `register()`：幂等先 `/Delete /F`（不存在也返 0）再 `/Create /SC DAILY /TN /TR
+  /ST /F`——保证改时间后重跑不报"任务已存在"错（复用 manage_ops_schtasks 既有纪律）。
+- `unregister()` / `list_tasks()`：清退 / 查询。
+- `main(argv)`：CLI 入口（`python -m discovery.schtasks --register/--unregister/--list`）。
 
-### 4. `caisen/optimize/training_loop.py`（顺手修正）
-- `active_loop_id` 属性 docstring 原写「供 ReviewChatbotHandler 把 @消息路由到正确 loop」，
-  改为「供 dws 桥把 @审核消息路由到正确 loop」（含 dingtalk_review_bridge.py →
-  POST /api/v1/training/review 路径说明）。纯注释修正，无逻辑改动。
+#### 2. `discovery/run_daemon.bat`（新，包内入口，CRLF 行尾）
+schtasks 触发的物理入口。`cd /d %~dp0\..`（bat 所在 discovery/ 的上一级=项目根）→
+`call .venv310\Scripts\activate.bat` → `python -m discovery daemon --budget 4h`。
+Why `cd /d %~dp0\..`：保证无论 schtasks 以哪个 cwd 启动都能定位 venv 与 discovery 包。
+**CRLF 行尾**（Windows bat 硬要求，已校验 8 CRLF / 0 lone LF）。
 
-## 测试命令 + 结果
+#### 3. `discovery/cli.py`（改动：+ cmd_daemon + main 注册 daemon 子命令）
+- `cmd_daemon(args)`：串 `build_default_manager()` → `freeze(lake_start)` →
+  `holdout_split(embargo)` → `run_daemon(meta, split, db_path, budget_hours=,
+  n_proc=, lake_start=, tpe_trials=, rho_threshold=, K=)`。打印 RunSummary +
+  跨夜判据① + outer 去偏 + 下一步 publish 提示。
+  - **⚠️ 关键职责**：开头必须 `from infra.notifier import build_default_manager;
+    build_default_manager()`。Why：run_daemon 内部 `_notify_champion` 走
+    `NotificationManager.get_default()` 单例，但首次 `_channels=[]`（get_default
+    懒构造不读 .env）→ 告警走"无通道"软降级（仅 debug 日志，钉钉收不到，夜跑告警
+    静默丢失）。cmd_daemon 作为生产入口必须显式装通道（读 .env 的
+    DINGTALK_WEBHOOK/SECRET 等），这是 T3 reviewer Cannot-verify 标记、brief 之外
+    补加的关键一步。
+  - **early_exited 短路**：run_daemon 返回 dict 在跨夜已收敛时
+    `early_exited=True, summary=None, run_id=None`——cmd_daemon 按
+    `out["early_exited"]` 短路 return，不访问 `out["summary"]`（否则
+    None.attribute 炸）。brief Step 5 verbatim 代码已正确处理。
+- `main()` 在 `ap_rp`（report）之后注册 `daemon` 子命令：`--budget`(默认 4h) /
+  `--embargo`(5) / `--n-proc` / `--lake-start` / `--tpe-trials`(默认 10，夜跑默认
+  与 run 的 0 不同) / `--rho-threshold`(0.8) / `--k-rounds`(3，跨夜收敛 K 判据①)。
 
-```bash
-PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe -m pytest \
-  tests/caisen/test_training_dingtalk.py \
-  tests/caisen/test_training_loop.py \
-  tests/test_training_api.py -q
+#### 4. `discovery/__init__.py`（改动：导出 run_daemon）
+追加 `from discovery.daemon import run_daemon, run_daemon_cycle` + `__all__`
+追加两符号。Plan 4 L4 生产入口对外可见。
+
+#### 5. 顺手清 T3 Minor M1（`discovery/daemon.py`）
+`_notify_champion` 的死形参 `snapshot_hash=""`（T3 遗留，函数体用 `summary.snapshot_hash`
+不用形参，brief 之外的关键事实里 reviewer 标记"可选顺手清"）。已删——cmd_daemon
+不直传 snapshot_hash 给 _notify_champion（run_daemon 内部调），无调用方影响
+（已 grep 确认 tests 无直接调 `_notify_champion`，都是 mock notify_fn）。
+
+### 测试（`tests/discovery/test_schtasks.py` 新，2 测试）
+- `test_build_register_commands_shape`：纯函数验证——`len(cmds)==1` /
+  `c["task"]==DAEMON_TASK_NAME` / `c["time"]=="02:00"` /
+  `c["bat"].endswith("discovery\\run_daemon.bat")`（包内 bat，不指向 scripts）。
+- `test_register_calls_schtasks_delete_then_create`：`monkeypatch.setattr(sch,
+  "_schtasks", _fake)` mock subprocess（不污染真实 Windows 任务计划程序），调
+  `register()` 后断言 `calls` 里至少一次 `/Delete` + 一次 `/Create`（幂等序）。
+
+## TDD 证据
+1. **RED**：先写 test_schtasks.py → 跑 `pytest tests/discovery/test_schtasks.py -v`
+   → 2 FAILED（`ModuleNotFoundError: No module named 'discovery.schtasks'`）。
+2. **GREEN**：实现 schtasks.py + run_daemon.bat + cmd_daemon + __init__ 导出 →
+   跑同一组 → 2 PASSED。
+3. **回归**：
+   - `pytest tests/discovery/test_cli_run.py tests/discovery/test_cli_plan3.py
+     tests/discovery/test_daemon.py` → 全 exit 0（cli 既有不回归 + T2/T3 daemon 不回归）。
+   - `pytest tests/discovery/ -q -m "not slow"` → **96 passed, 8 deselected**
+     （T3 的 94 + T4 的 2 = 96，零回归）。
+4. **import 自检**：`from discovery import run_daemon, run_daemon_cycle` +
+   `from discovery.schtasks import DAEMON_TASK_NAME, build_register_commands,
+   register, main` + `from discovery.cli import cmd_daemon` → OK（防运行时
+   ImportError）。
+5. **CLI 入口自检**：`python -m discovery.schtasks --help` 与
+   `python -m discovery daemon --help` → 正常输出（三互斥选项 / 七参数全注册）。
+6. **CRLF 校验**：run_daemon.bat 8 CRLF / 0 lone LF（Windows bat 硬要求）。
+
+## 测试输出
+```
+tests/discovery/test_schtasks.py::test_build_register_commands_shape PASSED [ 50%]
+tests/discovery/test_schtasks.py::test_register_calls_schtasks_delete_then_create PASSED [100%]
+============================== 2 passed in 0.35s ==============================
+
+====================== 96 passed, 8 deselected in 5.59s =======================
 ```
 
-**结果**：`19 passed, 1 warning in 3.32s`（warning 为 fastapi/httpx 已知 deprecation，与本次改动无关）
+## commits
+- `feat(discovery): T4 cli daemon 子命令 + 包自包含 schtasks 注册（Plan 4 L4）`
 
-## Smoke 验证
-
-```bash
-PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe -c "from server.main import app; ..."
-```
-
-- `from server.main import app` **无异常**（review_bot_stream 不再装配，DingTalkNotifier 仍在）。
-- OpenAPI 38 路径，training 5 端点全部就位：`/api/v1/training`、`/review`、`/start`、`/{loop_id}`、
-  `/{loop_id}/stop`。
-- 断言死代码确实删除：`caisen.optimize.training_dingtalk` 不再有 `start_review_bot`/
-  `ReviewChatbotHandler`/`_run_stream`；`DingTalkNotifier`/`_NoopNotifier`/`ReviewBotConfig` 保留。
-
-## Commit
-
-见 `git log`（commit message：`refactor(dws-migration): Task4 删审查老stream死代码(@接收改dws桥)`）。
-
-## Concerns（次要，非阻断）
-
-1. **`scripts/verify_dingtalk_review.py`**（未跟踪新文件，git status `??`，不在本次 Task 4 范围）：
-   - 它是 @用户自建的「审查 stream 通道」独立验证脚本，仍 `import dingtalk_stream` + 用
-     `ChatbotHandler`，且 line 55 注释提到 "spec3 ReviewChatbotHandler 可据此唤醒 loop"。
-   - dws 迁移后这脚本验证的是**已废弃的老通道**（应改去验证 dws 桥）。
-   - 本次未改动它（不在删改清单），建议后续单独决定：删除 / 改造为验证 dws 桥 / 保留作为
-     app 凭证连通性 smoke。
-
-2. **`bridge/stream_client.py`** 仍 `import dingtalk_stream`：这是 **@claude 桥**的 stream
-   （完全独立应用，非审查机器人），保留正确，无任何问题。
-
-3. **`ReviewBotConfig.from_env` 门控未改**：仍要求 `app_key/secret/staff` 三件套齐全才装配。
-   dws 迁移后 webhook 推报告其实只需要 `webhook`/`webhook_secret`，`app_*` 已是历史遗留。
-   本任务**故意不改门控**（避免连锁影响 server/main.py lifespan 与既有 7 个测试断言），
-   顶部 docstring 已显式说明此决策。如未来想让 webhook-only 配置也能装配 notifier，需单独评估。
-
-## 相关文件（绝对路径）
-- 实现（删改）：`C:\Users\yzzhan\Desktop\quanter\caisen\optimize\training_dingtalk.py`
-- lifespan（删装配）：`C:\Users\yzzhan\Desktop\quanter\server\main.py`
-- 测试（删测试）：`C:\Users\yzzhan\Desktop\quanter\tests\caisen\test_training_dingtalk.py`
-- 注释修正：`C:\Users\yzzhan\Desktop\quanter\caisen\optimize\training_loop.py`
-- 垫片（未动）：`C:\Users\yzzhan\Desktop\quanter\caisen\training_dingtalk.py`
-- dws 桥（新通道，不在本任务）：`C:\Users\yzzhan\Desktop\quanter\scripts\dingtalk_review_bridge.py`
+## concerns / 遗留
+- **cmd_daemon 未做 slow 端到端集成测试**（真跑会触达 data_lake + 真钉钉 + schtasks）：
+  留 T7 slow 端到端集成（task #16）统一覆盖跨夜状态累积 + outer 去偏 + 告警送达。
+  本任务的 96 non-slow 已覆盖所有纯函数与 mock 路径。
+- **schtasks register 真实执行未测**：Windows 任务计划程序注册是副作用操作，CI/开发机
+  反复跑会污染真实调度——按 brief 纪律只用 mock 验幂等序（先 /Delete /F 再 /Create），
+  真实注册需人手 `python -m discovery.schtasks --register` 一次（一次性配置，不进自动化）。
+- **build_default_manager 是隐式契约**：cmd_daemon 开头必须调它是"约定胜于配置"——
+  未来若有其他入口调 run_daemon（如手动夜跑脚本），也需同样先 build_default_manager，
+  否则告警静默丢失。T7 slow 集成会真验钉钉通道是否装上（Cannot-verify 收口）。

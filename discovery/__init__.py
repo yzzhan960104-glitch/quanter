@@ -18,6 +18,8 @@ from discovery.pareto import pareto_frontier, frontier_grew, converged_k_rounds
 from discovery.coverage import grid_coverage, coverage_gate
 from discovery.dsr import deflated_sharpe
 from discovery.search import tpe_search, expected_improvement
+# Plan 4 新增：L4 daemon 生产入口（cli cmd_daemon 调）
+from discovery.daemon import run_daemon, run_daemon_cycle
 
 __all__ = ["freeze", "SnapshotMeta", "snapshot_hash", "holdout_split", "Segment",
            "HoldoutSplit", "evaluate", "run_full_scan", "segment_metrics", "metrics_of",
@@ -29,4 +31,6 @@ __all__ = ["freeze", "SnapshotMeta", "snapshot_hash", "holdout_split", "Segment"
            # Plan 3
            "pareto_frontier", "frontier_grew", "converged_k_rounds",
            "grid_coverage", "coverage_gate", "deflated_sharpe",
-           "tpe_search", "expected_improvement"]
+           "tpe_search", "expected_improvement",
+           # Plan 4
+           "run_daemon", "run_daemon_cycle"]

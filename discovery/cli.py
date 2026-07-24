@@ -144,6 +144,47 @@ def cmd_run(args):
     print(f"信息隔离: 汇总只用 inner（spec §6.2）；判据①连续K轮 + 跨 run EI 衰减留 Plan 4 daemon")
 
 
+def cmd_daemon(args):
+    """L4 守护 daemon 夜跑入口（spec §5.2/§12#13，Plan 4 Task 4）。
+
+    串 freeze→holdout_split→run_daemon（跨夜编排：判据①连续K夜 + 钉钉告警 + outer去偏）。
+    每夜 schtasks @02:00 触发本命令（discovery/schtasks.py 注册，run_daemon.bat 激活venv）。
+
+    ⚠️ 开头必须 build_default_manager() 装钉钉通道：run_daemon 内部 _notify_champion
+    走 NotificationManager.get_default() 单例，但首次 _channels=[]（get_default 懒构造
+    不读 .env）→ 告警走"无通道"软降级（仅 debug 日志，钉钉收不到，夜跑告警静默丢失）。
+    cmd_daemon 作为生产入口必须显式装通道（读 .env 的 DINGTALK_WEBHOOK/SECRET 等），
+    这是 cmd_daemon 不可推卸的关键职责（T3 reviewer Cannot-verify 标记）。
+    """
+    # 先装钉钉通道（读 .env）——必须在 run_daemon 调用前完成，否则告警静默丢失
+    from infra.notifier import build_default_manager
+    build_default_manager()
+    from discovery.daemon import run_daemon, estimate_budget
+    universe, meta = freeze(args.lake_start)
+    split = holdout_split(args.embargo)
+    print(f"=== discovery daemon：跨夜守护（snapshot={meta.snapshot_hash}）===")
+    print(f"配置: budget={args.budget}h(≈{estimate_budget(args.budget, args.n_proc)}组) "
+          f"tpe={args.tpe_trials} proc={args.n_proc} K={args.k_rounds} rho={args.rho_threshold}")
+    out = run_daemon(meta, split, _db_path(),
+                     budget_hours=args.budget, n_proc=args.n_proc, lake_start=args.lake_start,
+                     tpe_trials=args.tpe_trials, rho_threshold=args.rho_threshold, K=args.k_rounds)
+    # early_exited 短路（跨夜已收敛→不访问 out["summary"]，否则 None.attribute 炸）
+    if out["early_exited"]:
+        print(f"早退：跨夜已收敛（k={out['latest_k']}），不重复夜跑")
+        return
+    s = out["summary"]
+    print(f"--- daemon 汇总 ---")
+    print(f"run_id={out['run_id']} n_new={s.n_new_trials} frontier={s.frontier_size} "
+          f"top_calmar={s.top_inner_calmar:.2f} rho={s.rho:.3f}")
+    print(f"跨夜判据①: k={out['latest_k']}/{args.k_rounds} "
+          f"{'已收敛（可 publish）' if out['converged_cross'] else '进行中'}")
+    if out.get("outer"):
+        o = out["outer"]
+        print(f"冠军 outer 去偏: ann={o.get('ann',0)*100:.1f}% calmar={o.get('calmar',0):.2f} "
+              f"max_dd={o.get('max_dd',0)*100:.1f}%")
+        print(f"下一步: python -m discovery publish {s.top_trial_id}")
+
+
 def cmd_champions(args):
     """Pareto 前沿 + DSR 冠军报告（spec §3.5/§3.7，读 store 最新 snapshot 的 trial）。
 
@@ -238,6 +279,21 @@ def main(argv=None):
     ap_c.set_defaults(func=cmd_champions)
     ap_rp = sub.add_parser("report", help="run 历史简报（Plan 3）")
     ap_rp.set_defaults(func=cmd_report)
+    # daemon 子命令（Plan 4 Task 4）：schtasks @02:00 触发 run_daemon.bat → 本命令
+    ap_d = sub.add_parser("daemon", help="L4 守护 daemon 夜跑（Plan 4）")
+    ap_d.add_argument("--budget", type=int, default=4, help="时间预算小时（默认 4h）")
+    ap_d.add_argument("--embargo", type=int, default=5, help="inner→outer embargo 天数")
+    ap_d.add_argument("--n-proc", type=int, default=None, dest="n_proc",
+                     help="进程数（默认核数-2）")
+    ap_d.add_argument("--lake-start", type=str, default="2025-01-01", dest="lake_start",
+                     help="universe 加载起始日")
+    ap_d.add_argument("--tpe-trials", type=int, default=10, dest="tpe_trials",
+                     help="TPE 序贯 trial 数（夜跑默认 10）")
+    ap_d.add_argument("--rho-threshold", type=float, default=0.8, dest="rho_threshold",
+                     help="覆盖度阈值 ρ（判据④前置否决）")
+    ap_d.add_argument("--k-rounds", type=int, default=3, dest="k_rounds",
+                     help="跨夜收敛 K（判据①连续K夜前沿不扩张）")
+    ap_d.set_defaults(func=cmd_daemon)
     args = ap.parse_args(argv)
     args.func(args)
 

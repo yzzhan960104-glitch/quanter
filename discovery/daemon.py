@@ -149,7 +149,7 @@ def _eval_outer(trial_id, db_path, split, lake_start="2025-01-01"):
     return evaluate(params, universe, split)["outer"]
 
 
-def _notify_champion(summary, k, K, converged_cross, outer, snapshot_hash=""):
+def _notify_champion(summary, k, K, converged_cross, outer):
     """新冠军/收敛钉钉告警（fire_and_forget 不阻塞 daemon 主流程）。
 
     直指 infra.notifier 真身（core.notifier 是 strangler 垫片，未来拆 core 时可能断链，
@@ -165,7 +165,6 @@ def _notify_champion(summary, k, K, converged_cross, outer, snapshot_hash=""):
       k/K: 跨夜判据①进度（连续未扩张夜数 / 阈值）。
       converged_cross: 跨夜是否已收敛（True→消息尾注"可 publish"）。
       outer: _eval_outer 返回的 outer metrics dict（可能 None，软降级场景）。
-      snapshot_hash: 兼容位（summary.snapshot_hash 已含，预留 CLI 直传场景）。
     """
     from infra.notifier import NotificationManager, fire_and_forget
     outer_ann = (outer or {}).get("ann", 0.0)
