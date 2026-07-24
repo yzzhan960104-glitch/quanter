@@ -46,10 +46,11 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                       "script": "scripts/sync_macro_credit.py", "schedule": "每月初",   "freshness_hours": 720},
     "sector":        {"source": "AKShare", "market": "板块", "granularity": "1d",
                       "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
-    # daily（前复权日线）：sync_data_lake.py 实际用 tushare 代理 pro.daily + pro.adj_factor 重建前复权
-    # （非 AKShare——历史误标，2026-07-19 数据层盘点订正）。a_shares_daily.parquet 903 万行 tushare 源。
+    # daily（前复权日线）：2026-07-25 Plan Task 7 纳入统一管道（_sync_by_symbol adj_api 增强），
+    # script 从 sync_data_lake.py 切到 sync_tushare.py（sync_data_lake 转薄壳 deprecated）。
+    # 前复权逻辑照搬 fetch_qfq: price=raw×adj/latest，与既有 a_shares_daily.parquet（903万行）字节级一致。
     "daily":         {"source": "Tushare", "market": "A股",  "granularity": "1d",
-                      "script": "scripts/sync_data_lake.py",   "schedule": "每日18:00", "freshness_hours": 24},
+                      "script": "scripts/sync_tushare.py",   "schedule": "每日18:00", "freshness_hours": 24},
     "daily_active":  {"source": "AKShare", "market": "A股",  "granularity": "1d",
                       "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
     "minute":        {"source": "JQData",  "market": "A股",  "granularity": "1m",
@@ -194,6 +195,32 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     # exchange 列区分）。LAKE_CONFIG key=mkt_daily（与 TUSHARE_DATASETS 一致，单一真相源）。
     "mkt_daily":       {"source": "Tushare", "market": "宏观", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # ============================================================================
+    # 数据快照扩容（2026-07-25 Plan Task 8）：新增数据集元信息（前端 DataLakeView 反射）
+    # ============================================================================
+    # script 统一 scripts/sync_tushare.py（server data_service 子进程拉起该薄壳）。
+    # freshness_hours：日频=24h、季频=2190h、静态快照=730h（标的不常变动）。
+    # —— 基础桶：列表 / 成分类 ——
+    "stock_basic":    {"source": "Tushare", "market": "A股", "granularity": "快照",
+                       "script": "scripts/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
+    "hs_const_sh":    {"source": "Tushare", "market": "A股", "granularity": "快照",
+                       "script": "scripts/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
+    "hs_const_sz":    {"source": "Tushare", "market": "A股", "granularity": "快照",
+                       "script": "scripts/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
+    "concept_detail": {"source": "Tushare", "market": "板块", "granularity": "快照",
+                       "script": "scripts/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
+    # —— 特色桶：筹码明细 / 因子 ——
+    "cyq_chips":      {"source": "Tushare", "market": "A股", "granularity": "1d",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "daily_basic":    {"source": "Tushare", "market": "A股", "granularity": "1d",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "stk_factor_pro": {"source": "Tushare", "market": "A股", "granularity": "1d",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # —— OHLCV 前复权周/月线（daily 已在上方注册，script 已切 sync_tushare.py）——
+    "weekly":         {"source": "Tushare", "market": "A股", "granularity": "1w",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "monthly":        {"source": "Tushare", "market": "A股", "granularity": "1M",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
 }
 
 # ============================================================

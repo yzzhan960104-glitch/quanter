@@ -4,7 +4,7 @@
 物理意图：钉死新注册数据集的必填字段（api/by/date_col/symbol_col/fields/lake/quota_type）
 与 quota_type 归类正确性（基础桶 basic / 特色桶 special），防配置漂移。
 """
-from config.registry import TUSHARE_DATASETS
+from config.registry import TUSHARE_DATASETS, DATASET_REGISTRY
 
 
 REQUIRED_FIELDS = {"api", "by", "date_col", "symbol_col", "fields", "lake", "quota_type"}
@@ -84,3 +84,22 @@ def test_daily_复用既有a_shares_daily湖():
     assert TUSHARE_DATASETS["daily"]["lake"] == "data_lake/a_shares_daily.parquet"
     assert TUSHARE_DATASETS["weekly"]["lake"] == "data_lake/a_shares_weekly.parquet"
     assert TUSHARE_DATASETS["monthly"]["lake"] == "data_lake/a_shares_monthly.parquet"
+
+
+# ============ Task 8：DATASET_REGISTRY 元信息（前端 DataLakeView 反射） ============
+def test_新数据集_元信息完整():
+    """所有新 TUSHARE_DATASETS key 必须在 DATASET_REGISTRY 有元信息（前端反射）。"""
+    new_keys = ["stock_basic", "hs_const_sh", "hs_const_sz", "concept_detail",
+                "cyq_chips", "daily_basic", "stk_factor_pro",
+                "weekly", "monthly"]
+    for k in new_keys:
+        assert k in DATASET_REGISTRY, f"{k} 缺 DATASET_REGISTRY 元信息"
+        meta = DATASET_REGISTRY[k]
+        assert meta["source"] == "Tushare"
+        assert meta["script"] == "scripts/sync_tushare.py", f"{k} script 应统一 sync_tushare.py"
+        assert "market" in meta and "granularity" in meta and "freshness_hours" in meta
+
+
+def test_daily_脚本切统一入口():
+    """daily 的 script 切到 sync_tushare.py（统一管道，原 sync_data_lake.py 转薄壳 deprecated）。"""
+    assert DATASET_REGISTRY["daily"]["script"] == "scripts/sync_tushare.py"
