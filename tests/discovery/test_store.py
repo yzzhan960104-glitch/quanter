@@ -63,3 +63,54 @@ def test_write_snapshot(tmp_path):
         write_snapshot(conn, meta)
         row = conn.execute("SELECT * FROM snapshot WHERE snapshot_hash=?", ("snap1",)).fetchone()
     assert row["universe_count"] == 1334
+
+
+def test_init_db_search_run_migration_idempotent(tmp_path):
+    """search_run 表扩跨夜字段后，init_db 重复调用不报错（PRAGMA migration 幂等）。"""
+    from discovery.store import init_db
+    db = str(tmp_path / "t.db")
+    init_db(db)   # 首次：建表 + migration 补列
+    init_db(db)   # 二次：migration 列已存，不重复 ALTER（不报错）
+    init_db(db)   # 三次：再确认幂等
+    import sqlite3
+    con = sqlite3.connect(db)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(search_run)")}
+    con.close()
+    assert {"frontier_size_prev", "k_rounds_no_expansion", "daemon_run_count"} <= cols
+
+
+def test_write_read_daemon_state_roundtrip(tmp_path):
+    """write_search_run → read_latest_search_run → write_daemon_state 往返一致。"""
+    from discovery.store import (init_db, connect, write_search_run,
+                                 read_latest_search_run, write_daemon_state)
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    snap = "abc123"
+    with connect(db) as conn:
+        write_search_run(conn, run_id="r1", snapshot_hash=snap, started_at="t1",
+                         ended_at="t1e", n_trials=5, status="budget_exhausted",
+                         frontier_size=3, k_rounds_no_expansion=0, daemon_run_count=1, note="")
+        write_search_run(conn, run_id="r2", snapshot_hash=snap, started_at="t2",
+                         ended_at="t2e", n_trials=4, status="budget_exhausted",
+                         frontier_size=3, k_rounds_no_expansion=1, daemon_run_count=2, note="")
+    with connect(db) as conn:
+        latest = read_latest_search_run(conn, snap)
+    assert latest is not None
+    assert latest["run_id"] == "r2"                  # 最新一行（started_at DESC）
+    assert latest["k_rounds_no_expansion"] == 1
+    # daemon 更新本次行跨夜状态
+    with connect(db) as conn:
+        write_daemon_state(conn, run_id="r2", frontier_size=3,
+                           k_rounds_no_expansion=2, daemon_run_count=2, status="converged")
+        latest2 = read_latest_search_run(conn, snap)
+    assert latest2["k_rounds_no_expansion"] == 2
+    assert latest2["status"] == "converged"
+
+
+def test_read_latest_search_run_none_when_empty(tmp_path):
+    """首次 daemon（无历史 run）→ read_latest_search_run 返 None（不抛）。"""
+    from discovery.store import init_db, connect, read_latest_search_run
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    with connect(db) as conn:
+        assert read_latest_search_run(conn, "no_such_snap") is None

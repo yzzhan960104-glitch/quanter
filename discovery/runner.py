@@ -17,7 +17,8 @@ import json
 from discovery.sampler import sample_search
 from discovery.worker import eval_batch
 from discovery.store import (init_db, connect, write_trial, write_snapshot,
-                             trial_id_of, trial_exists, read_trials_by_snapshot)
+                             trial_id_of, trial_exists, read_trials_by_snapshot,
+                             write_search_run, _now_iso)
 from discovery.snapshot import SnapshotMeta, freeze
 from discovery.split import HoldoutSplit
 from discovery.objective import evaluate
@@ -63,6 +64,7 @@ class RunSummary:
     ei: float = 0.0                # 预期提升代理（判据②）
     frontier_size: int = 0         # Pareto 前沿大小
     dsr_top: float = 0.0           # top-1 DSR（L2 统计裁决）
+    run_id: str = ""               # Plan 4：本次 run 的 search_run 行 id（daemon 跨夜状态键）
 
 
 def _params_key(params):
@@ -201,6 +203,19 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         dsr_top = deflated_sharpe(top_m.get("sharpe", 0.0),
                                   n_trials=len(trials_db), n_obs=top_m.get("n", 30))
 
+    # === Plan 4：落 search_run 行（daemon 跨夜状态源；cmd_run 亦受益可追溯） ===
+    # 每次 run_search 写一行，同 snapshot 下多行按 started_at DESC 取最新做跨夜比对。
+    # run_id = snapshot前缀 + uuid4 前8，保证同 snapshot 多夜跑批各行唯一（uuid4 每次新）。
+    import uuid
+    run_id = f"{snapshot_meta.snapshot_hash[:8]}_{uuid.uuid4().hex[:8]}"
+    _started = _now_iso()
+    with connect(db_path) as conn:
+        write_search_run(conn, run_id=run_id, snapshot_hash=snapshot_meta.snapshot_hash,
+                         started_at=_started, ended_at=_now_iso(), n_trials=n_new,
+                         status=status, frontier_size=len(frontier_idxs),
+                         k_rounds_no_expansion=0, daemon_run_count=0,
+                         note=reason)
+
     return RunSummary(
         n_sampled=n_sampled, n_evaluated=len(to_eval), n_new_trials=n_new,
         n_skipped_dup=n_skipped, n_failed=n_failed,
@@ -208,4 +223,5 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         db_path=db_path, snapshot_hash=snapshot_meta.snapshot_hash,
         status=status, convergence_reason=reason,
         rho=rho, ei=ei, frontier_size=len(frontier_idxs), dsr_top=dsr_top,
+        run_id=run_id,
     )
