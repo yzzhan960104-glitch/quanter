@@ -13,6 +13,11 @@ from discovery.constraints import normalize_params, is_feasible, filter_feasible
 from discovery.sampler import sample_search, sobol_sample, random_sample, PARAM_SPACE
 from discovery.worker import eval_batch
 from discovery.runner import run_search, RunSummary
+# Plan 3 新增
+from discovery.pareto import pareto_frontier, frontier_grew, converged_k_rounds
+from discovery.coverage import grid_coverage, coverage_gate
+from discovery.dsr import deflated_sharpe
+from discovery.search import tpe_search, expected_improvement
 
 __all__ = ["freeze", "SnapshotMeta", "snapshot_hash", "holdout_split", "Segment",
            "HoldoutSplit", "evaluate", "run_full_scan", "segment_metrics", "metrics_of",
@@ -20,4 +25,8 @@ __all__ = ["freeze", "SnapshotMeta", "snapshot_hash", "holdout_split", "Segment"
            # Plan 2
            "normalize_params", "is_feasible", "filter_feasible", "PARAM_KEYS",
            "sample_search", "sobol_sample", "random_sample", "PARAM_SPACE",
-           "eval_batch", "run_search", "RunSummary"]
+           "eval_batch", "run_search", "RunSummary",
+           # Plan 3
+           "pareto_frontier", "frontier_grew", "converged_k_rounds",
+           "grid_coverage", "coverage_gate", "deflated_sharpe",
+           "tpe_search", "expected_improvement"]

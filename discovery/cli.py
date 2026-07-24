@@ -112,31 +112,98 @@ def cmd_verify(args):
 
 
 def cmd_run(args):
-    """并发搜索跑批：采样→Pool→落库（spec §5.1，Plan 2 L2+L3 基础）。
+    """两阶段搜索跑批：Sobol 批量→TPE 序贯→落库→收敛自停（spec §5.1/§7.2，Plan 2+3）。
 
     串起 freeze→holdout_split→run_search（内含 sample_search→eval_batch→store）。
     主进程 freeze 一次拿 SnapshotMeta（snapshot_hash 依赖真实 universe_count/date_range，
     必须真 freeze 一次）；universe 由子进程 initializer 各自 freeze 复用（不随 params pickle）。
+    Plan 3 新增：tpe_trials/rho_threshold 透传 run_search，收敛字段（status/rho/ei/dsr/
+    frontier_size/convergence_reason）从 RunSummary 打印——给 T8 slow 集成测试一个稳定 cli 入口。
     """
     from discovery.runner import run_search
     universe, meta = freeze(args.lake_start)
     split = holdout_split(args.embargo)
-    print(f"=== discovery run：并发搜索（snapshot={meta.snapshot_hash}）===")
+    print(f"=== discovery run：两阶段搜索（snapshot={meta.snapshot_hash}）===")
     print(f"snapshot: {meta.universe_count} 只 | {meta.date_range} | hash {meta.snapshot_hash}")
     print(f"配置: budget={args.budget} sobol={args.n_sobol} random={args.n_random} "
-          f"proc={args.n_proc} seed={args.seed} embargo={args.embargo}")
+          f"tpe={args.tpe_trials} proc={args.n_proc} seed={args.seed} "
+          f"embargo={args.embargo} rho_threshold={args.rho_threshold}")
     summary = run_search(meta, split, budget=args.budget, n_sobol=args.n_sobol,
                          n_random=args.n_random, seed=args.seed, db_path=_db_path(),
-                         n_proc=args.n_proc, lake_start=args.lake_start)
+                         n_proc=args.n_proc, lake_start=args.lake_start,
+                         tpe_trials=args.tpe_trials, rho_threshold=args.rho_threshold)
     print(f"--- RunSummary ---")
     print(f"n_sampled={summary.n_sampled} n_evaluated={summary.n_evaluated} "
           f"n_new_trials={summary.n_new_trials} n_skipped_dup={summary.n_skipped_dup} "
           f"n_failed={summary.n_failed}")
-    print(f"top_inner_calmar={summary.top_inner_calmar:.2f} "
-          f"top_trial_id={summary.top_trial_id} status={summary.status}")
+    print(f"top_inner_calmar={summary.top_inner_calmar:.2f} top_trial_id={summary.top_trial_id} "
+          f"dsr_top={summary.dsr_top:.3f}")
+    print(f"收敛: status={summary.status} reason={summary.convergence_reason} "
+          f"rho={summary.rho:.3f} ei={summary.ei:.4f} frontier_size={summary.frontier_size}")
     print(f"db={summary.db_path}")
-    print(f"信息隔离: 汇总只用 inner calmar（搜索不反馈 outer，spec §6.2）；"
-          f"Plan 2 无收敛判据（Pareto/覆盖度④留 Plan 3）")
+    print(f"信息隔离: 汇总只用 inner（spec §6.2）；判据①连续K轮 + 跨 run EI 衰减留 Plan 4 daemon")
+
+
+def cmd_champions(args):
+    """Pareto 前沿 + DSR 冠军报告（spec §3.5/§3.7，读 store 最新 snapshot 的 trial）。
+
+    物理意图：run 跑完后，人审要从一堆 trial 里挑冠军——本命令读 store 最新 snapshot 的全部
+    trial，算 Pareto 前沿（calmar×max_dd 多目标非支配）+ L1 calmar 排序 + DSR 标注（ deflate
+    多重比较偏差）。信息隔离（spec §6.2）：报告只用 inner_metrics，outer 留 Plan 4 daemon 选型。
+    """
+    import json
+    from discovery.store import connect
+    from discovery.pareto import pareto_frontier
+    from discovery.dsr import deflated_sharpe
+    from discovery.judging import feasibility_gate
+    db = _db_path()
+    with connect(db) as conn:
+        rows = conn.execute(
+            "SELECT trial_id, snapshot_hash, inner_metrics FROM trial ORDER BY created_at DESC"
+        ).fetchall()
+    if not rows:
+        print(f"无 trial 记录（db={db}）")
+        return
+    latest = rows[0]["snapshot_hash"]
+    trials = [r for r in rows if r["snapshot_hash"] == latest]
+    metrics = []
+    for t in trials:
+        try:
+            metrics.append((json.loads(t["inner_metrics"]), t["trial_id"]))
+        except (TypeError, ValueError):
+            continue
+    frontier_idxs = pareto_frontier([m for m, _ in metrics]) if metrics else []
+    feasible = [(m, tid) for m, tid in metrics if feasibility_gate(m)]
+    ranked = sorted(feasible, key=lambda x: x[0].get("calmar", 0.0), reverse=True)
+    print(f"=== discovery champions（snapshot={latest}，{len(trials)} trial，前沿 {len(frontier_idxs)}）===")
+    if not ranked:
+        print("无可行域内 trial（L0 闸 max_dd≤0.4 ∧ n≥30 未过）")
+        return
+    for i, (m, tid) in enumerate(ranked[:args.top_n]):
+        dsr = deflated_sharpe(m.get("sharpe", 0.0), n_trials=len(trials), n_obs=m.get("n", 30))
+        print(f"#{i+1} {tid}: calmar={m.get('calmar', 0):.2f} ann={m.get('ann', 0)*100:.1f}% "
+              f"max_dd={m.get('max_dd', 0)*100:.1f}% n={m.get('n', 0)} DSR={dsr:.3f}")
+
+
+def cmd_report(args):
+    """run 历史简报（snapshot/trial 计数 + 最近 snapshot，spec §12 验收）。
+
+    物理意图：多次 run 后人审要快速看"跑了几个 snapshot、几个 trial、最近啥时候跑的"——
+    本命令读 store 汇总，给一个不进排序的简报（排序留 champions）。spec §12 验收锚固化用。
+    """
+    from discovery.store import connect
+    db = _db_path()
+    with connect(db) as conn:
+        n_trial = conn.execute("SELECT COUNT(*) c FROM trial").fetchone()["c"]
+        n_snap = conn.execute("SELECT COUNT(*) c FROM snapshot").fetchone()["c"]
+        snaps = conn.execute(
+            "SELECT snapshot_hash, universe_count, date_range, created_at "
+            "FROM snapshot ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+    print(f"=== discovery report（db={db}）===")
+    print(f"snapshot: {n_snap} | trial: {n_trial}")
+    for s in snaps:
+        print(f"  {s['snapshot_hash']}: {s['universe_count']}只 {s['date_range']} ({s['created_at']})")
 
 
 def main(argv=None):
@@ -161,7 +228,16 @@ def main(argv=None):
     ap_r.add_argument("--seed", type=int, default=42, help="采样种子（可复现）")
     ap_r.add_argument("--lake-start", type=str, default="2025-01-01", dest="lake_start",
                      help="universe 加载起始日")
+    ap_r.add_argument("--tpe-trials", type=int, default=0, dest="tpe_trials",
+                     help="TPE 序贯 trial 数（Plan 3，0=仅 Sobol）")
+    ap_r.add_argument("--rho-threshold", type=float, default=0.8, dest="rho_threshold",
+                     help="覆盖度阈值 ρ（判据④前置否决，Plan 3）")
     ap_r.set_defaults(func=cmd_run)
+    ap_c = sub.add_parser("champions", help="Pareto 前沿 + DSR 冠军报告（Plan 3）")
+    ap_c.add_argument("--top-n", type=int, default=10, dest="top_n", help="报 top-N")
+    ap_c.set_defaults(func=cmd_champions)
+    ap_rp = sub.add_parser("report", help="run 历史简报（Plan 3）")
+    ap_rp.set_defaults(func=cmd_report)
     args = ap.parse_args(argv)
     args.func(args)
 
