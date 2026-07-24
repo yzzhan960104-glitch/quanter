@@ -12,14 +12,20 @@ Plan 2 范围：budget 驱动跑 N 组新 trial，落 SQLite，返回 RunSummary
 只用 inner（feasibility_gate 过滤后 calmar 最高）——搜索不反馈 outer，outer 留报告。
 """
 from dataclasses import dataclass
+import json
 
 from discovery.sampler import sample_search
 from discovery.worker import eval_batch
 from discovery.store import (init_db, connect, write_trial, write_snapshot,
-                             trial_id_of, trial_exists)
-from discovery.snapshot import SnapshotMeta
+                             trial_id_of, trial_exists, read_trials_by_snapshot)
+from discovery.snapshot import SnapshotMeta, freeze
 from discovery.split import HoldoutSplit
+from discovery.objective import evaluate
 from discovery.judging import feasibility_gate
+from discovery.coverage import grid_coverage, coverage_gate
+from discovery.pareto import pareto_frontier
+from discovery.dsr import deflated_sharpe
+from discovery.search import tpe_search, expected_improvement
 
 
 def _engine_hash():
@@ -40,17 +46,28 @@ def _engine_hash():
 
 @dataclass
 class RunSummary:
-    """跑批汇总（Plan 2：无收敛判据，status 恒 budget_exhausted；Plan 3 扩 converged）。"""
-    n_sampled: int = 0          # 采样总数（filter_feasible 后）
-    n_evaluated: int = 0        # 实际送 Pool 评估数（采样 - 已存去重）
-    n_new_trials: int = 0       # 新落库 trial 数
-    n_skipped_dup: int = 0      # 跳过的已存 trial（断点续跑去重）
-    n_failed: int = 0           # 评估失败组数（eval_batch 返回 None）
-    top_inner_calmar: float = 0.0   # 可行域内最高 inner calmar（信息隔离：不用 outer）
-    top_trial_id: str = ""      # top_inner_calmar 对应的 trial_id
+    """跑批汇总（Plan 3：status 扩 converged + 收敛/覆盖/EI/DSR 字段）。"""
+    n_sampled: int = 0
+    n_evaluated: int = 0
+    n_new_trials: int = 0
+    n_skipped_dup: int = 0
+    n_failed: int = 0
+    top_inner_calmar: float = 0.0
+    top_trial_id: str = ""
     db_path: str = ""
     status: str = "budget_exhausted"   # Plan 3 扩 "converged"
     snapshot_hash: str = ""
+    # Plan 3 新增
+    convergence_reason: str = ""   # "coverage_met+ei_below_eps" / "budget_exhausted"
+    rho: float = 0.0               # 覆盖度（判据④）
+    ei: float = 0.0                # 预期提升代理（判据②）
+    frontier_size: int = 0         # Pareto 前沿大小
+    dsr_top: float = 0.0           # top-1 DSR（L2 统计裁决）
+
+
+def _params_key(params):
+    """params dict → 可 hash 键（TPE _res_cache 用，避免双 evaluate）。"""
+    return tuple(sorted((k, str(v)) for k, v in params.items()))
 
 
 def _persist_trial(conn, params, snapshot_meta, split_tag, engine_hash, result, source, seed):
@@ -82,38 +99,30 @@ def _source_of(seed):
 
 def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
                n_sobol: int, n_random: int, seed: int,
-               db_path: str, n_proc=None, lake_start="2025-01-01") -> "RunSummary":
-    """跑批主函数：采样→去重→并发评估→落库→汇总。
+               db_path: str, n_proc=None, lake_start="2025-01-01",
+               tpe_trials: int = 0, rho_threshold: float = 0.8,
+               ei_eps: float = 1e-3) -> RunSummary:
+    """跑批主函数（Plan 3：两阶段搜索 + 收敛自停 + DSR）。
 
-    流程（spec §5.1）：
-    1. sample_search 产 n_sobol+n_random 合法 params（约束裁剪后），budget 截断目标量
-    2. write_snapshot 落 snapshot（upsert，每 run 刷新）
-    3. trial_id_of+trial_exists 过滤已落库组（断点续跑去重）
-    4. eval_batch 并发评估未跑组（Pool, initializer 复用 universe）
-    5. _persist_trial 落库（INSERT OR IGNORE 二次保险）
-    6. RunSummary 汇总（top_inner_calmar 用 inner，信息隔离）
-
-    snapshot_meta: SnapshotMeta（freeze 已算好，避免每 run 重 freeze）。
-    split: HoldoutSplit。budget: 采样目标上限（n_sobol+n_random 受其截断）。
-    返回 RunSummary（status 恒 budget_exhausted，Plan 3 才扩 converged）。
+    阶段一（Plan 2 Sobol 批量并发）：sample_search→去重→eval_batch→落库。
+    阶段二（Plan 3 TPE 序贯，tpe_trials>0）：主进程 freeze→tpe_search（Sobol warm start，
+      inner calmar 目标）→落库 TPE 新 trial（_res_cache 避免双 evaluate）。
+    收敛判据（单 run）：判据④覆盖度 ρ 前置否决 + 判据②EI（TPE 后）；判据①连续K轮 + 跨 run
+      EI 衰减留 Plan 4 daemon（spec §5.2）；判据③预算耗尽=budget_exhausted。
+    DSR（§3.7）：top-1 trial 算 DSR 标注（L2 统计裁决，诚实报告不强选，ADR13）。
     """
     init_db(db_path)
     engine_hash = _engine_hash()
     split_tag = _split_tag(split)
 
-    # 1. 采样（约束裁剪后合法流）；budget 截断目标量（先 sobol 后 random）
+    # === 阶段一：Sobol 批量并发（Plan 2 逻辑） ===
     n_sobol_eff = min(n_sobol, budget)
     n_random_eff = min(n_random, max(0, budget - n_sobol_eff))
     sampled = sample_search(n_sobol=n_sobol_eff, n_random=n_random_eff, seed=seed)
     n_sampled = len(sampled)
-
-    # 2. 落 snapshot（每 run 刷新，upsert）
     with connect(db_path) as conn:
         write_snapshot(conn, snapshot_meta)
-
-    # 3. 去重：过滤已落库组（断点续跑）
-    to_eval = []
-    n_skipped = 0
+    to_eval, n_skipped = [], 0
     with connect(db_path) as conn:
         for p in sampled:
             tid = trial_id_of(p, snapshot_meta.snapshot_hash, seed)
@@ -121,17 +130,10 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
                 n_skipped += 1
             else:
                 to_eval.append(p)
-
-    # 4. 并发评估（空则跳过，避免 Pool 空转）
-    results = []
-    if to_eval:
-        results = eval_batch(to_eval, lake_start=lake_start,
-                             embargo_days=split.embargo_days, n_proc=n_proc)
-
-    # 5. 落库 + 汇总
-    n_new = 0
-    n_failed = 0
-    candidates = []   # (calmar, tid) for top
+    results = eval_batch(to_eval, lake_start=lake_start,
+                         embargo_days=split.embargo_days, n_proc=n_proc) if to_eval else []
+    n_new, n_failed = 0, 0
+    all_evaluated = []   # 累积本 run 评估的 params（算覆盖度 ρ）
     with connect(db_path) as conn:
         for item in results:
             if item is None:
@@ -141,27 +143,69 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
             tid = _persist_trial(conn, params, snapshot_meta, split_tag,
                                  engine_hash, res, _source_of(seed), seed)
             if tid is None:
-                continue   # 竞态下被 IGNORE 吞（罕见）
+                continue
             n_new += 1
-            inner = res["inner"]
-            if feasibility_gate(inner):
-                candidates.append((inner["calmar"], tid))
+            all_evaluated.append(params)
 
-    # top_inner_calmar（信息隔离：只用 inner）
-    top_calmar = 0.0
-    top_tid = ""
+    # === 阶段二：TPE 序贯精化（tpe_trials>0，主进程串行 evaluate） ===
+    tpe_study = None
+    if tpe_trials > 0:
+        universe, _ = freeze(lake_start=lake_start)   # 主进程 freeze（TPE 串行 evaluate 用）
+        _res_cache = {}                                # params→res，避免落库时双 evaluate
+        def _obj(p):
+            res = evaluate(p, universe, split)
+            _res_cache[_params_key(p)] = res
+            return res["inner"].get("calmar", 0.0)
+        all_params, tpe_study = tpe_search(sampled, _obj, n_trials=tpe_trials, seed=seed)
+        # 落库 TPE 新 trial（sampled 之后的是 TPE 新采；缓存命中避免双跑）
+        with connect(db_path) as conn:
+            for p in all_params[len(sampled):]:
+                res = _res_cache.get(_params_key(p)) or evaluate(p, universe, split)
+                tid = _persist_trial(conn, p, snapshot_meta, split_tag,
+                                     engine_hash, res, "tpe", seed)
+                if tid is None:
+                    continue
+                n_new += 1
+                all_evaluated.append(p)
+
+    # === 收敛判据 + 覆盖度 + EI ===
+    rho = grid_coverage(all_evaluated)
+    ei = expected_improvement(tpe_study) if tpe_study is not None else float("inf")
+    converged = False
+    reason = "budget_exhausted"
+    if coverage_gate(rho, rho_threshold):
+        if tpe_study is not None and ei < ei_eps:
+            converged = True
+            reason = "coverage_met+ei_below_eps"
+        # Sobol-only（无 TPE）单 run 不判 EI → budget（判据①跨 run 留 daemon）
+    status = "converged" if converged else "budget_exhausted"
+
+    # === Pareto 前沿 + DSR top-1（从 store 读所有 trial，信息隔离：只用 inner） ===
+    with connect(db_path) as conn:
+        trials_db = read_trials_by_snapshot(conn, snapshot_meta.snapshot_hash)
+    inner_metrics = []
+    for t in trials_db:
+        try:
+            inner_metrics.append((json.loads(t["inner_metrics"]), t))
+        except (TypeError, ValueError):
+            continue
+    frontier_idxs = pareto_frontier([m for m, _ in inner_metrics]) if inner_metrics else []
+    candidates = [(m.get("calmar", 0.0), t) for m, t in inner_metrics if feasibility_gate(m)]
+    top_calmar, top_tid, dsr_top = 0.0, "", 0.0
     if candidates:
-        candidates.sort(reverse=True)
-        top_calmar, top_tid = candidates[0]
+        candidates.sort(reverse=True, key=lambda x: x[0])
+        top_calmar, top_t = candidates[0]
+        top_tid = top_t["trial_id"]
+        top_m = json.loads(top_t["inner_metrics"]) if top_t["inner_metrics"] else {}
+        # DSR top-1：n_trials=本 snapshot trial 数（多重比较），n_obs=top 的交易笔数
+        dsr_top = deflated_sharpe(top_m.get("sharpe", 0.0),
+                                  n_trials=len(trials_db), n_obs=top_m.get("n", 30))
 
     return RunSummary(
-        n_sampled=n_sampled,
-        n_evaluated=len(to_eval),
-        n_new_trials=n_new,
-        n_skipped_dup=n_skipped,
-        n_failed=n_failed,
-        top_inner_calmar=top_calmar,
-        top_trial_id=top_tid,
-        db_path=db_path,
-        snapshot_hash=snapshot_meta.snapshot_hash,
+        n_sampled=n_sampled, n_evaluated=len(to_eval), n_new_trials=n_new,
+        n_skipped_dup=n_skipped, n_failed=n_failed,
+        top_inner_calmar=top_calmar, top_trial_id=top_tid,
+        db_path=db_path, snapshot_hash=snapshot_meta.snapshot_hash,
+        status=status, convergence_reason=reason,
+        rho=rho, ei=ei, frontier_size=len(frontier_idxs), dsr_top=dsr_top,
     )

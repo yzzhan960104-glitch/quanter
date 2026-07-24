@@ -127,3 +127,15 @@ def write_trial(conn, trial_id, params, snapshot_hash, engine_hash, split,
 def trial_exists(conn, trial_id):
     """trial_id 是否已存在（断点续跑/去重用）。"""
     return conn.execute("SELECT 1 FROM trial WHERE trial_id=?", (trial_id,)).fetchone() is not None
+
+
+def read_trials_by_snapshot(conn, snapshot_hash):
+    """读某 snapshot 下所有 trial（Pareto/DSR 计算用，spec §3.4）。
+
+    返回 list[dict]，每项含 trial_id/inner_metrics/outer_metrics/source。
+    inner_metrics/outer_metrics 是 JSON 字符串（write_trial 存的），调用方 json.loads。
+    """
+    rows = conn.execute(
+        "SELECT trial_id, inner_metrics, outer_metrics, source FROM trial WHERE snapshot_hash=?",
+        (snapshot_hash,)).fetchall()
+    return [dict(r) for r in rows]
