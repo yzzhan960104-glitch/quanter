@@ -247,6 +247,25 @@ def cmd_report(args):
         print(f"  {s['snapshot_hash']}: {s['universe_count']}只 {s['date_range']} ({s['created_at']})")
 
 
+def cmd_publish(args):
+    """L5 publish：冠军 trial → experiment DRAFT + outer 去偏报告（spec §5.3，Plan 4 T5）。
+
+    人审下一步：`experiment promote <id> --weight 0.1` → 走既有 _eod 链路。
+    **不自动 promote**（spec §2.2 红线——防过拟合冠军参数直冲实盘）。
+    """
+    from discovery.publish import publish_champion
+    out = publish_champion(args.trial_id, db_path=_db_path())
+    print(f"=== discovery publish：冠军 → experiment DRAFT ===")
+    print(f"experiment_id: {out['experiment_id']}（source=discovery:{out['snapshot_hash'][:8]}）")
+    if out["outer"]:
+        o = out["outer"]
+        print(f"outer 去偏: ann={o.get('ann', 0)*100:.1f}% calmar={o.get('calmar', 0):.2f} "
+              f"max_dd={o.get('max_dd', 0)*100:.1f}% n={o.get('n', 0)}")
+    else:
+        print("outer 去偏: 评估失败（数据缺失，已软降级）")
+    print(f"下一步人审: python -m experiment promote {out['experiment_id']} --weight 0.1")
+
+
 def main(argv=None):
     """cli 入口：子命令派发。argv=None 走 sys.argv（python -m discovery {oos,verify}）。"""
     ap = argparse.ArgumentParser(prog="discovery")
@@ -279,6 +298,10 @@ def main(argv=None):
     ap_c.set_defaults(func=cmd_champions)
     ap_rp = sub.add_parser("report", help="run 历史简报（Plan 3）")
     ap_rp.set_defaults(func=cmd_report)
+    # publish 子命令（Plan 4 Task 5）：daemon 收敛后冠军 → experiment DRAFT 桥
+    ap_p = sub.add_parser("publish", help="L5 冠军→experiment DRAFT（Plan 4 T5）")
+    ap_p.add_argument("trial_id", help="冠军 trial id（champions 报的 top / daemon top_trial_id）")
+    ap_p.set_defaults(func=cmd_publish)
     # daemon 子命令（Plan 4 Task 4）：schtasks @02:00 触发 run_daemon.bat → 本命令
     ap_d = sub.add_parser("daemon", help="L4 守护 daemon 夜跑（Plan 4）")
     ap_d.add_argument("--budget", type=int, default=4, help="时间预算小时（默认 4h）")

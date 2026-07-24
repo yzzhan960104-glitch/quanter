@@ -181,6 +181,12 @@ def _notify_champion(summary, k, K, converged_cross, outer):
 def run_daemon(snapshot_meta, split, db_path, *, notify_fn=None, eval_outer_fn=None, **kwargs):
     """生产入口：run_daemon_cycle 预装真实 notify/outer（供 cli cmd_daemon 调）。
 
+    ⚠️ **关键前置（生产入口必读）**：调用本函数前必须先 `build_default_manager()` 装钉钉通道
+    （读 .env 的 DINGTALK_WEBHOOK/SECRET 等）。run_daemon 内部 _notify_champion 走
+    NotificationManager.get_default() 单例，但首次 _channels=[]（get_default 懒构造不读 .env）
+    → 告警走"无通道"软降级（仅 debug 日志，钉钉收不到，夜跑告警静默丢失）。cli cmd_daemon
+    已在调本函数前显式 build_default_manager()——其他生产入口（如 cron 直调）须照此办理。
+
     与 run_daemon_cycle（测试用纯函数）分离的设计意图：
       - run_daemon_cycle 保持纯函数语义（notify/outer 默认 noop），测试直接注入 mock
         验注入语义，不触达真实钉钉/data_lake（spec §6.2 信息隔离可单测）。

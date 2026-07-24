@@ -20,6 +20,8 @@ from discovery.dsr import deflated_sharpe
 from discovery.search import tpe_search, expected_improvement
 # Plan 4 新增：L4 daemon 生产入口（cli cmd_daemon 调）
 from discovery.daemon import run_daemon, run_daemon_cycle
+# Plan 4 T5：L5 publish 冠军→experiment DRAFT 桥（cli cmd_publish 调）
+from discovery.publish import publish_champion
 
 __all__ = ["freeze", "SnapshotMeta", "snapshot_hash", "holdout_split", "Segment",
            "HoldoutSplit", "evaluate", "run_full_scan", "segment_metrics", "metrics_of",
@@ -33,4 +35,6 @@ __all__ = ["freeze", "SnapshotMeta", "snapshot_hash", "holdout_split", "Segment"
            "grid_coverage", "coverage_gate", "deflated_sharpe",
            "tpe_search", "expected_improvement",
            # Plan 4
-           "run_daemon", "run_daemon_cycle"]
+           "run_daemon", "run_daemon_cycle",
+           # Plan 4 T5
+           "publish_champion"]

@@ -47,11 +47,16 @@ class ActiveExperiment:
     """resolver 返回给 scan 的精简视图（design §4.1 resolve_active 契约）。
 
     Why 精简：scan 只需知道「用哪个策略 + 什么参数 + 多大权重」，不需版本/审计元信息。
+    activated_at（Plan 4 T5 加，additive 末尾默认 None）：上线时刻 ISO 时间戳，供 T6
+    「上线满 ≥5 天才进实盘 budget」的 fail-closed 影子期硬闸读取。additive 不破坏
+    既有字段顺序，trading/engine.py::_eod 等调用方按 experiment_id/strategy_name/params/
+    weight 读不受影响。
     """
     experiment_id: str
     strategy_name: str
     params: dict
     weight: float
+    activated_at: Optional[str] = None   # Plan 4：上线时刻（≥5天硬闸算影子期用，additive）
 
 
 @dataclass
