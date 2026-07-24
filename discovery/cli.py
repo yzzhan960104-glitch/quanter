@@ -111,6 +111,34 @@ def cmd_verify(args):
           f"（去偏幅度见 spec §1.4）")
 
 
+def cmd_run(args):
+    """并发搜索跑批：采样→Pool→落库（spec §5.1，Plan 2 L2+L3 基础）。
+
+    串起 freeze→holdout_split→run_search（内含 sample_search→eval_batch→store）。
+    主进程 freeze 一次拿 SnapshotMeta（snapshot_hash 依赖真实 universe_count/date_range，
+    必须真 freeze 一次）；universe 由子进程 initializer 各自 freeze 复用（不随 params pickle）。
+    """
+    from discovery.runner import run_search
+    universe, meta = freeze(args.lake_start)
+    split = holdout_split(args.embargo)
+    print(f"=== discovery run：并发搜索（snapshot={meta.snapshot_hash}）===")
+    print(f"snapshot: {meta.universe_count} 只 | {meta.date_range} | hash {meta.snapshot_hash}")
+    print(f"配置: budget={args.budget} sobol={args.n_sobol} random={args.n_random} "
+          f"proc={args.n_proc} seed={args.seed} embargo={args.embargo}")
+    summary = run_search(meta, split, budget=args.budget, n_sobol=args.n_sobol,
+                         n_random=args.n_random, seed=args.seed, db_path=_db_path(),
+                         n_proc=args.n_proc, lake_start=args.lake_start)
+    print(f"--- RunSummary ---")
+    print(f"n_sampled={summary.n_sampled} n_evaluated={summary.n_evaluated} "
+          f"n_new_trials={summary.n_new_trials} n_skipped_dup={summary.n_skipped_dup} "
+          f"n_failed={summary.n_failed}")
+    print(f"top_inner_calmar={summary.top_inner_calmar:.2f} "
+          f"top_trial_id={summary.top_trial_id} status={summary.status}")
+    print(f"db={summary.db_path}")
+    print(f"信息隔离: 汇总只用 inner calmar（搜索不反馈 outer，spec §6.2）；"
+          f"Plan 2 无收敛判据（Pareto/覆盖度④留 Plan 3）")
+
+
 def main(argv=None):
     """cli 入口：子命令派发。argv=None 走 sys.argv（python -m discovery {oos,verify}）。"""
     ap = argparse.ArgumentParser(prog="discovery")
@@ -123,6 +151,17 @@ def main(argv=None):
     ap_v.add_argument("--perturb", type=float, default=0.15, help="邻域扰动幅度（默认 15%%）")
     ap_v.add_argument("--n-samples", type=int, default=5, dest="n_samples")
     ap_v.set_defaults(func=cmd_verify)
+    ap_r = sub.add_parser("run", help="并发搜索跑批（L2+L3 基础，Plan 2）")
+    ap_r.add_argument("--budget", type=int, default=10, help="采样目标上限（最多跑 N 组新 trial）")
+    ap_r.add_argument("--n-sobol", type=int, default=5, dest="n_sobol", help="Sobol 初始覆盖组数")
+    ap_r.add_argument("--n-random", type=int, default=5, dest="n_random", help="random 补充组数")
+    ap_r.add_argument("--embargo", type=int, default=5, help="inner→outer embargo 天数")
+    ap_r.add_argument("--n-proc", type=int, default=None, dest="n_proc",
+                     help="进程数（默认核数-2）")
+    ap_r.add_argument("--seed", type=int, default=42, help="采样种子（可复现）")
+    ap_r.add_argument("--lake-start", type=str, default="2025-01-01", dest="lake_start",
+                     help="universe 加载起始日")
+    ap_r.set_defaults(func=cmd_run)
     args = ap.parse_args(argv)
     args.func(args)
 
