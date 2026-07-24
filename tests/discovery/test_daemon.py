@@ -94,11 +94,52 @@ def test_daemon_first_run_k_zero_when_no_latest(tmp_path):
     assert out["converged_cross"] is False
 
 
+def test_daemon_alerts_on_new_champion(tmp_path, monkeypatch):
+    """有冠军 → notify_fn 被调（验注入语义：消息含 summary/k/converged_cross/outer）。
+
+    本测试不触达真实钉钉（notify_fn 注入 mock dict 收集器），只验 T2 的注入点把
+    正确字段透传给了告警回调——T3 的 _notify_champion 真实实现由 run_daemon 预装。
+    """
+    from discovery.daemon import run_daemon_cycle
+    from discovery.snapshot import SnapshotMeta
+    from discovery.store import init_db
+    db = str(tmp_path / "t.db"); init_db(db)
+    meta = SnapshotMeta("snap1", "u", 10, "d", "2025-01-01"); split = holdout_split()
+    rs_fn, _ = _make_run_search_fn([_fake_summary("r1", 3)], db, "snap1")
+    sent = {}
+    def _notify(**kw): sent.update(kw)
+    run_daemon_cycle(meta, split, db, run_search_fn=rs_fn, notify_fn=_notify)
+    assert "summary" in sent and sent["k"] == 0
+    assert sent["converged_cross"] is False
+
+
+def test_daemon_outer_no_feedback(tmp_path, monkeypatch):
+    """outer 去偏结果只进返回 dict，不回写 run_search 排序（信息隔离红线 spec §6.2）。
+
+    验证两件事：
+      ① eval_outer_fn 被调，返回值原样出现在返回 dict['outer']（供报告/告警消费）；
+      ② run_search_fn 收到的调用参数绝不含 outer（run_search 签名无 outer 入参，
+         物理上不可能把 outer 回写进排序——这是 inner/outer 隔离的硬保证）。
+    """
+    from discovery.daemon import run_daemon_cycle
+    from discovery.snapshot import SnapshotMeta
+    from discovery.store import init_db
+    db = str(tmp_path / "t.db"); init_db(db)
+    meta = SnapshotMeta("snap1", "u", 10, "d", "2025-01-01"); split = holdout_split()
+    rs_calls = []
+    def _rs(*a, **kw): rs_calls.append(kw); return _fake_summary("r1", 3)
+    def _eval(tid): return {"ann": 0.5, "calmar": 2.0}
+    out = run_daemon_cycle(meta, split, db, run_search_fn=_rs, eval_outer_fn=_eval)
+    assert out["outer"] == {"ann": 0.5, "calmar": 2.0}     # outer 进返回 dict
+    # run_search 收到的 kwargs 不含 outer（信息隔离：outer 永不回写 run_search 排序）
+    assert all("outer" not in kw for kw in rs_calls)
+
+
 def test_daemon_early_exit_when_converged(tmp_path):
     """latest.status==converged → 早退，不调 run_search。"""
     from discovery.daemon import run_daemon_cycle
     from discovery.snapshot import SnapshotMeta
-    from discovery.store import init_db, connect, write_search_run, write_daemon_state
+    from discovery.store import init_db, connect, write_search_run
     db = str(tmp_path / "t.db")
     init_db(db)
     meta = SnapshotMeta("snap1", "u", 10, "d", "2025-01-01")

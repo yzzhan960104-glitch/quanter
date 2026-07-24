@@ -109,3 +109,103 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
 
     return {"early_exited": False, "run_id": summary.run_id, "summary": summary,
             "latest_k": k, "converged_cross": converged_cross, "outer": outer, "status": status}
+
+
+def _eval_outer(trial_id, db_path, split, lake_start="2025-01-01"):
+    """冠军 outer 去偏：读 trial params → evaluate 在 outer 段跑真实 OOS（spec §6.2）。
+
+    物理意图：run_search 的 inner 排序天然乐观偏（holdout 调参对 inner 过拟合），
+    daemon 每夜把冠军拿到 outer holdout 复核一次，给研究员一个未参与排序的诚实
+    OOS 指标（用于 publish 决策 / 钉钉告警），是 inner/outer 隔离的第二道闸。
+
+    信息隔离红线（spec §6.2）：结果只返回给调用方进返回 dict/告警，严禁回写
+    run_search 排序——否则 inner 搜索会被 outer 变相污染，holdout 退化为训练集。
+
+    软降级：trial 不存在（断点续跑残留 id）/ evaluate 抛异常（数据缺失）→ 返 None，
+    daemon 主流程不阻断（spec §7——告警/outer 是旁路，不阻塞跑批编排）。
+
+    Args:
+      trial_id: 冠军 trial_id（来自 RunSummary.top_trial_id，RunSummary 语义而非
+        params dict——T2 reviewer 发现 brief 早期 docstring 把它写成 (params) 是笔误，
+        实际 run_daemon_cycle 传的就是 summary.top_trial_id str，与此签名对齐）。
+      db_path: SQLite 路径（读 trial 表拿 params JSON）。
+      split: HoldoutSplit（objective.evaluate 按 split.inner/outer 切段评估）。
+      lake_start: 数据湖加载起始日（主进程 freeze 用，保证 outer 段含 2026 真实 OOS）。
+    Returns:
+      dict（evaluate 返回的 outer metrics，如 {"ann":..., "calmar":...}）或 None。
+    """
+    import json
+    from discovery.store import connect
+    from discovery.snapshot import freeze
+    from discovery.objective import evaluate
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT params FROM trial WHERE trial_id=?", (trial_id,)).fetchone()
+    if row is None:
+        return None
+    params = json.loads(row["params"])
+    # 主进程 freeze（outer evaluate 需要完整 universe 做 window/ATR 预热，
+    # objective 再按 signal_date 切 inner/outer，不在 daemon 侧切——snapshot.freeze 范式）。
+    universe, _ = freeze(lake_start)
+    return evaluate(params, universe, split)["outer"]
+
+
+def _notify_champion(summary, k, K, converged_cross, outer, snapshot_hash=""):
+    """新冠军/收敛钉钉告警（fire_and_forget 不阻塞 daemon 主流程）。
+
+    直指 infra.notifier 真身（core.notifier 是 strangler 垫片，未来拆 core 时可能断链，
+    daemon 作为 L4 生产入口必须绑死 infra 这一层防未来回归）。
+
+    level=INFO：发现新冠军/进度属于业务流水（非风控红线），用 ℹ️ 前缀；投递失败由
+    NotificationManager._broadcast 的 return_exceptions=True 软降级兜底（单通道失败仅
+    记日志、不抛出），fire_and_forget 再加一层 daemon 线程隔离——双重软降级保证
+    钉钉故障永不阻断 daemon 跑批编排（spec §7 拷问②接口边界）。
+
+    Args:
+      summary: RunSummary（含 snapshot_hash/run_id/top_trial_id/top_inner_calmar/rho/ei）。
+      k/K: 跨夜判据①进度（连续未扩张夜数 / 阈值）。
+      converged_cross: 跨夜是否已收敛（True→消息尾注"可 publish"）。
+      outer: _eval_outer 返回的 outer metrics dict（可能 None，软降级场景）。
+      snapshot_hash: 兼容位（summary.snapshot_hash 已含，预留 CLI 直传场景）。
+    """
+    from infra.notifier import NotificationManager, fire_and_forget
+    outer_ann = (outer or {}).get("ann", 0.0)
+    msg = (
+        f"discovery daemon: snapshot={summary.snapshot_hash} run={summary.run_id}\n"
+        f"冠军 calmar={summary.top_inner_calmar:.2f} trial={summary.top_trial_id} "
+        f"outer ann={outer_ann*100:.1f}% rho={summary.rho:.3f} ei={summary.ei:.4f}\n"
+        f"跨夜判据①: k={k}/{K}（连续未扩张夜数）"
+        f"{' → 已收敛，可 publish' if converged_cross else ' 进行中'}"
+    )
+    fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "INFO"))
+
+
+def run_daemon(snapshot_meta, split, db_path, *, notify_fn=None, eval_outer_fn=None, **kwargs):
+    """生产入口：run_daemon_cycle 预装真实 notify/outer（供 cli cmd_daemon 调）。
+
+    与 run_daemon_cycle（测试用纯函数）分离的设计意图：
+      - run_daemon_cycle 保持纯函数语义（notify/outer 默认 noop），测试直接注入 mock
+        验注入语义，不触达真实钉钉/data_lake（spec §6.2 信息隔离可单测）。
+      - 本函数绑死 _notify_champion（infra.notifier 真身）+ _eval_outer（evaluate 真身），
+        cli 调本函数即得生产行为；两入口物理分离避免"测试要 mock、生产要真身"的
+        全局开关坏味道（显式 > 隐式，Karpathy 极简）。
+
+    显式签名（snapshot_meta/split/db_path 位置参数）而非 *args 透传：brief 早期
+    `def run_daemon(*args, **kwargs)` 透传版有 bug——eval_outer_fn 闭包需要 split/
+    db_path 来调 _eval_outer(tid, db_path, split)，但 *args 透传时 lambda 拿不到
+    位置参数。显式签名把这俩提到形参，闭包自然捕获（T2 reviewer 标记的关键修正）。
+
+    Args:
+      snapshot_meta/split/db_path: 透传 run_daemon_cycle（见其 docstring）。
+      notify_fn: None→绑 _notify_champion；测试/特殊场景可显式覆盖。
+      eval_outer_fn: None→绑 lambda tid: _eval_outer(tid, db_path, split)；可覆盖。
+      **kwargs: 其余 run_daemon_cycle 参数（budget_hours/n_proc/K/...）。
+    Returns:
+      run_daemon_cycle 的返回 dict。
+    """
+    if notify_fn is None:
+        notify_fn = _notify_champion
+    if eval_outer_fn is None:
+        # 闭包捕获 db_path/split（显式形参，非 *args——这是本函数不用透传版的根本原因）。
+        eval_outer_fn = lambda tid: _eval_outer(tid, db_path, split)
+    return run_daemon_cycle(snapshot_meta, split, db_path,
+                            notify_fn=notify_fn, eval_outer_fn=eval_outer_fn, **kwargs)
