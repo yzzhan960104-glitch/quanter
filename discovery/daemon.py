@@ -67,9 +67,12 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
     if run_search_fn is None:
         from discovery.runner import run_search as run_search_fn
     n_budget = estimate_budget(budget_hours, n_proc)
+    # daemon 轮次（seed 派生用）：每次夜跑换 seed，否则相同 seed+snapshot 产相同参数序列
+    # → trial_id 全去重 → 无新探索（rho 永远 0，伪收敛）。run_count 上移到 run_search 前。
+    run_count = (latest["daemon_run_count"] + 1 if latest else 1)
     summary = run_search_fn(
         snapshot_meta, split, budget=n_budget, n_sobol=min(5, n_budget),
-        n_random=min(5, max(0, n_budget - 5)), seed=42, db_path=db_path,
+        n_random=min(5, max(0, n_budget - 5)), seed=42 + run_count, db_path=db_path,
         n_proc=n_proc, lake_start=lake_start,
         tpe_trials=tpe_trials, rho_threshold=rho_threshold)
 
@@ -87,7 +90,7 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
     # 4. 写回跨夜状态（UPDATE 本次 run_id 行：run_search 收尾已 write_search_run 落了初值 0，
     #    此处覆写 daemon 算完的最终 k/daemon_run_count/status，使次夜 read_latest 读到正确态）。
     status = "converged" if converged_cross else summary.status
-    daemon_run_count = (latest["daemon_run_count"] + 1 if latest else 1)
+    daemon_run_count = run_count   # 上移到 run_search 前做 seed 派生（避免重跑去重）
     with connect(db_path) as conn:
         write_daemon_state(conn, run_id=summary.run_id, frontier_size=summary.frontier_size,
                            k_rounds_no_expansion=k, daemon_run_count=daemon_run_count,
