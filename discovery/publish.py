@@ -32,7 +32,7 @@ def publish_champion(trial_id, db_path=DEFAULT_DB_PATH, exp_db_path=None, *, lak
     幂等性：experiment_id 含 trial_id[:6] + 日期，同 trial 同日重复 publish 会撞
     UNIQUE(strategy_name, version) → create_version 抛 ValueError（调用方感知重复）。
     """
-    from experiment.store import create_version, _DEFAULT_DB
+    from experiment.store import create_version, _DEFAULT_DB, init_db as init_exp_db
     from experiment.models import ExperimentVersion, ExperimentStatus
     from discovery.snapshot import freeze
     from discovery.split import holdout_split
@@ -77,6 +77,8 @@ def publish_champion(trial_id, db_path=DEFAULT_DB_PATH, exp_db_path=None, *, lak
         weight=0.0, status=ExperimentStatus.DRAFT, version=1,
         source=f"discovery:{snapshot_hash[:8]}", note=note,
         created_at=datetime.now().isoformat(timespec="seconds"))
+    # 确保 experiment.db 建表（幂等；首次 publish 前可能从未 init，create_version 会报 no such table）
+    init_exp_db(exp_db)
     create_version(exp_db, version, operator="discovery:publish")
 
     return {"experiment_id": experiment_id, "outer": outer,
