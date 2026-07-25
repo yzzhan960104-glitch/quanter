@@ -2,7 +2,7 @@
 """E2E 残留端口清理（Windows 闭环）。
 
 Why 存在：webapp-testing 的 with_server.py 在 Windows 停服时可能 kill 不掉 vite/uvicorn
-子进程，残留进程占 5173-5177/8000 → 下次 `uvicorn server.main:app` 报
+子进程，残留进程占 5173-5177/8000 → 下次 `uvicorn presentation.server.main:app` 报
 `[WinError 10013] 访问套接字权限不允许`（曾两次踩坑）。本脚本在 E2E 跑完
 （with_server 退出后）调，清理残留 + socket bind 实测端口可绑（netstat/excludedportrange
 都滞后于 winnat 动态保留状态，socket bind 实测最准）。

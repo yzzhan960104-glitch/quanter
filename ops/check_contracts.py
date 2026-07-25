@@ -80,7 +80,7 @@ def parse_openapi_endpoints(spec: dict) -> Set[Tuple[str, str]]:
 def main(backend_spec: dict, ts_files: Iterable[Path]) -> int:
     """比对后端 openapi 端点集与前端 ts 调用集，返回 exit code。
 
-    真相源：backend_spec（openapi dict，CLI 入口进程内取自 server.main:app.openapi()）。
+    真相源：backend_spec（openapi dict，CLI 入口进程内取自 presentation.server.main:app.openapi()）。
     返回码：
       0 —— 前端所有调用都在后端端点集内（一致，静默放行）
       1 —— 漂移：存在「前端调用但后端无」的端点，stderr 中文逐条列出
@@ -114,7 +114,7 @@ def main(backend_spec: dict, ts_files: Iterable[Path]) -> int:
         print(
             f"[契约护栏] 发现 {len(drift)} 处前后端契约漂移（前端调用但后端 openapi 无此端点）：\n"
             f"{lines}\n"
-            f"  修复：核对 web/src/api/*.ts 的请求 URL/method 与 server/api/v1/*.py 路由装饰器，"
+            f"  修复：核对 web/src/api/*.ts 的请求 URL/method 与 presentation/server/api/v1/*.py 路由装饰器，"
             f"使端点路径与方法对齐（注意路径参数名差异不影响，护栏已归一比对）。",
             file=sys.stderr,
         )

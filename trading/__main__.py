@@ -115,7 +115,7 @@ def _shadow_gate():
         历史脏数据 activated_at 缺失比误放行一个未观测满期的新实验代价小得多）。
 
     通道装配（关键）：trading/__main__ 是独立常驻进程（不寄生 server lifespan），
-    grep 确认 server/main.py、discovery/cli.py 均在启动期显式 build_default_manager()
+    grep 确认 presentation/server/main.py、discovery/cli.py 均在启动期显式 build_default_manager()
     装钉钉通道，但本入口历史从未装过。本函数在调 notify_risk_event 前补装——否则
     拒切 LIVE 的 CRITICAL 告警会因无通道走软降级静默丢失，sys.exit(2) 仍生效但研究
     员不知为何被拒。build_default_manager 幂等，重复调用安全。

@@ -26,7 +26,7 @@ Why 独立进程是硬约束：
 - 若 engine 与 server 同进程：engine 在 pre_open 注入的 _DYNAMIC 会污染 server 的
   手动下单路径（Cockpit/前端），导致 server 手动下单越过静态 env 白名单（前视污染），
   破坏「server 行为与改造前完全一致」的向后兼容红线。
-- 因此 ``server/main.py`` 的 lifespan **不应** import 本模块、不应构造 TradingEngine。
+- 因此 ``presentation/server/main.py`` 的 lifespan **不应** import 本模块、不应构造 TradingEngine。
   入口唯一在 ``trading/__main__.py``（Task 10）。
 
 ============================================================================

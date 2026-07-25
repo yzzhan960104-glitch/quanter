@@ -17,6 +17,8 @@ Quanter 是一套面向 **A 股** 的量化研究平台,以**颈线法形态学(
 设计哲学遵循「**显式实现、拒绝黑盒**」:核心指标(形态识别、盈亏比、ATR、筹码分布等)均以平铺直叙的数学运算实现;策略、撮合、状态机均配像素级中文注释。
 
 > **架构演进注**:本平台早期以 `caisen/` 门面包组织(见 `2026-07-15-backend-layering-refactor-design.md`)。`2026-07-16 step4-execution-layer` 起执行链重组,`execution/` 包解散,caisen 门面在 Task 1.3 退役——回测基础设施归 `backtest/`、执行编排归 `trading/`、券商网关归 `broker/`、形态执行链(ExecutionEngine)删除。当前 README 反映 `2026-07-22 layer2-decoupling` 之后的真实分层。
+>
+> **T7 架构治理(2026-07-26)**:core/factors/viz 三相死代码删除;server/core/ 正名 server/http/(消除 core 命名歧义);web/+server/ 收编进 presentation/ 伞盖(README §2 接口层语义落地文件夹)。详见 `docs/superpowers/specs/2026-07-26-arch-t7-subtraction-and-presentation-design.md`。
 
 ---
 
@@ -26,68 +28,38 @@ Quanter 是一套面向 **A 股** 的量化研究平台,以**颈线法形态学(
 
 ```
 quanter/
-├─ 接口层 Presentation
-│  ├─ web/                 前端 6 视图(CaisenScreen/ParamLab/Dashboard/LiveCockpit/DataLake/Review)
-│  ├─ server/api/v1/       HTTP 路由(caisen·data·macro·review·trading·training·logs + sse)
-│  └─ server/services/     应用服务(编排用例,聚合各域)
+├─ 接口层 presentation/         web/+server/ 收编(README §2 语义落地)
+│  ├─ web/                      前端 6 视图(CaisenScreen/ParamLab/Dashboard/LiveCockpit/DataLake/Review)
+│  └─ server/                   FastAPI 应用
+│     ├─ api/v1/                HTTP 路由(caisen·data·macro·review·trading·training·logs + sse)
+│     ├─ services/              应用服务(编排用例,聚合各域)
+│     ├─ schemas/               请求/响应 DTO
+│     ├─ http/                  HTTP 运行时基建(auth/config/_responses,原 server/core/ 正名)
+│     └─ main.py                app 装配
 │
-├─ 执行编排层 trading/      实盘执行引擎 + 状态机
-│  ├─ compute/             纯函数决策(plan/exit/stop/risk/reconcile/breaker/types)
-│  ├─ io/                  网关 IO 封装(orders/positions/quotes/breaker)
-│  ├─ orchestrate/         盘中编排引擎
-│  ├─ state/ types/        订单状态机 + 类型
-│  ├─ engine.py            ExecutionEngine 主循环
-│  └─ qmt_gateway.py       ⚠ strangler 垫片(re-export 自 broker.qmt,真身已迁出)
-│
-├─ 网关层 broker/           券商网关抽象(Layer2 阶段3 从 trading 剥离)
-│  ├─ base.py              BaseExecutionGateway ABC + OrderResult
-│  ├─ mock.py              MockExecutionGateway(实盘契约的 Mock·交易求稳)
-│  ├─ qmt.py               QmtExecutionGateway 真身(xtquant 异步实现)
-│  └─ qmt_quote.py         xtdata 行情封装(驼峰归一 + 涨跌停注入)
-│
-├─ 策略层 strategies/       纯叶子(零下游依赖)
-│  ├─ base.py              Strategy Protocol + TRADE_REQUIRED_KEYS
-│  ├─ registry.py signal.py
-│  └─ neckline/            颈线法本体(method_v0 + backtest + schema)
-│
-├─ 回测副线 backtest/       策略中立回测器(不碰交易编排/券商)
-│  ├─ replay.py            驱动器(依赖 strategies.base.Strategy)
-│  ├─ worker/scheduler/tasks_db/runs   异步回测任务队列 + SQLite
-│  ├─ optimize/            参数训练(training_loop/analyzer/loops_db/dingtalk)
-│  └─ mock_broker.py       MockBroker(回测撮合·回测求变,与 broker.mock 刻意分层)
-│
-├─ 发现副线 discovery/      参数发现引擎(Plan 1-4 · L0-L5 闭环)
-│  ├─ snapshot/split/objective/judging   Plan1 快照+holdout OOS+裁判
-│  ├─ constraints/sampler/worker/runner  Plan2 约束+采样+并发+断点续跑
-│  ├─ pareto/coverage/dsr/search         Plan3 帕累托+覆盖门+DSR+TPE
-│  └─ daemon/publish/cli/schtasks        Plan4 daemon 生产入口 + 冠军 publish→experiment
-│
-├─ 实验中心 experiment/     实盘版本配置中心(零反向依赖)
-│  ├─ models.py            ExperimentStatus/Version/AuditLog/ActiveExperiment
-│  └─ resolver.py          resolve_active() 发生效策略+权重
-│
+├─ 执行编排层 trading/          实盘执行引擎 + 状态机(compute/io/orchestrate/state/types + engine)
+├─ 网关层 broker/               券商网关抽象(base/mock/qmt/qmt_quote)
+├─ 策略层 strategies/           纯叶子(base/registry/signal + neckline/)
+├─ 回测副线 backtest/           策略中立回测器(replay/worker/scheduler/optimize/mock_broker)
+├─ 发现副线 discovery/          参数发现引擎(Plan 1-4 · L0-L5 闭环)
+├─ 实验中心 experiment/         实盘版本配置中心(models/resolver/store)
 ├─ 数据层
-│  ├─ data/                取数(clients/fetcher/cleaner/lake_reader/lake_fetcher/price_loader,只放 .py)
-│  ├─ data_lake/           parquet 存储(只放数据 + .syncing 状态,禁放 .py)
-│  └─ config/              按层拆配置(8 子文件包,dotenv 包入口)
-│
-├─ 横切
-│  ├─ infra/               通知(notifier)+ LLM(llm/glm)
-│  ├─ factors/             纯计算因子(atr)
-│  ├─ viz/                 可视化
-│  └─ broadcast/           行情播报(brief/push/name_resolver)
-│
-└─ core/                   ⚠ strangler 垫片收尾中(notifier/indicator 已迁 infra/factors,垫片路径仍被全项目引用;macro_regime/宏观 CTA 已于 2026-07 整体下线删除)
+│  ├─ data/                     取数(clients/fetcher/cleaner/lake_reader,只放 .py)
+│  ├─ data_lake/                parquet 存储(只放数据,禁放 .py,不入库)
+│  └─ config/                   按层拆配置(8 子文件包)
+└─ 横切
+   ├─ infra/                    通知(notifier)+ LLM(llm/glm)
+   └─ broadcast/                行情播报(brief/push/name_resolver)
 ```
 
 **依赖铁律(实证)**:
 
-- `strategies / factors / viz / infra / experiment / config` 为**纯叶子**(零下游扇出),是健康的底层/横切。
+- `strategies / infra / experiment / config` 为**纯叶子**(零下游扇出),是健康的底层/横切。
 - `backtest → strategies / trading.compute / data`(单向,不碰 broker/engine)——已实证合规。
 - `discovery → strategies / experiment / infra`(发现链自洽内聚)。
 - `trading → broker`(执行层调网关,正向);`broker → trading.compute.types`(**疑似反向**,Layer2 follow-up #4c 类型迁移遗留,待收尾)。
-- `trading → server.services`(5 处,执行层倒挂接口层);`trading/protocols.py` 定义了 `ExecutionExecutor` Protocol 拟反转此依赖,但**当前为孤儿契约、未接通**——已记入架构债。
-- `server` 经 services 扇出 7 个域(原 caisen 门面收敛已随退役消失)。
+- `trading → presentation.server.services`(5 处,执行层倒挂接口层);`trading/protocols.py` 定义了 `ExecutionExecutor` Protocol 拟反转此依赖,但**当前为孤儿契约、未接通**——已记入架构债。
+- `presentation.server` 经 services 扇出 7 个域(原 caisen 门面收敛已随退役消失)。
 
 > 详细跨包依赖矩阵与层次违规清单见 `docs/superpowers/specs/2026-07-22-layer2-decoupling-design.md`。
 
@@ -106,7 +78,7 @@ pip install -r requirements.txt
 ### 3.2 前端
 
 ```bash
-cd web && npm install
+cd presentation/web && npm install
 ```
 
 ---
@@ -177,7 +149,7 @@ uvicorn presentation.server.main:app --reload
 ### 6.2 前端(6 视图)
 
 ```bash
-cd web && npm run dev
+cd presentation/web && npm run dev
 ```
 
 - `/caisen` —— **形态扫描**:颈线候选 + 颈线/盈亏比/止损可视化。

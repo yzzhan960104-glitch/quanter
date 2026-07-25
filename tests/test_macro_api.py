@@ -14,7 +14,7 @@
       1) /macro/sector/flow 在无 sector 湖时返回 {sectors:[], pool:[]} 空结构不抛；
       2) /macro/sector/flow 活跃股池走内存湖 reader.symbols()（零 IO，不重读 daily）。
 
-    Why TestClient 复用 server.main:app 单例：DataLakeReader 单例 monkeypatch
+    Why TestClient 复用 presentation.server.main:app 单例：DataLakeReader 单例 monkeypatch
     重置 _instance 与 _lakes，模拟「湖未载入」的离线场景以验证降级契约。
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def client():
-    """构造 FastAPI TestClient（复用 server.main:app 单例）。
+    """构造 FastAPI TestClient（复用 presentation.server.main:app 单例）。
 
     Why 用 import 后再构造：server.main 模块级 app 已注册全部路由，TestClient
     生命周期内即可触发 lifespan（含 StrategyLoader.scan、多湖 load），CI 无数据湖

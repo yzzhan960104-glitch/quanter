@@ -96,7 +96,7 @@ _BRIEF_LAKES = ("index_daily", "ths_daily", "moneyflow", "dragon_list")
 
 
 def _load_reader() -> DataLakeReader:
-    """仅 load 播报用到的 4 湖（复用 server/main.py:78 load 模式，但收窄到 _BRIEF_LAKES）。
+    """仅 load 播报用到的 4 湖（复用 presentation/server/main.py:78 load 模式，但收窄到 _BRIEF_LAKES）。
 
     Why 不全量：LAKE_CONFIG['lakes'] 含 a_shares_daily（9M 行/408MB），market 播报用不到，
     load 它纯浪费内存+启动时间。parquet 缺失则 lake_reader 内部离线降级（不阻断）。

@@ -12,11 +12,12 @@
 
 ## Global Constraints
 
+- **Python 解释器(关键,影响所有验证)**:所有 pytest 与 `python -c` 必须用 `.venv310/Scripts/python.exe`。系统 python(`/c/Users/yzzhan/AppData/Local/Programs/Python/Python310/python`)缺项目依赖,裸 `pytest`/`python` 会产 78 个 collection error 的误判。规范写法:`.venv310/Scripts/python.exe -m pytest ...` 与 `.venv310/Scripts/python.exe -c "..."`。**本计划下文所有出现的 `pytest` 与 `python -c` 均默认指 venv310 解释器,执行时必须替换。**
 - **分支**:在 `refactor/arch-t7-2026-07` 上执行(已建好,spec commit `6f613c45` 在此)。严禁动 master。
 - **中文协议**(CLAUDE.md):所有 commit message、新增/修改注释用专业中文。
 - **显式实现**(CLAUDE.md):不引入新依赖,纯结构搬运。
 - **git mv 保历史**:所有目录/文件移动用 `git mv`,非 cp+rm。
-- **TDD 适配**:这是重构不是功能开发,无新测试。"测试先行"= 每个 Task 先跑当前 pytest 建基线绿,改完再跑确认仍绿 + grep 结构断言。
+- **TDD 适配**:这是重构不是功能开发,无新测试。"测试先行"= 每个 Task 先跑当前 pytest 建基线,改完再跑确认无新增失败 + grep 结构断言。
 - **commit 粒度**:每个 Task 末尾一个 commit,信息含"Co-Authored-By: Claude <noreply@anthropic.com>"尾签。
 - **平台**:Git Bash(POSIX sh),路径用正斜杠,sed 用 `-i`(Git Bash 支持)。
 - **不 push**:本计划只本地 commit,不 push、不开 PR(等用户发话)。
