@@ -142,10 +142,10 @@ DINGTALK_SECRET=
 
 ```bash
 # 全量同步(quick/slow 批)
-python scripts/sync_all_tushare.py
+python data/tools/sync_all_tushare.py
 
 # 单数据集
-python scripts/sync_tushare.py <dataset_key>
+python data/tools/sync_tushare.py <dataset_key>
 ```
 
 数据集资产元信息(source / market / granularity / script / freshness)的**单一真相源** = `config/registry.py` 的 `DATASET_REGISTRY` + `TUSHARE_DATASETS`,前端 `DataLakeView` 经 `/api/v1/data/datasets` 反射本表。
@@ -153,9 +153,9 @@ python scripts/sync_tushare.py <dataset_key>
 辅助数据流(历史保留):
 
 ```bash
-python scripts/sync_macro_credit.py    # 宏观信贷(CreditRegime 输入)
-python scripts/sync_sector_daily.py    # 板块 + 活跃股日线
-python scripts/sync_jqdata_1min.py     # JQData 分钟级(配额双机制防封)
+python data/tools/sync_macro_credit.py    # 宏观信贷(CreditRegime 输入)
+python data/tools/sync_sector_daily.py    # 板块 + 活跃股日线
+python data/tools/sync_jqdata_1min.py     # JQData 分钟级(配额双机制防封)
 python scripts/sync_binance_vision.py  # (可选) 加密沙盒,7x24 极端市场测试
 ```
 

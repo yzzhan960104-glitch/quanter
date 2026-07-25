@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """统一同步 CLI 参数解析 + key 过滤 + fail-soft 测试（Plan Task 9）。
 
-物理意图：把散装 scripts/sync_*.py 能力收敛到 python -m data.sync，底层复用 sync_dataset。
+物理意图：把散装 data/tools/sync_*.py 能力收敛到 python -m data.sync，底层复用 sync_dataset。
 """
 from unittest.mock import patch
 import pytest

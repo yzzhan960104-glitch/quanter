@@ -4,7 +4,7 @@
 stock_lhb_detail_daily_sina → 合并 MultiIndex(date, symbol)，供
 factors/alternative.dragon_signal 取当日上榜集合。
 
-用法：python scripts/sync_dragon_list.py --days 30
+用法：python data/tools/sync_dragon_list.py --days 30
 """
 from __future__ import annotations
 

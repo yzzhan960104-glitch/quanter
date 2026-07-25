@@ -4,7 +4,7 @@
 定位：前端驾驶舱「板块轮动 + 微观定权」的后端供给。原宏观 CTA 端点
 ``/macro/regime`` 与 ``/macro/credit``（CreditRegime 信贷状态机）已于 2026-07
 随 CreditRegime 整体下线删除——宏观逻辑后续重建时再恢复；数据管道
-（macro_credit 湖 + scripts/sync_macro_credit.py）保留，不受影响。
+（macro_credit 湖 + data/tools/sync_macro_credit.py）保留，不受影响。
 
 端点清单：
     - GET /api/v1/macro/sector/flow        板块资金流排名 + 活跃股池

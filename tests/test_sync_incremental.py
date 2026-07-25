@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""scripts/sync_incremental.py 增量同步测试。
+"""data/tools/sync_incremental.py 增量同步测试。
 
 设计意图（反黑盒 + 全 mock）：
 - 完全 mock 掉 data.tushare_sync.sync_dataset（避免触发真实 Tushare 调用/限频/熔断），
@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytest
 
-# 把项目根加进 sys.path，保证 import scripts.sync_incremental 可达
+# 把项目根加进 sys.path，保证 import data.tools.sync_incremental 可达
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -49,7 +49,7 @@ def _isolate_registry():
 
 def test_latest_date_multiindex():
     """MultiIndex(date, symbol) → 返回 date 层 max。"""
-    from scripts.sync_incremental import _latest_date
+    from data.tools.sync_incremental import _latest_date
     idx = pd.MultiIndex.from_tuples([
         (pd.Timestamp("2024-01-01"), "000001.SZ"),
         (pd.Timestamp("2024-01-05"), "600000.SH"),
@@ -61,7 +61,7 @@ def test_latest_date_multiindex():
 
 def test_latest_date_datetimeindex():
     """DatetimeIndex（宏观指标 index_mode=datetime）→ 返回 idx max。"""
-    from scripts.sync_incremental import _latest_date
+    from data.tools.sync_incremental import _latest_date
     df = pd.DataFrame({"cpi": [1, 2, 3]},
                       index=pd.DatetimeIndex(["2024-01-01", "2024-03-01", "2024-02-01"]))
     assert _latest_date(df) == pd.Timestamp("2024-03-01")
@@ -69,7 +69,7 @@ def test_latest_date_datetimeindex():
 
 def test_latest_date_empty_or_static():
     """空 df 或无时序索引（静态快照）→ 返 None，触发全量回退。"""
-    from scripts.sync_incremental import _latest_date
+    from data.tools.sync_incremental import _latest_date
     assert _latest_date(pd.DataFrame()) is None
     assert _latest_date(None) is None
     # 静态快照扁平 df（无时间索引）→ None
@@ -84,7 +84,7 @@ def test_merge_dedup_multiindex_keep_new():
 
     物理意图：Tushare 偶发数据修订（如 ann_date 重述），同 (date, symbol) 行应以新拉的为准。
     """
-    from scripts.sync_incremental import _merge_dedup
+    from data.tools.sync_incremental import _merge_dedup
     old_idx = pd.MultiIndex.from_tuples([
         (pd.Timestamp("2024-01-01"), "000001.SZ"),
         (pd.Timestamp("2024-01-02"), "000001.SZ"),
@@ -111,7 +111,7 @@ def test_merge_dedup_multiindex_keep_new():
 
 def test_merge_dedup_datetimeindex_keep_new():
     """DatetimeIndex（宏观指标）：单层索引去重保留新。"""
-    from scripts.sync_incremental import _merge_dedup
+    from data.tools.sync_incremental import _merge_dedup
     old = pd.DataFrame({"cpi": [1.0, 2.0]},
                        index=pd.DatetimeIndex(["2024-01-01", "2024-02-01"]))
     new = pd.DataFrame({"cpi": [2.5, 3.0]},  # 2月1日修订 + 3月新增
@@ -125,7 +125,7 @@ def test_merge_dedup_datetimeindex_keep_new():
 
 def test_merge_dedup_empty_new():
     """new 为空 → merged 等于 old（全部保留）。"""
-    from scripts.sync_incremental import _merge_dedup
+    from data.tools.sync_incremental import _merge_dedup
     old = pd.DataFrame({"v": [1]}, index=pd.DatetimeIndex(["2024-01-01"]))
     new = pd.DataFrame({"v": []}, index=pd.DatetimeIndex([]))
     merged = _merge_dedup(old, new)
@@ -159,9 +159,9 @@ def _make_multiindex_df(rows):
 def mock_sync_dataset(monkeypatch):
     """mock data.tushare_sync.sync_dataset，按预设回调决定写什么数据到 lake。
 
-    Why 不直接 mock scripts.sync_incremental.sync_dataset：sync_incremental.py 顶部
+    Why 不直接 mock data.tools.sync_incremental.sync_dataset：sync_incremental.py 顶部
     `from data.tushare_sync import sync_dataset` 把函数对象绑到 sync_incremental 模块全局，
-    必须 patch scripts.sync_incremental.sync_dataset 才能短路（与 test_tushare_sync 的
+    必须 patch data.tools.sync_incremental.sync_dataset 才能短路（与 test_tushare_sync 的
     fake_pro 双重 patch 同理——模块顶部 from import 的绑定语义）。
     """
     calls = []
@@ -176,7 +176,7 @@ def mock_sync_dataset(monkeypatch):
         return None
 
     _fake_sync_dataset.writer = None  # 测试可覆盖
-    monkeypatch.setattr("scripts.sync_incremental.sync_dataset", _fake_sync_dataset)
+    monkeypatch.setattr("data.tools.sync_incremental.sync_dataset", _fake_sync_dataset)
     return calls, _fake_sync_dataset
 
 
@@ -188,7 +188,7 @@ def test_sync_one_key_incremental_multiindex(tmp_path, mock_sync_dataset):
       - sync_dataset 收到 start='2024-01-03'（d0 次日），end=today
       - merge 后旧+新都在，无重复行
     """
-    from scripts.sync_incremental import sync_one_key
+    from data.tools.sync_incremental import sync_one_key
     from config import TUSHARE_DATASETS
 
     lake = str(tmp_path / "moneyflow.parquet")
@@ -230,7 +230,7 @@ def test_sync_one_key_incremental_multiindex(tmp_path, mock_sync_dataset):
 
 def test_sync_one_key_skip_unavailable(tmp_path, mock_sync_dataset):
     """_unavailable 数据集被跳过：不调 sync_dataset，不写盘。"""
-    from scripts.sync_incremental import sync_one_key
+    from data.tools.sync_incremental import sync_one_key
     from config import TUSHARE_DATASETS
 
     lake = str(tmp_path / "top_list.parquet")
@@ -252,7 +252,7 @@ def test_sync_one_key_skip_unavailable(tmp_path, mock_sync_dataset):
 
 def test_sync_one_key_first_time_fallback(tmp_path, mock_sync_dataset):
     """parquet 不存在 → 全量回退：start = today - 365*years。"""
-    from scripts.sync_incremental import sync_one_key
+    from data.tools.sync_incremental import sync_one_key
     from config import TUSHARE_DATASETS
 
     lake = str(tmp_path / "margin.parquet")  # 不创建，触发首次回退
@@ -287,7 +287,7 @@ def test_sync_one_key_empty_new_keeps_old(tmp_path, mock_sync_dataset):
     Why 关键：节假日 sync_dataset 拉不到数据，single 模式可能落空 parquet；
     若直接 merge 会丢失旧历史。本测试钉死此防线：空数据时旧 parquet 必须完整保留。
     """
-    from scripts.sync_incremental import sync_one_key
+    from data.tools.sync_incremental import sync_one_key
     from config import TUSHARE_DATASETS
 
     lake = str(tmp_path / "cn_cpi.parquet")
@@ -316,7 +316,7 @@ def test_sync_one_key_empty_new_keeps_old(tmp_path, mock_sync_dataset):
 
 def test_sync_one_key_max_days_caps_window(tmp_path, mock_sync_dataset):
     """--days N 限制：d0 距今 > N 天时，start 被截到 today-N（防一次性拉多年）。"""
-    from scripts.sync_incremental import sync_one_key
+    from data.tools.sync_incremental import sync_one_key
     from config import TUSHARE_DATASETS
 
     lake = str(tmp_path / "old.parquet")
@@ -350,7 +350,7 @@ def test_sync_one_key_merge_with_revision(tmp_path, mock_sync_dataset):
     Why 此测试：财报 ann_date 重述或资金流数据修订时，同一交易日数据会被新值覆盖。
     钉死 _merge_dedup 的 keep='last' 语义——同 key 必须保留新拉的。
     """
-    from scripts.sync_incremental import sync_one_key
+    from data.tools.sync_incremental import sync_one_key
     from config import TUSHARE_DATASETS
 
     lake = str(tmp_path / "mf.parquet")

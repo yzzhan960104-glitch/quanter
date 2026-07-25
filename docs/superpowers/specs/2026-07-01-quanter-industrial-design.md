@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
 
 ## 2. 🗄️ Epic 1：极速本地数据湖
 
-### 2.1 `scripts/sync_data_lake.py`（独立 CLI，断点续传）
+### 2.1 `data/tools/sync_data_lake.py`（独立 CLI，断点续传）
 **职责**：拉取全市场（剔除 ST/退市）过去 N 年日线**前复权** OHLCV，合并为 MultiIndex 超级大表。
 
 **关键接口**：

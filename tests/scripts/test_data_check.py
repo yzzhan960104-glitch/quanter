@@ -83,7 +83,7 @@ def test_checkpoint2_multi_round_resync_then_pass():
 #   原 _resync_key 一律调 sync_incremental.sync_one_key，但 sync_incremental 的
 #   quick 批不含 "daily"（A股日线原无日频增量机制）→ daily 陈旧时重采形同空转，
 #   检查点②必熔断 eod_plan（明明有新数据可用，却因 sync 不到被判「不交易不自欺」）。
-#   Phase 1.5 新增 scripts.sync_daily_incremental.sync_daily_incremental（分页批量拉
+#   Phase 1.5 新增 data.tools.sync_daily_incremental.sync_daily_incremental（分页批量拉
 #   raw daily + adj_factor 重建前复权）补 daily 日频缺口；_resync_key 按 key 分流：
 #     - key == "daily" → 走 sync_daily_incremental（返 str → 包成 (True, msg)）
 #     - 其他 key      → 原 sync_one_key 逻辑（registry 语义 key 走通用增量）

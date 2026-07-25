@@ -266,7 +266,7 @@ def test_macro_lake_credit_regime_columns(tmp_path, fake_pro, monkeypatch):
                                                    "DR007": [1.9, 1.8]}),
                         }.get(kind, pd.DataFrame()))
     out = str(tmp_path / "macro.parquet")
-    from scripts.sync_macro_credit import sync_macro
+    from data.tools.sync_macro_credit import sync_macro
     sync_macro("2024-01-01", "2024-02-28", out=out)
     df = pd.read_parquet(out)
     assert "shrzgm" in df.columns, "CreditRegime core 字段 shrzgm 缺失"

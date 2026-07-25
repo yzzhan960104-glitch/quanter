@@ -10,9 +10,9 @@
 - 错误隔离：单数据集异常不影响其他；积分/限频/权限致命错误停整批（避免无谓重试烧积分）。
 
 用法：
-  python scripts/sync_all_tushare.py --batch quick --years 10        # 先跑快批（by=date/宏观）
-  python scripts/sync_all_tushare.py --batch slow --limit-symbols 300 # 慢批子集（沪深300）
-  python scripts/sync_all_tushare.py --batch all --years 10           # 全量（快+慢，慢批全市场）
+  python data/tools/sync_all_tushare.py --batch quick --years 10        # 先跑快批（by=date/宏观）
+  python data/tools/sync_all_tushare.py --batch slow --limit-symbols 300 # 慢批子集（沪深300）
+  python data/tools/sync_all_tushare.py --batch all --years 10           # 全量（快+慢，慢批全市场）
 """
 from __future__ import annotations
 import argparse

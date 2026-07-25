@@ -75,7 +75,7 @@ def test_compute_margin_growth_top_sectors():
     断言：银行合计 200 vs 昨日 100 → 增速 +1.0；地产合计 105 vs 昨日 100 → +0.05。
     故 top1 必为「银行」，且银行增速严格 > 地产增速。
     """
-    from scripts.sync_sector_daily import compute_margin_growth
+    from data.tools.sync_sector_daily import compute_margin_growth
 
     margin = pd.DataFrame({
         "标的代码": ["000001.SZ", "000002.SZ", "600000.SH"],
@@ -99,7 +99,7 @@ def test_select_active_pool_size_and_source():
         3. 池内 symbol 必来自 top1 板块（银行 = 000001.SZ + 600000.SH），
            绝不应混入地产（000002.SZ）——验证漏斗「板块内筛」物理意图。
     """
-    from scripts.sync_sector_daily import select_active_pool
+    from data.tools.sync_sector_daily import select_active_pool
 
     pool = select_active_pool(
         _FakeClient(), top_n=1, pool_size=2,

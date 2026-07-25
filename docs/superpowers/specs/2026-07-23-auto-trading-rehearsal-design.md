@@ -38,7 +38,7 @@ brainstorming 前先核实，纠正了多处与记忆/旧 spec 不符的认知�
 | 风控 10 关 | `trading/compute/risk.py check_order` | 资金/涨跌停/白名单/熔断 lock_down/session/confirm |
 | 计划落盘+人审确认 | `trading/trading_plan.py` save_plan/load_plan/confirm_plan/push_plan_to_dingtalk | JSON `logs/trading_plans/plan_<date>.json`，confirmed 闸 |
 | 钉钉出站 | `broadcast/push.py` + dws send-by-bot | 零自写加签 |
-| Tushare 增量采集 | `scripts/sync_incremental.py` @schtasks 18:00 | 每日自动拉 T 日数据落湖 |
+| Tushare 增量采集 | `data/tools/sync_incremental.py` @schtasks 18:00 | 每日自动拉 T 日数据落湖 |
 | 断线重连 | `broker/qmt.py` _reconnect | 指数退避 5 次上限（避免刷爆登录限频） |
 | 回报回调注入点 | `broker/qmt.py:301` `_on_order_update` | **代码注释原文：「上层注入的异步回报回调（钉钉报警 / State 持久化）」——挂载点早已预留，当前无人注册** |
 | post_close 熔断三件套 | `trading/compute/breaker.py` + `trading/io/breaker.py` + `trading_service.emergency_halt` | 纯函数+I/O壳+API均已实现且单测覆盖，**仅 post_close 未串联** |

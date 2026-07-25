@@ -82,7 +82,7 @@ def test_fetch_dragon_list_failure_records_breaker(monkeypatch):
 
 def test_normalize_symbol_suffix_rule():
     """6 位代码 → .SH/.SZ 后缀（6/9 开头上交所，其余深交所）。"""
-    from scripts.sync_dragon_list import _normalize_symbol
+    from data.tools.sync_dragon_list import _normalize_symbol
     assert _normalize_symbol("600000") == "600000.SH"
     assert _normalize_symbol("000001") == "000001.SZ"
     assert _normalize_symbol("900001") == "900001.SH"  # 9 开头 B 股上交所

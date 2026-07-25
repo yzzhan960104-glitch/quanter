@@ -9,7 +9,7 @@
 import pandas as pd
 import pytest
 
-from scripts.sync_data_lake import build_multiindex, fetch_qfq, load_universe
+from data.tools.sync_data_lake import build_multiindex, fetch_qfq, load_universe
 
 
 def test_build_multiindex_merges_shards_to_multiindex(tmp_path):

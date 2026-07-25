@@ -2,10 +2,10 @@
 """统一 Tushare 同步 CLI：python -m data.sync [选项]
 
 设计意图（高内聚低耦合，2026-07-25 Plan Task 9 scripts/ 收敛）：
-- 把散装 scripts/sync_*.py（sync_all_tushare/sync_incremental/sync_data_lake/sync_daily_incremental）
+- 把散装 data/tools/sync_*.py（sync_all_tushare/sync_incremental/sync_data_lake/sync_daily_incremental）
   的能力收敛到一个 CLI，底层复用 data.tushare_sync.sync_dataset 统一引擎。
-- scripts/sync_*.py 转薄壳 + DeprecationWarning 转调本 CLI（server data_service 仍依赖
-  scripts/sync_tushare.py 薄壳，故该脚本保留作 key 单同步入口）。
+- data/tools/sync_*.py 转薄壳 + DeprecationWarning 转调本 CLI（server data_service 仍依赖
+  data/tools/sync_tushare.py 薄壳，故该脚本保留作 key 单同步入口）。
 
 用法：
   python -m data.sync --all --since 2021-01-01                  # 全量回填所有数据集

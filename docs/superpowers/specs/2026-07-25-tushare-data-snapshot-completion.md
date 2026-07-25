@@ -45,7 +45,7 @@
 3. **`config/registry.py`**：补 10 新数据集 + moneyflow 归 special；DATASET_REGISTRY 补元信息；daily.script 切 sync_tushare.py
 4. **`config/data.py`**：LAKE_CONFIG 补 9 新湖
 5. **`data/sync_cli.py`+`data/sync.py`**：统一 CLI `python -m data.sync`（--all/--keys/--since/--quota/--incremental/--dry-run）
-6. **`scripts/sync_data_lake.py`**：__main__ 转薄壳 + DeprecationWarning
+6. **`data/tools/sync_data_lake.py`**：__main__ 转薄壳 + DeprecationWarning
 
 ## 5. dry-run 订正的关键事实（Task 11，防幻觉列）
 

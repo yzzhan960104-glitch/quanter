@@ -14,7 +14,7 @@
 
 | 转向 | 处置 | 理由 |
 |---|---|---|
-| **绝对禁止 Tushare** | 现有 Tushare 代码（`TushareDataFetcher` / `scripts/sync_data_lake.py`）**保留 dormant**，新数据流全走 **AKShare** | 用户要求 dormant 备用；不删降低风险，新流程不调用即合规 |
+| **绝对禁止 Tushare** | 现有 Tushare 代码（`TushareDataFetcher` / `data/tools/sync_data_lake.py`）**保留 dormant**，新数据流全走 **AKShare** | 用户要求 dormant 备用；不删降低风险，新流程不调用即合规 |
 | **摒弃外部大模型（LLM）** | **移除** `core/llm_client.py` + `factors/alternative_sentiment.py` + 对应 tests；撤 `server/main.py` lifespan 的 GLMClient 装配 + `requirements.txt` 的 `openai` + `.env` 的 `ZHIPU_*` | 用户明确移除 |
 | **纯 A 股 CTA** | Binance 加密沙盒**保留为可选**（低优先，最后做） | 用户保留作 7x24 极端市场测试 |
 
@@ -100,7 +100,7 @@ LAKE_CONFIG["default_lake"] = "daily"
 
 数据流：**宏观（月频）→ 板块资金（日频）→ 50 只活跃股日线（日频）→ 这 50 只的分钟级（分钟频）**，层层递进。
 
-### 2.1 `scripts/sync_macro_credit.py`（宏观信贷同步器）
+### 2.1 `data/tools/sync_macro_credit.py`（宏观信贷同步器）
 **职责**：AKShare 拉宏观信贷三件套，落日频对齐 parquet。
 ```python
 def sync_macro(start, end) -> pd.DataFrame:
@@ -113,7 +113,7 @@ def sync_macro(start, end) -> pd.DataFrame:
 - **前视红线**：月频宏观只能向前 ffill 到当日（用过去值解释现在），绝不用未来月度值回填过去。
 - 复用 `tushare_breaker` 范式为 AKShare 建独立 `akshare_breaker`/`akshare_limiter`（手动 API，失败返空 DF 不抛）。
 
-### 2.2 `scripts/sync_sector_daily.py`（板块两融 + 活跃股初筛）
+### 2.2 `data/tools/sync_sector_daily.py`（板块两融 + 活跃股初筛）
 **职责**：盘后拉融资融券 + 主力资金，选 top-3 信贷扩张板块 + 50 只活跃股 + 其日线。
 ```python
 def select_active_pool(date) -> list[str]:
@@ -133,7 +133,7 @@ def sync_sector_daily(pool) -> None:
 - 活跃股池**每日动态**（依赖当日板块信贷）。
 - `stock_zh_a_hist` 限频 → 复用 `akshare_limiter`。
 
-### 2.3 `scripts/sync_jqdata_1min.py`（JQData 高频精准狙击）
+### 2.3 `data/tools/sync_jqdata_1min.py`（JQData 高频精准狙击）
 **职责**：对**当日活跃股池（50 只）**拉近 3 月 1m/5m，落分钟湖。
 ```python
 def sync_jqdata_1min(pool, months=3, freq="5m"):

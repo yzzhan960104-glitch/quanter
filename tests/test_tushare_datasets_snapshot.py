@@ -106,10 +106,10 @@ def test_新数据集_元信息完整():
         assert k in DATASET_REGISTRY, f"{k} 缺 DATASET_REGISTRY 元信息"
         meta = DATASET_REGISTRY[k]
         assert meta["source"] == "Tushare"
-        assert meta["script"] == "scripts/sync_tushare.py", f"{k} script 应统一 sync_tushare.py"
+        assert meta["script"] == "data/tools/sync_tushare.py", f"{k} script 应统一 sync_tushare.py"
         assert "market" in meta and "granularity" in meta and "freshness_hours" in meta
 
 
 def test_daily_脚本切统一入口():
     """daily 的 script 切到 sync_tushare.py（统一管道，原 sync_data_lake.py 转薄壳 deprecated）。"""
-    assert DATASET_REGISTRY["daily"]["script"] == "scripts/sync_tushare.py"
+    assert DATASET_REGISTRY["daily"]["script"] == "data/tools/sync_tushare.py"

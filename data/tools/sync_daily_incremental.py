@@ -13,7 +13,7 @@ Why 此脚本存在（数据底座缺口）：
      follow-up：全量重算除权标的修正）。
 
 用法：
-  python scripts/sync_daily_incremental.py     # 自动读 a_shares_daily 最新日 d0，拉 [d0+1, today]
+  python data/tools/sync_daily_incremental.py     # 自动读 a_shares_daily 最新日 d0，拉 [d0+1, today]
 退出码：0=成功/已最新；1=失败。
 """
 from __future__ import annotations

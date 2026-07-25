@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""scripts/sync_daily_incremental.py 单元测试（Phase 1.5 任务2 TDD）。
+"""data/tools/sync_daily_incremental.py 单元测试（Phase 1.5 任务2 TDD）。
 
 Why 不真调 tushare：本脚本是数据链路最后一公里（每日增量 raw daily + adj_factor 重建
 前复权 append 到 a_shares_daily.parquet），全市场 ~5500 标的 × 2 请求 × N 交易日，
@@ -21,7 +21,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts import sync_daily_incremental as mod
+from data.tools import sync_daily_incremental as mod
 
 
 # ============================================================================

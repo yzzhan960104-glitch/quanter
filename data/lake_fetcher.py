@@ -150,7 +150,7 @@ class LakeDataFetcher:
             if not pool:
                 raise LookupError(
                     "dynamic_top50 路由失败：daily_active 湖未加载"
-                    "（先跑 scripts/sync_sector_daily.py）"
+                    "（先跑 data/tools/sync_sector_daily.py）"
                 )
             logger.info("dynamic_top50 → 活跃池首只代表 %s", pool[0])
             return pool[0]

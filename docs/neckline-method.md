@@ -73,7 +73,7 @@
 | `a_shares_daily.parquet` | 个股 OHLCV（颈线法主输入，MultiIndex date×symbol） | `sync_all_tushare.py` / `sync_incremental.py` |
 | `etf_daily.parquet` | ETF OHLCV（全市场外推实验用） | `sync_all_tushare.py` |
 | `market_breadth.parquet` | 全市场宽度（站上 MA60 比例）· 四层动能②层 | `backtest/tools/market_breadth.py` |
-| `shibor.parquet` / `shibor_lpr.parquet` / `cn_m.parquet` | 利率三件套 · 四层动能②层流动性子模块 | `scripts/sync_rate_data.py` |
+| `shibor.parquet` / `shibor_lpr.parquet` / `cn_m.parquet` | 利率三件套 · 四层动能②层流动性子模块 | `data/tools/sync_rate_data.py` |
 
 ### 1.3 入口矩阵（谁在用哪条路）
 
@@ -412,4 +412,4 @@ list_strategies()                   ← 供前端策略下拉
 | `execution/backtest_replay.py` | 回测编排（逐 symbol×T 滚动 + ReplayReport） | — |
 | `discovery/tools/param_iter.py` | 参数迭代引擎（22 维概念·约束式 score 多目标·P1-c 宽度加权） | ~340 |
 | `backtest/tools/market_breadth.py` | 四层动能②层宽度指标生成 | ~80 |
-| `scripts/sync_rate_data.py` | 利率三件套补采（shibor/lpr/cn_m） | ~100 |
+| `data/tools/sync_rate_data.py` | 利率三件套补采（shibor/lpr/cn_m） | ~100 |

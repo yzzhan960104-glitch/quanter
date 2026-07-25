@@ -16,8 +16,8 @@ price_qfq = price_raw × adj_factor / adj_factor_latest。
 - 限频 + 熔断：tushare_rate_limiter + tushare_breaker；空数据跳过不中断。
 
 用法：
-    python scripts/sync_data_lake.py --years 10            # 全市场 10 年（~2.8h）
-    python scripts/sync_data_lake.py --years 2 --limit 10  # 小样本调试
+    python data/tools/sync_data_lake.py --years 10            # 全市场 10 年（~2.8h）
+    python data/tools/sync_data_lake.py --years 2 --limit 10  # 小样本调试
 """
 from __future__ import annotations
 
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     # main/fetch_qfq 函数保留（test_daily_migration_parity 复用 fetch_qfq 做新旧管道一致性对比）。
     import warnings
     warnings.warn(
-        "scripts/sync_data_lake.py 已 deprecated（2026-07-25 scripts/ 收敛）。"
+        "data/tools/sync_data_lake.py 已 deprecated（2026-07-25 scripts/ 收敛）。"
         "daily 前复权已纳入统一管道，请改用：python -m data.sync --keys daily --since 2021-01-01",
         DeprecationWarning, stacklevel=2,
     )

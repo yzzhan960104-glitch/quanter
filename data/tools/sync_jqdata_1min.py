@@ -128,7 +128,7 @@ if __name__ == "__main__":
     import argparse
     from config import AKSHARE_CONFIG, JQDATA_CONFIG
     from data.clients.akshare_client import AKShareClient
-    from scripts.sync_sector_daily import select_active_pool
+    from data.tools.sync_sector_daily import select_active_pool
 
     ap = argparse.ArgumentParser(description="JQData 分钟级数据湖同步")
     ap.add_argument("--start", default=None, help="起始日 YYYY-MM-DD（试用账号须落在权限窗口内，如 2025-03-24）")

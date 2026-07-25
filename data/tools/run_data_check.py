@@ -16,15 +16,15 @@ from datetime import datetime
 
 from data.freshness import check_freshness
 from trading.calendar import expected_latest_trade_day
-# 模块级 import（非 _resync_key 内局部 import）：测试需 patch "scripts.run_data_check.sync_one_key"
+# 模块级 import（非 _resync_key 内局部 import）：测试需 patch "data.tools.run_data_check.sync_one_key"
 # 才能隔离真实采集，故必须把名字绑到模块命名空间。sync_incremental 模块本身 import 轻量
 # （tushare 是其内部延迟 import），不会拖慢本入口启动。
-from scripts.sync_incremental import sync_one_key
+from data.tools.sync_incremental import sync_one_key
 # daily 日频增量采集器（Phase 1.5 数据链路闭环）：
-# 模块级 import 同样为测试可 patch "scripts.run_data_check.sync_daily_incremental" 隔离真实采集。
+# 模块级 import 同样为测试可 patch "data.tools.run_data_check.sync_daily_incremental" 隔离真实采集。
 # Why 单独 import 而非懒加载：sync_daily_incremental 内部延迟 import pandas/tushare，
 # 本入口启动时仅 import 该函数对象，不触发重依赖加载，与 sync_one_key 等价轻量。
-from scripts.sync_daily_incremental import sync_daily_incremental
+from data.tools.sync_daily_incremental import sync_daily_incremental
 
 logger = logging.getLogger(__name__)
 
@@ -138,10 +138,10 @@ def run_check(
 
 
 def main() -> None:
-    """schtasks 入口：python -m scripts.run_data_check t1|t2。"""
+    """schtasks 入口：python -m data.tools.run_data_check t1|t2。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if len(sys.argv) < 2 or sys.argv[1] not in ("t1", "t2"):
-        print("用法: python -m scripts.run_data_check t1|t2", file=sys.stderr)
+        print("用法: python -m data.tools.run_data_check t1|t2", file=sys.stderr)
         sys.exit(1)
     r = run_check(sys.argv[1])
     # 熔断用退出码 2 区分（eod_plan/schtasks 据此跳过）

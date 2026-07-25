@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""通用 Tushare 数据集同步 CLI：python scripts/sync_tushare.py <key> [--years N] [--limit N]
+"""通用 Tushare 数据集同步 CLI：python data/tools/sync_tushare.py <key> [--years N] [--limit N]
 
 设计意图（极简 CLI）：
 - key 必须是 config.TUSHARE_DATASETS 已注册的数据集（argparse choices 反射注册表，
@@ -8,8 +8,8 @@
 - --limit：by=symbol 时仅前 N 只标的（冒烟/调试用，避免全市场拉取耗配额）。
 
 用法示例：
-  python scripts/sync_tushare.py fina_income              # 全市场利润表（近10年）
-  python scripts/sync_tushare.py fina_income --limit 5    # 仅前5只（冒烟）
+  python data/tools/sync_tushare.py fina_income              # 全市场利润表（近10年）
+  python data/tools/sync_tushare.py fina_income --limit 5    # 仅前5只（冒烟）
 """
 from __future__ import annotations
 import argparse

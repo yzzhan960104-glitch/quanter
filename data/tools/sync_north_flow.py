@@ -4,7 +4,7 @@
 持续流出常领先回调。落盘 DatetimeIndex × [north_net_flow]（亿元），供
 factors/alternative.north_flow_momentum 算连续净流入动量信号。
 
-用法：python scripts/sync_north_flow.py --years 2
+用法：python data/tools/sync_north_flow.py --years 2
 """
 from __future__ import annotations
 

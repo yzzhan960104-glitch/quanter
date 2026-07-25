@@ -80,7 +80,7 @@ DataLakeReader (jqdata 4h / akshare 日线 / 日线聚合周线)
 迁移后改 import 的保留文件：
 - `trading/execution_gateway.py`（`MacroAwareGateway`）
 - `server/api/v1/macro.py`（宏观驾驶舱端点）
-- `scripts/sync_macro_credit.py`（宏观数据同步）
+- `data/tools/sync_macro_credit.py`（宏观数据同步）
 - `tests/test_macro_regime.py` / `tests/test_sync_macro_credit.py`
 
 ### 2.3 改造（保留但需清理耦合）

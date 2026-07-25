@@ -24,28 +24,28 @@
 
 ```bash
 # 1. 全市场日线（10年，AKShare，~1-2h；断点续传，失败重跑从断点继续）
-python scripts/sync_data_lake.py --years 10
+python data/tools/sync_data_lake.py --years 10
 
 # 2. 活跃池日线（~5min，AKShare；写 daily_active 湖，不覆盖全市场 daily）
-python scripts/sync_sector_daily.py
+python data/tools/sync_sector_daily.py
 
 # 3. 宏观信贷（~10min，AKShare）
-python scripts/sync_macro_credit.py
+python data/tools/sync_macro_credit.py
 
 # 4. 基本面估值（10年，Tushare daily_basic 批量，需 2000+ 积分，~40min）
 python scripts/sync_fundamentals.py --years 10
 
 # 5. 北向资金（~10min，AKShare）
-python scripts/sync_north_flow.py --years 2
+python data/tools/sync_north_flow.py --years 2
 
 # 6. 龙虎榜（~20min/月，AKShare）
-python scripts/sync_dragon_list.py --days 30
+python data/tools/sync_dragon_list.py --days 30
 ```
 
 ### 小样本验证（快速跑通管道）
 
 ```bash
-python scripts/sync_data_lake.py --years 2 --limit 10           # 10 只 2 年
+python data/tools/sync_data_lake.py --years 2 --limit 10           # 10 只 2 年
 python scripts/sync_fundamentals.py --years 2 --limit-dates 20  # 20 个交易日
 ```
 

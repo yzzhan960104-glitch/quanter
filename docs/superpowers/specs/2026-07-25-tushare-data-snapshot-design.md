@@ -175,7 +175,7 @@ def _fetch_with_guard(api_name: str, *, quota_type: str = "basic", **kwargs) -> 
 
 #### DATASET_REGISTRY 同步补元信息（前端 DataLakeView 反射）
 
-每个新 TUSHARE_DATASETS key 都要在 `DATASET_REGISTRY` 加对应条目（source/market/granularity/script/freshness_hours）。`script` 统一标 `scripts/sync_tushare.py`（薄壳，server data_service 依赖）。
+每个新 TUSHARE_DATASETS key 都要在 `DATASET_REGISTRY` 加对应条目（source/market/granularity/script/freshness_hours）。`script` 统一标 `data/tools/sync_tushare.py`（薄壳，server data_service 依赖）。
 
 #### `resolve_symbols` 增强（`data/tushare_sync.py`）
 
@@ -232,11 +232,11 @@ python -m data.sync --quota basic                      # 仅跑基础桶数据�
 
 | 现有脚本 | 动作 |
 |---|---|
-| `scripts/sync_tushare.py` | **保留为薄壳**（server `data_service` 子进程依赖），内部转调 `data.sync_cli.main([key])` 或 `sync_dataset`。`DATASET_REGISTRY.script` 仍指向它。 |
-| `scripts/sync_all_tushare.py` | **deprecated 薄壳**，转调 `python -m data.sync --all`，顶部加 DeprecationWarning。 |
-| `scripts/sync_incremental.py` | **deprecated 薄壳**，转调 `python -m data.sync --incremental`。 |
-| `scripts/sync_data_lake.py` | **deprecated**：`fetch_qfq` 逻辑迁移到 `_sync_ohlcv_qfq` 后，标 deprecated，转调 `python -m data.sync --keys daily`。 |
-| `scripts/sync_daily_incremental.py` | **deprecated 薄壳**，转调 `python -m data.sync --keys daily --incremental`。 |
+| `data/tools/sync_tushare.py` | **保留为薄壳**（server `data_service` 子进程依赖），内部转调 `data.sync_cli.main([key])` 或 `sync_dataset`。`DATASET_REGISTRY.script` 仍指向它。 |
+| `data/tools/sync_all_tushare.py` | **deprecated 薄壳**，转调 `python -m data.sync --all`，顶部加 DeprecationWarning。 |
+| `data/tools/sync_incremental.py` | **deprecated 薄壳**，转调 `python -m data.sync --incremental`。 |
+| `data/tools/sync_data_lake.py` | **deprecated**：`fetch_qfq` 逻辑迁移到 `_sync_ohlcv_qfq` 后，标 deprecated，转调 `python -m data.sync --keys daily`。 |
+| `data/tools/sync_daily_incremental.py` | **deprecated 薄壳**，转调 `python -m data.sync --keys daily --incremental`。 |
 
 > **红线**：不删任何脚本（server/前端/schtasks 计划任务可能依赖），只转薄壳 + DeprecationWarning。真正删除留后续清理 PR。
 

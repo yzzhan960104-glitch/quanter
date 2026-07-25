@@ -30,10 +30,10 @@
 退出码：0=全部成功或可跳过；1=至少一个 key 失败（致命错误如积分耗尽会停整批）。
 
 用法：
-  python scripts/sync_incremental.py              # 默认 d0+1~today，无回看上限
-  python scripts/sync_incremental.py --days 7     # 限制最多回看 7 天（防 d0 异常）
-  python scripts/sync_incremental.py --keys moneyflow,margin  # 只同步指定 key 子集
-  python scripts/sync_incremental.py --years 3    # 首次全量回退时的窗口（默认 3）
+  python data/tools/sync_incremental.py              # 默认 d0+1~today，无回看上限
+  python data/tools/sync_incremental.py --days 7     # 限制最多回看 7 天（防 d0 异常）
+  python data/tools/sync_incremental.py --keys moneyflow,margin  # 只同步指定 key 子集
+  python data/tools/sync_incremental.py --years 3    # 首次全量回退时的窗口（默认 3）
 """
 from __future__ import annotations
 import argparse
@@ -51,7 +51,7 @@ from config import TUSHARE_DATASETS
 from data.tushare_sync import sync_dataset
 
 # 复用 sync_all_tushare.classify() 拿 quick 批 keys（单一真相源：分批口径不在两处维护）
-from scripts.sync_all_tushare import classify
+from data.tools.sync_all_tushare import classify
 
 # 致命错误关键词：命中则停整批（与 sync_all_tushare._FATAL 同口径，避免积分耗尽后继续烧）
 _FATAL = ["积分", "频", "limit", "quota", "权限", "无权限", "没有接口"]

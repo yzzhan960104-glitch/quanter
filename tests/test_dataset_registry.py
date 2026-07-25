@@ -162,14 +162,14 @@ def test_stock_keys_cross_check_with_tushare_datasets():
     Why 不再只遍历硬编码列表：原 test_stock_lakes_count_matches_tushare_datasets 只遍历
     STOCK_TUSHARE_KEYS 自身，未来在 config.py 加股票类 Tushare 数据集却忘更新本文件硬编码列表，
     测试仍会绿（自映射盲点）。本断言从 TUSHARE_DATASETS 推导实际通用同步器 key 集，反向钉死：
-    凡 DATASET_REGISTRY 走 scripts/sync_tushare.py 的，必须都在 TUSHARE_DATASETS
+    凡 DATASET_REGISTRY 走 data/tools/sync_tushare.py 的，必须都在 TUSHARE_DATASETS
     （防注册了无法同步的 key）；反之 STOCK_TUSHARE_KEYS 必须 ⊆ TUSHARE_DATASETS
     （防硬编码列表混入不存在的 key）。
 
     ⚠️ Plan C Task 6 后界定变更（source → script）：原断言用 source=="Tushare" 推导「股票类」，
     但 Task 6 把 macro（macro_credit 湖，script=sync_macro_credit.py）也标 source=Tushare
     （主源 cn_m + akshare 社融 fallback），而 macro 不在 TUSHARE_DATASETS（它走独立脚本，不经
-    通用同步器）。若仍用 source 界定，macro 会被误判为 orphan。故改用 script=="scripts/sync_tushare.py"
+    通用同步器）。若仍用 source 界定，macro 会被误判为 orphan。故改用 script=="data/tools/sync_tushare.py"
     精确界定「通用同步器数据集」——这才是 sync_dataset(key) 能消费的集合（ETF/宏观原始指标也走
     通用同步器，都在 TUSHARE_DATASETS，自然通过；macro 走独立脚本，不在此集合，不误判）。
     """
@@ -177,7 +177,7 @@ def test_stock_keys_cross_check_with_tushare_datasets():
     # （配置层真相，非硬编码列表；精确界定 sync_dataset 可消费的集合，排除 macro 等独立脚本数据集）
     actual_sync_tushare_in_registry = {
         k for k, spec in DATASET_REGISTRY.items()
-        if spec.get("script") == "scripts/sync_tushare.py"
+        if spec.get("script") == "data/tools/sync_tushare.py"
     }
     # 反向断言 1：硬编码股票列表 ⊆ 实际通用同步器集合（防硬编码列表多写）
     assert set(STOCK_TUSHARE_KEYS) <= actual_sync_tushare_in_registry, \
@@ -291,17 +291,17 @@ def fake_pro(monkeypatch):
 
     单 patch get_pro：sync_macro_credit.py:39 已 `from data._tushare_compat import get_pro`
     把 get_pro 绑定到自身模块命名空间（line 128 `pro = get_pro()` 走模块绑定），
-    故只需 patch `scripts.sync_macro_credit.get_pro` 即可劫持调用（与 test_sync_macro_credit.py:38
+    故只需 patch `data.tools.sync_macro_credit.get_pro` 即可劫持调用（与 test_sync_macro_credit.py:38
     单 patch 同手法）。无需再 patch `data._tushare_compat.get_pro`——那是对源模块的冗余 patch，
     此处不触发源模块的 get_pro 调用路径。
     """
     fake = _FakePro()
-    monkeypatch.setattr("scripts.sync_macro_credit.get_pro", lambda: fake)
+    monkeypatch.setattr("data.tools.sync_macro_credit.get_pro", lambda: fake)
     # 限频/熔断器 patch：sync_macro_credit._fetch_with_guard 内部调用，不 patch 会
     # 触达真实限流器（阻塞）或熔断器（OPEN 返空 DF → 宏观湖为空）。与 test_sync_macro_credit 同手法。
-    monkeypatch.setattr("scripts.sync_macro_credit.tushare_rate_limiter",
+    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_rate_limiter",
                         type("L", (), {"acquire": lambda self, n: None})())
-    monkeypatch.setattr("scripts.sync_macro_credit.tushare_breaker",
+    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_breaker",
                         type("B", (), {"allow_request": lambda self: True,
                                        "record_success": lambda self: None,
                                        "record_failure": lambda self: None})())
@@ -317,7 +317,7 @@ def test_macro_source_changed_to_tushare():
     """macro（macro_credit 湖）source 必须切到 Tushare（主源 cn_m + akshare 社融 fallback）。
 
     Why 钉死切源：DATASET_REGISTRY["macro"] 对应 macro_credit.parquet（CreditRegime 输入湖），
-    由 scripts/sync_macro_credit.py 产出。Plan C Task 2 已把 sync_macro_credit 重写为
+    由 data/tools/sync_macro_credit.py 产出。Plan C Task 2 已把 sync_macro_credit 重写为
     Tushare cn_m(M0/M1/M2) 主源 + akshare 社融/DR007 fallback（混合源语义，plan 既定决策非 bug）。
     此处 source 标 Tushare（主源），让前端 DataLakeView 反射出「宏观信贷现已切 Tushare」，
     而非仍停留在 AKShare 标签。

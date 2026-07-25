@@ -25,7 +25,7 @@
 |---|---|---|
 | `data/tushare_sync.py` | 通用 Tushare 湖同步器（配置驱动） | 新建 |
 | `config.py` | `TUSHARE_DATASETS` 注册表 + 新湖注册到 `LAKE_CONFIG["lakes"]`/`DATASET_REGISTRY` | 修改 |
-| `scripts/sync_tushare.py` | 通用同步 CLI（`python scripts/sync_tushare.py <key>`） | 新建 |
+| `data/tools/sync_tushare.py` | 通用同步 CLI（`python data/tools/sync_tushare.py <key>`） | 新建 |
 | `tests/test_tushare_sync.py` | 通用同步器单测 | 新建 |
 | `tests/test_tushare_datasets_stock.py` | 股票类各数据集配置+落湖测试 | 新建 |
 
@@ -35,7 +35,7 @@
 
 **Files:**
 - Create: `data/tushare_sync.py`
-- Create: `scripts/sync_tushare.py`
+- Create: `data/tools/sync_tushare.py`
 - Modify: `config.py`（新增 `TUSHARE_DATASETS` 注册表 + 新湖注册）
 - Test: `tests/test_tushare_sync.py`
 
@@ -340,8 +340,8 @@ def _trade_days(start: str, end: str) -> list[str]:
 ```
 
 ```python
-# scripts/sync_tushare.py
-"""通用 Tushare 数据集同步 CLI：python scripts/sync_tushare.py <key> [--years N] [--limit N]"""
+# data/tools/sync_tushare.py
+"""通用 Tushare 数据集同步 CLI：python data/tools/sync_tushare.py <key> [--years N] [--limit N]"""
 from __future__ import annotations
 import argparse
 import os
@@ -393,7 +393,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
 
 Run: `python -m pytest tests/test_tushare_sync.py -v` → PASS
 ```bash
-git add data/tushare_sync.py scripts/sync_tushare.py config.py tests/test_tushare_sync.py
+git add data/tushare_sync.py data/tools/sync_tushare.py config.py tests/test_tushare_sync.py
 git commit -m "feat(tushare): 通用湖同步器框架(配置驱动+分页+断点续传+限流复用)"
 ```
 
@@ -942,8 +942,8 @@ def test_new_stock_lakes_registered():
 - [ ] **Step 3: 端到端小样本验证**
 
 ```bash
-python scripts/sync_tushare.py fina_income --years 1 --limit 3
-python scripts/sync_tushare.py moneyflow --years 1  # 小区间
+python data/tools/sync_tushare.py fina_income --years 1 --limit 3
+python data/tools/sync_tushare.py moneyflow --years 1  # 小区间
 python -m pytest tests/ -v --ignore=tests/e2e
 ```
 Expected: 新湖落盘；全测试绿。

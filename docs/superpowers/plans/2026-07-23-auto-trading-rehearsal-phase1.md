@@ -322,7 +322,7 @@ git commit -m "feat(data): 新增 freshness 实时性检查（交易日历vs数�
 - Test: `tests/scripts/test_data_check.py`
 
 **Interfaces:**
-- Consumes: `data.freshness.check_freshness`（Task2）；`trading.calendar.expected_latest_trade_day`（Task1）；`scripts.sync_incremental.sync_one_key`
+- Consumes: `data.freshness.check_freshness`（Task2）；`trading.calendar.expected_latest_trade_day`（Task1）；`data.tools.sync_incremental.sync_one_key`
 - Produces: `run_check(checkpoint: str, *, keys=("daily",), deadline_hour=20) -> dict`（CLI 入口 `main()`）
 
 **说明：** 检查点①@17:00 查 T-1（历史应齐全，FAIL 仅告警不熔断）；检查点②@18:30 查 T（FAIL 触发重采窗口，每 15min 重采至 20:00，仍 FAIL 熔断 eod_plan）。
@@ -333,13 +333,13 @@ git commit -m "feat(data): 新增 freshness 实时性检查（交易日历vs数�
 # tests/scripts/test_data_check.py
 """数据检查点：①查T-1告警 / ②查T重采熔断。"""
 from unittest.mock import patch, MagicMock
-from scripts.run_data_check import run_check
+from data.tools.run_data_check import run_check
 
 
 def test_checkpoint1_t1_pass_no_alert():
     """检查点①：T-1 齐全 → 返 OK，不熔断。"""
     from data.freshness import FreshnessResult
-    with patch("scripts.run_data_check.check_freshness",
+    with patch("data.tools.run_data_check.check_freshness",
                return_value=FreshnessResult("daily", True, "2026-07-22", "2026-07-22", "PASS")):
         r = run_check("t1", keys=("daily",))
     assert r["ok"] is True
@@ -352,9 +352,9 @@ def test_checkpoint2_t_fail_triggers_resync_until_pass():
     fail = FreshnessResult("daily", False, "2026-07-22", "2026-07-23", "陈旧")
     ok = FreshnessResult("daily", True, "2026-07-23", "2026-07-23", "PASS")
     sync = MagicMock(return_value=(True, "ok"))
-    with patch("scripts.run_data_check.check_freshness", side_effect=[fail, ok]), \
-         patch("scripts.run_data_check.sync_one_key", sync), \
-         patch("scripts.run_data_check._now", side_effect=["18:30", "18:45"]):
+    with patch("data.tools.run_data_check.check_freshness", side_effect=[fail, ok]), \
+         patch("data.tools.run_data_check.sync_one_key", sync), \
+         patch("data.tools.run_data_check._now", side_effect=["18:30", "18:45"]):
         r = run_check("t2", keys=("daily",), deadline_hour=20)
     assert r["ok"] is True
     assert r["melted"] is False
@@ -365,9 +365,9 @@ def test_checkpoint2_t_fail_after_deadline_melts():
     """检查点②：超时仍 FAIL → 熔断（不交易不自欺）。"""
     from data.freshness import FreshnessResult
     fail = FreshnessResult("daily", False, "2026-07-22", "2026-07-23", "陈旧")
-    with patch("scripts.run_data_check.check_freshness", return_value=fail), \
-         patch("scripts.run_data_check.sync_one_key", return_value=(False, "积分不足")), \
-         patch("scripts.run_data_check._now", return_value="20:30"):  # 已超 20:00
+    with patch("data.tools.run_data_check.check_freshness", return_value=fail), \
+         patch("data.tools.run_data_check.sync_one_key", return_value=(False, "积分不足")), \
+         patch("data.tools.run_data_check._now", return_value="20:30"):  # 已超 20:00
         r = run_check("t2", keys=("daily",), deadline_hour=20)
     assert r["ok"] is False
     assert r["melted"] is True
@@ -376,7 +376,7 @@ def test_checkpoint2_t_fail_after_deadline_melts():
 - [ ] **Step 2: 验证测试失败**
 
 Run: `pytest tests/scripts/test_data_check.py -v`
-Expected: FAIL `ModuleNotFoundError: No module named 'scripts.run_data_check'`
+Expected: FAIL `ModuleNotFoundError: No module named 'data.tools.run_data_check'`
 
 - [ ] **Step 3: 实现**
 
@@ -412,7 +412,7 @@ def _resync_key(key: str) -> tuple[bool, str]:
 
     ⚠️ key 是 registry 语义 key（如 "daily"），不是 parquet 文件名（如 "a_shares_daily"）。
     """
-    from scripts.sync_incremental import sync_one_key
+    from data.tools.sync_incremental import sync_one_key
     import io
     today_str = datetime.today().strftime("%Y-%m-%d")
     return sync_one_key(key, today_str, fallback_years=3, max_days=None, log=io.StringIO())
@@ -484,10 +484,10 @@ def run_check(
 
 
 def main() -> None:
-    """schtasks 入口：python -m scripts.run_data_check t1|t2。"""
+    """schtasks 入口：python -m data.tools.run_data_check t1|t2。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if len(sys.argv) < 2 or sys.argv[1] not in ("t1", "t2"):
-        print("用法: python -m scripts.run_data_check t1|t2", file=sys.stderr)
+        print("用法: python -m data.tools.run_data_check t1|t2", file=sys.stderr)
         sys.exit(1)
     r = run_check(sys.argv[1])
     # 熔断用退出码 2 区分（eod_plan/schtasks 据此跳过）
@@ -527,7 +527,7 @@ git commit -m "feat(data): 数据检查点①②入口(重采熔断,t1告警/t2�
 @echo off
 cd /d C:\Users\yzzhan\Desktop\quanter
 call .venv310\Scripts\activate.bat
-python -m scripts.run_data_check t1
+python -m data.tools.run_data_check t1
 ```
 
 ```bat
@@ -535,7 +535,7 @@ python -m scripts.run_data_check t1
 @echo off
 cd /d C:\Users\yzzhan\Desktop\quanter
 call .venv310\Scripts\activate.bat
-python -m scripts.run_data_check t2
+python -m data.tools.run_data_check t2
 ```
 
 - [ ] **Step 2: 在 manage_ops_schtasks.py 注册两个任务**
@@ -562,7 +562,7 @@ Expected: 两个任务都存在，下次运行时间 17:00 / 18:30。
 - [ ] **Step 4: 手动触发验证（dry run）**
 
 ```bash
-python -m scripts.run_data_check t1
+python -m data.tools.run_data_check t1
 ```
 Expected: 输出检查结果，退出码 0（当前数据应齐全）。
 

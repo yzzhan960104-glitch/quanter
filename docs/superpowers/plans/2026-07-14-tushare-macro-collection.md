@@ -21,7 +21,7 @@
 | 文件 | 责任 | 操作 |
 |---|---|---|
 | `data/tushare_sync.py` | `_sync_single` 加 `index_mode=datetime` 支持 | 修改 |
-| `scripts/sync_macro_credit.py` | 重写：Tushare cn_m + akshare fallback → macro 湖 | 重写 |
+| `data/tools/sync_macro_credit.py` | 重写：Tushare cn_m + akshare fallback → macro 湖 | 重写 |
 | `config.py` | TUSHARE_DATASETS 追加宏观配置 + macro source 改 Tushare | 修改 |
 | `tests/test_tushare_datasets_macro.py` | 宏观数据集 + CreditRegime 列名对齐测试 | 新建 |
 
@@ -120,7 +120,7 @@ git commit -m "feat(tushare): 通用同步器支持 index_mode=datetime(宏观�
 ### Task 2: 重写 sync_macro_credit（Tushare cn_m + akshare 社融/DR007 fallback + CreditRegime 列名对齐）
 
 **Files:**
-- Rewrite: `scripts/sync_macro_credit.py`
+- Rewrite: `data/tools/sync_macro_credit.py`
 - Test: `tests/test_tushare_datasets_macro.py`
 
 **Interfaces:**
@@ -144,7 +144,7 @@ def test_macro_lake_credit_regime_columns(tmp_path, fake_pro, monkeypatch):
                             "dr007": pd.DataFrame({"日期": ["2024-01-05", "2024-02-05"], "DR007": [1.9, 1.8]}),
                         }.get(kind, pd.DataFrame()))
     out = str(tmp_path / "macro.parquet")
-    from scripts.sync_macro_credit import sync_macro
+    from data.tools.sync_macro_credit import sync_macro
     sync_macro("2024-01-01", "2024-02-28", out=out)
     df = pd.read_parquet(out)
     assert "shrzgm" in df.columns, "CreditRegime core 字段 shrzgm 缺失"
@@ -274,7 +274,7 @@ if __name__ == "__main__":
 
 Run: `python -m pytest tests/test_tushare_datasets_macro.py -k "credit_regime or macro_lake" -v` → PASS
 ```bash
-git add scripts/sync_macro_credit.py tests/test_tushare_datasets_macro.py
+git add data/tools/sync_macro_credit.py tests/test_tushare_datasets_macro.py
 git commit -m "refactor(sync): sync_macro_credit 切 Tushare cn_m(M1/M2)+akshare社融/DR007 fallback,CreditRegime不变"
 ```
 
@@ -409,7 +409,7 @@ def test_credit_regime_end_to_end_with_tushare_macro(tmp_path, fake_pro, monkeyp
                                                          "社融增量": [50000] * 25})
                         if kind == "shrzgm" else pd.DataFrame())
     out = str(tmp_path / "macro.parquet")
-    from scripts.sync_macro_credit import sync_macro
+    from data.tools.sync_macro_credit import sync_macro
     sync_macro("2023-01-01", "2025-01-01", out=out)
     from core.macro_regime import CreditRegime
     df = pd.read_parquet(out)
@@ -428,8 +428,8 @@ def test_credit_regime_end_to_end_with_tushare_macro(tmp_path, fake_pro, monkeyp
 - [ ] **Step 3: 端到端验证**
 
 ```bash
-python scripts/sync_macro_credit.py
-python scripts/sync_tushare.py cn_cpi
+python data/tools/sync_macro_credit.py
+python data/tools/sync_tushare.py cn_cpi
 python -c "
 import pandas as pd
 from core.macro_regime import CreditRegime
