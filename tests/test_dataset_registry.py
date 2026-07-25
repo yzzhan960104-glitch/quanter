@@ -52,15 +52,17 @@ STOCK_TUSHARE_KEYS = [
 ]
 
 
-def test_concept_detail_not_in_tushare_datasets():
-    """concept_detail 必须不在 TUSHARE_DATASETS（按概念 id 分页，本 task 跳过）。
+def test_concept_detail_in_tushare_datasets():
+    """concept_detail 已注册（2026-07-25 决策订正：原跳过，现纳入统一管道）。
 
-    Why 钉死：brief 草稿 new_lakes 曾含 concept_detail，但该接口需 pro.concept_detail(id=...)
-    逐概念分页，通用同步器只支持 symbol/date/single 三种 by，无 by=concept 模式。Task 7 已决策
-    跳过，TUSHARE_DATASETS 实际不含此 key。本测试守卫「不误注册一个无法同步的数据集」。
+    Why 订正：原决策「通用同步器不支持 by=concept 故跳过」已过时——2026-07-25 Plan Task 4 给
+    resolve_symbols 加了 universe=concept 分支（从 concept 湖读 id 列表），concept_detail 复用
+    by=symbol + code_param=id 分页，纳入统一管道。代理废弃后直连 concept_detail 接口可用。
     """
-    assert "concept_detail" not in TUSHARE_DATASETS, \
-        "concept_detail 应跳过（按概念 id 分页，通用同步器不支持 by=concept）"
+    assert "concept_detail" in TUSHARE_DATASETS, "concept_detail 应已注册（universe=concept）"
+    cfg = TUSHARE_DATASETS["concept_detail"]
+    assert cfg["universe"] == "concept", "concept_detail 走 universe=concept 标的池"
+    assert cfg["code_param"] == "id", "concept_detail 传参名=id（非 ts_code）"
 
 
 def test_new_stock_lakes_registered():

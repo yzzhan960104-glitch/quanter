@@ -513,6 +513,9 @@ def test_by_symbol_datasets_universe_correctly_declared():
             assert uni == "etf", f"{key} 应 universe=etf（基金代码），实际 {uni!r}"
         elif key.startswith("index_"):
             assert uni == "index", f"{key} 应 universe=index（指数代码），实际 {uni!r}"
+        elif key == "concept_detail":
+            # concept_detail（2026-07-25 新增）：按概念 id 分页，universe=concept 从 concept 湖读 id
+            assert uni == "concept", f"{key} 应 universe=concept（概念 id），实际 {uni!r}"
         else:
             assert uni == "stock", f"{key} 应 universe=stock（股票），实际 {uni!r}"
 

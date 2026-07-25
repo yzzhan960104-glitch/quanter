@@ -134,5 +134,17 @@ LAKE_CONFIG["lakes"] = {
     "shibor": "data_lake/shibor.parquet",           # Shibor 日频均值（DatetimeIndex）
     "shibor_quote": "data_lake/shibor_quote.parquet",  # Shibor 逐报价行明细（DatetimeIndex + bank 数据列）
     "mkt_daily": "data_lake/mkt_daily.parquet",  # 交易所日级成交统计（daily_info，沪深合并，by=date）
+    # 数据快照扩容（2026-07-25）：基础桶新湖（key 与 TUSHARE_DATASETS 一一对应）
+    "stock_basic": "data_lake/stock_basic.parquet",     # 股票列表（标的池源头，by=single 扁平）
+    "hs_const_sh": "data_lake/hs_const_sh.parquet",     # 沪股通成分（by=single 扁平）
+    "hs_const_sz": "data_lake/hs_const_sz.parquet",     # 深股通成分（by=single 扁平）
+    "concept_detail": "data_lake/concept_detail.parquet",  # 概念成分股（by=symbol universe=concept）
+    # 数据快照扩容（2026-07-25）：特色桶新湖
+    "cyq_chips": "data_lake/cyq_chips.parquet",          # 逐价位筹码分布（by=date，数据量大）
+    "daily_basic": "data_lake/daily_basic.parquet",      # 每日基本面因子 PE/PB/换手率（by=date）
+    "stk_factor_pro": "data_lake/stk_factor_pro.parquet",  # 技术因子 MACD/KDJ/BOLL（by=date）
+    # OHLCV 前复权三频（2026-07-25）：daily 复用既有 a_shares_daily 湖（已注册），weekly/monthly 新湖
+    "weekly": "data_lake/a_shares_weekly.parquet",       # 个股前复权周线（by=symbol + adj_api）
+    "monthly": "data_lake/a_shares_monthly.parquet",     # 个股前复权月线（by=symbol + adj_api）
 }
 LAKE_CONFIG["default_lake"] = "daily"

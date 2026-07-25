@@ -349,9 +349,12 @@ def test_concept_ths_daily_registered():
     assert cfg_ths["by"] == "date", "ths_daily 应为 date（单日全市场板块行情）"
     assert cfg_ths["date_col"] == "trade_date", "ths_daily date_col 应为 trade_date"
     assert cfg_ths["symbol_col"] == "ts_code", "ths_daily symbol_col 应为 ts_code（板块指数代码）"
-    # concept_detail 必须不在注册表（按概念 id 分页，通用同步器不支持，本 task 跳过）
-    assert "concept_detail" not in TUSHARE_DATASETS, \
-        "concept_detail 应跳过（按概念 id 分页，需扩展 by=concept，本 task 不接入）"
+    # concept_detail（2026-07-25 订正）：原决策跳过，现 resolve_symbols 支持 universe=concept，
+    # concept_detail 复用 by=symbol + code_param=id 分页纳入统一管道（详见 test_resolve_symbols_concept）
+    assert "concept_detail" in TUSHARE_DATASETS, "concept_detail 应已注册（universe=concept）"
+    cfg_cd = TUSHARE_DATASETS["concept_detail"]
+    assert cfg_cd["universe"] == "concept" and cfg_cd["code_param"] == "id", \
+        "concept_detail 走 universe=concept + code_param=id"
 
 
 def test_concept_ths_daily_lake_registered():
@@ -396,25 +399,23 @@ def test_ths_daily_by_date(tmp_path, fake_pro, monkeypatch):
 
 
 def test_concept_unavailable_skipped(tmp_path, fake_pro, monkeypatch):
-    """concept 标 _unavailable 时 sync_dataset 跳过（不下载、不报错、不落盘）。
+    """concept 标 _unavailable 时跳过（2026-07-25 Task 11 dry-run：直连积分不足仍不可用）。
 
-    Why 跳过守卫（B 类·方法名错订正）：tnskhdata 无概念接口（concept/stock_concept/
-    concept_detail 均 No such method），配置层标 _unavailable 后 sync_dataset 检测跳过。
-    本测试验证跳过语义：fake_pro 即使注入了数据也不会被消费，不写 parquet（落盘文件不存在），
-    不抛异常（return 早退）。待 akshare 换源后恢复，此处守卫「不误下不可用数据集」。
+    Why 守卫：代理废弃后纯直连 tushare，但 concept 接口服务端仍返「无正确的接口名」
+    （hasattr True 但调用失败，积分不足/接口下线）。Task 11 dry-run 探测确认，标 _unavailable
+    跳过。Task 4 曾误删 _unavailable（以为代理废弃即可用），dry-run 订正加回。
     """
     import data.tushare_sync as ts
-    # 即使 fake_pro 注入 concept 数据，_unavailable 标记会让 sync_dataset 早退不消费
+    import os
+    # concept 必须标 _unavailable（直连积分不足）
+    assert TUSHARE_DATASETS["concept"].get("_unavailable"), \
+        "concept 必须标 _unavailable（直连积分不足，服务端返「无正确的接口名」）"
     fake_pro.set("concept", pd.DataFrame({"code": ["TS2"], "name": ["新能源汽车"]}))
     lake = str(tmp_path / "concept.parquet")
     monkeypatch.setitem(TUSHARE_DATASETS["concept"], "lake", lake)
-    # 不抛、不落盘
     ts.sync_dataset("concept", "2024-01-05", "2024-12-31", resume=False)
-    import os
+    # _unavailable 时跳过，不落盘
     assert not os.path.exists(lake), "concept 标 _unavailable 后不应落盘 parquet"
-    # 配置层必须有 _unavailable 标记
-    assert TUSHARE_DATASETS["concept"].get("_unavailable"), \
-        "concept 必须标 _unavailable（tnskhdata 无概念接口）"
 
 
 def test_index_datasets_registered():

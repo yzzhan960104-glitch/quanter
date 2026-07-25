@@ -23,7 +23,12 @@ import pandas as pd
 
 from config import TUSHARE_DATASETS, LAKE_CONFIG
 from data._tushare_compat import get_pro, source_name
-from data.resilience import tushare_breaker, tushare_rate_limiter
+from data.resilience import (
+    tushare_breaker,
+    tushare_rate_limiter_basic,
+    tushare_rate_limiter_special,
+    tushare_rate_limiter,  # 别名=basic，向后兼容既有测试 mock tushare_sync.tushare_rate_limiter
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +68,12 @@ def _classify_exc(e: Exception) -> str:
     return "unknown"
 
 
-def _fetch_with_guard(api_name: str, **kwargs) -> pd.DataFrame:
+def _fetch_with_guard(api_name: str, *, quota_type: str = "basic", **kwargs) -> pd.DataFrame:
     """限频 + 熔断 + 异常分类包装的 pro 接口调用，空数据/失败返空 DF。
+
+    quota_type（2026-07-25 双桶改造）：basic 走 500/min 基础桶，special 走 300/min 特色桶。
+    缺省 basic（向后兼容未显式声明的数据集 + 旧调用）。三态处理（瞬时态/持久态/未知态）
+    与异常分类逻辑不变，见 _classify_exc。
 
     三态处理（关键修复：瞬时态限频改指数退避重试，而非原直接 record_failure 返空）：
       - transient（限频/超时/断网）：指数退避重试（2/4/8/16/32s），重试期间**不**
@@ -82,8 +91,11 @@ def _fetch_with_guard(api_name: str, **kwargs) -> pd.DataFrame:
     也不 record_success —— 空数据不污染熔断计数，原逻辑保持）。
     """
     pro = get_pro()
-    # 限频令牌桶：阻塞至令牌可用（桶容量+匀速补充已由 RateLimiter 管控，此处只扣 1）
-    tushare_rate_limiter.acquire(1.0)
+    # 限频令牌桶：按 quota_type 选桶（基础500/特色300），阻塞至令牌可用。
+    # Why 按数据集类别选桶：Tushare 官方按接口分两档配额，特色数据（资金/筹码/因子）走 300/min
+    # 独立桶，避免与基础行情（500/min）争抢导致特色接口被基础接口挤占限频。
+    limiter = tushare_rate_limiter_special if quota_type == "special" else tushare_rate_limiter_basic
+    limiter.acquire(1.0)
 
     # 熔断 OPEN 冷却重试：allow_request False 时不直接返空，sleep recovery_timeout
     # 让 breaker 自动转 HALF_OPEN，再走一次完整重试链（最多 _BREAKER_OPEN_WAIT_RETRIES 次）。
@@ -292,9 +304,35 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
             kwargs["end_date"] = ed
         if fields:
             kwargs["fields"] = fields
-        df = _fetch_with_guard(api, **kwargs)
+        df = _fetch_with_guard(api, quota_type=(cfg or {}).get("quota_type", "basic"), **kwargs)
         if df.empty:
             continue
+        # —— adj_api 前复权增强（daily/weekly/monthly，2026-07-25 Plan Task 3）——
+        # 物理意图：照搬 sync_data_lake.fetch_qfq，price_qfq = raw × adj / latest（latest=区间最新），
+        # 与 a_shares_daily.parquet（fetch_qfq 生产）字节级一致。volume/amount 不复权
+        # （除权不影响成交额口径）。latest 取区间最新 adj_factor，基准日（最新日）价 = 原始价
+        # （adj/latest=1），历史价向下调整消除除权断崖，与 pro_bar(qfq) 同语义。
+        adj_api = (cfg or {}).get("adj_api")
+        if adj_api:
+            adj_kwargs = {code_param: ts_code}
+            if not (cfg or {}).get("no_date_filter"):
+                adj_kwargs["start_date"] = sd
+                adj_kwargs["end_date"] = ed
+            adj_df = _fetch_with_guard(
+                adj_api, quota_type=(cfg or {}).get("quota_type", "basic"),
+                fields="ts_code,trade_date,adj_factor", **adj_kwargs)
+            if not adj_df.empty:
+                adj_df["trade_date"] = pd.to_datetime(adj_df["trade_date"], format="%Y%m%d", errors="coerce")
+                df_dt = pd.to_datetime(df[date_col], format="%Y%m%d", errors="coerce")
+                adj_map = dict(zip(adj_df["trade_date"], adj_df["adj_factor"]))
+                adj_series = df_dt.map(adj_map)
+                latest_adj = adj_df.sort_values("trade_date")["adj_factor"].iloc[-1]
+                if pd.isna(latest_adj) or latest_adj == 0:
+                    latest_adj = 1.0
+                for col in ("open", "high", "low", "close"):
+                    if col in df.columns:
+                        df[col] = df[col].astype(float) * adj_series.astype(float) / float(latest_adj)
+        # —— adj_api 前复权增强结束 ——
         df = _cleanse(df, date_col)
         if rename:
             df = df.rename(columns=rename)  # 列名归一（如 fund_daily vol→volume）
@@ -322,7 +360,7 @@ def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, ou
         kwargs = {"trade_date": td}
         if fields:
             kwargs["fields"] = fields
-        df = _fetch_with_guard(api, **kwargs)
+        df = _fetch_with_guard(api, quota_type=(cfg or {}).get("quota_type", "basic"), **kwargs)
         if df.empty:
             continue
         df = _cleanse(df, date_col)
@@ -379,7 +417,7 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
     if (cfg or {}).get("date_range") and start and end:
         kwargs["start_date"] = start.replace("-", "")
         kwargs["end_date"] = end.replace("-", "")
-    df = _fetch_with_guard(api, **kwargs)
+    df = _fetch_with_guard(api, quota_type=(cfg or {}).get("quota_type", "basic"), **kwargs)
     if df.empty:
         logger.warning("%s 数据为空，跳过", key)
         return
@@ -466,6 +504,24 @@ def _load_etf_universe() -> list[str]:
     return df["ts_code"].tolist()
 
 
+def _load_concept_ids() -> list[str]:
+    """概念 id 列表（从已落湖的 concept.parquet 读，供 concept_detail 的 by=symbol 消费）。
+
+    Why 从湖读而非即时拉 concept 接口：concept（概念字典）是 concept_detail 的前置依赖，
+    落湖后复用零额外配额；且 concept 接口静态，即时拉与读湖等价但后者省一次请求。
+    Why 湖不存在返空：concept 未同步时 concept_detail 无标的可拉，返空让 _sync_by_symbol
+    的 symbols=[] 自然跳过（for 空列表不执行），不抛异常阻断编排（编排脚本可先跑 concept
+    再跑 concept_detail，resolve_symbols 在 concept_detail 时读已落湖的 concept）。
+    """
+    lake = os.path.join("data_lake", "concept.parquet")
+    if not os.path.exists(lake):
+        logger.warning("concept.parquet 不存在，concept_detail 无概念 id 可拉（请先同步 concept）")
+        return []
+    df = pd.read_parquet(lake)
+    code_col = "code" if "code" in df.columns else df.columns[0]
+    return df[code_col].astype(str).tolist()
+
+
 # A 股核心宽基指数（覆盖主流规模/板块风格）。指数类数据集（index_daily/index_member）
 # 的标的池——固定常量，无需也不应从股票/基金接口拉（与 _load_universe 股票池语义隔离）。
 CORE_INDEX_CODES: list[str] = [
@@ -499,6 +555,8 @@ def resolve_symbols(key: str, limit: Optional[int] = None) -> list[str]:
         syms = _load_etf_universe()
     elif universe == "index":
         syms = list(CORE_INDEX_CODES)
+    elif universe == "concept":
+        syms = _load_concept_ids()
     else:  # stock（含缺省）
         syms = _load_universe()
     if limit:

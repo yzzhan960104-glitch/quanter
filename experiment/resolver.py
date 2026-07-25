@@ -19,6 +19,8 @@ def resolve_active(db_path: Optional[str] = None) -> list:
     空列表表示无在线实验（scan 调用方应 fail-fast，不下单）。
     """
     versions = list_versions(db_path or _DEFAULT_DB, status=ExperimentStatus.ACTIVE)
+    # activated_at 透传：ExperimentVersion 已有该字段 + list_versions SELECT * 直接读；
+    # 此处构造 ActiveExperiment 时带上，供 T6 ≥5天硬闸算影子期（Plan 4）。
     return [ActiveExperiment(experiment_id=v.experiment_id, strategy_name=v.strategy_name,
-                             params=v.params, weight=v.weight)
+                             params=v.params, weight=v.weight, activated_at=v.activated_at)
             for v in versions if v.weight > 0]

@@ -46,10 +46,11 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                       "script": "scripts/sync_macro_credit.py", "schedule": "每月初",   "freshness_hours": 720},
     "sector":        {"source": "AKShare", "market": "板块", "granularity": "1d",
                       "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
-    # daily（前复权日线）：sync_data_lake.py 实际用 tushare 代理 pro.daily + pro.adj_factor 重建前复权
-    # （非 AKShare——历史误标，2026-07-19 数据层盘点订正）。a_shares_daily.parquet 903 万行 tushare 源。
+    # daily（前复权日线）：2026-07-25 Plan Task 7 纳入统一管道（_sync_by_symbol adj_api 增强），
+    # script 从 sync_data_lake.py 切到 sync_tushare.py（sync_data_lake 转薄壳 deprecated）。
+    # 前复权逻辑照搬 fetch_qfq: price=raw×adj/latest，与既有 a_shares_daily.parquet（903万行）字节级一致。
     "daily":         {"source": "Tushare", "market": "A股",  "granularity": "1d",
-                      "script": "scripts/sync_data_lake.py",   "schedule": "每日18:00", "freshness_hours": 24},
+                      "script": "scripts/sync_tushare.py",   "schedule": "每日18:00", "freshness_hours": 24},
     "daily_active":  {"source": "AKShare", "market": "A股",  "granularity": "1d",
                       "script": "scripts/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
     "minute":        {"source": "JQData",  "market": "A股",  "granularity": "1m",
@@ -194,6 +195,32 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     # exchange 列区分）。LAKE_CONFIG key=mkt_daily（与 TUSHARE_DATASETS 一致，单一真相源）。
     "mkt_daily":       {"source": "Tushare", "market": "宏观", "granularity": "1d",
                         "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # ============================================================================
+    # 数据快照扩容（2026-07-25 Plan Task 8）：新增数据集元信息（前端 DataLakeView 反射）
+    # ============================================================================
+    # script 统一 scripts/sync_tushare.py（server data_service 子进程拉起该薄壳）。
+    # freshness_hours：日频=24h、季频=2190h、静态快照=730h（标的不常变动）。
+    # —— 基础桶：列表 / 成分类 ——
+    "stock_basic":    {"source": "Tushare", "market": "A股", "granularity": "快照",
+                       "script": "scripts/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
+    "hs_const_sh":    {"source": "Tushare", "market": "A股", "granularity": "快照",
+                       "script": "scripts/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
+    "hs_const_sz":    {"source": "Tushare", "market": "A股", "granularity": "快照",
+                       "script": "scripts/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
+    "concept_detail": {"source": "Tushare", "market": "板块", "granularity": "快照",
+                       "script": "scripts/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
+    # —— 特色桶：筹码明细 / 因子 ——
+    "cyq_chips":      {"source": "Tushare", "market": "A股", "granularity": "1d",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "daily_basic":    {"source": "Tushare", "market": "A股", "granularity": "1d",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "stk_factor_pro": {"source": "Tushare", "market": "A股", "granularity": "1d",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # —— OHLCV 前复权周/月线（daily 已在上方注册，script 已切 sync_tushare.py）——
+    "weekly":         {"source": "Tushare", "market": "A股", "granularity": "1w",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    "monthly":        {"source": "Tushare", "market": "A股", "granularity": "1M",
+                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
 }
 
 # ============================================================
@@ -270,6 +297,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "ts_code,trade_date,buy_sm_amount,sell_sm_amount,buy_elg_amount,sell_elg_amount,net_mf_amount",
         "lake": "data_lake/moneyflow.parquet",
+        "quota_type": "special",  # 资金流向按 Tushare 官方归特色数据（300/min，2026-07-25 Task 6）
     },
     # —— 龙虎榜（top_list/top_inst）：单日全市场，按 date 分页 ——
     # dragon_list 湖切 Tushare（原 akshare 源退役）；top_inst 机构席位单独湖。
@@ -361,7 +389,12 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "date_col": "code", "symbol_col": "code",
         "fields": "code,name",
         "lake": "data_lake/concept.parquet",
-        "_unavailable": "tnskhdata 无概念接口（concept/stock_concept/concept_detail 均 No such method），待 akshare 换源",
+        "quota_type": "basic",
+        # 2026-07-25 Task 11 dry-run 订正：代理废弃后纯直连 tushare，但 concept 接口服务端仍返
+        # 「无正确的接口名」（hasattr True 但调用失败——SDK __getattr__ 动态返回不验证，积分不足或
+        # 接口下线）。标 _unavailable 由 sync_dataset 跳过，待积分提升/换源（akshare 概念接口）恢复。
+        # 原 Task 4 误删 _unavailable（以为代理废弃即可用），dry-run 探测发现直连仍不可用，加回。
+        "_unavailable": "直连 tushare concept 接口服务端返「无正确的接口名」（积分不足/接口下线），待换源恢复",
     },
     # ths_daily（同花顺板块指数日线）：单日全市场板块行情一次返（ts_code 为板块指数代码如 885572.TI，
     # 非个股）→ by=date 分页。symbol 从 ts_code 列取（Task 1 fix 已保证 by=date 不从文件名取 symbol）。
@@ -657,7 +690,138 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "ts_code,trade_date,his_low,his_high,cost_5pct,cost_15pct,cost_50pct,cost_85pct,cost_95pct,weight_avg,winner_rate",
         "lake": "data_lake/cyq_perf.parquet",
-        "quota_type": "special",  # 特色数据：300/分独立通道（纯日志标记，限流仍走统一 rate_limiter）
+        "quota_type": "special",  # 特色数据：300/分独立通道（2026-07-25 Task 2 已升级为真路由到 tushare_rate_limiter_special 桶，不再仅日志标记）
+    },
+    # ============================================================================
+    # 数据快照扩容（2026-07-25 Plan Task 5）：基础桶新数据集（500/min）
+    # ============================================================================
+    # 物理意图：补齐标的池源头（stock_basic）、互联互通成分（hs_const 沪/深）、概念成分股（concept_detail）。
+    "stock_basic": {
+        # 股票列表（标的池源头）：单次拉全市场在售（list_status='L'），by=single 落扁平 df。
+        # Why 落湖：原仅 _load_universe 内部即时调用拿 universe 不落 parquet；提升为正式数据集
+        # 便于白盒掌控标的池快照 + 供下游选股 universe 复用（零额外配额）。
+        # Why params list_status='L'：与 _load_universe 一致过滤在售；不剔 ST（落湖保留全集，下游自行过滤）。
+        "api": "stock_basic", "by": "single",
+        "date_col": "list_date", "symbol_col": "ts_code",
+        "fields": "ts_code,symbol,name,area,industry,market,list_date",
+        "params": {"list_status": "L"},
+        "lake": "data_lake/stock_basic.parquet",
+        "quota_type": "basic",
+    },
+    "hs_const_sh": {
+        # 沪股通成分（hs_const hs_type=SH）：单次拉全量沪股通标的，by=single 落扁平 df。
+        # 物理意图：互联互通成分是北向资金可投标的范围，用于外资流向归因 + 池子边界识别。
+        # date_col=in_date（纳入日期）：标的纳入沪股通时间，无前视风险（历史成分变动公开）。
+        "api": "hs_const", "by": "single",
+        "params": {"hs_type": "SH"},
+        "date_col": "in_date", "symbol_col": "ts_code",
+        "fields": "ts_code,hs_type,in_date,out_date,is_new",
+        "lake": "data_lake/hs_const_sh.parquet",
+        "quota_type": "basic",
+    },
+    "hs_const_sz": {
+        # 深股通成分（hs_const hs_type=SZ）：同上，hs_type=SZ。
+        "api": "hs_const", "by": "single",
+        "params": {"hs_type": "SZ"},
+        "date_col": "in_date", "symbol_col": "ts_code",
+        "fields": "ts_code,hs_type,in_date,out_date,is_new",
+        "lake": "data_lake/hs_const_sz.parquet",
+        "quota_type": "basic",
+    },
+    "concept_detail": {
+        # 概念成分股（concept_detail）：按概念 id 分页（pro.concept_detail(id=...)）。
+        # Why by=symbol + universe=concept + code_param=id：复用 _sync_by_symbol 逐标的分页，
+        # 标的池=concept 湖的 id 列表（resolve_symbols universe=concept 分支），传参名=id 非 ts_code。
+        # ⚠️ 2026-07-25 Task 11 dry-run：前置依赖 concept 不可用（直连积分不足，见 concept _unavailable），
+        # concept_detail 无概念 id 来源（_load_concept_ids 返空），标 _unavailable 跳过。
+        # 待 concept 恢复（积分提升/换源）后，concept_detail 自动恢复（_load_concept_ids 读 concept 湖）。
+        "api": "concept_detail", "by": "symbol",
+        "universe": "concept",
+        "code_param": "id",
+        "date_col": "in_date", "symbol_col": "ts_code",
+        "fields": "id,concept_name,ts_code,name,in_date,out_date",
+        "lake": "data_lake/concept_detail.parquet",
+        "quota_type": "basic",
+        "_unavailable": "前置 concept 不可用（直连积分不足），concept_detail 无概念 id 来源，待 concept 恢复后自动恢复",
+    },
+    # ============================================================================
+    # 数据快照扩容（2026-07-25 Plan Task 6）：特色桶新数据集（300/min）
+    # ============================================================================
+    # 物理意图：补齐逐价位筹码明细（cyq_chips）+ 基本面因子（daily_basic）+ 技术因子（stk_factor_pro）。
+    # ⚠️ fields 串按 Tushare 官方文档填，Task 11 dry-run 用 probe_tushare_fields 探测真实列名订正。
+    "cyq_chips": {
+        # 逐价位筹码分布（cyq_chips）：单标的单日 ~100 价位行，接口要求 ts_code（纯 trade_date 报错）。
+        # 2026-07-25 Task 11 dry-run 订正：原配 by=date（trade_date 全市场），实测 cyq_chips 硬性要求
+        # ts_code（cyq_chips(trade_date=X) 报「必须 ts_code 或 trade_date」失败，cyq_chips(ts_code=Y,trade_date=X) OK）。
+        # 改 by=symbol 逐标的拉（universe=stock）。物理意图：画筹码峰图 + 精细筹码集中度（cyq_perf 仅五档成本）。
+        # ⚠️ 数据量：单标的单日 ~104 价位，全市场 5000 标的逐日拉区间内每日每价位——5年全量会爆炸
+        # （~6亿行），故全量回填应限制区间（近期快照，筹码动态转移，历史价值低），见 Task 13。
+        "api": "cyq_chips", "by": "symbol",
+        "universe": "stock",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,price,percent",
+        "lake": "data_lake/cyq_chips.parquet",
+        "quota_type": "special",
+    },
+    "daily_basic": {
+        # 每日全市场基本面因子（daily_basic）：PE/PB/换手率/市值，by=date 单日全市场。
+        # 物理意图：估值因子（PE/PB）+ 流动性因子（换手率）核心数据源，每日 5000+ 行。
+        # date_col=trade_date（交易日，无前视）。
+        "api": "daily_basic", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,close,turnover_rate,turnover_rate_f,pe,pe_ttm,pb,ps,total_mv,circ_mv",
+        "lake": "data_lake/daily_basic.parquet",
+        "quota_type": "special",
+    },
+    "stk_factor_pro": {
+        # 技术面因子专业版（stk_factor_pro）：MACD/KDJ/BOLL/RSI/CCI 等，by=date 单日全市场。
+        # 物理意图：技术因子核心源，供动量/反转/突破策略直接消费（免下游自算）。
+        # ⚠️ 2026-07-25 Task 11 dry-run 订正：fields 列名全部带 _bfq/_hfq/_qfq 后缀（不复权/后复权/前复权），
+        # 无裸 macd/rsi_6/cci（原 fields 是幻觉列）。订正为 _bfq（不复权，与技术分析惯例 + 与 daily 湖
+        # 原始价口径一致，复权由下游 adj_factor 自行重建）。close 是裸列（不复权收盘，保留）。
+        "api": "stk_factor_pro", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,close,macd_bfq,kdj_k_bfq,kdj_d_bfq,kdj_j_bfq,boll_upper_bfq,boll_mid_bfq,boll_lower_bfq,rsi_bfq_6,cci_bfq",
+        "lake": "data_lake/stk_factor_pro.parquet",
+        "quota_type": "special",
+    },
+    # ============================================================================
+    # OHLCV 前复权三频（2026-07-25 Plan Task 7）：daily/weekly/monthly 统一管道（基础桶）
+    # ============================================================================
+    # 物理意图：把 sync_data_lake.fetch_qfq 的前复权逻辑纳入 _sync_by_symbol（adj_api 增强），
+    # daily/weekly/monthly 三频复用同一管道，shard 按标的 + MultiIndex(date,symbol) 落湖。
+    # Why by=symbol 非 by=date：与既有 a_shares_daily.parquet 生产方式一致（fetch_qfq 范式），
+    # 字节级可复现 + shard 按标的断点续传友好（5000 标的 × 2请求 ≈ 10000，500/min ≈ 20min）。
+    # Why adj_api=adj_factor：_sync_by_symbol 检测 adj_api 后拉 adj_factor 重建前复权
+    # price_qfq = raw × adj / latest（latest=区间最新），volume/amount 不复权。
+    # Why rename vol→volume：Tushare daily/weekly/monthly 返 vol 列，与项目 OHLCV schema（volume）归一。
+    "daily": {
+        # 个股前复权日线：复用既有 a_shares_daily.parquet（903万行已落盘），保持一致性。
+        "api": "daily", "by": "symbol", "adj_api": "adj_factor",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,open,high,low,close,vol,amount",
+        "rename": {"vol": "volume"},
+        "lake": "data_lake/a_shares_daily.parquet",
+        "quota_type": "basic",
+    },
+    "weekly": {
+        # 个股前复权周线：pro.weekly 接口（周末日 OHLCV + 周聚合成交），同 daily 管道。
+        # adj_factor 日频，merge on trade_date（周线 trade_date=周末日，adj 该日有值）。
+        "api": "weekly", "by": "symbol", "adj_api": "adj_factor",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,open,high,low,close,vol,amount",
+        "rename": {"vol": "volume"},
+        "lake": "data_lake/a_shares_weekly.parquet",
+        "quota_type": "basic",
+    },
+    "monthly": {
+        # 个股前复权月线：pro.monthly 接口，同 daily 管道。
+        "api": "monthly", "by": "symbol", "adj_api": "adj_factor",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,open,high,low,close,vol,amount",
+        "rename": {"vol": "volume"},
+        "lake": "data_lake/a_shares_monthly.parquet",
+        "quota_type": "basic",
     },
 }
 

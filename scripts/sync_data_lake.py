@@ -184,13 +184,27 @@ def main(years: int, out: str, resume: bool = True, limit: int | None = None) ->
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(
-        description="A 股全市场前复权日线数据湖同步（代理 daily+adj_factor 重建）"
+    # 2026-07-25 Plan Task 10：本脚本 __main__ 已 deprecated，daily 前复权已纳入统一管道
+    # （_sync_by_symbol adj_api 增强，见 data/tushare_sync.py），__main__ 转调统一 CLI。
+    # main/fetch_qfq 函数保留（test_daily_migration_parity 复用 fetch_qfq 做新旧管道一致性对比）。
+    import warnings
+    warnings.warn(
+        "scripts/sync_data_lake.py 已 deprecated（2026-07-25 scripts/ 收敛）。"
+        "daily 前复权已纳入统一管道，请改用：python -m data.sync --keys daily --since 2021-01-01",
+        DeprecationWarning, stacklevel=2,
     )
-    ap.add_argument("--years", type=int, default=LAKE_CONFIG["years_default"])
-    ap.add_argument("--out", default=LAKE_CONFIG["default_path"])
-    ap.add_argument("--no-resume", action="store_true")
-    ap.add_argument("--limit", type=int, default=None,
-                    help="仅同步前 N 只标的（小样本调试；全量留空）")
-    args = ap.parse_args()
-    main(years=args.years, out=args.out, resume=not args.no_resume, limit=args.limit)
+    import argparse as _ap
+    _ap2 = _ap.ArgumentParser(
+        description="[deprecated] A 股前复权日线同步（转调 python -m data.sync --keys daily）"
+    )
+    _ap2.add_argument("--years", type=int, default=5)
+    _ap2.add_argument("--limit", type=int, default=None)
+    _args = _ap2.parse_args()
+    from datetime import datetime as _dt, timedelta as _td
+    _end = _dt.today().strftime("%Y-%m-%d")
+    _start = (_dt.today() - _td(days=365 * _args.years)).strftime("%Y-%m-%d")
+    from data.sync_cli import main as _cli_main
+    _cli_argv = ["--keys", "daily", "--since", _start, "--end", _end]
+    if _args.limit:
+        _cli_argv += ["--limit", str(_args.limit)]
+    sys.exit(_cli_main(_cli_argv))

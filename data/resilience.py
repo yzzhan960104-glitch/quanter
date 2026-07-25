@@ -270,11 +270,22 @@ class RateLimiter:
 
 # ============ 模块级单例（fetcher 共享，避免每次新建桶/熔断器）============
 # 限频策略：突发容量 + 持续 QPS，依据各数据源官方限频量级保守取值。
-# Tushare 降速（全量下载诊断）：tushare 对大数据接口（by=date 全市场逐日，单日
-# 5090 行）有服务端限频，原 60/分（capacity=5, refill_rate=1.0）连续拉会撞 "Rate limit
-# temporarily busy"。降到 ~20/分（refill_rate=0.33 token/s）+ 小桶 capacity=3 避免突发
-# 撞限频。20/分实测稳定推进（单接口退避重试后可恢复）。若仍撞则进一步降到 10/分。
-tushare_rate_limiter = RateLimiter(name="tushare", capacity=3, refill_rate=0.33)
+# 双桶限频（2026-07-25 账户升级后官方配额：基础500/分 + 特色300/分）：
+# Why 双桶：Tushare 官方按接口类别分两档配额，原单桶 ~20/分（capacity=3, refill_rate=0.33）
+# 是为已废弃的 tnskhdata 代理调的旧参数（2026-07-24 已纯直连 tushare 官方 SDK，见
+# data/_tushare_compat.py 顶部注释），远低于官方配额上限，浪费吞吐。按 quota_type 路由
+# 到对应桶（见 data/tushare_sync._fetch_with_guard 的 quota_type 选桶逻辑）。
+# 容量取值：refill_rate × 60 ≈ 配额/min，capacity 给少量突发（官方滑动窗口边界允许
+# 短时突发），留 ~1% 余量避免边界抖动触发 429。
+# 历史降速注释（tnskhdata 代理时代，现已过时保留作决策脉络）：原 60/分撞 "Rate limit
+# temporarily busy"，降到 ~20/分稳定推进；代理废弃后官方配额放宽到 500/300，本双桶为新基线。
+tushare_rate_limiter_basic = RateLimiter(name="tushare_basic", capacity=8, refill_rate=8.3)    # ~498/min 基础桶
+tushare_rate_limiter_special = RateLimiter(name="tushare_special", capacity=5, refill_rate=5.0)  # 300/min 特色桶
+
+# 向后兼容别名（2026-07-25 双桶改造）：旧名 tushare_rate_limiter 指向基础桶，让
+# fetcher.py / sync_macro_credit.py / sync_data_lake.py / tushare_sync.py 等 4 处旧调用零改。
+# Why 别名不删：显式至上，避免为改名而扩散冲击 4 个文件；旧调用多走基础接口，归基础桶配额合理。
+tushare_rate_limiter = tushare_rate_limiter_basic
 fred_rate_limiter = RateLimiter(name="fred", capacity=2, refill_rate=0.5)
 
 # 熔断器：连续 3 次基础设施异常 → 熔断 60s（expected_exception 仅装饰器路径生效）
