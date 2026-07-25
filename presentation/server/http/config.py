@@ -20,7 +20,7 @@ from typing import Dict, Any, List
 # server/http/config.py → server/ → 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# 将项目根目录加入 sys.path，确保 import core / data / viz 等模块可用
+# 将项目根目录加入 sys.path，确保 import data / strategies / trading 等顶层模块可用
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -34,7 +34,7 @@ CORS_ORIGINS: List[str] = [
 ]
 
 # ============ 服务监听配置 ============
-# 后端 uvicorn 监听地址与端口——前后端端口的**单一真相源**：被 server/main.py 的
+# 后端 uvicorn 监听地址与端口——前后端端口的**单一真相源**：被 presentation/server/main.py 的
 # __main__ 块与 ops/check_ports.py（前端 npm run dev 的 predev 护栏）共同引用，
 # 杜绝 web/vite.config.ts 的 proxy target 与后端端口漂移（曾出现 8001 vs 8000 的
 # ECONNREFUSED 事故）。env 可覆盖：API_HOST / API_PORT（容器/CI 内需改端口时）。
@@ -51,12 +51,12 @@ DATA_DEFAULTS: Dict[str, Any] = {
 # 设计意图：Python root logger 默认级别 WARNING 会吞掉 INFO（业务链路打点的
 # 主要级别），必须显式 setLevel(INFO) 才能放行；同时落盘一份本地文件，便于
 # 事后排查无需复现。日志记录经 RingBufferLogHandler 同时流到前端 TerminalLogs
-#（见 server/main.py lifespan 装配），本地文件 + 前端流 + 控制台三路并行。
+#（见 presentation/server/main.py lifespan 装配），本地文件 + 前端流 + 控制台三路并行。
 # 凭证隔离红线：此处不含任何敏感信息，仅格式/级别/路径，可安全提交。
 LOG_CONFIG: Dict[str, Any] = {
     # 默认 INFO（放行业务链路打点）；可经 LOG_LEVEL 环境变量提级到 DEBUG 排查
     "level": os.getenv("LOG_LEVEL", "INFO"),
-    # 时间 | 级别(7列对齐) | logger名 | 消息 —— 与 server/api/v1/logs.py 的
+    # 时间 | 级别(7列对齐) | logger名 | 消息 —— 与 presentation/server/api/v1/logs.py 的
     # RingBufferLogHandler formatter 风格一致，便于本地文件与前端日志交叉比对
     "format": "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
     # 本地落盘路径（项目根/logs/quanter.log）；启动时自动建目录

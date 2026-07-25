@@ -170,14 +170,6 @@ python -m discovery publish   # 手动把冠军 publish 为 experiment DRAFT 版
 
 > **daemon 纪律**(运维红线):daemon 进程必须**串行**单实例运行(多实例同跑会产生重复参数全去重、ρ 永远 0 的伪收敛);schtasks 定时任务**只汇报状态、不自动拉起 daemon**(人工确认环境后再启);每轮 seed 按 `42 + run_count` 派生,避免固定 seed 致夜跑/重跑产相同参数。
 
-### 6.4 Celery Worker(因子沙盒,可选)
-
-```bash
-celery -A server.celery_app worker -Q explorer -l info
-```
-
-需先启动 Redis;无 Redis 时因子沙盒降级为同步执行(CPU 探针 > 80% 拒绝调度)。
-
 ---
 
 ## 7. 业务模块速览
