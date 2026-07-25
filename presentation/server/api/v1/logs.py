@@ -21,7 +21,7 @@ from collections import deque
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from server.api.v1._sse import sse_dumps
+from presentation.server.api.v1._sse import sse_dumps
 
 router = APIRouter(prefix="/logs", tags=["实时日志"])
 

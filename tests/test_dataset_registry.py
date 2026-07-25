@@ -24,7 +24,7 @@ from config import LAKE_CONFIG, DATASET_REGISTRY, TUSHARE_DATASETS
 
 # data_service._parquet_path 是前端 list_datasets 的湖寻址热路径（Finding 1 修复对象）。
 # 用函数真实返回值断言（非 monkeypatch），覆盖复用湖 fallback 落点。
-from server.services.data_service import _parquet_path
+from presentation.server.services.data_service import _parquet_path
 
 
 # ============================================================================

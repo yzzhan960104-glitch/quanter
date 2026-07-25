@@ -6,7 +6,7 @@ Step4 将连同 replay_*/backtest_replay 整体迁出 caisen 包至独立的执�
 当前位置仅为 Step3 分层重构的中间态。
 
 Step4e 反向债已收口：_load_price_data 改 import data.price_loader 模块级函数
-（原 from server.services.caisen_service import 是 execution→server 反向依赖，Step2.2 过渡债）。
+（原 from presentation.server.services.caisen_service import 是 execution→server 反向依赖，Step2.2 过渡债）。
 
 Layer2 解耦·Task 1.3：caisen 形态（W底/头肩/三角形）完整退役。run_replay_worker 内
 caisen 分支（_merge_cfg + RiskManager + CaisenPatternStrategy）随之删除，仅保留颈线法
@@ -34,7 +34,7 @@ from backtest.replay import replay, ReplayAborted
 # 注意：strategies.neckline_method 不在模块级 import——会触发循环
 # （execution.__init__→replay_worker→strategies→caisen→execution）。改 run_replay_worker 内延迟 import。
 # 模块级 import → _load_price_data 成为本模块属性（测试 monkeypatch 生效）。
-# Step4e 反向债收口：原 ``from server.services.caisen_service import _load_price_data``
+# Step4e 反向债收口：原 ``from presentation.server.services.caisen_service import _load_price_data``
 # 是 execution→server 反向依赖（Step2.2 过渡债）。现改 import data.price_loader 的模块级
 # 函数（逻辑单源，与 facade 同源），消除反向依赖。alias 保持 _load_price_data 模块名 →
 # replay_worker._load_price_data 测试 monkeypatch 语义不变。

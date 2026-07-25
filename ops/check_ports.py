@@ -9,7 +9,7 @@ vite 误写成 8001、后端实为 8000 的事故）。本脚本在 `npm run dev
 
 设计（反黑盒 / 极简）：
 - 纯函数 parse_* + main(文件路径)，CLI 仅薄封装，便于单测喂字符串 / tmp_path。
-- 零第三方依赖（仅标准库），且刻意 **不 import server.http.config**——避免 import 链
+- 零第三方依赖（仅标准库），且刻意 **不 import presentation.server.http.config**——避免 import 链
   拉起 fastapi/uvicorn 重依赖，保证脚本启动快、CI 友好、venv 未装全也能跑。
 - 端口用正则从源码文本提取：后端真相源是 `config.py` 的 API_PORT（os.getenv 可覆盖），
   前端真相源是 `vite.config.ts` 的 proxy target。双写 + 比对，而非跨语言物理单源。
@@ -22,8 +22,8 @@ from typing import Optional
 
 # 项目根锚定：ops/check_ports.py → scripts/ → 项目根（与运行 cwd 无关）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "server" / "core" / "config.py"
-DEFAULT_VITE_PATH = PROJECT_ROOT / "web" / "vite.config.ts"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "presentation" / "server" / "http" / "config.py"
+DEFAULT_VITE_PATH = PROJECT_ROOT / "presentation" / "web" / "vite.config.ts"
 
 # config.py 实际写法：API_PORT: int = int(os.getenv("API_PORT", "8000"))
 # `[^=\n]*` 吃掉 API_PORT 与 = 之间可选的类型注解（: int），兼容带/不带注解两种写法；

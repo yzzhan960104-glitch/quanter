@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from backtest.optimize import training_loops_db
 from backtest.optimize.training_loop import LoopBusyError
-from server.schemas.training import TrainingLoopState, TrainingReviewRequest, TrainingStartRequest
+from presentation.server.schemas.training import TrainingLoopState, TrainingReviewRequest, TrainingStartRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/training", tags=["训练 loop"])

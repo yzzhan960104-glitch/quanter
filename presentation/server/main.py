@@ -9,11 +9,11 @@ FastAPI 应用入口
 4. 提供健康检查端点
 
 启动方式：
-    uvicorn server.main:app --reload --host 0.0.0.0 --port 8000
+    uvicorn presentation.server.main:app --reload --host 0.0.0.0 --port 8000
 
 设计原则：
 - 应用入口仅做组装，不包含业务逻辑
-- CORS 配置从 core/config.py 读取，不硬编码
+- CORS 配置从 http/config.py 读取，不硬编码
 - 路由版本化 /api/v1/，预留后续版本空间
 """
 import logging
@@ -22,29 +22,29 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.http.config import CORS_ORIGINS, LOG_CONFIG
-from server.http._responses import StrictJSONResponse
+from presentation.server.http.config import CORS_ORIGINS, LOG_CONFIG
+from presentation.server.http._responses import StrictJSONResponse
 # API 鉴权依赖（B-1）：挂在敏感 router（trading/caisen/data/review）上，
 # token 未配置=开发态放行（WARNING），生产须配 QUANTER_API_TOKEN。
-from server.http.auth import require_write
-from server.api.v1.logs import (
+from presentation.server.http.auth import require_write
+from presentation.server.api.v1.logs import (
     RingBufferLogHandler,
     log_stream_hub,
     router as logs_router,
 )
 # 宏观/板块/因子只读端点（T16）：读内存湖 + CreditRegime，零写入，
 # 供给前端驾驶舱（T17 /dashboard）宏观灯/信贷曲线/板块流/ATR 四视图。
-from server.api.v1.macro import router as macro_router
+from presentation.server.api.v1.macro import router as macro_router
 # 实盘交易（优雅降级真接 QMT；无 xtquant/缺凭证时 /status 返 unavailable，不阻断 lifespan）
-from server.api.v1.trading import router as trading_router
+from presentation.server.api.v1.trading import router as trading_router
 # AI 参数训练 loop 路由（Spec 3 Task 6）：start/get/list/submit_review 四端点，
 # 驱动 orchestrator 状态机（CREATED→RUNNING→ANALYZING→AWAITING_REVIEW→…→DONE）。
 # 钉钉审核进程内调 handler 不走 HTTP；此 router 仅对外暴露状态查询 + 启停 + 审核提交。
-from server.api.v1.training import router as training_router
+from presentation.server.api.v1.training import router as training_router
 # 数据湖资产路由（层级一）：扫描 parquet mtime + 哨兵推导状态，触发同步起 daemon 子进程
-from server.api.v1.data import router as data_router
+from presentation.server.api.v1.data import router as data_router
 # AI 复盘路由（层级六）：GLM 调用 + 三级降级，CPU/网络阻塞走线程池
-from server.api.v1.review import router as review_router
+from presentation.server.api.v1.review import router as review_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
 from infra.notifier import build_default_manager
 
@@ -140,7 +140,7 @@ async def lifespan(app: FastAPI):
     # config.py「零守护进程」（线程寄生主进程，非独立调度器如 Celery Beat/APScheduler）。
     # 复用 data_service.sweep_stale_on_startup（扫 list_datasets + trigger_sync 子进程+哨兵）。
     import threading as _threading
-    from server.services import data_service as _data_service
+    from presentation.server.services import data_service as _data_service
 
     def _startup_sync_sweep() -> None:
         try:
@@ -186,7 +186,7 @@ async def lifespan(app: FastAPI):
     # Why try/except 吞异常：shutdown 路径不应因网关断开失败而阻塞后续 handler 清理；
     # 无网关装配（开发态/CI）时 get_gateway 返 None，直接跳过。
     try:
-        from server.services.trading_service import get_gateway
+        from presentation.server.services.trading_service import get_gateway
         gw = get_gateway()
         if gw is not None:
             await gw.disconnect()

@@ -29,7 +29,7 @@ export default defineConfig({
     strictPort: true,   // 5173 被占则启动失败（不漂移到 5174+），强制走 scripts/dev.py 启动前清残留，杜绝多 vite 累积
     proxy: {
       '/api': {
-        // 端口须与后端启动命令 `uvicorn server.main:app --port 8000` 对齐；
+        // 端口须与后端启动命令 `uvicorn presentation.server.main:app --port 8000` 对齐；
         // 用 127.0.0.1 锁定 IPv4，规避 Windows + Node17+ 下 localhost 解析为
         // ::1+127.0.0.1 双地址、internalConnectMultiple 并发尝试引发的 AggregateError。
         target: 'http://127.0.0.1:8000',

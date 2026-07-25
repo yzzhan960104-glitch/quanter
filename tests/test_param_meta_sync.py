@@ -11,7 +11,7 @@ from pathlib import Path
 
 from strategies.neckline_schema import NecklineConfig
 
-PARAM_META_TS = Path(__file__).resolve().parents[1] / "web" / "src" / "components" / "lab" / "paramMeta.ts"
+PARAM_META_TS = Path(__file__).resolve().parents[1] / "presentation" / "web" / "src" / "components" / "lab" / "paramMeta.ts"
 
 
 def _extract_param_meta_keys() -> set[str]:

@@ -16,8 +16,8 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException
 
-from server.schemas.data import DatasetAsset, SyncResponse
-from server.services import data_service
+from presentation.server.schemas.data import DatasetAsset, SyncResponse
+from presentation.server.services import data_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/data", tags=["数据湖"])

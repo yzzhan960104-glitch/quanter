@@ -40,5 +40,5 @@ async def submit_order(order: Any, *, dry_run: bool, confirm: bool = True) -> di
     异常：
         非 dry_run 挡板命中 → raise RuntimeError（透传，由调用方 try-except）。
     """
-    from server.services.trading_service import submit_order as svc_submit
+    from presentation.server.services.trading_service import submit_order as svc_submit
     return await svc_submit(order, dry_run=dry_run, confirm=confirm)

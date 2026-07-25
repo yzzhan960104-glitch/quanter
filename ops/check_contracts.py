@@ -10,8 +10,8 @@ FastAPI 的权威 /openapi.json（后端真相源）与前端 api/*.ts 的 apiCl
 设计（反黑盒 / 极简，与 check_ports.py 同哲学）：
 - 纯函数 parse_openapi_endpoints / parse_ts_calls / _norm_path + main(backend_spec, ts_files)，
   CLI 仅薄封装，单测喂假 openapi dict + tmp_path 造假 ts，不依赖 subprocess；
-- 刻意不在单测路径 import server.main（拉 fastapi/uvicorn/celery 重依赖）；CLI 入口
-  才进程内 import server.main:app 取权威 openapi，故挂在后端 CI / make verify-contracts，
+- 刻意不在单测路径 import presentation.server.main（拉 fastapi/uvicorn/celery 重依赖）；CLI 入口
+  才进程内 import presentation.server.main:app 取权威 openapi，故挂在后端 CI / make verify-contracts，
   不挂前端 predev（前端开发机可能无后端依赖，与 check_ports.py 前端轻量诉求互补）。
 
 参数归一红线：前端 TS 写 /plans/${planId}（模板字符串），后端 openapi 写 /plans/{plan_id}，
@@ -24,7 +24,7 @@ from typing import Iterable, Set, Tuple
 
 # 项目根锚定：ops/check_contracts.py → scripts/ → 项目根（与运行 cwd 无关）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_API_DIR = PROJECT_ROOT / "web" / "src" / "api"
+DEFAULT_API_DIR = PROJECT_ROOT / "presentation" / "web" / "src" / "api"
 
 # 前端调用提取：apiClient.<method>('<path>') / apiClient.<method>(`<path>`)。
 # method ∈ get/post/put/patch/delete；path 用单/双/反引号包裹；反引号内 ${...} 为模板参数。
@@ -124,18 +124,18 @@ def main(backend_spec: dict, ts_files: Iterable[Path]) -> int:
 
 
 def _load_backend_spec_from_app() -> dict:
-    """CLI 入口专用：进程内 import server.main:app，取权威 openapi dict。
+    """CLI 入口专用：进程内 import presentation.server.main:app，取权威 openapi dict。
 
     Why 进程内而非 HTTP 拉 /openapi.json：不依赖起 uvicorn、不占端口、CI 友好；
     代价是拉 fastapi/uvicorn 等重依赖，故仅 CLI 调用（单测喂 spec dict 绕开）。
 
     sys.path 注入：`python ops/check_contracts.py` 时 sys.path[0]=scripts/，不含项目根
-    → 必须显式加项目根才能 import server.main（与 server/http/config.py 的 PROJECT_ROOT
+    → 必须显式加项目根才能 import presentation.server.main（与 server/http/config.py 的 PROJECT_ROOT
     sys.path 注入同款；此处延迟到 CLI 调用才加，避免污染单测路径）。
     """
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
-    from server.main import app  # noqa: WPS433（延迟 import：隔离重依赖，仅 CLI 需要）
+    from presentation.server.main import app  # noqa: WPS433（延迟 import：隔离重依赖，仅 CLI 需要）
     return app.openapi()
 
 

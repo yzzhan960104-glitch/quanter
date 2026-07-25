@@ -31,7 +31,7 @@ def client():
     生命周期内即可触发 lifespan（含 StrategyLoader.scan、多湖 load），CI 无数据湖
     时 lifespan 内的 reader.load 对缺失 parquet 仅记 warning 不阻断（离线降级契约）。
     """
-    from server.main import app
+    from presentation.server.main import app
     return TestClient(app)
 
 

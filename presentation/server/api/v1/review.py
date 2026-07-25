@@ -14,8 +14,8 @@ import logging
 from fastapi import APIRouter
 from starlette.concurrency import run_in_threadpool
 
-from server.schemas.review import ReviewRequest, ReviewReport
-from server.services import review_service
+from presentation.server.schemas.review import ReviewRequest, ReviewReport
+from presentation.server.services import review_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/review", tags=["AI 复盘"])

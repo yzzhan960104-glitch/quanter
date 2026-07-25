@@ -175,7 +175,7 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
     # 延迟 import：trading_service 顶层 import 了 infra.notifier/broker.base/
     # trading.compute.types 等较重链路，且 __main__ 仅 trading 分支需要 → 放函数内，
     # market/data/strategy 分支零负担。
-    from server.services import trading_service
+    from presentation.server.services import trading_service
 
     # 同步取数：trades（CSV 流水）/ status（四态镜像）
     try:
@@ -237,7 +237,7 @@ def _fetch_data_snapshot() -> list[dict]:
     # 延迟 import：data_service 顶层会触发 config 注册表 + DataLakeReader 耦合，
     # market/trading 分支不需要 → 放函数内，避免无谓依赖加载。
     from datetime import datetime, timezone
-    from server.services import data_service
+    from presentation.server.services import data_service
 
     try:
         raw = data_service.list_datasets() or []

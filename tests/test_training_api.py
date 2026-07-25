@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from server.api.v1 import training as training_api
+from presentation.server.api.v1 import training as training_api
 
 
 def _app_with_fake_orch(orch):

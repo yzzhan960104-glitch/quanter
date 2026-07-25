@@ -169,7 +169,7 @@ python data/tools/sync_jqdata_1min.py     # JQData 分钟级(配额双机制防�
 ### 6.1 后端
 
 ```bash
-uvicorn server.main:app --reload
+uvicorn presentation.server.main:app --reload
 ```
 
 默认 `http://127.0.0.1:8000`,API 文档 `/docs`。启动期按 `LAKE_CONFIG["lakes"]` 加载存在的湖,缺失则离线降级。

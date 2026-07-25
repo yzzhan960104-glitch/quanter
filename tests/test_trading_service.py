@@ -14,7 +14,7 @@ import pytest
 
 def test_status_unavailable_when_no_gateway(monkeypatch):
     """无网关单例（缺 QMT 凭证）→ mode='unavailable'。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     s = trading_service.get_status()
     assert s == {"connected": False, "locked": False, "mode": "unavailable"}
@@ -22,7 +22,7 @@ def test_status_unavailable_when_no_gateway(monkeypatch):
 
 def test_status_disconnected_when_gateway_not_connected(monkeypatch):
     """网关存在但未 connect → mode='disconnected'。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     gw = type("G", (), {"_connected": False, "is_locked": False})()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     s = trading_service.get_status()
@@ -31,7 +31,7 @@ def test_status_disconnected_when_gateway_not_connected(monkeypatch):
 
 def test_status_live_when_connected(monkeypatch):
     """已连接且未锁定 → mode='live'。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     gw = type("G", (), {"_connected": True, "is_locked": False})()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     assert trading_service.get_status()["mode"] == "live"
@@ -39,7 +39,7 @@ def test_status_live_when_connected(monkeypatch):
 
 def test_status_vetoed_when_locked(monkeypatch):
     """断线锁定 → mode='vetoed_by_risk'（锁定优先于 connected）。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     gw = type("G", (), {"_connected": True, "is_locked": True})()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     assert trading_service.get_status()["mode"] == "vetoed_by_risk"
@@ -47,7 +47,7 @@ def test_status_vetoed_when_locked(monkeypatch):
 
 def test_emergency_halt_idempotent(monkeypatch):
     """连续两次 emergency_halt：第一次置 lock_down，第二次返'已处于'（不重复撤单）。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
 
     class FakeGW:
         def __init__(self):
@@ -79,7 +79,7 @@ def test_emergency_halt_idempotent(monkeypatch):
 
 def test_emergency_halt_unavailable(monkeypatch):
     """无网关 → raise RuntimeError（路由层转 503）。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     with pytest.raises(RuntimeError):
         trading_service.emergency_halt()
@@ -122,7 +122,7 @@ def _fake_gw_connected():
 
 
 def test_connect_gateway(monkeypatch):
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     asyncio.run(trading_service.connect_gateway())
@@ -130,7 +130,7 @@ def test_connect_gateway(monkeypatch):
 
 
 def test_connect_gateway_unavailable(monkeypatch):
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     with pytest.raises(RuntimeError):
         asyncio.run(trading_service.connect_gateway())
@@ -142,7 +142,7 @@ def test_submit_order_dry_run_records_and_returns(monkeypatch):
     不 patch get_quote：conftest 假 xtdata.get_full_tick 返 {} → get_quote 返 None，
     挡板跳过涨跌停关（dry_run 在第 2 关即命中，根本到不了第 9 关）。
     """
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
@@ -161,7 +161,7 @@ def test_submit_order_dry_run_records_and_returns(monkeypatch):
 
 def test_submit_order_blocked_raises(monkeypatch):
     """挡板命中（白名单外）→ raise RuntimeError + 落 BLOCKED 流水。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
@@ -182,7 +182,7 @@ def test_submit_order_blocked_raises(monkeypatch):
 
 def test_submit_order_live_calls_gateway(monkeypatch):
     """dry_run=False + 全过 → 调网关 submit_order。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
@@ -206,7 +206,7 @@ def test_submit_order_live_records_audit(monkeypatch):
     路径（370-376 行）拿到 OrderResult 后直接 return，未落任何流水——真实成交在
     logs/live_trades.csv 中完全缺失，违反审计合规红线。
     """
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()
@@ -235,7 +235,7 @@ def test_submit_order_live_records_audit(monkeypatch):
 
 def test_submit_order_disconnected_blocks(monkeypatch):
     """网关未连接 → 挡板 connection 关命中。"""
-    from server.services import trading_service
+    from presentation.server.services import trading_service
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
 
     gw = _fake_gw_connected()

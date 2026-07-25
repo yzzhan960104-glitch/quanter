@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from pydantic import BaseModel
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
-from server.services.trading_service import (
+from presentation.server.services.trading_service import (
     emergency_halt,
     export_trades,
     get_positions,
