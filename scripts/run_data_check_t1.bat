@@ -4,4 +4,4 @@
 :: FAIL 仅告警，不熔断（T-1 缺不影响当日 T+1 计划的 T 日数据输入）。
 cd /d C:\Users\yzzhan\Desktop\quanter
 call .venv310\Scripts\activate.bat
-python -m scripts.run_data_check t1
+python -m data.tools.run_data_check t1

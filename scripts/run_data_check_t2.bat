@@ -5,4 +5,4 @@
 :: 仍 FAIL → 熔断 eod_plan（不交易不自欺，绝不用 T-1 兜底算 T+1＝前视偏差）。
 cd /d C:\Users\yzzhan\Desktop\quanter
 call .venv310\Scripts\activate.bat
-python -m scripts.run_data_check t2
+python -m data.tools.run_data_check t2

@@ -156,7 +156,6 @@ python data/tools/sync_tushare.py <dataset_key>
 python data/tools/sync_macro_credit.py    # 宏观信贷(CreditRegime 输入)
 python data/tools/sync_sector_daily.py    # 板块 + 活跃股日线
 python data/tools/sync_jqdata_1min.py     # JQData 分钟级(配额双机制防封)
-python scripts/sync_binance_vision.py  # (可选) 加密沙盒,7x24 极端市场测试
 ```
 
 - **前视红线**:财报类 `date_col=ann_date`(公告日),**绝不用** `end_date`(报告期)——报告期早于公告日会导致前视偏差。

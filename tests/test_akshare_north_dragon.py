@@ -3,7 +3,7 @@
 注：原文件（test_akshare_north_dragon.py）还含 factors/alternative（北向动量/龙虎榜信号）因子测试，
 蔡森专精化 Phase 1 Task 3 删除 factors 体系后随之一并移除——本文件仅保留纯数据源测试部分，
 覆盖 fetch_north_flow / fetch_dragon_list（data/clients/akshare_client）与 _normalize_symbol
-（scripts/sync_dragon_list），不 import 任何已删的 factors 模块。
+（data/tools/sync_dragon_list），不 import 任何已删的 factors 模块。
 """
 import pandas as pd
 
