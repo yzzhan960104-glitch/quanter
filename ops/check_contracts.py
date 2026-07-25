@@ -130,7 +130,7 @@ def _load_backend_spec_from_app() -> dict:
     代价是拉 fastapi/uvicorn 等重依赖，故仅 CLI 调用（单测喂 spec dict 绕开）。
 
     sys.path 注入：`python ops/check_contracts.py` 时 sys.path[0]=scripts/，不含项目根
-    → 必须显式加项目根才能 import server.main（与 server/core/config.py 的 PROJECT_ROOT
+    → 必须显式加项目根才能 import server.main（与 server/http/config.py 的 PROJECT_ROOT
     sys.path 注入同款；此处延迟到 CLI 调用才加，避免污染单测路径）。
     """
     if str(PROJECT_ROOT) not in sys.path:

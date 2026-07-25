@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 # ============ 项目根目录 ============
-# server/core/config.py → server/ → 项目根目录
+# server/http/config.py → server/ → 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # 将项目根目录加入 sys.path，确保 import core / data / viz 等模块可用

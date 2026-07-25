@@ -9,7 +9,7 @@ vite 误写成 8001、后端实为 8000 的事故）。本脚本在 `npm run dev
 
 设计（反黑盒 / 极简）：
 - 纯函数 parse_* + main(文件路径)，CLI 仅薄封装，便于单测喂字符串 / tmp_path。
-- 零第三方依赖（仅标准库），且刻意 **不 import server.core.config**——避免 import 链
+- 零第三方依赖（仅标准库），且刻意 **不 import server.http.config**——避免 import 链
   拉起 fastapi/uvicorn 重依赖，保证脚本启动快、CI 友好、venv 未装全也能跑。
 - 端口用正则从源码文本提取：后端真相源是 `config.py` 的 API_PORT（os.getenv 可覆盖），
   前端真相源是 `vite.config.ts` 的 proxy target。双写 + 比对，而非跨语言物理单源。

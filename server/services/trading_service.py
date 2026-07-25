@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Optional
 
 from infra.notifier import NotificationManager, fire_and_forget
-from server.core.config import PROJECT_ROOT
+from server.http.config import PROJECT_ROOT
 from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 broker.base 真身
 from trading import qmt_market_data
 from trading.dynamic_whitelist import get_effective_whitelist

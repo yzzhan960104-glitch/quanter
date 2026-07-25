@@ -22,11 +22,11 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.core.config import CORS_ORIGINS, LOG_CONFIG
-from server.core._responses import StrictJSONResponse
+from server.http.config import CORS_ORIGINS, LOG_CONFIG
+from server.http._responses import StrictJSONResponse
 # API 鉴权依赖（B-1）：挂在敏感 router（trading/caisen/data/review）上，
 # token 未配置=开发态放行（WARNING），生产须配 QUANTER_API_TOKEN。
-from server.core.auth import require_write
+from server.http.auth import require_write
 from server.api.v1.logs import (
     RingBufferLogHandler,
     log_stream_hub,

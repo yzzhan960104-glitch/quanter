@@ -8,7 +8,7 @@ useTerminalState 的 catch{return} 静默吞帧，表现为「K 线/买卖点不
 ValueError，由调用方决定降级（result 帧→error 帧 / 日志帧→跳过），绝不产出
 非法 JSON 到前端。
 
-对称防线：server/core/_responses.py 的 StrictJSONResponse 守同步端点，
+对称防线：server/http/_responses.py 的 StrictJSONResponse 守同步端点，
 本模块守 SSE 流式端点。两道防线共同保证「NaN 不可能以字面形式到达浏览器」。
 """
 from __future__ import annotations

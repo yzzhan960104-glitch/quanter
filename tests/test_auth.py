@@ -13,7 +13,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from server.core.auth import require_write
+from server.http.auth import require_write
 
 
 def _app_with_protected_endpoint() -> FastAPI:

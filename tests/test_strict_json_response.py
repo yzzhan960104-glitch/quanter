@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from server.core._responses import StrictJSONResponse
+from server.http._responses import StrictJSONResponse
 
 
 def test_strict_json_response_normal_dict():
