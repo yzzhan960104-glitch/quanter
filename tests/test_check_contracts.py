@@ -8,7 +8,7 @@ Why 本护栏存在：前后端契约此前仅靠 web/src/api/*.ts 头注释人�
 
 Why TDD：先钉死纯函数行为（路径参数归一 / TS 调用提取 / openapi 端点提取 / 三态 exit），
 再写最小实现。设计上拆成纯函数 + main(backend_spec, ts_files)，测试喂假 openapi dict +
-tmp_path 造假 api/*.ts，不依赖 subprocess、不 import 真实 server.main（重依赖隔离，
+tmp_path 造假 api/*.ts，不依赖 subprocess、不 import 真实 presentation.server.main（重依赖隔离，
 与 test_check_ports.py 不 import presentation.server.http.config 同哲学）。
 """
 import sys

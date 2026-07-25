@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 def client():
     """构造 FastAPI TestClient（复用 presentation.server.main:app 单例）。
 
-    Why 用 import 后再构造：server.main 模块级 app 已注册全部路由，TestClient
+    Why 用 import 后再构造：presentation.server.main 模块级 app 已注册全部路由，TestClient
     生命周期内即可触发 lifespan（含 StrategyLoader.scan、多湖 load），CI 无数据湖
     时 lifespan 内的 reader.load 对缺失 parquet 仅记 warning 不阻断（离线降级契约）。
     """
