@@ -36,8 +36,8 @@ CHECKS = [
     ("① 端口一致性 check_ports", [sys.executable, "ops/check_ports.py"], False),
     ("② 前后端契约 check_contracts", [sys.executable, "ops/check_contracts.py"], False),
     ("③ 后端单测 pytest", [sys.executable, "-m", "pytest", "tests", "-q", "--tb=short"], False),
-    ("④ 前端类型检查 vue-tsc", "npm --prefix web run typecheck", True),
-    ("⑤ 前端组件/单测 vitest", "npm --prefix web run test", True),
+    ("④ 前端类型检查 vue-tsc", "npm --prefix presentation/web run typecheck", True),
+    ("⑤ 前端组件/单测 vitest", "npm --prefix presentation/web run test", True),
 ]
 
 

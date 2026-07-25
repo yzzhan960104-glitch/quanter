@@ -24,8 +24,8 @@ selector 对齐说明（与 ParamLabView.vue / NewReplayDrawer.vue 真实组件�
 运行（with_server 起后端 uvicorn + 前端 vite；尾串 clean_ports 清 Windows 残留端口）：
   VENV=.venv310/Scripts/python.exe
   QUANTER_API_TOKEN=e2e-token python "$WITH_SERVER" \\
-    --server "$VENV -m uvicorn server.main:app --port 8000" --port 8000 \\
-    --server "npm --prefix web run dev" --port 5173 --timeout 180 \\
+    --server "$VENV -m uvicorn presentation.server.main:app --port 8000" --port 8000 \\
+    --server "npm --prefix presentation/web run dev" --port 5173 --timeout 180 \\
     -- "$VENV" tests/e2e/lab_param_lab.py && python ops/clean_ports.py
 """
 import sys
