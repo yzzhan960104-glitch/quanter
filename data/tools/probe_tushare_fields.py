@@ -16,7 +16,7 @@
 - 仅探测 columns 一致性，不落盘、不取大样本（省积分）。
 - 三态：OK（字段全匹配）/ FIELD_MISMATCH（缺或多字段）/ CALL_FAIL 或 EMPTY（参数错/限频/无数据）。
 
-用法：python scripts/probe_tushare_fields.py
+用法：python data/tools/probe_tushare_fields.py
 """
 from __future__ import annotations
 import os

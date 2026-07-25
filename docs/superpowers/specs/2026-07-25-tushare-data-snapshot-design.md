@@ -295,7 +295,7 @@ CLI (data.sync) / HTTP (POST /sync/{key}) / 旧 scripts/*.py 薄壳
 
 **dry-run 小样例验证**（全量回填前必做，保护配额）：
 - 每个新 key 拉 1-2 日（by=date）/ 1-2 标的（by=symbol）/ 单次（by=single），验证 fields 真实性（防幻觉列）、落湖结构、行数合理。
-- 用既有 `scripts/probe_tushare_fields.py`（项目已有探测习惯）对 cyq_chips/daily_basic/stk_factor_pro/concept_detail 做字段探测。
+- 用既有 `data/tools/probe_tushare_fields.py`（项目已有探测习惯）对 cyq_chips/daily_basic/stk_factor_pro/concept_detail 做字段探测。
 
 ## 8. 全量回填计划
 

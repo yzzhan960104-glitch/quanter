@@ -16,7 +16,7 @@
 - `scripts/sync_tushare.py` 不能删（server `data_service` 子进程依赖 `DATASET_REGISTRY.script`）
 - 不删任何既有脚本，只转薄壳 + DeprecationWarning
 - 每任务 TDD：先写失败测试→验证失败→最小实现→验证通过→commit
-- 字段名必须 dry-run 探测确认（防幻觉列，沿用项目 `scripts/probe_tushare_fields.py` 习惯）
+- 字段名必须 dry-run 探测确认（防幻觉列，沿用项目 `data/tools/probe_tushare_fields.py` 习惯）
 - quota_type 归类：基础桶=list/行情/指数/概念/宏观；特色桶=资金/筹码/因子/龙虎榜机构/融资融券明细/股东
 
 **Spec:** `docs/superpowers/specs/2026-07-25-tushare-data-snapshot-design.md`
@@ -1306,7 +1306,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ## Task 11: dry-run 字段探测（cyq_chips / daily_basic / stk_factor_pro / concept_detail / weekly / monthly）
 
 **Files:**
-- Use: `scripts/probe_tushare_fields.py`（项目已有探测脚本习惯）
+- Use: `data/tools/probe_tushare_fields.py`（项目已有探测脚本习惯）
 - Maybe Modify: `config/registry.py`（若探测发现幻觉列，订正 fields 串）
 
 **物理意图**：全量回填前用最小配额（每接口 1-2 次请求）验证字段真实性，防幻觉列导致空数据反复拉。沿用项目 `probe_tushare_fields.py` 习惯。

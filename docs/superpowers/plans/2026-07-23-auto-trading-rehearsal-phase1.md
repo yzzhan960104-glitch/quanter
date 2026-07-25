@@ -29,7 +29,7 @@
 |---|---|---|
 | `trading/calendar.py` | 改 | 新增 `expected_latest_trade_day(now)`（期望最新交易日） |
 | `data/freshness.py` | 新 | 数据实时性检查核心（期望日 vs 数据湖最新日） |
-| `scripts/run_data_check.py` | 新 | 数据检查点①②入口（重采熔断） |
+| `data/tools/run_data_check.py` | 新 | 数据检查点①②入口（重采熔断） |
 | `scripts/run_data_check_t1.bat` / `_t2.bat` | 新 | schtasks 包装（17:00 查T-1 / 18:30 查T） |
 | `broadcast/brief_data.py` | 改 | freshness 结果并入 data bot 播报 |
 | `trading/engine.py` | 改 | eod cron→19:00、stoploss 注入 stop_prices+30s interval、新增 `_handle_order_update` |
@@ -318,7 +318,7 @@ git commit -m "feat(data): 新增 freshness 实时性检查（交易日历vs数�
 ## Task 3: 数据检查点入口（重采熔断）
 
 **Files:**
-- Create: `scripts/run_data_check.py`
+- Create: `data/tools/run_data_check.py`
 - Test: `tests/scripts/test_data_check.py`
 
 **Interfaces:**
@@ -381,7 +381,7 @@ Expected: FAIL `ModuleNotFoundError: No module named 'scripts.run_data_check'`
 - [ ] **Step 3: 实现**
 
 ```python
-# scripts/run_data_check.py
+# data/tools/run_data_check.py
 """数据实时性检查点入口（schtasks 调度）。
 
 两个检查点（brainstorm 决策 A 双检查点）：
@@ -506,7 +506,7 @@ Expected: PASS（3 passed）
 - [ ] **Step 5: commit（需研究员授权）**
 
 ```bash
-git add scripts/run_data_check.py tests/scripts/test_data_check.py
+git add data/tools/run_data_check.py tests/scripts/test_data_check.py
 git commit -m "feat(data): 数据检查点①②入口(重采熔断,t1告警/t2熔断eod_plan)"
 ```
 

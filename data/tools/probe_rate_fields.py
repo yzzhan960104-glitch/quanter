@@ -9,7 +9,7 @@
 利率相关同样要逐个实测——getattr None / 异常 / 空均记录。
 
 用法：
-    PYTHONIOENCODING=utf-8 python -u scripts/probe_rate_fields.py
+    PYTHONIOENCODING=utf-8 python -u data/tools/probe_rate_fields.py
 """
 import os
 import sys

@@ -1,12 +1,12 @@
 """数据检查点：①查T-1告警 / ②查T重采熔断。"""
 from unittest.mock import patch, MagicMock
-from scripts.run_data_check import run_check, _resync_key
+from data.tools.run_data_check import run_check, _resync_key
 
 
 def test_checkpoint1_t1_pass_no_alert():
     """检查点①：T-1 齐全 → 返 OK，不熔断。"""
     from data.freshness import FreshnessResult
-    with patch("scripts.run_data_check.check_freshness",
+    with patch("data.tools.run_data_check.check_freshness",
                return_value=FreshnessResult("daily", True, "2026-07-22", "2026-07-22", "PASS")):
         r = run_check("t1", keys=("daily",))
     assert r["ok"] is True
@@ -22,9 +22,9 @@ def test_checkpoint2_t_fail_triggers_resync_until_pass():
     fail = FreshnessResult("daily", False, "2026-07-22", "2026-07-23", "陈旧")
     ok = FreshnessResult("daily", True, "2026-07-23", "2026-07-23", "PASS")
     sync = MagicMock(return_value="OK 最新日 2026-07-23")
-    with patch("scripts.run_data_check.check_freshness", side_effect=[fail, ok]), \
-         patch("scripts.run_data_check.sync_daily_incremental", sync), \
-         patch("scripts.run_data_check._now", side_effect=["18:30", "18:45"]):
+    with patch("data.tools.run_data_check.check_freshness", side_effect=[fail, ok]), \
+         patch("data.tools.run_data_check.sync_daily_incremental", sync), \
+         patch("data.tools.run_data_check._now", side_effect=["18:30", "18:45"]):
         r = run_check("t2", keys=("daily",), deadline_hour=20)
     assert r["ok"] is True
     assert r["melted"] is False
@@ -38,10 +38,10 @@ def test_checkpoint2_t_fail_after_deadline_melts():
     """
     from data.freshness import FreshnessResult
     fail = FreshnessResult("daily", False, "2026-07-22", "2026-07-23", "陈旧")
-    with patch("scripts.run_data_check.check_freshness", return_value=fail), \
-         patch("scripts.run_data_check.sync_daily_incremental",
+    with patch("data.tools.run_data_check.check_freshness", return_value=fail), \
+         patch("data.tools.run_data_check.sync_daily_incremental",
                side_effect=RuntimeError("积分不足")), \
-         patch("scripts.run_data_check._now", return_value="20:30"):  # 已超 20:00
+         patch("data.tools.run_data_check._now", return_value="20:30"):  # 已超 20:00
         r = run_check("t2", keys=("daily",), deadline_hour=20)
     assert r["ok"] is False
     assert r["melted"] is True
@@ -63,10 +63,10 @@ def test_checkpoint2_multi_round_resync_then_pass():
     fail = FreshnessResult("daily", False, "2026-07-22", "2026-07-23", "陈旧")
     ok = FreshnessResult("daily", True, "2026-07-23", "2026-07-23", "PASS")
     sync = MagicMock(return_value="OK 最新日 2026-07-23")
-    with patch("scripts.run_data_check.check_freshness", side_effect=[fail, fail, ok]), \
-         patch("scripts.run_data_check.sync_daily_incremental", sync), \
-         patch("scripts.run_data_check.time.sleep", side_effect=lambda _: None) as mock_sleep, \
-         patch("scripts.run_data_check._now",
+    with patch("data.tools.run_data_check.check_freshness", side_effect=[fail, fail, ok]), \
+         patch("data.tools.run_data_check.sync_daily_incremental", sync), \
+         patch("data.tools.run_data_check.time.sleep", side_effect=lambda _: None) as mock_sleep, \
+         patch("data.tools.run_data_check._now",
                side_effect=["18:30", "18:30", "18:45"]):
         r = run_check("t2", keys=("daily",), deadline_hour=20)
     assert r["ok"] is True
@@ -100,8 +100,8 @@ def test_resync_key_daily_routes_to_sync_daily_incremental():
     """
     sdi = MagicMock(return_value="OK 最新日 2026-07-24（+5778 行）")
     sok = MagicMock(return_value=(False, "不应被调"))
-    with patch("scripts.run_data_check.sync_daily_incremental", sdi), \
-         patch("scripts.run_data_check.sync_one_key", sok):
+    with patch("data.tools.run_data_check.sync_daily_incremental", sdi), \
+         patch("data.tools.run_data_check.sync_one_key", sok):
         ok, msg = _resync_key("daily")
     assert ok is True
     assert "OK 最新日" in msg  # sync_daily_incremental 的 str 原样透传
@@ -112,7 +112,7 @@ def test_resync_key_daily_routes_to_sync_daily_incremental():
 def test_resync_key_daily_exception_returns_false():
     """sync_daily_incremental 抛异常 → 包成 (False, str(e))，不向主流程泄异常。"""
     sdi = MagicMock(side_effect=RuntimeError("tushare 限频"))
-    with patch("scripts.run_data_check.sync_daily_incremental", sdi):
+    with patch("data.tools.run_data_check.sync_daily_incremental", sdi):
         ok, msg = _resync_key("daily")
     assert ok is False
     assert "tushare 限频" in msg
@@ -122,8 +122,8 @@ def test_resync_key_non_daily_falls_through_to_sync_one_key():
     """非 daily key 走原 sync_one_key 逻辑（registry 通用增量未变）。"""
     sok = MagicMock(return_value=(True, "ok"))
     sdi = MagicMock(return_value="不应被调")
-    with patch("scripts.run_data_check.sync_one_key", sok), \
-         patch("scripts.run_data_check.sync_daily_incremental", sdi):
+    with patch("data.tools.run_data_check.sync_one_key", sok), \
+         patch("data.tools.run_data_check.sync_daily_incremental", sdi):
         ok, _ = _resync_key("moneyflow")  # moneyflow 是 quick 批常规 key
     assert ok is True
     assert sok.call_count == 1
