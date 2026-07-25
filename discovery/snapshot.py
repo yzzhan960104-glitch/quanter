@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """L0 数据快照冻结（spec §6.1 / §1.4 漂移实证）。
 
-物理意图：探查（scripts/probe_champion_oos.py）发现两次跑 universe 1334→1332 只、
+物理意图：探查（discovery/tools/probe_champion_oos.py）发现两次跑 universe 1334→1332 只、
 冠军 ann 漂 6%——data_lake 增量 + 流动性边界票浮动致"连复现自己都做不到"。本模块
 冻结 universe + 日期范围 → sha256 指纹，同一指纹下所有 trial 可比，数据湖后续增量
 不污染历史试验（spec ADR3）。

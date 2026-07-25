@@ -138,7 +138,7 @@ Layer 1:  data (被所有人依赖)
 - **迁移来源 → 目标**（拆 execution 包）：
   - `execution/backtest_replay.py`+`replay_worker.py`+`replay_scheduler.py`+`replay_tasks_db.py`+`replay_runs.py` → `backtest/`
   - `caisen/optimize/`（training_loop/training_analyzer/training_loops_db/training_dingtalk）→ `backtest/optimize/`（D5，参数训练归此）
-  - `scripts/param_iter.py`+`identify_param_scan.py`+`calibrate_min_rr.py`：param_iter/identify 内核已同源（Task 1.6 `scan_symbol`≡`scan_at`，由 `test_scan_symbol_matches_strategy` 守护）；统计层有意分轨（param_iter kelly 调参 vs replay CAGR 展示，非债）；全局 mutation 传参债已清（见 follow-up 2026-07-23 §3.2）。calibrate_min_rr 走同一内核
+  - `discovery/tools/param_iter.py`+`identify_param_scan.py`+`calibrate_min_rr.py`：param_iter/identify 内核已同源（Task 1.6 `scan_symbol`≡`scan_at`，由 `test_scan_symbol_matches_strategy` 守护）；统计层有意分轨（param_iter kelly 调参 vs replay CAGR 展示，非债）；全局 mutation 传参债已清（见 follow-up 2026-07-23 §3.2）。calibrate_min_rr 走同一内核
   - `trading/mock_broker.py`（同步撮合）→ `backtest/`（回测撮合用）
 - **死包回收**：`backtest/` 现是 0 文件空壳（残留 `__pycache__`），名字直接复用，先 `git rm -r backtest/__pycache__`。
 - **依赖**：`trading.compute`（单向）+ `strategies`（信号）+ `data`（历史 bar）。**禁止** import 整个 `trading/engine` 或 `execution`（盘中执行）。
@@ -272,7 +272,7 @@ trading ─► experiment / strategies / broker / data
 |---|---|---|---|---|
 | **T0** | 单元/契约 | 零件级正确（函数/契约/同源） | 秒级 | 全量 pytest（基线 `918 passed / 3 failed`） |
 | **T1** | **数值回归** | **决策内核级**：喂固定 `(bars, params)` → 固定 `(signals, trades, kelly 年化)` | 快版秒级 / 全版 8h | `param_iter.run_one`（快版·3 固定标的）+ `param_iter.py --time-budget 28800`（全版·8h 里程碑） |
-| **T2** | 真实链路冒烟 | 链路级：编排/券商端到端连通 | 分钟级（部分需柜台/客户端） | `scripts/smoke_trading_engine.py`（交易编排影子 eod_plan 全链路）+ `scripts/qmt_live_smoke_headless.py`（券商 T1–T6 真实柜台 14 项） |
+| **T2** | 真实链路冒烟 | 链路级：编排/券商端到端连通 | 分钟级（部分需柜台/客户端） | `trading/tools/smoke_trading_engine.py`（交易编排影子 eod_plan 全链路）+ `trading/tools/qmt_live_smoke_headless.py`（券商 T1–T6 真实柜台 14 项） |
 | **T3** | 浏览器 E2E | 表现层：前端不炸 | 分钟级 | `tests/e2e/lab_param_lab.py`（Playwright headless chromium） |
 
 > **T1 是本重构最强的 E2E**：纯重构 = 决策逻辑物理不变，所以固定输入的输出**必须逐位一致**。

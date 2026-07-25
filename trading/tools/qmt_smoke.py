@@ -6,7 +6,7 @@
   2. userdata_mini 目录已生成（D:\\国金QMT交易端模拟\\userdata_mini）
   3. .env 已配置 QMT_USERDATA_PATH / QMT_ACCOUNT_ID
 
-运行：python scripts/qmt_smoke.py
+运行：python trading/tools/qmt_smoke.py
 
 铁律（CLAUDE.md 状态机边界）：每步 input() 等待人工确认，绝不批量自动跑真单。
 本脚本直连网关验证 SDK 连通性（connect/资产/持仓/真单/撤单），dry_run 与风控

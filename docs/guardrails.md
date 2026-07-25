@@ -9,8 +9,8 @@
 
 | 层 | 工具 | 速度 | 何时跑 | 抓什么 |
 |---|---|---|---|---|
-| 端口一致性 | `scripts/check_ports.py` | 秒级 | 每次 `npm run dev`（predev 自动）+ CI | vite proxy 与后端 API_PORT 漂移（ECONNREFUSED） |
-| 前后端契约 | `scripts/check_contracts.py` | 秒级 | CI | `api/*.ts` 调用了后端 openapi 不存在的端点（404/契约漂移） |
+| 端口一致性 | `ops/check_ports.py` | 秒级 | 每次 `npm run dev`（predev 自动）+ CI | vite proxy 与后端 API_PORT 漂移（ECONNREFUSED） |
+| 前后端契约 | `ops/check_contracts.py` | 秒级 | CI | `api/*.ts` 调用了后端 openapi 不存在的端点（404/契约漂移） |
 | 后端单测 | `pytest tests` | ~30s | CI | 533 项后端逻辑/路由/状态机/鉴权回归 |
 | 前端类型 | `npm run typecheck`（vue-tsc） | ~30s | CI | TS 类型回归 |
 | 前端组件/单测 | `npm run test`（vitest + @vue/test-utils） | ~3s | CI | facade 契约姿势（URL/method/timeout）+ 组件渲染/emit 回归 |
@@ -21,7 +21,7 @@
 ## 二、一键 fast gate（CI 与本地同源）
 
 ```bash
-python scripts/run_checks.py
+python ops/run_checks.py
 ```
 
 串跑端口/契约/后端单测/前端类型/前端单测 5 项，逐项中文报告，任一失败 exit 1。**这是 push 前的标准动作**——
@@ -32,8 +32,8 @@ CI 跑的就是这一条，本地过了 CI 必过。
 ## 三、单项跑（定位用）
 
 ```bash
-python scripts/check_ports.py            # 端口一致性（前端 predev 也自动跑这个）
-python scripts/check_contracts.py        # 前后端契约（exit 0=一致，1=漂移，2=解析失败）
+python ops/check_ports.py            # 端口一致性（前端 predev 也自动跑这个）
+python ops/check_contracts.py        # 前后端契约（exit 0=一致，1=漂移，2=解析失败）
 python -m pytest tests -q                # 后端全量单测
 python -m pytest tests/test_check_contracts.py -v   # 单个测试文件
 npm --prefix web run typecheck           # 前端类型检查（vue-tsc --noEmit）
@@ -62,7 +62,7 @@ QUANTER_API_TOKEN=e2e-token python "$WITH_SERVER" \
   --server "$VENV -m uvicorn server.main:app --port 8000" --port 8000 \
   --server "npm --prefix web run dev" --port 5173 --timeout 120 \
   -- "$VENV" tests/e2e/caisen_token_path.py \
-&& python scripts/clean_ports.py
+&& python ops/clean_ports.py
 ```
 
 断言三件：`GET /caisen/plans` 带 `Authorization: Bearer` 头、响应非 401、`POST /scan` 同样带 token。
@@ -74,14 +74,14 @@ QUANTER_API_TOKEN=e2e-token python "$WITH_SERVER" \
 > **Windows 残留坑（含自动闭环）**：`with_server.py` 在 Windows 停服时 kill 不掉 vite/uvicorn 子进程，
 > 残留进程占 5173-5177/8000 → 下次 `uvicorn server.main:app` 报 `[WinError 10013]`（已踩两次）。
 >
-> **自动闭环（推荐）**：E2E 命令尾串 `&& python scripts/clean_ports.py`（with_server 退出后自动清
+> **自动闭环（推荐）**：E2E 命令尾串 `&& python ops/clean_ports.py`（with_server 退出后自动清
 > 残留 + socket bind 实测端口可绑）。10013 根因常是 winnat（Hyper-V/WSL）**动态保留**——
 > `netstat`/`excludedportrange` 都**滞后**于实际保留状态（查不到，但 bind 失败），socket bind 实测才准；
 > clean_ports.py 用 socket bind 兜底验证，netstat 不可靠时仍能确认端口就绪。
 >
 > 手动清理（兜底）：
 > ```bash
-> python scripts/clean_ports.py                                          # 一键清残留 + socket bind 实测
+> python ops/clean_ports.py                                          # 一键清残留 + socket bind 实测
 > # 或手查：netstat -ano | findstr ":8000 " → powershell Stop-Process -Id <PID> -Force
 > ```
 
@@ -90,7 +90,7 @@ QUANTER_API_TOKEN=e2e-token python "$WITH_SERVER" \
 ## 五、CI（GitHub Actions）
 
 `.github/workflows/ci.yml`：`push`/`pull_request` 到 master/main 自动触发（也支持网页 `workflow_dispatch` 手动触发）。
-ubuntu runner 装 Python 3.10 + Node 20 → `pip install -r requirements.txt` → `npm ci --prefix web` → `python scripts/run_checks.py`。
+ubuntu runner 装 Python 3.10 + Node 20 → `pip install -r requirements.txt` → `npm ci --prefix web` → `python ops/run_checks.py`。
 
 - 同 ref 重复 push 自动取消旧 run（省额度）；
 - fast gate 全过才放行合并；
@@ -100,7 +100,7 @@ ubuntu runner 装 Python 3.10 + Node 20 → `pip install -r requirements.txt` �
 
 ## 六、开发流程建议
 
-1. **改代码后**：`python scripts/run_checks.py`（约 1min，5 项门禁）。
+1. **改代码后**：`python ops/run_checks.py`（约 1min，5 项门禁）。
 2. **碰前端 UI/交互/鉴权/契约后**：**默认必须跑 E2E**（第四节，浏览器实测是「页面真实可用性」金标准，
    不再当可选——AI 助手开发完 UI 应自动实测一轮，而非把"E2E 未做"列为诚实边界事后补）。
    现有 E2E：`tests/e2e/caisen_token_path.py`（token 注入链路）、`tests/e2e/caisen_replay_tab.py`（回测 UI）。

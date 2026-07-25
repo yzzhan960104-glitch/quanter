@@ -5,7 +5,7 @@
 迁移说明（2026-07-16，dws-migration Task 4，权威）
 ================================================================
 原「webhook 推 + dingtalk-stream 收审核」双通道中的 **stream 收审核已删**：
-@审核消息现已改走 dws dev connect 桥（scripts/dingtalk_review_bridge.py →
+@审核消息现已改走 dws dev connect 桥（infra/tools/dingtalk_review_bridge.py →
 POST /api/v1/training/review → orchestrator.submit_review），不再由本模块的
 dingtalk-stream SDK 被动收。本模块仅保留 webhook 主动推报告（training loop 仍在用）。
 

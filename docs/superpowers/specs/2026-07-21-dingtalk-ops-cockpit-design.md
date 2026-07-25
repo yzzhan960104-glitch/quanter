@@ -163,7 +163,7 @@ STRATEGY_BRIEF_TIME=16:00
 ```
 
 ### 6.2 schtasks 管理脚本（配置化注册）
-新增 `scripts/manage_ops_schtasks.py`：
+新增 `ops/manage_ops_schtasks.py`：
 - 读 `.env` 的 `*_BRIEF_TIME`，幂等注册 3 个 schtasks（`QuanterTradingBrief` / `QuanterStrategyBrief` / `QuanterDataBrief`），各指向 `scripts/run_<bot>_brief.bat`。
 - 支持 `--list` / `--register` / `--unregister` / `--rerun <bot>`。
 - 改时间：改 `.env` → `python manage_ops_schtasks.py --register`（脚本先删后建，幂等）。
@@ -226,7 +226,7 @@ STRATEGY_BRIEF_TIME=16:00
 ### 新增（第一期要开发）
 - `broadcast/brief_trading.py` / `brief_data.py` / `brief_strategy.py` + 单测
 - `scripts/run_trading_brief.bat` / `run_data_brief.bat` / `run_strategy_brief.bat`
-- `scripts/manage_ops_schtasks.py`（配置化 schtasks 管理）
+- `ops/manage_ops_schtasks.py`（配置化 schtasks 管理）
 - 钉钉侧：3 个统一应用（建号 + 拉群 + send-by-bot 验证）
 - 后端：`GET /api/v1/trading/trades`（流水分页查询，读 CSV）
 - 前端：`web/src/views/CockpitView.vue` + 三个子组件（流水表 / TerminalLogs / 回测对比）+ 路由 + 顶栏入口

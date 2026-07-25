@@ -62,7 +62,7 @@ def submit_review(body: TrainingReviewRequest, request: Request) -> Dict[str, An
     """dws dev connect 收到统一应用@消息 → bridge脚本HTTP转发 → orchestrator.submit_review。
 
     物理定位：审查应用是「统一应用」，老 dingtalk-stream SDK 收不到@（根因：代际不匹配），
-    故改走 dws 桥：dws 用统一应用新机制收@（已实测通）→ scripts/dingtalk_review_bridge.py
+    故改走 dws 桥：dws 用统一应用新机制收@（已实测通）→ infra/tools/dingtalk_review_bridge.py
     转发到此端点。端点取当前活跃 loop（concurrency=1），无活跃 → 409。submit_review
     唤醒 AWAITING_REVIEW，loop 后续 parse+回显+续跑，推送走 webhook（DingTalkNotifier）。
     """

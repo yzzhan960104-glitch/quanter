@@ -32,16 +32,16 @@
 
 | 文件 | 改动 | 性质 |
 |---|---|---|
-| `scripts/check_ports.py` | preflight 校验脚本，零依赖纯正则 | 🆕 新增 |
+| `ops/check_ports.py` | preflight 校验脚本，零依赖纯正则 | 🆕 新增 |
 | `server/core/config.py` | 加 `API_HOST` / `API_PORT` 常量，`os.getenv` 可覆盖 | 改动（沿用 `LOG_LEVEL` 同款） |
 | `server/main.py` | 加 `if __name__ == "__main__": uvicorn.run(...)`，端口读 config | 改动（补 `__main__` 块） |
-| `web/package.json` | 加 `"predev": "python ../scripts/check_ports.py"` | 改动（npm 自动钩子） |
+| `web/package.json` | 加 `"predev": "python ../ops/check_ports.py"` | 改动（npm 自动钩子） |
 
 ### 3.2 数据流
 
 ```
 npm run dev
- → predev 自动先跑: python ../scripts/check_ports.py
+ → predev 自动先跑: python ../ops/check_ports.py
     backend_port = os.getenv("API_PORT") or 正则提取 config.py 的 API_PORT 默认值
     vite_port    = 正则提取 vite.config.ts 的 proxy target 端口
     backend_port != vite_port → 打印中文错误 + sys.exit(1)
@@ -58,9 +58,9 @@ npm run dev
 3. **`predev` 的 python 解释器走 PATH** —— 不硬编码 `.venv310` 路径，保跨机器/CI 通用；代价是要求开发者先激活 venv 再 `npm run dev`（README 注明）。CI 另配显式解释器。
 4. **失败硬度 `sys.exit(1)`** —— 强制阻断 `npm run dev`，不留静默漂移。
 
-## 4. preflight 脚本契约（`scripts/check_ports.py`）
+## 4. preflight 脚本契约（`ops/check_ports.py`）
 
-- 入口：`python scripts/check_ports.py`
+- 入口：`python ops/check_ports.py`
 - 输入：无参。脚本以自身文件位置锚定项目根（`Path(__file__).resolve().parent.parent`），定位 `server/core/config.py` 与 `web/vite.config.ts`。
 - 输出：
   - 一致：静默，`exit 0`。
@@ -81,7 +81,7 @@ npm run dev
 
 ## 6. 落地验证清单
 
-- [ ] `python scripts/check_ports.py` 当前仓库（已修为 8000）→ `exit 0`。
+- [ ] `python ops/check_ports.py` 当前仓库（已修为 8000）→ `exit 0`。
 - [ ] 手动把 vite.config.ts 临时改回 8001 → `exit 1` + 中文错误；改回。
 - [ ] `cd web && npm run dev` → predev 自动触发，通过后 vite 起来。
 - [ ] `pytest tests/test_check_ports.py` 全绿。

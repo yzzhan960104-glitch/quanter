@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """discovery 夜跑 daemon 的 schtasks 注册（spec §10，Plan 4 Task 4）。
 
-Why 包自包含调度（不依赖 scripts/manage_ops_schtasks.py）：
+Why 包自包含调度（不依赖 ops/manage_ops_schtasks.py）：
   - discovery 是 L4 生产入口，调度配置必须跟随包走——scripts/ 后续废弃时 discovery
     夜跑不能断链。把 DAEMON_TASK_NAME/TIME/BAT 常量 + register/unregister 收进包内，
     `python -m discovery.schtasks --register` 一键自治。
   - 与 broadcast（scripts/manage_ops_schtasks）解耦：两者调度对象/时序无关
     （broadcast 是盘后播报，daemon 是 02:00 跑批），合并管理会引入虚假耦合。
 
-幂等模式（先 /Delete /F 再 /Create /SC DAILY）复用 scripts/manage_ops_schtasks.py
+幂等模式（先 /Delete /F 再 /Create /SC DAILY）复用 ops/manage_ops_schtasks.py
 既有纪律：schtasks /Create 非 /F 遇到已存在会失败，先删保证重跑 register 不报错
 （改时间 / 误触 / schtasks 多触发都安全）。
 
@@ -41,7 +41,7 @@ def build_register_commands() -> list[dict]:
 
     Returns:
       list[dict]：每元素含 task/time/bat/bot 四键（bot 字段保留以对齐
-      scripts/manage_ops_schtasks.py 的结构，便于一键 report 工具复用）。
+      ops/manage_ops_schtasks.py 的结构，便于一键 report 工具复用）。
     """
     return [{"task": DAEMON_TASK_NAME, "time": DAEMON_TIME, "bat": DAEMON_BAT, "bot": "discovery"}]
 

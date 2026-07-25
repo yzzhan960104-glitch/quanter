@@ -255,7 +255,7 @@ specs(设计)/ plans(实现计划)均在 `docs/superpowers/`,按时间倒序。�
 
 **对话 / 人审类(dws dev connect 常驻·入站)**:
 - **yzzhanCli 通用**(对话):@机器人 → dws → Claude Code 对话(`--channel claudecode`,带 `--allowed-users` 身份闸 + `--agent-approval-mode ask` 审批闸)。
-- **yzzhan 参数优化**(训练人审):@机器人 → dws → `scripts/dingtalk_review_bridge.py` → `POST /api/v1/training/review` → training loop 人审关卡。
+- **yzzhan 参数优化**(训练人审):@机器人 → dws → `infra/tools/dingtalk_review_bridge.py` → `POST /api/v1/training/review` → training loop 人审关卡。
 
 **单向播报类(dws send-by-bot 出站 + schtasks 定时·无入站)**:
 - **行情播报**(每日播报):schtasks 每日 19:00 触发 `python -m broadcast` → 取 `data_lake` 行情 → 纯 pandas 聚合 → 模板 Markdown → `dws chat message send-by-bot` 推群。大盘 8 宽基 + 板块榜 + 主力资金 + 龙虎榜,幂等去重(周末/节假日不播)。建号/拉群见 [`scripts/setup_broadcast_bot.md`](scripts/setup_broadcast_bot.md),定时注册见 [`scripts/setup_broadcast_schtasks.md`](scripts/setup_broadcast_schtasks.md)。

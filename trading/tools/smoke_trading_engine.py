@@ -18,7 +18,7 @@ Why monkeypatch push_brief（而非 push_plan_to_dingtalk）：
 幂等：可重复跑（save_plan 用 json.dump 覆盖写，plan_<today>.json 幂等覆盖）。
 
 用法：
-    .venv310/Scripts/python.exe scripts/smoke_trading_engine.py
+    .venv310/Scripts/python.exe trading/tools/smoke_trading_engine.py
 """
 from __future__ import annotations
 

@@ -12,7 +12,7 @@ dingtalk-stream SDK 的 ChatbotHandler 收不到@（代际不匹配；stream 连
 配合（常驻）：
     dws dev connect --unified-app-id e2695383-6fe9-4617-9439-2a8538af3107 \
         --channel custom \
-        --agent-cmd ".venv310/Scripts/python.exe scripts/dingtalk_review_bridge.py"
+        --agent-cmd ".venv310/Scripts/python.exe infra/tools/dingtalk_review_bridge.py"
 """
 import json
 import os

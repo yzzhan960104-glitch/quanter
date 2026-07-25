@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """miniQMT headless 只读联调（非交互 · 跑全部只读接口 · 不发真单）。
 
-物理意图：scripts/qmt_live_smoke.py 的自动跑兄弟版。原脚本每步 input() 人工确认，
+物理意图：trading/tools/qmt_live_smoke.py 的自动跑兄弟版。原脚本每步 input() 人工确认，
 适合人工把守的真单链路；本脚本去掉交互，一次性把 T1-T6 + 既有只读接口在真实模拟盘
 上端到端跑通，输出 ✅/❌ 矩阵，便于一眼扫「哪些接口当前模拟盘调用成功」。
 
@@ -11,7 +11,7 @@
   - 不发任何 submit_order / cancel_order（真单走原交互脚本 qmt_live_smoke.py 步骤10）。
   - 所有调用 try/except 包裹，单接口失败不阻断后续，给出失败原因供排查。
 
-运行：.venv310/Scripts/python.exe scripts/qmt_live_smoke_headless.py
+运行：.venv310/Scripts/python.exe trading/tools/qmt_live_smoke_headless.py
 """
 import asyncio
 import os

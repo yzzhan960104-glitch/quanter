@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from scripts import manage_ops_schtasks as m
+from ops import manage_ops_schtasks as m
 
 
 def test_register_command_builder(monkeypatch):

@@ -16,7 +16,7 @@ from pathlib import Path
 
 # scripts/ 无 __init__.py（namespace 包），直接把该目录加 sys.path 最稳（与
 # test_check_ports.py 同款），规避 pytest rootdir 推导歧义。
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "ops"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 

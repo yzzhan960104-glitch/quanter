@@ -3,7 +3,7 @@
 
 物理定位（用户诉求「让护栏自动跑，而非手跑」的统一入口）：
     把分散的 4 项 fast gate 串成一条命令，CI（GitHub Actions）与本地
-    `python scripts/run_checks.py` 跑的是同一份代码——杜绝「本地过了 CI 挂」的漂移。
+    `python ops/run_checks.py` 跑的是同一份代码——杜绝「本地过了 CI 挂」的漂移。
 
 fast gate 清单（秒~分钟级，push 必跑）：
     ① 端口一致性 check_ports.py     —— vite proxy 与后端 API_PORT 静态比对（防 ECONNREFUSED）
@@ -33,8 +33,8 @@ except Exception:
 # (名称, 命令, 是否 shell)。shell=False 用 list（python 类，sys.executable 精确控解释器）；
 # shell=True 用字符串（npm 类，让系统 shell 解析 npm/npm.cmd）。
 CHECKS = [
-    ("① 端口一致性 check_ports", [sys.executable, "scripts/check_ports.py"], False),
-    ("② 前后端契约 check_contracts", [sys.executable, "scripts/check_contracts.py"], False),
+    ("① 端口一致性 check_ports", [sys.executable, "ops/check_ports.py"], False),
+    ("② 前后端契约 check_contracts", [sys.executable, "ops/check_contracts.py"], False),
     ("③ 后端单测 pytest", [sys.executable, "-m", "pytest", "tests", "-q", "--tb=short"], False),
     ("④ 前端类型检查 vue-tsc", "npm --prefix web run typecheck", True),
     ("⑤ 前端组件/单测 vitest", "npm --prefix web run test", True),
@@ -64,7 +64,7 @@ def main() -> int:
     failed = [name for name, rc in results if rc != 0]
     if failed:
         print(f"\n✗ {len(failed)} 项失败：{', '.join(failed)}", flush=True)
-        print("  修复对应 gate 后重跑 python scripts/run_checks.py", flush=True)
+        print("  修复对应 gate 后重跑 python ops/run_checks.py", flush=True)
         return 1
     print("\n全部通过，护栏放行。", flush=True)
     return 0

@@ -17,7 +17,7 @@
 - **screener 对外签名不变**：`screen(price_data, date)` / `screen_with_pivots(price_data, pivots_map, hv_map, date)` / `_screen_one(symbol, df, pivots, hv_win)`。
 - **candidate DataFrame schema 不变**：`symbol/pattern_type/formed_at/breakout_price/neckline_price/bottom_price/depth/tension/amount30d/is_valid`（+`pattern_height` for triangle）。空命中返回的列名 list 不变。
 - **consumer 零改**：`plan.py` / `backtest_replay.py` / `caisen_service` / 前端不动。
-- 回归线：`python scripts/run_checks.py` 5 gate 全绿（后端 644+ 测试 0 新增失败）。
+- 回归线：`python ops/run_checks.py` 5 gate 全绿（后端 644+ 测试 0 新增失败）。
 - 每步 commit message 结尾 `Co-Authored-By: Claude <noreply@anthropic.com>`。
 
 ---
@@ -428,7 +428,7 @@ Expected: PASS — 13 用例全绿（9 现有 + 4 新 `registry_driven`）。任
 
 - [ ] **Step 6: 跑 run_checks 5 gate 全量验证（确认全链路零回归）**
 
-Run: `.venv310/Scripts/python scripts/run_checks.py`
+Run: `.venv310/Scripts/python ops/run_checks.py`
 Expected: 5 gate 全绿（① 端口 ② 契约 ③ 后端单测 644+ ④ 前端类型 ⑤ 前端单测）。后端测试数应 ≥ 原 644（含新增 test_registry 5 + test_screener 4 = 9 个新测试），0 新增失败。
 
 - [ ] **Step 7: Commit**

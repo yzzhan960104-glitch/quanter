@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """miniQMT 真单 + 撤单 headless 联调（模拟仓 · 验证 submit/cancel/回调推送全链路）。
 
-物理意图：scripts/qmt_live_smoke_headless.py 只跑只读接口；本脚本补「真单 + 撤单 +
+物理意图：trading/tools/qmt_live_smoke_headless.py 只跑只读接口；本脚本补「真单 + 撤单 +
 回调推送」最后一环（原 qmt_live_smoke.py 步骤10 的自动版）。
 
 安全设计（CLAUDE.md 模拟仓无顾忌但仍守序 + 风控拷问）：

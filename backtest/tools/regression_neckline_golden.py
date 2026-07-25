@@ -24,10 +24,10 @@
 
 用法：
     # 捕获 golden 基线（阶段 1 起步执行一次，commit 进仓）
-    .venv310/Scripts/python.exe scripts/regression_neckline_golden.py --capture
+    .venv310/Scripts/python.exe backtest/tools/regression_neckline_golden.py --capture
 
     # 验证（阶段 1/2/4 每步迁移后跑，逐位对比）
-    .venv310/Scripts/python.exe scripts/regression_neckline_golden.py --verify
+    .venv310/Scripts/python.exe backtest/tools/regression_neckline_golden.py --verify
 """
 import os
 import sys

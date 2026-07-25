@@ -101,7 +101,7 @@ brainstorming 前先核实，纠正了多处与记忆/旧 spec 不符的认知�
 ### 3.3 调度落地
 
 - engine 内四 cron（APSched ular）：eod_plan cron 改 `0 19 * * 1-5`；stop_loss 改 `IntervalTrigger(seconds=30)`（cron 最小粒度分钟，30s 必须 interval）。
-- engine 外 schtasks：数据检查点①②走 `scripts/manage_ops_schtasks.py` 幂等注册（沿用 QuanterDataBrief 模式，新增两个 bat）。
+- engine 外 schtasks：数据检查点①②走 `ops/manage_ops_schtasks.py` 幂等注册（沿用 QuanterDataBrief 模式，新增两个 bat）。
 
 ---
 
@@ -262,7 +262,7 @@ PENDING → SUBMITTED → PARTIAL_FILLED → FILLED★(终态)
   - 成交回调链路（注入 mock _on_order_update，验证日志+钉钉+挂止盈三连）。
   - stop_prices 注入（验证 monitor 不再空转）。
 - **契约测试**：守 Layer2 spec §7 六铁律（不破坏五模块单向依赖）。
-- **模拟盘 smoke**：`scripts/smoke_trading_engine.py`（现状已有）扩展，覆盖完整一日链路。
+- **模拟盘 smoke**：`trading/tools/smoke_trading_engine.py`（现状已有）扩展，覆盖完整一日链路。
 - **影子对照（可选）**：dry_run 影子与 live 模拟盘并行，对比执行差异。
 
 ---

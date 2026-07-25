@@ -38,10 +38,10 @@
 | 层 | 命令 | 预期 | 成本 |
 |---|---|---|---|
 | **T0** 单元/契约 | `.venv310/Scripts/python.exe -m pytest tests/ -q --tb=short -p no:cacheprovider 2>&1 \| tail -5` | `918 passed, 3 failed`（failed 必须恒为「已知基线失败」3 个，不得新增） | 秒级 |
-| **T1** 数值回归·快版 | `.venv310/Scripts/python.exe scripts/regression_neckline_golden.py`（阶段 1 Task 1.0 建） | golden kelly 年化逐位一致（`==` 或 `pytest.approx(abs=1e-9)`） | 秒级 |
-| **T1** 数值回归·全版 | `.venv310/Scripts/python.exe -u scripts/param_iter.py --time-budget 28800` | 最优年化稳定在基线区间（全市场 28.4% / 创板科创口径 99.7%） | 8h · 仅里程碑 |
-| **T2** 交易编排冒烟 | `.venv310/Scripts/python.exe scripts/smoke_trading_engine.py` | 影子 eod_plan 全链路 dry_run 返回 `{n_orders:0, mode:dry_run}`，`plan_<today>.json` 落盘 | 分钟级 |
-| **T2** 券商真实柜台 | `.venv310/Scripts/python.exe scripts/qmt_live_smoke_headless.py` | T1–T6 共 14 项全 pass（需 miniQMT 客户端登录 + 开盘时段） | 分钟级 · 需柜台 |
+| **T1** 数值回归·快版 | `.venv310/Scripts/python.exe backtest/tools/regression_neckline_golden.py`（阶段 1 Task 1.0 建） | golden kelly 年化逐位一致（`==` 或 `pytest.approx(abs=1e-9)`） | 秒级 |
+| **T1** 数值回归·全版 | `.venv310/Scripts/python.exe -u discovery/tools/param_iter.py --time-budget 28800` | 最优年化稳定在基线区间（全市场 28.4% / 创板科创口径 99.7%） | 8h · 仅里程碑 |
+| **T2** 交易编排冒烟 | `.venv310/Scripts/python.exe trading/tools/smoke_trading_engine.py` | 影子 eod_plan 全链路 dry_run 返回 `{n_orders:0, mode:dry_run}`，`plan_<today>.json` 落盘 | 分钟级 |
+| **T2** 券商真实柜台 | `.venv310/Scripts/python.exe trading/tools/qmt_live_smoke_headless.py` | T1–T6 共 14 项全 pass（需 miniQMT 客户端登录 + 开盘时段） | 分钟级 · 需柜台 |
 | **T3** 浏览器 E2E | `.venv310/Scripts/python.exe -m pytest tests/e2e/lab_param_lab.py -q` | Parameter Lab 页面加载 + 交互断言全绿 | 分钟级 |
 
 ### 每阶段必跑门（✓ = 必跑，✓✓ = 核心强校验，— = 该阶段不触及可跳）
@@ -124,8 +124,8 @@ Expected: `918 passed, 3 failed`（与阶段0 收尾一致；3 failed 是已知�
 
 - [ ] **Step 1b: 捕获颈线法数值 golden 基线（T1 锚点 · 阶段 1/2/4 数值回归全靠此对比）**
 
-建 `scripts/regression_neckline_golden.py`：固定 3 标的（从 `data_lake` 取创板科创代表，如 `300750.SZ / 688981.SH / 301269.SZ`）+ `neckline_method.DEFAULTS` + `EXEC_DEFAULTS`，调 `scan_symbol` 全链路（识别→执行→凯利），汇总输出 → 落 `tests/_golden/neckline_baseline.json`（含标的清单 + DEFAULTS 哈希 + 各标的 kelly 年化 + trades 计数）。
-Run: `.venv310/Scripts/python.exe scripts/regression_neckline_golden.py --capture`
+建 `backtest/tools/regression_neckline_golden.py`：固定 3 标的（从 `data_lake` 取创板科创代表，如 `300750.SZ / 688981.SH / 301269.SZ`）+ `neckline_method.DEFAULTS` + `EXEC_DEFAULTS`，调 `scan_symbol` 全链路（识别→执行→凯利），汇总输出 → 落 `tests/_golden/neckline_baseline.json`（含标的清单 + DEFAULTS 哈希 + 各标的 kelly 年化 + trades 计数）。
+Run: `.venv310/Scripts/python.exe backtest/tools/regression_neckline_golden.py --capture`
 Expected: 生成 golden json 并 commit「捕获颈线法 T1 golden 基线」。**此数值是阶段 1/2/4 迁移后逐位对比的锚**——纯结构重构下迁移后重跑 `--verify` 必须 `==` 一致（`pytest.approx(abs=1e-9)`），任何漂移 = 偷改逻辑，立即 revert。
 ⚠ 本步是「新增测试脚手架」非业务逻辑，不违反 strangler「纯结构迁移」红线；`scan_symbol` 阶段 1 收口进 `strategies/neckline/` 后，脚本 import 路径随之改，**golden 数值不变**（这正是要守的不变量）。
 

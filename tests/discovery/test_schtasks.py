@@ -29,7 +29,7 @@ def test_build_register_commands_shape():
 def test_register_calls_schtasks_delete_then_create(monkeypatch):
     """register 幂等：先 /Delete /F 再 /Create（不污染真实任务计划程序，mock subprocess）。
 
-    幂等模式复用 scripts/manage_ops_schtasks.py 既有纪律：先 /Delete /F（不存在也返 0，
+    幂等模式复用 ops/manage_ops_schtasks.py 既有纪律：先 /Delete /F（不存在也返 0，
     不报错），再 /Create /SC DAILY /TN /TR /ST /F 覆盖。保证改时间后重跑 register 不
     报"任务已存在"错（schtasks /Create 非 /F 模式遇到已存在会失败）。
     """

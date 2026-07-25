@@ -11,7 +11,7 @@
     本指标是②层的"广度温度计"，与流动性（Shibor/M2）共同构成 A 股系统性动能判据。
 
 落 data_lake/market_breadth.parquet（DatetimeIndex，列 breadth=站上MA60比例）。
-用法：PYTHONIOENCODING=utf-8 python -u scripts/market_breadth.py
+用法：PYTHONIOENCODING=utf-8 python -u backtest/tools/market_breadth.py
 """
 import os
 import sys

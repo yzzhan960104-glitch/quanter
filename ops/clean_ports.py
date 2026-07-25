@@ -9,7 +9,7 @@ Why 存在：webapp-testing 的 with_server.py 在 Windows 停服时可能 kill 
 
 用法（E2E 命令尾 && 串接，with_server 退出后自动清理）：
     python "$WITH_SERVER" --server ... -- python tests/e2e/caisen_replay_tab.py \
-      && python scripts/clean_ports.py
+      && python ops/clean_ports.py
 
 设计（反黑盒 / 极简）：
 - 纯标准库，netstat + PowerShell Stop-Process + socket bind，零第三方依赖；

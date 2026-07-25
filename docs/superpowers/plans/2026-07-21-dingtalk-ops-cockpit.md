@@ -32,7 +32,7 @@
 - `broadcast/__main__.py`（改）：加 `--bot {market|trading|data|strategy}` 路由 + 每机器人独立幂等文件。
 - `server/services/trading_service.py`（改）：加 `query_trades(start,end,symbol,direction,limit,offset)` 流水分页函数。
 - `server/api/v1/trading.py`（改）：加 `GET /trades` 端点。
-- `scripts/manage_ops_schtasks.py`（新）：读 `.env` 配置化注册/列出/删除 3 个播报 schtasks。
+- `ops/manage_ops_schtasks.py`（新）：读 `.env` 配置化注册/列出/删除 3 个播报 schtasks。
 - `scripts/run_trading_brief.bat` / `run_data_brief.bat` / `run_strategy_brief.bat`（新）：schtasks 触发入口。
 
 **测试（pytest）**
@@ -734,11 +734,11 @@ git commit -m "feat(broadcast): 策略机器人每日健康度 brief（信号/�
 ## Task 6: schtasks 管理脚本 `manage_ops_schtasks.py`
 
 **Files:**
-- Create: `scripts/manage_ops_schtasks.py`
+- Create: `ops/manage_ops_schtasks.py`
 - Test: `tests/scripts/test_manage_ops_schtasks.py`
 
 **Interfaces:**
-- Produces: CLI `python scripts/manage_ops_schtasks.py {--list|--register|--unregister|--rerun <bot>}`，读 `.env` 的 `*_BRIEF_TIME` 幂等注册 3 个 schtasks（`QuanterTradingBrief`/`QuanterStrategyBrief`/`QuanterDataBrief`）
+- Produces: CLI `python ops/manage_ops_schtasks.py {--list|--register|--unregister|--rerun <bot>}`，读 `.env` 的 `*_BRIEF_TIME` 幂等注册 3 个 schtasks（`QuanterTradingBrief`/`QuanterStrategyBrief`/`QuanterDataBrief`）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -777,7 +777,7 @@ def test_task_names_complete():
 Run: `.venv310/Scripts/python.exe -m pytest tests/scripts/test_manage_ops_schtasks.py -v`
 Expected: FAIL（模块不存在）
 
-- [ ] **Step 3: 实现 `scripts/manage_ops_schtasks.py`**
+- [ ] **Step 3: 实现 `ops/manage_ops_schtasks.py`**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -896,7 +896,7 @@ Expected: PASS
 - [ ] **Step 5: 提交**
 
 ```bash
-git add scripts/manage_ops_schtasks.py tests/scripts/test_manage_ops_schtasks.py
+git add ops/manage_ops_schtasks.py tests/scripts/test_manage_ops_schtasks.py
 git commit -m "feat(scripts): 观测层播报 schtasks 配置化管理（读.env时间幂等注册）"
 ```
 
@@ -1458,9 +1458,9 @@ dws dev connect --unified-app-id <TRADING_BOT_UNIFIED_APP_ID> --channel claudeco
 - [ ] **Step 5: 注册 schtasks + 端到端验证**
 
 ```bash
-.venv310/Scripts/python.exe scripts/manage_ops_schtasks.py --register
-.venv310/Scripts/python.exe scripts/manage_ops_schtasks.py --list
-.venv310/Scripts/python.exe scripts/manage_ops_schtasks.py --rerun trading  # 立即触发一次
+.venv310/Scripts/python.exe ops/manage_ops_schtasks.py --register
+.venv310/Scripts/python.exe ops/manage_ops_schtasks.py --list
+.venv310/Scripts/python.exe ops/manage_ops_schtasks.py --rerun trading  # 立即触发一次
 ```
 Expected: 3 任务注册成功；--rerun 触发后群收到交易报告
 

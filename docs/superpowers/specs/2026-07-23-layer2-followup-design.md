@@ -145,7 +145,7 @@ class LLMClient(Protocol):
 **收口边界订正**：内核同源 = 已收口；统计层有意分轨 = 设计非债。
 
 **清真技术债 · 全局状态 mutation**：
-`scripts/param_iter.py::run_one`（行 159–160）用 `DEFAULTS.update(id_params)` / `EXEC_DEFAULTS.update(exec_params)` **mutation 全局可变状态**传参（靠 try/finally 恢复，不安全）。而 `scan_symbol(sym_df, window, exec=None, id_cfg=None)` **已支持显式传参**，param_iter 未用。
+`discovery/tools/param_iter.py::run_one`（行 159–160）用 `DEFAULTS.update(id_params)` / `EXEC_DEFAULTS.update(exec_params)` **mutation 全局可变状态**传参（靠 try/finally 恢复，不安全）。而 `scan_symbol(sym_df, window, exec=None, id_cfg=None)` **已支持显式传参**，param_iter 未用。
 
 动作：
 1. **param_iter**：去 `DEFAULTS.update`/`EXEC_DEFAULTS.update` + try/finally，改构造 `id_cfg`/`exec_cfg` dict 显式传 `scan_symbol(sym_df, window, exec=exec_cfg, id_cfg=id_cfg)`。
@@ -180,8 +180,8 @@ class LLMClient(Protocol):
 | 层 | 跑什么 | 验收 |
 |---|---|---|
 | **T0 单元/契约** | 全量 pytest | failed 恒为 1（universe\*ST 预存基线），**不新增**；test_layer_contract 7 passed |
-| **T1 数值回归** | `scripts/regression_neckline_golden.py --verify` | exit 0、golden kelly 年化零漂移（#2 改传参后数值不变） |
-| **T2 链路冒烟** | `scripts/smoke_trading_engine.py` | PASS（#4 execution_gateway 迁后实盘编排链路不变） |
+| **T1 数值回归** | `backtest/tools/regression_neckline_golden.py --verify` | exit 0、golden kelly 年化零漂移（#2 改传参后数值不变） |
+| **T2 链路冒烟** | `trading/tools/smoke_trading_engine.py` | PASS（#4 execution_gateway 迁后实盘编排链路不变） |
 | **grep 残留** | 全仓扫 `trading.signal_runner` / `trading.execution_gateway` / 垫片 re-export | 零残留（order_state 除真身 OrderStateMachine） |
 | **依赖方向** | `server→infra.llm` / `backtest→infra.llm` 合法；backtest 不 import server；infra 与 data 同级 | grep 证 |
 

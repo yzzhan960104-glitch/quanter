@@ -12,7 +12,7 @@
   ⑥ 运行模式：--time-budget 秒数跑到时间耗尽，state 持久化可续（kill/重启自动接续）
 
 用法：
-    PYTHONIOENCODING=utf-8 python -u scripts/param_iter.py --time-budget 28800   # 8h
+    PYTHONIOENCODING=utf-8 python -u discovery/tools/param_iter.py --time-budget 28800   # 8h
 """
 import os
 import sys

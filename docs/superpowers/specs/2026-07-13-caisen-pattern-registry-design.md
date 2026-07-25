@@ -216,7 +216,7 @@ price_data → liquidity_filter → micro_filter → causal_pivots(+ATR)
 - [ ] `tests/caisen/test_registry.py` 新建并通过。
 - [ ] `tests/caisen/test_screener.py` 现有用例**全过（零回归）**。
 - [ ] 注册表驱动测试（enable/depth_override/extra_output/异常隔离）通过。
-- [ ] `python scripts/run_checks.py` 5 gate 全绿（后端 644+ 测试 0 新增失败）。
+- [ ] `python ops/run_checks.py` 5 gate 全绿（后端 644+ 测试 0 新增失败）。
 - [ ] screener 对外签名 / candidate schema / consumer 零改（代码审查确认）。
 
 ## 12. Follow-up（后续周期，非本 spec 范围）

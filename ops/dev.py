@@ -13,8 +13,8 @@ Why 存在（用户诉求「根本杜绝」反复踩的 10013/僵尸）：
       ③ uvicorn + vite 注册为子进程组，atexit + SIGINT 双保险干净清理（Ctrl+C 全杀，不残留）。
 
 用法：
-    python scripts/dev.py            # 一键起后端 8000 + 前端 5173，Ctrl+C 干净退出
-    python scripts/dev.py --reload   # 后端带 --reload（接受偶尔清端口的代价，换热重载）
+    python ops/dev.py            # 一键起后端 8000 + 前端 5173，Ctrl+C 干净退出
+    python ops/dev.py --reload   # 后端带 --reload（接受偶尔清端口的代价，换热重载）
 
 设计（反黑盒 / 极简）：
 - 纯标准库（subprocess/socket/signal/atexit），零新依赖；

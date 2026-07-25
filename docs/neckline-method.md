@@ -1,6 +1,6 @@
 # 颈线法形态学策略 · 完整技术文档
 
-> 维护范围：`scripts/neckline_method_v0.py` · `scripts/neckline_backtest.py` · `strategies/neckline_*` · `execution/backtest_replay.py` · `scripts/param_iter.py`
+> 维护范围：`scripts/neckline_method_v0.py` · `scripts/neckline_backtest.py` · `strategies/neckline_*` · `execution/backtest_replay.py` · `discovery/tools/param_iter.py`
 > 最后更新：2026-07-20
 
 ---
@@ -72,14 +72,14 @@
 |---|---|---|
 | `a_shares_daily.parquet` | 个股 OHLCV（颈线法主输入，MultiIndex date×symbol） | `sync_all_tushare.py` / `sync_incremental.py` |
 | `etf_daily.parquet` | ETF OHLCV（全市场外推实验用） | `sync_all_tushare.py` |
-| `market_breadth.parquet` | 全市场宽度（站上 MA60 比例）· 四层动能②层 | `scripts/market_breadth.py` |
+| `market_breadth.parquet` | 全市场宽度（站上 MA60 比例）· 四层动能②层 | `backtest/tools/market_breadth.py` |
 | `shibor.parquet` / `shibor_lpr.parquet` / `cn_m.parquet` | 利率三件套 · 四层动能②层流动性子模块 | `scripts/sync_rate_data.py` |
 
 ### 1.3 入口矩阵（谁在用哪条路）
 
 | 场景 | 入口 | 走 Strategy 接口？ |
 |---|---|---|
-| 参数迭代（调参） | `scripts/param_iter.py` → `scan_symbol` | ❌ 直调 |
+| 参数迭代（调参） | `discovery/tools/param_iter.py` → `scan_symbol` | ❌ 直调 |
 | 单标的诊断/复盘 | `scripts/neckline_backtest.main()` → `scan_symbol` | ❌ 直调 |
 | 异步回测（前端 ParamLab） | `caisen/facade.replay_async` → `execution/backtest_replay.replay` → `scan_at` | ✅ 经接口 |
 | 同步回测（API） | `caisen/facade.replay` → `execution/backtest_replay.replay` → `scan_at` | ✅ 经接口 |
@@ -410,6 +410,6 @@ list_strategies()                   ← 供前端策略下拉
 | `strategies/base.py` | Strategy 协议 + TRADE_REQUIRED_KEYS | ~80 |
 | `strategies/registry.py` | 策略注册表 | ~40 |
 | `execution/backtest_replay.py` | 回测编排（逐 symbol×T 滚动 + ReplayReport） | — |
-| `scripts/param_iter.py` | 参数迭代引擎（22 维概念·约束式 score 多目标·P1-c 宽度加权） | ~340 |
-| `scripts/market_breadth.py` | 四层动能②层宽度指标生成 | ~80 |
+| `discovery/tools/param_iter.py` | 参数迭代引擎（22 维概念·约束式 score 多目标·P1-c 宽度加权） | ~340 |
+| `backtest/tools/market_breadth.py` | 四层动能②层宽度指标生成 | ~80 |
 | `scripts/sync_rate_data.py` | 利率三件套补采（shibor/lpr/cn_m） | ~100 |

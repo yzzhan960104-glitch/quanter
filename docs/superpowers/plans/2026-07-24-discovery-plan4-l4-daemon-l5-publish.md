@@ -679,7 +679,7 @@ git commit -m "feat(discovery): T3 daemon 钉钉告警+outer去偏调度（信�
 - Test: `tests/discovery/test_schtasks.py`
 
 **Interfaces:**
-- Consumes: `discovery/daemon.py::run_daemon`；`discovery/cli.py::{freeze, holdout_split, _db_path}`（既有 helper）；`scripts/manage_ops_schtasks.py` 模式（幂等先删后建）
+- Consumes: `discovery/daemon.py::run_daemon`；`discovery/cli.py::{freeze, holdout_split, _db_path}`（既有 helper）；`ops/manage_ops_schtasks.py` 模式（幂等先删后建）
 - Produces: `discovery/schtasks.py::{DAEMON_TASK_NAME, build_register_commands, register, unregister, list_tasks, main}`；`discovery/cli.py::cmd_daemon`
 
 - [ ] **Step 1: 写 schtasks 纯函数测试（RED）**
@@ -721,7 +721,7 @@ Expected: FAIL（`discovery.schtasks` 不存在）。
 """discovery 夜跑 daemon 的 schtasks 注册（spec §10，Plan 4）。
 
 discovery 包自包含调度：不依赖 scripts/（后续废弃），与 broadcast schtasks 解耦。
-幂等模式（先 /Delete /F 再 /Create /SC DAILY）复用 scripts/manage_ops_schtasks.py 既有纪律。
+幂等模式（先 /Delete /F 再 /Create /SC DAILY）复用 ops/manage_ops_schtasks.py 既有纪律。
 改时间 = 改本模块常量 + python -m discovery.schtasks --register。
 """
 from __future__ import annotations

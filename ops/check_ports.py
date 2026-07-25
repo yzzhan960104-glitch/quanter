@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# 项目根锚定：scripts/check_ports.py → scripts/ → 项目根（与运行 cwd 无关）
+# 项目根锚定：ops/check_ports.py → scripts/ → 项目根（与运行 cwd 无关）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "server" / "core" / "config.py"
 DEFAULT_VITE_PATH = PROJECT_ROOT / "web" / "vite.config.ts"

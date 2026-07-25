@@ -16,7 +16,7 @@
 
 运行
 ====
-.venv310/Scripts/python.exe scripts/probe_qmt_ratelimit.py
+.venv310/Scripts/python.exe trading/tools/probe_qmt_ratelimit.py
 
 前置
 ====

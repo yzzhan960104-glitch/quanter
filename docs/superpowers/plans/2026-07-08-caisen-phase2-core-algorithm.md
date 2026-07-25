@@ -84,16 +84,16 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 用既有脚本渲染采样页定位（目录页码为印刷页码，PDF≈+1 偏移）：
 ```bash
-PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe scripts/_render_pdf.py 17 26   # 技术篇 W底颈线满足计算
+PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe ops/_render_pdf.py 17 26   # 技术篇 W底颈线满足计算
 ```
 对每页 `Read scripts/pages/pXXX.png` 上传 CDN，再用 `analyze_image` 工具提取文字。重点找：① W底颈线满足计算的公式（颈线高度投影倍数）② 满足点分级规则。
 
 - [ ] **Step 2: 定位实战篇正文（书后半，约 PDF 130-220 区间采样）**
 
 ```bash
-PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe scripts/_render_pdf.py 130 135
-PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe scripts/_render_pdf.py 160 165
-PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe scripts/_render_pdf.py 190 195
+PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe ops/_render_pdf.py 130 135
+PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe ops/_render_pdf.py 160 165
+PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe ops/_render_pdf.py 190 195
 ```
 逐页视觉识别找：实战篇四（底部反转＆多方转折）、六（双底幅宽张力）、八（W底满足计算）、十（形态失败）。记录章节起始 PDF 页。
 

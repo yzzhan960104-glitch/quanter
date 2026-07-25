@@ -516,7 +516,7 @@ git commit -m "feat(data): 数据检查点①②入口(重采熔断,t1告警/t2�
 
 **Files:**
 - Create: `scripts/run_data_check_t1.bat`、`scripts/run_data_check_t2.bat`
-- Create/Modify: `scripts/manage_ops_schtasks.py`（注册两个新任务）
+- Create/Modify: `ops/manage_ops_schtasks.py`（注册两个新任务）
 
 **说明：** 沿用 QuanterDataBrief 模式（cd /d 锁根 + 调 .venv310 python）。
 
@@ -553,7 +553,7 @@ python -m scripts.run_data_check t2
 
 Run（研究员在场时执行，需 Windows schtasks 权限）:
 ```bash
-python scripts/manage_ops_schtasks.py
+python ops/manage_ops_schtasks.py
 schtasks /Query /TN QuanterDataCheckT1
 schtasks /Query /TN QuanterDataCheckT2
 ```
@@ -569,7 +569,7 @@ Expected: 输出检查结果，退出码 0（当前数据应齐全）。
 - [ ] **Step 5: commit（需研究员授权）**
 
 ```bash
-git add scripts/run_data_check_t1.bat scripts/run_data_check_t2.bat scripts/manage_ops_schtasks.py
+git add scripts/run_data_check_t1.bat scripts/run_data_check_t2.bat ops/manage_ops_schtasks.py
 git commit -m "chore(ops): 注册数据检查点schtasks(17:00查T-1/18:30查T重采熔断)"
 ```
 
@@ -829,7 +829,7 @@ self.sched.add_job(
 在模拟盘连接状态下，跑一个临时脚本测连续调用限频：
 
 ```python
-# scripts/probe_qmt_ratelimit.py（临时，测完可删）
+# trading/tools/probe_qmt_ratelimit.py（临时，测完可删）
 import asyncio, time
 from trading.engine import get_gateway
 async def main():
@@ -858,7 +858,7 @@ Expected: 输出含 `interval` / `30`。
 - [ ] **Step 4: commit（需研究员授权）**
 
 ```bash
-git add trading/engine.py .env .env.example scripts/probe_qmt_ratelimit.py
+git add trading/engine.py .env .env.example trading/tools/probe_qmt_ratelimit.py
 git commit -m "feat(engine): stop_loss 5min→30s interval(限频实测后定终值,cron不支持秒级)"
 ```
 

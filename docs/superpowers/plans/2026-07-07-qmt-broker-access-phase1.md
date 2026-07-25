@@ -33,7 +33,7 @@
 | `tests/test_trading_service.py` | 改 | +submit_order/cancel/connect 单测 |
 | `server/api/v1/trading.py` | 改 | +6 路由（含 `/submit_order` body.dry_run） |
 | `tests/test_trading_api.py` | 新增 | 路由端到端冒烟（TestClient） |
-| `scripts/qmt_smoke.py` | 新增 | 真实联调脚本（5 步人工确认） |
+| `trading/tools/qmt_smoke.py` | 新增 | 真实联调脚本（5 步人工确认） |
 
 ---
 
@@ -1506,18 +1506,18 @@ git commit -m "feat(api): 6 路由 connect/disconnect/submit/cancel/orders/asset
 
 ---
 
-## Task 7: 联调脚本（`scripts/qmt_smoke.py`）
+## Task 7: 联调脚本（`trading/tools/qmt_smoke.py`）
 
 **Files:**
-- Create: `scripts/qmt_smoke.py`
+- Create: `trading/tools/qmt_smoke.py`
 - 无自动化测试（手跑）；验证脚本可 import
 
 **Interfaces:**
-- 产出：可执行 `python scripts/qmt_smoke.py`，分 5 步 `input()` 人工确认
+- 产出：可执行 `python trading/tools/qmt_smoke.py`，分 5 步 `input()` 人工确认
 
 - [ ] **Step 1: 写脚本**
 
-创建 `scripts/qmt_smoke.py`：
+创建 `trading/tools/qmt_smoke.py`：
 
 ```python
 # -*- coding: utf-8 -*-
@@ -1528,7 +1528,7 @@ git commit -m "feat(api): 6 路由 connect/disconnect/submit/cancel/orders/asset
   2. userdata_mini 目录已生成（D:\\国金QMT交易端模拟\\userdata_mini）
   3. .env 已配置 QMT_USERDATA_PATH / QMT_ACCOUNT_ID
 
-运行：python scripts/qmt_smoke.py
+运行：python trading/tools/qmt_smoke.py
 
 铁律（CLAUDE.md 状态机边界）：每步 input() 等待人工确认，绝不批量自动跑真单。
 步骤：
@@ -1629,14 +1629,14 @@ if __name__ == "__main__":
 - [ ] **Step 2: 验证脚本可 import（语法检查）**
 
 ```bash
-python -c "import ast; ast.parse(open('scripts/qmt_smoke.py', encoding='utf-8').read()); print('语法 OK')"
+python -c "import ast; ast.parse(open('trading/tools/qmt_smoke.py', encoding='utf-8').read()); print('语法 OK')"
 ```
 Expected: `语法 OK`
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add scripts/qmt_smoke.py
+git add trading/tools/qmt_smoke.py
 git commit -m "feat(smoke): QMT 真实联调脚本 5 步人工确认（Phase 1 Task 7）"
 ```
 
@@ -1666,7 +1666,7 @@ Expected: `{'connected': False, 'locked': False, 'mode': 'disconnected'}`（不�
 由研究员确认 XtItClient 已启动后：
 
 ```bash
-python scripts/qmt_smoke.py
+python trading/tools/qmt_smoke.py
 ```
 Expected: 步骤 1 connect 成功（_connected=True）；步骤 2 返回资产；步骤 3 持仓；步骤 4 dry_run 打印；步骤 5（研究员输 YES）真单 + 撤单回报对账。
 

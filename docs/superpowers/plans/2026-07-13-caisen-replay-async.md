@@ -27,7 +27,7 @@
 - `caisen/replay_tasks_db.py` — SQLite 任务表访问层（DDL + CRUD）。单一职责：任务行读写。
 - `caisen/replay_worker.py` — worker 进程入口（跑 replay + Queue 通信 + initializer 加载 data_lake）。
 - `caisen/replay_scheduler.py` — 调度器 daemon 线程（poll PENDING → submit + heartbeat 监控 + 重启恢复）。
-- `scripts/migrate_replay_runs_to_sqlite.py` — replay_runs JSON→SQLite 一次性迁移。
+- `ops/migrate_replay_runs_to_sqlite.py` — replay_runs JSON→SQLite 一次性迁移。
 - 测试：`tests/test_replay_tasks_db.py`、`tests/test_replay_worker.py`、`tests/test_replay_scheduler.py`、`tests/test_migrate_replay_runs.py`。
 
 **修改：**
@@ -1046,7 +1046,7 @@ if pool:
     pool.shutdown(wait=False)
 ```
 
-- [ ] **Step 2: 手动验证** → 启 `scripts/dev.py`，看日志「启动恢复：N 个残留 RUNNING 标 FAILED」（首次 0）+ scheduler 线程启动无异常。
+- [ ] **Step 2: 手动验证** → 启 `ops/dev.py`，看日志「启动恢复：N 个残留 RUNNING 标 FAILED」（首次 0）+ scheduler 线程启动无异常。
 - [ ] **Step 3: 跑回归** → `.venv310/Scripts/python.exe -m pytest tests/ -q`（确认 lifespan 改动不破坏现有套件；ProcessPoolExecutor 在纯单元测试环境可 monkeypatch 为 None 跳过，或用 TestClient 验证装配）。
 - [ ] **Step 4: commit**
 ```bash
@@ -1059,7 +1059,7 @@ git commit -m "feat(server): lifespan 装配回测 pool + 调度器（Spec 1 Tas
 ### Task 8: 迁移脚本 + 清理 + E2E
 
 **Files:**
-- Create: `scripts/migrate_replay_runs_to_sqlite.py`、`tests/test_migrate_replay_runs.py`
+- Create: `ops/migrate_replay_runs_to_sqlite.py`、`tests/test_migrate_replay_runs.py`
 
 - [ ] **Step 1: 写迁移测试 `tests/test_migrate_replay_runs.py`**
 
@@ -1088,7 +1088,7 @@ def test_migrate_json_to_sqlite(tmp_path, monkeypatch):
     assert rows[0]["report"]["n_hits"] == 5
 ```
 
-- [ ] **Step 2: 实现迁移脚本 `scripts/migrate_replay_runs_to_sqlite.py`**
+- [ ] **Step 2: 实现迁移脚本 `ops/migrate_replay_runs_to_sqlite.py`**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -1142,10 +1142,10 @@ if __name__ == "__main__":
 - [ ] **Step 3: 跑迁移测试** → `.venv310/Scripts/python.exe -m pytest tests/test_migrate_replay_runs.py -v`
 - [ ] **Step 4: 删除老 `caisen/replay_runs.py` + `tests/test_caisen_replay_runs.py`**（已被 SQLite 取代；先 `grep -rn "replay_runs" --include=*.py` 确认仅迁移脚本和自身测试引用，无残余依赖）
 - [ ] **Step 5: E2E 手动验证**：启服务 → `curl -X POST .../replay/async -d '{"start":"2024-01-01","end":"2024-03-01"}'` 拿 task_id → 轮询 `GET /replay/tasks/{id}` 看 PENDING→RUNNING(progress↑)→SUCCESS → `GET /replay/runs` 列出该条
-- [ ] **Step 6: 全量回归** → `.venv310/Scripts/python.exe -m pytest tests/ -q`（全绿）+ `python scripts/run_checks.py`（fast gate）
+- [ ] **Step 6: 全量回归** → `.venv310/Scripts/python.exe -m pytest tests/ -q`（全绿）+ `python ops/run_checks.py`（fast gate）
 - [ ] **Step 7: commit**
 ```bash
-git add scripts/migrate_replay_runs_to_sqlite.py tests/test_migrate_replay_runs.py
+git add ops/migrate_replay_runs_to_sqlite.py tests/test_migrate_replay_runs.py
 git rm caisen/replay_runs.py tests/test_caisen_replay_runs.py
 git commit -m "feat(caisen): replay_runs→SQLite 迁移脚本 + 删除老 JSON 模块（Spec 1 Task 8 完成）" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
 ```

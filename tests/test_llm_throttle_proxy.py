@@ -7,7 +7,7 @@
 "主动让速"，用"更慢"换"不撞墙"。
 
 纯逻辑测试，不涉网络/真实时钟：用注入的 now 时间戳驱动，确定性验证间隔/退避/恢复。
-（HTTP 流式反代胶水层另起集成冒烟脚本验证，见 scripts/smoke_throttle_proxy.py。）
+（HTTP 流式反代胶水层另起集成冒烟脚本验证，见 infra/tools/smoke_throttle_proxy.py。）
 """
 import sys
 from pathlib import Path

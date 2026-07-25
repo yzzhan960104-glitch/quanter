@@ -10,10 +10,10 @@
 结构：
 - ThrottlePolicy：纯逻辑节流策略（TDD 由 tests/test_llm_throttle_proxy.py 驱动）。
 - aiohttp 流式反代 main：透传 header/body/SSE，转发前调 ThrottlePolicy；由集成冒烟
-  scripts/smoke_throttle_proxy.py 验证（网络胶水用集成测试，节流内核用纯单测）。
+  infra/tools/smoke_throttle_proxy.py 验证（网络胶水用集成测试，节流内核用纯单测）。
 
 启动：
-  python scripts/llm_throttle_proxy.py [--port 8787] [--min-interval 8] \\
+  python infra/tools/llm_throttle_proxy.py [--port 8787] [--min-interval 8] \\
       [--overload-cooldown 20] [--upstream https://api.z.ai/api/anthropic]
 机器人接入（重启 dws connect 时注入，不动全局 settings）：
   ANTHROPIC_BASE_URL=http://127.0.0.1:8787 dws dev connect --unified-app-id ... --channel claudecode ...

@@ -13,7 +13,7 @@ from backtest import tasks_db as replay_tasks_db
 # importlib 加载迁移脚本（scripts/ 非包；exec 时其顶部 sys.path.insert 项目根让 from caisen 可达）
 _SPEC = importlib.util.spec_from_file_location(
     "migrate_replay_runs_to_sqlite",
-    Path(__file__).resolve().parent.parent / "scripts" / "migrate_replay_runs_to_sqlite.py",
+    Path(__file__).resolve().parent.parent / "ops" / "migrate_replay_runs_to_sqlite.py",
 )
 mig = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(mig)

@@ -5,7 +5,7 @@
 透传是否正确、转发前 sleep 是否真执行、上游 529 是否真触发更长退避。用短间隔(0.3/0.8s)
 快速验证时序，生产用 8/20s。
 
-跑法：PYTHONUTF8=1 python scripts/smoke_throttle_proxy.py
+跑法：PYTHONUTF8=1 python infra/tools/smoke_throttle_proxy.py
 """
 import asyncio
 import sys

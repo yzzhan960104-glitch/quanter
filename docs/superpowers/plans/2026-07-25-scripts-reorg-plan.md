@@ -50,7 +50,7 @@ ImportError: cannot import name 'manage_ops_schtasks' from 'scripts'
    - `check_contracts`/`check_ports`:`tests/test_check_*.py` 用 `_SCRIPTS_DIR = .../scripts` + `sys.path.insert` + `import X`。移到 `ops/` 后须改 `_SCRIPTS_DIR = .../ops`。
    - `migrate_replay_runs_to_sqlite`:`tests/test_migrate_replay_runs.py` 用 `importlib` 从路径加载。移到 `ops/` 后改路径。
    - `manage_ops_schtasks`/`run_data_check`:被 `from scripts import X` / `from scripts.X import`。移到 `ops/` 后改 `from ops import X` / `from ops.X import`。
-2. **`param_iter` coupling 债**:`discovery/sampler.py:24 from scripts.param_iter` → 迁 `discovery/tools/param_iter.py` 后改 `from discovery.tools.param_iter`。
+2. **`param_iter` coupling 债**:`discovery/sampler.py:24 from discovery.tools.param_iter` → 迁 `discovery/tools/param_iter.py` 后改 `from discovery.tools.param_iter`。
 3. **`config/registry.py` script 字段**(🔴 最高危):`DATASET_REGISTRY[*]["script"]` 是前端 DataLakeView 反射 + POST /sync/{key} 子进程触发路径。sync_* 移到 `data/tools/` 后,字段改 `"data/tools/sync_X.py"`,**改错会让数据同步静默失效**。
 
 ---

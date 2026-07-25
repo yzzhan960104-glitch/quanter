@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Set, Tuple
 
-# 项目根锚定：scripts/check_contracts.py → scripts/ → 项目根（与运行 cwd 无关）
+# 项目根锚定：ops/check_contracts.py → scripts/ → 项目根（与运行 cwd 无关）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_API_DIR = PROJECT_ROOT / "web" / "src" / "api"
 
@@ -129,7 +129,7 @@ def _load_backend_spec_from_app() -> dict:
     Why 进程内而非 HTTP 拉 /openapi.json：不依赖起 uvicorn、不占端口、CI 友好；
     代价是拉 fastapi/uvicorn 等重依赖，故仅 CLI 调用（单测喂 spec dict 绕开）。
 
-    sys.path 注入：`python scripts/check_contracts.py` 时 sys.path[0]=scripts/，不含项目根
+    sys.path 注入：`python ops/check_contracts.py` 时 sys.path[0]=scripts/，不含项目根
     → 必须显式加项目根才能 import server.main（与 server/core/config.py 的 PROJECT_ROOT
     sys.path 注入同款；此处延迟到 CLI 调用才加，避免污染单测路径）。
     """

@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **同源内核**：复用 `strategies/neckline/backtest.py::scan_symbol(sym_df, window, exec=None, id_cfg=None)` 与 `risk_metrics(pnls, dates, pos_cap=0.05, freq_cap=150)`，与 `scripts/param_iter.py` 的 115.8% 基线逐字可比（ADR8：回测内核零改动）。
+- **同源内核**：复用 `strategies/neckline/backtest.py::scan_symbol(sym_df, window, exec=None, id_cfg=None)` 与 `risk_metrics(pnls, dates, pos_cap=0.05, freq_cap=150)`，与 `discovery/tools/param_iter.py` 的 115.8% 基线逐字可比（ADR8：回测内核零改动）。
 - **零反向依赖**：`discovery/` 不依赖 `trading/`（不实盘下单），只读 `strategies/neckline/` 内核。
 - **反魔法**：不引 vectorbt/qlib/backtrader；optuna 不在本 plan。
 - **快照冻结**：同一 `snapshot_hash` 下 trial 才可比；数据湖增量不污染历史（ADR3）。
@@ -170,7 +170,7 @@ Expected: FAIL（`ModuleNotFoundError: No module named 'discovery.snapshot'`）�
 # -*- coding: utf-8 -*-
 """L0 数据快照冻结（spec §6.1 / §1.4 漂移实证）。
 
-物理意图：探查（scripts/probe_champion_oos.py）发现两次跑 universe 1334→1332 只、
+物理意图：探查（discovery/tools/probe_champion_oos.py）发现两次跑 universe 1334→1332 只、
 冠军 ann 漂 6%——data_lake 增量 + 流动性边界票浮动致"连复现自己都做不到"。本模块
 冻结 universe + 日期范围 → sha256 指纹，同一指纹下所有 trial 可比，数据湖后续增量
 不污染历史试验（spec ADR3）。

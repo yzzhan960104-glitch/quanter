@@ -13,7 +13,7 @@ cancel_order / 回调推送）在真实 miniQMT 模拟盘下端到端可用。�
   3. .env 已配 QMT_USERDATA_PATH / QMT_ACCOUNT_ID / QMT_SESSION_ID
   4. .venv310 环境（xtquant 绑 3.10）
 
-运行：.venv310/Scripts/python.exe scripts/qmt_live_smoke.py
+运行：.venv310/Scripts/python.exe trading/tools/qmt_live_smoke.py
 
 铁律（CLAUDE.md 状态机边界 + 模拟仓无顾忌但仍守序）：
   - 每步 input() 等待人工确认，绝不批量自动跑真单（防止意外多发）。
@@ -227,7 +227,7 @@ def _summary():
     print("\n联调完成。请核对：")
     print("  - 各步骤 ✅/❌ 通过情况")
     print("  - miniQMT 客户端委托/成交记录（步骤 10 真单+撤单）")
-    print("  - 若有 ❌，对照 T1-T6 接口契约排查（见 scripts/qmt_live_smoke.py docstring）")
+    print("  - 若有 ❌，对照 T1-T6 接口契约排查（见 trading/tools/qmt_live_smoke.py docstring）")
 
 
 if __name__ == "__main__":
