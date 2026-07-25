@@ -896,8 +896,8 @@ class TradingEngine:
 
         # b. 钉钉成交通知（fire_and_forget 不阻塞回调链；钉钉软降级在 _broadcast 内兜底）
         try:
-            # ⚠️ 走 infra.notifier 真身（core.notifier 是 strangler 转发垫片，broker/qmt
-            # 同口径用 core.notifier；此处直指 infra 真身，避免垫片未来下线后隐性断链）。
+            # ⚠️ 走 infra.notifier 真身（infra.notifier 是 strangler 转发垫片，broker/qmt
+            # 同口径用 infra.notifier；此处直指 infra 真身，避免垫片未来下线后隐性断链）。
             from infra.notifier import NotificationManager, fire_and_forget
             fire_and_forget(NotificationManager.get_default().notify_trade_event(
                 symbol, direction or "TRADE", float(qty), float(price),

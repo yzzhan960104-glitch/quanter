@@ -151,7 +151,7 @@ CI 友好（假注入，无需真实 EMT 柜台）。
 
 ---
 
-## 9. 联调（`scripts/emt_smoke.py`）
+## 9. 联调（`scripts/smoke/emt_smoke.py`）
 
 5 步人工确认（仿 `qmt_smoke.py`，去 emoji 防 GBK 崩）：
 1. `login`（期望 session≠0）
@@ -160,7 +160,7 @@ CI 友好（假注入，无需真实 EMT 柜台）。
 4. dry_run 演示（不真下单）
 5. 真最小限价单 100 股（需 YES 确认）→ 查 order → 撤单
 
-用 `.venv310/Scripts/python scripts/emt_smoke.py` 跑。
+用 `.venv310/Scripts/python scripts/smoke/emt_smoke.py` 跑。
 
 ---
 

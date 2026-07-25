@@ -13,7 +13,7 @@ signal_runner/risk_shield/stop_loss/circuit_breaker/execution_gateway 等垫片
 - broker → trading.types（如需）
 - broker → xtquant（vendor，sys.path 注入，延迟容错 import）
 - broker → data/*（行情清洗若需）
-- broker → core.notifier（infra 别名垫片，断线告警 fire_and_forget）
+- broker → infra.notifier（infra 别名垫片，断线告警 fire_and_forget）
 
 模块清单（design §3.3）：
 - ``broker.base``：BaseExecutionGateway 抽象基类 + OrderResult（含 spec §3.3 新增

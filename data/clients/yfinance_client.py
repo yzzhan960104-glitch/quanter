@@ -21,7 +21,7 @@ import logging
 import pandas as pd
 import yfinance as yf
 
-from core.notifier import NotificationManager, fire_and_forget
+from infra.notifier import NotificationManager, fire_and_forget
 from data.resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)

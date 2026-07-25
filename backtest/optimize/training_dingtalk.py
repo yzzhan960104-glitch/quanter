@@ -43,7 +43,7 @@ from typing import Optional
 # 注：原文本清洗函数 clean_markdown_for_dingtalk 从 bridge/replier.py 内联而来
 # （dws-migration Task 5：bridge/ 自研全退役，本模块是 clean_* 的唯一存活用户，
 # 故连同其依赖的 3 个正则常量一并内联，切断对 bridge 的依赖）。
-from core.notifier import DingTalkChannel
+from infra.notifier import DingTalkChannel
 
 logger = logging.getLogger(__name__)
 

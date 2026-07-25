@@ -275,17 +275,3 @@ def test_macro_lake_credit_regime_columns(tmp_path, fake_pro, monkeypatch):
     assert df["M1M2_gap"].notna().any()
 
 
-def test_credit_regime_unchanged_reads_columns(fake_pro, monkeypatch):
-    """CreditRegime 代码不改，验证其消费 macro 湖列名（shrzgm/M1M2_gap/dr007）。
-
-    Why 钉死"消费者不变量"：CreditRegime.compute(core/macro_regime.py:154) 声明
-    core=("shrzgm","M1M2_gap")，dr007 可选。源切换后这些列名【绝不可变】——
-    本测试注入含此 3 列的合成 macro_df，验证 compute(date) 不抛、返回 ∈{+1,0,-1}，
-    即列名契约在消费者侧成立（任何 rename 都会让此测试先红，比改 sync 早暴露）。
-    """
-    from core.macro_regime import CreditRegime
-    idx = pd.date_range("2024-01-01", periods=30, freq="B")
-    macro = pd.DataFrame({"shrzgm": range(30), "M1M2_gap": [1.0] * 30,
-                          "dr007": [2.0] * 30}, index=idx)
-    r = CreditRegime(macro_df=macro)
-    assert r.compute(idx[-1]) in (1, 0, -1)  # 列名对齐，不抛

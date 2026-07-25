@@ -100,10 +100,10 @@
 **验证数据**：全量 pytest `918 passed, 3 failed`（基线 `946 passed, 3 failed` → 删 2 个 EMT 测试文件 -28 用例，failed 同 3 个零新增）；生产代码 EMT 残留 Grep 零命中；import 冒烟 `get_gateway()` QMT-only 正确。
 
 **改动**（14 文件，净删 1278 行）：
-- Delete：`trading/emt_gateway.py`(652) · `tests/test_emt_gateway.py`(328) · `tests/test_emt_reconnect.py`(75) · `scripts/emt_smoke.py`(120) · `emt_api_python/`(SDK) · `backtest/__pycache__`
+- Delete：`trading/emt_gateway.py`(652) · `tests/test_emt_gateway.py`(328) · `tests/test_emt_reconnect.py`(75) · `scripts/smoke/emt_smoke.py`(120) · `emt_api_python/`(SDK) · `backtest/__pycache__`
 - Modify：`trading_service.get_gateway`（QMT 唯一）· `execution/__init__`（去 EMT re-export）· `conftest`（删 vnemttrader 注入，保留 xtquant）· `test_execution_layer_compat`（摘 5 处 EMT 断言）· `.env.example`/`.gitignore`（去 EMT 配置）· `circuit_breaker`/`qmt_gateway`/`test_notifier`/`test_circuit_breaker`（注释清理）
 
-**遗留标注**：`scripts/smoke_caisen.py::run_emt_dry_run_smoke` 不直接 import emt_gateway（走 `ts.get_gateway`），删 EMT 后不炸且不在 tests/，**随阶段1 caisen 形态退役整体删**。
+**遗留标注**：`scripts/smoke/smoke_caisen.py::run_emt_dry_run_smoke` 不直接 import emt_gateway（走 `ts.get_gateway`），删 EMT 后不炸且不在 tests/，**随阶段1 caisen 形态退役整体删**。
 
 ---
 

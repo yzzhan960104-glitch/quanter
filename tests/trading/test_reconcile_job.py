@@ -47,8 +47,8 @@ def test_reconcile_no_drift_does_not_alert(monkeypatch):
     called: list[tuple] = []
 
     # mock 掉 fire_and_forget：断言「不被调用」；真发钉钉会污染测试环境。
-    # _alert_drift 函数级 import core.notifier，patch 真实模块符号即可生效。
-    monkeypatch.setattr("core.notifier.fire_and_forget", lambda coro: called.append(("fire", coro)))
+    # _alert_drift 函数级 import infra.notifier，patch 真实模块符号即可生效。
+    monkeypatch.setattr("infra.notifier.fire_and_forget", lambda coro: called.append(("fire", coro)))
 
     local = {"510300.SH": 100.0, "600000.SH": 200.0}
     gw = FakeGW(dict(local))  # broker 与 local 完全一致
@@ -86,7 +86,7 @@ def test_reconcile_only_local_triggers_alert(monkeypatch):
     """
     captured: list[str] = []
     monkeypatch.setattr(
-        "core.notifier.fire_and_forget",
+        "infra.notifier.fire_and_forget",
         _close_coro_factory(lambda: captured.append("called")),
     )
 
@@ -112,7 +112,7 @@ def test_reconcile_drifted_qty_triggers_alert(monkeypatch):
     """
     captured: list[str] = []
     monkeypatch.setattr(
-        "core.notifier.fire_and_forget",
+        "infra.notifier.fire_and_forget",
         _close_coro_factory(lambda: captured.append("called")),
     )
 
@@ -153,12 +153,12 @@ def test_reconcile_alert_message_is_human_readable(monkeypatch):
             return _NoopAwaitable()
 
     monkeypatch.setattr(
-        "core.notifier.NotificationManager",
+        "infra.notifier.NotificationManager",
         type("NM", (), {"get_default": staticmethod(lambda: FakeMgr())}),
     )
     # fire_and_forget 占位：notify_risk_event 是同步函数，已记录 msg；
     # 这里它收到的不是 coroutine，直接吞掉即可。
-    monkeypatch.setattr("core.notifier.fire_and_forget", lambda awaitable: None)
+    monkeypatch.setattr("infra.notifier.fire_and_forget", lambda awaitable: None)
 
     local = {"510300.SH": 100.0, "000001.SZ": 100.0}
     broker = {"510300.SH": 100.0}  # 缺 000001.SZ → only_local
@@ -190,7 +190,7 @@ def test_reconcile_notifier_exception_does_not_block(monkeypatch):
             pass
         raise RuntimeError("钉钉通道爆炸")
 
-    monkeypatch.setattr("core.notifier.fire_and_forget", exploding_fire_and_forget)
+    monkeypatch.setattr("infra.notifier.fire_and_forget", exploding_fire_and_forget)
 
     local = {"000001.SZ": 100.0}
     broker: dict[str, float] = {}  # only_local

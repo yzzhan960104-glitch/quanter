@@ -931,7 +931,7 @@ git commit -m "refactor(caisen): Step3.4 物理迁移 infra(storage/execution/re
 - `git mv`: `caisen/__main__.py` → `caisen/engines/__main__.py`（或保留 `caisen/__main__.py` 作 CLI 入口转发，取决于其对内部模块的 import 方式）
 - Modify: 视 import 方式调整
 
-> **design §7.3 风控拷问**：`__main__.py` 引用几乎所有内部模块，是 3b 最大波及面。必须**最后**移，移完单独跑 `python -m caisen` 冒烟 + `scripts/smoke_caisen.py`（若存在）。
+> **design §7.3 风控拷问**：`__main__.py` 引用几乎所有内部模块，是 3b 最大波及面。必须**最后**移，移完单独跑 `python -m caisen` 冒烟 + `scripts/smoke/smoke_caisen.py`（若存在）。
 
 - [ ] **Step 1: 分析 `__main__.py` import 方式**
 

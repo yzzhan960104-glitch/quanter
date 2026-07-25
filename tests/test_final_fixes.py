@@ -12,7 +12,7 @@ import pandas as pd
 
 def test_atr_preserves_warmup_nan_not_fake_value():
     """atr() warm-up 期（前 window-1 根）须是 NaN，绝不能被 .where 静默替换成 1e-9 伪 ATR。"""
-    from core.indicator import atr
+    from factors.atr import atr
     idx = pd.date_range("2024-01-02 09:30", periods=20, freq="min")
     df = pd.DataFrame({"high": [11.0] * 20, "low": [9.0] * 20, "close": [10.0] * 20}, index=idx)
     a = atr(df, window=14)

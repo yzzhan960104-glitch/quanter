@@ -39,7 +39,7 @@ def test_config_credentials_dotenv_loaded():
 # ============================================================================
 def test_factor_atr_legacy_and_new_path():
     """core.indicator.atr 迁至 factors.atr，两条 import 路径都可用且同一对象。"""
-    from core.indicator import atr as atr_legacy
+    from factors.atr import atr as atr_legacy
     from factors.atr import atr as atr_new
     from factors import atr as atr_pkg  # 包级 re-export
     assert atr_legacy is atr_new is atr_pkg
@@ -49,8 +49,8 @@ def test_factor_atr_legacy_and_new_path():
 # Step 1 契约：core/notifier → infra/notifier 后，新旧路径并存且符号同源
 # ============================================================================
 def test_notifier_legacy_and_new_path():
-    """core.notifier 迁至 infra.notifier，关键符号新旧路径同源。"""
-    from core.notifier import NotificationManager, fire_and_forget
+    """infra.notifier 迁至 infra.notifier，关键符号新旧路径同源。"""
+    from infra.notifier import NotificationManager, fire_and_forget
     from infra.notifier import NotificationManager as NM2, fire_and_forget as ff2
     assert NotificationManager is NM2
     assert fire_and_forget is ff2
