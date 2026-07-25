@@ -38,7 +38,7 @@ brainstorming 前先核实，纠正了多处与记忆/旧 spec 不符的认知�
 | 风控 10 关 | `trading/compute/risk.py check_order` | 资金/涨跌停/白名单/熔断 lock_down/session/confirm |
 | 计划落盘+人审确认 | `trading/trading_plan.py` save_plan/load_plan/confirm_plan/push_plan_to_dingtalk | JSON `logs/trading_plans/plan_<date>.json`，confirmed 闸 |
 | 钉钉出站 | `broadcast/push.py` + dws send-by-bot | 零自写加签 |
-| Tushare 增量采集 | `scripts/sync_incremental.py` @schtasks 18:00 | 每日自动拉 T 日数据落湖 |
+| Tushare 增量采集 | `data/tools/sync_incremental.py` @schtasks 18:00 | 每日自动拉 T 日数据落湖 |
 | 断线重连 | `broker/qmt.py` _reconnect | 指数退避 5 次上限（避免刷爆登录限频） |
 | 回报回调注入点 | `broker/qmt.py:301` `_on_order_update` | **代码注释原文：「上层注入的异步回报回调（钉钉报警 / State 持久化）」——挂载点早已预留，当前无人注册** |
 | post_close 熔断三件套 | `trading/compute/breaker.py` + `trading/io/breaker.py` + `trading_service.emergency_halt` | 纯函数+I/O壳+API均已实现且单测覆盖，**仅 post_close 未串联** |
@@ -101,7 +101,7 @@ brainstorming 前先核实，纠正了多处与记忆/旧 spec 不符的认知�
 ### 3.3 调度落地
 
 - engine 内四 cron（APSched ular）：eod_plan cron 改 `0 19 * * 1-5`；stop_loss 改 `IntervalTrigger(seconds=30)`（cron 最小粒度分钟，30s 必须 interval）。
-- engine 外 schtasks：数据检查点①②走 `scripts/manage_ops_schtasks.py` 幂等注册（沿用 QuanterDataBrief 模式，新增两个 bat）。
+- engine 外 schtasks：数据检查点①②走 `ops/manage_ops_schtasks.py` 幂等注册（沿用 QuanterDataBrief 模式，新增两个 bat）。
 
 ---
 
@@ -262,7 +262,7 @@ PENDING → SUBMITTED → PARTIAL_FILLED → FILLED★(终态)
   - 成交回调链路（注入 mock _on_order_update，验证日志+钉钉+挂止盈三连）。
   - stop_prices 注入（验证 monitor 不再空转）。
 - **契约测试**：守 Layer2 spec §7 六铁律（不破坏五模块单向依赖）。
-- **模拟盘 smoke**：`scripts/smoke_trading_engine.py`（现状已有）扩展，覆盖完整一日链路。
+- **模拟盘 smoke**：`trading/tools/smoke_trading_engine.py`（现状已有）扩展，覆盖完整一日链路。
 - **影子对照（可选）**：dry_run 影子与 live 模拟盘并行，对比执行差异。
 
 ---

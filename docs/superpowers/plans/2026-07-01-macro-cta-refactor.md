@@ -26,7 +26,7 @@
 **新建（后端）**：
 - `data/clients/akshare_client.py` — AKShare 熔断/限流 + macro/sector/daily fetch wrapper
 - `data/clients/jqdata_client.py` — JQDataClient 单例+锁+配额双机制
-- `scripts/sync_macro_credit.py` / `scripts/sync_sector_daily.py` / `scripts/sync_jqdata_1min.py` / `scripts/sync_binance_vision.py`
+- `data/tools/sync_macro_credit.py` / `data/tools/sync_sector_daily.py` / `data/tools/sync_jqdata_1min.py` / `scripts/sync_binance_vision.py`
 - `factors/macro_regime.py` — CreditRegime 单例
 - `factors/micro_momentum.py` — 微观动量+ATR
 - `server/api/v1/macro.py` — macro/sector/factors 只读端点
@@ -336,15 +336,15 @@ def _today8() -> str:
 
 ---
 
-### Task 5: 宏观信贷同步脚本（`scripts/sync_macro_credit.py`）
+### Task 5: 宏观信贷同步脚本（`data/tools/sync_macro_credit.py`）
 
-**Files:** Create `scripts/sync_macro_credit.py`；Test: `tests/test_sync_macro_credit.py`
+**Files:** Create `data/tools/sync_macro_credit.py`；Test: `tests/test_sync_macro_credit.py`
 **Interfaces:** Produces `fetch_macro_series(client)`、`align_to_daily(monthly_df)`、`sync_macro(out)`；落 `data_lake/macro_credit.parquet`（DatetimeIndex）。
 
 - [ ] **Step 1: 写失败测试**（mock AKShareClient.fetch_macro_raw）：
 ```python
 import pandas as pd
-from scripts.sync_macro_credit import align_to_daily, fetch_macro_series
+from data.tools.sync_macro_credit import align_to_daily, fetch_macro_series
 
 class _FakeClient:
     def fetch_macro_raw(self, kind):
@@ -366,7 +366,7 @@ def test_fetch_macro_series_no_empty_merge():
     assert "M1M2_gap" in s.columns   # 剪刀差衍生列
 ```
 - [ ] **Step 2: 跑 FAIL**。
-- [ ] **Step 3: 创建 `scripts/sync_macro_credit.py`**：
+- [ ] **Step 3: 创建 `data/tools/sync_macro_credit.py`**：
 ```python
 """宏观信贷同步：AKShare 社融/M1M2/DR007/SHIBOR → 日频对齐 parquet。
 
@@ -433,15 +433,15 @@ if __name__ == "__main__":
 
 ---
 
-### Task 6: 板块两融 + 活跃股初筛（`scripts/sync_sector_daily.py`）
+### Task 6: 板块两融 + 活跃股初筛（`data/tools/sync_sector_daily.py`）
 
-**Files:** Create `scripts/sync_sector_daily.py`；Test: `tests/test_sync_sector_daily.py`
+**Files:** Create `data/tools/sync_sector_daily.py`；Test: `tests/test_sync_sector_daily.py`
 **Interfaces:** Produces `select_active_pool(client, top_n=3, pool_size=50)`、`sync_sector_daily(out_sector, out_daily)`。
 
 - [ ] **Step 1: 写失败测试**（mock client）：
 ```python
 import pandas as pd
-from scripts.sync_sector_daily import select_active_pool, compute_margin_growth
+from data.tools.sync_sector_daily import select_active_pool, compute_margin_growth
 
 def test_compute_margin_growth_top_sectors():
     """融资余额环比增速 → 取前 3 板块。"""
@@ -463,7 +463,7 @@ def test_select_active_pool_size_and_source():
 ```
 （测试用小池验证筛选逻辑；真实 pool_size=50 由 config。）
 - [ ] **Step 2: 跑 FAIL**。
-- [ ] **Step 3: 创建 `scripts/sync_sector_daily.py`**：
+- [ ] **Step 3: 创建 `data/tools/sync_sector_daily.py`**：
 ```python
 """板块两融 + 活跃股初筛：融资融券明细→申万一级 groupby→融资余额环比增速 top3 板块
 → 板块内按 20 日换手率/动量选 50 只活跃股 → 拉其前复权日线。
@@ -664,15 +664,15 @@ class JQDataClient:
 
 ---
 
-### Task 8: JQData 分钟同步脚本（`scripts/sync_jqdata_1min.py`）
+### Task 8: JQData 分钟同步脚本（`data/tools/sync_jqdata_1min.py`）
 
-**Files:** Create `scripts/sync_jqdata_1min.py`；Test: `tests/test_sync_jqdata_1min.py`
+**Files:** Create `data/tools/sync_jqdata_1min.py`；Test: `tests/test_sync_jqdata_1min.py`
 **Interfaces:** Produces `sync_jqdata_1min(pool, months=3, freq='5m')`；断点续传 + 优雅停。
 
 - [ ] **Step 1: 写失败测试**（mock JQDataClient + QuotaExceeded 优雅停）：
 ```python
 import pandas as pd
-from scripts.sync_jqdata_1min import sync_jqdata_1min
+from data.tools.sync_jqdata_1min import sync_jqdata_1min
 
 class _FakeClient:
     def __init__(self, fail_at=99): self.n=0; self.fail_at=fail_at
@@ -685,8 +685,8 @@ class _FakeClient:
                             index=pd.to_datetime(["2024-01-02"]))
 
 def test_sync_resumable_and_graceful_stop(tmp_path, monkeypatch):
-    monkeypatch.setattr("scripts.sync_jqdata_1min.JQDataClient.get_instance", lambda: _FakeClient(fail_at=2))
-    monkeypatch.setattr("scripts.sync_jqdata_1min.build_multiindex", lambda d,o: None)
+    monkeypatch.setattr("data.tools.sync_jqdata_1min.JQDataClient.get_instance", lambda: _FakeClient(fail_at=2))
+    monkeypatch.setattr("data.tools.sync_jqdata_1min.build_multiindex", lambda d,o: None)
     shard_dir = str(tmp_path/"shards"); out = str(tmp_path/"m.parquet")
     sync_jqdata_1min(["A","B","C"], months=3, freq="5m", shard_dir=shard_dir, out=out)
     import os
@@ -696,7 +696,7 @@ def test_sync_resumable_and_graceful_stop(tmp_path, monkeypatch):
     assert "C_5m.parquet" not in done
 ```
 - [ ] **Step 2: 跑 FAIL**。
-- [ ] **Step 3: 创建 `scripts/sync_jqdata_1min.py`**：
+- [ ] **Step 3: 创建 `data/tools/sync_jqdata_1min.py`**：
 ```python
 """JQData 分钟同步：对活跃池(50只)拉近 3 月 1m/5m，断点续传，配额耗尽优雅停。
 
@@ -745,7 +745,7 @@ def sync_jqdata_1min(pool: list[str], months: int = 3, freq: str = "5m",
         except RuntimeError as e: print(e)
 
 if __name__ == "__main__":
-    from scripts.sync_sector_daily import select_active_pool
+    from data.tools.sync_sector_daily import select_active_pool
     from data.clients.akshare_client import AKShareClient
     from config import JQDATA_CONFIG, AKSHARE_CONFIG
     pool = select_active_pool(AKShareClient(), AKSHARE_CONFIG["top_sectors"], AKSHARE_CONFIG["active_pool_size"])

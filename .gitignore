@@ -18,6 +18,8 @@ env/
 replay_runs/
 # 异步回测任务表 SQLite（Spec 1 caisen/replay_tasks_db.py 写，运行时数据不入库）
 data/replay_tasks.db
+# 实验存储 SQLite（discovery/experiment 运行时产物,不入库）
+experiment/experiments.db
 # tushare 因子缓存（data/cache/，运行时 parquet 缓存，不入库）
 data/cache/
 
@@ -74,6 +76,8 @@ venv/
 # 测试 & 运行产物
 # ========================
 .coverage
+coverage.xml
+htmlcov/
 .pytest_cache/
 reports/*.html
 reports/*.csv

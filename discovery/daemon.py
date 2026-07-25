@@ -156,7 +156,7 @@ def _eval_outer(trial_id, db_path, split, lake_start="2025-01-01"):
 def _notify_champion(summary, k, K, converged_cross, outer):
     """新冠军/收敛钉钉告警（fire_and_forget 不阻塞 daemon 主流程）。
 
-    直指 infra.notifier 真身（core.notifier 是 strangler 垫片，未来拆 core 时可能断链，
+    直指 infra.notifier 真身（infra.notifier 是 strangler 垫片，未来拆 core 时可能断链，
     daemon 作为 L4 生产入口必须绑死 infra 这一层防未来回归）。
 
     level=INFO：发现新冠军/进度属于业务流水（非风控红线），用 ℹ️ 前缀；投递失败由

@@ -25,7 +25,7 @@
 
 **新建：**
 - `.env.example` — 环境变量模板
-- `scripts/sync_data_lake.py` — 数据湖批量同步 CLI
+- `data/tools/sync_data_lake.py` — 数据湖批量同步 CLI
 - `data/lake_reader.py` — `DataLakeReader` 单例（截面/时序查询）
 - `data/clients/__init__.py` — 包标识
 - `data/clients/yfinance_client.py` — `YFinanceClient`（标普/原油/黄金/VIX）
@@ -910,20 +910,20 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ### Task 7: 数据湖批量同步脚本 + lifespan 接入
 
 **Files:**
-- Create: `scripts/sync_data_lake.py`
+- Create: `data/tools/sync_data_lake.py`
 - Modify: `server/main.py`（lifespan 接入 LakeReader）
 - Test: `tests/test_sync_data_lake.py`
 
 **Interfaces:**
 - Consumes: `tushare pro`（`pro_bar(adj='qfq')` 取前复权）、`data.resilience.tushare_rate_limiter` + `tushare_breaker`、`config.LAKE_CONFIG`。
-- Produces: CLI `python scripts/sync_data_lake.py --years 10`；函数 `load_universe(pro)`、`fetch_qfq(pro, ts_code, start, end)`、`build_multiindex(shard_dir, out)`。
+- Produces: CLI `python data/tools/sync_data_lake.py --years 10`；函数 `load_universe(pro)`、`fetch_qfq(pro, ts_code, start, end)`、`build_multiindex(shard_dir, out)`。
 
 - [ ] **Step 1: 写失败测试 `tests/test_sync_data_lake.py`**
 
 ```python
 """数据湖同步：universe 过滤 ST、空数据跳过、断点续传。"""
 import pandas as pd
-from scripts.sync_data_lake import load_universe, fetch_qfq, build_multiindex
+from data.tools.sync_data_lake import load_universe, fetch_qfq, build_multiindex
 
 
 class _FakePro:
@@ -973,7 +973,7 @@ def test_build_multiindex(tmp_path):
 Run: `pytest tests/test_sync_data_lake.py -v`
 Expected: FAIL（模块不存在）。
 
-- [ ] **Step 3: 创建 `scripts/sync_data_lake.py`**
+- [ ] **Step 3: 创建 `data/tools/sync_data_lake.py`**
 
 ```python
 """数据湖批量同步 CLI：全市场（剔除 ST/退市）过去 N 年日线【前复权】OHLCV。
@@ -984,7 +984,7 @@ Expected: FAIL（模块不存在）。
 - 复用 tushare_rate_limiter / tushare_breaker 防封；空数据跳过不中断。
 
 用法：
-    python scripts/sync_data_lake.py --years 10 --out data_lake/a_shares_daily.parquet
+    python data/tools/sync_data_lake.py --years 10 --out data_lake/a_shares_daily.parquet
 """
 from __future__ import annotations
 
@@ -1114,7 +1114,7 @@ Expected: 全绿。
 - [ ] **Step 7: Commit**
 
 ```bash
-git add scripts/sync_data_lake.py tests/test_sync_data_lake.py server/main.py
+git add data/tools/sync_data_lake.py tests/test_sync_data_lake.py server/main.py
 git commit -m "feat(lake): 全市场前复权日线同步脚本(pro_bar qfq/断点续传) + lifespan 接入
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
@@ -2403,7 +2403,7 @@ Expected: 全绿（原 17 + 新 11 个测试文件）。
 
 - [ ] **Step 2: 创建根 `README.md`**
 
-含：项目定位、依赖安装（`pip install -r requirements.txt` + `cd web && npm install`）、`.env` 配置（参照 `.env.example`）、数据湖同步命令（`python scripts/sync_data_lake.py --years 10`）、启动后端/前端、Celery worker 启动（`celery -A server.celery_app worker -Q explorer -l info`）、5 Epic 模块速览、指向 `docs/superpowers/specs/2026-07-01-quanter-industrial-design.md` 的设计文档链接。全文中文、无占位符。
+含：项目定位、依赖安装（`pip install -r requirements.txt` + `cd web && npm install`）、`.env` 配置（参照 `.env.example`）、数据湖同步命令（`python data/tools/sync_data_lake.py --years 10`）、启动后端/前端、Celery worker 启动（`celery -A server.celery_app worker -Q explorer -l info`）、5 Epic 模块速览、指向 `docs/superpowers/specs/2026-07-01-quanter-industrial-design.md` 的设计文档链接。全文中文、无占位符。
 
 - [ ] **Step 3: Commit**
 

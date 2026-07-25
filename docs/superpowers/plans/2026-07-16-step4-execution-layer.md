@@ -88,8 +88,8 @@
 - [ ] **Step 1:** 分析 ExecutionEngine 对 trading_service 的调用面（get_status/submit_order 等），定义执行接口（Protocol/ABC）或抽 submit_order 到 execution/。
 - [ ] **Step 2:** ExecutionEngine 改依赖 execution/ 内部的执行接口（或 trading/ gateway 直接），删除 `self.trading = trading_service`（server 层注入）。
 - [ ] **Step 3:** server/services/trading_service.py 变薄（HTTP 适配 + 调 execution/），保留 emergency_halt 幂等 + get_gateway env 路由。
-- [ ] **Step 4:** 更新 scripts/smoke_caisen.py + celery_app beat（ExecutionEngine 装配方式变更）。
-- [ ] **Step 5:** **实盘风控链验证**：`pytest tests/test_risk_shield.py tests/test_trading_service*.py -v` + 若环境允许 `python scripts/emt_smoke.py`/`qmt_smoke.py` 冒烟。
+- [ ] **Step 4:** 更新 scripts/smoke/smoke_caisen.py + celery_app beat（ExecutionEngine 装配方式变更）。
+- [ ] **Step 5:** **实盘风控链验证**：`pytest tests/test_risk_shield.py tests/test_trading_service*.py -v` + 若环境允许 `python scripts/smoke/emt_smoke.py`/`qmt_smoke.py` 冒烟。
 - [ ] **Step 6:** 全量 pytest ≥827 + commit `refactor(exec): Step4d 依赖反转(ExecutionEngine去trading_service,execution自含执行核心)`。
 
 > **风控拷问**：4d 动实盘执行路径。emergency_halt 幂等、T+1 底仓冻结、风控链（RiskManager→risk_shield）任一破坏 = 实盘事故。Step 5 必须全绿 + 冒烟。若 emt_smoke/qmt_smoke 环境不具备（无实盘凭证），至少 test_risk_shield + test_trading_service 全绿 + 人工 review 执行链。

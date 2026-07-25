@@ -284,7 +284,7 @@ dws dev connect <据Task2凭证> --channel claudecode --agent-memory \
 
 ## 2. 审查训练机器人（yzzhan参数优化）
 dws dev connect --unified-app-id e2695383-6fe9-4617-9439-2a8538af3107 \
-  --channel custom --agent-cmd "<venv>/python.exe scripts/dingtalk_review_bridge.py"
+  --channel custom --agent-cmd "<venv>/python.exe infra/tools/dingtalk_review_bridge.py"
 
 ## 3. uvicorn 服务（training loop + webhook 推 + /review 端点）
 <venv>/python.exe -m uvicorn server.main:app --host 127.0.0.1 --port 8000

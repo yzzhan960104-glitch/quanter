@@ -285,7 +285,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `discovery/constraints.{PARAM_KEYS, filter_feasible}`（Task 1）；`scripts/param_iter.PARAM_SPACE`（候选档，复用同源不重造）。
-- Produces: `PARAM_SPACE`（21 维候选档，从 `scripts.param_iter` import 复用）；`sobol_sample(dim, n, seed) -> np.ndarray`（自写 Sobol，shape=(n, dim)，值∈[0,1)）；`random_sample(dim, n, seed) -> np.ndarray`；`_scale_to_candidates(unit_vec, candidates_per_dim) -> dict`（单位向量 → 每维候选档索引 → params dict）；`sample_search(n_sobol, n_random, seed, n_attempts_factor=3) -> list[dict]`（约束裁剪后产合法 params 流， Sobol 初始覆盖 + random 补充）。
+- Produces: `PARAM_SPACE`（21 维候选档，从 `discovery.tools.param_iter` import 复用）；`sobol_sample(dim, n, seed) -> np.ndarray`（自写 Sobol，shape=(n, dim)，值∈[0,1)）；`random_sample(dim, n, seed) -> np.ndarray`；`_scale_to_candidates(unit_vec, candidates_per_dim) -> dict`（单位向量 → 每维候选档索引 → params dict）；`sample_search(n_sobol, n_random, seed, n_attempts_factor=3) -> list[dict]`（约束裁剪后产合法 params 流， Sobol 初始覆盖 + random 补充）。
 
 **关键设计**：
 - **自写 Sobol**（反魔法，零新依赖）：用 Joe & Kuo (2008) 标准方向数实现，支持 dim≤21（覆盖 21 维参数空间）。Sobol 序列值∈[0,1)^dim，低差异（比纯随机均匀，spec §7.2/§3.5 判据④覆盖度的物理手段）。**确定性**：同 seed 同 dim 同 n → 同输出（可复现，落 trial.seed）。
@@ -427,7 +427,7 @@ Plan 3**（需 OOS 目标函数 + 后验拟合，Plan 2 仅立采样骨架）。
 import numpy as np
 
 # 复用 scripts/param_iter.PARAM_SPACE（21 维候选档，同源不重造）
-from scripts.param_iter import PARAM_SPACE as _PARAM_SPACE_RAW
+from discovery.tools.param_iter import PARAM_SPACE as _PARAM_SPACE_RAW
 
 # 整理为有序 [(key, [candidates])]（去掉 layer 标记，顺序与 PARAM_KEYS 一致）
 PARAM_SPACE = [(k, cands) for k, _layer, cands in _PARAM_SPACE_RAW]

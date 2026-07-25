@@ -21,7 +21,7 @@ import threading
 import pandas as pd
 
 from config import JQDATA_CONFIG
-from core.notifier import NotificationManager, fire_and_forget
+from infra.notifier import NotificationManager, fire_and_forget
 
 logger = logging.getLogger(__name__)
 

@@ -46,7 +46,7 @@ from server.api.v1.data import router as data_router
 # AI 复盘路由（层级六）：GLM 调用 + 三级降级，CPU/网络阻塞走线程池
 from server.api.v1.review import router as review_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
-from core.notifier import build_default_manager
+from infra.notifier import build_default_manager
 
 # ============ lifespan：启动/销毁钩子 ============
 @asynccontextmanager

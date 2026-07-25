@@ -12,8 +12,8 @@
 
 - **分支**：全程在 `feat/layer2-decouple`（未 merge），每 Task 一个 commit，最后与主线统一 merge。
 - **零回归红线**：每 Task 后 `python -m pytest` failed 恒为 **1**（`universe*ST` 预存基线，与解耦无关），**不得新增**；passed 数自然变动（删迁移测试所致）可接受。
-- **T1 数值**：`python scripts/regression_neckline_golden.py --verify` exit 0、golden kelly 年化零漂移。
-- **链路冒烟**：`python scripts/smoke_trading_engine.py` PASS。
+- **T1 数值**：`python backtest/tools/regression_neckline_golden.py --verify` exit 0、golden kelly 年化零漂移。
+- **链路冒烟**：`python trading/tools/smoke_trading_engine.py` PASS。
 - **依赖契约**：`python -m pytest tests/test_layer_contract.py -v` 全 passed。
 - **venv**：命令在 `.venv310` 激活态下跑（xtquant 依赖环境）。
 - **语言**：所有新增/改注释、docstring 像素级中文（CLAUDE.md）。
@@ -31,7 +31,7 @@
 | 2 (#4a) | 删垫片+改消费 | 删 `trading/signal_runner.py`；改 4 tests import |
 | 3 (#4b) | 删垫片+改消费 | 删 `trading/execution_gateway.py`；改 20+ 消费点 |
 | 4 (#4c) | 瘦身+改消费 | `trading/order_state.py` 删两 re-export；改消费点 |
-| 5 (#2a) | 改传参 | `scripts/param_iter.py` / `scripts/kbkg_trailing_verify.py`（+核实 golden） |
+| 5 (#2a) | 改传参 | `discovery/tools/param_iter.py` / `backtest/tools/kbkg_trailing_verify.py`（+核实 golden） |
 | 6 (#2b) | 加契约测试 | `tests/test_param_iter_kernel_same_source.py`（新建） |
 | 7 (#2c) | 订正上游 spec | `docs/superpowers/specs/2026-07-22-layer2-decoupling-design.md` §3.6/§8.4/§10 |
 
@@ -435,7 +435,7 @@ Run:
 ```bash
 python -m pytest tests/test_infra_llm.py tests/caisen/test_training_analyzer.py tests/test_layer_contract.py -v
 python -m pytest -x -q
-python scripts/smoke_trading_engine.py
+python trading/tools/smoke_trading_engine.py
 ```
 Expected: 新测全 passed；全量 failed 恒 1（universe\*ST）；smoke PASS。
 
@@ -541,7 +541,7 @@ Run:
 ```bash
 grep -rn "trading.execution_gateway\|trading/execution_gateway" --include="*.py" . || echo "OK: 零残留"
 python -m pytest -x -q
-python scripts/smoke_trading_engine.py
+python trading/tools/smoke_trading_engine.py
 ```
 Expected: grep 零残留；全量 failed 恒 1；smoke PASS（实盘下单/撤单/查持仓链路不变）。
 
@@ -597,7 +597,7 @@ from trading.types.order_state import OrderState  # noqa: F401
 Run:
 ```bash
 python -m pytest -x -q
-python scripts/smoke_trading_engine.py
+python trading/tools/smoke_trading_engine.py
 ```
 Expected: 全量 failed 恒 1；smoke PASS。
 
@@ -612,9 +612,9 @@ git add -u && git commit -m "refactor(trading): #4c order_state 去 OrderState�
 ## Task 5: param_iter 等去全局 mutation → 显式传参
 
 **Files:**
-- Modify: `scripts/param_iter.py:146-188`（run_one 去 `DEFAULTS.update`/`EXEC_DEFAULTS.update` + try/finally）
-- Modify: `scripts/kbkg_trailing_verify.py:69-105`（run 去 mutation）
-- 核实: `scripts/regression_neckline_golden.py`（若也 mutation 则一并改）
+- Modify: `discovery/tools/param_iter.py:146-188`（run_one 去 `DEFAULTS.update`/`EXEC_DEFAULTS.update` + try/finally）
+- Modify: `backtest/tools/kbkg_trailing_verify.py:69-105`（run 去 mutation）
+- 核实: `backtest/tools/regression_neckline_golden.py`（若也 mutation 则一并改）
 
 **Interfaces:**
 - Consumes: `strategies.neckline.backtest.scan_symbol(sym_df, window, exec=None, id_cfg=None)`（已支持传参，`id_cfg` 默认 `{**DEFAULTS, "window":window}`，显式传则绕过全局）。
@@ -622,15 +622,15 @@ git add -u && git commit -m "refactor(trading): #4c order_state 去 OrderState�
 
 - [ ] **Step 1: 锁 golden 基线（改前 capture）**
 
-Run: `python scripts/regression_neckline_golden.py --verify`
+Run: `python backtest/tools/regression_neckline_golden.py --verify`
 Expected: exit 0（当前 golden 已对齐基线，作为改传参后的对比锚）。
 
 - [ ] **Step 2: 核实 golden 脚本是否 mutation**
 
-Run: `grep -n "DEFAULTS.update\|EXEC_DEFAULTS.update" scripts/regression_neckline_golden.py scripts/identify_param_scan.py`
+Run: `grep -n "DEFAULTS.update\|EXEC_DEFAULTS.update" backtest/tools/regression_neckline_golden.py discovery/tools/identify_param_scan.py`
 Expected: golden 若有 mutation 则纳入本 Task；`identify_param_scan.py` 已是 `cfg={**DEFAULTS,...}` 传参模式（**不动**）。
 
-- [ ] **Step 3: 改 `scripts/param_iter.py::run_one`**
+- [ ] **Step 3: 改 `discovery/tools/param_iter.py::run_one`**
 
 原（行 155-187）核心：
 
@@ -686,7 +686,7 @@ Expected: golden 若有 mutation 则纳入本 Task；`identify_param_scan.py` �
 
 > 删除 try/finally 恢复全局的代码（不再 mutation 即无需恢复）。删除 `import copy`（若本文件别处不用）。`breadth` 分支逻辑原样保留。
 
-- [ ] **Step 4: 改 `scripts/kbkg_trailing_verify.py::run`**
+- [ ] **Step 4: 改 `backtest/tools/kbkg_trailing_verify.py::run`**
 
 原（行 69-71）：
 
@@ -711,7 +711,7 @@ def run(lbl, exec_p):
 
 - [ ] **Step 5: T1 golden 验零漂移（核心红线）**
 
-Run: `python scripts/regression_neckline_golden.py --verify`
+Run: `python backtest/tools/regression_neckline_golden.py --verify`
 Expected: exit 0（改传参后数值与基线逐位一致——证明传参等价于 mutation）。
 
 > 若 golden 漂移：说明 scan_symbol/detect 有未发现的隐式全局读取，回到 Step 3 排查（grep `DEFAULTS[` 在 strategies/neckline/ 内的裸引用），**不放过任何漂移**。
@@ -722,7 +722,7 @@ Run: `python -m pytest -x -q`
 Expected: failed 恒 1。
 
 ```bash
-git add scripts/param_iter.py scripts/kbkg_trailing_verify.py scripts/regression_neckline_golden.py
+git add discovery/tools/param_iter.py backtest/tools/kbkg_trailing_verify.py backtest/tools/regression_neckline_golden.py
 git commit -m "refactor(backtest): #2a param_iter/kbkg 去全局 DEFAULTS.update mutation→显式 exec/id_cfg 传参(golden零漂移证等价·detect不读全局)"
 ```
 

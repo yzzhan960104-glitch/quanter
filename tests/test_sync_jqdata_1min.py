@@ -54,15 +54,15 @@ def test_sync_resumable_and_graceful_stop(tmp_path, monkeypatch):
         2. C_5m.parquet 不存在 —— 第 2 只触临限后优雅停，第 3 只绝不再拉（不越界）；
         3. 不抛异常（优雅停不崩，仅打印）。
     """
-    from scripts.sync_jqdata_1min import sync_jqdata_1min
+    from data.tools.sync_jqdata_1min import sync_jqdata_1min
 
     # FakeClient 在第 2 只抛 QuotaExceeded → A 成功、B 抛、C 不拉
     monkeypatch.setattr(
-        "scripts.sync_jqdata_1min.JQDataClient.get_instance",
+        "data.tools.sync_jqdata_1min.JQDataClient.get_instance",
         lambda: _FakeClient(fail_at=2),
     )
     # build_multiindex 被 mock：优雅停分支本就不合并，但即便走合并也隔离真实 IO
-    monkeypatch.setattr("scripts.sync_jqdata_1min.build_multiindex", lambda d, o: None)
+    monkeypatch.setattr("data.tools.sync_jqdata_1min.build_multiindex", lambda d, o: None)
 
     shard_dir = str(tmp_path / "shards")
     out = str(tmp_path / "m.parquet")
@@ -82,7 +82,7 @@ def test_sync_resumable_skip_existing(tmp_path, monkeypatch):
     物理意图：聚宽按条计费，重跑必须从断点续传——已拉的 shard 不再发请求。
     预置 A_5m.parquet，FakeClient 计数应【不增加】（A 被跳过未调用 fetch）。
     """
-    from scripts.sync_jqdata_1min import sync_jqdata_1min
+    from data.tools.sync_jqdata_1min import sync_jqdata_1min
 
     shard_dir = str(tmp_path / "shards")
     out = str(tmp_path / "m.parquet")
@@ -95,9 +95,9 @@ def test_sync_resumable_skip_existing(tmp_path, monkeypatch):
 
     fake = _FakeClient(fail_at=99)  # 不会触临限
     monkeypatch.setattr(
-        "scripts.sync_jqdata_1min.JQDataClient.get_instance", lambda: fake
+        "data.tools.sync_jqdata_1min.JQDataClient.get_instance", lambda: fake
     )
-    monkeypatch.setattr("scripts.sync_jqdata_1min.build_multiindex", lambda d, o: None)
+    monkeypatch.setattr("data.tools.sync_jqdata_1min.build_multiindex", lambda d, o: None)
 
     sync_jqdata_1min(["A", "B"], months=3, freq="5m", shard_dir=shard_dir, out=out)
 

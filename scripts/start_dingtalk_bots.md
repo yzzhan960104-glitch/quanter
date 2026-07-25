@@ -29,7 +29,7 @@ dws dev connect --unified-app-id f0b2740f-c029-4b99-943c-58de139c7463 \
 ### 2. 审查训练机器人（yzzhan参数优化）
 ```bash
 dws dev connect --unified-app-id e2695383-6fe9-4617-9439-2a8538af3107 \
-  --channel custom --agent-cmd "C:/Users/yzzhan/Desktop/quanter/.venv310/Scripts/python.exe C:/Users/yzzhan/Desktop/quanter/scripts/dingtalk_review_bridge.py" \
+  --channel custom --agent-cmd "C:/Users/yzzhan/Desktop/quanter/.venv310/Scripts/python.exe C:/Users/yzzhan/Desktop/quanter/infra/tools/dingtalk_review_bridge.py" \
   --allowed-users <DINGTALK_ALLOWED_STAFF_IDS>
 ```
 - @yzzhan参数优化 → dws 收 → bridge脚本 → `POST /api/v1/training/review` → orchestrator.submit_review（training loop 人审关卡）
@@ -151,8 +151,8 @@ dws dev connect --unified-app-id <STRATEGY_BOT_UNIFIED_APP_ID> \
 
 ```bash
 cd C:/Users/yzzhan/Desktop/quanter
-.venv310/Scripts/python.exe scripts/manage_ops_schtasks.py --register
-.venv310/Scripts/python.exe scripts/manage_ops_schtasks.py --list
+.venv310/Scripts/python.exe ops/manage_ops_schtasks.py --register
+.venv310/Scripts/python.exe ops/manage_ops_schtasks.py --list
 ```
 - `--register` 先 `/Delete` 再 `/Create`，**幂等**（改时间 = 改 `.env` + 重跑 `--register`）。
 - `--list` 看到 3 个任务 `QuanterTradingBrief` / `QuanterStrategyBrief` / `QuanterDataBrief` 即注册成功。
@@ -168,7 +168,7 @@ cd C:/Users/yzzhan/Desktop/quanter
 .venv310/Scripts/python.exe -m broadcast --bot strategy --force
 ```
 - `--force` 忽略幂等去重（首次上线用，确保不因已发而跳过）。
-- 或立即手动触发 schtasks：`.venv310/Scripts/python.exe scripts/manage_ops_schtasks.py --rerun trading`（data/strategy 同理）。
+- 或立即手动触发 schtasks：`.venv310/Scripts/python.exe ops/manage_ops_schtasks.py --rerun trading`（data/strategy 同理）。
 - 群应收到 3 份当日播报；无报错即上线完成。
 
 ## 上线后常驻进程清单（一期 · 共 6 个）

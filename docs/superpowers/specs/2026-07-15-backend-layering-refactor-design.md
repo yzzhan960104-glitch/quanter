@@ -286,7 +286,7 @@ engines  ◄──── infra      (执行/存储调引擎,绝不反向)
 - **3a. 建子包骨架 + re-export**：创建 `engines/ optimize/ infra/ advisor/` 四个空包，`__init__.py` 从原位置 re-export（文件暂不动）。此时旧路径 `from caisen.patterns.screener import PatternScreener` 与新路径 `from caisen.engines.patterns import PatternScreener` 并存可用。
 - **3b. 物理移动文件**：把文件真正搬进子包，更新 re-export 指向新位置，删除原文件。每移一类跑一次测试。`infra/` 内文件标注「Step4 迁出 caisen 包」。
 
-> **风控拷问**：`caisen/__main__.py`（623 行 CLI 入口）引用几乎所有内部模块，是 3b 的最大波及面 —— 必须作为 3b 的**最后**移动项，移完后单独跑 `python -m caisen` 冒烟 + `scripts/smoke_caisen.py`。
+> **风控拷问**：`caisen/__main__.py`（623 行 CLI 入口）引用几乎所有内部模块，是 3b 的最大波及面 —— 必须作为 3b 的**最后**移动项，移完后单独跑 `python -m caisen` 冒烟 + `scripts/smoke/smoke_caisen.py`。
 
 ---
 

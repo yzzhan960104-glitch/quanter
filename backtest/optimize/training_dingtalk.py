@@ -5,7 +5,7 @@
 迁移说明（2026-07-16，dws-migration Task 4，权威）
 ================================================================
 原「webhook 推 + dingtalk-stream 收审核」双通道中的 **stream 收审核已删**：
-@审核消息现已改走 dws dev connect 桥（scripts/dingtalk_review_bridge.py →
+@审核消息现已改走 dws dev connect 桥（infra/tools/dingtalk_review_bridge.py →
 POST /api/v1/training/review → orchestrator.submit_review），不再由本模块的
 dingtalk-stream SDK 被动收。本模块仅保留 webhook 主动推报告（training loop 仍在用）。
 
@@ -43,7 +43,7 @@ from typing import Optional
 # 注：原文本清洗函数 clean_markdown_for_dingtalk 从 bridge/replier.py 内联而来
 # （dws-migration Task 5：bridge/ 自研全退役，本模块是 clean_* 的唯一存活用户，
 # 故连同其依赖的 3 个正则常量一并内联，切断对 bridge 的依赖）。
-from core.notifier import DingTalkChannel
+from infra.notifier import DingTalkChannel
 
 logger = logging.getLogger(__name__)
 

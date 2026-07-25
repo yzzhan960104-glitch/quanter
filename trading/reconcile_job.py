@@ -91,14 +91,14 @@ def _alert_drift(msg: str) -> None:
     原实现用模块级 ``fire_and_forget = None`` + ``_ensure_notifier_loaded``
     双别名哨兵仅为便利测试 monkeypatch，属过度设计（违反 Karpathy 反魔法硬
     约束）。此处与 qmt_gateway._on_disconnect_fatal（见 qmt_gateway.py:530-573）
-    同模式：函数内直接 ``from core.notifier import ...`` 内联，零抽象。
-    测试通过 monkeypatch 真实模块 ``core.notifier.fire_and_forget`` /
-    ``core.notifier.NotificationManager`` 注入 mock（_alert_drift import 时即解析
+    同模式：函数内直接 ``from infra.notifier import ...`` 内联，零抽象。
+    测试通过 monkeypatch 真实模块 ``infra.notifier.fire_and_forget`` /
+    ``infra.notifier.NotificationManager`` 注入 mock（_alert_drift import 时即解析
     到被 patch 的符号），语义完全等价。
     """
     # 函数级 import：规避顶层循环依赖（notifier 初始化可能 import trading）；
-    # patch 真实模块 core.notifier.* 后，此处解析到的即 mock，测试可注入。
-    from core.notifier import NotificationManager, fire_and_forget
+    # patch 真实模块 infra.notifier.* 后，此处解析到的即 mock，测试可注入。
+    from infra.notifier import NotificationManager, fire_and_forget
     try:
         fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "WARN"))
     except Exception:

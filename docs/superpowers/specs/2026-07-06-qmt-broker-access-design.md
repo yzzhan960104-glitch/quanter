@@ -55,7 +55,7 @@
 6. **交易流水全覆盖**：dry_run / 被挡板拦截 / 真单成交 / 废单 / 撤单 五种情况均落 `live_trades.csv`，direction 字段区分（契约见 §6.3）
 7. 新增 `tests/test_qmt_gateway.py` + `tests/test_risk_shield.py`（mock xtquant，CI 可跑）
 8. 修复 `trading/__init__.py` 导出
-9. 新增 `scripts/qmt_smoke.py`（首次真实联调脚本，分步人工确认）
+9. 新增 `trading/tools/qmt_smoke.py`（首次真实联调脚本，分步人工确认）
 
 ### 2.2 非目标（Phase 1 不做，归入后续 phase）
 
@@ -105,7 +105,7 @@ HTTP/前端 ──► server/api/v1/trading.py（薄路由，run_in_threadpool�
 | 5 | `server/services/trading_service.py` | 改 | 6 个业务函数 + submit 经挡板 + positions 富化 |
 | 6 | `server/api/v1/trading.py` | 改 | 6 个新路由 |
 | 7 | `tests/test_qmt_gateway.py` + `tests/test_risk_shield.py` | 新增 | mock 单测 |
-| 8 | `scripts/qmt_smoke.py` | 新增 | 真实联调脚本 |
+| 8 | `trading/tools/qmt_smoke.py` | 新增 | 真实联调脚本 |
 
 ---
 
@@ -302,7 +302,7 @@ async def get_quote(symbol: str) -> dict[str, Any] | None:
 
 ### 10.3 联调脚本（手跑，不进 CI）
 
-`scripts/qmt_smoke.py` 分 5 步、每步 `input()` 等待人工确认：
+`trading/tools/qmt_smoke.py` 分 5 步、每步 `input()` 等待人工确认：
 
 1. `connect()` → 期望 `_connected=True, _lock_down=False`
 2. `query_asset()` → 期望返回 XtAsset（现金/总资产）
@@ -320,7 +320,7 @@ async def get_quote(symbol: str) -> dict[str, Any] | None:
 - [ ] 既有 444 测试无回归（不破坏现有契约）
 - [ ] `.env` 配置后 `GET /api/v1/trading/status` 返回 `disconnected`（不再是 unavailable）
 - [ ] MiniQMT 启动登录后 `POST /api/v1/trading/connect` 成功，status 变 `live`
-- [ ] `scripts/qmt_smoke.py` 5 步全通（含 1 笔真实最小单 + 撤单回报对账）
+- [ ] `trading/tools/qmt_smoke.py` 5 步全通（含 1 笔真实最小单 + 撤单回报对账）
 - [ ] dry_run 下单被挡板拦截并落审计 CSV
 - [ ] 断线（手动kill MiniQMT）后 `/status` 变 `vetoed_by_risk`，submit 返 409
 

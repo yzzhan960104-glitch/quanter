@@ -1,6 +1,6 @@
 # 参数发现引擎（Parameter Discovery Engine）· 设计文档
 
-> **维护范围**：升级 `scripts/param_iter.py`（离线随机+贪心搜索脚本）→ 长期自治参数发现系统；复用 `backtest/worker.py`（ProcessPool）+ `backtest/tasks_db.py`（SQLite WAL）；打通 `experiment/` 闭环（冠军参数 → 影子验证 → 上线）。**新增 `discovery/` 包，回测内核（`strategies/neckline/`）零改动**。
+> **维护范围**：升级 `discovery/tools/param_iter.py`（离线随机+贪心搜索脚本）→ 长期自治参数发现系统；复用 `backtest/worker.py`（ProcessPool）+ `backtest/tasks_db.py`（SQLite WAL）；打通 `experiment/` 闭环（冠军参数 → 影子验证 → 上线）。**新增 `discovery/` 包，回测内核（`strategies/neckline/`）零改动**。
 > **创建日期**：2026-07-23
 > **状态**：v1.3 · 设计稿（v1.2 评价体系 +探查实证订正：2026 OOS 普遍强、证伪过拟合假设、风险转移至 regime 依赖/评价失真/快照漂移，见 §1.4）
 > **前置依赖**：颈线法策略已就绪（`strategies/neckline/`，识别内核 `method_v0.py` + 回测内核 `backtest.py`）；`experiment/` 已 100% 实现并接入二期引擎（`docs/superpowers/specs/2026-07-22-experiment-system-design.md`）。
@@ -19,7 +19,7 @@
 
 ### 1.1 触发场景
 
-需求：**做一个长期的参数优化任务，持续探索颈线法策略的参数空间，发掘出"相对最优"的参数**。这把 `scripts/param_iter.py`（一次性离线脚本，8h 时间预算跑完即止）升级成一个**可持续运行、自收敛、结果可直接流转上线**的发现系统。
+需求：**做一个长期的参数优化任务，持续探索颈线法策略的参数空间，发掘出"相对最优"的参数**。这把 `discovery/tools/param_iter.py`（一次性离线脚本，8h 时间预算跑完即止）升级成一个**可持续运行、自收敛、结果可直接流转上线**的发现系统。
 
 ### 1.2 当前痛点（基于真实代码定位的 4 个缺口）
 
@@ -45,7 +45,7 @@
 
 ---
 
-### 1.4 L1 Go/No-Go 探查实证（2026-07-24，`scripts/probe_champion_oos.py`）
+### 1.4 L1 Go/No-Go 探查实证（2026-07-24，`discovery/tools/probe_champion_oos.py`）
 
 在铺 discovery 系统前，先跑 L1 验收第 2 条最小版：当前 param_iter 冠军 **top-5** 的 2026 近期 OOS 去偏（方法：全历史跑 `scan_symbol` + 按 `signal_date` 分段，`full` 段作复现锚）。**结果证伪了 §0 / ADR1 的悲观预期**：
 
@@ -184,7 +184,7 @@ CREATE TABLE search_run (         -- 每次长期跑批
 
 ### 3.5 分层裁判：评价体系（v1.2 重写——"相对最优"的可操作定义）
 
-**重写动机（探查实证）**：L1 Go/No-Go 探查（`scripts/probe_champion_oos.py`）实测当前冠军 inner 全段：`risk_metrics` 算出夏普 11.7 / ann 115.8%，2026 段更高到夏普 15.5 / ann 201.8%——**这些不是实盘可达值**，是 `risk_metrics` 的 `freq_cap=150 笔复利 + 夏普=per-trade×√年交易数` 在高频短段下的**算法放大产物**（顶级高频真实夏普仅 3-5）。单一 `score=ann×sharpe/(1+max_dd)` 或 Pareto 在这种失真口径上排序，等于在放大的噪声上挑最高。**评价体系必须分层——把"可行/排序/统计显著性/稳健性"分开裁判，各自用物理贴切的度量。**
+**重写动机（探查实证）**：L1 Go/No-Go 探查（`discovery/tools/probe_champion_oos.py`）实测当前冠军 inner 全段：`risk_metrics` 算出夏普 11.7 / ann 115.8%，2026 段更高到夏普 15.5 / ann 201.8%——**这些不是实盘可达值**，是 `risk_metrics` 的 `freq_cap=150 笔复利 + 夏普=per-trade×√年交易数` 在高频短段下的**算法放大产物**（顶级高频真实夏普仅 3-5）。单一 `score=ann×sharpe/(1+max_dd)` 或 Pareto 在这种失真口径上排序，等于在放大的噪声上挑最高。**评价体系必须分层——把"可行/排序/统计显著性/稳健性"分开裁判，各自用物理贴切的度量。**
 
 **分层裁判（tournament，逐层收紧）**：
 

@@ -3,7 +3,7 @@
 注：原文件（test_akshare_north_dragon.py）还含 factors/alternative（北向动量/龙虎榜信号）因子测试，
 蔡森专精化 Phase 1 Task 3 删除 factors 体系后随之一并移除——本文件仅保留纯数据源测试部分，
 覆盖 fetch_north_flow / fetch_dragon_list（data/clients/akshare_client）与 _normalize_symbol
-（scripts/sync_dragon_list），不 import 任何已删的 factors 模块。
+（data/tools/sync_dragon_list），不 import 任何已删的 factors 模块。
 """
 import pandas as pd
 
@@ -82,7 +82,7 @@ def test_fetch_dragon_list_failure_records_breaker(monkeypatch):
 
 def test_normalize_symbol_suffix_rule():
     """6 位代码 → .SH/.SZ 后缀（6/9 开头上交所，其余深交所）。"""
-    from scripts.sync_dragon_list import _normalize_symbol
+    from data.tools.sync_dragon_list import _normalize_symbol
     assert _normalize_symbol("600000") == "600000.SH"
     assert _normalize_symbol("000001") == "000001.SZ"
     assert _normalize_symbol("900001") == "900001.SH"  # 9 开头 B 股上交所

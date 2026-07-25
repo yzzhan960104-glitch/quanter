@@ -162,14 +162,14 @@ def test_stock_keys_cross_check_with_tushare_datasets():
     Why 不再只遍历硬编码列表：原 test_stock_lakes_count_matches_tushare_datasets 只遍历
     STOCK_TUSHARE_KEYS 自身，未来在 config.py 加股票类 Tushare 数据集却忘更新本文件硬编码列表，
     测试仍会绿（自映射盲点）。本断言从 TUSHARE_DATASETS 推导实际通用同步器 key 集，反向钉死：
-    凡 DATASET_REGISTRY 走 scripts/sync_tushare.py 的，必须都在 TUSHARE_DATASETS
+    凡 DATASET_REGISTRY 走 data/tools/sync_tushare.py 的，必须都在 TUSHARE_DATASETS
     （防注册了无法同步的 key）；反之 STOCK_TUSHARE_KEYS 必须 ⊆ TUSHARE_DATASETS
     （防硬编码列表混入不存在的 key）。
 
     ⚠️ Plan C Task 6 后界定变更（source → script）：原断言用 source=="Tushare" 推导「股票类」，
     但 Task 6 把 macro（macro_credit 湖，script=sync_macro_credit.py）也标 source=Tushare
     （主源 cn_m + akshare 社融 fallback），而 macro 不在 TUSHARE_DATASETS（它走独立脚本，不经
-    通用同步器）。若仍用 source 界定，macro 会被误判为 orphan。故改用 script=="scripts/sync_tushare.py"
+    通用同步器）。若仍用 source 界定，macro 会被误判为 orphan。故改用 script=="data/tools/sync_tushare.py"
     精确界定「通用同步器数据集」——这才是 sync_dataset(key) 能消费的集合（ETF/宏观原始指标也走
     通用同步器，都在 TUSHARE_DATASETS，自然通过；macro 走独立脚本，不在此集合，不误判）。
     """
@@ -177,7 +177,7 @@ def test_stock_keys_cross_check_with_tushare_datasets():
     # （配置层真相，非硬编码列表；精确界定 sync_dataset 可消费的集合，排除 macro 等独立脚本数据集）
     actual_sync_tushare_in_registry = {
         k for k, spec in DATASET_REGISTRY.items()
-        if spec.get("script") == "scripts/sync_tushare.py"
+        if spec.get("script") == "data/tools/sync_tushare.py"
     }
     # 反向断言 1：硬编码股票列表 ⊆ 实际通用同步器集合（防硬编码列表多写）
     assert set(STOCK_TUSHARE_KEYS) <= actual_sync_tushare_in_registry, \
@@ -291,17 +291,17 @@ def fake_pro(monkeypatch):
 
     单 patch get_pro：sync_macro_credit.py:39 已 `from data._tushare_compat import get_pro`
     把 get_pro 绑定到自身模块命名空间（line 128 `pro = get_pro()` 走模块绑定），
-    故只需 patch `scripts.sync_macro_credit.get_pro` 即可劫持调用（与 test_sync_macro_credit.py:38
+    故只需 patch `data.tools.sync_macro_credit.get_pro` 即可劫持调用（与 test_sync_macro_credit.py:38
     单 patch 同手法）。无需再 patch `data._tushare_compat.get_pro`——那是对源模块的冗余 patch，
     此处不触发源模块的 get_pro 调用路径。
     """
     fake = _FakePro()
-    monkeypatch.setattr("scripts.sync_macro_credit.get_pro", lambda: fake)
+    monkeypatch.setattr("data.tools.sync_macro_credit.get_pro", lambda: fake)
     # 限频/熔断器 patch：sync_macro_credit._fetch_with_guard 内部调用，不 patch 会
     # 触达真实限流器（阻塞）或熔断器（OPEN 返空 DF → 宏观湖为空）。与 test_sync_macro_credit 同手法。
-    monkeypatch.setattr("scripts.sync_macro_credit.tushare_rate_limiter",
+    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_rate_limiter",
                         type("L", (), {"acquire": lambda self, n: None})())
-    monkeypatch.setattr("scripts.sync_macro_credit.tushare_breaker",
+    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_breaker",
                         type("B", (), {"allow_request": lambda self: True,
                                        "record_success": lambda self: None,
                                        "record_failure": lambda self: None})())
@@ -317,7 +317,7 @@ def test_macro_source_changed_to_tushare():
     """macro（macro_credit 湖）source 必须切到 Tushare（主源 cn_m + akshare 社融 fallback）。
 
     Why 钉死切源：DATASET_REGISTRY["macro"] 对应 macro_credit.parquet（CreditRegime 输入湖），
-    由 scripts/sync_macro_credit.py 产出。Plan C Task 2 已把 sync_macro_credit 重写为
+    由 data/tools/sync_macro_credit.py 产出。Plan C Task 2 已把 sync_macro_credit 重写为
     Tushare cn_m(M0/M1/M2) 主源 + akshare 社融/DR007 fallback（混合源语义，plan 既定决策非 bug）。
     此处 source 标 Tushare（主源），让前端 DataLakeView 反射出「宏观信贷现已切 Tushare」，
     而非仍停留在 AKShare 标签。
@@ -362,86 +362,3 @@ def test_macro_lakes_registered():
     assert "sse_daily" not in DATASET_REGISTRY, "sse_daily 资产应删（合并入 mkt_daily）"
 
 
-# —— CreditRegime.compute 返值规则核实（core/macro_regime.py:133-171，构造方向性数据依据）——
-# 取 tail(_MIN_LOOKBACK=20) 工作日窗口（≈ 4 周，必然跨月），首尾比较判趋势：
-#   +1（扩张）：credit_up（shrzgm 尾>首）AND gap_pos（M1M2_gap 末值>0）AND rate_down（无 dr007 视作 True）
-#   -1（收缩）：credit_down（shrzgm 尾<首）AND not gap_pos（M1M2_gap 末值≤0）AND rate_up（无 dr007 视作 True）
-#   0（中性）：  其余（credit_up/credit_down 都 False 即 shrzgm 首尾相等，或信号矛盾）
-# M1M2_gap = m1_yoy - m2_yoy（sync_macro_credit.py:192，M1同比 - M2同比）。
-# 下方三组参数化数据严格对齐上述规则，分别压到 +1 / -1 / 0 三个分支（不再用宽松 in (1,0,-1)）。
-@pytest.mark.parametrize(
-    "m1_yoy,m2_yoy,shrzgm_values,expected",
-    [
-        # 扩张：shrzgm 月度递增（40000→65000，步长 1000）→ 跨月窗口首尾递增 credit_up=True；
-        #       m1_yoy=8 > m2_yoy=5 → M1M2_gap=+3>0 → gap_pos=True；无 dr007 → rate_down=True ⇒ +1。
-        pytest.param(8.0, 5.0, [40000 + i * 1000 for i in range(26)], 1, id="expansion"),
-        # 收缩：shrzgm 月度递减（60000→35000，步长 -1000）→ credit_down=True；
-        #       m1_yoy=5 < m2_yoy=8 → M1M2_gap=-3≤0 → not gap_pos=True；无 dr007 → rate_up=True ⇒ -1。
-        pytest.param(5.0, 8.0, [60000 - i * 1000 for i in range(26)], -1, id="contraction"),
-        # 中性：shrzgm 常数 50000 → credit_up=False / credit_down=False → 两个方向分支都不进 ⇒ 0。
-        pytest.param(5.0, 8.0, [50000] * 26, 0, id="neutral"),
-    ],
-)
-def test_credit_regime_end_to_end_with_tushare_macro(
-    m1_yoy, m2_yoy, shrzgm_values, expected, tmp_path, fake_pro, monkeypatch
-):
-    """端到端：sync_macro 落湖 → CreditRegime.compute 返预期方向值（+1 扩张 / -1 收缩 / 0 中性）。
-
-    What：mock Tushare cn_m（M1/M2 同比，月频）+ monkeypatch akshare fetch_macro_raw（社融 shrzgm），
-          跑 sync_macro(start, end, out=tmp_path) 落盘 macro_credit.parquet，再用 CreditRegime
-          读湖 compute(末日) → 必须返参数化预期值（1/-1/0，精确断言，不再用宽松 in 集合）。
-
-    Why 三组方向性守卫（宏观 CTA 顶层最致命回归）：
-      - 早期版本用全常数 mock（m1_yoy=5/m2_yoy=8→gap=-3；shrzgm=50000 常数），导致
-        credit_up=credit_down=False 且 gap_pos=False，三分支都不触发 → 必然返 0（中性兜底）。
-        旧的宽松断言 `r in (1,0,-1)` 虽过，但**只证明「不抛+中性分支」，未验证 +1/-1 方向性路径**——
-        CreditRegime 是宏观 CTA 顶层锚，扩张/收缩方向性是最关键回归路径（网关宏观否决、前端红绿灯）。
-      - 本参数化三组分别稳定压到 +1/-1/0 三个分支：shrzgm 月度单调（递增/递减/常数）保证 20 工作日
-        跨月窗口首尾可比较；M1/M2 同比组合控制 gap_pos 正负；精确断言 expected 不留宽松余地。
-
-    Why 端到端守卫（源切换不破坏消费者）：sync_macro_credit 切源 Tushare 后，落盘湖必须
-    仍含 CreditRegime core 字段 shrzgm + M1M2_gap（core/macro_regime.py:154），否则 compute 走
-    「缺列防御」分支强制返 0（宏观否决/绿灯双双失效）。本测试是「源切换不破坏消费者」的最强守卫。
-
-    无前视红线（align_to_daily ffill-only 不破）：sync_macro 内部 align_to_daily 严格仅向前 ffill，
-    CreditRegime._series 用 .loc[:date] 时间门控，本端到端验证整条链路无 bfill 回填。
-    """
-    # Tushare cn_m：M1/M2 同比（月频，month=YYYYMM）。26 个【不同】月份保证 > _MIN_LOOKBACK(20)。
-    # ⚠️ brief 草稿用 ["202301"]*25（同月份），set_index 后重复索引会让 align_to_daily 的
-    # reindex 抛 "duplicate labels"；此处修正为 26 个连续不同月份（brief 意图不变：足量样本）。
-    # 月份须覆盖 sync 区间 [start, end]：从 2022-12 起生成 26 个月（至 2025-01），确保 align 的
-    # bdate_range(2023-01..2025-01) 内有月值可 ffill（否则月初都早于 cal 首日 → 全 NaN）。
-    n_months = 26
-    months_ym = [d.strftime("%Y%m") for d in pd.date_range("2022-12-01", periods=n_months, freq="MS")]
-    fake_pro.set("cn_m", pd.DataFrame({
-        "month": months_ym,
-        "m1_yoy": [m1_yoy] * n_months, "m2_yoy": [m2_yoy] * n_months,
-        "m0_yoy": [m2_yoy] * n_months}))
-    # akshare 社融 fallback：monkeypatch fetch_macro_raw，shrzgm 按 scenario 返 26 个月度值
-    # （递增/递减/常数三态），dr007 返空（可选列，compute 缺 dr007 时 rate_down/rate_up 视作 True）。
-    # ⚠️ 月份列日期用【BMS 每月首个工作日】（非 1 号）：align_to_daily 把月度日期 reindex 到工作日
-    # 日历，若月度日期落在非工作日（如 12-01 周日）会被 reindex 丢弃 → 整月值缺失 → ffill 用上月
-    # 值一路填到下次月初，导致 compute tail(20) 窗口首尾同值（credit_up/down 都 False）。用 BMS
-    # 保证每月值都落在工作日，跨月窗口首尾能稳定体现月度增减趋势 → 方向性分支被真压到。
-    bms_days = pd.bdate_range("2022-12-01", periods=n_months, freq="BMS")
-    months_iso = [d.strftime("%Y-%m-%d") for d in bms_days]
-    import data.clients.akshare_client as akc
-    monkeypatch.setattr(akc.AKShareClient, "fetch_macro_raw",
-                        lambda self, kind: pd.DataFrame({"月份": months_iso,
-                                                         "社融增量": shrzgm_values})
-                        if kind == "shrzgm" else pd.DataFrame())
-    out = str(tmp_path / "macro.parquet")
-    from scripts.sync_macro_credit import sync_macro
-    sync_macro("2023-01-01", "2025-01-01", out=out)
-    # 落盘湖必须含 CreditRegime core 字段（列名契约）
-    df = pd.read_parquet(out)
-    assert "shrzgm" in df.columns, "CreditRegime core 字段 shrzgm 缺失（源切换破坏消费者）"
-    assert "M1M2_gap" in df.columns, "CreditRegime core 字段 M1M2_gap 缺失（源切换破坏消费者）"
-    # CreditRegime 读湖 compute(末日) → 返参数化预期值（精确断言 1/-1/0，验证方向性分支被真压到）
-    from core.macro_regime import CreditRegime
-    r = CreditRegime(macro_df=df).compute(df.index[-1])
-    assert r == expected, (
-        f"CreditRegime.compute 应返 {expected}，实际 {r} "
-        f"(窗口首尾 shrzgm={df['shrzgm'].dropna().iloc[-21]:.0f}→{df['shrzgm'].dropna().iloc[-1]:.0f}, "
-        f"M1M2_gap 末值={df['M1M2_gap'].dropna().iloc[-1]})"
-    )

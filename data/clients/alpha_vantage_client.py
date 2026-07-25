@@ -15,7 +15,7 @@ import os
 import httpx
 import pandas as pd
 
-from core.notifier import NotificationManager, fire_and_forget
+from infra.notifier import NotificationManager, fire_and_forget
 from data.resilience import CircuitBreaker, DataFetchError, RateLimiter
 
 # 复用熔断器在装饰器路径抛出的异常类型

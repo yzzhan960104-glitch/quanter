@@ -4,7 +4,7 @@
 
 **Goal:** 把 Tushare 限频改双桶(基础500/特色300)、补齐 9 类数据集（跳过 opt_basic，保留 cyq_chips）、daily/weekly/monthly 纳入统一前复权管道、统一 CLI 收敛 scripts/，并跑一轮近 5 年全量回填。
 
-**Architecture:** `data/resilience.py` 拆双桶 + 别名向后兼容；`data/tushare_sync.py` 的 `_fetch_with_guard` 按 `quota_type` 选桶、`_sync_by_symbol` 加 `adj_api` 前复权增强、`resolve_symbols` 加 concept universe；`config/registry.py` 声明式补 key + quota_type；新建 `data/sync_cli.py` 统一入口；`scripts/sync_*.py` 转薄壳 + DeprecationWarning。
+**Architecture:** `data/resilience.py` 拆双桶 + 别名向后兼容；`data/tushare_sync.py` 的 `_fetch_with_guard` 按 `quota_type` 选桶、`_sync_by_symbol` 加 `adj_api` 前复权增强、`resolve_symbols` 加 concept universe；`config/registry.py` 声明式补 key + quota_type；新建 `data/sync_cli.py` 统一入口；`data/tools/sync_*.py` 转薄壳 + DeprecationWarning。
 
 **Tech Stack:** Python 3 + pandas + pyarrow + tushare SDK（纯直连）+ pytest（TDD）
 
@@ -13,10 +13,10 @@
 - 全中文代码注释（CLAUDE.md 协议），注释说"为什么"不只说"是什么"
 - 前视红线：财报类 `date_col=ann_date`，绝不用 `end_date`；OHLCV 用 `trade_date`
 - 前复权公式 `price_qfq = price_raw × adj_factor / adj_factor_latest`（latest=区间最新），与现有 `a_shares_daily.parquet` 字节级一致
-- `scripts/sync_tushare.py` 不能删（server `data_service` 子进程依赖 `DATASET_REGISTRY.script`）
+- `data/tools/sync_tushare.py` 不能删（server `data_service` 子进程依赖 `DATASET_REGISTRY.script`）
 - 不删任何既有脚本，只转薄壳 + DeprecationWarning
 - 每任务 TDD：先写失败测试→验证失败→最小实现→验证通过→commit
-- 字段名必须 dry-run 探测确认（防幻觉列，沿用项目 `scripts/probe_tushare_fields.py` 习惯）
+- 字段名必须 dry-run 探测确认（防幻觉列，沿用项目 `data/tools/probe_tushare_fields.py` 习惯）
 - quota_type 归类：基础桶=list/行情/指数/概念/宏观；特色桶=资金/筹码/因子/龙虎榜机构/融资融券明细/股东
 
 **Spec:** `docs/superpowers/specs/2026-07-25-tushare-data-snapshot-design.md`
@@ -873,7 +873,7 @@ def test_新数据集_元信息完整():
         assert k in DATASET_REGISTRY, f"{k} 缺 DATASET_REGISTRY 元信息"
         meta = DATASET_REGISTRY[k]
         assert meta["source"] == "Tushare"
-        assert meta["script"] == "scripts/sync_tushare.py"
+        assert meta["script"] == "data/tools/sync_tushare.py"
         assert "market" in meta and "granularity" in meta and "freshness_hours" in meta
 ```
 
@@ -892,32 +892,32 @@ Expected: FAIL（KeyError: 'stock_basic' in DATASET_REGISTRY）
     # ============================================================================
     # 设计意图：Task 5/6/7 新增的 TUSHARE_DATASETS key 必须在此补元信息，否则前端
     # DataLakeView 表格看不到这些资产（DATASET_REGISTRY 是前端反射的单一真相源）。
-    # script 统一 scripts/sync_tushare.py（server data_service 子进程拉起该薄壳）。
+    # script 统一 data/tools/sync_tushare.py（server data_service 子进程拉起该薄壳）。
     # freshness_hours：日频=24h、月频=730h、静态快照=730h（标的不常变动）。
     # —— 列表 / 成分类（基础桶）——
     "stock_basic":    {"source": "Tushare", "market": "A股", "granularity": "快照",
-                       "script": "scripts/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
     "hs_const_sh":    {"source": "Tushare", "market": "A股", "granularity": "快照",
-                       "script": "scripts/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
     "hs_const_sz":    {"source": "Tushare", "market": "A股", "granularity": "快照",
-                       "script": "scripts/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
     "concept_detail": {"source": "Tushare", "market": "板块", "granularity": "快照",
-                       "script": "scripts/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
     # —— 特色数据类（特色桶）——
     "cyq_chips":      {"source": "Tushare", "market": "A股", "granularity": "1d",
-                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "daily_basic":    {"source": "Tushare", "market": "A股", "granularity": "1d",
-                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "stk_factor_pro": {"source": "Tushare", "market": "A股", "granularity": "1d",
-                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     # —— OHLCV 三频（基础桶，daily 复用既有湖）——
     # daily 的 script 仍标 sync_tushare.py（统一入口），原 sync_data_lake.py 转薄壳 deprecated。
     "daily":          {"source": "Tushare", "market": "A股", "granularity": "1d",
-                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "weekly":         {"source": "Tushare", "market": "A股", "granularity": "1w",
-                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "monthly":        {"source": "Tushare", "market": "A股", "granularity": "1M",
-                       "script": "scripts/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+                       "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
 ```
 
 - [ ] **Step 4: 验证通过**
@@ -1015,10 +1015,10 @@ Expected: FAIL（`ModuleNotFoundError: data.sync_cli`）
 """统一 Tushare 同步 CLI：python -m data.sync [选项]
 
 设计意图（高内聚低耦合，2026-07-25 scripts/ 收敛）：
-- 把散装 scripts/sync_*.py（sync_all_tushare/sync_incremental/sync_data_lake/sync_daily_incremental）
+- 把散装 data/tools/sync_*.py（sync_all_tushare/sync_incremental/sync_data_lake/sync_daily_incremental）
   的能力收敛到一个 CLI，底层复用 data.tushare_sync.sync_dataset 统一引擎。
-- scripts/sync_*.py 转薄壳 + DeprecationWarning 转调本 CLI（server data_service 仍依赖
-  scripts/sync_tushare.py 薄壳，故该脚本不转，仅作 key 单同步入口保留）。
+- data/tools/sync_*.py 转薄壳 + DeprecationWarning 转调本 CLI（server data_service 仍依赖
+  data/tools/sync_tushare.py 薄壳，故该脚本不转，仅作 key 单同步入口保留）。
 
 用法：
   python -m data.sync --all --since 2021-01-01                  # 全量回填所有数据集
@@ -1199,17 +1199,17 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ## Task 10: `scripts/` 收敛薄壳 + DeprecationWarning
 
 **Files:**
-- Modify: `scripts/sync_data_lake.py`（顶部加 DeprecationWarning，`__main__` 转调 `python -m data.sync --keys daily`）
-- Modify: `scripts/sync_all_tushare.py`（转调 `--all`）
-- Modify: `scripts/sync_incremental.py`（转调 `--incremental`）
-- Modify: `scripts/sync_daily_incremental.py`（转调 `--keys daily --incremental`）
-- Modify: `scripts/sync_tushare.py`（保留，仅加注释说明 server 依赖它，不自 deprecated）
+- Modify: `data/tools/sync_data_lake.py`（顶部加 DeprecationWarning，`__main__` 转调 `python -m data.sync --keys daily`）
+- Modify: `data/tools/sync_all_tushare.py`（转调 `--all`）
+- Modify: `data/tools/sync_incremental.py`（转调 `--incremental`）
+- Modify: `data/tools/sync_daily_incremental.py`（转调 `--keys daily --incremental`）
+- Modify: `data/tools/sync_tushare.py`（保留，仅加注释说明 server 依赖它，不自 deprecated）
 - Test: `tests/test_scripts_deprecated.py`（新建，验证薄壳转调）
 
 **Interfaces:**
 - Consumes: Task 9 的 `data.sync_cli.main`
 
-> **红线**：`scripts/sync_tushare.py` **不 deprecated**（server `data_service` 子进程 + `DATASET_REGISTRY.script` 依赖它），只加注释。
+> **红线**：`data/tools/sync_tushare.py` **不 deprecated**（server `data_service` 子进程 + `DATASET_REGISTRY.script` 依赖它），只加注释。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1240,19 +1240,19 @@ Expected: FAIL（sync_data_lake.py 未转薄壳）
 
 - [ ] **Step 3: 实现**
 
-`scripts/sync_data_lake.py` 顶部（`from __future__ import annotations` 之后）插入 DeprecationWarning + `__main__` 改写：
+`data/tools/sync_data_lake.py` 顶部（`from __future__ import annotations` 之后）插入 DeprecationWarning + `__main__` 改写：
 
 ```python
 import warnings
 warnings.warn(
-    "scripts/sync_data_lake.py 已 deprecated（2026-07-25 scripts/ 收敛）。"
+    "data/tools/sync_data_lake.py 已 deprecated（2026-07-25 scripts/ 收敛）。"
     "daily 前复权已纳入统一管道，请改用：python -m data.sync --keys daily --since 2021-01-01",
     DeprecationWarning,
     stacklevel=2,
 )
 ```
 
-`scripts/sync_data_lake.py` 的 `if __name__ == "__main__":` 块改为转调（保留原 argparse 兼容旧调用，但内部转调）：
+`data/tools/sync_data_lake.py` 的 `if __name__ == "__main__":` 块改为转调（保留原 argparse 兼容旧调用，但内部转调）：
 
 ```python
 if __name__ == "__main__":
@@ -1273,9 +1273,9 @@ if __name__ == "__main__":
     sys.exit(_cli_main(_cli_argv))
 ```
 
-对 `scripts/sync_all_tushare.py`、`scripts/sync_incremental.py`、`scripts/sync_daily_incremental.py` 做类似处理（顶部 DeprecationWarning + `__main__` 转调对应 `--all`/`--incremental`/`--keys daily --incremental`）。
+对 `data/tools/sync_all_tushare.py`、`data/tools/sync_incremental.py`、`data/tools/sync_daily_incremental.py` 做类似处理（顶部 DeprecationWarning + `__main__` 转调对应 `--all`/`--incremental`/`--keys daily --incremental`）。
 
-`scripts/sync_tushare.py` 顶部加注释（不 deprecated）：
+`data/tools/sync_tushare.py` 顶部加注释（不 deprecated）：
 
 ```python
 # 2026-07-25 注：本脚本为 server data_service 子进程入口（DATASET_REGISTRY.script 指向它），
@@ -1290,10 +1290,10 @@ Expected: PASS
 
 - [ ] **Step 5: 回归 + commit**
 
-Run: `python scripts/sync_tushare.py --help`（验证 server 依赖的薄壳仍可用）
+Run: `python data/tools/sync_tushare.py --help`（验证 server 依赖的薄壳仍可用）
 
 ```bash
-git add scripts/sync_data_lake.py scripts/sync_all_tushare.py scripts/sync_incremental.py scripts/sync_daily_incremental.py scripts/sync_tushare.py tests/test_scripts_deprecated.py
+git add data/tools/sync_data_lake.py data/tools/sync_all_tushare.py data/tools/sync_incremental.py data/tools/sync_daily_incremental.py data/tools/sync_tushare.py tests/test_scripts_deprecated.py
 git commit -m "refactor(scripts): 散装 sync 脚本转薄壳+DeprecationWarning(收敛到 data.sync)
 
 sync_tushare.py 保留(server data_service依赖)；其余4脚本 deprecated 转调统一CLI。
@@ -1306,7 +1306,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ## Task 11: dry-run 字段探测（cyq_chips / daily_basic / stk_factor_pro / concept_detail / weekly / monthly）
 
 **Files:**
-- Use: `scripts/probe_tushare_fields.py`（项目已有探测脚本习惯）
+- Use: `data/tools/probe_tushare_fields.py`（项目已有探测脚本习惯）
 - Maybe Modify: `config/registry.py`（若探测发现幻觉列，订正 fields 串）
 
 **物理意图**：全量回填前用最小配额（每接口 1-2 次请求）验证字段真实性，防幻觉列导致空数据反复拉。沿用项目 `probe_tushare_fields.py` 习惯。
@@ -1375,7 +1375,7 @@ import pandas as pd
 import pytest
 
 import data.tushare_sync as tsync
-from scripts.sync_data_lake import fetch_qfq
+from data.tools.sync_data_lake import fetch_qfq
 
 
 def test_新管道与旧fetch_qfq同区间产出一致(tmp_path, monkeypatch):
@@ -1397,8 +1397,8 @@ def test_新管道与旧fetch_qfq同区间产出一致(tmp_path, monkeypatch):
     pro.adj_factor = MagicMock(return_value=adj)
     monkeypatch.setattr(tsync, "get_pro", lambda: pro)
     # —— 旧管道 fetch_qfq ——
-    monkeypatch.setattr("scripts.sync_data_lake.get_pro", lambda: pro)
-    monkeypatch.setattr("scripts.sync_data_lake._fetch_with_guard",
+    monkeypatch.setattr("data.tools.sync_data_lake.get_pro", lambda: pro)
+    monkeypatch.setattr("data.tools.sync_data_lake._fetch_with_guard",
                         lambda p, api, **kw: raw if api=="daily" else adj)
     old_df = fetch_qfq(pro, ts_code, "2025-01-01", "2025-01-03")
     # —— 新管道：手动复刻 _sync_by_symbol 的前复权块（抽出为纯函数更佳，此处直接比对公式结果）——

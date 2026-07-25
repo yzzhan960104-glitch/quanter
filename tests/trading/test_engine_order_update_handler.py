@@ -53,7 +53,7 @@ def test_trade_update_writes_log_and_notifies():
     # patch 真实模块路径（_handle_order_update 内 lazy import 这些符号，故 patch 真身模块
     # 而非 trading.engine —— engine 模块顶层不 import 这两个符号，避免循环依赖）：
     #   - record_live_trade 实身：server.services.trading_service
-    #   - NotificationManager 实身：infra.notifier（core.notifier 是转发垫片）
+    #   - NotificationManager 实身：infra.notifier（infra.notifier 是转发垫片）
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     with patch("server.services.trading_service.record_live_trade") as rec, \

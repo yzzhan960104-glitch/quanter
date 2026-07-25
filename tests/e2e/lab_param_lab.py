@@ -26,7 +26,7 @@ selector 对齐说明（与 ParamLabView.vue / NewReplayDrawer.vue 真实组件�
   QUANTER_API_TOKEN=e2e-token python "$WITH_SERVER" \\
     --server "$VENV -m uvicorn server.main:app --port 8000" --port 8000 \\
     --server "npm --prefix web run dev" --port 5173 --timeout 180 \\
-    -- "$VENV" tests/e2e/lab_param_lab.py && python scripts/clean_ports.py
+    -- "$VENV" tests/e2e/lab_param_lab.py && python ops/clean_ports.py
 """
 import sys
 

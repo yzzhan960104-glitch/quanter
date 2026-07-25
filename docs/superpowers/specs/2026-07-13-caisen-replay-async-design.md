@@ -75,7 +75,7 @@ CREATE INDEX idx_tasks_created ON replay_tasks(created_at DESC);
 DB 文件路径 `data/replay_tasks.db`（与其他数据资产同源）；启用 WAL 模式提升并发读。
 
 ### 4.2 迁移 replay_runs（JSON→SQLite）
-一次性脚本 `scripts/migrate_replay_runs_to_sqlite.py`：遍历 `replay_runs/*.json` → INSERT 为 SUCCESS 行（report_json 存原 report 全字段）。caf3772 后数据量小，一次跑完。迁移后老 JSON 目录保留只读/归档。
+一次性脚本 `ops/migrate_replay_runs_to_sqlite.py`：遍历 `replay_runs/*.json` → INSERT 为 SUCCESS 行（report_json 存原 report 全字段）。caf3772 后数据量小，一次跑完。迁移后老 JSON 目录保留只读/归档。
 
 ### 4.3 /replay/runs 改读 SQLite
 `GET /replay/runs` 端点改 `SELECT ... WHERE status='SUCCESS' ORDER BY created_at DESC`，前端契约（`ReplayRunSummary`）不变。

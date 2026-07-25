@@ -21,7 +21,7 @@ import numpy as np
 
 # 复用 scripts/param_iter.PARAM_SPACE（21 维候选档，同源不重造）
 # PARAM_SPACE_RAW 形如 [(key, layer, [candidates]), ...]，顺序与 PARAM_KEYS 一致
-from scripts.param_iter import PARAM_SPACE as _PARAM_SPACE_RAW
+from discovery.tools.param_iter import PARAM_SPACE as _PARAM_SPACE_RAW
 
 # 整理为有序 [(key, [candidates])]（去掉 layer 标记，顺序与 PARAM_KEYS 一致）
 PARAM_SPACE = [(k, cands) for k, _layer, cands in _PARAM_SPACE_RAW]

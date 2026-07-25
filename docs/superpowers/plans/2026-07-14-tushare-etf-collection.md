@@ -309,8 +309,8 @@ def test_etf_lakes_registered():
 - [ ] **Step 3: 端到端小样本验证**
 
 ```bash
-python scripts/sync_tushare.py fund_basic
-python scripts/sync_tushare.py fund_daily --years 1 --limit 3  # 注：--limit 走 _load_universe（股票），
+python data/tools/sync_tushare.py fund_basic
+python data/tools/sync_tushare.py fund_daily --years 1 --limit 3  # 注：--limit 走 _load_universe（股票），
                                                               # ETF 需改 sync_tushare.py 支持 --etf 用 _load_etf_universe
 ```
 > ⚠️ sync_tushare.py 的 `--limit` 当前用 `_load_universe`（股票）。ETF 需加 `--etf` 标志走 `_load_etf_universe`。实现 Task：在 sync_tushare.py 加 `--market {stock,etf}` 参数，etf 时 symbols=`_load_etf_universe()[:limit]`。
@@ -318,7 +318,7 @@ python scripts/sync_tushare.py fund_daily --years 1 --limit 3  # 注：--limit �
 - [ ] **Step 4: 提交**
 
 ```bash
-git add config.py tests/test_dataset_registry.py scripts/sync_tushare.py
+git add config.py tests/test_dataset_registry.py data/tools/sync_tushare.py
 git commit -m "feat(tushare): Plan B ETF 湖注册+sync_tushare支持--market etf"
 ```
 

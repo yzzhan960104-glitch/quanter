@@ -13,7 +13,7 @@
 | 机器人 | 应用 | 应用类型 | 现接入方式 |
 |---|---|---|---|
 | **bridge 对话**（yzzhan量化） | `dingyyzdjpl6tojlz2mn` | 老式企业内部应用 | 自研 `dingtalk-stream` SDK + `ClaudePool` + `Alarmer` + `safety` + 审计 + 频控（`bridge/` 9 模块 ~1000 行） |
-| **审查训练**（yzzhan参数优化） | `dingbabujxcelmssmdpn` | 统一应用（App ID UUID 铁证） | `dws dev connect` + `scripts/dingtalk_review_bridge.py` → `POST /api/v1/training/review`（2026-07-16 改） |
+| **审查训练**（yzzhan参数优化） | `dingbabujxcelmssmdpn` | 统一应用（App ID UUID 铁证） | `dws dev connect` + `infra/tools/dingtalk_review_bridge.py` → `POST /api/v1/training/review`（2026-07-16 改） |
 
 **根因（2026-07-16 实测）**：审查应用是统一应用，老 `dingtalk-stream` SDK 的 `ChatbotHandler`/`ChatbotMessage.TOPIC` 代际不兼容（stream 连得上但 @不推，只收 SYSTEM ping）。bridge 老应用用老 SDK 兼容（能收 @）。
 
@@ -83,7 +83,7 @@ dws dev connect [--robot-client-id <id> --robot-client-secret <sec> | --unified-
 
 # 审查训练机器人（现状保留）
 dws dev connect --unified-app-id e2695383-6fe9-4617-9439-2a8538af3107 \
-  --channel custom --agent-cmd "<venv>/python.exe scripts/dingtalk_review_bridge.py"
+  --channel custom --agent-cmd "<venv>/python.exe infra/tools/dingtalk_review_bridge.py"
 
 # uvicorn 服务不变（training loop + webhook 推 + /review 端点）
 ```

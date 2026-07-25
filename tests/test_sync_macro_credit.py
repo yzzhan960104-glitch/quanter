@@ -35,10 +35,10 @@ class _FakePro:
 def fake_pro(monkeypatch):
     """mock get_pro + 限频/熔断器（与 test_tushare_datasets_macro 同手法）。"""
     fake = _FakePro()
-    monkeypatch.setattr("scripts.sync_macro_credit.get_pro", lambda: fake)
-    monkeypatch.setattr("scripts.sync_macro_credit.tushare_rate_limiter",
+    monkeypatch.setattr("data.tools.sync_macro_credit.get_pro", lambda: fake)
+    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_rate_limiter",
                         type("L", (), {"acquire": lambda self, n: None})())
-    monkeypatch.setattr("scripts.sync_macro_credit.tushare_breaker",
+    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_breaker",
                         type("B", (), {"allow_request": lambda self: True,
                                        "record_success": lambda self: None,
                                        "record_failure": lambda self: None})())
@@ -52,7 +52,7 @@ def test_align_to_daily_forward_fill_only():
     1 月内所有工作日的值必须恒为 1.0（用过去值解释现在）；
     若出现 2.0，说明发生了 bfill 回填未来月度值 → 前视偏差，红线被破。
     """
-    from scripts.sync_macro_credit import align_to_daily
+    from data.tools.sync_macro_credit import align_to_daily
 
     m = pd.DataFrame({"月份": ["2024-01-01", "2024-02-01"], "x": [1.0, 2.0]})
     m["月份"] = pd.to_datetime(m["月份"])
@@ -84,6 +84,6 @@ def test_fetch_macro_series_derives_m1m2_gap(fake_pro, monkeypatch):
                             "dr007": pd.DataFrame({"日期": ["2024-01-02"], "利率": [2.1]}),
                         }.get(kind, pd.DataFrame()))
 
-    from scripts.sync_macro_credit import fetch_macro_series
+    from data.tools.sync_macro_credit import fetch_macro_series
     s = fetch_macro_series("2024-01-01", "2024-01-31")
     assert "M1M2_gap" in s.columns   # 剪刀差衍生列

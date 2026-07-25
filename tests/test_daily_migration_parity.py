@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-import scripts.sync_data_lake as sdl
+import data.tools.sync_data_lake as sdl
 
 
 def test_旧fetch_qfq公式产出与新管道Task3一致(monkeypatch):

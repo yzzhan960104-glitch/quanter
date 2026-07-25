@@ -32,7 +32,7 @@
 
 **Files:**
 - Move: `factors/macro_regime.py` → `core/macro_regime.py`
-- Modify: `trading/execution_gateway.py`（MacroAwareGateway 间接用，无直接 import——核实）、`server/api/v1/macro.py`、`scripts/sync_macro_credit.py`
+- Modify: `trading/execution_gateway.py`（MacroAwareGateway 间接用，无直接 import——核实）、`server/api/v1/macro.py`、`data/tools/sync_macro_credit.py`
 - Modify: `tests/test_macro_regime.py`、`tests/test_sync_macro_credit.py`、`tests/test_execution_gateway_veto.py`
 
 **Interfaces:**
@@ -47,7 +47,7 @@ Expected: PASS（若已有失败，先记录，迁移后须不引入新失败）
 - [ ] **Step 2: grep 定位所有 import CreditRegime 的位置**
 
 Run: `grep -rn "macro_regime\|CreditRegime" --include=*.py server/ scripts/ tests/ trading/ | grep -v "factors/macro_regime.py"`
-Expected: 列出 `server/api/v1/macro.py`、`scripts/sync_macro_credit.py`、`tests/test_macro_regime.py`、`tests/test_sync_macro_credit.py`、`tests/test_execution_gateway_veto.py`（及任何其他命中）。
+Expected: 列出 `server/api/v1/macro.py`、`data/tools/sync_macro_credit.py`、`tests/test_macro_regime.py`、`tests/test_sync_macro_credit.py`、`tests/test_execution_gateway_veto.py`（及任何其他命中）。
 
 - [ ] **Step 3: git mv 迁移文件**
 

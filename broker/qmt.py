@@ -212,10 +212,10 @@ def _assert_status_contract() -> None:
 def _alert_account_status(gw, status_int: int, level: str) -> None:
     """主线程：账号状态告警（fire_and_forget 跨线程安全，链路异常吞不影响主路径）。
 
-    与 _on_disconnect_fatal 同通道，复用 core.notifier（infra.notifier 别名垫片）。
+    与 _on_disconnect_fatal 同通道，复用 infra.notifier（infra.notifier 别名垫片）。
     """
     try:
-        from core.notifier import NotificationManager, fire_and_forget
+        from infra.notifier import NotificationManager, fire_and_forget
         fire_and_forget(NotificationManager.get_default().notify_risk_event(
             f"QMT 账号状态异常 status={status_int} account={gw._account_id}，网关已锁定", level))
     except Exception:
@@ -903,7 +903,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         )
         # 钉钉告警（fire_and_forget 跨线程安全，链路异常被吞不影响重连主路径）
         try:
-            from core.notifier import NotificationManager, fire_and_forget
+            from infra.notifier import NotificationManager, fire_and_forget
             fire_and_forget(NotificationManager.get_default().notify_risk_event(
                 f"QMT 断线，启动自动重连 account={self._account_id}", "WARN"))
         except Exception:
@@ -919,7 +919,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         - 全部失败 → 保持锁态（connect 失败已置 lock_down=True）+ ERROR 告警等人工；
         - 退避 sleep 期间 lock_down=True，submit_order 被网关拒，tick_exit 优雅 no-op。
         """
-        from core.notifier import NotificationManager, fire_and_forget
+        from infra.notifier import NotificationManager, fire_and_forget
         # 防御：重连期间确保锁态（拒新单）；connect 成功会清锁，失败/耗尽保持锁。
         self._lock_down = True
         n = len(_RECONNECT_BACKOFFS)

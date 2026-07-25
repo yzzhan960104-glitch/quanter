@@ -11,4 +11,4 @@
 :: 退出码 0=成功/已最新；1=失败（schtasks 层默认不熔断，仅 Last Run Result 可观测）。
 cd /d C:\Users\yzzhan\Desktop\quanter
 call .venv310\Scripts\activate.bat
-python scripts\sync_daily_incremental.py
+python data\tools\sync_daily_incremental.py

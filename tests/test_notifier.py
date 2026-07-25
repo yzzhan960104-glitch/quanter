@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from core.notifier import (
+from infra.notifier import (
     NotificationManager,
     NotificationChannel,
     TelegramChannel,
@@ -110,7 +110,7 @@ def test_wecom_channel_payload(monkeypatch):
 
 def test_fire_and_forget_runs_coroutine_in_background():
     """fire_and_forget 必须在无事件循环的同步上下文里也能跑通协程。"""
-    from core.notifier import fire_and_forget
+    from infra.notifier import fire_and_forget
     import time as _t
     done = []
     async def _work():
@@ -127,7 +127,7 @@ def test_fire_and_forget_inside_running_loop_executes_coro():
     线程 asyncio.run 在 loop 上下文仍正常跑（不抛 RuntimeError 吞协程）。
     若此测试 FAIL，说明 fire_and_forget 需改自适应（loop 内 create_task）。
     """
-    from core.notifier import fire_and_forget
+    from infra.notifier import fire_and_forget
     done = []
 
     async def _work():
@@ -143,7 +143,7 @@ def test_fire_and_forget_inside_running_loop_executes_coro():
 
 def test_dingtalk_channel_payload_and_sign(monkeypatch):
     """守护钉钉加签 URL 拼装与 Markdown payload（脱网，monkeypatch _post）。"""
-    from core.notifier import DingTalkChannel
+    from infra.notifier import DingTalkChannel
     captured = {}
 
     async def fake_post(url, payload):
@@ -164,7 +164,7 @@ def test_dingtalk_channel_payload_and_sign(monkeypatch):
 
 def test_build_default_manager_includes_dingtalk(monkeypatch):
     """配齐钉钉凭证后 build_default_manager 必须装配 DingTalkChannel（幂等）。"""
-    from core.notifier import build_default_manager, DingTalkChannel
+    from infra.notifier import build_default_manager, DingTalkChannel
     monkeypatch.setenv("DINGTALK_WEBHOOK", "https://oapi.dingtalk.com/robot/send?access_token=X")
     monkeypatch.setenv("DINGTALK_SECRET", "SEC")
     mgr = NotificationManager.get_default()
@@ -179,7 +179,7 @@ def test_build_default_manager_includes_dingtalk(monkeypatch):
 
 def test_build_default_manager_skips_dingtalk_without_credentials(monkeypatch):
     """缺凭证必须跳过该通道，不报错。"""
-    from core.notifier import build_default_manager, DingTalkChannel
+    from infra.notifier import build_default_manager, DingTalkChannel
     monkeypatch.delenv("DINGTALK_WEBHOOK", raising=False)
     monkeypatch.delenv("DINGTALK_SECRET", raising=False)
     mgr = NotificationManager.get_default()
@@ -196,7 +196,7 @@ def test_build_default_manager_skips_dingtalk_without_credentials(monkeypatch):
 
 def test_dingtalk_validate_response_rejects_nonzero_errcode():
     """errcode!=0 必须抛 RuntimeError（含 errcode 与 errmsg 上下文）。"""
-    from core.notifier import DingTalkChannel
+    from infra.notifier import DingTalkChannel
     # 加签失败是最高频的红线相邻故障
     with pytest.raises(RuntimeError) as exc_info:
         DingTalkChannel._validate_response({"errcode": 310000, "errmsg": "sign not match"})
@@ -212,7 +212,7 @@ def test_dingtalk_validate_response_rejects_nonzero_errcode():
 
 def test_dingtalk_validate_response_accepts_success_and_tolerant():
     """errcode==0 视为成功不抛；缺 errcode 字段保守放行（避免误杀）。"""
-    from core.notifier import DingTalkChannel
+    from infra.notifier import DingTalkChannel
     # 成功
     DingTalkChannel._validate_response({"errcode": 0, "errmsg": "ok"})
     # 缺 errcode 字段（极少数 SDK 不回包）——保守放行，避免误杀
@@ -228,7 +228,7 @@ def test_dingtalk_post_raises_on_business_errcode(monkeypatch):
     构造一个假的 ClientSession.post async context manager，其 __aexit__ 返回的
     response 对象 raise_for_status 是 no-op、json() 返回 errcode!=0 的 dict。
     """
-    from core.notifier import DingTalkChannel
+    from infra.notifier import DingTalkChannel
     import aiohttp
 
     class _FakeResp:
@@ -276,7 +276,7 @@ def test_dingtalk_post_raises_on_business_errcode(monkeypatch):
 
 def test_dingtalk_markdown_is_structured():
     """钉钉卡片须结构化：H1 品牌 + 引用块级别徽标 + 正文 + 品牌脚注。"""
-    from core.notifier import DingTalkChannel
+    from infra.notifier import DingTalkChannel
     md = DingTalkChannel._render_markdown("🚨 [CRITICAL] 最大回撤触红线 12.3%")
     assert md["title"] == "【Quanter】风控告警"
     text = md["text"]
@@ -288,7 +288,7 @@ def test_dingtalk_markdown_is_structured():
 
 def test_dingtalk_render_plain_text_has_no_level_badge():
     """无级别前缀的裸文本（直调 send）：不渲染级别徽标，仅品牌标题+正文+脚注。"""
-    from core.notifier import DingTalkChannel
+    from infra.notifier import DingTalkChannel
     md = DingTalkChannel._render_markdown("裸文本消息")
     text = md["text"]
     assert "裸文本消息" in text

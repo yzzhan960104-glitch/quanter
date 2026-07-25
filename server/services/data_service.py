@@ -4,7 +4,7 @@
 核心设计（反黑盒）：
 - 状态真相源 = 文件系统（parquet mtime + data_lake/.syncing/{key} 哨兵），不依赖任何
   调度器守护进程，零新增运维组件，符合 Karpathy 极简原则。
-- 同步以 sys.executable 子进程拉起 scripts/sync_*.py（与脚本既有 CLI 语义一致），
+- 同步以 sys.executable 子进程拉起 data/tools/sync_*.py（与脚本既有 CLI 语义一致），
   隔离 AKShare/JQData/Binance 等重网络/重内存依赖对 FastAPI 主进程的污染。
 - 触发即返回（fire-and-forget）：写哨兵 → 起 daemon 线程跑子进程 → 立即返回 syncing；
   子进程结束后由 daemon 线程删哨兵（成功）或写 .failed（失败）。
@@ -44,7 +44,7 @@ _ERR_TAIL_CHARS = 500
 _trigger_lock = threading.Lock()
 
 # 项目根：data_service.py 位于 server/services/，上溯三级 = quanter/。
-# 用绝对路径拼 script，保证 uvicorn 以任意 CWD 启动都能定位 scripts/sync_*.py。
+# 用绝对路径拼 script，保证 uvicorn 以任意 CWD 启动都能定位 data/tools/sync_*.py。
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 数据集中文展示名（表格首列；与 LAKE key 同步维护，单一维护点）
