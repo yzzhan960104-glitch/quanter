@@ -769,8 +769,7 @@ def test_step1_data_freshness_ok(tmp_path):
     from data.freshness import check_freshness
 
     # 造小样本 parquet（MultiIndex date,symbol，最新日 = T 日 2026-07-27）
-    dates = pd.date_range("2026-07-20", periods=6, freq="D")  # 末日 = 2026-07-25... 改为含 07-27
-    dates = pd.date_range("2026-07-22", periods=6, freq="D")  # 2026-07-22..27
+    dates = pd.date_range("2026-07-22", periods=6, freq="D")  # 2026-07-22..27，末日=07-27
     idx = pd.MultiIndex.from_product([dates, ["300001.SZ"]], names=["date", "symbol"])
     df = pd.DataFrame({"open": 10, "high": 11, "low": 9, "close": 10, "vol": 1000}, index=idx)
     lake = tmp_path / "lake"
