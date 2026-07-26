@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from broadcast import connect_manager
 from broadcast.brief_data import build_data_brief
 from broadcast.brief_strategy import build_strategy_brief
 from broadcast.brief_trading import build_trading_brief
@@ -429,16 +430,30 @@ def _build_brief(bot: str, date: str, reader: DataLakeReader):
 # ===========================================================================
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI 主入口。返回 0=成功/跳过，1=无法定播报日，2=推送失败。
+    """CLI 总入口（机器人总管）。返回 0=成功/跳过，1=无法定播报日，2=推送失败。
 
-    --bot {trading|data|strategy}（默认 trading）：选择 push 机器人身份，
-    决定 brief 构造器 + 凭证 + 幂等文件。
+    子命令路由（C1 兼容红线）：
+      - 首参为 'connect' → _main_connect（对话机器人后台托管）
+      - 首参为 'push'    → _main_push（显式等价默认）
+      - 其余（含 --bot/无参）→ _main_push（schtasks 'python -m broadcast --bot trading' 零改动）
+    """
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    if raw and raw[0] == "connect":
+        return _main_connect(raw[1:])
+    if raw and raw[0] == "push":
+        return _main_push(raw[1:])
+    return _main_push(raw)
+
+
+def _main_push(argv: list[str]) -> int:
+    """push 子命令（播报）：生成文案 → push_brief → 退出。无子命令默认即此路径。
+
+    返回 0=成功/跳过，1=无法定播报日，2=推送失败。
     """
     p = argparse.ArgumentParser(
-        prog="python -m broadcast", description="钉钉播报（多机器人 · 一期观测运营层）"
+        prog="python -m broadcast", description="钉钉播报（push 类 · 一次性）"
     )
-    p.add_argument("--bot", default="trading", choices=SUPPORTED_BOTS,
-                   help="push 机器人身份（默认 trading）")
+    p.add_argument("--bot", default="trading", choices=SUPPORTED_BOTS, help="push 机器人身份")
     p.add_argument("--date", help="播报日 YYYY-MM-DD（缺省=index_daily 最新交易日）")
     p.add_argument("--dry-run", action="store_true", help="只打印文案不发钉钉")
     p.add_argument("--force", action="store_true", help="忽略幂等去重强制重发")
@@ -450,8 +465,6 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("无法确定播报日（index_daily 未加载/为空）；用 --date 显式指定")
         return 1
 
-    # 幂等去重：每机器人独立文件，防跨机器人误判；dry_run 不参与去重（随时可预览文案）；
-    # 非 force 且今日已播 → 跳过。
     last_file = last_brief_file(args.bot)
     if not args.dry_run and not args.force and _read_last(last_file) == date:
         print(f"{args.bot} 今日({date})已播报，跳过（--force 可重发）")
@@ -474,6 +487,92 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     logger.error("%s 推送失败，未写 %s（下次触发重试）", args.bot, last_file)
     return 2
+
+
+def _read_confirm() -> str:
+    """读二次确认输入（y/N）。无 tty（schtasks/管道）→ EOFError 兜底返 'n'（保守不启）。"""
+    try:
+        return input("确认？[y/N] ").strip().lower()
+    except EOFError:
+        return "n"
+
+
+def _main_connect(argv: list[str]) -> int:
+    """connect 子命令：dev connect 对话机器人后台托管（start/stop/status/logs）。
+
+    生命周期托管给 connect_manager（PID 文件 + 日志 + 树杀 + 僵尸清理）。
+    """
+    p = argparse.ArgumentParser(
+        prog="python -m broadcast connect",
+        description="对话机器人后台托管（connect 类 · dev connect 常驻）",
+    )
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--start", metavar="BOT|all", help="拉起 connect 机器人（bot key 或 all）")
+    g.add_argument("--stop", metavar="BOT|all", help="停止（bot key 或 all）")
+    g.add_argument("--status", action="store_true", help="全部 connect bot 状态 + 僵尸清理")
+    g.add_argument("--logs", metavar="BOT", help="查日志（tail 最后 40 行）")
+    args = p.parse_args(argv)
+
+    if args.status:
+        for bot in CONNECT_BOTS:
+            print(f"{bot}: {connect_manager.status(bot)}")
+        return 0
+    if args.start:
+        return _connect_start(args.start)
+    if args.stop:
+        return _connect_stop(args.stop)
+    if args.logs:
+        return _connect_logs(args.logs)
+    return 0
+
+
+def _connect_start(target: str) -> int:
+    """拉起 connect 机器人。target='all' 需二次确认（防误启 5 个 Claude Code 实例）。"""
+    bots = list(CONNECT_BOTS) if target == "all" else [target]
+    for b in bots:
+        if b not in CONNECT_BOTS:
+            print(f"未知 connect bot={b}，支持：{list(CONNECT_BOTS)}")
+            return 1
+    if target == "all":
+        print(f"即将拉起 {len(bots)} 个 connect 机器人：{bots}（= {len(bots)} 个 Claude Code 常驻实例）")
+        if _read_confirm() != "y":
+            print("已取消")
+            return 0
+    for b in bots:
+        try:
+            res = connect_manager.start(b, CONNECT_BOTS[b], CONNECT_DEFAULTS)
+        except RuntimeError as e:
+            # 缺 unified-app-id / 身份闸 → 该 bot 跳过，不让单点阻断其余
+            print(f"{b}: 配置缺失跳过（{e}）")
+            continue
+        print(f"{b}: {res}")
+    return 0
+
+
+def _connect_stop(target: str) -> int:
+    """停止 connect 机器人（树杀）。target='all' 批量停。"""
+    bots = list(CONNECT_BOTS) if target == "all" else [target]
+    for b in bots:
+        if b not in CONNECT_BOTS:
+            print(f"未知 connect bot={b}，支持：{list(CONNECT_BOTS)}")
+            return 1
+        print(f"{b}: {connect_manager.stop(b)}")
+    return 0
+
+
+def _connect_logs(bot: str) -> int:
+    """tail 某 connect bot 日志最后 40 行（dev connect 原始输出）。"""
+    if bot not in CONNECT_BOTS:
+        print(f"未知 connect bot={bot}，支持：{list(CONNECT_BOTS)}")
+        return 1
+    log_path = connect_manager._log_file(bot)
+    if not log_path.exists():
+        print(f"无日志（{bot} 未启动过）：{log_path}")
+        return 0
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for line in lines[-40:]:
+        print(line)
+    return 0
 
 
 if __name__ == "__main__":
