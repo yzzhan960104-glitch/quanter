@@ -52,9 +52,12 @@ def test_generate_review_drift_true(db):
 
 
 def test_save_review_idempotent(db, tmp_path):
-    """save_review 落盘 + 重复写覆盖。"""
+    """save_review 落盘 + 重复写覆盖 + 内容真是 md（三态钉死：存在 + 路径稳定 + 内容正确）。"""
     md = review_report.generate_review("2026-07-27", plan=None, drift=None)
     out = review_report.save_review("2026-07-27", md, review_dir=str(tmp_path / "reviews"))
     assert out.exists()
+    # 内容真是 generate_review 的原样产物（钉死「写盘内容 == 入参 md」，防 future 改动截断/包壳）
+    assert out.read_text(encoding="utf-8") == md
     out2 = review_report.save_review("2026-07-27", md, review_dir=str(tmp_path / "reviews"))
-    assert out == out2  # 同一文件覆盖
+    assert out == out2  # 同一文件覆盖（路径稳定）
+    assert out2.read_text(encoding="utf-8") == md  # 二次写仍内容正确

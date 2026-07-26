@@ -415,28 +415,48 @@ def test_post_close_empty_book_passes_empty_dict(monkeypatch):
 
 
 def test_handle_order_update_writes_book(monkeypatch):
-    """BUY 成交回报 → apply_fill 被调；方向 None（order_type 缺失）→ 不调。"""
+    """BUY 成交回报 → apply_fill 被调（方向 "BUY"）；order_id 缺失 _orders（direction=None）→ apply_fill 不调。
+
+    双 case 诚实覆盖（T3-M1 fix）：
+      - 正向：order_type=23(STOCK_BUY) → _order_direction 返 "BUY" → engine 第四连守门
+        ``if direction in ("BUY","SELL")`` 放行 → apply_fill 被调一次、direction 实参为 "BUY"；
+      - 反向：_orders 清空 → order_id 不在 dict → _order_direction 返 None → 守门拦截 → apply_fill 零调用
+        （对齐 engine.py:941 注释「方向 None 不写」与 c 连「不挂止盈」保守语义——不猜方向误记为买当卖/卖当买）。
+    """
     from unittest.mock import MagicMock, AsyncMock, patch
     from trading import position_book
     from trading.engine import TradingEngine
 
+    # ---- 公共前置：成交回报报文 + 引擎实例 ----
     eng = TradingEngine()
     eng._tp_placed = set()
     update = {
         "kind": "trade", "order_id": "999", "stock_code": "300001.SZ",
         "traded_volume": 100, "traded_price": 10.5, "state": "FILLED",
     }
+
+    # ---- Case 1（正向）：order_type=23 → BUY → apply_fill 被调一次、方向 "BUY" ----
     eng._gw = MagicMock()
     eng._gw._orders = {"999": {"order_type": 23}}  # 23=STOCK_BUY
 
     with patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager"), \
          patch.object(eng, "_place_take_profit", new=AsyncMock()), \
-         patch.object(position_book, "apply_fill", return_value=True) as af:
+         patch.object(position_book, "apply_fill", return_value=True) as af_buy:
         asyncio.run(eng._handle_order_update(update))
-    # BUY 成交 → apply_fill 被调一次，方向 "BUY"
-    af.assert_called_once()
-    assert af.call_args.args[2] == "BUY"  # direction 参数（位置参）
+    af_buy.assert_called_once()
+    assert af_buy.call_args.args[2] == "BUY"  # direction 参数（位置参）
+
+    # ---- Case 2（反向）：order_id 不在 _orders → direction None → apply_fill 零调用 ----
+    eng._gw = MagicMock()
+    eng._gw._orders = {}  # 清空 _orders：_order_direction 查无 order_type → None
+
+    with patch("presentation.server.services.trading_service.record_live_trade"), \
+         patch("infra.notifier.NotificationManager"), \
+         patch.object(eng, "_place_take_profit", new=AsyncMock()), \
+         patch.object(position_book, "apply_fill", return_value=True) as af_none:
+        asyncio.run(eng._handle_order_update(update))
+    af_none.assert_not_called()  # 方向 None 守门拦截，账本不写（防误记买当卖/卖当买）
 
 
 def test_handle_order_update_book_failure_soft_degrades(monkeypatch):

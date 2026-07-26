@@ -113,6 +113,9 @@ def apply_fill(order_id: str, symbol: str, direction: str, qty: float, price: fl
                 (order_id, symbol, direction, float(qty), float(price), now))
         except sqlite3.IntegrityError:
             # 重推幂等：order_id 已入账，跳过（持仓不重复加减——R1 红线）。
+            # 注：IntegrityError 时 INSERT 被 SQLite 在语句层直接拒，事务无 pending changes，
+            # 后续 _connect 上下文的 con.commit() 是 no-op（rollback/commit 对空事务均合法），
+            # 不影响账本一致性（fill/position 表均无任何写入）。
             logger.info("apply_fill 跳过重复 order_id=%s symbol=%s", order_id, symbol)
             return False
         # UPSERT 持仓（SQLite ON CONFLICT 语法，3.24+ 支持）。
