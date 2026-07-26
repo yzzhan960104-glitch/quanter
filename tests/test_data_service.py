@@ -4,7 +4,7 @@
 物理意图：验证 sweep_stale_on_startup 只对 stale/missing 数据集调 trigger_sync，
 跳过 healthy/syncing/failed，且 trigger_sync 抛 KeyError（无 script）时静默不崩。
 """
-from server.services import data_service
+from presentation.server.services import data_service
 
 
 def test_sweep_stale_on_startup_triggers_stale_and_missing(monkeypatch):

@@ -26,7 +26,7 @@ Why 独立进程是硬约束：
 - 若 engine 与 server 同进程：engine 在 pre_open 注入的 _DYNAMIC 会污染 server 的
   手动下单路径（Cockpit/前端），导致 server 手动下单越过静态 env 白名单（前视污染），
   破坏「server 行为与改造前完全一致」的向后兼容红线。
-- 因此 ``server/main.py`` 的 lifespan **不应** import 本模块、不应构造 TradingEngine。
+- 因此 ``presentation/server/main.py`` 的 lifespan **不应** import 本模块、不应构造 TradingEngine。
   入口唯一在 ``trading/__main__.py``（Task 10）。
 
 ============================================================================
@@ -155,7 +155,7 @@ def get_gateway():
     trading_service.get_gateway 固化，本引擎薄编排不重复，避免双单例漂移。
     本函数独立出来便于测试 monkeypatch（engine.get_gateway）隔离真实网关副作用。
     """
-    from server.services.trading_service import get_gateway as _svc_get_gw
+    from presentation.server.services.trading_service import get_gateway as _svc_get_gw
     return _svc_get_gw()
 
 
@@ -176,7 +176,7 @@ async def _submit(order, *, confirm: bool = True) -> dict:
     三层保障，**而非** confirm 开关——confirm 是 server 手动下单路径的防误触开关，
     引擎通道若走 confirm=False 会导致批量挂单逐单等待人工点确认，盘中不可行。
     """
-    from server.services.trading_service import submit_order as svc_submit
+    from presentation.server.services.trading_service import submit_order as svc_submit
     return await svc_submit(order, dry_run=(_mode() == "dry_run"), confirm=confirm)
 
 
@@ -705,7 +705,7 @@ class TradingEngine:
         try:
             # 局部 import：避免顶层拉起 server/infra 子系统（与 _eod 内 experiment/strategies
             # 局部 import 同口径，保持引擎薄编排）。
-            from server.services.trading_service import get_positions
+            from presentation.server.services.trading_service import get_positions
             from infra.notifier import NotificationManager, fire_and_forget
 
             gw = get_gateway()
@@ -881,7 +881,7 @@ class TradingEngine:
 
         # a. 成交日志补写（用真实成交价/量，非下单预估价；Layer 6 LLM 复盘数据源）
         try:
-            from server.services.trading_service import record_live_trade
+            from presentation.server.services.trading_service import record_live_trade
             record_live_trade(
                 symbol,
                 direction or "TRADE",  # 方向未知时落 "TRADE"（保守中性，不误判买卖）

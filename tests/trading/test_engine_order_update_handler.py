@@ -52,11 +52,11 @@ def test_trade_update_writes_log_and_notifies():
     eng._gw._orders = {"123": {"order_type": 23}}  # 23=STOCK_BUY（买单标记）
     # patch 真实模块路径（_handle_order_update 内 lazy import 这些符号，故 patch 真身模块
     # 而非 trading.engine —— engine 模块顶层不 import 这两个符号，避免循环依赖）：
-    #   - record_live_trade 实身：server.services.trading_service
+    #   - record_live_trade 实身：presentation.server.services.trading_service
     #   - NotificationManager 实身：infra.notifier（infra.notifier 是转发垫片）
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    with patch("server.services.trading_service.record_live_trade") as rec, \
+    with patch("presentation.server.services.trading_service.record_live_trade") as rec, \
          patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))
@@ -112,7 +112,7 @@ def test_buy_fill_places_take_profit_once_idempotent():
     # 故 patch ``trading.engine.trading_plan.load_plan``；其余两符号走真实模块路径
     # （同 test_trade_update_writes_log_and_notifies 注释）。
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("server.services.trading_service.record_live_trade"), \
+         patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager"), \
          patch.object(eng, "_place_take_profit", new=AsyncMock()) as tp:
         asyncio.run(eng._handle_order_update(update))  # 首次成交回报
@@ -165,7 +165,7 @@ def test_place_take_profit_truncates_fractional_qty_to_int():
     #   - ``trading.engine.trading_plan.load_plan`` 返含 take_profit 的计划；
     #   - record_live_trade / NotificationManager patch 掉日志与通知副作用。
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("server.services.trading_service.record_live_trade"), \
+         patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager"), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(eng._handle_order_update(update))

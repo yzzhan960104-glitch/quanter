@@ -8,7 +8,7 @@ backtest.replay，闭环自洽）。caisen/ 包随之解散（无真身残留）
 
 依赖方向（不变量）：本子包仅依赖 backtest（tasks_db 时间戳工具 + replay driver）
 + infra.llm（AI 分析横切，经 infra/llm 工厂调 LLM——Layer2 解耦 follow-up #3 已收口：
-  原反向 import server.services.review_service._call_glm 已下沉为正向依赖 infra）
+  原反向 import presentation.server.services.review_service._call_glm 已下沉为正向依赖 infra）
 + infra.notifier（钉钉推送）+ stdlib。不触 trading.engine/execution/broker。
 """
 from .training_analyzer import *  # noqa: F401,F403

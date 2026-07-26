@@ -2,7 +2,7 @@
 import asyncio
 import logging
 
-from server.api.v1.logs import LogStreamHub, RingBufferLogHandler, log_stream_hub
+from presentation.server.api.v1.logs import LogStreamHub, RingBufferLogHandler, log_stream_hub
 
 
 def test_hub_publish_reaches_subscriber():
@@ -84,8 +84,8 @@ def test_sse_event_gen_emits_ping_on_idle(monkeypatch):
     wait_for 超时发 SSE 注释帧 ': ping\\n\\n'（客户端不触发 message，仅保连接活跃）。
     用独立空 hub（无历史缓冲）+ 极小超时加速测试。
     """
-    import server.api.v1.logs as logs_mod
-    from server.api.v1.logs import _sse_event_gen, LogStreamHub
+    import presentation.server.api.v1.logs as logs_mod
+    from presentation.server.api.v1.logs import _sse_event_gen, LogStreamHub
 
     monkeypatch.setattr(logs_mod, "_SSE_KEEPALIVE_TIMEOUT", 0.05)
     empty_hub = LogStreamHub()   # 空缓冲：subscribe 后 q.get() 无历史可取 → 必走 ping 路径

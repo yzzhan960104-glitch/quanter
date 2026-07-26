@@ -38,7 +38,7 @@ dws dev connect --unified-app-id e2695383-6fe9-4617-9439-2a8538af3107 \
 
 ### 3. uvicorn 服务（training loop + webhook 推 + /review 端点 + 观测层 API）
 ```bash
-C:/Users/yzzhan/Desktop/quanter/.venv310/Scripts/python.exe -m uvicorn server.main:app --host 127.0.0.1 --port 8000
+C:/Users/yzzhan/Desktop/quanter/.venv310/Scripts/python.exe -m uvicorn presentation.server.main:app --host 127.0.0.1 --port 8000
 ```
 - lifespan 装 TrainingLoopOrchestrator（daemon）+ replay_scheduler
 - DingTalkNotifier（webhook 推报告/回显，urllib，不用 dingtalk-stream SDK）
@@ -175,7 +175,7 @@ cd C:/Users/yzzhan/Desktop/quanter
 
 | 进程 | 职责 | 启动命令见 |
 |------|------|-----------|
-| uvicorn server.main:app (127.0.0.1:8000) | training loop + webhook + 观测层 API（`/trades` `/data/datasets` SSE 等） | 「一、3」 |
+| uvicorn presentation.server.main:app (127.0.0.1:8000) | training loop + webhook + 观测层 API（`/trades` `/data/datasets` SSE 等） | 「一、3」 |
 | `yzzhanCli通用` 常驻 | 通用 Claude Code 对话 | 「一、1」 |
 | `yzzhan参数优化` 常驻 | training loop 人审桥 | 「一、2」 |
 | `quanter交易` 常驻 | 交易专业 @查询 | 「二、Step 6」 |

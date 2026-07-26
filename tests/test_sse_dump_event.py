@@ -7,7 +7,7 @@
 """
 from pydantic import BaseModel, ConfigDict, Field
 
-from server.api.v1._sse import sse_dumps
+from presentation.server.api.v1._sse import sse_dumps
 
 
 # ============ 测试用桩模型（原 server.schemas.portfolio.NavPoint 的等价替身） ============

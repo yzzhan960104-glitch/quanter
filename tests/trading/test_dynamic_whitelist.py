@@ -35,7 +35,7 @@ def test_service_whitelist_consumes_dynamic(monkeypatch):
     """
     # 延迟 import：避免在 collection 期触发 server 包初始化副作用（若 server 模块
     # import 路径重，可在 conftest 层 fixture 化；此处直接 import 已足够）。
-    from server.services import trading_service
+    from presentation.server.services import trading_service
 
     monkeypatch.setenv("QMT_SYMBOL_WHITELIST", "510300.SH")
     dw.clear_dynamic_whitelist()

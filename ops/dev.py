@@ -87,7 +87,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, lambda *_: (_cleanup(), sys.exit(0)))
 
     # 2. 起 uvicorn（默认不带 --reload，根治坑 ①：reloader 子进程僵尸）
-    backend_cmd = [str(VENV_PY), "-m", "uvicorn", "server.main:app",
+    backend_cmd = [str(VENV_PY), "-m", "uvicorn", "presentation.server.main:app",
                    "--port", str(BACKEND_PORT)]
     if reload:
         backend_cmd.append("--reload")
@@ -98,7 +98,7 @@ def main() -> int:
     _children.append(backend)
 
     # 3. 起 vite（npm run dev，shell=True 兼容 Windows npm.cmd）
-    frontend = subprocess.Popen("npm run dev", cwd=ROOT / "web", shell=True)
+    frontend = subprocess.Popen("npm run dev", cwd=ROOT / "presentation" / "web", shell=True)
     _children.append(frontend)
 
     print(f"[dev] 后端 http://localhost:{BACKEND_PORT} + 前端 http://localhost:{FRONTEND_PORT}")

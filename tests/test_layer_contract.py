@@ -319,16 +319,17 @@ def test_backtest_no_live_execution_dependency() -> None:
 # ============================================================================
 
 # experiment 是纯配置叶子包（实盘策略版本管理 + 权重）。禁任何 Layer2 兄弟 +
-# server——experiment 是最外层配置，不应反向依赖被它配置的兄弟。
+# presentation（接口层）——experiment 是最外层配置，不应反向依赖被它配置的兄弟。
+# 注：T7 批4 后 server/ 迁入 presentation/，禁止集由 "server" 收紧为顶层 "presentation"。
 _EXPERIMENT_FORBIDDEN_ROOTS = {
     "trading", "strategies", "broker", "backtest",
-    "caisen", "execution", "server",
+    "caisen", "execution", "presentation",
 }
 
 
 def test_experiment_pure_leaf() -> None:
     """铁律 5：experiment/ 零任何 Layer2 兄弟(trading/strategies/broker/backtest/
-    caisen/execution) + server 依赖。
+    caisen/execution) + presentation（接口层）依赖。
 
     物理意义：experiment 是纯配置叶子（实盘版本 + 权重管理），它定义「当前跑哪个
     策略版本、权重多少」。它不应 import 被它配置的兄弟（trading/strategies 等），

@@ -12,7 +12,7 @@ dingtalk-stream SDK 被动收。本模块仅保留 webhook 主动推报告（tra
 保留下列实体（@接收改 dws 桥后仍是必需）：
   - ReviewBotConfig：webhook/app 凭证装配（app_* 字段对 webhook 推送本身非必需，但
     from_env 软降级门控沿用「app_key/secret/staff 三件套缺一 → None」语义，避免改
-    门控条件连锁影响 server/main.py lifespan 与既有测试断言）。
+    门控条件连锁影响 presentation/server/main.py lifespan 与既有测试断言）。
   - DingTalkNotifier：webhook 推 Markdown 报告（TrainingNotifier Protocol 的 push）。
   - _NoopNotifier：凭证未配时 orchestrator 的软降级哑通知器。
 
