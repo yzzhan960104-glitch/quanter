@@ -828,7 +828,13 @@ class TradingEngine:
         if not calendar.is_trading_day(today):
             logger.info("post_close 跳过：今日非交易日 %s", today)
             return
-        await post_close(today)
+        # gap4 fix：读本地账本 → 注入 local_positions，对账链路真跑。
+        # ⚠️ 空 dict 直传（不转 None）：live 下账本空但 broker 有持仓（疑似外部单）时，
+        # reconcile(local={}, broker={有}) 会报 only_broker drift——转 None 会让 post_close
+        # 走跳过分支漏报（对账查漏价值丧失）。dry_run 下 gw=None 时 post_close 内部自然跳过。
+        from trading import position_book
+        local_positions = position_book.get_local_positions()
+        await post_close(today, local_positions=local_positions)
 
     # ----- 成交回报 handler（Task 10 · 修 G5：成交回调链路）-----
     async def _handle_order_update(self, update: Mapping[str, Any]) -> None:
@@ -927,6 +933,17 @@ class TradingEngine:
                 # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
                 # 注意：此处不回滚 _tp_placed（保留已调度标记，防重推再挂；真失败由人工补）。
                 logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)
+
+        # d. 本地持仓账本写入（gap4 · post_close 对账数据源）。
+        #    独立 try-except 软降级：账本写入失败不阻断 a 日志/b 通知/c 止盈。
+        #    方向 None 不写（保守，对齐 c 连不挂止盈语义——不猜方向误记为买当卖/卖当买，
+        #    账本失真比对账漏记更危险）。
+        if direction in ("BUY", "SELL"):
+            try:
+                from trading import position_book
+                position_book.apply_fill(order_id, symbol, direction, float(qty), float(price))
+            except Exception:
+                logger.exception("本地账本写入失败 symbol=%s（不影响日志/通知/止盈）", symbol)
 
     def _order_direction(self, order_id: str) -> Optional[str]:
         """从 ``gw._orders`` 查订单方向（BUY/SELL）。

@@ -368,3 +368,100 @@ async def _no_op_submit(order, **kw):
 async def _no_op_cancel(gw):
     """占位 cancel_all_open_orders：no-op。"""
     return 0
+
+
+# ============================================================================
+# gap4：position_book 接线（_post_close 读账本 + _handle_order_update 写账本）
+# ============================================================================
+def test_post_close_reads_position_book(monkeypatch):
+    """_post_close：读 position_book 账本 → 注入 local_positions → 调 post_close 对账。"""
+    from trading import position_book, engine as eng_mod
+
+    # 让 position_book 返非空（模拟有真实成交累计的持仓）
+    monkeypatch.setattr(position_book, "get_local_positions",
+                        lambda **kw: {"300001.SZ": 100.0})
+    captured = {}
+
+    async def _fake_post_close(date, *, gw=None, local_positions=None, tolerance=0.0):
+        captured["local"] = local_positions
+        captured["date"] = date
+        return {"date": date}
+
+    monkeypatch.setattr(eng_mod, "post_close", _fake_post_close)
+    monkeypatch.setattr(eng_mod.calendar, "is_trading_day", lambda d: True)
+
+    eng = eng_mod.TradingEngine()
+    asyncio.run(eng._post_close())
+    assert captured["local"] == {"300001.SZ": 100.0}  # 账本读出注入 post_close
+
+
+def test_post_close_empty_book_passes_empty_dict(monkeypatch):
+    """_post_close：账本空 → 传 {}（非 None）——live 下 broker 有时能报 only_broker drift。"""
+    from trading import position_book, engine as eng_mod
+
+    monkeypatch.setattr(position_book, "get_local_positions", lambda **kw: {})
+    captured = {}
+
+    async def _fake_post_close(date, *, gw=None, local_positions=None, tolerance=0.0):
+        captured["local"] = local_positions
+        return {"date": date}
+
+    monkeypatch.setattr(eng_mod, "post_close", _fake_post_close)
+    monkeypatch.setattr(eng_mod.calendar, "is_trading_day", lambda d: True)
+
+    eng = eng_mod.TradingEngine()
+    asyncio.run(eng._post_close())
+    assert captured["local"] == {}  # 空 dict 直传，不转 None
+
+
+def test_handle_order_update_writes_book(monkeypatch):
+    """BUY 成交回报 → apply_fill 被调；方向 None（order_type 缺失）→ 不调。"""
+    from unittest.mock import MagicMock, AsyncMock, patch
+    from trading import position_book
+    from trading.engine import TradingEngine
+
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    update = {
+        "kind": "trade", "order_id": "999", "stock_code": "300001.SZ",
+        "traded_volume": 100, "traded_price": 10.5, "state": "FILLED",
+    }
+    eng._gw = MagicMock()
+    eng._gw._orders = {"999": {"order_type": 23}}  # 23=STOCK_BUY
+
+    with patch("presentation.server.services.trading_service.record_live_trade"), \
+         patch("infra.notifier.NotificationManager"), \
+         patch.object(eng, "_place_take_profit", new=AsyncMock()), \
+         patch.object(position_book, "apply_fill", return_value=True) as af:
+        asyncio.run(eng._handle_order_update(update))
+    # BUY 成交 → apply_fill 被调一次，方向 "BUY"
+    af.assert_called_once()
+    assert af.call_args.args[2] == "BUY"  # direction 参数（位置参）
+
+
+def test_handle_order_update_book_failure_soft_degrades(monkeypatch):
+    """apply_fill 抛异常 → 不阻断 a 日志/b 通知/c 止盈（独立 try-except 软降级）。"""
+    from unittest.mock import MagicMock, AsyncMock, patch
+    from trading import position_book
+    from trading.engine import TradingEngine
+
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    update = {
+        "kind": "trade", "order_id": "999", "stock_code": "300001.SZ",
+        "traded_volume": 100, "traded_price": 10.5, "state": "FILLED",
+    }
+    eng._gw = MagicMock()
+    eng._gw._orders = {"999": {"order_type": 23}}
+
+    tp_called = []
+    async def _tp(*a, **kw):
+        tp_called.append(True)
+
+    with patch("presentation.server.services.trading_service.record_live_trade"), \
+         patch("infra.notifier.NotificationManager"), \
+         patch.object(position_book, "apply_fill", side_effect=RuntimeError("db locked")), \
+         patch.object(eng, "_place_take_profit", new=_tp):
+        asyncio.run(eng._handle_order_update(update))  # apply_fill 抛异常不应冒泡
+    # 止盈仍被调（账本失败不阻断 c 连）
+    assert tp_called == [True]

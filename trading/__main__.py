@@ -197,6 +197,12 @@ async def _run_forever() -> None:
     else:
         logger.warning("未装配网关（AUTO_TRADE_MODE=dry_run 影子模式，回调链路不生效）")
 
+    # 初始化本地持仓账本（gap4 · 幂等建表，对齐 experiment/store.init_db 范式）。
+    # 必须在 eng.start() 之前：cron 一旦启动，_handle_order_update/_post_close 就可能
+    # 读写账本，建表必须先就绪。
+    from trading import position_book
+    position_book.init_db()
+
     eng.start()  # 注册四 cron job + 启动 AsyncIOScheduler（不阻塞）
     try:
         while True:
