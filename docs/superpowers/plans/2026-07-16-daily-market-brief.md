@@ -1,5 +1,7 @@
 # 每日行情播报机器人 Implementation Plan
 
+> ⚠️ **已废弃（market 机器人下线，2026-07-26）**：本文档设计的「每日行情播报（market）」机器人已从 broadcast 移除。下线决策与清理清单见 `docs/superpowers/specs/2026-07-26-broadcast-robot-manager-design.md` §4.5。本文件保留作历史溯源，不再代表当前架构。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现。步骤用 `- [ ]` 复选框跟踪。
 
 **Goal:** 每日 19:00 自动取 `data_lake` 行情 → 纯 pandas 聚合 → 模板 Markdown → `dws send-by-bot` 推 yzzhan量化群。新建扁平 `broadcast/` 包 + dws 全自动建专用播报机器人（Task 0 前置）。

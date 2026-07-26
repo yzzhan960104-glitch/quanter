@@ -16,25 +16,23 @@
 
 ### 1. bridge 对话机器人（yzzhanCli通用）
 ```bash
-dws dev connect --unified-app-id f0b2740f-c029-4b99-943c-58de139c7463 \
-  --channel claudecode --agent-memory --agent-approval-mode ask \
-  --allowed-users <DINGTALK_ALLOWED_STAFF_IDS> \
-  --agent-workdir <项目根，如 C:/Users/yzzhan/Desktop/quanter>
+# 拉起（后台常驻 + PID 文件 + 日志，详见 broadcast/connect_manager.py）
+python -m broadcast connect --start cli
 ```
 - @yzzhanCli通用 → dws 收 → Claude Code 对话（--agent-memory 续聊）
-- --allowed-users：身份闸（.env 里 `DINGTALK_ALLOWED_STAFF_IDS` 白名单 staff_id，承接老 bridge safety 白名单 → dws 身份闸；省略 = 任何 @该机器人的钉钉用户都能驱动本机 Claude Code，bypassPermissions 全放行下属高危，必填）
-- --agent-approval-mode ask：审批闸（事前确认，替代老 Alarmer 事后告警）
-- --agent-workdir：Claude Code 工作目录设项目根（读 CLAUDE.md/memory/代码；省略则跑空白 Temp 目录、不了解项目做不了开发，已踩坑）
+- 参数由 broadcast 配置固化（unified-app-id / 身份闸 / 审批闸 / workdir），详见 `broadcast/__main__.py` 的 `CONNECT_BOTS.cli` / `CONNECT_DEFAULTS`：
+  - 身份闸：`.env` 的 `DINGTALK_ALLOWED_STAFF_IDS` 白名单 staff_id（承接老 bridge safety 白名单 → dws 身份闸；省略 = 任何 @该机器人的钉钉用户都能驱动本机 Claude Code，bypassPermissions 全放行下属高危，必填）
+  - 审批闸：`--agent-approval-mode ask`（事前确认，替代老 Alarmer 事后告警）
+  - 工作目录：项目根（读 CLAUDE.md/memory/代码；省略则跑空白 Temp 目录、不了解项目做不了开发，已踩坑）
+- unified-app-id 已入 `.env:CLI_BOT_UNIFIED_APP_ID`，文档不再重复硬编码。
 
 ### 2. 审查训练机器人（yzzhan参数优化）
 ```bash
-dws dev connect --unified-app-id e2695383-6fe9-4617-9439-2a8538af3107 \
-  --channel custom --agent-cmd "C:/Users/yzzhan/Desktop/quanter/.venv310/Scripts/python.exe C:/Users/yzzhan/Desktop/quanter/infra/tools/dingtalk_review_bridge.py" \
-  --allowed-users <DINGTALK_ALLOWED_STAFF_IDS>
+python -m broadcast connect --start review
 ```
 - @yzzhan参数优化 → dws 收 → bridge脚本 → `POST /api/v1/training/review` → orchestrator.submit_review（training loop 人审关卡）
-- **绝对路径**（dws cwd 不是项目根，相对路径找不到 python.exe，已踩坑）
-- --allowed-users：身份闸（限制谁能 @触发 training loop；Task4 删 ReviewChatbotHandler 白名单后 dws 层补，省略 = 任何人 @都能触发训练消耗算力）
+- `agent_cmd` 由 `CONNECT_BOTS.review` 固化为相对路径 `.venv310/Scripts/python.exe infra/tools/dingtalk_review_bridge.py`（靠 connect_manager Popen cwd 锁项目根，化解旧绝对路径踩坑——dws cwd 不是项目根时相对路径找不到 python.exe）。
+- 身份闸：`.env` 的 `DINGTALK_ALLOWED_STAFF_IDS`（限制谁能 @触发 training loop；Task4 删 ReviewChatbotHandler 白名单后 dws 层补，省略 = 任何人 @都能触发训练消耗算力）。
 
 ### 3. uvicorn 服务（training loop + webhook 推 + /review 端点 + 观测层 API）
 ```bash
@@ -43,6 +41,23 @@ C:/Users/yzzhan/Desktop/quanter/.venv310/Scripts/python.exe -m uvicorn presentat
 - lifespan 装 TrainingLoopOrchestrator（daemon）+ replay_scheduler
 - DingTalkNotifier（webhook 推报告/回显，urllib，不用 dingtalk-stream SDK）
 - 一期观测层 API（`/trades` `/data/datasets` SSE 日志 等）也挂此 app；前端 `/cockpit` 看板依赖它。
+
+---
+
+## connect 机器人统一托管（broadcast 升格 · 2026-07-26）
+
+5 个 dev connect 对话机器人不再手工敲命令，统一由 broadcast 托管：
+
+| 命令 | 作用 |
+|------|------|
+| `python -m broadcast connect --start <bot\|all>` | 后台拉起（PID 文件 + 日志；all 二次确认） |
+| `python -m broadcast connect --stop <bot\|all>` | 树杀（taskkill /T，连 Claude Code 子进程） |
+| `python -m broadcast connect --status` | 全部 connect bot 状态 + 僵尸清理 |
+| `python -m broadcast connect --logs <bot>` | 查日志（tail 最后 40 行） |
+
+bot key：`cli` / `trading_q` / `data_q` / `strategy_q` / `review`。
+配置真相源：`.env`（unified-app-id/身份闸/workdir）+ `broadcast/__main__.py:CONNECT_BOTS`。
+进程管理实现：`broadcast/connect_manager.py`。
 
 ---
 
@@ -55,7 +70,7 @@ C:/Users/yzzhan/Desktop/quanter/.venv310/Scripts/python.exe -m uvicorn presentat
 
 ### Step 1 · 建 3 个 dws 应用机器人（异步 · 拿 robotCode）
 
-群统一复用 `yzzhan量化`（`ciduznBwLLiWKcMewBOF4+kWQ==`，`BROADCAST_GROUP_ID`），不新建群。
+群统一复用 `yzzhan量化`（`ciduznBwLLiWKcMewBOF4+kWQ==`，`BROADCAST_GROUP_ID`，3 机器人共用：trading/data/strategy，market 已下线），不新建群。
 
 ```bash
 # 交易机器人
@@ -123,29 +138,26 @@ cd C:/Users/yzzhan/Desktop/quanter
 
 ### Step 6 · 起 3 个 @查询常驻（专业机器人 = Claude Code 大脑转发）
 
-每个专业机器人一个常驻进程（单独终端窗口/Windows Terminal tab/PM2 任选），照抄：
+每个专业机器人一个常驻进程，由 broadcast 托管拉起（后台常驻 + PID 文件 + 日志）：
 
 ```bash
 # 交易 @查询
-dws dev connect --unified-app-id <TRADING_BOT_UNIFIED_APP_ID> \
-  --channel claudecode --agent-memory --agent-approval-mode ask \
-  --allowed-users <DINGTALK_ALLOWED_STAFF_IDS> \
-  --agent-workdir C:/Users/yzzhan/Desktop/quanter
+python -m broadcast connect --start trading_q
 
 # 数据 @查询
-dws dev connect --unified-app-id <DATA_BOT_UNIFIED_APP_ID> \
-  --channel claudecode --agent-memory --agent-approval-mode ask \
-  --allowed-users <DINGTALK_ALLOWED_STAFF_IDS> \
-  --agent-workdir C:/Users/yzzhan/Desktop/quanter
+python -m broadcast connect --start data_q
 
 # 策略 @查询
-dws dev connect --unified-app-id <STRATEGY_BOT_UNIFIED_APP_ID> \
-  --channel claudecode --agent-memory --agent-approval-mode ask \
-  --allowed-users <DINGTALK_ALLOWED_STAFF_IDS> \
-  --agent-workdir C:/Users/yzzhan/Desktop/quanter
+python -m broadcast connect --start strategy_q
+```
+
+或一次性拉起全部 5 个 connect 机器人（带二次确认）：
+
+```bash
+python -m broadcast connect --start all
 ```
 - @quanter交易 / @quanter数据 / @quanter策略 → dws 收 → Claude Code 专业问答（隔离 yzzhanCli 通用对话）
-- `--allowed-users` / `--agent-approval-mode ask` / `--agent-workdir` 三参数含义同上文「bridge 对话机器人」，身份闸 / 审批闸 / 工作目录缺一不可。
+- 身份闸 / 审批闸 / 工作目录三参数由 `CONNECT_BOTS.<bot>` 固化，含义同上文「bridge 对话机器人」，缺一不可。
 
 ### Step 7 · 注册 3 个播报 schtasks（每日定时触发）
 
@@ -176,11 +188,11 @@ cd C:/Users/yzzhan/Desktop/quanter
 | 进程 | 职责 | 启动命令见 |
 |------|------|-----------|
 | uvicorn presentation.server.main:app (127.0.0.1:8000) | training loop + webhook + 观测层 API（`/trades` `/data/datasets` SSE 等） | 「一、3」 |
-| `yzzhanCli通用` 常驻 | 通用 Claude Code 对话 | 「一、1」 |
-| `yzzhan参数优化` 常驻 | training loop 人审桥 | 「一、2」 |
-| `quanter交易` 常驻 | 交易专业 @查询 | 「二、Step 6」 |
-| `quanter数据` 常驻 | 数据专业 @查询 | 「二、Step 6」 |
-| `quanter策略` 常驻 | 策略专业 @查询 | 「二、Step 6」 |
+| `yzzhanCli通用` 常驻 | 通用 Claude Code 对话 | `broadcast connect --start cli` |
+| `yzzhan参数优化` 常驻 | training loop 人审桥 | `broadcast connect --start review` |
+| `quanter交易` 常驻 | 交易专业 @查询 | `broadcast connect --start trading_q` |
+| `quanter数据` 常驻 | 数据专业 @查询 | `broadcast connect --start data_q` |
+| `quanter策略` 常驻 | 策略专业 @查询 | `broadcast connect --start strategy_q` |
 
 定时任务（非常驻，到点跑完即退）：`QuanterTradingBrief` @ 15:30 / `QuanterStrategyBrief` @ 16:00 / `QuanterDataBrief` @ 17:00（时间从 `.env` 读，幂等重建）。
 

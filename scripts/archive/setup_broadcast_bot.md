@@ -1,5 +1,7 @@
 # 每日行情播报机器人 · 部署 setup（dws 全自动建号 + 拉群）
 
+> ⚠️ 已归档（market 机器人下线，2026-07-26）。保留作历史参考，配置真相源已移至 .env + broadcast/__main__.py:CONNECT_BOTS。
+
 > 一次性部署。机器人已建则跳过对应步骤。**前置：`dws auth login`（浏览器授权，仅一次）**。
 > 实测于 2026-07-16（分支 `feat/daily-market-brief` Task 0）。
 

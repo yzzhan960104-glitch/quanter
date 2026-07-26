@@ -1,5 +1,7 @@
 # 每日行情播报机器人设计（daily market brief）
 
+> ⚠️ **已废弃（market 机器人下线，2026-07-26）**：本文档设计的「每日行情播报（market）」机器人已从 broadcast 移除。下线决策与清理清单见 `docs/superpowers/specs/2026-07-26-broadcast-robot-manager-design.md` §4.5。本文件保留作历史溯源，不再代表当前架构。
+
 > **日期**：2026-07-16
 > **状态**：设计（待用户认可 → 转 writing-plans 出实现计划）
 > **关联**：钉钉出站通道 `infra/notifier.py`、数据湖 `data/lake_reader.py`、daemon 先例 `execution/replay_scheduler.py`

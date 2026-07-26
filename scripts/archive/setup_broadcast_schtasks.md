@@ -1,5 +1,7 @@
 # 每日行情播报 · Windows 定时触发（schtasks）
 
+> ⚠️ 已归档（market 机器人下线，2026-07-26）。保留作历史参考，配置真相源已移至 .env + broadcast/__main__.py:CONNECT_BOTS。
+
 > 每日 19:00 自动跑 `python -m broadcast`。**前置**：Task 0 的 robot-code 已写 `.env`。
 > 实测于 2026-07-16（分支 `feat/daily-market-brief` Task 4）。
 
