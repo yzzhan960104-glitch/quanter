@@ -118,7 +118,7 @@ def push_plan_to_dingtalk(date: str, orders: list) -> bool:
             + "\n".join(lines)
         )
         # 凭证从环境读：TRADING_BOT_ROBOT_CODE（交易机器人）/ BROADCAST_GROUP_ID（运营群），
-        # 与一期 broadcast __main__._BOT_CFG["trading"] / _GROUP_ID_ENV 完全一致。
+        # 与 broadcast __main__.PUSH_BOTS["trading"] / _GROUP_ID_ENV 凭证约定一致。
         robot = os.getenv("TRADING_BOT_ROBOT_CODE", "")
         group = os.getenv("BROADCAST_GROUP_ID", "")
         return push_brief(
