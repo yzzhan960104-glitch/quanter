@@ -32,7 +32,7 @@ def publish_champion(trial_id, db_path=DEFAULT_DB_PATH, exp_db_path=None, *, lak
     幂等性：experiment_id 含 trial_id[:6] + 日期，同 trial 同日重复 publish 会撞
     UNIQUE(strategy_name, version) → create_version 抛 ValueError（调用方感知重复）。
     """
-    from experiment.store import create_version, _DEFAULT_DB, init_db as init_exp_db
+    from experiment.store import create_version, _DEFAULT_DB, init_db as init_exp_db, list_versions
     from experiment.models import ExperimentVersion, ExperimentStatus
     from discovery.snapshot import freeze
     from discovery.split import holdout_split
@@ -72,9 +72,13 @@ def publish_champion(trial_id, db_path=DEFAULT_DB_PATH, exp_db_path=None, *, lak
                 f"max_dd={outer.get('max_dd', 0)*100:.1f}%")
     else:
         note = "outer 评估失败（软降级）"
+    # version 递增：同 strategy_name(neckline) 下避免 UNIQUE(strategy,version) 冲突
+    # （多 DRAFT 候选共存，如 25c6028b v1 + a1693ea v2）
+    _existing_v = [v.version for v in list_versions(exp_db) if v.strategy_name == "neckline"]
+    next_v = max(_existing_v) + 1 if _existing_v else 1
     version = ExperimentVersion(
         experiment_id=experiment_id, strategy_name="neckline", params=params,
-        weight=0.0, status=ExperimentStatus.DRAFT, version=1,
+        weight=0.0, status=ExperimentStatus.DRAFT, version=next_v,
         source=f"discovery:{snapshot_hash[:8]}", note=note,
         created_at=datetime.now().isoformat(timespec="seconds"))
     # 确保 experiment.db 建表（幂等；首次 publish 前可能从未 init，create_version 会报 no such table）
