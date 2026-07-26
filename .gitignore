@@ -82,8 +82,10 @@ htmlcov/
 reports/*.html
 reports/*.csv
 reports/*.json
-# 数据湖生成产物（parquet/shards，本地产物不入库）
-data_lake/
+# 数据湖生成产物（parquet/shards，本地产物不入库；a_shares_daily.parquet 例外，见下）
+data_lake/*
+# Mac 计算单元需 git pull 取 a_shares_daily.parquet（discovery 回测唯一依赖，spec §4）
+!data_lake/a_shares_daily.parquet
 qmt_data
 # 本地运行日志（server/main.py LOG_CONFIG 落盘，回测链路日志，本地产物不入库）
 logs/
