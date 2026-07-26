@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """每日播报 CLI 入口（一期观测运营层 · `python -m broadcast`）。
 
-一期扩展：从单一行情播报扩展到 4 个机器人
-  - market   ：既有每日行情播报（build_daily_brief，本模块历史能力）
-  - trading  ：每日交易流水播报（Task 3 接入 build_trading_brief）
-  - data     ：每日数据采集播报（Task 4 接入 build_data_brief）
-  - strategy ：策略状态播报（Task 5 接入 build_strategy_brief）
+机器人总管（一期）：push 播报类 3 个 + connect 对话类 5 个
+  - push   ：trading / data / strategy（一次性 schtasks 触发，本模块 push 主流程）
+  - connect：cli / trading_q / data_q / strategy_q / review（dev connect 后台常驻，
+             由 connect_manager 管理，Task 4 接入 CLI 子命令路由）
 
-每机器人独立幂等文件 `logs/.last_<bot>_brief`，互不干扰：
+push 机器人独立幂等文件 `logs/.last_<bot>_brief`，互不干扰：
 同日不重发（除非 --force）；周末/节假日 index_daily 最新日不变 → 天然跳过，零废报。
 比维护一张 A 股交易日历表极简得多。
 
 降级：dws 推送失败不写 last_brief（下次触发重试）；dry_run 不读/写 last_brief。
+
+market 已下线（2026-07-26）：本模块不再含行情播报分支与 build_daily_brief 依赖。
 """
 from __future__ import annotations
 
@@ -24,7 +25,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from broadcast.brief import build_daily_brief
 from broadcast.brief_data import build_data_brief
 from broadcast.brief_strategy import build_strategy_brief
 from broadcast.brief_trading import build_trading_brief
@@ -35,71 +35,71 @@ from data.lake_reader import DataLakeReader
 logger = logging.getLogger(__name__)
 
 # ===========================================================================
-# 多机器人配置（一期：market 既有；trading/data/strategy 为一期新增）
+# 机器人总管配置（push 播报类 + connect 对话类）
 # ===========================================================================
-
-# 支持的机器人清单（CLI --bot choices 与 last_brief_file 校验同源，防散落硬编码）
-SUPPORTED_BOTS = ("market", "trading", "data", "strategy")
-
-# 各机器人的 .env 凭证变量名 + 幂等文件名 + 标题前缀（工厂式，避免散落硬编码）
-#   robot_env：对应 .env 中该机器人 dws 应用 robot_code；不同机器人 = 不同 dws 应用 = 不同群
-#   last     ：幂等去重文件名；分文件防跨机器人误判已播
-#   title    ：钉钉消息标题前缀，便于一眼区分来源
-_BOT_CFG = {
-    "market":   {"robot_env": "DINGTALK_CHAT_ROBOT_CODE", "last": ".last_market_brief",
-                 "title": "📈 每日行情播报"},
-    "trading":  {"robot_env": "TRADING_BOT_ROBOT_CODE",   "last": ".last_trading_brief",
+# 播报类（push）：一次性 → schtasks 到点 / 手工 --force 触发
+#   robot_env：对应 .env 中该机器人 dws 应用 robot_code（不同机器人=不同 dws 应用=不同群）
+#   last      ：幂等去重文件名；分文件防跨机器人误判已播
+#   title     ：钉钉消息标题前缀，便于一眼区分来源
+PUSH_BOTS = {
+    "trading":  {"robot_env": "TRADING_BOT_ROBOT_CODE",  "last": ".last_trading_brief",
                  "title": "💰 每日交易播报"},
-    "data":     {"robot_env": "DATA_BOT_ROBOT_CODE",      "last": ".last_data_brief",
+    "data":     {"robot_env": "DATA_BOT_ROBOT_CODE",     "last": ".last_data_brief",
                  "title": "🗄 每日数据播报"},
-    "strategy": {"robot_env": "STRATEGY_BOT_ROBOT_CODE",  "last": ".last_strategy_brief",
+    "strategy": {"robot_env": "STRATEGY_BOT_ROBOT_CODE", "last": ".last_strategy_brief",
                  "title": "♟ 每日策略播报"},
 }
+# market 已下线（2026-07-26）：代码/配置/文档全清，钉钉侧资源由用户移除。
+SUPPORTED_BOTS = tuple(PUSH_BOTS.keys())  # ("trading","data","strategy")
 
-# 钉钉群组（所有机器人共用一个运营群；机器人身份靠 robot_code 区分）
+# 对话类（connect）：dws dev connect 后台常驻，broadcast connect --start 拉起
+#   unified_env：.env 中该机器人 unified-app-id（dev connect 建联用）
+#   channel    ：claudecode=对话（dev connect 自动拉 Claude Code）/ custom=业务脚本
+#   agent_cmd  ：仅 channel=custom 的 review 有；相对路径靠 connect_manager.Popen cwd 锁根
+CONNECT_BOTS = {
+    "cli":         {"unified_env": "CLI_BOT_UNIFIED_APP_ID",      "channel": "claudecode"},  # yzzhanCli通用
+    "trading_q":   {"unified_env": "TRADING_BOT_UNIFIED_APP_ID",  "channel": "claudecode"},  # quanter交易
+    "data_q":      {"unified_env": "DATA_BOT_UNIFIED_APP_ID",     "channel": "claudecode"},  # quanter数据
+    "strategy_q":  {"unified_env": "STRATEGY_BOT_UNIFIED_APP_ID", "channel": "claudecode"},  # quanter策略
+    "review":      {"unified_env": "REVIEW_BOT_UNIFIED_APP_ID",   "channel": "custom",
+                    "agent_cmd": ".venv310/Scripts/python.exe infra/tools/dingtalk_review_bridge.py"},  # yzzhan参数优化
+}
+# claudecode 类共用的 dev connect 启动参数（DRY，不每 bot 重复）
+CONNECT_DEFAULTS = {
+    "allowed_users_env": "DINGTALK_ALLOWED_STAFF_IDS",  # 身份闸（.env 已配）
+    "workdir_env":       "BROADCAST_AGENT_WORKDIR",     # Claude Code 工作目录（新增=F:/quanter）
+    "agent_memory":      True,
+    "approval_mode":     "ask",  # 审批闸，写死，绝不为任何 bot 留覆盖口子（C2 安全底线）
+}
+
+# 钉钉群组（所有 push 机器人共用一个运营群；机器人身份靠 robot_code 区分）
 _GROUP_ID_ENV = "BROADCAST_GROUP_ID"
-
-# ===========================================================================
-# 向后兼容别名（回归红线：tests/test_broadcast_main.py 直接 patch LAST_BC_FILE）
-# ---------------------------------------------------------------------------
-# 旧单一行情播报时代，幂等文件路径写死在此常量。一期多机器人化后，market 分支
-# 走 `last_brief_file("market")`，但既有测试通过 monkeypatch.setattr(bm,"LAST_BC_FILE",...)
-# 来隔离文件系统——保留此别名 = 兼容旧测试 + 旧运维脚本可能的直接引用，零成本。
-#
-# 文件名从 .last_broadcast 改为 .last_market_brief：与其他三机器人命名对齐
-# （logs/.last_<bot>_brief）。生产侧后果：升级后首次运行 market 会重发一次当日
-# （旧 .last_broadcast 不再读），可接受（dws send-by-bot 不会因重复触发自身限频）。
-# ===========================================================================
-LAST_BC_FILE = Path("logs") / ".last_market_brief"
 
 
 def last_brief_file(bot: str) -> Path:
-    """返回某机器人的幂等去重文件路径（logs/.last_<bot>_brief）。
+    """返回某 push 机器人的幂等去重文件路径（logs/.last_<bot>_brief）。
 
-    Why 工厂式：4 个机器人各自独立幂等文件，避免 trading 已播 → market 误判已播跳过。
-    未知 bot 抛 ValueError（CLI 层 argparse choices 已挡一道，这里是第二道防线）。
+    Why 工厂式：每机器人独立幂等文件，防跨机器人误判已播。
+    未知 bot 抛 ValueError（CLI argparse choices 已挡一道，这里是第二道防线）。
 
-    特例：market 分支返回模块级 LAST_BC_FILE（而非新建 Path），回归测试通过
-    monkeypatch.setattr(bm,"LAST_BC_FILE",...) 注入 tmp_path，必须经此引用才能生效。
+    market 下线后特例消除：所有 push bot 统一走 Path("logs")/PUSH_BOTS[bot]["last"]。
     """
-    if bot not in _BOT_CFG:
+    if bot not in PUSH_BOTS:
         raise ValueError(f"未知 bot={bot}，支持：{SUPPORTED_BOTS}")
-    if bot == "market":
-        # 经 LAST_BC_FILE 引用：兼容既有测试 monkeypatch 注入临时路径（回归红线）
-        return LAST_BC_FILE
-    return Path("logs") / _BOT_CFG[bot]["last"]
+    return Path("logs") / PUSH_BOTS[bot]["last"]
 
 
-# 播报只用这 4 个湖（不全量 load：a_shares_daily 9M 行/408MB load 慢且浪费，market brief 用不到）。
-# 注：一期 trading/data/strategy brief 是否复用同一湖子集，Task 3-5 各自定，本框架层不锁死。
-_BRIEF_LAKES = ("index_daily", "ths_daily", "moneyflow", "dragon_list")
+# 播报只用 index_daily 这 1 个湖（market 下线后 ths_daily/moneyflow/dragon_list 无人用）：
+# 仅 _latest_trade_date 需读 index_daily 取最新交易日作默认播报日。trading/data/strategy
+# brief 各自走 trading_service/data_service/plans+json，不依赖这三个湖，load 它们纯浪费内存。
+_BRIEF_LAKES = ("index_daily",)
 
 
 def _load_reader() -> DataLakeReader:
-    """仅 load 播报用到的 4 湖（复用 presentation/server/main.py:78 load 模式，但收窄到 _BRIEF_LAKES）。
+    """仅 load 播报用到的 index_daily 湖（收窄到 _BRIEF_LAKES）。
 
-    Why 不全量：LAKE_CONFIG['lakes'] 含 a_shares_daily（9M 行/408MB），market 播报用不到，
-    load 它纯浪费内存+启动时间。parquet 缺失则 lake_reader 内部离线降级（不阻断）。
+    Why 不全量：LAKE_CONFIG['lakes'] 含 a_shares_daily（9M 行/408MB），trading/data/strategy
+    播报都用不到，load 它纯浪费内存+启动时间。parquet 缺失则 lake_reader 内部离线降级（不阻断）。
     """
     reader = DataLakeReader.get_instance()
     lakes = LAKE_CONFIG.get("lakes", {})
@@ -146,18 +146,8 @@ def _write_last(date: str, last_file: Path) -> None:
         logger.warning("写 %s 失败（不影响本次推送，但下次可能重复）", last_file, exc_info=True)
 
 
-def _read_last_broadcast() -> str:
-    """[向后兼容] 读 market 机器人幂等文件（旧单一播报时代 API，回归测试依赖）。"""
-    return _read_last(LAST_BC_FILE)
-
-
-def _write_last_broadcast(date: str) -> None:
-    """[向后兼容] 写 market 机器人幂等文件（旧单一播报时代 API，回归测试依赖）。"""
-    _write_last(date, LAST_BC_FILE)
-
-
 # ===========================================================================
-# Brief 构造器路由（market 既有；trading/data/strategy Task 3-5 接入）
+# Brief 构造器路由（trading/data/strategy 注入式取数 + 纯函数渲染）
 # ===========================================================================
 
 def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, dict]:
@@ -174,7 +164,7 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
     """
     # 延迟 import：trading_service 顶层 import 了 infra.notifier/broker.base/
     # trading.compute.types 等较重链路，且 __main__ 仅 trading 分支需要 → 放函数内，
-    # market/data/strategy 分支零负担。
+    # data/strategy 分支零负担。
     from presentation.server.services import trading_service
 
     # 同步取数：trades（CSV 流水）/ status（四态镜像）
@@ -235,7 +225,7 @@ def _fetch_data_snapshot() -> list[dict]:
       ISO（UTC）解析为实际 age 小时（None 则不显示 lag，与 missing/failed 语义一致）。
     """
     # 延迟 import：data_service 顶层会触发 config 注册表 + DataLakeReader 耦合，
-    # market/trading 分支不需要 → 放函数内，避免无谓依赖加载。
+    # trading/strategy 分支不需要 → 放函数内，避免无谓依赖加载。
     from datetime import datetime, timezone
     from presentation.server.services import data_service
 
@@ -292,7 +282,7 @@ def _fetch_data_freshness() -> list:
     - check_freshness 单 key 异常 → 该 key 不进列表（其余 key 照常，不让单点失败拖垮整段）。
     """
     # 延迟 import：trading.calendar 触发交易日历加载，data.freshness 触发 pandas read_parquet
-    # 链路，仅 data 分支需要 → 放函数内，market/trading/strategy 分支零负担。
+    # 链路，仅 data 分支需要 → 放函数内，trading/strategy 分支零负担。
     from datetime import datetime
 
     from data.freshness import check_freshness
@@ -402,15 +392,11 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
 
 
 def _build_brief(bot: str, date: str, reader: DataLakeReader):
-    """按机器人路由到对应 brief 构造器。
+    """按 push 机器人路由到对应 brief 构造器（注入式取数 + 纯函数渲染）。
 
-    一期 Task 2 框架 + Task 3 trading + Task 4 data + Task 5 strategy 全部接入：
-    market 走既有 build_daily_brief；trading/data/strategy 走注入式取数 + 纯函数渲染。
+    market 已下线；trading/data/strategy 各自取数失败均降级，不阻断播报。
     本函数集中路由，避免 main() 里散落 if/elif。
     """
-    if bot == "market":
-        # 既有行情播报 brief：return BriefResult(markdown=...)，调用链不变（回归红线）
-        return build_daily_brief(date, reader=reader)
     if bot == "trading":
         # 交易机器人：取数注入 → 纯函数渲染。取数失败任一项均降级，不阻断播报。
         trades, asset, positions, status = _fetch_trading_snapshot(date)
@@ -445,13 +431,14 @@ def _build_brief(bot: str, date: str, reader: DataLakeReader):
 def main(argv: list[str] | None = None) -> int:
     """CLI 主入口。返回 0=成功/跳过，1=无法定播报日，2=推送失败。
 
-    --bot {market|trading|data|strategy}（默认 market）：选择机器人身份，
-    决定 brief 构造器 + 凭证 + 幂等文件。market 分支行为与一期前完全一致（回归红线）。
+    --bot {trading|data|strategy}（默认 trading）：选择 push 机器人身份，
+    决定 brief 构造器 + 凭证 + 幂等文件。
     """
     p = argparse.ArgumentParser(
         prog="python -m broadcast", description="钉钉播报（多机器人 · 一期观测运营层）"
     )
-    p.add_argument("--bot", default="market", choices=SUPPORTED_BOTS, help="机器人身份")
+    p.add_argument("--bot", default="trading", choices=SUPPORTED_BOTS,
+                   help="push 机器人身份（默认 trading）")
     p.add_argument("--date", help="播报日 YYYY-MM-DD（缺省=index_daily 最新交易日）")
     p.add_argument("--dry-run", action="store_true", help="只打印文案不发钉钉")
     p.add_argument("--force", action="store_true", help="忽略幂等去重强制重发")
@@ -471,8 +458,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     brief = _build_brief(args.bot, date, reader)
-    title = f"{_BOT_CFG[args.bot]['title']} {date}"
-    robot_code = os.getenv(_BOT_CFG[args.bot]["robot_env"], "")
+    title = f"{PUSH_BOTS[args.bot]['title']} {date}"
+    robot_code = os.getenv(PUSH_BOTS[args.bot]["robot_env"], "")
     group_id = os.getenv(_GROUP_ID_ENV, "")
     ok = push_brief(
         title, brief.markdown,
