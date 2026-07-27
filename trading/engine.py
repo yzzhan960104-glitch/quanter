@@ -232,6 +232,10 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
             "take_profit": o.take_profit,
             "experiment_id": o.experiment_id,           # 透传实验归因（Task5 → Task8 链路）
             "experiment_weight": o.experiment_weight,   # 透传实验权重（Task8 加权聚合用）
+            # R3 实际口径盈亏比（2026-07-27 Task 2）：从 PlannedOrder.rr 透传到 order_dict，
+            # 供 push_plan_to_dingtalk md 渲染「盈亏比N.N」+ trading_plan JSON 落盘存档。
+            # Why 落盘：研究员复盘时可按 rr 排序找出弱信号历史，迭代 min_rr 守卫阈值。
+            "rr": round(o.rr, 2),
         }
         for o in orders
     ]

@@ -35,11 +35,15 @@ from strategies.signal import Signal
 
 @dataclass
 class PlannedOrder:
-    """计划单（OrderRequest + 出场价 + 实验归因）。
+    """计划单（OrderRequest + 出场价 + 实验归因 + 实际盈亏比）。
 
     新增 experiment_id/experiment_weight 两个默认值字段：
     - 默认值保证老调用点（不带归因）零回归；
     - 实验系统启用后，Task 7 的 _eod 会在 signal dict 里注入，此处原样落盘。
+    新增 rr 字段（R3 · 2026-07-27 Task 2）：
+    - 实际口径盈亏比 = (tp2-entry)/(entry-stop_price)，从 Signal.rr 透传，
+      用于 push_plan_to_dingtalk md 展示「盈亏比N.N」让研究员人审看真实风险报酬比。
+    - 默认 0.0 保证老 Signal（无 rr）零回归，push 层判 falsy 跳过渲染。
     """
     order: OrderRequest
     stop_price: float
@@ -47,6 +51,7 @@ class PlannedOrder:
     neckline: float
     experiment_id: str = ""          # 归因：所属实验版本（_eod 注入，Task 8 report 按此聚合）
     experiment_weight: float = 1.0   # 归因：落盘时冻结的资金权重（灰度分流，1.0=满仓口径）
+    rr: float = 0.0                  # R3 实际口径盈亏比（从 Signal 透传，push 展示用）
 
 
 def build_orders_from_signals(
@@ -112,5 +117,7 @@ def build_orders_from_signals(
             # 归因透传：experiment_id Signal 默认 ""（老链路），experiment_weight 已在 budget 落地
             experiment_id=s.experiment_id,
             experiment_weight=weight,
+            # R3 实际 rr 透传：Signal.rr 缺省（None）时归 0.0（push 层 falsy 跳渲染，零回归）
+            rr=s.rr if s.rr is not None else 0.0,
         ))
     return out

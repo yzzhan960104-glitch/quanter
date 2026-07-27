@@ -124,3 +124,23 @@ def test_push_plan_to_dingtalk_returns_false_on_push_failure(tmp_path, monkeypat
 
     monkeypatch.setattr(tp, "push_brief", fake_push_brief)
     assert tp.push_plan_to_dingtalk("2026-07-22", _sample_nested_orders()) is False
+
+
+def test_push_plan_md_includes_rr(monkeypatch):
+    """R3：push_plan_to_dingtalk md 含实际盈亏比 rr（研究员人审看真实风险报酬比）。
+
+    物理意图（颈线法算法修复 R3）：detect 已算出实际口径 rr（基于真实止损/止盈价），
+    全链路 Signal.rr → PlannedOrder.rr → order_dict["rr"] → 此处 md 渲染「盈亏比N.N」，
+    让研究员 T-1 晚人审时看到每单的真实风险报酬比——而非历史写死的 "2.0"。
+    缺此渲染 → 人审凭直觉拍，盈亏比 1.2 的弱信号可能蒙混过确认闸，实盘敞口失稳。
+    影子模式红线：monkeypatch push_brief 绝不真发 dws。
+    """
+    from trading import trading_plan
+    captured = {}
+    # 与既有 test 同款 monkeypatch：替换 trading_plan 模块内 push_brief 引用
+    monkeypatch.setattr(trading_plan, "push_brief",
+                        lambda title, md, **kw: captured.update(md=md) or True)
+    orders = [{"order": {"symbol": "T.SZ", "side": "buy", "qty": 100, "price": 10.0},
+               "stop_price": 9.0, "take_profit": 12.0, "rr": 2.5}]
+    trading_plan.push_plan_to_dingtalk("2026-07-27", orders)
+    assert "2.5" in captured["md"]  # md 显示 rr

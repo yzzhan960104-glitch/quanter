@@ -148,14 +148,19 @@ def push_plan_to_dingtalk(date: str, orders: list) -> bool:
         name_map = _load_name_map()
         # 计划下单段：标的名(symbol) 双显。研究员人工确认闸依赖中文标的名认知，
         # 只显代码认不出 → 必须 name + code（name 缺失时降级只显 code 不崩）。
+        # R3（2026-07-27 Task 2）：每单追加「盈亏比N.N」——从 order_dict["rr"] 读，
+        # 让研究员 T-1 晚人审快速识别弱信号（rr<1.5 的形态风险报酬比失衡，应人工否决）。
+        # 老 order_dict（无 rr 键）→ o.get 返 None → rr_str="" → md 与旧版逐字一致（零回归）。
         lines = []
         for o in orders:
             sym = o['order']['symbol']
             nm = name_map.get(sym, "")
             prefix = f"{nm} " if nm else ""
+            rr = o.get("rr")
+            rr_str = f" 盈亏比{rr:.1f}" if rr else ""
             lines.append(
                 f"- {prefix}{sym} {o['order']['side']} {o['order']['qty']}股"
-                f"@{o['order']['price']}（止损{o['stop_price']}/止盈{o['take_profit']}）"
+                f"@{o['order']['price']}（止损{o['stop_price']}/止盈{o['take_profit']}）{rr_str}"
             )
         # 当前持仓段：engine 记账（与下单计划同框，研究员一眼看「计划 + 持仓」全貌，
         # 避免研究员只看计划不知已有持仓导致超配误判）。

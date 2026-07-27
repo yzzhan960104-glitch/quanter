@@ -197,4 +197,11 @@ class NecklineMethodStrategy:
             bottom=res.get("bottom"),
             entry_price=res.get("entry") if res.get("entry") is not None else res.get("neckline"),
             atr=float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else res.get("atr"),
+            # R3 实际口径盈亏比（2026-07-27 Task 2）：detect 已算 (tp2-entry)/(entry-stop_price)
+            # 实际盈亏比（基于颈线-N×ATR 止损 / 颈线+N×H 止盈的真实风险报酬比），
+            # 此处原样透传到 Signal.rr，供 PlannedOrder → order_dict → 钉钉 md 展示，
+            # 让研究员 T-1 晚人审看到每单的真实风险报酬比（而非历史写死的 2.0）。
+            # Why 必须透传：旧链路 Signal.rr 在 scan_live 路径下恒 None，研究员人审只看
+            # 到止损/止盈价无法快速心算盈亏比 → 弱信号（如 rr=1.2）易蒙混过确认闸。
+            rr=res.get("rr"),
         )]
