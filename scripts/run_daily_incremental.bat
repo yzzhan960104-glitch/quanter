@@ -9,6 +9,6 @@
 ::   的熔断只在 daily 增量真失败 + 重采 15min 节流仍 FAIL 时触发）。
 ::
 :: 退出码 0=成功/已最新；1=失败（schtasks 层默认不熔断，仅 Last Run Result 可观测）。
-cd /d C:\Users\yzzhan\Desktop\quanter
+cd /d F:\quanter
 call .venv310\Scripts\activate.bat
 python data\tools\sync_daily_incremental.py

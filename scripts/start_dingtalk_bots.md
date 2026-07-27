@@ -36,7 +36,7 @@ python -m broadcast connect --start review
 
 ### 3. uvicorn 服务（training loop + webhook 推 + /review 端点 + 观测层 API）
 ```bash
-C:/Users/yzzhan/Desktop/quanter/.venv310/Scripts/python.exe -m uvicorn presentation.server.main:app --host 127.0.0.1 --port 8000
+F:/quanter/.venv310/Scripts/python.exe -m uvicorn presentation.server.main:app --host 127.0.0.1 --port 8000
 ```
 - lifespan 装 TrainingLoopOrchestrator（daemon）+ replay_scheduler
 - DingTalkNotifier（webhook 推报告/回显，urllib，不用 dingtalk-stream SDK）
@@ -129,7 +129,7 @@ DATA_BRIEF_TIME=17:00
 ### Step 5 · dry-run 三份文案（不发钉钉，只打印；改完 .env 先验文案）
 
 ```bash
-cd C:/Users/yzzhan/Desktop/quanter
+cd F:/quanter
 .venv310/Scripts/python.exe -m broadcast --bot trading  --dry-run
 .venv310/Scripts/python.exe -m broadcast --bot data     --dry-run
 .venv310/Scripts/python.exe -m broadcast --bot strategy --dry-run
@@ -162,7 +162,7 @@ python -m broadcast connect --start all
 ### Step 7 · 注册 3 个播报 schtasks（每日定时触发）
 
 ```bash
-cd C:/Users/yzzhan/Desktop/quanter
+cd F:/quanter
 .venv310/Scripts/python.exe ops/manage_ops_schtasks.py --register
 .venv310/Scripts/python.exe ops/manage_ops_schtasks.py --list
 ```
@@ -174,7 +174,7 @@ cd C:/Users/yzzhan/Desktop/quanter
 ### Step 8 · 冒烟真发（每机器人真发一份当日报告）
 
 ```bash
-cd C:/Users/yzzhan/Desktop/quanter
+cd F:/quanter
 .venv310/Scripts/python.exe -m broadcast --bot trading  --force
 .venv310/Scripts/python.exe -m broadcast --bot data     --force
 .venv310/Scripts/python.exe -m broadcast --bot strategy --force
@@ -256,7 +256,7 @@ pm2 logs trading-engine
 
 ```bash
 # 一次性注册（幂等：删后建覆盖；改时点 = 改 .env + 重跑 bat 不变）
-schtasks /Create /TN "QuanterTradingEngine" /TR "C:\Users\yzzhan\Desktop\quanter\scripts\run_trading_engine.bat" /SC ONSTART /RU "<Windows用户名>" /RP "<密码>" /F
+schtasks /Create /TN "QuanterTradingEngine" /TR "F:\quanter\scripts\run_trading_engine.bat" /SC ONSTART /RU "<Windows用户名>" /RP "<密码>" /F
 schtasks /Query /TN "QuanterTradingEngine" /V
 # 立即触发一次（不等开机）
 schtasks /Run /TN "QuanterTradingEngine"

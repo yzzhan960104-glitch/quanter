@@ -22,7 +22,7 @@ REM   B. PM2（pm2 start scripts/run_trading_engine.bat --name trading-engine）
 REM   C. schtasks（开机自启 · 影子模式稳定后切生产推荐）
 REM ============================================================================
 chcp 65001 >nul
-cd /d "C:\Users\yzzhan\Desktop\quanter"
+cd /d "F:\quanter"
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 ".venv310\Scripts\python.exe" -m trading
