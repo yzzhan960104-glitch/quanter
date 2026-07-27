@@ -19,7 +19,7 @@ def test_config_package_reexports_legacy_names():
     from config import (  # noqa: F401
         DATA_SOURCE_CREDENTIALS, MARKET_HOURS, DATA_CONFIG, MACRO_CONFIG,
         VIZ_CONFIG, MOCK_TRADING_CONFIG, LAKE_CONFIG, MACRO_CLIENT_CONFIG,
-        CELERY_CONFIG, JQDATA_CONFIG, AKSHARE_CONFIG,
+        CELERY_CONFIG,
         DATASET_REGISTRY, TUSHARE_DATASETS, SYNCING_DIR, get_credential,
     )
     # LAKE_CONFIG 跨段拼接正确性：base 键 + 追加键都在

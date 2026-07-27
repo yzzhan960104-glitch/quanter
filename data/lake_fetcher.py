@@ -7,8 +7,6 @@
 设计原则（极简 + 离线降级）：
 - 不重新取数：纯读 DataLakeReader 内存湖（启动时 lifespan 已 load 全部湖）。
 - 与 MockDataFetcher 同签名（fetch_ohlcv / fetch_macro），service 层零改逻辑、只换实例。
-- symbol 路由：'dynamic_top50'（前端 ParamForm 劫持的活跃池代号）→ daily_active 湖活跃池，
-  单资产回测取首只代表；真实代码（如 600000.SH）→ 直接 get_timeseries。
 - 数据缺失抛 LookupError：由 service 层捕获降级到 MockDataFetcher，保证开发机/CI 无数据湖
   时仍可启动回测（不阻断），并 logger.warning 留痕。
 
@@ -16,12 +14,16 @@
 - 不在 fetcher 层做任何重采样/ffill（reader.get_timeseries 返回原始时序，保留停牌空洞）；
   清洗由上层 DataCleaner.clean_ohlcv 统一处理（与 Mock 路径一致），避免在数据获取环节
   引入“用未来解释现在”的污染。
+
+退役说明（2026-07-27）：
+- 分钟级湖（minute / jq_shards）+ 活跃池湖（daily_active）已整体退役，原 dynamic_top50
+  路由（活跃池首只代表）与 fetch_active_symbols 一并下线；fetch_ohlcv 现仅接受真实 symbol。
+- freq 映射只保留 '1d' → daily；分钟级 freq 降级到 daily 湖，由 LookupError 兜底降级 Mock。
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import List
 
 import pandas as pd
 
@@ -29,12 +31,10 @@ from data.lake_reader import DataLakeReader
 
 logger = logging.getLogger(__name__)
 
-# freq → 湖 key 映射：分钟级走 minute 湖，日级走 daily 湖
+# freq → 湖 key 映射：当前仅日级（分钟级湖已退役，分钟 freq 统一降级到 daily 湖，
+# daily 湖无分钟粒度 → get_timeseries 返空 → 抛 LookupError → service 降级 Mock）。
 _FREQ_TO_LAKE = {
     "1d": "daily",
-    "1h": "minute",
-    "5m": "minute",
-    "1m": "minute",
 }
 
 # 宏观 indicator（service 层调用名）→ macro 湖实际列名映射。
@@ -48,9 +48,6 @@ _MACRO_COL_MAP = {
     "dr007": "dr007",
     "shrzgm": "shrzgm",
 }
-
-# 前端劫持的活跃池代号（ParamForm.vue:387），LakeDataFetcher 内部路由到 daily_active 湖
-_ACTIVE_POOL_CODE = "dynamic_top50"
 
 
 class LakeDataFetcher:
@@ -74,22 +71,19 @@ class LakeDataFetcher:
     ) -> pd.DataFrame:
         """从 data_lake 取真实 OHLCV 时序。
 
-        - 真实 symbol → get_timeseries(symbol, lake=daily/minute 按 freq)
-        - 'dynamic_top50' → daily_active 湖活跃池，单资产取首只代表
-          （组合回测由 service 逐只调本方法，不走 _resolve_symbol 的单只退化）
+        - 真实 symbol → get_timeseries(symbol, lake=daily)
         - 数据缺失 → 抛 LookupError（service 降级 Mock）
 
         返回：OHLCV DataFrame（open/high/low/close/volume/[amount]/[turnover]），
         DatetimeIndex，**不 ffill**（保留停牌空洞交由 DataCleaner 统一清洗）。
         """
-        target = self._resolve_symbol(symbol)
         lake = _FREQ_TO_LAKE.get(freq, "daily")
         df = self._reader.get_timeseries(
-            target, self._fmt(start), self._fmt(end), lake=lake
+            symbol, self._fmt(start), self._fmt(end), lake=lake
         )
         if df is None or df.empty:
             raise LookupError(
-                f"data_lake[{lake}] 无 {target} 数据"
+                f"data_lake[{lake}] 无 {symbol} 数据"
                 f"（{start.date()}~{end.date()}, freq={freq}）"
             )
         return df
@@ -122,39 +116,6 @@ class LakeDataFetcher:
                 f"macro 湖 {col} 在 {start.date()}~{end.date()} 区间无数据"
             )
         return series.to_frame(name=indicator)
-
-    # ---------- 活跃池 ----------
-
-    def fetch_active_symbols(self) -> List[str]:
-        """daily_active 湖的活跃池标的列表（供组合回测 universe 用）。
-
-        无 daily_active 湖时返空 list（service 决定降级）。
-        """
-        lake_df = self._reader._lakes.get("daily_active")
-        if lake_df is None or lake_df.empty:
-            return []
-        # MultiIndex(date, symbol) → 取 symbol 层级唯一值（保留出现顺序）
-        return list(lake_df.index.get_level_values("symbol").unique())
-
-    # ---------- 内部 ----------
-
-    def _resolve_symbol(self, symbol: str) -> str:
-        """symbol 路由：'dynamic_top50' → 活跃池首只（单资产代表）；其余原样。
-
-        Why 首只：单资产回测（BacktestRequest.symbol: str）只跑一只，活跃池多只无法塞进；
-        取首只作代表（活跃池已按 momentum 排序，首只是最强标的，代表性强）。
-        组合回测走 symbols 列表，由 service 逐只调 fetch_ohlcv，不走此分支。
-        """
-        if symbol == _ACTIVE_POOL_CODE:
-            pool = self.fetch_active_symbols()
-            if not pool:
-                raise LookupError(
-                    "dynamic_top50 路由失败：daily_active 湖未加载"
-                    "（先跑 data/tools/sync_sector_daily.py）"
-                )
-            logger.info("dynamic_top50 → 活跃池首只代表 %s", pool[0])
-            return pool[0]
-        return symbol
 
     @staticmethod
     def _fmt(dt: datetime) -> str:

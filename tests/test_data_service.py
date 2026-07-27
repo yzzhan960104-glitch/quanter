@@ -12,16 +12,16 @@ def test_sweep_stale_on_startup_triggers_stale_and_missing(monkeypatch):
     monkeypatch.setattr(data_service, "list_datasets", lambda: [
         {"key": "daily", "status": "healthy"},
         {"key": "macro", "status": "stale"},
-        {"key": "minute", "status": "missing"},
+        {"key": "daily_basic", "status": "missing"},
         {"key": "crypto", "status": "syncing"},
-        {"key": "north_flow", "status": "failed"},
+        {"key": "ths_daily", "status": "failed"},
     ])
     triggered = []
     monkeypatch.setattr(data_service, "trigger_sync",
                         lambda key: triggered.append(key))
     result = data_service.sweep_stale_on_startup()
-    assert sorted(result) == ["macro", "minute"]
-    assert sorted(triggered) == ["macro", "minute"]
+    assert sorted(result) == ["daily_basic", "macro"]
+    assert sorted(triggered) == ["daily_basic", "macro"]
 
 
 def test_sweep_stale_on_startup_skips_keyerror_silently(monkeypatch):

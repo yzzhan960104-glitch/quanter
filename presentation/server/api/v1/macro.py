@@ -43,17 +43,17 @@ async def sector_flow() -> dict[str, Any]:
     离线降级：sector 湖未载入 → 返 {sectors: [], pool: []} 不抛。
 
     Why head(20)：前端面板仅展示 Top 20 板块，避免一次性渲染过多行拖慢交互。
-    Why pool 暂返 []：活跃股池目前由 sync_sector_daily 单独落盘到独立结构，
-    本期端点先留字段占位（前端契约已对齐），下期接入活跃股池湖后填充。
+    退役说明（2026-07-27）：原 sector 湖（akshare 板块资金流，sync_sector_daily 写）+
+    a_shares_active 活跃池湖已整体退役——sectors 恒空（无数据源），pool 改走 daily 湖
+    前 50 只（reader.symbols）。端点保留契约不崩前端，彻底下线待前端确认后移除。
     """
     import os as _os
     import pandas as _pd
     from config import LAKE_CONFIG
-    # sector 资金流是【快照排名表】（RangeIndex，非时序），DataLakeReader 只载时序湖会跳过它，
-    # 故此处直读 parquet（小表 ~500 行，IO 可忽略）。
+    # sector 湖已退役，LAKE_CONFIG 无此 key，.get 防 KeyError → sectors 恒空（无数据源）。
     sectors: list = []
-    _sp = LAKE_CONFIG["lakes"]["sector"]
-    if _os.path.exists(_sp):
+    _sp = LAKE_CONFIG["lakes"].get("sector", "")
+    if _sp and _os.path.exists(_sp):
         _sdf = _pd.read_parquet(_sp)
         if _sdf is not None and not _sdf.empty:
             sectors = _sdf.head(20).to_dict("records")

@@ -12,8 +12,8 @@ def test_data_brief_health_summary():
     """混合健康度样本：3 healthy / 1 stale / 1 missing，验证健康分计数 + 异常清单。"""
     r = build_data_brief("2026-07-21", datasets=[
         {"key": "daily", "status": "healthy", "freshness_hours": 2.0},
-        {"key": "minute", "status": "stale", "freshness_hours": 48.0},
-        {"key": "dragon_list", "status": "missing"},
+        {"key": "daily_basic", "status": "stale", "freshness_hours": 48.0},
+        {"key": "index_daily", "status": "missing"},
         {"key": "ths_daily", "status": "healthy", "freshness_hours": 1.0},
     ])
     md = r.markdown

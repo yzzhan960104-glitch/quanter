@@ -31,11 +31,9 @@ from typing import Dict, Any
 #   schedule:        计划节奏（**仅元信息展示**，无 Beat 守护，不做强约束）
 #   freshness_hours: 「健康」新鲜度阈值（小时）；parquet mtime 距今 ≤ 此值 = healthy，否则 stale
 # key 与 LAKE_CONFIG["lakes"] 的 key 通常一一对应（路径不重复定义，只在此声明资产语义）。
-# 例外——复用湖场景：数据集名作 key，但物理 parquet 落在既有湖（见 lake_key 字段）。
-#   lake_key: 物理湖在 LAKE_CONFIG["lakes"] 的 key；缺省 = 数据集 key 自身（一一对应）。
-#   仅复用湖需显式声明：top_list → dragon_list、hsgt_top10 → north_flow（切 Tushare 替代
-#   akshare，parquet 落同一文件，避免双湖分叉）。data_service 的 _parquet_path /
-#   _loaded_data_span 优先读 lake_key 作湖索引，fallback 到数据集 key（零回归保护既有湖）。
+# 例外——复用湖场景（已废弃 2026-07-27）：原 top_list→dragon_list、hsgt_top10→north_flow 的
+#   lake_key 复用设计已废弃（dragon_list/north_flow 两湖随 AKShare 源退役删除），top_list/
+#   hsgt_top10 改用独立 lake 路径。data_service._parquet_path fallback 到数据集 key 自身（零回归）。
 DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     # macro（macro_credit 湖）：CreditRegime 的输入湖，由 sync_macro_credit.py 产出。
     # Plan C Task 6 源切换：主源 Tushare cn_m(M0/M1/M2) + akshare 社融(shrzgm)/DR007 fallback。
@@ -44,24 +42,13 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     # 「宏观信贷现已切 Tushare」，而非仍停留在 AKShare 标签（混合源语义，plan 既定决策非 bug）。
     "macro":         {"source": "Tushare", "market": "宏观", "granularity": "月频→日频",
                       "script": "data/tools/sync_macro_credit.py", "schedule": "每月初",   "freshness_hours": 720},
-    "sector":        {"source": "AKShare", "market": "板块", "granularity": "1d",
-                      "script": "data/tools/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
     # daily（前复权日线）：2026-07-25 Plan Task 7 纳入统一管道（_sync_by_symbol adj_api 增强），
     # script 从 sync_data_lake.py 切到 sync_tushare.py（sync_data_lake 转薄壳 deprecated）。
     # 前复权逻辑照搬 fetch_qfq: price=raw×adj/latest，与既有 a_shares_daily.parquet（903万行）字节级一致。
     "daily":         {"source": "Tushare", "market": "A股",  "granularity": "1d",
                       "script": "data/tools/sync_tushare.py",   "schedule": "每日18:00", "freshness_hours": 24},
-    "daily_active":  {"source": "AKShare", "market": "A股",  "granularity": "1d",
-                      "script": "data/tools/sync_sector_daily.py", "schedule": "每日18:00", "freshness_hours": 24},
-    "minute":        {"source": "JQData",  "market": "A股",  "granularity": "1m",
-                      "script": "data/tools/sync_jqdata_1min.py", "schedule": "每日18:00", "freshness_hours": 24},
-    # north_flow（akshare 北向资金净流入）：⚠️ moneyflow_hsgt.north_money 为北向总量权威源
-    # （tushare 全期 700 行可用），north_flow 为 akshare 冗余备份（24 行废弃态，近期未同步）。
-    # 保留 akshare client 能力（test_akshare_north_dragon 覆盖），不主动调度；北向总量读 moneyflow_hsgt。
-    "north_flow":    {"source": "AKShare", "market": "A股",  "granularity": "1d",
-                      "script": "data/tools/sync_north_flow.py",  "schedule": "每日18:00", "freshness_hours": 24},
-    "dragon_list":   {"source": "AKShare", "market": "A股",  "granularity": "1d",
-                      "script": "data/tools/sync_dragon_list.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # 退役（2026-07-27）：原 sector/daily_active/minute/north_flow/dragon_list 5 条 AKShare/JQData
+    # 数据集注册已删——连同对应 sync 脚本与 lake key 一并下线。北向总量读 moneyflow_hsgt.north_money。
     # ============================================================================
     # Tushare 数据中心新湖（Plan A Task 11 注册表对齐）
     # ============================================================================
@@ -103,8 +90,8 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     # top_list（龙虎榜个股明细）：⚠️ 代理 tnskhdata 无此方法（2026-07-19 probe 实测 DataApi has no
     # attribute，间歇返字段不可靠），TUSHARE_DATASETS 标 _unavailable，前端展示但无数据。
-    # 原 lake_key=dragon_list 复用设计废弃——dragon_list（akshare hit 标记，brief.py 播报消费）语义
-    # 不同，且代理跑不通 top_list，复用无意义。龙虎榜单用 dragon_list，个股明细待 akshare 换源。
+    # lake_key 复用已废弃：top_list 用独立 lake（data_lake/top_list.parquet）；代理跑不通 top_list
+    # 标 _unavailable 前端展示 missing。原 dragon_list 湖（akshare hit 标记）已随 AKShare 源退役删除。
     "top_list":        {"source": "Tushare", "market": "A股", "granularity": "1d",
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "top_inst":        {"source": "Tushare", "market": "A股", "granularity": "1d",
@@ -116,10 +103,10 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "margin_secs":     {"source": "Tushare", "market": "A股", "granularity": "快照",
                         "script": "data/tools/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
-    # —— 北向资金 2（hsgt_top10 复用 north_flow 湖，切 Tushare 替代 akshare）——
+    # —— 北向资金 2（hsgt_top10 / moneyflow_hsgt）——
     # hsgt_top10（沪深港通十大成交股）：⚠️ 代理 tnskhdata 无此方法（同 top_list，probe 实测），_unavailable。
-    # 原 lake_key=north_flow 复用废弃——north_flow（akshare 北向总量，废弃态）语义不同。
-    # 北向总量改用 moneyflow_hsgt.north_money（全期 700 行可用），个股十大明细待换源。
+    # hsgt_top10 用独立 lake（data_lake/hsgt_top10.parquet）；原 north_flow 湖（akshare 北向总量，废弃态）
+    # 已随 AKShare 源退役删除；北向总量读 moneyflow_hsgt.north_money（全期 700 行可用）。
     "hsgt_top10":      {"source": "Tushare", "market": "A股", "granularity": "1d",
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "moneyflow_hsgt":  {"source": "Tushare", "market": "A股", "granularity": "1d",
