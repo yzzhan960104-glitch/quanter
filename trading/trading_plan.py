@@ -92,6 +92,44 @@ def confirm_plan(date: str) -> bool:
     return True
 
 
+_NAME_MAP_CACHE = None
+
+
+def _load_name_map() -> dict:
+    """加载 ts_code→中文名称 映射（data_lake/stock_basic.parquet，懒加载缓存）。
+
+    Why 缓存：push_plan_to_dingtalk 每次调不重读 parquet（5531 行 I/O）；首次读后
+    模块级复用。读失败返 {}（名称缺失时推送只显代码，不崩——展示降级，不阻断推送）。
+    """
+    global _NAME_MAP_CACHE
+    if _NAME_MAP_CACHE is not None:
+        return _NAME_MAP_CACHE
+    try:
+        import pandas as pd
+        sb = pd.read_parquet("data_lake/stock_basic.parquet")
+        _NAME_MAP_CACHE = dict(zip(sb["ts_code"], sb["name"]))
+    except Exception:
+        logger.exception("加载 stock_basic 名称映射失败（推送将只显代码）")
+        _NAME_MAP_CACHE = {}
+    return _NAME_MAP_CACHE
+
+
+def _get_positions_snapshot() -> dict:
+    """当前本地持仓快照 {symbol: qty}（position_book；dry_run 空仓，live 反映真实成交累计）。
+
+    Why 本地账本而非 broker：push 时研究员看「engine 记账持仓」，与 post_close 对账
+    同源；broker 真实持仓在对账环节比对。init_db 幂等兜底（手动调用未走 __main__ 时
+    position 表可能未建）。
+    """
+    try:
+        from trading import position_book
+        position_book.init_db()
+        return position_book.get_local_positions()
+    except Exception:
+        logger.exception("读本地持仓失败（推送持仓段将显空仓）")
+        return {}
+
+
 def push_plan_to_dingtalk(date: str, orders: list) -> bool:
     """把 T-1 计划推到交易机器人群（研究员钉钉确认用）。
 
@@ -107,15 +145,32 @@ def push_plan_to_dingtalk(date: str, orders: list) -> bool:
     """
     # 格式化在 try 外也可，但兜底：orders 结构异常时不抛，记堆栈返 False。
     try:
-        lines = [
-            f"- {o['order']['symbol']} {o['order']['side']} {o['order']['qty']}股"
-            f"@{o['order']['price']}（止损{o['stop_price']}/止盈{o['take_profit']}）"
-            for o in orders
-        ]
+        name_map = _load_name_map()
+        # 计划下单段：标的名(symbol) 双显。研究员人工确认闸依赖中文标的名认知，
+        # 只显代码认不出 → 必须 name + code（name 缺失时降级只显 code 不崩）。
+        lines = []
+        for o in orders:
+            sym = o['order']['symbol']
+            nm = name_map.get(sym, "")
+            prefix = f"{nm} " if nm else ""
+            lines.append(
+                f"- {prefix}{sym} {o['order']['side']} {o['order']['qty']}股"
+                f"@{o['order']['price']}（止损{o['stop_price']}/止盈{o['take_profit']}）"
+            )
+        # 当前持仓段：engine 记账（与下单计划同框，研究员一眼看「计划 + 持仓」全貌，
+        # 避免研究员只看计划不知已有持仓导致超配误判）。
+        local = _get_positions_snapshot()
+        if local:
+            pos_lines = [
+                f"- {name_map.get(s, '')} {s} {q:g}股" for s, q in local.items()
+            ]
+        else:
+            pos_lines = ["- 空仓"]
         md = (
             f"### T-1 交易计划 {date}\n"
             f"> 待确认（回复「确认」即挂单）\n\n"
-            + "\n".join(lines)
+            f"**计划下单**\n" + "\n".join(lines) + "\n\n"
+            f"**当前持仓**\n" + "\n".join(pos_lines)
         )
         # 凭证从环境读：TRADING_BOT_ROBOT_CODE（交易机器人）/ BROADCAST_GROUP_ID（运营群），
         # 与 broadcast __main__.PUSH_BOTS["trading"] / _GROUP_ID_ENV 凭证约定一致。
