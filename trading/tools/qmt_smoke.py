@@ -19,8 +19,10 @@ import asyncio
 import os
 import sys
 
-# 把项目根加入 sys.path（脚本独立运行需要）
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 把项目根加入 sys.path（脚本独立运行需要）。脚本位于 项目根/trading/tools/，
+# 须三层 dirname 上溯项目根（两层只到 trading/，会被 insert 进 sys.path[0]
+# 遮蔽标准库 calendar + 致 from trading 找不到包）。
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _PROJECT_ROOT)
 
 # 触发 .env 加载（python-dotenv 若有；否则依赖外部已 export）
