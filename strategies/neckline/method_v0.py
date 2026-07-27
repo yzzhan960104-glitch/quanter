@@ -232,20 +232,30 @@ def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=No
 
     # —— 4. 交易要素（颈线 + 最低点 → 进场/止损/止盈/rr）——
     # 进场 = 颈线价 c*（挂单等回踩；close>c* 只触发信号，不追涨）。
-    # 使 risk=H、rr=2H/H=2.0 结构恒定，盈亏比由形态结构决定，不依赖突破日涨幅。
-    # 止盈用第二波满足（颈线+2H），对齐 caisen plan.neckline_height_multiple=2。
+    # 止盈用 H 几何标尺（形态目标位：颈线+1H 第一波、颈线+N×H 第二波），
+    # N=cfg["tp_h_mult"] 参数化（默认 2.0，对齐 caisen plan.neckline_height_multiple=2）。
     entry = c_star
-    stop = min_price                         # 谷底（注：持有期模拟里止损改为颈线，见 backtest）
-    H = c_star - min_price
+    H = c_star - min_price                          # 形态几何深度（tp 定位标尺）
     if H <= 0:
         return None
     # ⑦ 形态深度过滤：H/ATR > max_h_atr 视为"暴跌反弹"（深形态全市场实证胜率仅 27%）
     h_over_atr = H / atr_val
     if h_over_atr > cfg.get("max_h_atr", 4.0):
         return None
-    take_profit_1 = c_star + H               # 第一波满足（50% 止盈位）
-    take_profit_2 = c_star + 2 * H           # 第二波满足（50% 止盈位）
-    rr = (take_profit_2 - entry) / H         # = 2H/H = 2.0
+    take_profit_1 = c_star + H                      # 第一波满足（几何，颈线+1H）
+    take_profit_2 = c_star + cfg["tp_h_mult"] * H   # 第二波满足（几何，颈线+N×H）
+    # —— R3 实际止损 + 实际盈亏比（2026-07-27 Task 1）——
+    # Why：旧版 rr=2H/H=2.0 是几何 sanity，止损用谷底（min_price）跟执行层 simulate_exit
+    # 的实际止损（颈线−stop_atr_mult×ATR，base_stop）口径脱节——detect 说"风险=H"，
+    # 执行层真止损在颈线−N×ATR（往往远高于谷底），min_rr 没把住真实风险收益。
+    # 修正：detect 显式产出 stop_price（与执行层同口径），rr 用实际盈亏比
+    # (tp2−entry)/(entry−stop_price)，min_rr 验真实盈亏比。
+    # 止盈仍用 H 几何标尺（形态目标位，与 caisen plan 对齐），止损改 ATR 波动标尺（风控口径）。
+    stop_price = c_star - cfg["stop_atr_mult"] * atr_val   # 实际止损（执行层 base_stop 同口径）
+    risk_dist = entry - stop_price
+    if risk_dist <= 0:
+        return None  # 防御：颈线 ≤ stop_price（ATR 异常放大），无风险距离无意义
+    rr = (take_profit_2 - entry) / risk_dist              # 实际口径盈亏比（替换旧 2H/H 几何）
     if rr < cfg["min_rr"]:
         return None
 
@@ -256,12 +266,13 @@ def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=No
         "bottom": round(min_price, 3),
         "n_bottoms": len(bottom_set),
         "entry": round(entry, 3),
-        "stop": round(stop, 3),
+        "stop": round(min_price, 3),                # 谷底（保留，H 计算基准 + 形态参考）
+        "stop_price": round(stop_price, 3),         # R3 实际交易止损（颈线−N×ATR，执行层 base_stop 同口径）
         "take_profit_1": round(take_profit_1, 3),
         "take_profit_2": round(take_profit_2, 3),
         "H": round(H, 3),
-        "H_over_ATR": round(h_over_atr, 2),   # 形态深度（实证关键分水岭）
-        "rr": round(rr, 3),
+        "H_over_ATR": round(h_over_atr, 2),          # 形态深度（实证关键分水岭）
+        "rr": round(rr, 3),                          # R3 实际口径盈亏比（替换旧几何 2H/H）
         "atr": round(atr_val, 3),
     }
 

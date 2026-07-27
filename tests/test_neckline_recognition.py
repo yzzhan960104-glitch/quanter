@@ -158,7 +158,7 @@ def test_search_neckline_reject_few_tops():
 # ③ detect_neckline_method · 成功路径 + 5 个拒绝边界
 # ============================================================================
 def test_detect_recognizes_pattern():
-    """合成形态完整通过 7 守卫 → 返回候选 dict（颈线=100/bottom=90/H=10/rr=2）。"""
+    """合成形态完整通过 7 守卫 → 返回候选 dict（颈线=100/bottom=90/H=10）。"""
     df = _ohlc(_synth_pattern())
     res = detect_neckline_method(df, cfg=_CFG_W20)
     assert res is not None
@@ -166,7 +166,10 @@ def test_detect_recognizes_pattern():
     assert res["bottom"] == 90.0
     assert res["n_bottoms"] == 2          # bottom_set = {90.0, 91.0}
     assert res["H"] == 10.0
-    assert res["rr"] == 2.0               # 结构恒 2H/H = 2.0
+    # R3（2026-07-27 Task 1）：rr 改实际口径 (tp2-entry)/(entry-stop_price)，
+    # stop_price=颈线-stop_atr_mult×ATR（执行层 base_stop 同口径）。本形态 ATR≈3.9 →
+    # stop_price=96.1、rr=20/3.9≈5.128（旧几何 2H/H=2.0 已废弃，与执行层脱节）。
+    assert res["rr"] == 5.128
     assert res["entry"] == 100.0          # 进场 = 颈线（挂单等回踩，不追涨）
     assert res["H_over_ATR"] < 4.0        # 深度守卫通过（防暴跌反弹）
 
@@ -313,3 +316,49 @@ def test_scan_symbol_matches_strategy(monkeypatch):
     assert a["entry"] == b.entry_price
     assert a["exit_date"] == b.exit_date
     assert a["exit_reason"] == b.exit_reason
+
+
+# ============================================================================
+# ⑤ R3 · detect 返 stop_price + rr 实际口径（2026-07-27 Task 1）
+# ============================================================================
+# 物理意图（Why 这组测试存在）：
+#     旧版 detect 用「谷底」当止损、rr=2H/H=2.0 几何 sanity——跟执行层 simulate_exit
+#     的实际止损（颈线−stop_atr_mult×ATR）口径脱节，min_rr 没把住真实风险收益。
+#     R3：detect 显式产出 stop_price（实际止损，与执行层口径一致），rr 改实际口径
+#     (tp2−entry)/(entry−stop_price)，min_rr 验真实盈亏比。
+#
+#     注：R2（窗口内已突破过滤）经实证前提错（c* 是顶部聚集位非真颈线，全市场信号
+#     归零），已放弃——本组只测 R3，跳过 R2 测试。
+def test_detect_rr_uses_actual_stop_price():
+    """R3：rr 改实际口径 (tp2-entry)/(entry-stop_price)，stop_price=颈线-stop_atr_mult×ATR。
+
+    几何 rr=2H/H=2.0（谷底止损）→ 实际 rr 用颈线−N×ATR 止损，不等于 2.0。
+    断言：① 返回 dict 含 stop_price 字段 = 颈线−stop_atr_mult×ATR；
+          ② rr = (tp2−entry)/(entry−stop_price) 实际口径（非几何 2.0）。
+    """
+    df = _ohlc(_synth_pattern())
+    cfg = {**_CFG_W20, "stop_atr_mult": 1.0, "tp_h_mult": 2.0}
+    res = detect_neckline_method(df, cfg=cfg)
+    assert res is not None
+    atr_val = res["atr"]
+    # R3：stop_price = 颈线 - stop_atr_mult×ATR（实际止损，与执行层 simulate_exit 同口径）
+    assert res["stop_price"] == round(res["neckline"] - 1.0 * atr_val, 3)
+    # rr 实际口径 = (tp2-entry)/(entry-stop_price)，不再恒等 2.0
+    expected_rr = (res["take_profit_2"] - res["entry"]) / (res["entry"] - res["stop_price"])
+    assert abs(res["rr"] - round(expected_rr, 3)) < 0.01
+
+
+def test_detect_min_rr_uses_actual():
+    """R3：min_rr 守卫验实际 rr（非几何 2.0）。
+
+    把 min_rr 设为宽松档（远低于几何 2.0 也远低于实际 rr）→ 应通过；
+    断言返回的 rr 字段反映实际口径（> min_rr 且自我一致）。
+    """
+    df = _ohlc(_synth_pattern())
+    cfg = {**_CFG_W20, "min_rr": 0.5}  # 宽松 min_rr，确保不因守卫被拒
+    res = detect_neckline_method(df, cfg=cfg)
+    assert res is not None
+    assert res["rr"] > 0.5  # 实际 rr 通过宽松守卫
+    # 实际口径自我一致性：rr == (tp2-entry)/(entry-stop_price)
+    expected = (res["take_profit_2"] - res["entry"]) / (res["entry"] - res["stop_price"])
+    assert abs(res["rr"] - round(expected, 3)) < 0.01
