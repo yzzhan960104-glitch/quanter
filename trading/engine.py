@@ -226,10 +226,20 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
                 "symbol": o.order.symbol,
                 "qty": o.order.qty,
                 "side": o.order.side,
-                "price": o.order.price,
+                # 挂单价 round 两位（A 股报价粒度=分；颈线回踩挂单同此约束）
+                "price": round(o.order.price, 2),
             },
-            "stop_price": o.stop_price,
-            "take_profit": o.take_profit,
+            # 止损/止盈/颈线 round 两位四舍五入：A 股最小报价 0.01 元，算法产出的高精度
+            # 浮点（如 stop=10.350317475825085）无实际意义，且污染人审/复盘可读性。
+            # Why 序列化层 round 而非 compute 层：compute 是 functional core 保持全精度
+            # （风控参数计算精度不折损），仅落盘+展示约束两位（IO 层关切）。
+            "stop_price": round(o.stop_price, 2),
+            "take_profit": round(o.take_profit, 2),
+            # 颈线价（形态基准 c*）：透出供 push_plan_to_dingtalk md 显式标注「颈线」，
+            # 让研究员 T-1 晚人审时一眼确认形态基准位（止损/止盈均以颈线为锚）。
+            # scan_live 下 entry_price=neckline，故与 order.price 同值——显式单列是为
+            # 语义清晰（挂单价=回踩位 vs 颈线=形态位），未来 entry≠neckline 时自然分叉。
+            "neckline": round(o.neckline, 2),
             "experiment_id": o.experiment_id,           # 透传实验归因（Task5 → Task8 链路）
             "experiment_weight": o.experiment_weight,   # 透传实验权重（Task8 加权聚合用）
             # R3 实际口径盈亏比（2026-07-27 Task 2）：从 PlannedOrder.rr 透传到 order_dict，
@@ -241,7 +251,16 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
     ]
     # 落盘 confirmed=False（pre_open 会检查此位）+ 推钉钉等确认
     trading_plan.save_plan(date, order_dicts)
-    trading_plan.push_plan_to_dingtalk(date, order_dicts)
+    # 持仓段注入 QMT 真实持仓（全量口径，和持仓播报同源）：研究员钉钉人审要看券商实际
+    # 仓位（含 T+1 冻结），而非 engine 记账（dry_run 空仓 + 不含 smoke 直接 broker 操作）。
+    # 网关未连/异常 → None，push 内部退回 position_book 本地账本（软降级，不阻断推送）。
+    broker_positions = None
+    try:
+        from presentation.server.services.trading_service import get_positions as _get_positions
+        broker_positions = await _get_positions()
+    except Exception:
+        logger.warning("eod_plan 拉 QMT 持仓失败，交易计划持仓段退回本地账本")
+    trading_plan.push_plan_to_dingtalk(date, order_dicts, broker_positions=broker_positions)
     logger.info("eod_plan 完成 date=%s n_orders=%d mode=%s", date, len(orders), _mode())
     return {"date": date, "n_orders": len(orders), "mode": _mode()}
 
@@ -725,14 +744,21 @@ class TradingEngine:
 
             positions = await get_positions()
 
-            # 汇总浮盈：仅累加 pnl 非 None 的仓位（盲价仓位跳过，避免 None + 数值 TypeError）。
+            # 汇总浮盈 + 持仓成本总额（账户浮亏率分母）：仅累加 pnl 非 None 的仓位
+            # （盲价仓位跳过，避免 None + 数值 TypeError）。total_cost = Σ(avg×qty) 用于算
+            # 账户浮亏率 = total_pnl / total_cost（B1 口径：相对持仓成本的投入产出比，零新存储）。
             total_pnl = 0.0
+            total_cost = 0.0
             pnl_known = 0
             for p in positions:
                 pnl = p.get("pnl")
+                avg = p.get("avg_price")
+                qty = p.get("qty")
                 if pnl is not None:
                     total_pnl += float(pnl)
                     pnl_known += 1
+                if avg is not None and qty is not None:
+                    total_cost += float(avg) * float(qty)
 
             lines = [f"## 💼 持仓盈亏播报（总资产 {total:.0f}）"]
             if not positions:
@@ -741,18 +767,27 @@ class TradingEngine:
                 for p in positions:
                     pnl = p.get("pnl")
                     qty = p.get("qty")
-                    # pnl 非 None → 带 +/- 前缀浮盈；None → N/A（盲价防御语义对齐 get_positions）
-                    pnl_mark = f"{pnl:+.0f}" if pnl is not None else "N/A"
-                    # qty 恒为 float（trading_service.get_positions 契约返回 float volume；
-                    # T7 扩展后仍富化为 float）。历史「?股」else 分支是死代码——
-                    # 真出现非数值 qty 会在上方 get_positions 富化阶段就抛 TypeError，
-                    # 不可能安静地流到此格式化语句，故无条件按 float 格式化。
-                    qty_str = f"{qty:.0f}股"
-                    lines.append(f"- {p['symbol']} {qty_str} 浮盈{pnl_mark}")
-                # 汇总行：已估值仓位 N/总 M，累计浮盈（盲价仓位不计入累计，防误导）
+                    avg = p.get("avg_price")
+                    last = p.get("last_price")
+                    pct = p.get("pnl_pct")
+                    # 盲价防御：avg/last/pct 任一缺失 → 只显 N/A（不猜价，量化审计红线，
+                    # 与 get_positions 盲价口径一致）。齐全时展示「成本 现价 +N.N%（浮盈）」三件套。
+                    if pnl is not None and avg is not None and last is not None and pct is not None:
+                        lines.append(
+                            f"- {p['symbol']} {qty:.0f}股 成本{avg:.2f} 现价{last:.2f} "
+                            f"{pct:+.2f}%（浮盈{pnl:+.0f}）"
+                        )
+                    else:
+                        # qty 恒为 float（get_positions 契约）；非数值 qty 会在富化阶段抛 TypeError，
+                        # 不会安静流到此（同既有死代码分析），故无条件按 float 格式化。
+                        lines.append(f"- {p['symbol']} {qty:.0f}股 浮盈N/A")
+                # 汇总行：已估值仓位 N/总 M，累计盈亏 + 浮亏率（盲价仓位不计入累计，防误导）。
+                # rate = 浮盈 / 持仓成本总额 × 100；total_cost==0（全盲价/空成本）→ 不显率，只显绝对值。
+                pnl_rate = (total_pnl / total_cost * 100) if total_cost > 0 else None
+                rate_str = f"（{pnl_rate:+.2f}%）" if pnl_rate is not None else ""
                 lines.append(
                     f"- 汇总：已估值 {pnl_known}/{len(positions)} 仓，"
-                    f"累计浮盈 {total_pnl:+.0f}"
+                    f"累计盈亏 {total_pnl:+.0f}{rate_str}"
                 )
             msg = "\n".join(lines)
 

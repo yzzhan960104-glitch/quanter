@@ -80,7 +80,7 @@ def _isolate_runtime_env(monkeypatch, tmp_path):
     # 恒交易日：绕开节假日闸门，聚焦归因链路验证（节假日逻辑由 test_calendar 覆盖）
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
     # 拦截钉钉推送：网络副作用隔离（push_plan_to_dingtalk 调 dws send-by-bot）
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     # 拦截 data_lake parquet 读：_eod 入口读一次，mock 成空 placeholder；
     # _load_universe / _load_df_upto 各 case 单独 mock，不消费此 placeholder。
     monkeypatch.setattr(pd, "read_parquet", lambda *a, **kw: pd.DataFrame())

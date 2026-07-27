@@ -578,3 +578,26 @@ def test_fetch_broker_positions_volume_is_primary(monkeypatch):
     result = asyncio.run(gw._fetch_broker_positions())
     # volume 子键仍是主可用量（消费者扁平化读这个键）
     assert result["600000.SH"]["volume"] == 2000
+
+
+def test_fetch_broker_positions_full_includes_frozen(monkeypatch):
+    """tradable_only=False → 全量持仓（含 can_use==0 的 T+1 冻结仓）。
+
+    Why 固化：展示(get_positions)/对账(sync_positions)用全量口径看真实敞口；
+    历史 bug 是这两处复用过滤口径，致 T+1 真实敞口被藏（研究员看「空仓」实则有
+    T+1 仓）+ drift 失真。本测试钉死「默认过滤 / 全量含冻结」双口径契约，防回归。
+    """
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderPositions([
+        _FakePosition("600000.SH", 1000, 1000, 10.0, 10.0, 1000),  # 可卖
+        _FakePosition("000001.SZ", 500, 0, 15.0, 15.0, 0),         # T+1 冻结
+    ])
+    gw._account = object()
+    gw._connected = True
+    # 默认 True（stop_loss 口径，向后兼容）：过滤 T+1 冻结仓
+    tradable = asyncio.run(gw._fetch_broker_positions())
+    assert set(tradable.keys()) == {"600000.SH"}
+    # tradable_only=False（展示/对账口径）：全量，T+1 冻结仓保留
+    full = asyncio.run(gw._fetch_broker_positions(tradable_only=False))
+    assert set(full.keys()) == {"600000.SH", "000001.SZ"}
+    assert full["000001.SZ"]["volume"] == 500   # T+1 冻结仓的真实敞口可见

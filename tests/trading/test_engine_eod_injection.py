@@ -37,7 +37,7 @@ def _isolate_plan_dir(monkeypatch, tmp_path):
     # 恒为交易日（节假日判定由 _eod 内 calendar.is_trading_day 负责，本文件聚焦注入链路）
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
     # 拦截真发钉钉（网络副作用隔离）
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     # 拦截 data_lake 真 read_parquet（Task 7b fix 后 _eod 入口仍会读一次 lake 作为
     # universe / df_upto 的共享源；本测试聚焦注入链路而非真盘数据，故 monkeypatch
     # pandas.read_parquet 返一个空 placeholder DataFrame，避免 455MB disk read）。

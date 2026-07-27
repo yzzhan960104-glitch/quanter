@@ -103,10 +103,12 @@ def get_status() -> dict:
 
 
 async def get_positions() -> list:
-    """聚合底层真实持仓 → [{symbol, qty, market_value, pnl, strategy, entry_rationale}]。
+    """聚合底层真实持仓 → [{symbol, qty, avg_price, last_price, market_value, pnl, pnl_pct, strategy, entry_rationale}]。
 
+    avg_price = 持仓成本价（broker.avg_price）；last_price = 现价（行情 tick last_price）。
     pnl = (last_price - avg_price) × qty（累计浮盈；XtPosition 不带昨收，无法算"今日"
     盈亏，务实口径见 spec 偏差记录）。
+    pnl_pct = (last_price - avg_price) / avg_price × 100（盈亏百分比，供钉钉持仓播报 + 前端列展示）。
     market_value = last_price × qty（按现价估值持仓总市值）。
 
     Task12 修 G6（原第一版 pnl/market_value 恒 None）：持仓查询后批量
@@ -122,7 +124,9 @@ async def get_positions() -> list:
         raise RuntimeError("交易网关未装配（unavailable）")
     if getattr(gw, "is_locked", False) or not getattr(gw, "_connected", False):
         raise RuntimeError("交易网关未连接或已锁定，拒绝对账")
-    raw = await gw._fetch_broker_positions()
+    # 全量口径（tradable_only=False）：展示须含 T+1 冻结仓（真实敞口 + 浮盈），不可滤。
+    # 与 sync_positions 对账同口径；区别于 stop_loss 的可操作口径（io.fetch_positions 默认 True）。
+    raw = await gw._fetch_broker_positions(tradable_only=False)
     # T7：raw 形态可能是 {sym: float}（Mock/EMT）或 {sym: {volume, avg_price, ...}}（QMT）。
     # 扁平化同时保留 avg_price（Task12：算浮盈必需 avg_price，早期扁平化只取 volume 丢了
     # avg_price，致 pnl 无从计算——此处补回）。形态统一为 {sym: {"volume":v, "avg_price":a}}，
@@ -166,17 +170,24 @@ async def get_positions() -> list:
         # NaN 防御：xtdata 在停牌/异常 tick 时偶发返 float('nan')，NaN 参与运算会污染
         # 整列（NaN × 100 仍 NaN），必须在算术前拦截。
         if last is None or avg is None or last != last:
-            market_value, pnl = None, None
+            market_value, pnl, pnl_pct = None, None, None
         else:
             market_value = float(last) * qty
             pnl = (float(last) - float(avg)) * qty
+            # 盈亏百分比（供钉钉持仓播报「+N.N%」+ 前端列）：avg==0 除零防御（柜台成本恒>0，理论不会）
+            pnl_pct = (float(last) - float(avg)) / float(avg) * 100 if float(avg) != 0 else None
         # 层级五·持仓富化：join 归因注册表，附 strategy/entry_rationale（未登记则 None，
         # 前端显示 '—'）。富化逻辑与 Task5 完全一致，本次仅补现价查询与 pnl 计算。
+        # 成本/现价/盈亏%（Task12+）：avg_price/last_price/pnl_pct 透出供钉钉持仓播报 + 前端展示。
+        # last_price 存「有效现价或 None」——NaN 在上方 if 已被 last!=last 拦截，此处再守一道。
         result.append({
             "symbol": str(sym),
             "qty": qty,
+            "avg_price": (float(avg) if avg is not None else None),
+            "last_price": (float(last) if (last is not None and last == last) else None),
             "market_value": market_value,
             "pnl": pnl,
+            "pnl_pct": pnl_pct,
             "strategy": _position_attribution.get(sym, {}).get("strategy"),
             "entry_rationale": _position_attribution.get(sym, {}).get("rationale"),
         })

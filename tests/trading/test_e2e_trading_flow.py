@@ -139,7 +139,7 @@ def test_step2_generate_plan(isolated, monkeypatch):
     断言订单数 == 信号数（一信号一单）+ confirmed=False（未确认绝不挂单）+ symbol 回写正确。
     """
     # patch 掉钉钉推送（不触达 dws），保留 save_plan 真实落盘
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     # AUTO_TRADE_MODE=dry_run 让 eod_plan 内 _mode() 读到（影子模式，不触达真单）
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
 
@@ -172,7 +172,7 @@ def test_step3_trade_next_day(isolated, monkeypatch):
         engine.pre_open(today) 拿 {'submitted': N} 业务返回（不依赖 cron 触发器，
         与既有 test_engine.py 同范式）。
     """
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
 
     # 先落一份计划（复用第 2 步产物路径）
@@ -238,7 +238,7 @@ def test_step4_review_report(isolated, monkeypatch):
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
 
     # 预置：计划落盘 + 账本有一笔 BUY 成交（复用前两步状态）
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     sig = _make_signal()
     asyncio.run(engine.eod_plan("2026-07-28", [sig], {"300001.SZ": 0.5}, 1_000_000.0))
     position_book.apply_fill("o1", "300001.SZ", "BUY", 100, 10.5)
@@ -286,7 +286,7 @@ def test_e2e_full_flow_symbol_propagates(isolated, monkeypatch):
     若 review_report 聚合错 key，报告会漏该 symbol。本测试用与 step3 不同的 symbol
     （688001.SH）防止与同 test session 其他用例的 300001.SZ 串味。
     """
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
 
     # 第 2 步：生成计划

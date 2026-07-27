@@ -24,10 +24,29 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from trading import position_book
 from trading.engine import TradingEngine
 
 
-def test_trade_update_writes_log_and_notifies():
+@pytest.fixture
+def db(tmp_path, monkeypatch):
+    """每个测试用独立 tmp db（隔离生产账本 logs/trading_state.db），patch _DEFAULT_DB
+    让 engine._handle_order_update → position_book.apply_fill 间接调用也命中 tmp。
+
+    Why 必要：_handle_order_update 内调 position_book.apply_fill 写成交回报。无本
+    fixture 时 apply_fill 走默认 _DEFAULT_DB=logs/trading_state.db，会污染生产账本
+    （历史 bug：order_id=123/456 的测试数据被写进真实账本 logs/trading_state.db，
+    2026-07-27 排查定位）。照抄 test_position_book 同款隔离范式。
+    """
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    return db_path
+
+
+def test_trade_update_writes_log_and_notifies(db):
     """成交回报 → 补写成交日志 + 推钉钉成交通知（三连中的 a + b）。
 
     断言：
@@ -72,7 +91,7 @@ def test_trade_update_writes_log_and_notifies():
     assert ntf_args[3] == 10.5         # price
 
 
-def test_buy_fill_places_take_profit_once_idempotent():
+def test_buy_fill_places_take_profit_once_idempotent(db):
     """买单成交 → 挂止盈；重复回报幂等不重挂（三连中的 c + 幂等防重挂红线）。
 
     物理意图（幂等为何是红线）：
@@ -121,7 +140,7 @@ def test_buy_fill_places_take_profit_once_idempotent():
     tp.assert_called_once()
 
 
-def test_place_take_profit_truncates_fractional_qty_to_int():
+def test_place_take_profit_truncates_fractional_qty_to_int(db):
     """``_place_take_profit`` 用 ``int(filled_qty)`` 截断部分成交的零股（A 股整手红线）。
 
     物理意图（A 股整手约束 · spec §6.2 C1 数量来源）：

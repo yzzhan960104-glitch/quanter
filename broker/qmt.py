@@ -379,7 +379,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         logger.info("QMT 网关已断开 account=%s", self._account_id)
 
     # ---------------------------------------------------------- 持仓对账
-    async def _fetch_broker_positions(self) -> Mapping[str, Mapping[str, Any]]:
+    async def _fetch_broker_positions(self, *, tradable_only: bool = True) -> Mapping[str, Mapping[str, Any]]:
         """
         拉取券商真实持仓并清洗为 {stock_code: {volume, avg_price, open_price, yesterday_volume}}
         （模板方法 _fetch_broker_positions 实现，T7 扩展字段）。
@@ -421,8 +421,12 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
 
         cleaned: dict[str, dict[str, Any]] = {}
         for p in positions:
-            # 过滤可用为 0 的废弃持仓（已平仓残留 / T+1 冻结不可操作仓）
-            if getattr(p, "can_use_volume", 0) == 0:
+            # 过滤可用为 0 的废弃持仓（已平仓残留 / T+1 冻结不可操作仓）。
+            # tradable_only=True（默认）：过滤——供 stop_loss 等只动可卖仓的场景（不能卖 T+1 冻结仓）；
+            # tradable_only=False：全量（含 T+1 冻结）——供展示/对账看真实敞口。
+            # 修正（2026-07-27）：原展示(get_positions)/对账(sync_positions)复用过滤口径，
+            # 致 T+1 真实敞口被藏（研究员看「空仓」实则有茅台 T+1 仓）+ drift 失真。
+            if tradable_only and getattr(p, "can_use_volume", 0) == 0:
                 continue
             cleaned[p.stock_code] = {
                 # volume 主可用量（可卖持仓，消费者扁平化时取此键）

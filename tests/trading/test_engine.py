@@ -43,7 +43,7 @@ def test_eod_plan_dry_run_no_real_order(monkeypatch):
     # 防真发钉钉（scope #5）：monkeypatch trading_plan.push_plan_to_dingtalk
     pushed = {"n": 0}
 
-    def _fake_push(date, orders):
+    def _fake_push(date, orders, **kw):
         pushed["n"] += 1
         pushed["orders"] = orders
         return True
@@ -68,7 +68,7 @@ def test_eod_plan_produces_nested_orders(monkeypatch):
     from strategies.signal import Signal
 
     monkeypatch.setattr(engine, "_submit", _no_op_submit)
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o: True)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
 
     # Layer2 阶段1：signals 改为 list[Signal]（frozen dataclass）
     signal = [Signal(

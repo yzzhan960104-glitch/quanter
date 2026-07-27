@@ -96,8 +96,13 @@ class BaseExecutionGateway(ABC):
         """撤单。已成交单应返回当前终态而非抛错（幂等语义）。"""
 
     @abstractmethod
-    async def _fetch_broker_positions(self) -> Mapping[str, Any]:
+    async def _fetch_broker_positions(self, *, tradable_only: bool = True) -> Mapping[str, Any]:
         """子类实现：从券商拉取真实持仓（模板方法的可变点）。
+
+        Args:
+            tradable_only: True=仅可操作持仓（过滤 can_use_volume==0 的 T+1 冻结/废弃仓，
+                供 stop_loss 等只动可卖仓的场景）；False=全量持仓（含 T+1 冻结，供展示/
+                对账看真实敞口）。默认 True 向后兼容既有 stop_loss / io 调用。
 
         返回形态（T7 后双形态，消费者须 isinstance 防御）：
         - Mock/EMT 子类：{symbol: qty(float)}（老契约）
@@ -162,7 +167,9 @@ class BaseExecutionGateway(ABC):
         # reconcile 只在本方法被调用时需要，模块加载期无谓提前 import 反而致循环。
         from trading.compute.reconcile import reconcile
 
-        broker_positions = await self._fetch_broker_positions()
+        # 对账用全量口径（tradable_only=False）：T+1 冻结仓是真实敞口，必须入对账，
+        # 否则本地账本 vs broker 本就有的 T+1 仓永远 drift，却显示「无偏差」——对账口径红线。
+        broker_positions = await self._fetch_broker_positions(tradable_only=False)
         # T7 扁平化：QMT _fetch_broker_positions 返 {sym: {volume, avg_price, ...}}，
         # 对账只关心 volume，扁平化为 {sym: float} 再传 reconcile。
         # Why 保持 reconcile 契约：reconcile(local, broker) 双方都是 {sym: float}，

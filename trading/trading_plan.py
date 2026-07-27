@@ -130,7 +130,7 @@ def _get_positions_snapshot() -> dict:
         return {}
 
 
-def push_plan_to_dingtalk(date: str, orders: list) -> bool:
+def push_plan_to_dingtalk(date: str, orders: list, broker_positions: list | None = None) -> bool:
     """把 T-1 计划推到交易机器人群（研究员钉钉确认用）。
 
     复用一期 broadcast.push.push_brief（subprocess 调 dws send-by-bot，
@@ -161,19 +161,47 @@ def push_plan_to_dingtalk(date: str, orders: list) -> bool:
             # 信息过载），order_dict 落盘用 round(rr, 2)（复盘统计精度保留两位）。
             # 两路精度不同是有意为之——人审足够 vs 复盘精度，分轨处理。
             rr_str = f" 盈亏比{rr:.1f}" if rr else ""
+            # 颈线价（形态基准 c*）：显式标出让研究员一眼确认「挂单价=颈线回踩位」，
+            # 止损/止盈均以此为锚。老 plan（无 neckline 键）→ .get 返 None → neck_str=""
+            # → md 与旧版逐字一致（零回归，与 rr 同款 falsy 跳渲染范式）。
+            neckline = o.get("neckline")
+            neck_str = f"颈线{neckline:.2f}/" if neckline else ""
+            # 价格统一 :.2f（A 股报价粒度=分）：落盘已 round 两位，显示再 :.2f 双保险，
+            # 防 10.30 显示成 10.3（保证两位小数对齐，人审可读性）。
             lines.append(
                 f"- {prefix}{sym} {o['order']['side']} {o['order']['qty']}股"
-                f"@{o['order']['price']}（止损{o['stop_price']}/止盈{o['take_profit']}）{rr_str}"
+                f"@{o['order']['price']:.2f}（{neck_str}止损{o['stop_price']:.2f}/止盈{o['take_profit']:.2f}）{rr_str}"
             )
-        # 当前持仓段：engine 记账（与下单计划同框，研究员一眼看「计划 + 持仓」全貌，
-        # 避免研究员只看计划不知已有持仓导致超配误判）。
-        local = _get_positions_snapshot()
-        if local:
+        # 当前持仓段：优先用调用方注入的 broker_positions（QMT 全量口径，和持仓播报
+        # 同源，含成本/现价/盈亏%）；None（网关未连/异常）→ 退回 position_book 本地账本。
+        # Why 优先 broker：研究员钉钉人审要看券商真实仓位（含 T+1 冻结仓），position_book
+        # 是 engine 记账（dry_run 空仓 + 不含 smoke 等直接 broker 操作），用本地账本会
+        # 显示「空仓」误导（实则持有茅台 T+1）。
+        if broker_positions is not None:
+            pos_lines = []
+            for p in broker_positions:
+                sym = p.get("symbol", "")
+                nm = name_map.get(sym, "")
+                prefix = f"{nm} " if nm else ""
+                qty = p.get("qty")
+                avg = p.get("avg_price"); last = p.get("last_price"); pct = p.get("pnl_pct")
+                # 盲价防御：avg/last/pct 任一缺失 → 只显代码+数量（不猜价，与播报同口径）
+                if qty is not None and avg is not None and last is not None and pct is not None:
+                    pos_lines.append(
+                        f"- {prefix}{sym} {qty:.0f}股 成本{avg:.2f} 现价{last:.2f} {pct:+.2f}%"
+                    )
+                elif qty is not None:
+                    pos_lines.append(f"- {prefix}{sym} {qty:.0f}股")
+                else:
+                    pos_lines.append(f"- {prefix}{sym}")
+            if not pos_lines:
+                pos_lines = ["- 空仓"]
+        else:
+            # 软降级：网关未连 → position_book 本地账本（engine 记账）
+            local = _get_positions_snapshot()
             pos_lines = [
                 f"- {name_map.get(s, '')} {s} {q:g}股" for s, q in local.items()
-            ]
-        else:
-            pos_lines = ["- 空仓"]
+            ] or ["- 空仓"]
         md = (
             f"### T-1 交易计划 {date}\n"
             f"> 待确认（回复「确认」即挂单）\n\n"

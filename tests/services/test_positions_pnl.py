@@ -62,6 +62,10 @@ def test_get_positions_computes_pnl_from_avg_and_last():
         # 浮盈计算契约：last × qty / (last - avg) × qty
         assert pos["market_value"] == 1100.0   # 11.0 × 100
         assert pos["pnl"] == 100.0             # (11.0 - 10.0) × 100
+        # 成本/现价/盈亏% 契约（Task12+）：avg_price/last_price 透出 + pnl_pct=(last-avg)/avg*100
+        assert pos["avg_price"] == 10.0
+        assert pos["last_price"] == 11.0
+        assert pos["pnl_pct"] == 10.0          # (11-10)/10*100 = +10%
 
     asyncio.run(_run())
 
@@ -98,6 +102,10 @@ def test_get_positions_no_quote_pnl_none():
 
         assert result[0]["pnl"] is None          # 盲价防御
         assert result[0]["market_value"] is None  # 不用前一收盘猜市值
+        # 盲价时：成本仍可透（broker.avg_price 不依赖行情），现价/盈亏率 None（算不出）
+        assert result[0]["avg_price"] == 10.0
+        assert result[0]["last_price"] is None
+        assert result[0]["pnl_pct"] is None
         # symbol/qty 仍可返（持仓真相不依赖行情）
         assert result[0]["symbol"] == "300001.SZ"
         assert result[0]["qty"] == 100.0

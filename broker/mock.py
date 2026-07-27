@@ -47,8 +47,9 @@ class MockExecutionGateway(BaseExecutionGateway):
     async def disconnect(self) -> None:
         self._connected = False
 
-    async def _fetch_broker_positions(self) -> Mapping[str, float]:
+    async def _fetch_broker_positions(self, *, tradable_only: bool = True) -> Mapping[str, float]:
         # 返回副本，避免上层误改 Mock 内部状态（防御性拷贝）。
+        # tradable_only 仅对齐基类签名（Mock 无 can_use 概念，不区分可操作/全量）。
         return dict(self._broker_positions)
 
     async def submit_order(self, order: OrderRequest) -> OrderResult:
