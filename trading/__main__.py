@@ -58,7 +58,9 @@ import sys
 try:
     from dotenv import load_dotenv
 
-    load_dotenv()
+    # override=True：.env 是单一真相源，强制覆盖系统/session env（修：历史 AUTO_TRADE_MODE
+    # 被 Windows 系统 env 压制，致 .env 切 live 不生效——engine 仍读继承的 dry_run）。
+    load_dotenv(override=True)
 except ImportError:
     pass
 

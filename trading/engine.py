@@ -249,8 +249,13 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
         }
         for o in orders
     ]
-    # 落盘 confirmed=False（pre_open 会检查此位）+ 推钉钉等确认
+    # 落盘 + 确认闸：AUTO_CONFIRM_PLAN=true（全自动模式）→ 落盘后自动 confirm_plan 置
+    # confirmed=True，pre_open 次日直接挂单（opt-out：研究员 pre_open 前可 veto 拦截）；
+    # 默认 false → confirmed=False 保持人审（回复「确认」才挂，spec §2 红线，向后兼容）。
     trading_plan.save_plan(date, order_dicts)
+    auto_confirmed = os.getenv("AUTO_CONFIRM_PLAN", "").lower() in ("true", "1", "yes")
+    if auto_confirmed:
+        trading_plan.confirm_plan(date)  # 全自动：落盘即确认，pre_open 直挂
     # 持仓段注入 QMT 真实持仓（全量口径，和持仓播报同源）：研究员钉钉人审要看券商实际
     # 仓位（含 T+1 冻结），而非 engine 记账（dry_run 空仓 + 不含 smoke 直接 broker 操作）。
     # 网关未连/异常 → None，push 内部退回 position_book 本地账本（软降级，不阻断推送）。
@@ -260,9 +265,11 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
         broker_positions = await _get_positions()
     except Exception:
         logger.warning("eod_plan 拉 QMT 持仓失败，交易计划持仓段退回本地账本")
-    trading_plan.push_plan_to_dingtalk(date, order_dicts, broker_positions=broker_positions)
-    logger.info("eod_plan 完成 date=%s n_orders=%d mode=%s", date, len(orders), _mode())
-    return {"date": date, "n_orders": len(orders), "mode": _mode()}
+    trading_plan.push_plan_to_dingtalk(
+        date, order_dicts, broker_positions=broker_positions, auto_confirmed=auto_confirmed)
+    logger.info("eod_plan 完成 date=%s n_orders=%d mode=%s auto_confirmed=%s",
+                date, len(orders), _mode(), auto_confirmed)
+    return {"date": date, "n_orders": len(orders), "mode": _mode(), "auto_confirmed": auto_confirmed}
 
 
 # ============================================================================

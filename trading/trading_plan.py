@@ -130,7 +130,7 @@ def _get_positions_snapshot() -> dict:
         return {}
 
 
-def push_plan_to_dingtalk(date: str, orders: list, broker_positions: list | None = None) -> bool:
+def push_plan_to_dingtalk(date: str, orders: list, broker_positions: list | None = None, auto_confirmed: bool = False) -> bool:
     """把 T-1 计划推到交易机器人群（研究员钉钉确认用）。
 
     复用一期 broadcast.push.push_brief（subprocess 调 dws send-by-bot，
@@ -202,9 +202,14 @@ def push_plan_to_dingtalk(date: str, orders: list, broker_positions: list | None
             pos_lines = [
                 f"- {name_map.get(s, '')} {s} {q:g}股" for s, q in local.items()
             ] or ["- 空仓"]
+        # 文案随确认模式切（C1 兼容）：auto_confirmed=True=全自动 opt-out（将自动挂单，
+        # pre_open 前 veto 可拦）；False=人审 opt-in（回复确认才挂，spec §2 默认）。
+        note = ("⏰ 全自动模式：将自动挂单（pre_open 09:22 前 veto_plan.py 可拦）"
+                if auto_confirmed else
+                "待确认（回复「确认」即挂单）")
         md = (
             f"### T-1 交易计划 {date}\n"
-            f"> 待确认（回复「确认」即挂单）\n\n"
+            f"> {note}\n\n"
             f"**计划下单**\n" + "\n".join(lines) + "\n\n"
             f"**当前持仓**\n" + "\n".join(pos_lines)
         )
