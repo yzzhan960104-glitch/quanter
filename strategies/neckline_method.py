@@ -169,6 +169,28 @@ class NecklineMethodStrategy:
         if res is None:
             return []
 
+        # R1 cancel_on 预判（2026-07-27 Task 3，挡缺口1+4）：
+        # 当前 close ≥ 颈线 + cancel_thresh_mult × H → 返 []，不挂颈线回踩买单。
+        # What：把 execute 层 cancel_on 撤单逻辑前移为识别期预判（物理等价，但
+        #       在挂单前而非挂单后撤——避免实盘挂上废单后再撤的滑点/费率/状态机污染）。
+        # Why：scan_live 不调 simulate_exit（保持实盘无前视），故 execute 层的撤单
+        #      逻辑必须前移到识别期。挡两类废单：
+        #      ① 缺口1：close 偏离颈线过大，挂颈线买单永世不成交（300214.SZ
+        #        close 11.86 远超颈线 8.08，挂 8.08 买单永不回踩）。
+        #      ② 缺口4：涨幅达 cancel_on 后回踩是【退潮】而非【蓄势】，挂颈线
+        #        买单即便成交也是反抽顶（高风险/低收益，违背颈线法"颈线蓄势突破"
+        #        的形态前提——突破日已把颈线到 cancel_on 的涨幅透支完毕）。
+        # 参数复用：exec_cfg["cancel_thresh_mult"]（默认 1.0=颈线+H，执行层冠军 2.0=
+        #          颈线+2H），与 execute 层撤单阈值同口径——识别层挡多少、执行层就撤多少。
+        # 物理标尺：H = 颈线 - 谷底（形态几何深度，detect 已返回 res["bottom"]）。
+        cancel_thresh = self.exec_cfg.get("cancel_thresh_mult")
+        if cancel_thresh is not None:
+            H = res["neckline"] - res["bottom"]
+            cancel_on = res["neckline"] + cancel_thresh * H
+            close_T = float(df_upto["close"].iloc[-1])
+            if close_T >= cancel_on:
+                return []  # 涨幅已兑现，不产回踩挂单信号（挡 300214.SZ 类冲天突破）
+
         # 当日突破过滤（防御层）：只挂当日新信号。
         # Why：detect 物理上只在末根突破时返，此处等于 date 是常态；但显式校验防 detect
         # 内部窗口语义未来变化（如支持历史日回溯）时把旧信号当新信号重吐占仓。

@@ -362,3 +362,71 @@ def test_detect_min_rr_uses_actual():
     # 实际口径自我一致性：rr == (tp2-entry)/(entry-stop_price)
     expected = (res["take_profit_2"] - res["entry"]) / (res["entry"] - res["stop_price"])
     assert abs(res["rr"] - round(expected, 3)) < 0.01
+
+
+# ============================================================================
+# ⑥ R1 · scan_live cancel_on 预判（2026-07-27 Task 3）
+# ============================================================================
+# 物理意图（Why 这组测试存在）：
+#     300214.SZ 案例暴露缺口：close 11.86 远超颈线 8.08，scan_live 仍产挂颈线买单信号
+#     → 实盘挂单在颈线 8.08 永不回踩成交（涨幅已兑现，回踩是退潮非蓄势）→ 废单占仓。
+#     R1 解：scan_live 在 detect 后加 cancel_on 守卫——close ≥ 颈线+cancel_thresh_mult×H
+#     → 返 []（涨幅已透支，挂颈线买单是废单）。挡缺口1（close 偏离颈线过大不成交）+
+#     缺口4（涨幅达 cancel_on 回踩是退潮）。
+#
+#     注：scan_live 不调 simulate_exit（保持实盘无前视），故 execute 层 cancel_on 撤单
+#     逻辑前移为识别期预判——物理等价，但在挂单前而非挂单后撤。
+def test_scan_live_rejects_when_close_above_cancel_on():
+    """R1：close ≥ 颈线+cancel_thresh_mult×H → 返 []（涨幅已兑现，回踩是退潮，挂废单）。
+
+    300214.SZ 案例：close 11.86 ≥ cancel_on 10.86（颈线8.08+2×H1.39）→ 不产信号。
+
+    合成 fixture（70 根 OHLCV，颈线=10.5 / 双底 8.0+8.5 / H=2.0 / ATR≈1.12）：
+        - pos0-4 高位 10（顶部聚集 → 颈线 10.5）
+        - pos5 第一底 8.0（local min，bottom_set 元素 1）
+        - pos6-10 反弹回 10
+        - pos11-14 下行
+        - pos15 第二底 8.5（local min，bottom_set 元素 2 → 过双底守卫）
+        - pos16-68 平台震荡 close=9.5（颈线下压制 → suppression≈0.98 ≥ 0.6）
+        - pos69 冲天突破 close=15 > cancel_on=颈线10.5+1.0×H2.0=12.5 → 触发 R1 守卫
+        - breakout_vol_mult=1.0（弱化带量守卫，让 R1 守卫单独被触发）
+    断言：scan_live 返 []（不挂颈线 10.5 的回踩废单）。
+    """
+    import pandas as pd
+    from strategies.neckline_method import NecklineMethodStrategy
+
+    # 显式逐根构造（_synth_pattern 风格），确保过 detect 7 守卫：
+    # 顶部聚集 + 压制时长 + 双底 + 突破 + 带量 + 形态深度 H/ATR + 实际 rr
+    rows = [
+        (10, 10.5, 9.5, 10, 1000),     # pos0-4 高位（颈线聚集位）
+        (10, 10.5, 9.5, 10, 1000),
+        (10, 10.5, 9.5, 10, 1000),
+        (10, 10.5, 9.5, 10, 1000),
+        (10, 10.5, 9.5, 10, 1000),
+        (10, 10, 8.0, 8.5, 1000),      # pos5 ← bottom1=8.0（local min）
+        (10, 10.5, 9.5, 10, 1000),     # pos6-10 反弹回 10
+        (10, 10.5, 9.5, 10, 1000),
+        (10, 10.5, 9.5, 10, 1000),
+        (10, 10.5, 9.5, 10, 1000),
+        (10, 10.5, 9.5, 10, 1000),
+        (10, 10.5, 9.5, 9.9, 1000),    # pos11-14 下行（造第二底前坡）
+        (10, 10.5, 9.3, 9.8, 1000),
+        (10, 10.5, 9.1, 9.7, 1000),
+        (10, 10.0, 8.9, 9.0, 1000),
+        (9, 9.5, 8.5, 8.8, 1000),      # pos15 ← bottom2=8.5（local min，bottom_set={8.0,8.5}）
+    ]
+    # pos16-68：平台震荡 close=9.5（54 根，压制时长积累；末根 pos69 单独构造）
+    rows += [(9.5, 10, 9, 9.5, 1000) for _ in range(54)]
+    # pos69：末根冲天突破（close=15 ≥ cancel_on=颈线10.5+1.0×H2.0=12.5 → 触发 R1 守卫）
+    rows[-1] = (15.0, 15.5, 14.5, 15.0, 5000.0)
+
+    dates = pd.date_range("2026-01-01", periods=70, freq="D")
+    df = pd.DataFrame(
+        rows, columns=["open", "high", "low", "close", "volume"], index=dates,
+        dtype=float,  # 显式 float dtype，避免 int64→float 赋值的 FutureWarning
+    )
+
+    strat = NecklineMethodStrategy(cfg_override={
+        "window": 60, "breakout_vol_mult": 1.0, "cancel_thresh_mult": 1.0})
+    sigs = strat.scan_live("TEST.SZ", df, str(dates[-1].date()))
+    assert sigs == [], "close 远超颈线+cancel_thresh_mult×H（涨幅已兑现）应返 []，不产废单信号"
