@@ -87,8 +87,18 @@ class Signal:
     """离场原因（stop_loss / tp1 / tp2 / timeout / skip_no_pullback / skip_target_met）。"""
 
     rr: float | None = None
-    """盈亏比（风险倍数）。颈线法口径 = avg_pnl_pct / risk_pct（% / % = 风险倍数），
-    与 caisen ``(exit-entry)/(entry-stop)`` 同语义。引擎统计层 win_rate / avg_rr 依赖。"""
+    """盈亏比（风险倍数）。本字段语义重载，两入口按各自物理语义填：
+
+    - **scan_live（detect-time 预期口径，R3 Task 2 2026-07-27）**：在形态识别阶段就
+      填，rr = (tp2 − entry) / (entry − stop_price)，stop_price = 颈线 − N×ATR（与
+      execute 层 base_stop 同口径）；供 PlannedOrder → order_dict → 钉钉 md 展示，
+      让研究员 T-1 晚人审快速识别弱信号。
+    - **scan_at（simulate_exit post-trade 实现口径）**：在回测模拟出场后填，rr =
+      avg_pnl_pct / risk_pct（% / % = 风险倍数），与 caisen ``(exit−entry)/(entry−stop)``
+      同语义；引擎统计层 win_rate / avg_rr 依赖此值做冠军择优。
+
+    两口径物理含义一致（都是"风险倍数"），区别仅在 pre-trade 预期 vs post-trade 实现。
+    消费方按入口约定读，跨入口混读会口径错配。"""
 
     holding_bars: int | None = None
     """持仓交易日数（exit_pos - buy_idx）。引擎统计 avg_holding_bars 读此。"""

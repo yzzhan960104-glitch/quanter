@@ -173,6 +173,12 @@ class NecklineMethodStrategy:
         # 当前 close ≥ 颈线 + cancel_thresh_mult × H → 返 []，不挂颈线回踩买单。
         # What：把 execute 层 cancel_on 撤单逻辑前移为识别期预判（物理等价，但
         #       在挂单前而非挂单后撤——避免实盘挂上废单后再撤的滑点/费率/状态机污染）。
+        #       注：execute 层 simulate_exit 用【盘中 high】判 cancel_on（摸高即撤），
+        #       本识别期用【当日 close】判（当日收盘兑现）——close≥cancel_on 蕴含
+        #       high≥cancel_on（close 是 high 的下界），故 close 守卫是 high 守卫的
+        #       保守近似：识别期更严，execute 层不漏挡（不会让识别期放过但 execute
+        #       层撤掉的形态流到挂单环节）。Why 用 close：识别期 T-1 晚只有完整收盘
+        #       K 线，没有次日盘中 high 可用（无前视），用 close 是因果可得的最近似。
         # Why：scan_live 不调 simulate_exit（保持实盘无前视），故 execute 层的撤单
         #      逻辑必须前移到识别期。挡两类废单：
         #      ① 缺口1：close 偏离颈线过大，挂颈线买单永世不成交（300214.SZ

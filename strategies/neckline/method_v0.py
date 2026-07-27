@@ -12,7 +12,8 @@
     ③ 底部 = 窗口最低点 min + [min, min+ATR] 内的离散局部极值低点（含 min ≥2 个）
     ④ 突破 = 末根收盘 close > 颈线 c*（信号触发）
     ⑤ 进场 = 颈线价 c*（挂单等回踩；close>c* 只触发信号，不追涨）
-    ⑥ 盈亏比 = 2H/H = 2.0 结构恒定（H=颈线−谷底），min_rr 作 sanity 守卫
+    ⑥ R3 实际口径盈亏比 rr = (tp2−entry)/(entry−stop_price)
+       （stop_price = 颈线 − N×ATR，与 execute 层 base_stop 同口径；min_rr 验真实盈亏比）
 
 交易要素（用户规则，持有期模拟见 neckline_backtest.py）：
     进场执行 = T+1 日收盘买入；止损 = 颈线 c*；止盈 = 50%@颈线+H，50%@颈线+2H；
@@ -43,7 +44,7 @@ DEFAULTS = {
     "local_extrema_window": 3, # ③ 局部极值左右各 3 根
     "min_bottoms": 2,          #    至少双底（含 min 在内）
     "breakout_vol_mult": 1.5,  #    突破带量 1.5×近5日均量（复用 caisen）
-    "min_rr": 1.5,             # ⑥ 盈亏比下限（恒 2.0，作 sanity 守卫）
+    "min_rr": 1.5,             # ⑥ 实际盈亏比下限（rr 实际口径 (tp2−entry)/(entry−stop_price)，min_rr 验真实盈亏比）
     "max_h_atr": 4.0,          # ⑦ 形态深度上限 H/ATR（实证：浅形态胜率51% vs 深形态27%，深=暴跌反弹）
     "stop_atr_mult": 1.0,      # ⑧ 止损 ATR 倍数（止损=颈线−N×ATR；参数化供迭代）
     "tp_h_mult": 2.0,          # ⑨ 止盈2 的 H 倍数（止盈2=颈线+N×H；参数化供迭代）

@@ -157,6 +157,9 @@ def push_plan_to_dingtalk(date: str, orders: list) -> bool:
             nm = name_map.get(sym, "")
             prefix = f"{nm} " if nm else ""
             rr = o.get("rr")
+            # 精度取舍（非 bug）：md 展示用 1 位小数（人审快速识别弱信号足够，避免群里
+            # 信息过载），order_dict 落盘用 round(rr, 2)（复盘统计精度保留两位）。
+            # 两路精度不同是有意为之——人审足够 vs 复盘精度，分轨处理。
             rr_str = f" 盈亏比{rr:.1f}" if rr else ""
             lines.append(
                 f"- {prefix}{sym} {o['order']['side']} {o['order']['qty']}股"
