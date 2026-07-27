@@ -62,8 +62,35 @@ def _trade_days(pro, d0: str, today: str) -> list[str]:
     return [str(d) for d in cal["cal_date"].tolist() if str(d) > d0c]
 
 
-def sync_daily_incremental() -> str:
-    """增量同步入口：读 d0 → 拉新交易日 raw daily + adj_factor → 前复权 → append 落盘。"""
+def _backscan_recent(df, trade_days_set, suspend_intervals, days=30):
+    """抽查 lake 近 days 个交易日连续性，返 unjustified gaps（规则 5 回扫）。
+
+    物理意图：sync 增量只补 d0→today，d0 之前的近期缺口不补；回扫抽查近期连续性，
+    发现漏采则告警/触发 repair_gaps（历史远期缺口由 scan_integrity 一次性兜底）。
+
+    Args:
+        df: lake df（MultiIndex(date, symbol)）。
+        trade_days_set: 全期交易日集合。
+        suspend_intervals: load_suspend_intervals 输出。
+        days: 近期交易日窗口（默认 30，覆盖停牌复牌常见周期）。
+    Returns:
+        list[GapRange]（仅 unjustified，含至少一个非停牌漏采日）。
+    """
+    from data.integrity import find_gaps
+    # 取 df 最近 days 个唯一交易日（date 层级），截近期子集扫缺口
+    recent_dates = sorted(df.index.get_level_values("date").unique())[-days:]
+    if not recent_dates:
+        return []
+    recent_df = df[df.index.get_level_values("date").isin(recent_dates)]
+    gaps = find_gaps(recent_df, trade_days_set, suspend_intervals)
+    return [g for g in gaps if not g.suspend_justified]
+
+
+def sync_daily_incremental(no_backscan: bool = False) -> str:
+    """增量同步入口：读 d0 → 拉新交易日 raw daily + adj_factor → 前复权 → append 落盘。
+
+    no_backscan=True 禁用规则5近期连续性回扫（调试用；生产默认开启回扫防缺口累积）。
+    """
     df = pd.read_parquet(LAKE)
     d0 = str(pd.Timestamp(df.index.get_level_values("date").max()).date())
     today = datetime.today().strftime("%Y-%m-%d")
@@ -135,12 +162,42 @@ def sync_daily_incremental() -> str:
     new_d0 = str(pd.Timestamp(combined.index.get_level_values("date").max()).date())
     logger.info("完成：a_shares_daily %d 行，最新日 %s（新增 %d 行）",
                 len(combined), new_d0, len(new))
-    return f"OK 最新日 {new_d0}（+{len(new)} 行，除权标的 {len(div_syms)} 只待重算）"
+
+    # 规则5：回扫近期连续性（抽查 d0 之前近期缺口——sync 增量只补 d0→today，不补历史缺口）
+    backscan_msg = ""
+    if not no_backscan:
+        try:
+            from datetime import timedelta
+            from pathlib import Path
+            from data.integrity import fetch_trade_days, load_suspend_intervals
+            back_start = (datetime.today() - timedelta(days=60)).strftime("%Y-%m-%d")
+            back_td = fetch_trade_days(back_start, today)
+            susp_path = Path("data_lake/suspend_d.parquet")
+            if susp_path.exists():
+                susp_df = pd.read_parquet(susp_path)
+                susp = load_suspend_intervals(susp_df, back_td)
+            else:
+                susp = {}
+            unjustified = _backscan_recent(combined, back_td, susp, days=30)
+            if unjustified:
+                backscan_msg = f"；⚠️ 回扫发现 {len(unjustified)} 段近期漏采，跑 repair_gaps --auto 补"
+                logger.warning("sync 回扫发现 %d 段近期漏采，top 标的：%s",
+                               len(unjustified), [g.symbol for g in unjustified[:10]])
+        except Exception as e:
+            # 回扫异常不阻断主流程（增量已落盘，回扫是附加防护）
+            logger.warning("sync 回扫异常（不阻断主流程）：%s", e)
+
+    return f"OK 最新日 {new_d0}（+{len(new)} 行，除权标的 {len(div_syms)} 只待重算{backscan_msg}）"
 
 
 if __name__ == "__main__":
+    import argparse as _ap
+    _ap2 = _ap.ArgumentParser(description="A 股日线日频增量同步（含规则5近期回扫）")
+    _ap2.add_argument("--no-backscan", action="store_true",
+                      help="禁用近期连续性回扫（调试用）")
+    _args = _ap2.parse_args()
     try:
-        print(sync_daily_incremental())
+        print(sync_daily_incremental(no_backscan=_args.no_backscan))
         sys.exit(0)
     except Exception as e:
         logger.exception("增量同步失败")

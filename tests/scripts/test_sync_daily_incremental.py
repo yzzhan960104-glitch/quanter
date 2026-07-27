@@ -204,3 +204,43 @@ def test_sync_detects_dividend_when_adj_changes():
         msg = mod.sync_daily_incremental()
     # msg 含「除权标的 1 只待重算」（adj 1.0 → 2.0 跳变被 detect）
     assert "除权标的" in msg and "1" in msg
+
+
+# ============================================================================
+# ⑤ 规则5：_backscan_recent 近期连续性回扫
+# ============================================================================
+def test_backscan_recent_returns_unjustified_gaps():
+    """回扫：近期 df 含漏采段（非停牌）→ 返 unjustified GapRange。
+
+    物理意图：sync 增量只补 d0→today，d0 之前近期缺口不补；回扫抽查近期连续性，
+    发现漏采则告警/触发 repair_gaps（规则5，防历史缺口累积）。
+    """
+    df = pd.DataFrame(
+        {"close": [1, 1, 1, 1]},
+        index=pd.MultiIndex.from_tuples([
+            (pd.Timestamp("2024-09-02"), "000001.SZ"),
+            (pd.Timestamp("2024-09-03"), "000001.SZ"),
+            (pd.Timestamp("2024-09-06"), "000001.SZ"),  # 缺 09-04, 09-05
+            (pd.Timestamp("2024-09-09"), "000001.SZ"),
+        ], names=["date", "symbol"]),
+    )
+    trade_days = {"2024-09-02", "2024-09-03", "2024-09-04",
+                  "2024-09-05", "2024-09-06", "2024-09-09"}
+    gaps = mod._backscan_recent(df, trade_days, suspend_intervals={}, days=30)
+    assert len(gaps) == 1
+    assert gaps[0].symbol == "000001.SZ"
+    assert not gaps[0].suspend_justified
+
+
+def test_backscan_recent_clean_returns_empty():
+    """回扫：近期完整（无缺口）→ []。"""
+    df = pd.DataFrame(
+        {"close": [1, 1, 1]},
+        index=pd.MultiIndex.from_tuples([
+            (pd.Timestamp("2024-09-02"), "000001.SZ"),
+            (pd.Timestamp("2024-09-03"), "000001.SZ"),
+            (pd.Timestamp("2024-09-04"), "000001.SZ"),
+        ], names=["date", "symbol"]),
+    )
+    trade_days = {"2024-09-02", "2024-09-03", "2024-09-04"}
+    assert mod._backscan_recent(df, trade_days, suspend_intervals={}, days=30) == []
