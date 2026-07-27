@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
-"""观测层播报 schtasks 配置化管理（一期）。
+"""观测层 schtasks 配置化管理（方案 C · 数据链 + 播报 supervisor）。
 
-读 .env 的 *_BRIEF_TIME，幂等注册/列出/删除 3 个每日播报任务。
-改时间 = 改 .env + python manage_ops_schtasks.py --register（先删后建，幂等）。
+schtasks 从 7 个收敛到 3 个（本脚本管 2 个 + discovery/schtasks.py 独立管 1 个）：
+  - QuanterDataPipeline @17:00（supervisor：T1→采集→T2 串行，ops/data_pipeline.py）
+  - QuanterBrief        @18:00（supervisor：Trading+Strategy+Data，ops/brief_all.py；
+    在 pipeline 之后，修正历史 DataBrief@17:00 在采集@17:30 前的顺序 bug）
+  - QuanterDiscoveryDaemon @02:00（独立，由 discovery/schtasks.py 注册，本脚本不管）
 
-第二期交易引擎引入 APScheduler 后，播报调度可迁移进程内，本脚本留作 fallback。
+改时间 = 改下方 PIPELINE_TASKS + python manage_ops_schtasks.py --register（先删后建，幂等）。
+--register 同时清退历史 6 个零散任务（QuanterTradingBrief/StrategyBrief/DataBrief/
+DataCheckT1/DailyIncremental/DataCheckT2），防残留。
 """
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,57 +21,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-# bot → schtasks 任务名
-TASK_NAMES = {
-    "trading": "QuanterTradingBrief",
-    "strategy": "QuanterStrategyBrief",
-    "data": "QuanterDataBrief",
-}
-# bot → .env 时间变量名 + 默认时间
-BOT_TIME_ENV = {
-    "trading": ("TRADING_BRIEF_TIME", "15:30"),
-    "strategy": ("STRATEGY_BRIEF_TIME", "16:00"),
-    "data": ("DATA_BRIEF_TIME", "17:00"),
-}
-
-# 数据检查点 + 日频增量任务（auto-trading-rehearsal Task 4 + Phase 1.5 任务3）
-# Why 独立 list 不复用 bot dict：这些 bat 命名 run_data_check_t1/t2.bat /
-# run_daily_incremental.bat（非 run_{bot}_brief.bat 套路），且时间硬编码不读 .env
-# （17:00 查T-1 / 17:30 拉当日 daily / 18:30 查T 是 brainstorm 钉死的盘后时序，
-# 调度漂移会破坏「拉新 daily → 检查点② 验 T 数据」链路，故不做 env 化）。
-# ⚠️ 时序约束：daily_incremental @17:30 必须早于 DataCheckT2 @18:30——检查点②重采 daily
-#    走 sync_daily_incremental（Phase 1.5 任务1 分流），daily 增量调度先跑保证 T 日数据
-#    落湖，检查点② 多为一次过 PASS 不进重采熔断窗口。
-DATA_CHECK_TASKS = [
+# 方案 C：2 个 supervisor 任务（原 6 个零散任务合并）
+# 时序：DataPipeline @17:00 须早于 Brief @18:00（Brief 的 DataBrief 反映采集后状态）
+PIPELINE_TASKS = [
     # (任务名, 时间, bat 相对路径)
-    ("QuanterDataCheckT1", "17:00", "scripts\\run_data_check_t1.bat"),
-    ("QuanterDailyIncremental", "17:30", "scripts\\run_daily_incremental.bat"),
-    ("QuanterDataCheckT2", "18:30", "scripts\\run_data_check_t2.bat"),
+    ("QuanterDataPipeline", "17:00", "scripts\\run_data_pipeline.bat"),
+    ("QuanterBrief",        "18:00", "scripts\\run_brief_all.bat"),
 ]
 
-
-def _load_env() -> None:
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(ROOT / ".env")
-    except ImportError:
-        pass
-
-
-def build_register_commands() -> list[dict]:
-    """生成 3 个 schtasks 注册命令参数（不执行）。先 /Delete 再 /Create 保证幂等。
-
-    Why 拆纯函数：让单测能在不触发 subprocess（不污染 Windows 任务计划程序）的
-    前提下，验证"读 .env 时间 → 任务名 → bat 路径"三段映射的回归。
-    """
-    _load_env()
-    out = []
-    for bot, task in TASK_NAMES.items():
-        env_key, default = BOT_TIME_ENV[bot]
-        time = os.getenv(env_key, default)
-        bat = str(ROOT / "scripts" / f"run_{bot}_brief.bat")
-        out.append({"task": task, "time": time, "bat": bat, "bot": bot})
-    return out
+# 历史 6 个零散任务（--register / --unregister 时清理，防残留）
+LEGACY_TASKS = [
+    "QuanterTradingBrief",
+    "QuanterStrategyBrief",
+    "QuanterDataBrief",
+    "QuanterDataCheckT1",
+    "QuanterDailyIncremental",
+    "QuanterDataCheckT2",
+]
 
 
 def _schtasks(args: list[str]) -> int:
@@ -76,60 +46,55 @@ def _schtasks(args: list[str]) -> int:
 
 
 def register() -> None:
-    """幂等注册：先 /Delete /F（不存在也返回 0，不报错）再 /Create /F 覆盖。
-
-    覆盖两类任务：bot 播报（3 个，读 .env 时间）+ 数据检查点（2 个，硬编码时间）。
-    """
-    # bot 播报任务
-    for c in build_register_commands():
-        _schtasks(["/Delete", "/TN", c["task"], "/F"])  # 幂等：先删
-        rc = _schtasks(["/Create", "/SC", "DAILY", "/TN", c["task"],
-                        "/TR", c["bat"], "/ST", c["time"], "/F"])
-        print(f"{'OK' if rc == 0 else 'FAIL'} {c['task']} @ {c['time']} → {c['bat']}")
-    # 数据检查点任务
-    for task, t, bat_rel in DATA_CHECK_TASKS:
+    """幂等注册：先清退历史 6 个零散任务 + 重建 2 个 supervisor（先 /Delete 再 /Create）。"""
+    # 清退历史任务（幂等，不存在不报错）
+    for task in LEGACY_TASKS:
+        _schtasks(["/Delete", "/TN", task, "/F"])
+    print(f"清退 {len(LEGACY_TASKS)} 个历史零散任务")
+    # 注册 2 个 supervisor
+    for task, t, bat_rel in PIPELINE_TASKS:
         bat = str(ROOT / bat_rel)
-        _schtasks(["/Delete", "/TN", task, "/F"])  # 幂等：先删
+        _schtasks(["/Delete", "/TN", task, "/F"])  # 幂等先删
         rc = _schtasks(["/Create", "/SC", "DAILY", "/TN", task,
                         "/TR", bat, "/ST", t, "/F"])
         print(f"{'OK' if rc == 0 else 'FAIL'} {task} @ {t} → {bat}")
 
 
 def unregister() -> None:
-    """一键清退全部任务（删除是幂等的，不存在不报错）。"""
-    for task in TASK_NAMES.values():
+    """一键清退全部（2 个 supervisor + 历史 6 个，删除幂等）。"""
+    for task, _, _ in PIPELINE_TASKS:
         _schtasks(["/Delete", "/TN", task, "/F"])
         print(f"deleted {task}")
-    for task, _, _ in DATA_CHECK_TASKS:
+    for task in LEGACY_TASKS:
         _schtasks(["/Delete", "/TN", task, "/F"])
-        print(f"deleted {task}")
+        print(f"deleted (legacy) {task}")
 
 
 def list_tasks() -> None:
-    """逐个 /Query：schtasks 没有"按前缀过滤"原生能力，逐个查最直白。"""
-    subprocess.run(["schtasks", "/Query", "/TN", "QuanterTradingBrief"], check=False)
-    subprocess.run(["schtasks", "/Query", "/TN", "QuanterStrategyBrief"], check=False)
-    subprocess.run(["schtasks", "/Query", "/TN", "QuanterDataBrief"], check=False)
-    for task, _, _ in DATA_CHECK_TASKS:
+    """逐个 /Query 当前 2 个 supervisor 任务。"""
+    for task, _, _ in PIPELINE_TASKS:
         subprocess.run(["schtasks", "/Query", "/TN", task], check=False)
 
 
-def rerun(bot: str) -> None:
-    """手工触发某个 bot 的播报（不等时间到，立即跑一次 bat）。"""
-    task = TASK_NAMES.get(bot)
+def rerun(task_key: str) -> None:
+    """手工触发某 supervisor（不等时间到，立即跑）：data / brief。"""
+    mapping = {"data": "QuanterDataPipeline", "brief": "QuanterBrief"}
+    task = mapping.get(task_key)
     if not task:
-        print(f"未知 bot={bot}，支持：{list(TASK_NAMES)}")
+        print(f"未知 task={task_key}，支持：{list(mapping)}")
         sys.exit(1)
     subprocess.run(["schtasks", "/Run", "/TN", task], check=False)
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="观测层播报 schtasks 管理")
+    p = argparse.ArgumentParser(
+        description="观测层 schtasks 管理（方案 C · 2 个 supervisor）"
+    )
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--list", action="store_true")
     g.add_argument("--register", action="store_true")
     g.add_argument("--unregister", action="store_true")
-    g.add_argument("--rerun", metavar="BOT")
+    g.add_argument("--rerun", metavar="TASK", help="data | brief")
     args = p.parse_args(argv)
     if args.register:
         register()
