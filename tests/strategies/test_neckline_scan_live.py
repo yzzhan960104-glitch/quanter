@@ -50,6 +50,9 @@ def strategy(monkeypatch):
 
     monkeypatch.setattr(nm, "detect_neckline_method", fake_detect)
     monkeypatch.setattr(nm, "simulate_exit", fake_simulate_exit)
+    # 完整性 gate（规则4）cache 置空：现有用例不测 gate 行为，空 cache 让 gate 放行
+    # （expected=空集 → missing=空 → ok=True），聚焦 detect/simulate 契约。
+    monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, set()))
     return strat
 
 
@@ -182,3 +185,75 @@ def test_scan_live_with_string_date_from_eod(strategy):
     assert len(signals) == 1, "str date 与 Timestamp formed_at 同日应识别为当日突破（C1）"
     assert signals[0].symbol == "600000.SH"
     assert strategy._sim_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# 完整性 gate（规则4）：scan_live 窗口含未解释漏采 → 跳过标的（return []）
+# ---------------------------------------------------------------------------
+# 物理意图（300214.SZ 案例）：lake 缺停牌复牌段，残缺数据识别颈线 8.07→11.86 误判突破产计划。
+# gate 在 detect 前置检查窗口连续性：缺日且非停牌 → return [] + warning，不用残缺数据产信号。
+# 这 3 个用例不用 strategy fixture（需自定义 cache 注入漏采/停牌场景）。
+
+def _mk_window_df(dates):
+    """单标的窗口 df（DatetimeIndex，值任意——detect 被 mock 不真算）。"""
+    n = len(dates)
+    return pd.DataFrame(
+        {"high": [10.0] * n, "low": [9.0] * n, "close": [9.5] * n, "volume": [1000] * n},
+        index=pd.DatetimeIndex(pd.to_datetime(dates)),
+    )
+
+
+def test_scan_live_gate_skips_unjustified_gap(monkeypatch):
+    """窗口含未解释漏采（缺日 + 非停牌）→ scan_live return []，detect 不被调。
+
+    gate 红线：残缺窗口识别结果不可信，跳过该标的不产误信号（300214.SZ 教训）。
+    """
+    from strategies import neckline_method as nm
+    strat = nm.NecklineMethodStrategy()
+    detect_calls = []
+    monkeypatch.setattr(nm, "detect_neckline_method",
+                        lambda *a, **kw: detect_calls.append(1) or None)
+    trade_days = {"2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06"}
+    monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, trade_days))
+    df_upto = _mk_window_df(["2024-09-02", "2024-09-03", "2024-09-06"])  # 缺 09-04, 09-05
+
+    signals = strat.scan_live("000001.SZ", df_upto, "2024-09-06")
+
+    assert signals == [], "漏采窗口应被 gate 跳过"
+    assert detect_calls == [], "gate 前置拦截，detect 不应被调用"
+
+
+def test_scan_live_gate_keeps_complete_window(monkeypatch):
+    """窗口完整（无漏采）→ gate 放行，detect 被调。"""
+    from strategies import neckline_method as nm
+    strat = nm.NecklineMethodStrategy()
+    detect_calls = []
+    monkeypatch.setattr(nm, "detect_neckline_method",
+                        lambda *a, **kw: detect_calls.append(1) or None)
+    trade_days = {"2024-09-02", "2024-09-03", "2024-09-04"}
+    monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, trade_days))
+    df_upto = _mk_window_df(["2024-09-02", "2024-09-03", "2024-09-04"])  # 完整
+
+    strat.scan_live("000001.SZ", df_upto, "2024-09-04")
+
+    assert detect_calls, "完整窗口 gate 应放行，detect 被调"
+
+
+def test_scan_live_gate_keeps_all_suspend_gap(monkeypatch):
+    """窗口缺日但全是停牌 → gate 放行（合法跳空），detect 被调。
+
+    红线：停牌造成的跳空是合法的，gate 不能误跳过（否则停牌复牌标的永不被识别）。
+    """
+    from strategies import neckline_method as nm
+    strat = nm.NecklineMethodStrategy()
+    detect_calls = []
+    monkeypatch.setattr(nm, "detect_neckline_method",
+                        lambda *a, **kw: detect_calls.append(1) or None)
+    susp = {"000413.SZ": {"2024-09-03", "2024-09-04"}}
+    trade_days = {"2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06"}
+    monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: (susp, trade_days))
+    df_upto = _mk_window_df(["2024-09-02", "2024-09-05", "2024-09-06"])  # 缺 09-03, 09-04 停牌
+
+    strat.scan_live("000413.SZ", df_upto, "2024-09-06")
+
+    assert detect_calls, "全停牌跳空是合法的，gate 应放行"

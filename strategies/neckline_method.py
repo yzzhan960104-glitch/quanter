@@ -16,6 +16,8 @@ trade dict（出场逻辑归策略侧，引擎零感知）。
 """
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 # 颈线法算法原挂 scripts/neckline_method_v0 + scripts/neckline_backtest（靠 sys.path hack
@@ -39,6 +41,46 @@ _NECKLINE_EXEC_KEYS = (
     "max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
     "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
 )
+
+logger = logging.getLogger(__name__)
+
+# 完整性 gate（规则4）模块级 cache：首次 scan_live 懒加载，跨 symbol 复用。
+# 物理意图：gate 每次 scan_live 都要查窗口连续性，suspend 区间 + trade_days 是
+# 全市场共享的静态基准，per-symbol 重加载是 IO 浪费；模块级缓存一次加载全复用。
+_suspend_intervals_cache: dict | None = None
+_trade_days_cache: set | None = None
+
+
+def _ensure_integrity_cache():
+    """懒加载停牌区间 + 近 2 年 trade_days（首次 scan_live 触发）。
+
+    返 (suspend_intervals, trade_days_set)。读 data_lake/suspend_d.parquet +
+    近 2 年 trade_cal（颈线法窗口 60 日 ≈ 3 月，2 年余量充足）。
+    fail-open：加载失败（无文件/无 token/网络异常）→ 返 ({}, set()) 让 gate 放行，
+    不阻断识别（gate 是新增防护，失效时退回原行为，与 reader 离线降级同口径）。
+    """
+    global _suspend_intervals_cache, _trade_days_cache
+    if _suspend_intervals_cache is not None:
+        return _suspend_intervals_cache, _trade_days_cache
+    try:
+        from datetime import datetime, timedelta
+        from pathlib import Path
+        from data.integrity import load_suspend_intervals, fetch_trade_days
+        today = datetime.today().strftime("%Y-%m-%d")
+        start = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
+        _trade_days_cache = fetch_trade_days(start, today)
+        susp_path = Path("data_lake/suspend_d.parquet")
+        if susp_path.exists():
+            susp_df = pd.read_parquet(susp_path)
+            _suspend_intervals_cache = load_suspend_intervals(susp_df, _trade_days_cache)
+        else:
+            logger.warning("suspend_d.parquet 缺失，完整性 gate 无停牌 ground-truth（全判漏采）")
+            _suspend_intervals_cache = {}
+    except Exception as e:
+        logger.warning("完整性 gate cache 加载失败（fail-open 放行）：%s", e)
+        _suspend_intervals_cache = {}
+        _trade_days_cache = set()
+    return _suspend_intervals_cache, _trade_days_cache
 
 
 @register_strategy("neckline")
@@ -155,6 +197,24 @@ class NecklineMethodStrategy:
                 symbol / formed_at / breakout_date / neckline / bottom / entry_price / atr
             突破日非当日（res["formed_at"] != date）→ 返 []（只挂当日新信号，防历史重吐）。
         """
+        # 完整性 gate（规则4）：窗口含未解释漏采 → 跳过，不产误信号（300214.SZ 教训）。
+        # Why：lake 缺停牌复牌段时残缺数据误判颈线；gate 用 trade_cal + suspend_d 区分
+        # 合法跳空（停牌）vs 漏采，漏采则 return []（不阻断 universe 扫描，warning 留痕）。
+        # fail-open：gate 自身异常（cache 加载失败等）不阻断识别，退回原行为。
+        try:
+            _susp, _td = _ensure_integrity_cache()
+            if _td:  # cache 非空才查（空 cache = 测试降级/首次加载失败 → 放行）
+                from data.integrity import check_window_continuity
+                _cont = check_window_continuity(
+                    df_upto.tail(self.id_cfg["window"]), _td, _susp, symbol)
+                if not _cont.ok:
+                    logger.warning(
+                        "颈线 scan_live %s 窗口含 %d 个未解释漏采交易日 %s，跳过（数据完整性 gate）",
+                        symbol, len(_cont.unjustified), list(_cont.unjustified[:5]))
+                    return []
+        except Exception as _e:
+            logger.warning("完整性 gate 异常（fail-open 继续）：%s", _e)
+
         # ATR 全序列预算（窗口对齐 id_cfg["window"]，与 scan_at / precompute 同口径）。
         # 物理意图：颈线在 window 天形成，衡量其波动尺度也用 window 天，而非写死 14 天。
         # 截至此处仅用 df_upto（无前视），末根即 date 当日的 ATR。
