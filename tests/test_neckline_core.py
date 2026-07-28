@@ -72,6 +72,21 @@ def _ohlc(rows, start="2024-01-01"):
 #   max_wait=5, max_holding=15, tp1_portion=0.5
 C_STAR, BOTTOM, ATR = 100.0, 90.0, 2.0
 
+
+def _net_pct(raw_pct: float) -> float:
+    """raw pnl(%) → 扣费后 net pnl(%)（与 simulate_exit factor 变换同源 · plan Task 12）。
+
+    simulate_exit 对 lot1/lot2 各做 net=(1+raw)×(1-sell)/(1+buy)-1 仿射变换（entry 扣
+    buy_rate=佣+过、每笔 exit 各扣 sell_rate=佣+印+过）。仿射加权可交换：avg_net ==
+    _net_pct(raw_avg)。用于既有 golden 断言更新（扣费使 pnl 降，对齐实盘成本）。
+    """
+    buy_rate = EXEC_DEFAULTS["commission_rate"] + EXEC_DEFAULTS["transfer_rate"]
+    sell_rate = (EXEC_DEFAULTS["commission_rate"] + EXEC_DEFAULTS["stamp_rate"]
+                 + EXEC_DEFAULTS["transfer_rate"])
+    factor = (1 - sell_rate) / (1 + buy_rate)
+    return round(((1 + raw_pct / 100) * factor - 1) * 100, 2)
+
+
 # 信号日统一取 bar0（signal_idx=0）；simulate_exit 从 signal_idx+1=bar1 起等回踩。
 
 
@@ -88,8 +103,8 @@ def test_stop_loss():
     res = simulate_exit(df, 0, C_STAR, BOTTOM, ATR)
     assert res["exit_reason"] == "stop_loss"
     assert res["entry"] == 102.0
-    # 两手同价止损：avg = (98−102)/102 = −3.92%
-    assert res["avg_pnl_pct"] == round((98 - 102) / 102 * 100, 2)
+    # 两手同价止损 raw=(98−102)/102=−3.92%，扣费后 net（手续费侵蚀更低，plan Task 12）
+    assert res["avg_pnl_pct"] == _net_pct((98 - 102) / 102 * 100)
 
 
 def test_tp1_then_tp2():
@@ -102,12 +117,12 @@ def test_tp1_then_tp2():
     ])
     res = simulate_exit(df, 0, C_STAR, BOTTOM, ATR)
     assert res["exit_reason"] == "tp2"
-    lot1_pct = (110 - 102) / 102 * 100   # +7.84%
-    lot2_pct = (120 - 102) / 102 * 100   # +17.65%
-    expected_avg = 0.5 * lot1_pct + 0.5 * lot2_pct
-    assert res["lot1_pnl_pct"] == round(lot1_pct, 2)
-    assert res["lot2_pnl_pct"] == round(lot2_pct, 2)
-    assert res["avg_pnl_pct"] == round(expected_avg, 2)
+    lot1_pct = (110 - 102) / 102 * 100   # raw +7.84%
+    lot2_pct = (120 - 102) / 102 * 100   # raw +17.65%
+    # 各 lot 扣 sell_rate（分级两笔各卖=双倍佣）；avg 仿射加权可交换（plan Task 12）
+    assert res["lot1_pnl_pct"] == _net_pct(lot1_pct)
+    assert res["lot2_pnl_pct"] == _net_pct(lot2_pct)
+    assert res["avg_pnl_pct"] == _net_pct(0.5 * lot1_pct + 0.5 * lot2_pct)
 
 
 def test_timeout():
@@ -122,8 +137,8 @@ def test_timeout():
     df = _ohlc(rows)
     res = simulate_exit(df, 0, C_STAR, BOTTOM, ATR)
     assert res["exit_reason"] == "timeout"
-    # 两手按收盘 105：avg = (105−102)/102 = +2.94%
-    assert res["avg_pnl_pct"] == round((105 - 102) / 102 * 100, 2)
+    # 两手按收盘 105 raw=+2.94%，扣费后 net（plan Task 12）
+    assert res["avg_pnl_pct"] == _net_pct((105 - 102) / 102 * 100)
 
 
 def test_skip_no_pullback():
@@ -190,8 +205,8 @@ def test_trailing_tightens_stop():
     ])
     res = simulate_exit(df, 0, C_STAR, BOTTOM, ATR, exec=exec_cfg)
     assert res["exit_reason"] == "stop_loss"
-    # stop=98.6, entry=102 → (98.6−102)/102 = −3.33%
-    assert res["avg_pnl_pct"] == round((98.6 - 102) / 102 * 100, 2)
+    # stop=98.6, entry=102 raw=−3.33%，扣费后 net（plan Task 12）
+    assert res["avg_pnl_pct"] == _net_pct((98.6 - 102) / 102 * 100)
 
     # 对照：同样 sym_df 但 trailing 关闭（默认 grace=0/step=0 → 固定 base_stop=98），
     # bar6 low=98.3>98 不触发 stop_loss@bar6 —— 证明 trailing 是 bar6 触发的唯一原因。
@@ -360,6 +375,50 @@ def test_simulate_exit_id_cfg_overrides_stop_and_tp():
     assert res["risk_pct"] == round((102 - 97) / 102 * 100, 2), (
         f"risk_pct={res['risk_pct']} ≠ 预期（base_stop 用 stop_atr_mult=1.5 → 97）"
     )
-    # stop_loss 触发价 = base_stop = 97 → avg_pnl = (97−102)/102 = −4.90%
+    # stop_loss 触发价 = base_stop = 97 raw=−4.90%，扣费后 net（plan Task 12）
     assert res["exit_reason"] == "stop_loss"
-    assert res["avg_pnl_pct"] == round((97 - 102) / 102 * 100, 2)
+    assert res["avg_pnl_pct"] == _net_pct((97 - 102) / 102 * 100)
+
+
+# ============================================================================
+# plan Task 12（P1-9 手续费/印花税）：_cost 金额口径 + simulate_exit 扣费
+# ============================================================================
+def test_cost_buy_sell_amount_based():
+    """_cost：万三佣 min5 + 卖0.05%印 + 0.001%过（金额口径，实盘用）。
+
+    物理意图（plan Task 12 · spec §4.8）：实盘成本建模——佣金双边（买+卖各一次）min5、
+    印花税单边（仅卖）、过户费双边。小金额命中 min5（佣金=max(amount×万三, 5)）。
+    """
+    from strategies.neckline.backtest import _cost
+    # 1万元金额：佣金=10000×0.0003=3 <5 → min5 命中。买=佣5+过0.1（无印花）
+    assert _cost("buy", 1000, 10.0) == pytest.approx(5.0 + 10000 * 0.00001)
+    # 卖=佣5+印5+过0.1（印花=10000×0.0005=5）
+    assert _cost("sell", 1000, 10.0) == pytest.approx(
+        5.0 + 10000 * 0.0005 + 10000 * 0.00001)
+    # 10万元金额：佣金=100000×0.0003=30 >5 → 按费率。买=佣30+过1
+    assert _cost("buy", 10000, 10.0) == pytest.approx(
+        100000 * 0.0003 + 100000 * 0.00001)
+
+
+def test_simulate_exit_with_cost_lowers_pnl():
+    """simulate_exit 默认扣费 → pnl 低于零费率（手续费侵蚀收益，对齐实盘成本）。
+
+    物理意图（plan Task 12）：EXEC_DEFAULTS 默认含 cost 费率，simulate_exit entry 扣 buy_rate
+    （佣+过）、lot1/lot2 exit 各扣 sell_rate（佣+印+过，分级两笔各卖=双倍佣）。零费率 exec
+    退化 raw pnl（向后兼容）。默认 pnl < 零费率 pnl（费率使 pnl 降，对齐实盘）。
+    """
+    df = _ohlc([
+        (100, 101, 99, 100.5, 1000),   # bar0 信号
+        (102, 103, 102, 102.5, 1000),  # bar1 成交 entry=102
+        (109, 111, 108, 110.5, 1000),  # bar2 high≥tp1=110 → 卖 lot1
+        (119, 121, 118, 120.5, 1000),  # bar3 high≥tp2=120 → 卖 lot2
+    ])
+    res_cost = simulate_exit(df, 0, C_STAR, BOTTOM, ATR)              # 默认 EXEC_DEFAULTS（扣费）
+    zero_exec = {**EXEC_DEFAULTS, "commission_rate": 0,
+                 "stamp_rate": 0, "transfer_rate": 0}
+    res_zero = simulate_exit(df, 0, C_STAR, BOTTOM, ATR, exec=zero_exec)  # 零费率（raw pnl）
+
+    # 扣费后 avg/lot1/lot2 pnl 均低于零费率（lot1/lot2 各扣 sell=双倍佣）
+    assert res_cost["avg_pnl_pct"] < res_zero["avg_pnl_pct"]
+    assert res_cost["lot1_pnl_pct"] < res_zero["lot1_pnl_pct"]
+    assert res_cost["lot2_pnl_pct"] < res_zero["lot2_pnl_pct"]

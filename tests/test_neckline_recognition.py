@@ -257,8 +257,12 @@ def test_scan_symbol_orchestration(monkeypatch):
     assert n_skip == 0
     hit = filled[0]
     assert hit["exit_reason"] == "stop_loss"
-    # entry=103, stop=96.4 → avg_pnl = (96.4−103)/103 = −6.41%
-    assert hit["avg_pnl_pct"] == round((96.4 - 103) / 103 * 100, 2)
+    # entry=103, stop=96.4 raw=−6.41%，扣费后 net（Task 12 仿射变换 net=(1+raw)×(1-sell)/(1+buy)-1）
+    _buy = nb.EXEC_DEFAULTS["commission_rate"] + nb.EXEC_DEFAULTS["transfer_rate"]
+    _sell = (nb.EXEC_DEFAULTS["commission_rate"] + nb.EXEC_DEFAULTS["stamp_rate"]
+             + nb.EXEC_DEFAULTS["transfer_rate"])
+    assert hit["avg_pnl_pct"] == round(
+        ((1 + (96.4 - 103) / 103) * (1 - _sell) / (1 + _buy) - 1) * 100, 2)
 
 
 # ============================================================================

@@ -49,7 +49,36 @@ EXEC_DEFAULTS = {
     "trailing_grace": 0,         # 宽限天数 b（前 b 天不收紧；候选 5/10）
     "trailing_step": 0.0,        # 收紧速度 a（ATR/日；候选 0.05/0.1/0.15）
     "trailing_floor": 0.5,       # 最低 ATR 倍数（收紧上限；0=到颈线，0.5=颈线-0.5ATR）
+    # 交易成本（plan Task 12 · P1-9 对齐实盘）：万三佣金 + 卖0.05%印花 + 0.001%过户。
+    # simulate_exit 按费率扣 entry/exit pnl（lot1/lot2 各卖各扣 sell_rate=双倍佣）。
+    # _cost(side,qty,price) 金额口径（含 min5）供实盘；回测用费率（百分比 pnl 无 notional）。
+    "commission_rate": 0.0003,   # 佣金万三（双边，买+卖各一次）
+    "stamp_rate": 0.0005,        # 印花税卖 0.05%（单边卖出）
+    "transfer_rate": 0.00001,    # 过户费 0.001%（双边，沪市）
 }
+
+
+def _cost(side: str, qty: float, price: float) -> float:
+    """交易成本（金额口径，实盘用）：万三佣金 min5 + 卖0.05%印花 + 0.001%过户。
+
+    物理意图（plan Task 12 · spec §4.8）：实盘下单金额扣费——佣金双边（买+卖各一次）、
+    印花税单边（仅卖）、过户费双边（沪市）。min5 是券商最低佣金门槛（小金额单笔 5 元）。
+
+    回测 simulate_exit 用【费率】口径（百分比 pnl，无 notional，不含 min5 门槛）；本函数
+    【金额】口径供实盘 build_orders/对账用（含 min5，小资金精确）。两者费率同源 EXEC_DEFAULTS。
+
+    Args:
+        side:  "buy"/"sell"（sell 加印花税）。
+        qty:   成交股数。
+        price: 成交价。
+    Returns:
+        成本金额（元）。amount = qty×price；commission=max(amount×0.0003, 5)。
+    """
+    amount = float(qty) * float(price)
+    commission = max(amount * EXEC_DEFAULTS["commission_rate"], 5.0)   # 万三 min5
+    stamp = amount * EXEC_DEFAULTS["stamp_rate"] if side == "sell" else 0.0
+    transfer = amount * EXEC_DEFAULTS["transfer_rate"]
+    return commission + stamp + transfer
 
 
 def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
@@ -158,6 +187,18 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             exit_pos = i   # = end_idx
     if lot1_pnl is None or lot2_pnl is None:
         return None
+
+    # 交易成本扣费（plan Task 12 · spec §4.8）：entry 扣 buy_rate（佣+过）、每 lot exit 各扣
+    # sell_rate（佣+印+过，分级两笔各卖=双倍佣）。仿射变换 net=(1+raw)×(1-sell)/(1+buy)-1，
+    # 加权可交换（avg_net == net(raw_avg)，故 avg_pnl 字段先变换 lot 再加权即可）。
+    # rate=0（零费率 exec）→ factor=1 零回归（向后兼容 Task 12 前的 raw pnl）。
+    buy_rate = exec.get("commission_rate", 0) + exec.get("transfer_rate", 0)
+    sell_rate = (exec.get("commission_rate", 0) + exec.get("stamp_rate", 0)
+                 + exec.get("transfer_rate", 0))
+    if buy_rate or sell_rate:
+        factor = (1 - sell_rate) / (1 + buy_rate)
+        lot1_pnl = (1 + lot1_pnl) * factor - 1
+        lot2_pnl = (1 + lot2_pnl) * factor - 1
 
     avg_pnl = exec["tp1_portion"] * lot1_pnl + (1 - exec["tp1_portion"]) * lot2_pnl
     # exit_price：分级止盈两批不同价，用 avg_pnl 反推加权平均离场价（供适配器 trade dict）
