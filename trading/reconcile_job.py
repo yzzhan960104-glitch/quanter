@@ -6,7 +6,7 @@
   纯函数里（已由 tests/trading/test_circuit_breaker.py 等覆盖）。
 - 我们**不重复造对账逻辑**——BaseExecutionGateway.sync_positions 模板方法已固化
   「拉券商 → reconcile → 返结构化差异」的算法骨架，唯一变化点 _fetch_broker_positions
-  由具体子类（QMT/EMT/Mock）实现。本 job 只做：调 sync_positions + 按结果决策告警。
+  由具体子类（QMT/Mock）实现。本 job 只做：调 sync_positions + 按结果决策告警。
 
 物理意图（盘后 15:30 post_close 触发，二期引擎 Task 7）：
 - drifted（数量漂移）：本地记 100 股、券商只记 90——最危险，敞口直接失真，

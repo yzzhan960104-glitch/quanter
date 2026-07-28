@@ -6,7 +6,7 @@
  * - /caisen     → CaisenScreenView（蔡森形态学筛选：Tick 缓存 → MA/无敌量/KZ → 结果展示）
  * - /lab        → ParamLabView（参数实验室：异步回测 master-detail + 轮询 + 参数调优，Spec 2）
  * - /dashboard  → DashboardView（宏观·板块驾驶舱）
- * - /live       → LiveCockpitView（实盘交易中控：EMT/QMT 连接 + 下单 + 订单/资产）
+ * - /live       → LiveCockpitView（实盘交易中控：QMT 连接 + 下单 + 订单/资产）
  * - /data       → DataLakeView（数据湖资产白盒反射）
  * - /review     → ReviewView（AI 复盘：GLM + 实盘日志 → Markdown 诊断报告）
  *

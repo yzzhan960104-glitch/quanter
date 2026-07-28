@@ -286,7 +286,7 @@ schtasks /Delete /TN "QuanterTradingEngine" /F
 - [ ] **① 影子跑满 `TRADE_SHADOW_MIN_DAYS`（≥5）**：完整覆盖 ≥5 个交易日，四 cron 全链路跑通无异常。
 - [ ] **② 对账连续无 drift**：post_close 每日 `drift=False`，连续 ≥5 天（对账逻辑依赖 gw + local_positions，见下「二期 live 前必修」）。
 - [ ] **③ 网关连通（miniQMT 模拟盘）**：`trading.get_gateway()` 返非 None，`gw._fetch_broker_positions()` 正常返持仓 dict（gw=None 时 pre_open/stop_loss/post_close 均降级 no-op，live 无法工作）。
-- [ ] **④ 止损行情源已接入（`qmt_market_data.get_quote` 通道）**：miniQMT 通道可用，`get_quote(sym)["last_price"]` 返有效快照（EMT 网关无 xtdata → 止损链路需另接行情源）。
+- [ ] **④ 止损行情源已接入（`qmt_market_data.get_quote` 通道）**：miniQMT 通道可用，`get_quote(sym)["last_price"]` 返有效快照（行情源缺失则止损链路需另接）。
 - [ ] **⑤ 二期 live 前必修三项**（当前代码 gap，未完成前禁切 live，详见下节）。
 
 ### 二期 live 前必修项（当前代码 gap · 上线集成阶段工作）
@@ -307,9 +307,9 @@ schtasks /Delete /TN "QuanterTradingEngine" /F
    - `active.json` 真实 `local_positions`（post_close 对账消费）：当前 `_post_close` 传 None（对账跳过，drift 恒为 False 非真对账）。
    - 必修：上线集成阶段接线策略实例化 + universe 拉取 + 持仓状态机读写 + active.json 读取。
 
-3. **若切 EMT 网关（已废弃路径，memory `quanter-emt-broker-access.md`）**：
-   - EMT 极速交易网关无 xtdata 行情源，止损链路 `qmt_market_data.get_quote` 返 None → stop_loss_monitor 全跳过（盲止损 = 敞口失控）。
-   - 必修：另接行情源（如 EMT 的 `get_quote` API 或第三方 tick 源），或固定使用 miniQMT 通道。
+3. **网关固定 QMT/miniQMT（EMT 已于 2026-07 废弃移除，不再支持切换）**：
+   - 止损链路依赖 xtdata 行情源（`qmt_market_data.get_quote`），仅 miniQMT 通道可用时返有效快照。
+   - 必修：确保 miniQMT 通道可用；若行情源返 None → stop_loss_monitor 全跳过（盲止损 = 敞口失控）。
 
 ## 切 live 操作（五前置全打勾后）
 

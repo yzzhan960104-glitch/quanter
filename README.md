@@ -9,7 +9,7 @@ Quanter 是一套面向 **A 股** 的量化研究平台,以**颈线法形态学(
 - **实验版本中心 · experiment**:实盘下单的策略版本配置中心,`resolve_active()` 给 scan 发放当前生效的 `(strategy_name, params, weight)` 列表,支持版本切换 + 审计日志 + 权重校验。
 - **回测引擎 · backtest**:`replay` 策略中立回测器 + 异步任务队列(worker/scheduler/tasks_db)+ 参数优化(`optimize/training_*`)+ 回测撮合模拟器(MockBroker)。**单向依赖铁律**:只依赖 `trading.compute`(离场纯函数)+ `strategies` + `data`,严禁触碰 `trading.engine`/`broker`(回测求变、交易求稳,分离防污染)。
 - **数据中心**:Tushare 通用同步器(20+ 数据集,配置驱动),AKShare / JQData 辅助。
-- **实盘接入**:东财 EMT 极速交易(MiniQMT 监管停用,按 env 路由 EMT/QMT gateway)。
+- **实盘接入**:miniQMT 极速交易(gateway QMT 唯一,EMT 已于 2026-07 废弃)。
 - **后端引擎**:FastAPI(异步)+ 纯 Python 量化内核(Pandas/NumPy 显式向量化,拒绝黑盒)。
 - **前端交互**:Vue 3 + Vite + ECharts,6 视图。
 - **远程协同**:钉钉机器人经 dws dev connect 接入(对话 + 训练人审两职责)。
@@ -73,7 +73,7 @@ quanter/
 pip install -r requirements.txt
 ```
 
-主要依赖:`fastapi`、`uvicorn`、`pandas`、`numpy`、`tushare`、`akshare`、`jqdatasdk`、`celery`、`redis`、`aiohttp`、`pyarrow`、`fastparquet`、`pydantic`、`yfinance` 等。实盘 EMT 接入用 Python 3.10 venv(`.venv310`)。
+主要依赖:`fastapi`、`uvicorn`、`pandas`、`numpy`、`tushare`、`akshare`、`jqdatasdk`、`celery`、`redis`、`aiohttp`、`pyarrow`、`fastparquet`、`pydantic`、`yfinance` 等。实盘 QMT 接入用 Python 3.10 venv(`.venv310`)。
 
 ### 3.2 前端
 
@@ -155,7 +155,7 @@ cd presentation/web && npm run dev
 - `/caisen` —— **形态扫描**:颈线候选 + 颈线/盈亏比/止损可视化。
 - `/param-lab` —— **参数训练**:异步回测 + 参数扫描 + AI 分析。
 - `/dashboard` —— **驾驶舱**:(宏观 CTA / CreditRegime 已于 2026-07 下线;`/macro/sector/flow` 板块资金流端点保留,前端视图待适配)
-- `/live` —— **实盘驾驶舱**:EMT 网关持仓/订单/风控。
+- `/live` —— **实盘驾驶舱**:QMT 网关持仓/订单/风控。
 - `/data-lake` —— **数据中心**:Tushare 数据集资产表 + 同步触发。
 - `/review` —— **审核**:候选计划 approve/reject + 钉钉远程审核。
 
@@ -182,7 +182,7 @@ python -m discovery publish   # 手动把冠军 publish 为 experiment DRAFT 版
 | **颈线法策略** | CaisenScreen | 多空转折形态学(纯多头),颈线聚集带 + 压制验证 + 挂单回踩 + 分级止盈,当前唯一活跃策略 |
 | **数据中心** | DataLake | Tushare 20+ 数据集,registry 反射 + 同步状态(healthy/stale) |
 | ~~宏观驾驶舱~~ | Dashboard | (宏观 CTA / CreditRegime 已于 2026-07 下线;板块资金流端点保留,前端待适配) |
-| **实盘接入** | LiveCockpit | 东财 EMT 极速交易(MiniQMT 监管停用),gateway 按 env 路由 |
+| **实盘接入** | LiveCockpit | miniQMT 极速交易(gateway QMT 唯一,EMT 已废弃) |
 | **行情播报** | `python -m broadcast` | 每日 19:00 schtasks 触发,大盘 8 宽基 + 板块榜 + 主力资金 + 龙虎榜,幂等去重 |
 | **钉钉机器人** | `scripts/start_dingtalk_bots.md` | dws dev connect 统一接入(对话 + 训练人审两职责) |
 
@@ -201,7 +201,7 @@ specs(设计)/ plans(实现计划)均在 `docs/superpowers/`,按时间倒序。�
 - **数据中心与数据治理**:[design](docs/superpowers/specs/2026-07-14-data-center-and-data-governance-design.md)
 - **Tushare 数据快照扩容**:[design](docs/superpowers/specs/2026-07-25-tushare-data-snapshot-design.md) / [completion](docs/superpowers/specs/2026-07-25-tushare-data-snapshot-completion.md)
 - **钉钉 claude 桥 / ops cockpit**:[bridge design](docs/superpowers/specs/2026-07-12-dingtalk-claude-bridge-design.md) / [ops design](docs/superpowers/specs/2026-07-21-dingtalk-ops-cockpit-design.md)
-- **EMT 实盘接入**:[design](docs/superpowers/specs/2026-07-08-emt-broker-access-design.md)
+- **实盘接入(QMT/miniQMT)**:[design](docs/superpowers/specs/2026-07-22-miniqmt-access-gap-design.md)
 
 策略方法论权威参考:
 

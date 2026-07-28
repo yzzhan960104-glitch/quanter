@@ -447,7 +447,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         查询资金资产，返标准化 dict（投线程池调 query_stock_asset）。
 
         返回结构（4 字段，与一期 trading_service.get_asset 的 QMT 内联分支 +
-        EMT _fetch_asset + 前端 Asset 类型完全对齐）::
+        前端 Asset 类型完全对齐）::
 
             {"account_id": str, "cash": float, "total_asset": float, "market_value": float}
 

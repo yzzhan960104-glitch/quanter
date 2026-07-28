@@ -52,7 +52,7 @@ _gateway_singleton: Optional[object] = None
 
 
 def get_gateway() -> Optional[object]:
-    """懒构造交易网关单例（QMT 唯一；EMT 已于 2026-07 废弃移除）。
+    """懒构造交易网关单例（QMT 唯一在用券商）。
 
     优先级：
     1. QMT 凭证（QMT_USERDATA_PATH/QMT_ACCOUNT_ID）齐全 → QmtExecutionGateway
@@ -65,7 +65,7 @@ def get_gateway() -> Optional[object]:
     global _gateway_singleton
     if _gateway_singleton is not None:
         return _gateway_singleton
-    # QMT（miniQMT 模拟盘，唯一在用券商；EMT 已废弃移除）
+    # QMT（miniQMT，唯一在用券商）
     if os.environ.get("QMT_USERDATA_PATH") and os.environ.get("QMT_ACCOUNT_ID"):
         try:
             from trading.qmt_gateway import QmtExecutionGateway
@@ -127,7 +127,7 @@ async def get_positions() -> list:
     # 全量口径（tradable_only=False）：展示须含 T+1 冻结仓（真实敞口 + 浮盈），不可滤。
     # 与 sync_positions 对账同口径；区别于 stop_loss 的可操作口径（io.fetch_positions 默认 True）。
     raw = await gw._fetch_broker_positions(tradable_only=False)
-    # T7：raw 形态可能是 {sym: float}（Mock/EMT）或 {sym: {volume, avg_price, ...}}（QMT）。
+    # T7：raw 形态可能是 {sym: float}（Mock）或 {sym: {volume, avg_price, ...}}（QMT）。
     # 扁平化同时保留 avg_price（Task12：算浮盈必需 avg_price，早期扁平化只取 volume 丢了
     # avg_price，致 pnl 无从计算——此处补回）。形态统一为 {sym: {"volume":v, "avg_price":a}}，
     # 与 sync_positions 扁平化同型 isinstance 防御。
@@ -140,7 +140,7 @@ async def get_positions() -> list:
             for s, p in raw.items()
         }
     else:
-        # {sym: float} 形态（Mock/EMT 无 avg_price）→ 补 None 占位，保持下游统一访问
+        # {sym: float} 形态（Mock 无 avg_price）→ 补 None 占位，保持下游统一访问
         raw = {s: {"volume": p, "avg_price": None} for s, p in (raw or {}).items()}
     if not raw:
         return []
@@ -533,22 +533,13 @@ async def get_orders() -> list:
 async def get_asset() -> dict:
     """查询资金资产（现金/总资产/市值）。未连接或无网关 → 空字典。
 
-    双网关适配：
-    - EMT：gw._fetch_asset()（async，queryAsset 回调聚合）
-    - QMT：gw._trader.query_stock_asset（同步 C++，投线程池）
+    QMT 网关：gw._trader.query_stock_asset（同步 C++，投线程池）。
     """
     gw = get_gateway()
     if gw is None:
         return {}
     if getattr(gw, "is_locked", False) or not getattr(gw, "_connected", False):
         return {}
-    # EMT 网关：_fetch_asset（async，queryAsset 回调聚合）
-    if hasattr(gw, "_fetch_asset"):
-        try:
-            return await gw._fetch_asset()
-        except Exception as e:
-            logger.warning("EMT query_asset 异常：%s", e)
-            return {}
     # QMT 网关：query_stock_asset（同步 C++，投线程池）
     import asyncio
     loop = asyncio.get_running_loop()

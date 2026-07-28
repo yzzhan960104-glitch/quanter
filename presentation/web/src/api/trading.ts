@@ -6,7 +6,7 @@
  * 状态四态严格镜像后端：unavailable / disconnected / live / vetoed_by_risk，
  * 前端心跳灯完全跟随后端返回值，绝不本地推断（杜绝"虚假繁荣"）。
  *
- * Phase 2 新增（EMT 适配，前端不感知券商）：connect/disconnect/submitOrder/
+ * Phase 2 新增（前端不感知券商）：connect/disconnect/submitOrder/
  * cancelOrder/getOrders/getAsset。dry_run 由前端按单控制（双开关语义见后端 risk_shield）。
  */
 import { apiClient } from './client'
@@ -36,7 +36,7 @@ export interface SubmitOrderBody {
   symbol: string
   qty: number
   side: 'buy' | 'sell'
-  price: number | null            // null=市价（EMT 第一版仅限价，故通常有值）
+  price: number | null            // null=市价（限价单通常有值）
   dry_run: boolean                // 前端控制：true=模拟（不真下单）
   confirm: boolean                // 二次确认开关
 }
@@ -48,22 +48,20 @@ export interface OrderResultRow {
   message: string
 }
 
-/** 订单回报行（GET /orders 返回；EMT 字段 order_emt_id，QMT 用 seq-str） */
+/** 订单回报行（GET /orders 返回，QMT 用 seq-str order_id） */
 export interface OrderRow {
   kind?: string                   // order / trade / cancel_error / async_response
-  order_emt_id?: string | number  // EMT 真实订单号
-  order_id?: string | number      // 兼容 QMT seq-str
+  order_id?: string | number      // QMT seq-str 订单号
   ticker?: string
-  order_status?: number           // EMT 原始状态码
   state: string                   // 映射后 OrderState.name
   qty_traded?: number             // 累计成交
   qty_left?: number               // 剩余（撤单时为撤单量）
   price?: number
-  side?: number                   // EMT: 1=买 2=卖
+  side?: number                   // 方向码 1=买 2=卖（预留，QMT 回报暂不返回）
   error_msg?: string
 }
 
-/** 资产（GET /asset；EMT buying_power=cash, QMT 同口径） */
+/** 资产（GET /asset；cash=可用资金口径） */
 export interface Asset {
   account_id?: string
   cash: number                    // 可用资金
@@ -109,7 +107,7 @@ export async function exportLiveTrades(start: string, end: string): Promise<void
 
 // ============ Phase 2 新增：连接 / 下单 / 撤单 / 查询 ============
 
-/** POST /trading/connect：触发网关连接（后端 get_gateway 选 EMT/QMT）。失败→503。 */
+/** POST /trading/connect：触发网关连接（后端 get_gateway QMT 唯一）。失败→503。 */
 export function connect(): Promise<{ connected: boolean; mode: string }> {
   return apiClient.post('/api/v1/trading/connect', {}, { timeout: 30000 })
 }

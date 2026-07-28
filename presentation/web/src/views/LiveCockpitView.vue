@@ -106,7 +106,7 @@ async function onConnect() {
     fetchStatus()
   } catch (e: any) {
     const detail = e?.response?.data?.detail?.msg || e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('连接失败：' + detail + '（确认 EMT 凭证 + 仿真账号有效期）')
+    ElMessage.error('连接失败：' + detail + '（确认 miniQMT 已登录 + userdata_mini 路径正确）')
   } finally {
     connecting.value = false
   }
@@ -160,12 +160,12 @@ function isCancelable(state: string): boolean {
   return state === 'SUBMITTED' || state === 'PARTIAL_FILLED'
 }
 
-/** 订单行显示用 id（EMT order_emt_id 或 QMT order_id） */
+/** 订单行显示用 id（QMT seq-str order_id） */
 function orderId(row: OrderRow): string {
-  return String(row.order_emt_id ?? row.order_id ?? '')
+  return String(row.order_id ?? '')
 }
 
-/** 方向显示（EMT side: 1=买 2=卖；兼容 QMT 不带 side 的回报） */
+/** 方向显示（方向码 1=买 2=卖；QMT 回报暂不返回 side，显示 '—'） */
 function sideLabel(row: OrderRow): string {
   if (row.side === 1) return '买'
   if (row.side === 2) return '卖'

@@ -8,7 +8,7 @@
 
 ⚠️ live 行情源依赖（物理边界 · live 前必修 follow-up）：
     底层 ``broker.qmt_quote.get_quotes`` 走 xtdata.get_full_tick，仅在 miniQMT 通道
-    可用时返回有效快照；EMT 网关无 xtdata 行情源，止损链路 live 前必须另接行情源。
+    可用时返回有效快照；止损链路依赖 xtdata 行情源，无 xtdata 则 live 前必须另接。
     本包装不解决行情源缺失——None/NaN 现价由 orchestrate 传给 compute 判定时跳过
     （无价不能判跌破，盲单 = 卖错价 = 致命）。
 """

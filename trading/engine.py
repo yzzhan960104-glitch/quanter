@@ -11,7 +11,7 @@
               → 注入动态白名单（过关5）→ 挂限价买 + 止盈限价卖（逐单 try-except 兜底）。
   stop_loss 每 5min 盘中：查 gw 真实持仓 + 现价（qmt_market_data.get_quote / xtdata），
               跌破止损价 → 发卖出单（qty 必须来自 gw 持仓，绝不硬编码——live 卖错数量 = 致命）。
-              ⚠️ EMT 网关无 xtdata 行情源，止损链路 live 前需另接行情源（C1 follow-up）。
+              ⚠️ 止损链路依赖 xtdata 行情源（miniQMT 通道），无 xtdata 时 live 前需另接行情源（C1 follow-up）。
   post_close 15:30 盘后：对账（run_reconcile）+ 清动态白名单。熔断连线见 TODO（本 task 不做）。
 
 ============================================================================
@@ -151,7 +151,7 @@ def _load_df_upto(lake, symbol: str, date: str):
 def get_gateway():
     """惰性取交易网关单例（透传 trading_service.get_gateway）。
 
-    Why 透传不重造：网关单例的装配优先级（EMT > QMT > None）与懒构造策略已在
+    Why 透传不重造：网关单例的装配（QMT 唯一，无凭证→None）与懒构造策略已在
     trading_service.get_gateway 固化，本引擎薄编排不重复，避免双单例漂移。
     本函数独立出来便于测试 monkeypatch（engine.get_gateway）隔离真实网关副作用。
     """
@@ -370,8 +370,8 @@ async def stop_loss_monitor(
     ⚠️ live 止损现价依赖（C1 fix + T3 批量）：现价统一从
     ``trading.qmt_market_data.get_quotes(list(positions.keys()))`` 批量取 ``last_price``。
     **该接口底层是 xtdata.get_full_tick，仅在 miniQMT 通道可用时返回有效快照**；
-    **EMT 网关无 xtdata 行情源，止损链路 live 前必须另接行情源（live 前必修 follow-up，
-    切勿在未接行情源的 EMT 环境切 live）**。
+    **止损链路依赖 xtdata 行情源（miniQMT 通道），无 xtdata 时 live 前必须另接行情源（live 前必修 follow-up，
+    切勿在无 xtdata 行情源的环境切 live）**。
     若 ``get_quotes`` 返回的某标的 quote 为 None 或 ``last_price`` 为 None/NaN，
     则该标的跳过止损检查（无现价不能判断跌破）并记 warning，绝不发盲价卖出单。
 
@@ -417,7 +417,7 @@ async def stop_loss_monitor(
     #   Why 批量：N 只持仓原 N 次 get_full_tick 线程池调用 → 1 次（原生 list 入参，
     #   xtdata.html 契约），减少 GIL 切换与 C++ 调用开销；颈线法盘中 5min 巡查场景下
     #   显著降低行情查询延迟（极端行情下高频止损检查更及时）。
-    #   ⚠️ xtdata 通道（miniQMT）返快照；EMT 网关无 xtdata 行情源，live 前需另接行情源。
+    #   ⚠️ xtdata 通道（miniQMT）返快照；无 xtdata 时 live 前需另接行情源。
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
     quotes = await qmt_market_data.get_quotes(list(positions.keys()))
     n_triggered = 0
@@ -841,7 +841,7 @@ class TradingEngine:
 
         ⚠️ 现价依赖（C1 fix）：``stop_loss_monitor`` 现价走
         ``trading.qmt_market_data.get_quote``（xtdata，miniQMT 通道可用）；
-        **EMT 网关无 xtdata 行情源，止损链路需另接行情源（live 前必修 follow-up）**。
+        **止损链路依赖 xtdata 行情源（miniQMT 通道），无 xtdata 时需另接行情源（live 前必修 follow-up）**。
 
         ⚠️ Trailing stop 动态更新（follow-up）：本处注入的是计划内**静态** stop_price
             （pre_open 挂单时落盘的初始止损价）；时间驱动 trailing（海龟 grace/step/floor）
