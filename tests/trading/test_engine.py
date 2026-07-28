@@ -344,6 +344,37 @@ def test_post_close_no_gw_is_noop():
 
 
 # ============================================================================
+# 4.5 Task 4（P1-6）：_trade_cfg 默认 stop_atr_mult=1.0（对齐回测 DEFAULTS）
+# ============================================================================
+def test_trade_cfg_stop_atr_mult_default_aligns_backtest(monkeypatch):
+    """_trade_cfg 默认 stop_atr_mult=1.0（对齐回测 neckline/method_v0.DEFAULTS=1.0）。
+
+    物理意图（plan Task 4 · 对齐缺口 P1-6）：
+        回测 DEFAULTS["stop_atr_mult"]=1.0（strategies/neckline/method_v0.py:49），
+        实盘老默认 env=2.0（engine.py:85）——回测冠军档套实盘时 stop 间隙不一致：
+        - stop_atr_mult=1.0 → stop=颈线-1×ATR
+        - stop_atr_mult=2.0 → stop=颈线-2×ATR（更宽，回测锚定 1.0 时实盘风险敞口翻倍）
+        把默认值对齐回测，env 仍可显式覆盖（spec §4.6）。
+
+    Why 简化版（用户 plan 指令）：
+        plan Step 2 原写「_trade_cfg 加 active_experiments 参数，从主力实验 params 读」，
+        本 task 简化为只改默认值（env 兜底），从实验 params 读标 follow-up 待 Task 14
+        param_iter 重跑后落地（与 Task 4 单独跟 param_iter 冠军档绑定更稳）。
+    """
+    # 清掉 env，强制走默认（验证默认值=1.0，不是 2.0）
+    monkeypatch.delenv("TRADE_STOP_ATR_MULT", raising=False)
+    cfg = engine._trade_cfg()
+    assert cfg["stop_atr_mult"] == 1.0  # 默认对齐回测 DEFAULTS
+
+
+def test_trade_cfg_stop_atr_mult_env_overrides(monkeypatch):
+    """env 显式设置仍可覆盖默认（向后兼容：实盘调参不改代码）。"""
+    monkeypatch.setenv("TRADE_STOP_ATR_MULT", "1.5")
+    cfg = engine._trade_cfg()
+    assert cfg["stop_atr_mult"] == 1.5
+
+
+# ============================================================================
 # 5. TradingEngine 装配：实例化即注册 4 cron job（不 start，不真起 scheduler）
 # ============================================================================
 def test_engine_registers_four_cron_jobs():

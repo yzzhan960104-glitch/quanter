@@ -78,11 +78,21 @@ def _trade_cfg() -> dict:
 
     Why env 化：实盘调参不改代码（十二期自动化原则），且独立进程的 env 与 server
     解耦（server 不应感知这些参数，进一步隔离两端状态）。
+
+    ⚠️ stop_atr_mult 默认值对齐回测（plan Task 4 · P1-6 修复 · 2026-07-28）：
+        历史默认 env=2.0 与回测 neckline/method_v0.DEFAULTS["stop_atr_mult"]=1.0 不一致，
+        导致回测冠军档套实盘时止损价偏宽（颈线−2×ATR vs 颈线−1×ATR），风险敞口与
+        回测预期脱钩。改默认 1.0 对齐回测基线；env 显式设置仍可覆盖（向后兼容）。
+
+    TODO(follow-up · plan Task 14 param_iter 重跑后落地)：spec §4.6 原设计是「_trade_cfg
+        加 active_experiments 参数，从主力实验 params 读 stop_atr_mult」——待 param_iter
+        新冠军档稳定后单独落地（避免此时引入「读实验」耦合扩大本 task 改动面）。
     """
     return {
         "pos_cap": float(os.getenv("TRADE_POS_CAP", "0.05")),
         # 颈线法 id_cfg 默认；实盘从 NecklineConfig 读（本引擎薄编排，不重算）
-        "stop_atr_mult": float(os.getenv("TRADE_STOP_ATR_MULT", "2.0")),
+        # P1-6 修复：默认 1.0 对齐回测 DEFAULTS（原 2.0 与回测不一致致风险敞口翻倍）
+        "stop_atr_mult": float(os.getenv("TRADE_STOP_ATR_MULT", "1.0")),
         "tp_h_mult": float(os.getenv("TRADE_TP_H_MULT", "2.0")),
         # 地基（live-readiness Task 2）：挂单等待回踩有效期日，pre_open max_wait 窗口过滤用
         "max_wait": int(os.getenv("TRADE_MAX_WAIT", "5")),
