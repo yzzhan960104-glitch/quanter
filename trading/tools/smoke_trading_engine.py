@@ -31,7 +31,10 @@ from pathlib import Path
 
 # 锁定 cwd 在项目根（trading_plan.TRADE_PLAN_DIR 默认 logs/trading_plans 相对路径，
 # 必须从项目根跑，否则 plan 落盘到错位置）。
-ROOT = Path(__file__).resolve().parent.parent
+# 三层 parent：smoke_trading_engine.py → tools → trading → quanter（项目根）。
+# 历史 bug：写成两层 parent → ROOT=F:\quanter\trading（错位），sys.path 注入错致
+# `import trading` ModuleNotFoundError（与 commit 049db6ce 同类 tools 路径 bug）。
+ROOT = Path(__file__).resolve().parent.parent.parent
 os.chdir(ROOT)
 
 # 把项目根加到 sys.path 头部（否则 scripts/ 下脚本直接跑时 Python 不认项目根包；
