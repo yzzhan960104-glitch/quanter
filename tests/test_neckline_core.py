@@ -422,3 +422,20 @@ def test_simulate_exit_with_cost_lowers_pnl():
     assert res_cost["avg_pnl_pct"] < res_zero["avg_pnl_pct"]
     assert res_cost["lot1_pnl_pct"] < res_zero["lot1_pnl_pct"]
     assert res_cost["lot2_pnl_pct"] < res_zero["lot2_pnl_pct"]
+
+
+# ============================================================================
+# plan Task 13（P1-11 标的池对齐）：_filter_chuangke_kechuang 创板科创前缀过滤
+# ============================================================================
+def test_filter_chuangke_kechuang():
+    """_filter_chuangke_kechuang：只保留创板科创（300/301/688/689 前缀），对齐实盘 _load_universe。
+
+    物理意图（plan Task 13 · spec §11）：回测 universe 对齐实盘 trading.engine._load_universe
+    创板科创口径（20cm 涨跌幅 + 流动性结构契合颈线法形态学），排除主板/北交所。回测与实盘
+    标的池一致是冠军档套实盘行为一致的前提（否则回测含主板信号、实盘无主板 → 背离）。
+    """
+    from strategies.neckline.backtest import _filter_chuangke_kechuang
+    syms = ["300001.SZ", "301001.SZ", "688001.SH", "689009.SH",   # 创板科创（留）
+            "000001.SZ", "600000.SH", "830001.BJ"]                 # 主板/北交所（滤除）
+    filtered = _filter_chuangke_kechuang(syms)
+    assert set(filtered) == {"300001.SZ", "301001.SZ", "688001.SH", "689009.SH"}

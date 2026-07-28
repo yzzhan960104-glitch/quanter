@@ -81,6 +81,18 @@ def _cost(side: str, qty: float, price: float) -> float:
     return commission + stamp + transfer
 
 
+def _filter_chuangke_kechuang(symbols: list) -> list:
+    """过滤创板科创标的（300/301/688/689 前缀），对齐实盘 _load_universe 口径。
+
+    物理意图（plan Task 13 · spec §11）：回测 universe 收窄创板科创——20cm 涨跌幅 + 流动性
+    结构更契合颈线法形态学（与实盘 trading.engine._load_universe 同口径）。主板/北交所不在
+    该策略可交易池。回测与实盘标的池一致是冠军档套实盘行为一致的前提（否则回测含主板信号、
+    实盘无主板 → 冠军档套实盘行为背离）。
+    """
+    return [s for s in symbols
+            if str(s).split(".")[0].startswith(("300", "301", "688", "689"))]
+
+
 def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
                   bottom: float, atr_val: float, exec: dict = None, id_cfg: dict = None):
     """挂单回踩进场 + 颈线−ATR 止损 + 分级止盈（执行层参数化版）。
@@ -382,6 +394,7 @@ def main():
     # 1. 全市场流动性过滤（amount 千元；近30日均 ≥ 1e5 千元 = 1 亿元，对齐 caisen）
     print("计算流动性（近30日均成交额 ≥ 1 亿元）...")
     syms = lake.index.get_level_values("symbol").unique().tolist()
+    syms = _filter_chuangke_kechuang(syms)   # plan Task 13：对齐实盘创板科创池（300/301/688/689）
     tradable = []
     for s in syms:
         try:
