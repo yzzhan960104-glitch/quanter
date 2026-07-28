@@ -188,6 +188,33 @@ def get_local_positions(*, db_path: str | None = None) -> dict[str, float]:
     return {r["symbol"]: float(r["qty"]) for r in rows}
 
 
+def reconcile_qty(symbol: str, qty: float, *, db_path: str | None = None) -> None:
+    """盘后兜底纠正：以 query_trades 聚合为准重写单 symbol 的 position.qty。
+
+    物理意图（plan Task 11 · spec §5.1）：apply_fill 漏记（db lock/异常软降级）致 position_book
+    与 CSV 成交流水 drift 时，盘后 query_trades 聚合为准重写 qty，让账本回到真实净持仓。
+
+    Why 保留 avg_price/entry_date：query_trades 流水是逐笔（不含加权 avg），重算 avg 需重放
+        全部 fill；entry_date 是建仓日（max_holding/trailing 依赖，保留旧值更稳）。drift 纠正
+        通常只改 qty（apply_fill 漏记是少记量，非成本/日期错）。
+    新 symbol（position 无该行）→ avg_price/entry_date 写 NULL（CSV 无成本，后续盈亏播报显 N/A，
+        不猜价）。qty=0 → 删除（与 apply_fill 归零清理同口径，账本干净）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    now = datetime.now().isoformat()
+    with _connect(db_path) as con:
+        if abs(float(qty)) < 1e-9:
+            con.execute("DELETE FROM position WHERE symbol=?", (symbol,))
+            return
+        # UPSERT：新行写 NULL avg/entry（CSV 无成本）；已有行 ON CONFLICT 仅更新 qty+updated_at
+        # （不动 avg_price/entry_date，保留 apply_fill 算好的加权成本与建仓日）。
+        con.execute(
+            "INSERT INTO position(symbol, qty, avg_price, entry_date, updated_at)"
+            " VALUES(?, ?, NULL, NULL, ?)"
+            " ON CONFLICT(symbol) DO UPDATE SET qty=excluded.qty, updated_at=excluded.updated_at",
+            (symbol, float(qty), now))
+
+
 def get_entry_dates(*, db_path: str | None = None) -> dict[str, str]:
     """读 {symbol: entry_date}（首次建仓日，qty!=0）。
 

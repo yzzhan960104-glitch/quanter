@@ -882,6 +882,50 @@ async def post_close(
                     "有" if gw is not None else "无",
                     "有" if local_positions is not None else "无")
 
+    # ② query_trades 盘后兜底纠正（Task 11 · R-1 · reconcile 之后、熔断之前）：
+    # 物理意图：apply_fill 可能因 db lock/异常漏记（_handle_order_update 软降级），position_book
+    # 少记；record_live_trade 写 CSV 是独立 try-except，漏笔概率低于 apply_fill。用 CSV 流水聚合
+    # vs position_book，drift 以 CSV 为准重写 qty + 告警。分工：①reconcile 查持仓 drift，本步查
+    # 成交流水漏笔。gw=None（dry_run）跳过（无真实成交可对，避免误读 CSV 老数据重写账本）。
+    if gw is not None:
+        try:
+            from presentation.server.services.trading_service import query_trades as _svc_query_trades
+            today_eq = datetime.now().strftime("%Y-%m-%d")
+            trades = (_svc_query_trades(today_eq, today_eq, limit=1000) or {}).get("trades", [])
+            # 聚合净持仓（BUY 加 SELL 减）——CSV 流水的权威净持仓口径
+            net: dict[str, float] = {}
+            for t in trades:
+                sym = t.get("symbol")
+                direction = (t.get("direction") or "").upper()
+                shares = t.get("shares")
+                if not sym or direction not in ("BUY", "SELL") or shares is None:
+                    continue
+                net[sym] = net.get(sym, 0.0) + (float(shares) if direction == "BUY" else -float(shares))
+            local = _position_book.get_local_positions()
+            drifts: list[tuple[str, float, float]] = []
+            # CSV 有：账本少记 → 以 CSV 为准重写
+            for sym, net_qty in net.items():
+                if abs(net_qty - local.get(sym, 0.0)) > 0.01:
+                    _position_book.reconcile_qty(sym, net_qty)
+                    drifts.append((sym, local.get(sym, 0.0), net_qty))
+            # CSV 无但账本有：账本多记（疑似外部单/且回报）→ 归零（保守以 CSV 为准）
+            for sym, local_qty in local.items():
+                if sym not in net and abs(local_qty) > 0.01:
+                    _position_book.reconcile_qty(sym, 0.0)
+                    drifts.append((sym, local_qty, 0.0))
+            if drifts:
+                result["trades_reconciled"] = len(drifts)
+                msg = "【盘后兜底】query_trades vs position_book drift " + ", ".join(
+                    f"{s}({lo}→{n})" for s, lo, n in drifts)
+                logger.warning(msg)
+                try:
+                    from infra.notifier import NotificationManager, fire_and_forget
+                    fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "WARN"))
+                except Exception:
+                    logger.exception("盘后兜底告警推送失败（不阻塞）")
+        except Exception:
+            logger.exception("post_close query_trades 兜底异常（不阻塞熔断/清白名单）")
+
     # ③ 日内熔断三步（Task 10 · R-2 · 在 reconcile 之后）：
     # Why 在 reconcile 后：reconcile 查持仓 drift 是另一维度观测，与日内总资产 -3% 熔断
     # 互不依赖；放后面让熔断有最完整的 curr_equity（含盘后 reconcile 拉到的最新持仓估值）。
