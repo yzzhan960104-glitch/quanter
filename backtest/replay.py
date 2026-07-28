@@ -80,6 +80,53 @@ class ReplayAborted(Exception):
     """
 
 
+def _apply_continuity_filter(price_data: dict, strategy, start, end) -> dict:
+    """Task 7 U5：replay 前过滤窗口含未解释漏采的 symbol（回测/实盘同源 filter）。
+
+    物理意图（300214.SZ 漏采教训 · memory data-lake-integrity-gap）：
+        完整性 gate 已从 scan_live 上提到 data/integrity.filter_universe_by_continuity
+        （universe 级 pre-filter）。replay 在滚动 scan_at 前先 filter price_data——
+        与 trading/engine._eod 共用同一 filter（数据校验单源）。
+
+    策略 window 解析：从 strategy.id_cfg["window"] 取（颈线法），缺失兜底 60。
+    susp/trade_days 加载：fetch_trade_days(start, end) + 读 data_lake/suspend_d.parquet。
+    fail-open（与 _eod._load_integrity_ctx 同口径）：加载失败返 ({}, set()) → filter 全放行
+    （trade_days 空集 → check_window_continuity 的 expected 恒空 → ok=True）。
+
+    Returns:
+        过滤后的 price_data（{symbol: df}，仅含通过完整性 gate 的 symbol）。
+    """
+    try:
+        from data.integrity import filter_universe_by_continuity, load_suspend_intervals, fetch_trade_days
+        import pandas as _pd
+        from pathlib import Path as _Path
+        # 解析策略 window（与 _eod._resolve_id_window 同源，缺失兜底 60）
+        try:
+            window = int(getattr(strategy, "id_cfg", {}).get("window") or 60)
+        except (TypeError, ValueError):
+            window = 60
+        # 加载 trade_days + susp（fail-open）
+        try:
+            trade_days = fetch_trade_days(str(start), str(end))
+            susp_path = _Path("data_lake/suspend_d.parquet")
+            if susp_path.exists():
+                susp_df = _pd.read_parquet(susp_path)
+                susp = load_suspend_intervals(susp_df, trade_days)
+            else:
+                susp = {}
+        except Exception as _e:
+            _logger.warning("replay 完整性 gate 上下文加载失败（fail-open 放行）：%s", _e)
+            trade_days, susp = set(), {}
+        # filter price_data（universe=price_data.keys()，df_map=price_data）
+        clean_syms = filter_universe_by_continuity(
+            list(price_data.keys()), price_data, window, susp, trade_days)
+        return {sym: price_data[sym] for sym in clean_syms}
+    except Exception as _e:
+        # filter 自身异常 fail-open（不阻断回测）——退回原 price_data 全放行
+        _logger.warning("replay filter_universe_by_continuity 异常（fail-open 放行）：%s", _e)
+        return price_data
+
+
 def replay(
     price_data: dict,
     strategy: Strategy,
@@ -100,7 +147,19 @@ def replay(
     策略职责：precompute（指标预算）+ scan_at（识别+进场+出场一站式，返回 trade dict 列表）。
 
     无前视红线：传给 scan_at 的 df_T 严格 = df.loc[:T]；策略内部预算指标用 .iloc[:T_pos+1] 截断。
+
+    Task 7 U5 gate 下沉（2026-07-29 · 300214.SZ 漏采教训）：
+        replay 前调 ``filter_universe_by_continuity`` 过滤窗口含未解释漏采的 symbol——
+        与 trading/engine._eod 共用同一 filter（回测/实盘数据校验单源）。策略层 scan_at
+        假设 df 已通过完整性 gate（颈线法 scan_live 已删内联 gate，回测经此 filter 兜底）。
+        ⚠️ 本 filter 只检 price_data 末端 window 日（df.tail(window)），与 _eod 实盘窗口同口径
+        （实盘 T 日盘后窗口就在末端）；回测中段窗口的漏采由 scan_at 逐 T 的 df_T.tail(window)
+        隐式覆盖（df_T 是 .loc[:T] 截断，中段漏采会持续命中末端窗口直到滚出）。
+        fail-open：susp/trade_days 加载失败 → trade_days 空集 → filter 全放行（不阻断回测）。
     """
+    # ── Task 7 U5：完整性 gate pre-filter（回测/实盘同源 data.integrity.filter）──
+    price_data = _apply_continuity_filter(price_data, strategy, start, end)
+
     # —— 预算：每 symbol 调一次 strategy.precompute（ATR/HV/pivots 等下沉策略）——
     state = {sym: strategy.precompute(sym, df) for sym, df in price_data.items()}
 

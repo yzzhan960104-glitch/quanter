@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import logging
 
-import pandas as pd
-
 # 颈线法算法原挂 scripts/neckline_method_v0 + scripts/neckline_backtest（靠 sys.path hack
 # 挂载），Layer2 Task 1.5 收口进 strategies/neckline/ 子包后改本包相对 import——
 # sys.path hack 已彻底删除。决策逻辑零改动。
@@ -44,44 +42,6 @@ _NECKLINE_EXEC_KEYS = (
 )
 
 logger = logging.getLogger(__name__)
-
-# 完整性 gate（规则4）模块级 cache：首次 scan_live 懒加载，跨 symbol 复用。
-# 物理意图：gate 每次 scan_live 都要查窗口连续性，suspend 区间 + trade_days 是
-# 全市场共享的静态基准，per-symbol 重加载是 IO 浪费；模块级缓存一次加载全复用。
-_suspend_intervals_cache: dict | None = None
-_trade_days_cache: set | None = None
-
-
-def _ensure_integrity_cache():
-    """懒加载停牌区间 + 近 2 年 trade_days（首次 scan_live 触发）。
-
-    返 (suspend_intervals, trade_days_set)。读 data_lake/suspend_d.parquet +
-    近 2 年 trade_cal（颈线法窗口 60 日 ≈ 3 月，2 年余量充足）。
-    fail-open：加载失败（无文件/无 token/网络异常）→ 返 ({}, set()) 让 gate 放行，
-    不阻断识别（gate 是新增防护，失效时退回原行为，与 reader 离线降级同口径）。
-    """
-    global _suspend_intervals_cache, _trade_days_cache
-    if _suspend_intervals_cache is not None:
-        return _suspend_intervals_cache, _trade_days_cache
-    try:
-        from datetime import datetime, timedelta
-        from pathlib import Path
-        from data.integrity import load_suspend_intervals, fetch_trade_days
-        today = datetime.today().strftime("%Y-%m-%d")
-        start = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
-        _trade_days_cache = fetch_trade_days(start, today)
-        susp_path = Path("data_lake/suspend_d.parquet")
-        if susp_path.exists():
-            susp_df = pd.read_parquet(susp_path)
-            _suspend_intervals_cache = load_suspend_intervals(susp_df, _trade_days_cache)
-        else:
-            logger.warning("suspend_d.parquet 缺失，完整性 gate 无停牌 ground-truth（全判漏采）")
-            _suspend_intervals_cache = {}
-    except Exception as e:
-        logger.warning("完整性 gate cache 加载失败（fail-open 放行）：%s", e)
-        _suspend_intervals_cache = {}
-        _trade_days_cache = set()
-    return _suspend_intervals_cache, _trade_days_cache
 
 
 @register_strategy("neckline")
@@ -210,6 +170,12 @@ class NecklineMethodStrategy:
             df_upto 由 Task7b 的 _eod 从 data_lake 加载该 symbol 截至 date 的前复权日线
             （截断于 date，不含 date 之后），atr 也在 df_upto 上算——严格因果。
 
+        ⚠️ Task 7 U5 gate 下沉（2026-07-29）：原完整性 gate（窗口连续性检查）已从本入口
+        上提到 data/integrity.filter_universe_by_continuity（universe 级 pre-filter）。
+        调用方（trading/engine._eod / backtest/replay.replay）先 filter universe，本入口
+        假设 df_upto 已通过完整性 gate——策略层零数据质量代码，回测/实盘共用同一 filter。
+        ⚠️ 直接调 scan_live 的调用方（如 scripts）需自行先 filter（gate 下沉的 trade-off）。
+
         参数：
             symbol: 标的代码（归因用）
             df_upto: 该 symbol 截至 date 的前复权日线 DataFrame（OHLCV，index 为 DatetimeIndex）
@@ -220,24 +186,6 @@ class NecklineMethodStrategy:
                 symbol / formed_at / breakout_date / neckline / bottom / entry_price / atr
             突破日非当日（res["formed_at"] != date）→ 返 []（只挂当日新信号，防历史重吐）。
         """
-        # 完整性 gate（规则4）：窗口含未解释漏采 → 跳过，不产误信号（300214.SZ 教训）。
-        # Why：lake 缺停牌复牌段时残缺数据误判颈线；gate 用 trade_cal + suspend_d 区分
-        # 合法跳空（停牌）vs 漏采，漏采则 return []（不阻断 universe 扫描，warning 留痕）。
-        # fail-open：gate 自身异常（cache 加载失败等）不阻断识别，退回原行为。
-        try:
-            _susp, _td = _ensure_integrity_cache()
-            if _td:  # cache 非空才查（空 cache = 测试降级/首次加载失败 → 放行）
-                from data.integrity import check_window_continuity
-                _cont = check_window_continuity(
-                    df_upto.tail(self.id_cfg["window"]), _td, _susp, symbol)
-                if not _cont.ok:
-                    logger.warning(
-                        "颈线 scan_live %s 窗口含 %d 个未解释漏采交易日 %s，跳过（数据完整性 gate）",
-                        symbol, len(_cont.unjustified), list(_cont.unjustified[:5]))
-                    return []
-        except Exception as _e:
-            logger.warning("完整性 gate 异常（fail-open 继续）：%s", _e)
-
         # 识别统一（U2 · 2026-07-29 Task 3）：本入口原内联「ATR 预算 → detect_neckline_method
         # → R1 cancel_on close 守卫 → 当日突破过滤 → Signal 装配」已逐位抽取到
         # ``detect_signal``（strategies/neckline/method_v0.py:302，Task 2 已测）。

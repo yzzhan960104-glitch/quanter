@@ -249,3 +249,101 @@ def test_check_window_ok_when_gap_all_suspend():
     assert r.ok is True
     assert set(r.missing_dates) == {"2024-09-03", "2024-09-04"}
     assert r.unjustified == ()
+
+
+# ============================================================================
+# filter_universe_by_continuity：universe 级完整性 gate（规则 4 · Task 7 U5 gate 下沉）
+# ============================================================================
+# 物理意图（300214.SZ 漏采教训 · memory data-lake-integrity-gap）：
+#   原完整性 gate 内联在 strategies/neckline_method.scan_live（per-symbol 自验窗口连续性），
+#   导致「策略层混入数据质量代码」+ 「回测/实盘各走各的 gate」。Task 7 把 gate 上提到
+#   data/integrity 的 universe 级纯函数：调用方（_eod / replay）先 filter universe，策略层
+#   scan_live 假设已过滤——回测/实盘共用同一 filter（数据校验单源）。
+#
+# strangler 红线：filter 逻辑零改动于 scan_live 原内联 gate——同样调 check_window_continuity，
+# 只从 per-symbol 上提到 universe 级 pre-filter。本测试覆盖：
+#   1. 漏采 symbol 过滤（窗口含未解释缺日 → 不在 clean_universe）
+#   2. 干净 symbol 保留（窗口完整 → 在 clean_universe）
+#   3. 全停牌跳空放行（合法跳空 → 在 clean_universe）
+#   4. fail-open 放行（susp={}/trade_days=set() = 加载失败 → 全放行，退回原行为）
+
+
+def test_filter_universe_drops_unjustified_gap_symbol():
+    """漏采 symbol（窗口缺日且非停牌）→ 被 filter 过滤（不在 clean_universe）。
+
+    等价原 scan_live gate 的「漏采 return []」：漏采 symbol 不进 clean_universe，
+    调用方据此跳过该 symbol 的 scan_live（不产误信号，300214.SZ 教训）。
+    """
+    from data.integrity import filter_universe_by_continuity
+    universe = ["000001.SZ", "000002.SZ"]
+    # 000001.SZ 窗口完整；000002.SZ 窗口缺 09-04/09-05 且非停牌（漏采）
+    df_map = {
+        "000001.SZ": _make_window_df(["2024-09-02", "2024-09-03", "2024-09-04",
+                                      "2024-09-05", "2024-09-06"]),
+        "000002.SZ": _make_window_df(["2024-09-02", "2024-09-03", "2024-09-06"]),
+    }
+    clean = filter_universe_by_continuity(
+        universe, df_map, window=5, susp={}, trade_days=TRADE_DAYS)
+    assert "000001.SZ" in clean, "完整窗口 symbol 应保留"
+    assert "000002.SZ" not in clean, "漏采 symbol 应被过滤"
+
+
+def test_filter_universe_keeps_all_suspend_gap_symbol():
+    """窗口缺日但全停牌（合法跳空）→ 保留（不能因停牌误过滤）。
+
+    gate 红线：停牌跳空是合法的，filter 不能误剔除（否则停牌复牌标的永不被回测/识别）。
+    """
+    from data.integrity import filter_universe_by_continuity
+    universe = ["000413.SZ"]
+    df_map = {"000413.SZ": _make_window_df(["2024-09-02", "2024-09-05", "2024-09-06"])}
+    susp = {"000413.SZ": {"2024-09-03", "2024-09-04"}}
+    clean = filter_universe_by_continuity(
+        universe, df_map, window=3, susp=susp, trade_days=TRADE_DAYS)
+    assert clean == ["000413.SZ"], "全停牌跳空是合法的，应保留"
+
+
+def test_filter_universe_failopen_when_trade_days_empty():
+    """fail-open：trade_days 为空集（加载失败/测试降级）→ 全放行。
+
+    与原 scan_live:229 `if _td:` fail-open 同口径——gate 是新增防护，加载失败时
+    退回原行为（全放行），不阻断识别（与 reader 离线降级同口径）。
+    """
+    from data.integrity import filter_universe_by_continuity
+    universe = ["000001.SZ", "000002.SZ"]
+    # 即使 000002.SZ 缺日，trade_days 空集 → 无法判定漏采 → 全放行
+    df_map = {
+        "000001.SZ": _make_window_df(["2024-09-02", "2024-09-03"]),
+        "000002.SZ": _make_window_df(["2024-09-02", "2024-09-06"]),
+    }
+    clean = filter_universe_by_continuity(
+        universe, df_map, window=2, susp={}, trade_days=set())
+    assert set(clean) == {"000001.SZ", "000002.SZ"}, "fail-open：trade_days 空集应全放行"
+
+
+def test_filter_universe_preserves_input_order():
+    """clean_universe 保持 universe 输入顺序（调用方遍历顺序稳定，便于断言/复现）。
+
+    物理意图：_eod / replay 遍历 clean_universe 调 scan_live，顺序稳定让 A2 信号对照
+    可复现；dict 保留 universe 顺序（Python 3.7+ dict 有序，list comp 保持顺序）。
+    """
+    from data.integrity import filter_universe_by_continuity
+    universe = ["600000.SH", "000001.SZ", "300001.SZ"]
+    df_map = {s: _make_window_df(["2024-09-02", "2024-09-03", "2024-09-04"]) for s in universe}
+    clean = filter_universe_by_continuity(
+        universe, df_map, window=3, susp={}, trade_days=TRADE_DAYS)
+    assert clean == universe, "filter 应保持 universe 输入顺序"
+
+
+def test_filter_universe_skips_symbol_missing_from_df_map():
+    """df_map 缺该 symbol（df_upto 加载失败）→ 过滤掉（不进 clean_universe）。
+
+    边界：df_map.get(sym) 返 None 时不应抛错（调用方 _eod 的 _load_df_upto 可能返 None），
+    安全跳过并记 warning（与原 scan_live 调用前 _eod:1206 的 None 跳过同口径）。
+    """
+    from data.integrity import filter_universe_by_continuity
+    universe = ["000001.SZ", "000002.SZ"]
+    df_map = {"000001.SZ": _make_window_df(["2024-09-02", "2024-09-03", "2024-09-04"])}
+    # 000002.SZ 不在 df_map
+    clean = filter_universe_by_continuity(
+        universe, df_map, window=3, susp={}, trade_days=TRADE_DAYS)
+    assert clean == ["000001.SZ"], "df_map 缺失的 symbol 应被过滤"

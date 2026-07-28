@@ -63,9 +63,8 @@ def strategy(monkeypatch):
     # 桩点：scan_live 改调 detect_signal（U2 Task 3 后），不再调 detect_neckline_method。
     monkeypatch.setattr(nm, "detect_signal", fake_detect_signal)
     monkeypatch.setattr(nm, "simulate_exit", fake_simulate_exit)
-    # 完整性 gate（规则4）cache 置空：现有用例不测 gate 行为，空 cache 让 gate 放行
-    # （expected=空集 → missing=空 → ok=True），聚焦 detect_signal/simulate 契约。
-    monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, set()))
+    # Task 7 U5：完整性 gate 已从 scan_live 上提到 data/integrity.filter_universe_by_continuity
+    # （策略层零数据代码）。scan_live 现假设 df_upto 已 filter——fixture 无需再桩 gate。
     return strat
 
 
@@ -212,11 +211,17 @@ def test_scan_live_with_string_date_from_eod(strategy):
 
 
 # ---------------------------------------------------------------------------
-# 完整性 gate（规则4）：scan_live 窗口含未解释漏采 → 跳过标的（return []）
+# Task 7 U5 gate 下沉：完整性 gate 已从 scan_live 上提到 data/integrity.filter_universe_by_continuity
 # ---------------------------------------------------------------------------
-# 物理意图（300214.SZ 案例）：lake 缺停牌复牌段，残缺数据识别颈线 8.07→11.86 误判突破产计划。
-# gate 在 detect 前置检查窗口连续性：缺日且非停牌 → return [] + warning，不用残缺数据产信号。
-# 这 3 个用例不用 strategy fixture（需自定义 cache 注入漏采/停牌场景）。
+# 物理意图（300214.SZ 案例 · memory data-lake-integrity-gap）：lake 缺停牌复牌段时残缺数据
+# 误判颈线 8.07→11.86 误判突破产计划。原 gate 内联在 scan_live（per-symbol 自验窗口连续性），
+# Task 7 把 gate 上提到 data/integrity 的 universe 级 filter——策略层 scan_live 假设 df_upto
+# 已 filter，零数据质量代码；回测/实盘共用同一 filter（数据校验单源）。
+#
+# 原本文件 3 个 gate 测试（scan_live 窗口含漏采/完整/全停牌跳空 → return [] / 放行）已迁移到
+# tests/test_integrity.py::test_filter_universe_*（直接测 filter 函数，不再经 scan_live 间接测）。
+# 本文件改为测「scan_live 删 gate 后的透明度契约」——无论 df_upto 是否完整，scan_live 都透传给
+# detect_signal（gate 由调用方 _eod/replay 在 universe 级 pre-filter 负责）。
 
 def _mk_window_df(dates):
     """单标的窗口 df（DatetimeIndex，值任意——detect 被 mock 不真算）。"""
@@ -227,58 +232,39 @@ def _mk_window_df(dates):
     )
 
 
-def test_scan_live_gate_skips_unjustified_gap(monkeypatch):
-    """窗口含未解释漏采（缺日 + 非停牌）→ scan_live return []，detect_signal 不被调。
+def test_scan_live_no_longer_gates_unjustified_gap(monkeypatch):
+    """Task 7 U5：scan_live 删 gate 后，窗口含未解释漏采也直接透传 detect_signal（不再 return []）。
 
-    gate 红线：残缺窗口识别结果不可信，跳过该标的不产误信号（300214.SZ 教训）。
-    桩点迁移（U2 · Task 3）：scan_live 改调 detect_signal，gate 前置拦截目标相应迁移。
+    红线（gate 下沉 trade-off 的负向契约）：scan_live 不再做完整性 gate——调用方（_eod/replay）
+    必须先调 filter_universe_by_continuity 过滤。若 scan_live 重新加了 gate，本测试会失败
+    （detect_calls 会是空），提醒维护者 gate 应在 universe 级而非 per-symbol。
     """
     from strategies import neckline_method as nm
     strat = nm.NecklineMethodStrategy()
     detect_calls = []
     monkeypatch.setattr(nm, "detect_signal",
                         lambda *a, **kw: detect_calls.append(1) or None)
-    trade_days = {"2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06"}
-    monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, trade_days))
-    df_upto = _mk_window_df(["2024-09-02", "2024-09-03", "2024-09-06"])  # 缺 09-04, 09-05
+    df_upto = _mk_window_df(["2024-09-02", "2024-09-03", "2024-09-06"])  # 缺 09-04, 09-05（漏采）
 
-    signals = strat.scan_live("000001.SZ", df_upto, "2024-09-06")
+    strat.scan_live("000001.SZ", df_upto, "2024-09-06")
 
-    assert signals == [], "漏采窗口应被 gate 跳过"
-    assert detect_calls == [], "gate 前置拦截，detect_signal 不应被调用"
+    # scan_live 不再 gate：detect_signal 必被调（gate 责任在调用方的 universe 级 filter）
+    assert detect_calls, "scan_live 删 gate 后应直接调 detect_signal（完整性责任上提到调用方）"
 
 
-def test_scan_live_gate_keeps_complete_window(monkeypatch):
-    """窗口完整（无漏采）→ gate 放行，detect_signal 被调。"""
-    from strategies import neckline_method as nm
-    strat = nm.NecklineMethodStrategy()
-    detect_calls = []
-    monkeypatch.setattr(nm, "detect_signal",
-                        lambda *a, **kw: detect_calls.append(1) or None)
-    trade_days = {"2024-09-02", "2024-09-03", "2024-09-04"}
-    monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, trade_days))
-    df_upto = _mk_window_df(["2024-09-02", "2024-09-03", "2024-09-04"])  # 完整
+def test_scan_live_no_longer_gates_suspend_gap(monkeypatch):
+    """Task 7 U5：全停牌跳空窗口也直接透传 detect_signal（scan_live 零数据质量代码）。
 
-    strat.scan_live("000001.SZ", df_upto, "2024-09-04")
-
-    assert detect_calls, "完整窗口 gate 应放行，detect_signal 被调"
-
-
-def test_scan_live_gate_keeps_all_suspend_gap(monkeypatch):
-    """窗口缺日但全是停牌 → gate 放行（合法跳空），detect_signal 被调。
-
-    红线：停牌造成的跳空是合法的，gate 不能误跳过（否则停牌复牌标的永不被识别）。
+    补强负向契约：即使是合法停牌跳空，scan_live 也不做任何窗口检查——所有 df_upto
+    一视同仁透传 detect_signal。gate（区分漏采 vs 停牌跳空）完全由 filter 负责。
     """
     from strategies import neckline_method as nm
     strat = nm.NecklineMethodStrategy()
     detect_calls = []
     monkeypatch.setattr(nm, "detect_signal",
                         lambda *a, **kw: detect_calls.append(1) or None)
-    susp = {"000413.SZ": {"2024-09-03", "2024-09-04"}}
-    trade_days = {"2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06"}
-    monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: (susp, trade_days))
     df_upto = _mk_window_df(["2024-09-02", "2024-09-05", "2024-09-06"])  # 缺 09-03, 09-04 停牌
 
     strat.scan_live("000413.SZ", df_upto, "2024-09-06")
 
-    assert detect_calls, "全停牌跳空是合法的，gate 应放行"
+    assert detect_calls, "scan_live 零数据质量代码，停牌跳空也直接透传 detect_signal"

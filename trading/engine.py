@@ -259,6 +259,62 @@ def _resolve_cooldown_days(experiments: list) -> int:
         return 0
 
 
+# ============================================================================
+# Task 7 U5 gate 下沉：完整性 gate 上下文加载 + 策略窗口解析（_eod 辅助）
+# ============================================================================
+def _load_integrity_ctx(today: str):
+    """加载完整性 gate 上下文：停牌区间 + 近 2 年 trade_days（fail-open）。
+
+    物理意图（Task 7 U5 · 300214.SZ 漏采教训）：完整性 gate 从 scan_live 上提到 _eod
+    后，_eod 需在 filter_universe_by_continuity 前加载 susp/trade_days。逻辑从原 scan_live
+    内联的 ``_ensure_integrity_cache`` 搬出（模块级 cache 删除——_eod 每次盘后只调一次，
+    无需跨调用缓存；若重复调用可再引入缓存）。
+
+    fail-open 红线（与原 _ensure_integrity_cache:80-83 同口径）：
+        加载失败（无文件/无 token/网络异常）→ 返 ({}, set()) 让 filter 放行。
+        trade_days 空集 → check_window_continuity 的 expected 恒空 → missing 恒空 →
+        ok=True 全放行，退回原行为（gate 是新增防护，失效时不阻断识别）。
+
+    Returns:
+        (susp_intervals, trade_days_set)：dict[str, set[str]] + set[str]。
+    """
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        from pathlib import Path as _Path
+        import pandas as _pd
+        from data.integrity import load_suspend_intervals, fetch_trade_days
+        start = (_dt.strptime(today, "%Y-%m-%d") - _td(days=730)).strftime("%Y-%m-%d")
+        trade_days = fetch_trade_days(start, today)
+        susp_path = _Path("data_lake/suspend_d.parquet")
+        if susp_path.exists():
+            susp_df = _pd.read_parquet(susp_path)
+            susp = load_suspend_intervals(susp_df, trade_days)
+        else:
+            logger.warning("suspend_d.parquet 缺失，完整性 gate 无停牌 ground-truth（全判漏采）")
+            susp = {}
+        return susp, trade_days
+    except Exception as e:
+        logger.warning("完整性 gate 上下文加载失败（fail-open 放行）：%s", e)
+        return {}, set()
+
+
+def _resolve_id_window(strategy) -> int:
+    """从策略实例解析识别窗口（颈线法 id_cfg["window"]）。
+
+    Why 不硬编码：颈线法的 window 经 NecklineConfig 默认值 + cfg_override 覆盖后落在
+    strategy.id_cfg["window"]（与原 scan_live:232 的 self.id_cfg["window"] 同源）。本函数
+    安全兜底：策略无 id_cfg 属性或缺 window 键时返 DEFAULTS.window（60）。
+    """
+    try:
+        w = getattr(strategy, "id_cfg", {}).get("window")
+        if w and int(w) > 0:
+            return int(w)
+    except Exception:
+        pass
+    # 兜底：颈线法 DEFAULTS.window=60（与 method_v0.DEFAULTS 同口径）
+    return 60
+
+
 
 def get_gateway():
     """惰性取交易网关单例（透传 trading_service.get_gateway）。
@@ -1182,6 +1238,8 @@ class TradingEngine:
         import pandas as pd
         from experiment.resolver import resolve_active
         from strategies.registry import build_strategy
+        # Task 7 U5：完整性 gate 上提到 _eod（filter 复用 data.integrity 单源）
+        from data.integrity import filter_universe_by_continuity
 
         experiments = resolve_active()
         if not experiments:
@@ -1195,16 +1253,42 @@ class TradingEngine:
         lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 
         universe = _load_universe(lake)
+
+        # ── Task 7 U5 gate 下沉：完整性 gate 从 scan_live 上提到 _eod（universe 级 pre-filter）─
+        # 物理意图（300214.SZ 漏采教训 · memory data-lake-integrity-gap）：lake 缺停牌复牌段
+        # 时残缺数据误判颈线突破产误信号。原 gate 内联在 scan_live（per-symbol 自验窗口），
+        # 现上提到 data/integrity.filter_universe_by_continuity——策略层 scan_live 假设已过滤，
+        # 回测/实盘共用同一 filter（数据校验单源）。逻辑零改动于原 scan_live:228-235 的
+        # per-symbol gate（同一 check_window_continuity，只从 per-symbol 上提到 universe 级）。
+        #
+        # 一次性加载全 universe 的 df_upto（df_map：sym → df_upto），后续 scan_live 复用——
+        # df_upto 复用红线（与 Task 7b lake 复用同源）：避免 filter 与 scan_live 各 _load_df_upto
+        # 一次（double load）。filter 在 df_map 上跑（per-experiment window 可能不同，故 df_map
+        # 在 exp 循环外构建一次）。
+        df_map: dict = {}
+        for sym in universe:
+            df_upto = _load_df_upto(lake, sym, today)
+            if df_upto is not None and len(df_upto) >= 60:
+                # 历史不足（<60 行）不进 df_map（与原 _eod 内联 <60 跳过同口径）
+                df_map[sym] = df_upto
+
+        # 加载停牌区间 + 近 2 年 trade_days（逻辑从 scan_live 原 _ensure_integrity_cache 搬，
+        # fail-open 同口径：加载失败返 ({}, set()) 让 filter 放行——trade_days 空集 →
+        # check_window_continuity 的 expected 恒空 → ok=True 全放行，退回原行为）。
+        susp, trade_days = _load_integrity_ctx(today)
+
         signals: list = []
         atr_map: dict = {}
         # 逐实验 × 逐 symbol 扫信号；单 symbol scan_live 异常仅 warn 跳过，不炸整批
         for exp in experiments:
             strategy = build_strategy(exp.strategy_name, cfg_override=exp.params)
-            for sym in universe:
-                df_upto = _load_df_upto(lake, sym, today)
-                # 历史不足（<60 行）跳过：颈线 window+ATR 窗口需足够样本，否则识别失真
-                if df_upto is None or len(df_upto) < 60:
-                    continue
+            # filter universe（per-experiment window 可能不同，故在 exp 循环内 filter）。
+            # 颈线法 id_cfg["window"] 对齐原 scan_live:232 的 df_upto.tail(self.id_cfg["window"])。
+            id_window = _resolve_id_window(strategy)
+            clean_universe = filter_universe_by_continuity(
+                list(df_map.keys()), df_map, id_window, susp, trade_days)
+            for sym in clean_universe:
+                df_upto = df_map[sym]   # df_upto 复用（不重复 _load_df_upto）
                 try:
                     for s in strategy.scan_live(sym, df_upto, today):
                         # 注入实验归因字段（signal_runner/PlannedOrder 透传链路依赖）。

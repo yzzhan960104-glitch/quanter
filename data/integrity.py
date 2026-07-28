@@ -228,3 +228,69 @@ def check_window_continuity(
         missing_dates=tuple(missing),
         unjustified=unjustified,
     )
+
+
+# ============================================================================
+# 规则 4 · universe 级：filter_universe_by_continuity（Task 7 U5 gate 下沉）
+# ============================================================================
+# 物理意图（300214.SZ 漏采教训 · memory data-lake-integrity-gap）：
+#   原完整性 gate 内联在 strategies/neckline_method.scan_live（per-symbol 自验窗口连续性），
+#   导致「策略层混入数据质量代码」+ 「回测/实盘各走各的 gate」。Task 7 把 gate 上提到
+#   data/integrity 的 universe 级纯函数：调用方（trading/engine._eod / backtest/replay.replay）
+#   先 filter universe，策略层 scan_live 假设已过滤——回测/实盘共用同一 filter（数据校验单源）。
+#
+# strangler 红线：本函数逻辑零改动于 scan_live 原内联 gate（同调 check_window_continuity，
+# 只从 per-symbol 上提到 universe 级 pre-filter）。等价性依据：
+#   - scan_live:228-235 原逻辑 = 取 df_upto.tail(window) → check_window_continuity →
+#     not ok 则 return []（该 symbol 不产信号）
+#   - 本函数 = 遍历 universe，对 df_map[sym].tail(window) 调 check_window_continuity，
+#     not ok 则不含入 clean_universe（该 symbol 不进 scan_live）→ 信号等价
+
+def filter_universe_by_continuity(
+    universe, df_map, window, susp, trade_days,
+):
+    """universe 级完整性 gate：过滤窗口含未解释漏采的 symbol。
+
+    遍历 ``universe``，对每个 symbol 的 ``df_map[sym].tail(window)`` 调
+    ``check_window_continuity``，不通过的（窗口含未解释漏采）从 clean_universe 中过滤。
+    与原 scan_live 内联 gate 等价（同一 check_window_continuity 逻辑，只上提到 universe 级）。
+
+    物理意图（300214.SZ 教训）：lake 缺停牌复牌段时残缺数据误判颈线突破产误信号；
+    gate 在 scan_live 前置过滤掉漏采 symbol，让策略层假设 df_upto 已完整——策略层零数据代码。
+
+    Args:
+        universe: 待过滤的 symbol 列表（str 序列）。
+        df_map: {symbol: df_upto}（每标的截至当日的 OHLCV，DatetimeIndex）。
+                缺失某 symbol 或对应值为 None → 该 symbol 被过滤（不抛错）。
+        window: 识别窗口长度（颈线法 id_cfg["window"]，与 scan_live 同口径）。
+        susp: load_suspend_intervals 输出（{symbol: 停牌日集合}），区分合法跳空 vs 漏采。
+        trade_days: 全期交易日集合（fetch_trade_days 输出）。
+
+    Returns:
+        clean_universe: list[str] —— 通过完整性 gate 的 symbol，**保持 universe 输入顺序**。
+
+    fail-open 红线（与原 scan_live:229 `if _td:` 同口径）：
+        trade_days 为空集（加载失败/测试降级）时，check_window_continuity 的 expected 恒为
+        空集 → missing 恒空 → ok=True，全放行（退回原行为，不阻断识别）。
+    """
+    import logging
+    _log = logging.getLogger("data.integrity")
+    clean: list = []
+    for sym in universe:
+        df = df_map.get(sym) if hasattr(df_map, "get") else None
+        if df is None or len(df) == 0:
+            # df_map 缺该 symbol 或空 df（加载失败/历史不足）→ 跳过过滤（不进 clean）。
+            # 与 _eod:1206 的 df_upto is None 跳过 scan_live 同口径——不进 clean 即不被扫。
+            continue
+        # check_window_continuity 复用（strangler 红线：不新建 continuity 判定）。
+        # window 对齐 scan_live:232 的 df_upto.tail(self.id_cfg["window"])。
+        result = check_window_continuity(df.tail(window), trade_days, susp, sym)
+        if result.ok:
+            clean.append(sym)
+        else:
+            # 与 scan_live:234-236 同口径的 warning 留痕（不阻断，只过滤）
+            _log.warning(
+                "完整性 gate 过滤 %s：窗口含 %d 个未解释漏采交易日 %s（data.integrity.filter_universe_by_continuity）",
+                sym, len(result.unjustified), list(result.unjustified[:5]),
+            )
+    return clean
