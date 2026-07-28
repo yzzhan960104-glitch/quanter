@@ -96,7 +96,7 @@ def parse_review(text: str, cfg: Dict[str, Any], strategy_name: str = "neckline"
     """
     # 阶段C：按策略选 config_schema（Task 1.3：仅颈线法 NecklineConfig 18 维）
     if strategy_name == "neckline":
-        from strategies.neckline_schema import NecklineConfig
+        from strategies.neckline.schema import NecklineConfig
         schema = NecklineConfig
     else:
         raise ParseError(

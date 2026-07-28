@@ -52,7 +52,7 @@ def _select_schema(strategy_name: str):
     校验出"假合法"的 cfg_override）。
     """
     if strategy_name == "neckline":
-        from strategies.neckline_schema import NecklineConfig
+        from strategies.neckline.schema import NecklineConfig
         return NecklineConfig
     raise ValueError(
         f"未知 strategy_name={strategy_name!r}，无对应 config schema"

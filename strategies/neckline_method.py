@@ -26,11 +26,11 @@ import pandas as pd
 from .neckline.method_v0 import detect_neckline_method, DEFAULTS, compute_atr
 from .neckline.backtest import simulate_exit, EXEC_DEFAULTS
 
-from .neckline_schema import NecklineConfig
+from .neckline.schema import NecklineConfig
 from .registry import register_strategy
 # Layer2 阶段1：scan_at / scan_live 统一返 list[Signal]（frozen dataclass），
 # 替代散落多处的 dict 字符串键访问。决策逻辑零改动，只改返回封装。
-from .signal import Signal
+from .neckline.signal import Signal
 
 # 识别层 / 执行层 键集（cfg_override 拆分用）
 _NECKLINE_ID_KEYS = (

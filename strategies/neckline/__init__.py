@@ -37,6 +37,10 @@ from .backtest import (
     risk_metrics,
     scan_symbol,
 )
+# U1 契约归位：Signal（值对象）+ NecklineConfig（参数模型）物理实体已搬入本子包，
+# 公开符号统一从此处 re-export（消费方可 `from strategies.neckline import Signal`）。
+from .signal import Signal, signal_to_dict
+from .schema import NecklineConfig
 
 __all__ = [
     # method_v0（识别层）
@@ -57,4 +61,8 @@ __all__ = [
     "kelly_metrics",
     "risk_metrics",
     "scan_symbol",
+    # signal / schema（U1 契约归位）
+    "Signal",
+    "signal_to_dict",
+    "NecklineConfig",
 ]

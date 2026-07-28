@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from trading.compute.types import OrderRequest
-from strategies.signal import Signal
+from strategies.neckline.signal import Signal
 
 
 @dataclass
