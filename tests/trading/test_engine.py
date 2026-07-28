@@ -344,6 +344,248 @@ def test_post_close_no_gw_is_noop():
 
 
 # ============================================================================
+# 4.7 Task 10（R-2 日内熔断）：pre_open 快照 + post_close 三步串联
+# ============================================================================
+def test_pre_open_snapshot_start_equity(monkeypatch):
+    """pre_open：确认闸通过后调 query_asset → snapshot_start_equity 写 daily_equity。
+
+    物理意图（plan Task 10 Step 2 · 对齐缺口 R-2）：
+        熔断判定需要 start_equity 基线。pre_open 在确认闸后（撤昨日单前或后均可，
+        关键是开盘前抓基线）调 gw.query_asset 拿当日开盘总资产，写 daily_equity 表。
+        - query_asset 返 {}（未连接/锁定/异常）→ 跳过快照 + WARN（不拿 0 误触发熔断）
+        - 重入幂等：snapshot_start_equity 用 INSERT OR REPLACE，重启安全
+    """
+    from trading import position_book
+
+    # 隔离 position_book db（防污染生产账本）
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+
+    # 已确认计划
+    orders = [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0,
+    }]
+    trading_plan.save_plan("2099-01-02", orders)
+    trading_plan.confirm_plan("2099-01-02")
+
+    # 假 gw：query_asset 返 total_asset=1_000_000
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 1_000_000.0, "cash": 500_000.0,
+                    "market_value": 500_000.0, "account_id": "test"}
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+
+    submitted = []
+    async def _fake_submit(order, **kw):
+        submitted.append(order.symbol)
+        return {"state": "SUBMITTED"}
+    monkeypatch.setattr(engine, "_submit", _fake_submit)
+
+    asyncio.run(engine.pre_open("2099-01-02"))
+
+    # 验证 daily_equity 快照已写
+    today = datetime.now().strftime("%Y-%m-%d")
+    start_eq = position_book.get_start_equity(today)
+    assert start_eq == 1_000_000.0
+
+
+def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch):
+    """query_asset 返 {}（未连接）→ 跳过快照 + WARN（不拿 0 误触发熔断）。
+
+    物理意图（边界 · spec §5.2）：
+        gw 未连接 / 锁定 / 超时 → query_asset 返 {}。绝不能拿 0 当基线，
+        否则 post_close check_daily_loss_limit(0, curr) 会因 start<=0 返 False
+        反而永不熔断，或拿 None 参与除法抛 TypeError。正确行为：跳过快照 + 告警。
+    """
+    from trading import position_book
+
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+
+    orders = [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0,
+    }]
+    trading_plan.save_plan("2099-01-02", orders)
+    trading_plan.confirm_plan("2099-01-02")
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {}  # 未连接/锁定/异常 → 空 dict
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
+
+    asyncio.run(engine.pre_open("2099-01-02"))
+
+    # 验证未写 daily_equity（get_start_equity 返 None）
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert position_book.get_start_equity(today) is None
+
+
+async def _no_op_submit_should_not_be_called_unused(order, **kw):
+    """占位（用于 test_pre_open_snapshot_skip_when_query_asset_empty，挂单会被调
+    但本测试不验证挂单，故不抛错只返 SUBMITTED）。"""
+    return {"state": "SUBMITTED"}
+
+
+def test_post_close_circuit_breaker_triggers(monkeypatch):
+    """post_close：start=100w/curr=96w（-4%）→ cancel_all + emergency_halt + ERROR 告警。
+
+    物理意图（plan Task 10 Step 3 · 对齐缺口 R-2）：
+        post_close 在 reconcile 之后串联三步：
+          1) get_start_equity(today) → start_equity
+          2) query_asset → curr_equity
+          3) check_daily_loss_limit(start, curr) → True 即 cancel_all + emergency_halt
+        缺基线（start=None）→ 跳过 + WARN（不拿 0 误触发）。
+    """
+    from trading import position_book
+
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    # 写基线 100w
+    today = datetime.now().strftime("%Y-%m-%d")
+    position_book.snapshot_start_equity(today, 1_000_000.0)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 960_000.0}  # -4% 触发熔断（限 -3%）
+        async def _fetch_broker_positions(self):
+            return {}
+    fake_gw = _FakeGw()
+
+    # 拦截副作用：cancel_all + emergency_halt
+    cancel_calls = []
+    async def _fake_cancel(gw):
+        cancel_calls.append(gw)
+        return 0
+    halt_calls = []
+    def _fake_halt():
+        halt_calls.append(True)
+        return {"halted": True}
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.emergency_halt", _fake_halt)
+
+    # reconcile mock（返 ok，不干扰熔断路径）
+    from trading.compute.reconcile import ReconciliationResult
+    fake_rec = ReconciliationResult(
+        matched=[], drifted=[], only_local=[], only_broker=[],
+        max_abs_drift=0.0, is_ok=True)
+    async def _fake_run_rec(gw, local, tolerance=0.0):
+        return fake_rec
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+
+    result = asyncio.run(engine.post_close(
+        today, gw=fake_gw, local_positions={}))
+
+    assert result.get("circuit_breaker") is True
+    assert len(cancel_calls) == 1     # cancel_all 被调
+    assert len(halt_calls) == 1       # emergency_halt 被调
+
+
+def test_post_close_circuit_breaker_skip_when_within_limit(monkeypatch):
+    """post_close：curr 只跌 2%（未触 -3%）→ 不熔断，cancel_all/halt 均不调。"""
+    from trading import position_book
+
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    position_book.snapshot_start_equity(today, 1_000_000.0)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 980_000.0}  # -2% 不触发
+        async def _fetch_broker_positions(self):
+            return {}
+    fake_gw = _FakeGw()
+
+    cancel_calls = []
+    async def _fake_cancel(gw):
+        cancel_calls.append(gw)
+        return 0
+    halt_calls = []
+    def _fake_halt():
+        halt_calls.append(True)
+        return {"halted": True}
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.emergency_halt", _fake_halt)
+
+    from trading.compute.reconcile import ReconciliationResult
+    fake_rec = ReconciliationResult(
+        matched=[], drifted=[], only_local=[], only_broker=[],
+        max_abs_drift=0.0, is_ok=True)
+    async def _fake_run_rec(gw, local, tolerance=0.0):
+        return fake_rec
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+
+    result = asyncio.run(engine.post_close(today, gw=fake_gw, local_positions={}))
+
+    assert result.get("circuit_breaker") is False
+    assert cancel_calls == []
+    assert halt_calls == []
+
+
+def test_post_close_circuit_breaker_skip_when_no_baseline(monkeypatch):
+    """post_close：无基线（start=None，未快照）→ 跳过 + WARN，不熔断。
+
+    物理意图（边界 · spec §5.2）：
+        pre_open 未抓到基线（query_asset 返空），post_close 无 start_equity。
+        绝不拿 0 触发熔断（check_daily_loss_limit(0, X) 虽返 False，但语义模糊），
+        显式跳过 + WARN 让研究员次日人工补基线。
+    """
+    from trading import position_book
+
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    # 不写基线（模拟 pre_open 未抓到）
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 500_000.0}
+        async def _fetch_broker_positions(self):
+            return {}
+    fake_gw = _FakeGw()
+
+    cancel_calls = []
+    async def _fake_cancel(gw):
+        cancel_calls.append(gw)
+        return 0
+    halt_calls = []
+    def _fake_halt():
+        halt_calls.append(True)
+        return {"halted": True}
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.emergency_halt", _fake_halt)
+
+    from trading.compute.reconcile import ReconciliationResult
+    fake_rec = ReconciliationResult(
+        matched=[], drifted=[], only_local=[], only_broker=[],
+        max_abs_drift=0.0, is_ok=True)
+    async def _fake_run_rec(gw, local, tolerance=0.0):
+        return fake_rec
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    result = asyncio.run(engine.post_close(today, gw=fake_gw, local_positions={}))
+
+    # 无基线 → 跳过（breaker_skipped=True），不熔断
+    assert result.get("circuit_breaker") is False
+    assert result.get("breaker_skipped") is True
+    assert cancel_calls == []
+    assert halt_calls == []
+
+
+# ============================================================================
 # 4.5 Task 4（P1-6）：_trade_cfg 默认 stop_atr_mult=1.0（对齐回测 DEFAULTS）
 # ============================================================================
 def test_trade_cfg_stop_atr_mult_default_aligns_backtest(monkeypatch):

@@ -57,6 +57,10 @@ from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals
 from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between
+# Task 10（R-2 日内熔断）：check_daily_loss_limit 纯判定 functional core
+from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
+# Task 10（R-2）：position_book 的 daily_equity reader/writer（snapshot/get_start）
+from trading import position_book as _position_book
 
 logger = logging.getLogger(__name__)
 
@@ -444,6 +448,34 @@ async def pre_open(date: str) -> dict:
             # 撤单失败不阻塞挂单主路径（单笔失败已在 cancel_all 内被吞，此处兜整体异常）
             logger.exception("pre_open 撤昨日单整体异常（继续挂新单）")
 
+    # ②.5 抓日内熔断基线（Task 10 · R-2 日内熔断 · spec §5.2）：
+    # 物理意图：post_close 判 -3% 熔断需要 start_equity 基线，开盘前是唯一可靠的
+    # 「未受当日交易影响」时点。pre_open 在确认闸 + 撤昨日单后调 gw.query_asset
+    # 抓当日开盘总资产 → snapshot_start_equity 写 daily_equity 表（幂等 INSERT OR REPLACE，
+    # 进程崩溃重启重入安全）。
+    # 边界（红线）：
+    # - gw=None / query_asset 返 {}（未连接/锁定/超时）→ 跳过 + WARN，绝不拿 0/None
+    #   写基线（否则 post_close check_daily_loss_limit(0, curr) 返 False 反永不熔断）；
+    # - query_asset 异常 → 跳过 + 告警（不阻塞挂单主路径）。
+    # Why 在撤单后而非前：撤单不影响总资产（仅未成交单状态变化），先后顺序无关；
+    # 放后面可与撤单共用同一个 gw 引用，且「撤完昨日 → 抓今日基线」语义更清晰。
+    today_eq = datetime.now().strftime("%Y-%m-%d")
+    if gw is not None:
+        try:
+            asset = await gw.query_asset() if hasattr(gw, "query_asset") else {}
+            total = (asset or {}).get("total_asset")
+            if total is not None and float(total) > 0:
+                _position_book.snapshot_start_equity(today_eq, float(total))
+                logger.info("pre_open 日内熔断基线已抓取 date=%s start_equity=%s",
+                            today_eq, float(total))
+            else:
+                # query_asset 返空（未连接/锁定/超时）→ 不写基线，让 post_close 跳过熔断
+                logger.warning("pre_open 跳过熔断基线快照：query_asset 返空 date=%s", today_eq)
+        except Exception:
+            logger.exception("pre_open 抓熔断基线异常（不阻塞挂单主路径） date=%s", today_eq)
+    else:
+        logger.warning("pre_open 跳过熔断基线快照：gw=None date=%s", today_eq)
+
     # ③ 注入动态白名单（Task5）：仅 engine 进程生效，server 进程不受影响。
     symbols = {o["order"]["symbol"] for o in plan["orders"]}
     dynamic_whitelist.inject_dynamic_whitelist(symbols)
@@ -613,7 +645,7 @@ async def post_close(
     local_positions: Optional[Mapping[str, float]] = None,
     tolerance: float = 0.0,
 ) -> dict:
-    """盘后：对账（run_reconcile） + 清动态白名单。
+    """盘后：对账（run_reconcile） + 盘后兜底 + 日内熔断 + 清动态白名单。
 
     Args:
         date:            T 日。
@@ -622,25 +654,29 @@ async def post_close(
         tolerance:       持仓偏差容忍度（默认 0 零容忍）。
 
     Returns:
-        {"date":..., "drift":bool}（drift=True 表示有偏差，run_reconcile 已告警）。
+        {"date":..., "drift":bool, "circuit_breaker":bool, "breaker_skipped"?:bool}
+        - drift=True：对账有偏差（run_reconcile 已告警）
+        - circuit_breaker=True：日内 -3% 熔断已触发（cancel_all + emergency_halt 已执行）
+        - breaker_skipped=True：无基线跳过熔断（start_equity 未抓到，不拿 0 误触发）
 
-    ⚠️ follow-up（live 前必修，本 task 显式不做的部分）：
-        本函数**不做**熔断连线（check_daily_loss_limit + cancel_all_open_orders +
-        emergency_halt）。原因：daily loss 熔断需要 start_equity / curr_equity 两个
-        基线值，plan/spec 未给 equity 数据源（trading_service 当前无 get_equity 公开
-        接口），无来源的熔断是伪熔断（用 None/0 触发 = 永远不触发 或 误触发）。
-        TODO(live 前必修)：定 equity 来源（如 gw.query_asset 或新增 get_equity 接口）
-        后，在此处串联：
-            1) check_daily_loss_limit(start_equity, curr_equity) → True 即熔断
-            2) io.breaker.cancel_all_open_orders(gw) 撤所有未终态单
-            3) trading_service.emergency_halt() 置 lock_down + 告警
-        无上述三步，post_close 不算完成 live 准入。
+    编排顺序（plan 红线 · spec §6 数据流）：
+        ① reconcile（持仓对账）→ ② query_trades 兜底（Task 11 follow-up）
+        → ③ 熔断（本 Task 10）→ ④ trailing（Task 9，未熔断时跑）
+        → ⑤ max_holding 标记（Task 8，未熔断时跑）
+        各段独立 try-except 软降级（单段异常不阻塞下一段）。
+
+    ⚠️ 熔断三步（Task 10 · R-2 日内熔断 · spec §5.2）：
+        1) get_start_equity(today) → start_equity（pre_open 快照的基线）
+        2) gw.query_asset → curr_equity（盘后总资产）
+        3) check_daily_loss_limit(start, curr) → True 即 cancel_all_open_orders +
+           emergency_halt + ERROR 告警
+        缺基线（start=None）→ 跳过 + WARN（不拿 0 触发，防 check(0,X) 永远 False 反永不熔断）。
     """
     result: dict = {"date": date}
     if gw is None:
         gw = get_gateway()
 
-    # 对账：gw + local 齐全才跑（缺一不可，否则伪对账）
+    # ① 对账：gw + local 齐全才跑（缺一不可，否则伪对账）
     if gw is not None and local_positions is not None:
         try:
             rec = await reconcile_job.run_reconcile(gw, local_positions, tolerance)
@@ -654,13 +690,84 @@ async def post_close(
                     "有" if gw is not None else "无",
                     "有" if local_positions is not None else "无")
 
+    # ③ 日内熔断三步（Task 10 · R-2 · 在 reconcile 之后）：
+    # Why 在 reconcile 后：reconcile 查持仓 drift 是另一维度观测，与日内总资产 -3% 熔断
+    # 互不依赖；放后面让熔断有最完整的 curr_equity（含盘后 reconcile 拉到的最新持仓估值）。
+    # 各步独立 try-except 软降级：单段异常不阻塞清白名单和后续 trailing/max_holding。
+    circuit_breaker_triggered = False
+    breaker_skipped = False
+    try:
+        # 步骤 1：读 start_equity 基线（pre_open snapshot 写入 daily_equity 表）
+        today_eq = datetime.now().strftime("%Y-%m-%d")
+        start_equity = _position_book.get_start_equity(today_eq)
+        if start_equity is None or start_equity <= 0:
+            # 无基线（pre_open 未抓到 / 查询异常）→ 跳过熔断 + WARN
+            # Why 显式跳过：check_daily_loss_limit(0, X) 虽返 False 但语义模糊，
+            # 显式 breaker_skipped=True 让观测层知道「未判定」而非「判定未触发」。
+            breaker_skipped = True
+            logger.warning(
+                "post_close 跳过日内熔断：无 start_equity 基线 date=%s"
+                "（pre_open query_asset 失败？次日人工补基线）", today_eq)
+        else:
+            # 步骤 2：拉当前总资产（盘后总资产 = curr_equity）
+            curr_equity = None
+            if gw is not None and hasattr(gw, "query_asset"):
+                try:
+                    asset = await gw.query_asset()
+                    curr_equity = (asset or {}).get("total_asset")
+                except Exception:
+                    logger.exception("post_close query_asset 异常（熔断路径降级跳过）")
+            if curr_equity is None or float(curr_equity) <= 0:
+                # curr 缺失同样跳过（不拿 0 触发）
+                breaker_skipped = True
+                logger.warning(
+                    "post_close 跳过日内熔断：query_asset 返空 date=%s curr=None", today_eq)
+            else:
+                # 步骤 3：判定 + 触发三步（cancel_all + emergency_halt + 告警）
+                triggered = _check_daily_loss_limit(
+                    float(start_equity), float(curr_equity))
+                if triggered:
+                    logger.critical(
+                        "【日内熔断】触发！date=%s start=%s curr=%s 回撤=%.2f%%"
+                        "（执行 cancel_all + emergency_halt）",
+                        today_eq, start_equity, curr_equity,
+                        (float(curr_equity) - float(start_equity)) / float(start_equity) * 100)
+                    # 撤所有未终态单（尽最大努力撤完，单笔失败不中断）
+                    if gw is not None:
+                        try:
+                            await _cancel_all_open_orders(gw)
+                        except Exception:
+                            logger.exception("post_close 熔断撤单异常（继续 emergency_halt）")
+                    # 置网关 lock_down + ERROR 告警
+                    try:
+                        from presentation.server.services.trading_service import (
+                            emergency_halt as _emergency_halt,
+                        )
+                        _emergency_halt()
+                    except Exception:
+                        logger.exception("post_close emergency_halt 异常（已尽力撤单）")
+                    circuit_breaker_triggered = True
+                else:
+                    logger.info(
+                        "post_close 日内熔断未触发 date=%s 回撤=%.2f%%（阈值 -3.0%%）",
+                        today_eq,
+                        (float(curr_equity) - float(start_equity)) / float(start_equity) * 100)
+    except Exception:
+        logger.exception("post_close 日内熔断整体异常（不阻塞清白名单）")
+
+    result["circuit_breaker"] = circuit_breaker_triggered
+    if breaker_skipped:
+        result["breaker_skipped"] = True
+
     # 清动态白名单（Task5）：保证下一交易日从干净状态开始（防止昨日标的污染今日白名单）
     try:
         dynamic_whitelist.clear_dynamic_whitelist()
     except Exception:
         logger.exception("post_close 清动态白名单异常")
 
-    logger.info("post_close 完成 date=%s drift=%s", date, result.get("drift"))
+    logger.info("post_close 完成 date=%s drift=%s circuit_breaker=%s breaker_skipped=%s",
+                date, result.get("drift"),
+                result.get("circuit_breaker"), result.get("breaker_skipped"))
     return result
 
 
