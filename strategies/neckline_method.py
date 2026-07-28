@@ -283,7 +283,11 @@ class NecklineMethodStrategy:
             breakout_date=res.get("formed_at"),
             neckline=res.get("neckline"),
             bottom=res.get("bottom"),
-            entry_price=res.get("entry") if res.get("entry") is not None else res.get("neckline"),
+            # P0-1 挂单价偏移（live-readiness）：entry=颈线+buy_limit_atr_mult×ATR（对齐回测
+            # simulate_exit:75 buy_limit=c_star+buy_limit_atr_mult×atr）。Signal.entry_price=挂单价，
+            # Signal.neckline 仍=颈线（stop/tp 基准不变）。mult=0 退化颈线（零回归）；atr 缺失回退颈线。
+            entry_price=(res.get("neckline") or 0.0) + self.exec_cfg.get("buy_limit_atr_mult", 1.0) * (
+                float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else (res.get("atr") or 0.0)),
             atr=float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else res.get("atr"),
             # R3 实际口径盈亏比（2026-07-27 Task 2）：detect 已算 (tp2-entry)/(entry-stop_price)
             # 实际盈亏比（基于颈线-N×ATR 止损 / 颈线+N×H 止盈的真实风险报酬比），

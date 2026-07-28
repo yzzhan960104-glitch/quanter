@@ -101,8 +101,9 @@ def test_scan_live_returns_signal_without_simulate_exit(strategy):
     assert sig.symbol == "600000.SH"
     assert sig.neckline == 10.0
     assert sig.bottom == 9.0
-    # entry_price 取 res["entry"]，缺则用 neckline 近似（此处 res 有 entry）
-    assert sig.entry_price == 10.0
+    # P0-1 挂单价偏移（live-readiness）：entry=颈线+buy_limit_atr_mult×ATR = 10+1.0×1.0=11.0
+    # （Signal.neckline 仍=10.0 是 stop/tp 基准不变；entry_price 是挂单价，对齐回测 simulate_exit:75）
+    assert sig.entry_price == 11.0
     # atr 用 atr_full 末值（df_upto 全 ATR 末根）
     assert sig.atr is not None
     # formed_at / breakout_date 字段供 signal_runner 消费

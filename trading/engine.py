@@ -84,6 +84,8 @@ def _trade_cfg() -> dict:
         # 颈线法 id_cfg 默认；实盘从 NecklineConfig 读（本引擎薄编排，不重算）
         "stop_atr_mult": float(os.getenv("TRADE_STOP_ATR_MULT", "2.0")),
         "tp_h_mult": float(os.getenv("TRADE_TP_H_MULT", "2.0")),
+        # 地基（live-readiness Task 2）：挂单等待回踩有效期日，pre_open max_wait 窗口过滤用
+        "max_wait": int(os.getenv("TRADE_MAX_WAIT", "5")),
         # 占位（M1）：海龟 trailing 动态止损参数——grace/step/floor 三件套本 task 未实际消费，
         # compute_stop_price 盘后重算（Task2 已就绪）需 Task 10 在引擎状态层维护
         # {symbol: stop_price} 并每日/盘中更新后注入 stop_loss_monitor；本 task 的
@@ -214,7 +216,7 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
         capital=capital,
         pos_cap=cfg["pos_cap"],
         atr_map=atr_map,
-        stop_cfg={"stop_atr_mult": cfg["stop_atr_mult"], "tp_h_mult": cfg["tp_h_mult"]},
+        stop_cfg={"stop_atr_mult": cfg["stop_atr_mult"], "tp_h_mult": cfg["tp_h_mult"], "max_wait": cfg["max_wait"]},
     )
     # 序列化为嵌套 dict（Task8 契约硬约束：order + stop_price + take_profit 三段）
     # 透传 experiment_id/experiment_weight 归因（Task5 PlannedOrder 携带）：
@@ -241,6 +243,11 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
             # scan_live 下 entry_price=neckline，故与 order.price 同值——显式单列是为
             # 语义清晰（挂单价=回踩位 vs 颈线=形态位），未来 entry≠neckline 时自然分叉。
             "neckline": round(o.neckline, 2),
+            # 地基字段（live-readiness Task 2）：atr 供 trailing 盘后演进 / formed_at 供 pre_open
+            # max_wait 窗口判定 / max_wait 有效期。精度：atr round 4 位（计算用），其余原值。
+            "atr": round(o.atr, 4),
+            "formed_at": o.formed_at,
+            "max_wait": o.max_wait,
             "experiment_id": o.experiment_id,           # 透传实验归因（Task5 → Task8 链路）
             "experiment_weight": o.experiment_weight,   # 透传实验权重（Task8 加权聚合用）
             # R3 实际口径盈亏比（2026-07-27 Task 2）：从 PlannedOrder.rr 透传到 order_dict，

@@ -49,6 +49,9 @@ class PlannedOrder:
     stop_price: float
     take_profit: float
     neckline: float
+    atr: float = 0.0                 # 地基：信号日 ATR（trailing 演进用，from Signal.atr）
+    formed_at: str = ""              # 地基：信号突破日（pre_open max_wait 窗口判定用，from Signal.formed_at）
+    max_wait: int = 5                # 地基：挂单等待回踩有效期日（pre_open 超期过滤用，from stop_cfg）
     experiment_id: str = ""          # 归因：所属实验版本（_eod 注入，Task 8 report 按此聚合）
     experiment_weight: float = 1.0   # 归因：落盘时冻结的资金权重（灰度分流，1.0=满仓口径）
     rr: float = 0.0                  # R3 实际口径盈亏比（从 Signal 透传，push 展示用）
@@ -114,6 +117,11 @@ def build_orders_from_signals(
         out.append(PlannedOrder(
             order=OrderRequest(symbol=sym, qty=float(qty), side="buy", price=float(entry)),
             stop_price=stop_price, take_profit=take_profit, neckline=float(neckline),
+            # 地基字段（live-readiness Task 2）：atr 供 trailing 演进 / formed_at 供 pre_open
+            # max_wait 窗口判定 / max_wait 从 stop_cfg 读（默认 5 对齐 NecklineConfig）
+            atr=float(atr),
+            formed_at=str(s.formed_at) if s.formed_at is not None else "",
+            max_wait=int(stop_cfg.get("max_wait", 5)),
             # 归因透传：experiment_id Signal 默认 ""（老链路），experiment_weight 已在 budget 落地
             experiment_id=s.experiment_id,
             experiment_weight=weight,
