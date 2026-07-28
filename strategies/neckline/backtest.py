@@ -24,6 +24,11 @@ import pandas as pd
 # 子包后改相对 import（同包内 .method_v0）。
 from .method_v0 import DEFAULTS, compute_atr, detect_signal
 
+# Task 5 · U3 执行单源：持有期逐根离场判定改调 decide_exit（Task 4 建好的纯函数），
+# 让回测 simulate_exit 与实盘 stop_loss_monitor（Task 9）共用 decide_exit 单源。
+# decide_exit 内部调 compute_stop_price 算 trailing，本模块不再内联算 trailing（消除数学双份）。
+from .execution import decide_exit, ExitAction, ExitReason
+
 
 # 持有期参数（用户规则，可调）—— 保留为向后兼容常量
 MAX_HOLDING = 15           # 成交后超时持仓周期（交易日）
@@ -148,36 +153,77 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     # → 成交 open（市价<挂单价，更优）。旧版 entry=buy_limit 高估了跳空低开的买入价。
     end_idx = min(buy_idx + max_holding, len(sym_df) - 1)
 
-    # ② 持有期逐根判 exit
+    # ② 持有期逐根判 exit（Task 5 · U3 执行单源：改调 decide_exit 纯函数）
+    # strangler 等价红线：本循环改前是 simulate_exit:156-199 的内联 trailing + 四分支判定，
+    # 现每根构造 state+bar+cfg → decide_exit → 据 action/reason/portion/new_stop 推进 lot1/lot2
+    # 状态机 + pnl + exit_reason/exit_pos。decide_exit 已证等价（Task 4），本循环只保证衔接等价。
+    #
+    # trailing 收敛（spec §4.3）：原内联算 trailing stop（grace/step/floor）已删除，改用
+    # decide_exit 内部调 compute_stop_price 返的 dec.new_stop——trailing 数学不再双份（单源）。
+    #
+    # lot 翻转硬契约（Task 4 I-1）：decide_exit 是无状态纯函数只读 lot1_open/lot2_open，不写 state，
+    # 本循环必须据返回显式翻：TP1→lot1_open=False；TP2→lot2_open=False（+lot1_open if open）。
+    # 每根传当前 lot1_open/lot2_open 给 state，否则下根 decide_exit 会重复触发同一触发器。
     lot1_open, lot2_open = True, True
     lot1_pnl, lot2_pnl = None, None
     exit_reason = "timeout"
     exit_pos = end_idx   # 默认超时（is_last 或循环自然结束）；stop_loss/tp2 break 时覆盖
+
+    # cfg：decide_exit 需要的静态参数（整个持有期不变）。参数映射红线（resolution §7）：
+    #   stop_atr_mult ← id_cfg（与原内联 :167 id_cfg["stop_atr_mult"] 同源）；
+    #   trailing_*   ← exec（与原内联 :164-168 exec.get 同源）；
+    #   tp1_portion  ← exec（TP1 时 portion 传回，仅供调用方观测，本循环据 reason 分支不读 portion）。
+    cfg = {
+        "stop_atr_mult": id_cfg["stop_atr_mult"],
+        "trailing_grace": exec.get("trailing_grace", 0) or 0,
+        "trailing_step": exec.get("trailing_step", 0.0) or 0.0,
+        "trailing_floor": exec.get("trailing_floor"),
+        "tp1_portion": exec["tp1_portion"],
+    }
+
     for i in range(buy_idx, end_idx + 1):
         row = sym_df.iloc[i]
         high, low, close = float(row["high"]), float(row["low"]), float(row["close"])
-        is_last = (i == end_idx)
-        # 时间驱动移动止损（海龟风格）：前 trailing_grace 天用 base_stop（宽限，给趋势确认空间），
-        # grace 天后每日收紧 trailing_step×ATR（趋势不确认逐步退出），到 trailing_floor×ATR 卡住。
-        # grace=0/step=0 退化为固定止损（=base_stop，兼容旧行为）。
         holding_days = i - buy_idx
-        grace = exec.get("trailing_grace", 0) or 0
-        step = exec.get("trailing_step", 0) or 0
-        if grace and step and holding_days > grace:
-            eff_mult = id_cfg["stop_atr_mult"] - (holding_days - grace) * step
-            floor = exec.get("trailing_floor")
-            if floor is not None:
-                eff_mult = max(eff_mult, floor)
-            stop = c_star - eff_mult * atr_val
-        else:
-            stop = base_stop
-        if low <= stop:                                  # 优先级1：止损（动态 trailing）
+        is_last = (i == end_idx)
+
+        # 每根构造 state（运行时变量）+ bar（当根 K 线）喂 decide_exit。holding 期不需 cancel_on
+        # （decide_exit holding 分支不读）。base_stop 不必入 state（decide_exit 调 compute_stop_price
+        # 自算 trailing，返 dec.new_stop）。
+        state = {
+            "phase": "holding",
+            "entry": entry,
+            "tp1": tp1,
+            "tp2": tp2,
+            "neckline": c_star,
+            "atr": atr_val,
+            "holding_days": holding_days,
+            "is_last": is_last,
+            "lot1_open": lot1_open,
+            "lot2_open": lot2_open,
+        }
+        bar = {"high": high, "low": low, "close": close}
+
+        dec = decide_exit(state, bar, cfg)
+        stop = dec.new_stop   # decide_exit 算好的当根 trailing stop（= compute_stop_price 结果）
+
+        # ── 分发（按 dec.action / dec.reason / dec.portion 推进状态机，逐分支对齐原内联）──
+        if dec.action is ExitAction.HOLD:
+            # 原内联：四分支均未触发 → 自然下一根（lot 状态不变）
+            continue
+
+        if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.STOP_LOSS:
+            # 优先级1（原 :174-179）：止损全平。lot1/lot2 用 stop（=dec.new_stop）算 pnl。
             lot1_pnl = lot2_pnl = (stop - entry) / entry
             lot1_open = lot2_open = False
             exit_reason = "stop_loss"
             exit_pos = i
             break
-        if lot2_open and high >= tp2:                    # 优先级2：tp2（lot1 同日一并卖）
+
+        if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TAKE_PROFIT \
+                and dec.portion >= 1.0:
+            # 优先级2（原 :180-188）：tp2 全平。lot2 用 tp2 算 pnl；lot1 若仍持用 tp1 同日一并卖。
+            # portion==1.0 = TP2 全平（decide_exit priority 2）；对齐原内联 :181-185。
             lot2_pnl = (tp2 - entry) / entry
             lot2_open = False
             if lot1_open:
@@ -186,11 +232,19 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             exit_reason = "tp2"
             exit_pos = i
             break
-        if lot1_open and high >= tp1:                    # 优先级3：tp1（卖 lot1）
+
+        if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TAKE_PROFIT \
+                and dec.portion < 1.0:
+            # 优先级3（原 :189-192）：tp1 只卖 lot1，lot2 续持博 tp2。continue 不是 break
+            # （对齐原 :192），下根继续判 lot2 的 tp2/stop/timeout。
             lot1_pnl = (tp1 - entry) / entry
             lot1_open = False
             continue
-        if is_last:                                       # 超时
+
+        if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TIMEOUT:
+            # 优先级4（原 :193-199）：is_last 超时强制平。lot1/lot2 各用 close 算 pnl。
+            # decide_exit TIMEOUT 不判浮盈 threshold（Controller #5：is_last 直接平），
+            # pnl 在本循环算（decide_exit 是纯决策不碰 pnl，对齐 Task 4 契约）。
             if lot1_open:
                 lot1_pnl = (close - entry) / entry
             if lot2_open:
