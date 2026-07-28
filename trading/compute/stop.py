@@ -87,34 +87,14 @@ def _natural_days_fallback(start_date: str, end_date: str) -> int:
 
 
 # ============================================================================
-# 海龟 trailing 止损离散（从 scripts/neckline_backtest.simulate_exit 迁出）
+# 海龟 trailing 止损离散（已迁 strategies/neckline/execution.py · 垫片 re-export）
 # ============================================================================
-def compute_stop_price(
-    neckline: float,
-    atr: float,
-    holding_days: int,
-    stop_atr_mult: float,
-    grace: int,
-    step: float,
-    floor: float | None,
-) -> float:
-    """给定持有天数算当日止损价（颈线基准，trailing 离散）。
-
-    物理意图（与 simulate_exit:122-135 完全同源）：
-    - grace 天内：用 base_stop（颈线 - stop_atr_mult×ATR，固定，给趋势确认空间）；
-    - grace 天后：每日收紧 step×ATR（eff_mult 递减），到 floor 卡底（收紧上限）；
-    - grace=0/step=0：退化为固定止损（=base_stop，兼容旧行为）。
-
-    离散化（二期）：盘后对每只持仓调本函数重算【次日】固定止损价；盘中监控用此固定价，
-    不移动（符合 spec「盘中不调整」）。回测里是逐根 K 线调；实盘改为每日一次。
-    """
-    base_stop = neckline - stop_atr_mult * atr
-    if grace and step and holding_days > grace:
-        eff_mult = stop_atr_mult - (holding_days - grace) * step
-        if floor is not None:
-            eff_mult = max(eff_mult, floor)
-        return neckline - eff_mult * atr
-    return base_stop
+# compute_stop_price 已【物理迁到】strategies/neckline/execution.py（Task 4 · U3）。
+# 迁移原因：本函数本质是颈线法专属的海龟 trailing 离散（从 simulate_exit 迁出），
+# 真正归属是 strategies/neckline/。颈线法 decide_exit（execution.py 执行单源）需要
+# 调它，但 strategies/ 铁律零 trading 依赖——故把定义搬回颈线法家乡，本模块改垫片
+# re-export 保 trading/engine.py 等调用点零改动（Task 5/6 清理时一并收）。
+from strategies.neckline.execution import compute_stop_price  # noqa: F401
 
 
 # ============================================================================

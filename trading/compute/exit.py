@@ -39,22 +39,23 @@ from typing import Optional
 
 
 # ============================================================================
-# 离场判定数据模型（ExitAction / ExitReason / ExitDecision）
+# ExitAction / ExitReason 迁移垫片（Task 4 · U3 · Controller #8）
 # ============================================================================
-class ExitAction(Enum):
-    """离场动作（HOLD 持有 / CLOSE 平仓）。"""
-
-    HOLD = "hold"
-    CLOSE = "close"
-
-
-class ExitReason(Enum):
-    """离场原因（NONE 默认 / STOP_LOSS 止损 / TAKE_PROFIT 止盈 / TIMEOUT 时间止损）。"""
-
-    STOP_LOSS = "stop_loss"
-    TAKE_PROFIT = "take_profit"
-    TIMEOUT = "timeout"
-    NONE = "none"
+# ExitAction/ExitReason 的 class 定义已【物理剪到】strategies/neckline/execution.py
+# （颈线法 decide_exit 单源基石，2026-07-29 Task 4）。本模块改 re-export 垫片，保
+# check_exit:79 + ExitDecision:71 + trading/compute/__init__.py 透传不破。
+#
+# 迁移物理意图：ExitAction/ExitReason 是【跨形态共用枚举】（动作/原因无 caisen/颈线法
+# 业务逻辑，纯枚举）。颈线法 decide_exit（execution.py）与 caisen check_exit（本文件）
+# 都要用——故搬到颈线法执行层模块（execution.py，decide_exit 主场），exit.py 反向 re-export。
+#
+# 新增成员（Task 4）：ExitAction.CANCEL、ExitReason.CANCEL_ON（颈线法 pending 撤单专属，
+# caisen 无此场景，但 Enum 成员加不破坏老 check_exit 逻辑——它只认 HOLD/CLOSE/STOP_LOSS
+# /TAKE_PROFIT/TIMEOUT/NONE）。
+#
+# 生命周期：Task 6 删 check_exit + ExitDecision 时，本垫片一并清除（exit.py 整个删除，
+# ExitAction/ExitReason 单源于 execution.py）。
+from strategies.neckline.execution import ExitAction, ExitReason  # noqa: F401
 
 
 @dataclass
