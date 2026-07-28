@@ -40,6 +40,7 @@ Why 独立进程是硬约束：
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import replace as _dc_replace
@@ -113,6 +114,10 @@ def _trade_cfg() -> dict:
         "grace": int(os.getenv("TRADE_STOPLOSS_GRACE_DAYS", "5")),
         "step": float(os.getenv("TRADE_STOPLOSS_STEP_ATR", "0.1")),
         "floor": float(os.getenv("TRADE_STOPLOSS_FLOOR", "0.5")),
+        # max_holding（Task 8 · P0-4 超时平仓）：成交后超时持仓周期（交易日），对齐回测
+        # strategies/neckline/backtest.py MAX_HOLDING=15。post_close 扫超期 → 次日 pre_open
+        # 跌停价平仓释放资金（对齐回测「成交后 max_holding 日未达止盈收盘卖剩余」语义）。
+        "max_holding": int(os.getenv("TRADE_MAX_HOLDING", "15")),
     }
 
 
@@ -476,6 +481,15 @@ async def pre_open(date: str) -> dict:
     else:
         logger.warning("pre_open 跳过熔断基线快照：gw=None date=%s", today_eq)
 
+    # ②.6 Task 8（P0-4 max_holding）：平昨日盘后标记的超期持仓（跌停价释放资金）。
+    # 物理意图：回测 max_holding 超时平仓对齐——持仓超 max_holding 日未达止盈即收盘平，
+    # 实盘在【次日 pre_open】挂跌停价卖单（保证成交，接受滑点；超时释放资金不等好价位）。
+    # Why 在挂新买单前：先释放超期资金占用再挂新单（资金可用度更准）；卖单与买单方向
+    # 相反不冲突。qty 必须来自 gw 真实持仓（红线，同 stop_loss_monitor，绝不硬编码）。
+    expired_positions = _load_expired_positions()
+    if expired_positions:
+        await _close_expired_positions(gw, expired_positions)
+
     # ③ 注入动态白名单（Task5）：仅 engine 进程生效，server 进程不受影响。
     symbols = {o["order"]["symbol"] for o in plan["orders"]}
     dynamic_whitelist.inject_dynamic_whitelist(symbols)
@@ -636,6 +650,139 @@ async def stop_loss_monitor(
 
 
 # ============================================================================
+# Task 8（P0-4 max_holding 超时平仓）：post_close 标记超期 + pre_open 跌停价平仓
+# ============================================================================
+# 超期持仓标记文件（post_close 覆盖写，pre_open 读后消费删除）。
+# Why 单文件不进 db：这是一次性「次日要平」的待办标记，pre_open 消费即删，无需持久化/
+# 审计（持仓周期信息在 position_book.entry_date 已存，本文件仅跨日传递「昨日盘后判定」）。
+_EXPIRED_POSITIONS_PATH = os.path.join("logs", "expired_positions.json")
+
+
+def _scan_expired_positions(today: str, max_holding: int) -> list[dict]:
+    """扫超期持仓（holding_days > max_holding 的 {symbol→entry_date}）。
+
+    物理意图（plan Task 8 · 对齐回测 MAX_HOLDING 超时平仓）：
+        回测里成交后 max_holding 日未达任一止盈即收盘卖剩余；实盘对齐——post_close 用
+        position_book.entry_date 算 holding_days（交易日口径，trading_days_between），
+        >max_holding 即标超期，写 expired_positions.json 供次日 pre_open 平仓。
+
+    边界：
+        - get_entry_dates 仅返 qty!=0 且 entry_date NOT NULL 的持仓（Task 1 前老数据无
+          entry_date 视作未超期，向后兼容——不盲平无周期信息的持仓）；
+        - holding_days<=max_holding 视窗口内不标（含 ==：第 max_holding 日仍给足机会）。
+    """
+    expired: list[dict] = []
+    for sym, entry_date in _position_book.get_entry_dates().items():
+        holding_days = _trading_days_between(entry_date, today)
+        if holding_days > max_holding:
+            expired.append({
+                "symbol": sym, "entry_date": entry_date,
+                "holding_days": holding_days, "max_holding": max_holding,
+            })
+    return expired
+
+
+def _write_expired_positions(date: str, expired: list[dict]) -> None:
+    """post_close 覆盖写超期标记（logs/expired_positions.json）。
+
+    覆盖写（w 模式）：每个交易日盘后重算重写，文件永远反映最新一次 post_close 结果。
+    """
+    os.makedirs(os.path.dirname(_EXPIRED_POSITIONS_PATH) or ".", exist_ok=True)
+    payload = {"date": date, "written_at": datetime.now().isoformat(), "expired": expired}
+    with open(_EXPIRED_POSITIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _load_expired_positions() -> list[dict]:
+    """pre_open 读超期标记。文件不存在/损坏 → 返 []（无超期可平，软降级）。"""
+    try:
+        with open(_EXPIRED_POSITIONS_PATH, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    return payload.get("expired", []) if isinstance(payload, dict) else []
+
+
+def _consume_expired_positions() -> None:
+    """pre_open 平仓尝试后消费标记（删文件）。
+
+    Why 无条件删：防 pre_open 崩溃重启后重复读标记 → 重复挂卖单 → 卖超（致命）。
+    漏平（删了但部分标的没卖成）由人工对账兜底——风控宁可漏平也不重复卖超。
+    """
+    try:
+        os.remove(_EXPIRED_POSITIONS_PATH)
+    except FileNotFoundError:
+        pass
+
+
+async def _close_expired_positions(gw: Any, expired: list[dict]) -> dict:
+    """平超期持仓：查 gw 真实持仓 → 跌停价挂卖 → 消费标记文件。
+
+    风控红线（Grill Me · 同 stop_loss_monitor scope #3）：
+        - 卖出 qty **必须**来自 gw._fetch_broker_positions 的真实持仓，绝不硬编码；
+        - 价格优先跌停价（保证成交，超时释放资金接受滑点），无跌停价退化 last_price，
+          都无则跳过（无价不发盲单=卖错价=致命）；
+        - 消费时机：挂卖尝试【之后】无论成败都删标记（漏平<卖超，见 _consume）。
+
+    Args:
+        gw:      网关（dry_run 下 None → 无持仓可查，跳过+消费标记文件）。
+        expired: _load_expired_positions 返回的超期列表。
+
+    Returns:
+        {"closed": <成功挂卖数>, "reason"?: ...}
+    """
+    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：直指 compute.types 真身
+    if gw is None:
+        # dry_run 无网关无持仓可平；仍消费标记文件（切 live 前清掉 dry_run 期残留标记）
+        logger.warning("跳过平超期持仓：gw=None（dry_run 无持仓可平，消费标记文件）")
+        _consume_expired_positions()
+        return {"closed": 0, "reason": "gw=None"}
+    try:
+        positions = await gw._fetch_broker_positions()
+    except Exception:
+        # 查持仓失败拒发卖单（敞口未明即操作=盲卖）且【保留标记】下次重试（不消费）
+        logger.exception("平超期持仓查持仓失败（拒发卖单，保留标记下次重试）")
+        return {"closed": 0, "reason": "查持仓异常"}
+    # 批量取所有超期标的跌停价（对齐 stop_loss_monitor T3 批量模式，减 GIL/C++ 调用开销）
+    try:
+        quotes = await qmt_market_data.get_quotes([e["symbol"] for e in expired])
+    except Exception:
+        quotes = {}
+        logger.exception("平超期持仓取行情异常（按无价处理，逐只跳过）")
+    n_closed = 0
+    for e in expired:
+        sym = e["symbol"]
+        pos = positions.get(sym)
+        qty = pos["volume"] if isinstance(pos, dict) else pos  # 兼容老 mock 返 float
+        if not qty or qty <= 0:
+            continue
+        quote = quotes.get(sym)
+        low_limit = (quote or {}).get("low_limit")
+        last_price = (quote or {}).get("last_price")
+        # 跌停价优先（保证成交）；无跌停价退化 last_price；都无跳过（拒发盲单）
+        price = low_limit if low_limit else last_price
+        if price is None or price != price:  # NaN check（price!=price ⟺ isNaN）
+            logger.warning("跳过平超期 %s：无跌停价/现价（拒发盲单，quote=%s）", sym, quote)
+            continue
+        try:
+            result = await _submit(
+                OrderRequest(symbol=sym, qty=qty, side="sell", price=price),
+                confirm=True)
+        except Exception as exc:
+            # 挡板 raise（断线 lock_down 等）：单只失败不阻塞其他标的平仓
+            logger.warning("平超期持仓失败 symbol=%s qty=%s 原因=%s", sym, qty, exc)
+            continue
+        if result.get("state") not in ("REJECTED", "FAILED"):
+            n_closed += 1
+            logger.warning("【超期平仓】%s 卖出 %s 股 @%s（holding_days=%s max_holding=%s mode=%s）",
+                           sym, qty, price, e.get("holding_days"), e.get("max_holding"), _mode())
+    # 消费标记文件（无论是否全部成功，避免下次 pre_open 重复挂卖单致卖超）
+    _consume_expired_positions()
+    logger.info("平超期持仓完成 closed=%d/%d mode=%s", n_closed, len(expired), _mode())
+    return {"closed": n_closed}
+
+
+# ============================================================================
 # 触发点 4：post_close —— 盘后对账 + 清动态白名单（熔断连线留 follow-up）
 # ============================================================================
 async def post_close(
@@ -758,6 +905,24 @@ async def post_close(
     result["circuit_breaker"] = circuit_breaker_triggered
     if breaker_skipped:
         result["breaker_skipped"] = True
+
+    # ⑤ max_holding 超期标记（Task 8 · P0-4 · 未熔断时跑）：
+    # Why 熔断优先：日内 -3% 熔断已 emergency_halt + lock_down 全场停摆，此时再标超期会让
+    # 次日 pre_open 平仓单与熔断善后冲突（熔断应全场停摆，不叠加平仓释放资金）。
+    if not circuit_breaker_triggered:
+        try:
+            today_eq = datetime.now().strftime("%Y-%m-%d")
+            max_holding = _trade_cfg()["max_holding"]
+            expired = _scan_expired_positions(today_eq, max_holding)
+            if expired:
+                _write_expired_positions(today_eq, expired)
+                result["expired_positions"] = len(expired)
+                logger.warning(
+                    "【超期持仓】%d 只 holding_days>max_holding=%d：%s（次日 pre_open 跌停价平仓）",
+                    len(expired), max_holding,
+                    ", ".join(f"{e['symbol']}({e['holding_days']}d)" for e in expired))
+        except Exception:
+            logger.exception("post_close max_holding 扫描异常（不阻塞清白名单）")
 
     # 清动态白名单（Task5）：保证下一交易日从干净状态开始（防止昨日标的污染今日白名单）
     try:

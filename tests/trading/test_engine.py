@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import datetime
 
@@ -846,3 +847,213 @@ def test_handle_order_update_book_failure_soft_degrades(monkeypatch):
         asyncio.run(eng._handle_order_update(update))  # apply_fill 抛异常不应冒泡
     # 止盈仍被调（账本失败不阻断 c 连）
     assert tp_called == [True]
+
+
+# ============================================================================
+# 4.8 Task 8（P0-4 max_holding 超时平仓）：post_close 标记超期 + pre_open 跌停价平仓
+# ============================================================================
+def test_scan_expired_positions_marks_over_holding(monkeypatch):
+    """_scan_expired_positions：holding_days>max_holding 标记，窗口内不标。
+
+    物理意图（plan Task 8 Step 2 · 对齐缺口 P0-4）：
+        回测 MAX_HOLDING=15（成交后超时周期），实盘 post_close 用 entry_date 算
+        holding_days（交易日口径，trading_days_between），>max_holding 即标超期，
+        次日 pre_open 跌停价平仓释放资金（对齐回测「超时收盘卖剩余」）。
+    """
+    from trading import position_book
+    # A 超期（holding_days=20>15）、B 窗口内（5<=15）
+    monkeypatch.setattr(position_book, "get_entry_dates",
+                        lambda **kw: {"A.SH": "2099-01-01", "B.SH": "2099-01-15"})
+    monkeypatch.setattr(engine, "_trading_days_between",
+                        lambda s, e: 20 if s == "2099-01-01" else 5)
+
+    expired = engine._scan_expired_positions("2099-01-21", 15)
+
+    assert len(expired) == 1
+    assert expired[0]["symbol"] == "A.SH"
+    assert expired[0]["holding_days"] == 20
+    assert expired[0]["max_holding"] == 15
+    assert expired[0]["entry_date"] == "2099-01-01"
+
+
+def test_scan_expired_positions_empty_when_all_within(monkeypatch):
+    """全部窗口内（holding_days<=max_holding）→ 返空列表（不标超期）。"""
+    from trading import position_book
+    monkeypatch.setattr(position_book, "get_entry_dates",
+                        lambda **kw: {"A.SH": "2099-01-15"})
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 5)
+
+    assert engine._scan_expired_positions("2099-01-21", 15) == []
+
+
+def test_post_close_writes_expired_positions(monkeypatch):
+    """post_close：未熔断 + 有超期持仓 → 写 expired_positions.json + result 标记数。
+
+    物理意图（plan Task 8 Step 2）：post_close 在 ⑤ max_holding 段（熔断后、清白名单前）
+    扫超期持仓写标记文件，供次日 pre_open 消费平仓。熔断未触发时正常写。
+    """
+    from trading import position_book
+    monkeypatch.setattr(position_book, "get_entry_dates",
+                        lambda **kw: {"A.SH": "2099-01-01"})
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 20)
+    # 隔离 expired_positions.json 到 tmp
+    expired_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "expired.json")
+    monkeypatch.setattr(engine, "_EXPIRED_POSITIONS_PATH", expired_path)
+    # 隔离 position_book db + 写熔断基线（curr=start → 0% 不熔断）
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    position_book.snapshot_start_equity(today, 1_000_000.0)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 1_000_000.0}  # 0% 不熔断
+        async def _fetch_broker_positions(self):
+            return {}
+    from trading.compute.reconcile import ReconciliationResult
+    async def _fake_rec(gw, local, tolerance=0.0):
+        return ReconciliationResult([], [], [], [], 0.0, True)
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+
+    result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
+
+    assert result.get("expired_positions") == 1
+    payload = json.loads(open(expired_path, encoding="utf-8").read())
+    assert payload["expired"][0]["symbol"] == "A.SH"
+    assert payload["date"] == today
+
+
+def test_post_close_breaker_skips_max_holding(monkeypatch):
+    """post_close：日内熔断触发 → 跳过 max_holding 标记（熔断优先，不写 expired.json）。
+
+    物理意图（plan Task 8 Step 4 · 熔断优先约束）：
+        熔断（-3%）已 emergency_halt + lock_down 全场停摆，此时再标超期会让次日
+        pre_open 平仓单与熔断善后冲突。spec 红线：熔断优先于 max_holding 标记。
+    """
+    from trading import position_book
+    monkeypatch.setattr(position_book, "get_entry_dates",
+                        lambda **kw: {"A.SH": "2099-01-01"})
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 20)
+    expired_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "expired_breaker.json")
+    monkeypatch.setattr(engine, "_EXPIRED_POSITIONS_PATH", expired_path)
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    position_book.snapshot_start_equity(today, 1_000_000.0)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 950_000.0}  # -5% 触发熔断（限 -3%）
+        async def _fetch_broker_positions(self):
+            return {}
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.emergency_halt",
+        lambda: {"halted": True})
+    from trading.compute.reconcile import ReconciliationResult
+    async def _fake_rec(gw, local, tolerance=0.0):
+        return ReconciliationResult([], [], [], [], 0.0, True)
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
+
+    result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
+
+    assert result.get("circuit_breaker") is True
+    assert "expired_positions" not in result       # 熔断 → 不标 max_holding
+    assert not os.path.exists(expired_path)        # 且不写 expired.json
+
+
+def test_pre_open_closes_expired_positions(monkeypatch):
+    """pre_open：读 expired 标记 → 查 gw 持仓 → 跌停价卖 + 消费标记文件。
+
+    物理意图（plan Task 8 Step 3）：
+        pre_open 在撤昨日单后、挂新买单前，平【昨日盘后标记】的超期持仓：
+        - qty 来自 gw._fetch_broker_positions 真实持仓（红线，同 stop_loss_monitor）；
+        - 挂跌停价卖单（保证成交，超时释放资金接受滑点）；
+        - 平仓尝试后消费（删）标记文件——防下次 pre_open 重复挂卖单致卖超（漏平<卖超）。
+    """
+    expired_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "expired_pre.json")
+    monkeypatch.setattr(engine, "_EXPIRED_POSITIONS_PATH", expired_path)
+    # 写昨日盘后的超期标记（holding_days=20>15）
+    with open(expired_path, "w", encoding="utf-8") as f:
+        json.dump({"date": "2099-01-02", "expired": [
+            {"symbol": "300001.SZ", "entry_date": "2099-01-01",
+             "holding_days": 20, "max_holding": 15}]}, f)
+    # 当日已确认计划（买单标的与超期标的不同，互不干扰）
+    orders = [{"order": {"symbol": "300002.SZ", "qty": 100, "side": "buy", "price": 10.0},
+               "stop_price": 9.0, "take_profit": 11.0}]
+    trading_plan.save_plan("2099-01-02", orders)
+    trading_plan.confirm_plan("2099-01-02")
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 1_000_000.0}
+        async def _fetch_broker_positions(self):
+            return {"300001.SZ": {"volume": 200, "avg_price": 10.0}}  # 真实持仓 200 股
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    # 跌停价行情（low_limit=8.5）
+    async def _fake_quotes(syms):
+        return {sym: {"last_price": 9.0, "low_limit": 8.5} for sym in syms}
+    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_quotes)
+    # 拦截 _submit：记录所有挂单（区分 buy/sell）
+    submitted = []
+    async def _fake_submit(order, **kw):
+        submitted.append((order.symbol, order.side, order.qty, order.price))
+        return {"state": "SUBMITTED"}
+    monkeypatch.setattr(engine, "_submit", _fake_submit)
+
+    asyncio.run(engine.pre_open("2099-01-02"))
+
+    # 验平仓卖单：300001.SZ sell 200 @8.5（跌停价）
+    sell_orders = [s for s in submitted if s[1] == "sell"]
+    assert len(sell_orders) == 1
+    assert sell_orders[0] == ("300001.SZ", "sell", 200, 8.5)
+    # 验标记文件被消费（删除，防重复挂卖单）
+    assert not os.path.exists(expired_path)
+
+
+def test_pre_open_close_expired_skip_when_no_price(monkeypatch):
+    """pre_open：无跌停价/现价 → 跳过该标的（拒发盲单），仍消费标记文件。
+
+    物理意图（边界 · Grill Me 风控）：
+        quote 缺 low_limit + last_price（停牌/行情源异常）→ 无价不能挂卖单（盲单=卖错价=
+        致命）。跳过该标的但【仍消费标记文件】：避免下次 pre_open 反复尝试同一无价标的；
+        漏平（删了没卖成）由人工对账兜底，风控宁可漏平也不发盲单/重复卖超。
+    """
+    expired_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "expired_nopx.json")
+    monkeypatch.setattr(engine, "_EXPIRED_POSITIONS_PATH", expired_path)
+    with open(expired_path, "w", encoding="utf-8") as f:
+        json.dump({"date": "2099-01-02", "expired": [
+            {"symbol": "300001.SZ", "entry_date": "2099-01-01",
+             "holding_days": 20, "max_holding": 15}]}, f)
+    orders = [{"order": {"symbol": "300002.SZ", "qty": 100, "side": "buy", "price": 10.0},
+               "stop_price": 9.0, "take_profit": 11.0}]
+    trading_plan.save_plan("2099-01-02", orders)
+    trading_plan.confirm_plan("2099-01-02")
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 1_000_000.0}
+        async def _fetch_broker_positions(self):
+            return {"300001.SZ": {"volume": 200, "avg_price": 10.0}}
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    # quote 空 dict（无 low_limit/last_price）
+    async def _fake_quotes(syms):
+        return {sym: {} for sym in syms}
+    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_quotes)
+    submitted = []
+    async def _fake_submit(order, **kw):
+        submitted.append((order.symbol, order.side))
+        return {"state": "SUBMITTED"}
+    monkeypatch.setattr(engine, "_submit", _fake_submit)
+
+    asyncio.run(engine.pre_open("2099-01-02"))
+
+    # 无价 → 300001.SZ 不发卖单（submitted 只含买单 300002）
+    assert ("300001.SZ", "sell") not in submitted
+    # 标记文件仍被消费（避免反复尝试无价标的）
+    assert not os.path.exists(expired_path)
