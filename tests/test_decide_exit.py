@@ -251,3 +251,45 @@ def test_decide_exit_hold():
     assert decision.portion == pytest.approx(0.0)
     expected_stop = compute_stop_price(100.0, 2.0, 0, 1.0, 0, 0.0, 0.5)
     assert decision.new_stop == pytest.approx(expected_stop)
+
+
+# ============================================================================
+# 7. holding 期 STOP_LOSS（trailing 收紧生效分支）：
+#    验证 decide_exit → compute_stop_price 参数传递在 holding_days>grace 收紧分支正确
+#    （M-2 补测：eff_mult 递减使 stop 比 base_stop 更紧，与 simulate_exit:166-173 等价）
+# ============================================================================
+def test_decide_exit_stop_loss_trailing_active():
+    """holding_days>grace → trailing 收紧生效，low 触及收紧后 stop → STOP_LOSS。
+
+    strangler 等价 simulate_exit:160-179（收紧分支 L166-173）：
+        if grace and step and holding_days > grace:
+            eff_mult = stop_atr_mult - (holding_days - grace) * step
+            if floor is not None: eff_mult = max(eff_mult, floor)
+            stop = neckline - eff_mult * atr   # 收紧后 stop
+        if low <= stop: → stop_loss
+    参数取定：stop_atr_mult=1.0 / grace=2 / step=0.1 / floor=None，holding_days=3（>grace=2）。
+    eff_mult = 1.0 - (3-2)*0.1 = 0.9 < 1.0 → stop = 100 - 0.9*2 = 98.2
+    base_stop = 100 - 1.0*2 = 98.0；98.2 > 98.0（收紧后更紧，趋势不确认逐步退出）。
+
+    断言三连：
+        ① action=CLOSE / reason=STOP_LOSS（收紧后 stop 被触及，止损触发）；
+        ② new_stop == compute_stop_price(100, 2, 3, 1.0, 2, 0.1, None)（参数透传精确）；
+        ③ new_stop（98.2）> base_stop（98.0）：eff_mult 递减生效，stop 比 grace 天内固定
+           止损更紧（与 simulate_exit:166-173 内联收紧同源 · Controller #6 红线）。
+    本测专门覆盖 decide_exit→compute_stop_price 参数映射在【收紧分支】的正确性，
+    与 test_decide_exit_stop_loss_trailing（base_stop 分支，grace=0/step=0）互补。
+    """
+    cfg = _base_cfg(stop_atr_mult=1.0, trailing_grace=2, trailing_step=0.1, trailing_floor=None)
+    state = _holding_state(holding_days=3)   # 3 > grace=2 → 走收紧分支
+    # 收紧后 stop = 98.2；base_stop = 98.0；用 low=98.1 触及 98.2 但 > 98.0
+    expected_stop = compute_stop_price(100.0, 2.0, 3, 1.0, 2, 0.1, None)
+    assert expected_stop == pytest.approx(98.2)                 # 收紧生效：98.2
+    base_stop = 100.0 - 1.0 * 2.0                               # = 98.0
+    assert expected_stop > base_stop                            # ③ 收紧后更紧
+    bar = {"high": 105.0, "low": 98.1, "close": 99.0, "open": 100.0}  # low=98.1 ≤ 98.2
+
+    decision = decide_exit(state, bar, cfg)
+    assert decision.action is ExitAction.CLOSE                  # ①
+    assert decision.reason is ExitReason.STOP_LOSS
+    assert decision.portion == pytest.approx(1.0)
+    assert decision.new_stop == pytest.approx(expected_stop)    # ② 参数透传精确

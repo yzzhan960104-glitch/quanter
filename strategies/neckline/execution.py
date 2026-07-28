@@ -174,9 +174,17 @@ def decide_exit(state: dict, bar: dict, cfg: dict) -> NecklineExitDecision:
             priority 1 (L174): low ≤ trailing_stop → CLOSE/STOP_LOSS/1.0/stop（止损全平）
             priority 2 (L180): lot2_open and high ≥ tp2 → CLOSE/TAKE_PROFIT/1.0/stop
                                （tp2 全平 lot1+lot2；simulate_exit:183 lot1 同日一并卖）
+                               【调用方硬契约】decide_exit 是无状态纯函数，只读 lot2_open，
+                               不写 state——收到本分支返回后调用方必须显式 lot2_open=False
+                               （对齐 simulate_exit:182）+ 若 lot1_open 则同日 lot1_open=False
+                               （对齐 simulate_exit:185），否则下根 decide_exit 会重复触发 tp2。
             priority 3 (L189): lot1_open and high ≥ tp1 → CLOSE/TAKE_PROFIT/tp1_portion/stop
                                （只卖 lot1，simulate_exit:192 continue 持 lot2；调用方见
                                CLOSE+portion<1.0 应 continue 循环，勿 break）
+                               【调用方硬契约】同上，decide_exit 不写 state——收到 CLOSE+
+                               portion<1.0（TP1）返回后调用方必须显式 lot1_open=False
+                               （对齐 simulate_exit:191），否则下根 decide_exit 会重复触发 TP1
+                               （lot1_open 仍 True）。
             priority 4 (L193): is_last → CLOSE/TIMEOUT/1.0/stop（超时强制平，不判浮盈）
             else           → HOLD/NONE/0.0/stop（继续持有，new_stop 供观测/推进）
 
@@ -257,6 +265,9 @@ def decide_exit(state: dict, bar: dict, cfg: dict) -> NecklineExitDecision:
     # strangler 等价 simulate_exit:180-188：
     #   if lot2_open and high >= tp2: → lot2 卖 + lot1 同日一并卖; break (exit_reason=tp2)
     # portion=1.0 = 全平（lot1+lot2 100%）。
+    # 【调用方硬契约】本函数无状态不写 state——调用方收到本返回后必须 lot2_open=False
+    # （对齐 simulate_exit:182）+ 若 lot1_open 则同日 lot1_open=False（对齐 simulate_exit:185），
+    # 否则下根 decide_exit 会重复触发 tp2（lot2_open 仍 True）。
     tp2 = state["tp2"]
     if lot2_open and high >= tp2:
         return NecklineExitDecision(
@@ -272,6 +283,9 @@ def decide_exit(state: dict, bar: dict, cfg: dict) -> NecklineExitDecision:
     #   if lot1_open and high >= tp1: → lot1 卖; continue (exit_reason 不变, lot1_open=False)
     # 注意 simulate_exit 是 continue 不是 break——调用方见 CLOSE+portion<1.0 应继续循环 lot2。
     # portion=tp1_portion（lot1 占比，0.5=卖一半仓位）。
+    # 【调用方硬契约】本函数无状态不写 state——调用方收到 CLOSE+portion<1.0（TP1）返回后
+    # 必须 lot1_open=False（对齐 simulate_exit:191），否则下根 decide_exit 会重复触发 TP1
+    # （lot1_open 仍 True）。simulate_exit:189-192 的 lot1_open=False 即此副作用。
     tp1 = state["tp1"]
     if lot1_open and high >= tp1:
         return NecklineExitDecision(
@@ -283,8 +297,10 @@ def decide_exit(state: dict, bar: dict, cfg: dict) -> NecklineExitDecision:
 
     # ── priority 4（simulate_exit:193）：超时（is_last，不判浮盈 threshold）──
     # 物理意图：持有期最后一根，无论浮盈多少都强制收盘平（资金占用机会成本兜底）。
-    # strangler 等价 simulate_exit:193-199：
+    # strangler 等价 simulate_exit:193（判定行 `if is_last:`）：
     #   if is_last: → lot1/lot2 各用 close 算 pnl 强制平 (exit_reason=timeout)
+    # pnl 计算在 simulate_exit:194-198（lot1_pnl/lot2_pnl=(close-entry)/entry）由调用方算，
+    # decide_exit 只返 action/reason/portion/new_stop（纯决策不碰 pnl）。
     # Controller #5：is_last 直接平，【不判浮盈 threshold】（brief 描述不精确，以源为准）。
     if state.get("is_last", False):
         return NecklineExitDecision(
