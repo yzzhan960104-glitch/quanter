@@ -96,6 +96,12 @@ def _trade_cfg() -> dict:
         "tp_h_mult": float(os.getenv("TRADE_TP_H_MULT", "2.0")),
         # 地基（live-readiness Task 2）：挂单等待回踩有效期日，pre_open max_wait 窗口过滤用
         "max_wait": int(os.getenv("TRADE_MAX_WAIT", "5")),
+        # 分级止盈（Task 7 · P0-3 对齐）：tp1_h_mult×H 锁利位 + tp1_portion 比例。
+        # Why 默认 1.0/0.5 对齐 NecklineConfig EXEC_DEFAULTS（颈线+1.0×H 锁 50% 仓）：
+        #     simulate_exit 用同口径加权两批，实盘 _place_take_profit 据此挂两张限价卖单。
+        # env 缺省 → 对齐回测；显式 env 可覆盖（灰度调参用）。
+        "tp1_h_mult": float(os.getenv("TRADE_TP1_H_MULT", "1.0")),
+        "tp1_portion": float(os.getenv("TRADE_TP1_PORTION", "0.5")),
         # 占位（M1）：海龟 trailing 动态止损参数——grace/step/floor 三件套本 task 未实际消费，
         # compute_stop_price 盘后重算（Task2 已就绪）需 Task 10 在引擎状态层维护
         # {symbol: stop_price} 并每日/盘中更新后注入 stop_loss_monitor；本 task 的
@@ -311,7 +317,12 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
         capital=capital,
         pos_cap=cfg["pos_cap"],
         atr_map=atr_map,
-        stop_cfg={"stop_atr_mult": cfg["stop_atr_mult"], "tp_h_mult": cfg["tp_h_mult"], "max_wait": cfg["max_wait"]},
+        stop_cfg={
+            "stop_atr_mult": cfg["stop_atr_mult"], "tp_h_mult": cfg["tp_h_mult"],
+            "max_wait": cfg["max_wait"],
+            # Task 7：tp1_h_mult/tp1_portion 透传 build_orders 算 tp1 锁利位
+            "tp1_h_mult": cfg["tp1_h_mult"], "tp1_portion": cfg["tp1_portion"],
+        },
     )
     # 序列化为嵌套 dict（Task8 契约硬约束：order + stop_price + take_profit 三段）
     # 透传 experiment_id/experiment_weight 归因（Task5 PlannedOrder 携带）：
@@ -343,6 +354,13 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
             "atr": round(o.atr, 4),
             "formed_at": o.formed_at,
             "max_wait": o.max_wait,
+            # 分级止盈（Task 7 · P0-3）：tp1 锁利位 + tp1_portion 分配比例。
+            # Why 落盘：_place_take_profit 盘中买单成交时读 plan.tp1/tp1_portion 拆两张卖单，
+            # 必须在 plan JSON 持久化（盘中进程重启 / 切换执行机都能读回）。
+            # tp1 可能为 None（老 cfg 不配 tp1_h_mult）→ JSON null，_place_take_profit 检测
+            # falsy 退回 tp2 单笔全平（向后兼容）。
+            "tp1": round(o.tp1, 2) if o.tp1 is not None else None,
+            "tp1_portion": o.tp1_portion,
             "experiment_id": o.experiment_id,           # 透传实验归因（Task5 → Task8 链路）
             "experiment_weight": o.experiment_weight,   # 透传实验权重（Task8 加权聚合用）
             # R3 实际口径盈亏比（2026-07-27 Task 2）：从 PlannedOrder.rr 透传到 order_dict，
@@ -1178,21 +1196,33 @@ class TradingEngine:
 
     async def _place_take_profit(self, symbol: str, filled_qty: float,
                                  fill_price: float, order_id: str) -> None:
-        """挂限价止盈卖单（Phase1 简化版：单一固定止盈价、全额）。
+        """挂限价止盈卖单（Phase2 分级止盈：tp1 锁利 + tp2 形态目标位）。
 
-        物理意图：
-            买单成交后立刻挂一张限价卖单在止盈价——买单一旦成交即转为持仓，需主动
-            挂止盈单等待触发（颈线法 take_profit 来自计划落盘时的 tp_h_mult×H 计算）。
-            Phase2 升级为分级状态机（tp1 卖部分量锁利 + tp2 卖剩余量，复刻 simulate_exit）。
+        物理意图（plan Task 7 · 对齐缺口 P0-3）：
+            买单成交后立刻挂止盈卖单——买单一旦成交即转为持仓，需主动挂限价单等待触发。
+            Phase1 只挂单笔全平 tp2（颈线+tp_h_mult×H 形态对称目标位），与回测 simulate_exit
+            用 tp1_portion 加权两批止盈的口径背离（回测冠军档套实盘止盈逻辑失真）。
+            Phase2 升级为分级：tp1 价位（颈线+tp1_h_mult×H）卖 tp1_portion 比例仓锁利，
+            tp2 价位卖剩余仓博形态对称目标位——与 simulate_exit 同口径对齐。
 
         止盈价来源（与 pre_open / stop_loss 同一张活跃计划，单源一致）：
-            ``trading_plan.load_plan(today).orders[i].take_profit``（当日 confirmed 计划，
-            pre_open 挂买单时同一张计划里就有 take_profit 字段，保证买卖单止盈价同源）。
+            ``trading_plan.load_plan(today).orders[i]``（当日 confirmed 计划）：
+            - take_profit = tp2（颈线+tp_h_mult×H）
+            - tp1 = 颈线 + tp1_h_mult × H（Task 7 落盘）；老 plan 无此字段 → 退回 tp2 单笔
+            - tp1_portion：tp1 档分配比例（0~1）
+
+        整手分割红线（A 股卖出约束）：
+            tp1_qty = int(filled × portion / 100) × 100（向下取整 100 整手）；
+            tp2_qty = filled - tp1_qty（余量含零股，券商接受卖出清仓零股）。
+            portion=0 → 全量 tp2；portion=1 → 全量 tp1；filled×portion<100 → tp1_qty=0 全量 tp2。
+
+        Sanity 守卫（防参数坏值）：
+            tp1 ≥ tp2 时只挂 tp2（数据异常或 H≤0 致 tp1 算到 tp2 之上，挂 tp1 永远先成交
+            反而拖累——正常 tp1_h_mult<tp_h_mult 保证 tp1<tp2，守卫是兜底）。
 
         数量来源（scope #3 红线同源）：
             ``filled_qty`` 用成交回报里的**实际成交量**（``traded_volume``），**非计划全量**。
-            部分成交时若用计划全量挂止盈 → 卖超过实际持仓 = 超卖敞口致命（与 stop_loss
-            ``qty 必须来自 gw 持仓``同一条 live 安全红线）。
+            部分成交时若用计划全量挂止盈 → 卖超过实际持仓 = 超卖敞口致命。
 
         幂等（``_tp_placed``）：
             **标记在调度点 ``_handle_order_update`` 完成**（不在本方法内），先占位防
@@ -1210,32 +1240,94 @@ class TradingEngine:
         if not plan:
             logger.warning("挂止盈跳过：无活跃计划 symbol=%s（计划未落盘/已失效）", symbol)
             return
-        # 从计划 orders 里查该 symbol 的 take_profit（与 pre_open 挂买单同一张计划同源）
-        tp = None
+        # 从计划 orders 里查该 symbol 的止盈配置（与 pre_open 挂买单同一张计划同源）
+        tp2 = None
+        tp1 = None
+        tp1_portion = 0.0
         for o in plan.get("orders", []):
             if (o.get("order") or {}).get("symbol") == symbol:
-                tp = o.get("take_profit")
+                tp2 = o.get("take_profit")
+                tp1 = o.get("tp1")
+                tp1_portion = float(o.get("tp1_portion") or 0.0)
                 break
-        if tp is None or tp <= 0:
+        if tp2 is None or tp2 <= 0:
             # 计划缺止盈价（数据瑕疵/手工计划）→ 不挂盲单，告警人工补
             logger.warning("挂止盈跳过：无止盈价配置 symbol=%s（计划缺 take_profit）", symbol)
             return
 
+        # 整手化 filled_qty（A 股卖出红线：int 截断零股，防 broker 按 float 解释成 100x）
+        filled_int = int(filled_qty)
+        if filled_int <= 0:
+            logger.warning("挂止盈跳过：成交量非正 symbol=%s filled_qty=%s", symbol, filled_qty)
+            return
+
         # 挂限价止盈卖单（confirm=True 同 pre_open，引擎是自动批量通道，盘中无人工二次确认）
         from trading.compute.types import OrderRequest
-        result = await _submit(
-            OrderRequest(symbol=symbol, qty=int(filled_qty), side="sell", price=tp),
+
+        # 分级分割判定（Task 7）：
+        # 1. tp1 缺失 / portion=0 → 全量 tp2（向后兼容 Task 7 前的老 plan）
+        # 2. tp1 ≥ tp2 sanity 守卫 → 全量 tp2（防 tp1 永远先成交拖累）
+        # 3. 正常分级：tp1_qty = int(filled×portion/100)*100（整手），tp2_qty = 余量
+        use_two_legs = (
+            tp1 is not None and tp1 > 0
+            and tp1_portion > 0.0
+            and tp1 < tp2
+        )
+        if not use_two_legs:
+            # 单笔全平 tp2（Phase1 行为，向后兼容）
+            result = await _submit(
+                OrderRequest(symbol=symbol, qty=filled_int, side="sell", price=tp2),
+                confirm=True,
+            )
+            if result.get("state") not in ("REJECTED", "FAILED"):
+                logger.info("【止盈单已挂】%s %s股 @%s（单笔全平 tp2 触发成交价=%s order_id=%s）",
+                            symbol, filled_int, tp2, fill_price, order_id)
+            else:
+                logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
+                               symbol, result.get("state"), result.get("message"))
+            return
+
+        # 分级止盈（Phase2）：tp1 锁利部分 + tp2 余量
+        # tp1_qty 向下取整 100 整手；tp2_qty = 余量（含零股，券商接受卖出清仓）
+        tp1_qty = int(filled_int * tp1_portion / 100) * 100
+        tp2_qty = filled_int - tp1_qty
+        # tp1_qty 整手后为 0（filled×portion<100）→ 退化全量 tp2（不挂零股 tp1）
+        if tp1_qty <= 0:
+            result = await _submit(
+                OrderRequest(symbol=symbol, qty=filled_int, side="sell", price=tp2),
+                confirm=True,
+            )
+            if result.get("state") not in ("REJECTED", "FAILED"):
+                logger.info("【止盈单已挂】%s %s股 @%s（tp1整手不足退化全量tp2 触发成交价=%s order_id=%s）",
+                            symbol, filled_int, tp2, fill_price, order_id)
+            else:
+                logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
+                               symbol, result.get("state"), result.get("message"))
+            return
+
+        # 分级挂两张单（tp1 锁利 + tp2 形态目标位）
+        results = []
+        # tp1 leg（锁利）
+        r1 = await _submit(
+            OrderRequest(symbol=symbol, qty=tp1_qty, side="sell", price=tp1),
             confirm=True,
         )
-        if result.get("state") not in ("REJECTED", "FAILED"):
-            # 幂等标记在调用方 _handle_order_update 已先占位，此处只记成功观测日志
-            logger.info("【止盈单已挂】%s %s股 @%s（触发成交价=%s order_id=%s）",
-                        symbol, int(filled_qty), tp, fill_price, order_id)
-        else:
-            # 挂单失败（资金不足/涨跌停/白名单拒）→ 调用方 _tp_placed 已占位不再重挂，
-            # 真失败由告警人工补（Phase1 不做自动重试限频，避免与柜台频控冲突）
-            logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
-                           symbol, result.get("state"), result.get("message"))
+        results.append(("tp1", tp1, tp1_qty, r1))
+        # tp2 leg（形态目标位，仅当有余量时挂）
+        if tp2_qty > 0:
+            r2 = await _submit(
+                OrderRequest(symbol=symbol, qty=tp2_qty, side="sell", price=tp2),
+                confirm=True,
+            )
+            results.append(("tp2", tp2, tp2_qty, r2))
+        # 观测日志（两腿各自成败独立记录）
+        for leg, price, qty, r in results:
+            if r.get("state") not in ("REJECTED", "FAILED"):
+                logger.info("【止盈单已挂】%s %s腿 %s股 @%s（分级 触发成交价=%s order_id=%s）",
+                            symbol, leg, qty, price, fill_price, order_id)
+            else:
+                logger.warning("止盈单挂失败 symbol=%s leg=%s state=%s msg=%s（人工补挂）",
+                               symbol, leg, r.get("state"), r.get("message"))
 
     # ----- 生命周期 -----
     def start(self) -> None:

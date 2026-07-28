@@ -140,6 +140,170 @@ def test_buy_fill_places_take_profit_once_idempotent(db):
     tp.assert_called_once()
 
 
+# ============================================================================
+# Task 7（P0-3 分级止盈 tp1/tp2）：_place_take_profit 挂两张限价卖单 + 整手分割
+# ============================================================================
+def test_place_take_profit_two_legs(db):
+    """分级止盈：filled=1000/portion=0.5 → 挂 tp1@500股 + tp2@500股。
+
+    物理意图（plan Task 7 · 对齐缺口 P0-3）：
+        回测 ``simulate_exit`` 用 tp1_portion 加权两批止盈（tp1 锁利 + tp2 博形态
+        对称目标位），实盘 Phase1 只挂单笔全平 → 回测/实盘行为背离。
+        Phase2：``_place_take_profit`` 读 plan.tp1/tp1_portion/take_profit(tp2)
+        拆两张限价卖单：tp1_qty=int(filled×portion/100)*100（向下整手） + tp2_qty=余量。
+
+    断言：
+      1) _submit 被调两次（两张限价卖单）；
+      2) 第一张 qty=500 price=tp1；第二张 qty=500 price=tp2；
+      3) 两张都是 side="sell"（限价卖单）。
+    """
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    plan = {
+        "confirmed": True,
+        "orders": [{
+            "order": {"symbol": "300001.SZ", "qty": 1000, "side": "buy", "price": 10.0},
+            "stop_price": 9.0,
+            "take_profit": 13.0,        # tp2（颈线 + tp_h_mult × H）
+            "tp1": 11.5,                # tp1（颈线 + tp1_h_mult × H）
+            "tp1_portion": 0.5,         # 50% 在 tp1 锁利
+        }],
+    }
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._place_take_profit("300001.SZ", 1000, 10.5, order_id="ord-1"))
+    # _submit 必被调两次（两张限价卖单）
+    assert submit_mock.call_count == 2
+    legs = [call.args[0] for call in submit_mock.call_args_list]
+    # 两张都是 sell
+    assert all(leg.side == "sell" for leg in legs)
+    # tp1 leg：qty=500（1000×0.5 向下整手 100），price=tp1=11.5
+    tp1_leg = next(leg for leg in legs if leg.price == 11.5)
+    assert tp1_leg.qty == 500
+    # tp2 leg：qty=500（余量），price=tp2=13.0
+    tp2_leg = next(leg for leg in legs if leg.price == 13.0)
+    assert tp2_leg.qty == 500
+
+
+def test_place_take_profit_tp1_qty_round_to_lot(db):
+    """filled=430/portion=0.5 → tp1=200（int(215/100)*100），tp2=230（余量含零股）。
+
+    物理意图（A 股整手约束 · plan Task 7 Step 1）：
+        tp1_qty 必须整手（100 股整数倍），向下取整；tp2_qty = filled - tp1_qty
+        含零股（券商接受卖出零股清仓）。若 filled×portion<100 → tp1_qty=0 全量 tp2。
+    """
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    plan = {
+        "confirmed": True,
+        "orders": [{
+            "order": {"symbol": "300002.SZ", "qty": 430, "side": "buy", "price": 10.0},
+            "stop_price": 9.0, "take_profit": 13.0,
+            "tp1": 11.5, "tp1_portion": 0.5,
+        }],
+    }
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._place_take_profit("300002.SZ", 430, 10.5, order_id="ord-2"))
+    legs = [call.args[0] for call in submit_mock.call_args_list]
+    tp1_leg = next(leg for leg in legs if leg.price == 11.5)
+    tp2_leg = next(leg for leg in legs if leg.price == 13.0)
+    assert tp1_leg.qty == 200          # int(430*0.5/100)*100 = int(2.15)*100 = 200
+    assert tp2_leg.qty == 230          # 430 - 200 = 230（余量，含零股 30）
+
+
+def test_place_take_profit_portion_zero_only_tp2(db):
+    """portion=0 → 只挂 tp2（不锁利，全量博形态对称目标位）。"""
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    plan = {
+        "confirmed": True,
+        "orders": [{
+            "order": {"symbol": "300003.SZ", "qty": 1000, "side": "buy", "price": 10.0},
+            "stop_price": 9.0, "take_profit": 13.0,
+            "tp1": 11.5, "tp1_portion": 0.0,   # portion=0 → 全量 tp2
+        }],
+    }
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._place_take_profit("300003.SZ", 1000, 10.5, order_id="ord-3"))
+    # 只调一次（tp2 全量）
+    submit_mock.assert_called_once()
+    leg = submit_mock.call_args.args[0]
+    assert leg.price == 13.0 and leg.qty == 1000
+
+
+def test_place_take_profit_portion_full_only_tp1(db):
+    """portion=1 → 只挂 tp1（全部在 tp1 锁利，不博 tp2）。"""
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    plan = {
+        "confirmed": True,
+        "orders": [{
+            "order": {"symbol": "300004.SZ", "qty": 1000, "side": "buy", "price": 10.0},
+            "stop_price": 9.0, "take_profit": 13.0,
+            "tp1": 11.5, "tp1_portion": 1.0,    # portion=1 → 全量 tp1
+        }],
+    }
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._place_take_profit("300004.SZ", 1000, 10.5, order_id="ord-4"))
+    submit_mock.assert_called_once()
+    leg = submit_mock.call_args.args[0]
+    assert leg.price == 11.5 and leg.qty == 1000
+
+
+def test_place_take_profit_tp1_ge_tp2_falls_back_to_tp2_only(db):
+    """sanity 守卫：tp1≥tp2（数据异常或 H≤0）→ 只挂 tp2 全量（防 tp1 永远先成交）。
+
+    物理意图：
+        tp1 是颈线+tp1_h_mult×H，tp2 是颈线+tp_h_mult×H，正常 tp_h_mult > tp1_h_mult
+        保证 tp1 < tp2。但若 H 异常（≈0 或负）或参数被手工调坏，tp1 可能 ≥ tp2，
+        此时挂 tp1 无意义（永远不会先于 tp2 成交，或成交在更高价反而拖累）。
+        守卫：tp1≥tp2 时跳过 tp1，全量挂 tp2。
+    """
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    plan = {
+        "confirmed": True,
+        "orders": [{
+            "order": {"symbol": "300005.SZ", "qty": 1000, "side": "buy", "price": 10.0},
+            "stop_price": 9.0,
+            "take_profit": 11.0,        # tp2 = 11
+            "tp1": 11.5,                # tp1 > tp2（异常）
+            "tp1_portion": 0.5,
+        }],
+    }
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._place_take_profit("300005.SZ", 1000, 10.5, order_id="ord-5"))
+    # tp1 ≥ tp2 时 sanity 只挂 tp2
+    submit_mock.assert_called_once()
+    leg = submit_mock.call_args.args[0]
+    assert leg.price == 11.0 and leg.qty == 1000
+
+
+def test_place_take_profit_no_tp1_in_plan_falls_back_to_tp2_only(db):
+    """老 plan 无 tp1 字段（Task 7 前的 plan）→ 退回 tp2 单笔全平（向后兼容零回归）。"""
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    plan = {
+        "confirmed": True,
+        "orders": [{
+            "order": {"symbol": "300006.SZ", "qty": 1000, "side": "buy", "price": 10.0},
+            "stop_price": 9.0,
+            "take_profit": 13.0,
+            # 无 tp1 / tp1_portion（老 plan）
+        }],
+    }
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._place_take_profit("300006.SZ", 1000, 10.5, order_id="ord-6"))
+    submit_mock.assert_called_once()
+    leg = submit_mock.call_args.args[0]
+    assert leg.price == 13.0 and leg.qty == 1000
+
+
 def test_place_take_profit_truncates_fractional_qty_to_int(db):
     """``_place_take_profit`` 用 ``int(filled_qty)`` 截断部分成交的零股（A 股整手红线）。
 

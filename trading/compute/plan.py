@@ -44,6 +44,14 @@ class PlannedOrder:
     - 实际口径盈亏比 = (tp2-entry)/(entry-stop_price)，从 Signal.rr 透传，
       用于 push_plan_to_dingtalk md 展示「盈亏比N.N」让研究员人审看真实风险报酬比。
     - 默认 0.0 保证老 Signal（无 rr）零回归，push 层判 falsy 跳过渲染。
+
+    新增 tp1/tp1_portion（plan Task 7 · 对齐缺口 P0-3）：
+    - tp1 = 颈线 + tp1_h_mult × H：颈线法分级止盈的第一档锁利位（轻仓提前兑现，
+      避免回踩破位把全部浮盈回吐）。_place_take_profit 据此挂 tp1 限价卖单。
+    - tp1_portion：tp1 档分配的持仓比例（0~1，默认 0.5）。0 = 全量 tp2（不锁利），
+      1 = 全量 tp1（不博 tp2 形态对称目标位）。
+    - tp1 默认 None：stop_cfg 缺 tp1_h_mult 时不计算（_place_take_profit 检测 falsy
+      退回 tp2 单笔全平，向后兼容 Task 7 前的老 stop_cfg / 老 plan）。
     """
     order: OrderRequest
     stop_price: float
@@ -55,6 +63,9 @@ class PlannedOrder:
     experiment_id: str = ""          # 归因：所属实验版本（_eod 注入，Task 8 report 按此聚合）
     experiment_weight: float = 1.0   # 归因：落盘时冻结的资金权重（灰度分流，1.0=满仓口径）
     rr: float = 0.0                  # R3 实际口径盈亏比（从 Signal 透传，push 展示用）
+    # 分级止盈第一档（Task 7）：tp1=None 表示 stop_cfg 未配置，退回 tp2 单笔全平（零回归）
+    tp1: float | None = None
+    tp1_portion: float = 0.0         # 分级止盈 tp1 分配比例（默认 0 → 全量 tp2，向后兼容）
 
 
 def build_orders_from_signals(
@@ -81,6 +92,11 @@ def build_orders_from_signals(
     """
     stop_mult = stop_cfg.get("stop_atr_mult", 2.0)
     tp_mult = stop_cfg.get("tp_h_mult", 2.0)
+    # 分级止盈参数（Task 7 · P0-3 对齐）：tp1_h_mult×H 锁利位 + tp1_portion 分配比例。
+    # Why 显式 .get + None 兜底：老 stop_cfg（Task 7 前）不传这两键，None 让下游
+    # _place_take_profit 检测 falsy 退回 tp2 单笔全平，零回归。
+    tp1_mult = stop_cfg.get("tp1_h_mult")
+    tp1_portion = float(stop_cfg.get("tp1_portion", 0.0) or 0.0)
     out: list[PlannedOrder] = []
     for s in signals:
         sym = s.symbol
@@ -112,8 +128,13 @@ def build_orders_from_signals(
         h = float(neckline) - float(bottom)
         # 止损 = 颈线 - stop_mult × ATR（ATR 口径，过滤窄幅噪音）
         stop_price = float(neckline) - stop_mult * float(atr)
-        # 止盈 = 颈线 + tp_mult × H（形态学对称目标位）
+        # 止盈 tp2 = 颈线 + tp_mult × H（形态学对称目标位）
         take_profit = float(neckline) + tp_mult * h
+        # 分级止盈 tp1 = 颈线 + tp1_h_mult × H（Task 7 · P0-3）：
+        # Why tp1<tp2：tp1_h_mult < tp_h_mult（EXEC_DEFAULTS 1.0 vs 2.0）保证 tp1 先于 tp2
+        # 成交，在 tp1 锁定部分浮利后剩余博 tp2 形态目标位；simulate_exit 同口径计算。
+        # tp1_mult 缺省（None）→ tp1=None，下游 _place_take_profit 退回 tp2 单笔全平（零回归）。
+        tp1_price = (float(neckline) + tp1_mult * h) if tp1_mult is not None else None
         out.append(PlannedOrder(
             order=OrderRequest(symbol=sym, qty=float(qty), side="buy", price=float(entry)),
             stop_price=stop_price, take_profit=take_profit, neckline=float(neckline),
@@ -127,5 +148,7 @@ def build_orders_from_signals(
             experiment_weight=weight,
             # R3 实际 rr 透传：Signal.rr 缺省（None）时归 0.0（push 层 falsy 跳渲染，零回归）
             rr=s.rr if s.rr is not None else 0.0,
+            # Task 7：tp1/tp1_portion（None/0 → 下游退回 tp2 单笔全平，向后兼容）
+            tp1=tp1_price, tp1_portion=tp1_portion,
         ))
     return out
