@@ -3,7 +3,7 @@
 
 Layer2 阶段1：signals 改为 list[Signal]（frozen dataclass），测试构造 Signal 替代 dict。
 """
-from strategies.signal import Signal
+from strategies.neckline.signal import Signal
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，改指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals, PlannedOrder
 
@@ -120,7 +120,7 @@ def test_scan_live_signal_carries_rr():
     _ROOT = Path(__file__).resolve().parent.parent
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
-    from strategies.neckline_method import NecklineMethodStrategy
+    from strategies.neckline.strategy import NecklineMethodStrategy
     # 复用既有已实证的合成颈线形态 fixture（颈线=100 / bottom=90 / 末根 close=102 突破）
     sys.path.insert(0, str(_ROOT / "tests"))
     from test_neckline_recognition import _synth_pattern, _ohlc  # noqa: E402

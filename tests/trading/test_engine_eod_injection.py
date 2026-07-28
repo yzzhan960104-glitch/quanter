@@ -67,8 +67,8 @@ def test_eod_resolves_experiments_and_tags_signals(monkeypatch):
         "experiment.resolver.resolve_active", lambda db_path=None: [fake_exp]
     )
 
-    # ② mock strategy：scan_live 返 1 条 Signal（字段契约对齐 strategies/neckline_method.scan_live）
-    from strategies.signal import Signal
+    # ② mock strategy：scan_live 返 1 条 Signal（字段契约对齐 strategies/neckline/strategy.scan_live）
+    from strategies.neckline.signal import Signal
 
     class _MockStrategy:
         def __init__(self, *a, **kw):
@@ -278,7 +278,7 @@ def test_eod_cooldown_dedup_recent_signal_dropped(monkeypatch, tmp_path):
       - 6 日前 plan 含 300001.SZ → 超过 cooldown=5 保留。
     """
     from experiment.models import ActiveExperiment
-    from strategies.signal import Signal
+    from strategies.neckline.signal import Signal
 
     fake_exp = ActiveExperiment(
         experiment_id="exp-cooldown", strategy_name="neckline",
@@ -353,7 +353,7 @@ def test_eod_cooldown_dedup_recent_signal_dropped(monkeypatch, tmp_path):
 def test_eod_cooldown_dedup_old_signal_kept(monkeypatch):
     """超 cooldown 日的历史 plan 不影响新信号（旧 plan 标的可重出信号）。"""
     from experiment.models import ActiveExperiment
-    from strategies.signal import Signal
+    from strategies.neckline.signal import Signal
 
     fake_exp = ActiveExperiment(
         experiment_id="exp-cooldown2", strategy_name="neckline",

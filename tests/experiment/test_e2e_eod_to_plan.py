@@ -18,7 +18,7 @@
       ``_load_universe(lake)`` / ``_load_df_upto(lake, sym, date)`` 各自 mock 成受控返回
       （Task 7b fix 后两者签名接 ``lake`` 由 _eod 注入，此处适配真实签名）；
     - mock 策略：``build_strategy`` 返 mock strategy，``scan_live`` 返受控信号 dict（对齐
-      strategies/neckline_method.scan_live 字段契约）；
+      strategies/neckline/strategy.scan_live 字段契约）；
     - mock 网络/落盘副作用：``trading_plan.push_plan_to_dingtalk`` / ``calendar.is_trading_day``
       均 monkeypatch，保证测试不触达真实网络/调度；
     - **不** mock ``signal_runner.build_orders_from_signals``：让它真跑（验证归因字段从
@@ -96,7 +96,7 @@ def _make_mock_strategy_factory(captured_signals=None):
         captured_signals: 可选 list，strategy.scan_live 被调时会 append 进该 list,
                           供测试断言「scan_live 真被 _eod 调用且收到正确入参」。
 
-    物理意图：模拟 strategies/neckline_method.scan_live 的字段契约（ NecklineMethodStrategy
+    物理意图：模拟 strategies/neckline/strategy.scan_live 的字段契约（ NecklineMethodStrategy
     实例方法 ``scan_live(symbol, df_upto, date) -> list[Signal]``，Layer2 阶段1 后返
     Signal dataclass），只对 1 个标的返 1 条信号，便于精准断言归因字段注入。
 
@@ -104,7 +104,7 @@ def _make_mock_strategy_factory(captured_signals=None):
         Signal(symbol, signal_type, formed_at, breakout_date, neckline, bottom, entry_price, atr)
     其中 ``atr`` 字段 _eod 会读并建 atr_map（缺 atr 不建项，signal_runner 会跳过该 symbol）。
     """
-    from strategies.signal import Signal
+    from strategies.neckline.signal import Signal
 
     class _MockStrategy:
         def __init__(self, *args, **kwargs):
@@ -289,7 +289,7 @@ def test_e2e_multi_experiment_attribution_split(db, monkeypatch):
 
     # ② mock 策略：对每实验的 300001.SZ 都返信号（atr=0.5）
     # 把每条 signal 打上「来自哪个实验」的内嵌标记（_eod 会随后覆盖 experiment_id）
-    from strategies.signal import Signal
+    from strategies.neckline.signal import Signal
 
     class _SplitStrategy:
         def __init__(self, *args, **kwargs):

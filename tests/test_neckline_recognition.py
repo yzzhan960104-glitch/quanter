@@ -283,8 +283,8 @@ def test_scan_symbol_matches_strategy(monkeypatch):
     去重逻辑改动若导致两侧不一致，本测试即失败。
     """
     from strategies.neckline import backtest as nb
-    import strategies.neckline_method as nm
-    from strategies.neckline_method import NecklineMethodStrategy
+    import strategies.neckline.strategy as nm
+    from strategies.neckline.strategy import NecklineMethodStrategy
 
     rows = _synth_pattern()[:20] + [
         (102, 106, 98, 102, 500),      # pos20  mock 在此返回信号
@@ -411,7 +411,7 @@ def test_scan_live_rejects_when_close_above_cancel_on():
     断言：scan_live 返 []（不挂颈线 10.5 的回踩废单）。
     """
     import pandas as pd
-    from strategies.neckline_method import NecklineMethodStrategy
+    from strategies.neckline.strategy import NecklineMethodStrategy
 
     # 显式逐根构造（_synth_pattern 风格），确保过 detect 7 守卫：
     # 顶部聚集 + 压制时长 + 双底 + 突破 + 带量 + 形态深度 H/ATR + 实际 rr

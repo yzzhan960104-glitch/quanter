@@ -7,12 +7,16 @@
 
 注册表：颈线法（NecklineMethodStrategy，算法收口于 strategies/neckline/ 子包）。
 注：caisen 形态（W底/头肩/三角形）已于 Layer2 解耦·Task 1.3 完整退役，颈线法是唯一活跃策略。
+
+U5（2026-07-29 Task 8）：adapter strategies/neckline_method.py 整删，NecklineMethodStrategy
+薄编排类搬到 strategies/neckline/strategy.py（归位子包，与算法本体同包）。registry import
+改为 ``from .neckline import strategy`` 触发注册。
 """
 from .base import Strategy, TRADE_REQUIRED_KEYS
 from .registry import register_strategy, build_strategy, list_strategies
 
 # import 各策略模块触发 @register_strategy 注册
-from . import neckline_method  # noqa: F401  颈线法适配器（唯一活跃策略）
+from .neckline import strategy as neckline_strategy  # noqa: F401  颈线法薄编排（唯一活跃策略）
 
 __all__ = [
     "Strategy",

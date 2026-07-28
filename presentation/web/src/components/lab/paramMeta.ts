@@ -2,16 +2,19 @@
  * 颈线法策略参数中文映射 + 分组（/lab 参数详情面板与新建回测抽屉共用）。
  *
  * 阶段D（2026-07-20）：caisen 形态 33 字段 → 颈线法 18 字段（识别层 11 + 执行层 7）。
- * 键集须与 strategies.neckline_schema.NecklineConfig.model_fields 完全一致——
+ * U5（2026-07-29 Task 8）：trailing 层 3 字段并入 → 颈线法 21 字段
+ * （识别层 11 + 执行层 7 + trailing 3）。
+ * 键集须与 strategies.neckline.schema.NecklineConfig.model_fields 完全一致——
  * 前后端参数名仍由 GET /config/schema 的 properties 键反射，杜绝漂移。
  * 同步守护：tests/test_param_meta_sync.py 断言参数表键集 == NecklineConfig.model_fields。
  *
- * 分组：识别层（颈线形态判定）/ 执行层（挂单/止盈/仓位/撤单）。识别层=形态核心默认展开。
+ * 分组：识别层（颈线形态判定）/ 执行层（挂单/止盈/仓位/撤单）/ trailing 层（时间驱动移动止损）。
+ * 识别层=形态核心默认展开。
  */
-export type ParamGroup = '识别层' | '执行层'
+export type ParamGroup = '识别层' | '执行层' | 'trailing层'
 
 /** 分组展示顺序（详情面板/抽屉按此序折叠渲染）。 */
-export const PARAM_GROUPS: ParamGroup[] = ['识别层', '执行层']
+export const PARAM_GROUPS: ParamGroup[] = ['识别层', '执行层', 'trailing层']
 
 export interface ParamMeta {
   title: string           // 短中文标题（表单 label / 详情字段名）
@@ -40,6 +43,10 @@ export const PARAM_META: Record<string, ParamMeta> = {
   tp1_h_mult:           { title: '止盈1 H倍数',        group: '执行层' },
   tp1_portion:          { title: '止盈1减仓比例',      group: '执行层' },
   cancel_thresh_mult:   { title: '撤单阈值',           group: '执行层' },
+  // —— trailing 层（时间驱动移动止损 · 海龟风格，3 维）默认退化为固定止损，仅显式传参才启用 ——
+  trailing_grace:       { title: 'trailing宽限天数',    group: 'trailing层' },
+  trailing_step:        { title: 'trailing收紧速度',    group: 'trailing层' },
+  trailing_floor:       { title: 'trailing最低ATR倍',   group: 'trailing层' },
 }
 
 /**

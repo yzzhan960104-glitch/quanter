@@ -8,7 +8,7 @@
 """
 import pytest
 
-from strategies.signal import Signal
+from strategies.neckline.signal import Signal
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，改指真身 trading.compute.plan
 from trading.compute.plan import PlannedOrder, build_orders_from_signals
 

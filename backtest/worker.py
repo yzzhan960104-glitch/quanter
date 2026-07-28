@@ -31,7 +31,7 @@ import os
 
 from backtest import tasks_db as replay_tasks_db
 from backtest.replay import replay, ReplayAborted
-# 注意：strategies.neckline_method 不在模块级 import——会触发循环
+# 注意：strategies.neckline.strategy 不在模块级 import——会触发循环
 # （execution.__init__→replay_worker→strategies→caisen→execution）。改 run_replay_worker 内延迟 import。
 # 模块级 import → _load_price_data 成为本模块属性（测试 monkeypatch 生效）。
 # Step4e 反向债收口：原 ``from presentation.server.services.caisen_service import _load_price_data``
@@ -111,7 +111,9 @@ def run_replay_worker(task_id: str, abort_flag, progress_q, heartbeat_q) -> None
         # （execution.__init__→replay_worker→strategies→caisen→execution）。
         # Task 1.3：caisen 形态分支已删（W底/头肩/三角形退役），仅保留颈线法。
         if strategy_name == "neckline":
-            from strategies.neckline_method import NecklineMethodStrategy
+            # U5（2026-07-29 Task 8）：adapter 整删后，NecklineMethodStrategy 搬到
+            # strategies/neckline/strategy.py（归位子包，薄编排层）。类名/构造签名零改动。
+            from strategies.neckline.strategy import NecklineMethodStrategy
             strategy = NecklineMethodStrategy(cfg_override=task.get("cfg_override"))
         else:
             # 未知策略名 → 显式 FAILED（防 Task 1.3 后旧 task 残留 strategy_name="caisen"

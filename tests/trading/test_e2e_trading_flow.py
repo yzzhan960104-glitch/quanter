@@ -24,7 +24,7 @@ import pandas as pd
 import pytest
 
 from trading import engine, position_book, review_report, trading_plan
-from strategies.signal import Signal
+from strategies.neckline.signal import Signal
 
 
 # ============================================================================

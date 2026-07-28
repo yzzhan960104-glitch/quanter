@@ -42,7 +42,7 @@ def strategy(monkeypatch):
     桩点迁移（U2 · Task 3）：原桩 nm.detect_neckline_method（返 res dict）改为
     nm.detect_signal（返 Signal | None）——对齐 scan_live 改后的单一识别源。
     """
-    from strategies import neckline_method as nm
+    from strategies.neckline import strategy as nm
 
     strat = nm.NecklineMethodStrategy()
 
@@ -239,7 +239,7 @@ def test_scan_live_no_longer_gates_unjustified_gap(monkeypatch):
     必须先调 filter_universe_by_continuity 过滤。若 scan_live 重新加了 gate，本测试会失败
     （detect_calls 会是空），提醒维护者 gate 应在 universe 级而非 per-symbol。
     """
-    from strategies import neckline_method as nm
+    from strategies.neckline import strategy as nm
     strat = nm.NecklineMethodStrategy()
     detect_calls = []
     monkeypatch.setattr(nm, "detect_signal",
@@ -258,7 +258,7 @@ def test_scan_live_no_longer_gates_suspend_gap(monkeypatch):
     补强负向契约：即使是合法停牌跳空，scan_live 也不做任何窗口检查——所有 df_upto
     一视同仁透传 detect_signal。gate（区分漏采 vs 停牌跳空）完全由 filter 负责。
     """
-    from strategies import neckline_method as nm
+    from strategies.neckline import strategy as nm
     strat = nm.NecklineMethodStrategy()
     detect_calls = []
     monkeypatch.setattr(nm, "detect_signal",

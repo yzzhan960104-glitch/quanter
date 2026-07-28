@@ -1,37 +1,48 @@
 # -*- coding: utf-8 -*-
-"""颈线法策略适配器（NecklineMethodStrategy · 阶段B）。
+"""颈线法策略薄编排类（NecklineMethodStrategy · U5 · 2026-07-29 Task 8）。
 
-经 Strategy 接口接入解耦后的回测引擎。颈线法的进场/出场是完整状态机（simulate_exit：
-挂单回踩 + max_wait + cancel_on 撤单 + 分级止盈 tp1/tp2 + 超时），scan_at 一站式产出
-trade dict（出场逻辑归策略侧，引擎零感知）。
+物理定位（本模块是阶段 5 strangler 收尾后的【唯一活跃策略入口】）：
+    本文件由旧 adapter ``strategies/neckline_method.py`` 原样搬入 strategies/neckline/
+    子包（与算法本体 method_v0/backtest/execution/schema/signal 同包），归位策略中性
+    ``Strategy`` 接口的【薄编排层】。4 类职责经 Task 2/3/5/7 已下沉到子包：
+        - 识别 → .method_v0.detect_signal（U2 识别单源）
+        - 执行 → .backtest.simulate_exit / .execution.decide_exit（U3 执行单源）
+        - 完整性 gate → data/integrity.filter_universe_by_continuity（U5 gate 下沉）
+        - trailing 收紧 → .execution.compute_stop_price（U3 trailing 收敛）
+    类内仅保留 precompute（预算全序列 ATR）/scan_at（回测一站式）/scan_live（实盘纯识别）
+    /config_schema（ParamLab 前端反射）薄编排，决策逻辑零改动（strangler 红线）。
 
-算法本体收口于 strategies/neckline/ 子包（method_v0 识别层 + backtest 执行层），
-本适配器从 .neckline 子包 import 算法原语（Layer2 Task 1.5 收口）。
+迁移注意（U5 Task 8）：
+    1. 类名保留 ``NecklineMethodStrategy``（plan 提议 NecklineStrategy，但保留旧名最小化
+       worker / 各测试 / registry 的连锁改动——类名仅是符号，无语义负载）。
+    2. ``@register_strategy("neckline")`` 装饰器跟着搬，registry 名仍为 "neckline"
+       （调用方 build_strategy("neckline", ...) 不变）。
+    3. 模块内 ``detect_signal`` / ``simulate_exit`` 仍是模块级 binding（同源护栏
+       test_param_iter_kernel_same_source 断言 ``nm.detect_signal is method_v0.detect_signal``）。
 
 与 caisen 形态的语义差异（已在 scan_at 处理）：
     - 信号去重：颈线法用 cooldown 交易日窗（caisen 用 neckline+bottom 价对签名）
     - 进场：挂单回踩 max_wait 天（caisen T+1 回踩成交）
-    - 出场：分级止盈 tp1_portion 加权（caisen 单笔全平已随形态退役；现颈线法
-      decide_exit 单源 execution.py，Task 6 删 caisen 遗产 check_exit/ExitDecision）
+    - 出场：分级止盈 tp1_portion 加权（caisen 单笔全平已随形态退役）
     - rr：颈线法 avg_pnl_pct/risk_pct（caisen (exit-entry)/(entry-stop)）——同口径"风险倍数"
 """
 from __future__ import annotations
 
 import logging
 
-# 颈线法算法原挂 scripts/neckline_method_v0 + scripts/neckline_backtest（靠 sys.path hack
-# 挂载），Layer2 Task 1.5 收口进 strategies/neckline/ 子包后改本包相对 import——
-# sys.path hack 已彻底删除。决策逻辑零改动。
-from .neckline.method_v0 import DEFAULTS, compute_atr, detect_signal
-from .neckline.backtest import simulate_exit, EXEC_DEFAULTS
+# 颈线法算法本体（识别/执行/契约）原挂 scripts/ 靠 sys.path hack，Layer2 Task 1.5 收口
+# 进 strategies/neckline/ 子包，本类从同包相对 import 拿算法原语——sys.path hack 已彻底删除。
+from .method_v0 import DEFAULTS, compute_atr, detect_signal
+from .backtest import simulate_exit, EXEC_DEFAULTS
+from .schema import NecklineConfig
+from .signal import Signal
+# Strategy Protocol 注册器（strategies 包级，非本子包）：``@register_strategy`` 把本类挂进
+# 全局 ``_STRATEGY_REGISTRY``，调用方 ``build_strategy("neckline")`` 反射构造。
+from ..registry import register_strategy
 
-from .neckline.schema import NecklineConfig
-from .registry import register_strategy
-# Layer2 阶段1：scan_at / scan_live 统一返 list[Signal]（frozen dataclass），
-# 替代散落多处的 dict 字符串键访问。决策逻辑零改动，只改返回封装。
-from .neckline.signal import Signal
-
-# 识别层 / 执行层 键集（cfg_override 拆分用）
+# 识别层 / 执行层 键集（cfg_override 拆分用）：ParamLab 抽屉/param_iter 传 21 维 cfg_override dict，
+# 本类按 _NECKLINE_ID_KEYS / _NECKLINE_EXEC_KEYS 分流到 id_cfg / exec_cfg（识别/执行各喂各的）。
+# trailing 3 字段属执行层语义（compute_stop_price 消费），归类 _NECKLINE_EXEC_KEYS 透传到 exec_cfg。
 _NECKLINE_ID_KEYS = (
     "window", "min_touches", "min_suppression", "local_extrema_window", "min_bottoms",
     "breakout_vol_mult", "min_rr", "max_h_atr", "stop_atr_mult", "tp_h_mult", "decay_tau",
@@ -39,6 +50,8 @@ _NECKLINE_ID_KEYS = (
 _NECKLINE_EXEC_KEYS = (
     "max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
     "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
+    # trailing 层（U5 Task 8）：归 exec_cfg 透传到 decide_exit → compute_stop_price
+    "trailing_grace", "trailing_step", "trailing_floor",
 )
 
 logger = logging.getLogger(__name__)
@@ -46,10 +59,10 @@ logger = logging.getLogger(__name__)
 
 @register_strategy("neckline")
 class NecklineMethodStrategy:
-    """颈线法策略（挂单回踩 + 分级止盈 + 撤单）。
+    """颈线法策略（挂单回踩 + 分级止盈 + 撤单 + 可选 trailing）。
 
     构造：
-        cfg_override: 18 维参数覆盖 dict（键在 NecklineConfig.model_fields 内）。
+        cfg_override: 21 维参数覆盖 dict（键在 NecklineConfig.model_fields 内）。
     """
 
     def __init__(self, cfg_override: dict | None = None, **kwargs):

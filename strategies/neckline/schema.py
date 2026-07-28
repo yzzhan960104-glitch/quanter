@@ -13,12 +13,13 @@ from pydantic import BaseModel, Field
 
 
 class NecklineConfig(BaseModel):
-    """颈线法 18 维参数（识别层 11 + 执行层 7）。
+    """颈线法 21 维参数（识别层 11 + 执行层 7 + trailing 3）。
 
     识别层（颈线形态判定）：window/min_touches/min_suppression/local_extrema_window/
     min_bottoms/breakout_vol_mult/min_rr/max_h_atr/stop_atr_mult/tp_h_mult/decay_tau。
     执行层（挂单/止盈/仓位/撤单）：max_holding/max_wait/cooldown/buy_limit_atr_mult/
     tp1_h_mult/tp1_portion/cancel_thresh_mult。
+    trailing 层（时间驱动移动止损 · 海龟风格）：trailing_grace/trailing_step/trailing_floor。
     """
 
     # —— 识别层（11 维，对齐 neckline_method_v0.DEFAULTS）——
@@ -42,3 +43,12 @@ class NecklineConfig(BaseModel):
     tp1_h_mult: float = Field(1.0, description="止盈1 = 颈线 + N×H（第一波减仓）")
     tp1_portion: float = Field(0.5, ge=0.0, le=1.0, description="止盈1 减仓比例（lot1 占比）")
     cancel_thresh_mult: Optional[float] = Field(1.0, description="撤单阈值 = 颈线 + N×H（None=不撤单放飞）")
+
+    # —— trailing 层（3 维，U5 · 2026-07-29 Task 8 收口；对齐 backtest.EXEC_DEFAULTS）——
+    # 物理意图（海龟风格，用户 2026-07-20）：前 grace 天宽限（止损=颈线−stop_mult×ATR 固定不动，
+    # 给趋势确认空间）；grace 天后每日收紧 step×ATR（趋势不确认逐步退出）；到 floor×ATR 卡住。
+    # 默认值对齐 EXEC_DEFAULTS（grace=0/step=0/floor=0.5），即【默认退化为固定止损】——
+    # 旧行为零回归，仅当显式传参才启用 trailing。compute_stop_price / decide_exit 单源消费。
+    trailing_grace: int = Field(0, ge=0, description="trailing 宽限天数 b（前 b 天不收紧，给趋势确认空间；0=无宽限即日收紧）")
+    trailing_step: float = Field(0.0, ge=0.0, description="trailing 收紧速度 a（ATR/日；0=固定止损退化为旧默认）")
+    trailing_floor: float = Field(0.5, ge=0.0, description="trailing 最低 ATR 倍数（收紧上限；0=收到颈线，0.5=颈线−0.5ATR）")

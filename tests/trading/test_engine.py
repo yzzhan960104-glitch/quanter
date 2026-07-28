@@ -66,7 +66,7 @@ def test_eod_plan_dry_run_no_real_order(monkeypatch):
 
 def test_eod_plan_produces_nested_orders(monkeypatch):
     """scope #1：eod_plan 生产的 orders 必须是嵌套结构（与 Task8 push 一致）。"""
-    from strategies.signal import Signal
+    from strategies.neckline.signal import Signal
 
     monkeypatch.setattr(engine, "_submit", _no_op_submit)
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)

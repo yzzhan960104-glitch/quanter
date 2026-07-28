@@ -9,7 +9,7 @@ NecklineConfig 全部字段（颈线法 18 维 = 识别层 11 + 执行层 7）�
 import re
 from pathlib import Path
 
-from strategies.neckline_schema import NecklineConfig
+from strategies.neckline.schema import NecklineConfig
 
 PARAM_META_TS = Path(__file__).resolve().parents[1] / "presentation" / "web" / "src" / "components" / "lab" / "paramMeta.ts"
 

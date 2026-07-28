@@ -52,10 +52,11 @@ def test_param_iter_kernel_is_same_object_as_driver_kernel():
     # param_iter 路径（研究侧）：strategies.neckline.backtest 模块级 binding
     import strategies.neckline.backtest as bk
     import strategies.neckline.method_v0 as m0
-    # driver/编排路径（execution 侧）：strategies.neckline_method 模块级 binding
-    import strategies.neckline_method as nm
+    # driver/编排路径（execution 侧）：strategies.neckline.strategy 模块级 binding
+    # （U5 Task 8：adapter neckline_method.py 整删，类搬到 neckline/strategy.py）
+    import strategies.neckline.strategy as nm
 
-    # —— ① simulate_exit 同源（backtest 与 neckline_method 两处 binding 同对象）——
+    # —— ① simulate_exit 同源（backtest 与 neckline.strategy 两处 binding 同对象）——
     # 物理意图：simulate_exit 是颈线法出场状态机（挂单回踩+撤单+分级止盈+超时），
     # param_iter 经 scan_symbol 调它，driver 经 scan_at 调它——必须是同一份代码，
     # 否则调参优化的止盈/止损参数在实盘会跑出不同行为。
@@ -64,7 +65,7 @@ def test_param_iter_kernel_is_same_object_as_driver_kernel():
         "（疑似模块别名 hack 导致对象分叉）"
     )
     assert nm.simulate_exit is simulate_exit, (
-        "neckline_method.simulate_exit 与 backtest.simulate_exit 不同对象——"
+        "neckline.strategy.simulate_exit 与 backtest.simulate_exit 不同对象——"
         "param_iter 路径与 driver 路径的模拟内核已分叉，调参优化参数不会在实盘生效"
     )
 
@@ -79,14 +80,14 @@ def test_param_iter_kernel_is_same_object_as_driver_kernel():
         "method_v0 自身 binding 与 import 的 detect_signal 不同对象（不应发生）"
     )
     assert nm.detect_signal is detect_signal, (
-        "neckline_method.detect_signal 与 method_v0.detect_signal 不同对象——"
+        "neckline.strategy.detect_signal 与 method_v0.detect_signal 不同对象——"
         "param_iter 识别内核与 driver 识别内核已分叉"
     )
 
     # —— ②' detect_neckline_method 同源（底层识别原语二道护栏，detect_signal 内部调它）——
     # 物理意图：detect_neckline_method 是 detect_signal 的识别底层（颈线定位 + 6 守卫），
     # 仍是 method_v0 模块原语，被 test_neckline_recognition 独立测守护卫分支。这里补一道
-    # is 同源护栏，防止有人复制 detect_neckline_method 副本到 backtest/neckline_method
+    # is 同源护栏，防止有人复制 detect_neckline_method 副本到 backtest/neckline.strategy
     # 让 detect_signal 间接分叉（detect_signal 内部按 method_v0 全局名引用，若在别处复制
     # 不会被 detect_signal 调到，但仍要守住 binding 同源以防未来重构引入别名）。
     assert m0.detect_neckline_method is detect_neckline_method, (
