@@ -241,7 +241,7 @@ def test_step4_review_report(isolated, monkeypatch):
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     sig = _make_signal()
     asyncio.run(engine.eod_plan("2026-07-28", [sig], {"300001.SZ": 0.5}, 1_000_000.0))
-    position_book.apply_fill("o1", "300001.SZ", "BUY", 100, 10.5)
+    position_book.apply_fill("o1", "300001.SZ", "BUY", 100, 10.5, "t1")
 
     # post_close：mock gw 持仓与账本一致（drift=False）+ run_reconcile 返 is_ok=True
     from trading.compute.reconcile import ReconciliationResult

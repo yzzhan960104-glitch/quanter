@@ -22,7 +22,7 @@ def db(tmp_path, monkeypatch):
 
 def test_generate_review_sections(db):
     """有计划 + 有成交 + 有持仓 + drift=False → 四段齐全。"""
-    position_book.apply_fill("o1", "300001.SZ", "BUY", 100, 10.0)
+    position_book.apply_fill("o1", "300001.SZ", "BUY", 100, 10.0, "t1")
     plan = {
         "confirmed": True,
         "orders": [

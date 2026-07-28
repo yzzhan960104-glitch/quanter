@@ -991,7 +991,7 @@ class TradingEngine:
         if direction in ("BUY", "SELL"):
             try:
                 from trading import position_book
-                position_book.apply_fill(order_id, symbol, direction, float(qty), float(price))
+                position_book.apply_fill(order_id, symbol, direction, float(qty), float(price), str(update.get("traded_time", "")))
             except Exception:
                 logger.exception("本地账本写入失败 symbol=%s（不影响日志/通知/止盈）", symbol)
 
