@@ -120,3 +120,17 @@ def _install_fake_xtquant() -> None:
 
 
 _install_fake_xtquant()
+
+
+# ============ 隔离 config 包 load_dotenv 的 .env 污染（治 eod_plan confirmed=True 误判）============
+# Why 全局 autouse：config/__init__.py:18 模块级 load_dotenv()——任何 import 链触及 config
+# 包即把 .env 注入 os.environ。完整 collection tests/trading/ 时某测试间接 import config
+# → AUTO_CONFIRM_PLAN=true / AUTO_TRADE_MODE=live 被注入 → eod_plan (engine.py:256) 读到
+# auto_confirmed=True → 落盘即 confirm_plan → plan.confirmed=True，而测试期望人审默认
+# confirmed=False → 误判失败。本 fixture 强制覆盖为测试默认（人审 + dry_run）。
+# 安全性：测试函数内显式 monkeypatch.setenv 同名变量会覆盖本默认（同一 monkeypatch 实例，
+# 后序生效）；Grep 全 tests/ 无测试依赖 AUTO_CONFIRM_PLAN=true，故 autouse 不破坏既有用例。
+@pytest.fixture(autouse=True)
+def _isolate_trade_env(monkeypatch):
+    monkeypatch.setenv("AUTO_CONFIRM_PLAN", "")
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")

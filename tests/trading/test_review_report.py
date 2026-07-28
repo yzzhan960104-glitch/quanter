@@ -30,7 +30,11 @@ def test_generate_review_sections(db):
              "stop_price": 9.0, "take_profit": 12.0},
         ],
     }
-    md = review_report.generate_review("2026-07-27", plan=plan, drift=False)
+    # apply_fill 写 applied_at=datetime.now()（今日）；generate_review(date) 查当日 fill，
+    # date 必须取今日才能查到刚写的成交（日期口径对齐，非生产 bug 是测试口径）。
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    md = review_report.generate_review(today, plan=plan, drift=False)
     assert "交易复盘" in md
     assert "300001.SZ" in md            # 计划段 + 成交段 + 持仓段都应出现
     assert "买入 1 笔" in md            # 成交聚合
@@ -40,7 +44,9 @@ def test_generate_review_sections(db):
 
 def test_generate_review_empty_plan(db):
     """无计划 → 报告标「无计划」不崩。"""
-    md = review_report.generate_review("2026-07-27", plan=None, drift=None)
+    # 用无残留 plan 的未来日：generate_review(plan=None) 会 fallback load_plan(date) 读
+    # 真实 logs/trading_plans；选 2099-01-01 确保无文件 → load_plan 返 None → 真无计划。
+    md = review_report.generate_review("2099-01-01", plan=None, drift=None)
     assert "无计划" in md
     assert "未对账" in md               # drift=None → 未对账
 
