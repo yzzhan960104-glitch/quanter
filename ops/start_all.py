@@ -102,17 +102,29 @@ def main() -> int:
         print("[2/5] 启动 uvicorn :8000（后端 API）...")
         _detached([str(VENV_PY), "-m", "uvicorn", "presentation.server.main:app",
                    "--host", "127.0.0.1", "--port", "8000"], "uvicorn")
-        if _wait_port_busy(8000, timeout=20):
+        # timeout=40：uvicorn 冷启动需加载完整数据湖（margin_secs/fund_basic/hs_const 等），
+        # 实测就绪 >20s，原 20s 会误报「未就绪」（uvicorn 其实随后正常监听）。40s 留冷启动余量。
+        if _wait_port_busy(8000, timeout=40):
             print("      ✅ uvicorn 就绪（:8000）")
         else:
-            print("      ⚠️ uvicorn 20s 未就绪，查 logs/uvicorn.log")
+            print("      ⚠️ uvicorn 40s 未就绪，查 logs/uvicorn.log")
 
     # 3. connect 5 钉钉机器人（依赖 uvicorn :8000）—— echo y 自动确认（绕过 _read_confirm）
+    # Why 前台 run 而非 detach：connect 是「短命启动器」（拉起 5 个 connect_manager 托管的
+    #   Claude Code 常驻实例后即退），detach 它无常驻意义；且 detach 脱离控制台会让
+    #   _read_confirm 的 input() 抛 EOFError → 兜底返 'n' → --start all 被取消、5 机器人全不启。
+    # Why 加 timeout：原 run 无超时，connect 死锁（Claude Code 启动卡住）会连累后面的
+    #   engine/schtasks 永久阻塞。timeout=120 兜底，超时即由 run 内部 kill+wait 并抛
+    #   subprocess.TimeoutExpired（注意：不是 builtins TimeoutError，二者无继承关系，用错会裸崩）。
     print("[3/5] 启动 connect 5 钉钉机器人（依赖 uvicorn）...")
-    subprocess.run(
-        f'echo y| "{VENV_PY}" -m broadcast connect --start all',
-        shell=True, cwd=str(ROOT),
-    )
+    try:
+        subprocess.run(
+            f'echo y| "{VENV_PY}" -m broadcast connect --start all',
+            shell=True, cwd=str(ROOT), timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        # 超时已被 run 内部 kill 子进程；start_all 继续推进，不连累 engine/schtasks。
+        print("      ⚠️ connect 启动超时(>120s)，已兜底跳过（engine/schtasks 不受阻塞）")
 
     # 4. trading engine（依赖 miniQMT；独立常驻进程）
     print("[4/5] 启动 trading engine（python -m trading，依赖 miniQMT）...")
