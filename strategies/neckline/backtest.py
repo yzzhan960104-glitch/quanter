@@ -389,17 +389,20 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
             n_skip += 1
         else:
             # 附识别特征供深挖（突破质量/颈线压制/形态深度）。
-            # 注意（U2 收尾）：detect_signal 返 Signal 不含 suppression/H_over_ATR（这两个是
-            # detect_neckline_method dict 的 debug-only 元数据，仅供 fullscan CSV 归因分析，
-            # 不参与 simulate_exit/去重决策）。此处保留 None 占位（backtest/tools/analyze_fullscan
-            # 等下游脚本对 dropna 兼容），避免改 detect_signal 返回类型扩大 Task 3 范围。
-            # 若研究侧需恢复这两列精确值，后续可在 detect_signal 侧扩 Signal 元数据字段或
-            # 本处补一次 detect_neckline_method 调用（仅 CSV 装饰，非识别 gate）。
+            # 注意（U2 收尾 · fix Important #1 2026-07-29）：
+            # - suppression：detect_signal 返 Signal 不含 suppression（detect_neckline_method
+            #   dict 的 debug-only 元数据，仅供 fullscan CSV 归因分析，不参与 simulate_exit/
+            #   去重决策）。此处保留 None 占位（backtest/tools/analyze_fullscan 等下游脚本对
+            #   dropna 兼容），真实妥协——defer Task 5 在 detect_signal 侧补 Signal 元数据字段，
+            #   不在本 fix 范围扩大返回类型。
+            # - H_over_ATR：由 simulate_exit 算并保留（sim 本就有，见 backtest.py:225，
+            #   H=c_star-bottom=sig.neckline-sig.bottom，atr_val=sig.atr，同源），勿覆盖为 None。
+            #   下游 analyze_fullscan.py:17 等大量消费 trades["H_over_ATR"].dropna() 做形态深度
+            #   分桶——原 implementer 多写一行 sim["H_over_ATR"]=None 把正确值冲掉致 dropna 全失效。
             vol_T = float(sym_df["volume"].iloc[sig_idx])
             vol5 = float(sym_df["volume"].iloc[max(0, sig_idx - 5):sig_idx].mean()) if sig_idx >= 5 else vol_T
             sim["breakout_vol_ratio"] = round(vol_T / vol5, 2) if vol5 > 0 else 0.0
             sim["suppression"] = None
-            sim["H_over_ATR"] = None
             filled.append(sim)
     return filled, len(signals), n_skip
 
