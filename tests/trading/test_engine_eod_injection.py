@@ -261,3 +261,153 @@ def test_load_df_upto_no_lookahead():
     #    DatetimeIndex 单 level 后 .index 不再有 symbol level，靠行数核验
     #    （18~21 共 4 个交易日，每日该 symbol 1 行 → 4 行）
     assert len(df_upto) == 4, f"截至 2026-07-21（含）应有 4 根 K 线，实际 {len(df_upto)}"
+
+
+# ============================================================================
+# 5. Task 5（P0-5 cooldown）：_eod scan 后查最近 cooldown 日 plan formed_at 同标的丢弃
+# ============================================================================
+def test_eod_cooldown_dedup_recent_signal_dropped(monkeypatch, tmp_path):
+    """同标的最近 cooldown 日 plan 已含 formed_at → 新信号丢弃；超 cooldown 日 → 保留。
+
+    物理意图（plan Task 5 · 对齐缺口 P0-5）：
+        scan_live 无去重时，同形态在多日窗口内连续触发（颈线被持续突破），实盘会
+        连续挂单超额成交。spec §4.5：_eod scan 后查最近 cooldown 日 plan，同标的丢弃。
+
+    场景：
+      - 最近 3 日内 plan 含 300001.SZ formed_at → cooldown=5 内新信号丢弃；
+      - 6 日前 plan 含 300001.SZ → 超过 cooldown=5 保留。
+    """
+    from experiment.models import ActiveExperiment
+    from strategies.signal import Signal
+
+    fake_exp = ActiveExperiment(
+        experiment_id="exp-cooldown", strategy_name="neckline",
+        params={"cooldown": 5}, weight=1.0,
+    )
+    monkeypatch.setattr(
+        "experiment.resolver.resolve_active", lambda db_path=None: [fake_exp]
+    )
+
+    # Mock strategy：返两条信号，cooldown 测试在 _eod 层做（不在 strategy 内）
+    class _MockStrategy:
+        def __init__(self, *a, **kw):
+            pass
+
+        def scan_live(self, symbol, df_upto, date):
+            # 两条信号：A 在 cooldown 内（应丢），B 超 cooldown（应留）
+            today_ts = pd.Timestamp(date)
+            return [
+                Signal(symbol="300001.SZ", formed_at=today_ts, neckline=10.0,
+                       bottom=9.0, entry_price=10.0, atr=0.2),
+                Signal(symbol="688001.SH", formed_at=today_ts, neckline=20.0,
+                       bottom=18.0, entry_price=20.0, atr=0.4),
+            ]
+
+    monkeypatch.setattr(
+        "strategies.registry.build_strategy",
+        lambda name, cfg_override=None, **kw: _MockStrategy(),
+    )
+    monkeypatch.setattr(engine, "_load_universe", lambda lake: ["300001.SZ"])
+    monkeypatch.setattr(engine, "_load_df_upto", lambda lake, s, d: pd.DataFrame(
+        {"open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0, "volume": 1000},
+        index=pd.date_range("2026-01-01", periods=80, freq="D"),
+    ))
+
+    # 构造历史 plan：3 日前 plan 含 300001.SZ formed_at（在 cooldown=5 内）
+    # 用 tmp_path 作为 TRADE_PLAN_DIR 隔离（fixture 已设）
+    from datetime import datetime, timedelta
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_ts = datetime.strptime(today, "%Y-%m-%d")
+    recent_date = (today_ts - timedelta(days=2)).strftime("%Y-%m-%d")  # 2 日前（cooldown=5 内）
+    old_date = (today_ts - timedelta(days=10)).strftime("%Y-%m-%d")   # 10 日前（cooldown 外）
+    import json
+    from pathlib import Path
+    plan_dir = Path(os.environ["TRADE_PLAN_DIR"])
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    # 最近 plan 含 300001.SZ（在 cooldown 内 → 新信号丢弃）
+    (plan_dir / f"plan_{recent_date}.json").write_text(json.dumps({
+        "date": recent_date, "confirmed": True,
+        "orders": [{
+            "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+            "stop_price": 9.0, "take_profit": 11.0,
+            "formed_at": recent_date,  # 关键：Task 2 落盘的 formed_at
+        }],
+    }), encoding="utf-8")
+
+    captured = {}
+
+    async def _fake_eod_plan(date, signals, atr_map, capital):
+        captured["signals"] = signals
+        return {"date": date, "n_orders": len(signals), "mode": "dry_run"}
+
+    monkeypatch.setattr(engine, "eod_plan", _fake_eod_plan)
+
+    asyncio.run(engine.TradingEngine()._eod())
+
+    # 300001.SZ 在 cooldown 内被丢弃；688001.SH 保留
+    syms = [s.symbol for s in captured["signals"]]
+    assert "300001.SZ" not in syms, "同标的 cooldown 内应丢弃"
+    assert "688001.SH" in syms
+
+
+def test_eod_cooldown_dedup_old_signal_kept(monkeypatch):
+    """超 cooldown 日的历史 plan 不影响新信号（旧 plan 标的可重出信号）。"""
+    from experiment.models import ActiveExperiment
+    from strategies.signal import Signal
+
+    fake_exp = ActiveExperiment(
+        experiment_id="exp-cooldown2", strategy_name="neckline",
+        params={"cooldown": 5}, weight=1.0,
+    )
+    monkeypatch.setattr(
+        "experiment.resolver.resolve_active", lambda db_path=None: [fake_exp]
+    )
+
+    class _MockStrategy:
+        def __init__(self, *a, **kw):
+            pass
+
+        def scan_live(self, symbol, df_upto, date):
+            return [Signal(symbol="300001.SZ", formed_at=pd.Timestamp(date),
+                           neckline=10.0, bottom=9.0, entry_price=10.0, atr=0.2)]
+
+    monkeypatch.setattr(
+        "strategies.registry.build_strategy",
+        lambda name, cfg_override=None, **kw: _MockStrategy(),
+    )
+    monkeypatch.setattr(engine, "_load_universe", lambda lake: ["300001.SZ"])
+    monkeypatch.setattr(engine, "_load_df_upto", lambda lake, s, d: pd.DataFrame(
+        {"open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0, "volume": 1000},
+        index=pd.date_range("2026-01-01", periods=80, freq="D"),
+    ))
+
+    # 10 日前 plan（cooldown=5 外）含 300001.SZ → 新信号应保留
+    from datetime import datetime, timedelta
+    import json
+    from pathlib import Path
+    today = datetime.now().strftime("%Y-%m-%d")
+    old_date = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=10)).strftime("%Y-%m-%d")
+    plan_dir = Path(os.environ["TRADE_PLAN_DIR"])
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    (plan_dir / f"plan_{old_date}.json").write_text(json.dumps({
+        "date": old_date, "confirmed": True,
+        "orders": [{
+            "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+            "stop_price": 9.0, "take_profit": 11.0,
+            "formed_at": old_date,
+        }],
+    }), encoding="utf-8")
+
+    captured = {}
+
+    async def _fake_eod_plan(date, signals, atr_map, capital):
+        captured["signals"] = signals
+        return {"date": date, "n_orders": len(signals), "mode": "dry_run"}
+
+    monkeypatch.setattr(engine, "eod_plan", _fake_eod_plan)
+
+    asyncio.run(engine.TradingEngine()._eod())
+
+    # 10 日前 plan 超 cooldown=5 → 300001.SZ 保留
+    syms = [s.symbol for s in captured["signals"]]
+    assert "300001.SZ" in syms

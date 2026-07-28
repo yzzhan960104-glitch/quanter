@@ -160,6 +160,91 @@ def _load_df_upto(lake, symbol: str, date: str):
         return None
 
 
+# ============================================================================
+# plan Task 5（P0-5 cooldown 信号去重）：扫最近 cooldown 日 plan formed_at 标的集
+# ============================================================================
+def _load_recent_plan_symbols(days_back: int, today: str) -> set[str]:
+    """扫 logs/trading_plans/plan_*.json 最近 N 自然日（含 today）含 formed_at 的 symbol 集。
+
+    物理意图（plan Task 5 · 对齐缺口 P0-5）：
+        scan_live 无跨日去重，同形态被持续突破会连续多日触发信号 → 实盘连续挂单超额成交。
+        spec §4.5：_eod scan 后查最近 cooldown 日 plan formed_at，同标的丢弃。
+
+    Why 用 formed_at 而非 order.symbol：
+        formed_at（Task 2 落盘）= 信号突破日，是「该标的最近一次被识别为信号」的真实时间锚点；
+        order.symbol 仅在「该标的进了 plan」时存在，但形成的信号可能被 max_wait 过滤掉未进 plan
+        ——用 formed_at 才能覆盖所有「被识别为信号」的标的（无论是否最终挂单）。
+        老 plan（Task 2 前，无 formed_at）兜底用 order.symbol（粗近似）。
+
+    Why 自然日回溯而非交易日：
+        cooldown 参数（exec_cfg["cooldown"]）本身是【交易日】单位（颈线法 EXEC_DEFAULTS），
+        但本函数用自然日回溯是**保守上界**——自然日≥交易日数（含周末），故 cooldown=5
+        交易日 ≈ 7 自然日；用 cooldown=5 自然日回溯可能漏掉周五+周末的 5 交易日窗口。
+        取 days_back=cooldown+2（含周末余量）作为保守窗口，避免周末边界漏判。
+
+    Args:
+        days_back: 回溯自然日数（含 today），调用方传 cooldown+2 余量。
+        today:     YYYY-MM-DD（_eod 调用时传 datetime.now()）。
+
+    Returns:
+        最近 days_back 自然日 plan 含 formed_at 的 symbol 集；plan 损坏/无 plan 返空集（保守不误杀）。
+    """
+    import json as _json
+    from datetime import datetime as _dt, timedelta as _td
+    from pathlib import Path as _Path
+    syms: set[str] = set()
+    try:
+        plan_dir = _Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
+        if not plan_dir.exists():
+            return syms
+        today_dt = _dt.strptime(today, "%Y-%m-%d")
+        # 回溯窗口：[today - days_back + 1, today]（含 today）
+        for i in range(days_back):
+            d = (today_dt - _td(days=i)).strftime("%Y-%m-%d")
+            p = plan_dir / f"plan_{d}.json"
+            if not p.exists():
+                continue
+            try:
+                plan = _json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                # 单 plan 损坏不影响其他 plan 扫描（保守继续，不抛）
+                continue
+            for o in plan.get("orders", []):
+                # 优先 formed_at（真实信号突破日）；老 plan 无 formed_at 兜底用 order.symbol
+                if o.get("formed_at") or (o.get("order") or {}).get("symbol"):
+                    sym = (o.get("order") or {}).get("symbol")
+                    if sym:
+                        syms.add(sym)
+    except Exception:
+        # 整体异常（IO/权限）返空集，保守不误杀（让所有新信号都通过，由人审闸兜底）
+        logger.exception("_load_recent_plan_symbols 异常返空集（cooldown 不去重）")
+        return set()
+    return syms
+
+
+def _resolve_cooldown_days(experiments: list) -> int:
+    """从 experiments 提取 cooldown（取所有实验里的最大值，保守去重）。
+
+    Why 取 max 而非首个：多实验灰度场景下，不同实验可能配不同 cooldown（如新档 5、旧档 3）。
+    按「最长 cooldown 跨日去重」最保守——避免新档信号被旧档短 cooldown 漏去重。
+    缺失/异常返 0（不去重，向后兼容老链路）。
+    """
+    if not experiments:
+        return 0
+    try:
+        cooldowns = []
+        for exp in experiments:
+            params = getattr(exp, "params", None) or {}
+            cd = params.get("cooldown")
+            if cd is not None and int(cd) > 0:
+                cooldowns.append(int(cd))
+        return max(cooldowns) if cooldowns else 0
+    except Exception:
+        logger.exception("_resolve_cooldown_days 异常返 0（不去重）")
+        return 0
+
+
+
 def get_gateway():
     """惰性取交易网关单例（透传 trading_service.get_gateway）。
 
@@ -724,6 +809,21 @@ class TradingEngine:
                             atr_map[sym] = s.atr
                 except Exception as e:  # noqa: BLE001 单标的挡板（scope #7 兜底）
                     logger.warning("_eod scan_live %s 异常跳过: %s", sym, e)
+
+        # plan Task 5（P0-5 cooldown 信号去重）：scan 后按 cooldown 过滤同标的（防连续日超额成交）。
+        # 物理意图：scan_live 无跨日去重，同形态连续触发会连续多日产信号；用最近 cooldown 日
+        # plan 的 formed_at 标的集做跨日去重，cooldown 窗口内的同标的新信号丢弃。
+        # 边界：cooldown=0 不去重（兼容用户配置）；窗口含周末故 days_back=cooldown+2 自然日余量。
+        cooldown = _resolve_cooldown_days(experiments)
+        if cooldown > 0 and signals:
+            recent_syms = _load_recent_plan_symbols(days_back=cooldown + 2, today=today)
+            if recent_syms:
+                before = len(signals)
+                signals = [s for s in signals if s.symbol not in recent_syms]
+                dropped = before - len(signals)
+                if dropped:
+                    logger.info("cooldown 去重丢弃 %d 条信号（cooldown=%d 日内已 plan）",
+                                dropped, cooldown)
 
         # date = T+1（计划生效日）：修 date 错位 bug（2026-07-28）。原传 today（T 日），
         # 但 pre_open 次日读 load_plan(today=T+1) → 永远差一天挂不上单。改传
