@@ -144,11 +144,6 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
 @pytest.mark.parametrize(
     "module_path, attr",
     [
-        # check_exit：双入口同源（compute / compute 包 re-export）
-        # Layer2 阶段4：execution 包解散，execution/execution.exit_logic 入口移除；
-        # check_exit 真身单源在 trading.compute.exit，由 compute 包 re-export。
-        ("trading.compute.exit", "check_exit"),
-        ("trading.compute", "check_exit"),
         # check_order：真身单源在 trading.compute.risk（Layer2 阶段6 risk_shield 垫片已删）
         ("trading.compute.risk", "check_order"),
         ("trading.compute", "check_order"),
@@ -178,8 +173,9 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
         # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，双源 is 契约退役
         ("trading.compute.types", "OrderRequest"),
         ("trading.compute", "OrderRequest"),
-        # 伴随 dataclass（ExitDecision / RiskDecision / PlannedOrder / ReconciliationResult）
-        ("trading.compute.exit", "ExitDecision"),
+        # 伴随 dataclass（RiskDecision / PlannedOrder / ReconciliationResult）
+        # Task 6：caisen 遗产 ExitDecision 随 check_exit 一并废弃删除（trading.compute.exit
+        # 整模块删除）。颈线法 decide_exit 用 NecklineExitDecision（execution.py 专属契约）。
         ("trading.compute.risk", "RiskDecision"),
         ("trading.compute.plan", "PlannedOrder"),
         ("trading.compute.reconcile", "ReconciliationResult"),
@@ -199,11 +195,6 @@ def test_all_entry_points_resolvable(module_path: str, attr: str) -> None:
 # —— 同源 is 断言（每个决策函数独立一组，失败时定位精确）——
 def _get(module_path: str, attr: str):
     return getattr(importlib.import_module(module_path), attr)
-
-
-def test_check_exit_single_source() -> None:
-    a = _get("trading.compute.exit", "check_exit")
-    assert a is _get("trading.compute", "check_exit")
 
 
 def test_check_order_single_source() -> None:

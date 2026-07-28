@@ -9,7 +9,8 @@
     任何漂移 = 某处偷改逻辑，立即 revert（spec §8.1 T1 层定义）。
 
     不变量守护（spec §8.4）：
-        · 阶段 2 `check_exit` is 同源 → 本脚本数值不变
+        · 阶段 2 `decide_exit` is 同源（颈线法 execution.py 单源；caisen 遗产 check_exit
+          已 Task 6 废弃删除）→ 本脚本数值不变
         · 阶段 4 `param_iter`/`identify_param_scan` 收口走 driver → 本脚本数值不变
         · 阶段 1 颈线法收口进 strategies/neckline/ → import 路径变，**数值不变**
 

@@ -6,8 +6,9 @@
     回测基础设施：replay/worker/scheduler/tasks_db/runs）+ caisen/optimize/
     （generic 参数训练：training_*）+ trading/mock_broker.py（回测撮合）的回测相关
     代码，独立成 backtest/ 模块。execution/ 包随之解散（其唯一真身即回测基础设施，
-    已全部迁入本包；余下 check_exit/check_order/网关等 facade re-export 改由
-    trading.* 真身直供，ExecutionExecutor Protocol 迁 trading/protocols.py）。
+    已全部迁入本包；余下 check_order/网关等 facade re-export 改由
+    trading.* 真身直供，ExecutionExecutor Protocol 迁 trading/protocols.py。
+    caisen 遗产 check_exit 已 Task 6 废弃删除（颈线法 decide_exit 单源 execution.py）。
 
 单向依赖（不变量·spec §3.6 回测不碰交易编排/券商）：
     backtest/ 只依赖 trading.compute（离场判定纯函数）/ strategies（颈线法策略本体）
@@ -28,8 +29,9 @@ from __future__ import annotations
 
 # ============================================================================
 # driver：策略中立回测器（backtest/replay.py）——依赖 strategies.base.Strategy
-# 单源真理契约：replay() 与颈线法共用 check_exit（trading.compute.exit 纯函数），
-# 杜绝回测/实盘决策分叉（design §3.2 杀手不变量）。
+# 单源真理契约：颈线法出场判定经 decide_exit（execution.py 纯函数，颈线法专属
+# NecklineExitDecision 契约），replay() 仅调度不碰决策，杜绝回测/实盘分叉（design §3.2）。
+# caisen 遗产 check_exit 已 Task 6 废弃删除。
 # ============================================================================
 from backtest.replay import (  # noqa: F401
     replay,

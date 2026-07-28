@@ -178,7 +178,7 @@ python -m discovery publish   # 手动把冠军 publish 为 experiment DRAFT 版
 |------|-------------|------|
 | **参数发现引擎** | `python -m discovery` | Plan 1-4 闭环:L0 快照冻结 → L1 holdout OOS 裁判 → L2 采样并发 → L3 帕累托/DSR/TPE → L4 daemon → L5 publish 冠军至 experiment |
 | **实验版本中心** | experiment API | 实盘策略版本配置中心:版本切换 + 权重校验 + 审计日志,`resolve_active()` 发生效配置 |
-| **回测引擎** | ParamLab / CLI | `replay` 策略中立回测 + 异步任务队列 + 参数优化(training_loop),回测/实盘共用 `check_exit` 杜绝决策分叉 |
+| **回测引擎** | ParamLab / CLI | `replay` 策略中立回测 + 异步任务队列 + 参数优化(training_loop),回测/实盘共用 `decide_exit` 杜绝决策分叉 |
 | **颈线法策略** | CaisenScreen | 多空转折形态学(纯多头),颈线聚集带 + 压制验证 + 挂单回踩 + 分级止盈,当前唯一活跃策略 |
 | **数据中心** | DataLake | Tushare 20+ 数据集,registry 反射 + 同步状态(healthy/stale) |
 | ~~宏观驾驶舱~~ | Dashboard | (宏观 CTA / CreditRegime 已于 2026-07 下线;板块资金流端点保留,前端待适配) |

@@ -11,7 +11,8 @@ trade dict（出场逻辑归策略侧，引擎零感知）。
 与 caisen 形态的语义差异（已在 scan_at 处理）：
     - 信号去重：颈线法用 cooldown 交易日窗（caisen 用 neckline+bottom 价对签名）
     - 进场：挂单回踩 max_wait 天（caisen T+1 回踩成交）
-    - 出场：分级止盈 tp1_portion 加权（caisen 单笔全平 check_exit）
+    - 出场：分级止盈 tp1_portion 加权（caisen 单笔全平已随形态退役；现颈线法
+      decide_exit 单源 execution.py，Task 6 删 caisen 遗产 check_exit/ExitDecision）
     - rr：颈线法 avg_pnl_pct/risk_pct（caisen (exit-entry)/(entry-stop)）——同口径"风险倍数"
 """
 from __future__ import annotations

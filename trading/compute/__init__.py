@@ -22,7 +22,8 @@
     trading.io / trading.orchestrate / requests / xtquant 等任何 I/O 库。
 
 公开 API（按决策域分组）：
-    - 离场判定：check_exit, ExitDecision, ExitAction, ExitReason（exit.py）
+    - 离场枚举：ExitAction, ExitReason（颈线法 execution.py 单源；caisen 遗产 check_exit/
+      ExitDecision 已 Task 6 废弃删除——颈线法 decide_exit/NecklineExitDecision 是唯一离场契约）
     - 风控挡板：check_order, RiskDecision（risk.py）
     - 下单计划：build_orders_from_signals, PlannedOrder（plan.py）
     - 止损系列：compute_stop_price, check_stop_loss, check_take_profit,
@@ -34,11 +35,12 @@
 from __future__ import annotations
 
 # ============================================================================
-# 离场判定（exit.py）
+# 离场枚举（颈线法 execution.py 单源 · Task 6 废弃 caisen 遗产 check_exit/ExitDecision）
+# ExitAction/ExitReason 是跨形态共用纯枚举（无 caisen/颈线法业务逻辑），Task 4 已把
+# class 定义物理剪到 strategies/neckline/execution.py（decide_exit 主场）。本包 re-export
+# 透传保 from trading.compute import ExitAction 不破（trading→strategies 依赖 stop.py 先例）。
 # ============================================================================
-from trading.compute.exit import (  # noqa: F401
-    check_exit,
-    ExitDecision,
+from strategies.neckline.execution import (  # noqa: F401
     ExitAction,
     ExitReason,
 )
@@ -95,9 +97,7 @@ from trading.compute.types import (  # noqa: F401
 
 
 __all__ = [
-    # 离场判定
-    "check_exit",
-    "ExitDecision",
+    # 离场枚举（颈线法 execution.py 单源）
     "ExitAction",
     "ExitReason",
     # 风控挡板

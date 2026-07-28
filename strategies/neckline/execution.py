@@ -13,21 +13,19 @@
     strangler 红线：decide_exit 逻辑【零改动】于 simulate_exit:125-199（只搬成纯函数，
     优先级/阈值/trailing 全照搬）。Task 5 golden 守护、Task 9 实盘守护都依赖此等价性。
 
-── NecklineExitDecision vs ExitDecision ──
-    NecklineExitDecision：本模块新建（颈线法专属，含 portion 分级字段，simulate_exit 用）。
-    ExitDecision（trading/compute/exit.py:71）：caisen 遗产，check_exit 用（Task 6 删）。
-    两者字段不同——ExitDecision 无 portion（caisen 单笔全平），NecklineExitDecision 有
-    portion（颈线法分级 lot1/lot2）。故不共用 dataclass。
+── NecklineExitDecision（唯一离场契约 · Task 6 后 caisen 遗产已清）──
+    NecklineExitDecision：本模块专属契约（含 portion 分级字段，simulate_exit / 实盘
+    stop_loss_monitor 共用）。caisen 遗产 ExitDecision（无 portion，单笔全平）+ check_exit
+    已 Task 6 废弃删除——颈线法 decide_exit 是唯一离场判定，无双源真理隐患。
 
-── ExitAction/ExitReason 迁移（Controller #8）──
-    ExitAction(Enum)/ExitReason(Enum) 原 in trading/compute/exit.py:44-57（caisen 遗产），
-    颈线法 decide_exit 也要用（动作/原因枚举跨形态共用，纯枚举无 caisen 业务逻辑）。
-    迁移策略：class 定义【物理剪到】本模块（execution.py），exit.py 改
-    `from strategies.neckline.execution import ExitAction, ExitReason`（re-export 垫片），
-    保 check_exit:79 + ExitDecision:71 不破（Task 6 删 check_exit/ExitDecision 时一并清垫片）。
-    trading/compute/__init__.py 的 re-export 通过垫片透传，不破。
+── ExitAction/ExitReason 单源（Controller #8 · Task 4 物理剪入本模块）──
+    ExitAction(Enum)/ExitReason(Enum) class 定义原 in trading/compute/exit.py（caisen 遗产），
+    Task 4 把 class 定义【物理剪到】本模块（execution.py，decide_exit 主场）。Task 6 删除
+    exit.py 后，本模块是 ExitAction/ExitReason 唯一物理真身；trading/compute/__init__.py
+    re-export 直指本模块（trading→strategies 依赖 stop.py 先例），保
+    `from trading.compute import ExitAction` 不破。
 
-    ExitReason 本 task 新增 CANCEL_ON 成员（颈线法 pending 撤单专属，caisen 无此场景）。
+    ExitReason 含 CANCEL_ON 成员（颈线法 pending 撤单专属，caisen 无此场景）。
 """
 from __future__ import annotations
 

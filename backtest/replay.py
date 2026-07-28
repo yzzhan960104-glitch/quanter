@@ -7,8 +7,9 @@
     经 scan_at(symbol, df_T, T, state) 一站式产出 trade dict 列表，引擎汇入统计。
 
     出场逻辑归策略侧：颈线法 simulate_exit 是完整状态机（挂单回踩+撤单+分级止盈），
-    caisen 形态 _simulate_one_trade（T+1回踩+check_exit移动止盈）——两者都封装在各自
-    Strategy 实现里，引擎零感知。
+    经 decide_exit 单根 K 线判定（颈线法专属 NecklineExitDecision 契约）；caisen 形态
+    _simulate_one_trade（T+1回踩+移动止盈）已随形态代码退役删除——出场判定现单源于
+    strategies/neckline/execution.py，引擎零感知。
 
 解耦前（已搬走）：原 screener/plan/zigzag/_simulate_one_trade 形态专属逻辑迁至
     strategies/caisen_pattern.py（CaisenPatternStrategy 适配器，阶段E 随形态代码删）。
