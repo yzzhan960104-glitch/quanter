@@ -17,6 +17,76 @@ from __future__ import annotations
 
 
 # ============================================================================
+# plan Task 6（P0-2 max_wait）+ Task 9（R-3 trailing）：交易日口径日数差公共函数
+# ============================================================================
+def trading_days_between(start_date: str, end_date: str) -> int:
+    """两个日期之间的【交易日】数差（max_holding/trailing/max_wait 共用）。
+
+    物理意图（plan Task 6 + Task 9 公共依赖）：
+        回测的「持有 N 天」「max_wait N 天」「cooldown N 天」都是【交易日】单位（颈线法
+        EXEC_DEFAULTS），不是自然日。实盘对齐必须用交易日历算（否则周末会让窗口虚长 2 天）。
+
+    实现：从 calendar.fetch_trade_cal(end_date 年份) 取交易日列表，数 (start, end] 区间内的
+    交易日数（不含 start，含 end——约定：start 当日是 formed_at/entry_date，今日 end 已是
+    「下一个交易日」要判断是否超期，故 end 计入）。
+
+    边界（Why 保守容错）：
+        - start_date 缺失/解析失败 → 返 0（视为窗口内，挂单/不超期，向后兼容老 plan）
+        - end_date 缺失/解析失败 → 返 0
+        - calendar.fetch_trade_cal 异常 → 退化为自然日差（不抛，宁可粗算不阻断 pre_open）
+        - 跨年：start/end 在不同年份时合并两年 trade_cal 做差集
+    """
+    from datetime import datetime
+    try:
+        from trading import calendar
+    except Exception:
+        # 测试环境/异常 import 失败 → 自然日兜底（不抛）
+        return _natural_days_fallback(start_date, end_date)
+    try:
+        sd = datetime.strptime(start_date, "%Y-%m-%d")
+        ed = datetime.strptime(end_date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        # 日期缺失/格式错 → 0（保守窗口内）
+        return 0
+    if ed <= sd:
+        return 0
+    # 取 start/end 涉及的所有年份 trade_cal（合并，处理跨年）
+    years = set([sd.year, ed.year])
+    trade_days: set[str] = set()
+    for y in years:
+        try:
+            trade_days.update(calendar.fetch_trade_cal(y))
+        except Exception:
+            # 任一年 trade_cal 取失败 → 自然日兜底（保守不阻断）
+            return _natural_days_fallback(start_date, end_date)
+    # 数 (sd, ed] 区间内的交易日（不含 start，含 end——end 是「今日已到」的判断日）
+    from datetime import timedelta
+    cnt = 0
+    d = sd + timedelta(days=1)
+    while d <= ed:
+        if d.strftime("%Y-%m-%d") in trade_days:
+            cnt += 1
+        d += timedelta(days=1)
+    return cnt
+
+
+def _natural_days_fallback(start_date: str, end_date: str) -> int:
+    """calendar 不可用时退化为自然日差（保守上界：自然日 ≥ 交易日数）。
+
+    Why 保守：自然日差会把周末也算进去（窗口虚长 2~3 天），意味着信号更容易被判定
+    为「超期」——更保守（多过滤、少挂单），符合「宁漏勿滥」风控原则。
+    """
+    from datetime import datetime
+    try:
+        sd = datetime.strptime(start_date, "%Y-%m-%d")
+        ed = datetime.strptime(end_date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return 0
+    delta = (ed - sd).days
+    return max(0, delta)
+
+
+# ============================================================================
 # 海龟 trailing 止损离散（从 scripts/neckline_backtest.simulate_exit 迁出）
 # ============================================================================
 def compute_stop_price(

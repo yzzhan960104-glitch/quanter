@@ -56,7 +56,7 @@ from trading import (
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals
-from trading.compute.stop import should_trigger_stop
+from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between
 
 logger = logging.getLogger(__name__)
 
@@ -432,9 +432,26 @@ async def pre_open(date: str) -> dict:
 
     # ④ 逐单挂单 + raise 兜底（scope #7）
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
+    # plan Task 6（P0-2 max_wait 窗口）：pre_open 按 formed_at+max_wait 过滤超期信号。
+    # 物理意图：回测信号后 max_wait 天窗口等回踩；实盘原口径只挂 1 天（次日 pre_open 撤昨日），
+    # 改为窗口内每日可挂（回测对齐）。窗口外（trading_days > max_wait）的信号视为过期跳过。
+    # 边界：order 缺 formed_at → days=0 视窗口内挂单（向后兼容老 plan）；缺 max_wait → 用 _trade_cfg 默认 5。
+    today_for_max_wait = datetime.now().strftime("%Y-%m-%d")
+    cfg_max_wait = int(os.getenv("TRADE_MAX_WAIT", "5"))
     n_submitted = 0
+    n_expired = 0
     for o in plan["orders"]:
         od = o["order"]
+        # max_wait 窗口过滤（plan Task 6）
+        formed_at = o.get("formed_at")
+        if formed_at:
+            order_max_wait = int(o.get("max_wait") or cfg_max_wait)
+            days_since = _trading_days_between(formed_at, today_for_max_wait)
+            if days_since > order_max_wait:
+                n_expired += 1
+                logger.info("pre_open 跳过超期信号 symbol=%s formed_at=%s days=%d > max_wait=%d",
+                            od["symbol"], formed_at, days_since, order_max_wait)
+                continue
         order_req = OrderRequest(
             symbol=od["symbol"], qty=od["qty"], side=od["side"], price=od["price"],
         )
@@ -452,8 +469,8 @@ async def pre_open(date: str) -> dict:
             logger.warning("pre_open 挂单未成功 symbol=%s state=%s msg=%s",
                            od["symbol"], result.get("state"), result.get("message"))
 
-    logger.info("pre_open 完成 date=%s submitted=%d/%d mode=%s",
-                date, n_submitted, len(plan["orders"]), _mode())
+    logger.info("pre_open 完成 date=%s submitted=%d/%d expired=%d mode=%s",
+                date, n_submitted, len(plan["orders"]), n_expired, _mode())
     return {"submitted": n_submitted, "mode": _mode()}
 
 

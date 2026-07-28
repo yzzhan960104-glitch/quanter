@@ -375,6 +375,94 @@ def test_trade_cfg_stop_atr_mult_env_overrides(monkeypatch):
 
 
 # ============================================================================
+# 4.6 Task 6（P0-2 max_wait 等待窗口）：pre_open 按 formed_at+max_wait 过滤超期信号
+# ============================================================================
+def test_pre_open_skip_expired_signal(monkeypatch):
+    """pre_open：order.formed_at 距今 > max_wait 交易日 → 跳过；<= max_wait → 挂。
+
+    物理意图（plan Task 6 · 对齐缺口 P0-2）：
+        回测信号后 max_wait 天窗口等回踩，实盘只挂 1 天（次日 pre_open 撤昨日）。
+        pre_open 按 ``_trading_days_between(formed_at, today) > max_wait`` 过滤超期。
+    """
+    # 已确认计划，单 order formed_at=10 交易日之前，max_wait=5 → 应跳过不挂
+    orders = [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0,
+        "formed_at": "2026-07-01",   # 远早于 today（2026-07-22），距 > 5 交易日
+        "max_wait": 5,
+    }]
+    trading_plan.save_plan("2099-01-02", orders)
+    trading_plan.confirm_plan("2099-01-02")
+
+    # monkeypatch _trading_days_between 返 10（> max_wait=5）→ 该单应被跳过
+    monkeypatch.setattr(engine, "get_gateway", lambda: object())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 10)
+
+    submitted = []
+    async def _fake_submit(order, **kw):
+        submitted.append(order.symbol)
+        return {"state": "SUBMITTED"}
+    monkeypatch.setattr(engine, "_submit", _fake_submit)
+
+    result = asyncio.run(engine.pre_open("2099-01-02"))
+    assert submitted == [], "超期信号（formed_at 距今 > max_wait）应被跳过不挂"
+    assert result["submitted"] == 0
+
+
+def test_pre_open_within_max_wait_window_is_placed(monkeypatch):
+    """pre_open：order.formed_at 距今 <= max_wait → 挂单（窗口内每日可挂）。"""
+    orders = [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0,
+        "formed_at": "2026-07-18",   # 3 交易日之前
+        "max_wait": 5,                # <= max_wait → 应挂
+    }]
+    trading_plan.save_plan("2099-01-02", orders)
+    trading_plan.confirm_plan("2099-01-02")
+
+    monkeypatch.setattr(engine, "get_gateway", lambda: object())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 3)
+
+    submitted = []
+    async def _fake_submit(order, **kw):
+        submitted.append(order.symbol)
+        return {"state": "SUBMITTED"}
+    monkeypatch.setattr(engine, "_submit", _fake_submit)
+
+    result = asyncio.run(engine.pre_open("2099-01-02"))
+    assert submitted == ["300001.SZ"]
+    assert result["submitted"] == 1
+
+
+def test_pre_open_formed_at_missing_fallback_places(monkeypatch):
+    """pre_open：order 缺 formed_at → days=0 视作窗口内，挂单（向后兼容老 plan）。"""
+    orders = [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0,
+        # 无 formed_at（老 plan，Task 2 前落盘的）
+        "max_wait": 5,
+    }]
+    trading_plan.save_plan("2099-01-02", orders)
+    trading_plan.confirm_plan("2099-01-02")
+
+    monkeypatch.setattr(engine, "get_gateway", lambda: object())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 0)
+
+    submitted = []
+    async def _fake_submit(order, **kw):
+        submitted.append(order.symbol)
+        return {"state": "SUBMITTED"}
+    monkeypatch.setattr(engine, "_submit", _fake_submit)
+
+    result = asyncio.run(engine.pre_open("2099-01-02"))
+    assert submitted == ["300001.SZ"]
+    assert result["submitted"] == 1
+
+
+# ============================================================================
 # 5. TradingEngine 装配：实例化即注册 4 cron job（不 start，不真起 scheduler）
 # ============================================================================
 def test_engine_registers_four_cron_jobs():
