@@ -1,0 +1,305 @@
+# -*- coding: utf-8 -*-
+"""stop_loss_monitor 切 decide_exit + pending cancel_on + tp 价格同源验证（Task 9 · U6）。
+
+物理定位（spec §2 目标 3/6 + §4.6 + D10/D11/D12 · 最高风险 · 盘中关键路径）：
+    实盘 stop_loss_monitor（盘中止损巡检）切调 decide_exit（Task 4 的执行单源纯函数），
+    让实盘与回测 simulate_exit 共用执行判定。补 pending cancel_on（D11）。
+    盘中关键路径：漏止损/误止损/重复挂单 = 真金损失，should_trigger_stop fallback（D12）
+    必留不裸奔，bar 用 xtdata 当日累积 high/low（R7 防误判）。
+
+测试边界（Grill Me）：
+    - 绝不真起 APScheduler、绝不真行情/真单：TradingEngine 仅实例化（装配 job 不 start）；
+      stop_loss_monitor 内部 gw / get_quotes / _submit / load_plan / position_book 全 patch。
+    - 6 测覆盖 decide_exit 四分支（STOP_LOSS/TIMEOUT/HOLD）+ D12 fallback + pending cancel_on
+      + tp1/tp2 价格同源验证（build_orders cfg 对比 simulate_exit cfg）。
+
+风控红线固化（R6/R7）：
+    - D12 fallback：decide_exit 抛异常 → 降级 should_trigger_stop，盘中绝不裸奔；
+    - R7 bar 防御：high/low 来自 xtdata 当日累积快照（get_quotes 返 tick.high/low），
+      非单 tick last_price——避免漏判盘中摸高/探底。
+"""
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from trading.engine import TradingEngine, stop_loss_monitor
+
+
+# ============================================================================
+# 公共 fixture：构造一个 holding 期 monitor_ctx（state + cfg + 持仓 + quote）
+# ============================================================================
+SYM = "300001.SZ"
+
+
+def _holding_ctx(*, stop=9.5, tp1=11.0, tp2=12.0, neckline=10.0, atr=0.5,
+                 holding_days=3, is_last=False, max_holding=15,
+                 stop_atr_mult=1.0, grace=5, step=0.1, floor=0.5,
+                 tp1_portion=0.5):
+    """构造 stop_loss_monitor 主路径需要的 monitor_ctx[symbol]。
+
+    state/cfg 字段对齐 decide_exit 契约（execution.py:131-201）+ simulate_exit cfg
+    （backtest.py:177-183）。stop 是【已盘后演进】的当日固定止损价（compute_stop_price
+    盘后算好写 plan，盘中不移动，spec「盘中不调整」红线）。
+    """
+    return {
+        "state": {
+            "phase": "holding",
+            "entry": 10.0,
+            "stop": stop,           # plan 里的当日固定止损（已 trailing 演进）
+            "tp1": tp1, "tp2": tp2,
+            "neckline": neckline, "atr": atr,
+            "holding_days": holding_days,
+            "is_last": is_last,
+            "lot1_open": True, "lot2_open": True,
+        },
+        "cfg": {
+            "stop_atr_mult": stop_atr_mult,
+            "trailing_grace": grace, "trailing_step": step, "trailing_floor": floor,
+            "tp1_portion": tp1_portion, "max_holding": max_holding,
+        },
+    }
+
+
+def _run_monitor(monitor_ctx, positions, quotes, submitted=None, gw=None,
+                 pending_ctx=None):
+    """跑 stop_loss_monitor 一次，patch 所有外部副作用。
+
+    - positions: gw._fetch_broker_positions 返回（{sym: {volume, avg_price}}）
+    - quotes: qmt_market_data.get_quotes 返回（{sym: {last_price, high, low}}）
+    - submitted: 收集 _submit 调用（list，append OrderRequest）
+    - gw: 可注入 mock gw（None 时造一个 AsyncMock _fetch_broker_positions）
+    - pending_ctx: {sym: cancel_on} pending 期撤单上下文（D11）
+    """
+    if gw is None:
+        gw = MagicMock()
+        gw._fetch_broker_positions = AsyncMock(return_value=positions)
+    submitted_list: list = []
+
+    async def fake_submit(order, *, confirm=True):
+        if submitted is not None:
+            submitted.append(order)
+        return {"order_id": "fake", "state": "FILLED"}
+
+    with patch("trading.engine.get_gateway", return_value=gw), \
+         patch("trading.engine.calendar") as cal, \
+         patch("trading.engine.qmt_market_data") as qmd, \
+         patch("trading.engine._submit", new=fake_submit):
+        # calendar.is_intraday_session 返 truthy（盘中）；is_trading_day 同理
+        cal.is_intraday_session.return_value = True
+        cal.is_trading_day.return_value = True
+        qmd.get_quotes = AsyncMock(return_value=quotes)
+        return asyncio.run(stop_loss_monitor(
+            monitor_ctx=monitor_ctx, pending_ctx=pending_ctx))
+
+
+# ============================================================================
+# 测试 1：STOP_LOSS — low ≤ stop → decide_exit 返 CLOSE/STOP_LOSS → 发卖出单
+# ============================================================================
+def test_monitor_stop_loss_via_decide_exit():
+    """low ≤ stop（plan 固定止损价）→ decide_exit STOP_LOSS → _submit 发卖出单。
+
+    物理意图（resolution 2）：stop_loss_monitor 切 decide_exit 后，止损判定行为
+    等价 should_trigger_stop（price≤stop → CLOSE/STOP_LOSS）。bar.low 取 xtdata 当日累积
+    最低（R7 防御：非单 tick，避免漏判盘中探底穿止损后反弹）。
+    """
+    ctx = _holding_ctx(stop=9.5)
+    submitted: list = []
+    # quote.high/low 是 xtdata 当日累积（get_full_tick 返），close=last_price
+    quotes = {SYM: {"last_price": 9.4, "high": 10.2, "low": 9.3}}
+    positions = {SYM: {"volume": 100, "avg_price": 10.0}}
+    result = _run_monitor({SYM: ctx}, positions, quotes, submitted=submitted)
+    # 断言：触发 1 次，发了 1 张卖出单（qty=持仓 100，side=sell）
+    assert result["stop_triggered"] == 1
+    assert len(submitted) == 1
+    assert submitted[0].side == "sell"
+    assert submitted[0].qty == 100
+
+
+# ============================================================================
+# 测试 2：TIMEOUT — holding_days >= max_holding + is_last → CLOSE/TIMEOUT → 发卖
+# ============================================================================
+def test_monitor_timeout_via_decide_exit():
+    """holding_days >= max_holding → is_last=True → decide_exit TIMEOUT → 发卖出单。
+
+    物理意图（resolution 6）：实盘无「末根 K 线」概念，设
+    is_last = (holding_days >= max_holding)（超期即当末根）→ decide_exit TIMEOUT
+    触发 CLOSE/TIMEOUT。【不判浮盈 threshold】（brief 描述不精确，以 decide_exit is_last 为准，
+    对齐 simulate_exit:193-199）。
+    """
+    ctx = _holding_ctx(stop=9.0, holding_days=15, is_last=True, max_holding=15)
+    submitted: list = []
+    # decide_exit 内部 compute_stop_price(15 天, grace=5)：eff_mult=max(1.0-(15-5)×0.1,0.5)=0.5
+    # → stop=10-0.5×0.5=9.75。low=9.8 > 9.75（不破止损），high=10.2 < tp1=11.0（未触止盈）
+    # → 进 is_last TIMEOUT 分支。
+    quotes = {SYM: {"last_price": 9.8, "high": 10.2, "low": 9.8}}
+    positions = {SYM: {"volume": 200, "avg_price": 10.0}}
+    result = _run_monitor({SYM: ctx}, positions, quotes, submitted=submitted)
+    assert result["stop_triggered"] == 1
+    assert len(submitted) == 1
+    assert submitted[0].side == "sell"
+    assert submitted[0].qty == 200
+
+
+# ============================================================================
+# 测试 3：HOLD — 未触发任何条件 → decide_exit HOLD → 跳过不发单
+# ============================================================================
+def test_monitor_hold_when_no_trigger():
+    """low > compute_stop_price(算出的 trailing stop) 且 high < tp1 且非 is_last → HOLD → 不发单。
+
+    物理意图：decide_exit 四分支均未触发 → 继续持有。stop_loss_monitor 不发卖单，
+    不误动持仓（误止损 = 真金损失）。
+
+    ⚠️ decide_exit 内部用 compute_stop_price 重算 trailing stop（不读 state["stop"]，
+    state.stop 仅 _stoploss 观测/fallback 用）。holding_days=3 在 grace=5 内 →
+    stop=base_stop=neckline-stop_atr_mult×ATR=10-1.0×0.5=9.5。故 low=9.6 > 9.5 才不破止损。
+    """
+    ctx = _holding_ctx(stop=9.5, tp1=11.0, tp2=12.0, holding_days=3,
+                      is_last=False, max_holding=15, stop_atr_mult=1.0,
+                      grace=5, step=0.1, floor=0.5)
+    submitted: list = []
+    # low=9.6 > compute_stop_price(9.5)（不破止损）；high=10.2 < tp1=11.0（未触止盈）；非 is_last
+    quotes = {SYM: {"last_price": 10.0, "high": 10.2, "low": 9.6}}
+    positions = {SYM: {"volume": 100, "avg_price": 10.0}}
+    result = _run_monitor({SYM: ctx}, positions, quotes, submitted=submitted)
+    assert result["stop_triggered"] == 0
+    assert len(submitted) == 0
+
+
+# ============================================================================
+# 测试 4：D12 fallback — decide_exit 抛异常 → 降级 should_trigger_stop（不裸奔）
+# ============================================================================
+def test_monitor_decide_exit_fallback(monkeypatch):
+    """decide_exit 抛异常 → 降级 should_trigger_stop(price, sp) 兜底（D12 红线）。
+
+    物理意图（resolution 2 D12 红线 · 盘中不裸奔）：
+        decide_exit 是 Task 4 新挂的纯函数，实盘首次切用它，state/bar/cfg 构造任何
+        异常（compute_stop_price 除零、state 缺键、bar NaN 等）绝不能让止损监控整体
+        崩溃——盘中持仓裸奔 = 真金损失。try-except 降级 should_trigger_stop(price, sp)
+        （原 :684 逻辑，已证等价 decide_exit STOP_LOSS 分支），保底不裸奔。
+        fallback 必须有日志告警（decide_exit 异常降级）。
+    """
+    ctx = _holding_ctx(stop=9.5)
+    submitted: list = []
+    quotes = {SYM: {"last_price": 9.4, "high": 10.2, "low": 9.3}}
+    positions = {SYM: {"volume": 100, "avg_price": 10.0}}
+
+    # patch decide_exit 抛异常（模拟 state/bar 构造错或 compute_stop_price 异常）
+    import trading.engine as eng_mod
+    with patch.object(eng_mod, "decide_exit", side_effect=RuntimeError("构造 state 错")):
+        result = _run_monitor({SYM: ctx}, positions, quotes, submitted=submitted)
+    # fallback 命中：should_trigger_stop(9.4, 9.5)=True → 发卖出单（不裸奔）
+    assert result["stop_triggered"] == 1
+    assert len(submitted) == 1
+    assert submitted[0].side == "sell"
+    assert result.get("fallback_used") == 1   # 告警计数
+
+
+# ============================================================================
+# 测试 5：tp1/tp2 价格同源 — _place_take_profit 读 plan 与 build_orders 同 mult
+# ============================================================================
+def test_place_take_profit_tp1_tp2_two_orders_and_same_source():
+    """_place_take_profit 读 plan.tp1/tp2 挂两腿，价格与 build_orders_from_signals 同 cfg。
+
+    物理意图（resolution 1 · 验证不重写）：
+        _place_take_profit 的两腿逻辑（Task 1/8 已实现 use_two_legs），价格来自 plan orders
+        的 tp1/tp2 字段。本测试验证【价格同源】——build_orders_from_signals 用 stop_cfg 的
+        tp1_h_mult/tp_h_mult 算 tp1/tp2 落盘，_place_take_profit 读同 plan 挂单；
+        simulate_exit 用 exec[id]_cfg 同 mult 算同价（backtest.py:125-126）。三处同 mult 同源。
+
+    验证三步：
+      1) build_orders 用 stop_cfg 算 tp1/tp2（mult=1.0/2.0，H=neckline-bottom）；
+      2) _place_take_profit 读 plan 的 tp1/tp2 挂两张限价卖单（_submit × 2）；
+      3) 挂单价 == build_orders 算出的 tp1/tp2（同源，无漂移）。
+    """
+    from strategies.neckline.signal import Signal
+    from trading.compute.plan import build_orders_from_signals
+
+    # 构造一个信号：neckline=10, bottom=8, atr=0.5, entry=10 → H=2
+    # tp1 = 10 + 1.0×2 = 12.0；tp2 = 10 + 2.0×2 = 14.0（stop_cfg mult 同 NecklineConfig 默认）
+    sig = Signal(symbol=SYM, entry_price=10.0, neckline=10.0, bottom=8.0, atr=0.5,
+                 formed_at="2026-07-28")
+    orders = build_orders_from_signals(
+        [sig], capital=100000.0, pos_cap=0.05,
+        atr_map={SYM: 0.5},
+        stop_cfg={"stop_atr_mult": 1.0, "tp_h_mult": 2.0, "max_wait": 5,
+                  "tp1_h_mult": 1.0, "tp1_portion": 0.5})
+    assert len(orders) == 1
+    o = orders[0]
+    # build_orders 算出的 tp1/tp2（同 simulate_exit:125-126 的 c_star + mult×H）
+    assert abs(o.tp1 - 12.0) < 1e-9
+    assert abs(o.take_profit - 14.0) < 1e-9
+
+    # 把 build_orders 结果落盘成 plan，再让 _place_take_profit 读它挂两腿
+    plan = {
+        "confirmed": True,
+        "orders": [{
+            "order": {"symbol": SYM, "qty": int(o.order.qty), "side": "buy",
+                      "price": round(o.order.price, 2)},
+            "stop_price": round(o.stop_price, 2),
+            "take_profit": round(o.take_profit, 2),   # = tp2
+            "tp1": round(o.tp1, 2),
+            "tp1_portion": o.tp1_portion,
+            "neckline": 10.0, "atr": 0.5,
+        }],
+    }
+    eng = TradingEngine()
+    submitted: list = []
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(
+             side_effect=lambda order, **kw: (submitted.append(order),
+                                              {"state": "FILLED"})[1])):
+        asyncio.run(eng._place_take_profit(SYM, 1000, 10.0, order_id="ord-x"))
+
+    # 两腿都挂了（tp1 portion=0.5 × 1000 = 500 整手；tp2 = 500）
+    assert len(submitted) == 2
+    prices = sorted(float(o.price) for o in submitted)
+    # 同源断言：挂单价就是 build_orders 算的 tp1=12.0 / tp2=14.0（无漂移）
+    assert prices == [12.0, 14.0]
+    # 两腿合计 = filled_qty（全平）
+    assert sum(int(o.qty) for o in submitted) == 1000
+
+
+# ============================================================================
+# 测试 6：pending cancel_on — 挂单等待期 high ≥ cancel_on → 撤买单（D11）
+# ============================================================================
+def test_pending_cancel_on_during_wait():
+    """pending 期（挂买单未成交）high ≥ cancel_on → 撤买单（D11，对齐 simulate_exit:130）。
+
+    物理意图（resolution 4 · D11 新增 · 当前实盘缺这环）：
+        挂单等待期（pre_open 挂买单未成交期间），盘中监控 high≥cancel_on → 涨幅已兑现，
+        回踩是退潮，撤买单不买（对齐 simulate_exit:130 skip_target_met）。cancel_on 价从
+        plan orders（build_orders 落盘，颈线+cancel_thresh_mult×H）。
+
+    验证：
+      1) pending_ctx 注入 {sym: cancel_on}；
+      2) quote.high ≥ cancel_on → 调 gw.cancel_order 撤该 sym 的 pending 买单；
+      3) 不发卖出单（pending 期无持仓可卖）。
+    """
+    cancel_on = 11.5   # 颈线 10 + 0.75×H(H=2)，触线即撤
+    pending_ctx = {SYM: cancel_on}
+    quotes = {SYM: {"last_price": 11.8, "high": 11.8, "low": 11.0}}  # high ≥ cancel_on
+    # pending 期无持仓（买单未成交），positions 空
+    positions = {}
+    cancelled: list = []
+
+    gw = MagicMock()
+    gw._fetch_broker_positions = AsyncMock(return_value=positions)
+    # gw.query_orders(cancelable_only=True) 返该 sym 的 pending 买单
+    gw.query_orders = AsyncMock(return_value=[
+        {"order_id": "ord-pending-1", "stock_code": SYM, "order_type": 23,
+         "order_status": 48, "state": "PENDING"}
+    ])
+    gw.cancel_order = AsyncMock(side_effect=lambda oid: (cancelled.append(oid),
+                                                         MagicMock(order_id=oid,
+                                                                   state="CANCELED",
+                                                                   message="ok"))[1])
+
+    result = _run_monitor({}, positions, quotes, submitted=[],
+                          gw=gw, pending_ctx=pending_ctx)
+    # 断言：撤了 1 单（pending 买单），未发卖单
+    assert result.get("pending_cancelled") == 1
+    assert len(cancelled) == 1
+    assert cancelled[0] == "ord-pending-1"

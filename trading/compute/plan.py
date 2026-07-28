@@ -66,6 +66,11 @@ class PlannedOrder:
     # 分级止盈第一档（Task 7）：tp1=None 表示 stop_cfg 未配置，退回 tp2 单笔全平（零回归）
     tp1: float | None = None
     tp1_portion: float = 0.0         # 分级止盈 tp1 分配比例（默认 0 → 全量 tp2，向后兼容）
+    # pending 期撤单阈值（Task 9 · D11 · 对齐 simulate_exit:128-129）：
+    # cancel_on = 颈线 + cancel_thresh_mult×H：挂单等待期 high≥此价 → 涨幅已兑现撤买单
+    # （颈线法专属，过滤「猛突破后回踩」陷阱）。None=不撤单放飞（cancel_thresh_mult 未配）。
+    # 实盘 stop_loss_monitor pending_ctx 读此字段盘中撤买单（simulate_exit:130 skip_target_met）。
+    cancel_on: float | None = None
 
 
 def build_orders_from_signals(
@@ -97,6 +102,10 @@ def build_orders_from_signals(
     # _place_take_profit 检测 falsy 退回 tp2 单笔全平，零回归。
     tp1_mult = stop_cfg.get("tp1_h_mult")
     tp1_portion = float(stop_cfg.get("tp1_portion", 0.0) or 0.0)
+    # pending 期撤单阈值倍数（Task 9 · D11）：cancel_thresh_mult×H，None=不撤单放飞。
+    # Why 显式 .get：老 stop_cfg（Task 9 前）不传此键，None 让下游 _stoploss pending_ctx
+    # 检测 falsy 不塞（不撤单），零回归（向后兼容）。
+    cancel_thresh_mult = stop_cfg.get("cancel_thresh_mult")
     out: list[PlannedOrder] = []
     for s in signals:
         sym = s.symbol
@@ -135,6 +144,11 @@ def build_orders_from_signals(
         # 成交，在 tp1 锁定部分浮利后剩余博 tp2 形态目标位；simulate_exit 同口径计算。
         # tp1_mult 缺省（None）→ tp1=None，下游 _place_take_profit 退回 tp2 单笔全平（零回归）。
         tp1_price = (float(neckline) + tp1_mult * h) if tp1_mult is not None else None
+        # pending 期撤单阈值（Task 9 · D11 · 对齐 simulate_exit:128-129）：
+        # cancel_on = 颈线 + cancel_thresh_mult×H。cancel_thresh_mult 缺省（None）→ cancel_on=None
+        # （下游 _stoploss pending_ctx 检测 falsy 不塞，不撤单放飞，向后兼容）。
+        cancel_on_price = ((float(neckline) + cancel_thresh_mult * h)
+                           if cancel_thresh_mult is not None else None)
         out.append(PlannedOrder(
             order=OrderRequest(symbol=sym, qty=float(qty), side="buy", price=float(entry)),
             stop_price=stop_price, take_profit=take_profit, neckline=float(neckline),
@@ -150,5 +164,7 @@ def build_orders_from_signals(
             rr=s.rr if s.rr is not None else 0.0,
             # Task 7：tp1/tp1_portion（None/0 → 下游退回 tp2 单笔全平，向后兼容）
             tp1=tp1_price, tp1_portion=tp1_portion,
+            # Task 9：cancel_on（None → 下游 pending_ctx 不塞，不撤单放飞，向后兼容）
+            cancel_on=cancel_on_price,
         ))
     return out
