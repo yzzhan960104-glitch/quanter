@@ -303,3 +303,38 @@ def test_pending_cancel_on_during_wait():
     assert result.get("pending_cancelled") == 1
     assert len(cancelled) == 1
     assert cancelled[0] == "ord-pending-1"
+
+
+# ============================================================================
+# 测试 7（I-2）：TAKE_PROFIT skip — monitor 不发市价单，交 _place_take_profit 预挂限价单（D10）
+# ============================================================================
+def test_monitor_take_profit_skipped_for_premarked_limit():
+    """high ≥ tp1 → decide_exit 返 CLOSE/TAKE_PROFIT/portion<1.0 → monitor **不发卖单**。
+
+    物理意图（I-1 修正 · spec D10 物理边界 · reviewer 方案 A）：
+        实盘止盈由 _place_take_profit（engine.py:1899）在买单成交时预挂 tp1+tp2 限价卖单
+        撮合（D10 物理边界，spec §4.6）。monitor 是 holding 巡检，decide_exit 无状态——
+        monitor_ctx.state.lot1_open/lot2_open 默认 True 不翻转（限价单成交无回报改 state），
+        若 monitor 对 TAKE_PROFIT 分支发市价单：tp1 限价单成交后下次巡检 decide_exit 仍
+        返 CLOSE/TAKE_PROFIT → monitor 再发 tp1 市价部分卖单 = 与已成交限价单重复（滑点
+        差异 + broker 拒单风险）。
+
+        故 monitor 收到 dec.reason == TAKE_PROFIT 时 **不发单 continue 跳过**（TP 完全交
+        预挂限价单）。本测试验证此 skip 行为。
+
+    验证：
+      1) 构造 high≥tp1 的 bar（decide_exit priority 3 返 CLOSE/TAKE_PROFIT/portion<1.0）；
+      2) 断言 monitor **不发卖单**（_submit 未被调，submitted 为空）；
+      3) 断言 stop_triggered==0（未触发止损/超期市价单）。
+    """
+    ctx = _holding_ctx(stop=9.5, tp1=11.0, tp2=12.0, holding_days=3,
+                      is_last=False, max_holding=15, tp1_portion=0.5)
+    submitted: list = []
+    # high=11.2 ≥ tp1=11.0 → decide_exit priority 3 命中 → CLOSE/TAKE_PROFIT/portion=0.5
+    # （low=9.6 > compute_stop_price(9.5) 不破止损；非 is_last 不超期）
+    quotes = {SYM: {"last_price": 11.2, "high": 11.2, "low": 9.6}}
+    positions = {SYM: {"volume": 100, "avg_price": 10.0}}
+    result = _run_monitor({SYM: ctx}, positions, quotes, submitted=submitted)
+    # 断言：TAKE_PROFIT 被 skip（不发市价单，交 _place_take_profit 预挂限价单）
+    assert result["stop_triggered"] == 0
+    assert len(submitted) == 0

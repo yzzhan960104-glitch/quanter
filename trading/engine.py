@@ -112,10 +112,12 @@ def _trade_cfg() -> dict:
         "tp1_h_mult": float(os.getenv("TRADE_TP1_H_MULT", "1.0")),
         "tp1_portion": float(os.getenv("TRADE_TP1_PORTION", "0.5")),
         # pending 期撤单阈值（Task 9 · D11 · 对齐 simulate_exit:128 + NecklineConfig EXEC）：
-        # cancel_on = 颈线 + cancel_thresh_mult×H。Why 默认 0.75（与 NecklineConfig
-        # cancel_thresh_mult 默认对齐，颈线法 EXEC_DEFAULTS）：挂单等待期 high≥此价 → 涨幅
-        # 已兑现撤买单（过滤「猛突破后回踩」陷阱）。env 缺省 → 对齐回测；显式 env 可覆盖。
-        "cancel_thresh_mult": float(os.getenv("TRADE_CANCEL_THRESH_MULT", "0.75")),
+        # cancel_on = 颈线 + cancel_thresh_mult×H。I-3 修正：默认 1.0（对齐回测 EXEC_DEFAULTS
+        # backtest.py:49 + NecklineConfig schema.py:45，二者均为 1.0；原 Task 9 误设 0.75
+        # 致实盘 env 缺省与回测分叉，违背 spec D9/「回测实盘一套逻辑」宗旨）。
+        # 物理意图：挂单等待期 high≥此价 → 涨幅已兑现撤买单（过滤「猛突破后回踩」陷阱）。
+        # env 缺省 → 对齐回测基准 1.0；显式 env 可覆盖（灰度调参用）。
+        "cancel_thresh_mult": float(os.getenv("TRADE_CANCEL_THRESH_MULT", "1.0")),
         # 占位（M1）：海龟 trailing 动态止损参数——grace/step/floor 三件套本 task 未实际消费，
         # compute_stop_price 盘后重算（Task2 已就绪）需 Task 10 在引擎状态层维护
         # {symbol: stop_price} 并每日/盘中更新后注入 stop_loss_monitor；本 task 的
@@ -750,12 +752,29 @@ async def stop_loss_monitor(
                 dec = None
             else:
                 # ── 按 decide_exit action 分发（等价 simulate_exit:208-254 的分发循环单根）──
+                # 分发三路径（I-1 修正 · spec D10 物理边界 · reviewer 方案 A）：
+                #   ① STOP_LOSS/TIMEOUT（CLOSE/STOP_LOSS | CLOSE/TIMEOUT）→ monitor 发市价卖单
+                #      （止损/超期是 monitor 职责，无预挂单，必须 monitor 主动平）。
+                #   ② TAKE_PROFIT（CLOSE/TAKE_PROFIT，含 portion<1 tp1 与 portion=1.0 tp2）
+                #      → monitor **不发单跳过**（continue）：实盘止盈由 _place_take_profit
+                #      （engine.py:1899）预挂 tp1+tp2 限价单撮合（D10 物理边界，spec §4.6）。
+                #      Why skip：decide_exit 是无状态纯函数，monitor_ctx.state.lot1_open/
+                #      lot2_open 默认 True 不翻转（限价单成交无回报改 state），tp1 限价单
+                #      成交后下次巡检 decide_exit priority 3 仍返 CLOSE/TAKE_PROFIT → monitor
+                #      再发一笔 tp1 市价部分卖单 = 与已成交限价单重复（滑点差异 + broker 拒单
+                #      风险）。skip 消除重复窗口，TP 完全交预挂限价单——符合 D10。
+                #   ③ HOLD → 跳过（decide_exit 已判无需离场）。
                 if dec.action is ExitAction.CLOSE:
-                    # CLOSE/STOP_LOSS | CLOSE/TIMEOUT | CLOSE/TAKE_PROFIT（portion>=1 全平）
-                    # → 发卖出单（市价=last_price，对齐 Task 9 前的 _submit 路径）。
-                    # 注：实盘 monitor 是 holding 巡检，decide_exit holding 分支不会返
-                    # CLOSE/TAKE_PROFIT portion<1（tp1 盘中由 _place_take_profit 限价单成交，
-                    # 不走 monitor；但若返了 portion<1 也按 portion 发部分卖单，对齐回测语义）。
+                    if dec.reason is ExitReason.TAKE_PROFIT:
+                        # I-1：TP 分支交 _place_take_profit 预挂限价单，monitor 不发市价单
+                        # （D10 物理边界：实盘止盈=限价单预挂撮合，非市价追平）。日志观测用。
+                        logger.info(
+                            "【TP 跳过】%s decide_exit %s/%s portion=%.2f —— TP 由 _place_take_profit"
+                            " 预挂限价单撮合，monitor 跳过不发市价单（D10 物理边界，防与预挂重复）",
+                            sym, dec.action.name, dec.reason.name, dec.portion)
+                        continue   # TP 交预挂，不走 fallback
+                    # STOP_LOSS | TIMEOUT（CLOSE，portion=1.0 全平）→ 发市价卖出单
+                    # （止损/超期是 monitor 职责，对齐 Task 9 前的 _submit 路径）。
                     sell_qty = int(qty) if dec.portion >= 1.0 else int(qty * dec.portion / 100) * 100
                     if sell_qty > 0:
                         try:
@@ -774,7 +793,7 @@ async def stop_loss_monitor(
                                 "【止损/超时触发】%s 卖出 %s 股 @%s（decide_exit %s/%s portion=%.2f mode=%s）",
                                 sym, sell_qty, price, dec.action.name, dec.reason.name,
                                 dec.portion, _mode())
-                    continue   # decide_exit 已决策（CLOSE 或 HOLD），不走 fallback
+                    continue   # decide_exit 已决策（CLOSE），不走 fallback
                 # HOLD → 跳过不发单（decide_exit 已判无需离场）
                 if dec.action is ExitAction.HOLD:
                     continue
@@ -887,10 +906,25 @@ def _scan_expired_positions(today: str, max_holding: int) -> list[dict]:
         - get_entry_dates 仅返 qty!=0 且 entry_date NOT NULL 的持仓（Task 1 前老数据无
           entry_date 视作未超期，向后兼容——不盲平无周期信息的持仓）；
         - holding_days<=max_holding 视窗口内不标（含 ==：第 max_holding 日仍给足机会）。
+
+    I-4 口径澄清（与 monitor is_last 的优先级语义，**不改运算符**）：
+        本函数用 `holding_days > max_holding`（严格大于，第 max_holding+1 日才标），
+        而 monitor is_last 用 `holding_days >= max_holding`（第 max_holding 日即市价强平）。
+        Why `>` 非 `>=`（兜底设计，防同日双卖）：
+          - 第 max_holding 日：monitor is_last=True 先触发，市价优先平仓（对齐回测 is_last
+            语义，市价成交）；
+          - 第 max_holding+1 日：本函数才标超期，post_close 写 expired_positions → 次日
+            pre_open 跌停价兜底平（处理 monitor 漏掉的标的：如 monitor 当日崩、断线、
+            持仓查询失败等）。
+        若改 `>=`：post_close 与 monitor 同日触发——monitor 市价先平后 post_close 跌停价
+        再挂卖 = 卖空风险（持仓已平再挂卖单）。故 `>` 是兜底设计，与 monitor `>=` 错位
+        一日，互不冲突。
     """
     expired: list[dict] = []
     for sym, entry_date in _position_book.get_entry_dates().items():
         holding_days = _trading_days_between(entry_date, today)
+        # I-4：`>` 严格大于（第 max_holding+1 日才标超期）——兜底 monitor 漏掉的标的，
+        # 不与 monitor is_last `>=`（第 max_holding 日市价强平）同日冲突（防卖空）。详见上方 docstring。
         if holding_days > max_holding:
             expired.append({
                 "symbol": sym, "entry_date": entry_date,
@@ -1697,6 +1731,10 @@ class TradingEngine:
                     # holding_days 交易日口径（trading_days_between，与 _scan_expired_positions 同源）；
                     # entry_date 缺失（未成交 / 老数据）→ holding_days=0（等同 base_stop，向后兼容）。
                     holding_days = _trading_days_between(entry_date, today) if entry_date else 0
+                    # I-4：is_last 用 `>=`（第 max_holding 日即当末根 → decide_exit TIMEOUT
+                    # 市价优先强平），对齐回测 simulate_exit is_last 语义。与 _scan_expired_positions
+                    # 的 `>`（第 max_holding+1 日跌停价兜底）错位一日——monitor 先市价平，
+                    # post_close 次日兜底仅处理 monitor 漏掉的标的（防同日双卖卖空）。
                     is_last = holding_days >= max_holding
                     monitor_ctx[sym] = {
                         "state": {
