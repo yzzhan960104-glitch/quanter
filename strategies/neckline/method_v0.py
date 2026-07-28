@@ -33,6 +33,10 @@ import math
 
 import pandas as pd
 
+# Signal dataclass（Task 1 归位 strategies/neckline/signal.py）——detect_signal 装配
+# 完整 Signal 返回。同包子相对 import（Layer2 Task 1.5 收口口径）。
+from .signal import Signal
+
 
 # ============================================================================
 # 压实后的参数（replay 定标项用默认值起步）
@@ -276,6 +280,111 @@ def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=No
         "rr": round(rr, 3),                          # R3 实际口径盈亏比（替换旧几何 2H/H）
         "atr": round(atr_val, 3),
     }
+
+
+# ============================================================================
+# detect_signal：识别纯函数（Task 2 · U2 识别统一）
+# ============================================================================
+# 物理定位：
+#     从 NecklineMethodStrategy.scan_live（strategies/neckline_method.py:218-298）
+#     抽取的【纯识别函数】——ATR 全序列预算 → detect_neckline_method（含 R2 窗口已突破）
+#     → R1 cancel_on close 口径预判 → 当日突破过滤 → 装配完整 Signal。
+#
+#     本函数是【已测但未挂接】的纯函数（Task 2 范围）——scan_live/scan_at/scan_symbol
+#     的调用点改接在 Task 3 做（strangler 红线：从 scan_live 逻辑零改动抽取，不顺手优化）。
+#
+# 等价性红线（与 scan_live:218-299 逐位一致）：
+#     - ATR 全序列预算用 id_cfg["window"]（颈线识别窗口，非写死 14）—— line 221-223
+#     - detect_neckline_method(df_upto, id_cfg, atr_series=atr_full) —— line 228
+#     - cancel_on 守卫用【close】（已是 close 口径，D9 实盘侧就位）—— line 252-258
+#     - 当日突破过滤（formed_at == date，两侧 ISO 日期字符串归一）—— line 264-273
+#     - Signal 装配（entry=颈线+buy_limit_mult×ATR, atr=ATR末值, rr=res["rr"]）—— line 279-299
+def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date):
+    """颈线法识别纯函数：从截至 date 的 df_upto 产出完整 Signal 或 None。
+
+    逻辑零改动抽取自 NecklineMethodStrategy.scan_live:218-298（strangler 红线）。
+    与 scan_live 的唯一差异：scan_live 返 ``list[Signal]``（实盘多信号容器约定），
+    本函数返 ``Signal | None``（纯识别单信号，调用方 Task 3 按入口语义包装成 list/None）。
+
+    无前视契约：
+        df_upto 由调用方（_eod / scan_at）从 data_lake 加载该 symbol 截至 date 的前复权
+        日线（截断于 date，不含 date 之后），atr 也在 df_upto 上算——严格因果。
+
+    参数：
+        symbol: 标的代码（Signal 归因用，如 "600000.SH"）
+        df_upto: 该 symbol 截至 date 的前复权日线 DataFrame（OHLCV，DatetimeIndex）
+        id_cfg: 识别层参数 dict（window/min_touches/...，与 DEFAULTS 同键集）
+        exec_cfg: 执行层参数 dict（buy_limit_atr_mult/cancel_thresh_mult/...，
+                  与 EXEC_DEFAULTS 同键集）
+        date: 当前识别日（_eod 传 T-1 收盘日，str 或 pd.Timestamp 均可）
+
+    返回：
+        Signal（含 symbol/formed_at/breakout_date/neckline/bottom/entry_price/atr/rr）
+        或 None（detect 无命中 / cancel_on close 守卫触发 / 非当日突破）。
+    """
+    # ATR 全序列预算（窗口对齐 id_cfg["window"]，与 scan_at / precompute 同口径）。
+    # 物理意图：颈线在 window 天形成，衡量其波动尺度也用 window 天，而非写死 14 天。
+    # 截至此处仅用 df_upto（无前视），末根即 date 当日的 ATR。
+    atr_full = compute_atr(
+        df_upto["high"], df_upto["low"], df_upto["close"], window=id_cfg["window"]
+    )
+
+    # 识别：detect_neckline_method（df_upto 截至 date，atr_series 末根对齐）。
+    # detect 仅在末根突破时返回（内部 close_T = W["close"].iloc[-1] > c_star 才命中），
+    # 故 res["formed_at"] == df_upto.index[-1] == date（正常路径）。detect 内部已含
+    # R2 窗口已突破判定（窗口内已突破形态返 None），detect_signal 直接透传 None。
+    res = detect_neckline_method(df_upto, id_cfg, atr_series=atr_full)
+    if res is None:
+        return None
+
+    # R1 cancel_on 预判（close 口径，D9 实盘侧就位）：挡缺口1+4。
+    # What：把 execute 层 cancel_on 撤单逻辑前移为识别期预判——避免实盘挂上废单后再撤
+    #       的滑点/费率/状态机污染。识别期用【当日 close】判（T-1 晚只有完整收盘 K 线，
+    #       没有次日盘中 high 可用，无前视），execute 层 simulate_exit 用盘中 high 判
+    #       （high≥cancel_on 摸高即撤）——close≥cancel_on 蕴含 high≥cancel_on，故
+    #       close 守卫是 high 守卫的保守近似（识别期更严，execute 层不漏挡）。
+    # 参数复用：exec_cfg["cancel_thresh_mult"]（默认 1.0=颈线+H），与 execute 层撤单
+    #          阈值同口径——识别层挡多少、执行层就撤多少。
+    # 物理标尺：H = 颈线 - 谷底（形态几何深度，detect 已返回 res["bottom"]）。
+    cancel_thresh = exec_cfg.get("cancel_thresh_mult")
+    if cancel_thresh is not None:
+        H = res["neckline"] - res["bottom"]
+        cancel_on = res["neckline"] + cancel_thresh * H
+        close_T = float(df_upto["close"].iloc[-1])
+        if close_T >= cancel_on:
+            return None  # 涨幅已兑现，不产回踩挂单信号（挡冲天突破）
+
+    # 当日突破过滤（防御层）：只挂当日新信号。
+    # Why：detect 物理上只在末根突破时返，此处等于 date 是常态；但显式校验防 detect
+    # 内部窗口语义未来变化（如支持历史日回溯）时把旧信号当新信号重吐占仓。
+    # 类型对齐（C1 final-fix）：detect 返 formed_at 是 pd.Timestamp，date 可能是 str
+    # （_eod 真实调用约定 strftime 出来）。pandas __ne__ 不像 __eq__ 做字符串解析，
+    # Timestamp != str 恒 True → 所有真实信号被误判为历史信号丢弃 → 实盘静默死亡。
+    # 两侧统一用 pd.Timestamp(...).strftime("%Y-%m-%d") 归一为短 ISO 比较才在任意类型
+    # 组合下都能正确做物理同日判定。
+    breakout_date = res.get("formed_at")
+    if pd.Timestamp(breakout_date).strftime("%Y-%m-%d") != pd.Timestamp(date).strftime("%Y-%m-%d"):
+        return None
+
+    # Signal dataclass（实盘纯识别字段集，不掺 simulate_exit 的出场字段）。
+    # entry_price：颈线 + buy_limit_atr_mult × ATR末值（对齐回测 simulate_exit:75
+    # buy_limit=c_star+buy_limit_atr_mult×atr）。mult=0 退化颈线（零回归）；
+    # atr 缺失/NaN 回退 res["atr"]（与 scan_live:289-290 同口径）。
+    # atr：用 atr_full 末值（对齐 date 当日，供二期引擎算止损=颈线−N×ATR 用）。
+    return Signal(
+        symbol=symbol,
+        signal_type="neckline",
+        formed_at=res.get("formed_at"),
+        breakout_date=res.get("formed_at"),
+        neckline=res.get("neckline"),
+        bottom=res.get("bottom"),
+        entry_price=(res.get("neckline") or 0.0) + exec_cfg.get("buy_limit_atr_mult", 1.0) * (
+            float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else (res.get("atr") or 0.0)),
+        atr=float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else res.get("atr"),
+        # R3 实际口径盈亏比透传（detect 已算 (tp2-entry)/(entry-stop_price)，
+        # 基于颈线-N×ATR 止损 / 颈线+N×H 止盈的真实风险报酬比），供研究员 T-1 晚人审。
+        rr=res.get("rr"),
+    )
 
 
 # ============================================================================
