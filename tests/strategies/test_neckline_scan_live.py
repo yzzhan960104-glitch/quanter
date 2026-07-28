@@ -1,15 +1,24 @@
 # -*- coding: utf-8 -*-
-"""NecklineMethodStrategy.scan_live 纯识别入口测试（Task 7a）。
+"""NecklineMethodStrategy.scan_live 纯识别入口测试（Task 7a / U2 识别单源 Task 3 更新）。
 
 物理定位：
-    scan_live 是实盘入口（区别于 scan_at 回测一站式）——只调 detect_neckline_method
-    识别形态，**不调 simulate_exit 推进未来 K 线模拟出场**。实盘出场由二期引擎
+    scan_live 是实盘入口（区别于 scan_at 回测一站式）——只调识别层产 Signal，
+    **不调 simulate_exit 推进未来 K 线模拟出场**。实盘出场由二期引擎
     pre_open / stop_loss_monitor 实时做，T-1 晚 _eod 调用时根本没有未来 K 线可用。
+
+识别单源（U2 · 2026-07-29 Task 3）：scan_live 的内联识别段已抽取为
+    ``strategies/neckline/method_v0.py::detect_signal``（Task 2 已测），scan_live 改调
+    该单一识别源——桩点相应从 ``nm.detect_neckline_method`` 迁到 ``nm.detect_signal``，
+    桩返回值从 ``res dict`` 迁到 ``Signal``（或 None）。断言意图不变（核心红线仍守）：
+        1. 命中形态：scan_live 返 Signal 列表且 simulate_exit 未被调用
+        2. detect_signal 返 None：scan_live 返空 []
+        3. 突破日 != 当日 date：由 detect_signal 内部过滤（桩测不到，改由
+           tests/test_detect_signal.py 覆盖），scan_live 桩测聚焦识别→Signal→list 链路。
 
 断言三连（TDD 红→绿）：
     1. 命中形态：scan_live 返 Signal 列表且 simulate_exit 未被调用
-    2. detect 返 None：scan_live 返空 []
-    3. detect 返的突破日 != 当日 date：scan_live 返空 []（只挂当日新信号）
+    2. detect_signal 返 None：scan_live 返空 []
+    3. detect_signal 返的突破日 != 当日 date：scan_live 返空 []（只挂当日新信号）
 """
 from __future__ import annotations
 
@@ -21,26 +30,29 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# 夹具：构造一个 NecklineMethodStrategy（默认参数，注入假 detect / simulate）
+# 夹具：构造一个 NecklineMethodStrategy（默认参数，注入假 detect_signal / simulate）
 # ---------------------------------------------------------------------------
 @pytest.fixture
 def strategy(monkeypatch):
-    """返一个 NecklineMethodStrategy，detect_neckline_method / simulate_exit 已被 monkey。
+    """返一个 NecklineMethodStrategy，detect_signal / simulate_exit 已被 monkey。
 
     调用方通过 strategy._detect_calls / strategy._sim_calls 观察调用计数，通过
     strategy._detect_return / strategy._sim_return 控制桩返回值。
+
+    桩点迁移（U2 · Task 3）：原桩 nm.detect_neckline_method（返 res dict）改为
+    nm.detect_signal（返 Signal | None）——对齐 scan_live 改后的单一识别源。
     """
     from strategies import neckline_method as nm
 
     strat = nm.NecklineMethodStrategy()
 
     # 桩状态容器（挂在 strat 上，测试可读写）
-    strat._detect_return = {"dummy": True}
+    strat._detect_return = None  # 默认 None（各 case 按需覆写为 Signal）
     strat._detect_calls = 0
     strat._sim_return = {"exit_reason": "tp2"}
     strat._sim_calls = 0
 
-    def fake_detect(df_upto, id_cfg, atr_series=None):
+    def fake_detect_signal(symbol, df_upto, id_cfg, exec_cfg, date):
         strat._detect_calls += 1
         return strat._detect_return
 
@@ -48,10 +60,11 @@ def strategy(monkeypatch):
         strat._sim_calls += 1
         return strat._sim_return
 
-    monkeypatch.setattr(nm, "detect_neckline_method", fake_detect)
+    # 桩点：scan_live 改调 detect_signal（U2 Task 3 后），不再调 detect_neckline_method。
+    monkeypatch.setattr(nm, "detect_signal", fake_detect_signal)
     monkeypatch.setattr(nm, "simulate_exit", fake_simulate_exit)
     # 完整性 gate（规则4）cache 置空：现有用例不测 gate 行为，空 cache 让 gate 放行
-    # （expected=空集 → missing=空 → ok=True），聚焦 detect/simulate 契约。
+    # （expected=空集 → missing=空 → ok=True），聚焦 detect_signal/simulate 契约。
     monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, set()))
     return strat
 
@@ -75,46 +88,52 @@ def _mk_df_upto(T: pd.Timestamp) -> pd.DataFrame:
 # Case 1：命中形态 → 返 Signal 列表，且 simulate_exit 未被调用（核心红线）
 # ---------------------------------------------------------------------------
 def test_scan_live_returns_signal_without_simulate_exit(strategy):
-    """detect 返命中 + 当日突破 → scan_live 应返 1 条 Signal，且 simulate_exit 零调用。"""
+    """detect_signal 返命中 Signal → scan_live 应透传 1 条 Signal，且 simulate_exit 零调用。
+
+    桩点（U2 · Task 3）：detect_signal 已是识别单一源（含 ATR/cancel_on/突破过滤/Signal
+    装配全闭包），scan_live 拿到现成 Signal 透传成 list——本 case 断言识别→Signal→list
+    链路完整且 simulate_exit 零调用（实盘纯识别红线）。
+    """
+    from strategies.neckline.signal import Signal
+
     T = pd.Timestamp("2026-07-21")
-    strategy._detect_return = {
-        "formed_at": T,           # detect 末根突破日（= df_upto.index[-1]）
-        "neckline": 10.0,
-        "bottom": 9.0,
-        "entry": 10.0,            # 进场价（= 颈线价 c_star）
-        "atr": 0.5,
-    }
+    strategy._detect_return = Signal(
+        symbol="600000.SH",
+        formed_at=T,
+        breakout_date=T,
+        neckline=10.0,
+        bottom=9.0,
+        entry_price=11.0,   # detect_signal 已算好（颈线+buy_limit_mult×ATR）
+        atr=1.0,
+    )
     df_upto = _mk_df_upto(T)
 
     signals = strategy.scan_live("600000.SH", df_upto, T)
 
     # 红线：simulate_exit 零调用（实盘纯识别不模拟出场）
     assert strategy._sim_calls == 0, "scan_live 不应调用 simulate_exit"
-    # detect 调用 1 次
+    # detect_signal 调用 1 次
     assert strategy._detect_calls == 1
     # 返回结构：1 条 Signal
     assert isinstance(signals, list)
     assert len(signals) == 1
 
     sig = signals[0]
-    # Layer2 阶段1：scan_live 返 list[Signal]（frozen dataclass），读属性
+    # scan_live 直接透传 detect_signal 返回的 Signal（原对象，零字段改动）
+    assert sig is strategy._detect_return
     assert sig.symbol == "600000.SH"
     assert sig.neckline == 10.0
     assert sig.bottom == 9.0
-    # P0-1 挂单价偏移（live-readiness）：entry=颈线+buy_limit_atr_mult×ATR = 10+1.0×1.0=11.0
-    # （Signal.neckline 仍=10.0 是 stop/tp 基准不变；entry_price 是挂单价，对齐回测 simulate_exit:75）
     assert sig.entry_price == 11.0
-    # atr 用 atr_full 末值（df_upto 全 ATR 末根）
-    assert sig.atr is not None
-    # formed_at / breakout_date 字段供 signal_runner 消费
+    assert sig.atr == 1.0
     assert sig.formed_at == T
 
 
 # ---------------------------------------------------------------------------
-# Case 2：detect 返 None → scan_live 返空 []
+# Case 2：detect_signal 返 None → scan_live 返空 []
 # ---------------------------------------------------------------------------
 def test_scan_live_no_detection_returns_empty(strategy):
-    """detect 返 None（窗口不足/无颈线/未突破等）→ scan_live 返 []。"""
+    """detect_signal 返 None（窗口不足/无颈线/未突破/cancel_on 命中/非当日突破等）→ scan_live 返 []。"""
     T = pd.Timestamp("2026-07-21")
     strategy._detect_return = None
     df_upto = _mk_df_upto(T)
@@ -127,28 +146,26 @@ def test_scan_live_no_detection_returns_empty(strategy):
 
 
 # ---------------------------------------------------------------------------
-# Case 3：detect 返的突破日 != date → 只返当日突破，非当日返 []
+# Case 3：detect_signal 返的突破日 != date —— 由 detect_signal 内部过滤（U2 Task 3 后下沉）
 # ---------------------------------------------------------------------------
+# 迁移说明（U2 · 2026-07-29 Task 3）：突破日 != date 的过滤逻辑已随内联识别段一并下沉到
+# detect_signal（method_v0.py:365-367），scan_live 拿到的 Signal 必然是当日突破。
+# 故此 case 的"非当日突破返 []"契约改由 tests/test_detect_signal.py 覆盖（detect_signal
+# 桩测），scan_live 桩测聚焦识别单信号→list 透传链路。删除本 case 避免与 detect_signal
+# 内部过滤契约重复（桩测不到该路径）。
 def test_scan_live_only_today_breakout(strategy):
-    """detect 返的 formed_at != date（历史形态，非当日突破）→ scan_live 返 []。
+    """【契约迁移】非当日突破过滤已下沉 detect_signal；scan_live 桩不再测此路径。
 
-    物理意图：实盘只挂当日新信号（避免重发历史信号占仓）；历史形态的仓位
-    由 eod_plan 状态机跟踪，不靠 scan_live 重吐。
+    保留空壳标记迁移事实，真正覆盖在 tests/test_detect_signal.py::test_*breakout_filter*。
     """
+    # detect_signal 桩返 None（模拟"非当日突破被 detect_signal 内部过滤掉"）→ scan_live 返 []
     T = pd.Timestamp("2026-07-21")
-    yesterday = T - pd.Timedelta(days=1)
-    strategy._detect_return = {
-        "formed_at": yesterday,   # 突破日是昨天，不是今天
-        "neckline": 10.0,
-        "bottom": 9.0,
-        "entry": 10.0,
-        "atr": 0.5,
-    }
+    strategy._detect_return = None
     df_upto = _mk_df_upto(T)
 
     signals = strategy.scan_live("600000.SH", df_upto, T)
 
-    assert signals == [], "非当日突破不应吐信号"
+    assert signals == []
     assert strategy._sim_calls == 0
 
 
@@ -164,26 +181,32 @@ def test_scan_live_only_today_breakout(strategy):
 # 修复契约：比较前统一两侧类型为 ISO 日期字符串，Timestamp 一致日 str 不再被误判。
 # 本 case 直接复刻 _eod 真实调用约定（date 是 str），是修复前的回归红线。
 def test_scan_live_with_string_date_from_eod(strategy):
-    """_eod 传 str 形式 date（"2026-07-21"），detect 返 Timestamp——应仍能识别为当日突破。
+    """_eod 传 str 形式 date（"2026-07-21"），detect_signal 已完成 ISO 同日过滤返 Signal——
+    scan_live 应透传返 1 条。
 
-    修复前：breakout_date（Timestamp）!= date（str）恒 True → 信号被丢弃 → 返 0（bug）。
-    修复后：两侧统一 ISO 日期字符串比较 → 返 1 条（绿）。
+    迁移说明（U2 · 2026-07-29 Task 3）：C1 类型混淆修复（两侧 ISO 日期字符串归一比较）
+    已随内联识别段下沉到 detect_signal（method_v0.py:366），scan_live 拿到的 Signal 必然
+    通过了 ISO 同日过滤。本 case 改测"str date 透传到 detect_signal 不影响透传链路"，
+    C1 真正的 ISO 过滤覆盖在 tests/test_detect_signal.py。
     """
+    from strategies.neckline.signal import Signal
+
     T_str = "2026-07-21"   # _eod 真实调用约定：date 是 strftime 出来的 str
-    strategy._detect_return = {
-        "formed_at": pd.Timestamp("2026-07-21"),  # detect 返的是 Timestamp（df_upto DatetimeIndex）
-        "neckline": 10.0,
-        "bottom": 9.0,
-        "entry": 10.0,
-        "atr": 0.5,
-    }
+    strategy._detect_return = Signal(
+        symbol="600000.SH",
+        formed_at=pd.Timestamp("2026-07-21"),  # detect_signal 返 Timestamp（已过 ISO 同日过滤）
+        breakout_date=pd.Timestamp("2026-07-21"),
+        neckline=10.0,
+        bottom=9.0,
+        entry_price=11.0,
+        atr=0.5,
+    )
     df_upto = _mk_df_upto(pd.Timestamp("2026-07-21"))
 
     signals = strategy.scan_live("600000.SH", df_upto, T_str)
 
-    # 修复前：len == 0（bug · 实盘静默死亡）
-    # 修复后：len == 1（当日突破被正确识别）
-    assert len(signals) == 1, "str date 与 Timestamp formed_at 同日应识别为当日突破（C1）"
+    # scan_live 透传 detect_signal 返回的 Signal（str date 不影响透传）
+    assert len(signals) == 1, "str date 不应影响 detect_signal 已过滤 Signal 的透传"
     assert signals[0].symbol == "600000.SH"
     assert strategy._sim_calls == 0
 
@@ -205,14 +228,15 @@ def _mk_window_df(dates):
 
 
 def test_scan_live_gate_skips_unjustified_gap(monkeypatch):
-    """窗口含未解释漏采（缺日 + 非停牌）→ scan_live return []，detect 不被调。
+    """窗口含未解释漏采（缺日 + 非停牌）→ scan_live return []，detect_signal 不被调。
 
     gate 红线：残缺窗口识别结果不可信，跳过该标的不产误信号（300214.SZ 教训）。
+    桩点迁移（U2 · Task 3）：scan_live 改调 detect_signal，gate 前置拦截目标相应迁移。
     """
     from strategies import neckline_method as nm
     strat = nm.NecklineMethodStrategy()
     detect_calls = []
-    monkeypatch.setattr(nm, "detect_neckline_method",
+    monkeypatch.setattr(nm, "detect_signal",
                         lambda *a, **kw: detect_calls.append(1) or None)
     trade_days = {"2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06"}
     monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, trade_days))
@@ -221,15 +245,15 @@ def test_scan_live_gate_skips_unjustified_gap(monkeypatch):
     signals = strat.scan_live("000001.SZ", df_upto, "2024-09-06")
 
     assert signals == [], "漏采窗口应被 gate 跳过"
-    assert detect_calls == [], "gate 前置拦截，detect 不应被调用"
+    assert detect_calls == [], "gate 前置拦截，detect_signal 不应被调用"
 
 
 def test_scan_live_gate_keeps_complete_window(monkeypatch):
-    """窗口完整（无漏采）→ gate 放行，detect 被调。"""
+    """窗口完整（无漏采）→ gate 放行，detect_signal 被调。"""
     from strategies import neckline_method as nm
     strat = nm.NecklineMethodStrategy()
     detect_calls = []
-    monkeypatch.setattr(nm, "detect_neckline_method",
+    monkeypatch.setattr(nm, "detect_signal",
                         lambda *a, **kw: detect_calls.append(1) or None)
     trade_days = {"2024-09-02", "2024-09-03", "2024-09-04"}
     monkeypatch.setattr(nm, "_ensure_integrity_cache", lambda: ({}, trade_days))
@@ -237,18 +261,18 @@ def test_scan_live_gate_keeps_complete_window(monkeypatch):
 
     strat.scan_live("000001.SZ", df_upto, "2024-09-04")
 
-    assert detect_calls, "完整窗口 gate 应放行，detect 被调"
+    assert detect_calls, "完整窗口 gate 应放行，detect_signal 被调"
 
 
 def test_scan_live_gate_keeps_all_suspend_gap(monkeypatch):
-    """窗口缺日但全是停牌 → gate 放行（合法跳空），detect 被调。
+    """窗口缺日但全是停牌 → gate 放行（合法跳空），detect_signal 被调。
 
     红线：停牌造成的跳空是合法的，gate 不能误跳过（否则停牌复牌标的永不被识别）。
     """
     from strategies import neckline_method as nm
     strat = nm.NecklineMethodStrategy()
     detect_calls = []
-    monkeypatch.setattr(nm, "detect_neckline_method",
+    monkeypatch.setattr(nm, "detect_signal",
                         lambda *a, **kw: detect_calls.append(1) or None)
     susp = {"000413.SZ": {"2024-09-03", "2024-09-04"}}
     trade_days = {"2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06"}

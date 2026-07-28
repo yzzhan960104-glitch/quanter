@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """固化 spec§3.6 订正：param_iter 调的 scan_symbol 与 replay driver 调的 scan_at
-走同一 simulate_exit/detect_neckline_method 函数对象（is 同源）。
+走同一 simulate_exit/detect_signal 函数对象（is 同源）。
 
 物理意图（Why 本文件存在）：
     param_iter（研究侧调参）与 replay driver（编排侧/实盘执行）的统计层有意分轨——
     param_iter 算 kelly + 年化作调参目标函数，replay 算 CAGR 作展示口径；两侧统计封装
     各自演进是允许的。但**识别层 + 模拟层内核必须同源**：两侧都应调到同一份
-    detect_neckline_method（识别主流程）和 simulate_exit（挂单回踩 + 分级止盈状态机），
+    detect_signal（识别单源·U2 Task 3 收口）和 simulate_exit（挂单回踩 + 分级止盈状态机），
     否则会出现「调参优化的参数 ≠ 实盘/异步回测真正执行的参数」致命分叉——研究侧调出来
     的最优参数在实盘跑的是另一套逻辑，回测好看而实盘失效。
 
     本测试是「统计层分轨但识别+模拟内核同源」契约的护栏：
-      ① scan_symbol（param_iter 直调）模块级引用的 simulate_exit/detect_neckline_method，
+      ① scan_symbol（param_iter 直调）模块级引用的 simulate_exit/detect_signal，
         与 NecklineMethodStrategy.scan_at（driver 调）模块级引用的，必须是同一函数对象
         （Python is 判定）——保证两侧永远共用一份代码，任何一侧被替换/复制都会被本测试抓出。
       ② scan_symbol 必须接受显式 id_cfg 参数（Layer2 #2a 去 mutation 后的契约），
@@ -19,10 +19,15 @@
 
 同源判定强度说明：
     理想断言用 ``is``（同一函数对象）。本仓库两侧 import 路径一致（均走包内相对 import
-    ``from .neckline.method_v0 import detect_neckline_method``，无 sys.modules 别名 hack），
+    ``from .neckline.method_v0 import detect_signal``，无 sys.modules 别名 hack），
     is 同源成立。若未来引入模块别名（如 sys.modules 注册双名）导致 is 失败，断言降级为
     ``__module__`` + ``__qualname__`` 一致（同源代码同一份，仅对象身份不同），并在此处
     注明降级原因。
+
+    桩点迁移（U2 · 2026-07-29 Task 3）：识别单源统一后，scan_symbol / scan_at 都改调
+    detect_signal（原 detect_neckline_method 仍是 detect_signal 内部调用的底层原语，
+    保留 method_v0.detect_neckline_method binding 作为「底层识别原语同源」二道护栏，
+    但上层调用契约迁到 detect_signal——param_iter 与 driver 都应共用同一 detect_signal）。
 """
 import sys
 from pathlib import Path
@@ -35,11 +40,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from strategies.neckline.backtest import scan_symbol, simulate_exit  # noqa: E402
-from strategies.neckline.method_v0 import detect_neckline_method     # noqa: E402
+from strategies.neckline.method_v0 import detect_neckline_method, detect_signal  # noqa: E402
 
 
 def test_param_iter_kernel_is_same_object_as_driver_kernel():
-    """scan_symbol 模块级引用的 simulate_exit/detect 与 NecklineMethodStrategy(scan_at) 同源。
+    """scan_symbol 模块级引用的 simulate_exit/detect_signal 与 NecklineMethodStrategy(scan_at) 同源。
 
     断言：两侧模块级 binding 指向同一函数对象（is 同源）。
     失败时降级为 ``__module__``+``__qualname__`` 一致判定（见下方注释块）。
@@ -63,22 +68,33 @@ def test_param_iter_kernel_is_same_object_as_driver_kernel():
         "param_iter 路径与 driver 路径的模拟内核已分叉，调参优化参数不会在实盘生效"
     )
 
-    # —— ② detect_neckline_method 同源（三处 binding 同对象）——
-    # 物理意图：detect 是识别主流程（6 个调用者，耦合 7 个守卫），param_iter 与 driver
+    # —— ② detect_signal 同源（U2 · Task 3 后的识别单源：三处 binding 同对象）——
+    # 物理意图：detect_signal 是识别单源（含 ATR 预算 + detect_neckline_method +
+    # cancel_on close 守卫 + 当日突破过滤 + Signal 装配的完整闭包），param_iter 与 driver
     # 共用同一份识别逻辑——否则「研究侧认定的颈线形态 ≠ 实盘触发的颈线形态」。
-    assert bk.detect_neckline_method is detect_neckline_method, (
-        "backtest.detect_neckline_method 与 method_v0.detect_neckline_method 不同对象"
+    assert bk.detect_signal is detect_signal, (
+        "backtest.detect_signal 与 method_v0.detect_signal 不同对象"
     )
-    assert m0.detect_neckline_method is detect_neckline_method, (
-        "method_v0 自身 binding 与 import 的 detect_neckline_method 不同对象（不应发生）"
+    assert m0.detect_signal is detect_signal, (
+        "method_v0 自身 binding 与 import 的 detect_signal 不同对象（不应发生）"
     )
-    assert nm.detect_neckline_method is detect_neckline_method, (
-        "neckline_method.detect_neckline_method 与 method_v0.detect_neckline_method 不同对象——"
+    assert nm.detect_signal is detect_signal, (
+        "neckline_method.detect_signal 与 method_v0.detect_signal 不同对象——"
         "param_iter 识别内核与 driver 识别内核已分叉"
     )
 
+    # —— ②' detect_neckline_method 同源（底层识别原语二道护栏，detect_signal 内部调它）——
+    # 物理意图：detect_neckline_method 是 detect_signal 的识别底层（颈线定位 + 6 守卫），
+    # 仍是 method_v0 模块原语，被 test_neckline_recognition 独立测守护卫分支。这里补一道
+    # is 同源护栏，防止有人复制 detect_neckline_method 副本到 backtest/neckline_method
+    # 让 detect_signal 间接分叉（detect_signal 内部按 method_v0 全局名引用，若在别处复制
+    # 不会被 detect_signal 调到，但仍要守住 binding 同源以防未来重构引入别名）。
+    assert m0.detect_neckline_method is detect_neckline_method, (
+        "method_v0.detect_neckline_method 自身 binding 与 import 的不同对象（不应发生）"
+    )
+
     # —— ③ scan_at 经 strategy 调到同一内核（间接验证：strategy 模块 binding 已同源，
-    #         scan_at 内部即调用 self 模块级 import 的 detect/simulate，无需另取副本）——
+    #         scan_at 内部即调用 self 模块级 import 的 detect_signal/simulate，无需另取副本）——
     assert hasattr(nm.NecklineMethodStrategy, "scan_at"), (
         "NecklineMethodStrategy 缺 scan_at（driver 入口消失）"
     )

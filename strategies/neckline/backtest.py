@@ -22,7 +22,7 @@ import pandas as pd
 
 # 本模块原在 scripts/（平级 from neckline_method_v0），Layer2 Task 1.5 收口进 strategies/neckline/
 # 子包后改相对 import（同包内 .method_v0）。
-from .method_v0 import detect_neckline_method, DEFAULTS, compute_atr
+from .method_v0 import DEFAULTS, compute_atr, detect_signal
 
 
 # 持有期参数（用户规则，可调）—— 保留为向后兼容常量
@@ -349,18 +349,31 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
         exec = EXEC_DEFAULTS
     if id_cfg is None:
         id_cfg = {**DEFAULTS, "window": window}
-    # 预算全序列 ATR 一次（窗口对齐 id_cfg["window"]，与 scan_at 同源），detect 复用
+    # 预算全序列 ATR 一次（窗口对齐 id_cfg["window"]，与 scan_at 同源），下方仅用于
+    # 给每个 sig_idx 复算 ATR 末值喂 simulate_exit（与 detect_signal 内部 compute_atr 同口径，
+    # 两侧 rolling 到 sig_idx 等价）。
     atr_full = compute_atr(sym_df["high"], sym_df["low"], sym_df["close"], window=id_cfg["window"])
     signals = []
     for i in range(id_cfg["window"], len(sym_df)):
-        res = detect_neckline_method(sym_df.iloc[: i + 1], id_cfg,
-                                     atr_series=atr_full.iloc[: i + 1])
-        if res is not None:
-            signals.append((i, res))
+        # 识别统一（U2 · 2026-07-29 Task 3）：改调单一识别源 ``detect_signal``
+        # （strategies/neckline/method_v0.py:302，Task 2 已测），与 scan_live / scan_at 同源。
+        #
+        # 识别口径变化（brief 澄清 2，spec D9 设计预期）：原 scan_symbol 只调
+        # detect_neckline_method（无 cancel_on / 无当日突破过滤），改调 detect_signal 后识别层
+        # 多了【cancel_on close 守卫】+【当日突破过滤】——研究侧识别口径向实盘 scan_live 对齐
+        # （识别单源 D9）。这【可能让某些冲天突破信号被识别期 cancel_on 挡掉】，影响回测
+        # 结果，但 golden gate 在 Task 5（本 task 不跑 golden）。scan_symbol 的 detect_signal
+        # 路径与 scan_at 现在完全一致（都调 detect_signal），双轨一致性守护
+        # test_scan_symbol_matches_strategy 仍守 simulate_exit/去重链路不分叉。
+        #
+        # date 入参：sym_df.index[i]（每个候选 i 的自然日，DatetimeIndex label）。
+        sig = detect_signal(None, sym_df.iloc[: i + 1], id_cfg, exec, sym_df.index[i])
+        if sig is not None:
+            signals.append((i, sig))
     signals = dedup_signals(signals, cooldown=exec["cooldown"])
     filled = []
     n_skip = 0
-    for sig_idx, res in signals:
+    for sig_idx, sig in signals:
         # 显式透传 id_cfg（Critical C1 修复·Layer2 #2a 去 mutation 后的正确性补强）：
         # 旧版靠 param_iter.run_one 的 DEFAULTS.update(id_params) 全局 mutation，让
         # simulate_exit 默认 id_cfg=None → 读"已 patch 的全局"。去 mutation 后全局变纯净，
@@ -368,19 +381,25 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
         # 悄悄丢弃 param_iter 搜到的非默认档（偷改目标函数，违反 spec #2 + golden 零漂移
         # 等价红线——默认参数下 1.0/2.0==DEFAULTS 故 golden 漏报）。此处转发 = 基线 mutation
         # 语义的真等价（与 run_one 旧版 update 后 simulate_exit 读到的值字面相同）。
-        sim = simulate_exit(sym_df, sig_idx, res["neckline"], res["bottom"], res["atr"],
+        sim = simulate_exit(sym_df, sig_idx, sig.neckline, sig.bottom, sig.atr,
                             exec=exec, id_cfg=id_cfg)
         if sim is None:
             continue
         if sim["exit_reason"] in ("skip_no_pullback", "skip_target_met"):
             n_skip += 1
         else:
-            # 附识别特征供深挖（突破质量/颈线压制/形态深度）
+            # 附识别特征供深挖（突破质量/颈线压制/形态深度）。
+            # 注意（U2 收尾）：detect_signal 返 Signal 不含 suppression/H_over_ATR（这两个是
+            # detect_neckline_method dict 的 debug-only 元数据，仅供 fullscan CSV 归因分析，
+            # 不参与 simulate_exit/去重决策）。此处保留 None 占位（backtest/tools/analyze_fullscan
+            # 等下游脚本对 dropna 兼容），避免改 detect_signal 返回类型扩大 Task 3 范围。
+            # 若研究侧需恢复这两列精确值，后续可在 detect_signal 侧扩 Signal 元数据字段或
+            # 本处补一次 detect_neckline_method 调用（仅 CSV 装饰，非识别 gate）。
             vol_T = float(sym_df["volume"].iloc[sig_idx])
             vol5 = float(sym_df["volume"].iloc[max(0, sig_idx - 5):sig_idx].mean()) if sig_idx >= 5 else vol_T
             sim["breakout_vol_ratio"] = round(vol_T / vol5, 2) if vol5 > 0 else 0.0
-            sim["suppression"] = res.get("suppression")
-            sim["H_over_ATR"] = res.get("H_over_ATR")
+            sim["suppression"] = None
+            sim["H_over_ATR"] = None
             filled.append(sim)
     return filled, len(signals), n_skip
 
