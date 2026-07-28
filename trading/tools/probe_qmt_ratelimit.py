@@ -171,8 +171,9 @@ async def main() -> int:
         )
         return 1
     print(
-        f"  ✅ {ROUNDS} 轮（×{INTERVAL}s）未观察限流——30s 可用，"
-        "ENGINE_STOPLOSS_INTERVAL_SECONDS=30 可定稿。"
+        f"  ✅ {ROUNDS} 轮（×{INTERVAL}s）未观察限流——{INTERVAL}s 巡检可用，"
+        f"ENGINE_STOPLOSS_INTERVAL_SECONDS={INTERVAL} 可定稿（plan Task 14 目标 15s："
+        "PROBE_INTERVAL=15 跑本脚本验证通过后，改 .env/.env.example 定终值；spec §10 限频实测红线）。"
     )
     return 0
 
