@@ -57,7 +57,7 @@ from trading import (
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals
-from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between
+from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between, compute_stop_price as _compute_stop_price
 # Task 10（R-2 日内熔断）：check_daily_loss_limit 纯判定 functional core
 from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
 # Task 10（R-2）：position_book 的 daily_equity reader/writer（snapshot/get_start）
@@ -782,6 +782,51 @@ async def _close_expired_positions(gw: Any, expired: list[dict]) -> dict:
     return {"closed": n_closed}
 
 
+def _evolve_trailing_stops(
+    orders: list[dict], entry_dates: Mapping[str, str], today: str, cfg: dict,
+) -> int:
+    """盘后演进 plan orders 的 stop_price（海龟 trailing，holding_days 驱动）。
+
+    物理意图（plan Task 9 · spec §5.3）：
+        compute_stop_price 已实现但实盘零调用（env 读 grace/step/floor 未消费）。post_close
+        盘后演进让 trailing 真正生效——对每个【已成交持仓】按 holding_days 重算【次日】固定
+        stop_price：holding_days<=grace 用 base_stop（颈线-stop_mult×ATR，给趋势确认空间），
+        holding_days>grace 每日收紧 step×ATR（eff_mult 递减），到 floor 卡底。盘中监控用此
+        固定价不移动（spec「盘中不调整 stop」红线），故仅盘后演进一步/日。
+
+    边界（spec §5.3）：
+        - holding_days=0（今日成交 / 缺 entry_date）→ compute_stop_price 返 base_stop（零回归，
+          Task 9 上线日不改变今日新成交持仓的止损）；
+        - 缺 neckline/atr 的 order 跳过（无基准无法重算，老 plan 向后兼容）；
+        - entry_dates 无该 symbol（未成交）→ holding_days=0（等同 base_stop）。
+
+    Args:
+        orders:      plan["orders"]（嵌套 dict，含 order.symbol/neckline/atr/stop_price）。
+        entry_dates: position_book.get_entry_dates() 的 {symbol: entry_date}。
+        today:       今日（holding_days 的 end）。
+        cfg:         _trade_cfg()（取 stop_atr_mult/grace/step/floor）。
+
+    Returns:
+        演进成功的 order 数（缺 neckline/atr 的不计）。
+    """
+    n_evolved = 0
+    for o in orders:
+        sym = (o.get("order") or {}).get("symbol")
+        neckline = o.get("neckline")
+        atr = o.get("atr")
+        # 缺基准（老 plan 无 neckline/atr 或数据瑕疵）跳过——不拿 None 算 stop_price
+        if not sym or neckline is None or not atr:
+            continue
+        entry_date = entry_dates.get(sym)
+        holding_days = _trading_days_between(entry_date, today) if entry_date else 0
+        new_stop = _compute_stop_price(
+            float(neckline), float(atr), holding_days,
+            cfg["stop_atr_mult"], cfg["grace"], cfg["step"], cfg["floor"])
+        o["stop_price"] = round(new_stop, 2)   # round 2 对齐 A 股 0.01 元精度
+        n_evolved += 1
+    return n_evolved
+
+
 # ============================================================================
 # 触发点 4：post_close —— 盘后对账 + 清动态白名单（熔断连线留 follow-up）
 # ============================================================================
@@ -905,6 +950,27 @@ async def post_close(
     result["circuit_breaker"] = circuit_breaker_triggered
     if breaker_skipped:
         result["breaker_skipped"] = True
+
+    # ④ trailing 盘后演进（Task 9 · R-3 · 未熔断时跑）：
+    # Why 熔断后跳过：熔断已 lock_down，次日人工接管——此时再演进 stop 收紧可能触发
+    # 额外卖出与熔断善后冲突（熔断应全场停摆，同 ⑤ max_holding 的熔断优先约束）。
+    if not circuit_breaker_triggered:
+        try:
+            today_eq = datetime.now().strftime("%Y-%m-%d")
+            plan = trading_plan.load_plan(today_eq)
+            if plan and plan.get("orders"):
+                entry_dates = _position_book.get_entry_dates()
+                n = _evolve_trailing_stops(
+                    plan["orders"], entry_dates, today_eq, _trade_cfg())
+                if n:
+                    # 写回 plan（保留 confirmed——trailing 是止损价演进不改人审状态；
+                    # 否则 confirmed 重置 False 会让次日 _stoploss 跳过止损监控致敞口裸奔）
+                    trading_plan.save_plan(
+                        today_eq, plan["orders"], confirmed=plan.get("confirmed", False))
+                    result["trailing_evolved"] = n
+                    logger.info("post_close trailing 演进 %d 单 stop（holding_days 驱动）", n)
+        except Exception:
+            logger.exception("post_close trailing 演进异常（不阻塞 max_holding/清白名单）")
 
     # ⑤ max_holding 超期标记（Task 8 · P0-4 · 未熔断时跑）：
     # Why 熔断优先：日内 -3% 熔断已 emergency_halt + lock_down 全场停摆，此时再标超期会让

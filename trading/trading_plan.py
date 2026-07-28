@@ -38,19 +38,22 @@ def _plan_path(date: str) -> Path:
     return base / f"plan_{date}.json"
 
 
-def save_plan(date: str, orders: list) -> Path:
-    """落盘 T 日交易计划（confirmed=false）。
+def save_plan(date: str, orders: list, *, confirmed: bool = False) -> Path:
+    """落盘 T 日交易计划（默认 confirmed=false 待人审）。
 
     Args:
-        date: 交易日（T），如 "2026-07-22"。
-        orders: PlannedOrder 嵌套字典列表，JSON 透传不校验内部结构。
+        date:      交易日（T），如 "2026-07-22"。
+        orders:    PlannedOrder 嵌套字典列表，JSON 透传不校验内部结构。
+        confirmed: 人审确认标志（默认 False）。Task 9 trailing 盘后演进重写 plan 时
+                   传 ``confirmed=原值``——保留人审状态（止损价演进不改确认闸，否则次日
+                   _stoploss 读 confirmed=False 会跳过止损监控致敞口裸奔）。
 
     Returns:
         落盘文件 Path。父目录自动创建（parents=True，支持嵌套 TRADE_PLAN_DIR）。
     """
     p = _plan_path(date)
     p.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"date": date, "confirmed": False, "orders": orders}
+    payload = {"date": date, "confirmed": confirmed, "orders": orders}
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("T-1 计划已落盘 %s（%d 单，待确认）", p, len(orders))
     return p

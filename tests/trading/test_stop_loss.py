@@ -52,3 +52,35 @@ def test_should_trigger_stop_at_threshold():
 def test_should_trigger_stop_above_threshold():
     """现价 > 止损价 → 不触发（仍在止损线之上，继续持有）。"""
     assert should_trigger_stop(price=9.51, stop_price=9.50) is False
+
+
+# ============================================================================
+# trading_days_between（plan Task 6 抽 · Task 9 trailing holding_days / Task 8 max_holding 复用）
+# ============================================================================
+def test_trading_days_between_uses_trade_calendar(monkeypatch):
+    """trading_days_between：用 calendar.fetch_trade_cal 算 (start,end] 交易日数（跳周末）。
+
+    物理意图（plan Task 9 · spec §5.3）：
+        trailing 的 holding_days 必须【交易日】口径（颈线法 grace/step 按交易日离散），
+        自然日会把周末算进去致窗口虚长。本函数从 calendar.fetch_trade_cal 取交易日集，
+        数 (start, end] 区间内的交易日（不含 start，含 end——end 是「今日已到」判断日）。
+    """
+    from trading.compute import stop
+    import trading.calendar as cal
+    # 构造 2099-01-04(周一) ~ 01-08(周五) 5 个交易日（跳过周末 01-09/10）
+    fake_trade_days = {"2099-01-04", "2099-01-05", "2099-01-06", "2099-01-07", "2099-01-08"}
+    monkeypatch.setattr(cal, "fetch_trade_cal", lambda year: fake_trade_days)
+    # (01-04, 01-08] = 01-05/06/07/08 = 4 个交易日
+    assert stop.trading_days_between("2099-01-04", "2099-01-08") == 4
+    # 同日 → 0（start 当日不算超期，给足机会）
+    assert stop.trading_days_between("2099-01-04", "2099-01-04") == 0
+    # end < start → 0
+    assert stop.trading_days_between("2099-01-08", "2099-01-04") == 0
+
+
+def test_trading_days_between_missing_start_returns_zero():
+    """start/end 缺失或格式错 → 0（保守视窗口内，向后兼容老 plan 无 entry_date）。"""
+    from trading.compute import stop
+    assert stop.trading_days_between("", "2099-01-08") == 0
+    assert stop.trading_days_between("bad-format", "2099-01-08") == 0
+    assert stop.trading_days_between("2099-01-01", "") == 0

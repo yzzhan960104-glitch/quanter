@@ -1057,3 +1057,134 @@ def test_pre_open_close_expired_skip_when_no_price(monkeypatch):
     assert ("300001.SZ", "sell") not in submitted
     # 标记文件仍被消费（避免反复尝试无价标的）
     assert not os.path.exists(expired_path)
+
+
+# ============================================================================
+# 4.9 Task 9（R-3 trailing 盘后演进）：post_close 演进 plan stop（compute_stop_price 消费 grace/step/floor）
+# ============================================================================
+def test_evolve_trailing_stops_writeback(monkeypatch):
+    """_evolve_trailing_stops：holding_days>grace → 收紧 stop 写回 round2。
+
+    物理意图（plan Task 9 · spec §5.3）：
+        compute_stop_price 已实现但实盘零调用（env 读 grace/step/floor 未消费）。盘后演进
+        让 trailing 真正生效：对每个【已成交持仓】按 holding_days 重算 stop_price。
+        holding_days=7, grace=5, step=0.1 → eff_mult=1.0-(7-5)*0.1=0.8 → stop=10-0.8×0.5=9.6。
+    """
+    orders = [{"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}]
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 7)
+    cfg = {"stop_atr_mult": 1.0, "grace": 5, "step": 0.1, "floor": 0.5}
+    n = engine._evolve_trailing_stops(orders, {"A.SH": "2099-01-01"}, "2099-01-10", cfg)
+
+    assert n == 1
+    assert orders[0]["stop_price"] == 9.6   # 10 - 0.8×0.5（grace 后收紧 0.2 mult）
+
+
+def test_evolve_trailing_stops_holding_days_zero_base_stop(monkeypatch):
+    """holding_days=0（今日成交 / 缺 entry_date）→ stop=base_stop 零回归（不收紧）。
+
+    物理意图（边界 · spec §5.3）：holding_days=0 视作 grace 内，compute_stop_price 返
+        base_stop（颈线-stop_atr_mult×ATR）。零回归保证 Task 9 上线日不改变今日新成交持仓的止损。
+    """
+    orders = [{"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}]
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 0)
+    cfg = {"stop_atr_mult": 1.0, "grace": 5, "step": 0.1, "floor": 0.5}
+    # entry_dates 空（未成交 / 缺 entry）→ holding_days=0
+    engine._evolve_trailing_stops(orders, {}, "2099-01-10", cfg)
+    # base_stop = 10 - 1.0×0.5 = 9.5（grace 内不收紧）
+    assert orders[0]["stop_price"] == 9.5
+
+
+def test_evolve_trailing_stops_skips_missing_neckline_atr():
+    """缺 neckline/atr 的 order 跳过不改（无基准无法重算 stop）。"""
+    orders = [
+        {"order": {"symbol": "A.SH"}, "neckline": None, "atr": 0.5, "stop_price": 9.0},
+        {"order": {"symbol": "B.SH"}, "neckline": 10.0, "atr": None, "stop_price": 9.0},
+    ]
+    n = engine._evolve_trailing_stops(
+        orders, {}, "2099-01-10",
+        {"stop_atr_mult": 1.0, "grace": 5, "step": 0.1, "floor": 0.5})
+    assert n == 0
+    assert orders[0]["stop_price"] == 9.0   # 未改
+    assert orders[1]["stop_price"] == 9.0
+
+
+def test_post_close_trailing_skipped_after_breaker(monkeypatch):
+    """post_close：日内熔断触发 → 跳过 trailing 演进（熔断优先，不收紧 stop）。
+
+    物理意图（plan Task 9 Step 4 · spec §5.3 边界）：
+        熔断（-3%）已 emergency_halt + lock_down，次日人工接管——此时再演进 stop 收紧
+        可能触发额外卖出与熔断善后冲突。熔断优先于 trailing（同 max_holding 约束）。
+    """
+    from trading import position_book
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    position_book.snapshot_start_equity(today, 1_000_000.0)
+    # plan 有持仓 order（若 trailing 跑会演进，验熔断时它不被调）
+    trading_plan.save_plan(today, [
+        {"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}])
+
+    evolve_calls = []
+    def _fake_evolve(orders, ed, t, cfg):
+        evolve_calls.append(True)
+        return 0
+    monkeypatch.setattr(engine, "_evolve_trailing_stops", _fake_evolve)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 950_000.0}  # -5% 触发熔断（限 -3%）
+        async def _fetch_broker_positions(self):
+            return {}
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.emergency_halt",
+        lambda: {"halted": True})
+    from trading.compute.reconcile import ReconciliationResult
+    async def _fake_rec(gw, local, tolerance=0.0):
+        return ReconciliationResult([], [], [], [], 0.0, True)
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
+
+    result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
+    assert result.get("circuit_breaker") is True
+    assert evolve_calls == []                # 熔断 → trailing 演进未跑
+    assert "trailing_evolved" not in result
+
+
+def test_post_close_trailing_evolves_plan_stop(monkeypatch):
+    """post_close：未熔断 + plan 有成交持仓 → trailing 演进 stop 写回 plan（保留 confirmed）。
+
+    物理意图（plan Task 9 Step 4）：post_close ④ 段串联 _evolve_trailing_stops ——
+        load_plan(today) → entry_date 算 holding_days → compute_stop_price → 写回 plan.stop_price。
+        次日 stop_loss 读演进后的 stop（盘中不调，spec「盘中不调整 stop」红线）。
+    """
+    from trading import position_book
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    position_book.snapshot_start_equity(today, 1_000_000.0)
+    # plan 有持仓 order（neckline/atr 齐全，可演进）
+    orders = [{"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}]
+    trading_plan.save_plan(today, orders)
+    # A.SH 已成交（entry_dates 有）+ holding_days=7>grace=5 → 收紧
+    monkeypatch.setattr(position_book, "get_entry_dates",
+                        lambda **kw: {"A.SH": "2099-01-01"})
+    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 7)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 1_000_000.0}  # 0% 不熔断
+        async def _fetch_broker_positions(self):
+            return {}
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    from trading.compute.reconcile import ReconciliationResult
+    async def _fake_rec(gw, local, tolerance=0.0):
+        return ReconciliationResult([], [], [], [], 0.0, True)
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
+
+    result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
+    assert result.get("trailing_evolved") == 1
+    # 验 plan 已写回演进后的 stop（holding_days=7 → 9.6）
+    plan = trading_plan.load_plan(today)
+    assert plan["orders"][0]["stop_price"] == 9.6
