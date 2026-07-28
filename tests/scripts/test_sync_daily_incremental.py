@@ -87,7 +87,7 @@ def test_sync_already_latest_returns_early():
             [(pd.Timestamp("2026-07-24"), "000001.SZ")], names=["date", "symbol"]))
     with patch.object(mod.pd, "read_parquet", return_value=fake_lake), \
          patch.object(mod, "get_pro") as mock_get_pro, \
-         patch("datetime.datetime") as mock_dt:
+         patch.object(mod, "datetime") as mock_dt:
         # today = d0 = 2026-07-24 → 早返
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
         msg = mod.sync_daily_incremental()

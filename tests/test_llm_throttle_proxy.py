@@ -12,8 +12,9 @@
 import sys
 from pathlib import Path
 
-# scripts/ 非项目包（无 __init__.py），测试单独把 scripts/ 加 path 才能 import
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+# infra/tools/ 非项目包（无 __init__.py），测试单独把 infra/tools/ 加 path 才能 import
+# （llm_throttle_proxy.py 实际位置；早期在 scripts/，迁移至 infra/tools/ 后 path 未同步）
+sys.path.insert(0, str(Path(__file__).parent.parent / "infra" / "tools"))
 
 import pytest
 

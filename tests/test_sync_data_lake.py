@@ -55,10 +55,12 @@ def test_load_universe_filters_st():
                 "list_date": ["19991110", "19910403", "20000101", "19910129"],
             })
 
-    codes = load_universe(_FakePro())
+    # include_delisted=False：只跑 L 段（验 ST/退名称过滤）；D 段全保留（幸存者偏差修正，
+    # 退市标的正常命名不能剔），_FakePro 不区分 L/D 会把 ST 经 D 段加回，故此处关 D 段聚焦 L 过滤
+    codes = load_universe(_FakePro(), include_delisted=False)
     assert "600000.SH" in codes and "000001.SZ" in codes
-    assert "600001.SH" not in codes  # *ST 剔除
-    assert "000002.SZ" not in codes  # 退 剔除
+    assert "600001.SH" not in codes  # *ST 剔除（L 段名称含 ST 过滤）
+    assert "000002.SZ" not in codes  # 退 剔除（L 段名称含"退"过滤）
     assert len(codes) == 2
 
 
