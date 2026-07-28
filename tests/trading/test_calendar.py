@@ -58,3 +58,26 @@ def test_fetch_trade_cal_weekday_fallback_when_no_token(tmp_path):
     assert "2026-01-05" in days
     assert "2026-01-03" not in days  # 周六被 weekday 过滤
     assert not cache.exists()  # 兜底不写缓存（避免脏缓存污染下次）
+
+
+def test_next_trading_day_skips_weekend(monkeypatch, tmp_path):
+    """周五 → 下周一（跳过周末），修 date 错位 bug 的核心契约。
+
+    Why 此测试存在：_eod 周五盘后落盘计划，生效日必须是下周一而非周五本身，
+    否则下周一 pre_open 读 plan_周一 读不到（差一个交易日 → 永远挂不上单）。
+    """
+    cache = tmp_path / "trade_cal_2026.json"
+    # 7-24 周五、7-27 周一（25/26 周末不在缓存 → next 必须跳过它们）
+    cache.write_text('["2026-07-24", "2026-07-27"]', encoding="utf-8")
+    monkeypatch.setattr(calendar, "_cache_path",
+                        lambda y: cache if y == 2026 else tmp_path / f"trade_cal_{y}.json")
+    assert calendar.next_trading_day("2026-07-24") == "2026-07-27"
+
+
+def test_next_trading_day_consecutive(monkeypatch, tmp_path):
+    """连续交易日 → +1 天（无周末跳过，最常见路径）。"""
+    cache = tmp_path / "trade_cal_2026.json"
+    cache.write_text('["2026-07-28", "2026-07-29"]', encoding="utf-8")
+    monkeypatch.setattr(calendar, "_cache_path",
+                        lambda y: cache if y == 2026 else tmp_path / f"trade_cal_{y}.json")
+    assert calendar.next_trading_day("2026-07-28") == "2026-07-29"

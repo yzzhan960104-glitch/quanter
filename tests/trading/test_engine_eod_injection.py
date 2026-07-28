@@ -123,8 +123,12 @@ def test_eod_resolves_experiments_and_tags_signals(monkeypatch):
     # 执行
     asyncio.run(engine.TradingEngine()._eod())
 
-    # 断言：信号被注入归因字段并透传
-    assert captured.get("date") == datetime.now().strftime("%Y-%m-%d")
+    # 断言：落盘 date = next_trading_day(today)，修 date 错位 bug（2026-07-28）。
+    # 原 assert == today 固化了「_eod 用当天落盘」的 bug——pre_open 次日读 plan_次日
+    # 读不到。fixture 已 mock is_trading_day 恒真，故 next_trading_day(today) = today+1。
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert captured.get("date") == engine.calendar.next_trading_day(today)
+    assert captured.get("date") != today  # 铁证：生效日必须晚于盘后落盘日
     signals = captured.get("signals", [])
     assert len(signals) == 1
     s = signals[0]

@@ -193,8 +193,9 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
         一次否决机会——故本函数只产计划不下单（spec §2 确认闸红线）。
 
     Args:
-        date:     T+1 日（计划生效日），如 "2026-07-22"。由 _eod 传 today（T 日），
-                  物理上计划在 T+1 日 pre_open 挂单执行。
+        date:     T+1 日（计划生效日），如 "2026-07-22"。由 _eod 传
+                  ``calendar.next_trading_day(today)``（T 日盘后算次日交易日），物理上
+                  计划在 T+1 日 pre_open 挂单执行（date 与 load_plan 读取口径对齐）。
         signals:  NecklineMethodStrategy.scan_live 返回的 list[Signal]（Layer2 阶段1 后为
                   frozen dataclass，_eod 已用 dataclasses.replace 注入实验归因字段）。
         atr_map:  {symbol: ATR}，缺 ATR 的标的（_eod 已过滤）在 build 阶段被跳过（不抛）。
@@ -707,8 +708,11 @@ class TradingEngine:
                 except Exception as e:  # noqa: BLE001 单标的挡板（scope #7 兜底）
                     logger.warning("_eod scan_live %s 异常跳过: %s", sym, e)
 
+        # date = T+1（计划生效日）：修 date 错位 bug（2026-07-28）。原传 today（T 日），
+        # 但 pre_open 次日读 load_plan(today=T+1) → 永远差一天挂不上单。改传
+        # calendar.next_trading_day(today) 让落盘 date 与次日 pre_open 读取口径对齐。
         await eod_plan(
-            today, signals, atr_map,
+            calendar.next_trading_day(today), signals, atr_map,
             capital=float(os.getenv("TRADE_CAPITAL", "1_000_000")),
         )
         # Task12 · 持仓盈亏播报（spec §6.2 C4 / 子诉求 1<2>）：eod_plan 落盘+推钉钉后，

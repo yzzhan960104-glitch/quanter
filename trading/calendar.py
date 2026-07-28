@@ -72,6 +72,31 @@ def is_trading_day(date_str: str) -> bool:
     return date_str in days
 
 
+def next_trading_day(date_str: str) -> str:
+    """``date_str``（YYYY-MM-DD）之后最近的一个 A 股交易日。
+
+    用途（修 date 错位 bug · 2026-07-28）：T 日盘后 ``engine._eod`` 落盘计划的
+    生效日 = ``next_trading_day(T)``，与次日 ``_pre_open(today=T+1)`` 的
+    ``load_plan(today)`` 对齐。原 ``_eod`` 用 ``datetime.now()``（T 日）落盘，
+    pre_open 次日却读 ``plan_(T+1)``，永远差一天 → 计划永远挂不上单（系统连续
+    多日有 confirmed 计划但 pre_open 全部 reason=「无计划」跳过的根因）。
+
+    实现：从 ``date_str+1`` 起逐日 ``is_trading_day``，最多向前找 15 自然日
+    （覆盖周末 + 春节/国庆等长假）。跨年（12 月底 → 次年 1 月）由
+    ``is_trading_day`` 内部按候选日的 year 拉 trade_cal 自动处理，无需特判。
+    """
+    from datetime import datetime, timedelta
+    d = datetime.strptime(date_str, "%Y-%m-%d")
+    for i in range(1, 16):
+        cand = (d + timedelta(days=i)).strftime("%Y-%m-%d")
+        if is_trading_day(cand):
+            return cand
+    # 兜底：15 自然日内无交易日（极端长假叠加）→ 返 date_str+1。该值语义上
+    # 「可能非交易日」，交由上层 _pre_open 的 is_trading_day 守卫自然告警拦截
+    # （宁可显式失败，不静默落一份永远挂不上的脏计划）。
+    return (d + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def is_intraday_session(now: datetime) -> bool:
     """是否 A 股盘中（9:30-11:30 / 13:00-15:00）。"""
     t = now.time()
