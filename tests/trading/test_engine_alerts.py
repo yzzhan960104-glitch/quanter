@@ -31,9 +31,11 @@ from trading import engine
 def captured_alerts(monkeypatch):
     """收集 notify_risk_event 调用（msg, level），断言用。
 
-    用 sync lambda 包 AsyncMock：engine._alert_critical 经 fire_and_forget 在
-    daemon 线程跑 asyncio.run(coro)——notify_risk_event 是 bound method，
-    monkeypatch.setattr 需按「self, msg, level」签名 patch 真实方法。
+    I-2 修复（消除 sleep 竞态）：patch ``infra.notifier.fire_and_forget`` 改同步 await——
+    engine._alert_critical 内部 ``from infra.notifier import fire_and_forget`` 是函数级
+    懒 import，每次调用都重新拿模块属性，故模块级 patch 会被即时捕获。原实现起 daemon
+    线程跑 ``asyncio.run(coro)``，测试需 ``time.sleep`` 等线程——CI/慢机高负载下假阴性。
+    改同步执行后，_alert_critical 返回时协程已跑完，断言零竞态。
     """
     fired: list[tuple[str, str]] = []
 
@@ -50,13 +52,38 @@ def captured_alerts(monkeypatch):
     monkeypatch.setattr(
         "infra.notifier.NotificationManager.get_default",
         classmethod(lambda cls: _NM.__new__(_NM)))
+
+    # fire_and_forget 改「同步阻塞跑协程」：消除 daemon 线程竞态（原 time.sleep(0.3) 等线程
+    # 在 CI 高负载下可能假阴性）。_alert_critical 的 from-import 会取到这个 patch 后的符号。
+    #
+    # 实现关键：_alert_critical 既可能在「同步上下文」被调（eng.start() 走纯同步路径），
+    # 也可能在「已运行事件循环内」被调（asyncio.run(engine.pre_open)/_health_guard）。
+    # 后者场景下当前线程已绑 running loop，再调 asyncio.run 会抛
+    # "asyncio.run() cannot be called from a running event loop"。故显式开一个独立 daemon
+    # 线程跑 asyncio.run 并 join() 阻塞至协程完成——同步语义（调用返回即已 append 到 fired）
+    # 且跨两种上下文都零竞态。线程创建成本可忽略（每测试仅 1~2 次告警）。
+    def _sync_fire(coro):
+        import threading
+        box: dict = {}
+        def _runner():
+            try:
+                asyncio.run(coro)
+                box["ok"] = True
+            except Exception as exc:
+                box["exc"] = exc
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+        t.join()
+        if "exc" in box:
+            raise box["exc"]
+    monkeypatch.setattr("infra.notifier.fire_and_forget", _sync_fire)
     return fired
 
 
 # ============================================================================
 # 事件点 ① pre_open submitted=0 + live → CRITICAL（核心断言）
 # ============================================================================
-def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypatch, captured_alerts):
+def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypatch, tmp_path, captured_alerts):
     """live 模式 pre_open submitted=0（网关拒所有单）→ 钉钉 CRITICAL。
 
     构造场景：gw lock_down（is_locked=True）→ _submit 抛 RuntimeError（trading_service
@@ -64,6 +91,9 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
     断言：notify_risk_event 被调，level=CRITICAL，msg 含「漏挂」/「submitted=0」。
     """
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    # I-1（测试卫生）：TRADE_PLAN_DIR 指向 tmp_path，save_plan/confirm_plan 落到临时目录，
+    # 不污染实盘 logs/trading_plans/（_plan_path 读 os.getenv("TRADE_PLAN_DIR")）。
+    monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
 
     # 落一份已确认计划（pre_open 必须有 orders 才有「漏挂」语义——0 orders 是正常无计划，
     # 不应触发 CRITICAL）。直 save_plan 跳过 build_orders_from_signals（本测聚焦告警点，
@@ -85,6 +115,10 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
     # gw 锁死：_submit 全部 raise（模拟 lock_down 拒所有单）
     fake_gw = MagicMock()
     fake_gw._connected = True
+    # M-2（fake_gw async 契约）：pre_open 内 await gw.query_asset()——MagicMock 默认返非
+    # awaitable，await 会抛 TypeError 被外层 try/except 吞（靠兜底过）。显式 AsyncMock 让
+    # 路径干净、不依赖异常吞咽，断言聚焦真正的「漏挂」告警点。
+    fake_gw.query_asset = AsyncMock(return_value={})
     monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(engine, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
@@ -94,9 +128,8 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
     result = asyncio.run(engine.pre_open("2026-07-28"))
     assert result["submitted"] == 0  # 全部被拒
 
-    # 给 daemon 线程（fire_and_forget）一点时间执行 notify_risk_event
-    import time
-    time.sleep(0.3)
+    # I-2：fire_and_forget 已在 fixture patch 为同步执行，_alert_critical 返回即已投递，
+    # 无需 time.sleep 等线程。
 
     # 核心断言：至少一条 CRITICAL 且 msg 含「漏挂」/「submitted=0」
     critical = [(m, l) for m, l in captured_alerts if l == "CRITICAL"]
@@ -105,13 +138,15 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
         f"msg 应含「漏挂」/「submitted=0」，实际：{critical}"
 
 
-def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, captured_alerts):
+def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, tmp_path, captured_alerts):
     """dry_run 模式 pre_open submitted=0 不触发 CRITICAL（避免告警风暴）。
 
     dry_run 是影子模式（验证用），submitted=0 多半是 DRY_RUN 状态被误判或 mock 问题，
     不是真「网关锁死」——真锁死只在 live 下才有漏单风险。故 dry_run 不告警。
     """
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    # I-1（测试卫生）：TRADE_PLAN_DIR 指向 tmp_path，落盘不污染实盘 logs/trading_plans/。
+    monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
     from trading import trading_plan
     orders = [
         {"order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
@@ -132,8 +167,7 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
 
     asyncio.run(engine.pre_open("2026-07-28"))
-    import time
-    time.sleep(0.3)
+    # I-2：fire_and_forget 同步执行，无需 sleep。
     # dry_run 不应触发 CRITICAL（漏挂在 live 才致命）
     assert not any(l == "CRITICAL" for _, l in captured_alerts), \
         f"dry_run 不应告警 CRITICAL，实际：{captured_alerts}"
@@ -155,8 +189,7 @@ def test_sanity_check_fail_alerts_critical(monkeypatch, captured_alerts):
     monkeypatch.setattr(engine.calendar, "next_trading_day", lambda d: d)  # 返 today（口径坏）
 
     eng.start()
-    import time
-    time.sleep(0.3)
+    # I-2：fire_and_forget 同步执行，start() 返回即已投递。
     critical = [(m, l) for m, l in captured_alerts if l == "CRITICAL"]
     assert critical, f"expected CRITICAL for sanity fail, got {captured_alerts}"
     assert any("口径自检" in m for m, _ in critical), \
@@ -188,8 +221,7 @@ def test_health_guard_fail_threshold_alerts_critical(monkeypatch, captured_alert
     for _ in range(10):
         asyncio.run(eng._health_guard())
 
-    import time
-    time.sleep(0.3)
+    # I-2：fire_and_forget 同步执行，循环结束即已投递。
     critical = [(m, l) for m, l in captured_alerts if l == "CRITICAL"]
     assert critical, f"expected CRITICAL for health_guard exhaust, got {captured_alerts}"
     assert any("health_guard" in m and "10" in m for m, _ in critical), \
@@ -211,21 +243,3 @@ def test_alert_critical_swallows_exception(monkeypatch):
         "infra.notifier.NotificationManager.notify_risk_event", _boom)
     # 不应抛
     engine._alert_critical("测试告警（应被吞）")
-
-
-# ============================================================================
-# 辅助：复用 e2e 的 signal 构造（最小可用颈线法 signal dict）
-# ============================================================================
-def _make_signal():
-    """最小颈线法 signal（symbol + formed_at + experiment 归因 + 量价字段）。"""
-    return {
-        "symbol": "300001.SZ",
-        "neckline": 10.0,
-        "atr": 0.5,
-        "high": 11.0,
-        "low": 9.5,
-        "close": 10.5,
-        "formed_at": "2026-07-25",
-        "experiment_id": "exp_test",
-        "experiment_weight": 1.0,
-    }
