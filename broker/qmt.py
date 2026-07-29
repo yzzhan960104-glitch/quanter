@@ -302,6 +302,29 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         self._on_order_update: Optional[OrderUpdateCallback] = None
 
     # ------------------------------------------------------------------ 连接
+    def is_client_ready(self, staleness_sec: int = 300) -> bool:
+        """探测 miniQMT 客户端是否就绪（M1 · 纯文件系统检查，不触 xtquant）。
+
+        判据：userdata_mini 下 down_queue_win_* / miniqmtShm*Cache / up_queue_win_*
+        任一文件 mtime 在近 staleness_sec（默认5min）内 = 客户端在跑且活跃。
+        若全部文件老旧/不存在 → 客户端未启动或未登录 → connect 必返 -1，不空跑重连。
+
+        Why 纯文件检查：不触达 xtquant（C++ 扩展），CI/单测/无 SDK 环境可安全调用；
+        且文件 mtime 是客户端存活的最可靠信号（进程名因东财定制不定匹配）。
+        """
+        import glob as _glob
+        if not self._userdata_path or not os.path.isdir(self._userdata_path):
+            return False
+        now = time.time()
+        for pat in ("down_queue_win_*", "miniqmtShm*Cache*", "up_queue_win_*"):
+            for f in _glob.glob(os.path.join(self._userdata_path, pat)):
+                try:
+                    if now - os.path.getmtime(f) < staleness_sec:
+                        return True
+                except OSError:
+                    continue
+        return False
+
     async def connect(self) -> None:
         """
         建立并保活 QMT 连接（BaseExecutionGateway.connect 实现）。
