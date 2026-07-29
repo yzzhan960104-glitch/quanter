@@ -1428,6 +1428,41 @@ class TradingEngine:
         self._tp_placed: set[str] = set()
         self._gw: Any = None
 
+    def _sanity_check_date_alignment(self, today: str | None = None) -> bool:
+        """M3：启动口径自检——确认 _eod 落盘用 next_trading_day、_pre_open 读 today。
+
+        Why（[[eod-date-offbyone-fix]] 主动防线）：
+            代码口径已修（_eod 传 next_trading_day(today) 落盘、_pre_open 次日读 today），
+            但若进程跑的是未重启的旧代码（口径退回 today 落盘 → 次日读 T+1 永远差一天），
+            会直接导致「标的错位 + 永不挂单」——这是已知的静默致命 bug，进程级口径不可见。
+            本自检在 start() 注册 cron 前主动验证 ``calendar.next_trading_day(today) != today``
+            （即确实算出了次日而非原样返回），否则视为口径坏，让调用方降级（dry_run + 告警）。
+
+        Args:
+            today: YYYY-MM-DD；None 时取 datetime.now() 当日（启动自检默认当日）。
+
+        Returns:
+            True  = 口径正常（next_trading_day 算出次日，落盘 key 与次日读 today 对齐）；
+            False = 口径异常（next_trading_day 返 today 自身/空值/抛异常 → 疑似跑旧代码，
+                    调用方 start() 须 logger.error 告警，CRITICAL 钉钉接线留 T9）。
+        """
+        _today = today or datetime.now().strftime("%Y-%m-%d")
+        try:
+            nxt = calendar.next_trading_day(_today)
+        except Exception as exc:
+            # next_trading_day 抛异常（日历源故障/网络异常）同样判口径坏（保守拒进 live）
+            logger.exception("【口径自检失败】next_trading_day(%s) 抛异常，判口径坏：%s", _today, exc)
+            return False
+        if not nxt or nxt == _today:
+            # 旧 bug 口径：next_trading_day 原样返回 today（或空值）→ 落盘 key=今日，
+            # 次日 pre_open 读 today 永远差一天 → 标的错位 + 永不挂单（静默致命）。
+            logger.error(
+                "【口径自检失败】next_trading_day(%s)=%s 未算出次日（疑似跑旧代码口径），"
+                "拒绝进 live（降级 dry_run，CRITICAL 钉钉告警待 T9 接入）", _today, nxt)
+            return False
+        logger.info("口径自检通过：eod 落盘 key=%s，pre_open 次日读 today 与之对齐", nxt)
+        return True
+
     # ----- cron 包装：交易日判定 + 转调 async 触发函数 -----
     async def _eod(self) -> None:
         """cron 包装：节假日跳过；交易日 resolve 多实验 + scan_live 产信号 → eod_plan。
@@ -2112,7 +2147,23 @@ class TradingEngine:
 
     # ----- 生命周期 -----
     def start(self) -> None:
-        """启动 scheduler（阻塞主线程进入事件循环由 ``__main__`` 负责）。"""
+        """启动 scheduler（阻塞主线程进入事件循环由 ``__main__`` 负责）。
+
+        M3 口径自检（Task 5 · 注册 cron 前）：
+            调 ``_sanity_check_date_alignment`` 主动校验 next_trading_day 口径正常。
+            - 通过 → 继续 register cron（正常进调度）；
+            - 失败 → ``logger.error`` 告警（CRITICAL 钉钉接线是 T9 的事，本任务不调
+              ``_alert_critical`` 避免前置依赖 T9），但仍让 cron 起（降级语义由 T9/M4
+              强化告警定，本任务先打 error 不阻断调度——避免 T9 未合入时启动直接卡死）。
+        """
+        if not self._sanity_check_date_alignment():
+            # 口径坏：疑似跑旧代码（next_trading_day 退回返 today 自身）。
+            # 本任务只 logger.error 告警（_sanity_check 内已打），不阻断 cron 调度；
+            # live 模式下若真跑旧代码会持续标的错位，由 T9 CRITICAL 钉钉 + 人工介入兜底。
+            logger.error(
+                "【M3 口径自检未过】TradingEngine 以降级模式启动（mode=%s）——"
+                "疑似 next_trading_day 口径坏，进 live 前必须人工核查代码版本/进程重启状态",
+                _mode())
         self.sched.start()
         logger.warning("TradingEngine 已启动（mode=%s）——独立常驻进程运行", _mode())
 
