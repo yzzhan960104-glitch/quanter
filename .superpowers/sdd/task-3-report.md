@@ -1,79 +1,100 @@
-# Task 3 实现报告 — gap4 接线（engine + __main__）
+# Task 3 实现报告 — M2 撤单确认接入（pre_open + stop_loss + 熔断）
 
-> 注：本报告覆盖旧的「Task 3 daemon 钉钉告警」报告（不同任务编号体系）。本次为 **gap4 position_book 接线 Task 3**。
+> 物理背景：spec M2 · [[qmt-live-smoke-findings]]。QMT `cancel_order` 调用后主推回报
+> 延迟 1-2s，原撤单逻辑只数「发起撤单笔数」即返，不确认柜台是否真撤成 → 状态悬空
+> （本地以为撤了、柜台没撤，敞口残留）。Task 2 已在 `QmtExecutionGateway` 产出
+> `_confirm_cancelled`（轮询 query_orders 直到终态或超时），本 Task 3 把它接入
+> `breaker.cancel_all_open_orders` 与三处撤单调用方。
 
-## 改动概览（3 处 Modify）
+## 改动概览
 
-| # | 文件 | 改动 | 行为 |
-|---|------|------|------|
-| 1 | `trading/engine.py` `_post_close` | 读账本 + 注入 local_positions | `position_book.get_local_positions()` → 传 `post_close(today, local_positions=...)`；空 dict 直传（不转 None） |
-| 2 | `trading/engine.py` `_handle_order_update` | c 连后追加第四连 d | `if direction in ("BUY","SELL")` → `position_book.apply_fill(...)`；独立 try-except 软降级 |
-| 3 | `trading/__main__.py` `_run_forever` | `eng.start()` 前插入 `init_db()` | `position_book.init_db()` 必须先于 cron 启动 |
+### 主线（已 merged 至 dbefffe4）
 
-## 测试新增（4 个，追加到 `tests/trading/test_engine.py` 末尾）
+| # | 文件 / 位置 | 改动 | 物理意图 |
+|---|-------------|------|----------|
+| 1 | `trading/io/breaker.py` `cancel_all_open_orders` | 返回值 `int` → `{"cancelled", "unconfirmed"}`；鸭子类型 `getattr(gw, "_confirm_cancelled", None)` 调确认方法 | 撤单「发起」与「确认到终态」分离；未确认笔数显式暴露给调用方，杜绝状态悬空 |
+| 2 | `trading/engine.py:530` `_pre_open` 撤昨日单 | 消费 unconfirmed 口径，`>0` 时 `logger.warning` 告警 | 开盘前撤昨日未成交单，若有未确认 → 显式告警让运维人工复核 |
+| 3 | `trading/engine.py:870` `stop_loss_monitor` pending cancel_on | 撤单后调 `_confirm_cancelled`，确认成功才计 `n_pending_cancelled` | 涨幅兑现撤买单时，确认真撤成才计数，避免「本地计撤了、柜台仍 pending → 漏买变漏卖」 |
+| 4 | 新测试 `tests/trading/test_breaker_cancel_confirm.py` | 3 用例：超时计 unconfirmed / 全确认 unconfirmed=0 / 无方法向后兼容 | 锁定 T3 行为契约 |
+| 5 | `tests/trading/test_circuit_breaker.py` | 4 处断言适配 `int` → `dict` 返回值 | 既有测试跟随返回值结构变化 |
+| 6 | `tests/trading/test_stop_loss_monitor_decide_exit.py` | `test_pending_cancel_on_during_wait` 显式 `gw._confirm_cancelled = AsyncMock(return_value=True)` | 锁定 pending cancel 确认闭环 |
 
-1. `test_post_close_reads_position_book` — 账本非空 → 注入 post_close
-2. `test_post_close_empty_book_passes_empty_dict` — 账本空 → 传 `{}` 非 None
-3. `test_handle_order_update_writes_book` — BUY 成交 → apply_fill 被调一次，方向 "BUY"
-4. `test_handle_order_update_book_failure_soft_degrades` — apply_fill 抛异常 → 不阻断 a/b/c 三连
+### 本轮 review fix（I-1 / I-2 / M-1 / M-3）
 
-## TDD 证据
+| finding | 位置 | 修法 |
+|---------|------|------|
+| **I-1** 熔断路径 unconfirmed 静默 | `trading/engine.py:1256` `_post_close` 日内熔断撤单 | 取 `_cancel_all_open_orders` 返回值，`unconfirmed>0` 时追加 `logger.critical`（与 :1248 触发告警不重复，此条专报撤单质量口径） |
+| **I-2** 5N 秒阻塞无标注 | `trading/io/breaker.py` docstring | 追加「阻塞上界」段：N 笔串行最坏 `5N 秒`（每单 timeout=5s），调用方需评估 N；pre_open/熔断 N 个位数可接受，N 上百需后台 task 或缩短 timeout |
+| **M-1** 探针风格不统一 + MagicMock 陷阱 | `trading/engine.py:883` stop_loss pending cancel | `hasattr(gw, "_confirm_cancelled") + await gw._confirm_cancelled` → `getattr(gw, "_confirm_cancelled", None) + await _confirm(...) if _confirm else True`（与 breaker.py 同风格，规避 MagicMock 自动属性 hasattr 恒 True 但不可 await 的陷阱） |
+| **M-3** 测试死代码 | `tests/trading/test_breaker_cancel_confirm.py:71` `test_cancel_all_backward_compat` | 删第一行 `gw = MagicMock()`（被下一行 `MagicMock(spec=[...])` 立即覆盖） |
 
-### Step 2 红灯（实现前）
+## 测试
+
+### 命令
+```bash
+F:/quanter/.venv310/Scripts/python.exe -m pytest \
+  tests/trading/test_breaker_cancel_confirm.py \
+  tests/trading/test_circuit_breaker.py \
+  tests/trading/test_stop_loss_monitor_decide_exit.py \
+  tests/trading/test_e2e_trading_flow.py -v
 ```
-tests/trading/test_engine.py::test_post_close_reads_position_book FAILED
-  assert None == {'300001.SZ': 100.0}  ← _post_close 仍传 None
-tests/trading/test_engine.py::test_handle_order_update_writes_book FAILED
-  Expected 'apply_fill' to have been called once. Called 0 times.  ← 第四连未接
-2 failed
+
+### 输出（fix 后）
+```
+tests/trading/test_breaker_cancel_confirm.py::test_cancel_all_counts_unconfirmed_on_timeout PASSED
+tests/trading/test_breaker_cancel_confirm.py::test_cancel_all_confirmed_zero_when_all_terminal PASSED
+tests/trading/test_breaker_cancel_confirm.py::test_cancel_all_backward_compat_without_confirm_method PASSED
+tests/trading/test_circuit_breaker.py ... 9 用例 PASSED
+tests/trading/test_stop_loss_monitor_decide_exit.py ... 8 用例 PASSED
+  （含 test_pending_cancel_on_during_wait 验证 M-1 getattr 改动）
+tests/trading/test_e2e_trading_flow.py ... 5 用例 PASSED
+
+============================= 25 passed in 1.86s ==============================
 ```
 
-### Step 6 绿灯（实现后 · 全量回归）
-```
-tests/trading/test_engine.py ... 18 passed   # 新 4 + 既有 14
-```
-
-### 跨测试文件回归（保险）
-```
-test_engine.py + test_engine_order_update_handler.py + test_engine_eod_injection.py
-+ test_engine_stoploss_inject.py + test_main.py + test_position_book.py
-==> 37 passed
-```
-- `test_engine_order_update_handler.py`（_handle_order_update 三连原测试）全过 → 第四连追加位置正确，未破坏 a 日志/b 通知/c 止盈语义
-- `test_main.py`（__main__ import + callable）全过 → init_db 注入未破坏启动契约
+零回归。重点：
+- `test_pending_cancel_on_during_wait` 通过 → M-1 getattr 改动不破坏既有 pending cancel 闭环（该测试 :302 显式设 `gw._confirm_cancelled = AsyncMock(return_value=True)`，改后仍命中）
+- `test_cancel_all_backward_compat_without_confirm_method` 通过 → M-3 删死代码不影响鸭子类型跳过分支
 
 ## Commit
 
-- hash: `0e1e25e3`
-- branch: `master`
-- files: 3 changed, 121 insertions(+), 1 deletion(-)
-- message:
-  ```
-  feat(trading): gap4 接线 — _post_close 读账本 + _handle_order_update 写账本
+### 主线（已在前序提交）
+- `d793e217` feat(trading): M2 撤单确认闭环 `_confirm_cancelled`（轮询终态，超时告警）
+- `dbefffe4` feat(trading): M2 撤单确认接入 pre_open+stop_loss（未确认不计成功）
 
-  - _post_close 读 position_book.get_local_positions() 注入 local_positions（空 dict 直传）
-  - _handle_order_update 第四连 apply_fill（BUY/SELL only，独立 try-except 软降级）
-  - __main__ 启动期 position_book.init_db()
-  ```
+### 本轮 fix
+- branch: `fix/trading-execution-resilience`
+- message: `fix(trading): T3 review findings（熔断unconfirmed告警+5N标注+探针统一+report重写+死代码）`
+- files: `trading/engine.py`, `trading/io/breaker.py`, `tests/trading/test_breaker_cancel_confirm.py`, `.superpowers/sdd/task-3-report.md`
 
 ## 自审清单
 
 - [x] **语言审查**：所有新增/修改代码块均带中文注释（含物理意图 + 风控拷问）
-- [x] **反魔法审查**：未引入新依赖；仅调用既有 `position_book` 三个公开函数
+- [x] **反魔法审查**：未引入新依赖；仅消费 T2 产出的 `_confirm_cancelled` 与既有 logger
 - [x] **边界审查**：
-  - `_post_close` 空 dict 直传（保守，对齐 spec —— broker-only drift 不漏报）
-  - `_handle_order_update` 方向 None 不写账本（保守，对齐 c 连不挂止盈 —— 不猜方向误记）
-  - 第四连独立 try-except（apply_fill 失败不阻断 a/b/c 三连 + 不冒泡到回调链调用方）
-  - `__main__` init_db 在 eng.start() 之前（cron 启动即可能读写账本，建表必须先就绪）
-- [x] **回归审查**：test_engine.py 18 + 跨文件 37 全过，零回归
-- [x] **既有测试无回归**：test_engine_order_update_handler.py 三连原测试全过，证明第四连追加位置（c 连 try 块结束之后、方法 return 之前）未破坏既有 a/b/c 语义
+  - 熔断路径 unconfirmed>0 critical 告警（最致命路径不静默）
+  - pending cancel 探针用 getattr 规避 MagicMock 自动属性陷阱
+  - cancel_all docstring 显式标注 5N 秒阻塞上界，调用方据 N 自行评估
+- [x] **回归审查**：25/25 passed，覆盖 4 个改动文件全部测试
 
-## 风控拷问（Grill Me · gap4 接线特有风险）
+## 风控拷问（Grill Me · M2 撤单确认特有风险）
 
-1. **回调链路重入与部分成交**：第四连在 `if direction in ("BUY","SELL")` 块内，与 c 连 `_tp_placed` 幂等标记**完全解耦**——部分成交重推时，c 连因 `symbol in _tp_placed` 跳过（防超卖），但第四连仍每次执行（apply_fill 自身有 order_id UNIQUE 幂等约束，重复写会被 SQLite 拒，由 try-except 兜底软降级）。两层幂等机制独立，互不干扰。
-2. **账本写失败不阻断实盘**：apply_fill 抛 `RuntimeError("db locked")` 等异常被独立 try-except 捕获，止盈仍正常挂——避免「账本坏了 → 止盈漏挂 → 持仓裸奔」级联灾难。test_handle_order_update_book_failure_soft_degrades 锁此契约。
-3. **空账本 vs 跳过对账**：live 下账本空（如新部署首日未跑完整成交链路）但 broker 有持仓（外部单/手工单）时，`local={}` 直传让 reconcile 报 only_broker drift；若误转 None，post_close 内部走跳过分支 → 漏报 → 隐性敞口。test_post_close_empty_book_passes_empty_dict 锁此契约。
+1. **熔断 + 未确认双重灾难**：日内熔断已触发（敞口超阈）时，若撤单又有 unconfirmed，
+   意味着「该堵的口子可能没堵上」。I-1 修法用 `logger.critical`（非 warning）追加
+   口径，与 :1248 触发告警形成「触发 + 撤单质量」双层告警，运维一眼可见需立即
+   人工查柜台真实持仓。不阻塞 emergency_halt（lock_down 仍执行），因为「锁定不再
+   下单」与「撤单未确认」是两个独立维度，后者只能人工兜底。
+2. **5N 秒阻塞 event loop**：pre_open/熔断 N 通常个位数（昨夜遗留 + 当日未成交），
+   5N≈数十秒可接受；但若批量挂单后紧急停机 N 上百，串行 5N 秒会饿死行情/订单回调。
+   I-2 docstring 已显式标注此约束，调用方（T8 健康守护 / 未来批量场景）需自行评估
+   是否后台 task 化或缩短 timeout。本 task 不改串行结构（熔断场景串行更可控、日志可读）。
+3. **MagicMock 自动属性陷阱**：M-1 原写法 `hasattr(gw, "_confirm_cancelled")` 对
+   裸 MagicMock 恒 True（自动生成属性），但生成的属性不可 await → TypeError。
+   真实 QmtExecutionGateway 挂的是 async method 不触发此 bug，但单测用 MagicMock
+   时若忘记 spec 会爆。getattr 默认 None 规避此陷阱，且与 breaker.py 同风格统一。
 
 ## Concerns
 
-无。Task 3 接线闭环，e2e 第 3 步（本 task）已就位，可进入 e2e 第 4 步（review_report 已于 Task 2 完成，e2e 测试组装待后续任务）。
+无。Task 3 闭环，M2 撤单确认已接入三处撤单路径（pre_open / stop_loss pending /
+日内熔断），unconfirmed 口径全链路消费。后续 Task 8（健康守护）需注意 5N 秒
+阻塞上界标注；Task 9（钉钉 CRITICAL 告警接线）应把 I-1 的 critical 纳入推送通道。

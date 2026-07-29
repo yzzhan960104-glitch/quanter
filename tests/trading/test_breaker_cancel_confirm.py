@@ -68,8 +68,6 @@ async def test_cancel_all_backward_compat_without_confirm_method():
         dry_run/测试 Mock 可能不挂该方法。getattr 判存让无方法时退化为「不确认」，
         unconfirmed 恒 0，cancel 计数照常，既有调用方零回归。
     """
-    gw = MagicMock()
-    gw.cancel_order = AsyncMock(return_value=None)
     # 故意不设 _confirm_cancelled（MagicMock spec 未声明 → getattr 返真 Mock 对象会破坏
     # 判空逻辑，故用 spec 限定属性集，使 getattr(gw, "_confirm_cancelled", None) 返 None）
     gw = MagicMock(spec=["cancel_order"])

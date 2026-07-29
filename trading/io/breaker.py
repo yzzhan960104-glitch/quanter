@@ -76,6 +76,16 @@ async def cancel_all_open_orders(gw: Any) -> dict[str, int]:
         异常时 confirmed 置 False 而非 True，是「宁可误报未确认触发人工复核，
         不可漏报假装已撤」的保守取向——熔断场景下假撤单的代价（敞口残留）远
         高于误告警的代价（人工多看一眼）。
+
+    阻塞上界（调用方必须评估）：
+        本函数对 N 笔未终态单【串行】调 cancel_order + _confirm_cancelled，
+        每笔最坏 ``timeout=5s``（_confirm_cancelled 轮询超时），故整体最坏
+        ``5N 秒``（N=未终态单数）。调用方需据 N 评估是否阻塞主路径：
+          - ``pre_open`` 撤昨日未成交单 / 日内熔断撤单：N 通常个位数（昨夜遗留
+            挂单 + 当日未成交买单），5N≈数十秒可接受，且都在非交易窗口或风控
+            触发后执行，阻塞无副作用；
+          - 若 N 可能上百（如批量挂单后紧急停机），调用方需自行评估是否放到
+            后台 task 或缩短 timeout，避免阻塞 event loop 致行情/订单回调饿死。
     """
     orders = getattr(gw, "_orders", {}) or {}
     # 鸭子类型探针：T2 产出的确认方法（仅 QmtExecutionGateway 挂载）；

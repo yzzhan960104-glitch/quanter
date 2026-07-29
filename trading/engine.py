@@ -890,12 +890,11 @@ async def stop_loss_monitor(
                     # 状态悬空（本地计 pending_cancelled 但柜台没撤 → 漏买变漏卖）。
                     # True=到终态（CANCELLED 撤成 或 FILLED 撤晚已成）才计成功；
                     # False=超时未确认 → 不计 pending_cancelled + WARNING 人工复核。
-                    # 鸭子类型：dry_run/老 Mock 无 _confirm_cancelled 时跳过确认（向后兼容）。
-                    _ok = True
-                    if hasattr(gw, "_confirm_cancelled"):
-                        _ok = await gw._confirm_cancelled(
-                            str(oid), timeout=5.0, interval=0.5
-                        )
+                    # 鸭子类型（与 breaker.py 同风格）：getattr 取方法引用，None 则跳过
+                    # 确认。严禁 hasattr + 直 await：MagicMock 自动属性会让 hasattr 恒 True
+                    # 但裸 MagicMock 不可 await → TypeError。getattr 默认 None 规避此陷阱。
+                    _confirm = getattr(gw, "_confirm_cancelled", None)
+                    _ok = await _confirm(str(oid), timeout=5.0, interval=0.5) if _confirm else True
                     if _ok:
                         n_pending_cancelled += 1
                         logger.warning(
@@ -1253,7 +1252,18 @@ async def post_close(
                     # 撤所有未终态单（尽最大努力撤完，单笔失败不中断）
                     if gw is not None:
                         try:
-                            await _cancel_all_open_orders(gw)
+                            # M2（T3 fix I-1）：熔断撤单必须消费 unconfirmed 口径。
+                            # 熔断是实盘最致命路径（敞口已超阈值），撤单若有未确认
+                            # 终态的单，必须 critical 告警——既不与上方 :1248 的
+                            # 「触发」告警重复（那一条是宣告触发，此条是追加撤单质量
+                            # 口径），也绝不允许静默（与 pre_open:530 同口径双标）。
+                            _cb_res = await _cancel_all_open_orders(gw)
+                            if _cb_res["unconfirmed"] > 0:
+                                logger.critical(
+                                    "【日内熔断】撤单有 %s 笔未确认终态（发起 %s 笔）"
+                                    "——敞口可能残留，必须人工复核柜台真实持仓",
+                                    _cb_res["unconfirmed"], _cb_res["cancelled"],
+                                )
                         except Exception:
                             logger.exception("post_close 熔断撤单异常（继续 emergency_halt）")
                     # 置网关 lock_down + ERROR 告警
