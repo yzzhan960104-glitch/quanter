@@ -1409,6 +1409,20 @@ class TradingEngine:
                 os.getenv("ENGINE_POST_CLOSE_CRON", "30 15 * * 1-5")),
             id="post_close",
         )
+        # M1 健康守护 job（Task 8）：interval 60s，统一网关自愈入口。
+        # Why interval：与 _stoploss 同机制（cron 最小粒度分钟，秒级周期必须 IntervalTrigger）；
+        #   时段约束下放给 _health_guard 内 is_client_ready/_connected 判据——非盘中或已连
+        #   时直接 no-op，全天跑零副作用。
+        # Why 60s：connect 是重操作（start/connect/subscribe C++ 阻塞链），60s 周期既能在
+        #   断线/启动失败后分钟级恢复 live，又不至于刷柜台（QMT connect 返 -1 session 占用
+        #   会触发自扰死循环，退避表 _guard_skip_rounds 抑制）。
+        # 守护逻辑见 _health_guard（就绪探测 + 互斥让出 + 退避），此处仅注册。
+        self.sched.add_job(
+            self._health_guard,
+            IntervalTrigger(
+                seconds=int(os.getenv("ENGINE_HEALTH_GUARD_INTERVAL_SECONDS", "60"))),
+            id="_health_guard",
+        )
 
         # 成交回调链路状态（Task 10 · 修 G5）：
         #   _tp_placed：已挂止盈的 symbol 集合（幂等防重挂——部分成交多次回报/柜台重推
@@ -1427,6 +1441,102 @@ class TradingEngine:
         #   也走 DRY_RUN 分支不触达 broker，最多多几条「止盈单已挂」日志，无敞口风险。
         self._tp_placed: set[str] = set()
         self._gw: Any = None
+
+        # M1 健康守护 job 退避状态（Task 8）：
+        #   _guard_fail_count：connect 连续失败次数——失败越多退避越长（防刷柜台）。
+        #   _guard_rounds_since_fail：上次失败后已过的守护轮数——达 skip 阈值才再试。
+        # Why 进程内存（不持久化）：守护 job 是分钟级自愈，进程重启后从 0 开始退避无副作用
+        #   （重启本身已是一次「连接重置」，无需继承历史失败计数）；持久化反增复杂度（YAGNI）。
+        self._guard_fail_count: int = 0
+        self._guard_rounds_since_fail: int = 0
+
+    async def _health_guard(self) -> None:
+        """M1：网关健康守护——未连接时探测客户端就绪→重连，恢复 live（Task 8）。
+
+        物理定位（spec M1 · 统一网关自愈入口）：
+            apscheduler interval job 每 60s 跑一次（``__init__`` 内 add_job 注册，
+            id="_health_guard"）。覆盖两条断线恢复路径的统一收口：
+              ① 启动时 connect 失败（客户端未起 / session 占用 / 环境类故障）；
+              ② 盘中断线（on_disconnected→_reconnect 耗尽 backoffs 仍未恢复）。
+            无此守护 job 时，任一路径失败都会让网关全天锁死 _lock_down=True，
+            pre_open/stop_loss 全线拒单（行情/下单/对账均不可用）→ 实盘当天废单。
+
+        逻辑（顺序不可调，前置条件逐级过滤）：
+          ① gw is None（网关未装配，如 dry_run / 未配凭证）→ no-op；
+          ② 已连接 _connected=True → 清失败计数 + no-op（不捣乱活跃连接）；
+          ③ _reconnecting=True → 让出（on_disconnected 路径正在重连，避免并发抢连
+             同一 sid 触发 QMT -1 自扰）；
+          ④ is_client_ready=False（miniQMT 客户端未起 / userdata shm 文件 mtime 过期）
+             → 跳过（connect 必失败，空跑只会刷柜台日志 + 撞限流）；
+          ⑤ 退避：连续失败越多跳过越多轮次（等效指数退避，不改 apscheduler 调度）；
+          ⑥ 调 connect()——成功清计数恢复 live，失败累加计数等下轮退避。
+
+        ⚠️ 与 _reconnect 的边界（两条重连路径的分工）：
+            _reconnect（broker/qmt.py）：on_disconnected 触发的即时重连，带固定
+                backoff 序列（_RECONNECT_BACKOFFS），失败 N 次后判「真断线」留 lock_down。
+            _health_guard（本方法）：常驻周期守护，在 _reconnect 耗尽后的长时间窗口
+                持续探测客户端就绪→重连（客户端可能在 _reconnect 耗尽后才重启完成）。
+            互斥靠 gw._reconnecting——_reconnect 持锁时本方法 ③ 让出。
+        """
+        gw = get_gateway()
+        if gw is None:
+            # 网关未装配（dry_run / 未配 QMT 凭证）→ 无可守护对象，直接返回
+            return
+        # ② 已连接 → 清失败计数 + no-op（活跃连接不能被周期 job 重连打断：
+        #    重连会断开活跃 session 重建，导致回报回调丢失 / 主推重新订阅抖动）
+        if getattr(gw, "_connected", False):
+            self._guard_fail_count = 0
+            self._guard_rounds_since_fail = 0
+            return
+        # ③ 互斥让出：on_disconnected→_reconnect 正在进行（_reconnecting=True），
+        #    并发重连会同时 start/connect 同一 sid → QMT 返回 -1（session 占用）→ 自扰死循环。
+        if getattr(gw, "_reconnecting", False):
+            return
+        # ④ 客户端未就绪 → 不空跑 connect（防刷柜台）。
+        #    is_client_ready 是纯文件 mtime 探测（T6）：False 意味 miniQMT 客户端进程
+        #    未起 / userdata 共享内存文件老旧 → connect 必返 -1 或超时，空跑无意义。
+        if not gw.is_client_ready():
+            return
+        # ⑤ 退避：失败次数→应跳过轮数（等效指数退避，不改 apscheduler 60s 调度）。
+        #   skip=0 立即试，skip>0 时累加 _guard_rounds_since_fail 直到达阈值再试一次。
+        skip = self._guard_skip_rounds(self._guard_fail_count)
+        if self._guard_rounds_since_fail < skip:
+            self._guard_rounds_since_fail += 1
+            return
+        # ⑥ 调 connect——成功清计数恢复 live，失败累加计数（下轮按新 fail_count 退避）
+        try:
+            await gw.connect()
+            prev_fails = self._guard_fail_count
+            self._guard_fail_count = 0
+            self._guard_rounds_since_fail = 0
+            logger.warning(
+                "【health_guard 重连成功】网关恢复 live（前累计失败 %s 次），"
+                "pre_open/stop_loss 链路恢复可用", prev_fails)
+        except Exception as exc:
+            self._guard_fail_count += 1
+            self._guard_rounds_since_fail = 0  # 失败后从 0 重新累计等待轮数
+            next_skip = self._guard_skip_rounds(self._guard_fail_count)
+            logger.warning(
+                "health_guard 重连失败（第 %s 次，下次退避 %s 轮 ≈%ss）：%s",
+                self._guard_fail_count, next_skip, next_skip * 60, exc)
+
+    @staticmethod
+    def _guard_skip_rounds(fail_count: int) -> int:
+        """失败次数→跳过轮数（指数退避近似，60s/轮）。
+
+        映射：0→0, 1→0, 2→1, 3→3, ≥4→7。
+        物理意图：connect 连续失败（柜台持续不可用）时空跑无意义，按失败次数拉长间隔
+        （60→120→240→480s），等效指数退避但不引入 apscheduler reschedule 复杂度
+        （只在本方法内累加计数）。
+        上限 7 轮 ≈ 8min：再长则恢复延迟过大（盘中断线 8min 不恢复 = 实盘敞口失控）。
+        """
+        if fail_count < 2:
+            return 0
+        if fail_count == 2:
+            return 1
+        if fail_count == 3:
+            return 3
+        return 7  # 上限≈8min（60s×8 含本轮）
 
     def _sanity_check_date_alignment(self, today: str | None = None) -> bool:
         """M3：启动口径自检——确认 _eod 落盘用 next_trading_day、_pre_open 读 today。
