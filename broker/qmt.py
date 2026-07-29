@@ -638,6 +638,42 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             "traded_time": getattr(t, "traded_time", 0),
         } for t in trades]
 
+    # ----------------------------------------------------- M2 撤单确认闭环
+    async def _confirm_cancelled(self, oid: str, timeout: float = 5.0, interval: float = 0.5) -> bool:
+        """撤单后轮询确认到终态（CANCELLED/FILLED/REJECTED/PARTIAL_CANCELLED），超时返 False。
+
+        物理意图（M2 · [[qmt-live-smoke-findings]] 撤单主推延迟1-2s）：
+            cancel_order 调用后 QMT 主推回报有 1-2s 延迟，若不主动确认，撤单状态悬空
+            （本地以为撤了、柜台其实没撤）。本方法轮询 query_orders 直到该 oid 到终态
+            或超时，让上层据 True/False 决定是否告警/重试。
+
+        返回：
+            True  = 已确认到终态（CANCELLED 撤成 / FILLED 撤前已成交 / REJECTED 拒单 /
+                    PARTIAL_CANCELLED 部分撤）
+            False = 超时未确认（调用方须记 WARNING，绝不假装撤成功）
+
+        边界：
+            lock_down/未连接 → query_orders 已降级返[] → 本方法自然超时返 False（不抛）。
+            撤单低频（pre_open每日1次+少量pending），0.5s 间隔撞柜台限频风险可接受。
+        """
+        deadline = time.monotonic() + timeout
+        # 终态集合：撤单成功的 CANCELLED + 撤单时已成交的 FILLED + 拒单 REJECTED + 部分撤
+        terminal = (OrderState.CANCELLED, OrderState.FILLED, OrderState.REJECTED,
+                    OrderState.PARTIAL_CANCELLED)
+        while time.monotonic() < deadline:
+            try:
+                orders = await self.query_orders(cancelable_only=False)
+            except Exception:
+                # query_orders 内部异常已吞返[]，双保险
+                orders = []
+            for o in orders:
+                if str(o.get("order_id")) == str(oid):
+                    if o.get("state") in terminal:
+                        return True
+                    break  # 找到但非终态，本轮等下一轮轮询
+            await asyncio.sleep(interval)
+        return False
+
     # ----------------------------------------------------- 主推不可用惰性兜底
     async def _sync_orders_if_stale(self) -> int:
         """主推不可用时惰性同步订单状态（subscribe 失败兜底，T5）。
