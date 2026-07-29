@@ -315,3 +315,352 @@ def test_e2e_full_flow_symbol_propagates(isolated, monkeypatch):
     # 第 4 步：复盘报告含同一 symbol
     md = review_report.generate_review("2026-07-28", drift=None)
     assert "688001.SH" in md  # 计划段 + 成交段 + 持仓段都应含计划 symbol
+
+
+# ============================================================================
+# Task 10：韧性系统四断点场景 e2e 收口
+#
+# 物理意图（spec M1-M4 端到端串联）：
+#     前面 Task 1-9 的单测覆盖了各组件行为（_confirm_cancelled / _health_guard /
+#     _sanity_check_date_alignment / _alert_critical），但韧性系统的真实价值在于
+#     「多组件联动救场」——网关锁死时漏挂告警 + 守护 job 自愈恢复 + 下一轮正常挂单
+#     这条端到端链路。本节聚焦「整链路串联」，不重复单测。
+#
+#     - 场景②（重连恢复 e2e）：核心补，单测无整链路覆盖。完整串联
+#       gw 锁死→pre_open 漏挂 CRITICAL→_health_guard 探测就绪→connect 成功→
+#       _lock_down=False 恢复 live→下次 pre_open 正常挂单。
+#     - 场景③（撤单确认端到端）：pre_open 内 _cancel_all_open_orders →
+#       gw._confirm_cancelled 返 True 计入 cancelled / 返 False 计 unconfirmed 的
+#       端到端串联（单测只测 cancel_all_open_orders 组件，不串 pre_open）。
+#     - 场景④（标的口径端到端）：口径自检通过 + eod_plan 落盘 next_trading_day +
+#       次日 pre_open load_plan(today) 拿到正确计划（单测只测 _sanity_check 返 bool）。
+#     - 场景①（锁死漏挂+告警）：T9 test_engine_alerts.py 已充分覆盖（pre_open
+#       submitted=0 → CRITICAL），e2e 视角其价值被场景②前置阶段吸收（场景②的
+#       第一阶段正是「锁死→漏挂→CRITICAL」），故不单列重复测试（遵循 brief 避免重复）。
+# ============================================================================
+
+
+# ----- 共享：韧性 e2e 的告警收集 fixture（复用 T9 同步执行语义，消除线程竞态）-----
+@pytest.fixture
+def captured_alerts_e2e(monkeypatch):
+    """韧性 e2e 告警收集（与 T9 captured_alerts 同口径，独立命名避免与单测 fixture 混淆）。
+
+    Why 同步执行 fire_and_forget：_alert_critical 起默认 daemon 线程跑 asyncio.run(coro)，
+    测试断言时需 time.sleep 等线程——CI 高负载下假阴性。改同步执行后，
+    _alert_critical 返回即已 append 到 fired，断言零竞态（详见 T9 fixture 注释）。
+    """
+    fired: list[tuple[str, str]] = []
+
+    async def _fake_notify(self, msg, level="INFO"):
+        fired.append((msg, level))
+        return []
+
+    monkeypatch.setattr(
+        "infra.notifier.NotificationManager.notify_risk_event", _fake_notify)
+    from infra.notifier import NotificationManager as _NM
+    monkeypatch.setattr(
+        "infra.notifier.NotificationManager.get_default",
+        classmethod(lambda cls: _NM.__new__(_NM)))
+
+    def _sync_fire(coro):
+        import threading
+        box: dict = {}
+
+        def _runner():
+            try:
+                asyncio.run(coro)
+                box["ok"] = True
+            except Exception as exc:
+                box["exc"] = exc
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+        t.join()
+        if "exc" in box:
+            raise box["exc"]
+    monkeypatch.setattr("infra.notifier.fire_and_forget", _sync_fire)
+    return fired
+
+
+def _save_confirmed_plan(date: str, symbols: list[str]) -> None:
+    """直写一份已确认计划（跳过信号构造，聚焦韧性链路而非颈线法）。
+
+    Why 直 save_plan 跳 eod_plan：韧性 e2e 的断言点是「网关锁死/恢复/撤单确认/口径」，
+    非「信号→订单」构造；直写两条订单让 pre_open 有 orders 可挂（len(orders)>0 才有
+    「漏挂」语义），与 T9 test_engine_alerts.py 同范式。
+    """
+    orders = [
+        {"order": {"symbol": sym, "qty": 100, "side": "buy", "price": 10.0},
+         "stop_price": 9.0, "take_profit": 11.0, "neckline": 10.0, "atr": 0.5,
+         "formed_at": "2026-07-25", "max_wait": 5, "tp1": None, "tp1_portion": None,
+         "cancel_on": None, "experiment_id": None, "experiment_weight": 1.0, "rr": 1.0}
+        for sym in symbols
+    ]
+    trading_plan.save_plan(date, orders)
+    assert trading_plan.confirm_plan(date) is True
+
+
+# ============================================================================
+# 场景②（核心）：网关锁死→漏挂 CRITICAL→守护 job 自愈→恢复 live→下次正常挂单
+# ============================================================================
+def test_e2e_lockdown_recover_full_cycle(isolated, monkeypatch, captured_alerts_e2e):
+    """场景② 端到端：网关锁死→pre_open 漏挂 CRITICAL→_health_guard 自愈→恢复 live→下次 pre_open 正常挂单。
+
+    端到端链路（与单测的差异 = 多组件联动 + 时间序列「锁死→恢复」状态机）：
+        ① gw._lock_down=True / _submit raise（live 挡板拒所有单）
+           → pre_open submitted=0 → 钉钉 CRITICAL（场景①前置阶段，融入不重复）
+        ② 同一进程 eng._health_guard 探测 is_client_ready=True
+           → 调 gw.connect() 成功 → gw._lock_down=False / _connected=True 恢复 live
+        ③ 再次 pre_open：gw 已恢复 → _submit 返 DRY_RUN（不再 raise）
+           → submitted>0 + 无新 CRITICAL（恢复后不该再误告警）
+
+    与单测差异（Why e2e 价值）：
+        - T9 单测只覆盖「pre_open submitted=0 → CRITICAL」一个事件点；
+        - T8 单测只覆盖「_health_guard 失败累计告警」一条路径，未覆盖「connect 成功恢复 live」
+          的正向恢复路径，更未串联「恢复后下次 pre_open 正常挂单」；
+        - 本测试串联三阶段时间序列，验证韧性系统的核心承诺：**自愈后链路真能恢复下单**，
+          而非只是「告警了事」。这是单测无法替代的端到端价值。
+    """
+    # 全程 live 模式（韧性场景只在 live 才有「漏挂」致命语义；dry_run 影子无风险）
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
+    _save_confirmed_plan("2026-07-28", ["300010.SZ", "300011.SZ"])
+
+    # 用一个可变 dict 模拟 gw 状态机：初始锁死，守护 job connect 后翻转 _lock_down/_connected
+    gw_state = {"lock_down": True, "connected": False}
+
+    fake_gw = MagicMock()
+    fake_gw._reconnecting = False
+    fake_gw.query_asset = AsyncMock(return_value={})  # 熔断基线兜底（返空跳过 snapshot）
+
+    def _is_client_ready(staleness_sec: int = 300):
+        # 客户端就绪探测：守护 job 据此决定是否空跑。始终 True 让 _health_guard 进入 connect 路径
+        return True
+    fake_gw.is_client_ready = _is_client_ready
+
+    async def _connect():
+        # connect 成功：翻转 gw 状态（_lock_down=False / _connected=True 恢复 live）
+        gw_state["lock_down"] = False
+        gw_state["connected"] = True
+        fake_gw._lock_down = False
+        fake_gw._connected = True
+    fake_gw.connect = AsyncMock(side_effect=_connect)
+
+    def _prop(name):
+        # 属性代理 gw_state（MagicMock 默认属性返新 MagicMock，须显式锚定布尔语义）
+        return gw_state[name]
+    # 用 side_effect 让每次属性访问都返当前状态（而非 MagicMock 创建时的快照）
+    fake_gw._lock_down = True
+    fake_gw._connected = False
+
+    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(engine, "_cancel_all_open_orders",
+                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
+
+    # 阶段①：gw 锁死 → _submit 全 raise（live 挡板拒单契约）→ pre_open submitted=0 + CRITICAL
+    submit_calls_phase1 = {"n": 0}
+
+    async def _submit_lockdown(order, *, confirm=True):
+        submit_calls_phase1["n"] += 1
+        raise RuntimeError("网关锁死拒单（live 挡板）")
+    monkeypatch.setattr(engine, "_submit", _submit_lockdown)
+
+    # 同步 _lock_down 属性到 gw_state（阶段①锁死态）
+    fake_gw._lock_down = True
+    fake_gw._connected = False
+    pre1 = asyncio.run(engine.pre_open("2026-07-28"))
+    assert pre1["submitted"] == 0  # 全部被拒
+    assert submit_calls_phase1["n"] == 2  # 两条订单都尝试了（逐单兜底，不炸整批）
+    # 场景①前置断言：live 漏挂触发 CRITICAL（融入场景②，不单列重复 T9 单测）
+    critical_phase1 = [(m, l) for m, l in captured_alerts_e2e if l == "CRITICAL"]
+    assert critical_phase1, "阶段①锁死应触发 CRITICAL 漏挂告警"
+    assert any("漏挂" in m or "submitted=0" in m for m, _ in critical_phase1)
+
+    # 阶段②：守护 job _health_guard 探测就绪 → connect 成功 → 恢复 live
+    #     构造一个独立 TradingEngine 实例跑守护 job（与 pre_open 模块函数共享同一 fake_gw
+    #     via get_gateway patch），验证守护 job 真能翻转 gw 锁死态。
+    eng = engine.TradingEngine()
+    # patch 退避返 0 强制每轮都试（退避调度单测已覆盖，本 e2e 聚焦恢复链路不重复验退避）
+    monkeypatch.setattr(engine.TradingEngine, "_guard_skip_rounds",
+                        staticmethod(lambda fail_count: 0))
+    # 此时 fake_gw._connected=False → 守护 job 进入 connect 路径
+    asyncio.run(eng._health_guard())
+    # 恢复成功：gw 状态翻转（_lock_down=False / _connected=True）
+    assert gw_state["lock_down"] is False, "守护 job 应解除 lock_down 恢复 live"
+    assert gw_state["connected"] is True, "守护 job 应置 _connected=True"
+    # 守护 job 成功路径不应误触发 health_guard 失败告警（恢复是好事，不该告警）
+    health_critical = [m for m, l in captured_alerts_e2e
+                       if l == "CRITICAL" and "health_guard" in m]
+    assert not health_critical, "恢复成功不应触发 health_guard 失败告警"
+
+    # 阶段③：再次 pre_open → gw 已恢复 → _submit 返 DRY_RUN（不再 raise）→ submitted>0
+    #     换一份新日期计划避免与阶段①的 max_wait 窗口过滤冲突（formed_at=07-25，日期近）
+    _save_confirmed_plan("2026-07-29", ["300012.SZ"])
+    monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
+
+    submit_calls_phase3 = {"n": 0}
+
+    async def _submit_recovered(order, *, confirm=True):
+        submit_calls_phase3["n"] += 1
+        # 恢复后挂单成功（live 模式下真单返 OrderState.name 字符串）
+        return {"order_id": str(submit_calls_phase3["n"]), "state": "SUBMITTED", "message": "ok"}
+    monkeypatch.setattr(engine, "_submit", _submit_recovered)
+
+    pre3 = asyncio.run(engine.pre_open("2026-07-29"))
+    assert pre3["submitted"] >= 1, "恢复后下次 pre_open 应正常挂单（韧性核心承诺）"
+    assert submit_calls_phase3["n"] == 1
+    # 阶段③成功挂单不应再触发新的漏挂 CRITICAL（恢复后不该误告警）
+    new_critical_after_recover = [(m, l) for m, l in captured_alerts_e2e
+                                  if l == "CRITICAL" and ("漏挂" in m or "submitted=0" in m)
+                                  and "2026-07-29" in m]
+    assert not new_critical_after_recover, "恢复后正常挂单不应触发新漏挂告警"
+
+
+# ============================================================================
+# 场景③（端到端串联）：pre_open → _cancel_all_open_orders → _confirm_cancelled 计数
+# ============================================================================
+def test_e2e_cancel_confirm_in_pre_open(isolated, monkeypatch):
+    """场景③ 端到端：pre_open 内撤昨日遗留单 → _confirm_cancelled 返 True/False 分流计数。
+
+    端到端链路（与单测差异 = 串联 pre_open 主路径 + 真实 _cancel_all_open_orders）：
+        - gw._orders 含昨日未成交单（非终态）+ 已成交单（终态）；
+        - pre_open 调 _cancel_all_open_orders（真身 trading.io.breaker）；
+        - 对非终态单调 gw.cancel_order + gw._confirm_cancelled：
+            * 一笔 _confirm_cancelled 返 True → 计入 cancelled（已确认终态）；
+            * 一笔 _confirm_cancelled 返 False → 计入 unconfirmed（超时未确认）；
+        - pre_open 据 n_unconfirmed>0 记 WARNING（不阻塞挂单主路径）。
+        - 终态单（FILLED）不被重复撤。
+
+    与单测差异：
+        - test_breaker_cancel_confirm.py 单测只测 cancel_all_open_orders 组件本身，
+          不串 pre_open 主路径；
+        - 本测试验证 pre_open 真把 _cancel_all_open_orders 的 {cancelled, unconfirmed}
+          返回值用起来了（记 WARNING 日志 + 不阻塞后续挂单），端到端串联完整。
+    """
+    from trading.types.order_state import OrderState
+
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")  # dry_run 让 _submit 不触达真单
+    monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
+    _save_confirmed_plan("2026-07-28", ["300020.SZ"])
+
+    # 构造 gw._orders：3 笔昨日遗留单
+    #   o1 非终态 + _confirm_cancelled 返 True（确认撤成）→ cancelled
+    #   o2 非终态 + _confirm_cancelled 返 False（主推延迟）→ unconfirmed
+    #   o3 已终态 FILLED → 不撤（cancel_all 跳过终态）
+    fake_gw = MagicMock()
+    fake_gw._connected = True
+    fake_gw._lock_down = False
+    fake_gw.query_asset = AsyncMock(return_value={})
+    fake_gw._orders = {
+        "o1": {"state": OrderState.SUBMITTED, "order_type": 23},   # 非终态，待撤
+        "o2": {"state": OrderState.PARTIAL_FILLED, "order_type": 23},  # 非终态，待撤
+        "o3": {"state": OrderState.FILLED, "order_type": 23},      # 终态，跳过
+    }
+    fake_gw.cancel_order = AsyncMock(return_value=None)
+
+    # _confirm_cancelled：o1 返 True，o2 返 False（按 oid 分流）
+    async def _confirm(oid, timeout=5.0, interval=0.5):
+        return oid == "o1"
+    fake_gw._confirm_cancelled = _confirm
+
+    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+
+    # 不 patch _cancel_all_open_orders——让它真跑（端到端验证 pre_open 串了真身）
+    # _submit 返 DRY_RUN 让挂单主路径正常（聚焦撤单链路断言）
+    async def _dry_submit(order, *, confirm=True):
+        return {"order_id": "new1", "state": "DRY_RUN", "message": "影子"}
+    monkeypatch.setattr(engine, "_submit", _dry_submit)
+
+    # 记 WARNING 日志（pre_open 据 n_unconfirmed>0 记 WARNING，捕获日志验证串联）
+    import logging
+    warns: list[str] = []
+    real_warning = engine.logger.warning
+
+    def _spy_warning(msg, *args):
+        warns.append(msg % args if args else msg)
+        return real_warning(msg, *args)
+    monkeypatch.setattr(engine.logger, "warning", _spy_warning)
+
+    result = asyncio.run(engine.pre_open("2026-07-28"))
+
+    # 撤单端到端断言：
+    #   - cancel_order 被调 2 次（o1+o2 非终态撤，o3 终态跳过）
+    assert fake_gw.cancel_order.await_count == 2, \
+        f"应撤 2 笔非终态单（o3 终态跳过），实际 {fake_gw.cancel_order.await_count}"
+    #   - pre_open 仍正常挂单（撤单不阻塞主路径）—— dry_run submitted>=1
+    assert result["submitted"] >= 1, "撤单链路不应阻塞挂单主路径"
+    #   - pre_open 日志体现「未确认 N 笔」（n_unconfirmed=1，o2 返 False）
+    #     pre_open 内 unconfirmed>0 记 WARNING「pre_open 有 X 笔撤单未确认终态」
+    assert any("撤单未确认" in w for w in warns), \
+        f"pre_open 应记撤单未确认 WARNING，实际 warns={warns}"
+
+
+# ============================================================================
+# 场景④（端到端串联）：口径自检通过 + eod_plan 落盘 next_trading_day + 次日 load_plan 对齐
+# ============================================================================
+def test_e2e_sanity_date_alignment_loads_right_plan(isolated, monkeypatch):
+    """场景④ 端到端：口径自检通过 → eod_plan 落盘 next_trading_day → 次日 pre_open load_plan(today) 拿到正确标的。
+
+    端到端链路（与单测差异 = 串联「自检 + 落盘 key + 次日读 today」三段一致性）：
+        - T 日（2026-07-27，周一）：_sanity_check_date_alignment(today=T) 通过
+          （next_trading_day(T) 算出 T+1，确认不是旧 bug 口径）；
+        - T 日盘后 eod_plan：落盘 key = next_trading_day(T) = T+1（2026-07-28）；
+        - T+1 日（2026-07-28）盘前 pre_open：load_plan(today=T+1) 拿到 T 日落的计划
+          （key 对齐，不是「无计划」跳过）。
+
+    与单测差异：
+        - test_engine_sanity_check.py 单测只断言 _sanity_check_date_alignment 返 True/False，
+          不串「自检通过 → eod_plan 落盘 key → 次日 load_plan 对齐」；
+        - 本测试验证 [[eod-date-offbyone-fix]] 修复后，落盘 key 与次日读 today 真的对齐了
+          （旧 bug 下 eod 落 today，pre_open 读 T+1，永远差一天 → 永不挂单）。
+          这是端到端的一致性断言，单测无法替代。
+
+    Why 两个不同 symbol：避免与同 session 其他用例的 300001.SZ / 688001.SH 串味。
+    """
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
+
+    # 阶段①：T 日（2026-07-27）启动口径自检（next_trading_day 真身未 patch，算出 T+1）
+    eng = engine.TradingEngine()
+    ok = eng._sanity_check_date_alignment("2026-07-27")
+    assert ok is True, "口径自检应通过（next_trading_day 算出 T+1，非旧 bug 口径）"
+
+    # 阶段②：T 日盘后 eod_plan，用 next_trading_day(T) 作为落盘 key（与 _eod 同口径）
+    t_day = "2026-07-27"
+    plan_date = engine.calendar.next_trading_day(t_day)  # = T+1（口径自检验证过的值）
+    assert plan_date != t_day, "next_trading_day 必须算出次日（自检通过的物理意义）"
+
+    sig = _make_signal("300099.SZ")
+    asyncio.run(engine.eod_plan(plan_date, [sig], {"300099.SZ": 0.5}, 1_000_000.0))
+    # 落盘 key = plan_date（T+1），confirmed=False（人审闸）
+    plan = trading_plan.load_plan(plan_date)
+    assert plan is not None, f"计划应落在 {plan_date}（T+1，next_trading_day 口径）"
+    assert plan["orders"][0]["order"]["symbol"] == "300099.SZ"
+
+    # 阶段③：T+1 日盘前 pre_open，load_plan(today=T+1) 拿到 T 日落的计划（key 对齐）
+    #     旧 bug 下：eod 落 today=T，pre_open 读 T+1 → load_plan(T+1) 返 None → reason=「无计划」
+    #     修复后：eod 落 plan_date=T+1，pre_open 读 T+1 → load_plan(T+1) 命中 → 正常挂单
+    trading_plan.confirm_plan(plan_date)  # 研究员 T-1 确认闸
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+
+    fake_gw = MagicMock()
+    fake_gw._connected = True
+    fake_gw._lock_down = False
+    fake_gw.query_asset = AsyncMock(return_value={})
+    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(engine, "_cancel_all_open_orders",
+                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
+    submitted = {"n": 0}
+
+    async def _dry_submit(order, *, confirm=True):
+        submitted["n"] += 1
+        return {"order_id": str(submitted["n"]), "state": "DRY_RUN", "message": "影子"}
+    monkeypatch.setattr(engine, "_submit", _dry_submit)
+
+    # pre_open(today=T+1)——load_plan 命中 T 日落的计划（key 对齐 = 口径自检的端到端兑现）
+    result = asyncio.run(engine.pre_open(plan_date))
+    assert result["submitted"] >= 1, \
+        f"次日 pre_open 应挂上 T 日落的计划（口径对齐），实际 submitted={result['submitted']}"
+    assert "reason" not in result or result.get("submitted", 0) > 0, \
+        "不应因 key 错位返「无计划」跳过（旧 bug 的静默致命特征）"
