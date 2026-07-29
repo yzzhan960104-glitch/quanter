@@ -461,10 +461,14 @@ def test_post_close_circuit_breaker_triggers(monkeypatch):
     fake_gw = _FakeGw()
 
     # 拦截副作用：cancel_all + emergency_halt
+    # 注意：T3 fix I-1 后 post_close:1261 取 _cb_res["unconfirmed"]，要求返回
+    # dict（对齐 cancel_all_open_orders 的 {"cancelled":int,"unconfirmed":int}
+    # 契约）。早期版本返回 int 0 会让 critical 告警逻辑抛 TypeError 被 :1267
+    # except 吞掉 → 测试假 PASS。此处统一改为 dict。
     cancel_calls = []
     async def _fake_cancel(gw):
         cancel_calls.append(gw)
-        return 0
+        return {"cancelled": 0, "unconfirmed": 0}
     halt_calls = []
     def _fake_halt():
         halt_calls.append(True)
@@ -488,6 +492,67 @@ def test_post_close_circuit_breaker_triggers(monkeypatch):
     assert result.get("circuit_breaker") is True
     assert len(cancel_calls) == 1     # cancel_all 被调
     assert len(halt_calls) == 1       # emergency_halt 被调
+
+
+def test_post_close_circuit_breaker_warns_unconfirmed(monkeypatch, caplog):
+    """post_close 熔断：cancel_all 返 unconfirmed>0 → critical 告警（T3 fix I-1 回归）。
+
+    物理意图：
+        熔断是实盘最致命路径（敞口已超阈值）。撤单若留未确认终态的单，意味着
+        柜台可能仍有挂单活着——敞口无法闭环。必须 critical 告警，人工复核真实
+        持仓。此测试断言该 critical 告警路径**真正执行**（非被 except 吞掉）。
+
+    覆盖回归：
+        早期 _fake_cancel 返 int 0 → engine.py:1261 _cb_res["unconfirmed"]
+        抛 TypeError → :1267 except Exception 吞错 → critical 从未触发，测试假 PASS。
+        现修 _fake_cancel 返 dict + 本用例直接断言 logger.critical 被调且消息含
+        「未确认终态」/「敞口可能残留」。
+    """
+    import logging
+    from trading import position_book
+
+    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    position_book.snapshot_start_equity(today, 1_000_000.0)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 960_000.0}  # -4% 触发熔断
+        async def _fetch_broker_positions(self):
+            return {}
+    fake_gw = _FakeGw()
+
+    # 撤单返回 unconfirmed=1（模拟柜台未确认终态）→ 必须触发 critical
+    async def _fake_cancel(gw):
+        return {"cancelled": 2, "unconfirmed": 1}
+    def _fake_halt():
+        return {"halted": True}
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.emergency_halt", _fake_halt)
+
+    # reconcile mock
+    from trading.compute.reconcile import ReconciliationResult
+    fake_rec = ReconciliationResult(
+        matched=[], drifted=[], only_local=[], only_broker=[],
+        max_abs_drift=0.0, is_ok=True)
+    async def _fake_run_rec(gw, local, tolerance=0.0):
+        return fake_rec
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+
+    with caplog.at_level(logging.CRITICAL, logger="trading.engine"):
+        result = asyncio.run(engine.post_close(
+            today, gw=fake_gw, local_positions={}))
+
+    # 熔断已触发（前置）
+    assert result.get("circuit_breaker") is True
+    # 断言 critical 告警确实被调，且消息覆盖未确认/敞口语义
+    critical_msgs = [r.getMessage() for r in caplog.records
+                     if r.levelno >= logging.CRITICAL]
+    assert any("未确认终态" in m or "敞口可能残留" in m for m in critical_msgs), (
+        f"熔断 unconfirmed critical 告警未触发！caplog critical: {critical_msgs}")
 
 
 def test_post_close_circuit_breaker_skip_when_within_limit(monkeypatch):
