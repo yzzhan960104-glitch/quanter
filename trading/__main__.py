@@ -159,6 +159,29 @@ def _shadow_gate():
     return True
 
 
+def log_startup_banner():
+    """M3：启动 banner 打印进程内关键配置 + 口径版本（配置漂移一眼可见）。
+
+    Why：[[qmt-connect-1-rootcause]] 故障中 engine 进程内 session=123456 而 .env=123458，
+    无 banner 无人发现。本函数把进程启动时读到的 env 固化进日志，对比 .env 即知漂移。
+
+    物理意图（纯函数 + caplog 单测友好）：
+      - 仅读 os.environ + logger.info，无 gateway/scheduler 依赖，便于单测断言；
+      - 漂移四要素：session_id / account_id / userdata_path / mode + confirm，
+        覆盖 connect/login 易漂移的全部 QMT/模式 env；
+      - 口径版本：eod=next_trading_day, pre_open=today（标的 T+1 对齐，T+0 则漏挂/重挂）。
+    """
+    logger.info(
+        "=== 启动 banner === session=%s account=%s userdata=%s mode=%s confirm=%s | "
+        "口径: eod=next_trading_day, pre_open=today（标的 T+1 对齐）",
+        os.environ.get("QMT_SESSION_ID", "?"),
+        os.environ.get("QMT_ACCOUNT_ID", "?"),
+        os.environ.get("QMT_USERDATA_PATH", "?"),
+        os.environ.get("AUTO_TRADE_MODE", "?"),
+        os.environ.get("AUTO_CONFIRM_PLAN", "?"),
+    )
+
+
 async def _run_forever() -> None:
     """起 TradingEngine + 守护 event loop（APScheduler 后台跑四 cron）。
 
@@ -171,6 +194,10 @@ async def _run_forever() -> None:
     # 惰性 import：避免模块顶层 import 触发 trading 包重链（test 导入本模块时不
     # 应连带拉起 engine 依赖链；engine.py 顶层 import apscheduler 等）。
     from trading.engine import TradingEngine, get_gateway
+
+    # M3 启动 banner：在连接网关前打印进程内 session/account/mode/口径版本
+    # （为什么在 get_gateway 之前：banner 先于 connect 输出，便于排查 .env 漂移）。
+    log_startup_banner()
 
     eng = TradingEngine()
 
