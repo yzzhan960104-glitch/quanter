@@ -66,8 +66,38 @@ from strategies.neckline.execution import decide_exit, ExitAction, ExitReason
 from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
 # Task 10（R-2）：position_book 的 daily_equity reader/writer（snapshot/get_start）
 from trading import position_book as _position_book
-
+# Task 9（M4 静默漏单消灭）：致命事件钉钉 CRITICAL 告警（复用 infra.notifier，
+# broker/qmt.py _reconnect 已在用同一套）。lazy import 避免顶层 import 副作用扩散到
+# 仅用纯函数的测试场景——_alert_critical 内部 import 保持引用局部化。
 logger = logging.getLogger(__name__)
+
+
+def _alert_critical(msg: str) -> None:
+    """Task 9（M4）：致命事件钉钉 CRITICAL（fire_and_forget 不阻塞主流程）。
+
+    物理意图（spec M4 · [[qmt-connect-1-rootcase]] 教训）：
+        引擎致命事件（pre_open 漏挂 / 口径自检失败 / health_guard 重连耗尽）若只写日志，
+        钉钉不推 → 用户事后才发现漏单（全天锁死无告警 = 实盘废单日）。本函数是这些事件
+        点的统一收口：复用 infra.notifier 推 CRITICAL 级钉钉（与 broker _reconnect 同通道）。
+
+    Why level=CRITICAL：notify_risk_event 按 level 加前缀（🚨），CRITICAL 限致命事件
+        避免告警风暴（撤单超时/WARN 级不升级）。三事件点均已用业务语义过滤过：
+
+    Why fire_and_forget：告警在 daemon 线程跑（见 infra.notifier.fire_and_forget docstring），
+        跨线程触发异步告警的最简显式做法，不阻塞 pre_open/start/health_guard 主路径——
+        告警系统绝不能成为交易主链路的单点故障源（告警失败由 except 兜底记日志）。
+
+    Args:
+        msg: 告警正文（不含 level 前缀，notify_risk_event 自动加 🚨）。
+    """
+    try:
+        from infra.notifier import NotificationManager, fire_and_forget
+        fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "CRITICAL"))
+    except Exception:
+        # 告警发送失败不阻塞主流程（fire_and_forget 内部 asyncio.run 异常已被它自己 except，
+        # 此处仅兜底 import/get_default 等同步异常）。告警是「尽最大努力」的观测通道，
+        # 不能拖垮 pre_open/start/health_guard 主路径。
+        logger.exception("CRITICAL 告警发送失败（不阻塞主流程）：%s", msg)
 
 
 # ============================================================================
@@ -625,6 +655,15 @@ async def pre_open(date: str) -> dict:
 
     logger.info("pre_open 完成 date=%s submitted=%d/%d expired=%d mode=%s",
                 date, n_submitted, len(plan["orders"]), n_expired, _mode())
+    # Task 9（M4 静默漏单消灭）：live 模式 submitted=0 且有计划单 → 钉钉 CRITICAL。
+    # 物理意图：live 下「全部挂单失败」= 当日废单日（网关锁死 / 涨跌停挡板 / 资金不足），
+    # 仅 logger.warning 不足以叫醒用户（[[qmt-connect-1-rootcause]] 全天锁死无告警教训）。
+    # Why 限 live：dry_run submitted=0 多半是 DRY_RUN 状态误判或测试 mock，非真漏单风险；
+    # Why 限 len(orders)>0：无计划单（0/0）是「当日无信号」正常态，不该误告警。
+    if n_submitted == 0 and _mode() == "live" and len(plan["orders"]) > 0:
+        _alert_critical(
+            f"pre_open 漏挂 submitted=0/{len(plan['orders'])} date={date}"
+            f"（网关锁死? 网关拒绝所有单? 人工核查 gw 状态与挡板日志）")
     return {"submitted": n_submitted, "mode": _mode()}
 
 
@@ -1519,6 +1558,17 @@ class TradingEngine:
             logger.warning(
                 "health_guard 重连失败（第 %s 次，下次退避 %s 轮 ≈%ss）：%s",
                 self._guard_fail_count, next_skip, next_skip * 60, exc)
+            # Task 9（M4 静默漏单消灭）：连续失败超阈值 → 钉钉 CRITICAL（网关持续锁死需人工介入）。
+            # Why % 10 节流：每 10 次失败推一条（避免高频告警风暴）；connect -1 的即时告警
+            # 已在 broker/qmt.py _reconnect（T7）处理，本守护是长周期兜底，不重复推。
+            # 物理阈值：fail_count=10 意味 connect 已连续失败 10 轮（含退避至少数十分钟），
+            # 自愈无望，必须人工重启 miniQMT 客户端 / 排查 session 占用。
+            if self._guard_fail_count % 10 == 0 and self._guard_fail_count > 0:
+                _alert_critical(
+                    f"health_guard 重连累计失败 {self._guard_fail_count} 次，"
+                    f"网关持续锁死（_reconnect 已耗尽 backoffs 仍未恢复），"
+                    f"请人工介入：检查 miniQMT 客户端是否启动 / session 是否被占用 / "
+                    f"userdata shm 文件是否过期")
 
     @staticmethod
     def _guard_skip_rounds(fail_count: int) -> int:
@@ -2274,6 +2324,12 @@ class TradingEngine:
                 "【M3 口径自检未过】TradingEngine 以降级模式启动（mode=%s）——"
                 "疑似 next_trading_day 口径坏，进 live 前必须人工核查代码版本/进程重启状态",
                 _mode())
+            # Task 9（M4）：口径自检失败补钉钉 CRITICAL（原 T5 仅 logger.error，钉钉不推）。
+            # ⚠️ 不改 T5「仅告警不阻断」行为（cron 照起，硬阻断升级是 R4 follow-up）。
+            # 降级运行是真隐患（旧代码口径会让标的错位 + 永不挂单），必须叫醒人工。
+            _alert_critical(
+                "口径自检失败：next_trading_day 未算出次日（疑似跑旧代码），"
+                "已降级启动，请立即重启 engine 加载新代码并核查 next_trading_day 口径")
         self.sched.start()
         logger.warning("TradingEngine 已启动（mode=%s）——独立常驻进程运行", _mode())
 
