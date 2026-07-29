@@ -301,6 +301,12 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # 上层注入的异步回报回调（钉钉报警 / State 持久化），主线程 create_task 调度
         self._on_order_update: Optional[OrderUpdateCallback] = None
 
+        # M1：重连互斥标志——on_disconnected→_reconnect 与 T8 健康守护 job 两条重连路径
+        # 共用入口的互斥锁。Why：两条路径并发触发时会同时 start/connect 同一 session_id，
+        # QMT 对已占用的 sid 返回 -1（connect 失败），形成「自扰性断线」死循环。
+        # 用 bool 做软锁：先到者置 True，后到者见 True 直接 return 让出，finally 释放。
+        self._reconnecting: bool = False
+
     # ------------------------------------------------------------------ 连接
     def is_client_ready(self, staleness_sec: int = 300) -> bool:
         """探测 miniQMT 客户端是否就绪（M1 · 纯文件系统检查，不触 xtquant）。
@@ -371,9 +377,16 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         if connect_rc != 0:
             # connect 返回非 0 即连接失败（xttrader.md：返回 0 表示成功）
             self._lock_down = True
+            # M1：按返回码区分失败原因，供 M4 钉钉告警精准定位（-1 与其他码处置路径不同）
+            # -1 的物理含义：session 被占用（残留锁 / 他进程已用同一 sid 连上 MiniQMT）。
+            # 其他非零码多为环境类故障（客户端未启动 / userdata 路径错 / 版本不匹配）。
+            reason = (
+                "session 疑似被占用（残留锁/他进程占用 sid）" if connect_rc == -1
+                else f"返回码 {connect_rc}"
+            )
             raise ConnectionError(
-                f"QMT connect 失败，返回码={connect_rc}（0=成功）；"
-                f"请确认 MiniQMT 客户端已启动且 userdata_mini 路径正确：{self._userdata_path}"
+                f"QMT connect 失败（{reason}）；userdata={self._userdata_path}。"
+                f"若 -1 且客户端在跑，跑 scripts/qmt_clear_session_lock.py 清残留或换 sid"
             )
         if sub_rc != 0:
             # subscribe 失败不致命但危险：拿不到主推回报（on_stock_order/on_stock_trade），
@@ -981,36 +994,49 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         - 重连成功 → connect() 内部清 lock_down/置 connected，下轮 beat 自动恢复 live；
         - 全部失败 → 保持锁态（connect 失败已置 lock_down=True）+ ERROR 告警等人工；
         - 退避 sleep 期间 lock_down=True，submit_order 被网关拒，tick_exit 优雅 no-op。
+
+        M1 互斥：on_disconnected→_reconnect 与 T8 健康守护 job 是两条重连路径，共用本
+        入口。用 _reconnecting 软锁保证同一时刻只有一条路径在跑重连，避免并发 connect
+        同一 sid 触发 QMT 返回 -1（session 占用）的自扰死循环。
         """
-        from infra.notifier import NotificationManager, fire_and_forget
-        # 防御：重连期间确保锁态（拒新单）；connect 成功会清锁，失败/耗尽保持锁。
-        self._lock_down = True
-        n = len(_RECONNECT_BACKOFFS)
-        for i, delay in enumerate(_RECONNECT_BACKOFFS, 1):
-            if delay > 0:
-                await asyncio.sleep(delay)
-            try:
-                await self.connect()
-                logger.info("QMT 重连成功（第 %s/%s 次）", i, n)
-                try:
-                    fire_and_forget(NotificationManager.get_default().notify_risk_event(
-                        f"QMT 断线后重连成功（第{i}次）", "INFO"))
-                except Exception:
-                    pass
-                return
-            except Exception as exc:
-                logger.warning("QMT 重连失败（第 %s/%s）：%s", i, n, exc)
-                try:
-                    fire_and_forget(NotificationManager.get_default().notify_risk_event(
-                        f"QMT 重连失败第{i}次：{exc}", "WARN"))
-                except Exception:
-                    pass
-        logger.critical("QMT 重连耗尽（%s 次），网关保持锁态，请人工介入", n)
+        # M1 互斥入口：已在重连则直接让出（另一条路径正在 connect，本路径不应叠加）
+        if self._reconnecting:
+            return
+        self._reconnecting = True
         try:
-            fire_and_forget(NotificationManager.get_default().notify_risk_event(
-                f"QMT 重连耗尽（{n}次），网关锁态，请人工介入！", "ERROR"))
-        except Exception:
-            pass
+            from infra.notifier import NotificationManager, fire_and_forget
+            # 防御：重连期间确保锁态（拒新单）；connect 成功会清锁，失败/耗尽保持锁。
+            self._lock_down = True
+            n = len(_RECONNECT_BACKOFFS)
+            for i, delay in enumerate(_RECONNECT_BACKOFFS, 1):
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                try:
+                    await self.connect()
+                    logger.info("QMT 重连成功（第 %s/%s 次）", i, n)
+                    try:
+                        fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                            f"QMT 断线后重连成功（第{i}次）", "INFO"))
+                    except Exception:
+                        pass
+                    return
+                except Exception as exc:
+                    logger.warning("QMT 重连失败（第 %s/%s）：%s", i, n, exc)
+                    try:
+                        fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                            f"QMT 重连失败第{i}次：{exc}", "WARN"))
+                    except Exception:
+                        pass
+            logger.critical("QMT 重连耗尽（%s 次），网关保持锁态，请人工介入", n)
+            try:
+                fire_and_forget(NotificationManager.get_default().notify_risk_event(
+                    f"QMT 重连耗尽（{n}次），网关锁态，请人工介入！", "ERROR"))
+            except Exception:
+                pass
+        finally:
+            # M1：无论重连成功/失败/异常，释放互斥锁，允许下一次断线再触发重连。
+            # 放 finally 保证异常路径（如 KeyboardInterrupt）不遗留死锁标志。
+            self._reconnecting = False
 
     # ================================================ XtQuantTraderCallback
     # 以下回调全部运行在 xtquant 的 C++ 线程！
