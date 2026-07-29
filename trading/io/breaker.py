@@ -45,33 +45,77 @@ _TERMINAL: frozenset[OrderState] = frozenset({
 })
 
 
-async def cancel_all_open_orders(gw: Any) -> int:
+async def cancel_all_open_orders(gw: Any) -> dict[str, int]:
     """撤销网关下所有未终态订单（熔断/断线/紧急停机时调）。
 
     参数：
         gw: 执行网关实例，需暴露 ``_orders: dict[str, dict]``（与
-            QmtExecutionGateway 同口径）与 async ``cancel_order(order_id)``。
+            QmtExecutionGateway 同口径）与 async ``cancel_order(order_id)``；
+            可选暴露 async ``_confirm_cancelled(oid, timeout, interval) -> bool``
+            （T2 产出，用于撤单后轮询确认到终态）。未挂该方法的网关（dry_run/
+            老 Mock）走鸭子类型跳过确认，行为向后兼容。
 
     返回：
-        成功发起撤单的笔数（注意：是「发起」而非「已撤成功」，柜台回报
-        最终态有滞后；调用方需结合后续 on_cancel_error/on_stock_order
-        对账最终确认）。
+        ``{"cancelled": int, "unconfirmed": int}``
+          - ``cancelled``：成功「发起」撤单的笔数（非「已撤成功」，柜台回报
+            最终态有滞后）。
+          - ``unconfirmed``：发起后 ``_confirm_cancelled`` 超时未确认到终态
+            的笔数（主推延迟或柜台未响应）。``unconfirmed>0`` 仅告警，不阻塞
+            熔断/挂单主路径——撤单已发，本地状态终会被 on_cancel_error/
+            on_stock_order 对账修正；但必须显式暴露此口径，让调用方据以决定
+            是否人工复核，杜绝「本地以为撤了、柜台其实没撤」的状态悬空。
 
     Why 必须容忍单笔失败：
         熔断路径往往伴随异常环境（断线恢复、柜台限流、流动性枯竭），单笔
         cancel_order 抛异常是常态而非偶发；一旦因单笔失败中断循环，剩余
         未终态单将持续暴露敞口，彻底违背「熔断把所有口子堵上」的物理意图。
         故采用 try/except 包裹 + logger.exception 全量记录，尽最大努力撤完。
+
+    Why 确认异常视为未确认（保守）：
+        _confirm_cancelled 自身轮询也可能抛异常（query_orders 断线、柜台限流）；
+        异常时 confirmed 置 False 而非 True，是「宁可误报未确认触发人工复核，
+        不可漏报假装已撤」的保守取向——熔断场景下假撤单的代价（敞口残留）远
+        高于误告警的代价（人工多看一眼）。
     """
     orders = getattr(gw, "_orders", {}) or {}
-    n = 0
+    # 鸭子类型探针：T2 产出的确认方法（仅 QmtExecutionGateway 挂载）；
+    # None 表示网关不支持确认（dry_run/老 Mock），退化为「不确认、unconfirmed 恒 0」。
+    confirm_fn = getattr(gw, "_confirm_cancelled", None)
+    n_cancelled = 0
+    n_unconfirmed = 0
     for oid, rec in list(orders.items()):
         if rec.get("state") not in _TERMINAL:
             try:
                 await gw.cancel_order(oid)
-                n += 1
+                n_cancelled += 1
+                # M2 撤单确认闭环（T3 接入）：撤单「发起」成功后，轮询确认是否
+                # 真到终态。QMT 主推延迟 1-2s，不确认则状态悬空（[[qmt-live-smoke-findings]]）。
+                # True=到终态（CANCELLED 撤成 或 FILLED 撤晚已成，都表示不再 pending）；
+                # False=超时未确认 → 计 unconfirmed + WARNING，不假装撤成。
+                if confirm_fn is not None:
+                    confirmed = True
+                    try:
+                        confirmed = await confirm_fn(
+                            str(oid), timeout=5.0, interval=0.5
+                        )
+                    except Exception:
+                        # 确认自身异常保守视为未确认（见 docstring Why）。
+                        confirmed = False
+                        logger.exception(
+                            "撤单确认异常（保守计未确认）oid=%s", oid
+                        )
+                    if not confirmed:
+                        n_unconfirmed += 1
+                        logger.warning(
+                            "撤单未确认终态 oid=%s（主推延迟或柜台未响应，需人工复核）",
+                            oid,
+                        )
             except Exception:
                 # 单笔失败不中断：记录后继续撤下一笔，最终返回成功发起数。
                 logger.exception("熔断撤单失败 oid=%s", oid)
-    logger.warning("熔断撤单完成，共撤 %s 笔未终态单", n)
-    return n
+    logger.warning(
+        "熔断撤单完成，共发起撤 %s 笔未终态单（其中未确认 %s 笔）",
+        n_cancelled,
+        n_unconfirmed,
+    )
+    return {"cancelled": n_cancelled, "unconfirmed": n_unconfirmed}

@@ -522,8 +522,23 @@ async def pre_open(date: str) -> dict:
         logger.warning("pre_open 撤昨日单跳过：交易网关未装配（gw=None）")
     else:
         try:
-            n_cancelled = await _cancel_all_open_orders(gw)
-            logger.info("pre_open 撤昨日未成交单 %s 笔", n_cancelled)
+            # M2（T3）：cancel_all_open_orders 返回 {cancelled, unconfirmed}。
+            # cancelled=成功发起撤单数；unconfirmed=发起后 _confirm_cancelled 超时
+            # 未到终态的笔数（主推延迟/柜台未响应）。unconfirmed>0 仅告警不阻塞挂单——
+            # 撤单已发，本地状态终会被 on_cancel_error/on_stock_order 对账修正，但必须
+            # 显式暴露此口径让运维知晓，杜绝「本地以为撤了、柜台其实没撤」的状态悬空。
+            _cancel_res = await _cancel_all_open_orders(gw)
+            n_cancelled = _cancel_res["cancelled"]
+            n_unconfirmed = _cancel_res["unconfirmed"]
+            logger.info(
+                "pre_open 撤昨日未成交单 发起 %s 笔（未确认 %s 笔）",
+                n_cancelled, n_unconfirmed,
+            )
+            if n_unconfirmed > 0:
+                logger.warning(
+                    "pre_open 有 %s 笔撤单未确认终态（主推延迟或柜台未响应，需人工复核）",
+                    n_unconfirmed,
+                )
         except Exception:
             # 撤单失败不阻塞挂单主路径（单笔失败已在 cancel_all 内被吞，此处兜整体异常）
             logger.exception("pre_open 撤昨日单整体异常（继续挂新单）")
@@ -870,10 +885,26 @@ async def stop_loss_monitor(
             for oid in pending_by_sym.get(sym, []):
                 try:
                     await gw.cancel_order(oid)
-                    n_pending_cancelled += 1
-                    logger.warning(
-                        "【pending 撤单】%s order_id=%s（high=%s ≥ cancel_on=%s，涨幅兑现撤买单）",
-                        sym, oid, day_high, cancel_on)
+                    # M2（T3）：撤单「发起」成功后，确认是否真到终态。
+                    # QMT 主推延迟 1-2s（[[qmt-live-smoke-findings]]），不确认则
+                    # 状态悬空（本地计 pending_cancelled 但柜台没撤 → 漏买变漏卖）。
+                    # True=到终态（CANCELLED 撤成 或 FILLED 撤晚已成）才计成功；
+                    # False=超时未确认 → 不计 pending_cancelled + WARNING 人工复核。
+                    # 鸭子类型：dry_run/老 Mock 无 _confirm_cancelled 时跳过确认（向后兼容）。
+                    _ok = True
+                    if hasattr(gw, "_confirm_cancelled"):
+                        _ok = await gw._confirm_cancelled(
+                            str(oid), timeout=5.0, interval=0.5
+                        )
+                    if _ok:
+                        n_pending_cancelled += 1
+                        logger.warning(
+                            "【pending 撤单】%s order_id=%s（high=%s ≥ cancel_on=%s，涨幅兑现撤买单）",
+                            sym, oid, day_high, cancel_on)
+                    else:
+                        logger.warning(
+                            "pending 撤单未确认终态 %s order_id=%s（主推延迟或柜台未响应，不计成功，需人工复核）",
+                            sym, oid)
                 except Exception as exc:
                     logger.warning("pending 撤单失败 symbol=%s order_id=%s 原因=%s",
                                    sym, oid, exc)

@@ -296,6 +296,10 @@ def test_pending_cancel_on_during_wait():
                                                          MagicMock(order_id=oid,
                                                                    state="CANCELED",
                                                                    message="ok"))[1])
+    # M2（T3）：撤单后调 _confirm_cancelled 确认终态。MagicMock 默认 hasattr 任意属性
+    # 为 True 但返裸 MagicMock 不能 await → 会抛异常进 except 致 pending_cancelled 不增。
+    # 显式设 AsyncMock(return_value=True) 让确认通过，测真实「撤单→确认→计数」路径。
+    gw._confirm_cancelled = AsyncMock(return_value=True)
 
     result = _run_monitor({}, positions, quotes, submitted=[],
                           gw=gw, pending_ctx=pending_ctx)

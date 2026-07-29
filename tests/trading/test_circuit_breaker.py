@@ -103,7 +103,10 @@ def test_cancel_all_open_orders_skips_terminal_states():
     })
     n = asyncio.run(cb.cancel_all_open_orders(gw))
     # 仅 1/7/8 撤单，顺序按 _orders 迭代序（Python 3.7+ dict 保序）
-    assert n == 3
+    # 返回值契约（M2 T3）：{cancelled, unconfirmed}；_FakeGW 无 _confirm_cancelled
+    # 方法 → 鸭子类型跳过确认，unconfirmed 恒 0（向后兼容）。
+    assert n["cancelled"] == 3
+    assert n["unconfirmed"] == 0
     assert gw.cancelled == ["1", "7", "8"]
 
 
@@ -125,7 +128,9 @@ def test_cancel_all_open_orders_resilient_to_single_failure():
     })
     n = asyncio.run(cb.cancel_all_open_orders(gw))
     # 第一笔失败被吞，第二笔仍被撤
-    assert n == 1
+    # 返回值契约（M2 T3）：{cancelled, unconfirmed}。
+    assert n["cancelled"] == 1
+    assert n["unconfirmed"] == 0
     assert gw.cancelled == ["2"]
 
 
@@ -136,11 +141,16 @@ def test_cancel_all_open_orders_missing_orders_attr():
             raise AssertionError("不应被调用")
 
     n = asyncio.run(cb.cancel_all_open_orders(BareGW()))
-    assert n == 0
+    # 返回值契约（M2 T3）：{cancelled, unconfirmed}；无 _orders → 都 0。
+    assert n["cancelled"] == 0
+    assert n["unconfirmed"] == 0
 
 
 def test_cancel_all_open_orders_empty():
     """_orders 为空字典时返 0。"""
     gw = _FakeGW({})
-    assert asyncio.run(cb.cancel_all_open_orders(gw)) == 0
+    res = asyncio.run(cb.cancel_all_open_orders(gw))
+    # 返回值契约（M2 T3）：{cancelled, unconfirmed}；空 _orders → 都 0。
+    assert res["cancelled"] == 0
+    assert res["unconfirmed"] == 0
     assert gw.cancelled == []
