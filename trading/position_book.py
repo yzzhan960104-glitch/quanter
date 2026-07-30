@@ -25,6 +25,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DB = "logs/trading_state.db"
+# 单账户默认 account_id（与 state_store._DEFAULT_ACCOUNT_ID 同值，多账户前所有持仓归此账户）。
+# position 复合 PK(account_id, symbol) 改造后，旧调用方无 account_id 时用此默认值，向后兼容。
+_DEFAULT_ACCOUNT_ID = "default"
 
 
 @contextmanager
@@ -63,11 +66,20 @@ def _has_column(con, table: str, column: str) -> bool:
 
 
 def init_db(db_path: str | None = None) -> None:
-    """幂等建表 + schema 迁移（live-readiness spec §3.1 地基）。
+    """幂等建表 + schema 迁移。
+
+    历史演进：live-readiness spec §3.1 先建了 symbol-PK 的 position/fill/daily_equity；
+    trading-state-store-redesign spec §7.1 进一步把 position 升级为复合 PK (account_id, symbol)
+    以支持多账户隔离。本函数现在建/迁移到 state_store 的统一 schema。
 
     迁移策略（列存在性检测，非 ALTER）：旧 fill 表无 traded_time / 旧 position 表无
-    avg_price → DROP+重建（SQLite 改 UNIQUE 必须重建表，直接重建比「建新+INSERT SELECT+
-    DROP+RENAME」简洁）。live 前无生产成交，丢影子数据可接受。不引 schema_version（YAGNI）。
+    account_id 或 avg_price → DROP+重建（SQLite 改 UNIQUE/PK 必须重建表，直接重建比
+    「建新+INSERT SELECT+DROP+RENAME」简洁）。live 前无生产成交，丢影子数据可接受。
+    不引 schema_version（YAGNI）。
+
+    与 state_store.init_store 的关系：state_store 是真相源，建完整 6 张表（含 account/origin/
+    FK）。本函数只建 position_book 自身读写需要的子集（position/fill/daily_equity），与
+    state_store 共用同一 db 文件，表结构一致（复合 PK），二者对同一表互不破坏。
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
@@ -75,20 +87,28 @@ def init_db(db_path: str | None = None) -> None:
         if _table_exists(con, "fill") and not _has_column(con, "fill", "traded_time"):
             logger.info("position_book 迁移：旧 fill 表无 traded_time，DROP 重建（部分成交增量幂等）")
             con.execute("DROP TABLE fill")
-        # 迁移：旧 position（无 avg_price 列）→ DROP 重建（加 avg_price/entry_date）
-        if _table_exists(con, "position") and not _has_column(con, "position", "avg_price"):
-            logger.info("position_book 迁移：旧 position 表无 avg_price，DROP 重建（加权成本+entry_date）")
+        # 迁移：旧 position（无 account_id 或无 avg_price）→ DROP 重建（复合 PK + 加权成本+entry_date）
+        # 复合 PK 改造：单列 symbol PK 无法 ADD COLUMN 改 PK，必须重建（state-store-redesign spec §7.1）
+        if _table_exists(con, "position") and (
+            not _has_column(con, "position", "account_id")
+            or not _has_column(con, "position", "avg_price")
+        ):
+            logger.info("position_book 迁移：旧 position 表无 account_id/avg_price，DROP 重建（复合PK+加权成本）")
             con.execute("DROP TABLE position")
         # 建表（IF NOT EXISTS：已 DROP 的重建，新库直接建，已是新结构的 no-op）
+        # position 复合 PK(account_id, symbol)——多账户隔离；单账户默认 account_id=_DEFAULT_ACCOUNT_ID
         con.execute("""
             CREATE TABLE IF NOT EXISTS position (
-                symbol     TEXT PRIMARY KEY,
-                qty        REAL NOT NULL,
-                avg_price  REAL,
-                entry_date TEXT,
-                updated_at TEXT NOT NULL
+                account_id  TEXT NOT NULL DEFAULT '""" + _DEFAULT_ACCOUNT_ID + """',
+                symbol      TEXT NOT NULL,
+                qty         REAL NOT NULL,
+                avg_price   REAL,
+                entry_date  TEXT,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (account_id, symbol)
             )
         """)
+        # fill 兼容既有：traded_time 增量幂等；account_id 可选（state_store.fill 有，这里 IF NOT EXISTS 不改既有列）
         con.execute("""
             CREATE TABLE IF NOT EXISTS fill (
                 fill_id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +133,8 @@ def init_db(db_path: str | None = None) -> None:
 
 
 def apply_fill(order_id: str, symbol: str, direction: str, qty: float, price: float,
-               traded_time: str, *, db_path: str | None = None) -> bool:
+               traded_time: str, *, account_id: str | None = None,
+               db_path: str | None = None) -> bool:
     """成交回报应用：写流水（增量幂等）+ 更新持仓（加权 avg + entry_date 锁定）。
 
     物理意图：_handle_order_update 在 on_stock_trade（kind=="trade"）时调本函数，把
@@ -128,12 +149,14 @@ def apply_fill(order_id: str, symbol: str, direction: str, qty: float, price: fl
 
     Args:
         traded_time: on_stock_trade 本笔成交时间（幂等键一半，来自 update["traded_time"]）。
+        account_id: 所属账户（复合 PK 一部分），None 时用 _DEFAULT_ACCOUNT_ID（单账户向后兼容）。
     Returns:
         True=本笔首次入账；False=重复 (order_id, traded_time) 跳过。
     """
     if direction not in ("BUY", "SELL"):
         raise ValueError(f"apply_fill direction 仅 BUY/SELL，收到 {direction}")
     db_path = db_path or _DEFAULT_DB
+    account_id = account_id or _DEFAULT_ACCOUNT_ID
     now = datetime.now().isoformat()
     today = datetime.now().strftime("%Y-%m-%d")
     delta = float(qty) if direction == "BUY" else -float(qty)
@@ -148,9 +171,10 @@ def apply_fill(order_id: str, symbol: str, direction: str, qty: float, price: fl
             # IntegrityError 时 INSERT 被语句层拒，事务无 pending，commit no-op，不影响一致性。
             logger.info("apply_fill 跳过重复 order_id=%s traded_time=%s", order_id, traded_time)
             return False
-        # 读当前持仓（加权 avg / entry_date 判定用）
+        # 读当前持仓（加权 avg / entry_date 判定用）——复合 PK (account_id, symbol)
         row = con.execute(
-            "SELECT qty, avg_price, entry_date FROM position WHERE symbol=?", (symbol,)
+            "SELECT qty, avg_price, entry_date FROM position WHERE account_id=? AND symbol=?",
+            (account_id, symbol)
         ).fetchone()
         old_qty = float(row["qty"]) if row else 0.0
         old_avg = float(row["avg_price"]) if row and row["avg_price"] is not None else None
@@ -169,12 +193,12 @@ def apply_fill(order_id: str, symbol: str, direction: str, qty: float, price: fl
             new_avg = old_avg  # A 股口径：卖出不动 avg_price
             new_entry = old_entry
 
-        # UPSERT（excluded.* = VALUES 提供的新值；冲突时直接覆盖，已在 new_qty/new_avg/new_entry 算好）
+        # UPSERT（复合 PK 冲突目标 (account_id, symbol)；excluded.* = VALUES 提供的新值）
         con.execute(
-            "INSERT INTO position(symbol, qty, avg_price, entry_date, updated_at) VALUES(?, ?, ?, ?, ?)"
-            " ON CONFLICT(symbol) DO UPDATE SET qty=excluded.qty, avg_price=excluded.avg_price,"
+            "INSERT INTO position(account_id, symbol, qty, avg_price, entry_date, updated_at) VALUES(?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(account_id, symbol) DO UPDATE SET qty=excluded.qty, avg_price=excluded.avg_price,"
             " entry_date=excluded.entry_date, updated_at=excluded.updated_at",
-            (symbol, new_qty, new_avg, new_entry, now))
+            (account_id, symbol, new_qty, new_avg, new_entry, now))
         # 归零清理：qty=0 删除（对账并集不被 0 干扰，账本干净）
         con.execute("DELETE FROM position WHERE qty=0")
     return True
@@ -188,7 +212,8 @@ def get_local_positions(*, db_path: str | None = None) -> dict[str, float]:
     return {r["symbol"]: float(r["qty"]) for r in rows}
 
 
-def reconcile_qty(symbol: str, qty: float, *, db_path: str | None = None) -> None:
+def reconcile_qty(symbol: str, qty: float, *, account_id: str | None = None,
+                  db_path: str | None = None) -> None:
     """盘后兜底纠正：以 query_trades 聚合为准重写单 symbol 的 position.qty。
 
     物理意图（plan Task 11 · spec §5.1）：apply_fill 漏记（db lock/异常软降级）致 position_book
@@ -201,18 +226,20 @@ def reconcile_qty(symbol: str, qty: float, *, db_path: str | None = None) -> Non
         不猜价）。qty=0 → 删除（与 apply_fill 归零清理同口径，账本干净）。
     """
     db_path = db_path or _DEFAULT_DB
+    account_id = account_id or _DEFAULT_ACCOUNT_ID
     now = datetime.now().isoformat()
     with _connect(db_path) as con:
         if abs(float(qty)) < 1e-9:
-            con.execute("DELETE FROM position WHERE symbol=?", (symbol,))
+            con.execute(
+                "DELETE FROM position WHERE account_id=? AND symbol=?", (account_id, symbol))
             return
-        # UPSERT：新行写 NULL avg/entry（CSV 无成本）；已有行 ON CONFLICT 仅更新 qty+updated_at
-        # （不动 avg_price/entry_date，保留 apply_fill 算好的加权成本与建仓日）。
+        # UPSERT：复合 PK 冲突目标 (account_id, symbol)；新行写 NULL avg/entry（CSV 无成本）；
+        # 已有行 ON CONFLICT 仅更新 qty+updated_at（不动 avg_price/entry_date，保留 apply_fill 算好的成本/建仓日）
         con.execute(
-            "INSERT INTO position(symbol, qty, avg_price, entry_date, updated_at)"
-            " VALUES(?, ?, NULL, NULL, ?)"
-            " ON CONFLICT(symbol) DO UPDATE SET qty=excluded.qty, updated_at=excluded.updated_at",
-            (symbol, float(qty), now))
+            "INSERT INTO position(account_id, symbol, qty, avg_price, entry_date, updated_at)"
+            " VALUES(?, ?, ?, NULL, NULL, ?)"
+            " ON CONFLICT(account_id, symbol) DO UPDATE SET qty=excluded.qty, updated_at=excluded.updated_at",
+            (account_id, symbol, float(qty), now))
 
 
 def get_entry_dates(*, db_path: str | None = None) -> dict[str, str]:
