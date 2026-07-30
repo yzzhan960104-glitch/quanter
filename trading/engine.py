@@ -66,6 +66,10 @@ from strategies.neckline.execution import decide_exit, ExitAction, ExitReason
 from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
 # Task 10（R-2）：position_book 的 daily_equity reader/writer（snapshot/get_start）
 from trading import position_book as _position_book
+# state-store-redesign：统一交易状态库（6 表，trade_event/order/fill/position/account_daily）。
+# 是 position_book 的超集（真相源）。engine 落 SIGNAL/CONFIRMED 事件、写 order/fill 幂等、读
+# stop_price/has_order 走 DB（替代 plan JSON 单一依赖 + _tp_placed 内存）。
+from trading import state_store as _state_store
 # Task 9（M4 静默漏单消灭）：致命事件钉钉 CRITICAL 告警（复用 infra.notifier，
 # broker/qmt.py _reconnect 已在用同一套）。lazy import 避免顶层 import 副作用扩散到
 # 仅用纯函数的测试场景——_alert_critical 内部 import 保持引用局部化。
@@ -356,6 +360,17 @@ def _resolve_id_window(strategy) -> int:
     return 60
 
 
+def _resolve_account_id() -> str:
+    """解析当前账户 ID（state_store 写事件/委托时的 account_id）。
+
+    物理意图：engine 落 trade_event/order 需要归属账户。优先读 .env QMT_ACCOUNT_ID（启动期
+    _migrate_env_to_account 已落库），缺失（dry_run 无 broker 配置）时用 state_store 默认账户。
+    保证 dry_run 测试/影子期也有稳定 account_id（不依赖真实 QMT 凭证）。
+    """
+    aid = os.getenv("QMT_ACCOUNT_ID")
+    return aid if aid else _state_store._DEFAULT_ACCOUNT_ID
+
+
 
 def get_gateway():
     """惰性取交易网关单例（透传 trading_service.get_gateway）。
@@ -491,6 +506,28 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
     auto_confirmed = os.getenv("AUTO_CONFIRM_PLAN", "").lower() in ("true", "1", "yes")
     if auto_confirmed:
         trading_plan.confirm_plan(date)  # 全自动：落盘即确认，pre_open 直挂
+    # state-store-redesign §3.3：plan 双写——DB 落 trade_event(SIGNAL, meta=计划参数) 作真相源，
+    # JSON 保留给人看/veto CLI/钉钉。SIGNAL 幂等（UNIQUE account_id+trade_id+action）：重跑 eod_plan
+    # 已存在则跳过（不重复记）。account_id 缺省走默认账户（_migrate_env_to_account 在启动期落真实账户）。
+    try:
+        account_id = _resolve_account_id()
+        # 确保 account 行存在（trade_event/order FK 引用；init_store 只建表不插行）
+        if _state_store.get_account(account_id) is None:
+            _state_store.upsert_account(account_id, broker="qmt")
+        for o in order_dicts:
+            sym = (o.get("order") or {}).get("symbol")
+            if not sym:
+                continue
+            trade_id = f"{account_id}_{sym}_{date}"
+            # SIGNAL meta 存计划参数快照（stop_loss/pre_open 改从 DB 读，spec §3.3）
+            _state_store.insert_trade_event(
+                account_id, trade_id, sym, "SIGNAL", meta=json.dumps(o, ensure_ascii=False))
+            # CONFIRMED 仅在 auto_confirmed 且未被 veto 时写（veto 保护：最新 action=VETOED 不覆盖）
+            if auto_confirmed and _state_store.get_latest_action(trade_id) != "VETOED":
+                _state_store.insert_trade_event(account_id, trade_id, sym, "CONFIRMED")
+    except Exception:
+        # DB 写失败不阻断 eod_plan 主流程（plan JSON 已落，DB 软降级，下次 eod 补写）
+        logger.exception("eod_plan 落 trade_event(SIGNAL) 失败（不阻断主流程，软降级）")
     # 持仓段注入 QMT 真实持仓（全量口径，和持仓播报同源）：研究员钉钉人审要看券商实际
     # 仓位（含 T+1 冻结），而非 engine 记账（dry_run 空仓 + 不含 smoke 直接 broker 操作）。
     # 网关未连/异常 → None，push 内部退回 position_book 本地账本（软降级，不阻断推送）。

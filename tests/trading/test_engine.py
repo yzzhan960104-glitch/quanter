@@ -88,6 +88,88 @@ def test_eod_plan_produces_nested_orders(monkeypatch):
     assert set(o["order"].keys()) >= {"symbol", "qty", "side", "price"}
 
 
+# ----------------------------------------------------------------------------
+# T6（state-store-redesign）：eod_plan 落 trade_event(SIGNAL+CONFIRMED) + veto 保护
+# ----------------------------------------------------------------------------
+@pytest.fixture
+def _state_db(tmp_path, monkeypatch):
+    """隔离 state_store DB（eod_plan 落 trade_event 用）。"""
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    return db_path
+
+
+def _signal_600000():
+    from strategies.neckline.signal import Signal
+    return [Signal(symbol="600000.SH", entry_price=10.0, neckline=10.5, bottom=9.5)]
+
+
+def test_eod_plan_inserts_signal_event(monkeypatch, _state_db):
+    """eod_plan 后 trade_event 有 SIGNAL 行（meta 含计划参数 stop_price/take_profit）。"""
+    import sqlite3
+    from trading import state_store
+    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
+                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
+    account_id = engine._resolve_account_id()  # 跟随 env，不硬编码默认账户
+    plan_meta = state_store.get_trade_plan(f"{account_id}_600000.SH_2099-01-01")
+    assert plan_meta is not None
+    assert "stop_price" in plan_meta
+    assert "take_profit" in plan_meta
+
+
+def test_eod_plan_auto_confirm_event(monkeypatch, _state_db):
+    """AUTO_CONFIRM_PLAN=true → trade_event 有 CONFIRMED 行。"""
+    from trading import state_store
+    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    monkeypatch.setenv("AUTO_CONFIRM_PLAN", "true")
+    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
+                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
+    account_id = engine._resolve_account_id()
+    trade_id = f"{account_id}_600000.SH_2099-01-01"
+    assert state_store.get_latest_action(trade_id) == "CONFIRMED"
+
+
+def test_eod_plan_signal_idempotent(monkeypatch, _state_db):
+    """重跑 eod_plan → SIGNAL 已存在 → 跳过（UNIQUE 幂等，不重复记）。"""
+    import sqlite3
+    from trading import state_store
+    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
+                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
+    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
+                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
+    # SIGNAL 行仍只有 1 条（幂等去重）
+    with sqlite3.connect(_state_db) as con:
+        n = con.execute(
+            "SELECT COUNT(*) FROM trade_event WHERE action='SIGNAL' AND symbol='600000.SH'"
+        ).fetchone()[0]
+    assert n == 1
+
+
+def test_eod_plan_veto_protection(monkeypatch, _state_db):
+    """trade_event VETOED 后重跑 eod_plan → 不重写为 CONFIRMED（veto 保护）。"""
+    from trading import state_store
+    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    monkeypatch.setenv("AUTO_CONFIRM_PLAN", "true")
+    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
+                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
+    # 研究员 veto：写 VETOED 事件
+    account_id = engine._resolve_account_id()
+    trade_id = f"{account_id}_600000.SH_2099-01-01"
+    state_store.insert_trade_event(account_id, trade_id, "600000.SH", "VETOED")
+    # 重跑 eod_plan（auto_confirm 仍 true）→ 最新 action 应仍是 VETOED（不被 CONFIRMED 覆盖）
+    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
+                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
+    assert state_store.get_latest_action(trade_id) == "VETOED"
+
+
 # ============================================================================
 # 2. pre_open：未确认不挂 / 确认后挂 / 撤昨日单 / submit raise 兜底
 # ============================================================================
