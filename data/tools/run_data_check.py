@@ -75,6 +75,29 @@ def _alert(msg: str, level: str = "WARN") -> None:
         logger.exception("告警发送失败（不影响检查主流程）")
 
 
+def _persist_ready(expected: str, results: list, *, all_ok: bool, melted: bool) -> None:
+    """T2 结构化结果就地落 data_ready（C-2 D4，同日重采覆盖，供 eod/pre_open gate 读）。
+
+    物理意图：T2 检查点每个 return 前调用，把 {ok, melted, latest_date, message} 零丢失落库，
+    让下游门禁读 DB 真相源而非退化为进程退出码（退出码丢 details/melted 等细节）。
+    try/except 包裹：DB 故障不得阻断检查点主流程（仅记日志，check_freshness 重采/熔断仍按原逻辑推进）。
+
+    dataset：单 key 场景（keys=("daily",)）落 results[0].key（registry 语义 key）；
+             results 为空（理论不应发生）兜底 "daily"。
+    latest_date：取首个非空（all_ok 时即期望日；melted 时通常 None 或陈旧日）。
+    message：各 result.message 用 "; " 拼接（保留多数据集排查信息，单 key 时即该 result.message）。
+    """
+    try:
+        from trading.state_store import upsert_data_ready
+        _latest = next((r.latest_date for r in results if r.latest_date), None)
+        _msg = "; ".join(r.message for r in results)
+        _dataset = results[0].key if results else "daily"
+        upsert_data_ready(expected, _dataset, ok=all_ok, melted=melted,
+                          latest_date=_latest, expected_date=expected, message=_msg)
+    except Exception:
+        logger.exception("data_ready 落库失败（不阻断检查点主流程）")
+
+
 def run_check(
     checkpoint: str,
     *,
@@ -107,6 +130,7 @@ def run_check(
 
     # checkpoint == "t2"：查 T，FAIL 触发重采窗口
     if all_ok:
+        _persist_ready(expected, results, all_ok=True, melted=False)
         return {"ok": True, "melted": False, "details": [r.message for r in results]}
 
     # 重采循环：每轮重采失败 key，重检，直到 PASS 或超 deadline
@@ -121,6 +145,7 @@ def run_check(
         # 重检
         results = [check_freshness(k, expected) for k in keys]
         if all(r.ok for r in results):
+            _persist_ready(expected, results, all_ok=True, melted=False)
             return {"ok": True, "melted": False, "details": [r.message for r in results]}
         # 未全 PASS：sleep 15min 再下一轮。
         # why：Tushare 盘后数据落盘有延迟，密集轮询既无效又会撞限频/积分扣减；
@@ -134,6 +159,7 @@ def run_check(
                 f"{[r.message for r in results if not r.ok]}，eod_plan 将跳过（不交易不自欺）")
     _alert(melt_msg, "ERROR")
     logger.error(melt_msg)
+    _persist_ready(expected, results, all_ok=False, melted=True)
     return {"ok": False, "melted": True, "details": [r.message for r in results]}
 
 
