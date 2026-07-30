@@ -1709,6 +1709,55 @@ class TradingEngine:
         global _ACTIVE_ENGINE
         _ACTIVE_ENGINE = self
 
+    async def bootstrap(self) -> None:
+        """W3：I/O 初始化收口（原 ``__main__._run_forever`` 的 7 步）。
+
+        三段分离（构造 → bootstrap → start）：
+            - ``__init__``：构造 AsyncIOScheduler + 注册四 cron job（零 I/O，可安全在
+              server lifespan 内构造）。
+            - ``bootstrap``（本方法）：连接网关 + 注册成交回报回调 + position_book/state_store
+              建表迁移（I/O init，必须在 start() 之前）。
+            - ``start``：启 scheduler（调度启动；cron 一旦启动，触发点可能读写 DB/网关）。
+
+        Why 必须在 start() 之前：cron 一旦启动，下一个触发点（如 stop_loss_monitor /
+            _handle_order_update）可能读 position_book/state_store / 调 gw 回调链路，
+            建表与回调注册必须先就绪，否则首触发点会崩。
+
+        Why 从 ``__main__._run_forever`` 提取：让独立 ``python -m trading`` 与 uvicorn
+            server lifespan 复用同一段 I/O 初始化（W3 收口），避免两处复制漂移。
+
+        物理意图（保留原 ``__main__`` 注释，行为完全等价 · W3 不改启动语义）：
+            - 网关 connect + set_order_update_callback（修 G5：成交回报回流链路就绪）。
+            - 异常兜底不抛：连接失败时仍让 cron 起来——触发点内部 get_gateway() 会再次
+              惰性取单例做兜底判空（None 时走 dry_run 分支），这里只打 exception 不阻断。
+            - position_book.init_db / state_store.init_store / state_store._migrate_env_to_account
+              建表 + 从 .env 落 account 行（state-store-redesign T13）。
+        """
+        gw = get_gateway()
+        if gw is not None:
+            try:
+                await gw.connect()  # async：内部 run_in_executor 包 xtquant C++ 阻塞 connect
+                gw.set_order_update_callback(self._handle_order_update)  # sync 注入成交回报回调
+                self._gw = gw  # 供 handler 反查 _orders 判 BUY/SELL side（见 engine._side_from_update）
+                logger.info("网关已连接 + 成交回调已注册")
+            except Exception:
+                logger.exception("网关连接失败（cron 仍启动，触发点内部 get_gateway 兜底）")
+        else:
+            logger.warning("未装配网关（AUTO_TRADE_MODE=dry_run 影子模式，回调链路不生效）")
+
+        # 初始化本地持仓账本（gap4 · 幂等建表，对齐 experiment/store.init_db 范式）。
+        # 必须在 start() 之前：cron 一旦启动，_handle_order_update/_post_close 就可能
+        # 读写账本，建表必须先就绪。
+        # state_store 统一交易状态库（state-store-redesign T13）：
+        # init_store 建 6 张表（account/trade_event/order/fill/position/account_daily）+
+        # _migrate_env_to_account 从 .env 读 QMT_* 配置写入 account 表（多账户扩展基础）。
+        # 必须在 start() 之前：eod_plan/pre_open/_handle_order_update 全查 state_store。
+        # 函数局部 import（W3）：patch 源模块路径（trading.position_book.init_db 等）可覆盖。
+        from trading import position_book, state_store
+        position_book.init_db()
+        state_store.init_store()
+        state_store._migrate_env_to_account()
+
     async def _health_guard(self) -> None:
         """M1：网关健康守护——未连接时探测客户端就绪→重连，恢复 live（Task 8）。
 

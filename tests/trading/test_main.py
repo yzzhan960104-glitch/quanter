@@ -68,17 +68,20 @@ def test_asyncio_run_is_main_guarded():
                 )
 
 
-def test_main_calls_init_store_and_migrate_account():
-    """_run_forever 内调 state_store.init_store + _migrate_env_to_account（T13）。
+def test_main_calls_bootstrap_before_start():
+    """_run_forever 调 ``await eng.bootstrap()`` 先于 ``eng.start()``（W3 收口后契约）。
 
-    物理意图（state-store-redesign §7.2）：engine 启动期必须建 6 张表 + 从 .env 迁移
-    account 配置，否则 eod_plan/pre_open/_handle_order_update 查 state_store 崩。
-    本测试源码级断言 _run_forever 调用了这两个函数（_run_forever 阻塞无法真跑，走源码锁）。
+    物理意图（C-2 scheduling-orchestration W3）：原 7 步 I/O 初始化（connect + 回调注册
+    + position_book.init_db + state_store.init_store + _migrate_env_to_account）已从
+    ``_run_forever`` 收口到 ``TradingEngine.bootstrap()``，本测试源码级锁住「_run_forever
+    调 bootstrap() 且在 start() 之前」契约（_run_forever 阻塞无法真跑，走源码锁）。
+    init_store/_migrate_env_to_account 落在 engine.bootstrap 内的契约锁见
+    test_engine_bootstrap.py。
     """
     import pathlib
 
     src = pathlib.Path(main_mod.__file__).read_text(encoding="utf-8")
-    # init_store 建表 + _migrate_env_to_account 从 .env 落 account 行
-    assert "init_store()" in src, "_run_forever 未调 state_store.init_store（启动期须建 6 张表）"
-    assert "_migrate_env_to_account()" in src, (
-        "_run_forever 未调 _migrate_env_to_account（启动期须从 .env 迁移 account 配置）")
+    assert "bootstrap()" in src, "_run_forever 未调 eng.bootstrap()（W3 收口：I/O init 进 bootstrap）"
+    # bootstrap 必须在 start 之前（connect-then-start 顺序不变量）
+    assert src.index("bootstrap()") < src.index("eng.start()"), (
+        "_run_forever 中 eng.bootstrap() 必须在 eng.start() 之前（W3：先 I/O init 再启调度）")
