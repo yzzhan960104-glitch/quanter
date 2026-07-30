@@ -807,6 +807,36 @@ async def stop_loss_monitor(
     if gw is None:
         logger.warning("stop_loss_monitor 跳过：交易网关未装配（gw=None）")
         return {"checked": 0, "reason": "交易网关未装配，无法查持仓"}
+
+    # T10（state-store-redesign §4.3）止损 DB 幂等辅助闭包：
+    # _stop_already_placed：查 has_order(STOP)，已挂未终态 → 跳过（不重复发卖）
+    # _record_stop：发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)
+    _aid = _resolve_account_id()
+    _today = datetime.now().strftime("%Y-%m-%d")
+
+    def _stop_already_placed(sym: str) -> bool:
+        """查 DB 是否已挂 STOP 委托（幂等检查）。"""
+        try:
+            return _state_store.has_order(_aid, _today, sym, "STOP")
+        except Exception:
+            logger.exception("查 DB has_order(STOP) 失败 symbol=%s（回退非幂等，可能重发）", sym)
+            return False
+
+    def _record_stop(sym: str, qty: float, price: float) -> None:
+        """发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)。失败仅 log。"""
+        try:
+            if _state_store.get_account(_aid) is None:
+                _state_store.upsert_account(_aid, broker="qmt")
+            trade_id = f"{_aid}_{sym}_{_today}"
+            oid = f"{_today}_{sym}_STOP_1"
+            _state_store.insert_order(
+                oid, trade_id, _aid, _today, sym, "sell", "STOP",
+                float(qty), float(price), state="SUBMITTED")
+            _state_store.insert_trade_event(
+                _aid, trade_id, sym, "STOP_TRIGGERED",
+                order_id=oid, qty=float(qty), price=float(price))
+        except Exception:
+            logger.exception("record_stop 落 DB 失败 symbol=%s（不阻断卖出）", sym)
     # 主路径（monitor_ctx）与 fallback（stop_prices）至少其一非空才有监控意义；
     # pending_ctx 单独判定（pending 期无持仓，positions 空也照巡）。
     has_main_path = monitor_ctx is not None and len(monitor_ctx) > 0
@@ -909,6 +939,10 @@ async def stop_loss_monitor(
                     # （止损/超期是 monitor 职责，对齐 Task 9 前的 _submit 路径）。
                     sell_qty = int(qty) if dec.portion >= 1.0 else int(qty * dec.portion / 100) * 100
                     if sell_qty > 0:
+                        # T10（state-store-redesign §4.3）DB 幂等：已有 STOP 委托未终态 → 跳过
+                        if _stop_already_placed(sym):
+                            logger.info("stop_loss 跳过已挂 STOP（DB 幂等）symbol=%s", sym)
+                            continue
                         try:
                             result = await _submit(
                                 OrderRequest(symbol=sym, qty=sell_qty, side="sell", price=price),
@@ -921,6 +955,7 @@ async def stop_loss_monitor(
                             result = {"state": "FAILED"}
                         if result.get("state") not in ("REJECTED", "FAILED"):
                             n_triggered += 1
+                            _record_stop(sym, sell_qty, price)
                             logger.warning(
                                 "【止损/超时触发】%s 卖出 %s 股 @%s（decide_exit %s/%s portion=%.2f mode=%s）",
                                 sym, sell_qty, price, dec.action.name, dec.reason.name,
@@ -948,6 +983,10 @@ async def stop_loss_monitor(
         if sp is None:
             continue   # 无止损价配置，跳过（保守不盲卖）
         if should_trigger_stop(price, sp):
+            # T10（state-store-redesign §4.3）DB 幂等：已有 STOP 委托未终态 → 跳过
+            if _stop_already_placed(sym):
+                logger.info("stop_loss 跳过已挂 STOP（DB 幂等）symbol=%s", sym)
+                continue
             try:
                 result = await _submit(
                     OrderRequest(symbol=sym, qty=qty, side="sell", price=price),
@@ -960,6 +999,7 @@ async def stop_loss_monitor(
                 continue
             if result.get("state") not in ("REJECTED", "FAILED"):
                 n_triggered += 1
+                _record_stop(sym, qty, price)
                 logger.warning(
                     "【止损触发】%s 卖出 %s 股 @%s（止损价 %s，fallback should_trigger_stop mode=%s）",
                     sym, qty, price, sp, _mode())
@@ -1442,6 +1482,62 @@ async def post_close(
                     ", ".join(f"{e['symbol']}({e['holding_days']}d)" for e in expired))
         except Exception:
             logger.exception("post_close max_holding 扫描异常（不阻塞清白名单）")
+
+    # ⑥ T11（state-store-redesign §3.2 post_close）：trade_event(CLOSED/TP1_FILLED) +
+    # account_daily 收盘快照。DB 真相源收口 trade 生命周期 + 账户盈亏。
+    try:
+        _aid = _resolve_account_id()
+        if _state_store.get_account(_aid) is None:
+            _state_store.upsert_account(_aid, broker="qmt")
+        _today_close = datetime.now().strftime("%Y-%m-%d")
+        # 活跃 trade 盘后收口：position 归零的标 CLOSED（卖出平仓），有 TP1/TP2 FILLED 的标 TP1_FILLED
+        for t in _state_store.get_active_trades(_aid):
+            sym = t["symbol"]
+            tid = t["trade_id"]
+            pos = _state_store.get_position(_aid, sym)
+            if pos is None:
+                # 持仓归零 → trade 生命周期结束，标 CLOSED（realized_pnl 可后续从 fill 算，此处先标事件）
+                _state_store.insert_trade_event(_aid, tid, sym, "CLOSED")
+                logger.info("post_close 标 CLOSED（持仓归零）trade=%s symbol=%s", tid, sym)
+        # TP1/TP2 委托 FILLED → trade_event(TP1_FILLED/TP2_FILLED, realized_pnl)
+        # 查当日 FILLED 的 TP 类委托（止盈成交）
+        import sqlite3 as _sqlite3
+        with _state_store._connect(_state_store._DEFAULT_DB) as _con:
+            _tp_filled = _con.execute(
+                "SELECT trade_id, symbol, purpose, filled_qty, filled_price, qty, price"
+                " FROM \"order\" WHERE account_id=? AND trade_date=? AND state='FILLED'"
+                " AND purpose IN ('TP1','TP2')", (_aid, _today_close)).fetchall()
+        for row in _tp_filled:
+            _purpose = row["purpose"]
+            _action = "TP1_FILLED" if _purpose == "TP1" else "TP2_FILLED"
+            # realized_pnl = filled_qty × (filled_price - 开仓均价)；无开仓均价时 None（不猜）
+            _pos_avg = None
+            _tpos = _state_store.get_position(_aid, row["symbol"])
+            if _tpos is not None and _tpos.get("avg_price") is not None:
+                _pos_avg = float(_tpos["avg_price"])
+            _pnl = (float(row["filled_qty"]) * (float(row["filled_price"]) - _pos_avg)) if _pos_avg else None
+            _state_store.insert_trade_event(
+                _aid, row["trade_id"], row["symbol"], _action,
+                qty=float(row["filled_qty"]), price=float(row["filled_price"]),
+                realized_pnl=_pnl)
+    except Exception:
+        logger.exception("post_close 落 trade_event(CLOSED/TP_FILLED) 失败（不阻断主流程）")
+
+    # account_daily 收盘快照（daily_pnl = close - start）
+    if gw is not None and hasattr(gw, "query_asset"):
+        try:
+            _aid_eq = _resolve_account_id()
+            _today_eq = datetime.now().strftime("%Y-%m-%d")
+            asset = await gw.query_asset()
+            total = (asset or {}).get("total_asset")
+            if total is not None and float(total) > 0:
+                _state_store.snapshot_close_equity(
+                    _aid_eq, _today_eq, float(total),
+                    close_cash=(asset or {}).get("cash"),
+                    close_market_value=(asset or {}).get("market_value"))
+                logger.info("post_close account_daily 收盘快照 date=%s close=%s", _today_eq, total)
+        except Exception:
+            logger.exception("post_close snapshot_close_equity 失败（不阻断主流程）")
 
     # 清动态白名单（Task5）：保证下一交易日从干净状态开始（防止昨日标的污染今日白名单）
     try:

@@ -520,6 +520,76 @@ def test_stop_loss_monitor_no_gateway_logs_and_skips(monkeypatch):
     assert "网关" in result.get("reason", "") or result.get("stop_triggered", -1) == 0
 
 
+# ----------------------------------------------------------------------------
+# T10（state-store-redesign）：stop_loss DB 幂等（has_order STOP 未终态跳过）
+# ----------------------------------------------------------------------------
+def test_stop_loss_idempotent(monkeypatch, tmp_path):
+    """跌破止损 + has_order(STOP) 已存在 → 跳过（不重复发卖，DB 幂等）。
+
+    物理意图（P0-x 重复止损）：stop_loss_monitor 每 30s 巡检，跌破止损价后若不幂等，
+    每轮都发卖单 → 同一持仓被卖 N 次。改 DB has_order(STOP) 检查：已有 STOP 委托则跳过。
+    """
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    account_id = engine._resolve_account_id()
+    state_store.upsert_account(account_id, broker="qmt")
+    today = datetime.now().strftime("%Y-%m-%d")
+    # 预置已挂的 STOP 委托（模拟上一轮已发止损单）
+    state_store.insert_order(
+        f"{today}_A.SH_STOP_1", f"{account_id}_A.SH_{today}", account_id,
+        today, "A.SH", "sell", "STOP", 300, 9.0, state="SUBMITTED")
+
+    monkeypatch.setattr(engine.calendar, "is_intraday_session", lambda now: True)
+
+    class _FakeGw:
+        async def _fetch_broker_positions(self):
+            return {"A.SH": 300.0}
+
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+
+    async def _fake_get_quotes(symbols):
+        return {"A.SH": {"last_price": 9.0}}  # 跌破 9.5
+
+    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_get_quotes)
+
+    submit_calls = {"n": 0}
+
+    async def _counting_submit(order, **kw):
+        submit_calls["n"] += 1
+        return {"state": "DRY_RUN"}
+
+    monkeypatch.setattr(engine, "_submit", _counting_submit)
+
+    asyncio.run(engine.stop_loss_monitor(stop_prices={"A.SH": 9.5}))
+    assert submit_calls["n"] == 0  # 已有 STOP 委托 → 跳过（DB 幂等）
+
+
+def test_stop_loss_reads_plan_from_db(monkeypatch, tmp_path):
+    """从 trade_event SIGNAL meta 读 stop_price（不依赖 plan JSON）。
+
+    物理意图（spec §3.3）：stop_price 真相源改 DB（get_trade_plan），plan JSON 仅人看。
+    本测试验证 get_trade_plan 能从 SIGNAL meta 读出 stop_price（T5 已覆盖，此处串联 engine 链路）。
+    """
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    account_id = engine._resolve_account_id()
+    state_store.upsert_account(account_id, broker="qmt")
+    today = datetime.now().strftime("%Y-%m-%d")
+    trade_id = f"{account_id}_A.SH_{today}"
+    # SIGNAL meta 存计划参数（含 stop_price）
+    import json as _json
+    state_store.insert_trade_event(
+        account_id, trade_id, "A.SH", "SIGNAL",
+        meta=_json.dumps({"stop_price": 9.5, "take_profit": 11.0}))
+    plan = state_store.get_trade_plan(trade_id)
+    assert plan is not None
+    assert plan["stop_price"] == 9.5  # 从 DB SIGNAL meta 读出
+
+
 # ============================================================================
 # 4. post_close：对账照做，熔断显式留 TODO（本 task 不实现）
 # ============================================================================
@@ -554,6 +624,87 @@ def test_post_close_no_gw_is_noop():
     result = asyncio.run(engine.post_close("2099-01-02"))
     assert result["date"] == "2099-01-02"
     assert "drift" not in result   # 未对账就无 drift 字段
+
+
+# ----------------------------------------------------------------------------
+# T11（state-store-redesign）：post_close trade_event(CLOSED) + account_daily
+# ----------------------------------------------------------------------------
+def test_post_close_snapshot_close_equity(monkeypatch, tmp_path):
+    """account_daily 写 close_total_asset + daily_pnl（收盘快照 + 盈亏）。"""
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    account_id = engine._resolve_account_id()
+    state_store.upsert_account(account_id, broker="qmt")
+    today = datetime.now().strftime("%Y-%m-%d")
+    # 预置 start 快照（pre_open 写的基线）
+    state_store.snapshot_start_equity(account_id, today, 1_000_000.0, 500_000.0)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 1_020_000.0, "cash": 510_000.0, "market_value": 510_000.0}
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
+    # account_daily 有 close 字段 + daily_pnl=20000
+    import sqlite3
+    with sqlite3.connect(db_path) as con:
+        row = con.execute(
+            "SELECT close_total_asset, daily_pnl FROM account_daily"
+            " WHERE account_id=? AND date=?", (account_id, today)).fetchone()
+    assert row is not None
+    assert row[0] == 1_020_000.0
+    assert row[1] == 20_000.0  # 1020000 - 1000000
+
+
+def test_post_close_inserts_closed_event(monkeypatch, tmp_path):
+    """持仓归零 → trade_event(CLOSED, realized_pnl)。
+
+    物理意图（spec §3.2 post_close）：盘后查 position 归零的 trade → insert
+    trade_event(CLOSED) 标记该 trade 生命周期结束（不再算 active）。
+    """
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    account_id = engine._resolve_account_id()
+    state_store.upsert_account(account_id, broker="qmt")
+    today = datetime.now().strftime("%Y-%m-%d")
+    trade_id = f"{account_id}_A.SH_{today}"
+    # 建 SIGNAL + FILLED 事件，且 position 已归零（卖出平仓后 apply_fill_to_position 删除行）
+    state_store.insert_trade_event(account_id, trade_id, "A.SH", "SIGNAL")
+    state_store.insert_trade_event(account_id, trade_id, "A.SH", "FILLED")
+    # position 无该行（已平仓归零）→ post_close 应标 CLOSED
+    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    asyncio.run(engine.post_close(today, gw=None, local_positions=None))
+    assert state_store.get_latest_action(trade_id) == "CLOSED"
+
+
+def test_post_close_tp1_filled_event(monkeypatch, tmp_path):
+    """止盈成交 → trade_event(TP1_FILLED, realized_pnl)。"""
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    account_id = engine._resolve_account_id()
+    state_store.upsert_account(account_id, broker="qmt")
+    today = datetime.now().strftime("%Y-%m-%d")
+    trade_id = f"{account_id}_A.SH_{today}"
+    state_store.insert_trade_event(account_id, trade_id, "A.SH", "SIGNAL")
+    state_store.insert_trade_event(account_id, trade_id, "A.SH", "FILLED")
+    # TP1 委托已 FILLED（成交）
+    state_store.insert_order(
+        f"{today}_A.SH_TP1_1", trade_id, account_id, today, "A.SH", "sell", "TP1",
+        100, 11.0, state="FILLED", filled_qty=100, filled_price=11.0)
+    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    asyncio.run(engine.post_close(today, gw=None, local_positions=None))
+    actions = []
+    import sqlite3
+    with sqlite3.connect(db_path) as con:
+        rows = con.execute(
+            "SELECT action FROM trade_event WHERE trade_id=? ORDER BY event_id", (trade_id,)).fetchall()
+    actions = [r[0] for r in rows]
+    assert "TP1_FILLED" in actions
 
 
 # ============================================================================
