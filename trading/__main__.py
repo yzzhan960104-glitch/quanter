@@ -232,6 +232,14 @@ async def _run_forever() -> None:
     from trading import position_book
     position_book.init_db()
 
+    # state_store 统一交易状态库（state-store-redesign T13）：
+    # init_store 建 6 张表（account/trade_event/order/fill/position/account_daily）+
+    # _migrate_env_to_account 从 .env 读 QMT_* 配置写入 account 表（多账户扩展基础）。
+    # 必须在 eng.start() 之前：eod_plan/pre_open/_handle_order_update 全查 state_store。
+    from trading import state_store
+    state_store.init_store()
+    state_store._migrate_env_to_account()
+
     eng.start()  # 注册四 cron job + 启动 AsyncIOScheduler（不阻塞）
     try:
         while True:

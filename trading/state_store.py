@@ -196,11 +196,10 @@ def init_store(db_path: str | None = None) -> None:
             )
         """)
         # ⑥ account_daily（账户日级快照 · pre_open 写 start / post_close 写 close）——全新表
-        # 注：旧 daily_equity（单 date PK，仅 start_total_asset）迁移到 account_daily；
-        # live 前无生产快照，DROP 重建（加 account_id + 收盘字段 + daily_pnl）。
-        if _table_exists(con, "daily_equity"):
-            logger.info("state_store 迁移：旧 daily_equity 表 DROP（数据迁 account_daily，live 前无生产快照）")
-            con.execute("DROP TABLE daily_equity")
+        # 与 position_book 的 daily_equity 共存（后者是单 date PK 的熔断基线，backward compat；
+        # account_daily 是多账户快照 + 收盘字段 + daily_pnl，state_store 收口盈亏用）。
+        # 不 DROP daily_equity：position_book.snapshot_start_equity/get_start_equity 仍读写它
+        # （pre_open/post_close 熔断基线），删了会让 position_book 的权益函数崩。
         con.execute("""
             CREATE TABLE IF NOT EXISTS account_daily (
                 account_id          TEXT NOT NULL REFERENCES account(account_id) ON DELETE RESTRICT,

@@ -66,3 +66,19 @@ def test_asyncio_run_is_main_guarded():
                     "asyncio.run(_run_forever()) 不应在模块顶层调用（必须 "
                     "在 `if __name__ == '__main__'` 守卫内，否则 import 阻塞）"
                 )
+
+
+def test_main_calls_init_store_and_migrate_account():
+    """_run_forever 内调 state_store.init_store + _migrate_env_to_account（T13）。
+
+    物理意图（state-store-redesign §7.2）：engine 启动期必须建 6 张表 + 从 .env 迁移
+    account 配置，否则 eod_plan/pre_open/_handle_order_update 查 state_store 崩。
+    本测试源码级断言 _run_forever 调用了这两个函数（_run_forever 阻塞无法真跑，走源码锁）。
+    """
+    import pathlib
+
+    src = pathlib.Path(main_mod.__file__).read_text(encoding="utf-8")
+    # init_store 建表 + _migrate_env_to_account 从 .env 落 account 行
+    assert "init_store()" in src, "_run_forever 未调 state_store.init_store（启动期须建 6 张表）"
+    assert "_migrate_env_to_account()" in src, (
+        "_run_forever 未调 _migrate_env_to_account（启动期须从 .env 迁移 account 配置）")

@@ -53,6 +53,11 @@ def isolated(tmp_path, monkeypatch):
     db_path = str(tmp_path / "state.db")
     monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
     position_book.init_db()
+    # state_store 与 position_book 共用同一 db（state-store-redesign 后 engine 四触发点查
+    # state_store 的 trade_event/order/account 表）。patch _DEFAULT_DB + init_store 建 6 张表。
+    from trading import state_store
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
     # trading_plan._plan_path 读 env TRADE_PLAN_DIR
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path / "plans"))
     monkeypatch.setenv("TRADE_STATE_DB", db_path)
@@ -668,3 +673,101 @@ def test_e2e_sanity_date_alignment_loads_right_plan(isolated, monkeypatch):
         f"次日 pre_open 应挂上 T 日落的计划（口径对齐），实际 submitted={result['submitted']}"
     assert "reason" not in result or result.get("submitted", 0) > 0, \
         "不应因 key 错位返「无计划」跳过（旧 bug 的静默致命特征）"
+
+
+# ============================================================================
+# T14（state-store-redesign）：全链路 e2e —— DB 6 张表数据一致性贯穿
+# ============================================================================
+def test_e2e_full_chain_db_consistency(isolated, monkeypatch):
+    """全链路：eod_plan(SIGNAL+CONFIRMED) → pre_open(OPEN 幂等) → 成交(fill+TP1/TP2 幂等)
+    → post_close(CLOSED + account_daily) —— DB 6 张表数据一致贯穿。
+
+    物理意图（state-store-redesign §5 数据流 + §8 验收）：验证统一状态库在完整交易
+    生命周期的事件流一致性：trade_event 完整事件链（SIGNAL→CONFIRMED→ORDERED→FILLED→
+    CLOSED）+ order 幂等 + fill 增量 + position 汇总。
+    """
+    import sqlite3
+    from trading import state_store
+
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    monkeypatch.setenv("AUTO_CONFIRM_PLAN", "true")  # 自动确认，让 pre_open 直接挂单
+    # 显式置 QMT_ACCOUNT_ID，避免 .env（load_dotenv）在完整套件中污染致 account_id 漂移
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "e2e_test_acc")
+    monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
+
+    account_id = engine._resolve_account_id()
+
+    # ── ① eod_plan：落 SIGNAL + CONFIRMED 事件 ──
+    sig = _make_signal()
+    asyncio.run(engine.eod_plan("2026-07-28", [sig], {"300001.SZ": 0.5}, 1_000_000.0))
+    trade_id = f"{account_id}_300001.SZ_2026-07-28"
+    assert state_store.get_latest_action(trade_id) == "CONFIRMED"  # SIGNAL→CONFIRMED
+
+    # ── ② pre_open：挂 OPEN 委托（幂等）+ ORDERED 事件 ──
+    fake_gw = MagicMock()
+    fake_gw._connected = True
+    fake_gw._lock_down = False
+    fake_gw.query_asset = AsyncMock(return_value={"total_asset": 1_000_000.0, "cash": 500_000.0})
+    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(engine, "_cancel_all_open_orders",
+                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
+    async def _dry_submit(order, *, confirm=True):
+        return {"order_id": "seq1", "state": "DRY_RUN", "message": "影子"}
+    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    pre_result = asyncio.run(engine.pre_open("2026-07-28"))
+    assert pre_result["submitted"] >= 1
+    assert state_store.has_order(account_id, "2026-07-28", "300001.SZ", "OPEN") is True
+
+    # 幂等：再跑 pre_open 不重复挂（has_order OPEN 跳过）
+    sub_count = {"n": 0}
+    async def _count_submit(order, *, confirm=True):
+        sub_count["n"] += 1
+        return {"order_id": "x", "state": "DRY_RUN"}
+    monkeypatch.setattr(engine, "_submit", _count_submit)
+    asyncio.run(engine.pre_open("2026-07-28"))
+    assert sub_count["n"] == 0  # DB 幂等：第二次跳过
+
+    # ── ③ 成交回报：fill + FILLED 事件 + TP1/TP2 止盈挂单（幂等）──
+    eng = engine.TradingEngine()
+    eng._gw = MagicMock()
+    eng._gw._orders = {"seq1": {"order_type": 23}}  # BUY
+    with patch("presentation.server.services.trading_service.record_live_trade"), \
+         patch("infra.notifier.NotificationManager") as NM:
+        NM.get_default.return_value.notify_trade_event = AsyncMock(return_value=[])
+        trade_update = {
+            "kind": "trade", "order_id": "seq1", "stock_code": "300001.SZ",
+            "traded_volume": 100, "traded_price": 10.5, "traded_time": "20260728",
+            "state": "FILLED",
+        }
+        asyncio.run(eng._handle_order_update(trade_update))
+    # fill 表 + FILLED 事件 + position 汇总
+    with sqlite3.connect(state_store._DEFAULT_DB) as con:
+        n_fill = con.execute("SELECT COUNT(*) FROM fill WHERE symbol='300001.SZ'").fetchone()[0]
+    assert n_fill == 1
+    assert state_store.get_position(account_id, "300001.SZ") is not None
+
+    # ── ④ post_close：trade_event(CLOSED) + account_daily（持仓归零场景需先卖出）──
+    # 先模拟卖出平仓（position 归零）→ post_close 应标 CLOSED
+    state_store.apply_fill_to_position(
+        account_id, "300001.SZ", "SELL", 100, 11.0, "15:00:00")
+    assert state_store.get_position(account_id, "300001.SZ") is None  # 归零
+    fake_gw.query_asset = AsyncMock(
+        return_value={"total_asset": 1_010_000.0, "cash": 510_000.0, "market_value": 500_000.0})
+    # post_close 内 today 用 datetime.now()，account_daily 落真实今日；断言用真实今日
+    from datetime import datetime as _dt_now
+    _today_real = _dt_now.now().strftime("%Y-%m-%d")
+    # reconcile/query_trades 用 mock 兜底（MagicMock 的 sync_positions 非 async，patch 掉）
+    from trading import reconcile_job as _rj
+    monkeypatch.setattr(_rj, "run_reconcile", AsyncMock(return_value=MagicMock(is_ok=True)))
+    from presentation.server.services import trading_service as _svc
+    monkeypatch.setattr(_svc, "query_trades", lambda *a, **k: {"trades": []})
+    asyncio.run(engine.post_close("2026-07-28", gw=fake_gw, local_positions={}))
+    # CLOSED 事件 + account_daily 收盘快照（date=真实今日，post_close 用 datetime.now）
+    assert state_store.get_latest_action(trade_id) == "CLOSED"
+    with sqlite3.connect(state_store._DEFAULT_DB) as con:
+        row = con.execute(
+            "SELECT close_total_asset FROM account_daily WHERE account_id=? AND date=?",
+            (account_id, _today_real)).fetchone()
+    assert row is not None
+    assert row[0] == 1_010_000.0

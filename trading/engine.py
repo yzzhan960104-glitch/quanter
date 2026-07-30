@@ -2278,19 +2278,16 @@ class TradingEngine:
                 # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
                 logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)
 
-        # d. 本地持仓账本写入（gap4 · post_close 对账数据源）。
+        # d. 成交账本写入（gap4 · post_close 对账数据源）。
         #    独立 try-except 软降级：账本写入失败不阻断 a 日志/b 通知/c 止盈。
         #    方向 None 不写（保守，对齐 c 连不挂止盈语义——不猜方向误记为买当卖/卖当买，
         #    账本失真比对账漏记更危险）。
-        #    state-store-redesign §4.2：同时写 state_store.fill（增量幂等）+ apply_fill_to_position
-        #    + insert_trade_event(FILLED)（DB 真相源，post_close 对账/复盘用）。
+        #    state-store-redesign §4.2：state_store 是真相源——insert_fill（增量幂等）+
+        #    apply_fill_to_position（加权 avg）+ insert_trade_event(FILLED)。
+        #    不再调 position_book.apply_fill（避免与 state_store 双写 fill 表致 insert_fill
+        #    恒返 False、position 用错 account_id）。position_book 读函数（get_local_positions
+        #    等）仍读同一张 position 表，向后兼容。
         if direction in ("BUY", "SELL"):
-            try:
-                from trading import position_book
-                position_book.apply_fill(order_id, symbol, direction, float(qty), float(price), str(update.get("traded_time", "")))
-            except Exception:
-                logger.exception("本地账本写入失败 symbol=%s（不影响日志/通知/止盈）", symbol)
-            # state_store 双写（fill + position + trade_event FILLED），DB 为真相源
             try:
                 # 确保 account 行存在（fill/trade_event FK 引用 account）
                 if _state_store.get_account(_account_id) is None:
