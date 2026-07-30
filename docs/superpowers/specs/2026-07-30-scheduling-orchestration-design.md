@@ -18,6 +18,7 @@
 | D4 | 就绪信号落库点 | **在 T2 步骤（`run_data_check.py`）内就地落库**——结构化结果零丢失，supervisor 不动 |
 | D5 | 事件链编排位置 | **`trading/orchestrate/pipeline.py`**（新文件，编排层，高内聚低耦合）|
 | D6 | spec 落盘 | **原地重写本文件**（取代旧轮询版）|
+| D7 | Brief 播报 + start_all 收编 | **Brief 收进 `_pipeline_then_eod` 事件链尾**（取代 QuanterBrief@18:00 schtasks）；start_all.py 5 步中 engine/采集/Brief 三者收进 uvicorn，miniQMT/broadcast/discovery 保持独立（见 §12）|
 
 ---
 
@@ -313,9 +314,41 @@ async def pipeline_then_eod(engine) -> None:
         return                              # 不跑 eod，不产废信号
     # 5. 全绿 → 跑 eod
     await engine._eod()
+    # 6. 事件链尾 → Brief 播报（D7，收进 uvicorn：采集后真实状态，零时序赌博）
+    await run_brief_all()                    # 见 §6.5
 ```
 
 **说明**：T2 步骤（`run_data_check.py`）内部仍就地落库（D4），与本函数写同一张 `data_ready` 表。本函数这层落库是给"非 supervisor 触发路径"兜底，两者 upsert 幂等不冲突。
+
+### 6.5 Brief 播报收进事件链尾（D7 · start_all 审视新增）
+
+原 `QuanterBrief@18:00`（独立 schtasks，跑 `ops/brief_all.py` 三播报 bot）依赖采集完成（播采集后状态），现收进 `_pipeline_then_eod` 事件链尾——彻底消除"采集超时→brief 播旧状态"的时序赌博。
+
+**关键设计：事件链调用 brief，不把 brief 逻辑塞进 orchestrate（保持关注点分离）**
+
+`ops/brief_all.py` 当前是纯 `subprocess.call([PY, "-m", "broadcast", "--bot", bot])` 串行。提供一个 async 包装供事件链调用（不破坏 `python -m broadcast` CLI 入口与 schtasks 兼容路径）：
+
+```python
+# ops/brief_all.py —— 加 async 函数（保留 main() 供 __main__/schtasks 不变）
+async def run_brief_all() -> int:
+    """事件链尾调用：串行跑三播报 bot（与 main() 同逻辑，async 友好）。
+
+    保持 subprocess 调 broadcast 而非 import：broadcast 模块拉起 dws/钉钉重链，
+    子进程隔离比 in-process import 更稳（单 bot 崩不连累 engine）。
+    """
+    import asyncio
+    rcs = []
+    for bot in BOTS:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "broadcast", "--bot", bot, cwd=str(ROOT))
+        rc = await proc.wait()
+        rcs.append((bot, rc))
+    return 1 if any(rc != 0 for _, rc in rcs) else 0
+```
+
+**为什么保持 subprocess 而非 import broadcast**：broadcast 模块拉起 dws/钉钉通道重链，子进程隔离让"单 bot 推送失败"不连累 engine 进程（与 brief_all 现有故障隔离语义一致）。事件链通过 `await run_brief_all()` 调用，brief 物理实现仍在 `ops/brief_all.py`，**orchestrate/pipeline.py 不 import broadcast**——边界清晰。
+
+**brief 失败不阻断 eod**：eod 已在步骤 5 跑完落 plan，brief（步骤 6）失败仅影响播报不影响交易。`run_brief_all` 内部 try/except 兜底，失败记 WARNING 不抛。
 
 ### 6.3 `data_ready` 表（`trading/state_store.py`，第 7 张表）
 
@@ -471,13 +504,63 @@ if _eng is not None and _eng.sched.running:
 3. **S1 data_ready 表 + CRUD + T2 落库**（依赖 W1 之外的零）— state_store 第 7 张表；`run_data_check.py` T2 末尾 upsert。立即可独立验证。
 4. **S2 `pipeline_then_eod` + `required_data_keys`**（依赖 W1/W3/S1）— `orchestrate/pipeline.py` 新文件；Strategy Protocol 加属性。
 5. **S3 pre_open 三段 gate**（依赖 S1，与 S2 正交）— `_pre_open_gate` + 接入 `pre_open`。
-6. **lifespan 装配块 + 删除独立 19:00 eod cron + schtasks 采集改子进程**（依赖 W1/W2/W3/S2）— 生产路径切 uvicorn。
-7. **e2e + 钉钉实测收口**（依赖 S1-S3）。
-8. （可选）模拟盘集成验证 → live（与韧性 spec §6 live gate 合并检查）。
+6. **S4 Brief 收进事件链尾**（依赖 S2）— `ops/brief_all.py` 加 `run_brief_all()` async；`pipeline_then_eod` 步骤 6 调用。
+7. **lifespan 装配块 + 删除独立 cron/schtasks + start_all 收编**（依赖 W1/W2/W3/S2/S4）— 生产路径切 uvicorn；删 19:00 eod cron、删 QuanterDataPipeline/QuanterBrief schtasks、改 `start_all.py`（见 §12）。
+8. **e2e + 钉钉实测收口**（依赖 S1-S4）。
+9. （可选）模拟盘集成验证 → live（与韧性 spec §6 live gate 合并检查）。
 
 ---
 
-## 11. 与 [[2026-07-29-trading-execution-resilience-design]] 的关系
+## 12. start_all 开机自启收编（D7）
+
+`scripts/start_all.bat` → `ops/start_all.py` 现拉起 5 步 + 注册 3 个 schtasks。本设计把其中 3 块收进 uvicorn 单进程，4 块保持独立。
+
+### 12.1 start_all.py 现状 5 步 + 3 schtasks（已核实）
+
+| # | 组件 | 现状 | 收进 uvicorn? | 理由 |
+|---|---|---|---|---|
+| 1 | miniQMT 检测 | `Path.exists()` 检测 + 提示（GUI 无法脚本启动） | ❌ 删此步 | engine 装配块 `get_gateway()` 已做 None 兜底降级，这步冗余 |
+| 2 | uvicorn :8000 | `_detached` 拉起子进程 | ✅ **就是宿主本身** | 合并的目的地，不再是子进程 |
+| 3 | broadcast connect（5 钉钉机器人） | `subprocess.run` 拉起 5 个 Claude Code 常驻实例 | ❌ 不动 | `dws dev connect` 托管的 Claude Code 子进程群，与交易正交，已是独立常驻 |
+| 4 | trading engine（`python -m trading`） | `_detached` 独立常驻进程 | ✅ **收进 lifespan** | C-2 核心（§5/§7） |
+| 5a | schtasks QuanterDataPipeline@17:00 | 独立进程跑 `data_pipeline.py`（T1→采→T2） | ✅ **收进事件链** | C-2 核心（§6.2 `_pipeline_then_eod` 用子进程驱动） |
+| 5b | schtasks QuanterBrief@18:00 | 独立进程跑 `brief_all.py`（三播报） | ✅ **收进事件链尾** | D7（§6.5），采集后真实状态，零时序赌博 |
+| 5c | schtasks QuanterDiscoveryDaemon@02:00 | 夜跑批（discovery 自治） | ❌ 不动 | 与交易/采集正交，02:00 夜跑无合并收益 |
+
+### 12.2 收编后的 start_all.py（瘦身）
+
+收编后 `ops/start_all.py` 只剩 3 步（原 5 步删 2、改 1）：
+
+```python
+def main() -> int:
+    load_dotenv(ROOT / ".env", override=True)
+    # 1. uvicorn :8000（宿主：engine + 采集 + brief 全在它的 lifespan 里）
+    if _bind_ok(8000):
+        _detached([str(VENV_PY), "-m", "uvicorn", "presentation.server.main:app",
+                   "--host", "127.0.0.1", "--port", "8000"], "uvicorn")
+        _wait_port_busy(8000, timeout=40)
+    # 2. broadcast connect 5 钉钉机器人（独立常驻，依赖 uvicorn :8000）—— 不变
+    subprocess.run(f'echo y| "{VENV_PY}" -m broadcast connect --start all',
+                   shell=True, cwd=str(ROOT), timeout=120)
+    # 3. schtasks：只注册 DiscoveryDaemon@02:00（采集/Brief 已收进 uvicorn，删除其 schtasks）
+    subprocess.run([str(VENV_PY), "-m", "discovery.schtasks", "--register"], cwd=str(ROOT))
+    # 删除已收编的 QuanterDataPipeline + QuanterBrief（幂等，防残留）
+    subprocess.run([str(VENV_PY), str(ROOT/"ops"/"manage_ops_schtasks.py"), "--unregister-pipeline-brief"],
+                   cwd=str(ROOT))
+    return 0
+```
+
+**删除项**：miniQMT 检测（冗余）、`python -m trading` 独立进程（收进 lifespan）、`manage_ops_schtasks.py --register`（只留 discovery；DataPipeline/Brief 的 schtasks 删除）。
+
+### 12.3 `manage_ops_schtasks.py` 配套改动
+
+`PIPELINE_TASKS`（`manage_ops_schtasks.py:28-29`）的两个任务（DataPipeline/Brief）**整体移除**——它们的触发职责已由 uvicorn 内 `_pipeline_then_eod` cron 承接。新增 `--unregister-pipeline-brief` 子命令（幂等删除这两个 schtasks，防历史残留）。`discovery/schtasks.py` 不动。
+
+### 12.4 dev.py（开发入口）是否也要收编？
+
+`ops/dev.py`（前台开发：uvicorn + vite）启动的 uvicorn 与 `start_all.py` 是**同一个 `presentation.server.main:app`**——lifespan 装配块对二者等价生效。故 dev 模式下 engine/采集/brief 同样自动收编，**dev.py 无需改动**（只是开发时不跑 broadcast connect/discovery，由开发者手动）。
+
+
 
 - **正交**：韧性 spec 解决"网关自愈/撤单确认/口径漂移/静默告警"（执行层韧性）；本设计解决"数据→eod 信号链断裂 + pre_open 缺显式 gate + 调度器合并"（调度编排层）。两者可独立实施、独立测试。
 - **协同点**：本设计 S3 pre_open 网关健康 gate 复用韧性 spec M1 的 `is_client_ready()`（`broker/qmt.py:311`）；S2/S3 的 CRITICAL 告警复用韧性 spec M4 的 `notify_risk_event` + `fire_and_forget`。
