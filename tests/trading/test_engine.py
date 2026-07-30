@@ -28,6 +28,14 @@ from trading import engine, trading_plan
 def _isolate_plan_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path / "plans"))
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")  # 影子模式默认，防测试真下单
+    # state_store 表初始化（state-store-redesign 后 _handle_order_update 等查 state_store，
+    # 无表 → no such table。autouse 确保所有 test 都有 state_store 可查）
+    from trading import state_store, position_book
+    _db = str(tmp_path / "engine_state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", _db)
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", _db)
+    position_book.init_db()
+    state_store.init_store()
 
 
 # ============================================================================
@@ -316,6 +324,23 @@ def test_pre_open_blocks_when_no_plan():
     result = asyncio.run(engine.pre_open("2099-12-31"))
     assert result["submitted"] == 0
     assert "无计划" in result["reason"]
+
+
+# ----------------------------------------------------------------------------
+# T12（state-store-redesign）：废弃 _tp_placed 内存（DB has_order 为唯一真相源）
+# ----------------------------------------------------------------------------
+def test_no_tp_placed_memory():
+    """engine.py 不再依赖 _tp_placed 内存态（grep 无 _tp_placed 赋值/读写）。
+
+    物理意图（spec §3.6）：_tp_placed 是进程内存，engine 重启清空 → 重连重推 →
+    重复挂止盈超卖（P0-1）。已由 state_store.has_order(TP1) DB 查询替代（跨重启持久）。
+    本测试断言 engine.py 源码无 _tp_placed 的赋值语句（= 彻底废弃，非保留兼容）。
+    """
+    import pathlib
+    src = pathlib.Path(engine.__file__).read_text(encoding="utf-8")
+    # 不应再有 _tp_placed 的赋值（self._tp_placed = ... 或 .add(...)）
+    assert "self._tp_placed" not in src, "engine.py 仍含 _tp_placed 实例属性（应已废弃，改用 DB has_order）"
+    assert "_tp_placed.add" not in src, "engine.py 仍写 _tp_placed.add（应已废弃，改用 DB insert_order）"
 
 
 def test_pre_open_cancels_yesterday_open_orders(monkeypatch):

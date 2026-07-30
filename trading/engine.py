@@ -1637,22 +1637,13 @@ class TradingEngine:
             id="_health_guard",
         )
 
-        # 成交回调链路状态（Task 10 · 修 G5）：
-        #   _tp_placed：已挂止盈的 symbol 集合（幂等防重挂——部分成交多次回报/柜台重推
-        #               不应重复挂止盈卖单，否则同笔持仓挂 N 张卖单 → 超卖敞口致命）。
+        # 成交回调链路状态：
         #   _gw：交易网关引用（_order_direction 查 gw._orders[order_id].order_type 判买卖方向）。
         #        Task 11 在 gw.connect 注册 _on_order_update 回调时同步注入，本 task 仅声明槽位。
         #
-        # ⚠️ _tp_placed 仅进程内存（不持久化）：
-        #   常驻进程重启（断电/崩溃恢复/OOM kill 后 systemd 拉起）后该集合清空——若 broker
-        #   断线重连后重推历史 trade 回报（miniQMT connect 时同步推送当日 _orders 与成交），
-        #   已挂止盈的买单会再次命中「symbol not in _tp_placed」分支 → 重复挂止盈卖单
-        #   （spec §8 幂等红线的已知缺口）。
-        #   Phase2 / 生产级准入必修：把 _tp_placed 持久化到 trading_plan JSON（或独立
-        #   tp_state.json），_handle_order_update 启动时加载、挂单成功后写盘。
-        #   Phase1 dry_run（影子模式）：风控极低——dry_run 命中不真下单，重复挂的止盈单
-        #   也走 DRY_RUN 分支不触达 broker，最多多几条「止盈单已挂」日志，无敞口风险。
-        self._tp_placed: set[str] = set()
+        # ⚠️ 止盈幂等已迁移到 state_store.has_order(TP1) DB 查询（state-store-redesign T12）：
+        #   原 _tp_placed 内存集合已废弃（重启清空→重连重推→重复挂止盈超卖 P0-1 根因）。
+        #   _handle_order_update 查 DB order 表 has_order(TP1) 判定是否已挂止盈（跨重启持久）。
         self._gw: Any = None
 
         # M1 健康守护 job 退避状态（Task 8）：
@@ -2202,10 +2193,10 @@ class TradingEngine:
                  （Phase1 简化版：单一固定止盈价、全额；Phase2 升级为分级状态机复刻
                  simulate_exit 的 tp1 部分量 + tp2 剩余量）。
 
-        幂等红线（``_tp_placed``）：
+        幂等红线（state_store.has_order(TP1)）：
             on_stock_trade 在部分成交 / 柜台重推时会多次推送同一 order_id 的 trade 回报。
-            若每次都重挂止盈卖单 → 同笔持仓挂 N 张卖单 → 超卖敞口致命。故以 symbol 为
-            key 标记已挂止盈，二次回报命中即跳过（``symbol in self._tp_placed``）。
+            若每次都重挂止盈卖单 → 同笔持仓挂 N 张卖单 → 超卖敞口致命。故查 DB order 表
+            has_order(TP1)，已挂即跳过（跨重启持久，state-store-redesign T12 替代原 _tp_placed 内存）。
 
         线程安全：
             本方法 async，由主线程 ``create_task`` 调度（Task 11 用
@@ -2263,30 +2254,28 @@ class TradingEngine:
         except Exception:
             logger.exception("成交通知发送失败 symbol=%s（不影响后续挂止盈）", symbol)
 
-        # c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（幂等防重挂）
+        # c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（DB 幂等防重挂）
         #    卖单成交（direction=="SELL"）无需挂止盈（卖出即离场，无持仓可止盈）。
         #    方向未知（None）保守不挂——宁可漏挂止盈让人工补，也不误把卖单当买单挂反方向单。
         #
-        # 幂等双闸（state-store-redesign §4.2，P0-1 止盈超卖根因修复）：
-        #   ① DB has_order(TP1)：查 state_store.order 表是否已挂 TP1（跨重启持久，替代纯内存）。
-        #   ② _tp_placed 内存：补充闸（同调度点同步占位，防 await 期间重入）。
-        #   二者或关系：任一已标记即跳过。_tp_placed 是 Phase1 遗留（T12 将废弃，DB 为唯一真相源）。
+        # 幂等闸（state-store-redesign §4.2，P0-1 止盈超卖根因修复）：
+        #   DB has_order(TP1)：查 state_store.order 表是否已挂 TP1（跨重启持久）。
+        #   T12 已废弃 _tp_placed 内存态（重启清空→重连重推→重复挂止盈超卖），DB 为唯一真相源。
+        #   _place_take_profit 内 _record_tp 落 insert_order(TP1/TP2)（UNIQUE 幂等），双重保护。
         today_tp = datetime.now().strftime("%Y-%m-%d")
         _account_id = _resolve_account_id()
         _trade_id = f"{_account_id}_{symbol}_{today_tp}"
-        _tp_already = symbol in self._tp_placed
+        _tp_already = False
         try:
-            if not _tp_already:
-                _tp_already = _state_store.has_order(_account_id, today_tp, symbol, "TP1")
+            _tp_already = _state_store.has_order(_account_id, today_tp, symbol, "TP1")
         except Exception:
-            logger.exception("查 DB has_order(TP1) 失败 symbol=%s（回退 _tp_placed 内存闸）", symbol)
+            logger.exception("查 DB has_order(TP1) 失败 symbol=%s（保守跳过，防重复挂）", symbol)
+            _tp_already = True  # DB 查询失败保守视为已挂（宁可漏挂人工补，不超卖）
         if direction == "BUY" and not _tp_already:
-            self._tp_placed.add(symbol)  # 调度点幂等标记（先占位，防 await 期间重入重挂）
             try:
                 await self._place_take_profit(symbol, qty, price, order_id)
             except Exception:
                 # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
-                # 注意：此处不回滚 _tp_placed（保留已调度标记，防重推再挂；真失败由人工补）。
                 logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)
 
         # d. 本地持仓账本写入（gap4 · post_close 对账数据源）。
@@ -2397,10 +2386,10 @@ class TradingEngine:
             ``filled_qty`` 用成交回报里的**实际成交量**（``traded_volume``），**非计划全量**。
             部分成交时若用计划全量挂止盈 → 卖超过实际持仓 = 超卖敞口致命。
 
-        幂等（``_tp_placed``）：
-            **标记在调度点 ``_handle_order_update`` 完成**（不在本方法内），先占位防
-            ``await`` 期间部分成交重推重入重挂。本方法只负责读计划止盈价 + _submit 挂单 +
-            结果观测日志，不写 ``_tp_placed``（单一写入点 = 幂等可测可证）。
+        幂等（state_store DB 双闸）：
+            **has_order(TP1) 在调度点 ``_handle_order_update`` 完成**（查 DB 是否已挂 TP1），
+            本方法挂单成功后 ``_record_tp`` 落 insert_order(TP1/TP2)（UNIQUE 幂等，单一写入点）。
+            双闸防 await 期间部分成交重推重入重挂：调度点查 + 写入点 UNIQUE 冲突兜底。
 
         Args:
             symbol:      成交标的（如 "300001.SZ"）。

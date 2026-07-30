@@ -36,14 +36,20 @@ def db(tmp_path, monkeypatch):
     """每个测试用独立 tmp db（隔离生产账本 logs/trading_state.db），patch _DEFAULT_DB
     让 engine._handle_order_update → position_book.apply_fill 间接调用也命中 tmp。
 
+    同时 init state_store（state-store-redesign 后 _handle_order_update 查 has_order/
+    insert_fill/insert_trade_event 等 state_store 表，无本初始化 → no such table）。
+
     Why 必要：_handle_order_update 内调 position_book.apply_fill 写成交回报。无本
     fixture 时 apply_fill 走默认 _DEFAULT_DB=logs/trading_state.db，会污染生产账本
     （历史 bug：order_id=123/456 的测试数据被写进真实账本 logs/trading_state.db，
     2026-07-27 排查定位）。照抄 test_position_book 同款隔离范式。
     """
+    from trading import state_store
     db_path = str(tmp_path / "state.db")
     monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
     position_book.init_db()
+    state_store.init_store()
     return db_path
 
 
@@ -93,25 +99,27 @@ def test_trade_update_writes_log_and_notifies(db):
 
 
 def test_buy_fill_places_take_profit_once_idempotent(db):
-    """买单成交 → 挂止盈；重复回报幂等不重挂（三连中的 c + 幂等防重挂红线）。
+    """买单成交 → 挂止盈；重复回报幂等不重挂（DB has_order 替代 _tp_placed 内存）。
 
     物理意图（幂等为何是红线）：
         on_stock_trade 在部分成交/柜台重推时会多次推送同一 order_id 的 trade 回报。
         若每次都重挂止盈卖单，会导致同一笔持仓挂出 N 张止盈单 → 超卖敞口致命。
-        ``_tp_placed`` 集合以 symbol 为 key 标记已挂止盈，二次回报命中即跳过。
+        Phase 2：_handle_order_update 在调 _place_take_profit 前先查 state_store.has_order(TP1)，
+        首次 False → 挂 + insert_order(TP1)；重复回报 has_order=True → 跳过（DB 幂等，跨重启持久）。
 
     断言：
-      1) 首次买单成交 → ``_place_take_profit`` 被调一次（挂止盈）；
-      2) 重复回报（同 symbol）→ ``_place_take_profit`` 总调用次数仍为 1（幂等）。
+      1) 首次买单成交 → _submit 被调（tp1+tp2 两腿，共 2 次）；
+      2) 重复回报 → has_order(TP1)=True → _place_take_profit 不执行 → _submit 不再被调。
     """
+    from trading import state_store
     eng = TradingEngine()
-    eng._tp_placed = set()
     update = {
         "kind": "trade",
         "order_id": "123",
         "stock_code": "300001.SZ",
         "traded_volume": 100,
         "traded_price": 10.5,
+        "traded_time": "09:30:00",
         "state": "FILLED",
     }
     plan = {
@@ -121,24 +129,26 @@ def test_buy_fill_places_take_profit_once_idempotent(db):
                 "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
                 "stop_price": 9.5,
                 "take_profit": 12.0,
+                "tp1": 11.0,
+                "tp1_portion": 1.0,  # 100% tp1（filled=100 向下整手=100，单腿）
             }
         ],
     }
     gw = MagicMock()
-    gw._orders = {"123": {"order_type": 23}}  # 23=STOCK_BUY（买单标记）
+    gw._orders = {"123": {"order_type": 23}}
     eng._gw = gw
-    # patch 全部真实副作用：止盈挂单 mock 成 AsyncMock（不触达 gw/_submit）。
-    # trading_plan 是 engine 顶层 import（``from trading import trading_plan``），
-    # 故 patch ``trading.engine.trading_plan.load_plan``；其余两符号走真实模块路径
-    # （同 test_trade_update_writes_log_and_notifies 注释）。
+    # Phase 2：不 mock _place_take_profit（让 DB insert_order 自然写入 → 幂等键生效）
+    # 只 mock _submit（不真挂单到 broker），让 _place_take_profit 内部 insert_order 落 DB
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager"), \
-         patch.object(eng, "_place_take_profit", new=AsyncMock()) as tp:
-        asyncio.run(eng._handle_order_update(update))  # 首次成交回报
-        asyncio.run(eng._handle_order_update(update))  # 重复回报（部分成交重推/柜台重推）
-    # 幂等断言：_place_take_profit 只被调一次（防超卖敞口）
-    tp.assert_called_once()
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._handle_order_update(update))  # 首次成交回报 → 挂 TP1
+        assert submit_mock.call_count >= 1  # 至少调了 1 次（tp1 单腿）
+        first_count = submit_mock.call_count
+        asyncio.run(eng._handle_order_update(update))  # 重复回报 → has_order(TP1)=True → 跳过
+    # 幂等：第二次不新增 _submit 调用（DB has_order 挡住）
+    assert submit_mock.call_count == first_count
 
 
 # ============================================================================
