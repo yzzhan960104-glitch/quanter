@@ -65,6 +65,10 @@ class NecklineMethodStrategy:
         cfg_override: 21 维参数覆盖 dict（键在 NecklineConfig.model_fields 内）。
     """
 
+    # 数据集依赖声明（C-2 D3）：本策略仅依赖 daily 日线。本类是普通 class
+    # （非 Strategy Protocol 子类），不继承 Protocol 默认值，故显式声明与默认一致。
+    required_data_keys = frozenset({"daily"})
+
     def __init__(self, cfg_override: dict | None = None, **kwargs):
         ov = cfg_override or {}
         self.id_cfg = {**DEFAULTS, **{k: ov[k] for k in _NECKLINE_ID_KEYS if k in ov}}
