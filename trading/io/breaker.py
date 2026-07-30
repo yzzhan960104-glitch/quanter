@@ -45,25 +45,27 @@ _TERMINAL: frozenset[OrderState] = frozenset({
 })
 
 
-async def cancel_all_open_orders(gw: Any) -> dict[str, int]:
+async def cancel_all_open_orders(gw: Any, account_id: str | None = None) -> dict[str, int]:
     """撤销网关下所有未终态订单（熔断/断线/紧急停机时调）。
 
+    state-store-redesign §3.4/§4.4 改造：撤单数据源从 gw._orders 内存改为柜台查询。
+
+    数据源优先级（P0-4 根因修复）：
+        1. **柜台查询（优先）**：gw 暴露 query_orders + cancel_order_by_broker_oid 时，
+           走 query_orders(cancelable_only=True) 查柜台全量可撤单，逐个 cancel_order_by_broker_oid
+           撤（绕过 seq→real 映射——内存 oid 在 live 下是柜台真实单号，cancel_order 走映射必失败）。
+        2. **内存回退（向后兼容）**：gw 无 query_orders 时（dry_run/老 Mock），退回遍历 gw._orders
+           + cancel_order（旧路径，保既有调用零回归）。
+
     参数：
-        gw: 执行网关实例，需暴露 ``_orders: dict[str, dict]``（与
-            QmtExecutionGateway 同口径）与 async ``cancel_order(order_id)``；
-            可选暴露 async ``_confirm_cancelled(oid, timeout, interval) -> bool``
-            （T2 产出，用于撤单后轮询确认到终态）。未挂该方法的网关（dry_run/
-            老 Mock）走鸭子类型跳过确认，行为向后兼容。
+        gw: 执行网关实例。需暴露 _orders + async cancel_order（内存回退路径）；
+            可选暴露 async query_orders(cancelable_only) + cancel_order_by_broker_oid(broker_oid)
+            （柜台查询路径）+ async _confirm_cancelled(oid, timeout, interval)（撤单确认）。
+        account_id: 所属账户（可选）。柜台路径撤单后回写 state_store.order.state=CANCELLED；
+            None 时不回写 DB（仅撤单，不更新账本）。
 
     返回：
-        ``{"cancelled": int, "unconfirmed": int}``
-          - ``cancelled``：成功「发起」撤单的笔数（非「已撤成功」，柜台回报
-            最终态有滞后）。
-          - ``unconfirmed``：发起后 ``_confirm_cancelled`` 超时未确认到终态
-            的笔数（主推延迟或柜台未响应）。``unconfirmed>0`` 仅告警，不阻塞
-            熔断/挂单主路径——撤单已发，本地状态终会被 on_cancel_error/
-            on_stock_order 对账修正；但必须显式暴露此口径，让调用方据以决定
-            是否人工复核，杜绝「本地以为撤了、柜台其实没撤」的状态悬空。
+        ``{"cancelled": int, "unconfirmed": int}``（口径见下方 docstring）。
 
     Why 必须容忍单笔失败：
         熔断路径往往伴随异常环境（断线恢复、柜台限流、流动性枯竭），单笔
@@ -76,21 +78,76 @@ async def cancel_all_open_orders(gw: Any) -> dict[str, int]:
         异常时 confirmed 置 False 而非 True，是「宁可误报未确认触发人工复核，
         不可漏报假装已撤」的保守取向——熔断场景下假撤单的代价（敞口残留）远
         高于误告警的代价（人工多看一眼）。
-
-    阻塞上界（调用方必须评估）：
-        本函数对 N 笔未终态单【串行】调 cancel_order + _confirm_cancelled，
-        每笔最坏 ``timeout=5s``（_confirm_cancelled 轮询超时），故整体最坏
-        ``5N 秒``（N=未终态单数）。调用方需据 N 评估是否阻塞主路径：
-          - ``pre_open`` 撤昨日未成交单 / 日内熔断撤单：N 通常个位数（昨夜遗留
-            挂单 + 当日未成交买单），5N≈数十秒可接受，且都在非交易窗口或风控
-            触发后执行，阻塞无副作用；
-          - 若 N 可能上百（如批量挂单后紧急停机），调用方需自行评估是否放到
-            后台 task 或缩短 timeout，避免阻塞 event loop 致行情/订单回调饿死。
     """
-    orders = getattr(gw, "_orders", {}) or {}
     # 鸭子类型探针：T2 产出的确认方法（仅 QmtExecutionGateway 挂载）；
     # None 表示网关不支持确认（dry_run/老 Mock），退化为「不确认、unconfirmed 恒 0」。
     confirm_fn = getattr(gw, "_confirm_cancelled", None)
+    query_fn = getattr(gw, "query_orders", None)
+    cancel_by_oid_fn = getattr(gw, "cancel_order_by_broker_oid", None)
+
+    # 路径选择：柜台查询优先（P0-4 根因修复），无 query_orders 回退内存
+    if query_fn is not None and cancel_by_oid_fn is not None:
+        return await _cancel_via_broker_query(
+            gw, query_fn, cancel_by_oid_fn, confirm_fn, account_id)
+    return await _cancel_via_memory(gw, confirm_fn)
+
+
+async def _cancel_via_broker_query(gw, query_fn, cancel_by_oid_fn, confirm_fn,
+                                   account_id: str | None) -> dict[str, int]:
+    """柜台查询撤单路径（state-store-redesign §3.4 P0-4 根因修复）。
+
+    查 query_orders(cancelable_only=True) 拿柜台全量可撤单，逐个 cancel_order_by_broker_oid
+    撤（柜台单号直撤，绕过 seq→real 映射）。撤成后回写 state_store.order.state=CANCELLED（对账一致）。
+    """
+    from trading import state_store
+
+    n_cancelled = 0
+    n_unconfirmed = 0
+    try:
+        orders = await query_fn(cancelable_only=True)
+    except Exception:
+        logger.exception("query_orders 查柜台可撤单失败，撤单中止（无法得知可撤集合）")
+        return {"cancelled": 0, "unconfirmed": 0}
+    for o in orders or []:
+        broker_oid = o.get("order_id")
+        if broker_oid is None:
+            continue
+        try:
+            await cancel_by_oid_fn(broker_oid)
+            n_cancelled += 1
+            # 回写 DB order.state=CANCELLED（account_id 提供时，对账一致）
+            # 按 broker_oid 列更新（柜台单号，order_id 主键与 broker_oid 不同）
+            if account_id:
+                try:
+                    state_store.cancel_order_by_broker_oid_db(str(broker_oid))
+                except Exception:
+                    logger.exception("回写 order.state=CANCELLED 失败 broker_oid=%s", broker_oid)
+            if confirm_fn is not None:
+                confirmed = True
+                try:
+                    confirmed = await confirm_fn(str(broker_oid), timeout=5.0, interval=0.5)
+                except Exception:
+                    confirmed = False
+                    logger.exception("撤单确认异常（保守计未确认）broker_oid=%s", broker_oid)
+                if not confirmed:
+                    n_unconfirmed += 1
+                    logger.warning(
+                        "撤单未确认终态 broker_oid=%s（主推延迟或柜台未响应，需人工复核）", broker_oid)
+        except Exception:
+            logger.exception("熔断撤单失败 broker_oid=%s", broker_oid)
+    logger.warning(
+        "熔断撤单完成（柜台查询路径），共发起撤 %s 笔（其中未确认 %s 笔）",
+        n_cancelled, n_unconfirmed)
+    return {"cancelled": n_cancelled, "unconfirmed": n_unconfirmed}
+
+
+async def _cancel_via_memory(gw, confirm_fn) -> dict[str, int]:
+    """内存回退撤单路径（旧逻辑，向后兼容 dry_run/无 query_orders 的网关）。
+
+    遍历 gw._orders，对未终态单调 gw.cancel_order（走 seq→real 映射）。
+    保留旧行为：test_breaker_cancel_confirm.py / test_pre_open_cancels_yesterday_open_orders 仍走此路径。
+    """
+    orders = getattr(gw, "_orders", {}) or {}
     n_cancelled = 0
     n_unconfirmed = 0
     for oid, rec in list(orders.items()):
@@ -98,34 +155,23 @@ async def cancel_all_open_orders(gw: Any) -> dict[str, int]:
             try:
                 await gw.cancel_order(oid)
                 n_cancelled += 1
-                # M2 撤单确认闭环（T3 接入）：撤单「发起」成功后，轮询确认是否
-                # 真到终态。QMT 主推延迟 1-2s，不确认则状态悬空（[[qmt-live-smoke-findings]]）。
-                # True=到终态（CANCELLED 撤成 或 FILLED 撤晚已成，都表示不再 pending）；
-                # False=超时未确认 → 计 unconfirmed + WARNING，不假装撤成。
+                # M2 撤单确认闭环：撤单「发起」成功后，轮询确认是否真到终态。
+                # True=到终态；False=超时未确认 → 计 unconfirmed + WARNING，不假装撤成。
                 if confirm_fn is not None:
                     confirmed = True
                     try:
-                        confirmed = await confirm_fn(
-                            str(oid), timeout=5.0, interval=0.5
-                        )
+                        confirmed = await confirm_fn(str(oid), timeout=5.0, interval=0.5)
                     except Exception:
-                        # 确认自身异常保守视为未确认（见 docstring Why）。
                         confirmed = False
-                        logger.exception(
-                            "撤单确认异常（保守计未确认）oid=%s", oid
-                        )
+                        logger.exception("撤单确认异常（保守计未确认）oid=%s", oid)
                     if not confirmed:
                         n_unconfirmed += 1
                         logger.warning(
-                            "撤单未确认终态 oid=%s（主推延迟或柜台未响应，需人工复核）",
-                            oid,
-                        )
+                            "撤单未确认终态 oid=%s（主推延迟或柜台未响应，需人工复核）", oid)
             except Exception:
                 # 单笔失败不中断：记录后继续撤下一笔，最终返回成功发起数。
                 logger.exception("熔断撤单失败 oid=%s", oid)
     logger.warning(
-        "熔断撤单完成，共发起撤 %s 笔未终态单（其中未确认 %s 笔）",
-        n_cancelled,
-        n_unconfirmed,
-    )
+        "熔断撤单完成（内存回退路径），共发起撤 %s 笔未终态单（其中未确认 %s 笔）",
+        n_cancelled, n_unconfirmed)
     return {"cancelled": n_cancelled, "unconfirmed": n_unconfirmed}

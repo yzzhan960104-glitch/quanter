@@ -558,6 +558,10 @@ def test_e2e_cancel_confirm_in_pre_open(isolated, monkeypatch):
         "o3": {"state": OrderState.FILLED, "order_type": 23},      # 终态，跳过
     }
     fake_gw.cancel_order = AsyncMock(return_value=None)
+    # state-store-redesign 后 cancel_all_open_orders 优先走柜台查询路径；
+    # 本场景测【内存回退路径】（无 query_orders 的网关），显式置空让其走内存路径。
+    fake_gw.query_orders = None
+    fake_gw.cancel_order_by_broker_oid = None
 
     # _confirm_cancelled：o1 返 True，o2 返 False（按 oid 分流）
     async def _confirm(oid, timeout=5.0, interval=0.5):

@@ -26,8 +26,12 @@ async def test_cancel_all_counts_unconfirmed_on_timeout():
 
     场景：pre_open 撤 2 笔未终态单，cancel_order 都成功发起，但柜台主推延迟
     致 _confirm_cancelled 超时返 False → unconfirmed=2（需告警人工复核）。
+
+    注（state-store-redesign 后）：本用例测【内存回退路径】（无 query_orders 的网关）。
+    用 spec 限定属性集，让 getattr(gw,"query_orders",None) 返 None → 走内存路径。
     """
-    gw = MagicMock()
+    # spec 让 query_orders/cancel_order_by_broker_oid 缺失（返 None）→ 走内存回退路径
+    gw = MagicMock(spec=["cancel_order", "_confirm_cancelled", "_orders"])
     gw.cancel_order = AsyncMock(return_value=None)
     gw._confirm_cancelled = AsyncMock(return_value=False)  # 超时未确认
     # _orders：2 笔未终态可撤单（state=SUBMITTED 非终态集）
@@ -46,8 +50,10 @@ async def test_cancel_all_confirmed_zero_when_all_terminal():
     """撤单且全部确认到终态 → unconfirmed=0（正常路径）。
 
     场景：2 笔未终态单，cancel_order 成功 + _confirm_cancelled 都返 True。
+
+    注（state-store-redesign 后）：本用例测【内存回退路径】（无 query_orders 的网关）。
     """
-    gw = MagicMock()
+    gw = MagicMock(spec=["cancel_order", "_confirm_cancelled", "_orders"])
     gw.cancel_order = AsyncMock(return_value=None)
     gw._confirm_cancelled = AsyncMock(return_value=True)  # 全部确认到终态
     gw._orders = {

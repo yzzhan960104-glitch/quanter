@@ -170,6 +170,71 @@ def test_eod_plan_veto_protection(monkeypatch, _state_db):
     assert state_store.get_latest_action(trade_id) == "VETOED"
 
 
+# ----------------------------------------------------------------------------
+# T7（state-store-redesign）：cancel_all_open_orders 改查柜台（不依赖 gw._orders 内存）
+# ----------------------------------------------------------------------------
+def test_cancel_uses_query_orders_not_memory():
+    """撤单查柜台：mock gw.query_orders 返 2 笔可撤单 + gw._orders 空 → 撤 2 笔。
+
+    物理意图（P0-4 根因修复）：旧路径遍历 gw._orders 内存，新连接/重启后内存空 → 漏撤柜台
+    旧单。改走 query_orders(cancelable_only=True) 查柜台全量，撤单不再依赖内存。
+    """
+    from trading.io import breaker
+    from unittest.mock import AsyncMock, MagicMock
+    from trading.types import OrderState
+
+    gw = MagicMock()
+    gw._orders = {}  # 内存空（模拟新连接/重启）
+    gw._confirm_cancelled = AsyncMock(return_value=True)
+    # query_orders 返 2 笔柜台可撤单（order_id=柜台真实单号）
+    async def _query_orders(cancelable_only=False):
+        return [
+            {"order_id": 1001, "state": OrderState.SUBMITTED, "stock_code": "600000.SH"},
+            {"order_id": 1002, "state": OrderState.SUBMITTED, "stock_code": "600001.SH"},
+        ]
+    gw.query_orders = _query_orders
+    cancelled_oids = []
+    async def _cancel_by_broker_oid(broker_oid):
+        cancelled_oids.append(broker_oid)
+        from broker.base import OrderResult
+        return OrderResult(order_id=str(broker_oid), state=OrderState.CANCELLED, message="ok")
+    gw.cancel_order_by_broker_oid = _cancel_by_broker_oid
+
+    res = asyncio.run(breaker.cancel_all_open_orders(gw))
+    assert res["cancelled"] == 2
+    assert set(cancelled_oids) == {1001, 1002}  # 用柜台单号撤，不依赖 _orders 内存
+
+
+def test_cancel_updates_order_state_db(monkeypatch, tmp_path):
+    """撤单后 state_store order.state=CANCELLED（回写 DB，对账一致）。"""
+    from trading.io import breaker
+    from trading import state_store
+    from unittest.mock import AsyncMock, MagicMock
+    from trading.types import OrderState
+    from broker.base import OrderResult
+
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    state_store.upsert_account("ACC1", broker="qmt")
+    # 预置一笔 SUBMITTED 委托（模拟昨日挂单）
+    state_store.insert_order("o1", "ACC1_X_2099", "ACC1", "2099-01-02", "600000.SH",
+                             "buy", "OPEN", 100, 10.0, broker_oid="1001", state="SUBMITTED")
+    gw = MagicMock()
+    gw._orders = {}
+    async def _query_orders(cancelable_only=False):
+        return [{"order_id": 1001, "state": OrderState.SUBMITTED, "stock_code": "600000.SH"}]
+    gw.query_orders = _query_orders
+    gw._confirm_cancelled = AsyncMock(return_value=True)
+    async def _cancel_by_broker_oid(broker_oid):
+        return OrderResult(order_id=str(broker_oid), state=OrderState.CANCELLED, message="ok")
+    gw.cancel_order_by_broker_oid = _cancel_by_broker_oid
+
+    asyncio.run(breaker.cancel_all_open_orders(gw, account_id="ACC1"))
+    # DB order.state 回写 CANCELLED
+    assert state_store.get_pending_orders("ACC1") == []  # SUBMITTED 已变 CANCELLED，不在 pending
+
+
 # ============================================================================
 # 2. pre_open：未确认不挂 / 确认后挂 / 撤昨日单 / submit raise 兜底
 # ============================================================================
@@ -179,6 +244,71 @@ def test_pre_open_blocks_unconfirmed_plan():
     result = asyncio.run(engine.pre_open("2099-01-02"))
     assert result["submitted"] == 0
     assert "未确认" in result["reason"]
+
+
+# ----------------------------------------------------------------------------
+# T8（state-store-redesign）：pre_open DB 幂等挂单
+# ----------------------------------------------------------------------------
+def _confirmed_plan_one_order(date="2099-01-02"):
+    """落一份已确认的单标的计划（pre_open 挂单测试共用种子）。"""
+    orders_nested = [
+        {"order": {"symbol": "600000.SH", "qty": 100.0, "side": "buy", "price": 10.0},
+         "stop_price": 9.5, "take_profit": 11.0, "formed_at": date, "max_wait": 5},
+    ]
+    trading_plan.save_plan(date, orders_nested)
+    trading_plan.confirm_plan(date)
+
+
+def test_pre_open_inserts_order_and_event(monkeypatch, _state_db):
+    """挂单后 order 表有 OPEN 行 + trade_event 有 ORDERED 行。"""
+    import sqlite3
+    from trading import state_store
+    _confirmed_plan_one_order()
+    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+
+    async def _dry_submit(order, **kw):
+        return {"order_id": "seq1", "state": "DRY_RUN", "message": "影子"}
+    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    asyncio.run(engine.pre_open("2099-01-02"))
+    account_id = engine._resolve_account_id()
+    assert state_store.has_order(account_id, "2099-01-02", "600000.SH", "OPEN") is True
+    trade_id = f"{account_id}_600000.SH_2099-01-02"
+    assert state_store.get_latest_action(trade_id) == "ORDERED"
+
+
+def test_pre_open_idempotent(monkeypatch, _state_db):
+    """同日 pre_open 调两次 → 只挂一次（has_order OPEN 第二次跳过，submit 只调 1 次）。"""
+    _confirmed_plan_one_order()
+    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    submit_calls = {"n": 0}
+    async def _counting_submit(order, **kw):
+        submit_calls["n"] += 1
+        return {"order_id": "x", "state": "DRY_RUN", "message": "影子"}
+    monkeypatch.setattr(engine, "_submit", _counting_submit)
+    asyncio.run(engine.pre_open("2099-01-02"))
+    asyncio.run(engine.pre_open("2099-01-02"))  # 第二次：has_order OPEN → 跳过
+    assert submit_calls["n"] == 1  # 只挂一次（DB 幂等）
+
+
+def test_pre_open_skips_vetoed(monkeypatch, _state_db):
+    """trade_event 最新 action=VETOED → 跳过该标的（不挂单）。"""
+    from trading import state_store
+    _confirmed_plan_one_order()
+    # 研究员 veto 该标的（eod_plan 已落 SIGNAL，再写 VETOED）
+    account_id = engine._resolve_account_id()
+    trade_id = f"{account_id}_600000.SH_2099-01-02"
+    state_store.upsert_account(account_id, broker="qmt")
+    state_store.insert_trade_event(account_id, trade_id, "600000.SH", "SIGNAL")
+    state_store.insert_trade_event(account_id, trade_id, "600000.SH", "VETOED")
+    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    submit_calls = {"n": 0}
+    async def _counting_submit(order, **kw):
+        submit_calls["n"] += 1
+        return {"order_id": "x", "state": "DRY_RUN", "message": "影子"}
+    monkeypatch.setattr(engine, "_submit", _counting_submit)
+    asyncio.run(engine.pre_open("2099-01-02"))
+    assert submit_calls["n"] == 0  # vetoed 不挂单
+    assert state_store.has_order(account_id, "2099-01-02", "600000.SH", "OPEN") is False
 
 
 def test_pre_open_blocks_when_no_plan():

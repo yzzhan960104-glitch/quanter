@@ -349,6 +349,9 @@ def update_order_state(order_id: str, state: str, *, broker_oid: str | None = No
     物理意图：order 表是可变的（与 trade_event/fill 的 append-only 不同）。pre_open submit 后
     回填 broker_oid（seq→real 映射）；cancel_all_open_orders 回写 state=CANCELLED；成交回报回填
     filled_qty/filled_price/state=FILLED。幂等：多次回填同值是 no-op（UPDATE 不冲突）。
+
+    按 order_id 主键更新（调用方持有内部 order_id 时用，如 pre_open submit 后回填）。
+    柜台查询撤单路径持有 broker_oid（非主键）→ 用 cancel_order_by_broker_oid_db。
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
@@ -367,6 +370,21 @@ def update_order_state(order_id: str, state: str, *, broker_oid: str | None = No
             sets.append("filled_at = ?"); params.append(filled_at)
         params.append(order_id)
         con.execute(f"UPDATE \"order\" SET {', '.join(sets)} WHERE order_id=?", params)
+
+
+def cancel_order_by_broker_oid_db(broker_oid: str, *, db_path: str | None = None) -> int:
+    """按柜台真实单号回写 order.state=CANCELLED（cancel_all_open_orders 柜台查询路径用）。
+
+    物理意图：柜台查询撤单路径（breaker._cancel_via_broker_query）持有 broker_oid（query_orders
+    返回的柜台单号），而非内部 order_id 主键。撤单后按 broker_oid 列回写 state=CANCELLED，
+    让 DB 账本与柜台一致（pending 列表不再含已撤单）。
+    Returns: 更新行数（0=无此 broker_oid 的委托，可能未落库或已终态）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        cur = con.execute(
+            "UPDATE \"order\" SET state='CANCELLED' WHERE broker_oid=?", (broker_oid,))
+        return cur.rowcount
 
 
 def insert_fill(order_id: str, account_id: str, traded_time: str, symbol: str,

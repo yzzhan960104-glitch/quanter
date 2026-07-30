@@ -890,6 +890,43 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         return OrderResult(order_id=order_id, state=OrderState.FAILED,
                            message=f"撤单失败 rc={rc}")
 
+    async def cancel_order_by_broker_oid(self, broker_oid: int) -> OrderResult:
+        """按柜台真实 order_id 撤单（state-store-redesign §3.5）。
+
+        物理意图（P0-4 根因修复）：cancel_all_open_orders 旧路径遍历 gw._orders 内存，
+        取出的 oid 在 live 下是柜台真实单号（_process_order_update 按 order.order_id 键），
+        再调 cancel_order(oid) 走 _resolve_real_order_id(seq→real 查表) —— 真实单号不是 seq，
+        查表必返 None → 撤单 FAILED「映射缺失」。本方法绕过 seq→real 映射，直接用柜台单号调
+        cancel_order_stock，让 cancel_all_open_orders（从 query_orders 拿到的就是柜台单号）能撤成。
+
+        与 cancel_order 的区别：cancel_order 入参是 seq-str（对外暴露的 order_id，走映射）；
+        本方法入参是 int 柜台单号（query_orders 返回的 order_id 字段，直接透传给底层 SDK）。
+
+        Args:
+            broker_oid: QMT 柜台真实 order_id（int），来自 query_orders(cancelable_only=True)。
+        """
+        if self._lock_down or not self._connected:
+            return OrderResult(order_id=str(broker_oid), state=OrderState.REJECTED,
+                               message="网关未连接或已锁定，撤单失败")
+
+        def _do_cancel() -> int:
+            # 直接用柜台单号撤，不走 _seq_to_real 映射（绕过 P0-4 根因）
+            return self._trader.cancel_order_stock(self._account, int(broker_oid))
+
+        try:
+            rc = await asyncio.wait_for(
+                self._loop.run_in_executor(None, _do_cancel), timeout=_ORDER_TIMEOUT)
+        except Exception as exc:
+            logger.exception("QMT cancel_order_by_broker_oid 异常/超时 broker_oid=%s", broker_oid)
+            return OrderResult(order_id=str(broker_oid), state=OrderState.FAILED,
+                               message=f"撤单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
+
+        if rc == 0:
+            return OrderResult(order_id=str(broker_oid), state=OrderState.CANCELLED,
+                               message="撤单指令已发出（非终态），最终态以 on_stock_order 推送 CANCELLED 为准")
+        return OrderResult(order_id=str(broker_oid), state=OrderState.FAILED,
+                           message=f"撤单失败 rc={rc}")
+
     # ---------------------------------------------------- 回调注入与查询
     def set_order_update_callback(self, cb: OrderUpdateCallback) -> None:
         """
