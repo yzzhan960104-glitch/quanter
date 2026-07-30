@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from trading import position_book
+from trading import engine
 from trading.engine import TradingEngine
 
 
@@ -138,6 +139,130 @@ def test_buy_fill_places_take_profit_once_idempotent(db):
         asyncio.run(eng._handle_order_update(update))  # 重复回报（部分成交重推/柜台重推）
     # 幂等断言：_place_take_profit 只被调一次（防超卖敞口）
     tp.assert_called_once()
+
+
+# ============================================================================
+# T9（state-store-redesign）：成交回报 fill + trade_event(FILLED) + DB 幂等挂 TP1/TP2
+# ============================================================================
+@pytest.fixture
+def state_db(tmp_path, monkeypatch):
+    """隔离 state_store DB（_handle_order_update 落 fill/trade_event 用）。
+
+    同时 patch position_book._DEFAULT_DB（既有 apply_fill 调用）与 state_store._DEFAULT_DB。
+    """
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    position_book.init_db()
+    state_store.init_store()
+    return db_path
+
+
+def _buy_fill_update(symbol="300001.SZ", order_id="123"):
+    return {
+        "kind": "trade", "order_id": order_id, "stock_code": symbol,
+        "traded_volume": 100, "traded_price": 10.5, "traded_time": "09:30:00",
+        "state": "FILLED",
+    }
+
+
+def _today_str():
+    """成交回报 handler 用 datetime.now() 定 trade_date，测试须跟随真实今日。"""
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _plan_with_tp(symbol="300001.SZ"):
+    return {
+        "confirmed": True,
+        "orders": [{
+            "order": {"symbol": symbol, "qty": 100, "side": "buy", "price": 10.0},
+            "stop_price": 9.5, "take_profit": 12.0,
+            "tp1": 11.0, "tp1_portion": 0.5,
+            "formed_at": "2099-01-02", "max_wait": 5,
+        }],
+    }
+
+
+def test_trade_update_inserts_fill_and_event(state_db):
+    """成交回报 → fill 表 + trade_event(FILLED) 写入（DB 真相源）。"""
+    import sqlite3
+    from trading import state_store
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    eng._gw = MagicMock()
+    eng._gw._orders = {"123": {"order_type": 23}}  # BUY
+    fake_mgr = MagicMock()
+    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+    with patch("presentation.server.services.trading_service.record_live_trade"), \
+         patch("infra.notifier.NotificationManager") as NM:
+        NM.get_default.return_value = fake_mgr
+        with patch.object(eng, "_place_take_profit", new=AsyncMock()):
+            asyncio.run(eng._handle_order_update(_buy_fill_update()))
+    account_id = engine._resolve_account_id()
+    trade_id = f"{account_id}_300001.SZ_{_today_str()}"
+    assert state_store.get_latest_action(trade_id) == "FILLED"
+    # fill 表有行（增量幂等）
+    with sqlite3.connect(state_db) as con:
+        n = con.execute("SELECT COUNT(*) FROM fill WHERE symbol='300001.SZ'").fetchone()[0]
+    assert n == 1
+
+
+def test_tp_idempotent_via_db(state_db, monkeypatch):
+    """同 symbol 成交回报重推 → has_order(TP1)=True → 跳过（替代 _tp_placed 内存）。
+
+    物理意图（P0-1 止盈超卖根因）：_tp_placed 是内存态，engine 重启清空 → 重连重推 →
+    重复挂止盈超卖。改 DB has_order(TP1) 查询，跨重启持久。
+    """
+    from trading import state_store
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    eng._gw = MagicMock()
+    eng._gw._orders = {"123": {"order_type": 23}}  # BUY
+    # 预置 TP1 已挂（模拟 DB 已记录止盈，trade_date=今日，与 handler 口径一致）
+    account_id = engine._resolve_account_id()
+    today = _today_str()
+    state_store.upsert_account(account_id, broker="qmt")
+    state_store.insert_order(
+        f"{today}_300001.SZ_TP1_1", f"{account_id}_300001.SZ_{today}", account_id,
+        today, "300001.SZ", "sell", "TP1", 100, 11.0, state="SUBMITTED")
+    tp_calls = {"n": 0}
+    async def _counting_tp(*a, **kw):
+        tp_calls["n"] += 1
+    fake_mgr = MagicMock()
+    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+    with patch("trading.engine.trading_plan.load_plan", return_value=_plan_with_tp()), \
+         patch("presentation.server.services.trading_service.record_live_trade"), \
+         patch("infra.notifier.NotificationManager") as NM:
+        NM.get_default.return_value = fake_mgr
+        with patch.object(eng, "_place_take_profit", new=_counting_tp):
+            asyncio.run(eng._handle_order_update(_buy_fill_update()))  # 已有 TP1 → 跳过
+    assert tp_calls["n"] == 0  # DB 幂等：已有 TP1 不重挂
+
+
+def test_tp_inserts_two_orders(state_db):
+    """成交后挂 tp1 + tp2 两笔 order（UNIQUE 幂等，落 DB 真相源）。
+
+    用 filled=1000/portion=0.5 → tp1_qty=500（整手非零，走分级两腿）。
+    """
+    import sqlite3
+    from trading import state_store
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    eng._gw = MagicMock()
+    eng._gw._orders = {"123": {"order_type": 23}}  # BUY
+    # plan 用 qty=1000 + portion=0.5 → tp1=500/tp2=500（两腿都非零）
+    plan = _plan_with_tp()
+    plan["orders"][0]["order"]["qty"] = 1000
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED", "order_id": "s1"})):
+        asyncio.run(eng._place_take_profit("300001.SZ", 1000, 10.5, order_id="123"))
+    account_id = engine._resolve_account_id()
+    today = _today_str()
+    # TP1 + TP2 两笔 order 落库（trade_date=今日，与 _place_take_profit 口径一致）
+    assert state_store.has_order(account_id, today, "300001.SZ", "TP1") is True
+    assert state_store.has_order(account_id, today, "300001.SZ", "TP2") is True
 
 
 # ============================================================================

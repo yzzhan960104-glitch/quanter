@@ -661,6 +661,13 @@ async def pre_open(date: str) -> dict:
     cfg_max_wait = int(os.getenv("TRADE_MAX_WAIT", "5"))
     n_submitted = 0
     n_expired = 0
+    account_id = _resolve_account_id()
+    # 确保 account 行存在（insert_order/trade_event FK 引用）
+    try:
+        if _state_store.get_account(account_id) is None:
+            _state_store.upsert_account(account_id, broker="qmt")
+    except Exception:
+        logger.exception("pre_open 确保 account 行失败（不阻断挂单，DB 写入将软降级）")
     for o in plan["orders"]:
         od = o["order"]
         # max_wait 窗口过滤（plan Task 6）
@@ -673,9 +680,31 @@ async def pre_open(date: str) -> dict:
                 logger.info("pre_open 跳过超期信号 symbol=%s formed_at=%s days=%d > max_wait=%d",
                             od["symbol"], formed_at, days_since, order_max_wait)
                 continue
+        # T8（state-store-redesign §4.1）DB 幂等挂单：
+        # ① veto 保护：trade_event 最新 action=VETOED → 跳过（研究员否决不挂）
+        # ② has_order(OPEN)：同日同标的已挂过 OPEN → 跳过（pre_open 重跑/崩溃重启不重复挂）
+        trade_id = f"{account_id}_{od['symbol']}_{date}"
+        try:
+            if _state_store.get_latest_action(trade_id) == "VETOED":
+                logger.info("pre_open 跳过 vetoed 标的 symbol=%s", od["symbol"])
+                continue
+            if _state_store.has_order(account_id, date, od["symbol"], "OPEN"):
+                logger.info("pre_open 跳过已挂 OPEN（DB 幂等）symbol=%s", od["symbol"])
+                continue
+        except Exception:
+            # DB 查询失败不阻断挂单（主路径是真实挂单，DB 是对账层，软降级）
+            logger.exception("pre_open DB 幂等检查失败 symbol=%s（不阻断，可能重复挂）", od["symbol"])
         order_req = OrderRequest(
             symbol=od["symbol"], qty=od["qty"], side=od["side"], price=od["price"],
         )
+        # T8：挂单前先 insert_order(OPEN, PENDING)（DB 真相源，幂等 UNIQUE）
+        try:
+            _order_id = f"{date}_{od['symbol']}_OPEN_1"
+            _state_store.insert_order(
+                _order_id, trade_id, account_id, date, od["symbol"], od["side"], "OPEN",
+                float(od["qty"]), float(od["price"]), state="PENDING")
+        except Exception:
+            logger.exception("pre_open insert_order(OPEN) 失败 symbol=%s（不阻断挂单）", od["symbol"])
         try:
             result = await _submit(order_req, confirm=True)
         except Exception as exc:
@@ -686,6 +715,18 @@ async def pre_open(date: str) -> dict:
         # state 是 OrderState.name 字符串；REJECTED/FAILED 视为未挂成功
         if result.get("state") not in ("REJECTED", "FAILED"):
             n_submitted += 1
+            # T8：挂单成功 → 回填 order.state=SUBMITTED + broker_oid（seq）+ trade_event(ORDERED)
+            try:
+                broker_oid = str(result.get("order_id") or "")
+                _state_store.update_order_state(
+                    _order_id, "SUBMITTED",
+                    broker_oid=broker_oid or None,
+                    submitted_at=datetime.now().isoformat())
+                _state_store.insert_trade_event(
+                    account_id, trade_id, od["symbol"], "ORDERED",
+                    order_id=_order_id, qty=float(od["qty"]), price=float(od["price"]))
+            except Exception:
+                logger.exception("pre_open 回填 order SUBMITTED/ORDERED 失败 symbol=%s", od["symbol"])
         else:
             logger.warning("pre_open 挂单未成功 symbol=%s state=%s msg=%s",
                            od["symbol"], result.get("state"), result.get("message"))
@@ -2126,21 +2167,24 @@ class TradingEngine:
         except Exception:
             logger.exception("成交通知发送失败 symbol=%s（不影响后续挂止盈）", symbol)
 
-        # c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（幂等 _tp_placed 防重挂）
+        # c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（幂等防重挂）
         #    卖单成交（direction=="SELL"）无需挂止盈（卖出即离场，无持仓可止盈）。
         #    方向未知（None）保守不挂——宁可漏挂止盈让人工补，也不误把卖单当买单挂反方向单。
         #
-        # 幂等关键设计（Why 在 _handle_order_update 标记，不在 _place_take_profit 内标记）：
-        #   ``_tp_placed.add(symbol)`` 必须在**调度点**完成（即此处，调 _place_take_profit
-        #   之前/之后都可，但必须在 _handle_order_update 同步路径里），**不能**下沉到
-        #   ``_place_take_profit`` 内部 —— 否则：
-        #     1. 部分成交重推时，_place_take_profit 还没跑完（await 中）就被第二次回报
-        #        重入，_tp_placed 仍空 → 二次重挂 → 超卖；
-        #     2. 单测 mock 掉 _place_take_profit 时，标记永远不会被写入，幂等链路无法验证。
-        #   Phase1 语义：「该 symbol 已调度挂止盈」即视为已处理（一票通行），后续重推一律
-        #   跳过；_place_take_profit 内部若真挂失败（风控拒/网关断），由告警人工补挂，
-        #   不靠 _tp_placed 之外的重试计数（重试限频是 Phase2 议题）。
-        if direction == "BUY" and symbol not in self._tp_placed:
+        # 幂等双闸（state-store-redesign §4.2，P0-1 止盈超卖根因修复）：
+        #   ① DB has_order(TP1)：查 state_store.order 表是否已挂 TP1（跨重启持久，替代纯内存）。
+        #   ② _tp_placed 内存：补充闸（同调度点同步占位，防 await 期间重入）。
+        #   二者或关系：任一已标记即跳过。_tp_placed 是 Phase1 遗留（T12 将废弃，DB 为唯一真相源）。
+        today_tp = datetime.now().strftime("%Y-%m-%d")
+        _account_id = _resolve_account_id()
+        _trade_id = f"{_account_id}_{symbol}_{today_tp}"
+        _tp_already = symbol in self._tp_placed
+        try:
+            if not _tp_already:
+                _tp_already = _state_store.has_order(_account_id, today_tp, symbol, "TP1")
+        except Exception:
+            logger.exception("查 DB has_order(TP1) 失败 symbol=%s（回退 _tp_placed 内存闸）", symbol)
+        if direction == "BUY" and not _tp_already:
             self._tp_placed.add(symbol)  # 调度点幂等标记（先占位，防 await 期间重入重挂）
             try:
                 await self._place_take_profit(symbol, qty, price, order_id)
@@ -2153,12 +2197,32 @@ class TradingEngine:
         #    独立 try-except 软降级：账本写入失败不阻断 a 日志/b 通知/c 止盈。
         #    方向 None 不写（保守，对齐 c 连不挂止盈语义——不猜方向误记为买当卖/卖当买，
         #    账本失真比对账漏记更危险）。
+        #    state-store-redesign §4.2：同时写 state_store.fill（增量幂等）+ apply_fill_to_position
+        #    + insert_trade_event(FILLED)（DB 真相源，post_close 对账/复盘用）。
         if direction in ("BUY", "SELL"):
             try:
                 from trading import position_book
                 position_book.apply_fill(order_id, symbol, direction, float(qty), float(price), str(update.get("traded_time", "")))
             except Exception:
                 logger.exception("本地账本写入失败 symbol=%s（不影响日志/通知/止盈）", symbol)
+            # state_store 双写（fill + position + trade_event FILLED），DB 为真相源
+            try:
+                # 确保 account 行存在（fill/trade_event FK 引用 account）
+                if _state_store.get_account(_account_id) is None:
+                    _state_store.upsert_account(_account_id, broker="qmt")
+                traded_time = str(update.get("traded_time", ""))
+                if _state_store.insert_fill(
+                        order_id, _account_id, traded_time, symbol, direction,
+                        float(qty), float(price)):
+                    # insert_fill 首次入账才更新 position（避免重推重复累加）
+                    _state_store.apply_fill_to_position(
+                        _account_id, symbol, direction, float(qty), float(price), traded_time)
+                # FILLED 事件（幂等：同 trade 同 action 跳过）
+                _state_store.insert_trade_event(
+                    _account_id, _trade_id, symbol, "FILLED",
+                    order_id=order_id, qty=float(qty), price=float(price))
+            except Exception:
+                logger.exception("state_store fill/position/FILLED 写入失败 symbol=%s（软降级）", symbol)
 
     def _order_direction(self, order_id: str) -> Optional[str]:
         """从 ``gw._orders`` 查订单方向（BUY/SELL）。
@@ -2277,6 +2341,25 @@ class TradingEngine:
         # 挂限价止盈卖单（confirm=True 同 pre_open，引擎是自动批量通道，盘中无人工二次确认）
         from trading.compute.types import OrderRequest
 
+        # T9（state-store-redesign §4.2）：止盈挂单落 DB（has_order(TP1/TP2) 幂等真相源）。
+        # insert_order UNIQUE(account_id, trade_date, symbol, purpose)：重推/重启重挂 → 跳过。
+        # 物理意图：替代 _tp_placed 内存（跨重启持久，防 P0-1 止盈超卖）。
+        _aid = _resolve_account_id()
+        _tid = f"{_aid}_{symbol}_{today}"
+
+        def _record_tp(purpose: str, qty: int, price: float) -> None:
+            """挂止盈单后落 DB order（幂等，重挂跳过）。失败仅 log 不阻断挂单。"""
+            try:
+                # 确保 account 行存在（insert_order FK 引用 account）
+                if _state_store.get_account(_aid) is None:
+                    _state_store.upsert_account(_aid, broker="qmt")
+                oid = f"{today}_{symbol}_{purpose}_1"
+                _state_store.insert_order(
+                    oid, _tid, _aid, today, symbol, "sell", purpose,
+                    float(qty), float(price), state="SUBMITTED")
+            except Exception:
+                logger.exception("insert_order(%s) 失败 symbol=%s（不阻断挂单）", purpose, symbol)
+
         # 分级分割判定（Task 7）：
         # 1. tp1 缺失 / portion=0 → 全量 tp2（向后兼容 Task 7 前的老 plan）
         # 2. tp1 ≥ tp2 sanity 守卫 → 全量 tp2（防 tp1 永远先成交拖累）
@@ -2295,6 +2378,7 @@ class TradingEngine:
             if result.get("state") not in ("REJECTED", "FAILED"):
                 logger.info("【止盈单已挂】%s %s股 @%s（单笔全平 tp2 触发成交价=%s order_id=%s）",
                             symbol, filled_int, tp2, fill_price, order_id)
+                _record_tp("TP2", filled_int, tp2)
             else:
                 logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
                                symbol, result.get("state"), result.get("message"))
@@ -2313,6 +2397,7 @@ class TradingEngine:
             if result.get("state") not in ("REJECTED", "FAILED"):
                 logger.info("【止盈单已挂】%s %s股 @%s（tp1整手不足退化全量tp2 触发成交价=%s order_id=%s）",
                             symbol, filled_int, tp2, fill_price, order_id)
+                _record_tp("TP2", filled_int, tp2)
             else:
                 logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
                                symbol, result.get("state"), result.get("message"))
@@ -2326,6 +2411,8 @@ class TradingEngine:
             confirm=True,
         )
         results.append(("tp1", tp1, tp1_qty, r1))
+        if r1.get("state") not in ("REJECTED", "FAILED"):
+            _record_tp("TP1", tp1_qty, tp1)
         # tp2 leg（形态目标位，仅当有余量时挂）
         if tp2_qty > 0:
             r2 = await _submit(
@@ -2333,6 +2420,8 @@ class TradingEngine:
                 confirm=True,
             )
             results.append(("tp2", tp2, tp2_qty, r2))
+            if r2.get("state") not in ("REJECTED", "FAILED"):
+                _record_tp("TP2", tp2_qty, tp2)
         # 观测日志（两腿各自成败独立记录）
         for leg, price, qty, r in results:
             if r.get("state") not in ("REJECTED", "FAILED"):
