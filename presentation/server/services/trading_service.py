@@ -443,7 +443,8 @@ async def disconnect_gateway() -> None:
     await gw.disconnect()
 
 
-async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool) -> dict:
+async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
+                       whitelist: set | None = None) -> dict:
     """下单业务编排：预取 quote → 风控挡板 → 真单/模拟/拒单 → 落流水。
 
     返回：
@@ -452,6 +453,13 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool) -> 
     挡板命中（非 dry_run）：raise RuntimeError(reason)（路由层转 409）
 
     交易流水全覆盖（spec §6.3）：dry_run / BLOCKED / 真单 / 废单 / 撤单 均落 CSV。
+
+    ``whitelist`` 参数（C-2 scheduling-orchestration W1 物理隔离）：
+    - server 手动下单路径不传（默认 None）→ 走 ``_whitelist()`` = get_effective_whitelist()
+      （_DYNAMIC 恒空 = 纯 env，向后兼容不变）。
+    - engine 自动下单通道显式传 ``self._dynamic_whitelist | static_env_whitelist()``
+      （来自 engine 实例属性，不读模块全局 _DYNAMIC）——engine 与 server 合并进同进程后，
+      两端白名单靠参数显式隔离，不再共享模块级全局态。
     """
     gw = get_gateway()
     if gw is None:
@@ -465,7 +473,7 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool) -> 
         order,
         dry_run=dry_run,
         allow_live=_allow_live(),
-        whitelist=_whitelist(),
+        whitelist=whitelist if whitelist is not None else _whitelist(),
         max_amount=_max_amount(),
         max_shares=_max_shares(),
         quote=quote,

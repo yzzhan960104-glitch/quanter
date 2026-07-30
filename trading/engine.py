@@ -107,6 +107,17 @@ def _alert_critical(msg: str) -> None:
 # ============================================================================
 # 环境读取辅助
 # ============================================================================
+
+# 模块级活跃引擎单例（C-2 scheduling-orchestration W1）：
+#   __init__ 末尾置位 self，供模块级 _submit / pre_open / post_close 反查实例的
+#   ``_dynamic_whitelist`` 属性（engine 与 server 合并进同进程后的物理隔离机制——
+#   注入/清空/拼白名单全部走实例属性，不再 mutate 模块级 _DYNAMIC 全局）。
+#   ⚠️ 仅 engine 独立进程（python -m trading）内会构造 TradingEngine（task brief 红线），
+#   故该单例在 server 进程内恒为 None——server 路径 submit_order 不传 whitelist，
+#   _submit 见 None 即走旧路径（_whitelist() = 纯 env），向后兼容不变。
+_ACTIVE_ENGINE: "TradingEngine | None" = None
+
+
 def _mode() -> str:
     """当前交易模式：dry_run（默认·影子）/ live。
 
@@ -383,7 +394,7 @@ def get_gateway():
     return _svc_get_gw()
 
 
-async def _submit(order, *, confirm: bool = True) -> dict:
+async def _submit(order, *, confirm: bool = True, whitelist: set | None = None) -> dict:
     """下单分流（dry_run 据 _mode）。
 
     透传 trading_service.submit_order，其契约：
@@ -399,9 +410,28 @@ async def _submit(order, *, confirm: bool = True) -> dict:
     （pre_open 必须研究员人工 confirmed=True 才挂单）+ 影子模式前置（≥5 天影子观测）
     三层保障，**而非** confirm 开关——confirm 是 server 手动下单路径的防误触开关，
     引擎通道若走 confirm=False 会导致批量挂单逐单等待人工点确认，盘中不可行。
+
+    whitelist 物理隔离（C-2 scheduling-orchestration W1）：
+        调用方（pre_open/stop_loss_monitor）均不显式传 whitelist（默认 None），
+        由本函数从模块级 ``_ACTIVE_ENGINE`` 单例取 engine 实例的 ``_dynamic_whitelist``
+        并拼静态 env（``self._dynamic_whitelist | static_env_whitelist()``），显式透传
+        给 svc_submit。这样 engine 自动下单通道的白名单与模块级 ``_DYNAMIC`` 全局物理解耦——
+        engine 与 server 合并进同进程后，server 路径的 submit_order（不传 whitelist）仍走
+        ``_whitelist() = get_effective_whitelist()``（_DYNAMIC 恒空 = 纯 env），向后兼容不变。
+        ``_ACTIVE_ENGINE is None`` 仅在未构造 TradingEngine 时发生（理论上不会，__init__ 必置），
+        此防御性分支回退到旧路径（读 get_effective_whitelist），保证 ``python -m trading``
+        单进程语义不变。
     """
     from presentation.server.services.trading_service import submit_order as svc_submit
-    return await svc_submit(order, dry_run=(_mode() == "dry_run"), confirm=confirm)
+    from trading.dynamic_whitelist import get_effective_whitelist, static_env_whitelist
+    if whitelist is None:
+        if _ACTIVE_ENGINE is not None:
+            whitelist = _ACTIVE_ENGINE._dynamic_whitelist | static_env_whitelist()
+        else:
+            # 防御性回退：未构造 TradingEngine（理论不会，__init__ 必置 _ACTIVE_ENGINE）
+            whitelist = get_effective_whitelist()
+    return await svc_submit(order, dry_run=(_mode() == "dry_run"), confirm=confirm,
+                            whitelist=whitelist)
 
 
 # ============================================================================
@@ -647,9 +677,16 @@ async def pre_open(date: str) -> dict:
     if expired_positions:
         await _close_expired_positions(gw, expired_positions)
 
-    # ③ 注入动态白名单（Task5）：仅 engine 进程生效，server 进程不受影响。
+    # ③ 注入动态白名单（Task5 → C-2 W1 改实例属性）：仅 engine 通道生效。
+    # 改造后注入到 engine 实例 self._dynamic_whitelist（通过 _ACTIVE_ENGINE 单例反查），
+    # 而非模块级 _DYNAMIC 全局——engine 与 server 合并进同进程后，实例属性化是两端
+    # 白名单物理隔离的唯一手段（server 路径不读实例属性）。_ACTIVE_ENGINE 理论非空
+    # （pre_open 由 TradingEngine 装配的 job 触发），None 守卫为防御性兜底（回退旧路径）。
     symbols = {o["order"]["symbol"] for o in plan["orders"]}
-    dynamic_whitelist.inject_dynamic_whitelist(symbols)
+    if _ACTIVE_ENGINE is not None:
+        _ACTIVE_ENGINE._dynamic_whitelist |= symbols
+    else:  # pragma: no cover - 防御性回退：未构造 TradingEngine（理论不会）
+        dynamic_whitelist.inject_dynamic_whitelist(symbols)
 
     # ④ 逐单挂单 + raise 兜底（scope #7）
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
@@ -1539,9 +1576,14 @@ async def post_close(
         except Exception:
             logger.exception("post_close snapshot_close_equity 失败（不阻断主流程）")
 
-    # 清动态白名单（Task5）：保证下一交易日从干净状态开始（防止昨日标的污染今日白名单）
+    # 清动态白名单（Task5 → C-2 W1 改实例属性）：保证下一交易日从干净状态开始。
+    # 改造后清 engine 实例 self._dynamic_whitelist（通过 _ACTIVE_ENGINE 单例反查），
+    # 而非模块级 _DYNAMIC 全局——与 pre_open 注入对称（实例属性化两端隔离）。
     try:
-        dynamic_whitelist.clear_dynamic_whitelist()
+        if _ACTIVE_ENGINE is not None:
+            _ACTIVE_ENGINE._dynamic_whitelist.clear()
+        else:  # pragma: no cover - 防御性回退：未构造 TradingEngine（理论不会）
+            dynamic_whitelist.clear_dynamic_whitelist()
     except Exception:
         logger.exception("post_close 清动态白名单异常")
 
@@ -1653,6 +1695,19 @@ class TradingEngine:
         #   （重启本身已是一次「连接重置」，无需继承历史失败计数）；持久化反增复杂度（YAGNI）。
         self._guard_fail_count: int = 0
         self._guard_rounds_since_fail: int = 0
+
+        # 动态白名单实例属性（C-2 scheduling-orchestration W1）：
+        #   当日颈线法计划标的的临时注入集合（pre_open 注入，post_close 清空）。
+        # Why 实例属性而非模块级 _DYNAMIC 全局：engine 与 server 合并进同进程后，
+        #   模块级全局会被 engine 注入污染 server 手动下单路径（破坏向后兼容红线）。
+        #   实例属性 + submit_order(whitelist=...) 显式参数透传实现物理隔离——
+        #   engine 通道读实例属性 + 静态 env，server 通道读 get_effective_whitelist()
+        #   （_DYNAMIC 恒空 = 纯 env），两端输入源互不污染。
+        self._dynamic_whitelist: set[str] = set()
+
+        # 模块级活跃引擎单例置位（供模块级 _submit / pre_open / post_close 反查实例）。
+        global _ACTIVE_ENGINE
+        _ACTIVE_ENGINE = self
 
     async def _health_guard(self) -> None:
         """M1：网关健康守护——未连接时探测客户端就绪→重连，恢复 live（Task 8）。

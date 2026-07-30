@@ -53,3 +53,19 @@ def get_effective_whitelist() -> set[str]:
     # 逐字一致，保证 server 进程的等价性）
     static = {s.strip() for s in os.getenv("QMT_SYMBOL_WHITELIST", "").split(",") if s.strip()}
     return static | _DYNAMIC
+
+
+def static_env_whitelist() -> set[str]:
+    """纯静态 env 白名单（不掺模块全局 _DYNAMIC）。
+
+    供 engine 实例拼接 self._dynamic_whitelist | static_env_whitelist()，
+    与 server 路径的 get_effective_whitelist()（含 _DYNAMIC）物理区分。
+
+    Why 独立函数而非复用 get_effective_whitelist（C-2 scheduling-orchestration W1）：
+        engine 与 server 合并进同进程后，_DYNAMIC 模块全局会承载 engine 注入的标的，
+        若 engine 复用 get_effective_whitelist() 就等于读自己的注入源——更关键的是
+        物理隔离红线要求 engine 通道的白名单（实例属性 + 静态 env）与 server 通道的
+        白名单（get_effective_whitelist，含 _DYNAMIC）走两套互不污染的输入源。
+        本函数只解析静态 env，是 engine 通道白名单的「静态基座」。
+    """
+    return {s.strip() for s in os.getenv("QMT_SYMBOL_WHITELIST", "").split(",") if s.strip()}
