@@ -36,6 +36,11 @@ def _isolate_plan_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(state_store, "_DEFAULT_DB", _db)
     position_book.init_db()
     state_store.init_store()
+    # Task 8（C-2 S3）：重置模块级 _ACTIVE_ENGINE 单例——pre_open 入口的 gate 经它调用
+    # 实例方法，若不重置会跨测试泄漏（前序构造 TradingEngine 的测试残留），让本文件里
+    # 非 gate 焦点的 pre_open 测试（expired_positions / alerts）被 gate 拦截早返。
+    # 重置为 None 后 pre_open 走防御性分支跳过 gate，保留这些测试原本验证的下游逻辑。
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
 
 
 # ============================================================================

@@ -62,6 +62,12 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path / "plans"))
     monkeypatch.setenv("TRADE_STATE_DB", db_path)
 
+    # Task 8（C-2 S3）：重置模块级 _ACTIVE_ENGINE 单例——pre_open 入口的三段式 gate 经它
+    # 调用实例方法，若不重置会从前序测试泄漏（构造 TradingEngine 残留），让本文件里非 gate
+    # 焦点的 e2e pre_open 流（step3/e2e_*）被 gate ③ 段（data_ready 无记录）拦截早返。
+    # 重置为 None 后 pre_open 走防御性分支跳过 gate，保留这些测试原本验证的全链路逻辑。
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
+
     # 冻结 position_book 内 datetime 至 T+1 日（让 applied_at 与 date 前缀匹配）
     from datetime import datetime as _RealDT
     class _FrozenDT(_RealDT):
@@ -511,6 +517,10 @@ def test_e2e_lockdown_recover_full_cycle(isolated, monkeypatch, captured_alerts_
         return {"order_id": str(submit_calls_phase3["n"]), "state": "SUBMITTED", "message": "ok"}
     monkeypatch.setattr(engine, "_submit", _submit_recovered)
 
+    # Task 8（C-2 S3）：本测焦点是韧性恢复链路，不是 gate。前序 eng=TradingEngine()
+    # 已把 _ACTIVE_ENGINE 置位，此处重置回 None 让 pre_open 跳过三段式 gate（data_ready
+    # 表在 e2e 隔离环境无记录，gate ③ 段会拦截），保留原本验证的「恢复后正常挂单」逻辑。
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
     pre3 = asyncio.run(engine.pre_open("2026-07-29"))
     assert pre3["submitted"] >= 1, "恢复后下次 pre_open 应正常挂单（韧性核心承诺）"
     assert submit_calls_phase3["n"] == 1
@@ -668,6 +678,10 @@ def test_e2e_sanity_date_alignment_loads_right_plan(isolated, monkeypatch):
     monkeypatch.setattr(engine, "_submit", _dry_submit)
 
     # pre_open(today=T+1)——load_plan 命中 T 日落的计划（key 对齐 = 口径自检的端到端兑现）
+    # Task 8（C-2 S3）：本测焦点是口径自检，不是 gate。前序 eng=TradingEngine() 已把
+    # _ACTIVE_ENGINE 置位，此处重置回 None 让 pre_open 跳过三段式 gate（data_ready 表
+    # 在 e2e 隔离环境无记录，gate ③ 段会拦截），保留原本验证的口径对齐逻辑。
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
     result = asyncio.run(engine.pre_open(plan_date))
     assert result["submitted"] >= 1, \
         f"次日 pre_open 应挂上 T 日落的计划（口径对齐），实际 submitted={result['submitted']}"

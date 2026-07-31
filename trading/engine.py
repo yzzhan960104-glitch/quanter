@@ -54,6 +54,13 @@ from trading import (
     reconcile_job,
     trading_plan,
 )
+# Task 8（C-2 S3 pre_open 三段式 gate）：显式 re-export 让 patch 目标稳定。
+# 物理意图：``pre_open`` 模块级函数与 ``TradingEngine._pre_open_gate`` 都直接调
+# ``load_plan`` / ``get_data_ready``，独立 import 让测试可 ``patch("trading.engine.load_plan")``
+# / ``patch("trading.engine.get_data_ready")`` 命中（trading_plan.get_data_ready 等其它
+# 调用方仍走各自的命名空间引用，互不污染）。
+from trading.trading_plan import load_plan
+from trading.state_store import get_data_ready
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals
@@ -604,6 +611,26 @@ async def pre_open(date: str) -> dict:
         - **结论**：live 部署前**必须**确保 gateway 已连接（``get_gateway()`` 返非 None），
           否则当日计划一支也挂不上。
     """
+    # S3（Task 8 · C-2）：三段式前置 gate（通过 _ACTIVE_ENGINE 单例调用实例方法）。
+    # 物理意图：plan-confirmed → gateway-health → data-ready 三段全绿才放行下游（撤昨日单 /
+    # 抓熔断基线 / 挂新单）。任一未绿即早返 skip payload，绝不触达网关写操作。顺序「先便宜
+    # 后贵」（JSON < 探测 < DB 查询）。gate 失败在 live 模式下推 CRITICAL 钉钉（复用
+    # _alert_critical 统一收口，与 M4 静默漏单告警同通道）。
+    # Why 经 _ACTIVE_ENGINE 单例：本函数是模块级函数，gate 是 TradingEngine 实例方法
+    # （需 ``self._plan_data_keys`` 反查策略数据集），故经模块级单例桥接（Task 4 范式）。
+    # _ACTIVE_ENGINE is None 仅在未构造 TradingEngine 时发生（理论不会，__init__ 必置），
+    # 此防御性分支跳过 gate 直接走原 plan["confirmed"] 检查（向后兼容，不破坏旧行为）。
+    if _ACTIVE_ENGINE is not None:
+        gate_ok, gate_reason = await _ACTIVE_ENGINE._pre_open_gate(date, get_gateway())
+        if not gate_ok:
+            msg = f"pre_open gate 未通过：{gate_reason}，跳过挂单"
+            logger.warning(msg)
+            if _mode() == "live":
+                # live 模式 gate 拦截 = 当日废单日风险（网关锁死 / 数据未就绪 / 计划未确认），
+                # 仅 logger.warning 不足以叫醒用户（spec M4 教训），推 CRITICAL 钉钉。
+                _alert_critical(msg)
+            return {"date": date, "n_orders": 0, "skipped": gate_reason}
+
     plan = trading_plan.load_plan(date)
     if plan is None:
         return {"submitted": 0, "reason": "无计划"}
@@ -1708,6 +1735,90 @@ class TradingEngine:
         # 模块级活跃引擎单例置位（供模块级 _submit / pre_open / post_close 反查实例）。
         global _ACTIVE_ENGINE
         _ACTIVE_ENGINE = self
+
+    # ---------------------------------------------------------------------
+    # Task 8（C-2 S3）：pre_open 三段式前置 gate
+    # ---------------------------------------------------------------------
+    async def _pre_open_gate(self, date: str, gw) -> tuple[bool, str]:
+        """S3：pre_open 三段式前置 gate。全绿返 ``(True, "")``，任一未绿即返。
+
+        物理意图（spec S3 · 三段式前置 gate，最便宜先做）：
+            模块级 ``pre_open(date)`` 入口最先调用本方法，**任一未绿即早返**，绝不触达
+            网关写操作（撤昨日单 / 抓熔断基线 / 挂新单）。顺序「先便宜后贵」：
+
+              ① 计划确认（读本地 JSON，最便宜）——
+                 ``load_plan`` 返 None → ``"无计划"``；
+                 ``plan["confirmed"]`` 假 → ``"计划未确认（人审闸）"``。
+              ② 网关健康（探测，无写副作用）——
+                 ``gw is None`` 或 ``gw._connected=False`` → ``"网关未连接"``；
+                 ``gw.is_client_ready()=False`` → ``"miniQMT 客户端未就绪"``。
+              ③ 数据就绪（DB 查询；防御性双检）——
+                 遍历 ``self._plan_data_keys(plan)``，``get_data_ready(date, k)`` 返 None
+                 或 ``ok!=1`` → ``f"数据 {k} 未就绪（{message}）"``。
+
+        Args:
+            date: T 日（YYYY-MM-DD，与 ``load_plan`` 读取口径一致）。
+            gw:   交易网关实例（``get_gateway()`` 取，可能为 None）。鸭子类型：读
+                  ``gw._connected`` 与调 ``gw.is_client_ready()``（broker/qmt.py:311 契约）。
+
+        Returns:
+            ``(True, "")`` 三段全绿；``(False, reason)`` 任一未绿，reason 为简短中文。
+        """
+        # ① 计划确认（读本地 JSON，最便宜）
+        plan = load_plan(date)
+        if not plan:
+            return False, "无计划"
+        if not plan.get("confirmed"):
+            return False, "计划未确认（人审闸）"
+        # ② 网关健康（探测，无写副作用）
+        if gw is None or not getattr(gw, "_connected", False):
+            return False, "网关未连接"
+        if not gw.is_client_ready():
+            return False, "miniQMT 客户端未就绪"
+        # ③ 数据就绪（DB 查询；防御性双检）
+        for k in self._plan_data_keys(plan):
+            ready = get_data_ready(date, k)
+            if ready is None or not ready.get("ok"):
+                msg = ready["message"] if ready else "未采集"
+                return False, f"数据 {k} 未就绪（{msg}）"
+        return True, ""
+
+    def _plan_data_keys(self, plan: dict) -> set[str]:
+        """从 plan 反推策略声明的数据集 key 并集（③ 数据就绪段防御性双检用）。
+
+        物理意图（spec S3 · ③ 数据就绪段的「查哪些数据集」来源）：
+            plan orders 携带 ``experiment_id``，经 ``resolve_active`` 反查
+            ``strategy_name`` → ``build_strategy(name, params).required_data_keys``
+            （Task 2 策略接口声明的依赖数据集），取并集。解析失败（无实验 / DB 锁 /
+            策略未注册）→ 返 ``{"daily"}``（保守默认，③ 本就是防御性双检，回退默认
+            不会误放行未就绪数据：daily 未就绪时 gate 仍会拦）。
+
+        Why resolve_active 而非读 plan orders 内联策略名：plan orders 只存
+            ``experiment_id``（归因字段），不存 ``strategy_name``——必须经 resolver
+            反查才能拿到策略名 → build_strategy。Why 不缓存：pre_open 单进程每日仅
+            一次调用，零缓存一致性成本。
+
+        Args:
+            plan: ``load_plan`` 返回的 dict（含 ``orders`` 列表，每项 ``experiment_id``）。
+
+        Returns:
+            数据集 key 并集（如 ``{"daily"}`` 或 ``{"daily", "moneyflow"}``）；
+            解析失败/空 orders → ``{"daily"}``。
+        """
+        keys: set[str] = set()
+        try:
+            from experiment.resolver import resolve_active
+            from strategies.registry import build_strategy
+            # ActiveExperiment 字段名是 experiment_id（非 .id，见 experiment/models.py:55）
+            exp_map = {e.experiment_id: e for e in resolve_active()}
+            for o in plan.get("orders", []):
+                exp = exp_map.get(o.get("experiment_id"))
+                if exp is not None:
+                    strat = build_strategy(exp.strategy_name, exp.params)
+                    keys |= set(strat.required_data_keys)
+        except Exception:
+            logger.exception("_plan_data_keys 解析失败，回退默认 {daily}")
+        return keys or {"daily"}
 
     async def bootstrap(self) -> None:
         """W3：I/O 初始化收口（原 ``__main__._run_forever`` 的 7 步）。
