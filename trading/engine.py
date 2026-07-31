@@ -1682,7 +1682,17 @@ class TradingEngine:
         from apscheduler.triggers.cron import CronTrigger
         from apscheduler.triggers.interval import IntervalTrigger
 
-        self.sched = AsyncIOScheduler()
+        # C-4 U1：job_defaults 硬化（防 job 堆积重叠 + 休眠补跑风暴）。
+        # max_instances=1：每 job 同时只一个实例——pre_open 挂单慢（QMT 限频）跑超 9:22，
+        #   下次触发被挡，防重叠双挂；stop_loss 30s 跑超 30s 同理防重叠发卖。
+        # misfire_grace_time=300：机器休眠/重启错过触发——5min 内补跑（保盘后 job 不轻易漏），
+        #   超 5min 放弃（stop_loss 30s 堆积 10 次只补最近 1 次，防补跑风暴）。
+        # coalesce=True：与 misfire 配合，堆积合并成一次（不补跑多次）。
+        self.sched = AsyncIOScheduler(job_defaults={
+            "max_instances": 1,
+            "misfire_grace_time": 300,
+            "coalesce": True,
+        })
         # C-2 scheduling-orchestration Task 9：eod 改由 ``pipeline_then_eod`` 事件链驱动。
         # 物理意图（取代 19:00 eod 时钟赌博）：原 ``self._eod`` cron（19:00）靠时差猜测
         # 18:00 增量采集是否落湖 + 18:30 检查点② 是否通过——脆弱时序（采集慢/失败时 _eod
