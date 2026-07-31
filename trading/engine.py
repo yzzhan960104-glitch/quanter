@@ -776,6 +776,7 @@ async def pre_open(date: str) -> dict:
     cfg_max_wait = int(os.getenv("TRADE_MAX_WAIT", "5"))
     n_submitted = 0
     n_expired = 0
+    n_rejected = 0   # C-4 U4：单只业务拒单计数（L2 聚合 CRITICAL 用，防告警风暴）
     account_id = _resolve_account_id()
     # 确保 account 行存在（insert_order/trade_event FK 引用）
     # C-4 U3a：account 行是 insert_order/trade_event 的 FK 源——get_account/upsert_account
@@ -837,6 +838,7 @@ async def pre_open(date: str) -> dict:
             # 挡板命中（资金不足/涨跌停/不在白名单等）会 raise RuntimeError
             # （trading_service.submit_order 契约）——必须逐单吞，一只拒单不炸整批。
             logger.warning("pre_open 挂单失败 symbol=%s 原因=%s", od["symbol"], exc)
+            n_rejected += 1   # C-4 U4：聚合 L2 CRITICAL 计数（循环末尾汇总一条，防风暴）
             # C-1 final-review fix (I-2)：失败时把残留 PENDING 行标 REJECTED，否则
             # has_order(OPEN) 恒 True → 重跑永久漏挂（live 资金不足/涨跌停挡板致命）。
             try:
@@ -865,6 +867,7 @@ async def pre_open(date: str) -> dict:
         else:
             logger.warning("pre_open 挂单未成功 symbol=%s state=%s msg=%s",
                            od["symbol"], result.get("state"), result.get("message"))
+            n_rejected += 1   # C-4 U4：未成功（REJECTED/FAILED）也计 L2 聚合（业务拒单同义）
             # C-1 final-review fix (I-2)：未成功（REJECTED/FAILED）标死态，has_order 放行重挂。
             try:
                 _dead = "REJECTED" if result.get("state") == "REJECTED" else "FAILED"
@@ -874,6 +877,13 @@ async def pre_open(date: str) -> dict:
 
     logger.info("pre_open 完成 date=%s submitted=%d/%d expired=%d mode=%s",
                 date, n_submitted, len(plan["orders"]), n_expired, _mode())
+    # C-4 U4：部分拒单（L2）聚合一条 CRITICAL——单只研究员要知情，但整批继续不炸。
+    # Why 聚合非逐只：防 N 只全拒告警风暴（spec R3）。整批 submitted=0 已有下方 CRITICAL（保留）。
+    # Why 限 live：dry_run/测试的拒单非真金风险，防误告警。n_submitted>0 守卫：全拒走下方 submitted=0 通道。
+    if n_rejected > 0 and _mode() == "live" and n_submitted > 0:
+        _alert_critical(
+            f"pre_open 部分挂单被拒 rejected={n_rejected}/{len(plan['orders'])} "
+            f"submitted={n_submitted} date={date}（查挡板日志：涨跌停/资金/白名单）")
     # Task 9（M4 静默漏单消灭）：live 模式 submitted=0 且有计划单 → 钉钉 CRITICAL。
     # 物理意图：live 下「全部挂单失败」= 当日废单日（网关锁死 / 涨跌停挡板 / 资金不足），
     # 仅 logger.warning 不足以叫醒用户（[[qmt-connect-1-rootcause]] 全天锁死无告警教训）。
@@ -1014,6 +1024,7 @@ async def stop_loss_monitor(
     n_checked = 0
     n_fallback = 0
     n_pending_cancelled = 0
+    n_submit_failed = 0   # C-4 U4：单只止损发卖失败计数（L2 聚合 CRITICAL 用，防风暴）
 
     # ── ④ holding 期巡检：每持仓标的构造 state+bar → decide_exit → 按分发（D12 fallback）──
     # T7：positions 现为 {sym: {volume, avg_price, ...}}（dict-of-dict），qty 取 volume 子键。
@@ -1099,6 +1110,7 @@ async def stop_loss_monitor(
                             logger.warning(
                                 "stop_loss_monitor 卖出失败 symbol=%s qty=%s 原因=%s",
                                 sym, sell_qty, exc)
+                            n_submit_failed += 1   # C-4 U4：聚合 L2 CRITICAL 计数（主路径）
                             result = {"state": "FAILED"}
                         if result.get("state") not in ("REJECTED", "FAILED"):
                             n_triggered += 1
@@ -1143,6 +1155,7 @@ async def stop_loss_monitor(
                 # 挡板 raise（如断线 lock_down）：单只失败不阻塞其他标的止损
                 logger.warning("stop_loss_monitor 卖出失败 symbol=%s qty=%s 原因=%s",
                                sym, qty, exc)
+                n_submit_failed += 1   # C-4 U4：聚合 L2 CRITICAL 计数（fallback 路径）
                 continue
             if result.get("state") not in ("REJECTED", "FAILED"):
                 n_triggered += 1
@@ -1212,6 +1225,13 @@ async def stop_loss_monitor(
                     logger.warning("pending 撤单失败 symbol=%s order_id=%s 原因=%s",
                                    sym, oid, exc)
 
+    # C-4 U4：止损发卖失败聚合 L2 CRITICAL——漏止损真金损失，研究员须知情（但整批监控不停）。
+    # Why 聚合非逐只：防多标的连板跌停时逐只告警风暴（spec R3）。Why 限 live：dry_run/测试
+    # 的发卖失败非真金风险。与 pre_open 部分拒同范式：L2 不停调度，_halted 保持 False。
+    if n_submit_failed > 0 and _mode() == "live":
+        _alert_critical(
+            f"stop_loss 部分卖出失败 submit_failed={n_submit_failed} checked={n_checked}"
+            f"（查 gw 挡板/lock_down 日志，漏止损须人工补单）")
     logger.info("stop_loss_monitor 完成 checked=%d triggered=%d fallback=%d pending_cancelled=%d mode=%s",
                 n_checked, n_triggered, n_fallback, n_pending_cancelled, _mode())
     return {"checked": n_checked, "stop_triggered": n_triggered,
