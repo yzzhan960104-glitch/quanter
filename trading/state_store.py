@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""trading.state_store — 统一交易状态库（6 张表 + 幂等写入 + 查询）。
+"""trading.state_store — 统一交易状态库（7 张表 = 6 核心 account/trade_event/order/fill/position/account_daily + C-2 S1 data_ready；幂等写入 + 查询）。
 
 物理定位：trading-state-store-redesign spec §2 的「单一真相源」。把散落在 5+ 处互不同步
 的存储（gw._orders 内存 / _tp_placed 内存 / position_book / live_trades.csv / trading_plan JSON）
@@ -546,8 +546,12 @@ def has_order(account_id: str, trade_date: str, symbol: str, purpose: str, *,
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
+        # C-1 final-review fix (I-2/?-1)：过滤非活态委托——REJECTED/FAILED/CANCELLED 不算
+        # 「已挂」，允许重挂。否则挂单被拒（资金不足/涨跌停挡板）后 has_order 恒 True →
+        # 当日永久漏挂（pre_open OPEN）+ stop_loss/TP 被拒后裸奔/永不补挂（live 真金致命）。
         row = con.execute(
-            "SELECT 1 FROM \"order\" WHERE account_id=? AND trade_date=? AND symbol=? AND purpose=?",
+            "SELECT 1 FROM \"order\" WHERE account_id=? AND trade_date=? AND symbol=? AND purpose=?"
+            " AND state NOT IN ('REJECTED','FAILED','CANCELLED')",
             (account_id, trade_date, symbol, purpose)
         ).fetchone()
     return row is not None

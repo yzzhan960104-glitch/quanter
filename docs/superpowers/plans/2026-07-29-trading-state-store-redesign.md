@@ -298,13 +298,21 @@ Task 1-13 ───────────→ Task 14 (e2e 全链路)
 
 ## 验收（Definition of Done）
 
-- [ ] state_store.py 6 张表 + 全部 CRUD + 幂等写入 + 查询接口
-- [ ] eod_plan 落 trade_event(SIGNAL/CONFIRMED) + plan JSON 双写
-- [ ] pre_open 查柜台撤单 + DB 幂等挂单（has_order）
-- [ ] 成交回调 fill 幂等 + order(TP1/TP2) 替代 _tp_placed
-- [ ] stop_loss DB 幂等（has_order STOP 跳过）
-- [ ] post_close trade_event(CLOSED + realized_pnl) + account_daily
-- [ ] _tp_placed 废弃 + cancel 查柜台（不依赖 gw._orders）
-- [ ] e2e 全链路（trade_event 完整事件流 + order/fill/position 一致）
-- [ ] 全测试 pass + 既有回归零退化
-- [ ] 全中文注释（CLAUDE.md）
+- [x] state_store.py **7** 张表（6 + C-2 S1 data_ready）+ 全部 CRUD + 幂等写入 + 查询接口 ✅
+- [x] eod_plan 落 trade_event(SIGNAL/CONFIRMED) + plan JSON 双写 ✅
+- [x] pre_open 查柜台撤单 + DB 幂等挂单（has_order）+ **失败回填 REJECTED/FAILED**（final-review I-2 修复）✅
+- [x] 成交回调 fill 幂等 + order(TP1/TP2) 替代 _tp_placed ✅
+- [x] stop_loss DB 幂等（has_order STOP 跳过）+ **has_order 过滤死态**（final-review I-2，防 STOP 被拒裸奔）✅
+- [~] post_close trade_event(CLOSED) + account_daily ✅；**realized_pnl 恒 NULL（I-1 follow-up，需从 fill 聚合 SELL 盈亏）**
+- [~] _tp_placed 废弃 ✅ + cancel 查柜台 ✅；**`_order_direction` 仍读 gw._orders（I-4 follow-up，重连方向丢失）**
+- [x] e2e 全链路（test_e2e_trading_flow 11 passed）✅
+- [x] 全测试 pass（test_state_store 23 + e2e 11 + 全量回归）✅
+- [x] 全中文注释（CLAUDE.md）✅
+
+> **Final-review sweep (2026-07-31)**：致命漏洞 I-2/?-1 已修——`has_order` 加 `state NOT IN ('REJECTED','FAILED','CANCELLED')` + pre_open 失败回填死态，附单测 `test_has_order_filters_dead_states`。修前 has_order 不过滤 state，挂单被拒后永久漏挂/裸奔（live 真金致命）。
+> **🔴 live 前 follow-up（验收收口遗留）**：
+> - **I-1** post_close CLOSED realized_pnl 恒 NULL（从 fill 聚合 SELL 盈亏）
+> - **I-4** `_order_direction` 改读 `state_store.order.side`（替代 gw._orders 内存，防重连方向丢失）
+> - **M-1** fill 表 order_id 加 FK 到 order（spec §2.2 偏差）
+> - **M-5** engine docstring 过期（19:00→18:00 事件链 / 5min→30s / get_quote→get_quotes）
+> - **live_trades.csv** 兜底对账切 state_store.fill 聚合后再删（spec §0 五源之一未收口）

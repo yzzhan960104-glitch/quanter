@@ -786,6 +786,12 @@ async def pre_open(date: str) -> dict:
             # 挡板命中（资金不足/涨跌停/不在白名单等）会 raise RuntimeError
             # （trading_service.submit_order 契约）——必须逐单吞，一只拒单不炸整批。
             logger.warning("pre_open 挂单失败 symbol=%s 原因=%s", od["symbol"], exc)
+            # C-1 final-review fix (I-2)：失败时把残留 PENDING 行标 REJECTED，否则
+            # has_order(OPEN) 恒 True → 重跑永久漏挂（live 资金不足/涨跌停挡板致命）。
+            try:
+                _state_store.update_order_state(_order_id, "REJECTED")
+            except Exception:
+                logger.exception("pre_open 失败回填 REJECTED 失败 symbol=%s", od["symbol"])
             continue
         # state 是 OrderState.name 字符串；REJECTED/FAILED 视为未挂成功
         if result.get("state") not in ("REJECTED", "FAILED"):
@@ -805,6 +811,12 @@ async def pre_open(date: str) -> dict:
         else:
             logger.warning("pre_open 挂单未成功 symbol=%s state=%s msg=%s",
                            od["symbol"], result.get("state"), result.get("message"))
+            # C-1 final-review fix (I-2)：未成功（REJECTED/FAILED）标死态，has_order 放行重挂。
+            try:
+                _dead = "REJECTED" if result.get("state") == "REJECTED" else "FAILED"
+                _state_store.update_order_state(_order_id, _dead)
+            except Exception:
+                logger.exception("pre_open 失败回填 %s 失败 symbol=%s", _dead, od["symbol"])
 
     logger.info("pre_open 完成 date=%s submitted=%d/%d expired=%d mode=%s",
                 date, n_submitted, len(plan["orders"]), n_expired, _mode())

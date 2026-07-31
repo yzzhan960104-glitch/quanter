@@ -256,6 +256,23 @@ def test_has_order_true_false(db):
     assert state_store.has_order("ACC1", "2026-07-30", "600000.SH", "STOP") is False
 
 
+def test_has_order_filters_dead_states(db):
+    """C-1 final-review (I-2/?-1)：REJECTED/FAILED/CANCELLED 死态不算已挂，允许重挂。
+
+    防止挂单被拒（资金不足/涨跌停挡板）后 has_order 恒 True → 永久漏挂（pre_open OPEN）
+    / 裸奔（stop_loss STOP 被拒不再发卖）/ 永不补挂（TP 被拒）。live 真金致命。
+    """
+    _seed_for_queries(db)  # o1 OPEN SUBMITTED → has_order True
+    assert state_store.has_order("ACC1", "2026-07-30", "600000.SH", "OPEN") is True
+    # 三种死态 → has_order False（可重挂）
+    for _dead in ("REJECTED", "FAILED", "CANCELLED"):
+        state_store.update_order_state("o1", _dead)
+        assert state_store.has_order("ACC1", "2026-07-30", "600000.SH", "OPEN") is False, _dead
+    # 活态恢复（SUBMITTED）→ True
+    state_store.update_order_state("o1", "SUBMITTED")
+    assert state_store.has_order("ACC1", "2026-07-30", "600000.SH", "OPEN") is True
+
+
 def test_get_active_trades(db):
     """最新 action 非终态（CLOSED/EXPIRED/VETOED）的 trade 列表。"""
     _seed_for_queries(db)
