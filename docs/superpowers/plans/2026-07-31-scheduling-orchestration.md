@@ -1,5 +1,9 @@
 # C-2 调度编排层合并到 uvicorn — 实施计划
 
+> **状态：✅ 完成（2026-07-30）** — Task 1-10 全部落地。Task 10 e2e 事件链收口（采集→freshness→
+> eod→次日 pre_open 三段式 gate 全绿挂单）+ 全套件 301/301 通过 + import-graph smoke 无循环依赖。
+> 提交：`b5f787a7..(Task 10)`（每 Task 单独提交，见 `git log --oneline | grep C-2`）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把交易 engine、数据采集、Brief 播报合并进 `uvicorn presentation.server.main:app` 单进程，用 `await proc.wait()` 事件链取代"19:00 时钟赌博"，并加 pre_open 三段式显式 gate。

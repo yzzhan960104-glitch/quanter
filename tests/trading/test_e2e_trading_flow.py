@@ -785,3 +785,137 @@ def test_e2e_full_chain_db_consistency(isolated, monkeypatch):
             (account_id, _today_real)).fetchone()
     assert row is not None
     assert row[0] == 1_010_000.0
+
+
+# ============================================================================
+# Task 10（C-2 收口）：事件链 e2e —— 采集→freshness→eod→(次日)pre_open gate 全绿挂单
+# ============================================================================
+def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch):
+    """C-2 收口 e2e：pipeline_then_eod 跑采集（mock subprocess）→ 写 data_ready → eod 落 plan
+    →（模拟次日）pre_open 三段式 gate 全绿 → 挂单成功。
+
+    物理意图（C-2 spec 全链路收口 · Task 10）：
+        本测试串联 C-2 全部前序 Task 的事件链——Task 6（pipeline_then_eod 编排）+
+        Task 1/2（data_ready 落库 + required_data_keys 声明）+ Task 8（pre_open 三段式 gate），
+        验证「采集→数据就绪落库→eod 落计划→次日盘前 gate 三段全绿放行挂单」这条端到端
+        事件链真能跑通。这是单测无法替代的：Task 6 单测只验编排顺序、Task 8 单测只验 gate
+        各段拦截，本测试把「编排层落库的 data_ready」真喂给「gate ③ 段的 get_data_ready」，
+        验证两个 Task 的数据契约（Task 1 定义 → Task 6 写 → Task 8 读）在事件链里真对齐。
+
+    与单测差异（Why e2e 价值）：
+        - test_pipeline_then_eod.py 单测 mock 掉 engine._eod，不验「eod 落的计划真能被次日
+          pre_open 读到 + gate 放行」；
+        - test_engine_pre_open_gate.py 单测用 patch("...get_data_ready", return_value=...)
+          直接注入读结果，不验「pipeline_then_eod 真把 data_ready 落进 DB + gate 真能从
+          同一个 DB 读到」（DB 落库契约的端到端一致性）；
+        - 本测试用同一个隔离的 state_store DB，让 pipeline_then_eod 的 upsert_data_ready
+          与 pre_open gate 的 get_data_ready 走同一张真实表，验证落库契约端到端对齐。
+
+    端到端链路：
+        ① pipeline_then_eod：mock subprocess（rc=0）+ mock check_freshness（ok=True）
+           → 写 data_ready(date, daily, ok=1) 落库（Task 1 表 + Task 6 步骤 4）
+           → all_ok → 调 engine._eod()（mock 成写 confirmed 计划 + 落 SIGNAL/CONFIRMED 事件）
+        ②（模拟次日）pre_open：_ACTIVE_ENGINE 置位让 gate 生效 + get_gateway 返 connected
+           & ready 的 gw + _submit 返 DRY_RUN
+           → gate ① 计划 confirmed ✓ / ② 网关 connected & client_ready ✓ /
+             ③ get_data_ready(date, daily) 命中 ① 写的记录 ok=1 ✓
+           → 三段全绿放行 → _submit 被调 → submitted>=1
+
+    Why 冻结 pipeline_then_eod 的 datetime：pipeline_then_eod 内部 today=datetime.now()
+    作为 data_ready 落库 key + eod 计划日。pre_open gate ③ 段用 pre_open(date) 的 date 查
+    data_ready。两处 date 必须一致才能命中——冻结 pipeline.datetime.now() 返回固定
+    PIPE_DATE，_eod mock 落计划 + confirm 用 PIPE_DATE，pre_open(PIPE_DATE) 查同一日
+    data_ready，整链路 date 口径对齐（端到端验证 date 契约一致性）。
+    """
+    from trading.orchestrate import pipeline as pipeline_mod
+    from trading import state_store
+
+    PIPE_DATE = "2026-07-30"  # 固定事件链日（pipeline datetime.now + eod 计划日 + pre_open 日）
+
+    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    # AUTO_CONFIRM_PLAN=true：模拟「研究员确认闸已过」（eod_plan 落盘即 confirm），
+    # 让 pre_open gate ① 段放行——本测焦点是事件链 + gate ③ 段数据就绪，不是人审流程。
+    monkeypatch.setenv("AUTO_CONFIRM_PLAN", "true")
+    # 显式置 QMT_ACCOUNT_ID，避免 .env（load_dotenv）在完整套件中污染致 account_id 漂移
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "e2e_c2_acc")
+    monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
+
+    # 冻结 pipeline_then_eod 内 datetime.now() → 固定 PIPE_DATE（data_ready 落库 key 口径）
+    from datetime import datetime as _RealDT
+    class _FrozenDT(_RealDT):
+        @classmethod
+        def now(cls, tz=None):
+            return _RealDT(2026, 7, 30, 19, 0, 0)
+    monkeypatch.setattr(pipeline_mod, "datetime", _FrozenDT)
+
+    # ── ① pipeline_then_eod：mock subprocess（rc=0）+ check_freshness（ok=True）+ eod 落计划 ──
+    # 用一个可变 box 让 _eod mock 能在 pipeline 内部被调时落计划（模拟 eod_plan 的产物）
+    eod_called = {"n": 0}
+
+    class _FakeEngineForPipeline:
+        """pipeline_then_eod 的 engine 参数：只需 async _eod()（编排层低耦合契约）。"""
+        async def _eod(self):
+            eod_called["n"] += 1
+            # 模拟 eod_plan 产物：落计划 + 自动确认（模拟 AUTO_CONFIRM_PLAN）
+            # 用一个真实颈线信号走 eod_plan 真身落盘（复用 _make_signal + engine.eod_plan），
+            # 让计划 orders 结构与生产一致（gate ① 段读 plan["confirmed"] + _plan_data_keys
+            # 反查 experiment_id），而不是直写裸 dict（避免与生产 plan 结构漂移）。
+            sig = _make_signal("300077.SZ")
+            await engine.eod_plan(PIPE_DATE, [sig], {"300077.SZ": 0.5}, 1_000_000.0)
+
+    from data.freshness import FreshnessResult
+
+    async def _fake_pipeline():
+        await pipeline_mod.pipeline_then_eod(_FakeEngineForPipeline())
+    # patch 掉子进程（不真起 ops/data_pipeline.py）+ freshness（不读真实 parquet）
+    # + resolve_active 返空让 keys 回退默认 {daily}（聚焦事件链编排而非策略装配）
+    with patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
+         patch("trading.orchestrate.pipeline.resolve_active", return_value=[]), \
+         patch("trading.orchestrate.pipeline.check_freshness",
+               return_value=FreshnessResult("daily", True, PIPE_DATE, PIPE_DATE, "PASS")), \
+         patch("ops.brief_all.run_brief_all", new=AsyncMock(return_value=0)):
+        proc = AsyncMock(); proc.wait.return_value = 0  # rc=0 采集成功
+        cse.return_value = proc
+        asyncio.run(_fake_pipeline())
+
+    # 事件链 ① 断言：_eod 被调（all_ok → 放行 eod）+ data_ready 落库（Task 1 表 + Task 6 步骤 4）
+    assert eod_called["n"] == 1, "数据全绿应放行 _eod（Task 6 编排顺序）"
+    ready_row = state_store.get_data_ready(PIPE_DATE, "daily")
+    assert ready_row is not None, "pipeline_then_eod 应落 data_ready 记录（Task 6 步骤 4 + Task 1 表）"
+    assert ready_row["ok"] == 1, "全绿场景 data_ready.ok=1（Task 1 落库契约）"
+    # eod 落的计划 confirmed=True（AUTO_CONFIRM_PLAN 模拟 + gate ① 段前置）
+    plan = trading_plan.load_plan(PIPE_DATE)
+    assert plan is not None and plan["confirmed"] is True
+    assert plan["orders"][0]["order"]["symbol"] == "300077.SZ"
+
+    # ── ②（模拟次日）pre_open：_ACTIVE_ENGINE 置位让 gate 生效 + gw connected&ready ──
+    eng = engine.TradingEngine()
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", eng)  # gate 经单例调用实例方法（Task 4 范式）
+
+    fake_gw = MagicMock()
+    fake_gw._connected = True
+    fake_gw.is_client_ready = lambda *a, **kw: True  # gate ② 段客户端就绪
+    fake_gw.query_asset = AsyncMock(return_value={})  # 熔断基线兜底（返空跳过 snapshot）
+    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(engine, "_cancel_all_open_orders",
+                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
+
+    submitted = {"n": 0}
+
+    async def _dry_submit(order, *, confirm=True):
+        submitted["n"] += 1
+        return {"order_id": str(submitted["n"]), "state": "DRY_RUN", "message": "影子"}
+    monkeypatch.setattr(engine, "_submit", _dry_submit)
+
+    # pre_open(PIPE_DATE)：gate ① 计划 confirmed ✓ / ② 网关 connected&ready ✓ /
+    # ③ get_data_ready(PIPE_DATE, daily) 命中 ① 写的记录 ok=1 ✓ → 三段全绿放行挂单
+    result = asyncio.run(engine.pre_open(PIPE_DATE))
+
+    # 事件链 ② 断言：三段全绿 → gate 放行 → submitted>=1（不被任何 gate 段早返 skip）
+    assert "skipped" not in result, \
+        f"gate 应三段全绿放行，不应早返 skip，实际 result={result}"
+    assert result["submitted"] >= 1, \
+        f"全绿 gate 应放行挂单（端到端事件链收口），实际 submitted={result['submitted']}"
+    assert submitted["n"] == 1, "_submit 应被调一次（gate 放行后真挂单）"
+
