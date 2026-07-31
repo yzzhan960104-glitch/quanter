@@ -102,14 +102,7 @@ async def pipeline_then_eod(engine) -> None:
     await engine._eod()
     # 6. 事件链尾 → Brief 播报（D7）。失败不阻断已完成的 eod plan。
     try:
-        import asyncio as _aio
-        from ops import brief_all as _brief
-        run_brief = getattr(_brief, "run_brief_all", None)
-        if run_brief is None:
-            # 既有 ops/brief_all.py 只有同步 main()——同步入口包进线程池跑，
-            # 保持编排层全 async 的统一签名（调用方 await 即可）。
-            await _aio.get_event_loop().run_in_executor(None, _brief.main)
-        else:
-            await run_brief()
+        from ops.brief_all import run_brief_all
+        await run_brief_all()
     except Exception:
         logger.exception("brief 播报失败（不阻断 eod 已完成的 plan）")
