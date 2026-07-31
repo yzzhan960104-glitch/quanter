@@ -28,6 +28,27 @@ import pytest
 from trading.engine import TradingEngine, stop_loss_monitor
 
 
+# ----------------------------------------------------------------------------
+# 公共 fixture：隔离 state_store / position_book DB（T10 幂等键 + C-4 U3b L1）
+# ----------------------------------------------------------------------------
+# 物理意图（测试卫生 · C-4 U6 发现的退化）：
+#   stop_loss_monitor 主路径成功触发后会调 _record_stop → _state_store.insert_order
+#   落 STOP 行（DB 幂等键，防下轮重发=双倍卖）。原测试无 DB 隔离 → _record_stop 直接
+#   写生产 logs/trading_state.db（account 取 .env 真实 QMT_ACCOUNT_ID），同测试文件内
+#   后续 case 再跑同 sym → _stop_already_placed 返 True 跳过 submit → stop_triggered=0
+#   假失败。C-4 U3b 把 _stop_already_placed 的 except 从「回退 False」改为「raise L1」，
+#   让这层既有 DB 依赖彻底暴露（无表=L1 停调度、有表污染=幂等跳过）。
+#   修法（最小改动）：autouse 隔离 state_store._DEFAULT_DB 到 tmp_path + init_store，
+#   每个 case 独立库，互不污染生产账本也不互相串读。
+@pytest.fixture(autouse=True)
+def _isolate_state_db(tmp_path, monkeypatch):
+    from trading import state_store, position_book
+    db_path = str(tmp_path / "stop_loss_state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+
+
 # ============================================================================
 # 公共 fixture：构造一个 holding 期 monitor_ctx（state + cfg + 持仓 + quote）
 # ============================================================================

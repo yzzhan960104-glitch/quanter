@@ -80,6 +80,25 @@ def captured_alerts(monkeypatch):
     return fired
 
 
+# ----------------------------------------------------------------------------
+# 公共 fixture：隔离 state_store / position_book DB（C-4 U3a account L1 停调度）
+# ----------------------------------------------------------------------------
+# 物理意图（测试卫生 · C-4 U6 发现的退化）：
+#   C-4 U3a 把 pre_open 的 account 行 upsert（FK 源）从 L3 软降级（catch + log + 继续）
+#   升为 L1 硬抛 _CriticalHalt（spec §3：account 失败=后续所有 FK 写全失效=DB 真故障）。
+#   原测试无 DB 隔离，靠「软降级吞 no-such-table」假性通过——U3a 后此路径直接停调度，
+#   pre_open 在到「submitted=0 漏挂」告警断言点前就 raise _CriticalHalt 了。修法（最小改动，
+#   不回退 U3a 语义）：autouse 隔离 state_store._DEFAULT_DB 到 tmp_path + init_store，
+#   让 account upsert 正常成功，pre_open 走完主路径到「submit 全拒 → 漏挂告警」。
+@pytest.fixture(autouse=True)
+def _isolate_state_db(tmp_path, monkeypatch):
+    from trading import state_store, position_book
+    db_path = str(tmp_path / "alerts_state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+
+
 # ============================================================================
 # 事件点 ① pre_open submitted=0 + live → CRITICAL（核心断言）
 # ============================================================================
