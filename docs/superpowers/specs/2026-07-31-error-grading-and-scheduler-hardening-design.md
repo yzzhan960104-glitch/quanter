@@ -63,8 +63,10 @@
 | pre_open `load_plan`/读 DB 失败 | plan 读不到/DB 查询异常 | 部分 soft | L1：无计划基准，停 |
 | stop_loss monitor 查持仓/DB 失败 | `gw._fetch_broker_positions`/state_store 查异常 | 软降级返 `{checked:0}` | L1：敞口未明，停 |
 | pipeline_then_eod 采集子进程失败 | `proc.wait()` 非 0 / eod 落 DB 失败 | 待查 | L1：T+1 计划失真，停 |
-| 网关断线 + 重连耗尽（live） | `_health_guard` 连续失败超阈值 | 已 CRITICAL（:1981） | L1：补停调度 |
+| 网关断线 + 重连耗尽（live） | `_health_guard` 连续失败超阈值 | 已 CRITICAL（:1981） | 不升 L1（见下方说明） |
 | 口径自检失败 | （已有） | 已 shutdown（:2795） | L1（保留） |
+
+> **`_health_guard` 特殊路径（不升 L1 · review 决议 2026-07-31）**：`_health_guard` 是「统一网关自愈入口」（M1），停调度=丧失自愈能力，与职责冲突。网关断线的致命场景由 pre_open/stop_loss 交易时点的 L1 兜底（查持仓/DB 失败已升 L1）；盘后/盘前断线时 `_health_guard` 持续 CRITICAL 告警 + 自愈尝试（客户端重启后能恢复）优于硬停等人工。故 `_health_guard` 保持 `@_critical_guard` 装饰（`_halted` 检查仍防「其他 job 已 halt 时本 job 跳过」），但函数体内不 `raise _CriticalHalt`。
 
 ### L2 警告（CRITICAL + **不**停调度）
 **定义**：单只标的/单次操作失败，局部影响，整批可继续。
@@ -168,6 +170,7 @@ C-1 已做 order/trade_event/fill UNIQUE + has_order I-2 闭环。C-3 剩余：
 | R3 | L1/L2 边界误判（L2 当 L1）→ 单只失败停整调度，过度保守 | spec §3 列具体映射；**单只 = L2（继续），整批/DB/网关 = L1（停）**；实现严守 + review |
 | R4 | `_halted` 后 engine 常驻需人工重启 | CRITICAL 钉钉唤醒人工；live 下停调度优于带病跑（真金保护） |
 | R5 | `sched.shutdown` 在 job 内调（self 关闭自己的 scheduler） | APScheduler 允许（:2795 先例）；`wait=False` 不等 pending |
+| R6 | `_stop_already_placed` 升 L1 在 stop_loss 30s 高频下，SQLite 偶发 `database is locked` 触发整引擎停 | 已知 live 运维风险（非逻辑 bug；升 L1 物理意图正确：不知是否挂 STOP→可能重发双倍卖）；模拟盘观察 DB 抖动频率，高频误停则 follow-up 加瞬时错误退避（仅 `OperationalError` 跳过本轮，`IntegrityError`/corruption 仍 L1） |
 
 ---
 

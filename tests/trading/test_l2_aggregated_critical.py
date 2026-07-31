@@ -58,6 +58,7 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
     assert result["submitted"] == 1   # 第 1 只挂成 / 第 2 只业务拒单 (部分拒触发 L2 聚合)
     # 聚合 CRITICAL 含 "被拒" 语义, _halted 保持 False (L2 不停调度)
     assert any("被拒" in str(c) for c in ac.call_args_list)
+    assert len(ac.call_args_list) == 1   # 守护「聚合一条」防未来回归成逐只告警风暴
     assert eng._halted is False
 
 
@@ -112,4 +113,5 @@ async def test_stop_loss_partial_submit_fail_aggregates_critical_not_halt(monkey
     assert result["stop_triggered"] == 1   # 第 1 只发卖成; 第 2 只失败不计
     # 聚合 CRITICAL 含 "卖出失败" 语义, _halted 保持 False (L2 不停调度)
     assert any("卖出失败" in str(c) for c in ac.call_args_list)
+    assert len(ac.call_args_list) == 1   # 守护「聚合一条」防未来回归成逐只告警风暴
     assert eng._halted is False

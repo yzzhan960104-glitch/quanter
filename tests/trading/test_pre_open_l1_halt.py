@@ -69,10 +69,11 @@ def _green_plan():
     }]}
 
 
-def _walk_to_submit_chain(engine_mod, ss_mock):
+def _walk_to_submit_chain(engine_mod):
     """统一构造 pre_open 走到挂单循环的 mock 链：gate 绿 / 撤单 / 基线 / 过期持仓 / 幂等读。
 
-    ss_mock 由调用方注入具体 side_effect（决定哪个 DB 调用抛异常）。
+    各 case 在调用方通过 patch("trading.engine._state_store") 注入具体 side_effect
+    （决定哪个 DB 调用抛异常）。
     """
     # ① gate 绿（_pre_open_gate 是 async，需 AsyncMock 返 (True, "")）
     eng = engine_mod._ACTIVE_ENGINE
@@ -89,7 +90,7 @@ def test_insert_order_failure_raises_critical_halt(isolated_eng, monkeypatch):
     """
     from trading import engine
 
-    _walk_to_submit_chain(engine, None)
+    _walk_to_submit_chain(engine)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -123,7 +124,7 @@ def test_idempotent_read_failure_raises_critical_halt(isolated_eng, monkeypatch)
     """has_order 抛异常 → pre_open raise _CriticalHalt（不知是否已挂=可能重复挂=真金损失）。"""
     from trading import engine
 
-    _walk_to_submit_chain(engine, None)
+    _walk_to_submit_chain(engine)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -157,7 +158,7 @@ def test_submit_backfill_failure_raises_critical_halt(isolated_eng, monkeypatch)
     """
     from trading import engine
 
-    _walk_to_submit_chain(engine, None)
+    _walk_to_submit_chain(engine)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -188,7 +189,7 @@ def test_account_row_failure_raises_critical_halt(isolated_eng, monkeypatch):
     """upsert_account / get_account 抛异常 → raise _CriticalHalt（DB 真故障，FK 全失效）。"""
     from trading import engine
 
-    _walk_to_submit_chain(engine, None)
+    _walk_to_submit_chain(engine)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -220,7 +221,7 @@ def test_submit_runtime_error_stays_l2_not_halt(isolated_eng, monkeypatch):
     """
     from trading import engine
 
-    _walk_to_submit_chain(engine, None)
+    _walk_to_submit_chain(engine)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
