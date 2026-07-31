@@ -159,17 +159,27 @@ python -m broadcast connect --start all
 - @quanter交易 / @quanter数据 / @quanter策略 → dws 收 → Claude Code 专业问答（隔离 yzzhanCli 通用对话）
 - 身份闸 / 审批闸 / 工作目录三参数由 `CONNECT_BOTS.<bot>` 固化，含义同上文「bridge 对话机器人」，缺一不可。
 
-### Step 7 · 注册 3 个播报 schtasks（每日定时触发）
+### Step 7 · 清退历史 schtasks（每日播报已收进 uvicorn 事件链）
+
+⚠️ C-2 scheduling-orchestration Task 9 收口：原 `QuanterDataPipeline @17:00` / `QuanterBrief @18:00`
+两个 schtasks 已**退役**——每日的「采集 → 校验 → eod → brief」串行已收进 uvicorn lifespan 内的
+`pipeline_then_eod` cron 事件链（由 `start_all.py` 拉起的 server 进程托管，确定性事件链取代
+历史时差赌博）。`manage_ops_schtasks.py --register` 现在只**清退**残留、**不创建**任何 schtasks
+（重建退役任务会与新事件链双重触发：采集跑两遍 / brief 推两份）。
 
 ```bash
 cd F:/quanter
+# 清退历史 6 个零散任务 + 2 个退役 schtasks（幂等 /Delete，不创建）
 .venv310/Scripts/python.exe ops/manage_ops_schtasks.py --register
+# 兜底：单独清退退役的两个（start_all.py 每次启动已自动调一次）
+.venv310/Scripts/python.exe ops/manage_ops_schtasks.py --unregister-pipeline-brief
+# 查看历史注册的 supervisor（未必仍存在，仅供清查残留）
 .venv310/Scripts/python.exe ops/manage_ops_schtasks.py --list
 ```
-- `--register` 先 `/Delete` 再 `/Create`，**幂等**（改时间 = 改 `.env` + 重跑 `--register`）。
-- `--list` 看到 3 个任务 `QuanterTradingBrief` / `QuanterStrategyBrief` / `QuanterDataBrief` 即注册成功。
-- 改时间：改 `.env` 的 `*_BRIEF_TIME` → 重跑 `--register`（先删后建覆盖）。
-- 卸载：`manage_ops_schtasks.py --unregister`。
+- `--register` 只 `/Delete` 清退历史零散 + 退役任务（**幂等**，不再 `/Create` 任何任务）。
+- 卸载全部：`manage_ops_schtasks.py --unregister`（清退 RETIRED + LEGACY）。
+- 每日播报改时间：现由 uvicorn 的 `pipeline_then_eod` cron 配置驱动（在 server 启动装配），
+  不再走 schtasks `*_BRIEF_TIME`。
 
 ### Step 8 · 冒烟真发（每机器人真发一份当日报告）
 

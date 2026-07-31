@@ -17,10 +17,16 @@ from datetime import datetime
 @pytest.mark.asyncio
 async def test_non_trading_day_noop(monkeypatch):
     from trading.orchestrate.pipeline import pipeline_then_eod
-    with patch("trading.calendar.is_trading_day", return_value=False):
+    # patch 目标须落被测模块的命名空间（pipeline 顶部 ``from trading.calendar import is_trading_day``
+    # 已把名字绑进 pipeline 命名空间，patch 源模块 trading.calendar 不会改变 pipeline 已绑的名字 →
+    # 交易日下 patch 失效，会越过 no-op guard 触达 await engine._eod() 在 MagicMock 上抛 TypeError。
+    with patch("trading.orchestrate.pipeline.is_trading_day", return_value=False):
         eng = MagicMock()
         await pipeline_then_eod(eng)
-        # 不应触达采集/eod
+        # 不应触达采集/eod：非交易日应在 is_trading_day 判定处直接 return。
+        # 用 assert_not_called（eng 是 MagicMock，_eod 是普通 MagicMock 子属性，
+        # 无 assert_not_awaited；assert_not_called 对 MagicMock/AsyncMock 均适用）。
+        eng._eod.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -28,7 +34,7 @@ async def test_data_not_ready_no_eod(monkeypatch):
     from trading.orchestrate.pipeline import pipeline_then_eod
     from data.freshness import FreshnessResult
     today = datetime.now().strftime("%Y-%m-%d")
-    with patch("trading.calendar.is_trading_day", return_value=True), \
+    with patch("trading.orchestrate.pipeline.is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch("trading.orchestrate.pipeline.resolve_active", return_value=[]), \
          patch("trading.orchestrate.pipeline.check_freshness",
@@ -46,7 +52,7 @@ async def test_data_ready_runs_eod(monkeypatch):
     from trading.orchestrate.pipeline import pipeline_then_eod
     from data.freshness import FreshnessResult
     today = datetime.now().strftime("%Y-%m-%d")
-    with patch("trading.calendar.is_trading_day", return_value=True), \
+    with patch("trading.orchestrate.pipeline.is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch("trading.orchestrate.pipeline.resolve_active", return_value=[]), \
          patch("trading.orchestrate.pipeline.check_freshness",
@@ -73,7 +79,7 @@ async def test_multi_experiment_keys_union(monkeypatch):
     def fake_cf(k, exp):
         checked_keys.append(k)
         return FreshnessResult(k, True, today, today, "ok")
-    with patch("trading.calendar.is_trading_day", return_value=True), \
+    with patch("trading.orchestrate.pipeline.is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch("trading.orchestrate.pipeline.resolve_active", return_value=exps), \
          patch("trading.orchestrate.pipeline.build_strategy", side_effect=[strat_a, strat_b]), \

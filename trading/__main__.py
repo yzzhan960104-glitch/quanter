@@ -1,17 +1,23 @@
 # -*- coding: utf-8 -*-
-"""二期自动交易引擎独立常驻进程入口：``python -m trading``。
+"""二期自动交易引擎常驻进程入口（开发/调试）：``python -m trading``。
 
 ============================================================================
-Why 独立进程（Task5/9 风险官硬约束 · 绝对红线）
+定位（C-2 scheduling-orchestration Task 5/W1 重构后）
 ============================================================================
-本入口起一个独立常驻 Python 进程，**不寄生 server uvicorn**：
+本入口现仅为**开发/调试常驻入口**，**不再是生产唯一入口**。生产路径由
+``start_all.py`` 拉起的 **uvicorn server** 进程托管：server lifespan 内构造
+TradingEngine 并起 APScheduler（engine 与 server 合并进同进程）。
 
-- ``trading.dynamic_whitelist._DYNAMIC`` 是模块级全局（当日计划标的临时注入），
-  只在 engine 进程内有效（设计预期，见 ``dynamic_whitelist.py`` 模块 docstring）。
-- 若 engine 与 server 同进程：engine 在 pre_open 注入的 _DYNAMIC 会污染 server 的
-  手动下单路径（Cockpit/前端），导致 server 手动下单越过静态 env 白名单（前视污染），
-  破坏「server 行为与改造前完全一致」的向后兼容红线。
-- 因此 server 的 lifespan **不** import 本模块、不构造 TradingEngine；入口唯一在此。
+Why 可合并（W1 实例属性隔离取代旧进程隔离硬约束）：
+- 历史红线「engine 必须独立进程、绝不嵌入 server」是为了防前视污染（engine 注入的
+  动态白名单污染 server 手动下单路径）。W1 已把动态白名单从模块级全局
+  ``_DYNAMIC`` 改为 engine **实例属性** ``_dynamic_whitelist``，``_submit`` 经
+  ``_ACTIVE_ENGINE`` 单例反查实例、显式透传 ``whitelist`` 给 submit_order；server 路径
+  不传 whitelist 即走纯 env 旧路径（见 ``engine.py`` 模块 docstring 不变量块）。
+- 因此 engine 与 server 同进程不再前视污染，合并进 uvicorn lifespan 安全。
+
+本入口的残留用途：本地无 server 时手动起 engine 跑四 cron（开发联调/排障）。
+生产部署用 uvicorn，不要靠本入口托管线上 engine。
 
 职责切分（薄入口原则 · Karpathy 极简）：
 - 本入口只做三件事：① 加载 .env ② 起 event loop 守护 AsyncIOScheduler
@@ -124,11 +130,11 @@ def check_shadow_gate() -> bool:
       - activated_at 缺失(None)或解析失败 → 保守归入 fresh 拒绝（D9 宁可误杀：
         历史脏数据 activated_at 缺失比误放行一个未观测满期的新实验代价小得多）。
 
-    通道装配（关键）：trading/__main__ 是独立常驻进程（不寄生 server lifespan），
-    grep 确认 presentation/server/main.py、discovery/cli.py 均在启动期显式 build_default_manager()
-    装钉钉通道，但本入口历史从未装过。本函数在调 notify_risk_event 前补装——否则
-    拒切 LIVE 的 CRITICAL 告警会因无通道走软降级静默丢失，返 False 仍生效但研究
-    员不知为何被拒。build_default_manager 幂等，重复调用安全。
+    通道装配（关键）：trading/__main__ 作为开发/调试常驻入口（生产路径在 uvicorn lifespan
+    内起 engine，本入口不寄生 server lifespan），grep 确认 presentation/server/main.py、
+    discovery/cli.py 均在启动期显式 build_default_manager() 装钉钉通道，但本入口历史从未装过。
+    本函数在调 notify_risk_event 前补装——否则拒切 LIVE 的 CRITICAL 告警会因无通道走软降级
+    静默丢失，返 False 仍生效但研究员不知为何被拒。build_default_manager 幂等，重复调用安全。
     """
     mode = os.getenv("AUTO_TRADE_MODE", "dry_run")
     if mode == "dry_run":

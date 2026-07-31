@@ -56,12 +56,19 @@ async def pipeline_then_eod(engine) -> None:
     # 1. 采集子进程（原 ops/data_pipeline.py，T1→采→T2）
     log_path = ROOT / "logs" / "data_pipeline.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, str(ROOT / "ops" / "data_pipeline.py"), cwd=str(ROOT),
-        stdout=open(log_path, "ab"),
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    rc = await proc.wait()
+    # M2：本编排现跑在长生命周期 uvicorn 进程内（不再是短命 schtasks 进程），裸
+    # ``open(...,"ab")`` 作为 subprocess stdout 会让文件句柄泄漏累积（每天 +1）。显式
+    # 捕获到局部变量，await proc.wait() 后 close()——确保句柄确定性地归还 OS。
+    log_fh = open(log_path, "ab")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(ROOT / "ops" / "data_pipeline.py"), cwd=str(ROOT),
+            stdout=log_fh,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        rc = await proc.wait()
+    finally:
+        log_fh.close()
     # 2. 装配本次实验策略 → 收集依赖 key 并集（D3）
     keys: set[str] = set()
     try:

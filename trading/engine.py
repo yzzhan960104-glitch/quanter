@@ -15,19 +15,27 @@
   post_close 15:30 盘后：对账（run_reconcile）+ 清动态白名单。熔断连线见 TODO（本 task 不做）。
 
 ============================================================================
-⚠️ 不变量（Task5 M2 风险官要求 · 绝对红线）
+⚠️ 不变量（Task5 M2 风险官要求 · 绝对红线 · W1 已重构为进程内隔离）
 ============================================================================
-本引擎**必须独立进程运行**（``python -m trading``，由 ``trading/__main__.py`` 起常驻
-AsyncIOScheduler），**绝不可被 server lifespan 嵌入 server 进程**。
+本引擎**运行在 uvicorn server 进程的 lifespan 内**（C-2 scheduling-orchestration Task 5/W1
+重构后的既定架构——engine 与 server 合并进同进程，``presentation/server/main.py`` 的 lifespan
+构造 TradingEngine 并起 APScheduler）。历史「必须独立进程、绝不可嵌入 server」的红线
+已由 W1 的**实例属性隔离机制**替代：不再依赖进程隔离来防前视污染。
 
-Why 独立进程是硬约束：
-- ``trading.dynamic_whitelist._DYNAMIC`` 是模块级全局（当日计划标的临时注入），
-  只在 engine 进程内有效——这是设计预期（见 dynamic_whitelist.py 模块 docstring）。
-- 若 engine 与 server 同进程：engine 在 pre_open 注入的 _DYNAMIC 会污染 server 的
-  手动下单路径（Cockpit/前端），导致 server 手动下单越过静态 env 白名单（前视污染），
-  破坏「server 行为与改造前完全一致」的向后兼容红线。
-- 因此 ``presentation/server/main.py`` 的 lifespan **不应** import 本模块、不应构造 TradingEngine。
-  入口唯一在 ``trading/__main__.py``（Task 10）。
+W1 隔离机制（取代旧的进程隔离硬约束）：
+- 动态白名单从模块级全局 ``_DYNAMIC`` 改为 engine **实例属性** ``_dynamic_whitelist``
+  （注入/清空/拼白名单全部走实例属性，不再 mutate 模块级全局）。
+- 模块级 ``_ACTIVE_ENGINE`` 单例（仅 engine 路径构造 TradingEngine 时置位）反查实例，
+  ``_submit`` 从该实例取 ``_dynamic_whitelist``，与静态 env 白名单合并后**显式透传**
+  给 ``trading_service.submit_order`` 的 ``whitelist`` 参数。
+- server 路径的 ``submit_order`` **不传** ``whitelist``（默认 None），``_submit`` 见
+  ``_ACTIVE_ENGINE`` 为 None 即走旧路径 ``_whitelist() = get_effective_whitelist()``
+  （``_dynamic_whitelist`` 恒空 = 纯 env）——server 行为与改造前完全一致（向后兼容红线）。
+- 因此 engine 与 server 同进程**不再**造成前视污染：server 手动下单路径不会读到 engine
+  注入的动态白名单（实例属性隔离 + whitelist 参数显式透传双保险）。
+
+⚠️ ``python -m trading``（``trading/__main__.py``）现仅为**开发/调试常驻入口**，不再是
+唯一入口；生产路径在 uvicorn lifespan 内起 engine（详见 ``start_all.py``）。
 
 ============================================================================
 影子模式（AUTO_TRADE_MODE=dry_run，默认）红线

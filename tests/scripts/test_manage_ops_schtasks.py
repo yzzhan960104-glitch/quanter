@@ -2,13 +2,13 @@
 """schtasks 管理脚本单测——只测任务定义/命令构造逻辑，不真跑 schtasks（系统级副作用）。
 
 Why 不真跑：schtasks /Create 会写入 Windows 任务计划程序（系统级副作用），冒烟应放在
-端到端阶段手工执行；单测层只验任务定义（PIPELINE_TASKS supervisor + LEGACY_TASKS 清退）
-+ register() 命令构造逻辑，保证改时间/改任务名等回归有红线拦截。
+端到端阶段手工执行；单测层只验任务定义（RETIRED/LEGACY 清退清单）+ register() 命令构造
+逻辑，保证退役任务不被重建、回归有红线拦截。
 
-方案C 重构（memory schtasks方案C合并 7→2）：原 6 零散任务（TradingBrief/StrategyBrief/
-DataBrief/DataCheckT1/T2/DailyIncremental）合并为 2 supervisor（DataPipeline 跑数据链、
-Brief 跑播报），各 supervisor 内部 bat 串联子任务。本测试对齐新架构（旧 build_register_
-commands/TASK_NAMES/DATA_CHECK_TASKS API 已废弃）。
+⚠️ C-2 scheduling-orchestration Task 9 收口（Final Fix）：
+    2 个 supervisor（QuanterDataPipeline / QuanterBrief）已退役，职责收进 uvicorn 的
+    ``pipeline_then_eod`` cron 事件链。``register()`` **绝不 /Create 它们**（否则采集跑两遍 /
+    brief 推两份），只 /Delete 清退。``PIPELINE_TASKS`` 仅保留为历史元数据供 --list/--rerun。
 """
 import sys
 from pathlib import Path
@@ -18,15 +18,25 @@ sys.path.insert(0, str(ROOT))
 from ops import manage_ops_schtasks as m
 
 
-def test_pipeline_tasks_two_supervisors():
-    """PIPELINE_TASKS：2 supervisor（数据链 17:00 + 播报 18:00），bat 路径 + 时序对。
+def test_retired_tasks_covers_pipeline_brief():
+    """RETIRED_TASKS：两个已退役 schtasks（register/unregister/pipeline-brief 清退）。
 
-    物理意图：数据链 supervisor 先跑（17:00 拉增量 + 检查点），播报 supervisor 后跑
-    （18:00 读已落湖数据出播报）——拉新先于播报的物理时序在任务时间上硬约束。
+    Why 完整覆盖：这两个任务的职责已收进 uvicorn ``pipeline_then_eod`` 事件链，升级环境
+    若残留旧 schtasks 会与新链重复触发（采集@17:00 schtask + 事件链采集）。RETIRED_TASKS
+    必须列全这两个，register()/unregister()/unregister_pipeline_brief() 清退时都查这份。
+    """
+    assert set(m.RETIRED_TASKS) == {"QuanterDataPipeline", "QuanterBrief"}
+
+
+def test_pipeline_tasks_kept_as_historical_metadata():
+    """PIPELINE_TASKS：历史 supervisor 元数据（时间 + bat），register 不再 /Create。
+
+    Final Fix：PIPELINE_TASKS 仅供 --list / --rerun 对历史已注册环境清查；register() 不再
+    迭代它创建。本测试锁定历史定义（防误删元数据导致 --list/--rerun 空跑）。
     """
     by_name = {t: (time, bat) for t, time, bat in m.PIPELINE_TASKS}
     assert set(by_name) == {"QuanterDataPipeline", "QuanterBrief"}
-    # 数据链早于播报（拉新先于播报的物理时序）
+    # 数据链早于播报（历史时序：拉新先于播报）
     assert by_name["QuanterDataPipeline"][0] < by_name["QuanterBrief"][0]
     assert by_name["QuanterDataPipeline"][1].endswith("run_data_pipeline.bat")
     assert by_name["QuanterBrief"][1].endswith("run_brief_all.bat")
@@ -35,18 +45,24 @@ def test_pipeline_tasks_two_supervisors():
 def test_legacy_tasks_cover_old_six():
     """LEGACY_TASKS：旧 6 零散任务全集（register 时 /Delete 清退防 schtasks 残留）。
 
-    Why 完整覆盖：方案C 前注册过 6 零散任务的环境升级后若不清退，旧任务会与新 supervisor
-    并存重复触发；LEGACY_TASKS 必须列全旧 6 个，register 幂等清退。
+    Why 完整覆盖：方案C 前注册过 6 零散任务的环境升级后若不清退，旧任务会并存重复触发；
+    LEGACY_TASKS 必须列全旧 6 个，register 幂等清退。
     """
     assert set(m.LEGACY_TASKS) == {
         "QuanterTradingBrief", "QuanterStrategyBrief", "QuanterDataBrief",
         "QuanterDataCheckT1", "QuanterDailyIncremental", "QuanterDataCheckT2"}
 
 
-def test_register_clears_legacy_then_creates_pipeline(monkeypatch):
-    """register()：先 /Delete 清退 LEGACY_TASKS，再 /Create 创建 PIPELINE_TASKS（幂等）。
+def test_register_clears_legacy_and_retired_creates_nothing(monkeypatch):
+    """register()：只 /Delete 清退 LEGACY + RETIRED，绝不 /Create（Final Fix）。
 
-    monkeypatch _schtasks 拦截系统调用，验命令构造（清退数=LEGACY 数，创建数=PIPELINE 数），
+    物理意图（Final Fix · C-2 Task 9）：两个 supervisor 已退役（职责收进 uvicorn 事件链），
+    register() 重建它们会造成双重触发（采集@17:00 schtask + 事件链采集、brief 推两份）。
+    故 register() 现在只清退、不创建任何 schtasks。
+
+    monkeypatch _schtasks 拦截系统调用，验：
+      - /Delete 数 = LEGACY(6) + RETIRED(2) = 8（清退全集防残留）
+      - /Create 数 = 0（绝不重建退役任务）
     不真写 Windows 任务计划程序。
     """
     calls = []
@@ -54,6 +70,25 @@ def test_register_clears_legacy_then_creates_pipeline(monkeypatch):
     m.register()
     deletes = [c for c in calls if "/Delete" in c]
     creates = [c for c in calls if "/Create" in c]
-    # 清退 6 LEGACY + 2 PIPELINE 先删（幂等：创建前先删防 schtasks 已存在报错）= 8 删
-    assert len(deletes) == len(m.LEGACY_TASKS) + len(m.PIPELINE_TASKS)
-    assert len(creates) == len(m.PIPELINE_TASKS)  # 创建 2 新 supervisor
+    # 清退 LEGACY + RETIRED = 8 删
+    assert len(deletes) == len(m.LEGACY_TASKS) + len(m.RETIRED_TASKS)
+    # Final Fix 红线：绝不创建任何 schtasks（两个 supervisor 已退役）
+    assert len(creates) == 0
+    # 删到的退役任务名正好是 RETIRED_TASKS 全集
+    deleted_names = {c[c.index("/TN") + 1] for c in deletes if c[1] == "/TN" or "/TN" in c}
+    # /TN 后跟任务名（schtasks /Delete /TN <name> /F）→ 取 /TN 的下一个 token
+    retired_deleted = {
+        c[c.index("/TN") + 1] for c in deletes if "/TN" in c
+        and c[c.index("/TN") + 1] in m.RETIRED_TASKS
+    }
+    assert retired_deleted == set(m.RETIRED_TASKS)
+
+
+def test_unregister_pipeline_brief_clears_retired(monkeypatch):
+    """unregister_pipeline_brief()：/Delete RETIRED_TASKS 全集（幂等，供 start_all 调用）。"""
+    calls = []
+    monkeypatch.setattr(m, "_schtasks", lambda args: calls.append(args) or 0)
+    m.unregister_pipeline_brief()
+    deletes = [c for c in calls if "/Delete" in c]
+    deleted_names = {c[c.index("/TN") + 1] for c in deletes}
+    assert deleted_names == set(m.RETIRED_TASKS)
