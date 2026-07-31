@@ -956,15 +956,17 @@ async def stop_loss_monitor(
     _today = datetime.now().strftime("%Y-%m-%d")
 
     def _stop_already_placed(sym: str) -> bool:
-        """查 DB 是否已挂 STOP 委托（幂等检查）。"""
+        """查 DB 是否已挂 STOP 委托（幂等检查）。失败升 L1（不知是否发过=可能重发=双倍卖）。"""
         try:
             return _state_store.has_order(_aid, _today, sym, "STOP")
-        except Exception:
-            logger.exception("查 DB has_order(STOP) 失败 symbol=%s（回退非幂等，可能重发）", sym)
-            return False
+        except Exception as e:
+            # C-4 U3b：幂等读失真——原回退 False（当作没挂）会直接走 _submit 重发卖单 = 双倍卖。
+            # 升 L1（spec §3 DB 幂等读失败=L1）：停调度，CRITICAL 唤醒人工核对 DB 真相。
+            raise _CriticalHalt(
+                f"stop_loss 查 has_order(STOP) 失败 symbol={sym}（幂等读失真，拒继续盲发）") from e
 
     def _record_stop(sym: str, qty: float, price: float) -> None:
-        """发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)。失败仅 log。"""
+        """发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)。失败升 L1。"""
         try:
             if _state_store.get_account(_aid) is None:
                 _state_store.upsert_account(_aid, broker="qmt")
@@ -976,8 +978,12 @@ async def stop_loss_monitor(
             _state_store.insert_trade_event(
                 _aid, trade_id, sym, "STOP_TRIGGERED",
                 order_id=oid, qty=float(qty), price=float(price))
-        except Exception:
-            logger.exception("record_stop 落 DB 失败 symbol=%s（不阻断卖出）", sym)
+        except Exception as e:
+            # C-4 U3b：卖单已通过 _submit 发出（柜台已收单）但 DB 没记 = 对账以为没挂 →
+            # 下轮 30s 后重发 = 双倍卖（幽灵单）。升 L1（spec §3 DB 写失败=L1）：
+            # 立即停调度，CRITICAL 唤醒人工核查 DB 真相 + 撤销可能的重复卖单。
+            raise _CriticalHalt(
+                f"stop_loss record_stop 落 DB 失败 symbol={sym}（卖单已发，DB 真相源失真）") from e
     # 主路径（monitor_ctx）与 fallback（stop_prices）至少其一非空才有监控意义；
     # pending_ctx 单独判定（pending 期无持仓，positions 空也照巡）。
     has_main_path = monitor_ctx is not None and len(monitor_ctx) > 0
@@ -986,12 +992,12 @@ async def stop_loss_monitor(
     if not (has_main_path or has_fallback or has_pending):
         return {"checked": 0, "reason": "无止损/撤单配置（monitor_ctx/stop_prices/pending_ctx 均空）"}
 
+    # C-4 U3b：查持仓失败=敞口完全未明——原 return 软降级只是本轮跳过，下轮 30s 继续盲跑。
+    # 升 L1（spec §3 查持仓失败=L1）：停调度，CRITICAL 唤醒人工（敞口未明继续跑=盲卖致命）。
     try:
         positions = await gw._fetch_broker_positions()  # {symbol: {volume, ...}}（T7 扩展）
-    except Exception:
-        # 持仓查询失败绝不下卖出单（敞口未明即操作 = 盲卖，违反风控）
-        logger.exception("stop_loss_monitor 查持仓失败（拒发任何卖出单）")
-        return {"checked": 0, "reason": "查持仓异常，拒发卖出单"}
+    except Exception as e:
+        raise _CriticalHalt("stop_loss_monitor 查持仓失败（敞口未明，拒继续盲跑）") from e
 
     # ③ 批量取所有相关标的现价 + 当日累积 high/low（T3 优化 + R7 bar 防御）。
     #   相关标的 = 持仓 ∪ monitor_ctx keys ∪ pending_ctx keys（撤单期标的可能未成交无持仓）。
