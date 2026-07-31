@@ -778,11 +778,15 @@ async def pre_open(date: str) -> dict:
     n_expired = 0
     account_id = _resolve_account_id()
     # 确保 account 行存在（insert_order/trade_event FK 引用）
+    # C-4 U3a：account 行是 insert_order/trade_event 的 FK 源——get_account/upsert_account
+    # 失败=后续所有 DB 写 FK 全失效=DB 真故障。原软降级会让下游连环报 FK 错仍继续挂单，
+    # 升 L1（review 补强：基础设施 > 单只计数）。
     try:
         if _state_store.get_account(account_id) is None:
             _state_store.upsert_account(account_id, broker="qmt")
-    except Exception:
-        logger.exception("pre_open 确保 account 行失败（不阻断挂单，DB 写入将软降级）")
+    except Exception as e:
+        raise _CriticalHalt(
+            f"pre_open 确保 account 行失败 account={account_id}（DB 真故障，下游 FK 全失效）") from e
     for o in plan["orders"]:
         od = o["order"]
         # max_wait 窗口过滤（plan Task 6）
@@ -806,20 +810,27 @@ async def pre_open(date: str) -> dict:
             if _state_store.has_order(account_id, date, od["symbol"], "OPEN"):
                 logger.info("pre_open 跳过已挂 OPEN（DB 幂等）symbol=%s", od["symbol"])
                 continue
-        except Exception:
-            # DB 查询失败不阻断挂单（主路径是真实挂单，DB 是对账层，软降级）
-            logger.exception("pre_open DB 幂等检查失败 symbol=%s（不阻断，可能重复挂）", od["symbol"])
+        except Exception as e:
+            # C-4 U3a：幂等读失败=「不知是否已挂过」→ 继续挂=可能重复挂（双倍成交，真金损失）。
+            # 原 soft-degrade 注释「不阻断，可能重复挂」即承认了真金损失风险——升 L1
+            # （spec §3 state_store 关键读失败 = L1）。宁可停整批不盲挂。
+            raise _CriticalHalt(
+                f"pre_open DB 幂等读失败 symbol={od['symbol']}（敞口未明，拒继续挂）") from e
         order_req = OrderRequest(
             symbol=od["symbol"], qty=od["qty"], side=od["side"], price=od["price"],
         )
         # T8：挂单前先 insert_order(OPEN, PENDING)（DB 真相源，幂等 UNIQUE）
+        # C-4 U3a：insert_order 是 DB 真相源写入——失败=柜台可能挂了但 DB 没记=对账幽灵单。
+        # 原 soft-degrade「不阻断挂单」会让幽灵单在重跑时被当成「未挂」重复挂（双倍成交）。
+        # 升 L1（review 补强：单只层面 DB 写异常 > 单只计数，硬抛停调度，绝不带病挂下一只）。
         try:
             _order_id = f"{date}_{od['symbol']}_OPEN_1"
             _state_store.insert_order(
                 _order_id, trade_id, account_id, date, od["symbol"], od["side"], "OPEN",
                 float(od["qty"]), float(od["price"]), state="PENDING")
-        except Exception:
-            logger.exception("pre_open insert_order(OPEN) 失败 symbol=%s（不阻断挂单）", od["symbol"])
+        except Exception as e:
+            raise _CriticalHalt(
+                f"pre_open insert_order(OPEN) 失败 symbol={od['symbol']}（DB 真相源失真）") from e
         try:
             result = await _submit(order_req, confirm=True)
         except Exception as exc:
@@ -846,8 +857,11 @@ async def pre_open(date: str) -> dict:
                 _state_store.insert_trade_event(
                     account_id, trade_id, od["symbol"], "ORDERED",
                     order_id=_order_id, qty=float(od["qty"]), price=float(od["price"]))
-            except Exception:
-                logger.exception("pre_open 回填 order SUBMITTED/ORDERED 失败 symbol=%s", od["symbol"])
+            except Exception as e:
+                # C-4 U3a：柜台挂成功了（_submit 返非 REJECTED/FAILED）但 DB 没回 SUBMITTED
+                # = 对账以为没挂 → 幽灵单 / 重跑重复挂。升 L1（DB 真相源失真优先于单只）。
+                raise _CriticalHalt(
+                    f"pre_open 回填 SUBMITTED/ORDERED 失败 symbol={od['symbol']}（DB 真相源失真）") from e
         else:
             logger.warning("pre_open 挂单未成功 symbol=%s state=%s msg=%s",
                            od["symbol"], result.get("state"), result.get("message"))
