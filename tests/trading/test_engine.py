@@ -1199,6 +1199,7 @@ async def _no_op_cancel(gw):
 # ============================================================================
 def test_post_close_reads_position_book(monkeypatch):
     """_post_close：读 position_book 账本 → 注入 local_positions → 调 post_close 对账。"""
+    from unittest.mock import MagicMock
     from trading import position_book, engine as eng_mod
 
     # 让 position_book 返非空（模拟有真实成交累计的持仓）
@@ -1213,6 +1214,12 @@ def test_post_close_reads_position_book(monkeypatch):
 
     monkeypatch.setattr(eng_mod, "post_close", _fake_post_close)
     monkeypatch.setattr(eng_mod.calendar, "is_trading_day", lambda d: True)
+    # C-5 V4：_post_close 入口先过 _gw_health_gate，须 patch get_gateway 返 connected+ready
+    # gw 让 gate 放行，否则 gate skip 到不了 post_close 对账。
+    _gw = MagicMock()
+    _gw._connected = True
+    _gw.is_client_ready.return_value = True
+    monkeypatch.setattr(eng_mod, "get_gateway", lambda: _gw)
 
     eng = eng_mod.TradingEngine()
     asyncio.run(eng._post_close())
@@ -1221,6 +1228,7 @@ def test_post_close_reads_position_book(monkeypatch):
 
 def test_post_close_empty_book_passes_empty_dict(monkeypatch):
     """_post_close：账本空 → 传 {}（非 None）——live 下 broker 有时能报 only_broker drift。"""
+    from unittest.mock import MagicMock
     from trading import position_book, engine as eng_mod
 
     monkeypatch.setattr(position_book, "get_local_positions", lambda **kw: {})
@@ -1232,6 +1240,11 @@ def test_post_close_empty_book_passes_empty_dict(monkeypatch):
 
     monkeypatch.setattr(eng_mod, "post_close", _fake_post_close)
     monkeypatch.setattr(eng_mod.calendar, "is_trading_day", lambda d: True)
+    # C-5 V4：补 connected+ready gw 让 gate 放行（同上用例）。
+    _gw = MagicMock()
+    _gw._connected = True
+    _gw.is_client_ready.return_value = True
+    monkeypatch.setattr(eng_mod, "get_gateway", lambda: _gw)
 
     eng = eng_mod.TradingEngine()
     asyncio.run(eng._post_close())

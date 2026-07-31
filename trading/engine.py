@@ -1873,6 +1873,33 @@ class TradingEngine:
     # ---------------------------------------------------------------------
     # Task 8（C-2 S3）：pre_open 三段式前置 gate
     # ---------------------------------------------------------------------
+    def _gw_health_gate(self, gw) -> tuple[bool, str]:
+        """C-5 V3：网关健康前置 gate（从 _pre_open_gate ② 段抽，共享给 _stoploss/_post_close）。
+
+        物理意图（spec §4.1 · B 共享前置 gate）：
+            触发点业务前显式探测网关健康，锁态时返 ``(False, reason)`` 让调用方
+            skip + CRITICAL 不跑业务（防静默全失败），与 ``_pre_open_gate`` ② 段
+            + ``_health_guard`` 自愈取向一致（不停调度，等 60s 自愈恢复 live）。
+
+        判据（与 _pre_open_gate ② 段逐行等价，DRY 抽离零行为变更）：
+            ① ``gw is None`` 或 ``gw._connected=False`` → ``"网关未连接"``；
+            ② ``gw.is_client_ready()=False`` → ``"miniQMT 客户端未就绪"``。
+        ``is_client_ready`` 是纯文件 mtime 探测（broker/qmt.py:311），不触达 xtquant，
+        CI/单测/无 SDK 环境安全调用。
+
+        Args:
+            gw: 交易网关实例（``get_gateway()`` 取，可能为 None）。鸭子类型：读
+                ``gw._connected`` 与调 ``gw.is_client_ready()``。
+
+        Returns:
+            ``(True, "")`` 网关健康；``(False, reason)`` 锁态，reason 简短中文。
+        """
+        if gw is None or not getattr(gw, "_connected", False):
+            return False, "网关未连接"
+        if not gw.is_client_ready():
+            return False, "miniQMT 客户端未就绪"
+        return True, ""
+
     async def _pre_open_gate(self, date: str, gw) -> tuple[bool, str]:
         """S3：pre_open 三段式前置 gate。全绿返 ``(True, "")``，任一未绿即返。
 
@@ -1904,11 +1931,11 @@ class TradingEngine:
             return False, "无计划"
         if not plan.get("confirmed"):
             return False, "计划未确认（人审闸）"
-        # ② 网关健康（探测，无写副作用）
-        if gw is None or not getattr(gw, "_connected", False):
-            return False, "网关未连接"
-        if not gw.is_client_ready():
-            return False, "miniQMT 客户端未就绪"
+        # ② 网关健康（探测，无写副作用）—— C-5 V3 DRY：改调共享 _gw_health_gate
+        # （与 _stoploss/_post_close 三入口同口径；行为与原内联逐行等价）。
+        gw_ok, gw_reason = self._gw_health_gate(gw)
+        if not gw_ok:
+            return False, gw_reason
         # ③ 数据就绪（DB 查询；防御性双检）
         for k in self._plan_data_keys(plan):
             ready = get_data_ready(date, k)
@@ -2439,6 +2466,15 @@ class TradingEngine:
             （pre_open 挂单时落盘的初始止损价）；时间驱动 trailing（海龟 grace/step/floor）
             需在盘中按持仓最高价动态更新 stop_prices map，属另一个 follow-up，不在本 task 内。
         """
+        # C-5 V4 B：网关健康前置 gate（@_critical_guard 后、交易日守卫前）。
+        # 物理意图（spec §4.3）：gw 锁态时 skip+CRITICAL 不跑业务（不查 plan、不调
+        # stop_loss_monitor），与 _pre_open_gate 网关锁态 skip 同口径；与 _health_guard
+        # 不升 L1 自愈取向一致（C-4 决议）—— 等待 60s 自愈恢复 live，而非 _halt 停调度。
+        gw = get_gateway()
+        ok, reason = self._gw_health_gate(gw)
+        if not ok:
+            _alert_critical(f"stop_loss 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
+            return
         today = datetime.now().strftime("%Y-%m-%d")
         # 交易日守卫（Task 8 fix · review I1）：IntervalTrigger 无 1-5 工作日过滤，
         # 必须显式 is_trading_day，否则周末盘中时段会空跑（与 eod/pre_open/post_close 同口径）。
@@ -2542,6 +2578,14 @@ class TradingEngine:
 
     @_critical_guard
     async def _post_close(self) -> None:
+        # C-5 V4 B：网关健康前置 gate（与 _stoploss 同口径，spec §4.3）。
+        # gw 锁态时 skip+CRITICAL 不跑对账业务（防基于陈旧/缺失快照误判 drift），
+        # 等 _health_guard 自愈；不停调度（与 _pre_open_gate + _health_guard 一致）。
+        gw = get_gateway()
+        ok, reason = self._gw_health_gate(gw)
+        if not ok:
+            _alert_critical(f"post_close 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
+            return
         today = datetime.now().strftime("%Y-%m-%d")
         if not calendar.is_trading_day(today):
             logger.info("post_close 跳过：今日非交易日 %s", today)

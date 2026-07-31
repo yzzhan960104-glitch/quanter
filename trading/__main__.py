@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
-"""二期自动交易引擎常驻进程入口（开发/调试）：``python -m trading``。
+"""二期自动交易引擎常驻进程入口：``python -m trading``。
 
 ============================================================================
-定位（C-2 scheduling-orchestration Task 5/W1 重构后）
+定位（C-5 V1 进程模型统一后）
 ============================================================================
-本入口现仅为**开发/调试常驻入口**，**不再是生产唯一入口**。生产路径由
-``start_all.py`` 拉起的 **uvicorn server** 进程托管：server lifespan 内构造
-TradingEngine 并起 APScheduler（engine 与 server 合并进同进程）。
+本入口起 **uvicorn server**（``presentation.server.main:app``），engine 由 server
+lifespan 装配——与生产 ``start_all.py`` 链**同一入口**，消除历史双进程抢 session
+（C-5 V1，[[qmt-connect-1-rootcause]] 教训）。端口 8000 天然单例（第二实例 bind
+失败 exit），无需文件锁。``run_server()`` 是薄包装（live 不 reload，防 reloader
+子进程抢 session）；``check_shadow_gate`` 影子期检查收归 lifespan（本块不 sys.exit）。
 
-Why 可合并（W1 实例属性隔离取代旧进程隔离硬约束）：
+Why engine 可合并进 lifespan（W1 实例属性隔离取代旧进程隔离硬约束）：
 - 历史红线「engine 必须独立进程、绝不嵌入 server」是为了防前视污染（engine 注入的
   动态白名单污染 server 手动下单路径）。W1 已把动态白名单从模块级全局
   ``_DYNAMIC`` 改为 engine **实例属性** ``_dynamic_whitelist``，``_submit`` 经
@@ -16,21 +18,19 @@ Why 可合并（W1 实例属性隔离取代旧进程隔离硬约束）：
   不传 whitelist 即走纯 env 旧路径（见 ``engine.py`` 模块 docstring 不变量块）。
 - 因此 engine 与 server 同进程不再前视污染，合并进 uvicorn lifespan 安全。
 
-本入口的残留用途：本地无 server 时手动起 engine 跑四 cron（开发联调/排障）。
-生产部署用 uvicorn，不要靠本入口托管线上 engine。
-
 职责切分（薄入口原则 · Karpathy 极简）：
-- 本入口只做三件事：① 加载 .env ② 起 event loop 守护 AsyncIOScheduler
-  ③ LIVE 模式启动期 ≥5 天影子期硬闸（Plan 4 T6，``check_shadow_gate`` fail-closed
-  真·闸，取代历史 WARNING 提醒——spec §5.3 误称"硬闸"实为提醒）。
-- 全部业务逻辑（四触发点、APScheduler cron 装配、交易日判定、影子分流）都在
-  ``trading/engine.py::TradingEngine``（Task9），本入口不重复实现任何业务逻辑。
+- 本入口只做两件事：① 加载 .env（``load_dotenv(override=True)``）② 调 ``run_server()``
+  起 uvicorn。全部业务逻辑（四触发点 cron、APScheduler 装配、交易日判定、影子分流、
+  网关 connect/bootstrap）都在 lifespan + ``trading/engine.py::TradingEngine``，本入口
+  不重复实现任何业务逻辑。
+- ``check_shadow_gate`` 影子期硬闸由 lifespan（main.py:196 ``if check_shadow_gate():
+  eng.start()``）决策；影子期不足时 server 仍起（手动 API 可用），仅 scheduler 不 start。
 
 ============================================================================
 ⚠️ Scope 边界：本入口【不】做策略层数据源注入
 ============================================================================
-本入口只起 APScheduler 常驻进程；四触发点的真实数据源属「二期引擎上线集成」
-阶段的工作（SOP/follow-up），不在 Task 10/11 代码 scope：
+本入口只起 uvicorn server（engine 由 lifespan 装）；四触发点的真实数据源属「二期引擎
+上线集成」阶段的工作（SOP/follow-up），不在 C-5 scope：
 
 - ``NecklineMethodStrategy.scan_at`` 扫颈线法信号（eod_plan 消费）
 - 持仓状态机 ``stop_prices`` map（stop_loss_monitor 消费）
@@ -38,7 +38,7 @@ Why 可合并（W1 实例属性隔离取代旧进程隔离硬约束）：
 
 Task 9 的四个内部触发方法（``_eod/_pre_open/_stoploss/_post_close``）已是
 **安全 no-op**：先过 ``calendar.is_trading_day`` 判交易日，再 logger.info 触发
-记录，数据源为 None/空时优雅降级不崩。故 __main__ 起进程后 APScheduler 即便
+记录，数据源为 None/空时优雅降级不崩。故 server 起后 APScheduler 即便
 触发这四个 job 也不会崩。
 
 详见 ``docs/superpowers/plans/2026-07-21-auto-trading-engine.md`` Task 11 SOP
@@ -47,17 +47,18 @@ Task 9 的四个内部触发方法（``_eod/_pre_open/_stoploss/_post_close``）
 ============================================================================
 Windows 进程托管
 ============================================================================
-本入口是前台进程（stdout 日志），设计成可被 schtasks / PM2 / terminal tab 托管：
-- Task 11 的 ``run_trading_engine.bat`` 会调它（schtasks 注册开机自启）。
-- Ctrl-C（KeyboardInterrupt）→ 优雅 ``eng.shutdown()``（APScheduler ``wait=False``
-  不等 pending job，进程退出场景）。
+``run_server()`` 起 uvicorn（前台进程，stdout 日志），设计成可被 schtasks / PM2 /
+「启动」文件夹快捷方式托管：
+- ``scripts/run_trading_engine.bat`` 调 ``python -m trading``（schtasks 注册开机自启，
+  命令字面不变，内部起 server）。
+- Ctrl-C（KeyboardInterrupt）→ uvicorn lifespan shutdown 钩子优雅停 TradingEngine
+  scheduler + 断网关（main.py lifespan yield 后的销毁段，``sched.shutdown(wait=False)``
+  不等 pending job）。
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import sys
 
 # 加载 .env（Task4 已装 python-dotenv；环境无 dotenv 时 fallback 跳过，env 由
 # 外层 schtasks/PM2 注入亦可——本行只是开发便利，非业务依赖）。
@@ -196,66 +197,51 @@ def log_startup_banner():
     )
 
 
-async def _run_forever() -> None:
-    """起 TradingEngine + 守护 event loop（APScheduler 后台跑四 cron）。
+def run_server() -> None:
+    """C-5 V1：起 uvicorn 托管 engine（消除双进程抢 QMT session）。
 
-    Why ``while True: await asyncio.sleep(3600)`` 而非 ``await eng.sched.running``
-    这种事件等待：APScheduler 的 AsyncIOScheduler 在后台协程内跑 job 调度，主协程
-    只需「挂起不退出」即可；每小时醒一次无业务意义（仅保活心跳，避免某些事件循环
-    实现对纯阻塞 sleep 的超时打断异常）。 KeyboardInterrupt/CancelledError 由外层
-    ``asyncio.run`` 冒泡到 ``__main__`` 守卫统一处置。
+    物理意图（spec §3.1 · [[qmt-connect-1-rootcause]] 教训）：
+        原 ``_run_forever`` 独立装配 TradingEngine + APScheduler，与生产链
+        ``start_all.py → detach uvicorn → main.py lifespan`` 形成两条并存入口。
+        两进程 ``gw.connect()`` 抢同一 ``QMT_SESSION_ID`` → QMT 返回 -1（session
+        占用）→ 07-29 全天锁死。本函数让 ``python -m trading`` 也走 uvicorn，
+        engine 只由 lifespan 装配一次；uvicorn bind 8000 天然单例（第二实例
+        ``WSAEADDRINUSE`` → uvicorn exit → 不到 lifespan → 天然不双进程），
+        无需文件锁/PID 锁（spec §3.3，A 方案废弃）。
 
-    W3（C-2 scheduling-orchestration Task 5）：原 7 步 I/O 初始化（connect + 注册回调
-    + position_book.init_db + state_store.init_store + _migrate_env_to_account）已收口到
-    ``TradingEngine.bootstrap()``，本入口仅做「构造 → bootstrap → start → 守护」四段，
-    让独立进程与 uvicorn server lifespan 复用同一段初始化（不改启动语义：connect-then-start
-    顺序保持不变，只是搬进 bootstrap）。
+    Why live 不 reload（spec §3.1 R6）：
+        ``reload=True`` 时 uvicorn 起 reloader 子进程，子进程会再次 import main →
+        lifespan → gw.connect() 抢同一 session（自扰性断线）。live 模式显式
+        ``reload=False``；dry_run 开 reload 便利开发热重载（无真网关无抢 session 风险）。
+
+    Why 不再 ``sys.exit`` shadow_gate：
+        V1 前独立进程模式下 ``if not check_shadow_gate(): sys.exit(2)`` 是进程级
+        决策；V1 后 shadow_gate 检查完全收归 lifespan（main.py:196
+        ``if check_shadow_gate(): eng.start()``），server 起不起与 engine 起不起
+        解耦——影子期不足时 server 仍起（手动 API 可用），只是不 start scheduler。
+
+    schtasks 兼容（spec §3.4）：
+        ``python -m trading`` 命令字面不变（schtasks/PM2/历史注册保持），内部从
+        「独立 engine」变「起 uvicorn」——schtasks 触发后起 server，engine 由
+        lifespan 装。
     """
-    # 惰性 import：避免模块顶层 import 触发 trading 包重链（test 导入本模块时不
-    # 应连带拉起 engine 依赖链；engine.py 顶层 import apscheduler 等）。
-    from trading.engine import TradingEngine
-
-    # M3 启动 banner：在 bootstrap（含网关 connect）前打印进程内 session/account/mode/
-    # 口径版本（banner 先于 connect 输出，便于排查 .env 漂移）。
-    log_startup_banner()
-
-    eng = TradingEngine()
-
-    # W3：7 步 I/O 初始化收口进 bootstrap（connect + 回调注册 + position_book/state_store
-    # 建表迁移）。必须先于 eng.start()——APScheduler 一旦 start，触发点可能读写 DB/回调链路。
-    await eng.bootstrap()
-
-    eng.start()  # 注册四 cron job + 启动 AsyncIOScheduler（不阻塞）
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        # Ctrl-C / 外部 cancel：优雅 shutdown APScheduler（wait=False 不等 pending job）。
-        eng.shutdown()
+    # 惰性 import：避免模块顶层 import uvicorn 拉起 fastapi/starlette 重链
+    # （test_main.py 的 import trading.__main__ 不应连带加载 server 栈）。
+    import uvicorn
+    uvicorn.run(
+        "presentation.server.main:app",
+        host=os.getenv("SERVER_HOST", "0.0.0.0"),
+        port=int(os.getenv("SERVER_PORT", "8000")),
+        # 显式不传 reuse_port（spec §3.3 R6）：uvicorn 默认 SO_REUSEPORT=False，
+        # 第二实例 bind 8000 即 WSAEADDRINUSE exit（端口单例防护）。
+        reload=(os.getenv("AUTO_TRADE_MODE", "dry_run") != "live"),
+    )
 
 
 if __name__ == "__main__":
-    # 启动期模式读取（默认 dry_run · 影子红线）。
-    # 缺省 dry_run：未显式 AUTO_TRADE_MODE=live 一律按影子处理，宁可漏挂单也
-    # 不在未观测足够天数时盲发真单。
+    # C-5 V1：起 uvicorn 托管 engine（替代独立 _run_forever 进程）。
+    # mode 仅用于启动日志；shadow_gate 检查收归 lifespan（main.py:196），本块不再
+    # sys.exit——server 起不起与 engine 起不起解耦（影子期不足 server 仍起，手动 API 可用）。
     mode = os.getenv("AUTO_TRADE_MODE", "dry_run")
-    logger.info("=== 自动交易引擎启动（AUTO_TRADE_MODE=%s）===", mode)
-
-    # Plan 4 T6：≥5 天影子期硬闸（fail-closed 真·闸）。
-    # 取代原启动期 WARNING 段（spec §5.3 误称"硬闸"实为提醒——切 LIVE 只需改 env，
-    # 无任何拦单）。check_shadow_gate 内部 dry_run 直接放行；live 时查所有 ACTIVE 实验
-    # activated_at，任一影子期 < TRADE_SHADOW_MIN_DAYS → 返 False + 钉钉 CRITICAL。
-    # 异常 fail-closed / 空列表放行 / activated_at 缺失保守拒绝（D3/D8/D9）。
-    # W2（C-2 Task 5）：check_shadow_gate 返 bool 而非 sys.exit——独立进程模式下
-    # 拒切 LIVE 仍 sys.exit(2)（进程级决策）；engine 合并进 uvicorn 后由 server
-    # lifespan 据 bool 决定是否起 engine，不再 sys.exit 杀掉整个 API server。
-    if not check_shadow_gate():
-        logger.error("影子期不足，拒绝启动 engine（独立进程模式退出）")
-        sys.exit(2)   # 独立进程模式仍可 exit；uvicorn 模式由 lifespan 决定
-
-    try:
-        asyncio.run(_run_forever())
-    except KeyboardInterrupt:
-        # Ctrl-C 在 asyncio.run 外层再次被捕（双保险）。
-        logger.info("收到 Ctrl-C，进程退出。")
-        sys.exit(0)
+    logger.info("=== 自动交易引擎启动（AUTO_TRADE_MODE=%s，起 uvicorn 托管 engine）===", mode)
+    run_server()

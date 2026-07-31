@@ -190,7 +190,12 @@ async def lifespan(app: FastAPI):
     # 仅自动 cron 编排缺席。与上面 replay_scheduler / training_orchestrator 同源软降级范式。
     try:
         from trading.engine import TradingEngine
-        from trading.__main__ import check_shadow_gate
+        from trading.__main__ import check_shadow_gate, log_startup_banner
+        # C-5 V2：装配 engine 前打启动 banner（session/account/mode/口径版本）。
+        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链 start_all→uvicorn
+        # →lifespan 之前无 banner，session 漂移（进程内 123456 vs .env 123458）无日志可
+        # 对比。banner 先于 bootstrap（含网关 connect）输出，便于排查 .env 漂移。
+        log_startup_banner()
         eng = TradingEngine()
         await eng.bootstrap()
         if check_shadow_gate():

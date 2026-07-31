@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from trading.engine import TradingEngine
 
@@ -39,7 +39,13 @@ def test_stoploss_injects_stop_prices_from_plan():
             }
         ],
     }
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    # C-5 V4：_stoploss 入口先过 _gw_health_gate，须 patch get_gateway 返 connected+ready
+    # gw 让 gate 放行，否则 gate skip 到不了 stop_prices 注入逻辑。
+    gw = MagicMock()
+    gw._connected = True
+    gw.is_client_ready.return_value = True
+    with patch("trading.engine.get_gateway", return_value=gw), \
+         patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine.calendar") as cal, \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:
         # calendar 被 patch 成 MagicMock（is_intraday_session 返 truthy），
@@ -58,7 +64,15 @@ def test_stoploss_no_plan_injects_none():
     否则 monitor 拿脏数据误判跌破 → 盲卖。此处断言 stop_prices ∈ {None, {}}。
     """
     eng = TradingEngine()
-    with patch("trading.engine.trading_plan.load_plan", return_value=None), \
+    # C-5 V4：补 connected+ready gw 让 gate 放行（见上用例同款）。
+    gw = MagicMock()
+    gw._connected = True
+    gw.is_client_ready.return_value = True
+    # 显式 patch is_trading_day=True 让测试与运行日无关（原测试依赖运行日为交易日，
+    # 周末跑会被交易日守卫拦在 monitor 之前——与 V4 gate 无关，deterministic 修正）。
+    with patch("trading.engine.get_gateway", return_value=gw), \
+         patch("trading.engine.calendar.is_trading_day", return_value=True), \
+         patch("trading.engine.trading_plan.load_plan", return_value=None), \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:
         asyncio.run(eng._stoploss())
     _, kwargs = mon.call_args
@@ -75,7 +89,12 @@ def test_stoploss_skips_non_trading_day():
     兜底（该兜底只查时间不查工作日，挡不住周末）。
     """
     eng = TradingEngine()
-    with patch("trading.engine.calendar.is_trading_day", return_value=False), \
+    # C-5 V4：gate 在交易日守卫前，须 gw 绿让 gate 放行，才能测到「非交易日守卫」拦截。
+    gw = MagicMock()
+    gw._connected = True
+    gw.is_client_ready.return_value = True
+    with patch("trading.engine.get_gateway", return_value=gw), \
+         patch("trading.engine.calendar.is_trading_day", return_value=False), \
          patch("trading.engine.trading_plan.load_plan") as lp, \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:
         asyncio.run(eng._stoploss())
