@@ -34,12 +34,15 @@ async def test_data_not_ready_no_eod(monkeypatch):
     from trading.orchestrate.pipeline import pipeline_then_eod
     from data.freshness import FreshnessResult
     today = datetime.now().strftime("%Y-%m-%d")
+    # C-4 U3c 后：rc=1 表示采集失败（直接 raise _CriticalHalt，L1）。
+    # 「数据未就绪」语义 = 采集成功（rc=0）但 freshness 校验不过（落了但内容/日期错位）。
+    # 故本用例的 proc.wait 必须返 0，由 freshness ok=False 触发 CRITICAL 跳过 eod。
     with patch("trading.orchestrate.pipeline.is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch("trading.orchestrate.pipeline.resolve_active", return_value=[]), \
          patch("trading.orchestrate.pipeline.check_freshness",
                return_value=FreshnessResult("daily", False, None, today, "缺")):
-        proc = AsyncMock(); proc.wait.return_value = 1
+        proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
         eng = MagicMock()
         eng._eod = AsyncMock()
@@ -89,3 +92,25 @@ async def test_multi_experiment_keys_union(monkeypatch):
         eng = MagicMock(); eng._eod = AsyncMock()
         await pipeline_then_eod(eng)
         assert set(checked_keys) == {"daily", "moneyflow"}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_collect_failure_raises_critical_halt(monkeypatch):
+    """采集子进程 rc!=0 → raise _CriticalHalt（T+1 计划失真，停调度）。"""
+    import asyncio
+    from trading.engine import _CriticalHalt
+    from trading.orchestrate import pipeline as pl
+
+    class _FakeProc:
+        async def wait(self):
+            return 1   # 采集失败
+    async def _fake_exec(*a, **kw):
+        return _FakeProc()
+    monkeypatch.setattr(pl.asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(pl, "is_trading_day", lambda d: True)
+    monkeypatch.setattr(pl, "resolve_active", lambda: [])
+    monkeypatch.setattr(pl, "expected_latest_trade_day", lambda now: "2026-07-31")
+
+    eng = object()   # 占位 engine（raise 在调 engine._eod 之前，不会被触达）
+    with pytest.raises(_CriticalHalt, match="采集子进程失败"):
+        await pl.pipeline_then_eod(eng)

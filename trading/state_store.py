@@ -24,6 +24,16 @@ account/trade_event/order/account_daily 四张表。state_store 是它的超集�
 
 约定（对齐 position_book）：file-based sqlite + _connect 上下文（WAL + foreign_keys=ON +
 row_factory + 自动 commit/rollback）。幂等写 catch IntegrityError → log + return False。
+
+C-3 cancel 幂等键约定（2026-07-31 文档化，非重建）：
+    撤单路径的幂等落 DB 由「柜台回写」承担，不另起 purpose='CANCEL' 行：
+      - cancel_all_open_orders（breaker._cancel_via_broker_query）在 ``account_id`` 提供时
+        调 cancel_order_by_broker_oid_db(broker_oid) 把同一条 order 行的 state 回写 CANCELLED
+        —— 复用 order 表既有 UNIQUE(account_id, trade_date, symbol, purpose)，不新增行。
+      - pre_open 调用必须透传 account_id=_resolve_account_id()（engine.pre_open），否则柜台
+        路径不回写 → DB 仍记 SUBMITTED → T+1 对账幽灵单（spec §6.1 判据决策树：撤单落 DB
+        即免 CANCEL 行；account_id=None / 内存回退路径才需补 CANCEL 行或 trade_event 兜底）。
+    完整审计结论见 docs/superpowers/audits/2026-07-31-cancel-idempotency-audit.md。
 """
 from __future__ import annotations
 

@@ -119,6 +119,46 @@ def _alert_critical(msg: str) -> None:
         logger.exception("CRITICAL 告警发送失败（不阻塞主流程）：%s", msg)
 
 
+# C-4 U2：L1 致命异常 + 停调度 wrapper。
+class _CriticalHalt(Exception):
+    """L1 致命异常：交易关键路径失败（DB 写/读失真·网关断线·整批失败·敞口未明）。
+
+    物理意图（spec §3 L1 + review 补强边界）：
+        抛出本异常 = 「继续跑会致真金损失或状态真相源失真」，_critical_guard 捕获后调
+        _halt() 停所有 job。与单只业务拒单（RuntimeError，L2 聚合 CRITICAL 不停）区分。
+
+    边界判定线（review 补强 · 基础设施 > 单只计数）：
+        - DB 写异常（insert_order/update_order_state/insert_trade_event/insert_fill 抛错）= L1
+          （哪怕只挂一只，DB 真相源失真优先于「单只」语义，硬抛）；
+        - 单只 _submit RuntimeError（业务拒单：涨跌停/资金不足/限频）= L2（不抛本异常）。
+    """
+
+
+def _critical_guard(coro_method):
+    """L1 路径 wrapper：_halted 检查 + 捕获 _CriticalHalt → _halt 停调度。
+
+    in-flight 语义（review 补强）：
+        - 当前 job：raise _CriticalHalt → 异常向上传播，当前 job 在 raise 处立即中断
+          后续写（不会 continue 把半截状态写完）；本 wrapper except 捕获后 _halt + 再 raise
+          （APScheduler 顶层吞 job 异常记日志，不影响其他 job）。
+        - 其他 job / 下一轮：_halted flag 在本 wrapper 顶 if 兜底——max_instance=1 下，
+          被触发或堆积补跑的 job 入口即跳过，不再写。
+        即 raise 中断「当前轮」，_halted 防「下一轮/其他 job」，覆盖 in-flight 全部窗口。
+    """
+    import functools
+    @functools.wraps(coro_method)
+    async def wrapped(self, *a, **kw):
+        if getattr(self, "_halted", False):
+            logger.warning("引擎已停调度（_halted），跳过 %s", coro_method.__name__)
+            return
+        try:
+            return await coro_method(self, *a, **kw)
+        except _CriticalHalt as e:
+            self._halt(f"[{coro_method.__name__}] {e}")
+            raise   # 再抛：APScheduler 顶层记 job 异常日志；_halt 已生效
+    return wrapped
+
+
 # ============================================================================
 # 环境读取辅助
 # ============================================================================
@@ -662,7 +702,11 @@ async def pre_open(date: str) -> dict:
             # 未到终态的笔数（主推延迟/柜台未响应）。unconfirmed>0 仅告警不阻塞挂单——
             # 撤单已发，本地状态终会被 on_cancel_error/on_stock_order 对账修正，但必须
             # 显式暴露此口径让运维知晓，杜绝「本地以为撤了、柜台其实没撤」的状态悬空。
-            _cancel_res = await _cancel_all_open_orders(gw)
+            # C-4 U5：补传 account_id 激活柜台路径 cancel_order_by_broker_oid_db 回写
+            # order.state=CANCELLED（breaker._cancel_via_broker_query 在 account_id 提供时才回写）。
+            # Why 必传：不传则撤了昨日单 DB 仍记 SUBMITTED → T+1 对账幽灵单（spec §6.1 判据）。
+            # 此为 C-3 审计结论的最小修（无需 purpose='CANCEL' 行，既有回写路径已够）。
+            _cancel_res = await _cancel_all_open_orders(gw, account_id=_resolve_account_id())
             n_cancelled = _cancel_res["cancelled"]
             n_unconfirmed = _cancel_res["unconfirmed"]
             logger.info(
@@ -736,13 +780,18 @@ async def pre_open(date: str) -> dict:
     cfg_max_wait = int(os.getenv("TRADE_MAX_WAIT", "5"))
     n_submitted = 0
     n_expired = 0
+    n_rejected = 0   # C-4 U4：单只业务拒单计数（L2 聚合 CRITICAL 用，防告警风暴）
     account_id = _resolve_account_id()
     # 确保 account 行存在（insert_order/trade_event FK 引用）
+    # C-4 U3a：account 行是 insert_order/trade_event 的 FK 源——get_account/upsert_account
+    # 失败=后续所有 DB 写 FK 全失效=DB 真故障。原软降级会让下游连环报 FK 错仍继续挂单，
+    # 升 L1（review 补强：基础设施 > 单只计数）。
     try:
         if _state_store.get_account(account_id) is None:
             _state_store.upsert_account(account_id, broker="qmt")
-    except Exception:
-        logger.exception("pre_open 确保 account 行失败（不阻断挂单，DB 写入将软降级）")
+    except Exception as e:
+        raise _CriticalHalt(
+            f"pre_open 确保 account 行失败 account={account_id}（DB 真故障，下游 FK 全失效）") from e
     for o in plan["orders"]:
         od = o["order"]
         # max_wait 窗口过滤（plan Task 6）
@@ -766,26 +815,34 @@ async def pre_open(date: str) -> dict:
             if _state_store.has_order(account_id, date, od["symbol"], "OPEN"):
                 logger.info("pre_open 跳过已挂 OPEN（DB 幂等）symbol=%s", od["symbol"])
                 continue
-        except Exception:
-            # DB 查询失败不阻断挂单（主路径是真实挂单，DB 是对账层，软降级）
-            logger.exception("pre_open DB 幂等检查失败 symbol=%s（不阻断，可能重复挂）", od["symbol"])
+        except Exception as e:
+            # C-4 U3a：幂等读失败=「不知是否已挂过」→ 继续挂=可能重复挂（双倍成交，真金损失）。
+            # 原 soft-degrade 注释「不阻断，可能重复挂」即承认了真金损失风险——升 L1
+            # （spec §3 state_store 关键读失败 = L1）。宁可停整批不盲挂。
+            raise _CriticalHalt(
+                f"pre_open DB 幂等读失败 symbol={od['symbol']}（敞口未明，拒继续挂）") from e
         order_req = OrderRequest(
             symbol=od["symbol"], qty=od["qty"], side=od["side"], price=od["price"],
         )
         # T8：挂单前先 insert_order(OPEN, PENDING)（DB 真相源，幂等 UNIQUE）
+        # C-4 U3a：insert_order 是 DB 真相源写入——失败=柜台可能挂了但 DB 没记=对账幽灵单。
+        # 原 soft-degrade「不阻断挂单」会让幽灵单在重跑时被当成「未挂」重复挂（双倍成交）。
+        # 升 L1（review 补强：单只层面 DB 写异常 > 单只计数，硬抛停调度，绝不带病挂下一只）。
         try:
             _order_id = f"{date}_{od['symbol']}_OPEN_1"
             _state_store.insert_order(
                 _order_id, trade_id, account_id, date, od["symbol"], od["side"], "OPEN",
                 float(od["qty"]), float(od["price"]), state="PENDING")
-        except Exception:
-            logger.exception("pre_open insert_order(OPEN) 失败 symbol=%s（不阻断挂单）", od["symbol"])
+        except Exception as e:
+            raise _CriticalHalt(
+                f"pre_open insert_order(OPEN) 失败 symbol={od['symbol']}（DB 真相源失真）") from e
         try:
             result = await _submit(order_req, confirm=True)
         except Exception as exc:
             # 挡板命中（资金不足/涨跌停/不在白名单等）会 raise RuntimeError
             # （trading_service.submit_order 契约）——必须逐单吞，一只拒单不炸整批。
             logger.warning("pre_open 挂单失败 symbol=%s 原因=%s", od["symbol"], exc)
+            n_rejected += 1   # C-4 U4：聚合 L2 CRITICAL 计数（循环末尾汇总一条，防风暴）
             # C-1 final-review fix (I-2)：失败时把残留 PENDING 行标 REJECTED，否则
             # has_order(OPEN) 恒 True → 重跑永久漏挂（live 资金不足/涨跌停挡板致命）。
             try:
@@ -806,11 +863,15 @@ async def pre_open(date: str) -> dict:
                 _state_store.insert_trade_event(
                     account_id, trade_id, od["symbol"], "ORDERED",
                     order_id=_order_id, qty=float(od["qty"]), price=float(od["price"]))
-            except Exception:
-                logger.exception("pre_open 回填 order SUBMITTED/ORDERED 失败 symbol=%s", od["symbol"])
+            except Exception as e:
+                # C-4 U3a：柜台挂成功了（_submit 返非 REJECTED/FAILED）但 DB 没回 SUBMITTED
+                # = 对账以为没挂 → 幽灵单 / 重跑重复挂。升 L1（DB 真相源失真优先于单只）。
+                raise _CriticalHalt(
+                    f"pre_open 回填 SUBMITTED/ORDERED 失败 symbol={od['symbol']}（DB 真相源失真）") from e
         else:
             logger.warning("pre_open 挂单未成功 symbol=%s state=%s msg=%s",
                            od["symbol"], result.get("state"), result.get("message"))
+            n_rejected += 1   # C-4 U4：未成功（REJECTED/FAILED）也计 L2 聚合（业务拒单同义）
             # C-1 final-review fix (I-2)：未成功（REJECTED/FAILED）标死态，has_order 放行重挂。
             try:
                 _dead = "REJECTED" if result.get("state") == "REJECTED" else "FAILED"
@@ -820,6 +881,13 @@ async def pre_open(date: str) -> dict:
 
     logger.info("pre_open 完成 date=%s submitted=%d/%d expired=%d mode=%s",
                 date, n_submitted, len(plan["orders"]), n_expired, _mode())
+    # C-4 U4：部分拒单（L2）聚合一条 CRITICAL——单只研究员要知情，但整批继续不炸。
+    # Why 聚合非逐只：防 N 只全拒告警风暴（spec R3）。整批 submitted=0 已有下方 CRITICAL（保留）。
+    # Why 限 live：dry_run/测试的拒单非真金风险，防误告警。n_submitted>0 守卫：全拒走下方 submitted=0 通道。
+    if n_rejected > 0 and _mode() == "live" and n_submitted > 0:
+        _alert_critical(
+            f"pre_open 部分挂单被拒 rejected={n_rejected}/{len(plan['orders'])} "
+            f"submitted={n_submitted} date={date}（查挡板日志：涨跌停/资金/白名单）")
     # Task 9（M4 静默漏单消灭）：live 模式 submitted=0 且有计划单 → 钉钉 CRITICAL。
     # 物理意图：live 下「全部挂单失败」= 当日废单日（网关锁死 / 涨跌停挡板 / 资金不足），
     # 仅 logger.warning 不足以叫醒用户（[[qmt-connect-1-rootcause]] 全天锁死无告警教训）。
@@ -902,15 +970,17 @@ async def stop_loss_monitor(
     _today = datetime.now().strftime("%Y-%m-%d")
 
     def _stop_already_placed(sym: str) -> bool:
-        """查 DB 是否已挂 STOP 委托（幂等检查）。"""
+        """查 DB 是否已挂 STOP 委托（幂等检查）。失败升 L1（不知是否发过=可能重发=双倍卖）。"""
         try:
             return _state_store.has_order(_aid, _today, sym, "STOP")
-        except Exception:
-            logger.exception("查 DB has_order(STOP) 失败 symbol=%s（回退非幂等，可能重发）", sym)
-            return False
+        except Exception as e:
+            # C-4 U3b：幂等读失真——原回退 False（当作没挂）会直接走 _submit 重发卖单 = 双倍卖。
+            # 升 L1（spec §3 DB 幂等读失败=L1）：停调度，CRITICAL 唤醒人工核对 DB 真相。
+            raise _CriticalHalt(
+                f"stop_loss 查 has_order(STOP) 失败 symbol={sym}（幂等读失真，拒继续盲发）") from e
 
     def _record_stop(sym: str, qty: float, price: float) -> None:
-        """发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)。失败仅 log。"""
+        """发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)。失败升 L1。"""
         try:
             if _state_store.get_account(_aid) is None:
                 _state_store.upsert_account(_aid, broker="qmt")
@@ -922,8 +992,12 @@ async def stop_loss_monitor(
             _state_store.insert_trade_event(
                 _aid, trade_id, sym, "STOP_TRIGGERED",
                 order_id=oid, qty=float(qty), price=float(price))
-        except Exception:
-            logger.exception("record_stop 落 DB 失败 symbol=%s（不阻断卖出）", sym)
+        except Exception as e:
+            # C-4 U3b：卖单已通过 _submit 发出（柜台已收单）但 DB 没记 = 对账以为没挂 →
+            # 下轮 30s 后重发 = 双倍卖（幽灵单）。升 L1（spec §3 DB 写失败=L1）：
+            # 立即停调度，CRITICAL 唤醒人工核查 DB 真相 + 撤销可能的重复卖单。
+            raise _CriticalHalt(
+                f"stop_loss record_stop 落 DB 失败 symbol={sym}（卖单已发，DB 真相源失真）") from e
     # 主路径（monitor_ctx）与 fallback（stop_prices）至少其一非空才有监控意义；
     # pending_ctx 单独判定（pending 期无持仓，positions 空也照巡）。
     has_main_path = monitor_ctx is not None and len(monitor_ctx) > 0
@@ -932,12 +1006,12 @@ async def stop_loss_monitor(
     if not (has_main_path or has_fallback or has_pending):
         return {"checked": 0, "reason": "无止损/撤单配置（monitor_ctx/stop_prices/pending_ctx 均空）"}
 
+    # C-4 U3b：查持仓失败=敞口完全未明——原 return 软降级只是本轮跳过，下轮 30s 继续盲跑。
+    # 升 L1（spec §3 查持仓失败=L1）：停调度，CRITICAL 唤醒人工（敞口未明继续跑=盲卖致命）。
     try:
         positions = await gw._fetch_broker_positions()  # {symbol: {volume, ...}}（T7 扩展）
-    except Exception:
-        # 持仓查询失败绝不下卖出单（敞口未明即操作 = 盲卖，违反风控）
-        logger.exception("stop_loss_monitor 查持仓失败（拒发任何卖出单）")
-        return {"checked": 0, "reason": "查持仓异常，拒发卖出单"}
+    except Exception as e:
+        raise _CriticalHalt("stop_loss_monitor 查持仓失败（敞口未明，拒继续盲跑）") from e
 
     # ③ 批量取所有相关标的现价 + 当日累积 high/low（T3 优化 + R7 bar 防御）。
     #   相关标的 = 持仓 ∪ monitor_ctx keys ∪ pending_ctx keys（撤单期标的可能未成交无持仓）。
@@ -954,6 +1028,7 @@ async def stop_loss_monitor(
     n_checked = 0
     n_fallback = 0
     n_pending_cancelled = 0
+    n_submit_failed = 0   # C-4 U4：单只止损发卖失败计数（L2 聚合 CRITICAL 用，防风暴）
 
     # ── ④ holding 期巡检：每持仓标的构造 state+bar → decide_exit → 按分发（D12 fallback）──
     # T7：positions 现为 {sym: {volume, avg_price, ...}}（dict-of-dict），qty 取 volume 子键。
@@ -1039,6 +1114,7 @@ async def stop_loss_monitor(
                             logger.warning(
                                 "stop_loss_monitor 卖出失败 symbol=%s qty=%s 原因=%s",
                                 sym, sell_qty, exc)
+                            n_submit_failed += 1   # C-4 U4：聚合 L2 CRITICAL 计数（主路径）
                             result = {"state": "FAILED"}
                         if result.get("state") not in ("REJECTED", "FAILED"):
                             n_triggered += 1
@@ -1083,6 +1159,7 @@ async def stop_loss_monitor(
                 # 挡板 raise（如断线 lock_down）：单只失败不阻塞其他标的止损
                 logger.warning("stop_loss_monitor 卖出失败 symbol=%s qty=%s 原因=%s",
                                sym, qty, exc)
+                n_submit_failed += 1   # C-4 U4：聚合 L2 CRITICAL 计数（fallback 路径）
                 continue
             if result.get("state") not in ("REJECTED", "FAILED"):
                 n_triggered += 1
@@ -1152,6 +1229,13 @@ async def stop_loss_monitor(
                     logger.warning("pending 撤单失败 symbol=%s order_id=%s 原因=%s",
                                    sym, oid, exc)
 
+    # C-4 U4：止损发卖失败聚合 L2 CRITICAL——漏止损真金损失，研究员须知情（但整批监控不停）。
+    # Why 聚合非逐只：防多标的连板跌停时逐只告警风暴（spec R3）。Why 限 live：dry_run/测试
+    # 的发卖失败非真金风险。与 pre_open 部分拒同范式：L2 不停调度，_halted 保持 False。
+    if n_submit_failed > 0 and _mode() == "live":
+        _alert_critical(
+            f"stop_loss 部分卖出失败 submit_failed={n_submit_failed} checked={n_checked}"
+            f"（查 gw 挡板/lock_down 日志，漏止损须人工补单）")
     logger.info("stop_loss_monitor 完成 checked=%d triggered=%d fallback=%d pending_cancelled=%d mode=%s",
                 n_checked, n_triggered, n_fallback, n_pending_cancelled, _mode())
     return {"checked": n_checked, "stop_triggered": n_triggered,
@@ -1682,7 +1766,17 @@ class TradingEngine:
         from apscheduler.triggers.cron import CronTrigger
         from apscheduler.triggers.interval import IntervalTrigger
 
-        self.sched = AsyncIOScheduler()
+        # C-4 U1：job_defaults 硬化（防 job 堆积重叠 + 休眠补跑风暴）。
+        # max_instances=1：每 job 同时只一个实例——pre_open 挂单慢（QMT 限频）跑超 9:22，
+        #   下次触发被挡，防重叠双挂；stop_loss 30s 跑超 30s 同理防重叠发卖。
+        # misfire_grace_time=300：机器休眠/重启错过触发——5min 内补跑（保盘后 job 不轻易漏），
+        #   超 5min 放弃（stop_loss 30s 堆积 10 次只补最近 1 次，防补跑风暴）。
+        # coalesce=True：与 misfire 配合，堆积合并成一次（不补跑多次）。
+        self.sched = AsyncIOScheduler(job_defaults={
+            "max_instances": 1,
+            "misfire_grace_time": 300,
+            "coalesce": True,
+        })
         # C-2 scheduling-orchestration Task 9：eod 改由 ``pipeline_then_eod`` 事件链驱动。
         # 物理意图（取代 19:00 eod 时钟赌博）：原 ``self._eod`` cron（19:00）靠时差猜测
         # 18:00 增量采集是否落湖 + 18:30 检查点② 是否通过——脆弱时序（采集慢/失败时 _eod
@@ -1695,11 +1789,12 @@ class TradingEngine:
         # Why args=[self]：``pipeline_then_eod(engine)`` 需要引擎实例调 ``engine._eod()``，
         # APScheduler ``args`` 透传 self（与原 ``self._eod`` bound method 等价的显式形式）。
         # ``pipeline_then_eod`` 是 async 函数，AsyncIOScheduler 直接 await（与 ``self._eod`` 同）。
-        from trading.orchestrate.pipeline import pipeline_then_eod
+        # C-4 U2：pipeline 收编为 ``_pipeline_then_eod`` method（过 _critical_guard 装饰），
+        # 替代原外部函数 + ``args=[self]`` 形式——五 job 统一走 L1 停调度 wrapper。
         self.sched.add_job(
-            pipeline_then_eod, CronTrigger.from_crontab(
+            self._pipeline_then_eod, CronTrigger.from_crontab(
                 os.getenv("ENGINE_PIPELINE_CRON", "0 18 * * 1-5")),  # 18:00 盘后触发事件链
-            args=[self], id="pipeline_then_eod",
+            id="pipeline_then_eod",
         )
         # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
         self.sched.add_job(
@@ -1756,6 +1851,11 @@ class TradingEngine:
         #   （重启本身已是一次「连接重置」，无需继承历史失败计数）；持久化反增复杂度（YAGNI）。
         self._guard_fail_count: int = 0
         self._guard_rounds_since_fail: int = 0
+
+        # C-4 U2：停调度 flag（_halt=True 后所有被 _critical_guard 装饰的 job 入口即跳过）。
+        # Why 进程内存（不持久化）：致命停调度需人工介入重启，重启后 _halted=False 重新就绪；
+        #   持久化反而让重启后仍锁死（与「人工确认恢复」语义冲突）。
+        self._halted: bool = False
 
         # 动态白名单实例属性（C-2 scheduling-orchestration W1）：
         #   当日颈线法计划标的的临时注入集合（pre_open 注入，post_close 清空）。
@@ -1903,6 +2003,7 @@ class TradingEngine:
         state_store.init_store()
         state_store._migrate_env_to_account()
 
+    @_critical_guard
     async def _health_guard(self) -> None:
         """M1：网关健康守护——未连接时探测客户端就绪→重连，恢复 live（Task 8）。
 
@@ -1983,6 +2084,28 @@ class TradingEngine:
                     f"网关持续锁死（_reconnect 已耗尽 backoffs 仍未恢复），"
                     f"请人工介入：检查 miniQMT 客户端是否启动 / session 是否被占用 / "
                     f"userdata shm 文件是否过期")
+
+    def _halt(self, msg: str) -> None:
+        """L1 统一停调度原语：置 _halted + CRITICAL + sched.shutdown（幂等）。
+
+        物理意图（spec §5 双层保障）：
+            sched.shutdown 停「新触发」+ _halted flag 防「in-flight job 继续写」。
+            幂等：已 _halted 时直接返回（多路径同时致命不重复 shutdown/alert）。
+
+        Why shutdown(wait=False) 而非 pause()（review 决议）：
+            致命场景下「带病跑不如停」——pause 可被误恢复，留口子；shutdown 硬停 + CRITICAL
+            唤醒人工，是 live 真金保护取向（spec R4）。
+        """
+        if self._halted:
+            return
+        self._halted = True
+        _alert_critical(f"致命停调度 {msg}")
+        try:
+            self.sched.shutdown(wait=False)   # 先例 engine.py shutdown()
+        except Exception:
+            # shutdown 自身抛（如 scheduler 未 start / 已 shutdown）→ _halted 已置，
+            # 被 _critical_guard 装饰的 job 顶检查兜底，不再写。
+            logger.exception("sched.shutdown 失败（_halted 已置，job 顶检查兜底）")
 
     @staticmethod
     def _guard_skip_rounds(fail_count: int) -> int:
@@ -2273,6 +2396,7 @@ class TradingEngine:
             # 顶层兜底：任何未预期异常（含 get_gateway import 失败）都软降级，绝不阻断 eod。
             logger.exception("持仓盈亏播报失败（不影响 eod_plan 主流程）")
 
+    @_critical_guard
     async def _pre_open(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
         if not calendar.is_trading_day(today):
@@ -2280,6 +2404,7 @@ class TradingEngine:
             return
         await pre_open(today)
 
+    @_critical_guard
     async def _stoploss(self) -> None:
         """IntervalTrigger 包装：止损监控（盘中时段判定在 stop_loss_monitor 内）。
 
@@ -2415,6 +2540,7 @@ class TradingEngine:
             pending_ctx=pending_ctx or None,
         )
 
+    @_critical_guard
     async def _post_close(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
         if not calendar.is_trading_day(today):
@@ -2761,6 +2887,18 @@ class TradingEngine:
             else:
                 logger.warning("止盈单挂失败 symbol=%s leg=%s state=%s msg=%s（人工补挂）",
                                symbol, leg, r.get("state"), r.get("message"))
+
+    @_critical_guard
+    async def _pipeline_then_eod(self) -> None:
+        """C-4 U2：pipeline_then_eod 收编为 method（过 _critical_guard）。
+
+        Why 包装：pipeline_then_eod 是 orchestrate/pipeline.py 的外部函数（编排层，
+        不该塞进 engine），但需要与其他四 job 同享 L1 停调度语义。包一层 method 让
+        五 job 统一被 guard 装饰（满足验收标准 2），pipeline 内 raise _CriticalHalt
+        经本 wrapper 捕获 → _halt。
+        """
+        from trading.orchestrate.pipeline import pipeline_then_eod
+        await pipeline_then_eod(self)
 
     # ----- 生命周期 -----
     def start(self) -> None:

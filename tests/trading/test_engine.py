@@ -360,7 +360,9 @@ def test_pre_open_cancels_yesterday_open_orders(monkeypatch):
         async def _fetch_broker_positions(self):
             return {}
 
-    async def _fake_cancel(gw):
+    # U5：pre_open 现调 _cancel_all_open_orders(gw, account_id=...) 激活 CANCELLED 回写，
+    # 测试桩须兼容 account_id 关键字参数（不真撤单）。
+    async def _fake_cancel(gw, account_id=None):
         cancelled["n"] += 1
         return 0
 
