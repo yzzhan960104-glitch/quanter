@@ -119,6 +119,46 @@ def _alert_critical(msg: str) -> None:
         logger.exception("CRITICAL 告警发送失败（不阻塞主流程）：%s", msg)
 
 
+# C-4 U2：L1 致命异常 + 停调度 wrapper。
+class _CriticalHalt(Exception):
+    """L1 致命异常：交易关键路径失败（DB 写/读失真·网关断线·整批失败·敞口未明）。
+
+    物理意图（spec §3 L1 + review 补强边界）：
+        抛出本异常 = 「继续跑会致真金损失或状态真相源失真」，_critical_guard 捕获后调
+        _halt() 停所有 job。与单只业务拒单（RuntimeError，L2 聚合 CRITICAL 不停）区分。
+
+    边界判定线（review 补强 · 基础设施 > 单只计数）：
+        - DB 写异常（insert_order/update_order_state/insert_trade_event/insert_fill 抛错）= L1
+          （哪怕只挂一只，DB 真相源失真优先于「单只」语义，硬抛）；
+        - 单只 _submit RuntimeError（业务拒单：涨跌停/资金不足/限频）= L2（不抛本异常）。
+    """
+
+
+def _critical_guard(coro_method):
+    """L1 路径 wrapper：_halted 检查 + 捕获 _CriticalHalt → _halt 停调度。
+
+    in-flight 语义（review 补强）：
+        - 当前 job：raise _CriticalHalt → 异常向上传播，当前 job 在 raise 处立即中断
+          后续写（不会 continue 把半截状态写完）；本 wrapper except 捕获后 _halt + 再 raise
+          （APScheduler 顶层吞 job 异常记日志，不影响其他 job）。
+        - 其他 job / 下一轮：_halted flag 在本 wrapper 顶 if 兜底——max_instance=1 下，
+          被触发或堆积补跑的 job 入口即跳过，不再写。
+        即 raise 中断「当前轮」，_halted 防「下一轮/其他 job」，覆盖 in-flight 全部窗口。
+    """
+    import functools
+    @functools.wraps(coro_method)
+    async def wrapped(self, *a, **kw):
+        if getattr(self, "_halted", False):
+            logger.warning("引擎已停调度（_halted），跳过 %s", coro_method.__name__)
+            return
+        try:
+            return await coro_method(self, *a, **kw)
+        except _CriticalHalt as e:
+            self._halt(f"[{coro_method.__name__}] {e}")
+            raise   # 再抛：APScheduler 顶层记 job 异常日志；_halt 已生效
+    return wrapped
+
+
 # ============================================================================
 # 环境读取辅助
 # ============================================================================
@@ -1705,11 +1745,12 @@ class TradingEngine:
         # Why args=[self]：``pipeline_then_eod(engine)`` 需要引擎实例调 ``engine._eod()``，
         # APScheduler ``args`` 透传 self（与原 ``self._eod`` bound method 等价的显式形式）。
         # ``pipeline_then_eod`` 是 async 函数，AsyncIOScheduler 直接 await（与 ``self._eod`` 同）。
-        from trading.orchestrate.pipeline import pipeline_then_eod
+        # C-4 U2：pipeline 收编为 ``_pipeline_then_eod`` method（过 _critical_guard 装饰），
+        # 替代原外部函数 + ``args=[self]`` 形式——五 job 统一走 L1 停调度 wrapper。
         self.sched.add_job(
-            pipeline_then_eod, CronTrigger.from_crontab(
+            self._pipeline_then_eod, CronTrigger.from_crontab(
                 os.getenv("ENGINE_PIPELINE_CRON", "0 18 * * 1-5")),  # 18:00 盘后触发事件链
-            args=[self], id="pipeline_then_eod",
+            id="pipeline_then_eod",
         )
         # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
         self.sched.add_job(
@@ -1766,6 +1807,11 @@ class TradingEngine:
         #   （重启本身已是一次「连接重置」，无需继承历史失败计数）；持久化反增复杂度（YAGNI）。
         self._guard_fail_count: int = 0
         self._guard_rounds_since_fail: int = 0
+
+        # C-4 U2：停调度 flag（_halt=True 后所有被 _critical_guard 装饰的 job 入口即跳过）。
+        # Why 进程内存（不持久化）：致命停调度需人工介入重启，重启后 _halted=False 重新就绪；
+        #   持久化反而让重启后仍锁死（与「人工确认恢复」语义冲突）。
+        self._halted: bool = False
 
         # 动态白名单实例属性（C-2 scheduling-orchestration W1）：
         #   当日颈线法计划标的的临时注入集合（pre_open 注入，post_close 清空）。
@@ -1913,6 +1959,7 @@ class TradingEngine:
         state_store.init_store()
         state_store._migrate_env_to_account()
 
+    @_critical_guard
     async def _health_guard(self) -> None:
         """M1：网关健康守护——未连接时探测客户端就绪→重连，恢复 live（Task 8）。
 
@@ -1993,6 +2040,28 @@ class TradingEngine:
                     f"网关持续锁死（_reconnect 已耗尽 backoffs 仍未恢复），"
                     f"请人工介入：检查 miniQMT 客户端是否启动 / session 是否被占用 / "
                     f"userdata shm 文件是否过期")
+
+    def _halt(self, msg: str) -> None:
+        """L1 统一停调度原语：置 _halted + CRITICAL + sched.shutdown（幂等）。
+
+        物理意图（spec §5 双层保障）：
+            sched.shutdown 停「新触发」+ _halted flag 防「in-flight job 继续写」。
+            幂等：已 _halted 时直接返回（多路径同时致命不重复 shutdown/alert）。
+
+        Why shutdown(wait=False) 而非 pause()（review 决议）：
+            致命场景下「带病跑不如停」——pause 可被误恢复，留口子；shutdown 硬停 + CRITICAL
+            唤醒人工，是 live 真金保护取向（spec R4）。
+        """
+        if self._halted:
+            return
+        self._halted = True
+        _alert_critical(f"致命停调度 {msg}")
+        try:
+            self.sched.shutdown(wait=False)   # 先例 engine.py shutdown()
+        except Exception:
+            # shutdown 自身抛（如 scheduler 未 start / 已 shutdown）→ _halted 已置，
+            # 被 _critical_guard 装饰的 job 顶检查兜底，不再写。
+            logger.exception("sched.shutdown 失败（_halted 已置，job 顶检查兜底）")
 
     @staticmethod
     def _guard_skip_rounds(fail_count: int) -> int:
@@ -2283,6 +2352,7 @@ class TradingEngine:
             # 顶层兜底：任何未预期异常（含 get_gateway import 失败）都软降级，绝不阻断 eod。
             logger.exception("持仓盈亏播报失败（不影响 eod_plan 主流程）")
 
+    @_critical_guard
     async def _pre_open(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
         if not calendar.is_trading_day(today):
@@ -2290,6 +2360,7 @@ class TradingEngine:
             return
         await pre_open(today)
 
+    @_critical_guard
     async def _stoploss(self) -> None:
         """IntervalTrigger 包装：止损监控（盘中时段判定在 stop_loss_monitor 内）。
 
@@ -2425,6 +2496,7 @@ class TradingEngine:
             pending_ctx=pending_ctx or None,
         )
 
+    @_critical_guard
     async def _post_close(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
         if not calendar.is_trading_day(today):
@@ -2771,6 +2843,18 @@ class TradingEngine:
             else:
                 logger.warning("止盈单挂失败 symbol=%s leg=%s state=%s msg=%s（人工补挂）",
                                symbol, leg, r.get("state"), r.get("message"))
+
+    @_critical_guard
+    async def _pipeline_then_eod(self) -> None:
+        """C-4 U2：pipeline_then_eod 收编为 method（过 _critical_guard）。
+
+        Why 包装：pipeline_then_eod 是 orchestrate/pipeline.py 的外部函数（编排层，
+        不该塞进 engine），但需要与其他四 job 同享 L1 停调度语义。包一层 method 让
+        五 job 统一被 guard 装饰（满足验收标准 2），pipeline 内 raise _CriticalHalt
+        经本 wrapper 捕获 → _halt。
+        """
+        from trading.orchestrate.pipeline import pipeline_then_eod
+        await pipeline_then_eod(self)
 
     # ----- 生命周期 -----
     def start(self) -> None:
