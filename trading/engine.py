@@ -629,7 +629,10 @@ async def pre_open(date: str) -> dict:
                 # live 模式 gate 拦截 = 当日废单日风险（网关锁死 / 数据未就绪 / 计划未确认），
                 # 仅 logger.warning 不足以叫醒用户（spec M4 教训），推 CRITICAL 钉钉。
                 _alert_critical(msg)
-            return {"date": date, "n_orders": 0, "skipped": gate_reason}
+            # 返回 shape 与 pre_open 其它返回对齐（success: {"submitted","mode"}；
+            # skip: {"submitted","reason"}）——保留 skipped（携带 gate reason，比 reason 更
+            # 富信息）+ 补 submitted/mode 让任何读 result["submitted"] 的调用方不 KeyError。
+            return {"submitted": 0, "mode": _mode(), "skipped": gate_reason}
 
     plan = trading_plan.load_plan(date)
     if plan is None:

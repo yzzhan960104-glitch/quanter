@@ -32,11 +32,6 @@ def eng():
     return TradingEngine()
 
 
-def _run(coro):
-    """同步驱动 async 协程（与 repo 其他 engine 测试范式一致）。"""
-    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
-
-
 # ============================================================================
 # ① 计划确认段
 # ============================================================================
@@ -255,5 +250,9 @@ def test_pre_open_skip_on_gate_failure(monkeypatch, tmp_path):
     with patch("trading.engine.load_plan", return_value=None):
         result = asyncio.run(engine.pre_open("2026-07-30"))
 
-    assert result["n_orders"] == 0
+    # 返回 shape 已规范化为与 pre_open 其它返回一致（success: {"submitted","mode"}；
+    # skip: {"submitted","reason"}）。gate skip 保留 skipped（携带 gate reason）+ 补
+    # submitted/mode，让任何读 result["submitted"] 的调用方不 KeyError（T8 M1 修复）。
+    assert result["submitted"] == 0
+    assert result["mode"] == "dry_run"
     assert result["skipped"] == "无计划"
