@@ -702,7 +702,11 @@ async def pre_open(date: str) -> dict:
             # 未到终态的笔数（主推延迟/柜台未响应）。unconfirmed>0 仅告警不阻塞挂单——
             # 撤单已发，本地状态终会被 on_cancel_error/on_stock_order 对账修正，但必须
             # 显式暴露此口径让运维知晓，杜绝「本地以为撤了、柜台其实没撤」的状态悬空。
-            _cancel_res = await _cancel_all_open_orders(gw)
+            # C-4 U5：补传 account_id 激活柜台路径 cancel_order_by_broker_oid_db 回写
+            # order.state=CANCELLED（breaker._cancel_via_broker_query 在 account_id 提供时才回写）。
+            # Why 必传：不传则撤了昨日单 DB 仍记 SUBMITTED → T+1 对账幽灵单（spec §6.1 判据）。
+            # 此为 C-3 审计结论的最小修（无需 purpose='CANCEL' 行，既有回写路径已够）。
+            _cancel_res = await _cancel_all_open_orders(gw, account_id=_resolve_account_id())
             n_cancelled = _cancel_res["cancelled"]
             n_unconfirmed = _cancel_res["unconfirmed"]
             logger.info(
