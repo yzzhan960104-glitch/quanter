@@ -1873,6 +1873,33 @@ class TradingEngine:
     # ---------------------------------------------------------------------
     # Task 8（C-2 S3）：pre_open 三段式前置 gate
     # ---------------------------------------------------------------------
+    def _gw_health_gate(self, gw) -> tuple[bool, str]:
+        """C-5 V3：网关健康前置 gate（从 _pre_open_gate ② 段抽，共享给 _stoploss/_post_close）。
+
+        物理意图（spec §4.1 · B 共享前置 gate）：
+            触发点业务前显式探测网关健康，锁态时返 ``(False, reason)`` 让调用方
+            skip + CRITICAL 不跑业务（防静默全失败），与 ``_pre_open_gate`` ② 段
+            + ``_health_guard`` 自愈取向一致（不停调度，等 60s 自愈恢复 live）。
+
+        判据（与 _pre_open_gate ② 段逐行等价，DRY 抽离零行为变更）：
+            ① ``gw is None`` 或 ``gw._connected=False`` → ``"网关未连接"``；
+            ② ``gw.is_client_ready()=False`` → ``"miniQMT 客户端未就绪"``。
+        ``is_client_ready`` 是纯文件 mtime 探测（broker/qmt.py:311），不触达 xtquant，
+        CI/单测/无 SDK 环境安全调用。
+
+        Args:
+            gw: 交易网关实例（``get_gateway()`` 取，可能为 None）。鸭子类型：读
+                ``gw._connected`` 与调 ``gw.is_client_ready()``。
+
+        Returns:
+            ``(True, "")`` 网关健康；``(False, reason)`` 锁态，reason 简短中文。
+        """
+        if gw is None or not getattr(gw, "_connected", False):
+            return False, "网关未连接"
+        if not gw.is_client_ready():
+            return False, "miniQMT 客户端未就绪"
+        return True, ""
+
     async def _pre_open_gate(self, date: str, gw) -> tuple[bool, str]:
         """S3：pre_open 三段式前置 gate。全绿返 ``(True, "")``，任一未绿即返。
 
@@ -1904,11 +1931,11 @@ class TradingEngine:
             return False, "无计划"
         if not plan.get("confirmed"):
             return False, "计划未确认（人审闸）"
-        # ② 网关健康（探测，无写副作用）
-        if gw is None or not getattr(gw, "_connected", False):
-            return False, "网关未连接"
-        if not gw.is_client_ready():
-            return False, "miniQMT 客户端未就绪"
+        # ② 网关健康（探测，无写副作用）—— C-5 V3 DRY：改调共享 _gw_health_gate
+        # （与 _stoploss/_post_close 三入口同口径；行为与原内联逐行等价）。
+        gw_ok, gw_reason = self._gw_health_gate(gw)
+        if not gw_ok:
+            return False, gw_reason
         # ③ 数据就绪（DB 查询；防御性双检）
         for k in self._plan_data_keys(plan):
             ready = get_data_ready(date, k)
