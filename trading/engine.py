@@ -2466,6 +2466,15 @@ class TradingEngine:
             （pre_open 挂单时落盘的初始止损价）；时间驱动 trailing（海龟 grace/step/floor）
             需在盘中按持仓最高价动态更新 stop_prices map，属另一个 follow-up，不在本 task 内。
         """
+        # C-5 V4 B：网关健康前置 gate（@_critical_guard 后、交易日守卫前）。
+        # 物理意图（spec §4.3）：gw 锁态时 skip+CRITICAL 不跑业务（不查 plan、不调
+        # stop_loss_monitor），与 _pre_open_gate 网关锁态 skip 同口径；与 _health_guard
+        # 不升 L1 自愈取向一致（C-4 决议）—— 等待 60s 自愈恢复 live，而非 _halt 停调度。
+        gw = get_gateway()
+        ok, reason = self._gw_health_gate(gw)
+        if not ok:
+            _alert_critical(f"stop_loss 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
+            return
         today = datetime.now().strftime("%Y-%m-%d")
         # 交易日守卫（Task 8 fix · review I1）：IntervalTrigger 无 1-5 工作日过滤，
         # 必须显式 is_trading_day，否则周末盘中时段会空跑（与 eod/pre_open/post_close 同口径）。
@@ -2569,6 +2578,14 @@ class TradingEngine:
 
     @_critical_guard
     async def _post_close(self) -> None:
+        # C-5 V4 B：网关健康前置 gate（与 _stoploss 同口径，spec §4.3）。
+        # gw 锁态时 skip+CRITICAL 不跑对账业务（防基于陈旧/缺失快照误判 drift），
+        # 等 _health_guard 自愈；不停调度（与 _pre_open_gate + _health_guard 一致）。
+        gw = get_gateway()
+        ok, reason = self._gw_health_gate(gw)
+        if not ok:
+            _alert_critical(f"post_close 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
+            return
         today = datetime.now().strftime("%Y-%m-%d")
         if not calendar.is_trading_day(today):
             logger.info("post_close 跳过：今日非交易日 %s", today)
