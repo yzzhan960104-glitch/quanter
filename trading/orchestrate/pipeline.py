@@ -69,6 +69,13 @@ async def pipeline_then_eod(engine) -> None:
         rc = await proc.wait()
     finally:
         log_fh.close()
+    # C-4 U3c：采集子进程失败（rc!=0）= T 日增量未落湖 → 用 T-1 数据算 T+1 计划 = 时序 bug
+    # （[[eod-date-offbyone-fix]] 同源风险）。升 L1：raise _CriticalHalt → engine _halt 停调度，
+    # 绝不用陈旧数据产废信号（spec §3 pipeline 采集失败=L1）。
+    # 函数内 import 规避循环依赖（engine.py 顶层 import 本编排层时会反向引用）。
+    if rc != 0:
+        from trading.engine import _CriticalHalt
+        raise _CriticalHalt(f"采集子进程失败 rc={rc}（T 日增量未落湖，拒产 T+1 计划）")
     # 2. 装配本次实验策略 → 收集依赖 key 并集（D3）
     keys: set[str] = set()
     try:
