@@ -15,19 +15,27 @@
   post_close 15:30 盘后：对账（run_reconcile）+ 清动态白名单。熔断连线见 TODO（本 task 不做）。
 
 ============================================================================
-⚠️ 不变量（Task5 M2 风险官要求 · 绝对红线）
+⚠️ 不变量（Task5 M2 风险官要求 · 绝对红线 · W1 已重构为进程内隔离）
 ============================================================================
-本引擎**必须独立进程运行**（``python -m trading``，由 ``trading/__main__.py`` 起常驻
-AsyncIOScheduler），**绝不可被 server lifespan 嵌入 server 进程**。
+本引擎**运行在 uvicorn server 进程的 lifespan 内**（C-2 scheduling-orchestration Task 5/W1
+重构后的既定架构——engine 与 server 合并进同进程，``presentation/server/main.py`` 的 lifespan
+构造 TradingEngine 并起 APScheduler）。历史「必须独立进程、绝不可嵌入 server」的红线
+已由 W1 的**实例属性隔离机制**替代：不再依赖进程隔离来防前视污染。
 
-Why 独立进程是硬约束：
-- ``trading.dynamic_whitelist._DYNAMIC`` 是模块级全局（当日计划标的临时注入），
-  只在 engine 进程内有效——这是设计预期（见 dynamic_whitelist.py 模块 docstring）。
-- 若 engine 与 server 同进程：engine 在 pre_open 注入的 _DYNAMIC 会污染 server 的
-  手动下单路径（Cockpit/前端），导致 server 手动下单越过静态 env 白名单（前视污染），
-  破坏「server 行为与改造前完全一致」的向后兼容红线。
-- 因此 ``presentation/server/main.py`` 的 lifespan **不应** import 本模块、不应构造 TradingEngine。
-  入口唯一在 ``trading/__main__.py``（Task 10）。
+W1 隔离机制（取代旧的进程隔离硬约束）：
+- 动态白名单从模块级全局 ``_DYNAMIC`` 改为 engine **实例属性** ``_dynamic_whitelist``
+  （注入/清空/拼白名单全部走实例属性，不再 mutate 模块级全局）。
+- 模块级 ``_ACTIVE_ENGINE`` 单例（仅 engine 路径构造 TradingEngine 时置位）反查实例，
+  ``_submit`` 从该实例取 ``_dynamic_whitelist``，与静态 env 白名单合并后**显式透传**
+  给 ``trading_service.submit_order`` 的 ``whitelist`` 参数。
+- server 路径的 ``submit_order`` **不传** ``whitelist``（默认 None），``_submit`` 见
+  ``_ACTIVE_ENGINE`` 为 None 即走旧路径 ``_whitelist() = get_effective_whitelist()``
+  （``_dynamic_whitelist`` 恒空 = 纯 env）——server 行为与改造前完全一致（向后兼容红线）。
+- 因此 engine 与 server 同进程**不再**造成前视污染：server 手动下单路径不会读到 engine
+  注入的动态白名单（实例属性隔离 + whitelist 参数显式透传双保险）。
+
+⚠️ ``python -m trading``（``trading/__main__.py``）现仅为**开发/调试常驻入口**，不再是
+唯一入口；生产路径在 uvicorn lifespan 内起 engine（详见 ``start_all.py``）。
 
 ============================================================================
 影子模式（AUTO_TRADE_MODE=dry_run，默认）红线
@@ -54,6 +62,13 @@ from trading import (
     reconcile_job,
     trading_plan,
 )
+# Task 8（C-2 S3 pre_open 三段式 gate）：显式 re-export 让 patch 目标稳定。
+# 物理意图：``pre_open`` 模块级函数与 ``TradingEngine._pre_open_gate`` 都直接调
+# ``load_plan`` / ``get_data_ready``，独立 import 让测试可 ``patch("trading.engine.load_plan")``
+# / ``patch("trading.engine.get_data_ready")`` 命中（trading_plan.get_data_ready 等其它
+# 调用方仍走各自的命名空间引用，互不污染）。
+from trading.trading_plan import load_plan
+from trading.state_store import get_data_ready
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals
@@ -107,6 +122,17 @@ def _alert_critical(msg: str) -> None:
 # ============================================================================
 # 环境读取辅助
 # ============================================================================
+
+# 模块级活跃引擎单例（C-2 scheduling-orchestration W1）：
+#   __init__ 末尾置位 self，供模块级 _submit / pre_open / post_close 反查实例的
+#   ``_dynamic_whitelist`` 属性（engine 与 server 合并进同进程后的物理隔离机制——
+#   注入/清空/拼白名单全部走实例属性，不再 mutate 模块级 _DYNAMIC 全局）。
+#   ⚠️ 仅 engine 独立进程（python -m trading）内会构造 TradingEngine（task brief 红线），
+#   故该单例在 server 进程内恒为 None——server 路径 submit_order 不传 whitelist，
+#   _submit 见 None 即走旧路径（_whitelist() = 纯 env），向后兼容不变。
+_ACTIVE_ENGINE: "TradingEngine | None" = None
+
+
 def _mode() -> str:
     """当前交易模式：dry_run（默认·影子）/ live。
 
@@ -383,7 +409,7 @@ def get_gateway():
     return _svc_get_gw()
 
 
-async def _submit(order, *, confirm: bool = True) -> dict:
+async def _submit(order, *, confirm: bool = True, whitelist: set | None = None) -> dict:
     """下单分流（dry_run 据 _mode）。
 
     透传 trading_service.submit_order，其契约：
@@ -399,9 +425,28 @@ async def _submit(order, *, confirm: bool = True) -> dict:
     （pre_open 必须研究员人工 confirmed=True 才挂单）+ 影子模式前置（≥5 天影子观测）
     三层保障，**而非** confirm 开关——confirm 是 server 手动下单路径的防误触开关，
     引擎通道若走 confirm=False 会导致批量挂单逐单等待人工点确认，盘中不可行。
+
+    whitelist 物理隔离（C-2 scheduling-orchestration W1）：
+        调用方（pre_open/stop_loss_monitor）均不显式传 whitelist（默认 None），
+        由本函数从模块级 ``_ACTIVE_ENGINE`` 单例取 engine 实例的 ``_dynamic_whitelist``
+        并拼静态 env（``self._dynamic_whitelist | static_env_whitelist()``），显式透传
+        给 svc_submit。这样 engine 自动下单通道的白名单与模块级 ``_DYNAMIC`` 全局物理解耦——
+        engine 与 server 合并进同进程后，server 路径的 submit_order（不传 whitelist）仍走
+        ``_whitelist() = get_effective_whitelist()``（_DYNAMIC 恒空 = 纯 env），向后兼容不变。
+        ``_ACTIVE_ENGINE is None`` 仅在未构造 TradingEngine 时发生（理论上不会，__init__ 必置），
+        此防御性分支回退到旧路径（读 get_effective_whitelist），保证 ``python -m trading``
+        单进程语义不变。
     """
     from presentation.server.services.trading_service import submit_order as svc_submit
-    return await svc_submit(order, dry_run=(_mode() == "dry_run"), confirm=confirm)
+    from trading.dynamic_whitelist import get_effective_whitelist, static_env_whitelist
+    if whitelist is None:
+        if _ACTIVE_ENGINE is not None:
+            whitelist = _ACTIVE_ENGINE._dynamic_whitelist | static_env_whitelist()
+        else:
+            # 防御性回退：未构造 TradingEngine（理论不会，__init__ 必置 _ACTIVE_ENGINE）
+            whitelist = get_effective_whitelist()
+    return await svc_submit(order, dry_run=(_mode() == "dry_run"), confirm=confirm,
+                            whitelist=whitelist)
 
 
 # ============================================================================
@@ -574,6 +619,29 @@ async def pre_open(date: str) -> dict:
         - **结论**：live 部署前**必须**确保 gateway 已连接（``get_gateway()`` 返非 None），
           否则当日计划一支也挂不上。
     """
+    # S3（Task 8 · C-2）：三段式前置 gate（通过 _ACTIVE_ENGINE 单例调用实例方法）。
+    # 物理意图：plan-confirmed → gateway-health → data-ready 三段全绿才放行下游（撤昨日单 /
+    # 抓熔断基线 / 挂新单）。任一未绿即早返 skip payload，绝不触达网关写操作。顺序「先便宜
+    # 后贵」（JSON < 探测 < DB 查询）。gate 失败在 live 模式下推 CRITICAL 钉钉（复用
+    # _alert_critical 统一收口，与 M4 静默漏单告警同通道）。
+    # Why 经 _ACTIVE_ENGINE 单例：本函数是模块级函数，gate 是 TradingEngine 实例方法
+    # （需 ``self._plan_data_keys`` 反查策略数据集），故经模块级单例桥接（Task 4 范式）。
+    # _ACTIVE_ENGINE is None 仅在未构造 TradingEngine 时发生（理论不会，__init__ 必置），
+    # 此防御性分支跳过 gate 直接走原 plan["confirmed"] 检查（向后兼容，不破坏旧行为）。
+    if _ACTIVE_ENGINE is not None:
+        gate_ok, gate_reason = await _ACTIVE_ENGINE._pre_open_gate(date, get_gateway())
+        if not gate_ok:
+            msg = f"pre_open gate 未通过：{gate_reason}，跳过挂单"
+            logger.warning(msg)
+            if _mode() == "live":
+                # live 模式 gate 拦截 = 当日废单日风险（网关锁死 / 数据未就绪 / 计划未确认），
+                # 仅 logger.warning 不足以叫醒用户（spec M4 教训），推 CRITICAL 钉钉。
+                _alert_critical(msg)
+            # 返回 shape 与 pre_open 其它返回对齐（success: {"submitted","mode"}；
+            # skip: {"submitted","reason"}）——保留 skipped（携带 gate reason，比 reason 更
+            # 富信息）+ 补 submitted/mode 让任何读 result["submitted"] 的调用方不 KeyError。
+            return {"submitted": 0, "mode": _mode(), "skipped": gate_reason}
+
     plan = trading_plan.load_plan(date)
     if plan is None:
         return {"submitted": 0, "reason": "无计划"}
@@ -647,9 +715,16 @@ async def pre_open(date: str) -> dict:
     if expired_positions:
         await _close_expired_positions(gw, expired_positions)
 
-    # ③ 注入动态白名单（Task5）：仅 engine 进程生效，server 进程不受影响。
+    # ③ 注入动态白名单（Task5 → C-2 W1 改实例属性）：仅 engine 通道生效。
+    # 改造后注入到 engine 实例 self._dynamic_whitelist（通过 _ACTIVE_ENGINE 单例反查），
+    # 而非模块级 _DYNAMIC 全局——engine 与 server 合并进同进程后，实例属性化是两端
+    # 白名单物理隔离的唯一手段（server 路径不读实例属性）。_ACTIVE_ENGINE 理论非空
+    # （pre_open 由 TradingEngine 装配的 job 触发），None 守卫为防御性兜底（回退旧路径）。
     symbols = {o["order"]["symbol"] for o in plan["orders"]}
-    dynamic_whitelist.inject_dynamic_whitelist(symbols)
+    if _ACTIVE_ENGINE is not None:
+        _ACTIVE_ENGINE._dynamic_whitelist |= symbols
+    else:  # pragma: no cover - 防御性回退：未构造 TradingEngine（理论不会）
+        dynamic_whitelist.inject_dynamic_whitelist(symbols)
 
     # ④ 逐单挂单 + raise 兜底（scope #7）
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
@@ -1539,9 +1614,14 @@ async def post_close(
         except Exception:
             logger.exception("post_close snapshot_close_equity 失败（不阻断主流程）")
 
-    # 清动态白名单（Task5）：保证下一交易日从干净状态开始（防止昨日标的污染今日白名单）
+    # 清动态白名单（Task5 → C-2 W1 改实例属性）：保证下一交易日从干净状态开始。
+    # 改造后清 engine 实例 self._dynamic_whitelist（通过 _ACTIVE_ENGINE 单例反查），
+    # 而非模块级 _DYNAMIC 全局——与 pre_open 注入对称（实例属性化两端隔离）。
     try:
-        dynamic_whitelist.clear_dynamic_whitelist()
+        if _ACTIVE_ENGINE is not None:
+            _ACTIVE_ENGINE._dynamic_whitelist.clear()
+        else:  # pragma: no cover - 防御性回退：未构造 TradingEngine（理论不会）
+            dynamic_whitelist.clear_dynamic_whitelist()
     except Exception:
         logger.exception("post_close 清动态白名单异常")
 
@@ -1555,16 +1635,19 @@ async def post_close(
 # TradingEngine：APScheduler 四 cron 装配（独立常驻进程 python -m trading）
 # ============================================================================
 class TradingEngine:
-    """APScheduler 编排容器（四 cron 触发点装配 + start/shutdown 生命周期）。
+    """APScheduler 编排容器（cron 触发点装配 + start/shutdown 生命周期）。
 
-    ⚠️ 不变量（再次强调，见模块 docstring）：本类实例**只在 ``python -m trading``
-    独立进程内构造**，绝不在 server 进程内实例化（否则 dynamic_whitelist._DYNAMIC
-    模块级全局会污染 server 手动下单路径，破坏 server 行为向后兼容）。
+    ⚠️ 进程模型（C-2 scheduling-orchestration Task 9 收口）：
+        本类实例既可由 ``python -m trading`` 独立进程构造（开发/调试，``trading/__main__``），
+        也可由 uvicorn server lifespan 构造（生产，``presentation/server/main.py``）。
+        engine 与 server 同进程后的 dynamic_whitelist 物理隔离已由 W1 实例属性化完成
+        （``self._dynamic_whitelist``，server 路径 submit_order 不读实例属性 → 两端输入源
+        互不污染），原「绝不可同进程」红线已解除。
 
-    四 cron（Task4 已配 env，缺省值对齐 A 股交易日历 · 术语对齐 T 日盘后扫盘）：
-        eod_plan   19:00 周一-五  T 日盘后扫信号 + 落计划 + 推钉钉（T+1 执行）
-                          ⚠️ 非 15:35：18:00 增量采集 + 18:30 检查点② 通过后才扫，
-                          否则读到 T-1 数据算 T+1 计划（时序 bug · Task6 修复）
+    cron 触发点（Task4/9 已配 env，缺省值对齐 A 股交易日历 · 术语对齐 T 日盘后扫盘）：
+        pipeline_then_eod  18:00 周一-五  盘后事件链：采集→校验→eod→brief（Task9 取代
+                          原 19:00 eod 时钟赌博；用 ``await proc.wait()`` 等采集完成，
+                          不再靠时差猜测 18:00 增量是否落湖）
         pre_open   09:22 周一-五  T 日开盘前撤昨日 + 挂当日单
         stop_loss  每 30s（IntervalTrigger，Task8：cron 不支持秒级；时段约束在 monitor 兜底）
         post_close 15:30 周一-五  盘后对账 + 清白名单
@@ -1576,7 +1659,7 @@ class TradingEngine:
         """装配 AsyncIOScheduler + 四 job（不 start）。
 
         ⚠️ 触发器形态分轨（Task8）：
-            eod_plan / pre_open / post_close：分钟粒度 CronTrigger（标准 5 字段）。
+            pipeline_then_eod / pre_open / post_close：分钟粒度 CronTrigger（标准 5 字段）。
             stop_loss：**IntervalTrigger（秒级）**——cron 最小粒度是分钟，
             30s 巡检必须用 interval。时段约束（9:30-11:30 / 13:00-15:00）下放给
             ``stop_loss_monitor`` 内 ``calendar.is_intraday_session`` 兜底，
@@ -1588,17 +1671,25 @@ class TradingEngine:
         from apscheduler.triggers.interval import IntervalTrigger
 
         self.sched = AsyncIOScheduler()
-        # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
+        # C-2 scheduling-orchestration Task 9：eod 改由 ``pipeline_then_eod`` 事件链驱动。
+        # 物理意图（取代 19:00 eod 时钟赌博）：原 ``self._eod`` cron（19:00）靠时差猜测
+        # 18:00 增量采集是否落湖 + 18:30 检查点② 是否通过——脆弱时序（采集慢/失败时 _eod
+        # 读 T-1 数据算 T+1 计划 = 时序 bug）。事件链 ``pipeline_then_eod`` 用确定性的
+        # ``await proc.wait()`` 等采集子进程完成 → 按策略声明 check_freshness → 全绿才
+        # ``engine._eod()``，把「时钟赌博」换成「事件驱动」。brief 播报也收进事件链尾部。
+        # Why 18:00（默认）：盘后 18:00 触发事件链——此时增量采集的 @18:00 sync_all_tushare
+        # 刚开始，事件链内部 ``await proc.wait()`` 等其完成（不再靠 19:00 时差赌博）。
+        # ENGINE_PIPELINE_CRON env 可覆盖（灰度调整事件链触发时点用）。
+        # Why args=[self]：``pipeline_then_eod(engine)`` 需要引擎实例调 ``engine._eod()``，
+        # APScheduler ``args`` 透传 self（与原 ``self._eod`` bound method 等价的显式形式）。
+        # ``pipeline_then_eod`` 是 async 函数，AsyncIOScheduler 直接 await（与 ``self._eod`` 同）。
+        from trading.orchestrate.pipeline import pipeline_then_eod
         self.sched.add_job(
-            self._eod, CronTrigger.from_crontab(
-                # ⚠️ 时序修复（Task6）：15:35 → 19:00。原 15:35 触发时 T 日增量行情
-                # 尚未落湖（@18:00 sync_all_tushare 才跑增量采集 + @18:30 数据检查点②
-                # 才验通过），_eod 读到的仍是 T-1 数据 → 用 T-1 收盘算 T+1 计划 = 时序 bug。
-                # 挪到 19:00 既等足 18:00 增量落湖 + 18:30 检查点② 通过，又留足窗口在
-                # T+1 日 09:22 pre_open 前完成扫盘 + 人审确认（confirmed=False 闸）。
-                os.getenv("ENGINE_EOD_PLAN_CRON", "0 19 * * 1-5")),
-            id="eod_plan",
+            pipeline_then_eod, CronTrigger.from_crontab(
+                os.getenv("ENGINE_PIPELINE_CRON", "0 18 * * 1-5")),  # 18:00 盘后触发事件链
+            args=[self], id="pipeline_then_eod",
         )
+        # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
         self.sched.add_job(
             self._pre_open, CronTrigger.from_crontab(
                 os.getenv("ENGINE_PRE_OPEN_CRON", "22 9 * * 1-5")),
@@ -1653,6 +1744,152 @@ class TradingEngine:
         #   （重启本身已是一次「连接重置」，无需继承历史失败计数）；持久化反增复杂度（YAGNI）。
         self._guard_fail_count: int = 0
         self._guard_rounds_since_fail: int = 0
+
+        # 动态白名单实例属性（C-2 scheduling-orchestration W1）：
+        #   当日颈线法计划标的的临时注入集合（pre_open 注入，post_close 清空）。
+        # Why 实例属性而非模块级 _DYNAMIC 全局：engine 与 server 合并进同进程后，
+        #   模块级全局会被 engine 注入污染 server 手动下单路径（破坏向后兼容红线）。
+        #   实例属性 + submit_order(whitelist=...) 显式参数透传实现物理隔离——
+        #   engine 通道读实例属性 + 静态 env，server 通道读 get_effective_whitelist()
+        #   （_DYNAMIC 恒空 = 纯 env），两端输入源互不污染。
+        self._dynamic_whitelist: set[str] = set()
+
+        # 模块级活跃引擎单例置位（供模块级 _submit / pre_open / post_close 反查实例）。
+        global _ACTIVE_ENGINE
+        _ACTIVE_ENGINE = self
+
+    # ---------------------------------------------------------------------
+    # Task 8（C-2 S3）：pre_open 三段式前置 gate
+    # ---------------------------------------------------------------------
+    async def _pre_open_gate(self, date: str, gw) -> tuple[bool, str]:
+        """S3：pre_open 三段式前置 gate。全绿返 ``(True, "")``，任一未绿即返。
+
+        物理意图（spec S3 · 三段式前置 gate，最便宜先做）：
+            模块级 ``pre_open(date)`` 入口最先调用本方法，**任一未绿即早返**，绝不触达
+            网关写操作（撤昨日单 / 抓熔断基线 / 挂新单）。顺序「先便宜后贵」：
+
+              ① 计划确认（读本地 JSON，最便宜）——
+                 ``load_plan`` 返 None → ``"无计划"``；
+                 ``plan["confirmed"]`` 假 → ``"计划未确认（人审闸）"``。
+              ② 网关健康（探测，无写副作用）——
+                 ``gw is None`` 或 ``gw._connected=False`` → ``"网关未连接"``；
+                 ``gw.is_client_ready()=False`` → ``"miniQMT 客户端未就绪"``。
+              ③ 数据就绪（DB 查询；防御性双检）——
+                 遍历 ``self._plan_data_keys(plan)``，``get_data_ready(date, k)`` 返 None
+                 或 ``ok!=1`` → ``f"数据 {k} 未就绪（{message}）"``。
+
+        Args:
+            date: T 日（YYYY-MM-DD，与 ``load_plan`` 读取口径一致）。
+            gw:   交易网关实例（``get_gateway()`` 取，可能为 None）。鸭子类型：读
+                  ``gw._connected`` 与调 ``gw.is_client_ready()``（broker/qmt.py:311 契约）。
+
+        Returns:
+            ``(True, "")`` 三段全绿；``(False, reason)`` 任一未绿，reason 为简短中文。
+        """
+        # ① 计划确认（读本地 JSON，最便宜）
+        plan = load_plan(date)
+        if not plan:
+            return False, "无计划"
+        if not plan.get("confirmed"):
+            return False, "计划未确认（人审闸）"
+        # ② 网关健康（探测，无写副作用）
+        if gw is None or not getattr(gw, "_connected", False):
+            return False, "网关未连接"
+        if not gw.is_client_ready():
+            return False, "miniQMT 客户端未就绪"
+        # ③ 数据就绪（DB 查询；防御性双检）
+        for k in self._plan_data_keys(plan):
+            ready = get_data_ready(date, k)
+            if ready is None or not ready.get("ok"):
+                msg = ready["message"] if ready else "未采集"
+                return False, f"数据 {k} 未就绪（{msg}）"
+        return True, ""
+
+    def _plan_data_keys(self, plan: dict) -> set[str]:
+        """从 plan 反推策略声明的数据集 key 并集（③ 数据就绪段防御性双检用）。
+
+        物理意图（spec S3 · ③ 数据就绪段的「查哪些数据集」来源）：
+            plan orders 携带 ``experiment_id``，经 ``resolve_active`` 反查
+            ``strategy_name`` → ``build_strategy(name, params).required_data_keys``
+            （Task 2 策略接口声明的依赖数据集），取并集。解析失败（无实验 / DB 锁 /
+            策略未注册）→ 返 ``{"daily"}``（保守默认，③ 本就是防御性双检，回退默认
+            不会误放行未就绪数据：daily 未就绪时 gate 仍会拦）。
+
+        Why resolve_active 而非读 plan orders 内联策略名：plan orders 只存
+            ``experiment_id``（归因字段），不存 ``strategy_name``——必须经 resolver
+            反查才能拿到策略名 → build_strategy。Why 不缓存：pre_open 单进程每日仅
+            一次调用，零缓存一致性成本。
+
+        Args:
+            plan: ``load_plan`` 返回的 dict（含 ``orders`` 列表，每项 ``experiment_id``）。
+
+        Returns:
+            数据集 key 并集（如 ``{"daily"}`` 或 ``{"daily", "moneyflow"}``）；
+            解析失败/空 orders → ``{"daily"}``。
+        """
+        keys: set[str] = set()
+        try:
+            from experiment.resolver import resolve_active
+            from strategies.registry import build_strategy
+            # ActiveExperiment 字段名是 experiment_id（非 .id，见 experiment/models.py:55）
+            exp_map = {e.experiment_id: e for e in resolve_active()}
+            for o in plan.get("orders", []):
+                exp = exp_map.get(o.get("experiment_id"))
+                if exp is not None:
+                    strat = build_strategy(exp.strategy_name, exp.params)
+                    keys |= set(strat.required_data_keys)
+        except Exception:
+            logger.exception("_plan_data_keys 解析失败，回退默认 {daily}")
+        return keys or {"daily"}
+
+    async def bootstrap(self) -> None:
+        """W3：I/O 初始化收口（原 ``__main__._run_forever`` 的 7 步）。
+
+        三段分离（构造 → bootstrap → start）：
+            - ``__init__``：构造 AsyncIOScheduler + 注册四 cron job（零 I/O，可安全在
+              server lifespan 内构造）。
+            - ``bootstrap``（本方法）：连接网关 + 注册成交回报回调 + position_book/state_store
+              建表迁移（I/O init，必须在 start() 之前）。
+            - ``start``：启 scheduler（调度启动；cron 一旦启动，触发点可能读写 DB/网关）。
+
+        Why 必须在 start() 之前：cron 一旦启动，下一个触发点（如 stop_loss_monitor /
+            _handle_order_update）可能读 position_book/state_store / 调 gw 回调链路，
+            建表与回调注册必须先就绪，否则首触发点会崩。
+
+        Why 从 ``__main__._run_forever`` 提取：让独立 ``python -m trading`` 与 uvicorn
+            server lifespan 复用同一段 I/O 初始化（W3 收口），避免两处复制漂移。
+
+        物理意图（保留原 ``__main__`` 注释，行为完全等价 · W3 不改启动语义）：
+            - 网关 connect + set_order_update_callback（修 G5：成交回报回流链路就绪）。
+            - 异常兜底不抛：连接失败时仍让 cron 起来——触发点内部 get_gateway() 会再次
+              惰性取单例做兜底判空（None 时走 dry_run 分支），这里只打 exception 不阻断。
+            - position_book.init_db / state_store.init_store / state_store._migrate_env_to_account
+              建表 + 从 .env 落 account 行（state-store-redesign T13）。
+        """
+        gw = get_gateway()
+        if gw is not None:
+            try:
+                await gw.connect()  # async：内部 run_in_executor 包 xtquant C++ 阻塞 connect
+                gw.set_order_update_callback(self._handle_order_update)  # sync 注入成交回报回调
+                self._gw = gw  # 供 handler 反查 _orders 判 BUY/SELL side（见 engine._side_from_update）
+                logger.info("网关已连接 + 成交回调已注册")
+            except Exception:
+                logger.exception("网关连接失败（cron 仍启动，触发点内部 get_gateway 兜底）")
+        else:
+            logger.warning("未装配网关（AUTO_TRADE_MODE=dry_run 影子模式，回调链路不生效）")
+
+        # 初始化本地持仓账本（gap4 · 幂等建表，对齐 experiment/store.init_db 范式）。
+        # 必须在 start() 之前：cron 一旦启动，_handle_order_update/_post_close 就可能
+        # 读写账本，建表必须先就绪。
+        # state_store 统一交易状态库（state-store-redesign T13）：
+        # init_store 建 6 张表（account/trade_event/order/fill/position/account_daily）+
+        # _migrate_env_to_account 从 .env 读 QMT_* 配置写入 account 表（多账户扩展基础）。
+        # 必须在 start() 之前：eod_plan/pre_open/_handle_order_update 全查 state_store。
+        # 函数局部 import（W3）：patch 源模块路径（trading.position_book.init_db 等）可覆盖。
+        from trading import position_book, state_store
+        position_book.init_db()
+        state_store.init_store()
+        state_store._migrate_env_to_account()
 
     async def _health_guard(self) -> None:
         """M1：网关健康守护——未连接时探测客户端就绪→重连，恢复 live（Task 8）。

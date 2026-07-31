@@ -36,6 +36,11 @@ def _isolate_plan_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(state_store, "_DEFAULT_DB", _db)
     position_book.init_db()
     state_store.init_store()
+    # Task 8（C-2 S3）：重置模块级 _ACTIVE_ENGINE 单例——pre_open 入口的 gate 经它调用
+    # 实例方法，若不重置会跨测试泄漏（前序构造 TradingEngine 的测试残留），让本文件里
+    # 非 gate 焦点的 pre_open 测试（expired_positions / alerts）被 gate 拦截早返。
+    # 重置为 None 后 pre_open 走防御性分支跳过 gate，保留这些测试原本验证的下游逻辑。
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
 
 
 # ============================================================================
@@ -1162,14 +1167,16 @@ def test_pre_open_formed_at_missing_fallback_places(monkeypatch):
 # 5. TradingEngine 装配：实例化即注册 4 cron job（不 start，不真起 scheduler）
 # ============================================================================
 def test_engine_registers_four_cron_jobs():
-    """TradingEngine 实例化 → AsyncIOScheduler 装 4 个 job（eod/pre_open/stoploss/post_close）。
+    """TradingEngine 实例化 → AsyncIOScheduler 装 4 个 job（pipeline_then_eod/pre_open/stoploss/post_close）。
 
     不 start（plan 红线：不起 APScheduler 真调度），只验证 cron 注册成功。
+    C-2 Task 9：原 ``eod_plan`` 19:00 cron 已由 ``pipeline_then_eod`` 事件链取代
+    （采集→校验→eod→brief，args=[self]）。
     """
     eng = engine.TradingEngine()
     jobs = eng.sched.get_jobs()
     job_ids = {j.id for j in jobs}
-    assert {"eod_plan", "pre_open", "stop_loss", "post_close"} <= job_ids
+    assert {"pipeline_then_eod", "pre_open", "stop_loss", "post_close"} <= job_ids
 
 
 # ============================================================================

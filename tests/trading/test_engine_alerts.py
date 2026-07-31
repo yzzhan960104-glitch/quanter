@@ -91,6 +91,10 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
     断言：notify_risk_event 被调，level=CRITICAL，msg 含「漏挂」/「submitted=0」。
     """
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    # Task 8（C-2 S3）：重置 _ACTIVE_ENGINE——本测焦点是 pre_open 末尾「submitted=0 漏挂」
+    # 告警，不是 gate。模块级 _ACTIVE_ENGINE 可能从前序测试泄漏（构造 TradingEngine 残留），
+    # 不重置会让 pre_open 入口的三段式 gate 先拦截早返，到不了 submit 逻辑。
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
     # I-1（测试卫生）：TRADE_PLAN_DIR 指向 tmp_path，save_plan/confirm_plan 落到临时目录，
     # 不污染实盘 logs/trading_plans/（_plan_path 读 os.getenv("TRADE_PLAN_DIR")）。
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
@@ -145,6 +149,8 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
     不是真「网关锁死」——真锁死只在 live 下才有漏单风险。故 dry_run 不告警。
     """
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    # Task 8（C-2 S3）：重置 _ACTIVE_ENGINE（同 live 用例，避免 gate 拦截到不了 submit 逻辑）。
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
     # I-1（测试卫生）：TRADE_PLAN_DIR 指向 tmp_path，落盘不污染实盘 logs/trading_plans/。
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
     from trading import trading_plan

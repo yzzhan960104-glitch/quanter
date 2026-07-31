@@ -216,6 +216,22 @@ def init_store(db_path: str | None = None) -> None:
                 PRIMARY KEY (account_id, date)
             )
         """)
+        # ⑦ data_ready（数据就绪信号 · eod/pre_open 前置门禁用）——全新表
+        # C-2 S1：采集完成后写一行 (date, dataset) 就绪事件，eod/pre_open 流读它判断是否可推进。
+        # INSERT OR REPLACE 幂等（同日重采覆盖），PK(date, dataset) 多数据集独立。
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS data_ready (
+                date          TEXT NOT NULL,
+                dataset       TEXT NOT NULL,
+                ok            INTEGER NOT NULL,
+                melted        INTEGER NOT NULL DEFAULT 0,
+                latest_date   TEXT,
+                expected_date TEXT NOT NULL,
+                ready_at      TEXT NOT NULL,
+                message       TEXT,
+                PRIMARY KEY (date, dataset)
+            )
+        """)
 
 
 # ============================= T2：account 表 CRUD + .env 迁移 =============================
@@ -620,3 +636,30 @@ def get_latest_action(trade_id: str, *, db_path: str | None = None) -> str | Non
             (trade_id,)
         ).fetchone()
     return row["action"] if row else None
+
+
+# ============================= C-2 S1：data_ready 数据就绪信号 =============================
+
+def upsert_data_ready(date: str, dataset: str, *, ok: bool, melted: bool,
+                      latest_date: str | None, expected_date: str,
+                      message: str, db_path: str | None = None) -> None:
+    """幂等写数据就绪事件（同日重采覆盖，PK (date, dataset) ON CONFLICT REPLACE）。"""
+    from datetime import datetime
+    ready_at = datetime.now().isoformat(timespec="seconds")
+    with _connect(db_path or _DEFAULT_DB) as con:
+        con.execute(
+            "INSERT OR REPLACE INTO data_ready "
+            "(date, dataset, ok, melted, latest_date, expected_date, ready_at, message) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (date, dataset, int(ok), int(melted), latest_date, expected_date, ready_at, message),
+        )
+
+
+def get_data_ready(date: str, dataset: str = "daily",
+                   db_path: str | None = None) -> dict | None:
+    """读某日某数据集就绪事件。无记录返 None（未采集）。"""
+    with _connect(db_path or _DEFAULT_DB) as con:
+        row = con.execute(
+            "SELECT * FROM data_ready WHERE date=? AND dataset=?", (date, dataset),
+        ).fetchone()
+    return dict(row) if row else None

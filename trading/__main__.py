@@ -1,21 +1,27 @@
 # -*- coding: utf-8 -*-
-"""二期自动交易引擎独立常驻进程入口：``python -m trading``。
+"""二期自动交易引擎常驻进程入口（开发/调试）：``python -m trading``。
 
 ============================================================================
-Why 独立进程（Task5/9 风险官硬约束 · 绝对红线）
+定位（C-2 scheduling-orchestration Task 5/W1 重构后）
 ============================================================================
-本入口起一个独立常驻 Python 进程，**不寄生 server uvicorn**：
+本入口现仅为**开发/调试常驻入口**，**不再是生产唯一入口**。生产路径由
+``start_all.py`` 拉起的 **uvicorn server** 进程托管：server lifespan 内构造
+TradingEngine 并起 APScheduler（engine 与 server 合并进同进程）。
 
-- ``trading.dynamic_whitelist._DYNAMIC`` 是模块级全局（当日计划标的临时注入），
-  只在 engine 进程内有效（设计预期，见 ``dynamic_whitelist.py`` 模块 docstring）。
-- 若 engine 与 server 同进程：engine 在 pre_open 注入的 _DYNAMIC 会污染 server 的
-  手动下单路径（Cockpit/前端），导致 server 手动下单越过静态 env 白名单（前视污染），
-  破坏「server 行为与改造前完全一致」的向后兼容红线。
-- 因此 server 的 lifespan **不** import 本模块、不构造 TradingEngine；入口唯一在此。
+Why 可合并（W1 实例属性隔离取代旧进程隔离硬约束）：
+- 历史红线「engine 必须独立进程、绝不嵌入 server」是为了防前视污染（engine 注入的
+  动态白名单污染 server 手动下单路径）。W1 已把动态白名单从模块级全局
+  ``_DYNAMIC`` 改为 engine **实例属性** ``_dynamic_whitelist``，``_submit`` 经
+  ``_ACTIVE_ENGINE`` 单例反查实例、显式透传 ``whitelist`` 给 submit_order；server 路径
+  不传 whitelist 即走纯 env 旧路径（见 ``engine.py`` 模块 docstring 不变量块）。
+- 因此 engine 与 server 同进程不再前视污染，合并进 uvicorn lifespan 安全。
+
+本入口的残留用途：本地无 server 时手动起 engine 跑四 cron（开发联调/排障）。
+生产部署用 uvicorn，不要靠本入口托管线上 engine。
 
 职责切分（薄入口原则 · Karpathy 极简）：
 - 本入口只做三件事：① 加载 .env ② 起 event loop 守护 AsyncIOScheduler
-  ③ LIVE 模式启动期 ≥5 天影子期硬闸（Plan 4 T6，``_shadow_gate`` fail-closed
+  ③ LIVE 模式启动期 ≥5 天影子期硬闸（Plan 4 T6，``check_shadow_gate`` fail-closed
   真·闸，取代历史 WARNING 提醒——spec §5.3 误称"硬闸"实为提醒）。
 - 全部业务逻辑（四触发点、APScheduler cron 装配、交易日判定、影子分流）都在
   ``trading/engine.py::TradingEngine``（Task9），本入口不重复实现任何业务逻辑。
@@ -72,8 +78,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 顶层绑定 resolve_active 到本模块属性（供 _shadow_gate 调用 + 测试 monkeypatch 覆盖）。
-# Why 不在 _shadow_gate 内用 ``from experiment.resolver import resolve_active``：
+# 顶层绑定 resolve_active 到本模块属性（供 check_shadow_gate 调用 + 测试 monkeypatch 覆盖）。
+# Why 不在 check_shadow_gate 内用 ``from experiment.resolver import resolve_active``：
 # 那会把符号绑到 experiment.resolver 模块，测试 ``monkeypatch.setattr(trading.__main__,
 # "resolve_active", fake)`` 无法覆盖（命名空间分叉）→ 测试无法 mock DB。
 # experiment.resolver 依赖链纯标准库（sqlite3/dataclass），不拉 trading.engine 的
@@ -99,28 +105,36 @@ def _days_since_activation(activated_at):
     return (datetime.now().date() - then).days
 
 
-def _shadow_gate():
+def check_shadow_gate() -> bool:
     """≥5 天影子期硬闸（spec §5.3/§12#14，Plan 4 L5，fail-closed 真·闸）。
 
     物理意图：spec §5.3 把 ``__main__`` 旧 WARNING 误称"≥5天硬闸"——实为提醒，切
     LIVE 只需改 env。本函数升级为真闸：mode=live 时查所有 ACTIVE 实验的
-    activated_at，任一影子期 < TRADE_SHADOW_MIN_DAYS → sys.exit(2) + 钉钉
+    activated_at，任一影子期 < TRADE_SHADOW_MIN_DAYS → 返 False + 钉钉
     CRITICAL（绝不裸跑真单）。
+
+    W2 改造（C-2 scheduling-orchestration Task 5）：原 ``_shadow_gate`` 内联
+    ``sys.exit(2)`` 在独立进程模式可接受，但 engine 合并进 uvicorn server 进程后，
+    ``sys.exit`` 会杀掉整个 API server。故本函数从「进程级 sys.exit」收敛为「函数级
+    布尔返回」：拒切 LIVE 时 ``return False`` 而非 sys.exit。独立 ``__main__`` 模式
+    仍可在调用点 ``if not check_shadow_gate(): sys.exit(2)``（进程级决策由调用方决定），
+    uvicorn lifespan 则据返回值决定是否起 engine。CRITICAL 钉钉告警（build_default_manager
+    + fire_and_forget）行为不变。
 
     风控红线（D3/D8/D9）：
       - mode=dry_run → 直接放行返 True（硬闸仅 LIVE 触发，影子模式不拦）。
-      - resolve_active 抛异常 → fail-closed sys.exit(2)（绝不因查不到而放行 LIVE；
+      - resolve_active 抛异常 → fail-closed 返 False（绝不因查不到而放行 LIVE；
         区别于返空列表的合法清场——异常意味着状态未知，按未知拒绝）。
       - 返空列表 → 放行（D8 合法清场：实验被 archive 后无在线版本，是研究员显式
         下线操作的结果，非查询失败，不应阻塞 LIVE）。
       - activated_at 缺失(None)或解析失败 → 保守归入 fresh 拒绝（D9 宁可误杀：
         历史脏数据 activated_at 缺失比误放行一个未观测满期的新实验代价小得多）。
 
-    通道装配（关键）：trading/__main__ 是独立常驻进程（不寄生 server lifespan），
-    grep 确认 presentation/server/main.py、discovery/cli.py 均在启动期显式 build_default_manager()
-    装钉钉通道，但本入口历史从未装过。本函数在调 notify_risk_event 前补装——否则
-    拒切 LIVE 的 CRITICAL 告警会因无通道走软降级静默丢失，sys.exit(2) 仍生效但研究
-    员不知为何被拒。build_default_manager 幂等，重复调用安全。
+    通道装配（关键）：trading/__main__ 作为开发/调试常驻入口（生产路径在 uvicorn lifespan
+    内起 engine，本入口不寄生 server lifespan），grep 确认 presentation/server/main.py、
+    discovery/cli.py 均在启动期显式 build_default_manager() 装钉钉通道，但本入口历史从未装过。
+    本函数在调 notify_risk_event 前补装——否则拒切 LIVE 的 CRITICAL 告警会因无通道走软降级
+    静默丢失，返 False 仍生效但研究员不知为何被拒。build_default_manager 幂等，重复调用安全。
     """
     mode = os.getenv("AUTO_TRADE_MODE", "dry_run")
     if mode == "dry_run":
@@ -138,7 +152,7 @@ def _shadow_gate():
                 f"拒切 LIVE：experiment 状态查询失败（{e}），回退 dry_run", "CRITICAL"))
         except Exception:
             pass
-        sys.exit(2)
+        return False
     # 空列表放行（D8）；任一影子期不足/缺失 → 拒绝（D9）。
     # 两次 _days_since_activation 调用合并到 fresh 推导式：None 视为 fresh（保守拒绝）。
     fresh = [e for e in experiments
@@ -152,7 +166,7 @@ def _shadow_gate():
                 f"拒切 LIVE：{len(fresh)} 实验影子期不足 {min_days} 天，回退 dry_run", "CRITICAL"))
         except Exception:
             pass
-        sys.exit(2)
+        return False
     # LIVE 放行前的最后提醒（保留原 WARNING 语义，避免运维因闸门通过而放松对账/网关/
     # 止损行情源就绪的人工核验——闸只校验影子期，不校验对账连续无 drift 等其他红线）。
     logger.warning("⚠️ LIVE 模式：所有 ACTIVE 实验影子期 ≥ %s 天，放行（确保对账/网关/止损已就绪）", min_days)
@@ -190,55 +204,26 @@ async def _run_forever() -> None:
     只需「挂起不退出」即可；每小时醒一次无业务意义（仅保活心跳，避免某些事件循环
     实现对纯阻塞 sleep 的超时打断异常）。 KeyboardInterrupt/CancelledError 由外层
     ``asyncio.run`` 冒泡到 ``__main__`` 守卫统一处置。
+
+    W3（C-2 scheduling-orchestration Task 5）：原 7 步 I/O 初始化（connect + 注册回调
+    + position_book.init_db + state_store.init_store + _migrate_env_to_account）已收口到
+    ``TradingEngine.bootstrap()``，本入口仅做「构造 → bootstrap → start → 守护」四段，
+    让独立进程与 uvicorn server lifespan 复用同一段初始化（不改启动语义：connect-then-start
+    顺序保持不变，只是搬进 bootstrap）。
     """
     # 惰性 import：避免模块顶层 import 触发 trading 包重链（test 导入本模块时不
     # 应连带拉起 engine 依赖链；engine.py 顶层 import apscheduler 等）。
-    from trading.engine import TradingEngine, get_gateway
+    from trading.engine import TradingEngine
 
-    # M3 启动 banner：在连接网关前打印进程内 session/account/mode/口径版本
-    # （为什么在 get_gateway 之前：banner 先于 connect 输出，便于排查 .env 漂移）。
+    # M3 启动 banner：在 bootstrap（含网关 connect）前打印进程内 session/account/mode/
+    # 口径版本（banner 先于 connect 输出，便于排查 .env 漂移）。
     log_startup_banner()
 
     eng = TradingEngine()
 
-    # ----------------------------------------------------------------------
-    # 连接网关 + 注册成交回报回调（修 G5 根因：原 __main__ 既不 connect 也不
-    # set_order_update_callback，导致 Task10 写的 _handle_order_update 永不被触发，
-    # QMT 异步成交回报无法回流到 engine._orders / 钉钉 / 自动止盈挂单链路）。
-    #
-    # Why 在 eng.start() 之前：APScheduler 一旦 start，下一个 cron 触发点（如
-    # stoploss_monitor）就可能进 place_order → 需要回调链路已就绪；故 connect +
-    # 注入 callback 必须先于 scheduler 启动，保证任何触发点跑时回调链已通。
-    #
-    # Why 异常兜底不抛：连接失败时仍让 cron 起来——触发点内部 get_gateway() 会
-    # 再次惰性取单例做兜底判空（None 时走 dry_run 分支），这里只打 exception 不
-    # 阻断 APScheduler 装配，避免「网关短时连不上」直接让整个常驻进程退出。
-    # ----------------------------------------------------------------------
-    gw = get_gateway()
-    if gw is not None:
-        try:
-            await gw.connect()  # async：内部 run_in_executor 包 xtquant C++ 阻塞 connect
-            gw.set_order_update_callback(eng._handle_order_update)  # sync 注入成交回报回调
-            eng._gw = gw  # 供 handler 反查 _orders 判 BUY/SELL side（见 engine._side_from_update）
-            logger.info("网关已连接 + 成交回调已注册")
-        except Exception:
-            logger.exception("网关连接失败（cron 仍启动，触发点内部 get_gateway 兜底）")
-    else:
-        logger.warning("未装配网关（AUTO_TRADE_MODE=dry_run 影子模式，回调链路不生效）")
-
-    # 初始化本地持仓账本（gap4 · 幂等建表，对齐 experiment/store.init_db 范式）。
-    # 必须在 eng.start() 之前：cron 一旦启动，_handle_order_update/_post_close 就可能
-    # 读写账本，建表必须先就绪。
-    from trading import position_book
-    position_book.init_db()
-
-    # state_store 统一交易状态库（state-store-redesign T13）：
-    # init_store 建 6 张表（account/trade_event/order/fill/position/account_daily）+
-    # _migrate_env_to_account 从 .env 读 QMT_* 配置写入 account 表（多账户扩展基础）。
-    # 必须在 eng.start() 之前：eod_plan/pre_open/_handle_order_update 全查 state_store。
-    from trading import state_store
-    state_store.init_store()
-    state_store._migrate_env_to_account()
+    # W3：7 步 I/O 初始化收口进 bootstrap（connect + 回调注册 + position_book/state_store
+    # 建表迁移）。必须先于 eng.start()——APScheduler 一旦 start，触发点可能读写 DB/回调链路。
+    await eng.bootstrap()
 
     eng.start()  # 注册四 cron job + 启动 AsyncIOScheduler（不阻塞）
     try:
@@ -258,10 +243,15 @@ if __name__ == "__main__":
 
     # Plan 4 T6：≥5 天影子期硬闸（fail-closed 真·闸）。
     # 取代原启动期 WARNING 段（spec §5.3 误称"硬闸"实为提醒——切 LIVE 只需改 env，
-    # 无任何拦单）。_shadow_gate 内部 dry_run 直接放行；live 时查所有 ACTIVE 实验
-    # activated_at，任一影子期 < TRADE_SHADOW_MIN_DAYS → sys.exit(2) + 钉钉 CRITICAL。
+    # 无任何拦单）。check_shadow_gate 内部 dry_run 直接放行；live 时查所有 ACTIVE 实验
+    # activated_at，任一影子期 < TRADE_SHADOW_MIN_DAYS → 返 False + 钉钉 CRITICAL。
     # 异常 fail-closed / 空列表放行 / activated_at 缺失保守拒绝（D3/D8/D9）。
-    _shadow_gate()
+    # W2（C-2 Task 5）：check_shadow_gate 返 bool 而非 sys.exit——独立进程模式下
+    # 拒切 LIVE 仍 sys.exit(2)（进程级决策）；engine 合并进 uvicorn 后由 server
+    # lifespan 据 bool 决定是否起 engine，不再 sys.exit 杀掉整个 API server。
+    if not check_shadow_gate():
+        logger.error("影子期不足，拒绝启动 engine（独立进程模式退出）")
+        sys.exit(2)   # 独立进程模式仍可 exit；uvicorn 模式由 lifespan 决定
 
     try:
         asyncio.run(_run_forever())

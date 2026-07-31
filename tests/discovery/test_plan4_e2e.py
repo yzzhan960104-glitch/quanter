@@ -75,11 +75,12 @@ def test_plan4_multi_night_daemon_converges_and_publishes(tmp_path, monkeypatch)
 
 @pytest.mark.slow
 def test_plan4_shadow_gate_blocks_insufficient_shadow(tmp_path, monkeypatch):
-    """≥5 天硬闸：mode=live + 新 promote 实验（activated_at 今日，影子期 0 < 5）→ sys.exit(2)。
+    """≥5 天硬闸：mode=live + 新 promote 实验（activated_at 今日，影子期 0 < 5）→ 返 False。
 
     物理意图：spec §5.3 把旧 WARNING 升级为真·闸（fail-closed）。本用例钉死"影子期不足
     拒绝切 LIVE"的红线——activated_at=今日 → 影子期 0 天 < TRADE_SHADOW_MIN_DAYS=5 →
-    sys.exit(2)，绝不裸跑真单。
+    返 False（W2 改造：原 sys.exit(2) 收敛为 bool 返回，进程级 sys.exit 由调用方决定），
+    绝不裸跑真单。
 
     Mock 策略：monkeypatch trading.__main__.resolve_active（顶层 import，T6 修正过，mock 生效）
     返回一个 activated_at=now 的假实验 + setenv AUTO_TRADE_MODE=live + TRADE_SHADOW_MIN_DAYS=5。
@@ -90,11 +91,9 @@ def test_plan4_shadow_gate_blocks_insufficient_shadow(tmp_path, monkeypatch):
 
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
     monkeypatch.setenv("TRADE_SHADOW_MIN_DAYS", "5")
-    # activated_at 今日 → 影子期 0 天 < 5 → fresh → 拒切 LIVE。
+    # activated_at 今日 → 影子期 0 天 < 5 → fresh → 拒切 LIVE（返 False）。
     recent = datetime.now().isoformat(timespec="seconds")
     monkeypatch.setattr(m, "resolve_active",
                         lambda: [types.SimpleNamespace(activated_at=recent, experiment_id="e1")],
                         raising=False)
-    with pytest.raises(SystemExit) as ei:
-        m._shadow_gate()
-    assert ei.value.code == 2
+    assert m.check_shadow_gate() is False

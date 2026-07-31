@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -30,6 +31,36 @@ PY = sys.executable
 
 # 三个播报 bot 串行（各自独立 robotCode + 幂等文件，互不干扰）
 BOTS = ["trading", "strategy", "data"]
+
+
+async def run_brief_all() -> int:
+    """事件链尾调用：串行跑三播报 bot（与 main() 同逻辑，async 友好）。
+
+    保持 subprocess 调 broadcast 而非 import：broadcast 模块拉起 dws/钉钉重链，
+    子进程隔离比 in-process import 更稳（单 bot 崩不连累 engine）。
+    """
+    rcs = []
+    # 确保日志目录存在（避免首次运行/干净环境 open() 失败）
+    (ROOT / "logs" / "broadcast_connect").mkdir(parents=True, exist_ok=True)
+    for bot in BOTS:
+        print(f"--- {bot} 播报 ---")
+        # M2：run_brief_all 现跑在长生命周期 uvicorn 进程内（由 pipeline_then_eod 事件链
+        # 调用，不再是短命 schtasks 进程），每 bot 一个 open() 不 close 会累积句柄泄漏
+        # （每天 +3）。显式捕获 + await proc.wait() 后 close()。
+        log_fh = open(ROOT / "logs" / "broadcast_connect" / f"{bot}_brief.log", "ab")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                PY, "-m", "broadcast", "--bot", bot, cwd=str(ROOT),
+                stdout=log_fh,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            rc = await proc.wait()
+        finally:
+            log_fh.close()
+        rcs.append((bot, rc))
+        if rc != 0:
+            print(f"⚠️ {bot} 播报失败 rc={rc}（继续其余 bot）")
+    return 1 if any(rc != 0 for _, rc in rcs) else 0
 
 
 def main() -> int:

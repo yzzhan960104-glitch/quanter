@@ -82,3 +82,12 @@ class Strategy(Protocol):
     def config_schema(self) -> type:
         """策略参数 Pydantic 模型类（供 ParamLab 反射 + parse_review 字段护栏）。"""
         ...
+
+    @property
+    def required_data_keys(self) -> frozenset[str]:
+        """本策略依赖的数据集 registry key（如 {"daily"}）。
+
+        eod/gate 据此决定要校验/读取哪些数据集。默认 daily；
+        子类可覆盖声明额外依赖（如 moneyflow/margin）。
+        """
+        return frozenset({"daily"})
