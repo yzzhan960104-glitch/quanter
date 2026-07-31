@@ -180,6 +180,32 @@ async def lifespan(app: FastAPI):
     app.state.log_handler = log_handler
     root_logger.addHandler(log_handler)
 
+    # C-2 scheduling-orchestration Task 9：TradingEngine 装配（合并 engine 进 uvicorn 单进程）。
+    # 物理意图：原 ``python -m trading`` 独立常驻进程收编进本 lifespan——engine 与 server
+    # 同进程后，四触发点 cron 在 uvicorn 内跑，data 采集经 ``pipeline_then_eod`` 事件链驱动
+    # （取代 19:00 eod 时钟赌博）。dynamic_whitelist 物理隔离已由 W1 实例属性化完成
+    # （engine._dynamic_whitelist，server 路径 submit_order 不读实例属性 → 两端输入源互不污染）。
+    # Why try/except 不阻断：engine 装配失败（网关连不上 / state_store 建表失败 / 影子期不足）
+    # 绝不应让整个 API 起不来——engine 缺席时交易 API 仍可用（手动下单路径不依赖 scheduler），
+    # 仅自动 cron 编排缺席。与上面 replay_scheduler / training_orchestrator 同源软降级范式。
+    try:
+        from trading.engine import TradingEngine
+        from trading.__main__ import check_shadow_gate
+        eng = TradingEngine()
+        await eng.bootstrap()
+        if check_shadow_gate():
+            eng.start()
+            app.state.trading_engine = eng
+            logging.getLogger(__name__).info("TradingEngine 已装配并启动")
+        else:
+            # 影子期不足（live 模式下 < TRADE_SHADOW_MIN_DAYS）：不 start scheduler，
+            # 但保留实例供运维查看 / 手动 vet 戏（API 继续运行，engine 自动编排缺席）。
+            app.state.trading_engine = eng
+            logging.getLogger(__name__).warning(
+                "TradingEngine 装配但 scheduler 未启动（影子期不足，API 继续运行）")
+    except Exception:
+        logging.getLogger(__name__).exception("TradingEngine 装配异常（已忽略）")
+
     yield
 
     # 销毁：优雅断开交易网关（B-18）——logout 释放券商会话，防进程退出时连接泄漏。
@@ -194,6 +220,16 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).exception(
             "lifespan shutdown 断开交易网关异常（已忽略，继续清理日志 handler）"
         )
+
+    # 销毁：TradingEngine scheduler（Task 9 · 合并 engine 进 uvicorn 后的优雅停机）。
+    # Why getattr 防御：lifespan 装配块 try/except 隔离，装配失败 / 影子期未 start 时
+    # state 上可能无 trading_engine 或 sched 未起——shutdown 路径必须对「未装配/未启动」
+    # 也安全（不能因 engine 装配失败而让整个 shutdown 崩，与 training_orchestrator 同范式）。
+    # sched.running 由 APScheduler 维护：start() 后 True，shutdown() 后 False——据此判定
+    # 是否需要调 shutdown，避免对未启动 scheduler 调 shutdown 抛 SchedulerNotRunningError。
+    _eng = getattr(app.state, "trading_engine", None)
+    if _eng is not None and getattr(_eng.sched, "running", False):
+        _eng.shutdown()
 
     # 销毁：卸载日志 handler（前端流 + 本地文件），避免重复挂载/引用泄漏
     # （reload 或测试复用进程时关键，否则 handler 单调累积致日志重复输出）

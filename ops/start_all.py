@@ -3,15 +3,21 @@
 
 与 ops/dev.py 的区别：
   - dev.py：前台开发（uvicorn + vite，Ctrl+C 退出，子进程组清理）
-  - start_all.py：后台 detach（uvicorn + connect + engine 各自独立常驻，本脚本跑完即退）
+  - start_all.py：后台 detach（uvicorn + connect 各自独立常驻，本脚本跑完即退）
     适合 schtasks ONSTART 或「启动」文件夹开机自启。
 
+C-2 scheduling-orchestration Task 9 收口：
+  engine + 数据采集 + Brief 已全部收编进 uvicorn :8000 的 lifespan——engine 在
+  lifespan 装配块构造 + bootstrap + start，数据采集经 ``pipeline_then_eod`` cron
+  事件链驱动（取代原 QuanterDataPipeline/QuanterBrief schtasks）。本脚本不再起
+  ``python -m trading`` 独立 engine 进程，也不再注册 DataPipeline/Brief schtasks
+  （改用 ``manage_ops_schtasks.py --unregister-pipeline-brief`` 幂等清退历史残留）。
+
 启动顺序（依赖链严格，不可调）：
-  1. [外部] miniQMT 客户端（GUI 应用，脚本无法启动，仅检测 userdata_mini + 提示）
-  2. uvicorn :8000（后端 API；前端 Cockpit + connect review 桥依赖）—— 复用 dev.py 端口清理
-  3. connect 5 钉钉机器人（依赖 uvicorn :8000，review 桥 POST /api/v1/training/review）
-  4. trading engine（依赖 miniQMT；python -m trading 独立常驻进程）
-  5. schtasks 注册（幂等：DataPipeline@17:00 + Brief@18:00 + DiscoveryDaemon@02:00）
+  1. uvicorn :8000（宿主：engine + 采集 + brief 全在它的 lifespan；前端 Cockpit +
+     connect review 桥依赖）—— 复用 dev.py 端口清理
+  2. connect 5 钉钉机器人（依赖 uvicorn :8000，review 桥 POST /api/v1/training/review）
+  3. schtasks：DiscoveryDaemon@02:00 注册 + 清退已收编的 DataPipeline/Brief
 
 进程模型：subprocess.Popen + DETACHED_PROCESS（独立进程组，本脚本退出不杀子进程），
 各进程 stdout/stderr 落 logs/<name>.log，便于排查。
@@ -22,7 +28,6 @@
 """
 from __future__ import annotations
 
-import os
 import socket
 import subprocess
 import sys
@@ -70,36 +75,23 @@ def _detached(cmd: list[str], name: str) -> subprocess.Popen:
     )
 
 
-def _check_miniqmt() -> bool:
-    """检测 miniQMT userdata_mini 是否存在（外部 GUI 应用，脚本无法启动，仅提示）。
-
-    Why 仅检测：miniQMT 是 XtMiniQmt.exe GUI 应用，需手动登录（密码不进 .env）。
-    userdata_mini 由登录后生成——存在即视为 miniQMT 已启动登录。
-    """
-    userdata = os.getenv("QMT_USERDATA_PATH", "")
-    return bool(userdata) and Path(userdata).exists()
-
-
 def main() -> int:
     from dotenv import load_dotenv
     # override=True：.env 单一真相源，覆盖系统 env（修：AUTO_TRADE_MODE 被继承 env 压制）
     load_dotenv(ROOT / ".env", override=True)
 
     print("=" * 60)
-    print("Quanter 全栈启动（开机自启 · 后台 detach）")
+    print("Quanter 全栈启动（engine/采集/Brief 已收进 uvicorn）")
     print("=" * 60)
 
-    # 1. miniQMT 检测（外部 GUI，无法脚本启动）
-    if _check_miniqmt():
-        print("[1/5] ✅ miniQMT userdata_mini 就绪")
-    else:
-        print("[1/5] ⚠️ miniQMT 未启动——engine 将降级（请手动启动 miniQMT 客户端登录）")
-
-    # 2. uvicorn :8000（端口被占=已在跑，跳过；否则后台 detach 启动）
+    # 1. uvicorn :8000（宿主：engine + 采集 + brief 在它的 lifespan）
+    # Why 最先：engine 装配在 uvicorn lifespan 内（Task 9），必须先起 uvicorn 才有 engine。
+    # 不再单独起 python -m trading（已合并进 lifespan），也不再检测 miniQMT
+    # （engine bootstrap 内部对网关连不上做软降级，start_all 不重复检测）。
     if not _bind_ok(8000):
-        print("[2/5] 端口 8000 已被占（uvicorn 可能已在跑），跳过")
+        print("[1/3] 端口 8000 已被占（uvicorn 可能已在跑），跳过")
     else:
-        print("[2/5] 启动 uvicorn :8000（后端 API）...")
+        print("[1/3] 启动 uvicorn :8000（宿主：engine + 采集 + brief 在 lifespan）...")
         _detached([str(VENV_PY), "-m", "uvicorn", "presentation.server.main:app",
                    "--host", "127.0.0.1", "--port", "8000"], "uvicorn")
         # timeout=40：uvicorn 冷启动需加载完整数据湖（margin_secs/fund_basic/hs_const 等），
@@ -109,39 +101,37 @@ def main() -> int:
         else:
             print("      ⚠️ uvicorn 40s 未就绪，查 logs/uvicorn.log")
 
-    # 3. connect 5 钉钉机器人（依赖 uvicorn :8000）—— echo y 自动确认（绕过 _read_confirm）
+    # 2. connect 5 钉钉机器人（独立常驻，依赖 uvicorn :8000）—— echo y 自动确认（绕过 _read_confirm）
     # Why 前台 run 而非 detach：connect 是「短命启动器」（拉起 5 个 connect_manager 托管的
     #   Claude Code 常驻实例后即退），detach 它无常驻意义；且 detach 脱离控制台会让
     #   _read_confirm 的 input() 抛 EOFError → 兜底返 'n' → --start all 被取消、5 机器人全不启。
     # Why 加 timeout：原 run 无超时，connect 死锁（Claude Code 启动卡住）会连累后面的
-    #   engine/schtasks 永久阻塞。timeout=120 兜底，超时即由 run 内部 kill+wait 并抛
+    #   schtasks 永久阻塞。timeout=120 兜底，超时即由 run 内部 kill+wait 并抛
     #   subprocess.TimeoutExpired（注意：不是 builtins TimeoutError，二者无继承关系，用错会裸崩）。
-    print("[3/5] 启动 connect 5 钉钉机器人（依赖 uvicorn）...")
+    print("[2/3] 启动 connect 5 钉钉机器人（依赖 uvicorn）...")
     try:
         subprocess.run(
             f'echo y| "{VENV_PY}" -m broadcast connect --start all',
             shell=True, cwd=str(ROOT), timeout=120,
         )
     except subprocess.TimeoutExpired:
-        # 超时已被 run 内部 kill 子进程；start_all 继续推进，不连累 engine/schtasks。
-        print("      ⚠️ connect 启动超时(>120s)，已兜底跳过（engine/schtasks 不受阻塞）")
+        # 超时已被 run 内部 kill 子进程；start_all 继续推进，不连累 schtasks。
+        print("      ⚠️ connect 启动超时(>120s)，已兜底跳过（schtasks 不受阻塞）")
 
-    # 4. trading engine（依赖 miniQMT；独立常驻进程）
-    print("[4/5] 启动 trading engine（python -m trading，依赖 miniQMT）...")
-    _detached([str(VENV_PY), "-m", "trading"], "trading_engine")
-
-    # 5. schtasks 注册（幂等：每次启动重注一遍，清退历史 + 建最新）
-    print("[5/5] 注册 schtasks（幂等：DataPipeline + Brief + DiscoveryDaemon）...")
-    subprocess.run([str(VENV_PY), str(ROOT / "ops" / "manage_ops_schtasks.py"), "--register"],
-                   cwd=str(ROOT))
+    # 3. schtasks：只注册 DiscoveryDaemon@02:00；清退已收编进 uvicorn 的 DataPipeline/Brief
+    # Why 清退：DataPipeline/Brief 的职责已由 engine 的 pipeline_then_eod cron 接管
+    #   （在 uvicorn lifespan 内跑），旧 schtasks 残留会与新事件链重复触发/抢资源。
+    # --unregister-pipeline-brief 幂等（不存在不报错），每次启动跑一遍防历史环境残留。
+    print("[3/3] schtasks（discovery 注册 + 清退 pipeline/brief）...")
     subprocess.run([str(VENV_PY), "-m", "discovery.schtasks", "--register"], cwd=str(ROOT))
+    subprocess.run([str(VENV_PY), str(ROOT / "ops" / "manage_ops_schtasks.py"),
+                    "--unregister-pipeline-brief"], cwd=str(ROOT))
 
     print("\n" + "=" * 60)
-    print("✅ 全栈启动完成（各进程独立常驻，本脚本退出不影响它们）")
-    print("  - uvicorn  :8000          → logs/uvicorn.log")
+    print("✅ 完成（engine/采集/Brief 在 uvicorn 内，broadcast/discovery 独立）")
+    print("  - uvicorn  :8000（含 engine + 采集 + brief lifespan）→ logs/uvicorn.log")
     print("  - connect 5 bots          → logs/broadcast_connect/<bot>.log")
-    print("  - engine（python -m trading）→ logs/trading_engine.log")
-    print("  - schtasks: DataPipeline@17:00 / Brief@18:00 / DiscoveryDaemon@02:00")
+    print("  - schtasks: DiscoveryDaemon@02:00（DataPipeline/Brief 已清退）")
     print("=" * 60)
     return 0
 

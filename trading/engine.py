@@ -1627,16 +1627,19 @@ async def post_close(
 # TradingEngine：APScheduler 四 cron 装配（独立常驻进程 python -m trading）
 # ============================================================================
 class TradingEngine:
-    """APScheduler 编排容器（四 cron 触发点装配 + start/shutdown 生命周期）。
+    """APScheduler 编排容器（cron 触发点装配 + start/shutdown 生命周期）。
 
-    ⚠️ 不变量（再次强调，见模块 docstring）：本类实例**只在 ``python -m trading``
-    独立进程内构造**，绝不在 server 进程内实例化（否则 dynamic_whitelist._DYNAMIC
-    模块级全局会污染 server 手动下单路径，破坏 server 行为向后兼容）。
+    ⚠️ 进程模型（C-2 scheduling-orchestration Task 9 收口）：
+        本类实例既可由 ``python -m trading`` 独立进程构造（开发/调试，``trading/__main__``），
+        也可由 uvicorn server lifespan 构造（生产，``presentation/server/main.py``）。
+        engine 与 server 同进程后的 dynamic_whitelist 物理隔离已由 W1 实例属性化完成
+        （``self._dynamic_whitelist``，server 路径 submit_order 不读实例属性 → 两端输入源
+        互不污染），原「绝不可同进程」红线已解除。
 
-    四 cron（Task4 已配 env，缺省值对齐 A 股交易日历 · 术语对齐 T 日盘后扫盘）：
-        eod_plan   19:00 周一-五  T 日盘后扫信号 + 落计划 + 推钉钉（T+1 执行）
-                          ⚠️ 非 15:35：18:00 增量采集 + 18:30 检查点② 通过后才扫，
-                          否则读到 T-1 数据算 T+1 计划（时序 bug · Task6 修复）
+    cron 触发点（Task4/9 已配 env，缺省值对齐 A 股交易日历 · 术语对齐 T 日盘后扫盘）：
+        pipeline_then_eod  18:00 周一-五  盘后事件链：采集→校验→eod→brief（Task9 取代
+                          原 19:00 eod 时钟赌博；用 ``await proc.wait()`` 等采集完成，
+                          不再靠时差猜测 18:00 增量是否落湖）
         pre_open   09:22 周一-五  T 日开盘前撤昨日 + 挂当日单
         stop_loss  每 30s（IntervalTrigger，Task8：cron 不支持秒级；时段约束在 monitor 兜底）
         post_close 15:30 周一-五  盘后对账 + 清白名单
@@ -1648,7 +1651,7 @@ class TradingEngine:
         """装配 AsyncIOScheduler + 四 job（不 start）。
 
         ⚠️ 触发器形态分轨（Task8）：
-            eod_plan / pre_open / post_close：分钟粒度 CronTrigger（标准 5 字段）。
+            pipeline_then_eod / pre_open / post_close：分钟粒度 CronTrigger（标准 5 字段）。
             stop_loss：**IntervalTrigger（秒级）**——cron 最小粒度是分钟，
             30s 巡检必须用 interval。时段约束（9:30-11:30 / 13:00-15:00）下放给
             ``stop_loss_monitor`` 内 ``calendar.is_intraday_session`` 兜底，
@@ -1660,17 +1663,25 @@ class TradingEngine:
         from apscheduler.triggers.interval import IntervalTrigger
 
         self.sched = AsyncIOScheduler()
-        # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
+        # C-2 scheduling-orchestration Task 9：eod 改由 ``pipeline_then_eod`` 事件链驱动。
+        # 物理意图（取代 19:00 eod 时钟赌博）：原 ``self._eod`` cron（19:00）靠时差猜测
+        # 18:00 增量采集是否落湖 + 18:30 检查点② 是否通过——脆弱时序（采集慢/失败时 _eod
+        # 读 T-1 数据算 T+1 计划 = 时序 bug）。事件链 ``pipeline_then_eod`` 用确定性的
+        # ``await proc.wait()`` 等采集子进程完成 → 按策略声明 check_freshness → 全绿才
+        # ``engine._eod()``，把「时钟赌博」换成「事件驱动」。brief 播报也收进事件链尾部。
+        # Why 18:00（默认）：盘后 18:00 触发事件链——此时增量采集的 @18:00 sync_all_tushare
+        # 刚开始，事件链内部 ``await proc.wait()`` 等其完成（不再靠 19:00 时差赌博）。
+        # ENGINE_PIPELINE_CRON env 可覆盖（灰度调整事件链触发时点用）。
+        # Why args=[self]：``pipeline_then_eod(engine)`` 需要引擎实例调 ``engine._eod()``，
+        # APScheduler ``args`` 透传 self（与原 ``self._eod`` bound method 等价的显式形式）。
+        # ``pipeline_then_eod`` 是 async 函数，AsyncIOScheduler 直接 await（与 ``self._eod`` 同）。
+        from trading.orchestrate.pipeline import pipeline_then_eod
         self.sched.add_job(
-            self._eod, CronTrigger.from_crontab(
-                # ⚠️ 时序修复（Task6）：15:35 → 19:00。原 15:35 触发时 T 日增量行情
-                # 尚未落湖（@18:00 sync_all_tushare 才跑增量采集 + @18:30 数据检查点②
-                # 才验通过），_eod 读到的仍是 T-1 数据 → 用 T-1 收盘算 T+1 计划 = 时序 bug。
-                # 挪到 19:00 既等足 18:00 增量落湖 + 18:30 检查点② 通过，又留足窗口在
-                # T+1 日 09:22 pre_open 前完成扫盘 + 人审确认（confirmed=False 闸）。
-                os.getenv("ENGINE_EOD_PLAN_CRON", "0 19 * * 1-5")),
-            id="eod_plan",
+            pipeline_then_eod, CronTrigger.from_crontab(
+                os.getenv("ENGINE_PIPELINE_CRON", "0 18 * * 1-5")),  # 18:00 盘后触发事件链
+            args=[self], id="pipeline_then_eod",
         )
+        # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
         self.sched.add_job(
             self._pre_open, CronTrigger.from_crontab(
                 os.getenv("ENGINE_PRE_OPEN_CRON", "22 9 * * 1-5")),

@@ -7,6 +7,13 @@ schtasks 从 7 个收敛到 3 个（本脚本管 2 个 + discovery/schtasks.py �
     在 pipeline 之后，修正历史 DataBrief@17:00 在采集@17:30 前的顺序 bug）
   - QuanterDiscoveryDaemon @02:00（独立，由 discovery/schtasks.py 注册，本脚本不管）
 
+⚠️ C-2 scheduling-orchestration Task 9 收口：
+  QuanterDataPipeline + QuanterBrief 的职责已由 engine 的 ``pipeline_then_eod`` cron
+  事件链接管（在 uvicorn lifespan 内跑，采集→校验→eod→brief 一条链）。这两个 schtasks
+  不再注册——下方 PIPELINE_TASKS 列表保留是为了 ``--unregister`` / ``--list`` /
+  ``--rerun`` 等子命令对历史已注册环境的清理能力，新部署由 ``--unregister-pipeline-brief``
+  幂等清退残留（start_all.py 每次启动自动调一次）。
+
 改时间 = 改下方 PIPELINE_TASKS + python manage_ops_schtasks.py --register（先删后建，幂等）。
 --register 同时清退历史 6 个零散任务（QuanterTradingBrief/StrategyBrief/DataBrief/
 DataCheckT1/DailyIncremental/DataCheckT2），防残留。
@@ -23,6 +30,8 @@ sys.path.insert(0, str(ROOT))
 
 # 方案 C：2 个 supervisor 任务（原 6 个零散任务合并）
 # 时序：DataPipeline @17:00 须早于 Brief @18:00（Brief 的 DataBrief 反映采集后状态）
+# ⚠️ C-2 Task 9：这两个任务的职责已收进 uvicorn 的 pipeline_then_eod cron 事件链，
+#   不再注册新实例（列表保留供 --unregister/--list/--rerun 清理历史环境）。
 PIPELINE_TASKS = [
     # (任务名, 时间, bat 相对路径)
     ("QuanterDataPipeline", "17:00", "scripts\\run_data_pipeline.bat"),
@@ -70,6 +79,25 @@ def unregister() -> None:
         print(f"deleted (legacy) {task}")
 
 
+def unregister_pipeline_brief() -> None:
+    """清退已收编进 uvicorn 的 DataPipeline/Brief schtasks（幂等，防残留）。
+
+    物理意图（C-2 scheduling-orchestration Task 9）：
+        QuanterDataPipeline + QuanterBrief 的职责已由 engine 的 ``pipeline_then_eod``
+        cron 事件链接管（在 uvicorn lifespan 内跑）。升级后的环境若不清退这两个旧
+        schtasks，它们会与新事件链重复触发（采集跑两遍 / brief 推两份）。
+
+    Why 幂等：``schtasks /Delete /F`` 对不存在的任务返非零但不抛，本函数对每个任务
+        都调一次，已删环境再调无副作用（start_all.py 每次启动都跑一遍防残留）。
+    Why 只删这两个（不动 LEGACY_TASKS）：LEGACY 已由 ``--register`` / ``--unregister``
+        覆盖；本子命令聚焦「Task 9 收编的两个」，语义清晰供 start_all 单独调用。
+    """
+    for task in ("QuanterDataPipeline", "QuanterBrief"):
+        rc = _schtasks(["/Delete", "/TN", task, "/F"])
+        # rc=0 删成；非零多半是任务不存在（已清退环境），均视为成功（幂等语义）。
+        print(f"{'deleted' if rc == 0 else 'skip(not exists)'} {task}")
+
+
 def list_tasks() -> None:
     """逐个 /Query 当前 2 个 supervisor 任务。"""
     for task, _, _ in PIPELINE_TASKS:
@@ -94,12 +122,16 @@ def main(argv=None) -> int:
     g.add_argument("--list", action="store_true")
     g.add_argument("--register", action="store_true")
     g.add_argument("--unregister", action="store_true")
+    g.add_argument("--unregister-pipeline-brief", action="store_true",
+                   help="清退已收编进 uvicorn 的 DataPipeline/Brief（幂等，Task 9）")
     g.add_argument("--rerun", metavar="TASK", help="data | brief")
     args = p.parse_args(argv)
     if args.register:
         register()
     elif args.unregister:
         unregister()
+    elif args.unregister_pipeline_brief:
+        unregister_pipeline_brief()
     elif args.list:
         list_tasks()
     elif args.rerun:

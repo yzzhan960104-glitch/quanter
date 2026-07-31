@@ -189,8 +189,8 @@ def test_health_guard_job_registered_in_init():
     eng = TradingEngine()
     job_ids = [j.id for j in eng.sched.get_jobs()]
     assert "_health_guard" in job_ids
-    # 不破坏既有 4 个 cron
-    assert {"eod_plan", "pre_open", "stop_loss", "post_close"} <= set(job_ids)
+    # 不破坏既有 4 个 cron（C-2 Task 9：eod_plan → pipeline_then_eod 事件链）
+    assert {"pipeline_then_eod", "pre_open", "stop_loss", "post_close"} <= set(job_ids)
     # interval 触发器，60s
     job = eng.sched.get_job("_health_guard")
     assert job.trigger.__class__.__name__ == "IntervalTrigger"
