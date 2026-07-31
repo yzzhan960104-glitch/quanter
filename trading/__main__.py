@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""二期自动交易引擎常驻进程入口（开发/调试）：``python -m trading``。
+"""二期自动交易引擎常驻进程入口：``python -m trading``。
 
 ============================================================================
 定位（C-5 V1 进程模型统一后）
@@ -10,7 +10,7 @@ lifespan 装配——与生产 ``start_all.py`` 链**同一入口**，消除历�
 失败 exit），无需文件锁。``run_server()`` 是薄包装（live 不 reload，防 reloader
 子进程抢 session）；``check_shadow_gate`` 影子期检查收归 lifespan（本块不 sys.exit）。
 
-Why 可合并（W1 实例属性隔离取代旧进程隔离硬约束）：
+Why engine 可合并进 lifespan（W1 实例属性隔离取代旧进程隔离硬约束）：
 - 历史红线「engine 必须独立进程、绝不嵌入 server」是为了防前视污染（engine 注入的
   动态白名单污染 server 手动下单路径）。W1 已把动态白名单从模块级全局
   ``_DYNAMIC`` 改为 engine **实例属性** ``_dynamic_whitelist``，``_submit`` 经
@@ -18,21 +18,19 @@ Why 可合并（W1 实例属性隔离取代旧进程隔离硬约束）：
   不传 whitelist 即走纯 env 旧路径（见 ``engine.py`` 模块 docstring 不变量块）。
 - 因此 engine 与 server 同进程不再前视污染，合并进 uvicorn lifespan 安全。
 
-本入口的残留用途：本地无 server 时手动起 engine 跑四 cron（开发联调/排障）。
-生产部署用 uvicorn，不要靠本入口托管线上 engine。
-
 职责切分（薄入口原则 · Karpathy 极简）：
-- 本入口只做三件事：① 加载 .env ② 起 event loop 守护 AsyncIOScheduler
-  ③ LIVE 模式启动期 ≥5 天影子期硬闸（Plan 4 T6，``check_shadow_gate`` fail-closed
-  真·闸，取代历史 WARNING 提醒——spec §5.3 误称"硬闸"实为提醒）。
-- 全部业务逻辑（四触发点、APScheduler cron 装配、交易日判定、影子分流）都在
-  ``trading/engine.py::TradingEngine``（Task9），本入口不重复实现任何业务逻辑。
+- 本入口只做两件事：① 加载 .env（``load_dotenv(override=True)``）② 调 ``run_server()``
+  起 uvicorn。全部业务逻辑（四触发点 cron、APScheduler 装配、交易日判定、影子分流、
+  网关 connect/bootstrap）都在 lifespan + ``trading/engine.py::TradingEngine``，本入口
+  不重复实现任何业务逻辑。
+- ``check_shadow_gate`` 影子期硬闸由 lifespan（main.py:196 ``if check_shadow_gate():
+  eng.start()``）决策；影子期不足时 server 仍起（手动 API 可用），仅 scheduler 不 start。
 
 ============================================================================
 ⚠️ Scope 边界：本入口【不】做策略层数据源注入
 ============================================================================
-本入口只起 APScheduler 常驻进程；四触发点的真实数据源属「二期引擎上线集成」
-阶段的工作（SOP/follow-up），不在 Task 10/11 代码 scope：
+本入口只起 uvicorn server（engine 由 lifespan 装）；四触发点的真实数据源属「二期引擎
+上线集成」阶段的工作（SOP/follow-up），不在 C-5 scope：
 
 - ``NecklineMethodStrategy.scan_at`` 扫颈线法信号（eod_plan 消费）
 - 持仓状态机 ``stop_prices`` map（stop_loss_monitor 消费）
@@ -40,7 +38,7 @@ Why 可合并（W1 实例属性隔离取代旧进程隔离硬约束）：
 
 Task 9 的四个内部触发方法（``_eod/_pre_open/_stoploss/_post_close``）已是
 **安全 no-op**：先过 ``calendar.is_trading_day`` 判交易日，再 logger.info 触发
-记录，数据源为 None/空时优雅降级不崩。故 __main__ 起进程后 APScheduler 即便
+记录，数据源为 None/空时优雅降级不崩。故 server 起后 APScheduler 即便
 触发这四个 job 也不会崩。
 
 详见 ``docs/superpowers/plans/2026-07-21-auto-trading-engine.md`` Task 11 SOP
@@ -49,10 +47,13 @@ Task 9 的四个内部触发方法（``_eod/_pre_open/_stoploss/_post_close``）
 ============================================================================
 Windows 进程托管
 ============================================================================
-本入口是前台进程（stdout 日志），设计成可被 schtasks / PM2 / terminal tab 托管：
-- Task 11 的 ``run_trading_engine.bat`` 会调它（schtasks 注册开机自启）。
-- Ctrl-C（KeyboardInterrupt）→ 优雅 ``eng.shutdown()``（APScheduler ``wait=False``
-  不等 pending job，进程退出场景）。
+``run_server()`` 起 uvicorn（前台进程，stdout 日志），设计成可被 schtasks / PM2 /
+「启动」文件夹快捷方式托管：
+- ``scripts/run_trading_engine.bat`` 调 ``python -m trading``（schtasks 注册开机自启，
+  命令字面不变，内部起 server）。
+- Ctrl-C（KeyboardInterrupt）→ uvicorn lifespan shutdown 钩子优雅停 TradingEngine
+  scheduler + 断网关（main.py lifespan yield 后的销毁段，``sched.shutdown(wait=False)``
+  不等 pending job）。
 """
 from __future__ import annotations
 
