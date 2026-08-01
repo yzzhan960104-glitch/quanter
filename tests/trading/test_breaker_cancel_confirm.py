@@ -83,3 +83,41 @@ async def test_cancel_all_backward_compat_without_confirm_method():
     # 无确认方法：cancelled 照数，unconfirmed=0（无法确认即不计未确认，保持旧行为）
     assert res["cancelled"] == 1
     assert res["unconfirmed"] == 0
+
+
+# ============================================================================
+# Task E2（live-mainchain-fixes）：撤单计数区分 failed（#8）
+# ============================================================================
+def test_cancel_via_broker_query_counts_failed(monkeypatch):
+    """撤单返回 FAILED 计 failed，不计 cancelled（#8）。"""
+    import asyncio
+    from unittest.mock import AsyncMock
+    from trading.io.breaker import _cancel_via_broker_query
+    from trading.types.order_state import OrderState
+    from broker.base import OrderResult
+
+    gw = AsyncMock()
+    gw.query_orders = AsyncMock(return_value=[{"order_id": 1001}])
+    gw.cancel_order_by_broker_oid = AsyncMock(
+        return_value=OrderResult(order_id="1001", state=OrderState.FAILED, message="撤单失败"))
+    res = asyncio.run(_cancel_via_broker_query(gw, gw.query_orders,
+                                               gw.cancel_order_by_broker_oid, None, None))
+    assert res["cancelled"] == 0, "FAILED 不得计 cancelled"
+    assert res["failed"] == 1
+
+
+def test_cancel_via_broker_query_counts_success(monkeypatch):
+    """撤单成功（CANCELLED）计 cancelled，failed=0（#8 正例）。"""
+    import asyncio
+    from unittest.mock import AsyncMock
+    from trading.io.breaker import _cancel_via_broker_query
+    from trading.types.order_state import OrderState
+    from broker.base import OrderResult
+
+    gw = AsyncMock()
+    gw.query_orders = AsyncMock(return_value=[{"order_id": 1002}])
+    gw.cancel_order_by_broker_oid = AsyncMock(
+        return_value=OrderResult(order_id="1002", state=OrderState.CANCELLED, message="已撤"))
+    res = asyncio.run(_cancel_via_broker_query(gw, gw.query_orders,
+                                               gw.cancel_order_by_broker_oid, None, None))
+    assert res["cancelled"] == 1 and res["failed"] == 0

@@ -102,18 +102,25 @@ async def _cancel_via_broker_query(gw, query_fn, cancel_by_oid_fn, confirm_fn,
     from trading import state_store
 
     n_cancelled = 0
+    n_failed = 0   # #8：撤单被拒/失败单独计数（cancelled 只计成功发出）
     n_unconfirmed = 0
     try:
         orders = await query_fn(cancelable_only=True)
     except Exception:
         logger.exception("query_orders 查柜台可撤单失败，撤单中止（无法得知可撤集合）")
-        return {"cancelled": 0, "unconfirmed": 0}
+        return {"cancelled": 0, "unconfirmed": 0, "failed": 0}
     for o in orders or []:
         broker_oid = o.get("order_id")
         if broker_oid is None:
             continue
         try:
-            await cancel_by_oid_fn(broker_oid)
+            res = await cancel_by_oid_fn(broker_oid)
+            # #8：只对成功发出（非 FAILED/REJECTED）计数；失败单独计 failed 告警
+            _st = getattr(res, "state", None)
+            if _st in (OrderState.FAILED, OrderState.REJECTED):
+                n_failed += 1
+                logger.warning("熔断撤单被拒/失败 broker_oid=%s state=%s（计入 failed）", broker_oid, _st)
+                continue
             n_cancelled += 1
             # 回写 DB order.state=CANCELLED（account_id 提供时，对账一致）
             # 按 broker_oid 列更新（柜台单号，order_id 主键与 broker_oid 不同）
@@ -136,9 +143,9 @@ async def _cancel_via_broker_query(gw, query_fn, cancel_by_oid_fn, confirm_fn,
         except Exception:
             logger.exception("熔断撤单失败 broker_oid=%s", broker_oid)
     logger.warning(
-        "熔断撤单完成（柜台查询路径），共发起撤 %s 笔（其中未确认 %s 笔）",
-        n_cancelled, n_unconfirmed)
-    return {"cancelled": n_cancelled, "unconfirmed": n_unconfirmed}
+        "熔断撤单完成（柜台查询路径），共发起撤 %s 笔（未确认 %s 笔，失败 %s 笔）",
+        n_cancelled, n_unconfirmed, n_failed)
+    return {"cancelled": n_cancelled, "unconfirmed": n_unconfirmed, "failed": n_failed}
 
 
 async def _cancel_via_memory(gw, confirm_fn) -> dict[str, int]:
@@ -149,11 +156,18 @@ async def _cancel_via_memory(gw, confirm_fn) -> dict[str, int]:
     """
     orders = getattr(gw, "_orders", {}) or {}
     n_cancelled = 0
+    n_failed = 0   # #8：撤单被拒/失败单独计数（cancelled 只计成功发出）
     n_unconfirmed = 0
     for oid, rec in list(orders.items()):
         if rec.get("state") not in _TERMINAL:
             try:
-                await gw.cancel_order(oid)
+                res = await gw.cancel_order(oid)
+                # #8：只对成功发出计数；失败单独计 failed 告警
+                _st = getattr(res, "state", None)
+                if _st in (OrderState.FAILED, OrderState.REJECTED):
+                    n_failed += 1
+                    logger.warning("熔断撤单被拒/失败 oid=%s state=%s（计入 failed）", oid, _st)
+                    continue
                 n_cancelled += 1
                 # M2 撤单确认闭环：撤单「发起」成功后，轮询确认是否真到终态。
                 # True=到终态；False=超时未确认 → 计 unconfirmed + WARNING，不假装撤成。
@@ -172,6 +186,6 @@ async def _cancel_via_memory(gw, confirm_fn) -> dict[str, int]:
                 # 单笔失败不中断：记录后继续撤下一笔，最终返回成功发起数。
                 logger.exception("熔断撤单失败 oid=%s", oid)
     logger.warning(
-        "熔断撤单完成（内存回退路径），共发起撤 %s 笔未终态单（其中未确认 %s 笔）",
-        n_cancelled, n_unconfirmed)
-    return {"cancelled": n_cancelled, "unconfirmed": n_unconfirmed}
+        "熔断撤单完成（内存回退路径），共发起撤 %s 笔未终态单（未确认 %s 笔，失败 %s 笔）",
+        n_cancelled, n_unconfirmed, n_failed)
+    return {"cancelled": n_cancelled, "unconfirmed": n_unconfirmed, "failed": n_failed}
