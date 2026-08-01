@@ -350,3 +350,43 @@ async def test_lifespan_catchup_skipped_when_recent():
             pass
 
     run_disc.assert_not_called()    # 不补跑
+
+# ============ C-8 V5：启动补跑任务接线（engine start 后 create_task + shutdown cancel）============
+# 物理意图（spec §3.6）：engine 装配+start 后，lifespan 创建后台补跑任务；仅
+# sched.running=True（scheduler 已起）时触发——影子期不足时补跑无意义。
+
+
+@pytest.mark.asyncio
+async def test_lifespan_creates_catchup_task_when_engine_started():
+    """engine 已 start → lifespan startup 创建 catchup_task 并 await run_startup_catchup。"""
+    from fastapi import FastAPI
+    from presentation.server.main import lifespan
+
+    app = FastAPI()
+    stack, _start, _stop, eng = _mock_lifespan_dependencies()
+    eng.sched.running = True                              # engine 已 start
+    stack.enter_context(patch("trading.__main__.check_shadow_gate", return_value=True))
+    catchup = stack.enter_context(
+        patch("trading.catchup.run_startup_catchup", new=AsyncMock()))
+    with stack:
+        async with lifespan(app):
+            task = getattr(app.state, "catchup_task", None)
+            assert task is not None                        # 任务已创建
+            await task                                     # 等补跑协程完成（AsyncMock 秒完）
+    catchup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_skips_catchup_when_engine_not_started():
+    """影子期不足（sched.running=False）→ 不创建 catchup_task。"""
+    from fastapi import FastAPI
+    from presentation.server.main import lifespan
+
+    app = FastAPI()
+    stack, _start, _stop, eng = _mock_lifespan_dependencies()   # 默认 running=False
+    catchup = stack.enter_context(
+        patch("trading.catchup.run_startup_catchup", new=AsyncMock()))
+    with stack:
+        async with lifespan(app):
+            assert not hasattr(app.state, "catchup_task")
+    catchup.assert_not_awaited()

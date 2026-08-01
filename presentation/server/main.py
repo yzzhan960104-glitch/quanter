@@ -16,6 +16,7 @@ FastAPI 应用入口
 - CORS 配置从 http/config.py 读取，不硬编码
 - 路由版本化 /api/v1/，预留后续版本空间
 """
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -376,7 +377,30 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("discovery 启动补跑异常（不阻断 uvicorn）")
 
+    # C-8 V5：全 job 启动补跑（台账 + 后台编排，spec §3.6）。
+    # 物理意图：生产机不 7x24，offline 跨 18:00 pipeline / 09:22 pre_open 时，启动补跑
+    # 到「当前可用的一致态」（采集→data_ready→eod→brief + pre_open 窗口内补挂）。
+    # 仅 engine 已 start（sched.running）时触发——影子期不足 scheduler 缺席，补跑无意义。
+    # 软降级：创建异常不阻断 uvicorn（与上方 engine/training/connect/discovery 同范式）。
+    try:
+        from trading.catchup import run_startup_catchup
+        _eng_c8 = getattr(app.state, "trading_engine", None)
+        if _eng_c8 is not None and getattr(_eng_c8.sched, "running", False):
+            app.state.catchup_task = asyncio.create_task(run_startup_catchup(_eng_c8))
+            logging.getLogger(__name__).info("C-8 启动补跑任务已创建")
+    except Exception:
+        logging.getLogger(__name__).exception("C-8 启动补跑创建异常（已忽略）")
+
     yield
+    # C-8 V5：shutdown 取消启动补跑任务（软降级；任务随事件循环销毁自然结束，
+    # 显式 cancel 更干净——采集子进程 await proc.wait() 会随事件循环关闭被中断）。
+    _cu_task = getattr(app.state, "catchup_task", None)
+    if _cu_task is not None:
+        try:
+            _cu_task.cancel()
+        except Exception:
+            logging.getLogger(__name__).exception("C-8 启动补跑任务 cancel 异常（已忽略）")
+
 
     # 销毁：优雅断开交易网关（B-18）——logout 释放券商会话，防进程退出时连接泄漏。
     # Why try/except 吞异常：shutdown 路径不应因网关断开失败而阻塞后续 handler 清理；
