@@ -1700,13 +1700,11 @@ def test_post_close_query_trades_reconcile_drift(monkeypatch):
     today = datetime.now().strftime("%Y-%m-%d")
     position_book.snapshot_start_equity(today, 1_000_000.0)   # 熔断基线（0% 不触发）
 
-    # mock service.query_trades 返当日成交 100@10（CSV 流水权威）
-    def _fake_qt(start, end, **kw):
-        return {"trades": [{"symbol": "A.SH", "direction": "BUY", "shares": 100.0,
-                            "price": 10.0}],
-                "total": 1, "limit": 1000, "offset": 0}
+    # mock service.aggregate_fills_by_symbol 返当日成交净持仓 100（CSV fill 行权威）
+    def _fake_agg(start, end):
+        return {"A.SH": 100.0}
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.query_trades", _fake_qt)
+        "presentation.server.services.trading_service.aggregate_fills_by_symbol", _fake_agg)
 
     class _FakeGw:
         async def query_asset(self):
@@ -1727,6 +1725,7 @@ def test_post_close_query_trades_reconcile_drift(monkeypatch):
 
 
 def test_post_close_query_trades_no_drift_is_noop(monkeypatch):
+    from trading.compute.reconcile import ReconciliationResult
     """post_close：CSV 聚合 == position_book → 无 drift 不重写（trades_reconciled 不设）。"""
     from trading import position_book
     db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
@@ -1736,13 +1735,10 @@ def test_post_close_query_trades_no_drift_is_noop(monkeypatch):
     today = datetime.now().strftime("%Y-%m-%d")
     position_book.snapshot_start_equity(today, 1_000_000.0)
 
-    def _fake_qt(start, end, **kw):
-        return {"trades": [{"symbol": "A.SH", "direction": "BUY", "shares": 100.0,
-                            "price": 10.0}],
-                "total": 1, "limit": 1000, "offset": 0}
+    def _fake_agg(start, end):
+        return {"A.SH": 100.0}
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.query_trades", _fake_qt)
-
+        "presentation.server.services.trading_service.aggregate_fills_by_symbol", _fake_agg)
     class _FakeGw:
         async def query_asset(self):
             return {"total_asset": 1_000_000.0}
@@ -1774,17 +1770,17 @@ def test_post_close_query_trades_skipped_when_no_gw(monkeypatch):
     # 模拟 dry_run 无网关（否则若测试环境残留 gw 单例会误触发 ② 段读 CSV 重写账本）。
     monkeypatch.setattr(engine, "get_gateway", lambda: None)
 
-    qt_calls = []
+    agg_calls = []
 
-    def _fake_qt(*a, **kw):
-        qt_calls.append(True)
-        return {"trades": [], "total": 0}
+    def _fake_agg(*a, **kw):
+        agg_calls.append(True)
+        return {}
 
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.query_trades", _fake_qt)
+        "presentation.server.services.trading_service.aggregate_fills_by_symbol", _fake_agg)
 
     today = datetime.now().strftime("%Y-%m-%d")
     result = asyncio.run(engine.post_close(today))   # gw=None → get_gateway 也 None
 
-    assert qt_calls == []                             # gw=None → 未调 query_trades
+    assert agg_calls == []                             # gw=None → 未调 aggregate_fills
     assert "trades_reconciled" not in result

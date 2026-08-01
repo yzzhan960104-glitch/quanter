@@ -1502,26 +1502,17 @@ async def post_close(
                     "有" if gw is not None else "无",
                     "有" if local_positions is not None else "无")
 
-    # ② query_trades 盘后兜底纠正（Task 11 · R-1 · reconcile 之后、熔断之前）：
-    # 物理意图：apply_fill 可能因 db lock/异常漏记（_handle_order_update 软降级），position_book
-    # 少记；record_live_trade 写 CSV 是独立 try-except，漏笔概率低于 apply_fill。用 CSV 流水聚合
-    # vs position_book，drift 以 CSV 为准重写 qty + 告警。分工：①reconcile 查持仓 drift，本步查
-    # 成交流水漏笔。gw=None（dry_run）跳过（无真实成交可对，避免误读 CSV 老数据重写账本）。
+    # ② aggregate_fills 盘后兜底纠正（#3：只认 kind=fill 的真实成交，submit 审计行不计）：
+    # 物理意图：apply_fill 可能因 db lock/异常漏记，position_book 少记；CSV 的 kind=fill 行是
+    # 真实成交的独立审计源，用其净持仓 vs position_book，drift 以 fill 行为准重写 qty + 告警。
+    # gw=None（dry_run）跳过（无真实成交可对，避免误读 CSV 老数据重写账本）。
     if gw is not None:
         try:
-            from presentation.server.services.trading_service import query_trades as _svc_query_trades
-            # C-6 V2：业务日期 key（query_trades 当日成交流水查询口径）走 clock.today。
+            from presentation.server.services.trading_service import \
+                aggregate_fills_by_symbol as _svc_agg_fills
+            # C-6 V2：业务日期 key（当日成交流水口径）走 clock.today。
             today_eq = clock.today()
-            trades = (_svc_query_trades(today_eq, today_eq, limit=1000) or {}).get("trades", [])
-            # 聚合净持仓（BUY 加 SELL 减）——CSV 流水的权威净持仓口径
-            net: dict[str, float] = {}
-            for t in trades:
-                sym = t.get("symbol")
-                direction = (t.get("direction") or "").upper()
-                shares = t.get("shares")
-                if not sym or direction not in ("BUY", "SELL") or shares is None:
-                    continue
-                net[sym] = net.get(sym, 0.0) + (float(shares) if direction == "BUY" else -float(shares))
+            net = _svc_agg_fills(today_eq, today_eq)
             local = _position_book.get_local_positions()
             drifts: list[tuple[str, float, float]] = []
             # CSV 有：账本少记 → 以 CSV 为准重写
@@ -1536,7 +1527,7 @@ async def post_close(
                     drifts.append((sym, local_qty, 0.0))
             if drifts:
                 result["trades_reconciled"] = len(drifts)
-                msg = "【盘后兜底】query_trades vs position_book drift " + ", ".join(
+                msg = "【盘后兜底】aggregate_fills vs position_book drift " + ", ".join(
                     f"{s}({lo}→{n})" for s, lo, n in drifts)
                 logger.warning(msg)
                 try:
@@ -1545,8 +1536,7 @@ async def post_close(
                 except Exception:
                     logger.exception("盘后兜底告警推送失败（不阻塞）")
         except Exception:
-            logger.exception("post_close query_trades 兜底异常（不阻塞熔断/清白名单）")
-
+            logger.exception("post_close aggregate_fills 兜底异常（不阻塞熔断/清白名单）")
     # ③ 日内熔断三步（Task 10 · R-2 · 在 reconcile 之后）：
     # Why 在 reconcile 后：reconcile 查持仓 drift 是另一维度观测，与日内总资产 -3% 熔断
     # 互不依赖；放后面让熔断有最完整的 curr_equity（含盘后 reconcile 拉到的最新持仓估值）。
@@ -2744,6 +2734,7 @@ class TradingEngine:
                 float(price),
                 strategy="neckline",
                 rationale=f"成交回报@{update.get('traded_time')}",
+                kind="fill",  # #3：真实成交，post_close 据此聚合净持仓
             )
         except Exception:
             # 日志写盘失败不阻塞通知/挂止盈（三连各自独立降级，互不阻断）

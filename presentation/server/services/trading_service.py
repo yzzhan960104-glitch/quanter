@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # 落盘而非仅内存，进程重启后历史成交可追溯（实盘合规基线）。
 LIVE_TRADE_LOG = os.path.join(str(PROJECT_ROOT), "logs", "live_trades.csv")
 LIVE_TRADE_COLUMNS = [
-    "timestamp", "symbol", "direction", "shares", "price", "strategy", "rationale",
+    "timestamp", "symbol", "direction", "shares", "price", "strategy", "rationale", "kind",
 ]
 
 # 持仓归因注册表（内存）：symbol → {strategy, rationale}。
@@ -216,10 +216,12 @@ def record_live_trade(
     price: float,
     strategy: str = "",
     rationale: str = "",
+    kind: str = "fill",  # "submit"=下单审计（含 REJECTED/FAILED）/"fill"=真实成交回报
 ) -> None:
-    """追加一笔实盘成交到 logs/live_trades.csv（CSV 导出 + Layer 6 LLM 复盘数据源）。
+    """追加一笔实盘记录到 logs/live_trades.csv（CSV 导出 + Layer 6 LLM 复盘数据源）。
 
-    供实盘订单成交回调调用。文件不存在/空时先写表头；utf-8-sig 编码便于 Excel 直开。
+    kind 区分（#3 修复）：post_close 聚合净持仓只认 kind='fill'，避免 submit 行
+    （拒单/重单）混入致幻影持仓。submit 行仍落盘满足审计合规（spec §6.3）。
     """
     os.makedirs(os.path.dirname(LIVE_TRADE_LOG), exist_ok=True)
     is_new = (not os.path.exists(LIVE_TRADE_LOG)) or os.path.getsize(LIVE_TRADE_LOG) == 0
@@ -231,6 +233,7 @@ def record_live_trade(
         "price": price,
         "strategy": strategy,
         "rationale": rationale,
+        "kind": kind,
     }
     with open(LIVE_TRADE_LOG, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=LIVE_TRADE_COLUMNS)
@@ -238,6 +241,31 @@ def record_live_trade(
             writer.writeheader()
         writer.writerow(row)
 
+
+
+def aggregate_fills_by_symbol(start: str, end: str) -> dict[str, float]:
+    """流式聚合 [start,end] 内 kind=fill 的 BUY/SELL 净持仓（post_close 对账用）。
+
+    Why 不走 query_trades：其 limit=1000 分页会截断单日超 1000 行的聚合；
+    本函数全量流式读 CSV，只认 kind=fill（老行无 kind 默认 submit，保守不计）。
+    """
+    net: dict[str, float] = {}
+    if not os.path.exists(LIVE_TRADE_LOG):
+        return net
+    with open(LIVE_TRADE_LOG, "r", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            day = (r.get("timestamp") or "").split(" ")[0]
+            if not (start <= day <= end):
+                continue
+            if (r.get("kind") or "submit") != "fill":
+                continue
+            sym = r.get("symbol")
+            direction = (r.get("direction") or "").upper()
+            shares = r.get("shares")
+            if not sym or direction not in ("BUY", "SELL") or shares is None:
+                continue
+            net[sym] = net.get(sym, 0.0) + (float(shares) if direction == "BUY" else -float(shares))
+    return net
 
 def export_trades(start: str, end: str) -> str:
     """按日期区间 [start, end]（YYYY-MM-DD）导出实盘成交 CSV 字符串。
@@ -308,6 +336,7 @@ def query_trades(
                 continue
             # 数值字段尽力转 float：转不动（空串/脏数据）保留原串，前端兜底
             row = dict(r)
+            row.setdefault("kind", "submit")  # 老行无 kind 保守按 submit（#3）
             for k in ("shares", "price"):
                 try:
                     row[k] = float(row[k])
@@ -512,6 +541,7 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
     record_live_trade(
         order.symbol, direction, order.qty, order.price or 0.0,
         rationale=f"{gw.__class__.__name__}:{result.state.name}:{result.message}",
+        kind="submit",  # 下单审计行（含 REJECTED/FAILED），post_close 不计入净持仓
     )
     return {
         "order_id": result.order_id,
