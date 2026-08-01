@@ -1969,11 +1969,16 @@ class TradingEngine:
         if not gw_ok:
             return False, gw_reason
         # ③ 数据就绪（DB 查询；防御性双检）
+        # #2 修复：改查 expected_latest_trade_day(now)——T 日盘后落 data_ready(T)，
+        # T+1 日盘前 pre_open 查“最近已收盘交易日”=T 命中。原查 get_data_ready(date=T+1)
+        # 永远 None（data_ready 只落 T）→ 整天不挂单。与 _eod next_trading_day 同源口径。
+        from trading.calendar import expected_latest_trade_day
+        _data_date = expected_latest_trade_day(clock.now())
         for k in self._plan_data_keys(plan):
-            ready = get_data_ready(date, k)
+            ready = get_data_ready(_data_date, k)
             if ready is None or not ready.get("ok"):
                 msg = ready["message"] if ready else "未采集"
-                return False, f"数据 {k} 未就绪（{msg}）"
+                return False, f"数据 {k} 未就绪（{_data_date}：{msg}）"
         return True, ""
 
     def _plan_data_keys(self, plan: dict) -> set[str]:

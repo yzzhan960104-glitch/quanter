@@ -915,3 +915,41 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
         f"全绿 gate 应放行挂单（端到端事件链收口），实际 submitted={result['submitted']}"
     assert submitted["n"] == 1, "_submit 应被调一次（gate 放行后真挂单）"
 
+
+
+# ============================================================================
+# Task B1（live-mainchain-fixes）：data_ready 跨日 gate（#2）
+# ============================================================================
+def test_pre_open_next_day_gate_hits_prev_day_data_ready(isolated, monkeypatch):
+    """跨日：T 日落 data_ready(T)，T+1 日 pre_open gate③ 应命中（#2）。
+
+    生产根因：原 gate③ 查 get_data_ready(date=T+1) → 永远 None → 整天不挂单；
+    旧同日冻结用例掩盖了跨日错位，本用例真实跨两日。
+    """
+    from datetime import datetime as _dt
+    from trading import clock, state_store
+    from trading.engine import TradingEngine
+
+    PIPE_T, PREOPEN_T1 = "2026-07-30", "2026-07-31"
+    monkeypatch.setattr(clock, "now", lambda: _dt(2026, 7, 30, 18, 0, 0))
+    monkeypatch.setattr(clock, "today", lambda: PIPE_T)
+    state_store.upsert_data_ready(PIPE_T, "daily", ok=True, melted=False,
+                                  latest_date=PIPE_T, expected_date=PIPE_T, message="ok")
+    # T+1 日 09:22 pre_open
+    monkeypatch.setattr(clock, "now", lambda: _dt(2026, 7, 31, 9, 22, 0))
+    monkeypatch.setattr(clock, "today", lambda: PREOPEN_T1)
+    monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
+    eng = TradingEngine()
+    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", eng)
+    fake_gw = MagicMock()
+    fake_gw._connected = True
+    fake_gw.is_client_ready = lambda *a, **kw: True
+    # 确认计划：gate ① 段需通过
+    trading_plan.save_plan(PREOPEN_T1, [{
+        "order": {"symbol": "300077.SZ", "qty": 100, "side": "BUY", "price": 10.0},
+        "stop_price": 9.5, "take_profit": 11.0, "neckline": 10.0, "atr": 0.25,
+        "formed_at": PIPE_T, "max_wait": 5, "tp1": None, "tp1_portion": 0.0,
+        "cancel_on": None, "experiment_id": None, "experiment_weight": None, "rr": 2.0,
+    }], confirmed=True)
+    ok, reason = asyncio.run(eng._pre_open_gate(PREOPEN_T1, fake_gw))
+    assert ok, f"T+1 pre_open gate 应放行（命中 T 日 data_ready），reason={reason}"
