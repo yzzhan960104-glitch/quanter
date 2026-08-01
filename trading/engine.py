@@ -2365,7 +2365,8 @@ class TradingEngine:
         return True
 
     # ----- cron 包装：交易日判定 + 转调 async 触发函数 -----
-    async def _eod(self) -> None:
+    async def _eod(self, *, data_day: str | None = None,
+                   plan_date: str | None = None) -> None:
         """cron 包装：节假日跳过；交易日 resolve 多实验 + scan_live 产信号 → eod_plan。
 
         物理意图（二期 gap② 策略数据源 · 术语对齐物理时序）：
@@ -2403,14 +2404,15 @@ class TradingEngine:
             scan_live 返回的 signal dict 上补齐两字段即可复用既有归因链路（Task5/6 已就绪）。
         """
         # C-6 V2：单一时间源 + 入口缓存（防同轮跨午夜漂移）。
+        # C-8 V2：data_day/plan_date 显式注入（启动补跑传最近已收盘交易日）；缺省 None 时与 C-6 完全等价（_today=clock.today，_td=clock.trading_day）。
         # _today=交易日守卫口径（clock.today），_td=eod 落盘 key 口径（clock.trading_day，
         # =next_trading_day(today)）。命名区分读/写避免 eod/pre_open key 错位
         # （[[eod-date-offbyone-fix]] 病灶：eod 落盘必用 trading_day，pre_open 读 today）。
-        _today = clock.today()
+        _today = data_day or clock.today()
         if not calendar.is_trading_day(_today):
             logger.info("eod_plan 跳过：今日非交易日 %s", _today)
             return
-        _td = clock.trading_day()
+        _td = plan_date or clock.trading_day()
         # 局部 import（避免顶层拉起 experiment/strategies 子系统，保持引擎薄编排）：
         import pandas as pd
         from experiment.resolver import resolve_active

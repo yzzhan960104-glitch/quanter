@@ -13,6 +13,12 @@
     ⑤ 全绿 → ``engine._eod()``；否则 CRITICAL 告警 + 跳过 eod（不产废信号）
     ⑥ 事件链尾 → brief 播报（失败不阻断已完成的 eod plan）
 
+C-8 补跑参数化（spec §3.2）：
+    for_date = 事件链数据日（补跑传最近已收盘交易日 T）；run_eod = 是否产计划
+    （窗口已过传 False 只补数据+brief，政策 A 不产过期计划）。默认 None/True 与 C-2 行为等价。
+台账（spec §3.4）：pipeline 状态 running→done/failed 由本函数统一落，
+    cron 与启动补跑共用（先查后写防双跑）。
+
 依赖单向（低耦合硬约束）：只 import ``data.freshness``（纯函数）+ 标准库 +
 ``engine._eod`` + ``state_store`` + ``calendar`` + ``experiment.resolver`` /
 ``strategies.registry``，**绝不反向 import server/broadcast**（广播收口在
@@ -35,91 +41,126 @@ from pathlib import Path
 from data.freshness import check_freshness
 from experiment.resolver import resolve_active
 from strategies.registry import build_strategy
-from trading.calendar import expected_latest_trade_day, is_trading_day
-from trading import clock
+from trading.calendar import expected_latest_trade_day, is_trading_day, next_trading_day
+from trading import clock, job_ledger
 from trading.state_store import upsert_data_ready
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 
 
-async def pipeline_then_eod(engine) -> None:
+def _ledger_finish(today: str, status: str, message: str = "") -> None:
+    """pipeline 台账落终态（失败软降级，绝不阻断事件链主流程）。"""
+    try:
+        job_ledger.finish_run("pipeline", today, status, message)
+    except Exception:
+        logger.exception("job_ledger finish_run 失败（不阻断主流程）")
+
+
+async def pipeline_then_eod(engine, *, for_date: str | None = None,
+                            run_eod: bool = True) -> None:
     """C-2 事件链：采集 → 等完成 → 按策略声明校验数据 → eod → brief。
 
     Args:
         engine: 持有 ``async _eod()`` 的交易引擎（编排层只调这一个方法，
             不读引擎内部状态——低耦合）。
+        for_date: 补跑用——事件链数据日（YYYY-MM-DD，缺省=clock.today()）。
+            C-8 spec §3.2：T+1 早上补跑 T 日链时，data_ready 必须落 T、
+            eod 必须产 next_trading_day(T) 计划，否则日期错位（C-6 同源风险）。
+        run_eod: 补跑窗口已过时传 False——只补 采集→校验→data_ready→brief，
+            不为已过期交易日产废计划（政策 A，spec §2）。
     """
-    # C-6 V3：单一时间源（pipeline_then_eod 入口 today 用 clock.today）。
-    today = clock.today()
+    today = for_date or clock.today()
     if not is_trading_day(today):
-        logger.info("pipeline_then_eod 跳过：今日非交易日 %s", today)
+        logger.info("pipeline_then_eod 跳过：非交易日 %s", today)
         return
-    # 1. 采集子进程（原 ops/data_pipeline.py，T1→采→T2）
-    log_path = ROOT / "logs" / "data_pipeline.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    # M2：本编排现跑在长生命周期 uvicorn 进程内（不再是短命 schtasks 进程），裸
-    # ``open(...,"ab")`` 作为 subprocess stdout 会让文件句柄泄漏累积（每天 +1）。显式
-    # 捕获到局部变量，await proc.wait() 后 close()——确保句柄确定性地归还 OS。
-    log_fh = open(log_path, "ab")
+    _st = job_ledger.latest_status("pipeline", today)
+    if _st in ("running", "done"):
+        logger.info("pipeline_then_eod 跳过：%s 已 %s（台账守卫，cron/补跑不双跑）",
+                    today, _st)
+        return
     try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(ROOT / "ops" / "data_pipeline.py"), cwd=str(ROOT),
-            stdout=log_fh,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        rc = await proc.wait()
-    finally:
-        log_fh.close()
-    # C-4 U3c：采集子进程失败（rc!=0）= T 日增量未落湖 → 用 T-1 数据算 T+1 计划 = 时序 bug
-    # （[[eod-date-offbyone-fix]] 同源风险）。升 L1：raise _CriticalHalt → engine _halt 停调度，
-    # 绝不用陈旧数据产废信号（spec §3 pipeline 采集失败=L1）。
-    # 函数内 import 规避循环依赖（engine.py 顶层 import 本编排层时会反向引用）。
-    if rc != 0:
-        from trading.engine import _CriticalHalt
-        raise _CriticalHalt(f"采集子进程失败 rc={rc}（T 日增量未落湖，拒产 T+1 计划）")
-    # 2. 装配本次实验策略 → 收集依赖 key 并集（D3）
-    keys: set[str] = set()
-    try:
-        for exp in resolve_active():
-            strat = build_strategy(exp.strategy_name, exp.params)
-            keys |= set(strat.required_data_keys)
+        job_ledger.begin_run("pipeline", today, clock.now().isoformat())
     except Exception:
-        logger.exception("策略依赖解析失败，回退默认 {daily}")
-        keys = {"daily"}
-    keys = keys or {"daily"}
-    # 3. 按声明的 key 逐个校验（复用 check_freshness 纯函数，不读旧 parquet mtime）
-    # C-6 V3：单一时间源（时点传 expected_latest_trade_day，clock.now() 返 datetime 等价）。
-    expected = expected_latest_trade_day(clock.now())
-    results = {k: check_freshness(k, expected) for k in keys}
-    all_ok = all(r.ok for r in results.values())
-    # 4. 落就绪事件（供 pre_open 防御性双检）
-    for k, r in results.items():
+        logger.exception("job_ledger begin_run 失败（不阻断主流程）")
+    try:
+        # 1. 采集子进程（原 ops/data_pipeline.py，T1→采→T2）
+        log_path = ROOT / "logs" / "data_pipeline.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # M2：本编排现跑在长生命周期 uvicorn 进程内（不再是短命 schtasks 进程），裸
+        # ``open(...,"ab")`` 作为 subprocess stdout 会让文件句柄泄漏累积（每天 +1）。显式
+        # 捕获到局部变量，await proc.wait() 后 close()——确保句柄确定性地归还 OS。
+        log_fh = open(log_path, "ab")
         try:
-            upsert_data_ready(today, k, ok=r.ok,
-                              melted=(not all_ok and rc != 0),
-                              latest_date=r.latest_date, expected_date=expected,
-                              message=r.message)
-        except Exception:
-            logger.exception("data_ready 落库失败（不阻断）")
-    if not all_ok:
-        msg = f"数据未就绪：{[r.message for r in results.values() if not r.ok]}，eod 跳过"
-        logger.warning(msg)
-        try:
-            from infra.notifier import (build_default_manager, fire_and_forget,
-                                        NotificationManager)
-            build_default_manager()
-            fire_and_forget(
-                NotificationManager.get_default().notify_risk_event(msg, "CRITICAL")
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(ROOT / "ops" / "data_pipeline.py"), cwd=str(ROOT),
+                stdout=log_fh,
+                stderr=asyncio.subprocess.STDOUT,
             )
+            rc = await proc.wait()
+        finally:
+            log_fh.close()
+        # C-4 U3c：采集子进程失败（rc!=0）= T 日增量未落湖 → 用 T-1 数据算 T+1 计划 = 时序 bug
+        # （[[eod-date-offbyone-fix]] 同源风险）。升 L1：raise _CriticalHalt → engine _halt 停调度，
+        # 绝不用陈旧数据产废信号（spec §3 pipeline 采集失败=L1）。
+        # C-8 V2：抛前落台账 failed（补跑路径由 catchup 捕获转 failed+CRITICAL，不停调度）。
+        # 函数内 import 规避循环依赖（engine.py 顶层 import 本编排层时会反向引用）。
+        if rc != 0:
+            _ledger_finish(today, "failed", f"采集子进程失败 rc={rc}")
+            from trading.engine import _CriticalHalt
+            raise _CriticalHalt(f"采集子进程失败 rc={rc}（T 日增量未落湖，拒产 T+1 计划）")
+        # 2. 装配本次在线实验策略 → 收集依赖 key 并集（D3）
+        keys: set[str] = set()
+        try:
+            for exp in resolve_active():
+                strat = build_strategy(exp.strategy_name, exp.params)
+                keys |= set(strat.required_data_keys)
         except Exception:
-            logger.exception("CRITICAL 告警发送失败")
-        return  # 不跑 eod，不产废信号
-    # 5. 全绿 → 跑 eod
-    await engine._eod()
-    # 6. 事件链尾 → Brief 播报（D7）。失败不阻断已完成的 eod plan。
-    try:
-        from ops.brief_all import run_brief_all
-        await run_brief_all()
+            logger.exception("策略依赖解析失败，回退默认 {daily}")
+            keys = {"daily"}
+        keys = keys or {"daily"}
+        # 3. 按声明的 key 逐个校验（复用 check_freshness 纯函数，不读旧 parquet mtime）
+        # C-6 V3：单一时间源（时点传 expected_latest_trade_day，clock.now() 返 datetime 等价）。
+        expected = expected_latest_trade_day(clock.now())
+        results = {k: check_freshness(k, expected) for k in keys}
+        all_ok = all(r.ok for r in results.values())
+        # 4. 落就绪事件（供 pre_open 防御性双检）——C-8 V2：日期用 today（for_date），
+        #    补跑时落 T 而非今天，否则 pre_open gate 查 expected_latest_trade_day=T 永远 None。
+        for k, r in results.items():
+            try:
+                upsert_data_ready(today, k, ok=r.ok,
+                                  melted=(not all_ok and rc != 0),
+                                  latest_date=r.latest_date, expected_date=expected,
+                                  message=r.message)
+            except Exception:
+                logger.exception("data_ready 落库失败（不阻断）")
+        if not all_ok:
+            msg = f"数据未就绪：{[r.message for r in results.values() if not r.ok]}，eod 跳过"
+            logger.warning(msg)
+            _ledger_finish(today, "failed", msg)
+            try:
+                from infra.notifier import (build_default_manager, fire_and_forget,
+                                            NotificationManager)
+                build_default_manager()
+                fire_and_forget(
+                    NotificationManager.get_default().notify_risk_event(msg, "CRITICAL")
+                )
+            except Exception:
+                logger.exception("CRITICAL 告警发送失败")
+            return  # 不跑 eod，不产废信号
+        # 5. 全绿 → 跑 eod（C-8 V2：补跑传显式 data_day/plan_date；默认路径零变化）
+        if run_eod:
+            if for_date is not None:
+                await engine._eod(data_day=today, plan_date=next_trading_day(today))
+            else:
+                await engine._eod()
+        # 6. 事件链尾 → Brief 播报（D7）。失败不阻断已完成的 eod plan。
+        try:
+            from ops.brief_all import run_brief_all
+            await run_brief_all()
+        except Exception:
+            logger.exception("brief 播报失败（不阻断 eod 已完成的 plan）")
+        _ledger_finish(today, "done")
     except Exception:
-        logger.exception("brief 播报失败（不阻断 eod 已完成的 plan）")
+        _ledger_finish(today, "failed", "未预期异常")
+        raise

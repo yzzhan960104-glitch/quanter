@@ -323,7 +323,7 @@ async def test_for_date_passes_explicit_dates_to_eod():
     eng = MagicMock()
     eng._eod = AsyncMock()
     with patch.object(pl, "is_trading_day", return_value=True), \
-         patch.object(pl, "asyncio.create_subprocess_exec") as cse, \
+         patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
          patch.object(pl, "next_trading_day", return_value="2026-08-03"), \
          patch.object(pl, "check_freshness",
@@ -346,7 +346,7 @@ async def test_default_path_calls_eod_without_args():
     eng = MagicMock()
     eng._eod = AsyncMock()
     with patch.object(pl, "is_trading_day", return_value=True), \
-         patch.object(pl, "asyncio.create_subprocess_exec") as cse, \
+         patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
          patch.object(pl, "check_freshness",
                       return_value=FreshnessResult("daily", True, "2026-08-03",
@@ -366,7 +366,7 @@ async def test_run_eod_false_skips_eod_but_runs_brief():
     eng = MagicMock()
     eng._eod = AsyncMock()
     with patch.object(pl, "is_trading_day", return_value=True), \
-         patch.object(pl, "asyncio.create_subprocess_exec") as cse, \
+         patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
          patch.object(pl, "check_freshness",
                       return_value=FreshnessResult("daily", True, "2026-07-31",
@@ -387,7 +387,7 @@ async def test_data_unready_records_failed():
     eng = MagicMock()
     eng._eod = AsyncMock()
     with patch.object(pl, "is_trading_day", return_value=True), \
-         patch.object(pl, "asyncio.create_subprocess_exec") as cse, \
+         patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
          patch.object(pl, "check_freshness",
                       return_value=FreshnessResult("daily", False, None,
@@ -443,12 +443,12 @@ async def test_eod_plan_date_flows_to_eod_plan(monkeypatch):
     monkeypatch.setattr("strategies.registry.build_strategy",
                         lambda *a, **kw: MagicMock())
     monkeypatch.setattr("pandas.read_parquet", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(eng, "_load_universe", lambda lake: [])
-    monkeypatch.setattr(eng, "_load_integrity_ctx", lambda d: (set(), set()))
+    monkeypatch.setattr("trading.engine._load_universe", lambda lake: [])
+    monkeypatch.setattr("trading.engine._load_integrity_ctx", lambda d: (set(), set()))
     monkeypatch.setattr("data.integrity.filter_universe_by_continuity",
                         lambda *a, **kw: [])
-    monkeypatch.setattr(eng, "_resolve_id_window", lambda s: 10)
-    monkeypatch.setattr(eng, "_resolve_cooldown_days", lambda exps: 0)
+    monkeypatch.setattr("trading.engine._resolve_id_window", lambda s: 10)
+    monkeypatch.setattr("trading.engine._resolve_cooldown_days", lambda exps: 0)
     monkeypatch.setattr(eng, "_broadcast_positions_pnl", AsyncMock())
     eod_plan = AsyncMock()
     monkeypatch.setattr("trading.engine.eod_plan", eod_plan)
