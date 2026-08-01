@@ -63,14 +63,14 @@ def test_orchestrator_smoke(isolated_state, monkeypatch, tmp_path):
             "order": {"symbol": "300001.SZ", "qty": 100, "side": "BUY", "price": 10.00},
             "stop_price": 9.50, "take_profit": 11.00, "neckline": 10.00,
             "atr": 0.25, "formed_at": "2026-07-01", "max_wait": 5,
-            "tp1": 10.50, "tp1_portion": 0.5, "cancel_on": 10.50,
+            "tp1": 10.50, "tp1_portion": 50, "cancel_on": 10.50,
             "experiment_id": None, "experiment_weight": None, "rr": 2.0,
         },
         {
             "order": {"symbol": "688001.SH", "qty": 100, "side": "BUY", "price": 20.00},
             "stop_price": 19.00, "take_profit": 22.00, "neckline": 20.00,
             "atr": 0.50, "formed_at": "2026-07-01", "max_wait": 5,
-            "tp1": 21.00, "tp1_portion": 0.5, "cancel_on": 21.00,
+            "tp1": 21.00, "tp1_portion": 50, "cancel_on": 21.00,
             "experiment_id": None, "experiment_weight": None, "rr": 2.0,
         },
     ]
@@ -127,13 +127,9 @@ def test_orchestrator_smoke(isolated_state, monkeypatch, tmp_path):
     # fake 2 日日历（不依赖 data_lake）：day1 eod → day2 pre_open/stoploss×8/post_close。
     calendar = [date(2026, 7, 1), date(2026, 7, 2)]
 
-    class _FakeEng:
-        """fake TradingEngine（smoke 不需真 sched，discovery_stub.attach 容错）。"""
-        class sched:
-            @staticmethod
-            def add_job(*a, **kw):
-                pass
-    eng = _FakeEng()
+    # 真实 TradingEngine：成交回报注入需 _handle_order_update 真身（design §4.2）
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
 
     job_runner = build_job_runner(
         min_bar_feeder, broker, dingtalk_log, snapshot_collector, eng)
@@ -270,6 +266,14 @@ def test_orchestrator_smoke(isolated_state, monkeypatch, tmp_path):
     assert total_fallback == 0, (
         f"I-1 回归：day1 stoploss 全程 fallback_used 应为 0（decide_exit 主路径无异常），"
         f"实际 total_fallback={total_fallback}")
+
+    # --- 验收 12：成交回报真实落表（design §4：fill/position/order 状态非空转） ---
+    assert any(snap.get("fill", 0) > 0 for snap in snapshots.values()), "应产生 fill 明细"
+    assert any(snap.get("positions") for snap in snapshots.values()), "应出现持仓列表"
+    states = set().union(*(snap.get("order_by_state", {}) for snap in snapshots.values()))
+    assert states & {"FILLED", "PARTIAL"}, f"order 应出现 FILLED/PARTIAL，实际 {states}"
+    assert "全周期成交流水" in content and "持仓列表" in content
+    assert "300001.SZ" in content, "交易/持仓列表应含真实 symbol"
 
 
 # ============================================================

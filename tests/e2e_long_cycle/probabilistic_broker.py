@@ -106,29 +106,35 @@ class ProbabilisticBroker:
                 self._positions[symbol]["volume"] = new
 
     def _queue_report(self, oid: str, symbol: str, side: str, qty: float, price: float,
-                      state: str, t_date: date, traded_time: str) -> None:
-        """排队一笔成交回报（FILLED/PARTIAL_FILLED/REJECTED），供 inject_fills 注入。"""
+                      state: str, t_date: date, traded_time: str,
+                      purpose: str | None = None) -> None:
+        """排队一笔成交回报（FILLED/PARTIAL_FILLED/REJECTED），供 inject_fills 注入。
+
+        purpose 仅 TP1/TP2 成交时携带（resting 触发已知目的）；市价卖单为 None。
+        """
         self._pending_reports.append({
             "oid": oid, "symbol": symbol, "side": side, "qty": float(qty),
             "price": float(price), "state": state, "t_date": t_date,
-            "traded_time": traded_time,
+            "traded_time": traded_time, "purpose": purpose,
         })
 
-    def _is_tp_price(self, symbol: str, price: float, t_date: date) -> bool:
+    def _tp_purpose(self, symbol: str, price: float, t_date: date) -> str | None:
         """SELL 是否 TP 限价单：price 命中 plan 该标的 tp1/take_profit（±1e-6）。
 
         Why 从 plan 判而非看价格高低：STOP/超期市价卖也带价（跌停/现价），只有命中计划
         止盈价才能确定是"限价挂单等成交"（spec §7：high >= tp 才触发）。
+        返 purpose（TP1/TP2）供 resting 与 _backfill_sell_order_state 精确回填。
         """
         from trading import trading_plan
         plan = trading_plan.load_plan(t_date.isoformat())
         for o in (plan or {}).get("orders", []):
             if (o.get("order") or {}).get("symbol") != symbol:
                 continue
-            for tp in (o.get("tp1"), o.get("take_profit")):
-                if tp is not None and abs(float(price) - float(tp)) < 1e-6:
-                    return True
-        return False
+            if o.get("tp1") is not None and abs(float(price) - float(o["tp1"])) < 1e-6:
+                return "TP1"
+            if o.get("take_profit") is not None and abs(float(price) - float(o["take_profit"])) < 1e-6:
+                return "TP2"
+        return None
 
     @staticmethod
     def _db_state(state: str) -> str:
@@ -139,13 +145,26 @@ class ProbabilisticBroker:
         """TP/STOP/EXPIRED 行 broker_oid 回填（E2E 不模拟生产 async_response 链路）。
 
         生产 _record_tp/add_order_qty/_record_stop/超期平仓的内部 order_id 确定性生成
-        ``{date}_{symbol}_{purpose}_1``；逐个尝试，命中行才更新（rowcount=0 天然跳过）。
-        否则 order 表终态停在 SUBMITTED，报表看不出止盈/止损单已成交。
+        ``{date}_{symbol}_{purpose}_1``。⚠️ 必须按【实际成交目的】回填，不能盲扫全部
+        目的行——否则 STOP 成交会把同 symbol 未触发的 TP2 行误标 FILLED（smoke 实测）。
+        - TP1/TP2：resting 触发时目的已知（rep["purpose"]）；
+        - STOP/EXPIRED_CLOSE（市价卖）：两者至多一行存在，且价格应与成交价一致
+          （STOP 行由 _record_stop 落盘价=成交价；EXPIRED 行落跌停/现价），用价格匹配防误标。
         """
         from trading import state_store
-        for purpose in ("TP1", "TP2", "STOP", "EXPIRED_CLOSE"):
+        purposes = ([rep["purpose"]] if rep.get("purpose") in ("TP1", "TP2")
+                    else ["STOP", "EXPIRED_CLOSE"])
+        for purpose in purposes:
             internal_oid = f"{rep['t_date']}_{rep['symbol']}_{purpose}_1"
             try:
+                with state_store._connect(state_store._DEFAULT_DB) as con:
+                    row = con.execute(
+                        'SELECT order_id, price FROM "order" WHERE order_id=?',
+                        (internal_oid,)).fetchone()
+                    if row is None:
+                        continue  # 该目的行不存在（单腿 plan 无 TP1 / 未落 STOP 行）
+                    if purpose in ("STOP", "EXPIRED_CLOSE") and row["price"] is not None                             and abs(float(row["price"]) - float(rep["price"])) > 1e-6:
+                        continue  # 价格不匹配 → 非本笔成交的目的行，跳过
                 state_store.update_order_state(
                     internal_oid, self._db_state(rep["state"]), broker_oid=oid,
                     filled_qty=rep["qty"], filled_price=rep["price"])
@@ -214,7 +233,8 @@ class ProbabilisticBroker:
             if qty > 0:
                 self._apply_mirror(r["symbol"], -qty, r["price"])
                 self._queue_report(oid, r["symbol"], "SELL", qty, r["price"],
-                                   "FILLED", t_date, r["traded_time"])
+                                   "FILLED", t_date, r["traded_time"],
+                                   purpose=r.get("purpose"))
             del self._resting[oid]
         if self._pending_reports:
             await self.inject_fills(eng)
@@ -239,10 +259,12 @@ class ProbabilisticBroker:
         if self._last_gw is not None:
             self._last_gw._orders[oid] = {"order_type": _STOCK_BUY if side == "BUY" else _STOCK_SELL}
 
-        if side == "SELL" and self._is_tp_price(symbol, price, t_date):
+        tp_purpose = self._tp_purpose(symbol, price, t_date) if side == "SELL" else None
+        if tp_purpose is not None:
             # TP 限价单：挂单等价格（spec §7：stk_mins 当日 high ≥ tp 价即触发）
             self._resting[oid] = {"symbol": symbol, "qty": qty, "price": price,
-                                  "t_date": t_date, "traded_time": traded_time}
+                                  "t_date": t_date, "traded_time": traded_time,
+                                  "purpose": tp_purpose}
             return {"order_id": oid, "state": "SUBMITTED", "price": price}
 
         if side == "SELL":
@@ -306,15 +328,16 @@ class ProbabilisticBroker:
         物理意图：stop_loss_monitor 真身经 gw._fetch_broker_positions 巡检持仓；
         超期构造标的（300099.SZ）须进镜像，才能被 monitor/超期平仓 SELL clamp 后真实减仓。
         """
-        out = dict(self._positions)
+        # 构造超期标的入镜像（SELL 平仓 clamp 需要；同步后返回副本）
         for sym, meta in self._expired.items():
             if t_date >= meta.get("holding_days_ref", t_date):
-                pos = out.setdefault(sym, {"volume": 100, "avg_price": 10.0,
-                                           "entry_date": meta["entry_date"]})
+                pos = self._positions.setdefault(
+                    sym, {"volume": 100, "avg_price": 10.0, "entry_date": meta["entry_date"]})
                 pos.setdefault("entry_date", meta["entry_date"])
-        # 同步回镜像：构造超期标的可被 SELL 平仓（clamp 防负）
-        self._positions = out
-        return out
+        # ⚠️ 必须返副本且【不重绑 self._positions】：stop_loss_monitor 迭代本返回值期间，
+        # simulate_submit/_apply_mirror 会原地改 self._positions；重绑会让 monitor 迭代的
+        # dict 与镜像同一对象 → "dictionary changed size during iteration"（smoke 实测）。
+        return dict(self._positions)
 
     @contextmanager
     def attach(self, t_date: date, up_to: time):

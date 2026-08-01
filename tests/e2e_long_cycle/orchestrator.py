@@ -112,11 +112,14 @@ def build_job_runner(
             # 软降级：upsert 失败不应中断回放（生产同源 try-except 不阻断）。
             from trading import state_store
             try:
+                # 生产 pipeline_then_eod 在 T 日盘后落 data_ready(T)（pipeline.py:103 口径）；
+                # pre_open(T+1) gate③ 查 expected_latest_trade_day(now)=T（engine.py:2110
+                # b77b2df7 修复后）。故 E2E 注入 key = T 日（旧注释写 T+1 已误导修正）。
                 state_store.upsert_data_ready(
-                    t_plus_1_iso, "daily",
+                    t_date.isoformat(), "daily",
                     ok=True, melted=False,
                     latest_date=t_date.isoformat(),     # 采集到的最新交易日 = T 日
-                    expected_date=t_plus_1_iso,         # 期望最新日 = T+1（口径与生产一致）
+                    expected_date=t_date.isoformat(),   # 期望最新日 = T（gate③ 查询口径）
                     message="E2E orchestrator mock 采集完成（pipeline_then_eod 注入）",
                 )
             except Exception:
@@ -133,8 +136,12 @@ def build_job_runner(
             # broker.attach patch engine.get_gateway/_submit/_cancel_all（单一 gw 注入点）。
             # V2 run_pre_open_phase 直调 engine.pre_open(today=T+1)，内部 get_gateway() 命中 patch。
             # gw=None 传参：V2 不消费 gw（直调模块级），让真身走 patched get_gateway（避免双 gw）。
-            with broker.attach(t_plus_1, time(9, 25)):
-                return asyncio.run(signal_scanner.run_pre_open_phase(t_plus_1, gw=None))
+            with broker.attach(t_plus_1, time(9, 25)) as gw:
+                eng._gw = gw  # _order_direction 内存兜底（_handle_order_update 方向反查）
+                result = asyncio.run(signal_scanner.run_pre_open_phase(t_plus_1, gw=None))
+                # design §4.2：挂单后注入成交回报（BUY fill 落账 + _place_take_profit 挂 TP 限价单）
+                asyncio.run(broker.inject_fills(eng))
+            return result
 
         # ============================================================
         # ③ stoploss：T+1 盘中 MinBarFeeder 注入行情 + stop_loss_monitor 真身判定
@@ -181,8 +188,9 @@ def build_job_runner(
 
             # 双 context 叠加：行情 patch + gw patch（顺序无依赖，但 gw patch 内
             # stop_loss_monitor 会 await get_quotes，行情 patch 必须在内层先就位）。
-            with min_bar_feeder.patch_get_quotes(), broker.attach(t_plus_1, now_time):
-                return asyncio.run(stop_loss_monitor(
+            with min_bar_feeder.patch_get_quotes(), broker.attach(t_plus_1, now_time) as gw:
+                eng._gw = gw  # _order_direction 内存兜底（_handle_order_update 方向反查）
+                result = asyncio.run(stop_loss_monitor(
                     # stop_prices：D12 fallback 兜底（decide_exit 异常时退回 should_trigger_stop
                     # 用此比价）。从 monitor_ctx.state.stop 提取；None 安全（fallback 跳过该 sym）。
                     stop_prices={
@@ -193,6 +201,10 @@ def build_job_runner(
                     monitor_ctx=monitor_ctx,
                     pending_ctx=pending_ctx,
                 ))
+                # design §4.2：盘中扫描 TP 限价单（stk_mins 累积 high>=tp 真实价格触发）
+                # + 注入 STOP/TP 成交回报（fill/position/order 状态推进）
+                asyncio.run(broker.scan_resting_and_inject(eng, t_plus_1, now_time))
+            return result
 
         # ============================================================
         # ④ post_close：T+1 15:30 broker.attach + V2 对账落表 + V6 snapshot
@@ -202,8 +214,11 @@ def build_job_runner(
             # broker.attach 注入 query_asset（熔断日构造 -4%）/ _fetch_broker_positions（超期标的）。
             # V2 run_post_close_phase 直调 engine.post_close(date=T+1, gw, local_positions)，
             # 内部对账 + trailing 演进 + max_holding 标记 + 清白名单 + 落 account_daily。
-            with broker.attach(t_plus_1, time(15, 30)):
+            with broker.attach(t_plus_1, time(15, 30)) as gw:
+                eng._gw = gw  # _order_direction 内存兜底（_handle_order_update 方向反查）
                 result = asyncio.run(signal_scanner.run_post_close_phase(t_plus_1, gw=None))
+                # design §4.2：post_close 内超期平仓等卖单的成交回报落账
+                asyncio.run(broker.inject_fills(eng))
 
             # V6 snapshot 当日每表落点（post_close 已落表，此刻读真相）。
             # 容错：snapshot 内部 sqlite3 直查，表缺失/DB 未 init 返 0 不抛（首日健壮）。

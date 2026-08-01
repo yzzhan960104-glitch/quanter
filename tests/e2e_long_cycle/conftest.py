@@ -51,6 +51,9 @@ def isolated_state(tmp_path, monkeypatch):
     # 范式参考 tests/trading/test_e2e_trading_flow.py:777 同款 patch。
     from presentation.server.services import trading_service as _svc
     monkeypatch.setattr(_svc, "query_trades", lambda *a, **k: {"trades": []})
+    # record_live_trade 隔离（design §4.3）：成交回报 _handle_order_update 会补写真实 CSV
+    # （logs/live_trades.csv）；E2E 用 tmp DB 做真相源，不污染真实流水（同 query_trades 范式）。
+    monkeypatch.setattr(_svc, "record_live_trade", lambda *a, **k: None)
     return tmp_path
 
 

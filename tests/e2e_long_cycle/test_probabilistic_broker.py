@@ -115,7 +115,7 @@ def test_resting_tp_stays_submitted_when_high_below_price(isolated_state, monkey
 
     trading_plan.save_plan("2026-07-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "BUY", "price": 10.0},
-        "stop_price": 9.5, "take_profit": 11.0, "tp1": 10.5, "tp1_portion": 0.5,
+        "stop_price": 9.5, "take_profit": 11.0, "tp1": 10.5, "tp1_portion": 50,
     }], confirmed=True)
 
     def loader(sym, d):
@@ -153,7 +153,7 @@ def test_resting_tp_fills_when_high_reaches_price(isolated_state, monkeypatch):
 
     trading_plan.save_plan("2026-07-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "BUY", "price": 10.0},
-        "stop_price": 9.5, "take_profit": 11.0, "tp1": 10.5, "tp1_portion": 0.5,
+        "stop_price": 9.5, "take_profit": 11.0, "tp1": 10.5, "tp1_portion": 50,
     }], confirmed=True)
 
     def loader(sym, d):
