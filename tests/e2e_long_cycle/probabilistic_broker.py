@@ -112,6 +112,16 @@ class ProbabilisticBroker:
         gw.query_orders = AsyncMock(return_value=[])
         gw.cancel_order = AsyncMock(return_value=None)
         gw._confirm_cancelled = AsyncMock(return_value=True)
+        # post_close 真身调 reconcile_job.run_reconcile → await gw.sync_positions(...)
+        # （BaseExecutionGateway 模板方法）。补 AsyncMock 返零漂 ReconciliationResult，
+        # 否则 post_close 对账崩（V7 串联时暴露的 V4 缺口）。
+        # 物理含义：概率 broker 内存持仓即"真相"，对账视为零漂（drift 由概率模型自洽）。
+        # 全链路真漂移场景由 ReportBuilder._check_consistency 从 fill/position 表实算暴露。
+        from trading.reconcile_job import ReconciliationResult
+        gw.sync_positions = AsyncMock(
+            return_value=ReconciliationResult(
+                matched=[], drifted=[], only_local=[], only_broker=[],
+                max_abs_drift=0.0, is_ok=True))
 
         async def _submit_mock(order, *, confirm=True):
             return self.simulate_submit(
