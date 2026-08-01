@@ -42,6 +42,17 @@ def test_run_eod_phase_lands_t_plus_1_plan(isolated_state, monkeypatch):
     plan = trading_plan.load_plan(t_plus_1)
     assert plan is not None, f"T+1={t_plus_1} plan 应落盘（eod_plan 真身）"
 
+    # I-2: result["date"] 应 == next_trading_day(T)（时序对齐独立校验，非信任返回值）。
+    # Why 独立校验：[[eod-date-offbyone-fix]] 已证明 date 错位是静默致命 bug——
+    # 若未来 eod_plan 重构退回 today 落盘，result["date"] 跟着错，load_plan 仍能读到
+    # 错位 plan，测试不会发现。此处用 next_trading_day(T) 独立锚定 T+1，杜绝 date 漂移。
+    from trading.calendar import next_trading_day
+    expected_t_plus_1 = next_trading_day("2026-07-01")
+    assert t_plus_1 == expected_t_plus_1, (
+        f"run_eod_phase(T) 应落 T+1={expected_t_plus_1}（next_trading_day 口径），"
+        f"实际 {t_plus_1}（date 错位见 [[eod-date-offbyone-fix]]）"
+    )
+
     # ② confirmed=True（AUTO_CONFIRM_PLAN=true 模拟人审闸已过）
     assert plan["confirmed"] is True
 
@@ -52,6 +63,20 @@ def test_run_eod_phase_lands_t_plus_1_plan(isolated_state, monkeypatch):
         assert "stop_price" in o, "每单必含 stop_price（止损价）"
         assert "take_profit" in o, "每单必含 take_profit（止盈价）"
         assert "symbol" in o["order"], "order 段必含 symbol"
+        # I-1: 真实信号值非零校验（守护 V2「真实信号」红线，spec §5 目标 2）。
+        # Why 必非零：颈线法 stop=neckline-2*atr、tp=neckline+2*H、neckline=突破位颈线，
+        # 均由 build_orders_from_signals 在真实 Signal 上算出，必为正值。若 detect_signal
+        # 退化为产 stop=0/tp=0 伪信号（如 ATR NaN 回退失败），结构键断言挡不住——
+        # 此处补值校验，让「伪信号仍 PASS」的回归立刻显形。
+        assert o["stop_price"] > 0, (
+            f"stop_price 应非零（真实颈线法信号 stop=neckline-2*atr），实际 {o['stop_price']}"
+        )
+        assert o["take_profit"] > 0, (
+            f"take_profit 应非零（真实颈线法 tp=neckline+2*H），实际 {o['take_profit']}"
+        )
+        assert o.get("neckline", 0) > 0, (
+            f"neckline 应非零（颈线法核心位，突破锚点），实际 {o.get('neckline')}"
+        )
 
 
 async def _run_eod(t_date: date) -> dict:
