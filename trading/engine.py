@@ -85,6 +85,12 @@ from trading import position_book as _position_book
 # 是 position_book 的超集（真相源）。engine 落 SIGNAL/CONFIRMED 事件、写 order/fill 幂等、读
 # stop_price/has_order 走 DB（替代 plan JSON 单一依赖 + _tp_placed 内存）。
 from trading import state_store as _state_store
+# C-6 V2：单一时间源口子（替代散落 18 处 datetime.now）。三函数分工：
+#   clock.today()       = 业务日期 key（load_plan/save_plan/is_trading_day/熔断基线 date）
+#   clock.trading_day() = eod 落盘 key（=next_trading_day(today)，eod 专用，禁混用）
+#   clock.now()         = 事件时间戳（submitted_at/written_at/is_intraday_session 时点）
+# 触发点入口缓存（_eod/_pre_open/_stoploss/_post_close 入口算一次）防同轮跨午夜漂移。
+from trading import clock
 # Task 9（M4 静默漏单消灭）：致命事件钉钉 CRITICAL 告警（复用 infra.notifier，
 # broker/qmt.py _reconnect 已在用同一套）。lazy import 避免顶层 import 副作用扩散到
 # 仅用纯函数的测试场景——_alert_critical 内部 import 保持引用局部化。
@@ -310,7 +316,7 @@ def _load_recent_plan_symbols(days_back: int, today: str) -> set[str]:
 
     Args:
         days_back: 回溯自然日数（含 today），调用方传 cooldown+2 余量。
-        today:     YYYY-MM-DD（_eod 调用时传 datetime.now()）。
+        today:     YYYY-MM-DD（_eod 调用时传 clock.today()）。
 
     Returns:
         最近 days_back 自然日 plan 含 formed_at 的 symbol 集；plan 损坏/无 plan 返空集（保守不误杀）。
@@ -733,7 +739,8 @@ async def pre_open(date: str) -> dict:
     # - query_asset 异常 → 跳过 + 告警（不阻塞挂单主路径）。
     # Why 在撤单后而非前：撤单不影响总资产（仅未成交单状态变化），先后顺序无关；
     # 放后面可与撤单共用同一个 gw 引用，且「撤完昨日 → 抓今日基线」语义更清晰。
-    today_eq = datetime.now().strftime("%Y-%m-%d")
+    # C-6 V2：用传入 date（入口缓存，_pre_open 已算 clock.today 传 pre_open），不重复 datetime.now。
+    today_eq = date
     if gw is not None:
         try:
             asset = await gw.query_asset() if hasattr(gw, "query_asset") else {}
@@ -776,7 +783,8 @@ async def pre_open(date: str) -> dict:
     # 物理意图：回测信号后 max_wait 天窗口等回踩；实盘原口径只挂 1 天（次日 pre_open 撤昨日），
     # 改为窗口内每日可挂（回测对齐）。窗口外（trading_days > max_wait）的信号视为过期跳过。
     # 边界：order 缺 formed_at → days=0 视窗口内挂单（向后兼容老 plan）；缺 max_wait → 用 _trade_cfg 默认 5。
-    today_for_max_wait = datetime.now().strftime("%Y-%m-%d")
+    # C-6 V2：用传入 date（入口缓存，防同轮跨午夜漂移）。
+    today_for_max_wait = date
     cfg_max_wait = int(os.getenv("TRADE_MAX_WAIT", "5"))
     n_submitted = 0
     n_expired = 0
@@ -859,7 +867,7 @@ async def pre_open(date: str) -> dict:
                 _state_store.update_order_state(
                     _order_id, "SUBMITTED",
                     broker_oid=broker_oid or None,
-                    submitted_at=datetime.now().isoformat())
+                    submitted_at=clock.now().isoformat())
                 _state_store.insert_trade_event(
                     account_id, trade_id, od["symbol"], "ORDERED",
                     order_id=_order_id, qty=float(od["qty"]), price=float(od["price"]))
@@ -953,7 +961,8 @@ async def stop_loss_monitor(
         无 gw：{"checked":0, "reason":"...网关..."}
     """
     # ① 盘中时段判定（Task1）
-    if not calendar.is_intraday_session(datetime.now()):
+    # C-6 V2：时点判定走 clock.now（单一时间源口子）。
+    if not calendar.is_intraday_session(clock.now()):
         return {"checked": 0, "reason": "非盘中时段（9:30-11:30 / 13:00-15:00），跳过止损监控"}
 
     # ② 取网关与持仓
@@ -967,7 +976,8 @@ async def stop_loss_monitor(
     # _stop_already_placed：查 has_order(STOP)，已挂未终态 → 跳过（不重复发卖）
     # _record_stop：发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)
     _aid = _resolve_account_id()
-    _today = datetime.now().strftime("%Y-%m-%d")
+    # C-6 V2：业务日期 key（has_order(STOP)/insert_order(STOP) trade_date）走 clock.today。
+    _today = clock.today()
 
     def _stop_already_placed(sym: str) -> bool:
         """查 DB 是否已挂 STOP 委托（幂等检查）。失败升 L1（不知是否发过=可能重发=双倍卖）。"""
@@ -1297,7 +1307,8 @@ def _write_expired_positions(date: str, expired: list[dict]) -> None:
     覆盖写（w 模式）：每个交易日盘后重算重写，文件永远反映最新一次 post_close 结果。
     """
     os.makedirs(os.path.dirname(_EXPIRED_POSITIONS_PATH) or ".", exist_ok=True)
-    payload = {"date": date, "written_at": datetime.now().isoformat(), "expired": expired}
+    # C-6 V2：written_at 是事件时间戳，走 clock.now（单一时间源口子）。
+    payload = {"date": date, "written_at": clock.now().isoformat(), "expired": expired}
     with open(_EXPIRED_POSITIONS_PATH, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
@@ -1499,7 +1510,8 @@ async def post_close(
     if gw is not None:
         try:
             from presentation.server.services.trading_service import query_trades as _svc_query_trades
-            today_eq = datetime.now().strftime("%Y-%m-%d")
+            # C-6 V2：业务日期 key（query_trades 当日成交流水查询口径）走 clock.today。
+            today_eq = clock.today()
             trades = (_svc_query_trades(today_eq, today_eq, limit=1000) or {}).get("trades", [])
             # 聚合净持仓（BUY 加 SELL 减）——CSV 流水的权威净持仓口径
             net: dict[str, float] = {}
@@ -1543,7 +1555,8 @@ async def post_close(
     breaker_skipped = False
     try:
         # 步骤 1：读 start_equity 基线（pre_open snapshot 写入 daily_equity 表）
-        today_eq = datetime.now().strftime("%Y-%m-%d")
+        # C-6 V2：熔断基线 date（start/close equity 同口径）走 clock.today。
+        today_eq = clock.today()
         start_equity = _position_book.get_start_equity(today_eq)
         if start_equity is None or start_equity <= 0:
             # 无基线（pre_open 未抓到 / 查询异常）→ 跳过熔断 + WARN
@@ -1620,7 +1633,8 @@ async def post_close(
     # 额外卖出与熔断善后冲突（熔断应全场停摆，同 ⑤ max_holding 的熔断优先约束）。
     if not circuit_breaker_triggered:
         try:
-            today_eq = datetime.now().strftime("%Y-%m-%d")
+            # C-6 V2：trailing 演进读/写 plan key（load_plan/save_plan 当日口径）走 clock.today。
+            today_eq = clock.today()
             plan = trading_plan.load_plan(today_eq)
             if plan and plan.get("orders"):
                 entry_dates = _position_book.get_entry_dates()
@@ -1641,7 +1655,8 @@ async def post_close(
     # 次日 pre_open 平仓单与熔断善后冲突（熔断应全场停摆，不叠加平仓释放资金）。
     if not circuit_breaker_triggered:
         try:
-            today_eq = datetime.now().strftime("%Y-%m-%d")
+            # C-6 V2：max_holding 扫描基线 date（_scan_expired_positions entry 基准）走 clock.today。
+            today_eq = clock.today()
             max_holding = _trade_cfg()["max_holding"]
             expired = _scan_expired_positions(today_eq, max_holding)
             if expired:
@@ -1660,7 +1675,8 @@ async def post_close(
         _aid = _resolve_account_id()
         if _state_store.get_account(_aid) is None:
             _state_store.upsert_account(_aid, broker="qmt")
-        _today_close = datetime.now().strftime("%Y-%m-%d")
+        # C-6 V2：trade_event(CLOSED/TP_FILLED) + account_daily trade_date key 走 clock.today。
+        _today_close = clock.today()
         # 活跃 trade 盘后收口：position 归零的标 CLOSED（卖出平仓），有 TP1/TP2 FILLED 的标 TP1_FILLED
         for t in _state_store.get_active_trades(_aid):
             sym = t["symbol"]
@@ -1698,7 +1714,8 @@ async def post_close(
     if gw is not None and hasattr(gw, "query_asset"):
         try:
             _aid_eq = _resolve_account_id()
-            _today_eq = datetime.now().strftime("%Y-%m-%d")
+            # C-6 V2：account_daily 收盘快照 trade_date key（与 start 口径对齐）走 clock.today。
+            _today_eq = clock.today()
             asset = await gw.query_asset()
             total = (asset or {}).get("total_asset")
             if total is not None and float(total) > 0:
@@ -2163,14 +2180,15 @@ class TradingEngine:
             （即确实算出了次日而非原样返回），否则视为口径坏，让调用方降级（dry_run + 告警）。
 
         Args:
-            today: YYYY-MM-DD；None 时取 datetime.now() 当日（启动自检默认当日）。
+            today: YYYY-MM-DD；None 时取 clock.today() 当日（启动自检默认当日）。
 
         Returns:
             True  = 口径正常（next_trading_day 算出次日，落盘 key 与次日读 today 对齐）；
             False = 口径异常（next_trading_day 返 today 自身/空值/抛异常 → 疑似跑旧代码，
                     调用方 start() 须 logger.error 告警，CRITICAL 钉钉接线留 T9）。
         """
-        _today = today or datetime.now().strftime("%Y-%m-%d")
+        # C-6 V2：启动口径自检的当日基准走 clock.today（单一时间源口子）。
+        _today = today or clock.today()
         try:
             nxt = calendar.next_trading_day(_today)
         except Exception as exc:
@@ -2225,10 +2243,15 @@ class TradingEngine:
             读权重、从 s.get("experiment_id") 读归因透传到 PlannedOrder——本函数只需在
             scan_live 返回的 signal dict 上补齐两字段即可复用既有归因链路（Task5/6 已就绪）。
         """
-        today = datetime.now().strftime("%Y-%m-%d")
-        if not calendar.is_trading_day(today):
-            logger.info("eod_plan 跳过：今日非交易日 %s", today)
+        # C-6 V2：单一时间源 + 入口缓存（防同轮跨午夜漂移）。
+        # _today=交易日守卫口径（clock.today），_td=eod 落盘 key 口径（clock.trading_day，
+        # =next_trading_day(today)）。命名区分读/写避免 eod/pre_open key 错位
+        # （[[eod-date-offbyone-fix]] 病灶：eod 落盘必用 trading_day，pre_open 读 today）。
+        _today = clock.today()
+        if not calendar.is_trading_day(_today):
+            logger.info("eod_plan 跳过：今日非交易日 %s", _today)
             return
+        _td = clock.trading_day()
         # 局部 import（避免顶层拉起 experiment/strategies 子系统，保持引擎薄编排）：
         import pandas as pd
         from experiment.resolver import resolve_active
@@ -2262,7 +2285,8 @@ class TradingEngine:
         # 在 exp 循环外构建一次）。
         df_map: dict = {}
         for sym in universe:
-            df_upto = _load_df_upto(lake, sym, today)
+            # C-6 V2：df_upto 截止于 T 日 today（入口缓存 _today，T 日盘后扫到 T）。
+            df_upto = _load_df_upto(lake, sym, _today)
             if df_upto is not None and len(df_upto) >= 60:
                 # 历史不足（<60 行）不进 df_map（与原 _eod 内联 <60 跳过同口径）
                 df_map[sym] = df_upto
@@ -2270,7 +2294,7 @@ class TradingEngine:
         # 加载停牌区间 + 近 2 年 trade_days（逻辑从 scan_live 原 _ensure_integrity_cache 搬，
         # fail-open 同口径：加载失败返 ({}, set()) 让 filter 放行——trade_days 空集 →
         # check_window_continuity 的 expected 恒空 → ok=True 全放行，退回原行为）。
-        susp, trade_days = _load_integrity_ctx(today)
+        susp, trade_days = _load_integrity_ctx(_today)
 
         signals: list = []
         atr_map: dict = {}
@@ -2285,7 +2309,8 @@ class TradingEngine:
             for sym in clean_universe:
                 df_upto = df_map[sym]   # df_upto 复用（不重复 _load_df_upto）
                 try:
-                    for s in strategy.scan_live(sym, df_upto, today):
+                    # C-6 V2：scan_live 截止日（T 日 today，入口缓存）传 _today。
+                    for s in strategy.scan_live(sym, df_upto, _today):
                         # 注入实验归因字段（signal_runner/PlannedOrder 透传链路依赖）。
                         # Layer2 阶段1：scan_live 现返 frozen Signal dataclass，原地赋值
                         # ``s["x"]=...`` 会抛 FrozenInstanceError；用 dataclasses.replace
@@ -2312,7 +2337,8 @@ class TradingEngine:
         # 边界：cooldown=0 不去重（兼容用户配置）；窗口含周末故 days_back=cooldown+2 自然日余量。
         cooldown = _resolve_cooldown_days(experiments)
         if cooldown > 0 and signals:
-            recent_syms = _load_recent_plan_symbols(days_back=cooldown + 2, today=today)
+            # C-6 V2：cooldown 回溯基准（T 日 today，入口缓存）传 _today。
+            recent_syms = _load_recent_plan_symbols(days_back=cooldown + 2, today=_today)
             if recent_syms:
                 before = len(signals)
                 signals = [s for s in signals if s.symbol not in recent_syms]
@@ -2324,8 +2350,10 @@ class TradingEngine:
         # date = T+1（计划生效日）：修 date 错位 bug（2026-07-28）。原传 today（T 日），
         # 但 pre_open 次日读 load_plan(today=T+1) → 永远差一天挂不上单。改传
         # calendar.next_trading_day(today) 让落盘 date 与次日 pre_open 读取口径对齐。
+        # C-6 V2：_td = clock.trading_day() = next_trading_day(_today)，与原逻辑等价但入口
+        # 缓存一次（防同轮跨午夜漂移，且命名区分读/写口径——eod 必用 trading_day）。
         await eod_plan(
-            calendar.next_trading_day(today), signals, atr_map,
+            _td, signals, atr_map,
             capital=float(os.getenv("TRADE_CAPITAL", "1_000_000")),
         )
         # Task12 · 持仓盈亏播报（spec §6.2 C4 / 子诉求 1<2>）：eod_plan 落盘+推钉钉后，
@@ -2425,7 +2453,9 @@ class TradingEngine:
 
     @_critical_guard
     async def _pre_open(self) -> None:
-        today = datetime.now().strftime("%Y-%m-%d")
+        # C-6 V2：单一时间源 + 入口缓存（clock.today，防同轮跨午夜漂移）。
+        # 入口算一次 today 传下游 pre_open（pre_open 内 today_eq/today_for_max_wait 用 date 参数）。
+        today = clock.today()
         if not calendar.is_trading_day(today):
             logger.info("pre_open 跳过：今日非交易日 %s", today)
             return
@@ -2475,7 +2505,8 @@ class TradingEngine:
         if not ok:
             _alert_critical(f"stop_loss 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
             return
-        today = datetime.now().strftime("%Y-%m-%d")
+        # C-6 V2：单一时间源 + 入口缓存（clock.today，防同轮跨午夜漂移）。
+        today = clock.today()
         # 交易日守卫（Task 8 fix · review I1）：IntervalTrigger 无 1-5 工作日过滤，
         # 必须显式 is_trading_day，否则周末盘中时段会空跑（与 eod/pre_open/post_close 同口径）。
         if not calendar.is_trading_day(today):
@@ -2586,7 +2617,8 @@ class TradingEngine:
         if not ok:
             _alert_critical(f"post_close 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
             return
-        today = datetime.now().strftime("%Y-%m-%d")
+        # C-6 V2：单一时间源 + 入口缓存（clock.today，防同轮跨午夜漂移）。
+        today = clock.today()
         if not calendar.is_trading_day(today):
             logger.info("post_close 跳过：今日非交易日 %s", today)
             return
@@ -2681,7 +2713,8 @@ class TradingEngine:
         #   DB has_order(TP1)：查 state_store.order 表是否已挂 TP1（跨重启持久）。
         #   T12 已废弃 _tp_placed 内存态（重启清空→重连重推→重复挂止盈超卖），DB 为唯一真相源。
         #   _place_take_profit 内 _record_tp 落 insert_order(TP1/TP2)（UNIQUE 幂等），双重保护。
-        today_tp = datetime.now().strftime("%Y-%m-%d")
+        # C-6 V2：TP1 幂等 key（trade_date 口径，has_order(TP1)/insert_order(TP1) 同口径）走 clock.today。
+        today_tp = clock.today()
         _account_id = _resolve_account_id()
         _trade_id = f"{_account_id}_{symbol}_{today_tp}"
         _tp_already = False
@@ -2813,7 +2846,9 @@ class TradingEngine:
             fill_price:  实际成交均价（仅用于日志可观测，不参与挂单价计算）。
             order_id:    触发本次止盈的成交回报 order_id（仅用于日志归因）。
         """
-        today = datetime.now().strftime("%Y-%m-%d")
+        # C-6 V2：止盈读 plan key（load_plan 当日口径）走 clock.today（与 _handle_order_update
+        # 的 today_tp 同口径，TP1 trade_id 与 plan date 对齐）。
+        today = clock.today()
         plan = trading_plan.load_plan(today)
         if not plan:
             logger.warning("挂止盈跳过：无活跃计划 symbol=%s（计划未落盘/已失效）", symbol)
