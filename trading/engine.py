@@ -1102,10 +1102,22 @@ async def stop_loss_monitor(
                     if dec.reason is ExitReason.TAKE_PROFIT:
                         # I-1：TP 分支交 _place_take_profit 预挂限价单，monitor 不发市价单
                         # （D10 物理边界：实盘止盈=限价单预挂撮合，非市价追平）。日志观测用。
-                        logger.info(
-                            "【TP 跳过】%s decide_exit %s/%s portion=%.2f —— TP 由 _place_take_profit"
-                            " 预挂限价单撮合，monitor 跳过不发市价单（D10 物理边界，防与预挂重复）",
-                            sym, dec.action.name, dec.reason.name, dec.portion)
+                        # #10：漏挂兜底——DB 无 TP1/TP2 时盘中补挂，否则止盈永远不执行
+                        # （拖到止损/超时）。补挂走模块级 place_take_profit（差额幂等）。
+                        _tp_ok = False
+                        try:
+                            _tp_ok = (_state_store.has_order(_aid, _today, sym, "TP1")
+                                      or _state_store.has_order(_aid, _today, sym, "TP2"))
+                        except Exception:
+                            _tp_ok = True  # DB 查失败保守视为已挂（防重复挂超卖）
+                        if not _tp_ok:
+                            logger.warning(
+                                "【TP 漏挂兜底】%s decide_exit=TAKE_PROFIT 但 DB 无 TP1/TP2，盘中补挂",
+                                sym)
+                            try:
+                                await place_take_profit(sym, qty, price, "")
+                            except Exception:
+                                logger.exception("TP 盘中补挂失败 symbol=%s（需人工补挂）", sym)
                         continue   # TP 交预挂，不走 fallback
                     # STOP_LOSS | TIMEOUT（CLOSE，portion=1.0 全平）→ 发市价卖出单
                     # （止损/超期是 monitor 职责，对齐 Task 9 前的 _submit 路径）。

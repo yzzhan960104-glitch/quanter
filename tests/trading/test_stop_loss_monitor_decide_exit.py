@@ -363,3 +363,30 @@ def test_monitor_take_profit_skipped_for_premarked_limit():
     # 断言：TAKE_PROFIT 被 skip（不发市价单，交 _place_take_profit 预挂限价单）
     assert result["stop_triggered"] == 0
     assert len(submitted) == 0
+
+
+# ============================================================================
+# Task D2（live-mainchain-fixes）：TP 漏挂盘中兜底（#10）
+# ============================================================================
+def test_tp_missing_places_fallback(monkeypatch):
+    """decide_exit=TAKE_PROFIT 且 DB 无 TP1/TP2 → 盘中补挂（#10）。
+
+    复用本文件既有 _holding_ctx/_run_monitor 夹具：autouse _isolate_state_db 保证
+    DB 无任何 TP 行 → has_order(TP1/TP2) 均 False → 必须触发 place_take_profit 补挂。
+    """
+    from unittest.mock import patch as _patch
+
+    ctx = _holding_ctx(stop=9.5, tp1=11.0, tp2=12.0, holding_days=3,
+                       is_last=False, max_holding=15, tp1_portion=0.5)
+    # high=11.2 ≥ tp1=11.0 → decide_exit priority 3 → CLOSE/TAKE_PROFIT/portion=0.5
+    quotes = {SYM: {"last_price": 11.2, "high": 11.2, "low": 9.6}}
+    positions = {SYM: {"volume": 100, "avg_price": 10.0}}
+    placed = {"n": 0}
+
+    async def _fake_place(symbol, filled_qty, fill_price, order_id):
+        placed["n"] += 1
+
+    with _patch("trading.engine.place_take_profit", new=_fake_place):
+        result = _run_monitor({SYM: ctx}, positions, quotes)
+    assert placed["n"] == 1, "TP 漏挂必须触发盘中补挂"
+    assert result["stop_triggered"] == 0, "补挂走限价单路径，monitor 不发市价单"
