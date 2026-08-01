@@ -58,6 +58,7 @@ from typing import Any, Mapping, Optional
 from trading import (
     calendar,
     dynamic_whitelist,
+    job_ledger,
     qmt_market_data,
     reconcile_job,
     trading_plan,
@@ -639,6 +640,35 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
 # 触发点 2：pre_open —— T 日开盘前：撤昨日单 + 检查确认闸 + 挂当日买单
 # ============================================================================
 async def pre_open(date: str) -> dict:
+    """T 日开盘前入口（C-8 V3 台账包裹）：running → done/skipped/failed。
+
+    物理意图（spec §3.4）：cron（engine._pre_open）与启动补跑（trading.catchup）共用
+    本函数，台账在此统一落（begin/finish）——「谁先完成谁生效」防双跑；
+    skipped（gate 未过/无计划/未确认）不算完成，补跑窗口内可重试。
+    实现 = 薄包裹 + 原逻辑改名 _pre_open_impl（行为零变更）。
+    """
+    try:
+        job_ledger.begin_run("pre_open", date, clock.now().isoformat())
+    except Exception:
+        logger.exception("job_ledger begin_run 失败（不阻断 pre_open）")
+    try:
+        result = await _pre_open_impl(date)
+    except Exception:
+        try:
+            job_ledger.finish_run("pre_open", date, "failed", "未预期异常")
+        except Exception:
+            logger.exception("job_ledger finish_run 失败（不阻断 pre_open）")
+        raise
+    status = "skipped" if (result.get("skipped") or result.get("reason")) else "done"
+    message = str(result.get("skipped") or result.get("reason") or "")
+    try:
+        job_ledger.finish_run("pre_open", date, status, message)
+    except Exception:
+        logger.exception("job_ledger finish_run 失败（不阻断 pre_open）")
+    return result
+
+
+async def _pre_open_impl(date: str) -> dict:
     """T 日开盘前：读已确认计划 → 撤昨日遗留未成交单 → 注入白名单 → 逐单挂单。
 
     物理意图与时序（顺序不可调，与代码实际执行顺序一致）：

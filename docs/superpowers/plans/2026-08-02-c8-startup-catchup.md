@@ -708,7 +708,7 @@ async def test_pre_open_no_plan_records_skipped():
     fake_engine._pre_open_gate = AsyncMock(return_value=(True, ""))
     with patch("trading.engine._ACTIVE_ENGINE", fake_engine), \
          patch("trading.engine.get_gateway", return_value=None), \
-         patch("trading.engine.load_plan", return_value=None):
+         patch("trading.trading_plan.load_plan", return_value=None):
         result = await pre_open("2026-08-03")
     assert result["reason"] == "无计划"
     assert job_ledger.latest_status("pre_open", "2026-08-03") == "skipped"
