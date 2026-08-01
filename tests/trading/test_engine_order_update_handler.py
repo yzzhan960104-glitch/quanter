@@ -492,3 +492,56 @@ def test_place_take_profit_truncates_fractional_qty_to_int(db):
     order_req = submit_mock.call_args.args[0]
     assert order_req.qty == 100          # int(100.5) == 100（A 股整手红线）
     assert isinstance(order_req.qty, int)  # 类型必须是 int（防 broker 按 float 解释成 10050）
+
+# ============================================================================
+# Task A1（live-mainchain-fixes）：真实回调链路 helper + async_response 回填
+# ============================================================================
+
+def _make_real_chain_engine():
+    """装配绑定真实 QmtExecutionGateway 的引擎（不 connect，直接驱动 C++ 回调）。"""
+    from broker.qmt import QmtExecutionGateway
+    gw = QmtExecutionGateway(userdata_path="C:/tmp/qmt_test", account_id="TEST_ACC")
+    gw._trader = MagicMock()
+    gw._account = MagicMock()
+    gw._connected = True
+    gw._lock_down = False
+    gw._orders = {}
+    gw._seq_to_real = {}
+    gw._seq_to_client = {}
+    eng = TradingEngine()
+    eng._gw = gw
+    gw.set_order_update_callback(eng._handle_order_update)
+    return eng, gw
+
+
+async def _pump(gw, fn):
+    """在真实事件循环里触发回调方法并让 _process_order_update 创建的任务跑完。"""
+    gw._loop = asyncio.get_running_loop()
+    fn()
+    await asyncio.sleep(0.05)
+
+
+def test_async_response_backfills_db_broker_oid(db):
+    """async_response 到达 → DB order.broker_oid 从 str(seq) 回填真实柜台单号。
+
+    生产根因（#5）：原 _handle_order_update 见 kind!='trade' 直接 return，
+    async_response 被丢弃 → broker_oid 恒 str(seq) → 撤单/对账永远按错单号匹配。
+    """
+    from types import SimpleNamespace
+    from trading import state_store
+
+    eng, gw = _make_real_chain_engine()
+    aid = "TEST_ACC"
+    seq, real = 7, 987654
+    oid = "2026-08-01_600000.SH_OPEN_7"
+    state_store.upsert_account(aid, broker="qmt")  # FK 前置：order 表引用 account 行
+    state_store.insert_order(oid, f"{aid}_600000.SH_2026-08-01", aid, "2026-08-01",
+                             "600000.SH", "buy", "OPEN", 100, 10.0,
+                             broker_oid=str(seq), state="SUBMITTED")
+    # 真实回调链路：on_order_stock_async_response → _process_order_update → _handle_order_update
+    asyncio.run(_pump(gw, lambda: gw.on_order_stock_async_response(
+        SimpleNamespace(seq=seq, order_id=real))))
+    with state_store._connect(state_store._DEFAULT_DB) as con:
+        row = con.execute('SELECT broker_oid, state FROM "order" WHERE order_id=?', (oid,)).fetchone()
+    assert row["broker_oid"] == str(real), f"应回填 {real}，实际 {row['broker_oid']}"
+    assert row["state"] == "SUBMITTED", "async_response 只回填单号，不动 state"

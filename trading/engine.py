@@ -2666,6 +2666,26 @@ class TradingEngine:
               不挂止盈（不误判买卖方向 → 不误挂止盈）。
         """
         kind = update.get("kind")
+        if kind == "async_response":
+            # #5 修复：seq→real 映射回填 DB order.broker_oid（撤单/对账唯一可靠锚点）。
+            # 原实现 kind!='trade' 直接 return 丢弃本事件 → broker_oid 恒 str(seq) →
+            # cancel_order_by_broker_oid_db 永匹配不到行（幽灵单）+ post_close TP_FILLED 恒空。
+            seq_str = str(update.get("seq", ""))
+            real = str(update.get("order_id", ""))
+            if seq_str and real and real != seq_str:
+                try:
+                    n = _state_store.update_order_state_by_broker_oid(
+                        seq_str, new_broker_oid=real)
+                    if n == 0:
+                        logger.warning(
+                            "async_response 未命中 DB 行 seq=%s real=%s（可能 pre_open 未落库）",
+                            seq_str, real)
+                except Exception:
+                    # 回填失败 = 撤单/对账锚点失效（可补偿：下次 order/trade 事件按 seq 反查）
+                    logger.exception(
+                        "async_response 回填 broker_oid 失败 seq=%s real=%s（CRITICAL：撤单锚点失效）",
+                        seq_str, real)
+            return
         if kind != "trade":
             return  # 仅处理成交回报（order/order_error 由风控层负责，不在本 handler 范围）
         symbol = update.get("stock_code", "")

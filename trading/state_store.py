@@ -415,6 +415,50 @@ def cancel_order_by_broker_oid_db(broker_oid: str, *, db_path: str | None = None
         return cur.rowcount
 
 
+def get_order_by_broker_oid(broker_oid: str, *, db_path: str | None = None) -> dict | None:
+    """按柜台单号查 order（成交回报/方向反查用）。
+
+    broker_oid 列在 async_response 回填前存 str(seq)、回填后存真实单号，
+    调用方需按 spec §5.2 先查 real、miss 后经 _seq_to_real 反查 seq 再查。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        row = con.execute('SELECT * FROM "order" WHERE broker_oid=?', (broker_oid,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_order_state_by_broker_oid(
+    lookup_oid: str,
+    *,
+    state: str | None = None,
+    new_broker_oid: str | None = None,
+    filled_qty: float | None = None,
+    filled_price: float | None = None,
+    db_path: str | None = None,
+) -> int:
+    """按 broker_oid 列定位更新 order（成交回报/async_response 持柜台单号时用）。
+
+    lookup_oid 是定位值（回填前 str(seq)，回填后真实单号）；None 字段不动。
+    Returns: 更新行数（0=未命中，调用方必须处理竞态：WARN + 后续事件补推进）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        sets: list[str] = []
+        params: list = []
+        if state is not None:
+            sets.append("state = ?"); params.append(state)
+        if new_broker_oid is not None:
+            sets.append("broker_oid = ?"); params.append(new_broker_oid)
+        if filled_qty is not None:
+            sets.append("filled_qty = ?"); params.append(float(filled_qty))
+        if filled_price is not None:
+            sets.append("filled_price = ?"); params.append(float(filled_price))
+        if not sets:
+            return 0
+        params.append(lookup_oid)
+        cur = con.execute(f'UPDATE "order" SET {", ".join(sets)} WHERE broker_oid=?', params)
+        return cur.rowcount
+
 def insert_fill(order_id: str, account_id: str, traded_time: str, symbol: str,
                 direction: str, qty: float, price: float, *,
                 db_path: str | None = None) -> bool:
