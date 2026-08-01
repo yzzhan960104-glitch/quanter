@@ -53,9 +53,23 @@ def _default_stk_mins_loader(sym: str, t_date: date) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+_LAKE_CACHE: pd.DataFrame | None = None  # 模块级 lake cache（首次 read_parquet，后续内存查）
+
+
 def _default_daily_loader(sym: str, t_date: date) -> dict:
-    """降级 loader：data_lake 日线 high/low/close（T 日已收盘）。"""
-    lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
+    """降级 loader：data_lake 日线 high/low/close（T 日已收盘）。
+
+    full_run 性能修复（根因6 · _daily_loader 每标的 read_parquet 致 stoploss 23s/时点）：
+        原 ``pd.read_parquet`` 每标的每降级调一次（5000+ 标的 × 全历史 parquet ~50-100MB，
+        读 1-3s）→ 盘中降级 7 标的 × read_parquet ≈ 23s/时点。full_run stoploss 23s/时点 ×
+        8 × 23 日 ≈ 84min 慢跑（曾误判 hang，实为 stk_mins 限频全降级 → 每标的 read_parquet
+        累积）。修法：模块级 lake cache（首次 read_parquet 落 _LAKE_CACHE，后续内存 xs 查
+        O(1)），7 标的降级从 23s → ~0.1s（cache 命中）。full_run 84min → ~12min。
+    """
+    global _LAKE_CACHE
+    if _LAKE_CACHE is None:
+        _LAKE_CACHE = pd.read_parquet("data_lake/a_shares_daily.parquet")
+    lake = _LAKE_CACHE
     try:
         row = lake.xs((pd.Timestamp(t_date), sym))
     except KeyError:
