@@ -48,6 +48,105 @@ from presentation.server.api.v1.review import router as review_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
 from infra.notifier import build_default_manager
 
+# C-7 V2：discovery daemon cron 调度（subprocess 子进程隔离，复用 cli daemon 装配）。
+# 物理意图（spec §3.2）：discovery 从 schtasks DAILY 02:00 收编到 lifespan——
+# engine.sched AsyncIOScheduler cron 02:00 触发本模块级函数，DETACHED subprocess 起
+# `python -m discovery daemon`。模块级（非闭包）：(1) 测试可直接 mock；
+# (2) 与 broadcast/connect_manager.py 等既有「模块级 subprocess 入口」范式一致
+# （C-7 后 ops/start_all.py 已删，本模块为该范式现存源头之一）；(3) V3 启动补跑
+# （startup 内同步调一次）复用同函数，避免逻辑重复。
+import subprocess as _subprocess
+
+# Windows DETACHED 标志（broadcast/connect_manager.py 等既有范式，C-7 前 ops/start_all.py 同源）：
+#   CREATE_NEW_PROCESS_GROUP(0x200) → 子进程独立进程组（Ctrl+C 不传播）；
+#   DETACHED_PROCESS(0x8)           → 无控制台（独立于父进程 uvicorn 的 stdio）。
+# 二者组合：uvicorn 退出/重启不杀 discovery 夜跑子进程（长任务不依附 server 生命周期）。
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_DETACHED_PROCESS = 0x00000008
+
+
+def _run_discovery_subprocess() -> None:
+    """discovery daemon cron job：subprocess 起 ``python -m discovery daemon``（子进程隔离）。
+
+    物理意图（spec §3.2）：discovery 收编 lifespan 后，触发点由 schtasks 改为
+    engine.sched cron 02:00（本函数）。用 subprocess 而非 ProcessPoolExecutor：
+      (1) 复用 cli ``cmd_daemon`` 全套装配（build_default_manager 钉钉通道 + freeze
+          /holdout_split/run_daemon 默认参数），不重写装配逻辑（YAGNI）；
+      (2) 子进程隔离——discovery 是重型全市场扫描（~4h budget），独立进程不阻塞
+          uvicorn 事件循环，与既有 schtasks→run_daemon.bat 行为等价（行为不变）；
+      (3) 与 schtasks 当前调 run_daemon.bat 语义对齐（.venv310/Scripts/python -m
+          discovery daemon），lifespan 收编仅改触发点不改 daemon 调用契约。
+    DETACHED：独立进程组，uvicorn 退出不杀 discovery 子进程（夜跑长任务不依附 server）。
+    log 重定向 logs/discovery_cron.log（append），cron 触发的 stdout/stderr 落盘可溯源。
+    """
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    _venv_py = _root / ".venv310" / "Scripts" / "python.exe"
+    _log_dir = _root / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_fh = (_log_dir / "discovery_cron.log").open("a", encoding="utf-8")
+    _subprocess.Popen(
+        [str(_venv_py), "-m", "discovery", "daemon"],
+        cwd=str(_root),
+        stdout=_log_fh,
+        stderr=_subprocess.STDOUT,
+        stdin=_subprocess.DEVNULL,
+        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
+        close_fds=True,
+    )
+
+
+def _discovery_missed_last_run() -> bool:
+    """检查 discovery 是否错过昨晚 02:00（offline 容错补跑判定）。
+
+    物理意图（spec §3.3）：生产机不 7x24，offline 跨 02:00 则当晚 discovery 漏跑
+    （策略迭代断链）。本函数读 search_run 表最新 started_at（**不按 snapshot_hash 过滤，
+    避免 freeze 重型**——freeze 涉及全市场扫描 + 哈希重建，启动补跑判定不能扛重活），
+    与昨日 02:00 比——错过则 lifespan startup 触发补跑。
+
+    幂等：discovery run_daemon_cycle 早退（status==converged 跳过）+ 轮次/seed 派生
+    （[[discovery-engine-status]]），补跑 + 当晚 02:00 双跑靠此去重——即使补跑触发，
+    daemon 内部对已收敛的 snapshot 直接跳过，不会重跑 trial。
+
+    Why sqlite3 直查而非 discovery.store.connect：补跑判定是纯读（单条 SELECT），
+    无需 WAL/Row 工厂/单点写锁装配；直查 sqlite3 更轻量，且表不存在（首次运行）时
+    sqlite3.OperationalError 走异常分支返 True（补跑），语义对齐「无记录即补跑」。
+
+    Returns:
+      True = 错过（DB 不存在 / 表未建 / 无记录 / 时间解析失败 / 最新 started_at <
+              昨日 02:00）→ 补跑；
+      False = 昨晚跑了（最新 started_at ≥ 昨日 02:00）→ 不补跑。
+    """
+    from datetime import datetime, timedelta
+    from discovery.store import DEFAULT_DB_PATH
+    import os as _os
+    import sqlite3 as _sqlite3
+
+    db_path = _os.environ.get("DISCOVERY_DB", DEFAULT_DB_PATH)
+    try:
+        conn = _sqlite3.connect(db_path)
+        conn.row_factory = _sqlite3.Row
+        row = conn.execute(
+            "SELECT started_at FROM search_run ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+    except Exception:
+        # DB 不存在 / 表未建（首次运行）→ 视为错过（补跑，让 daemon 首次跑）。
+        # sqlite3.connect 对不存在文件会建空库但 search_run 表缺失 → execute 抛
+        # OperationalError，落入此分支返 True（保守补跑）。
+        return True
+    if row is None:
+        return True  # 表存在但无记录（daemon 装配但从未完成一轮）→ 补跑
+    last_started = row["started_at"]
+    try:
+        last_dt = datetime.fromisoformat(last_started)
+    except (ValueError, TypeError):
+        return True  # 时间解析失败（脏数据 / 非 ISO 格式）→ 保守补跑
+    now = datetime.now()
+    yesterday_02 = (now - timedelta(days=1)).replace(hour=2, minute=0, second=0, microsecond=0)
+    return last_dt < yesterday_02
+
+
 # ============ lifespan：启动/销毁钩子 ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -192,7 +291,7 @@ async def lifespan(app: FastAPI):
         from trading.engine import TradingEngine
         from trading.__main__ import check_shadow_gate, log_startup_banner
         # C-5 V2：装配 engine 前打启动 banner（session/account/mode/口径版本）。
-        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链 start_all→uvicorn
+        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链 schtasks ONSTART→python -m trading→uvicorn
         # →lifespan 之前无 banner，session 漂移（进程内 123456 vs .env 123458）无日志可
         # 对比。banner 先于 bootstrap（含网关 connect）输出，便于排查 .env 漂移。
         log_startup_banner()
@@ -211,6 +310,72 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("TradingEngine 装配异常（已忽略）")
 
+    # C-7 V1：broadcast connect 收编进 lifespan（5 CONNECT_BOTS）。
+    # 物理意图（spec §3.1）：start_all step ② connect 编排移此处，软降级（单 bot
+    # 失败不阻断 uvicorn）。live reload=False（C-5 V1）不 reload，connect 不抖动。
+    # 与上方 engine/training_orchestrator 同源软降级范式——装配失败仅记日志不传播。
+    # app.state.connect_bots：记录已起 bot，供 shutdown stop 对偶（树杀 dev connect +
+    # Claude Code 子进程，防资源泄漏）。
+    try:
+        from broadcast.__main__ import CONNECT_BOTS, CONNECT_DEFAULTS
+        from broadcast import connect_manager
+        started_bots: list[str] = []
+        for _bot in CONNECT_BOTS:                # cli/trading_q/data_q/strategy_q/review
+            try:
+                connect_manager.start(_bot, CONNECT_BOTS[_bot], CONNECT_DEFAULTS)
+                started_bots.append(_bot)
+            except RuntimeError:
+                # 配置缺失（unified_app_id 未填 / 身份闸缺失）→ 跳过该 bot，
+                # 同 broadcast.__main__._connect_start 语义（不让单点阻断其余）
+                logging.getLogger(__name__).warning(
+                    "connect bot=%s 配置缺失跳过", _bot, exc_info=True)
+            except Exception:
+                # 其它异常（subprocess 拉起失败等）→ 同样跳过，不阻断 uvicorn
+                logging.getLogger(__name__).exception(
+                    "connect bot=%s 起异常（跳过，不阻断 uvicorn）", _bot)
+        app.state.connect_bots = started_bots
+    except Exception:
+        # 外层兜底：CONNECT_BOTS import 失败等极端情况——已忽略，不阻断 lifespan
+        logging.getLogger(__name__).exception("lifespan 装 connect 异常（已忽略）")
+        app.state.connect_bots = []
+
+    # C-7 V2：discovery 收编 lifespan（engine.sched cron 02:00 → subprocess 子进程）。
+    # 物理意图（spec §3.2）：discovery 从 schtasks DAILY 02:00 收编到 engine.sched
+    # AsyncIOScheduler，触发 _run_discovery_subprocess（DETACHED 子进程跑 cli daemon）。
+    # 软降级：engine 未装配（None）/ 影子期未 start sched / add_job 抛异常 → 跳过，
+    # 不阻断 uvicorn（与上方 engine/training/connect 同源软降级范式）。
+    # Why getattr 防御：engine 装配块 try/except 隔离，极端失败时 state 上可能无
+    # trading_engine——cron 注册必须对「未装配」也安全。
+    try:
+        _eng = getattr(app.state, "trading_engine", None)
+        if _eng is not None:
+            from apscheduler.triggers.cron import CronTrigger
+            _eng.sched.add_job(
+                _run_discovery_subprocess,
+                CronTrigger(hour=2, minute=0),
+                id="discovery_daemon",
+                replace_existing=True,
+            )
+            logging.getLogger(__name__).info(
+                "discovery cron 02:00 已注册到 engine.sched")
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan 装 discovery cron 异常（已忽略）")
+
+    # C-7 V3：discovery 启动补跑（offline 容错，收编自洽必需）。
+    # 物理意图（spec §3.3）：offline 跨昨晚 02:00 → 启动补跑（DETACHED subprocess，
+    # 不阻塞 uvicorn 起）。幂等靠 discovery 既有轮次/seed + run_daemon_cycle 早退
+    # （converged 跳过）去重——补跑 + 当晚 02:00 双跑靠此去重，不会重跑已收敛 snapshot。
+    # 软降级：补跑判定 / 子进程拉起异常不阻断 uvicorn（try/except 兜底，与上方 engine/
+    # training/connect/discovery cron 同源软降级范式）。
+    try:
+        if _discovery_missed_last_run():
+            logging.getLogger(__name__).warning(
+                "discovery 启动补跑：检测到 offline 跨昨晚 02:00，异步补跑")
+            _run_discovery_subprocess()  # DETACHED 子进程，立即返不阻塞 uvicorn 起
+    except Exception:
+        logging.getLogger(__name__).exception("discovery 启动补跑异常（不阻断 uvicorn）")
+
     yield
 
     # 销毁：优雅断开交易网关（B-18）——logout 释放券商会话，防进程退出时连接泄漏。
@@ -225,6 +390,20 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).exception(
             "lifespan shutdown 断开交易网关异常（已忽略，继续清理日志 handler）"
         )
+
+    # C-7 V1：shutdown 树杀 connect bots（与 startup start 对偶）。
+    # 物理意图：startup 起的 dev connect 常驻进程（含其拉起的 Claude Code 子进程），
+    # shutdown 时必须 taskkill /F /T 树杀，防进程退出后孤儿 Claude Code 实例持续吃资源。
+    # Why getattr 防御：startup 装配块 try/except 隔离，极端失败时 state 上可能无
+    # connect_bots——shutdown 路径必须对「未装配」也安全。
+    # Why try/except 包每 bot：单 bot stop 失败（taskkill 超时等）不阻断其余 bot 的树杀。
+    for _bot in getattr(app.state, "connect_bots", []):
+        try:
+            from broadcast import connect_manager
+            connect_manager.stop(_bot)          # taskkill /F /T 树杀
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "shutdown connect bot=%s 异常（已忽略）", _bot)
 
     # 销毁：TradingEngine scheduler（Task 9 · 合并 engine 进 uvicorn 后的优雅停机）。
     # Why getattr 防御：lifespan 装配块 try/except 隔离，装配失败 / 影子期未 start 时
