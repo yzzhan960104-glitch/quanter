@@ -154,3 +154,60 @@ async def test_lifespan_stops_connect_bots_on_shutdown():
     stopped_bots = [call.args[0] for call in stop_mock.call_args_list]
     assert set(stopped_bots) == set(CONNECT_BOTS.keys())
     assert stop_mock.call_count == len(CONNECT_BOTS)
+
+
+# ============ C-7 V2：discovery 进 lifespan cron 02:00（subprocess 子进程） ============
+# 物理意图（spec §3.2）：discovery 从 schtasks DAILY 02:00 收编到 engine.sched
+# AsyncIOScheduler，触发 _run_discovery_subprocess（DETACHED 子进程跑 cli daemon）。
+#
+# 测试范式适配说明（brief 给的 lifespan_startup_only + _discovery_missed_last_run 在 V1
+# 未落地——V1 用 @asynccontextmanager ``lifespan`` 整体上下文范式）。此处沿用 V1 既有
+# ``async with lifespan(app)`` + ``_mock_lifespan_dependencies()`` 范式，仅扩展两点：
+#   1. mock 掉 _run_discovery_subprocess 避免 cron job 实际起 subprocess（cron 由
+#      AsyncIOScheduler 异步派发，本测用 add_job 调用断言验证注册，不依赖 trigger 真触发）；
+#   2. 在 eng.sched.add_job 上挂 lambda 收集 id（断言 discovery_daemon 被注册）。
+
+
+@pytest.mark.asyncio
+async def test_lifespan_registers_discovery_cron_02():
+    """lifespan startup 在 engine.sched add_job ``discovery_daemon`` cron 02:00。
+
+    物理意图：discovery cron 从 schtasks 收编 lifespan（spec §3.2），engine.sched
+    AsyncIOScheduler 上挂 id="discovery_daemon" 的 job，trigger 为 CronTrigger(hour=2)。
+    mock _run_discovery_subprocess 避免 add_job 的 func 真被调度触发（cron trigger
+    在测期内不会到 02:00，但保险 mock 防触发——同时验证被传入的 func 是该模块函数）。
+    """
+    from fastapi import FastAPI
+    from presentation.server.main import lifespan
+
+    app = FastAPI()
+    stack, _start, _stop, eng = _mock_lifespan_dependencies()
+    # add_job 用 lambda 收集 id（func/trigger 实参不影响断言，聚焦 id）
+    added_jobs: list[str] = []
+    eng.sched.add_job = lambda func, trigger=None, **kw: added_jobs.append(kw.get("id"))
+    # mock _run_discovery_subprocess：避免 add_job 误触发或测试侧起 subprocess
+    stack.enter_context(patch("presentation.server.main._run_discovery_subprocess"))
+    with stack:
+        async with lifespan(app):
+            pass                    # startup 跑完 → yield（cron 已注册）
+
+    assert "discovery_daemon" in added_jobs    # discovery cron 02:00 注册
+
+
+def test_run_discovery_subprocess_detached():
+    """_run_discovery_subprocess 起 DETACHED 子进程 ``python -m discovery daemon``。
+
+    验：(1) subprocess.Popen 调一次；(2) cmd=[venv_py, -m, discovery, daemon]（复用
+    cli cmd_daemon 装配，不重写 freeze/split 默认参数）；(3) creationflags 含
+    DETACHED_PROCESS(0x8)——子进程独立进程组，uvicorn 退出不杀 discovery 夜跑。
+    """
+    from presentation.server.main import _run_discovery_subprocess
+
+    with patch("presentation.server.main._subprocess.Popen") as popen:
+        _run_discovery_subprocess()
+    popen.assert_called_once()
+    cmd = popen.call_args[0][0]
+    assert "-m" in cmd and "discovery" in cmd and "daemon" in cmd
+    # DETACHED 标志（creationflags 含 DETACHED_PROCESS = 0x8）
+    flags = popen.call_args[1].get("creationflags", 0)
+    assert flags & 0x00000008      # DETACHED_PROCESS 位

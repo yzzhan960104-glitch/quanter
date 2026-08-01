@@ -48,6 +48,52 @@ from presentation.server.api.v1.review import router as review_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
 from infra.notifier import build_default_manager
 
+# C-7 V2：discovery daemon cron 调度（subprocess 子进程隔离，复用 cli daemon 装配）。
+# 物理意图（spec §3.2）：discovery 从 schtasks DAILY 02:00 收编到 lifespan——
+# engine.sched AsyncIOScheduler cron 02:00 触发本模块级函数，DETACHED subprocess 起
+# `python -m discovery daemon`。模块级（非闭包）：(1) 测试可直接 mock；
+# (2) 与 ops/start_all.py / broadcast/connect_manager.py 等既有「模块级 subprocess
+# 入口」范式一致；(3) V3 启动补跑（startup 内同步调一次）复用同函数，避免逻辑重复。
+import subprocess as _subprocess
+
+# Windows DETACHED 标志（同 ops/start_all.py 既有范式）：
+#   CREATE_NEW_PROCESS_GROUP(0x200) → 子进程独立进程组（Ctrl+C 不传播）；
+#   DETACHED_PROCESS(0x8)           → 无控制台（独立于父进程 uvicorn 的 stdio）。
+# 二者组合：uvicorn 退出/重启不杀 discovery 夜跑子进程（长任务不依附 server 生命周期）。
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_DETACHED_PROCESS = 0x00000008
+
+
+def _run_discovery_subprocess() -> None:
+    """discovery daemon cron job：subprocess 起 ``python -m discovery daemon``（子进程隔离）。
+
+    物理意图（spec §3.2）：discovery 收编 lifespan 后，触发点由 schtasks 改为
+    engine.sched cron 02:00（本函数）。用 subprocess 而非 ProcessPoolExecutor：
+      (1) 复用 cli ``cmd_daemon`` 全套装配（build_default_manager 钉钉通道 + freeze
+          /holdout_split/run_daemon 默认参数），不重写装配逻辑（YAGNI）；
+      (2) 子进程隔离——discovery 是重型全市场扫描（~4h budget），独立进程不阻塞
+          uvicorn 事件循环，与既有 schtasks→run_daemon.bat 行为等价（行为不变）；
+      (3) 与 schtasks 当前调 run_daemon.bat 语义对齐（.venv310/Scripts/python -m
+          discovery daemon），lifespan 收编仅改触发点不改 daemon 调用契约。
+    DETACHED：独立进程组，uvicorn 退出不杀 discovery 子进程（夜跑长任务不依附 server）。
+    log 重定向 logs/discovery_cron.log（append），cron 触发的 stdout/stderr 落盘可溯源。
+    """
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    _venv_py = _root / ".venv310" / "Scripts" / "python.exe"
+    _log_dir = _root / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_fh = (_log_dir / "discovery_cron.log").open("a", encoding="utf-8")
+    _subprocess.Popen(
+        [str(_venv_py), "-m", "discovery", "daemon"],
+        cwd=str(_root),
+        stdout=_log_fh,
+        stderr=_subprocess.STDOUT,
+        stdin=_subprocess.DEVNULL,
+        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
+        close_fds=True,
+    )
+
 # ============ lifespan：启动/销毁钩子 ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -239,6 +285,29 @@ async def lifespan(app: FastAPI):
         # 外层兜底：CONNECT_BOTS import 失败等极端情况——已忽略，不阻断 lifespan
         logging.getLogger(__name__).exception("lifespan 装 connect 异常（已忽略）")
         app.state.connect_bots = []
+
+    # C-7 V2：discovery 收编 lifespan（engine.sched cron 02:00 → subprocess 子进程）。
+    # 物理意图（spec §3.2）：discovery 从 schtasks DAILY 02:00 收编到 engine.sched
+    # AsyncIOScheduler，触发 _run_discovery_subprocess（DETACHED 子进程跑 cli daemon）。
+    # 软降级：engine 未装配（None）/ 影子期未 start sched / add_job 抛异常 → 跳过，
+    # 不阻断 uvicorn（与上方 engine/training/connect 同源软降级范式）。
+    # Why getattr 防御：engine 装配块 try/except 隔离，极端失败时 state 上可能无
+    # trading_engine——cron 注册必须对「未装配」也安全。
+    try:
+        _eng = getattr(app.state, "trading_engine", None)
+        if _eng is not None:
+            from apscheduler.triggers.cron import CronTrigger
+            _eng.sched.add_job(
+                _run_discovery_subprocess,
+                CronTrigger(hour=2, minute=0),
+                id="discovery_daemon",
+                replace_existing=True,
+            )
+            logging.getLogger(__name__).info(
+                "discovery cron 02:00 已注册到 engine.sched")
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan 装 discovery cron 异常（已忽略）")
 
     yield
 
