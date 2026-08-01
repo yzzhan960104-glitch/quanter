@@ -211,6 +211,35 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("TradingEngine 装配异常（已忽略）")
 
+    # C-7 V1：broadcast connect 收编进 lifespan（5 CONNECT_BOTS）。
+    # 物理意图（spec §3.1）：start_all step ② connect 编排移此处，软降级（单 bot
+    # 失败不阻断 uvicorn）。live reload=False（C-5 V1）不 reload，connect 不抖动。
+    # 与上方 engine/training_orchestrator 同源软降级范式——装配失败仅记日志不传播。
+    # app.state.connect_bots：记录已起 bot，供 shutdown stop 对偶（树杀 dev connect +
+    # Claude Code 子进程，防资源泄漏）。
+    try:
+        from broadcast.__main__ import CONNECT_BOTS, CONNECT_DEFAULTS
+        from broadcast import connect_manager
+        started_bots: list[str] = []
+        for _bot in CONNECT_BOTS:                # cli/trading_q/data_q/strategy_q/review
+            try:
+                connect_manager.start(_bot, CONNECT_BOTS[_bot], CONNECT_DEFAULTS)
+                started_bots.append(_bot)
+            except RuntimeError:
+                # 配置缺失（unified_app_id 未填 / 身份闸缺失）→ 跳过该 bot，
+                # 同 broadcast.__main__._connect_start 语义（不让单点阻断其余）
+                logging.getLogger(__name__).warning(
+                    "connect bot=%s 配置缺失跳过", _bot, exc_info=True)
+            except Exception:
+                # 其它异常（subprocess 拉起失败等）→ 同样跳过，不阻断 uvicorn
+                logging.getLogger(__name__).exception(
+                    "connect bot=%s 起异常（跳过，不阻断 uvicorn）", _bot)
+        app.state.connect_bots = started_bots
+    except Exception:
+        # 外层兜底：CONNECT_BOTS import 失败等极端情况——已忽略，不阻断 lifespan
+        logging.getLogger(__name__).exception("lifespan 装 connect 异常（已忽略）")
+        app.state.connect_bots = []
+
     yield
 
     # 销毁：优雅断开交易网关（B-18）——logout 释放券商会话，防进程退出时连接泄漏。
@@ -225,6 +254,20 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).exception(
             "lifespan shutdown 断开交易网关异常（已忽略，继续清理日志 handler）"
         )
+
+    # C-7 V1：shutdown 树杀 connect bots（与 startup start 对偶）。
+    # 物理意图：startup 起的 dev connect 常驻进程（含其拉起的 Claude Code 子进程），
+    # shutdown 时必须 taskkill /F /T 树杀，防进程退出后孤儿 Claude Code 实例持续吃资源。
+    # Why getattr 防御：startup 装配块 try/except 隔离，极端失败时 state 上可能无
+    # connect_bots——shutdown 路径必须对「未装配」也安全。
+    # Why try/except 包每 bot：单 bot stop 失败（taskkill 超时等）不阻断其余 bot 的树杀。
+    for _bot in getattr(app.state, "connect_bots", []):
+        try:
+            from broadcast import connect_manager
+            connect_manager.stop(_bot)          # taskkill /F /T 树杀
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "shutdown connect bot=%s 异常（已忽略）", _bot)
 
     # 销毁：TradingEngine scheduler（Task 9 · 合并 engine 进 uvicorn 后的优雅停机）。
     # Why getattr 防御：lifespan 装配块 try/except 隔离，装配失败 / 影子期未 start 时
