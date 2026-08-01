@@ -1816,7 +1816,9 @@ def test_partial_fill_tp_diff_no_oversell_no_gap(monkeypatch, tmp_path):
 
     monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
     state_store.init_store()
-    aid, today, sym = "TEST_ACC", "2026-08-01", "600000.SH"
+        # 日期用 clock.today() 而非硬编码（2026-08-02 起硬编码 8/1 与生产 today 错位 → 幂等查不到）
+    from trading import clock
+    aid, today, sym = "TEST_ACC", clock.today(), "600000.SH"
     state_store.upsert_account(aid, broker="qmt")
     state_store.insert_order(f"{today}_{sym}_OPEN_7", f"{aid}_{sym}_{today}", aid, today, sym,
                              "buy", "OPEN", 300, 10.0, broker_oid="987654", state="SUBMITTED")
@@ -1852,7 +1854,9 @@ def test_tp_single_leg_portion_zero_incremental(monkeypatch, tmp_path):
 
     monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
     state_store.init_store()
-    aid, today, sym = "TEST_ACC", "2026-08-01", "600000.SH"
+        # 日期用 clock.today() 而非硬编码（2026-08-02 起硬编码 8/1 与生产 today 错位 → 幂等查不到）
+    from trading import clock
+    aid, today, sym = "TEST_ACC", clock.today(), "600000.SH"
     state_store.upsert_account(aid, broker="qmt")
     state_store.insert_order(f"{today}_{sym}_OPEN_7", f"{aid}_{sym}_{today}", aid, today, sym,
                              "buy", "OPEN", 300, 10.0, broker_oid="987654", state="SUBMITTED")
@@ -1882,7 +1886,9 @@ def test_close_expired_positions_skips_already_placed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
     state_store.init_store()
-    aid, today, sym = "TEST_ACC", "2026-08-01", "600000.SH"
+        # 日期用 clock.today() 而非硬编码（2026-08-02 起硬编码 8/1 与生产 today 错位 → 幂等查不到）
+    from trading import clock
+    aid, today, sym = "TEST_ACC", clock.today(), "600000.SH"
     state_store.upsert_account(aid, broker="qmt")
     state_store.insert_order(f"{today}_{sym}_EXPIRED_CLOSE_1", f"{aid}_{sym}_{today}",
                              aid, today, sym, "sell", "EXPIRED_CLOSE", 100, 9.5,
