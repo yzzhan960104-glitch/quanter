@@ -419,4 +419,14 @@ def test_e2e_long_cycle_full_run(isolated_state, connect_session, monkeypatch):
     for r in day_results[:-1]:  # 末日无 T+1
         assert r.trading_day is not None, f"{r.date} 应有 T+1"
 
+    # ── design 2026-08-01：真实交易/持仓列表验收（防空转回归）──
+    # 原 full_run 全绿但 fill=0/position=0（无成交回报注入）；本断言要求 23 日真实产生
+    # 成交流水 + 持仓 + order 终态 FILLED/PARTIAL，且报表渲染交易/持仓列表（design §4/§5）。
+    all_fills = [f for snap in snapshots.values() for f in snap.get("fills", [])]
+    assert all_fills, "全周期应产生真实成交流水（fill 明细非空）"
+    assert any(snap.get("positions") for snap in snapshots.values()), "应出现过持仓列表"
+    states = set().union(*(snap.get("order_by_state", {}) for snap in snapshots.values()))
+    assert states & {"FILLED", "PARTIAL"}, f"order 应出现 FILLED/PARTIAL，实际 {states}"
+    assert "全周期成交流水" in content and "持仓列表" in content
+
     # 验收 10：不破坏既有（本套件独立 mark，全量回归在 implementer gate 跑 -m "not e2e_long"）

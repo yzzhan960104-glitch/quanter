@@ -41,33 +41,33 @@ class DingTalkLog:
         except Exception:
             pass
 
-        async def _logged(coro):
-            """包一层：await 真推 + 落 records（time/kind/success/error，design §4.5）。
-
-            Why 包装而非直接透传：fire_and_forget 只拿 awaitable，不暴露调用内容；
-            包一层才能在协程真实执行前后记录推送审计条目（kind 取协程限定名，
-            如 notify_trade_event / notify_risk_event，够报表 §4 审计粒度）。
-            """
-            kind = getattr(getattr(coro, "cr_code", None), "co_qualname",
-                           type(coro).__name__)
-            try:
-                await coro
-                self.records.append({"time": clock.now().isoformat(), "kind": kind,
-                                     "success": True})
-            except Exception as exc:
-                self.records.append({"time": clock.now().isoformat(), "kind": kind,
-                                     "success": False, "error": str(exc)})
-                raise
-
         def _wrapped(coro):
-            # enabled=True 透传真推（包 _logged 落审计记录）；False 直接弃 coro（mock）。
+            # enabled=True 透传真推（包 _runner 落审计记录）；False 直接弃 coro（mock）。
             # Why 单参 coro（V5 review CV-1 收紧）：infra.notifier.fire_and_forget 源码签名
             # 是 fire_and_forget(coro: Awaitable) -> None（单参），*args/**kwargs 是过度设计——
             # 一旦调用方传额外参数且 enabled=True，original_faf(coro, *args) 会 TypeError
             # （fire_and_forget() takes 1 positional argument but N were given）。
-            if self.enabled and original_faf is not None:
-                return original_faf(_logged(coro))
-            coro.close()  # 关掉未 await 的 coro（避免 warning）
+            if not (self.enabled and original_faf is not None):
+                coro.close()  # 关掉未 await 的 coro（避免 warning）
+                return
+            # kind 必须在包装【前】从原始协程捕获（cr_code.co_qualname，如 notify_trade_event），
+            # 否则拿到的是 _runner 自身限定名（full_run 实测显示 "coroutine"）。
+            # 实测本仓库编译环境 cr_code.co_qualname 为 None，但协程对象 __qualname__
+            # 属性有真实限定名（如 NotificationManager.notify_trade_event）→ 用它。
+            kind = getattr(coro, "__qualname__", type(coro).__name__)
+
+            async def _runner():
+                """await 原始推送 + 落 records（time/kind/success/error，design §4.5）。"""
+                try:
+                    await coro
+                    self.records.append({"time": clock.now().isoformat(), "kind": kind,
+                                         "success": True})
+                except Exception as exc:
+                    self.records.append({"time": clock.now().isoformat(), "kind": kind,
+                                         "success": False, "error": str(exc)})
+                    raise
+
+            return original_faf(_runner())
 
         with patch("infra.notifier.fire_and_forget", _wrapped):
             yield self

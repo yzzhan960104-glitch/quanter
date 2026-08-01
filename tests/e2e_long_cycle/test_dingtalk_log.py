@@ -46,4 +46,5 @@ def test_dingtalk_log_records_real_push_entries(monkeypatch):
         notifier.fire_and_forget(_notify())
     assert len(log.records) == 1, "真推应落 1 条记录"
     assert log.records[0]["success"] is True
-    assert log.records[0]["kind"]
+    assert log.records[0]["kind"].endswith("._notify"), \
+        "kind 应为原始协程限定名（防包装自指）"
