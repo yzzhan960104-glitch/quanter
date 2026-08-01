@@ -54,19 +54,23 @@ def test_orchestrator_smoke(isolated_state, monkeypatch, tmp_path):
     # ===== V2 run_eod_phase monkeypatch 为 fake（smoke 不跑真算法） =====
     # 物理：fake 直接落 T+1 plan（2 个 fake 单），让 pre_open/stoploss/post_close 有单可挂。
     # 测的是 orchestrator 串联编排，不是 detect_signal 算法正确性（后者属 full_run）。
+    # I-1 fix：fake_orders 补 tp1/tp1_portion 真值（模拟 Task 7 后新 plan，让 decide_exit
+    # 主路径在 smoke 真跑而非走 D12 fallback）。tp1 介于 neckline 与 tp2 之间（颈线+tp1_h_mult×H），
+    # tp1_portion=0.5（lot1 占半仓）。老 plan（tp1=None）走 fallback 的健壮性由 _build_ctx
+    # 内 `tp1 is not None` 防御分支覆盖，无需 smoke 单独验（那是 _build_ctx 的保守降级路径）。
     fake_orders = [
         {
             "order": {"symbol": "300001.SZ", "qty": 100, "side": "BUY", "price": 10.00},
             "stop_price": 9.50, "take_profit": 11.00, "neckline": 10.00,
             "atr": 0.25, "formed_at": "2026-07-01", "max_wait": 5,
-            "tp1": None, "tp1_portion": None, "cancel_on": 10.50,
+            "tp1": 10.50, "tp1_portion": 0.5, "cancel_on": 10.50,
             "experiment_id": None, "experiment_weight": None, "rr": 2.0,
         },
         {
             "order": {"symbol": "688001.SH", "qty": 100, "side": "BUY", "price": 20.00},
             "stop_price": 19.00, "take_profit": 22.00, "neckline": 20.00,
             "atr": 0.50, "formed_at": "2026-07-01", "max_wait": 5,
-            "tp1": None, "tp1_portion": None, "cancel_on": 21.00,
+            "tp1": 21.00, "tp1_portion": 0.5, "cancel_on": 21.00,
             "experiment_id": None, "experiment_weight": None, "rr": 2.0,
         },
     ]
@@ -246,6 +250,26 @@ def test_orchestrator_smoke(isolated_state, monkeypatch, tmp_path):
     all_failures = [f for r in day_results for f in r.failures]
     assert not all_failures, \
         f"smoke 不应有 failures（暴露 orchestrator 串联 bug）：{all_failures}"
+
+    # --- 验收 11：I-1 fix 验主路径跑（decide_exit 非 D12 fallback）---
+    # 物理意图（V7 review I-1）：_build_ctx state 补全 decide_exit 必读键后，stoploss 阶段
+    # 应走 decide_exit 主路径（fallback_used==0），而非 D12 fallback（should_trigger_stop 单价
+    # 比对）。验法：day1 stoploss 至少一个盘中时点 checked>0（有持仓进 holding 循环）+
+    # fallback_used==0（decide_exit 主路径无 KeyError）。若 fallback_used>0 说明 state 仍缺键
+    # 或 decide_exit 异常，I-1 fix 回归。
+    day1_stoploss = day1.phase_results.get("stoploss", [])
+    main_path_hits = [
+        r for r in day1_stoploss
+        if r.get("checked", 0) > 0 and r.get("fallback_used") == 0
+    ]
+    assert main_path_hits, (
+        f"I-1 回归：day1 stoploss 应至少一个时点走 decide_exit 主路径（checked>0 + "
+        f"fallback_used==0），实际 stoploss 返回值={day1_stoploss}")
+    # 全程 fallback_used 应为 0（plan 字段齐全 + state 补全 → decide_exit 不 KeyError）。
+    total_fallback = sum(r.get("fallback_used", 0) for r in day1_stoploss)
+    assert total_fallback == 0, (
+        f"I-1 回归：day1 stoploss 全程 fallback_used 应为 0（decide_exit 主路径无异常），"
+        f"实际 total_fallback={total_fallback}")
 
 
 # ============================================================
