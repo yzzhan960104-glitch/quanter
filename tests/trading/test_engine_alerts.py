@@ -233,6 +233,7 @@ def test_health_guard_fail_threshold_alerts_critical(monkeypatch, captured_alert
     eng = engine.TradingEngine()
     fake_gw = MagicMock()
     fake_gw._connected = False
+    fake_gw._risk_halted = False  # #6：风控熔断标志默认 False（网络断线自愈路径）
     fake_gw._reconnecting = False
     fake_gw.is_client_ready = MagicMock(return_value=True)
     fake_gw.connect = AsyncMock(side_effect=RuntimeError("connect 失败"))

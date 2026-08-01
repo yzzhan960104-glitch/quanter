@@ -2100,6 +2100,11 @@ class TradingEngine:
         if gw is None:
             # 网关未装配（dry_run / 未配 QMT 凭证）→ 无可守护对象，直接返回
             return
+        # #6 修复：风控熔断粘滞——risk_halted 时只告警不重连（熔断应全场停摆，次日人工接管）。
+        # 与 on_disconnected 网络断线区分（后者 _risk_halted=False，允许 health_guard 自愈）。
+        if getattr(gw, "_risk_halted", False):
+            logger.warning("网关处于风控熔断态（risk_halted），health_guard 跳过重连（需人工 clear_risk_halt）")
+            return
         # ② 已连接 → 清失败计数 + no-op（活跃连接不能被周期 job 重连打断：
         #    重连会断开活跃 session 重建，导致回报回调丢失 / 主推重新订阅抖动）
         if getattr(gw, "_connected", False):

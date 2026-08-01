@@ -245,3 +245,18 @@ def test_submit_order_disconnected_blocks(monkeypatch):
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
     with pytest.raises(RuntimeError, match="连接"):
         asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
+
+
+def test_emergency_halt_sets_risk_halt(monkeypatch):
+    """emergency_halt → set_risk_halt(True)（#6：风控熔断粘滞标志）。"""
+    from presentation.server.services import trading_service
+    from broker.qmt import QmtExecutionGateway
+
+    gw = QmtExecutionGateway(userdata_path="C:/tmp/qmt_test", account_id="TEST_ACC")
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "fire_and_forget", lambda *a, **kw: None)
+
+    r = trading_service.emergency_halt()
+    assert r["halted"] is True
+    assert gw._risk_halted is True, "emergency_halt 必须置 risk_halted"
+    assert gw._lock_down is True and gw._connected is False

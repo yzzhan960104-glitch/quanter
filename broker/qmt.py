@@ -282,6 +282,9 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # get_status 误判为 vetoed_by_risk）；connect 成功保持 False；
         # on_disconnected/emergency_halt 置 True，风控层据此熔断。
         self._lock_down: bool = False
+        # 风控熔断粘滞标志（#6）：emergency_halt/日内-3% 熔断置 True，
+        # health_guard/账号 OK 均不得自动解除；解锁必须显式 clear_risk_halt()。
+        self._risk_halted: bool = False
 
         # 主推可用性标志（T5）：subscribe 成功保持 True，失败置 False（订单状态靠主动查询兜底）。
         # Why 单列：subscribe 失败时 connect 仍可能成功（socket 通），但拿不到
@@ -403,7 +406,8 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             self._main_push_available = True
 
         self._connected = True
-        self._lock_down = False  # 连接成功，解除发单锁定
+        if not self._risk_halted:
+            self._lock_down = False  # 仅网络断线重连清锁；风控熔断(_risk_halted)粘滞不清
         logger.info("QMT 网关已连接 account=%s session=%s", self._account_id, self._session_id)
 
     async def disconnect(self) -> None:
@@ -445,7 +449,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         """
         if self._loop is None or self._trader is None or self._account is None:
             raise RuntimeError("QMT 网关未连接，无法对账（请先 await connect()）")
-        if self._lock_down:
+        if self.is_blocked:
             raise RuntimeError("QMT 网关已锁定（断线保护），拒绝对账以防脏读")
 
         positions = await self._loop.run_in_executor(
@@ -518,7 +522,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         if self._loop is None or self._trader is None or self._account is None:
             return {}
         # 锁定（断线/账号 fatal）→ 返 {} 防脏读（与 submit_order 同口径熔断）
-        if self._lock_down:
+        if self.is_blocked:
             logger.warning("QMT 网关已锁定，query_asset 返空（断线保护，防脏读）")
             return {}
         try:
@@ -600,7 +604,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         if self._loop is None or self._trader is None or self._account is None:
             return []
         # 锁定（断线/账号 fatal）→ 返 [] 防脏读（与 query_asset / submit_order 同口径）
-        if self._lock_down:
+        if self.is_blocked:
             return []
         try:
             # lambda 闭包捕获 cancelable_only，投线程池同步执行后 await 拿结果
@@ -652,7 +656,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         """
         if self._loop is None or self._trader is None or self._account is None:
             return []
-        if self._lock_down:
+        if self.is_blocked:
             return []
         try:
             trades = await asyncio.wait_for(
@@ -788,7 +792,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         if self._loop is None or self._trader is None or self._account is None:
             return OrderResult(order_id=order.order_id or "", state=OrderState.REJECTED,
                                message="网关未连接，拒单")
-        if self._lock_down:
+        if self.is_blocked:
             # 断线熔断：宁可拒单也不发废单（断线窗口期重发=重复持仓风险）
             return OrderResult(order_id=order.order_id or "", state=OrderState.REJECTED,
                                message="网关已锁定（断线保护），禁止发单")
@@ -856,7 +860,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         出真实 order_id；若 async_response 回调未到（映射缺失），撤单无法发出——
         这是 seq/real 解耦的固有代价，返回 FAILED 让上层短延迟后重试。
         """
-        if self._lock_down or not self._connected:
+        if self.is_blocked or not self._connected:
             return OrderResult(order_id=order_id, state=OrderState.REJECTED,
                                message="网关未连接或已锁定，撤单失败")
         real_order_id = self._resolve_real_order_id(order_id)
@@ -905,7 +909,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         Args:
             broker_oid: QMT 柜台真实 order_id（int），来自 query_orders(cancelable_only=True)。
         """
-        if self._lock_down or not self._connected:
+        if self.is_blocked or not self._connected:
             return OrderResult(order_id=str(broker_oid), state=OrderState.REJECTED,
                                message="网关未连接或已锁定，撤单失败")
 
@@ -937,6 +941,22 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         落地方式：C++ 线程只投递，主线程只调度，副作用在主线程的协程里安全发生。
         """
         self._on_order_update = cb
+
+    @property
+    def is_blocked(self) -> bool:
+        """网关拒单总闸（#6）：风控熔断或断线锁任一生效即拒。"""
+        return self._risk_halted or self._lock_down
+
+    def set_risk_halt(self, halted: bool = True) -> None:
+        """风控熔断锁（emergency_halt/日内-3% 触发）。halted=True 置粘滞锁 + _lock_down。"""
+        self._risk_halted = halted
+        if halted:
+            self._lock_down = True
+            self._connected = False
+
+    def clear_risk_halt(self) -> None:
+        """显式解除风控熔断（人工/次日盘前）。仅清 risk_halt，_lock_down 由 connect 自然恢复。"""
+        self._risk_halted = False
 
     @property
     def is_locked(self) -> bool:
@@ -1126,8 +1146,12 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             logger.critical("【QMT 账号异常】status=%s account=%s 网关已锁定", status_int, self._account_id)
             _alert_account_status(self, status_int, "ERROR")
         elif status_int == _QMT_ACC_OK:
-            self._lock_down = False
-            logger.info("QMT 账号状态 OK account=%s，已清锁", self._account_id)
+            # #6：risk_halted 期间账号 OK 只记日志，不得清锁（风控熔断需人工解除）
+            if not self._risk_halted:
+                self._lock_down = False
+            logger.info("QMT 账号状态 OK account=%s，已清锁" if not self._risk_halted
+                        else "QMT 账号状态 OK account=%s（risk_halted 粘滞，锁保持）",
+                        self._account_id)
         else:
             # WAITING_LOGIN/LOGINING/INITING/CORRECTING/CLOSED 等非 fatal 态只 log
             logger.info("QMT 账号状态变动 status=%s account=%s（非 fatal，不锁）", status_int, self._account_id)

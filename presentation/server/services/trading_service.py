@@ -373,13 +373,15 @@ def emergency_halt() -> dict:
     if getattr(gw, "_lock_down", False):
         return {"halted": True, "message": "已处于熔断态（lock_down 已置位，跳过重复处理）"}
 
-    # 置断线锁定：后续 submit_order/cancel_order 见此标志即拒（既有网关契约）
-    gw._lock_down = True   # type: ignore[attr-defined]
-    try:
-        gw._connected = False   # type: ignore[attr-defined]  # 熔断即视为不可发单
-    except Exception:
-        pass
-
+    # 置风控熔断粘滞锁（#6：health_guard 不得自动重连解除）
+    if hasattr(gw, "set_risk_halt"):
+        gw.set_risk_halt(True)   # 置 _risk_halted=True + _lock_down=True + _connected=False
+    else:
+        gw._lock_down = True   # type: ignore[attr-defined]
+        try:
+            gw._connected = False   # type: ignore[attr-defined]  # 熔断即视为不可发单
+        except Exception:
+            pass
     # 钉钉最高级别告警（fire_and_forget，失败不影响熔断语义）
     try:
         fire_and_forget(

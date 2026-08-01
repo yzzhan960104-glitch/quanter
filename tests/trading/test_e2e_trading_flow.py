@@ -439,6 +439,7 @@ def test_e2e_lockdown_recover_full_cycle(isolated, monkeypatch, captured_alerts_
 
     fake_gw = MagicMock()
     fake_gw._reconnecting = False
+    fake_gw._risk_halted = False  # #6：网络断线自愈路径（非风控熔断）
     fake_gw.query_asset = AsyncMock(return_value={})  # 熔断基线兜底（返空跳过 snapshot）
 
     def _is_client_ready(staleness_sec: int = 300):

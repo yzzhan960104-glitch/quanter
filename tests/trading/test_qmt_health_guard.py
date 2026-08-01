@@ -86,6 +86,7 @@ async def test_health_guard_reconnects_when_ready_and_disconnected():
     from trading.engine import TradingEngine
     eng = TradingEngine()
     gw = MagicMock()
+    gw._risk_halted = False  # #6：风控熔断标志默认 False（网络断线自愈路径）
     gw._connected = False
     gw._reconnecting = False  # 无并发重连路径在跑
     gw.is_client_ready = MagicMock(return_value=True)
@@ -107,6 +108,7 @@ async def test_health_guard_skips_when_client_not_ready():
     from trading.engine import TradingEngine
     eng = TradingEngine()
     gw = MagicMock()
+    gw._risk_halted = False  # #6：风控熔断标志默认 False（网络断线自愈路径）
     gw._connected = False; gw._reconnecting = False
     gw.is_client_ready = MagicMock(return_value=False)
     gw.connect = AsyncMock()
@@ -127,6 +129,7 @@ async def test_health_guard_yields_when_reconnecting():
     from trading.engine import TradingEngine
     eng = TradingEngine()
     gw = MagicMock()
+    gw._risk_halted = False  # #6：风控熔断标志默认 False（网络断线自愈路径）
     gw._connected = False
     gw._reconnecting = True  # on_disconnected 路径正在重连
     gw.is_client_ready = MagicMock(return_value=True)
@@ -147,6 +150,7 @@ async def test_health_guard_backoff_after_connect_failure():
     from trading.engine import TradingEngine
     eng = TradingEngine()
     gw = MagicMock()
+    gw._risk_halted = False  # #6：风控熔断标志默认 False（网络断线自愈路径）
     gw._connected = False; gw._reconnecting = False
     gw.is_client_ready = MagicMock(return_value=True)
     gw.connect = AsyncMock(side_effect=RuntimeError("柜台拒绝"))
@@ -222,3 +226,37 @@ async def test_reconnect_resets_flag_on_success(tmp_path):
         qmt_mod.QmtExecutionGateway.connect = orig  # type: ignore
     # 核心断言：成功后标志复位（守护 job 下轮才能进入重连分支）
     assert gw._reconnecting is False
+
+
+# ============================================================ #6：风控熔断粘滞（_risk_halted）
+def test_risk_halt_not_cleared_by_health_guard_reconnect(monkeypatch, tmp_path):
+    """risk_halt 置位后，health_guard 重连成功也不解锁（风控粘滞，#6）。"""
+    from unittest.mock import patch
+    from trading.engine import TradingEngine
+
+    gw = _gw(str(tmp_path))
+    gw.set_risk_halt(True)
+    assert gw._risk_halted is True and gw._lock_down is True
+    gw._connected = False
+    monkeypatch.setattr(gw, "is_client_ready", lambda **kw: True)
+    monkeypatch.setattr(gw, "connect", AsyncMock())
+    eng = TradingEngine()
+    with patch("trading.engine.get_gateway", return_value=gw):
+        import asyncio
+        asyncio.run(eng._health_guard())
+    gw.connect.assert_not_awaited()  # risk_halt 期间不得自动重连
+    assert gw._risk_halted is True, "risk_halt 必须粘滞，health_guard 不得自动解除"
+    assert gw._lock_down is True, "risk_halt 期间 lock_down 不得被重连清掉"
+
+
+def test_account_status_ok_does_not_clear_risk_halt(tmp_path):
+    """账号状态 OK 推送不得清 risk_halt 的锁（#6 补强：_on_account_status_change 同闸）。"""
+    gw = _gw(str(tmp_path))
+    gw.set_risk_halt(True)
+    gw._on_account_status_change(0)  # ACCOUNT_STATUS_OK
+    assert gw._lock_down is True, "risk_halt 期间账号 OK 不得清 lock_down"
+    assert gw._risk_halted is True
+    # 非 risk_halt 时账号 OK 仍可清锁（网络断线自愈路径不受影响）
+    gw.clear_risk_halt()
+    gw._on_account_status_change(0)
+    assert gw._lock_down is False
