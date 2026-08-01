@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """CSV 审计层 kind 列（#3）：submit/fill 分离，post_close 聚合只认 fill。"""
 import csv as _csv
 
@@ -41,5 +41,7 @@ def test_aggregate_fills_only_kind_fill(csv_log):
                          rationale="QmtExecutionGateway:REJECTED:资金不足")
     ts.record_live_trade("600000.SH", "BUY", 100, 10.5, kind="fill", rationale="成交回报")
     ts.record_live_trade("600000.SH", "SELL", 40, 11.0, kind="fill", rationale="成交回报")
-    net = ts.aggregate_fills_by_symbol("2026-08-01", "2026-08-01")
+    # 查询范围用当天（record_live_trade 时间戳 = datetime.now）；硬编码 8/1 随日期轮转失效
+    _today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+    net = ts.aggregate_fills_by_symbol(_today, _today)
     assert net == {"600000.SH": 60.0}, f"只聚合 fill 行应得净 60，实际 {net}"
