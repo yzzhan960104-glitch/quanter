@@ -17,7 +17,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 P_FILLED = 0.70
 P_PARTIAL = 0.15
 P_REJECTED = 0.05
-P_DELAYED = 0.10  # 主推延迟（成交回报延后注入）
+# TODO(spec §7 未实现，final review Important-2)：主推延迟（成交回报延后 1 时点注入）。
+# spec §7 表把"主推延迟 10%"列为 4 种概率事件之一，模拟 QMT 成交回报 1-2s 延迟下 stoploss
+# 状态机一致性。V4 只实现了 FILLED/PARTIAL_FILLED/REJECTED 三态，本常量声明了槽位但
+# _sample_state 从未读取它（FILLED 路径吞掉 80% = P_FILLED + P_DELAYED），_delayed_fills
+# 队列从未 append/pop。V7+ 若要补主推延迟注入：
+#   ① _sample_state：r 落 [P_FILLED, P_FILLED+P_DELAYED) → 返 "DELAYED"，订单入 _delayed_fills；
+#   ② 下一盘中时点 stoploss 进入时 flush _delayed_fills（_handle_order_update 延后注入成交回报）；
+#   ③ 验 stoploss 在延迟窗口内不重复发单 / 不漏平仓（状态一致性）。
+# 保留常量 + 队列声明而非删除：避免 spec §7 设计意图丢失，下个阅读者能直接接住 V7+ 实现。
+P_DELAYED = 0.10  # 主推延迟（成交回报延后注入，spec §7 未实现，见 TODO）
 
 
 class ProbabilisticBroker:
@@ -43,7 +52,10 @@ class ProbabilisticBroker:
         self._start_equity = start_equity
         self._expired = expired_symbols or {}
         self._force_state = force_state
-        # 成交回报延迟队列：delayed_fill 注入待下时点（主推延迟模拟）
+        # TODO(spec §7 未实现，final review Important-2，与 P_DELAYED 配套）：成交回报延迟队列，
+        # 模拟 QMT 主推延后 1 时点注入。当前从未 append/pop（_sample_state FILLED 路径直接同步返），
+        # 保留槽位等 V7+ 补延迟注入逻辑（详见 P_DELAYED TODO）。删除会导致 spec §7「主推延迟」
+        # 设计意图完全丢失，故保守保留 + 显式标注。
         self._delayed_fills: list[dict] = []
         self._positions: dict[str, dict] = {}  # 内存持仓（模拟 gw._fetch_broker_positions）
 

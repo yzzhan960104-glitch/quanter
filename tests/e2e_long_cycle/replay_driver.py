@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
-from typing import Callable, Iterable
+from datetime import date, datetime, time
+from typing import Callable
 
 # 每日 4 阶段的 freeze 时点（spec §3.2 + §5）。
 # pipeline_then_eod 用 T 日 19:00；其余用 T+1 日（trading_day(T)）。

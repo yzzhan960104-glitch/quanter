@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
-from unittest.mock import patch
 
 
 def test_replay_driver_advances_calendar_and_freezes_clock_per_phase():

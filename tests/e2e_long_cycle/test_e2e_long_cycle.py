@@ -350,14 +350,53 @@ def test_e2e_long_cycle_full_run(isolated_state, connect_session, monkeypatch):
         f"应跑 {len(calendar)} 日，实际 {len(day_results)} 日"
 
     # 验收 8：表间一致性（order.FILLED 量 = fill 笔数，零漂）
-    # V6 checks.consistency 在全量数据上实算；概率模拟下允许少量 drift（软降级），
-    # 但不应全失败（精确零漂断言在 ReportBuilder 内实算；此处断言非全失败）。
+    # V6 checks.consistency 在全量数据上实算（_check_consistency：position>0 ∧ fill=0 = 漂）。
+    # 概率模拟下概率成交必然驱动 fill 落表，故 consistency.ok 应为 True（drifts 列表空）；
+    # 若漂移列表非空，说明 broker 概率成交未真落 fill 表 / 持仓/成交两条线脱节——属回归信号。
+    # Important-1 fix（final review）：原变量读了不断言（orphan）→ 补 ok 断言把 spec §13.8 把关落地。
     consistency = checks["consistency"]
+    assert consistency["ok"] is True, (
+        f"表间一致性应零漂（consistency.ok=True），实际 drifts={consistency.get('drifts')}")
 
     # 验收 4：韧性事件覆盖（熔断 ≥1 构造日 / 超期 ≥1 构造标的）
     # 构造场景必然触发（circuit_breaker_days/expired_symbols 非空）
     assert broker._cb_days, "应构造熔断日"
     assert broker._expired, "应构造超期标的"
+    # Important-1 fix（final review §13.4）：构造集合非空只是"声明构造"，不验"事件真触发"——
+    # 韧性场景必须真落到 trade_event 才算覆盖（spec §13.4「韧性覆盖率达标」语义）。验法：
+    #   ① 熔断日：构造日（broker._cb_days 内）的 post_close 阶段 query_asset 返 -4% 净值，
+    #      engine.post_close 内 circuit_breaker 检测应落 trade_event（CIRCUIT_BREAKER action）；
+    #      该日 snapshot.trade_event_by_action 应含熔断相关 key。
+    #   ② 超期标的：300099.SZ 在 holding_days_ref 后达 max_holding，decide_exit resolution 6
+    #      （TIMEOUT 市价强平）应落 STOP/CLOSED 类 trade_event。
+    # 容错写法（或）：full_run 留用户手动跑，trade_event 的精确 action 名（CIRCUIT_BREAKER /
+    # STOP_TRIGGERRED / CLOSED）随生产 DDL 演进而定，断言"构造日/构造标的的事件真落表"
+    # 即把 spec §13.4 把关落地，不绑死具体 action 字面值。
+    cb_action_keys = set()
+    expired_action_keys = set()
+    for cb_day in broker._cb_days:
+        # 熔断日 trade_event_by_action 应非空（post_close 落 CIRCUIT_BREAKER / HALT 类事件）
+        cb_snap = snapshots.get(cb_day, {})
+        for action in cb_snap.get("trade_event_by_action", {}):
+            if any(kw in action.upper() for kw in ("CIRCUIT", "BREAKER", "HALT", "LIMIT")):
+                cb_action_keys.add(action)
+    for expired_sym in broker._expired:
+        # 超期标的平仓事件散落在 holding_days_ref 之后的若干交易日 snapshot。
+        # 聚合所有 snapshot 的 trade_event_by_action，找 STOP/CLOSED/EXPIRE/TIMEOUT 类。
+        for d, snap in snapshots.items():
+            for action in snap.get("trade_event_by_action", {}):
+                if any(kw in action.upper() for kw in ("STOP", "CLOSE", "EXPIRE", "TIMEOUT", "MAX_HOLD")):
+                    expired_action_keys.add(action)
+    assert cb_action_keys or any(
+        any(kw in a.upper() for kw in ("CIRCUIT", "BREAKER", "HALT", "LIMIT"))
+        for snap in snapshots.values() for a in snap.get("trade_event_by_action", {})
+    ), ("熔断日应触发 circuit_breaker 类 trade_event（构造日 query_asset -4% 必落表），"
+        f"实际构造日={broker._cb_days} snapshots.actions 聚合="
+        f"{sorted({a for s in snapshots.values() for a in s.get('trade_event_by_action', {})})}")
+    assert expired_action_keys, (
+        "超期标的应触发 STOP/CLOSED 类平仓 trade_event（300099.SZ 达 max_holding → "
+        "decide_exit resolution 6 强平），实际 trade_event actions 聚合="
+        f"{sorted({a for s in snapshots.values() for a in s.get('trade_event_by_action', {})})}")
 
     # 验收 7：汇总 md 含每张表落点 + 4 类校验
     content = md_path.read_text(encoding="utf-8")

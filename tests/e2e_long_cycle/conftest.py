@@ -12,9 +12,6 @@ conftest session/module scope 复用避免每测试重起 connect 5 进程（成
 """
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
 import pytest
 
 
