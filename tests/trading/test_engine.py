@@ -1274,9 +1274,14 @@ def test_handle_order_update_writes_book(monkeypatch):
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
 
-    # ---- Case 1（正向）：order_type=23 → BUY → insert_fill 被调一次、direction "BUY" ----
+    # ---- Case 1（正向）：DB order.side=buy → BUY → insert_fill 被调一次、direction "BUY" ----
+    # #1 修复后方向以 DB 为准：主推路径 _orders 无 order_type，不再手塞内存态。
     eng._gw = MagicMock()
-    eng._gw._orders = {"999": {"order_type": 23}}  # 23=STOCK_BUY
+    eng._gw._orders = {}  # 主推路径真实形态：无 order_type，方向必须来自 DB
+    state_store.upsert_account("direction_test", broker="qmt")
+    state_store.insert_order("2026-08-01_300001.SZ_OPEN_1", "direction_test_300001.SZ_2026-08-01",
+                             "direction_test", "2026-08-01", "300001.SZ", "buy", "OPEN", 100, 10.0,
+                             broker_oid="999", state="SUBMITTED")
 
     with patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager") as NM1:
@@ -1288,7 +1293,8 @@ def test_handle_order_update_writes_book(monkeypatch):
     # insert_fill(order_id, account_id, traded_time, symbol, direction, qty, price)
     assert if_buy.call_args.args[4] == "BUY"  # direction 位置参
 
-    # ---- Case 2（反向）：order_id 不在 _orders → direction None → insert_fill 零调用 ----
+    # ---- Case 2（反向）：DB 无行 + _orders 空 → direction None → insert_fill 零调用 ----
+    update = dict(update); update["order_id"] = "998"  # 无 DB 行（Case 1 的 999 已存在）
     eng._gw = MagicMock()
     eng._gw._orders = {}  # 清空 _orders：_order_direction 查无 order_type → None
 

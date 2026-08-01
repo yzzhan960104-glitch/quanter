@@ -621,3 +621,43 @@ def test_trade_push_keeps_order_type_after_merge(db):
         order_id=987654, stock_code="600000.SH", traded_volume=100,
         traded_price=10.5, traded_amount=1050.0, traded_time="20260801101000"))))
     assert gw._orders["987654"].get("order_type") == 23, "trade 覆盖后 order_type 必须保留"
+
+# ============================================================================
+# Task A3（live-mainchain-fixes）：方向反查 DB 优先 + 内存兜底
+# ============================================================================
+
+def test_direction_resolved_from_db_not_memory(db):
+    """方向从 DB order.side 反查：gw._orders 无 order_type 也能判 BUY（#1 主刀）。"""
+    from trading import state_store
+
+    eng, gw = _make_real_chain_engine()
+    aid, real = "TEST_ACC", 987654
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order("2026-08-01_600000.SH_OPEN_7", f"{aid}_600000.SH_2026-08-01",
+                             aid, "2026-08-01", "600000.SH", "buy", "OPEN", 100, 10.0,
+                             broker_oid=str(real), state="SUBMITTED")
+    # 主推路径真实形态：_orders 只有状态无 order_type（禁止手塞 order_type）
+    gw._orders = {str(real): {"order_status": 56}}
+    assert eng._order_direction(str(real)) == "BUY", "应从 DB side='buy' 反查得 BUY"
+
+
+def test_direction_seq_fallback_when_async_response_late(db):
+    """竞态：async_response 未到（broker_oid 仍是 str(seq)），经 _seq_to_real 反查命中 DB。"""
+    from trading import state_store
+
+    eng, gw = _make_real_chain_engine()
+    aid, seq, real = "TEST_ACC", 7, 987654
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order("2026-08-01_600000.SH_OPEN_7", f"{aid}_600000.SH_2026-08-01",
+                             aid, "2026-08-01", "600000.SH", "buy", "OPEN", 100, 10.0,
+                             broker_oid=str(seq), state="SUBMITTED")
+    gw._seq_to_real = {seq: real}
+    gw._orders = {}
+    assert eng._order_direction(str(real)) == "BUY", "seq 反查应命中 DB side"
+
+
+def test_direction_unknown_returns_none(db):
+    """DB 无行 + 内存无 order_type → None（调用方必须告警，禁止静默）。"""
+    eng, gw = _make_real_chain_engine()
+    gw._orders = {}
+    assert eng._order_direction("999999") is None

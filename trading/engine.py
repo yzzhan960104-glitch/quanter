@@ -2728,6 +2728,11 @@ class TradingEngine:
 
         # 判定方向（BUY/SELL/None）——日志与挂止盈决策都依赖
         direction = self._order_direction(order_id)
+        if direction is None:
+            # #1：方向未知 = 审计黑洞（不挂止盈 + 不落账），必须叫醒人工对账，禁止静默。
+            _alert_critical(
+                f"成交回报方向未知 order_id={order_id} symbol={symbol} qty={qty} "
+                f"（DB 无 side、内存无 order_type，需人工对账补账）")
 
         # a. 成交日志补写（用真实成交价/量，非下单预估价；Layer 6 LLM 复盘数据源）
         try:
@@ -2836,25 +2841,39 @@ class TradingEngine:
             xtconstant 同值），保证单测可跑。生产环境（miniQMT 通道）xtquant 必装，
             兜底分支不会触达。
         """
-        # gw 可能未装配（Task 11 未注入 _gw）——getattr 兜底返 {} 不抛
+        # #1 修复：方向反查 DB 优先（state_store.order.side，pre_open 已落库），
+        # 内存 gw._orders.order_type 仅兜底（_sync_orders_if_stale 走 query_orders 时才有 order_type）。
+        # 竞态兜底：DB 按 real 查 miss 时经 _seq_to_real 反查 seq 再查一次（async_response 晚到）。
+        _row = None
+        try:
+            _row = _state_store.get_order_by_broker_oid(order_id)
+            if _row is None:
+                _seq = _seq_for_real_oid(self._gw, order_id)
+                if _seq is not None:
+                    _row = _state_store.get_order_by_broker_oid(str(_seq))
+        except Exception:
+            logger.exception("get_order_by_broker_oid 失败 order_id=%s（回退内存）", order_id)
+        if _row is not None:
+            side = str(_row.get("side") or "").lower()
+            if side == "buy":
+                return "BUY"
+            if side == "sell":
+                return "SELL"
+            # DB 有行但 side 异常 → 继续走内存兜底，不轻易返 None
         orders = getattr(self._gw, "_orders", {}) if self._gw else {}
         rec = orders.get(order_id, {})
-        # order_type 用 xtconstant 常量比较（绝不硬编码魔法数字到比较表达式里——
-        # 兜底 23/24 只在 ImportError 时启用，生产环境走 xtconstant.STOCK_BUY/SELL 真值）
         try:
             from xtquant import xtconstant  # 与 broker/qmt.py:61 同源导入路径
             STOCK_BUY = xtconstant.STOCK_BUY
             STOCK_SELL = xtconstant.STOCK_SELL
         except ImportError:
-            # CI/单测无 xtquant：兜底硬编码（与 tests/conftest.py 假 xtconstant 同值）
-            STOCK_BUY, STOCK_SELL = 23, 24
+            STOCK_BUY, STOCK_SELL = 23, 24  # CI/单测无 xtquant 兜底（与 conftest 同值）
         ot = rec.get("order_type")
         if ot == STOCK_BUY:
             return "BUY"
         if ot == STOCK_SELL:
             return "SELL"
         return None
-
 
     def _advance_order_state_from_status(self, update: Mapping[str, Any]) -> None:
         """kind=order：按柜台状态推进 DB order.state/filled_*（#5 第二刀）。
