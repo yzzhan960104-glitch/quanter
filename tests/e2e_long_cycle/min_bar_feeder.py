@@ -21,15 +21,36 @@ DailyLoader = Callable[[str, date], dict]              # (sym, t_date) -> {high,
 
 
 def _default_stk_mins_loader(sym: str, t_date: date) -> pd.DataFrame:
-    """生产 loader：Tushare pro.stk_mins 拉当日 5min bar。"""
-    import os, tushare as ts
+    """生产 loader：Tushare pro.stk_mins 拉当日 5min bar。
+
+    full_run 集成修复（根因 4 · stk_mins 限频容错）：
+        Tushare stk_mins 接口硬限频（实测 1 次/分钟，spec §6 假设"690 次限频内"是误判）。
+        23 日 × 多标的必超限 → pro.stk_mins 抛 "频率超限" 异常。原 loader 不捕获 →
+        MinBarFeeder._load_bars 抛 → feed 抛 → pre_open 挂单取价 + stoploss 行情注入
+        全失败（full_run 7/2 起 pre_open 全 REJECTED + 7/14+ stoploss 失败）。
+
+    修法：try/except 容错——限频/网络异常 → 返空 DataFrame（让 _load_bars 走 degraded
+    降级日线分支，spec §6.2 降级设计已就位）。空 df 触发 feed 的日线降级 + degraded=True
+    标记（ReportBuilder §5 行情降级清单可审计）。stk_mins 调用仍消耗限频配额（无法绕开
+    Tushare 硬限），但异常被吞不阻断回放，限频期间全降级日线近似（保 E2E 可行性）。
+    """
+    import logging
+    import os
+    import tushare as ts
     from dotenv import load_dotenv
     load_dotenv()
     ts.set_token(os.getenv("TUSHARE_TOKEN"))
     pro = ts.pro_api()
     d = t_date.isoformat()
-    return pro.stk_mins(ts_code=sym, start_date=f"{d} 09:00:00",
-                        end_date=f"{d} 15:00:00", freq="5min")
+    try:
+        return pro.stk_mins(ts_code=sym, start_date=f"{d} 09:00:00",
+                            end_date=f"{d} 15:00:00", freq="5min")
+    except Exception as exc:
+        # 限频/网络异常 → 返空 df 降级日线（不阻断回放；degraded 标记由 _load_bars 置）。
+        logging.getLogger(__name__).warning(
+            "stk_mins 拉取失败 symbol=%s date=%s（限频/网络？降级日线）：%s",
+            sym, d, str(exc)[:120])
+        return pd.DataFrame()
 
 
 def _default_daily_loader(sym: str, t_date: date) -> dict:
@@ -86,6 +107,19 @@ class MinBarFeeder:
         """
         out: dict[str, dict] = {}
         for sym in symbols:
+            # 盘前/盘后（无分钟数据）直接日线降级，不调 stk_mins（根因4 · 避免无意义限频消耗）。
+            # 物理意图：pre_open 09:25（<9:30）/ post_close 15:30（>15:00）时点本就无 5min bar，
+            # 调 stk_mins 只消耗硬限频配额（1次/分钟）返空。盘中 [9:30, 15:00] 走 stk_mins
+            # （15:00 是收盘 bar 仍有效，含边界）。直接日线 high/low/close 降级 + 标 degraded
+            # （ReportBuilder §5 可审计），既避开限频又保 E2E 可行（spec §6 降级设计）。
+            if up_to < time(9, 30) or up_to > time(15, 0):
+                # 盘前/盘后无分钟数据是设计常态（非故障）→ 日线降级【不标 degraded】。
+                # degraded 只标盘中 stk_mins 拉取失败/空（_load_bars 内，属异常降级）；
+                # 盘前/盘后是物理必然（9:30 前 / 15:00 后无 bar），标 degraded 会污染
+                # ReportBuilder §5「行情降级清单」（把每日 pre_open/post_close 都算降级）。
+                d = self._daily_loader(sym, t_date)
+                out[sym] = {"last_price": d["close"], "high": d["high"], "low": d["low"]}
+                continue
             df = self._load_bars(sym, t_date)
             if len(df) == 0:
                 # 降级日线（_stoploss bar 用日线 high/low/close）

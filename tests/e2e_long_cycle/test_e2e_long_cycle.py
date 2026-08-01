@@ -372,27 +372,33 @@ def test_e2e_long_cycle_full_run(isolated_state, connect_session, monkeypatch):
     # 容错写法（或）：full_run 留用户手动跑，trade_event 的精确 action 名（CIRCUIT_BREAKER /
     # STOP_TRIGGERRED / CLOSED）随生产 DDL 演进而定，断言"构造日/构造标的的事件真落表"
     # 即把 spec §13.4 把关落地，不绑死具体 action 字面值。
-    cb_action_keys = set()
+    # 韧性事件覆盖验证（spec §13.4 · final review Important-1 + full_run 首跑根因 5 修正）：
+    #   ① 熔断：生产 post_close 熔断走 cancel_all + emergency_halt + lock_down，【不落
+    #      trade_event(CIRCUIT)】（full_run 首跑暴露：log CRITICAL「日内熔断触发」+「紧急熔断
+    #      网关锁定」真跑，但 trade_event actions 无 CIRCUIT 类）。改验 post_close phase_result
+    #      .circuit_breaker=True（engine.post_close 返值 result["circuit_breaker"]，engine.py:1627），
+    #      即熔断真触发的可观测证据（与生产语义对齐，不臆造 trade_event action）。
+    #   ② 超期：300099.SZ 达 max_holding → decide_exit resolution 6 TIMEOUT 强平 → STOP/CLOSED
+    #      类 trade_event（聚合 snapshots 找，action 名随生产 DDL 演进，断言关键词非精确值）。
+    cb_triggered = False
+    for r in day_results:
+        # cb_days 是 trading_day（T+1，post_close 业务日，broker.attach(t_plus_1) 传入）；
+        # day_result.trading_day = T+1。两道检查兜底（date/trading_day 任一命中 cb_days）。
+        if r.trading_day in broker._cb_days or r.date in broker._cb_days:
+            for pc_result in r.phase_results.get("post_close", []):
+                if pc_result.get("circuit_breaker"):
+                    cb_triggered = True
+                    break
+    assert cb_triggered, (
+        f"熔断日应触发 circuit_breaker（post_close result.circuit_breaker=True），构造日="
+        f"{broker._cb_days}，实际 day_results post_close 无 circuit_breaker=True（查 log 是否有"
+        "「日内熔断触发」CRITICAL + emergency_halt）")
     expired_action_keys = set()
-    for cb_day in broker._cb_days:
-        # 熔断日 trade_event_by_action 应非空（post_close 落 CIRCUIT_BREAKER / HALT 类事件）
-        cb_snap = snapshots.get(cb_day, {})
-        for action in cb_snap.get("trade_event_by_action", {}):
-            if any(kw in action.upper() for kw in ("CIRCUIT", "BREAKER", "HALT", "LIMIT")):
-                cb_action_keys.add(action)
     for expired_sym in broker._expired:
-        # 超期标的平仓事件散落在 holding_days_ref 之后的若干交易日 snapshot。
-        # 聚合所有 snapshot 的 trade_event_by_action，找 STOP/CLOSED/EXPIRE/TIMEOUT 类。
         for d, snap in snapshots.items():
             for action in snap.get("trade_event_by_action", {}):
                 if any(kw in action.upper() for kw in ("STOP", "CLOSE", "EXPIRE", "TIMEOUT", "MAX_HOLD")):
                     expired_action_keys.add(action)
-    assert cb_action_keys or any(
-        any(kw in a.upper() for kw in ("CIRCUIT", "BREAKER", "HALT", "LIMIT"))
-        for snap in snapshots.values() for a in snap.get("trade_event_by_action", {})
-    ), ("熔断日应触发 circuit_breaker 类 trade_event（构造日 query_asset -4% 必落表），"
-        f"实际构造日={broker._cb_days} snapshots.actions 聚合="
-        f"{sorted({a for s in snapshots.values() for a in s.get('trade_event_by_action', {})})}")
     assert expired_action_keys, (
         "超期标的应触发 STOP/CLOSED 类平仓 trade_event（300099.SZ 达 max_holding → "
         "decide_exit resolution 6 强平），实际 trade_event actions 聚合="
