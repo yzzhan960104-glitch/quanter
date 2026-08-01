@@ -41,6 +41,13 @@ class TableSnapshotCollector:
             # 首日 post_close 时若 DB 未 init_store / 表缺失 → 视为 0 落点（不抛，校验阶段暴露）。
             return 0
 
+    def _rows(self, con: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
+        """明细行采集：sqlite Row → dict 列表；表缺失/列不存在 → []（首日健壮）。"""
+        try:
+            return [dict(r) for r in con.execute(sql, params).fetchall()]
+        except sqlite3.OperationalError:
+            return []
+
     def snapshot(self, t_date: date) -> dict:
         """读 t_date 当日每表落点。
 
@@ -86,6 +93,30 @@ class TableSnapshotCollector:
                 snap["order_by_state"] = {r["state"]: r["c"] for r in rows}
             except sqlite3.OperationalError:
                 snap["order_by_state"] = {}
+            # ── 明细行采集（design §4.4：报表要列出真实交易/持仓列表，不能只有计数）──
+            snap["fills"] = self._rows(
+                con, 'SELECT order_id, traded_time, symbol, direction, qty, price, '
+                     'applied_at FROM fill WHERE date(traded_time)=date(?) '
+                     'ORDER BY traded_time', (d,))
+            snap["orders"] = self._rows(
+                con, 'SELECT order_id, trade_date, symbol, side, purpose, qty, price, '
+                     'state, filled_qty, filled_price FROM "order" WHERE trade_date=? '
+                     'ORDER BY order_id', (d,))
+            snap["trade_events"] = self._rows(
+                con, 'SELECT event_id, trade_id, symbol, action, timestamp, order_id, qty, '
+                     'price FROM trade_event WHERE date(timestamp)=date(?) ORDER BY event_id', (d,))
+            snap["positions"] = self._rows(
+                con, 'SELECT symbol, qty, avg_price, entry_date, updated_at FROM position '
+                     'WHERE qty>0 ORDER BY symbol')
+            # 持仓附 holding_days（entry_date 起算，max_holding/超期可观测）
+            from trading.compute.stop import trading_days_between
+            for r in snap["positions"]:
+                entry = r.get("entry_date")
+                r["holding_days"] = trading_days_between(entry, t_date.isoformat()) if entry else 0
+            snap["account_daily_rows"] = self._rows(
+                con, 'SELECT date, start_total_asset, start_cash, close_total_asset, close_cash, '
+                     'close_market_value, daily_pnl, daily_pnl_pct FROM account_daily '
+                     'WHERE date=?', (d,))
         finally:
             con.close()
         # plan JSON：trading_plan.load_plan(date_str)，返 None/{"orders":[...], "confirmed":...}

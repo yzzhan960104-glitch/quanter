@@ -95,8 +95,27 @@ class ReportBuilder:
         # 精确校验在 V7 据 DayResult.phase_results 实算（plan_confirmed=False 但 pre_open 跑了 → key 错位）
         return {"ok": not issues, "issues": issues}
 
+    @staticmethod
+    def _fmt(v) -> str:
+        """表格单元格格式化：None→空；float 去尾零（100.0→100）。"""
+        if v is None:
+            return ""
+        if isinstance(v, float):
+            return f"{v:g}"
+        return str(v)
+
+    def _render_table(self, headers: list[str], rows: list[dict]) -> str:
+        """Markdown 表格渲染；空行输出（无）。"""
+        if not rows:
+            return "（无）"
+        lines = ["| " + " | ".join(headers) + " |",
+                 "|" + "|".join(["---"] * len(headers)) + "|"]
+        for r in rows:
+            lines.append("| " + " | ".join(self._fmt(r.get(h)) for h in headers) + " |")
+        return "\n".join(lines)
+
     def _render_md(self, day_results, snapshots, dingtalk_records, checks) -> str:
-        """渲染 md（§0-§6，spec §8 模板）。"""
+        """渲染 md（§0-§6，spec §8 模板 + design §4.5 交易/持仓列表）。"""
         lines = ["# C1-C7 长周期 E2E 测试报告（2026-07-01 ~ 07-31）", ""]
         lines += ["## 0. 运行配置", "",
                   "- 日期范围：2026-07-01 ~ 07-31（23 交易日）",
@@ -115,11 +134,59 @@ class ReportBuilder:
                          f"{p('stoploss')} | {p('post_close')} | {n_fail} 失败 |")
         lines.append("")
         lines += ["## 2. 每张表逐日落点", ""]
+
+        # ── 全周期成交流水（design §4.5：用户可审计的真实交易列表）──
+        all_fills: list[dict] = []
+        for d in sorted(snapshots):
+            for f in snapshots[d].get("fills", []):
+                all_fills.append({"date": str(d), "traded_time": f.get("traded_time"),
+                                  "symbol": f.get("symbol"), "direction": f.get("direction"),
+                                  "qty": f.get("qty"), "price": f.get("price")})
+        lines += ["### 全周期成交流水", "",
+                  self._render_table(
+                      ["date", "traded_time", "symbol", "direction", "qty", "price"],
+                      all_fills), ""]
+
+        # ── 期末持仓列表（最后一个非空快照的持仓）──
+        end_positions: list[dict] = []
+        for d in sorted(snapshots):
+            if snapshots[d].get("positions"):
+                end_positions = snapshots[d]["positions"]
+        lines += ["### 期末持仓列表", "",
+                  self._render_table(
+                      ["symbol", "qty", "avg_price", "entry_date", "holding_days"],
+                      end_positions), ""]
+
+        # ── 每日小节：计数 + 明细表 ──
         for d, snap in snapshots.items():
             lines.append(f"### {d}")
             for k, v in snap.items():
+                if k in ("fills", "orders", "trade_events", "positions", "account_daily_rows"):
+                    continue  # 明细以表格渲染，避免 dict 打印噪音
                 lines.append(f"- {k}: {v}")
-            lines.append("")
+            lines += ["", "#### trade_event 明细", "",
+                      self._render_table(
+                          ["event_id", "trade_id", "symbol", "action", "timestamp",
+                           "order_id", "qty", "price"],
+                          snap.get("trade_events", [])), ""]
+            lines += ["#### order 明细", "",
+                      self._render_table(
+                          ["order_id", "symbol", "side", "purpose", "qty", "price",
+                           "state", "filled_qty", "filled_price"],
+                          snap.get("orders", [])), ""]
+            lines += ["#### fill 交易列表", "",
+                      self._render_table(
+                          ["order_id", "traded_time", "symbol", "direction", "qty", "price"],
+                          snap.get("fills", [])), ""]
+            lines += ["#### 持仓列表", "",
+                      self._render_table(
+                          ["symbol", "qty", "avg_price", "entry_date", "holding_days"],
+                          snap.get("positions", [])), ""]
+            lines += ["#### account_daily", "",
+                      self._render_table(
+                          ["date", "start_total_asset", "start_cash", "close_total_asset",
+                           "close_cash", "close_market_value", "daily_pnl", "daily_pnl_pct"],
+                          snap.get("account_daily_rows", [])), ""]
         lines += ["## 3. 预期校验结果", ""]
         for kind, res in checks.items():
             lines.append(f"### 3. {kind}: {'✓' if res.get('ok') else '✗'}")
@@ -128,7 +195,11 @@ class ReportBuilder:
                     lines.append(f"  - {k}: {v}")
         lines.append("")
         lines += ["## 4. 钉钉推送记录", "",
-                  f"共 {len(dingtalk_records)} 条推送", ""]
+                  self._render_table(
+                      ["time", "kind", "success", "error"],
+                      [{"time": r.get("time"), "kind": r.get("kind"),
+                        "success": r.get("success"), "error": r.get("error")}
+                       for r in dingtalk_records]), ""]
         lines += ["## 5. 异常 / 降级清单", ""]
         lines += ["## 6. 结论", ""]
         all_ok = all(c.get("ok") for c in checks.values())
