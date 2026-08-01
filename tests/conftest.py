@@ -134,3 +134,10 @@ _install_fake_xtquant()
 def _isolate_trade_env(monkeypatch):
     monkeypatch.setenv("AUTO_CONFIRM_PLAN", "")
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+# ============ C-8 V1：隔离 job 台账 DB（防测试写真实 logs/trading_job_run.db）============
+# Why autouse：pipeline_then_eod / pre_open 改造后会写台账；若不隔离，任何调用这些
+# 函数的既有测试都会把「测试日」写成 done，污染真实启动补跑判定（漏跑被误判为已跑）。
+# tmp_path 每测试唯一，天然互不干扰。
+@pytest.fixture(autouse=True)
+def _isolate_job_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "job_run.db"))

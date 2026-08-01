@@ -1,0 +1,127 @@
+# -*- coding: utf-8 -*-
+"""C-8 job 运行台账：pipeline/pre_open 的跨重启运行状态（漏跑判定 + 幂等守卫）。
+
+物理意图（spec §3.1）：
+    生产机不 7x24，启动补跑需要「某业务日某 job 是否已跑」的持久真相源——plan 文件/
+    data_ready/.last 文件都是产物反推，语义模糊（无 plan 可能是无信号而非没跑）。
+    本台账以 (job_name, business_date) 为键记录状态机 running/done/skipped/failed，
+    cron 与启动补跑共用（先查后写），保证「谁先完成谁生效」的最终一致性。
+
+状态语义（spec §3.1）：
+    running  = 执行中（进程崩溃残留由 reset_stale_running 启动重置）；
+    done     = 流程正常完成（pipeline 含 run_eod=False 的裁剪态；pre_open 含无单可挂）；
+    skipped  = pre_open gate 未过（无计划/未确认/网关/数据未就绪）——不算完成，补跑可重试；
+    failed   = 采集失败 / data 未就绪 / 未预期异常。
+
+设计约束（Karpathy 极简）：
+    - 独立 sqlite（logs/trading_job_run.db），不混入 trading_state.db——台账是操作元数据，
+      写失败绝不影响交易关键路径（调用方全部 try/except 包裹）；
+    - 每次操作前 CREATE TABLE IF NOT EXISTS（幂等、零装配负担）；
+    - path=None fallback 读 env TRADING_JOB_LEDGER_DB > 模块级 _DEFAULT_DB_PATH
+      （同 backtest/tasks_db.py 测试隔离范式）。
+"""
+from __future__ import annotations
+
+import logging
+import os
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_DB_PATH = "logs/trading_job_run.db"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_run (
+  job_name      TEXT NOT NULL,
+  business_date TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  started_at    TEXT NOT NULL,
+  finished_at   TEXT,
+  message       TEXT,
+  PRIMARY KEY (job_name, business_date)
+);
+"""
+
+
+def _db_path(path: Optional[str] = None) -> str:
+    """解析 DB 路径：显式 path > env TRADING_JOB_LEDGER_DB > 默认。"""
+    if path is not None:
+        return path
+    env = os.getenv("TRADING_JOB_LEDGER_DB")
+    return env if env else _DEFAULT_DB_PATH
+
+
+def _connect(path: Optional[str] = None) -> sqlite3.Connection:
+    """打开连接并保证表存在（幂等，零装配负担）。"""
+    db = _db_path(path)
+    Path(db).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.execute(_SCHEMA)
+    return conn
+
+
+def init_db(path: Optional[str] = None) -> None:
+    """建表（幂等）。显式入口，供启动补跑编排先清场。"""
+    conn = _connect(path)
+    conn.commit()
+    conn.close()
+
+
+def begin_run(job_name: str, business_date: str, started_at: str,
+              path: Optional[str] = None) -> None:
+    """标记 job 开始（INSERT OR REPLACE → running，重跑可覆盖旧终态）。"""
+    conn = _connect(path)
+    conn.execute(
+        "INSERT OR REPLACE INTO job_run "
+        "(job_name, business_date, status, started_at, finished_at, message) "
+        "VALUES (?, ?, 'running', ?, NULL, '')",
+        (job_name, business_date, started_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def finish_run(job_name: str, business_date: str, status: str,
+               message: str = "", path: Optional[str] = None) -> None:
+    """落终态（done/skipped/failed）。"""
+    conn = _connect(path)
+    conn.execute(
+        "UPDATE job_run SET status=?, finished_at=?, message=? "
+        "WHERE job_name=? AND business_date=?",
+        (status, datetime.now().isoformat(), message, job_name, business_date),
+    )
+    conn.commit()
+    conn.close()
+
+
+def latest_status(job_name: str, business_date: str,
+                  path: Optional[str] = None) -> Optional[str]:
+    """查某 (job, date) 最新状态；无记录返 None。"""
+    conn = _connect(path)
+    row = conn.execute(
+        "SELECT status FROM job_run WHERE job_name=? AND business_date=?",
+        (job_name, business_date),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def reset_stale_running(path: Optional[str] = None) -> int:
+    """把遗留 running 全部置 failed('interrupted')，返回重置行数。
+
+    物理意图：进程崩溃/重启会留下 running 残留；若不重置，cron/补跑的
+    「running 跳过」守卫会永久阻塞该日 job（与 training_loops_db.reset_interrupted 同范式）。
+    """
+    conn = _connect(path)
+    cur = conn.execute(
+        "UPDATE job_run SET status='failed', finished_at=?, message='interrupted' "
+        "WHERE status='running'",
+        (datetime.now().isoformat(),),
+    )
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n
