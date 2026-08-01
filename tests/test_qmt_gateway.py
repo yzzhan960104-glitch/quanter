@@ -51,7 +51,7 @@ def test_map_status_junk():
 
 def test_map_status_canceled_and_reported_cancel():
     assert _map_qmt_status(54) == OrderState.CANCELLED
-    assert _map_qmt_status(51) == OrderState.CANCELLED  # 已报待撤
+    assert _map_qmt_status(51) == OrderState.SUBMITTED  # 已报待撤（#9：保守不终态）
 
 
 def test_map_status_partial_cancel():
@@ -237,3 +237,14 @@ def test_on_disconnected_locks(monkeypatch):
         assert gw._connected is False
 
     asyncio.run(run())
+
+
+# ============================================================================
+# Task E1（live-mainchain-fixes）：状态 51 保守映射 SUBMITTED（#9）
+# ============================================================================
+def test_status_51_reported_cancel_maps_to_submitted():
+    """51（已报待撤）保守映射 SUBMITTED：撤单刚受理不当终态（#9）。"""
+    from broker.qmt import _map_qmt_status
+    from trading.types.order_state import OrderState
+
+    assert _map_qmt_status(51) is OrderState.SUBMITTED

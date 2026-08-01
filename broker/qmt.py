@@ -136,7 +136,10 @@ def _map_qmt_status(status: int) -> OrderState:
         return OrderState.PARTIAL_FILLED
     if status == _QMT_ORDER_JUNK:
         return OrderState.REJECTED
-    if status in (_QMT_ORDER_CANCELED, _QMT_ORDER_REPORTED_CANCEL):
+    if status in (_QMT_ORDER_CANCELED,):
+        # #9：51（已报待撤）不再归 CANCELLED——撤单指令刚受理未到终态，
+        # 归 SUBMITTED 等主推/query_orders 推进到真撤（54），避免 unconfirmed 漏报。
+        return OrderState.CANCELLED
         return OrderState.CANCELLED
     if status in (_QMT_ORDER_PART_CANCEL, _QMT_ORDER_PARTSUCC_CANCEL):
         return OrderState.PARTIAL_CANCELLED
