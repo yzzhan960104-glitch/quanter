@@ -89,7 +89,8 @@ async def pipeline_then_eod(engine) -> None:
         keys = {"daily"}
     keys = keys or {"daily"}
     # 3. 按声明的 key 逐个校验（复用 check_freshness 纯函数，不读旧 parquet mtime）
-    expected = expected_latest_trade_day(datetime.now())
+    # C-6 V3：单一时间源（时点传 expected_latest_trade_day，clock.now() 返 datetime 等价）。
+    expected = expected_latest_trade_day(clock.now())
     results = {k: check_freshness(k, expected) for k in keys}
     all_ok = all(r.ok for r in results.values())
     # 4. 落就绪事件（供 pre_open 防御性双检）

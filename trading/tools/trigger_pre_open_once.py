@@ -39,6 +39,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# C-6 V3：单一时间源（CLI 今日触发走 clock.today，与 engine.py V2 同款）。
+from trading import clock
+
 # 三层 dirname（与 trigger_eod_once.py 同范式，防 tools 路径少算一层 bug）：
 # trigger_pre_open_once.py → tools → trading → quanter（项目根）。
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -74,7 +77,7 @@ logging.basicConfig(
 async def _run() -> int:
     from trading.engine import TradingEngine, pre_open, get_gateway
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = clock.today()
     mode = os.getenv("AUTO_TRADE_MODE", "dry_run")
     print(f"[trigger_pre_open] today={today} AUTO_TRADE_MODE={mode}")
     if mode != "live":

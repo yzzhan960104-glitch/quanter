@@ -45,6 +45,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+# C-6 V3：单一时间源（state_store 全部 DB 时间戳/日期 key 走 clock，与 engine.py V2 同款）。
+from trading import clock
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DB = "logs/trading_state.db"
@@ -257,7 +260,7 @@ def upsert_account(account_id: str, broker: str, *, name: str | None = None,
     None 字段用 DEFAULT（strategy_name='quanter'/mode='dry_run'/active=1），保证最小配置可写。
     """
     db_path = db_path or _DEFAULT_DB
-    now = datetime.now().isoformat()
+    now = clock.now().isoformat()
     with _connect(db_path) as con:
         con.execute(
             "INSERT OR REPLACE INTO account(account_id, broker, name, userdata_path,"
@@ -317,7 +320,7 @@ def insert_trade_event(account_id: str, trade_id: str, symbol: str, action: str,
     Returns: True=首次写入；False=重复 (account_id, trade_id, action) 跳过。
     """
     db_path = db_path or _DEFAULT_DB
-    ts = timestamp or datetime.now().isoformat()
+    ts = timestamp or clock.now().isoformat()
     with _connect(db_path) as con:
         try:
             con.execute(
@@ -423,7 +426,7 @@ def insert_fill(order_id: str, account_id: str, traded_time: str, symbol: str,
     Returns: True=首次写入；False=重复 (order_id, traded_time) 跳过。
     """
     db_path = db_path or _DEFAULT_DB
-    now = datetime.now().isoformat()
+    now = clock.now().isoformat()
     with _connect(db_path) as con:
         try:
             con.execute(
@@ -454,8 +457,8 @@ def apply_fill_to_position(account_id: str, symbol: str, direction: str, qty: fl
     if direction not in ("BUY", "SELL"):
         raise ValueError(f"apply_fill_to_position direction 仅 BUY/SELL，收到 {direction}")
     db_path = db_path or _DEFAULT_DB
-    now = datetime.now().isoformat()
-    today = datetime.now().strftime("%Y-%m-%d")
+    now = clock.now().isoformat()
+    today = clock.today()
     delta = float(qty) if direction == "BUY" else -float(qty)
     with _connect(db_path) as con:
         row = con.execute(
@@ -504,7 +507,7 @@ def snapshot_start_equity(account_id: str, date: str, total_asset: float, cash: 
     通常 pre_open 先写 start，post_close 再 UPDATE close。崩溃重启重入安全（覆盖 start）。
     """
     db_path = db_path or _DEFAULT_DB
-    now = datetime.now().isoformat()
+    now = clock.now().isoformat()
     with _connect(db_path) as con:
         con.execute(
             "INSERT INTO account_daily(account_id, date, start_total_asset, start_cash, start_snap_at)"
@@ -524,7 +527,7 @@ def snapshot_close_equity(account_id: str, date: str, close_total_asset: float,
     幂等：ON CONFLICT 仅更新 close 字段（保留 pre_open 写的 start）。
     """
     db_path = db_path or _DEFAULT_DB
-    now = datetime.now().isoformat()
+    now = clock.now().isoformat()
     with _connect(db_path) as con:
         # 读 start 算 daily_pnl（无 start 行时 pnl=None，仅记 close）
         start_row = con.execute(
@@ -658,8 +661,7 @@ def upsert_data_ready(date: str, dataset: str, *, ok: bool, melted: bool,
                       latest_date: str | None, expected_date: str,
                       message: str, db_path: str | None = None) -> None:
     """幂等写数据就绪事件（同日重采覆盖，PK (date, dataset) ON CONFLICT REPLACE）。"""
-    from datetime import datetime
-    ready_at = datetime.now().isoformat(timespec="seconds")
+    ready_at = clock.now().isoformat(timespec="seconds")
     with _connect(db_path or _DEFAULT_DB) as con:
         con.execute(
             "INSERT OR REPLACE INTO data_ready "
