@@ -24,6 +24,10 @@ def isolated_state(tmp_path, monkeypatch):
     - TRADE_PLAN_DIR / TRADE_STATE_DB env 注入。
     - init_db / init_store 建表。
     - 重置 _ACTIVE_ENGINE 单例（防 gate 泄漏，同 test_e2e_trading_flow 范式）。
+    - query_trades mock 返空（full_run 集成修复 · 根因 2）：post_close ② 兜底段
+      （engine.py:1510-1548）读真实 CSV 流水聚合净持仓 vs position_book，drift 即
+      reconcile_qty 改 tmp position_book 写入真实历史持仓（510300.SH 等）→ position>0
+      但 fill=0（E2E 无真成交）。隔离 query_trades 返空让兜底段跳过 reconcile_qty。
     """
     from trading import position_book, state_store, engine
 
@@ -36,6 +40,17 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADE_STATE_DB", db_path)
     monkeypatch.setenv("QMT_ACCOUNT_ID", "e2e_long_acc")  # 显式 account_id 防 .env 污染
     monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)  # 防 gate 泄漏
+
+    # query_trades 隔离（full_run 集成修复 · 根因 2）：
+    # 物理意图——engine.post_close ② 段读 record_live_trade 写的 CSV 流水（logs/ 真实路径）
+    # 聚合净持仓 vs position_book（tmp 空）→ drift → reconcile_qty 改 tmp position_book
+    # 写入 510300.SH 等真实历史持仓 → position>0 但 fill=0（E2E 没真成交，fill 空）→
+    # 表间一致性 23 日全 drift。E2E 不验证 CSV 兜底（那是 Task 11 范围），故隔离返空。
+    # 注意：post_close ② 段在 engine.py:1512 是 `from presentation.server.services.trading_service
+    # import query_trades as _svc_query_trades` 函数内 import，故 patch 模块级 symbol 即生效。
+    # 范式参考 tests/trading/test_e2e_trading_flow.py:777 同款 patch。
+    from presentation.server.services import trading_service as _svc
+    monkeypatch.setattr(_svc, "query_trades", lambda *a, **k: {"trades": []})
     return tmp_path
 
 

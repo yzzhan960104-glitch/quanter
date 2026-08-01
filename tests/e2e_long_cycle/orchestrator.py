@@ -92,7 +92,38 @@ def build_job_runner(
             from tests.e2e_long_cycle import signal_scanner
             # V2 run_eod_phase：自扫 universe × detect_signal 真跑 × eod_plan 落盘。
             # 不需 broker/feeder（无挂单/行情），直接 await（async fn → asyncio.run 同步化）。
-            return asyncio.run(signal_scanner.run_eod_phase(t_date))
+            result = asyncio.run(signal_scanner.run_eod_phase(t_date))
+
+            # ── data_ready 注入（full_run 集成修复 · 根因 1）──
+            # 物理意图：生产 pipeline_then_eod（trading/orchestrate/pipeline.py）在跑完
+            # 采集校验后会 upsert_data_ready(today, daily, ok=1) 落库，供 T+1 pre_open gate
+            # ③ 段（engine.pre_open → _pre_open_gate → state_store.get_data_ready）双检放行
+            # （C-2 链路，参考 tests/trading/test_e2e_trading_flow.py::
+            # test_e2e_pipeline_then_eod_to_pre_open_gate_all_green）。
+            #
+            # E2E orchestrator 的 pipeline_then_eod 只调了 _eod 落 plan，【没写 data_ready】
+            # → T+1 pre_open gate ③ 读 get_data_ready(T+1, daily) 命中 None → 拦截早返：
+            #     "pre_open gate 未通过：数据 daily 未就绪（未采集），跳过挂单"
+            # → 全周期无单可挂 → fill 表空 → 表间一致性 drift（position>0 ∧ fill=0）。
+            #
+            # 修法：在 _eod 落 plan 后补写 data_ready(T+1, daily, ok=1)。注意 key 是 T+1
+            # （pre_open 读 T+1 的 data_ready，与生产 pipeline_then_eod 在 T 日落 T+1 key
+            # 的口径对齐——pre_open(date=T+1) 内部 get_data_ready(T+1, daily)）。
+            # 软降级：upsert 失败不应中断回放（生产同源 try-except 不阻断）。
+            from trading import state_store
+            try:
+                state_store.upsert_data_ready(
+                    t_plus_1_iso, "daily",
+                    ok=True, melted=False,
+                    latest_date=t_date.isoformat(),     # 采集到的最新交易日 = T 日
+                    expected_date=t_plus_1_iso,         # 期望最新日 = T+1（口径与生产一致）
+                    message="E2E orchestrator mock 采集完成（pipeline_then_eod 注入）",
+                )
+            except Exception:
+                # data_ready 落库失败不阻断回放（生产 pipeline.py:103 同款软降级）；
+                # 失败会在 pre_open gate ③ 段表现为"未采集"拦截，由测试断言暴露。
+                pass
+            return result
 
         # ============================================================
         # ② pre_open：T+1 09:25 broker.attach + V2 挂 T+1 单

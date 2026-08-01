@@ -87,8 +87,38 @@ class ProbabilisticBroker:
             return "PARTIAL_FILLED"
         return "FILLED"  # 含延迟（延迟在 _handle_order_update 注入时体现）
 
-    def simulate_query_asset(self, t_date: date) -> dict:
-        """构造熔断日：熔断日返 start×0.96（-4% < -3% 阈值）；正常日返 start×(1+小波动)。"""
+    def simulate_query_asset(self, t_date: date, up_to: time | None = None) -> dict:
+        """构造熔断日：熔断日【盘后】返 start×0.96（-4% < -3% 阈值）。
+
+        物理语义（full_run 集成修复 · 根因 3）：
+            熔断判定的数学契约是 ``check_daily_loss_limit(start_equity, curr_equity)``，
+            其中 ``start_equity`` 是 pre_open（09:25）抓的「未受当日交易影响」基线，
+            ``curr_equity`` 是 post_close（15:30）拉的「盘后已受当日亏损」总资产。
+            回撤 = (curr - start) / start，熔断日 curr 应比 start 低 ≥3%。
+
+        ⚠️ V4 原 bug：``simulate_query_asset(t_date)`` 不区分时点，熔断日 pre_open
+            和 post_close 都返 ``start×0.96`` → start=curr=960k → 回撤 0% → 永不触发
+            熔断（full_run 首跑暴露：构造了熔断日但 trade_event 无 CIRCUIT 类事件，
+            log 无「日内熔断触发」CRITICAL）。smoke 未覆盖因 smoke 只验构造不验触发。
+
+        修法（时点语义对齐）：``up_to`` 时点区分盘前/盘后——
+            - pre_open（09:25，< 盘中）：返基线值 ``start``（1_000_000，未受当日交易影响）；
+            - post_close（15:30，≥ 收盘）：熔断日返 ``start×0.96``（-4%），正常日返
+              ``start×(1+小波动)``。
+            如此 start=1_000_000 / curr=960_000 → 回撤 -4% < -3% 阈值 → 真触发熔断。
+
+        Args:
+            t_date: 交易日期。
+            up_to: 时点（pre_open 09:25 / post_close 15:30）；None 时按盘后语义（向后兼容，
+                老 smoke 不传 up_to 走熔断日 -4% 分支，行为不变）。
+        """
+        # 盘前时点（pre_open 09:25 抓基线）：返未受当日交易影响的基线值。
+        # 物理意图：开盘前总资产 = 前一日收盘权益（1_000_000），日内交易尚未发生。
+        from datetime import time as _time
+        if up_to is not None and up_to < _time(9, 30):
+            return {"total_asset": self._start_equity,
+                    "cash": self._start_equity * 0.5, "market_value": self._start_equity * 0.5}
+        # 盘后/盘中时点（post_close 15:30 / stoploss 盘中）：熔断日返 -4%，正常日小波动。
         if t_date in self._cb_days:
             return {"total_asset": self._start_equity * 0.96,
                     "cash": self._start_equity * 0.5, "market_value": self._start_equity * 0.46}
@@ -119,7 +149,13 @@ class ProbabilisticBroker:
         gw.is_locked = False
         gw._lock_down = False
         gw._orders = {}
-        gw.query_asset = AsyncMock(return_value=self.simulate_query_asset(t_date))
+        # query_asset 注入：透传 up_to 时点给 simulate_query_asset（full_run 集成修复 ·
+        # 根因 3）。物理语义：pre_open 09:25 抓基线返未受当日交易影响的 start_equity，
+        # post_close 15:30 拉盘后返熔断日 -4% 值。用 side_effect 捕获 up_to（AsyncMock
+        # return_value 是固定值无法接时点，side_effect 在调用时动态算）。
+        _cb_up_to = up_to
+        gw.query_asset = AsyncMock(
+            side_effect=lambda: self.simulate_query_asset(t_date, _cb_up_to))
         gw._fetch_broker_positions = AsyncMock(return_value=self.simulate_fetch_positions(t_date))
         gw.query_orders = AsyncMock(return_value=[])
         gw.cancel_order = AsyncMock(return_value=None)
