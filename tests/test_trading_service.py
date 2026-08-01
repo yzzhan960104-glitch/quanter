@@ -254,7 +254,10 @@ def test_emergency_halt_sets_risk_halt(monkeypatch):
 
     gw = QmtExecutionGateway(userdata_path="C:/tmp/qmt_test", account_id="TEST_ACC")
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
-    monkeypatch.setattr(trading_service, "fire_and_forget", lambda *a, **kw: None)
+    def _swallow(coro=None, *a, **kw):
+        if coro is not None and hasattr(coro, "close"):
+            coro.close()
+    monkeypatch.setattr(trading_service, "fire_and_forget", _swallow)
 
     r = trading_service.emergency_halt()
     assert r["halted"] is True
