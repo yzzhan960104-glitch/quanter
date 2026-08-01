@@ -40,3 +40,40 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("QMT_ACCOUNT_ID", "e2e_long_acc")  # 显式 account_id 防 .env 污染
     monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)  # 防 gate 泄漏
     return tmp_path
+
+
+@pytest.fixture(scope="session")
+def connect_session():
+    """C-7 V1：connect 5 bot 真起（session scope，整套件起/停一次）。
+
+    物理意图（spec §4）：connect_manager.start 拉 5 个常驻 Claude Code 子进程
+    （cli/trading_q/data_q/strategy_q/review）。teardown stop 树杀（taskkill /F /T）。
+    session scope：避免每测试重起 5 进程（成本极高）。
+
+    ⚠️ 真起成本：5 个 Claude Code 子进程常驻整个 E2E（~30-90min）。空转不消耗 LLM
+    quota（仅 @ 响应计费）。teardown 必 stop（防进程泄漏）。
+    """
+    import os
+    # 凭证闸：connect_manager.start 需 unified_app_id + allowed_users（.env 已配）
+    from broadcast.__main__ import CONNECT_BOTS, CONNECT_DEFAULTS
+    from broadcast import connect_manager
+
+    if os.getenv("E2E_SKIP_CONNECT", "").lower() in ("1", "true"):
+        yield []  # CI/无凭证环境跳过（标记 enabled=False）
+        return
+
+    started = []
+    try:
+        for bot in CONNECT_BOTS:
+            try:
+                connect_manager.start(bot, CONNECT_BOTS[bot], CONNECT_DEFAULTS)
+                started.append(bot)
+            except RuntimeError:
+                pass  # 配置缺失跳过（C-7 V1 软降级）
+        yield started
+    finally:
+        for bot in started:
+            try:
+                connect_manager.stop(bot)
+            except Exception:
+                pass
