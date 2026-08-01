@@ -36,6 +36,7 @@ from data.freshness import check_freshness
 from experiment.resolver import resolve_active
 from strategies.registry import build_strategy
 from trading.calendar import expected_latest_trade_day, is_trading_day
+from trading import clock
 from trading.state_store import upsert_data_ready
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,8 @@ async def pipeline_then_eod(engine) -> None:
         engine: 持有 ``async _eod()`` 的交易引擎（编排层只调这一个方法，
             不读引擎内部状态——低耦合）。
     """
-    today = datetime.now().strftime("%Y-%m-%d")
+    # C-6 V3：单一时间源（pipeline_then_eod 入口 today 用 clock.today）。
+    today = clock.today()
     if not is_trading_day(today):
         logger.info("pipeline_then_eod 跳过：今日非交易日 %s", today)
         return

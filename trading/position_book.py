@@ -22,6 +22,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from trading import clock
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DB = "logs/trading_state.db"
@@ -157,8 +159,9 @@ def apply_fill(order_id: str, symbol: str, direction: str, qty: float, price: fl
         raise ValueError(f"apply_fill direction 仅 BUY/SELL，收到 {direction}")
     db_path = db_path or _DEFAULT_DB
     account_id = account_id or _DEFAULT_ACCOUNT_ID
-    now = datetime.now().isoformat()
-    today = datetime.now().strftime("%Y-%m-%d")
+    # C-6 V3：单一时间源收口——now/today 走 clock，防同轮跨午夜漂移 + 测试 monkeypatch 单点冻结。
+    now = clock.now().isoformat()
+    today = clock.today()
     delta = float(qty) if direction == "BUY" else -float(qty)
     with _connect(db_path) as con:
         try:
@@ -227,7 +230,7 @@ def reconcile_qty(symbol: str, qty: float, *, account_id: str | None = None,
     """
     db_path = db_path or _DEFAULT_DB
     account_id = account_id or _DEFAULT_ACCOUNT_ID
-    now = datetime.now().isoformat()
+    now = clock.now().isoformat()
     with _connect(db_path) as con:
         if abs(float(qty)) < 1e-9:
             con.execute(
@@ -262,7 +265,7 @@ def snapshot_start_equity(date: str, total_asset: float, *, db_path: str | None 
     INSERT OR REPLACE 幂等：pre_open 仅 09:22 一次，但崩溃重启重入覆盖安全。
     """
     db_path = db_path or _DEFAULT_DB
-    now = datetime.now().isoformat()
+    now = clock.now().isoformat()
     with _connect(db_path) as con:
         con.execute(
             "INSERT OR REPLACE INTO daily_equity(date, start_total_asset, snap_at) VALUES(?, ?, ?)",

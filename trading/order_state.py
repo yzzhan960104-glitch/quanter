@@ -19,6 +19,8 @@ from trading.types.order_state import OrderState
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 
+from trading import clock
+
 
 class OrderStateMachine:
     """
@@ -56,7 +58,8 @@ class OrderStateMachine:
             raise ValueError(f"当前状态 {self.current_state} 不支持提交订单")
 
         self.order_info = order_info
-        self.order_id = f"ORDER_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        # C-6 V3：order_id 唯一性时间戳走 clock.now（单一口子，测试 monkeypatch 冻结）。
+        self.order_id = f"ORDER_{clock.now().strftime('%Y%m%d%H%M%S%f')}"
 
         # 状态迁移：PENDING -> SUBMITTED
         self._transition_to(OrderState.SUBMITTED)
@@ -186,7 +189,8 @@ class OrderStateMachine:
         self.order_info["state_history"].append({
             "from": self.current_state,
             "to": new_state,
-            "time": datetime.now(),
+            # C-6 V3：状态迁移事件时间戳走 clock.now（单一口子）。
+            "time": clock.now(),
         })
 
         # 更新状态
