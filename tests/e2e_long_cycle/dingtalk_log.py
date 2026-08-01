@@ -39,10 +39,16 @@ class DingTalkLog:
         except Exception:
             pass
 
-        def _wrapped(coro, *args, **kwargs):
-            # enabled=True 透传真推；False 直接弃 coro（mock）
+        def _wrapped(coro):
+            # enabled=True 透传真推；False 直接弃 coro（mock）。
+            # Why 单参 coro（V5 review CV-1 收紧）：infra.notifier.fire_and_forget 源码签名
+            # 是 fire_and_forget(coro: Awaitable) -> None（单参），*args/**kwargs 是过度设计——
+            # 一旦调用方传额外参数且 enabled=True，original_faf(coro, *args) 会 TypeError
+            # （fire_and_forget() takes 1 positional argument but N were given）。
+            # 现状生产调用方（notify_risk_event / notify_trade_event 经 fire_and_forget(coro)
+            # 单参调）虽不触发，但 _wrapped 应与 fire_and_forget 同形，封死未来误用。
             if self.enabled and original_faf is not None:
-                return original_faf(coro, *args, **kwargs)
+                return original_faf(coro)
             coro.close()  # 关掉未 await 的 coro（避免 warning）
 
         with patch("infra.notifier.fire_and_forget", _wrapped):

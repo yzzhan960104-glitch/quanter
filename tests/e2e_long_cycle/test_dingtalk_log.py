@@ -2,13 +2,10 @@
 """V5：钉钉真推日志收集 + discovery 触发 mock。"""
 from __future__ import annotations
 
-import asyncio
-
 
 def test_dingtalk_log_captures_real_fire_and_forget(monkeypatch):
     """DingTalkLog patch fire_and_forget → 真调 + 落日志（不阻断）。"""
     from tests.e2e_long_cycle.dingtalk_log import DingTalkLog
-    from infra.notifier import fire_and_forget as real_faf
 
     log = DingTalkLog(enabled=True)
     called = {"n": 0}
