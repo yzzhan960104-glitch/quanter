@@ -52,11 +52,12 @@ from infra.notifier import build_default_manager
 # 物理意图（spec §3.2）：discovery 从 schtasks DAILY 02:00 收编到 lifespan——
 # engine.sched AsyncIOScheduler cron 02:00 触发本模块级函数，DETACHED subprocess 起
 # `python -m discovery daemon`。模块级（非闭包）：(1) 测试可直接 mock；
-# (2) 与 ops/start_all.py / broadcast/connect_manager.py 等既有「模块级 subprocess
-# 入口」范式一致；(3) V3 启动补跑（startup 内同步调一次）复用同函数，避免逻辑重复。
+# (2) 与 broadcast/connect_manager.py 等既有「模块级 subprocess 入口」范式一致
+# （C-7 后 ops/start_all.py 已删，本模块为该范式现存源头之一）；(3) V3 启动补跑
+# （startup 内同步调一次）复用同函数，避免逻辑重复。
 import subprocess as _subprocess
 
-# Windows DETACHED 标志（同 ops/start_all.py 既有范式）：
+# Windows DETACHED 标志（broadcast/connect_manager.py 等既有范式，C-7 前 ops/start_all.py 同源）：
 #   CREATE_NEW_PROCESS_GROUP(0x200) → 子进程独立进程组（Ctrl+C 不传播）；
 #   DETACHED_PROCESS(0x8)           → 无控制台（独立于父进程 uvicorn 的 stdio）。
 # 二者组合：uvicorn 退出/重启不杀 discovery 夜跑子进程（长任务不依附 server 生命周期）。
@@ -290,7 +291,7 @@ async def lifespan(app: FastAPI):
         from trading.engine import TradingEngine
         from trading.__main__ import check_shadow_gate, log_startup_banner
         # C-5 V2：装配 engine 前打启动 banner（session/account/mode/口径版本）。
-        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链 start_all→uvicorn
+        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链 schtasks ONSTART→python -m trading→uvicorn
         # →lifespan 之前无 banner，session 漂移（进程内 123456 vs .env 123458）无日志可
         # 对比。banner 先于 bootstrap（含网关 connect）输出，便于排查 .env 漂移。
         log_startup_banner()

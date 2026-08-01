@@ -12,12 +12,16 @@
   环境**做清查/手工补跑；``register()`` 不再迭代它创建任务（Final Fix 修正：原实现
   会复活两个退役任务，与 ``--unregister-pipeline-brief`` 互相打架）。
 
-  历史路径（方案 C · 7→3 收敛）的 ``QuanterDiscoveryDaemon @02:00`` 仍由
-  ``discovery/schtasks.py`` 独立注册，本脚本不管。
+  C-7 start-all 收编：``QuanterDiscoveryDaemon @02:00`` 已从 schtasks 收编进 uvicorn
+  lifespan 的 engine.sched cron 02:00（见 presentation/server/main.py）。本脚本新增
+  ``--unregister-discovery`` 退订残留 QuanterDiscoveryDaemon（防 lifespan + schtasks
+  双触发），``--register-server`` 注册 QuanterServer ONSTART（替代已删的 start_all.py
+  启动链，开机 session 0 后台起 ``python -m trading``）。
 """
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -104,6 +108,58 @@ def unregister_pipeline_brief() -> None:
         print(f"{'deleted' if rc == 0 else 'skip(not exists)'} {task}")
 
 
+def register_server(user: str | None = None) -> None:
+    """C-7 V4：注册 QuanterServer schtasks ONSTART（开机 session 0 后台起 ``python -m trading``）。
+
+    物理意图（spec §3.4）：替代 ``ops/start_all.py`` 的「subprocess.Popen DETACHED uvicorn
+    + 启动文件夹 ONLOGON」启动链。ONSTART 开机即跑（session 0 后台，不依赖用户登录/RDP
+    会话——logoff 不会杀进程），适配生产机不 7x24（会关机/断电，重启即自动恢复服务）。
+
+    Why ONSTART 而非 ONLOGON：ONLOGON 仅在用户登录的会话里跑，断 RDP / logoff 则 server
+    被 terminating（旧 start_all.bat 自安快捷式的痛点）；ONSTART 在 session 0 服务上下文
+    跑，与交互登录解耦。
+
+    /TR 指向 scripts/start_server.bat（cd /d F:\\quanter + venv python -m trading），
+    由 schtasks 包裹成后台进程（无需 start_all.py 的 DETACHED 代码）。
+
+    /RU：运行账户（user 参数；缺省 %USERNAME%）。/RP 密码由调用方交互输入——schtasks
+    ONSTART 需用户密码（session 0 需凭证），密码不进代码（安全 + 不硬编码）。若本函数
+    不带 /RP 导致 /Create 失败（rc≠0），打印手动命令提示由运维补密码重跑。
+
+    幂等：/F 强制覆盖（重复注册不报错，更新即有任务）。
+    """
+    user = user or os.environ.get("USERNAME", "")
+    rc = _schtasks(["/Create", "/SC", "ONSTART", "/TN", "QuanterServer",
+                    "/TR", str(ROOT / "scripts" / "start_server.bat"),
+                    "/RU", user, "/F"])
+    print(f"{'OK' if rc == 0 else 'FAIL(需 /RP 密码?)'} QuanterServer @ ONSTART → "
+          f"start_server.bat (user={user})")
+    if rc != 0:
+        # schtasks ONSTART 在无密码时 /Create 会失败（session 0 需用户凭证）。提示运维
+        # 手动带 /RP 跑一次（密码不进代码，避免硬编码 + git 泄露）。
+        print("⚠️ schtasks ONSTART 需用户密码，手动跑：\n"
+              "   schtasks /Create /SC ONSTART /TN QuanterServer "
+              f"/TR \"{ROOT / 'scripts' / 'start_server.bat'}\" /RU {user} /RP <密码> /F")
+
+
+def unregister_discovery() -> None:
+    """C-7 V4：退 discovery ``QuanterDiscoveryDaemon`` schtasks（收编 lifespan 后防双触发）。
+
+    物理意图（spec §3.4 · 风险 R5）：discovery 从 schtasks DAILY 02:00 收编到 uvicorn
+    lifespan 的 engine.sched cron 02:00（C-7 V2）。旧 schtasks ``QuanterDiscoveryDaemon``
+    若不退，会与 lifespan cron 同一晚双触发——daemon 跑两遍（虽 run_daemon_cycle 早退去重，
+    但双进程同时读 discovery_trials.db 有锁竞争风险，且浪费 4h budget × 2）。
+
+    Why 本函数独立（不并入 ``register()`` 兜底）：discovery 退订是 C-7 收编的独立语义，
+    需单独入口供 V5 smoke 清单显式调用（语义清晰、可单独重跑）；``register()`` 仍只清退
+    C-2 的 DataPipeline/Brief + 历史 6 零散任务（职责不混）。
+
+    幂等：/Delete /F 对不存在任务返非零但不抛，本函数对 rc 不敏感（已删环境再调无副作用）。
+    """
+    rc = _schtasks(["/Delete", "/TN", "QuanterDiscoveryDaemon", "/F"])
+    print(f"{'deleted' if rc == 0 else 'skip(not exists)'} QuanterDiscoveryDaemon")
+
+
 def list_tasks() -> None:
     """逐个 /Query 历史注册的 2 个 supervisor 任务（供运维清查残留，未必仍存在）。"""
     for task, _, _ in PIPELINE_TASKS:
@@ -126,23 +182,33 @@ def rerun(task_key: str) -> None:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
-        description="观测层 schtasks 管理（Final Fix · supervisor 已退役，register 仅清退）"
+        description="观测层 schtasks 管理（C-7：加 register-server ONSTART + unregister-discovery）"
     )
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--list", action="store_true")
     g.add_argument("--register", action="store_true",
                    help="清退历史零散 + 退役 schtasks（不再创建；Task 9 收口）")
+    g.add_argument("--register-server", action="store_true",
+                   help="C-7：注册 QuanterServer ONSTART（开机 session 0 后台起 python -m trading）")
     g.add_argument("--unregister", action="store_true")
     g.add_argument("--unregister-pipeline-brief", action="store_true",
                    help="清退已收编进 uvicorn 的 DataPipeline/Brief（幂等，Task 9）")
+    g.add_argument("--unregister-discovery", action="store_true",
+                   help="C-7：退 QuanterDiscoveryDaemon（discovery 收编 lifespan cron 02:00 防双触发）")
     g.add_argument("--rerun", metavar="TASK", help="data | brief")
+    p.add_argument("--user", default=None,
+                   help="schtasks /RU 运行账户（--register-server 用；缺省 %USERNAME%）")
     args = p.parse_args(argv)
     if args.register:
         register()
+    elif args.register_server:
+        register_server(user=args.user)
     elif args.unregister:
         unregister()
     elif args.unregister_pipeline_brief:
         unregister_pipeline_brief()
+    elif args.unregister_discovery:
+        unregister_discovery()
     elif args.list:
         list_tasks()
     elif args.rerun:
