@@ -29,6 +29,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# C-6 V3：单一时间源（CLI 今日触发走 clock.today，与 engine.py V2 同款）。
+from trading import clock
+
 # 锁定 cwd 在项目根（trading_plan.TRADE_PLAN_DIR 默认 logs/trading_plans 相对路径，
 # 必须从项目根跑，否则 plan 落盘到错位置）。
 # 三层 parent：smoke_trading_engine.py → tools → trading → quanter（项目根）。
@@ -79,7 +82,7 @@ def _smoke() -> int:
     # ② 触发 eod_plan（空信号 → 空 orders）
     from trading.engine import eod_plan
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = clock.today()
     print(f"[smoke] 触发 eod_plan(date={today}, signals=[], atr_map={{}}, capital=1e6)")
     result = asyncio.run(
         eod_plan(today, signals=[], atr_map={}, capital=1_000_000.0)

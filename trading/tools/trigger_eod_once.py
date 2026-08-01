@@ -28,6 +28,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# C-6 V3：单一时间源（CLI 今日触发走 clock.today，与 engine.py V2 同款）。
+from trading import clock
+
 # 三层 dirname（与 smoke_trading_engine.py 同范式，防 tools 路径少算一层 bug）：
 # trigger_eod_once.py → tools → trading → quanter（项目根）。
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -51,7 +54,7 @@ async def _run() -> int:
 
     # 构造 engine（装 scheduler 但不 start，无 cron 副作用、不连网关）。
     eng = TradingEngine()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = clock.today()
     mode = os.getenv("AUTO_TRADE_MODE", "dry_run")
     print(f"[trigger] 触发 _eod（today={today} AUTO_TRADE_MODE={mode}）")
     print("[trigger] 将真发钉钉「T-1 交易计划」到运营群（不拦推送）……")

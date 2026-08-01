@@ -68,13 +68,10 @@ def isolated(tmp_path, monkeypatch):
     # 重置为 None 后 pre_open 走防御性分支跳过 gate，保留这些测试原本验证的全链路逻辑。
     monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
 
-    # 冻结 position_book 内 datetime 至 T+1 日（让 applied_at 与 date 前缀匹配）
+    # C-6 V4：position_book 已收口 clock（V3），patch 单一口子 trading.clock.now 冻结时间。
     from datetime import datetime as _RealDT
-    class _FrozenDT(_RealDT):
-        @classmethod
-        def now(cls, tz=None):
-            return _RealDT(2026, 7, 28, 15, 30, 0)
-    monkeypatch.setattr(position_book, "datetime", _FrozenDT)
+    _frozen = _RealDT(2026, 7, 28, 15, 30, 0)
+    monkeypatch.setattr("trading.clock.now", lambda: _frozen)
     return tmp_path
 
 
@@ -768,21 +765,23 @@ def test_e2e_full_chain_db_consistency(isolated, monkeypatch):
     assert state_store.get_position(account_id, "300001.SZ") is None  # 归零
     fake_gw.query_asset = AsyncMock(
         return_value={"total_asset": 1_010_000.0, "cash": 510_000.0, "market_value": 500_000.0})
-    # post_close 内 today 用 datetime.now()，account_daily 落真实今日；断言用真实今日
-    from datetime import datetime as _dt_now
-    _today_real = _dt_now.now().strftime("%Y-%m-%d")
+    # C-6 V4：post_close 内 today 走 clock.today（V2 收口）；fixture 已冻结 clock.now
+    # 至 2026-07-28，故 account_daily 落 clock.today()="2026-07-28"。断言用同一冻结口径
+    # （原断言用真实 datetime.now 在 C-6 后会与 clock.today 错位 → 行级 None）。
+    from trading import clock as _clock_mod
+    _today_close = _clock_mod.today()
     # reconcile/query_trades 用 mock 兜底（MagicMock 的 sync_positions 非 async，patch 掉）
     from trading import reconcile_job as _rj
     monkeypatch.setattr(_rj, "run_reconcile", AsyncMock(return_value=MagicMock(is_ok=True)))
     from presentation.server.services import trading_service as _svc
     monkeypatch.setattr(_svc, "query_trades", lambda *a, **k: {"trades": []})
     asyncio.run(engine.post_close("2026-07-28", gw=fake_gw, local_positions={}))
-    # CLOSED 事件 + account_daily 收盘快照（date=真实今日，post_close 用 datetime.now）
+    # CLOSED 事件 + account_daily 收盘快照（date=clock.today()=2026-07-28，V2 后与 post_close 同源）
     assert state_store.get_latest_action(trade_id) == "CLOSED"
     with sqlite3.connect(state_store._DEFAULT_DB) as con:
         row = con.execute(
             "SELECT close_total_asset FROM account_daily WHERE account_id=? AND date=?",
-            (account_id, _today_real)).fetchone()
+            (account_id, _today_close)).fetchone()
     assert row is not None
     assert row[0] == 1_010_000.0
 
@@ -841,13 +840,10 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
     monkeypatch.setenv("QMT_ACCOUNT_ID", "e2e_c2_acc")
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
 
-    # 冻结 pipeline_then_eod 内 datetime.now() → 固定 PIPE_DATE（data_ready 落库 key 口径）
+    # C-6 V4：pipeline 已收口 clock（V3），patch trading.clock.now（单一口子）。
     from datetime import datetime as _RealDT
-    class _FrozenDT(_RealDT):
-        @classmethod
-        def now(cls, tz=None):
-            return _RealDT(2026, 7, 30, 19, 0, 0)
-    monkeypatch.setattr(pipeline_mod, "datetime", _FrozenDT)
+    _frozen = _RealDT(2026, 7, 30, 19, 0, 0)
+    monkeypatch.setattr("trading.clock.now", lambda: _frozen)
 
     # ── ① pipeline_then_eod：mock subprocess（rc=0）+ check_freshness（ok=True）+ eod 落计划 ──
     # 用一个可变 box 让 _eod mock 能在 pipeline 内部被调时落计划（模拟 eod_plan 的产物）

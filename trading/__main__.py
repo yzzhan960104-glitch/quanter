@@ -86,6 +86,9 @@ logger = logging.getLogger(__name__)
 # experiment.resolver 依赖链纯标准库（sqlite3/dataclass），不拉 trading.engine 的
 # apscheduler 重链，顶层 import 安全（不破坏 __main__ 模块加载性能 / 测试隔离）。
 from experiment.resolver import resolve_active
+# C-6 V3：单一时间源（_days_since_activation 时点走 clock.now，与 engine.py V2 同款）。
+# 安全性：clock.py 只依赖 trading.calendar，不反向 import __main__，无循环 import。
+from trading import clock
 
 
 def _days_since_activation(activated_at):
@@ -103,7 +106,7 @@ def _days_since_activation(activated_at):
     except (ValueError, TypeError):
         # 解析失败保守拒绝：宁可误杀也不放行未校验过的实验进 LIVE。
         return None
-    return (datetime.now().date() - then).days
+    return (clock.now().date() - then).days
 
 
 def check_shadow_gate() -> bool:

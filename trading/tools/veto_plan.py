@@ -35,6 +35,8 @@ except Exception:
     pass
 
 from trading import trading_plan
+# C-6 V3：单一时间源（CLI 今日默认走 clock.today，与 engine.py V2 同款）。
+from trading import clock
 
 
 def veto(date: str, symbol: str | None = None) -> int:
@@ -74,6 +76,6 @@ def veto(date: str, symbol: str | None = None) -> int:
 
 
 if __name__ == "__main__":
-    date = sys.argv[1] if len(sys.argv) > 1 else datetime.now().strftime("%Y-%m-%d")
+    date = sys.argv[1] if len(sys.argv) > 1 else clock.today()
     symbol = sys.argv[2] if len(sys.argv) > 2 else None
     sys.exit(veto(date, symbol))

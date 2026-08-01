@@ -36,6 +36,7 @@ from data.freshness import check_freshness
 from experiment.resolver import resolve_active
 from strategies.registry import build_strategy
 from trading.calendar import expected_latest_trade_day, is_trading_day
+from trading import clock
 from trading.state_store import upsert_data_ready
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,8 @@ async def pipeline_then_eod(engine) -> None:
         engine: 持有 ``async _eod()`` 的交易引擎（编排层只调这一个方法，
             不读引擎内部状态——低耦合）。
     """
-    today = datetime.now().strftime("%Y-%m-%d")
+    # C-6 V3：单一时间源（pipeline_then_eod 入口 today 用 clock.today）。
+    today = clock.today()
     if not is_trading_day(today):
         logger.info("pipeline_then_eod 跳过：今日非交易日 %s", today)
         return
@@ -87,7 +89,8 @@ async def pipeline_then_eod(engine) -> None:
         keys = {"daily"}
     keys = keys or {"daily"}
     # 3. 按声明的 key 逐个校验（复用 check_freshness 纯函数，不读旧 parquet mtime）
-    expected = expected_latest_trade_day(datetime.now())
+    # C-6 V3：单一时间源（时点传 expected_latest_trade_day，clock.now() 返 datetime 等价）。
+    expected = expected_latest_trade_day(clock.now())
     results = {k: check_freshness(k, expected) for k in keys}
     all_ok = all(r.ok for r in results.values())
     # 4. 落就绪事件（供 pre_open 防御性双检）

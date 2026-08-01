@@ -783,8 +783,9 @@ def test_pre_open_snapshot_start_equity(monkeypatch):
     asyncio.run(engine.pre_open("2099-01-02"))
 
     # 验证 daily_equity 快照已写
-    today = datetime.now().strftime("%Y-%m-%d")
-    start_eq = position_book.get_start_equity(today)
+    # C-6 V2：pre_open 内部 today_eq 改用传入 date 参数（入口缓存传递），故快照 date=2099-01-02
+    # （与 _pre_open 入口 clock.today 传 pre_open(date) 同口径），不再用 datetime.now() 当日。
+    start_eq = position_book.get_start_equity("2099-01-02")
     assert start_eq == 1_000_000.0
 
 
