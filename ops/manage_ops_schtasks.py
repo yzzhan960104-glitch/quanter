@@ -65,8 +65,9 @@ def register() -> None:
     ⚠️ Final Fix（C-2 Task 9）：原实现在此 /Create 两个 supervisor，但这两个任务已退役
     （职责收进 uvicorn 的 ``pipeline_then_eod`` cron 事件链）。重建它们会造成双重触发：
     采集@17:00(schtasks) + 事件链采集(uvicron)、brief 推两份。故本函数现在只**清退**、
-    **不创建**任何 schtasks。新部署由 ``start_all.py`` 调 ``--unregister-pipeline-brief``
-    兜底清退残留。
+    **不创建**任何 schtasks。C-7 后新部署由 ``QuanterServer`` schtasks ONSTART 起
+    ``python -m trading``（lifespan 装 engine/connect/discovery），残留清退由运维调
+    ``--unregister-pipeline-brief`` / ``--unregister-discovery``。
     """
     # 清退历史 6 个零散任务（幂等，不存在不报错）
     for task in LEGACY_TASKS:
@@ -97,10 +98,10 @@ def unregister_pipeline_brief() -> None:
         schtasks，它们会与新事件链重复触发（采集跑两遍 / brief 推两份）。
 
     Why 幂等：``schtasks /Delete /F`` 对不存在的任务返非零但不抛，本函数对每个任务
-        都调一次，已删环境再调无副作用（start_all.py 每次启动都跑一遍防残留）。
+        都调一次，已删环境再调无副作用（C-7 前 start_all.py 每次启动跑一遍防残留；
+        start_all.py 已删，改由运维或新部署脚本按需调用）。
     Why 只删 RETIRED_TASKS（不动 LEGACY_TASKS）：LEGACY 已由 ``--register`` /
-        ``--unregister`` 覆盖；本子命令聚焦「Task 9 收编的两个」，语义清晰供 start_all
-        单独调用。
+        ``--unregister`` 覆盖；本子命令聚焦「Task 9 收编的两个」，语义清晰供运维单独调用。
     """
     for task in RETIRED_TASKS:
         rc = _schtasks(["/Delete", "/TN", task, "/F"])
