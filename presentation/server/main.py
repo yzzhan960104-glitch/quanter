@@ -94,6 +94,58 @@ def _run_discovery_subprocess() -> None:
         close_fds=True,
     )
 
+
+def _discovery_missed_last_run() -> bool:
+    """检查 discovery 是否错过昨晚 02:00（offline 容错补跑判定）。
+
+    物理意图（spec §3.3）：生产机不 7x24，offline 跨 02:00 则当晚 discovery 漏跑
+    （策略迭代断链）。本函数读 search_run 表最新 started_at（**不按 snapshot_hash 过滤，
+    避免 freeze 重型**——freeze 涉及全市场扫描 + 哈希重建，启动补跑判定不能扛重活），
+    与昨日 02:00 比——错过则 lifespan startup 触发补跑。
+
+    幂等：discovery run_daemon_cycle 早退（status==converged 跳过）+ 轮次/seed 派生
+    （[[discovery-engine-status]]），补跑 + 当晚 02:00 双跑靠此去重——即使补跑触发，
+    daemon 内部对已收敛的 snapshot 直接跳过，不会重跑 trial。
+
+    Why sqlite3 直查而非 discovery.store.connect：补跑判定是纯读（单条 SELECT），
+    无需 WAL/Row 工厂/单点写锁装配；直查 sqlite3 更轻量，且表不存在（首次运行）时
+    sqlite3.OperationalError 走异常分支返 True（补跑），语义对齐「无记录即补跑」。
+
+    Returns:
+      True = 错过（DB 不存在 / 表未建 / 无记录 / 时间解析失败 / 最新 started_at <
+              昨日 02:00）→ 补跑；
+      False = 昨晚跑了（最新 started_at ≥ 昨日 02:00）→ 不补跑。
+    """
+    from datetime import datetime, timedelta
+    from discovery.store import DEFAULT_DB_PATH
+    import os as _os
+    import sqlite3 as _sqlite3
+
+    db_path = _os.environ.get("DISCOVERY_DB", DEFAULT_DB_PATH)
+    try:
+        conn = _sqlite3.connect(db_path)
+        conn.row_factory = _sqlite3.Row
+        row = conn.execute(
+            "SELECT started_at FROM search_run ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+    except Exception:
+        # DB 不存在 / 表未建（首次运行）→ 视为错过（补跑，让 daemon 首次跑）。
+        # sqlite3.connect 对不存在文件会建空库但 search_run 表缺失 → execute 抛
+        # OperationalError，落入此分支返 True（保守补跑）。
+        return True
+    if row is None:
+        return True  # 表存在但无记录（daemon 装配但从未完成一轮）→ 补跑
+    last_started = row["started_at"]
+    try:
+        last_dt = datetime.fromisoformat(last_started)
+    except (ValueError, TypeError):
+        return True  # 时间解析失败（脏数据 / 非 ISO 格式）→ 保守补跑
+    now = datetime.now()
+    yesterday_02 = (now - timedelta(days=1)).replace(hour=2, minute=0, second=0, microsecond=0)
+    return last_dt < yesterday_02
+
+
 # ============ lifespan：启动/销毁钩子 ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -308,6 +360,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception(
             "lifespan 装 discovery cron 异常（已忽略）")
+
+    # C-7 V3：discovery 启动补跑（offline 容错，收编自洽必需）。
+    # 物理意图（spec §3.3）：offline 跨昨晚 02:00 → 启动补跑（DETACHED subprocess，
+    # 不阻塞 uvicorn 起）。幂等靠 discovery 既有轮次/seed + run_daemon_cycle 早退
+    # （converged 跳过）去重——补跑 + 当晚 02:00 双跑靠此去重，不会重跑已收敛 snapshot。
+    # 软降级：补跑判定 / 子进程拉起异常不阻断 uvicorn（try/except 兜底，与上方 engine/
+    # training/connect/discovery cron 同源软降级范式）。
+    try:
+        if _discovery_missed_last_run():
+            logging.getLogger(__name__).warning(
+                "discovery 启动补跑：检测到 offline 跨昨晚 02:00，异步补跑")
+            _run_discovery_subprocess()  # DETACHED 子进程，立即返不阻塞 uvicorn 起
+    except Exception:
+        logging.getLogger(__name__).exception("discovery 启动补跑异常（不阻断 uvicorn）")
 
     yield
 

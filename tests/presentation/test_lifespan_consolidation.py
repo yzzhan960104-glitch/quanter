@@ -211,3 +211,142 @@ def test_run_discovery_subprocess_detached():
     # DETACHED 标志（creationflags 含 DETACHED_PROCESS = 0x8）
     flags = popen.call_args[1].get("creationflags", 0)
     assert flags & 0x00000008      # DETACHED_PROCESS 位
+
+
+# ============ C-7 V3：discovery 启动补跑（offline 容错） ============
+# 物理意图（spec §3.3）：生产机不 7x24，offline 跨昨晚 02:00 → 当晚 discovery 漏跑
+# （策略迭代断链）。lifespan startup 检测到漏跑则异步补跑 _run_discovery_subprocess。
+#
+# 测试范式：``_discovery_missed_last_run`` 单测用 tmp_path 真 sqlite（不 mock sqlite3，
+# 比 brief 的 mock 范式更稳健且对齐 tests/discovery/test_store.py 仓库范式）；补跑触发
+# 测试沿用 V2 的 ``async with lifespan(app)`` + ``_mock_lifespan_dependencies()``。
+
+
+def _seed_search_run(db_path: str, started_at: str | None) -> None:
+    """向 tmp sqlite 插一行 search_run（建表 + INSERT）。
+
+    幂等建表（CREATE TABLE IF NOT EXISTS），仅插入 started_at 列即可——
+    _discovery_missed_last_run 只读这一列，不依赖 snapshot_hash（spec §3.3：不按 hash
+    过滤避免 freeze 重型）。
+    """
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS search_run (
+          run_id TEXT PRIMARY KEY,
+          snapshot_hash TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          n_trials INTEGER,
+          status TEXT,
+          note TEXT);
+    """)
+    if started_at is not None:
+        conn.execute(
+            "INSERT INTO search_run (run_id, snapshot_hash, started_at) VALUES (?, ?, ?)",
+            ("r1", "snap1", started_at),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_discovery_missed_last_run_true_when_db_missing(tmp_path, monkeypatch):
+    """DB 文件不存在（首次运行 / 全新环境）→ 返 True（补跑，让 daemon 首次跑）。
+
+    物理意图：discovery_trials.db 未创建意味着从未跑过 discovery，lifespan 须触发
+    首次补跑（spec §3.3 offline 容错「无记录」分支）。
+    """
+    db_path = str(tmp_path / "no_such.db")   # 不创建——_discovery_missed_last_run 内 sqlite3.connect
+    # 对不存在文件 sqlite3.connect 会建空库但 search_run 表不存在 → execute 抛
+    # OperationalError → 异常分支返 True（补跑）
+    monkeypatch.setenv("DISCOVERY_DB", db_path)
+    from presentation.server.main import _discovery_missed_last_run
+    assert _discovery_missed_last_run() is True
+
+
+def test_discovery_missed_last_run_true_when_stale(tmp_path, monkeypatch):
+    """DB 存在但无 search_run 行（表空）→ 返 True（补跑，保守视为错过）。
+
+    物理意图：表已建但无 run 记录（daemon 装配但从未完成一轮）→ 视为错过补跑。
+    """
+    db_path = str(tmp_path / "t.db")
+    _seed_search_run(db_path, started_at=None)   # 建表不插行
+    monkeypatch.setenv("DISCOVERY_DB", db_path)
+    from presentation.server.main import _discovery_missed_last_run
+    assert _discovery_missed_last_run() is True
+
+
+def test_discovery_missed_last_run_true_when_old_started_at(tmp_path, monkeypatch):
+    """最新 started_at < 昨日 02:00 → 返 True（offline 跨昨晚 02:00，补跑）。
+
+    物理意图（spec §3.3 核心）：生产机 offline 跨过昨晚 02:00（如机器关机/uvicorn 未起），
+    discovery cron 漏跑——最新 search_run.started_at 是两天前，启动时补跑防策略迭代断链。
+    """
+    from datetime import datetime, timedelta
+    db_path = str(tmp_path / "t.db")
+    stale = (datetime.now() - timedelta(days=2)).isoformat()
+    _seed_search_run(db_path, started_at=stale)
+    monkeypatch.setenv("DISCOVERY_DB", db_path)
+    from presentation.server.main import _discovery_missed_last_run
+    assert _discovery_missed_last_run() is True
+
+
+def test_discovery_missed_last_run_false_when_recent(tmp_path, monkeypatch):
+    """最新 started_at ≥ 昨日 02:00（昨晚跑了）→ 返 False（不补跑）。
+
+    物理意图：今晚 uvicorn 起来前昨晚 02:00 的 cron 已正常跑过 discovery（started_at
+    是今天凌晨），无需补跑——幂等去重（discovery run_daemon_cycle 早退 converged 跳过）。
+    """
+    from datetime import datetime, timedelta
+    db_path = str(tmp_path / "t.db")
+    recent = (datetime.now() - timedelta(hours=2)).isoformat()   # 今天刚跑
+    _seed_search_run(db_path, started_at=recent)
+    monkeypatch.setenv("DISCOVERY_DB", db_path)
+    from presentation.server.main import _discovery_missed_last_run
+    assert _discovery_missed_last_run() is False
+
+
+@pytest.mark.asyncio
+async def test_lifespan_catchup_runs_discovery_when_missed():
+    """lifespan startup：_discovery_missed_last_run=True → 调 _run_discovery_subprocess 补跑。
+
+    物理意图（spec §3.3）：startup 检测到 offline 跨昨晚 02:00（错过）→ 异步补跑
+    _run_discovery_subprocess（DETACHED 子进程，立即返不阻塞 uvicorn 起）。幂等靠
+    discovery 既有轮次/seed + run_daemon_cycle 早退（converged 跳过）去重。
+    """
+    from fastapi import FastAPI
+    from presentation.server.main import lifespan
+
+    app = FastAPI()
+    stack, _start, _stop, eng = _mock_lifespan_dependencies()
+    eng.sched.add_job = MagicMock()                # add_job 不抛
+    # mock _discovery_missed_last_run=True（错过）+ _run_discovery_subprocess（断言补跑触发）
+    stack.enter_context(patch("presentation.server.main._discovery_missed_last_run", return_value=True))
+    run_disc = stack.enter_context(patch("presentation.server.main._run_discovery_subprocess"))
+    with stack:
+        async with lifespan(app):
+            pass                    # startup 跑完 → yield（补跑在 startup 段已触发）
+
+    run_disc.assert_called_once()   # 补跑触发
+
+
+@pytest.mark.asyncio
+async def test_lifespan_catchup_skipped_when_recent():
+    """lifespan startup：_discovery_missed_last_run=False → 不调 _run_discovery_subprocess。
+
+    物理意图（幂等）：昨晚 02:00 已跑过 discovery，启动不补跑（避免与今晚 02:00 双跑
+    重复——虽 run_daemon_cycle 早退去重，但补跑子进程本身有 ~4h budget 开销，避免之）。
+    """
+    from fastapi import FastAPI
+    from presentation.server.main import lifespan
+
+    app = FastAPI()
+    stack, _start, _stop, eng = _mock_lifespan_dependencies()
+    eng.sched.add_job = MagicMock()
+    stack.enter_context(patch("presentation.server.main._discovery_missed_last_run", return_value=False))
+    run_disc = stack.enter_context(patch("presentation.server.main._run_discovery_subprocess"))
+    with stack:
+        async with lifespan(app):
+            pass
+
+    run_disc.assert_not_called()    # 不补跑
