@@ -1868,3 +1868,36 @@ def test_tp_single_leg_portion_zero_incremental(monkeypatch, tmp_path):
     for filled in (100, 200, 300):
         asyncio.run(place_take_profit(sym, float(filled), 10.5, "987654"))
     assert submit_calls == [100, 100, 100] and sum(submit_calls) == 300
+
+
+# ============================================================================
+# Task E3（live-mainchain-fixes）：超期平仓 DB 幂等防重（#7）
+# ============================================================================
+def test_close_expired_positions_skips_already_placed(monkeypatch, tmp_path):
+    """已挂 EXPIRED_CLOSE 的 sym 不再重复 submit（#7 窄窗口卖超）。"""
+    import asyncio
+    from unittest.mock import AsyncMock
+    from trading import state_store
+    from trading.engine import _close_expired_positions
+
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
+    state_store.init_store()
+    aid, today, sym = "TEST_ACC", "2026-08-01", "600000.SH"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(f"{today}_{sym}_EXPIRED_CLOSE_1", f"{aid}_{sym}_{today}",
+                             aid, today, sym, "sell", "EXPIRED_CLOSE", 100, 9.5,
+                             state="SUBMITTED")
+    gw = AsyncMock()
+    gw._fetch_broker_positions = AsyncMock(return_value={sym: {"volume": 100, "avg_price": 10.0}})
+    monkeypatch.setattr("trading.engine.qmt_market_data.get_quotes",
+                        AsyncMock(return_value={sym: {"low_limit": 9.5, "last_price": 9.8}}))
+    submit_calls = []
+    async def _fake_submit(order, **kw):
+        submit_calls.append(order.symbol)
+        return {"order_id": "x", "state": "SUBMITTED"}
+    monkeypatch.setattr("trading.engine._submit", _fake_submit)
+    monkeypatch.setenv("QMT_ACCOUNT_ID", aid)  # _resolve_account_id 与幂等行同账户
+    res = asyncio.run(_close_expired_positions(gw, [{"symbol": sym, "entry_date": "2026-06-15",
+                                                     "holding_days": 20, "max_holding": 15}]))
+    assert res["closed"] == 0
+    assert submit_calls == [], "已挂 EXPIRED_CLOSE 不得重复 submit"

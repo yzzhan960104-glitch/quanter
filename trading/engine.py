@@ -1382,11 +1382,21 @@ async def _close_expired_positions(gw: Any, expired: list[dict]) -> dict:
         quotes = {}
         logger.exception("平超期持仓取行情异常（按无价处理，逐只跳过）")
     n_closed = 0
+    today_close = clock.today()
+    _aid = _resolve_account_id()
     for e in expired:
         sym = e["symbol"]
         pos = positions.get(sym)
         qty = pos["volume"] if isinstance(pos, dict) else pos  # 兼容老 mock 返 float
         if not qty or qty <= 0:
+            continue
+        # #7：DB 幂等防重——已挂 EXPIRED_CLOSE（未终态）跳过，兜住“提交后、消费标记前崩溃”
+        try:
+            if _state_store.has_order(_aid, today_close, sym, "EXPIRED_CLOSE"):
+                logger.info("跳过已挂 EXPIRED_CLOSE symbol=%s（DB 幂等）", sym)
+                continue
+        except Exception:
+            logger.exception("has_order(EXPIRED_CLOSE) 查询失败 symbol=%s（保守跳过）", sym)
             continue
         quote = quotes.get(sym)
         low_limit = (quote or {}).get("low_limit")
@@ -1408,6 +1418,16 @@ async def _close_expired_positions(gw: Any, expired: list[dict]) -> dict:
             n_closed += 1
             logger.warning("【超期平仓】%s 卖出 %s 股 @%s（holding_days=%s max_holding=%s mode=%s）",
                            sym, qty, price, e.get("holding_days"), e.get("max_holding"), _mode())
+            # #7：落 EXPIRED_CLOSE 幂等行（同日同标的同 purpose UNIQUE），防崩溃后重复挂卖
+            try:
+                if _state_store.get_account(_aid) is None:
+                    _state_store.upsert_account(_aid, broker="qmt")
+                _state_store.insert_order(
+                    f"{today_close}_{sym}_EXPIRED_CLOSE_1",
+                    f"{_aid}_{sym}_{today_close}", _aid, today_close, sym, "sell",
+                    "EXPIRED_CLOSE", float(qty), float(price), state="SUBMITTED")
+            except Exception:
+                logger.exception("insert_order(EXPIRED_CLOSE) 失败 symbol=%s（告警人工复核）", sym)
     # 消费标记文件（无论是否全部成功，避免下次 pre_open 重复挂卖单致卖超）
     _consume_expired_positions()
     logger.info("平超期持仓完成 closed=%d/%d mode=%s", n_closed, len(expired), _mode())
