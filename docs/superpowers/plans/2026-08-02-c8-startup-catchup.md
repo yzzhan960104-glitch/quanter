@@ -1005,6 +1005,7 @@ async def test_pre_open_skipped_before_window(monkeypatch):
     from trading import clock as clk
     monkeypatch.setattr(clk, "now", lambda: _now(2026, 8, 3, 9, 0))
     monkeypatch.setattr(cal, "expected_latest_trade_day", lambda now: "2026-07-31")
+    monkeypatch.setattr(cal, "next_trading_day", lambda d: "2026-08-03")
     monkeypatch.setattr(cal, "is_trading_day", lambda d: True)
     with patch("trading.orchestrate.pipeline.pipeline_then_eod", new=AsyncMock()) as pl, \
          patch("trading.engine.pre_open", new=AsyncMock()) as po, \
