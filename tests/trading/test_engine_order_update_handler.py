@@ -545,3 +545,79 @@ def test_async_response_backfills_db_broker_oid(db):
         row = con.execute('SELECT broker_oid, state FROM "order" WHERE order_id=?', (oid,)).fetchone()
     assert row["broker_oid"] == str(real), f"应回填 {real}，实际 {row['broker_oid']}"
     assert row["state"] == "SUBMITTED", "async_response 只回填单号，不动 state"
+
+# ============================================================================
+# Task A2（live-mainchain-fixes）：order_type 解析 + merge + order 事件推进状态
+# ============================================================================
+
+def test_on_stock_order_parses_order_type(db):
+    """on_stock_order 解析必须含 order_type（#1 地基：主推路径方向来源之一）。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    eng, gw = _make_real_chain_engine()
+    asyncio.run(_pump(gw, lambda: gw.on_stock_order(SimpleNamespace(
+        order_id=987654, stock_code="600000.SH", order_status=56, order_type=23,
+        order_volume=100, traded_volume=100, traded_price=10.5, status_msg=""))))
+    assert gw._orders["987654"].get("order_type") == 23, "on_stock_order 必须透出 order_type"
+
+
+def test_order_event_advances_db_state_filled(db):
+    """order 事件（status=56）→ DB order.state=FILLED + filled_qty=累计量（#5 第二刀）。"""
+    import asyncio
+    from types import SimpleNamespace
+    from trading import state_store
+
+    eng, gw = _make_real_chain_engine()
+    aid, real = "TEST_ACC", 987654
+    oid = "2026-08-01_600000.SH_OPEN_7"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(oid, f"{aid}_600000.SH_2026-08-01", aid, "2026-08-01",
+                             "600000.SH", "buy", "OPEN", 100, 10.0,
+                             broker_oid=str(real), state="SUBMITTED")
+    asyncio.run(_pump(gw, lambda: gw.on_stock_order(SimpleNamespace(
+        order_id=real, stock_code="600000.SH", order_status=56, order_type=23,
+        order_volume=100, traded_volume=100, traded_price=10.5, status_msg=""))))
+    with state_store._connect(state_store._DEFAULT_DB) as con:
+        row = con.execute('SELECT state, filled_qty, filled_price FROM "order" WHERE order_id=?',
+                          (oid,)).fetchone()
+    assert row["state"] == "FILLED"
+    assert row["filled_qty"] == 100
+    assert row["filled_price"] == 10.5
+
+
+def test_order_event_partial_status_maps_to_partial(db):
+    """status=55（部成）→ DB state=PARTIAL（精确部分成交，非近似 FILLED）。"""
+    import asyncio
+    from types import SimpleNamespace
+    from trading import state_store
+
+    eng, gw = _make_real_chain_engine()
+    aid, real = "TEST_ACC", 987654
+    oid = "2026-08-01_600000.SH_OPEN_7"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(oid, f"{aid}_600000.SH_2026-08-01", aid, "2026-08-01",
+                             "600000.SH", "buy", "OPEN", 300, 10.0,
+                             broker_oid=str(real), state="SUBMITTED")
+    asyncio.run(_pump(gw, lambda: gw.on_stock_order(SimpleNamespace(
+        order_id=real, stock_code="600000.SH", order_status=55, order_type=23,
+        order_volume=300, traded_volume=100, traded_price=10.4, status_msg=""))))
+    with state_store._connect(state_store._DEFAULT_DB) as con:
+        row = con.execute('SELECT state, filled_qty FROM "order" WHERE order_id=?', (oid,)).fetchone()
+    assert row["state"] == "PARTIAL"
+    assert row["filled_qty"] == 100
+
+
+def test_trade_push_keeps_order_type_after_merge(db):
+    """trade 事件不得覆盖 _orders 记录的 order_type（merge 语义，防止内存兜底失效）。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    eng, gw = _make_real_chain_engine()
+    asyncio.run(_pump(gw, lambda: gw.on_stock_order(SimpleNamespace(
+        order_id=987654, stock_code="600000.SH", order_status=56, order_type=23,
+        order_volume=100, traded_volume=100, traded_price=10.5, status_msg=""))))
+    asyncio.run(_pump(gw, lambda: gw.on_stock_trade(SimpleNamespace(
+        order_id=987654, stock_code="600000.SH", traded_volume=100,
+        traded_price=10.5, traded_amount=1050.0, traded_time="20260801101000"))))
+    assert gw._orders["987654"].get("order_type") == 23, "trade 覆盖后 order_type 必须保留"

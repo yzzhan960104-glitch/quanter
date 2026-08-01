@@ -984,10 +984,12 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # order_id 统一转 str 做 key（兼容 on_stock_order 的 int 真实单号与 seq-str）
         order_id = str(update.get("order_id", ""))
         if order_id:
-            rec = dict(update)
+            # #1：merge 而非覆盖——on_stock_trade/async_response 的 dict 不含 order_type，
+            # 覆盖会让 _order_direction 内存兜底失效（主推路径方向恒 None 的历史根因之一）。
+            rec = dict(self._orders.get(order_id, {}))
+            rec.update(update)
             rec["_gc_ts"] = time.time()   # #10 GC 时间基准（终态单按此判定超期）
             self._orders[order_id] = rec  # type: ignore[assignment]
-        # #10：_orders 终态单调增长致内存泄漏，超阈值触发 GC（保留近 N 日终态 + 全部非终态）。
         if len(self._orders) > _ORDERS_GC_THRESHOLD:
             self.cleanup_orders()
 
@@ -1140,6 +1142,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
                 "stock_code": order.stock_code,
                 "order_status": status,
                 "state": _map_qmt_status(status),
+                "order_type": getattr(order, "order_type", 0),  # #1/#5：主推路径方向来源（query_orders 同源）
                 "order_volume": getattr(order, "order_volume", 0),
                 "traded_volume": getattr(order, "traded_volume", 0),   # 累计成交
                 "traded_price": getattr(order, "traded_price", 0.0),   # 成交均价

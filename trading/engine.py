@@ -1744,6 +1744,31 @@ async def post_close(
     return result
 
 
+
+def _seq_for_real_oid(gw, real_oid: str) -> int | None:
+    """_seq_to_real 反查：real→seq（async_response 晚到时按 seq 匹配 DB 行）。"""
+    try:
+        real_int = int(real_oid)
+    except (TypeError, ValueError):
+        return None
+    seq_map = getattr(gw, "_seq_to_real", None) or {}
+    for seq, real in seq_map.items():
+        if real == real_int:
+            return seq
+    return None
+
+
+def _order_state_to_db(state) -> str:
+    """OrderState 枚举/字符串 → order 表 state 列约定（PARTIAL/FILLED/CANCELLED/REJECTED/...）。"""
+    name = state.name if hasattr(state, "name") else str(state)
+    return {
+        "PARTIAL_FILLED": "PARTIAL",
+        "FILLED": "FILLED",
+        "CANCELLED": "CANCELLED",
+        "REJECTED": "REJECTED",
+        "PARTIAL_CANCELLED": "PARTIAL_CANCELLED",
+    }.get(name, "SUBMITTED")
+
 # ============================================================================
 # TradingEngine：APScheduler 四 cron 装配（独立常驻进程 python -m trading）
 # ============================================================================
@@ -2686,6 +2711,11 @@ class TradingEngine:
                         "async_response 回填 broker_oid 失败 seq=%s real=%s（CRITICAL：撤单锚点失效）",
                         seq_str, real)
             return
+        if kind == "order":
+            # #5 第二刀：柜台委托状态推送（含累计 traded_volume）→ 推进 DB order state。
+            # 中间态（SUBMITTED）更新为同值 no-op；终态/部分态精确落库。
+            self._advance_order_state_from_status(update)
+            return
         if kind != "trade":
             return  # 仅处理成交回报（order/order_error 由风控层负责，不在本 handler 范围）
         symbol = update.get("stock_code", "")
@@ -2824,6 +2854,44 @@ class TradingEngine:
         if ot == STOCK_SELL:
             return "SELL"
         return None
+
+
+    def _advance_order_state_from_status(self, update: Mapping[str, Any]) -> None:
+        """kind=order：按柜台状态推进 DB order.state/filled_*（#5 第二刀）。
+
+        Why 用 order 事件而非 trade 事件：order_status 55/56 区分 PARTIAL/FILLED，
+        traded_volume 是累计成交（trade 是本笔增量），状态推进必须用累计量。
+        竞态（async_response 晚到）：按 real 查 miss 时经 _seq_to_real 反查 seq 再匹配。
+        """
+        lookup = str(update.get("order_id", ""))
+        if not lookup:
+            return
+        row = None
+        try:
+            row = _state_store.get_order_by_broker_oid(lookup)
+            if row is None:
+                seq = _seq_for_real_oid(self._gw, lookup)
+                if seq is not None:
+                    row = _state_store.get_order_by_broker_oid(str(seq))
+        except Exception:
+            logger.exception("get_order_by_broker_oid 失败 lookup=%s", lookup)
+            return
+        if row is None:
+            logger.warning("order 事件未命中 DB 行 lookup=%s（可能 server 手动单/未落库）", lookup)
+            return
+        traded_volume = update.get("traded_volume")
+        traded_price = update.get("traded_price")
+        try:
+            n = _state_store.update_order_state_by_broker_oid(
+                row["broker_oid"] or lookup,
+                state=_order_state_to_db(update.get("state")),
+                filled_qty=float(traded_volume) if traded_volume is not None else None,
+                filled_price=float(traded_price) if traded_price is not None else None,
+            )
+            if n == 0:
+                logger.warning("order 状态推进未命中 broker_oid=%s（下个事件补推进）", row.get("broker_oid"))
+        except Exception:
+            logger.exception("order 状态推进失败 lookup=%s（软降级，下个事件补推进）", lookup)
 
     async def _place_take_profit(self, symbol: str, filled_qty: float,
                                  fill_price: float, order_id: str) -> None:
