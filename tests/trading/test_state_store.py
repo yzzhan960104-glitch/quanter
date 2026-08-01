@@ -321,3 +321,18 @@ def test_get_latest_action(db):
     """某 trade_id 的最新 action（当前状态）。"""
     _seed_for_queries(db)
     assert state_store.get_latest_action("ACC1_600000.SH_2026-07-30") == "CONFIRMED"
+
+# ============================================================================
+# Task D1（live-mainchain-fixes）：get_order_placed_qty（止盈差额补挂）
+# ============================================================================
+def test_get_order_placed_qty_excludes_terminal(monkeypatch, tmp_path):
+    """get_order_placed_qty：只合计未终态 TP 行（REJECTED/CANCELLED 不计）。"""
+    from trading import state_store
+
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
+    state_store.init_store()
+    aid, d, sym = "TEST_ACC", "2026-08-01", "600000.SH"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(f"{d}_{sym}_TP2_1", f"{aid}_{sym}_{d}", aid, d, sym, "sell", "TP2", 100, 11.0, state="SUBMITTED")
+    state_store.insert_order(f"{d}_{sym}_TP2_2", f"{aid}_{sym}_{d}", aid, d, sym, "sell", "TP2", 100, 11.0, state="REJECTED")
+    assert state_store.get_order_placed_qty(aid, d, sym, "TP2") == 100.0

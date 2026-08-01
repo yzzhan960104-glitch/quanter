@@ -1803,3 +1803,68 @@ def test_post_close_query_trades_skipped_when_no_gw(monkeypatch):
 
     assert agg_calls == []                             # gw=None → 未调 aggregate_fills
     assert "trades_reconciled" not in result
+
+
+# ============================================================================
+# Task D1（live-mainchain-fixes）：止盈差额补挂（#4）
+# ============================================================================
+def test_partial_fill_tp_diff_no_oversell_no_gap(monkeypatch, tmp_path):
+    """3 笔部分成交（300 股）：TP 差额补挂，总量=目标量，不超卖、无覆盖缺口（#4）。"""
+    import asyncio
+    from trading import state_store
+    from trading.engine import place_take_profit
+
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
+    state_store.init_store()
+    aid, today, sym = "TEST_ACC", "2026-08-01", "600000.SH"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(f"{today}_{sym}_OPEN_7", f"{aid}_{sym}_{today}", aid, today, sym,
+                             "buy", "OPEN", 300, 10.0, broker_oid="987654", state="SUBMITTED")
+    monkeypatch.setattr("trading.engine.trading_plan.load_plan",
+                        lambda d: {"orders": [{"order": {"symbol": sym},
+                                               "take_profit": 12.0, "tp1": 11.0,
+                                               "tp1_portion": 0.5}]})
+    submit_calls = []
+    async def _fake_submit(order, **kw):
+        submit_calls.append((order.symbol, order.side, order.qty, order.price))
+        return {"order_id": f"seq{len(submit_calls)}", "state": "SUBMITTED"}
+    monkeypatch.setattr("trading.engine._submit", _fake_submit)
+    # 分 3 笔成交：累计 100/200/300
+    for filled in (100, 200, 300):
+        state_store.update_order_state_by_broker_oid(
+            "987654", state="PARTIAL" if filled < 300 else "FILLED",
+            filled_qty=float(filled), filled_price=10.5)
+        asyncio.run(place_take_profit(sym, float(filled), 10.5, "987654"))
+    tp_sells = [q for _, side, q, _ in submit_calls if side == "sell"]
+    assert sum(tp_sells) == 300, f"TP 卖单总量应=持仓 300，实际 {sum(tp_sells)}（{tp_sells}）"
+    assert tp_sells == [100, 100, 100], f"差额补挂应逐笔补 100，实际 {tp_sells}"
+    # 已挂量 = 目标量后再触发（重推）→ 零 submit
+    before = len(submit_calls)
+    asyncio.run(place_take_profit(sym, 300.0, 10.5, "987654"))
+    assert len(submit_calls) == before, "已挂满后再触发不得重复 submit"
+
+
+def test_tp_single_leg_portion_zero_incremental(monkeypatch, tmp_path):
+    """tp1_portion=0 退化单腿 TP2：分 3 笔补挂合计 300，不重复。"""
+    import asyncio
+    from trading import state_store
+    from trading.engine import place_take_profit
+
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
+    state_store.init_store()
+    aid, today, sym = "TEST_ACC", "2026-08-01", "600000.SH"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(f"{today}_{sym}_OPEN_7", f"{aid}_{sym}_{today}", aid, today, sym,
+                             "buy", "OPEN", 300, 10.0, broker_oid="987654", state="SUBMITTED")
+    monkeypatch.setattr("trading.engine.trading_plan.load_plan",
+                        lambda d: {"orders": [{"order": {"symbol": sym},
+                                               "take_profit": 12.0, "tp1": None,
+                                               "tp1_portion": 0.0}]})
+    submit_calls = []
+    async def _fake_submit(order, **kw):
+        submit_calls.append(order.qty)
+        return {"order_id": f"seq{len(submit_calls)}", "state": "SUBMITTED"}
+    monkeypatch.setattr("trading.engine._submit", _fake_submit)
+    for filled in (100, 200, 300):
+        asyncio.run(place_take_profit(sym, float(filled), 10.5, "987654"))
+    assert submit_calls == [100, 100, 100] and sum(submit_calls) == 300

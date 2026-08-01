@@ -415,6 +415,56 @@ def cancel_order_by_broker_oid_db(broker_oid: str, *, db_path: str | None = None
         return cur.rowcount
 
 
+def add_order_qty(account_id: str, trade_date: str, symbol: str, purpose: str,
+                  qty: float, price: float, *, db_path: str | None = None) -> bool:
+    """止盈差额补挂：purpose 行已存在则累加 qty，否则插入（UPSERT 语义）。
+
+    Why 非 insert_order：同 (account_id, trade_date, symbol, purpose) 一天只允许一行
+    （UNIQUE 幂等键），差额补挂第二次触发时须在既有行上累加，否则 INSERT 撞主键失败 →
+    柜台已发单但 DB 没记（超挂黑洞）。
+    Returns: True=成功（插入或累加）；False=异常（调用方必须告警人工复核）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    oid = f"{trade_date}_{symbol}_{purpose}_1"
+    trade_id = f"{account_id}_{symbol}_{trade_date}"
+    with _connect(db_path) as con:
+        try:
+            row = con.execute(
+                'SELECT order_id FROM "order" WHERE account_id=? AND trade_date=? '
+                'AND symbol=? AND purpose=?',
+                (account_id, trade_date, symbol, purpose)).fetchone()
+            if row is not None:
+                con.execute(
+                    'UPDATE "order" SET qty = qty + ?, price = ? WHERE order_id=?',
+                    (float(qty), float(price), row["order_id"]))
+                return True
+            con.execute(
+                'INSERT INTO "order"(order_id, trade_id, account_id, trade_date, symbol, side,'
+                ' purpose, qty, price, state) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (oid, trade_id, account_id, trade_date, symbol, "sell", purpose,
+                 float(qty), float(price), "SUBMITTED"))
+            return True
+        except Exception:
+            logger.exception("add_order_qty 失败 account=%s date=%s symbol=%s purpose=%s",
+                             account_id, trade_date, symbol, purpose)
+            return False
+
+def get_order_placed_qty(account_id: str, trade_date: str, symbol: str, purpose: str, *,
+                         db_path: str | None = None) -> float:
+    """已挂委托量合计（未终态 state）：止盈差额补挂用。
+
+    终态（REJECTED/FAILED/CANCELLED/PARTIAL_CANCELLED）不算已挂——被拒的腿
+    允许后续事件补挂（与 has_order 排除集同口径）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        row = con.execute(
+            "SELECT COALESCE(SUM(qty), 0) AS total FROM \"order\" "
+            "WHERE account_id=? AND trade_date=? AND symbol=? AND purpose=? "
+            "AND state NOT IN ('REJECTED','FAILED','CANCELLED','PARTIAL_CANCELLED')",
+            (account_id, trade_date, symbol, purpose)).fetchone()
+    return float(row["total"]) if row else 0.0
+
 def get_order_by_broker_oid(broker_oid: str, *, db_path: str | None = None) -> dict | None:
     """按柜台单号查 order（成交回报/方向反查用）。
 

@@ -1759,6 +1759,108 @@ def _order_state_to_db(state) -> str:
         "PARTIAL_CANCELLED": "PARTIAL_CANCELLED",
     }.get(name, "SUBMITTED")
 
+
+async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
+                            order_id: str) -> None:
+    """挂限价止盈卖单（#4 差额补挂：目标量 − 已挂量，防超卖/防覆盖缺口）。
+
+    Why 模块级：stop_loss_monitor（模块级函数）盘中 TP 漏挂兜底也要调它（#10），
+    实例方法无法被模块级函数引用（原 plan E4 的 self 错误根因）。
+    """
+    today = clock.today()
+    plan = trading_plan.load_plan(today)
+    if not plan:
+        logger.warning("挂止盈跳过：无活跃计划 symbol=%s（计划未落盘/已失效）", symbol)
+        return
+    tp2 = tp1 = None
+    tp1_portion = 0.0
+    for o in plan.get("orders", []):
+        if (o.get("order") or {}).get("symbol") == symbol:
+            tp2 = o.get("take_profit")
+            tp1 = o.get("tp1")
+            tp1_portion = float(o.get("tp1_portion") or 0.0)
+            break
+    if tp2 is None or tp2 <= 0:
+        logger.warning("挂止盈跳过：无止盈价配置 symbol=%s（计划缺 take_profit）", symbol)
+        return
+    filled_int = int(filled_qty)
+    if filled_int <= 0:
+        logger.warning("挂止盈跳过：成交量非正 symbol=%s filled_qty=%s", symbol, filled_qty)
+        return
+
+    from trading.compute.types import OrderRequest
+    _aid = _resolve_account_id()
+    _tid = f"{_aid}_{symbol}_{today}"
+
+    # 已成交总量：OPEN 行 filled_qty（order 事件累计）优先，入参兜底
+    total_filled = float(filled_int)
+    if order_id:
+        try:
+            _open = _state_store.get_order_by_broker_oid(str(order_id))
+            if _open is not None and _open.get("filled_qty"):
+                total_filled = float(_open["filled_qty"])
+        except Exception:
+            logger.warning("读 OPEN filled_qty 失败 symbol=%s（用入参兜底）", symbol)
+
+    def _placed(purpose: str) -> float:
+        """已挂未终态量（差额基准）。"""
+        try:
+            return _state_store.get_order_placed_qty(_aid, today, symbol, purpose)
+        except Exception:
+            logger.exception("get_order_placed_qty(%s) 失败 symbol=%s（保守视为 0 补挂）", purpose, symbol)
+            return 0.0
+
+    def _record_tp(purpose: str, qty: int, price: float) -> None:
+        """挂止盈单后落 DB order（UPSERT 累加语义）；失败=柜台已发单但 DB 没记 → ERROR 人工复核。"""
+        try:
+            if _state_store.get_account(_aid) is None:
+                _state_store.upsert_account(_aid, broker="qmt")
+            ok = _state_store.add_order_qty(
+                _aid, today, symbol, purpose, float(qty), float(price))
+            if not ok:
+                # #4：DB 记失败但本次 _submit 已发出 → 柜台可能多挂。
+                logger.error("【止盈幂等冲突】%s %s 落 DB 失败但本次 _submit 已发柜台，"
+                             "需人工复核是否多挂超卖", symbol, purpose)
+        except Exception:
+            logger.exception("insert_order(%s) 失败 symbol=%s", purpose, symbol)
+    use_two_legs = (tp1 is not None and tp1 > 0 and tp1_portion > 0.0 and tp1 < tp2)
+    if not use_two_legs:
+        # 单腿全平 tp2：差额 = 总持仓 − 已挂 TP2
+        need2 = int(total_filled) - int(_placed("TP2"))
+        if need2 <= 0:
+            return
+        result = await _submit(
+            OrderRequest(symbol=symbol, qty=need2, side="sell", price=tp2), confirm=True)
+        if result.get("state") not in ("REJECTED", "FAILED"):
+            logger.info("【止盈单已挂】%s %s股 @%s（单笔全平 tp2 差额补挂）", symbol, need2, tp2)
+            _record_tp("TP2", need2, tp2)
+        else:
+            logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
+                           symbol, result.get("state"), result.get("message"))
+        return
+
+    # 分级两腿：目标量 − 已挂量，各腿独立补挂（防超卖 + 防覆盖缺口）
+    tp1_target = int(total_filled * tp1_portion / 100) * 100
+    tp2_target = int(total_filled) - tp1_target
+    need1 = tp1_target - int(_placed("TP1"))
+    need2 = tp2_target - int(_placed("TP2"))
+    if need1 > 0:
+        r1 = await _submit(
+            OrderRequest(symbol=symbol, qty=need1, side="sell", price=tp1), confirm=True)
+        if r1.get("state") not in ("REJECTED", "FAILED"):
+            _record_tp("TP1", need1, tp1)
+        else:
+            logger.warning("止盈单挂失败 symbol=%s leg=tp1 state=%s msg=%s（人工补挂）",
+                           symbol, r1.get("state"), r1.get("message"))
+    if need2 > 0:
+        r2 = await _submit(
+            OrderRequest(symbol=symbol, qty=need2, side="sell", price=tp2), confirm=True)
+        if r2.get("state") not in ("REJECTED", "FAILED"):
+            _record_tp("TP2", need2, tp2)
+        else:
+            logger.warning("止盈单挂失败 symbol=%s leg=tp2 state=%s msg=%s（人工补挂）",
+                           symbol, r2.get("state"), r2.get("message"))
+
 # ============================================================================
 # TradingEngine：APScheduler 四 cron 装配（独立常驻进程 python -m trading）
 # ============================================================================
@@ -2906,166 +3008,8 @@ class TradingEngine:
 
     async def _place_take_profit(self, symbol: str, filled_qty: float,
                                  fill_price: float, order_id: str) -> None:
-        """挂限价止盈卖单（Phase2 分级止盈：tp1 锁利 + tp2 形态目标位）。
-
-        物理意图（plan Task 7 · 对齐缺口 P0-3）：
-            买单成交后立刻挂止盈卖单——买单一旦成交即转为持仓，需主动挂限价单等待触发。
-            Phase1 只挂单笔全平 tp2（颈线+tp_h_mult×H 形态对称目标位），与回测 simulate_exit
-            用 tp1_portion 加权两批止盈的口径背离（回测冠军档套实盘止盈逻辑失真）。
-            Phase2 升级为分级：tp1 价位（颈线+tp1_h_mult×H）卖 tp1_portion 比例仓锁利，
-            tp2 价位卖剩余仓博形态对称目标位——与 simulate_exit 同口径对齐。
-
-        止盈价来源（与 pre_open / stop_loss 同一张活跃计划，单源一致）：
-            ``trading_plan.load_plan(today).orders[i]``（当日 confirmed 计划）：
-            - take_profit = tp2（颈线+tp_h_mult×H）
-            - tp1 = 颈线 + tp1_h_mult × H（Task 7 落盘）；老 plan 无此字段 → 退回 tp2 单笔
-            - tp1_portion：tp1 档分配比例（0~1）
-
-        整手分割红线（A 股卖出约束）：
-            tp1_qty = int(filled × portion / 100) × 100（向下取整 100 整手）；
-            tp2_qty = filled - tp1_qty（余量含零股，券商接受卖出清仓零股）。
-            portion=0 → 全量 tp2；portion=1 → 全量 tp1；filled×portion<100 → tp1_qty=0 全量 tp2。
-
-        Sanity 守卫（防参数坏值）：
-            tp1 ≥ tp2 时只挂 tp2（数据异常或 H≤0 致 tp1 算到 tp2 之上，挂 tp1 永远先成交
-            反而拖累——正常 tp1_h_mult<tp_h_mult 保证 tp1<tp2，守卫是兜底）。
-
-        数量来源（scope #3 红线同源）：
-            ``filled_qty`` 用成交回报里的**实际成交量**（``traded_volume``），**非计划全量**。
-            部分成交时若用计划全量挂止盈 → 卖超过实际持仓 = 超卖敞口致命。
-
-        幂等（state_store DB 双闸）：
-            **has_order(TP1) 在调度点 ``_handle_order_update`` 完成**（查 DB 是否已挂 TP1），
-            本方法挂单成功后 ``_record_tp`` 落 insert_order(TP1/TP2)（UNIQUE 幂等，单一写入点）。
-            双闸防 await 期间部分成交重推重入重挂：调度点查 + 写入点 UNIQUE 冲突兜底。
-
-        Args:
-            symbol:      成交标的（如 "300001.SZ"）。
-            filled_qty:  实际成交量（股，来自成交回报 traded_volume，非计划全量）。
-            fill_price:  实际成交均价（仅用于日志可观测，不参与挂单价计算）。
-            order_id:    触发本次止盈的成交回报 order_id（仅用于日志归因）。
-        """
-        # C-6 V2：止盈读 plan key（load_plan 当日口径）走 clock.today（与 _handle_order_update
-        # 的 today_tp 同口径，TP1 trade_id 与 plan date 对齐）。
-        today = clock.today()
-        plan = trading_plan.load_plan(today)
-        if not plan:
-            logger.warning("挂止盈跳过：无活跃计划 symbol=%s（计划未落盘/已失效）", symbol)
-            return
-        # 从计划 orders 里查该 symbol 的止盈配置（与 pre_open 挂买单同一张计划同源）
-        tp2 = None
-        tp1 = None
-        tp1_portion = 0.0
-        for o in plan.get("orders", []):
-            if (o.get("order") or {}).get("symbol") == symbol:
-                tp2 = o.get("take_profit")
-                tp1 = o.get("tp1")
-                tp1_portion = float(o.get("tp1_portion") or 0.0)
-                break
-        if tp2 is None or tp2 <= 0:
-            # 计划缺止盈价（数据瑕疵/手工计划）→ 不挂盲单，告警人工补
-            logger.warning("挂止盈跳过：无止盈价配置 symbol=%s（计划缺 take_profit）", symbol)
-            return
-
-        # 整手化 filled_qty（A 股卖出红线：int 截断零股，防 broker 按 float 解释成 100x）
-        filled_int = int(filled_qty)
-        if filled_int <= 0:
-            logger.warning("挂止盈跳过：成交量非正 symbol=%s filled_qty=%s", symbol, filled_qty)
-            return
-
-        # 挂限价止盈卖单（confirm=True 同 pre_open，引擎是自动批量通道，盘中无人工二次确认）
-        from trading.compute.types import OrderRequest
-
-        # T9（state-store-redesign §4.2）：止盈挂单落 DB（has_order(TP1/TP2) 幂等真相源）。
-        # insert_order UNIQUE(account_id, trade_date, symbol, purpose)：重推/重启重挂 → 跳过。
-        # 物理意图：替代 _tp_placed 内存（跨重启持久，防 P0-1 止盈超卖）。
-        _aid = _resolve_account_id()
-        _tid = f"{_aid}_{symbol}_{today}"
-
-        def _record_tp(purpose: str, qty: int, price: float) -> None:
-            """挂止盈单后落 DB order（幂等，重挂跳过）。失败仅 log 不阻断挂单。"""
-            try:
-                # 确保 account 行存在（insert_order FK 引用 account）
-                if _state_store.get_account(_aid) is None:
-                    _state_store.upsert_account(_aid, broker="qmt")
-                oid = f"{today}_{symbol}_{purpose}_1"
-                _state_store.insert_order(
-                    oid, _tid, _aid, today, symbol, "sell", purpose,
-                    float(qty), float(price), state="SUBMITTED")
-            except Exception:
-                logger.exception("insert_order(%s) 失败 symbol=%s（不阻断挂单）", purpose, symbol)
-
-        # 分级分割判定（Task 7）：
-        # 1. tp1 缺失 / portion=0 → 全量 tp2（向后兼容 Task 7 前的老 plan）
-        # 2. tp1 ≥ tp2 sanity 守卫 → 全量 tp2（防 tp1 永远先成交拖累）
-        # 3. 正常分级：tp1_qty = int(filled×portion/100)*100（整手），tp2_qty = 余量
-        use_two_legs = (
-            tp1 is not None and tp1 > 0
-            and tp1_portion > 0.0
-            and tp1 < tp2
-        )
-        if not use_two_legs:
-            # 单笔全平 tp2（Phase1 行为，向后兼容）
-            result = await _submit(
-                OrderRequest(symbol=symbol, qty=filled_int, side="sell", price=tp2),
-                confirm=True,
-            )
-            if result.get("state") not in ("REJECTED", "FAILED"):
-                logger.info("【止盈单已挂】%s %s股 @%s（单笔全平 tp2 触发成交价=%s order_id=%s）",
-                            symbol, filled_int, tp2, fill_price, order_id)
-                _record_tp("TP2", filled_int, tp2)
-            else:
-                logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
-                               symbol, result.get("state"), result.get("message"))
-            return
-
-        # 分级止盈（Phase2）：tp1 锁利部分 + tp2 余量
-        # tp1_qty 向下取整 100 整手；tp2_qty = 余量（含零股，券商接受卖出清仓）
-        tp1_qty = int(filled_int * tp1_portion / 100) * 100
-        tp2_qty = filled_int - tp1_qty
-        # tp1_qty 整手后为 0（filled×portion<100）→ 退化全量 tp2（不挂零股 tp1）
-        if tp1_qty <= 0:
-            result = await _submit(
-                OrderRequest(symbol=symbol, qty=filled_int, side="sell", price=tp2),
-                confirm=True,
-            )
-            if result.get("state") not in ("REJECTED", "FAILED"):
-                logger.info("【止盈单已挂】%s %s股 @%s（tp1整手不足退化全量tp2 触发成交价=%s order_id=%s）",
-                            symbol, filled_int, tp2, fill_price, order_id)
-                _record_tp("TP2", filled_int, tp2)
-            else:
-                logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
-                               symbol, result.get("state"), result.get("message"))
-            return
-
-        # 分级挂两张单（tp1 锁利 + tp2 形态目标位）
-        results = []
-        # tp1 leg（锁利）
-        r1 = await _submit(
-            OrderRequest(symbol=symbol, qty=tp1_qty, side="sell", price=tp1),
-            confirm=True,
-        )
-        results.append(("tp1", tp1, tp1_qty, r1))
-        if r1.get("state") not in ("REJECTED", "FAILED"):
-            _record_tp("TP1", tp1_qty, tp1)
-        # tp2 leg（形态目标位，仅当有余量时挂）
-        if tp2_qty > 0:
-            r2 = await _submit(
-                OrderRequest(symbol=symbol, qty=tp2_qty, side="sell", price=tp2),
-                confirm=True,
-            )
-            results.append(("tp2", tp2, tp2_qty, r2))
-            if r2.get("state") not in ("REJECTED", "FAILED"):
-                _record_tp("TP2", tp2_qty, tp2)
-        # 观测日志（两腿各自成败独立记录）
-        for leg, price, qty, r in results:
-            if r.get("state") not in ("REJECTED", "FAILED"):
-                logger.info("【止盈单已挂】%s %s腿 %s股 @%s（分级 触发成交价=%s order_id=%s）",
-                            symbol, leg, qty, price, fill_price, order_id)
-            else:
-                logger.warning("止盈单挂失败 symbol=%s leg=%s state=%s msg=%s（人工补挂）",
-                               symbol, leg, r.get("state"), r.get("message"))
-
+        """薄包装：成交回报链路调模块级 place_take_profit（#4 差额补挂）。"""
+        return await place_take_profit(symbol, filled_qty, fill_price, order_id)
     @_critical_guard
     async def _pipeline_then_eod(self) -> None:
         """C-4 U2：pipeline_then_eod 收编为 method（过 _critical_guard）。
