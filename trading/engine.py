@@ -2716,7 +2716,7 @@ class TradingEngine:
             # 脏数据/撤单回报（traded_volume=0）不应落账或挂止盈，直接跳过
             return
 
-        # 判定方向（BUY/SELL/None）——日志与挂止盈决策都依赖
+        # 判定方向（BUY/SELL/None）——账本写入与挂止盈决策都依赖
         direction = self._order_direction(order_id)
         if direction is None:
             # #1：方向未知 = 审计黑洞（不挂止盈 + 不落账），必须叫醒人工对账，禁止静默。
@@ -2724,67 +2724,14 @@ class TradingEngine:
                 f"成交回报方向未知 order_id={order_id} symbol={symbol} qty={qty} "
                 f"（DB 无 side、内存无 order_type，需人工对账补账）")
 
-        # a. 成交日志补写（用真实成交价/量，非下单预估价；Layer 6 LLM 复盘数据源）
-        try:
-            from presentation.server.services.trading_service import record_live_trade
-            record_live_trade(
-                symbol,
-                direction or "TRADE",  # 方向未知时落 "TRADE"（保守中性，不误判买卖）
-                float(qty),
-                float(price),
-                strategy="neckline",
-                rationale=f"成交回报@{update.get('traded_time')}",
-                kind="fill",  # #3：真实成交，post_close 据此聚合净持仓
-            )
-        except Exception:
-            # 日志写盘失败不阻塞通知/挂止盈（三连各自独立降级，互不阻断）
-            logger.exception("成交日志补写失败 symbol=%s（不影响后续通知/挂止盈）", symbol)
-
-        # b. 钉钉成交通知（fire_and_forget 不阻塞回调链；钉钉软降级在 _broadcast 内兜底）
-        try:
-            # ⚠️ 走 infra.notifier 真身（infra.notifier 是 strangler 转发垫片，broker/qmt
-            # 同口径用 infra.notifier；此处直指 infra 真身，避免垫片未来下线后隐性断链）。
-            from infra.notifier import NotificationManager, fire_and_forget
-            fire_and_forget(NotificationManager.get_default().notify_trade_event(
-                symbol, direction or "TRADE", float(qty), float(price),
-            ))
-        except Exception:
-            logger.exception("成交通知发送失败 symbol=%s（不影响后续挂止盈）", symbol)
-
-        # c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（DB 幂等防重挂）
-        #    卖单成交（direction=="SELL"）无需挂止盈（卖出即离场，无持仓可止盈）。
-        #    方向未知（None）保守不挂——宁可漏挂止盈让人工补，也不误把卖单当买单挂反方向单。
-        #
-        # 幂等闸（state-store-redesign §4.2，P0-1 止盈超卖根因修复）：
-        #   DB has_order(TP1)：查 state_store.order 表是否已挂 TP1（跨重启持久）。
-        #   T12 已废弃 _tp_placed 内存态（重启清空→重连重推→重复挂止盈超卖），DB 为唯一真相源。
-        #   _place_take_profit 内 _record_tp 落 insert_order(TP1/TP2)（UNIQUE 幂等），双重保护。
-        # C-6 V2：TP1 幂等 key（trade_date 口径，has_order(TP1)/insert_order(TP1) 同口径）走 clock.today。
+        # C-6 V2：TP1 幂等 key（trade_date 口径）与账本 account/trade_id 同源计算一次。
         today_tp = clock.today()
         _account_id = _resolve_account_id()
         _trade_id = f"{_account_id}_{symbol}_{today_tp}"
-        _tp_already = False
-        try:
-            _tp_already = _state_store.has_order(_account_id, today_tp, symbol, "TP1")
-        except Exception:
-            logger.exception("查 DB has_order(TP1) 失败 symbol=%s（保守跳过，防重复挂）", symbol)
-            _tp_already = True  # DB 查询失败保守视为已挂（宁可漏挂人工补，不超卖）
-        if direction == "BUY" and not _tp_already:
-            try:
-                await self._place_take_profit(symbol, qty, price, order_id)
-            except Exception:
-                # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
-                logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)
 
-        # d. 成交账本写入（gap4 · post_close 对账数据源）。
-        #    独立 try-except 软降级：账本写入失败不阻断 a 日志/b 通知/c 止盈。
-        #    方向 None 不写（保守，对齐 c 连不挂止盈语义——不猜方向误记为买当卖/卖当买，
-        #    账本失真比对账漏记更危险）。
-        #    state-store-redesign §4.2：state_store 是真相源——insert_fill（增量幂等）+
-        #    apply_fill_to_position（加权 avg）+ insert_trade_event(FILLED)。
-        #    不再调 position_book.apply_fill（避免与 state_store 双写 fill 表致 insert_fill
-        #    恒返 False、position 用错 account_id）。position_book 读函数（get_local_positions
-        #    等）仍读同一张 position 表，向后兼容。
+        # ── d. 成交账本写入（真相源，最先做——先落账再挂止盈，防 crash 窗口账账不符）──
+        # state-store-redesign §4.2：state_store 是真相源——insert_fill（增量幂等）+
+        # apply_fill_to_position（加权 avg）+ insert_trade_event(FILLED)。
         if direction in ("BUY", "SELL"):
             try:
                 # 确保 account 行存在（fill/trade_event FK 引用 account）
@@ -2801,9 +2748,53 @@ class TradingEngine:
                 _state_store.insert_trade_event(
                     _account_id, _trade_id, symbol, "FILLED",
                     order_id=order_id, qty=float(qty), price=float(price))
-            except Exception:
-                logger.exception("state_store fill/position/FILLED 写入失败 symbol=%s（软降级）", symbol)
+            except Exception as e:
+                # #5/A5：C-4 分级——敞口真相失真 = L1 停调度（宁可停不可带病跑）。
+                # 原软降级会让 fill/position 静默缺失，对账只能事后发现。
+                logger.exception("成交回报落账失败 symbol=%s order_id=%s", symbol, order_id)
+                raise _CriticalHalt(
+                    f"成交回报落账失败 symbol={symbol} order_id={order_id}"
+                    f"（fill/position 真相源失真）") from e
 
+        # ── c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（DB 幂等防重挂）──
+        # 卖单成交（direction=="SELL"）无需挂止盈（卖出即离场，无持仓可止盈）。
+        # 方向未知（None）保守不挂——宁可漏挂止盈让人工补，也不误把卖单当买单挂反方向单。
+        _tp_already = False
+        try:
+            _tp_already = _state_store.has_order(_account_id, today_tp, symbol, "TP1")
+        except Exception:
+            logger.exception("查 DB has_order(TP1) 失败 symbol=%s（保守跳过，防重复挂）", symbol)
+            _tp_already = True  # DB 查询失败保守视为已挂（宁可漏挂人工补，不超卖）
+        if direction == "BUY" and not _tp_already:
+            try:
+                await self._place_take_profit(symbol, qty, price, order_id)
+            except Exception:
+                # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
+                logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)
+
+        # ── a. 成交日志（CSV 审计旁路，失败不阻断）──
+        try:
+            from presentation.server.services.trading_service import record_live_trade
+            record_live_trade(
+                symbol,
+                direction or "TRADE",  # 方向未知时落 "TRADE"（保守中性，不误判买卖）
+                float(qty),
+                float(price),
+                strategy="neckline",
+                rationale=f"成交回报@{update.get('traded_time')}",
+                kind="fill",  # #3：真实成交，post_close 据此聚合净持仓
+            )
+        except Exception:
+            logger.exception("成交日志补写失败 symbol=%s（不影响后续通知）", symbol)
+
+        # ── b. 钉钉成交通知（fire_and_forget 不阻塞回调链）──
+        try:
+            from infra.notifier import NotificationManager, fire_and_forget
+            fire_and_forget(NotificationManager.get_default().notify_trade_event(
+                symbol, direction or "TRADE", float(qty), float(price),
+            ))
+        except Exception:
+            logger.exception("成交通知发送失败 symbol=%s", symbol)
     def _order_direction(self, order_id: str) -> Optional[str]:
         """从 ``gw._orders`` 查订单方向（BUY/SELL）。
 

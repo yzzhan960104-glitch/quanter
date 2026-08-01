@@ -1252,18 +1252,23 @@ def test_post_close_empty_book_passes_empty_dict(monkeypatch):
     assert captured["local"] == {}  # 空 dict 直传，不转 None
 
 
-def test_handle_order_update_writes_book(monkeypatch):
+def test_handle_order_update_writes_book(monkeypatch, tmp_path):
     """BUY 成交回报 → state_store.insert_fill 被调（方向 "BUY"）；order_id 缺失 _orders
     （direction=None）→ insert_fill 不调。
 
     state-store-redesign 后账本写入改 state_store.insert_fill（DB 真相源），不再调
     position_book.apply_fill（避免双写 fill 表）。双 case 诚实覆盖：
-      - 正向：order_type=23(STOCK_BUY) → direction "BUY" → insert_fill 被调一次、direction="BUY"；
-      - 反向：_orders 清空 → direction None → insert_fill 零调用（不猜方向误记）。
+      - 正向：DB order.side=buy → direction "BUY" → insert_fill 被调一次、direction="BUY"；
+      - 反向：DB 无行 + _orders 空 → direction None → insert_fill 零调用（不猜方向误记）。
     """
     from unittest.mock import MagicMock, AsyncMock, patch
     from trading import state_store
     from trading.engine import TradingEngine
+
+    # A5：账本写入已是真相源主链路（失败升 _CriticalHalt），必须隔离 DB 并建表
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
 
     # ---- 公共前置：成交回报报文 + 引擎实例 ----
     eng = TradingEngine()
@@ -1307,19 +1312,33 @@ def test_handle_order_update_writes_book(monkeypatch):
     if_none.assert_not_called()  # 方向 None 守门拦截，账本不写（防误记买当卖/卖当买）
 
 
-def test_handle_order_update_book_failure_soft_degrades(monkeypatch):
-    """apply_fill 抛异常 → 不阻断 a 日志/b 通知/c 止盈（独立 try-except 软降级）。"""
+def test_handle_order_update_book_failure_raises_l1(monkeypatch, tmp_path):
+    """账本写入（insert_fill）抛异常 → 升 _CriticalHalt 停调度（A5 · C-4 分级）。
+
+    原实现软降级会让 fill/position 静默缺失，对账只能事后发现；A5 改为敞口真相
+    失真 = L1 停调度（宁可停不可带病跑）。
+    """
+    import pytest
     from unittest.mock import MagicMock, AsyncMock, patch
     from trading import state_store
-    from trading.engine import TradingEngine
+    from trading.engine import TradingEngine, _CriticalHalt
+
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
 
     eng = TradingEngine()
     update = {
         "kind": "trade", "order_id": "999", "stock_code": "300001.SZ",
         "traded_volume": 100, "traded_price": 10.5, "state": "FILLED",
     }
+    # 方向来自 DB（#1 口径，不手塞 _orders）
     eng._gw = MagicMock()
-    eng._gw._orders = {"999": {"order_type": 23}}
+    eng._gw._orders = {}
+    state_store.upsert_account("direction_test", broker="qmt")
+    state_store.insert_order("2026-08-01_300001.SZ_OPEN_1", "direction_test_300001.SZ_2026-08-01",
+                             "direction_test", "2026-08-01", "300001.SZ", "buy", "OPEN", 100, 10.0,
+                             broker_oid="999", state="SUBMITTED")
 
     tp_called = []
     async def _tp(*a, **kw):
@@ -1333,9 +1352,9 @@ def test_handle_order_update_book_failure_soft_degrades(monkeypatch):
         NM.get_default.return_value = fake_mgr
         with patch.object(state_store, "insert_fill", side_effect=RuntimeError("db locked")), \
              patch.object(eng, "_place_take_profit", new=_tp):
-            asyncio.run(eng._handle_order_update(update))  # insert_fill 抛异常不应冒泡
-    # 止盈仍被调（账本失败不阻断 c 连）
-    assert tp_called == [True]
+            with pytest.raises(_CriticalHalt):
+                asyncio.run(eng._handle_order_update(update))
+    assert tp_called == [], "账本失败升 L1，止盈不应再执行"
 
 
 # ============================================================================

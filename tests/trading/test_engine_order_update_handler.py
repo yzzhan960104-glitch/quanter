@@ -661,3 +661,82 @@ def test_direction_unknown_returns_none(db):
     eng, gw = _make_real_chain_engine()
     gw._orders = {}
     assert eng._order_direction("999999") is None
+
+# ============================================================================
+# Task A5（live-mainchain-fixes）：全链路 e2e（真实回调 + 竞态）
+# ============================================================================
+
+def test_e2e_real_callback_chain_fills_and_places_tp(db, monkeypatch):
+    """真实回调链路：OPEN 单 → async_response → order(FILLED) → trade → 落账 + 挂 TP。
+
+    守元问题：全程驱动 on_* 回调，禁止手塞 _orders；_submit 用模块级 patch。
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from trading import state_store
+
+    eng, gw = _make_real_chain_engine()
+    aid, seq, real = "TEST_ACC", 7, 987654
+    oid = "2026-08-01_600000.SH_OPEN_7"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(oid, f"{aid}_600000.SH_2026-08-01", aid, "2026-08-01",
+                             "600000.SH", "buy", "OPEN", 100, 10.0,
+                             broker_oid=str(seq), state="SUBMITTED")
+    monkeypatch.setattr("trading.engine.trading_plan.load_plan",
+                        lambda d: {"orders": [{"order": {"symbol": "600000.SH"},
+                                               "take_profit": 11.0, "tp1": 10.8,
+                                               "tp1_portion": 0.0}]})
+    monkeypatch.setattr("trading.engine._submit",
+                        AsyncMock(return_value={"order_id": "tp_seq", "state": "SUBMITTED"}))
+    # ① async_response 回填 real
+    asyncio.run(_pump(gw, lambda: gw.on_order_stock_async_response(
+        SimpleNamespace(seq=seq, order_id=real))))
+    # ② order 事件推进 FILLED（累计量）
+    asyncio.run(_pump(gw, lambda: gw.on_stock_order(SimpleNamespace(
+        order_id=real, stock_code="600000.SH", order_status=56, order_type=23,
+        order_volume=100, traded_volume=100, traded_price=10.5, status_msg=""))))
+    # ③ trade 事件落账 + 挂 TP
+    asyncio.run(_pump(gw, lambda: gw.on_stock_trade(SimpleNamespace(
+        order_id=real, stock_code="600000.SH", traded_volume=100, traded_price=10.5,
+        traded_amount=1050.0, traded_time="20260801101000"))))
+    with state_store._connect(state_store._DEFAULT_DB) as con:
+        row = con.execute('SELECT state, filled_qty FROM "order" WHERE order_id=?', (oid,)).fetchone()
+        tp_row = con.execute("SELECT purpose, qty FROM \"order\" WHERE purpose='TP2'").fetchone()
+        fill_row = con.execute("SELECT COUNT(*) c FROM fill").fetchone()
+        pos_row = con.execute("SELECT qty FROM position WHERE symbol='600000.SH'").fetchone()
+    assert row["state"] == "FILLED" and row["filled_qty"] == 100
+    assert tp_row is not None and tp_row["qty"] == 100, "BUY 成交后应挂 TP2 100"
+    assert fill_row["c"] == 1 and pos_row["qty"] == 100, "成交应落 fill + position"
+
+
+def test_e2e_trade_before_async_response_race(db, monkeypatch):
+    """竞态：trade 先于 async_response → seq 反查兜底落账，随后回填不覆盖。"""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from trading import state_store
+
+    eng, gw = _make_real_chain_engine()
+    aid, seq, real = "TEST_ACC", 7, 987654
+    oid = "2026-08-01_600000.SH_OPEN_7"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(oid, f"{aid}_600000.SH_2026-08-01", aid, "2026-08-01",
+                             "600000.SH", "buy", "OPEN", 100, 10.0,
+                             broker_oid=str(seq), state="SUBMITTED")
+    gw._seq_to_real = {seq: real}
+    monkeypatch.setattr("trading.engine._submit",
+                        AsyncMock(return_value={"order_id": "tp_seq", "state": "SUBMITTED"}))
+    # trade 先到（async_response 未回填）：方向经 seq 反查 DB side 仍应落账
+    asyncio.run(_pump(gw, lambda: gw.on_stock_trade(SimpleNamespace(
+        order_id=real, stock_code="600000.SH", traded_volume=100, traded_price=10.5,
+        traded_amount=1050.0, traded_time="20260801101000"))))
+    with state_store._connect(state_store._DEFAULT_DB) as con:
+        fill_row = con.execute("SELECT COUNT(*) c FROM fill").fetchone()
+    assert fill_row["c"] == 1, "trade 先到也必须落账（seq 反查兜底）"
+    # async_response 后到：回填 real，不覆盖任何东西
+    asyncio.run(_pump(gw, lambda: gw.on_order_stock_async_response(
+        SimpleNamespace(seq=seq, order_id=real))))
+    with state_store._connect(state_store._DEFAULT_DB) as con:
+        row = con.execute('SELECT broker_oid FROM "order" WHERE order_id=?', (oid,)).fetchone()
+    assert row["broker_oid"] == str(real), "async_response 应回填 real"
