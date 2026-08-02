@@ -125,3 +125,25 @@ def reset_stale_running(path: Optional[str] = None) -> int:
     n = cur.rowcount
     conn.close()
     return n
+
+
+def snapshot_for_date(business_date: str, path: Optional[str] = None) -> list[dict]:
+    """读某业务日全部 job 的最新台账行（只读 SELECT，不改状态机）。
+
+    返回 [{name, status, started_at, finished_at, message}, ...]，按 job_name 升序。
+    无记录返 []。物理意图（spec §5.1）：GET /trading/jobs 消费——把 C-8 台账暴露给
+    前端驾驶舱，让研究员一眼看清「今天 pipeline/pre_open 跑没跑、为何没挂单（gate
+    拒因=message）」。纯只读，调用方应 try/except 包裹，读失败降级返空，不阻断观测。
+    """
+    conn = _connect(path)
+    rows = conn.execute(
+        "SELECT job_name, status, started_at, finished_at, message "
+        "FROM job_run WHERE business_date=? ORDER BY job_name",
+        (business_date,),
+    ).fetchall()
+    conn.close()
+    return [
+        {"name": r[0], "status": r[1], "started_at": r[2],
+         "finished_at": r[3], "message": r[4] or ""}
+        for r in rows
+    ]

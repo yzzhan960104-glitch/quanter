@@ -39,3 +39,38 @@ def test_reset_stale_running(tmp_path):
     assert n == 1
     assert job_ledger.latest_status("pipeline", "2026-07-31", path=db) == "failed"
     assert job_ledger.latest_status("pre_open", "2026-08-03", path=db) == "done"
+
+
+# ---- Task 8: snapshot_for_date 只读查询（GET /trading/jobs 数据源）----
+
+def test_snapshot_returns_all_jobs_for_date(tmp_path):
+    """同日多 job 全返 + 字段映射 job_name→name + 按 job_name 升序。"""
+    db = str(tmp_path / "job_run.db")
+    job_ledger.begin_run("pipeline", "2026-08-02", "t1", path=db)
+    job_ledger.finish_run("pipeline", "2026-08-02", "done", "ok", path=db)
+    job_ledger.begin_run("pre_open", "2026-08-02", "t2", path=db)
+    job_ledger.finish_run("pre_open", "2026-08-02", "skipped", "gate3 reject", path=db)
+    snap = job_ledger.snapshot_for_date("2026-08-02", path=db)
+    assert [j["name"] for j in snap] == ["pipeline", "pre_open"]
+    assert snap[0]["status"] == "done" and snap[0]["message"] == "ok"
+    assert snap[1]["status"] == "skipped" and snap[1]["started_at"] == "t2"
+
+
+def test_snapshot_empty_when_no_rows(tmp_path):
+    """init_db 后查空表，无任何记录时返 []（前端驾驶舱空态）。"""
+    db = str(tmp_path / "job_run.db")
+    job_ledger.init_db(db)
+    assert job_ledger.snapshot_for_date("2026-08-02", path=db) == []
+
+
+def test_snapshot_isolates_by_date(tmp_path):
+    """按业务日隔离——两日各一条，查 2026-08-02 只返 1 条。"""
+    db = str(tmp_path / "job_run.db")
+    job_ledger.begin_run("pipeline", "2026-08-01", "t1", path=db)
+    job_ledger.finish_run("pipeline", "2026-08-01", "done", path=db)
+    job_ledger.begin_run("pipeline", "2026-08-02", "t2", path=db)
+    job_ledger.finish_run("pipeline", "2026-08-02", "done", path=db)
+    snap = job_ledger.snapshot_for_date("2026-08-02", path=db)
+    assert len(snap) == 1
+    assert snap[0]["name"] == "pipeline"
+    assert snap[0]["started_at"] == "t2"
