@@ -1,22 +1,22 @@
 <script setup lang="ts">
 /**
- * 实盘中控大屏（路由 /live）
+ * 实盘中控大屏（路由 /live）—— Phase 1 · 前端只读化
  *
- * 八块：
- *   ① 一键熔断红色大按钮（el-popconfirm 二次确认 → POST /emergency_halt，幂等）
- *   ② 网关心跳灯（2s 轮询 /status，四态严格镜像后端，绝不本地推断）
- *   ③ 连接/断开按钮（Phase 2：disconnected→连接，live→断开）
- *   ④ 资产卡（Phase 2：总资产/可用资金，live 态 5s 轮询 /asset）
- *   ⑤ 下单面板（Phase 2：symbol/qty/side/price/dry_run 开关/confirm → /submit_order）
- *   ⑥ 订单列表（Phase 2：/orders 3s 轮询，每行带撤单按钮）
- *   ⑦ 持仓 Treemap（面积=市值占比，颜色=浮盈红绿）
- *   ⑧ 持仓明细表 + CSV 导出
+ * 仅保留只读观测能力，前端不再下发任何写指令：
+ *   ① 网关心跳灯（2s 轮询 /status，四态严格镜像后端，绝不本地推断）
+ *   ② 资产卡（live 态轮询 /asset：总资产/可用资金）
+ *   ③ 委托订单回报列表（/orders 轮询，只读，无撤单列）
+ *   ④ 持仓 Treemap（面积=市值占比，颜色=浮盈红绿）
+ *   ⑤ 持仓明细表
+ *   ⑥ CSV 导出（按日期区间，触发浏览器下载）
+ *
+ * 写操作（连接/断开/下单/撤单/紧急熔断）已撤除——
+ *   - 下单：盘前 pre_open cron（09:22）自动挂单，手动补挂走 trading/tools/trigger_pre_open_once.py
+ *   - 连接/熔断：赴 QMT 客户端或后端 cron/CLI
+ * 后端写接口保留（脚本/CLI/QMT 走），前端只读化仅收回 UI 入口与 API 调用。
  *
  * 红线：轮询定时器 onBeforeUnmount 清理（防内存泄漏）；状态完全跟随后端，
  *      断网/锁定立即反映（杜绝"虚假繁荣"）；非 live 态清空 asset/orders/positions。
- *
- * dry_run 双开关（spec §6.1）：前端 dry_run=true（默认）= 模拟（不真下单）；
- *      dry_run=false 走后端 risk_shield 10 关 + env 总闸。
  */
 import { ref, shallowRef, computed, onMounted, onBeforeUnmount, markRaw } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -26,8 +26,8 @@ import { TreemapChart } from 'echarts/charts'
 import { TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import {
-  getStatus, getPositions, emergencyHalt, exportLiveTrades,
-  connect, disconnect, submitOrder, cancelOrder, getOrders, getAsset,
+  getStatus, getPositions, exportLiveTrades,
+  getOrders, getAsset,
   type TradingStatus, type PositionRow, type OrderRow, type Asset,
 } from '../api/trading'
 import { logger } from '../utils/logger'
@@ -38,20 +38,6 @@ const status = ref<TradingStatus>({ connected: false, locked: false, mode: 'unav
 const positions = shallowRef<PositionRow[]>([])
 const asset = shallowRef<Asset>({ cash: 0, total_asset: 0, market_value: 0 })
 const orders = shallowRef<OrderRow[]>([])
-const halting = ref(false)
-const halted = ref(false)
-const connecting = ref(false)
-const submitting = ref(false)
-
-// 下单表单（dry_run 默认 true=模拟；price 默认 null 但表单填 5.0 便于联调）
-const orderForm = ref({
-  symbol: '510300.SH',
-  qty: 100,
-  side: 'buy' as 'buy' | 'sell',
-  price: 5.0,
-  dry_run: true,
-  confirm: false,
-})
 
 let statusTimer: ReturnType<typeof setInterval> | null = null
 
@@ -64,11 +50,6 @@ const modeDisplay = computed(() => {
     default: return { color: '#d29922', label: '网关未装配', bg: '#2d2410' }
   }
 })
-
-/** 下单模式标注（dry_run 开关旁显眼提示，防误触实盘） */
-const orderModeLabel = computed(() =>
-  orderForm.value.dry_run ? '【模拟】不真下单' : '【实盘】真下单（经 10 关挡板）'
-)
 
 async function fetchStatus() {
   try {
@@ -97,70 +78,7 @@ onBeforeUnmount(() => {
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null }
 })
 
-// ============ 连接/断开（Phase 2）============
-async function onConnect() {
-  connecting.value = true
-  try {
-    await connect()
-    ElMessage.success('网关已连接')
-    fetchStatus()
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail?.msg || e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('连接失败：' + detail + '（确认 miniQMT 已登录 + userdata_mini 路径正确）')
-  } finally {
-    connecting.value = false
-  }
-}
-
-async function onDisconnect() {
-  connecting.value = true
-  try {
-    await disconnect()
-    ElMessage.info('网关已断开')
-    fetchStatus()
-  } catch (e: any) {
-    ElMessage.error('断开失败：' + (e?.message || ''))
-  } finally {
-    connecting.value = false
-  }
-}
-
-// ============ 下单/撤单（Phase 2）============
-async function onSubmitOrder() {
-  submitting.value = true
-  try {
-    const r = await submitOrder({ ...orderForm.value })
-    if (r.state === 'DRY_RUN') {
-      ElMessage.info('模拟下单已记录（未真下单）：' + r.message)
-    } else {
-      ElMessage.success(`下单成功 order_id=${r.order_id} (${r.state})`)
-    }
-    fetchStatus()   // 立即刷新订单列表
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail?.msg || e?.response?.data?.detail || e?.message || ''
-    ElMessage.warning('下单被拒：' + detail)
-  } finally {
-    submitting.value = false
-  }
-}
-
-async function onCancelOrder(oid: string) {
-  try {
-    const r = await cancelOrder(oid)
-    ElMessage.info(`撤单已发出 (${r.state})`)
-    fetchStatus()
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail?.msg || e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('撤单失败：' + detail)
-  }
-}
-
-/** 订单行是否可撤（仅未成交/部成可撤；FILLED/CANCELLED/REJECTED 终态不可撤） */
-function isCancelable(state: string): boolean {
-  return state === 'SUBMITTED' || state === 'PARTIAL_FILLED'
-}
-
-/** 订单行显示用 id（QMT seq-str order_id） */
+/** 订单行显示用 id（QMT seq-str order_id；只读展示，不再用于撤单） */
 function orderId(row: OrderRow): string {
   return String(row.order_id ?? '')
 }
@@ -170,20 +88,6 @@ function sideLabel(row: OrderRow): string {
   if (row.side === 1) return '买'
   if (row.side === 2) return '卖'
   return '—'
-}
-
-async function onHalt() {
-  halting.value = true
-  try {
-    const r = await emergencyHalt()
-    halted.value = r.halted
-    ElMessage.warning(r.message)
-    fetchStatus()   // 立即刷新（应变为 vetoed_by_risk）
-  } catch (e: any) {
-    ElMessage.error('熔断请求失败：' + (e?.message || ''))
-  } finally {
-    halting.value = false
-  }
 }
 
 // ============ CSV 导出 + 运行中策略 ============
@@ -245,35 +149,15 @@ const treemapOption = computed(() => {
 
 <template>
   <div class="cockpit-shell">
-    <!-- 顶部状态条 + 连接按钮 + 熔断按钮 -->
+    <!-- 顶部状态条（只读：撤连接/熔断按钮，改显式 READ-ONLY 徽标） -->
     <div class="top-bar">
       <div class="heartbeat" :style="{ background: modeDisplay.bg }">
         <span class="dot" :style="{ background: modeDisplay.color }"></span>
         <span class="ht-label" :style="{ color: modeDisplay.color }">{{ modeDisplay.label }}</span>
         <span class="ht-mode">mode={{ status.mode }}</span>
       </div>
-      <!-- Phase 2：连接/断开按钮（disconnected→连接，live→断开） -->
-      <button
-        v-if="status.mode === 'disconnected'"
-        class="conn-btn connect" :disabled="connecting"
-        @click="onConnect"
-      >{{ connecting ? '连接中…' : '连接' }}</button>
-      <button
-        v-else-if="status.mode === 'live'"
-        class="conn-btn disconnect" :disabled="connecting"
-        @click="onDisconnect"
-      >{{ connecting ? '断开中…' : '断开' }}</button>
-      <el-popconfirm
-        title="确认触发紧急熔断？网关将锁定，后续发单一律拒绝。"
-        confirm-button-text="熔断" cancel-button-text="取消"
-        @confirm="onHalt"
-      >
-        <template #reference>
-          <button class="halt-btn" :disabled="halting || halted" :class="{ halted }">
-            {{ halted ? '已熔断' : '紧急熔断' }}
-          </button>
-        </template>
-      </el-popconfirm>
+      <!-- 前端只读徽标：下单/连接/熔断请赴 QMT 客户端或 cron -->
+      <span class="ro-tag" title="前端只读：下单/连接/熔断请赴 QMT 客户端或 cron">READ-ONLY 只读</span>
     </div>
 
     <!-- 资产卡 + 运行中策略 + CSV 导出 -->
@@ -304,45 +188,14 @@ const treemapOption = computed(() => {
       </div>
     </div>
 
-    <!-- Phase 2：下单面板 -->
-    <section class="order-panel">
-      <div class="chart-title">下单面板（<span :class="orderForm.dry_run ? 'mode-sim' : 'mode-live'">{{ orderModeLabel }}</span>）</div>
-      <el-form :model="orderForm" size="small" label-width="64px" class="order-form">
-        <el-form-item label="标的">
-          <el-input v-model="orderForm.symbol" placeholder="如 510300.SH" style="width: 160px" />
-        </el-form-item>
-        <el-form-item label="数量">
-          <el-input-number v-model="orderForm.qty" :min="100" :step="100" :precision="0" style="width: 140px" />
-        </el-form-item>
-        <el-form-item label="方向">
-          <el-radio-group v-model="orderForm.side">
-            <el-radio-button label="buy">买</el-radio-button>
-            <el-radio-button label="sell">卖</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="限价">
-          <el-input-number v-model="orderForm.price" :min="0.01" :precision="3" :step="0.1" style="width: 140px" />
-        </el-form-item>
-        <el-form-item label="模式">
-          <el-switch v-model="orderForm.dry_run" active-text="模拟" inactive-text="实盘" />
-        </el-form-item>
-        <el-form-item label="确认">
-          <el-checkbox v-model="orderForm.confirm">二次确认下单</el-checkbox>
-        </el-form-item>
-        <el-form-item>
-          <el-button
-            type="primary" :loading="submitting"
-            :disabled="status.mode !== 'live'"
-            @click="onSubmitOrder"
-          >{{ orderForm.dry_run ? '模拟下单' : '实盘下单' }}</el-button>
-          <span v-if="status.mode !== 'live'" class="hint">（需先连接网关）</span>
-        </el-form-item>
-      </el-form>
+    <!-- 前端只读提示：撤下单面板，改为指向 cron/CLI 的只读说明 -->
+    <section class="readonly-panel">
+      <span class="readonly-hint">下单由盘前 pre_open cron（09:22）自动挂单；手动补挂走 trading/tools/trigger_pre_open_once.py；任意单请赴 QMT 客户端。前端只读，不下单。</span>
     </section>
 
-    <!-- Phase 2：订单列表（含撤单按钮） -->
+    <!-- 委托订单回报（只读：撤「操作」撤单列，仅展示订单状态流水） -->
     <section class="orders-card">
-      <div class="chart-title">委托订单（实时回报；SUBMITTED/PARTIAL_FILLED 可撤）</div>
+      <div class="chart-title">委托订单（实时回报，只读）</div>
       <el-table :data="orders" size="small" empty-text="无订单（或网关未连接）" max-height="180">
         <el-table-column label="订单号" min-width="160">
           <template #default="{ row }">{{ orderId(row) }}</template>
@@ -365,15 +218,6 @@ const treemapOption = computed(() => {
             <el-tag size="small" :type="row.state === 'FILLED' ? 'success' : row.state === 'REJECTED' || row.state === 'FAILED' ? 'danger' : row.state === 'CANCELLED' ? 'info' : 'warning'">
               {{ row.state }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="100">
-          <template #default="{ row }">
-            <el-button
-              v-if="isCancelable(row.state)" size="small" type="danger" plain
-              @click="onCancelOrder(orderId(row))"
-            >撤单</el-button>
-            <span v-else class="hint">—</span>
           </template>
         </el-table-column>
       </el-table>
@@ -428,31 +272,6 @@ const treemapOption = computed(() => {
 .ht-label { font-size: 14px; font-weight: 700; }
 .ht-mode { font-size: 11px; color: var(--qt-text-secondary); margin-left: auto; font-family: ui-monospace, Menlo, monospace; }
 
-/* Phase 2：连接/断开按钮 */
-.conn-btn {
-  width: 110px; border: none; border-radius: 6px; cursor: pointer;
-  font-size: 14px; font-weight: 700; color: #fff; transition: all 0.15s;
-}
-.conn-btn.connect { background: linear-gradient(180deg, #26a69a, #00897b); }
-.conn-btn.disconnect { background: linear-gradient(180deg, #78909c, #546e7a); }
-.conn-btn:hover:not(:disabled) { transform: translateY(-1px); }
-.conn-btn:disabled { cursor: not-allowed; opacity: 0.6; }
-
-.halt-btn {
-  width: 180px; border: none; border-radius: 6px; cursor: pointer;
-  font-size: 15px; font-weight: 700; color: #fff;
-  background: linear-gradient(180deg, #ef5350, #c62828);
-  box-shadow: 0 0 16px rgba(239, 83, 80, 0.5);
-  transition: all 0.15s;
-}
-.halt-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 0 24px rgba(239, 83, 80, 0.8);
-}
-.halt-btn:disabled { cursor: not-allowed; opacity: 0.6; }
-.halt-btn.halted { animation: pulse 1.5s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-
 /* 工具条 */
 .toolbar {
   display: flex; align-items: center; gap: 20px; padding: 8px 12px;
@@ -464,19 +283,9 @@ const treemapOption = computed(() => {
 .stat-v { font-size: 13px; color: var(--qt-text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
 .export-group { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
-/* Phase 2：下单面板 */
-.order-panel {
-  background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 10px 14px;
-}
-.order-form { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; margin-top: 6px; }
-.order-form :deep(.el-form-item) { margin-bottom: 0; margin-right: 4px; }
-.mode-sim { color: var(--qt-warn); font-weight: 700; }
-.mode-live { color: var(--qt-up); font-weight: 700; }
-.hint { font-size: 11px; color: var(--qt-text-secondary); margin-left: 8px; }
-
 .chart-title { font-size: 13px; color: var(--qt-text-primary); margin-bottom: 6px; }
 
-/* Phase 2：订单列表 */
+/* 委托订单回报列表（只读） */
 .orders-card {
   background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 8px;
 }
@@ -489,4 +298,9 @@ const treemapOption = computed(() => {
 .positions-card {
   background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 8px;
 }
+
+/* Phase 1 · 前端只读化：写操作已撤，新增只读提示样式 */
+.ro-tag { font-size: 11px; font-weight: 700; color: #fff; background: #c62828; padding: 2px 8px; border-radius: 4px; margin-left: 8px; }
+.readonly-panel { background: var(--qt-bg-card); border: 1px solid var(--qt-border); border-radius: 6px; padding: 10px 14px; }
+.readonly-hint { font-size: 12px; color: var(--qt-text-secondary); line-height: 1.7; }
 </style>

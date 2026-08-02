@@ -1,13 +1,16 @@
 /**
- * 实盘交易 API 封装
+ * 实盘交易 API 封装（Phase 1 · 前端只读化）
  *
  * 对应后端 server/api/v1/trading.py。复用 client.ts 的 apiClient。
  *
  * 状态四态严格镜像后端：unavailable / disconnected / live / vetoed_by_risk，
  * 前端心跳灯完全跟随后端返回值，绝不本地推断（杜绝"虚假繁荣"）。
  *
- * Phase 2 新增（前端不感知券商）：connect/disconnect/submitOrder/
- * cancelOrder/getOrders/getAsset。dry_run 由前端按单控制（双开关语义见后端 risk_shield）。
+ * 【只读边界】前端不再保留任何写函数——connect/disconnect/submitOrder/
+ * cancelOrder/emergencyHalt 五个写入口已收回。后端写接口保留，仅供
+ * scripts/CLI/QMT 客户端调用；前端只做观测：心跳灯/持仓 Treemap/资产卡/
+ * 委托回报列表/CSV 导出/流水查询。写需求路径：pre_open cron（09:22 自动挂单）
+ * 或 trading/tools/trigger_pre_open_once.py 手动补挂，连接/熔断赴 QMT 客户端。
  */
 import { apiClient } from './client'
 
@@ -31,24 +34,7 @@ export interface PositionRow {
   entry_rationale?: string | null  // 建仓因子逻辑
 }
 
-/** 下单请求体（dry_run 默认 true=模拟；confirm 默认 false=需二次确认） */
-export interface SubmitOrderBody {
-  symbol: string
-  qty: number
-  side: 'buy' | 'sell'
-  price: number | null            // null=市价（限价单通常有值）
-  dry_run: boolean                // 前端控制：true=模拟（不真下单）
-  confirm: boolean                // 二次确认开关
-}
-
-/** 下单/撤单结果（state 取 OrderState.name 或 'DRY_RUN'） */
-export interface OrderResultRow {
-  order_id: string
-  state: string                   // SUBMITTED / DRY_RUN / FILLED / CANCELLED / REJECTED / FAILED / ...
-  message: string
-}
-
-/** 订单回报行（GET /orders 返回，QMT 用 seq-str order_id） */
+/** 订单回报行（GET /orders 返回，QMT 用 seq-str order_id；只读展示） */
 export interface OrderRow {
   kind?: string                   // order / trade / cancel_error / async_response
   order_id?: string | number      // QMT seq-str 订单号
@@ -79,11 +65,6 @@ export function getPositions(): Promise<{ positions: PositionRow[] }> {
   return apiClient.get('/api/v1/trading/positions', { timeout: 10000 })
 }
 
-/** POST /trading/emergency_halt：一键熔断（幂等；按钮二次确认后调用） */
-export function emergencyHalt(): Promise<{ halted: boolean; message: string }> {
-  return apiClient.post('/api/v1/trading/emergency_halt', {}, { timeout: 15000 })
-}
-
 /**
  * GET /trading/export：导出实盘成交 CSV（按日期），触发浏览器下载。
  *
@@ -105,29 +86,7 @@ export async function exportLiveTrades(start: string, end: string): Promise<void
   URL.revokeObjectURL(url)
 }
 
-// ============ Phase 2 新增：连接 / 下单 / 撤单 / 查询 ============
-
-/** POST /trading/connect：触发网关连接（后端 get_gateway QMT 唯一）。失败→503。 */
-export function connect(): Promise<{ connected: boolean; mode: string }> {
-  return apiClient.post('/api/v1/trading/connect', {}, { timeout: 30000 })
-}
-
-/** POST /trading/disconnect：断开网关。 */
-export function disconnect(): Promise<{ connected: boolean }> {
-  return apiClient.post('/api/v1/trading/disconnect', {}, { timeout: 10000 })
-}
-
-/** POST /trading/submit_order：下单（dry_run 前端可控）。挡板命中→409。 */
-export function submitOrder(body: SubmitOrderBody): Promise<OrderResultRow> {
-  return apiClient.post('/api/v1/trading/submit_order', body, { timeout: 15000 })
-}
-
-/** POST /trading/cancel_order/{orderId}：撤单。 */
-export function cancelOrder(orderId: string): Promise<OrderResultRow> {
-  return apiClient.post(`/api/v1/trading/cancel_order/${encodeURIComponent(orderId)}`, {}, { timeout: 10000 })
-}
-
-/** GET /trading/orders：本地订单回报流水（live 态轮询）。 */
+/** GET /trading/orders：本地订单回报流水（live 态轮询；前端只读展示）。 */
 export function getOrders(): Promise<{ orders: OrderRow[] }> {
   return apiClient.get('/api/v1/trading/orders', { timeout: 10000 })
 }
