@@ -6,14 +6,15 @@
  *
  * 交互：
  * - 进入即拉 /datasets；只要存在 syncing 态即每 3s 轮询一次，全部非 syncing 则停轮询省请求。
- * - 「立即同步」→ POST /sync/{key} → 乐观本地置 syncing → 等下一轮轮询接管真实状态。
  * - 离开页面 onBeforeUnmount 清定时器（防内存泄漏，与 ExplorerView 同纪律）。
+ *
+ * 只读化（Phase 1）：撤除「立即同步」手动触发入口——所有同步统一由后台 daemon/cron 编排，
+ * 前端只保留对 syncing 态收敛过程的自适应轮询观测（轮询有意义：后台同步仍会产生 syncing 态）。
  *
  * 反黑盒：数据集清单、状态判定全部来自后端，前端只做反射与轮询编排。
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getDatasets, triggerSync, type DatasetAsset } from '@/api/data'
+import { getDatasets, type DatasetAsset } from '@/api/data'
 import DatasetTable from '@/components/DatasetTable.vue'
 import { logger } from '@/utils/logger'
 
@@ -46,21 +47,6 @@ function ensurePolling() {
   }
 }
 
-async function onSync(key: string) {
-  // 乐观更新：本地立即置 syncing，避免等下个轮询周期才看到状态翻转
-  const row = datasets.value.find(d => d.key === key)
-  if (row) row.status = 'syncing'
-  try {
-    const r = await triggerSync(key)
-    ElMessage.success(r.message)
-    ensurePolling()
-  } catch (e: any) {
-    // 失败回滚（下一轮 fetch 会校正为真实态）
-    ElMessage.error('触发同步失败：' + (e?.message || ''))
-    fetchDatasets(true)
-  }
-}
-
 onMounted(async () => {
   await fetchDatasets()
   ensurePolling()
@@ -78,7 +64,7 @@ onBeforeUnmount(() => {
       <el-button size="small" :loading="loading" @click="fetchDatasets()">刷新</el-button>
     </div>
     <div class="table-wrap">
-      <DatasetTable :datasets="datasets" @sync="onSync" />
+      <DatasetTable :datasets="datasets" />
     </div>
   </div>
 </template>

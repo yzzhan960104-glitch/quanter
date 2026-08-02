@@ -2,7 +2,7 @@
  * DatasetTable 组件渲染单测（第 3 项「前端组件/单测」层 · 组件测试范例）。
  *
  * 物理意图：验证 @vue/test-utils + jsdom + Element Plus 全量注册的装配链路通——
- * 给定 props.datasets 断言「每行渲染同步按钮 / 点击 emit 正确 key / 空态 empty-text /
+ * 给定 props.datasets 断言「不再渲染立即同步按钮（Phase 1 只读化） / 空态 empty-text /
  * 状态徽章中文」。
  *
  * Why flushPromises：EP el-table 接收 :data 后异步经 store.commit('setData') 渲染行，
@@ -76,20 +76,11 @@ const mountWith = (datasets: DatasetAsset[]) =>
   })
 
 describe('DatasetTable 组件渲染', () => {
-  it('每条数据集渲染一个「立即同步」按钮（2 条数据集 → 2 个按钮）', async () => {
+  it('Phase 1 只读化：不再渲染「立即同步」按钮（操作列已撤）', async () => {
     const wrapper = mountWith([healthy, failed])
     await flushPromises()
     const syncBtns = wrapper.findAll('button').filter((b) => b.text().includes('立即同步'))
-    expect(syncBtns.length).toBe(2)
-  })
-
-  it('点击「立即同步」emit sync 事件，携带该行 key', async () => {
-    const wrapper = mountWith([healthy, failed])
-    await flushPromises()
-    const syncBtns = wrapper.findAll('button').filter((b) => b.text().includes('立即同步'))
-    await syncBtns[0].trigger('click')
-    expect(wrapper.emitted('sync')).toBeTruthy()
-    expect(wrapper.emitted('sync')![0]).toEqual(['daily'])
+    expect(syncBtns).toHaveLength(0)
   })
 
   it('空数据集时渲染 empty-text「暂无数据集」', () => {

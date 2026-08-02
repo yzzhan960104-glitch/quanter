@@ -27,19 +27,7 @@ export interface DatasetAsset {
   last_error: string | null
 }
 
-/** POST /data/sync/{key} 响应 */
-export interface SyncResponse {
-  key: string
-  status: DatasetStatus
-  message: string
-}
-
 /** 列出全部数据集资产（前端 DataLakeView 表格数据源） */
 export function getDatasets(): Promise<DatasetAsset[]> {
   return apiClient.get('/api/v1/data/datasets', { timeout: 10000 })
-}
-
-/** 触发某数据集同步（fire-and-forget：后端起 daemon 子进程，立即返回 syncing） */
-export function triggerSync(key: string): Promise<SyncResponse> {
-  return apiClient.post(`/api/v1/data/sync/${encodeURIComponent(key)}`, {}, { timeout: 10000 })
 }

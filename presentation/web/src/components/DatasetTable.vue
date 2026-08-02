@@ -2,17 +2,16 @@
 /**
  * 数据集资产表格（层级一）
  *
- * 消费 DatasetAsset[]，el-table 展示 8 列 + 操作列。
- * 状态列用 el-tag 五色徽章严格镜像后端 status；操作列「立即同步」按钮在
- * syncing 时禁用 + loading（防重复触发，与后端哨兵幂等保护双保险）。
+ * 消费 DatasetAsset[]，el-table 展示 7 列（数据集/数据源/市场/粒度/区间/最新同步/状态）。
+ * 状态列用 el-tag 五色徽章严格镜像后端 status。
  * failed 态用 el-tooltip 悬浮展示 last_error 尾部，无需额外列。
  *
- * 反黑盒：表格数据/列名全部来自后端 DatasetAsset，本组件零硬编码数据集名。
+ * 只读化（Phase 1）：撤除原「操作」列与「立即同步」按钮——同步统一由后台 daemon/cron 编排，
+ * 前端不再提供手动触发入口。本组件零硬编码数据集名。
  */
 import type { DatasetAsset, DatasetStatus } from '@/api/data'
 
 defineProps<{ datasets: DatasetAsset[] }>()
-const emit = defineEmits<{ (e: 'sync', key: string): void }>()
 
 /** 状态 → el-tag type 映射（语义色，沿用 EP 默认 success/warning/danger/info/primary） */
 const TAG_TYPE = {
@@ -61,20 +60,6 @@ const tagLabel = (s: DatasetStatus) => TAG_LABEL[s]
         <el-tag v-else :type="tagType(row.status)" size="small" effect="dark">
           {{ tagLabel(row.status) }}
         </el-tag>
-      </template>
-    </el-table-column>
-    <el-table-column label="操作" width="120" fixed="right">
-      <template #default="{ row }">
-        <el-button
-          size="small"
-          type="primary"
-          plain
-          :loading="row.status === 'syncing'"
-          :disabled="row.status === 'syncing'"
-          @click="emit('sync', row.key)"
-        >
-          立即同步
-        </el-button>
       </template>
     </el-table-column>
   </el-table>
