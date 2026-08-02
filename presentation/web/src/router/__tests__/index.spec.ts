@@ -16,7 +16,7 @@ describe('router 路由表', () => {
   })
   it('保留核心只读路由', () => {
     const paths = router.getRoutes().map((r) => r.path)
-    for (const p of ['/caisen', '/lab', '/dashboard', '/data', '/live', '/cockpit']) {
+    for (const p of ['/caisen', '/lab', '/dashboard', '/data', '/live', '/cockpit', '/jobs']) {
       expect(paths).toContain(p)
     }
   })

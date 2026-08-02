@@ -1,13 +1,15 @@
 /**
  * Vue Router 配置（蔡森形态学流水线 Phase 3 Task 8：首页改指 /caisen）
  *
- * 当前路由（6 条，Phase 1 · 前端只读化已撤 /review）：
+ * 当前路由（7 条，Phase 1 · 前端只读化已撤 /review；Phase 2 Task 12 新增 /jobs）：
  * - /           → 重定向 /caisen（蔡森筛选作为研究/配置首屏，形态学流水线入口）
  * - /caisen     → CaisenScreenView（蔡森形态学筛选：Tick 缓存 → MA/无敌量/KZ → 结果展示）
  * - /lab        → ParamLabView（参数实验室：异步回测 master-detail + 轮询 + 参数调优，Spec 2）
  * - /dashboard  → DashboardView（宏观·板块驾驶舱）
  * - /live       → LiveCockpitView（实盘交易中控：QMT 连接 + 下单 + 订单/资产）
  * - /data       → DataLakeView（数据湖资产白盒反射）
+ * - /cockpit    → CockpitView（综合看板：聚合流水/日志/回测对比/心跳/资金/数据健康）
+ * - /jobs       → JobCockpitView（作业驾驶舱：当天 pipeline/pre_open 台账 + 启动补跑四态，Phase 2）
  *
  * Why 撤 /review（Phase 1 · 前端只读化 Task 5）：
  * - ReviewView 唯一功能 diagnose 是写操作（POST LLM 推理），撤后变空壳；
@@ -25,6 +27,8 @@ const DashboardView = () => import('../views/DashboardView.vue')
 const DataLakeView = () => import('../views/DataLakeView.vue')
 // 综合看板（Task 12 · 一期观测运营层前端收官）：聚合流水/日志/回测对比/心跳/资金/数据健康。
 const CockpitView = () => import('../views/CockpitView.vue')
+// 作业驾驶舱（Phase 2 · Task 12 收官）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
+const JobCockpitView = () => import('../views/JobCockpitView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -38,6 +42,8 @@ const router = createRouter({
     { path: '/live', name: 'live', component: LiveCockpitView },
     // 综合看板（Task 12）：实盘观测俯瞰入口，聚合心跳/资金/数据健康/流水/日志/回测对比。
     { path: '/cockpit', name: 'cockpit', component: CockpitView },
+    // 作业驾驶舱（Phase 2 · Task 12）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
+    { path: '/jobs', name: 'jobs', component: JobCockpitView },
     { path: '/data', name: 'data', component: DataLakeView },
   ],
 })
