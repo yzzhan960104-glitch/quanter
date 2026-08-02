@@ -138,7 +138,7 @@ def register_server(user: str | None = None) -> None:
     if rc != 0:
         # schtasks ONSTART 在无密码时 /Create 会失败（session 0 需用户凭证）。提示运维
         # 手动带 /RP 跑一次（密码不进代码，避免硬编码 + git 泄露）。
-        print("⚠️ schtasks ONSTART 需用户密码，手动跑：\n"
+        print("[!] schtasks ONSTART 需用户密码，手动跑：\n"
               "   schtasks /Create /SC ONSTART /TN QuanterServer "
               f"/TR \"{ROOT / 'scripts' / 'start_server.bat'}\" /RU {user} /RP <密码> /F")
 

@@ -74,7 +74,7 @@ def main() -> int:
             print(f"⚠️ {bot} 播报失败 rc={rc}（继续其余 bot）")
     print("\n=== brief_all 汇总 ===")
     for bot, rc in rcs:
-        print(f"  {'✅' if rc == 0 else '❌'} {bot}: rc={rc}")
+        print(f"  {'OK' if rc == 0 else 'FAIL'} {bot}: rc={rc}")
     return 1 if any(rc != 0 for _, rc in rcs) else 0
 
 
