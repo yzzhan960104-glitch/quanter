@@ -6,10 +6,13 @@
 import pytest
 from fastapi.testclient import TestClient
 
+# Task 10：jobs 端点用例需要直接 patch app.state（TestClient 不跑 lifespan，
+# state 上没有 trading_engine/catchup_task；用 monkeypatch 注入鸭子类型 _FakeTask）。
+from presentation.server.main import app
+
 
 @pytest.fixture
 def client():
-    from presentation.server.main import app
     return TestClient(app)
 
 
@@ -93,3 +96,53 @@ def test_connect_unavailable_503(client, monkeypatch):
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     r = client.post("/api/v1/trading/connect")
     assert r.status_code == 503
+
+
+# ============================================================================
+# Phase 2 Task 10：作业驾驶舱 GET /jobs 端点（TDD）
+# ============================================================================
+# _FakeTask 鸭子类型：模拟 asyncio.Task 的 done/exception/result 三态，
+# 与 tests/test_trading_service.py 中 catchup 用例同构（service 层 _resolve_catchup_state
+# 只 probe 这三个方法，不依赖真实 Task 继承链）。
+class _FakeTask:
+    def __init__(self, done, exc=None, result=None):
+        self._done, self._exc, self._res = done, exc, result
+    def done(self): return self._done
+    def exception(self): return self._exc
+    def result(self): return self._res
+
+
+def test_jobs_default_date_today(client, monkeypatch):
+    """GET /jobs 无 date → date 缺省 = clock.today()；无 catchup_task → not_started。"""
+    from trading import clock
+    # 清掉可能残留的 catchup_task（TestClient 不跑 lifespan，state 本来就没它）
+    monkeypatch.setattr(app.state, "catchup_task", None, raising=False)
+    r = client.get("/api/v1/trading/jobs")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["date"] == clock.today()
+    assert body["catchup"]["state"] == "not_started"
+    assert isinstance(body["jobs"], list)
+
+
+def test_jobs_catchup_running(client, monkeypatch):
+    """注入未完成 catchup_task → state=running。"""
+    monkeypatch.setattr(app.state, "catchup_task", _FakeTask(done=False), raising=False)
+    r = client.get("/api/v1/trading/jobs")
+    assert r.json()["catchup"]["state"] == "running"
+
+
+def test_jobs_catchup_done(client, monkeypatch):
+    """注入已完成 catchup_task → state=done + result 透传。"""
+    res = {"pipeline": True, "brief": False, "pre_open": False, "pre_open_note": "", "error": None}
+    monkeypatch.setattr(app.state, "catchup_task", _FakeTask(done=True, result=res), raising=False)
+    body = client.get("/api/v1/trading/jobs").json()
+    assert body["catchup"]["state"] == "done"
+    assert body["catchup"]["result"] == res
+
+
+def test_jobs_with_explicit_date(client, monkeypatch):
+    """GET /jobs?date=2026-07-31 → date 原样回显。"""
+    monkeypatch.setattr(app.state, "catchup_task", None, raising=False)
+    r = client.get("/api/v1/trading/jobs?date=2026-07-31")
+    assert r.json()["date"] == "2026-07-31"

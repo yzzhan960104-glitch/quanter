@@ -18,15 +18,17 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from pydantic import BaseModel
+from trading import clock  # Phase 2 Task 10：jobs 端点 date 缺省取 clock.today()（单一时间源 C-6）
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from presentation.server.services.trading_service import (
     emergency_halt,
     export_trades,
+    get_jobs,  # Phase 2 Task 10：作业驾驶舱聚合（job 台账 + catchup 四态）
     get_positions,
     get_status,
     connect_gateway,
@@ -177,3 +179,25 @@ async def orders_endpoint() -> dict:
 async def asset_endpoint() -> dict:
     """查询资金资产（现金/总资产/市值）。无网关或未连接 → 空 dict（200）。"""
     return {"asset": await get_asset()}
+
+
+# ============================================================================
+# Phase 2 Task 10：作业驾驶舱只读端点
+# ============================================================================
+@router.get("/jobs", summary="作业驾驶舱：当天 job 台账 + 启动补跑状态（只读）")
+async def jobs_endpoint(
+    request: Request,
+    date: str | None = Query(None, description="业务日 YYYY-MM-DD，缺省=clock.today()"),
+) -> dict:
+    """聚合当天 pipeline/pre_open 台账 + 启动补跑 catchup 四态（spec §5）。
+
+    只读、无副作用。台账读失败降级 jobs:[] + warning（service 层处理），绝不 5xx。
+    engine / catchup_task 从 app.state 取（lifespan 装配；未装配时 get_jobs 降级 not_started）。
+
+    Why 不走 run_in_threadpool：get_jobs 是同步快函数（一次 sqlite SELECT + task.done() probe），
+    与 status() 直调同步 get_status() 同纪律；丢线程池反增调度开销。
+    Why date 缺省用 clock.today() 而非 datetime.now：C-6 统一时间源，避免读写口径漂移。
+    """
+    engine = getattr(request.app.state, "trading_engine", None)
+    catchup_task = getattr(request.app.state, "catchup_task", None)
+    return get_jobs(date or clock.today(), engine, catchup_task)
