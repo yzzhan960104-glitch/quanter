@@ -263,3 +263,121 @@ def test_emergency_halt_sets_risk_halt(monkeypatch):
     assert r["halted"] is True
     assert gw._risk_halted is True, "emergency_halt 必须置 risk_halted"
     assert gw._lock_down is True and gw._connected is False
+
+
+# ============ Task 9：get_jobs（聚合台账 + catchup 四态） ============
+# 设计意图：catchup 状态解析走 duck typing（仅依赖 done/exception/result），
+# 测试用 _FakeTask 注入，无需真起 asyncio 事件循环——保持单测极速且无副作用。
+class _FakeTask:
+    """模拟 asyncio.Task 的最小鸭子类型（仅实现 _resolve_catchup_state 探测的三方法）。
+
+    done/has_exc/result_obj 三参数覆盖四态：
+    - not_started：测试侧直接传 catchup_task=None（不走 _FakeTask）
+    - running：done=False
+    - done：done=True, has_exc=False, result_obj=<dict>
+    - failed：done=True, has_exc=True, result_obj=<Exception 实例>
+    """
+
+    def __init__(self, *, done: bool, has_exc: bool = False, result_obj=None):
+        self._done = done
+        self._has_exc = has_exc
+        self._result_obj = result_obj
+
+    def done(self):
+        return self._done
+
+    def exception(self):
+        if not self._done:
+            raise RuntimeError("result is not ready")  # 与真 asyncio.Task 同语义
+        return self._result_obj if self._has_exc else None
+
+    def result(self):
+        if not self._done:
+            raise RuntimeError("result is not ready")  # 与真 asyncio.Task 同语义
+        if self._has_exc:
+            raise self._result_obj  # 失败态取 result 即重抛异常（asyncio.Task 同语义）
+        return self._result_obj
+
+
+def test_get_jobs_catchup_not_started(monkeypatch):
+    """catchup_task=None → catchup.state='not_started'，jobs 取台账快照。"""
+    from presentation.server.services import trading_service
+    import trading.job_ledger as job_ledger
+
+    fake_jobs = [{"name": "pipeline", "status": "done"}]
+    monkeypatch.setattr(job_ledger, "snapshot_for_date", lambda d: fake_jobs)
+
+    out = trading_service.get_jobs("2026-08-02", engine=None, catchup_task=None)
+    assert out["date"] == "2026-08-02"
+    assert out["jobs"] == fake_jobs
+    assert out["catchup"] == {"state": "not_started", "result": None}
+    assert "warning" not in out
+
+
+def test_get_jobs_catchup_running(monkeypatch):
+    """catchup_task 未 done → catchup.state='running'。"""
+    from presentation.server.services import trading_service
+    import trading.job_ledger as job_ledger
+
+    monkeypatch.setattr(job_ledger, "snapshot_for_date", lambda d: [])
+    task = _FakeTask(done=False)
+
+    out = trading_service.get_jobs("2026-08-02", engine=None, catchup_task=task)
+    assert out["catchup"] == {"state": "running", "result": None}
+
+
+def test_get_jobs_catchup_done(monkeypatch):
+    """catchup_task done 且无异常 → catchup.state='done'，result 透传 run_startup_catchup 返回 dict。"""
+    from presentation.server.services import trading_service
+    import trading.job_ledger as job_ledger
+
+    monkeypatch.setattr(job_ledger, "snapshot_for_date", lambda d: [])
+    # 真实 run_startup_catchup 返回结构（spec §C-8）
+    expected_result = {
+        "pipeline": True,
+        "brief": False,
+        "pre_open": False,
+        "pre_open_note": "",
+        "error": None,
+    }
+    task = _FakeTask(done=True, has_exc=False, result_obj=expected_result)
+
+    out = trading_service.get_jobs("2026-08-02", engine=None, catchup_task=task)
+    assert out["catchup"]["state"] == "done"
+    assert out["catchup"]["result"] == expected_result
+
+
+def test_get_jobs_catchup_failed(monkeypatch):
+    """catchup_task done 且抛异常 → catchup.state='failed'，result={'error': <str(exc)>}。"""
+    from presentation.server.services import trading_service
+    import trading.job_ledger as job_ledger
+
+    monkeypatch.setattr(job_ledger, "snapshot_for_date", lambda d: [])
+    boom = RuntimeError("启动补跑崩了")
+    task = _FakeTask(done=True, has_exc=True, result_obj=boom)
+
+    out = trading_service.get_jobs("2026-08-02", engine=None, catchup_task=task)
+    assert out["catchup"]["state"] == "failed"
+    assert out["catchup"]["result"] == {"error": "启动补跑崩了"}
+
+
+def test_get_jobs_ledger_read_failure_warns(monkeypatch):
+    """台账读失败（snapshot_for_date 抛 Exception）→ jobs=[] + warning，不向上抛。
+
+    Why：台账是操作元数据，绝不阻断观测主路径（spec §5.1）——
+    即便 SQLite 被锁/文件损坏，GET /trading/jobs 仍要返回 catchup 状态让前端可见。
+    """
+    from presentation.server.services import trading_service
+    import trading.job_ledger as job_ledger
+
+    monkeypatch.setattr(
+        job_ledger, "snapshot_for_date",
+        lambda d: (_ for _ in ()).throw(RuntimeError("db locked")),
+    )
+
+    out = trading_service.get_jobs("2026-08-02", engine=None, catchup_task=None)
+    assert out["jobs"] == []
+    assert "warning" in out
+    assert "db locked" in out["warning"]
+    # catchup 探测不受台账读失败影响
+    assert out["catchup"] == {"state": "not_started", "result": None}

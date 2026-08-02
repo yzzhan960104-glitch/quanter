@@ -598,3 +598,63 @@ async def get_asset() -> dict:
         "total_asset": float(getattr(asset, "total_asset", 0.0)),
         "market_value": float(getattr(asset, "market_value", 0.0)),
     }
+
+
+# ============================================================================
+# Phase 2 · 作业驾驶舱：get_jobs 聚合当天 job 台账 + 启动补跑 catchup 四态
+# ============================================================================
+def _resolve_catchup_state(task) -> dict:
+    """把启动补跑 asyncio.Task 探测为 {state, result}（spec §5.2 catchup 四态）。
+
+    纯函数，仅调 task.done()/exception()/result()（duck typing）——不依赖 asyncio
+    事件循环，故测试可用 fake 对象注入（无需起真 loop，保持单测极速且无副作用）。
+    状态分支：
+    - task is None → not_started（lifespan 未起 catchup task，如冷启动首帧）
+    - 未 done → running（asyncio.create_task 派发后、未完成的窗口）
+    - exception 非 None → failed，result={'error': str(exc)}（前端可直显失败原因）
+    - 否则 → done，result=run_startup_catchup 真实返回的 dict（pipeline/brief/pre_open/...）
+
+    Why 不缓存 task 引用做轮询：本函数在 GET /trading/jobs 每次请求时被调用，
+    现场探测一次即返——状态推进由 asyncio 自身完成，本函数无状态、无副作用。
+    """
+    if task is None:
+        return {"state": "not_started", "result": None}
+    if not task.done():
+        return {"state": "running", "result": None}
+    exc = task.exception()
+    if exc is not None:
+        return {"state": "failed", "result": {"error": str(exc)}}
+    return {"state": "done", "result": task.result()}
+
+
+def get_jobs(date: str, engine, catchup_task) -> dict:
+    """聚合当天 job 台账 + 启动补跑 task 状态（GET /trading/jobs 消费，spec §5.1）。
+
+    返回 {"date","jobs":[...],"catchup":{"state","result"},"warning"?}：
+    - jobs：job_ledger.snapshot_for_date(date) 当天台账最新行（C-8 引入）
+    - catchup：_resolve_catchup_state(catchup_task) 启动补跑四态
+    - warning：仅台账读失败时出现（job 台账是操作元数据，绝不阻断观测主路径——
+      即便 SQLite 被锁/文件损坏，前端驾驶舱仍要看见 catchup 状态，避免盲区）
+
+    Why `from trading import job_ledger` 写在函数体内而非模块顶：测试需 monkeypatch
+    job_ledger.snapshot_for_date，函数体内 import 在调用时取最新引用——让 patch
+    一定能命中（若在模块顶 import，monkeypatch 改的是 trading.job_ledger 上的属性，
+    本模块的本地引用会"漏过"patch，这是 Python import 语义的经典坑）。
+
+    engine 参数当前未用：预留未来读 engine 内嵌可观测态（如当前持仓/挂单数），
+    router 从 app.state 传入；本期 get_jobs 保持纯聚合层，不引入对 engine 内部结构的
+    耦合。本函数无状态，全部信息来自入参与 job_ledger。
+    """
+    from trading import job_ledger
+    out: dict = {"date": date, "jobs": [],
+                 "catchup": {"state": "not_started", "result": None}}
+    try:
+        out["jobs"] = job_ledger.snapshot_for_date(date)
+    except Exception as e:
+        # 台账读失败降级：jobs=[] + warning，logger.exception 打全栈便于事后排查
+        # （"db locked" 等偶发故障不阻断观测，但要在日志里留痕给运维）
+        logger.exception("job 台账读取失败（GET /jobs 降级返空，不阻断观测）")
+        out["jobs"] = []
+        out["warning"] = f"job 台账读取失败：{e}"
+    out["catchup"] = _resolve_catchup_state(catchup_task)
+    return out
