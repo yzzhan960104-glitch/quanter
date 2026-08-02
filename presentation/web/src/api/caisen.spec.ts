@@ -25,38 +25,30 @@ vi.mock('./client', () => ({
 
 import { apiClient } from './client'
 import {
-  scan, listPlans, getPlan, reviewPlan, activatePlan, getChart,
+  listPlans, getPlan, getChart,
   submitReplayAsync, listReplayTasks, getReplayTask, cancelReplayTask, deleteReplayTask,
 } from './caisen'
+// Phase 1 · 前端只读化：scan/reviewPlan/activatePlan 三写函数已从 caisen.ts 撤除，
+// 对应契约用例同步移除（候选→EOD 自动产出 / 审核→veto_plan.py / 激活→pre_open cron）。
 
 const mockPost = vi.mocked(apiClient.post)
 const mockGet = vi.mocked(apiClient.get)
-const mockPatch = vi.mocked(apiClient.patch)
+// mockPatch 已随 reviewPlan 用例移除（Phase 1 · 前端只读化）；apiClient.patch 仍保留在 mock
+// 工厂里以如实反映 client.ts 的真实结构，避免测试侧结构漂移。
 const mockDelete = vi.mocked(apiClient.delete)
 
 beforeEach(() => {
   mockPost.mockReset()
   mockGet.mockReset()
-  mockPatch.mockReset()
   mockDelete.mockReset()
   // facade 期望拿到 response.data（client.ts 响应拦截器剥壳），但 client 被 mock 绕过拦截器，
   // 这里直接 resolve 一个占位值，让 await 不抛；断言只关心「如何调用」而非「返回什么」。
   mockPost.mockResolvedValue([] as any)
   mockGet.mockResolvedValue([] as any)
-  mockPatch.mockResolvedValue({} as any)
   mockDelete.mockResolvedValue({} as any)
 })
 
 describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
-  it('scan: POST /api/v1/caisen/scan，body 透传，timeout 30000', async () => {
-    await scan({ date: '2026-01-01', universe: ['510300.SH'] })
-    expect(mockPost).toHaveBeenCalledWith(
-      '/api/v1/caisen/scan',
-      { date: '2026-01-01', universe: ['510300.SH'] },
-      { timeout: 30000 },
-    )
-  })
-
   it('listPlans() 无 status：GET /api/v1/caisen/plans，params 空，timeout 10000', async () => {
     await listPlans()
     expect(mockGet).toHaveBeenCalledWith('/api/v1/caisen/plans', { params: {}, timeout: 10000 })
@@ -75,26 +67,14 @@ describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
     expect(mockGet).toHaveBeenCalledWith('/api/v1/caisen/plans/plan%2F1', { timeout: 10000 })
   })
 
-  it('reviewPlan：PATCH /api/v1/caisen/plans/{id}，body 透传', async () => {
-    await reviewPlan('p1', { action: 'approve', edits: { stop_loss: 10 } })
-    expect(mockPatch).toHaveBeenCalledWith(
-      '/api/v1/caisen/plans/p1',
-      { action: 'approve', edits: { stop_loss: 10 } },
-      { timeout: 10000 },
-    )
-  })
-
-  it('activatePlan：POST .../activate，空 body {}', async () => {
-    await activatePlan('p1')
-    expect(mockPost).toHaveBeenCalledWith('/api/v1/caisen/plans/p1/activate', {}, { timeout: 10000 })
-  })
-
   it('getChart：GET .../chart，timeout 15000（图表数据装配放宽）', async () => {
     await getChart('p1')
     expect(mockGet).toHaveBeenCalledWith('/api/v1/caisen/plans/p1/chart', { timeout: 15000 })
   })
 
   // 注：老同步 runReplay（POST /caisen/replay）用例随 Spec 2 Task 8 /caisen 回放 tab 下线移除。
+  // Phase 1 · 前端只读化：scan / reviewPlan / activatePlan 三写函数用例同步移除——
+  // 候选→EOD 自动产出 / 审核→veto_plan.py / 激活→pre_open cron。
   // 回测能力由下方异步任务 5 端点承接（/lab 消费）。
 
   // ============ 异步回测任务（Spec 2 Task 2；对应 Spec 1 后端 5 端点） ============

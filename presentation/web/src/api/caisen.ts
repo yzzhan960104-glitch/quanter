@@ -1,5 +1,5 @@
 /**
- * 蔡森形态学流水线 API 封装（Phase 3 · Task 7）
+ * 蔡森形态学流水线 API 封装（Phase 3 · Task 7；Phase 1 · 前端只读化撤写）。
  *
  * 对应后端 server/api/v1/caisen.py。复用 client.ts 的 apiClient（单例）。
  *
@@ -8,11 +8,11 @@
  *   TS 函数，供 CaisenScreenView 消费。零业务逻辑，纯 HTTP 通道 + 类型守护。
  *
  *   后端契约（server/schemas/caisen.py）：
- *     POST   /caisen/scan                     → List[CandidatePlan]
+ *     POST   /caisen/scan                     → List[CandidatePlan]        ❌ 前端已撤（Phase 1）
  *     GET    /caisen/plans?status=            → List[CandidatePlan]
  *     GET    /caisen/plans/{plan_id}          → CandidatePlan
- *     PATCH  /caisen/plans/{plan_id}          → CandidatePlan（approve/reject + edits）
- *     POST   /caisen/plans/{plan_id}/activate → CandidatePlan（APPROVED → ARMED）
+ *     PATCH  /caisen/plans/{plan_id}          → CandidatePlan              ❌ 前端已撤（Phase 1）
+ *     POST   /caisen/plans/{plan_id}/activate → CandidatePlan              ❌ 前端已撤（Phase 1）
  *     GET    /caisen/plans/{plan_id}/chart    → ChartData（candles/markers/priceLines）
  *     GET    /caisen/positions                → { positions: [] }（占位）
  *     GET    /caisen/config/schema            → Record<string,unknown>（/lab 参数表单反射用）
@@ -23,6 +23,11 @@
  *     DELETE /caisen/replay/tasks/{id}        → { ok: true }
  *   注：老同步 POST /caisen/replay + GET/DELETE /caisen/replay/runs 端点后端仍保留（异步
  *   worker + 潜在 CLI 入口复用），但前端在 Spec 2 Task 8 后不再消费（老 /caisen 回放 tab 已下线）。
+ *
+ * Phase 1 · 前端只读化撤写记录：
+ *   scan/reviewPlan/activatePlan 三函数及 ScanRequestBody/PlanReviewBody 两类型已撤除。
+ *   三个后端端点仍存活（运维/CLI 入口复用），仅前端不再消费。候选计划产出归 EOD 事件链，
+ *   审核否决归 veto_plan.py，激活挂单归 pre_open cron（09:22）。CaisenScreenView 退化为纯观测。
  *
  * 状态机（与 storage 状态机严格同源，前端只读消费，不本地推断）：
  *   PENDING_APPROVAL → APPROVED → ARMED → FILLED → CLOSED
@@ -180,18 +185,9 @@ export interface ReplayReport {
 
 // ============ 请求体类型 ============
 
-/** POST /caisen/scan 请求体（对齐 ScanRequest）。 */
-export interface ScanRequestBody {
-  date: string                                // 扫描交易日（YYYY-MM-DD）
-  universe: string[]                          // 标的池（symbol 列表）
-  cfg_override?: Record<string, unknown>      // 策略参数增量覆盖（空 = 默认配置）
-}
-
-/** PATCH /caisen/plans/{plan_id} 请求体（对齐 PlanReview）。 */
-export interface PlanReviewBody {
-  action: 'approve' | 'reject'
-  edits?: Record<string, unknown>             // 字段微调（仅 approve 时生效）
-}
+// Phase 1 · 前端只读化：ScanRequestBody / PlanReviewBody 已随 scan/reviewPlan/activatePlan
+// 三函数一并撤除。候选计划由 EOD 事件链自动产出；审核否决走 veto_plan.py；激活挂单由
+// pre_open cron（09:22）自动执行。后端契约端点暂留，供运维/CLI 入口复用。
 
 // ============ 异步回测任务类型（Spec 1 SQLite 任务表，Spec 2 /lab 消费） ============
 
@@ -259,15 +255,11 @@ export interface CancelResponse {
 
 // ============ API 封装（仿 trading.ts 风格，超时按端点特性覆写） ============
 
-/**
- * POST /caisen/scan：触发当日扫描（screener → plan.generate → 落盘）。
- *
- * 物理意图：蔡森流水线起点。前端输入扫描日 + 标的池 → 后端串接算法 → 返回候选列表。
- * 扫描含 DataFrame 重计算，超时放宽到 30s（默认 60s 也够，但显式标注可观察）。
- */
-export function scan(body: ScanRequestBody): Promise<CandidatePlan[]> {
-  return apiClient.post('/api/v1/caisen/scan', body, { timeout: 30000 })
-}
+// Phase 1 · 前端只读化：以下三个写函数已撤除——
+//   - scan(body)              → POST   /caisen/scan                    （候选改由 EOD 事件链自动产出）
+//   - reviewPlan(id, body)    → PATCH  /caisen/plans/{id}              （审核否决走 veto_plan.py）
+//   - activatePlan(id)        → POST   /caisen/plans/{id}/activate     （激活由 pre_open cron 09:22 自动执行）
+// 后端契约端点暂留，供运维/CLI 入口复用；前端 CaisenScreenView 退化为纯观测。
 
 /**
  * GET /caisen/plans：读盘 + 可选 status 过滤。
@@ -282,26 +274,6 @@ export function listPlans(status?: string): Promise<CandidatePlan[]> {
 /** GET /caisen/plans/{plan_id}：单计划查询（plan_id 不存在后端返 404）。 */
 export function getPlan(planId: string): Promise<CandidatePlan> {
   return apiClient.get(`/api/v1/caisen/plans/${encodeURIComponent(planId)}`, { timeout: 10000 })
-}
-
-/**
- * PATCH /caisen/plans/{plan_id}：人工审核（approve/reject + edits 微调）。
- *
- * 物理意图：蔡森流水线审核节点——风控官基于经验判断推进/驳回，或微调止损止盈。
- * approve → APPROVED（可继续 activate）；reject → REJECTED（不进挂单流程）。
- */
-export function reviewPlan(planId: string, body: PlanReviewBody): Promise<CandidatePlan> {
-  return apiClient.patch(`/api/v1/caisen/plans/${encodeURIComponent(planId)}`, body, { timeout: 10000 })
-}
-
-/**
- * POST /caisen/plans/{plan_id}/activate：激活（APPROVED → ARMED）。
- *
- * 物理意图：把审核通过的计划置为 ARMED 态，同步写入 active.json 供执行器读取挂单。
- * 红线：仅 APPROVED 态可激活（后端状态机守护，非法转换抛 ValueError → 422）。
- */
-export function activatePlan(planId: string): Promise<CandidatePlan> {
-  return apiClient.post(`/api/v1/caisen/plans/${encodeURIComponent(planId)}/activate`, {}, { timeout: 10000 })
 }
 
 /**

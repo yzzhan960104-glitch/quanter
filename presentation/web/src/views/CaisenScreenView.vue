@@ -1,25 +1,28 @@
 <script setup lang="ts">
 /**
- * 蔡森形态学审核大屏（Phase 3 · Task 7；Spec 2 Task 8 退役回放 tab）
+ * 蔡森形态学只读观测大屏（Phase 1 · 前端只读化；Spec 2 Task 8 退役回放 tab）。
  *
- * 三栏布局（复用 --qt-* token + Element Plus，与 LiveCockpitView 同构）：
+ * 物理定位：本视图退化为**纯观测**——不持任何写能力。三栏布局（复用 --qt-* token +
+ * Element Plus，与 LiveCockpitView 同构）：
  *   ① 左栏：候选计划列表（ElTable，按 rr_ratio 降序，徽章 pattern_type/status）
  *   ② 右栏：lightweight-charts K 线图（candles + markers 形态点 + priceLines 止损止盈/颈线）
- *   ③ 底部：扫描参数表单 + approve/reject/activate 审核操作（直接铺平，无 tab）
+ *   ③ 底部：只读观测提示（指向 EOD/veto_plan.py/pre_open cron 三处真实写入口）
  *
- * 顶部操作动线（蔡森流水线审核 SOP）：
- *   scan 触发筛选 → 刷新候选列表 → 选中 → 看 K 线 → approve/reject/微调 → activate
+ * 写职责真实归属（Phase 1 · 前端只读化后）：
+ *   - 扫描筛选：候选计划由 EOD 事件链自动产出（不再前端触发扫描）；
+ *   - 审核否决：走 veto_plan.py（不再前端 approve/reject）；
+ *   - 激活挂单：由 pre_open cron（09:22）自动执行（不再前端 activate）。
+ *
+ * 顶部操作动线（纯观测）：刷新列表（listPlans）→ 选中 → 看 K 线（getChart）→ 看关键参数。
  *
  * Spec 2 Task 8 退役记录：原「历史回放」tab（走同步 runReplay API）已下线，回测能力
- * 全部迁至独立路由 /lab（ParamLabView，走异步任务 + 抽屉式新建）。本视图回归纯审核职责，
- * 审核区由原 el-tabs 双 tab 退化为直接铺平的扫描参数 + 审核操作两栏。
+ * 全部迁至独立路由 /lab（ParamLabView，走异步任务 + 抽屉式新建）。
  *
  * 红线（CLAUDE.md 量化风控·边界审查）：
  *   - lightweight-charts 实例 onBeforeUnmount 必销毁（防 canvas 内存泄漏）；
  *   - 切换选中计划时先 remove 旧 priceLines 再画新（防残留虚线堆叠）；
  *   - markers 经 createSeriesMarkers（v5 推荐入口，setMarkers v6 将移除）；
- *   - 状态完全跟随后端返回值，前端不本地推断（杜绝"虚假繁荣"）；
- *   - activate 前 el-popconfirm 二次确认（ARMED 后挂单待执行，不可撤销）。
+ *   - 状态完全跟随后端返回值，前端不本地推断（杜绝"虚假繁荣"）。
  *
  * lightweight-charts v5 API 适配（已验证 v5.2.0 typings）：
  *   - chart.addSeries(CandlestickSeries, options)（非 v4 的 addCandlestickSeries）
@@ -27,7 +30,7 @@
  *   - series.createPriceLine(options)（v4/v5 通用）
  */
 import { ref, shallowRef, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
   createChart, CandlestickSeries, createSeriesMarkers,
   type IChartApi, type ISeriesApi, type IPriceLine, type Time,
@@ -39,8 +42,8 @@ import {
 // ECharts 资金曲线随回放结果渲染迁入 ReplayReportPanel（Spec 2 Task 4），/lab 消费；
 // Spec 2 Task 8 下线 /caisen 老「历史回放」tab 后，本视图不再直接注册 ECharts、也不复用该面板。
 import {
-  scan, listPlans, getChart, reviewPlan, activatePlan,
-  type CandidatePlan, type ChartData, type ScanRequestBody,
+  listPlans, getChart,
+  type CandidatePlan, type ChartData,
 } from '../api/caisen'
 import { logger } from '../utils/logger'
 
@@ -64,27 +67,10 @@ const plans = shallowRef<CandidatePlan[]>([])
 const selectedPlan = shallowRef<CandidatePlan | null>(null)
 const chartData = shallowRef<ChartData | null>(null)
 const loadingPlans = ref(false)
-const scanning = ref(false)
 const loadingChart = ref(false)
-const reviewing = ref(false)
-const activating = ref(false)
-
-// 扫描参数表单（简化版 ScanRequest：date 默认今日，universe 默认宽基，cfg_override 留高级输入）
-const today = new Date().toISOString().slice(0, 10)
-// universe 在表单层用 string（逗号分隔）承载，提交时 split 转数组——
-// el-input v-model 直接绑数组会导致输入/显示异常，破坏 scan 入口。
-const scanForm = ref({
-  date: today,
-  universe: '510300.SH,510050.SH,510500.SH,159915.SZ',
-  cfg_override: {} as Record<string, unknown>,
-})
-
-// 审核 edits 微调表单（仅 approve 时提交，绑定选中计划字段）
-const editForm = ref({
-  stop_loss: 0,
-  take_profit: 0,
-  take_profit_2x: 0,
-})
+// Phase 1 · 前端只读化：撤除 scanning/reviewing/activating + scanForm/editForm + canActivate/canReview。
+// 候选计划由 EOD 事件链自动产出，审核否决走 veto_plan.py，激活挂单由 pre_open cron（09:22）自动执行；
+// 本视图退化为纯观测——listPlans 拉候选列表 + getChart 渲染 K 线 + 关键参数面板。
 
 // ============ 候选列表排序：按 rr_ratio 降序（高风险优先审核） ============
 const sortedPlans = computed(() =>
@@ -207,17 +193,11 @@ function renderChart(data: ChartData) {
   })
 }
 
-// ============ 选中计划联动：加载 chart + 同步 editForm ============
+// ============ 选中计划联动：加载 chart（只读观测，无 edits 同步） ============
 watch(selectedPlan, async (plan) => {
   if (!plan) {
     chartData.value = null
     return
-  }
-  // 同步 edits 表单为当前计划字段（审核微调起点）
-  editForm.value = {
-    stop_loss: plan.stop_loss,
-    take_profit: plan.take_profit,
-    take_profit_2x: plan.take_profit_2x,
   }
   // 拉图表数据
   loadingChart.value = true
@@ -238,30 +218,9 @@ function onSelectPlan(row: CandidatePlan) {
   selectedPlan.value = row
 }
 
-// ============ 操作：扫描 / 审核 / 激活 / 回放 ============
-async function onScan() {
-  scanning.value = true
-  try {
-    // 表单层 universe 为逗号分隔字符串，提交时拆分为标的数组传后端（与后端 ScanRequest.universe: string[] 对齐）
-    const payload: ScanRequestBody = {
-      date: scanForm.value.date,
-      universe: scanForm.value.universe
-        .split(/[\s,，]+/)
-        .map((s) => s.trim())
-        .filter(Boolean),
-      cfg_override: scanForm.value.cfg_override,
-    }
-    const result = await scan(payload)
-    ElMessage.success(`扫描完成，命中 ${result.length} 个候选计划`)
-    await refreshPlans()
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('扫描失败：' + detail)
-  } finally {
-    scanning.value = false
-  }
-}
-
+// ============ 操作：刷新候选列表（只读视图仅此一项主动操作） ============
+// Phase 1 · 前端只读化：onScan/onReview/onActivate 三个写操作函数已撤除——
+// 扫描由 EOD 事件链自动产出候选，审核否决走 veto_plan.py，激活挂单由 pre_open cron 自动执行。
 async function refreshPlans() {
   loadingPlans.value = true
   try {
@@ -270,46 +229,6 @@ async function refreshPlans() {
     logger.error('加载候选列表失败:', e)
   } finally {
     loadingPlans.value = false
-  }
-}
-
-async function onReview(action: 'approve' | 'reject') {
-  if (!selectedPlan.value) return
-  reviewing.value = true
-  try {
-    const edits = action === 'approve'
-      ? {
-          stop_loss: editForm.value.stop_loss,
-          take_profit: editForm.value.take_profit,
-          take_profit_2x: editForm.value.take_profit_2x,
-        }
-      : {}
-    const updated = await reviewPlan(selectedPlan.value.plan_id, { action, edits })
-    ElMessage.success(action === 'approve' ? '已通过审核（APPROVED）' : '已驳回（REJECTED）')
-    // 局部更新选中计划 + 列表（无需全量刷新）
-    selectedPlan.value = updated
-    plans.value = plans.value.map((p) => (p.plan_id === updated.plan_id ? updated : p))
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('审核失败：' + detail)
-  } finally {
-    reviewing.value = false
-  }
-}
-
-async function onActivate() {
-  if (!selectedPlan.value) return
-  activating.value = true
-  try {
-    const updated = await activatePlan(selectedPlan.value.plan_id)
-    ElMessage.success('已激活（ARMED）挂单待执行')
-    selectedPlan.value = updated
-    plans.value = plans.value.map((p) => (p.plan_id === updated.plan_id ? updated : p))
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail || e?.message || ''
-    ElMessage.error('激活失败：' + detail)
-  } finally {
-    activating.value = false
   }
 }
 
@@ -356,13 +275,9 @@ function statusTagType(s: string): '' | 'success' | 'warning' | 'info' | 'danger
   }
 }
 
-/** 选中计划是否可激活（仅 APPROVED 态可推进到 ARMED） */
-const canActivate = computed(() => selectedPlan.value?.status === 'APPROVED')
-/** 选中计划是否可审核（仅 PENDING_APPROVAL 态可 approve/reject） */
-const canReview = computed(() => selectedPlan.value?.status === 'PENDING_APPROVAL')
-
 // 回放链路（月度收益/形态分布/资金曲线 ECharts option、策略参数反射表单、回测历史表）已随
 // Spec 2 Task 8 老「历史回放」tab 下线一并移除——回测能力由 /lab 独立路由承接。
+// Phase 1 · 前端只读化：canActivate/canReview 两个 computed 撤除（写操作已全无，依赖同步消失）。
 </script>
 
 <template>
@@ -370,11 +285,7 @@ const canReview = computed(() => selectedPlan.value?.status === 'PENDING_APPROVA
     <!-- 顶部标题条 -->
     <div class="top-bar">
       <span class="title">蔡森形态学 · T 日候选审核</span>
-      <span class="subtitle">scan → 选中 → 看图 → approve → activate</span>
-      <el-button
-        size="small" type="primary" :loading="scanning"
-        @click="onScan"
-      >触发扫描</el-button>
+      <span class="subtitle">候选列表（EOD 自动产出）→ 选中 → 看图（只读观测）</span>
       <el-button
         size="small" plain :loading="loadingPlans"
         @click="refreshPlans"
@@ -387,7 +298,7 @@ const canReview = computed(() => selectedPlan.value?.status === 'PENDING_APPROVA
       <section class="plans-card">
         <div class="chart-title">候选计划（按盈亏比降序，{{ plans.length }} 个）</div>
         <el-table
-          :data="sortedPlans" size="small" empty-text="暂无候选（点击「触发扫描」生成）"
+          :data="sortedPlans" size="small" empty-text="暂无候选（候选计划由 EOD 事件链自动产出）"
           highlight-current-row
           @current-change="onSelectPlan"
           max-height="100%"
@@ -464,82 +375,10 @@ const canReview = computed(() => selectedPlan.value?.status === 'PENDING_APPROVA
       </section>
     </div>
 
-    <!-- 底部：审核区（Spec 2 Task 8 起，回放 tab 退役，扫描参数 + 审核操作直接铺平） -->
+    <!-- 底部：只读观测提示（Phase 1 · 前端只读化：撤除扫描参数 + 审核操作两块表单） -->
     <section class="bottom-card">
-      <div class="bottom-grid">
-        <!-- 扫描参数 -->
-        <div class="form-block">
-          <div class="block-title">扫描参数（ScanRequest）</div>
-          <el-form size="small" label-width="70px">
-            <el-form-item label="扫描日">
-              <el-date-picker
-                v-model="scanForm.date" type="date" value-format="YYYY-MM-DD"
-                style="width: 160px"
-              />
-            </el-form-item>
-            <el-form-item label="标的池">
-              <el-input
-                v-model="scanForm.universe"
-                placeholder="逗号分隔，如 510300.SH,510050.SH"
-                style="width: 320px"
-              />
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" :loading="scanning" @click="onScan">触发扫描</el-button>
-            </el-form-item>
-          </el-form>
-        </div>
-
-        <!-- 审核操作 -->
-        <div class="form-block" v-if="selectedPlan">
-          <div class="block-title">
-            审核操作（{{ selectedPlan.symbol }} · 当前态 {{ selectedPlan.status }}）
-          </div>
-          <!-- edits 微调（仅 PENDING_APPROVAL 态可调） -->
-          <el-form size="small" label-width="80px" :disabled="!canReview">
-            <el-form-item label="止损">
-              <el-input-number
-                v-model="editForm.stop_loss" :min="0" :precision="3" :step="0.1" style="width: 140px"
-              />
-            </el-form-item>
-            <el-form-item label="止盈·一">
-              <el-input-number
-                v-model="editForm.take_profit" :min="0" :precision="3" :step="0.1" style="width: 140px"
-              />
-            </el-form-item>
-            <el-form-item label="止盈·二">
-              <el-input-number
-                v-model="editForm.take_profit_2x" :min="0" :precision="3" :step="0.1" style="width: 140px"
-              />
-            </el-form-item>
-            <el-form-item>
-              <el-button
-                type="success" :loading="reviewing" :disabled="!canReview"
-                @click="onReview('approve')"
-              >通过（APPROVED）</el-button>
-              <el-button
-                type="danger" plain :loading="reviewing" :disabled="!canReview"
-                @click="onReview('reject')"
-              >驳回（REJECTED）</el-button>
-              <el-popconfirm
-                title="确认激活？计划将进入 ARMED 态，挂单待执行（不可撤销）。"
-                confirm-button-text="激活" cancel-button-text="取消"
-                @confirm="onActivate"
-              >
-                <template #reference>
-                  <el-button
-                    type="danger" :loading="activating" :disabled="!canActivate"
-                  >激活挂单（ARMED）</el-button>
-                </template>
-              </el-popconfirm>
-            </el-form-item>
-          </el-form>
-          <span v-if="!canReview" class="hint">（仅 PENDING_APPROVAL 态可审核）</span>
-          <span v-else-if="!canActivate" class="hint">（通过审核后可激活）</span>
-        </div>
-        <div class="form-block empty-block" v-else>
-          <span class="hint">从左侧选择候选计划进行审核</span>
-        </div>
+      <div class="readonly-hint">
+        蔡森候选计划由 EOD 事件链自动产出；审核否决请赴 <code>veto_plan.py</code>；激活挂单由 pre_open cron（09:22）自动执行。本视图仅作只读观测。
       </div>
     </section>
   </div>
@@ -653,7 +492,7 @@ const canReview = computed(() => selectedPlan.value?.status === 'PENDING_APPROVA
 .dv.up { color: var(--qt-up); }
 .dv.down { color: var(--qt-down); }
 
-/* 底部审核区（Spec 2 Task 8：回放 tab 退役后，扫描参数 + 审核操作直接铺平） */
+/* 底部只读提示卡（Phase 1 · 前端只读化：撤除扫描参数 + 审核操作两块表单后代之以只读提示） */
 .bottom-card {
   flex-shrink: 0;
   background: var(--qt-bg-card);
@@ -663,32 +502,15 @@ const canReview = computed(() => selectedPlan.value?.status === 'PENDING_APPROVA
   max-height: 38%;
   overflow: auto;
 }
-
-.bottom-grid {
-  display: flex;
-  gap: var(--qt-space-4);
-  flex-wrap: wrap;
-}
-.form-block {
-  background: var(--qt-bg-elevated);
-  border-radius: var(--qt-radius-sm);
-  padding: var(--qt-space-2) var(--qt-space-3);
-  flex: 1;
-  min-width: 320px;
-}
-.block-title {
-  font-size: var(--qt-fs-title);
-  color: var(--qt-text-primary);
-  margin-bottom: var(--qt-space-2);
-  font-weight: 600;
-}
-.empty-block {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 120px;
+.readonly-hint {
+  font-size: 12px;
   color: var(--qt-text-secondary);
-  font-size: var(--qt-fs-caption);
+  line-height: 1.7;
+  padding: 8px 4px;
+}
+.readonly-hint code {
+  color: var(--qt-accent);
+  font-family: var(--qt-font-mono);
 }
 .hint { font-size: var(--qt-fs-caption); color: var(--qt-text-secondary); }
 .rr-value {
