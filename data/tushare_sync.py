@@ -164,6 +164,21 @@ def _shard_dir(key: str) -> str:
     return cfg.get("shard_dir", os.path.join("data_lake", "shards", key))
 
 
+def _shard_date_series(shard_df: pd.DataFrame, date_col: str) -> pd.Series:
+    """从 shard 提取日期序列：兼容 _cleanse 写的 DatetimeIndex 与外部预置 date 列。
+
+    Why 两种形态：_sync_by_symbol 落 shard 时 _cleanse 已把 date_col 设为
+    DatetimeIndex；但外部预置/历史 shard 可能把日期放列里（date_col 或 "date"）。
+    统一抽成 Series 供 max/min 推断，避免增量合并时因形态不同误判"已最新"。
+    """
+    if isinstance(shard_df.index, pd.DatetimeIndex):
+        return shard_df.index.to_series()
+    col = date_col if date_col in shard_df.columns else ("date" if "date" in shard_df.columns else None)
+    if col is not None:
+        return shard_df[col]
+    return pd.Series(dtype="datetime64[ns]")
+
+
 def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str,
                       by: str = "symbol") -> None:
     """合并 shard → MultiIndex(date, symbol) parquet。
@@ -227,7 +242,7 @@ def sync_dataset(key: str, start: str, end: str,
         key: 数据集 key（TUSHARE_DATASETS 注册）
         start/end: "YYYY-MM-DD" 区间
         symbols: by=symbol 时的标的列表（None=全市场，需上游 load_universe）
-        resume: 断点续传（shard 已存在跳过）
+        resume: 断点续传（shard 已最新则跳过；落后则拉缺口合并，复权数据集重拉全区间）
 
     Why 入口收敛到一个函数：所有数据集走同一限频/熔断/落湖管道，调用方只需
     传 key + 区间，分页细节由 cfg["by"] 决定。新增数据集零新增分支代码。
@@ -293,20 +308,44 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
     code_param = (cfg or {}).get("code_param", "ts_code")
     for ts_code in symbols:
         shard = os.path.join(shard_dir, f"{ts_code}.parquet")
-        if resume and os.path.exists(shard):
-            continue
+        existing = None
+        fetch_start = sd
+        if os.path.exists(shard) and resume:
+            # 增量续传（C-7 收口修复）：shard 已存在不再盲跳——
+            #   已最新 → 跳过；落后 → 拉缺口合并（复权数据集重拉全区间保 qfq 基线一致）。
+            try:
+                existing = pd.read_parquet(shard)
+                dates = _shard_date_series(existing, date_col)
+                d_max = pd.to_datetime(dates, errors="coerce").max()
+                if pd.isna(d_max):
+                    existing = None  # 日期不可解析 → 视为无 shard，全量重拉
+                elif d_max.date().isoformat() >= end:
+                    continue  # 已最新（原断点续传语义：不浪费配额）
+                elif not (cfg or {}).get("adj_api"):
+                    # 非复权：只拉缺口（shard 最新日+1 .. end），合并去重
+                    fetch_start = (d_max + pd.Timedelta(days=1)).strftime("%Y%m%d")
+                else:
+                    # 复权（daily/weekly/monthly）：重拉 shard 起始日 .. end，
+                    # 用窗口最新 adj_factor 重建前复权，保证新旧行基线一致（无断崖）。
+                    d_min = pd.to_datetime(dates, errors="coerce").min()
+                    fetch_start = (d_min if pd.notna(d_min) else pd.Timestamp(start)).strftime("%Y%m%d")
+            except Exception:
+                logger.warning("shard 读取失败，全量重拉：%s（%s）", ts_code, shard, exc_info=True)
+                existing = None
+        elif os.path.exists(shard):
+            existing = None  # resume=False：按请求区间全量重拉覆盖
         kwargs = {code_param: ts_code}
         # date_filter：多数 by=symbol 接口认 start_date/end_date（财报按 ann_date 过滤）；
         # 但事件类接口（dividend 分红）不认日期参数（实测传了返空），cfg['no_date_filter']=True
         # 时跳过，拉单标的全历史由落湖后区间自然覆盖，避免日期致 shard 全空。
         if not (cfg or {}).get("no_date_filter"):
-            kwargs["start_date"] = sd
+            kwargs["start_date"] = fetch_start
             kwargs["end_date"] = ed
         if fields:
             kwargs["fields"] = fields
         df = _fetch_with_guard(api, quota_type=(cfg or {}).get("quota_type", "basic"), **kwargs)
         if df.empty:
-            continue
+            continue  # 拉空（节假日/接口故障）→ 保留旧 shard，绝不覆盖
         # —— adj_api 前复权增强（daily/weekly/monthly，2026-07-25 Plan Task 3）——
         # 物理意图：照搬 sync_data_lake.fetch_qfq，price_qfq = raw × adj / latest（latest=区间最新），
         # 与 a_shares_daily.parquet（fetch_qfq 生产）字节级一致。volume/amount 不复权
@@ -316,7 +355,7 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
         if adj_api:
             adj_kwargs = {code_param: ts_code}
             if not (cfg or {}).get("no_date_filter"):
-                adj_kwargs["start_date"] = sd
+                adj_kwargs["start_date"] = fetch_start
                 adj_kwargs["end_date"] = ed
             adj_df = _fetch_with_guard(
                 adj_api, quota_type=(cfg or {}).get("quota_type", "basic"),
@@ -336,6 +375,23 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
         df = _cleanse(df, date_col)
         if rename:
             df = df.rename(columns=rename)  # 列名归一（如 fund_daily vol→volume）
+        if existing is not None:
+            # 增量合并：旧 shard + 新数据 → 归一为 DatetimeIndex(date_col) →
+            # 同日期去重保留新（Tushare 偶发修订）→ 升序。拉空已在上面 continue，
+            # 此处 existing 必然带有效日期列。
+            merged = existing.reset_index()
+            if date_col not in merged.columns:
+                if "date" in merged.columns:
+                    merged = merged.rename(columns={"date": date_col})
+                elif len(merged.columns) > 0:
+                    merged = merged.rename(columns={merged.columns[0]: date_col})
+            merged[date_col] = pd.to_datetime(merged[date_col], errors="coerce")
+            merged = merged.dropna(subset=[date_col])
+            merged = pd.concat([merged.set_index(date_col), df])
+            merged = merged.reset_index() \
+                .drop_duplicates(subset=[date_col], keep="last") \
+                .set_index(date_col).sort_index()
+            df = merged
         df.to_parquet(shard)
     _build_multiindex(shard_dir, date_col, symbol_col, out, by="symbol")
 

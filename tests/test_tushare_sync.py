@@ -108,8 +108,8 @@ def test_sync_dataset_by_symbol_multiindex(tmp_path, fake_pro, monkeypatch):
     assert len(df) == 3
 
 
-def test_sync_dataset_resume_skips_existing_shard(tmp_path, fake_pro, monkeypatch):
-    """断点续传：shard 已存在即跳过（省配额）。"""
+def test_sync_dataset_resume_skips_up_to_date_shard(tmp_path, fake_pro, monkeypatch):
+    """断点续传：shard 已最新（max >= end）→ 跳过，不浪费配额。"""
     from config import TUSHARE_DATASETS, LAKE_CONFIG
     shard_dir = str(tmp_path / "shards")
     TUSHARE_DATASETS["fina_income"] = {
@@ -120,15 +120,130 @@ def test_sync_dataset_resume_skips_existing_shard(tmp_path, fake_pro, monkeypatc
         "shard_dir": shard_dir,
     }
     os.makedirs(shard_dir)
-    # 预置 shard（模拟已拉过 000001.SZ）
+    # 预置 shard：已覆盖到 2024-12-31（== end）→ 应跳过
     pd.DataFrame({"total_revenue": [1e9]},
-                 index=pd.DatetimeIndex(["2024-01-01"], name="ann_date")
+                 index=pd.DatetimeIndex(["2024-12-31"], name="ann_date")
                  ).to_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
     from data.tushare_sync import sync_dataset
     sync_dataset("fina_income", "2024-01-01", "2024-12-31",
                  symbols=["000001.SZ"], resume=True)
-    # fake_pro 未被调（shard 已存在跳过）
+    # fake_pro 未被调（shard 已最新，跳过）
     assert fake_pro.calls == []
+
+
+def test_sync_dataset_resume_incremental_gap_fetch_merges(tmp_path, fake_pro):
+    """增量续传：shard 落后 → 只拉缺口（start=shard_max+1）→ 合并去重落 shard/湖。"""
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    shard_dir = str(tmp_path / "shards")
+    TUSHARE_DATASETS["fina_income"] = {
+        "api": "income", "by": "symbol",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,end_date,total_revenue",
+        "lake": str(tmp_path / "income.parquet"),
+        "shard_dir": shard_dir,
+    }
+    os.makedirs(shard_dir)
+    # 旧 shard：只到 2024-01-01
+    pd.DataFrame({"total_revenue": [1e9]},
+                 index=pd.DatetimeIndex(["2024-01-01"], name="ann_date")
+                 ).to_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    # 新拉数据：2024-03-01（缺口内）
+    fake_pro._data["income"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"],
+        "ann_date": ["20240301"],
+        "end_date": ["20240331"],
+        "total_revenue": [2e9],
+    })
+    from data.tushare_sync import sync_dataset
+    sync_dataset("fina_income", "2024-01-01", "2024-12-31",
+                 symbols=["000001.SZ"], resume=True)
+    # API 只拉缺口：start_date = shard 最新日次日（20240102），不是全窗口起点
+    income_calls = [kw for api, kw in fake_pro.calls if api == "income"]
+    assert len(income_calls) == 1
+    assert income_calls[0]["start_date"] == "20240102"
+    assert income_calls[0]["end_date"] == "20241231"
+    # shard 合并：旧 1 行 + 新 1 行
+    shard_df = pd.read_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    assert len(shard_df) == 2
+    assert sorted(shard_df.index.astype(str)) == ["2024-01-01", "2024-03-01"]
+    # 湖同样合并（旧数据不丢）
+    lake_df = pd.read_parquet(TUSHARE_DATASETS["fina_income"]["lake"])
+    assert len(lake_df) == 2
+
+
+def test_sync_dataset_resume_empty_fetch_keeps_shard(tmp_path, fake_pro):
+    """增量续传拉空（节假日/接口故障）→ 旧 shard 完整保留（关键防线）。"""
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    shard_dir = str(tmp_path / "shards")
+    TUSHARE_DATASETS["fina_income"] = {
+        "api": "income", "by": "symbol",
+        "date_col": "ann_date", "symbol_col": "ts_code",
+        "fields": "ts_code,ann_date,end_date,total_revenue",
+        "lake": str(tmp_path / "income.parquet"),
+        "shard_dir": shard_dir,
+    }
+    os.makedirs(shard_dir)
+    old = pd.DataFrame({"total_revenue": [1e9]},
+                       index=pd.DatetimeIndex(["2024-01-01"], name="ann_date"))
+    old.to_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    # 接口返空（列齐全但零行）
+    fake_pro._data["income"] = pd.DataFrame(
+        columns=["ts_code", "ann_date", "end_date", "total_revenue"])
+    from data.tushare_sync import sync_dataset
+    sync_dataset("fina_income", "2024-01-01", "2024-12-31",
+                 symbols=["000001.SZ"], resume=True)
+    shard_df = pd.read_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    assert len(shard_df) == 1
+    assert shard_df["total_revenue"].iloc[0] == 1e9
+
+
+def test_sync_dataset_resume_adj_refetches_full_range(tmp_path, fake_pro):
+    """复权数据集（adj_api）增量：落后时重拉 shard 起始日..end，重建前复权基线。"""
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    shard_dir = str(tmp_path / "shards")
+    TUSHARE_DATASETS["daily_test"] = {
+        "api": "daily", "by": "symbol", "adj_api": "adj_factor",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,open,high,low,close",
+        "lake": str(tmp_path / "daily.parquet"),
+        "shard_dir": shard_dir,
+    }
+    os.makedirs(shard_dir)
+    # 旧 shard：只有 2023-12-29（旧基线 close=10.0）
+    pd.DataFrame({"ts_code": ["000001.SZ"], "open": [9.8], "high": [10.2],
+                  "low": [9.7], "close": [10.0]},
+                 index=pd.DatetimeIndex(["2023-12-29"], name="trade_date")
+                 ).to_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    # 原始行情 + 复权因子（12-29=0.9 → 01-03=1.0，最新日基准）
+    fake_pro._data["daily"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 3,
+        "trade_date": ["20231229", "20240102", "20240103"],
+        "open": [9.8, 10.5, 11.0],
+        "high": [10.2, 10.8, 11.3],
+        "low": [9.7, 10.2, 10.8],
+        "close": [10.0, 10.6, 11.2],
+    })
+    fake_pro._data["adj_factor"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 3,
+        "trade_date": ["20231229", "20240102", "20240103"],
+        "adj_factor": [0.9, 0.95, 1.0],
+    })
+    from data.tushare_sync import sync_dataset
+    sync_dataset("daily_test", "2024-01-01", "2024-01-03",
+                 symbols=["000001.SZ"], resume=True)
+    # 复权数据集：start = shard 起始日（20231229），而非缺口次日（20231230）
+    daily_calls = [kw for api, kw in fake_pro.calls if api == "daily"]
+    adj_calls = [kw for api, kw in fake_pro.calls if api == "adj_factor"]
+    assert len(daily_calls) == 1 and len(adj_calls) == 1
+    assert daily_calls[0]["start_date"] == "20231229"
+    assert daily_calls[0]["end_date"] == "20240103"
+    assert adj_calls[0]["start_date"] == "20231229"
+    # 3 行全部保留，且旧行被新基线重建
+    shard_df = pd.read_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    assert len(shard_df) == 3
+    closes = shard_df.sort_index()["close"].astype(float)
+    assert closes.iloc[-1] == pytest.approx(11.2)  # 最新日 adj/latest=1 → 原始价
+    assert closes.iloc[0] == pytest.approx(9.0)    # 12-29: 10.0 * 0.9 / 1.0
 
 
 def test_build_multiindex_by_date_symbol_from_column(tmp_path):
@@ -586,4 +701,3 @@ def test_sync_by_symbol_no_date_filter_skips_date(tmp_path, fake_pro, monkeypatc
     assert div_calls, "dividend 应被调用"
     assert "start_date" not in div_calls[0], "no_date_filter 时不应传 start_date（dividend 不认日期）"
     assert "end_date" not in div_calls[0], "no_date_filter 时不应传 end_date"
-
