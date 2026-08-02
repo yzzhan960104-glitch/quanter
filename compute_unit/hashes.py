@@ -3,6 +3,10 @@
 
 env_check(校验路径)与 task_export(导出路径)共用——DRY 单源,未来改算法只改一处。
 不依赖 discovery(只 import hashlib/subprocess/pathlib/strategies),故无 import 链耦合。
+
+P1-3(2026-08-02):engine_hash 指纹从「backtest.py + method_v0.py」扩展到完整回测内核
+(replay/models/strategy/execution/signal/objective)。compute_unit v2 支持 replay 模式后,
+任何内核文件改动都必须触发跨机漂移检测,否则 Mac 与 Win 静默跑出不同结果。
 """
 from __future__ import annotations
 
@@ -41,15 +45,28 @@ def _file_sha256(path) -> str:
     return h.hexdigest()
 
 
-def _engine_hash() -> str:
-    """回测内核指纹:backtest.py + method_v0.py 内容 sha256[:12]。
+ENGINE_FILES = (
+    "strategies/neckline/backtest.py",
+    "strategies/neckline/method_v0.py",
+    "strategies/neckline/strategy.py",
+    "strategies/neckline/execution.py",
+    "strategies/neckline/signal.py",
+    "backtest/replay.py",
+    "backtest/models.py",
+    "discovery/objective.py",
+)
 
-    与 discovery/runner.py:_engine_hash 同款算法。内核一动(engine_hash 变),Mac 与 Win 不可比。
+
+def _engine_hash() -> str:
+    """回测内核指纹:ENGINE_FILES 逐文件内容 sha256[:12]（文件名入 hash 防改名漏检）。
+
+    discovery/runner.py:_engine_hash 是同款算法(双份实现,test_hashes 断言相等)。
+    内核一动(engine_hash 变),Mac 与 Win 不可比。
     """
-    from strategies.neckline import backtest, method_v0
     h = hashlib.sha256()
-    for f in (backtest.__file__, method_v0.__file__):
-        with open(f, "rb") as fh:
+    for rel in ENGINE_FILES:
+        h.update(rel.encode("utf-8"))
+        with open(PROJECT_ROOT / rel, "rb") as fh:
             h.update(fh.read())
     return h.hexdigest()[:12]
 

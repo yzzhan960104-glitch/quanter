@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""caisen.replay_worker 异步回测 worker 进程入口（Spec 1 · Task 3）。
+"""backtest.replay_worker 异步回测 worker 进程入口（Spec 1 · Task 3）。
 
-（待迁·Step4 移出 caisen 包至执行编排层）本模块当前物理位于 caisen/infra/ 过渡子包，
-Step4 将连同 replay_*/backtest_replay 整体迁出 caisen 包至独立的执行编排层。
-当前位置仅为 Step3 分层重构的中间态。
+Layer2 阶段4（2026-07）已随执行编排层收口至 backtest/ 包——本文件即真身，
+不再是 caisen/infra/ 过渡态（旧"待迁 Step4"注释已失效，2026-08-02 清理）。
 
 Step4e 反向债已收口：_load_price_data 改 import data.price_loader 模块级函数
 （原 from presentation.server.services.caisen_service import 是 execution→server 反向依赖，Step2.2 过渡债）。

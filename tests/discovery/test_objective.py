@@ -63,6 +63,30 @@ def test_evaluate_returns_inner_outer(champion_params, synth_sym_df):
     assert res["n_total"] == res["inner"]["n"] + res["outer"]["n"]
 
 
+def test_evaluate_replay_uses_replay_report_metrics(champion_params, synth_sym_df):
+    """v2：evaluate_replay 用 replay 引擎产出 ReplayReport 口径指标（非 kelly/calmar）。"""
+    from discovery.objective import evaluate_replay
+    from discovery.split import holdout_split
+    universe = {"300001.SZ": synth_sym_df}
+    res = evaluate_replay(champion_params, universe, holdout_split())
+    assert set(res.keys()) >= {"inner", "outer", "n_total", "report"}
+    for m in (res["inner"], res["outer"]):
+        assert {"n_hits", "win_rate", "avg_rr", "max_drawdown",
+                "annualized_return"} <= set(m.keys())
+    assert res["n_total"] == res["inner"]["n_hits"] + res["outer"]["n_hits"]
+
+
+def test_evaluate_replay_single_segment_override(champion_params, synth_sym_df):
+    """v2：显式 start/end → 只评单段（inner），outer 空（供任意区间回测任务）。"""
+    from discovery.objective import evaluate_replay
+    from discovery.split import holdout_split
+    universe = {"300001.SZ": synth_sym_df}
+    res = evaluate_replay(champion_params, universe, holdout_split(),
+                          start="2025-01-01", end="2025-06-30")
+    assert res["outer"] == {}
+    assert res["n_total"] == res["inner"]["n_hits"]
+
+
 @pytest.mark.slow
 def test_evaluate_champion_real(champion_params):
     """集成：当前冠军真实 evaluate（~3min），复现探查锚——2026 outer ann>0（探查实证 145-182%）。"""

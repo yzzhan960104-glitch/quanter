@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """L1 评估函数（spec §6.2，Plan 1 简化：inner/outer 二段，无 walk-forward）。
 
+v2（P0-2 · 2026-08-02）：新增 evaluate_replay——用 backtest.replay 引擎（与 Win 主回测
+同源）评估同一 params，产出 ReplayReport 口径指标（胜率/均rr/回撤/年化），供 compute_unit
+replay 模式与"基于最新策略回测"使用；老 evaluate 保持 kelly/calmar 搜索口径不动。
+
 核心范式（探查脚本 probe_champion_oos.py 验证过）：全历史跑 scan_symbol 一次 → 收集
 all_filled → 按 signal_date 分段。不硬切 df（scan_symbol 用 sym_df.iloc[:i+1] 截至信号
 历史识别，传完整 sym_df 才保 window/ATR 预热）；分段只发生在 signal_date 维度，无前视。
@@ -90,4 +94,66 @@ def evaluate(params, universe, split):
         "inner": segment_metrics(all_filled, split.inner, embargo_days=0),
         "outer": segment_metrics(all_filled, split.outer, embargo_days=split.embargo_days),
         "n_total": len(all_filled),
+    }
+
+
+def report_metrics(report) -> dict:
+    """ReplayReport → 指标 dict（compute_unit result 用，无 trades 轻量）。"""
+    return {
+        "n_hits": report.n_hits,
+        "win_rate": report.win_rate,
+        "avg_rr": report.avg_rr,
+        "max_drawdown": report.max_drawdown,
+        "annualized_return": report.annualized_return,
+        "n_trading_days": report.n_trading_days,
+    }
+
+
+def _compact_report(report) -> dict:
+    """ReplayReport → 压缩快照（去 trades/equity_curve/metadata，防 result.json 膨胀）。"""
+    return {k: v for k, v in report.__dict__.items()
+            if k not in ("trades", "equity_curve", "metadata")}
+
+
+def evaluate_replay(params, universe, split, start=None, end=None,
+                    position_model: dict | None = None) -> dict:
+    """replay 模式评估（P0-2）：给定 params 跑 backtest.replay → ReplayReport 口径指标。
+
+    与 discovery evaluate 的差异：
+        - 引擎：backtest.replay + NecklineMethodStrategy(cfg_override=params)（主回测同源）；
+        - 指标：ReplayReport 聚合（n_hits/win_rate/avg_rr/max_drawdown/annualized_return），
+          非 kelly/calmar；
+        - 分段：默认按 split.inner/outer 各跑一段；显式 start/end → 只评单段（inner）。
+        - 资金：position_model（PositionModel.to_dict()）透传，None=默认 pos_cap 口径。
+    """
+    from backtest.models import PositionModel
+    from backtest.replay import replay
+    from strategies.neckline.strategy import NecklineMethodStrategy
+
+    strategy = NecklineMethodStrategy(cfg_override=params)
+    pm = None
+    if position_model:
+        valid = {k: v for k, v in position_model.items()
+                 if k in PositionModel.__dataclass_fields__}
+        pm = PositionModel(**valid) if valid else None
+
+    if start is not None and end is not None:
+        segments = [("inner", start, end)]
+    else:
+        segments = [
+            ("inner", split.inner.start, split.inner.end),
+            ("outer", split.outer.start, split.outer.end),
+        ]
+    out, inner_report = {}, None
+    for name, seg_start, seg_end in segments:
+        rep = replay(universe, strategy, str(seg_start), str(seg_end), position_model=pm)
+        out[name] = report_metrics(rep)
+        if name == "inner":
+            inner_report = rep
+    outer = out.get("outer", {})
+    return {
+        "inner": out["inner"],
+        "outer": outer,
+        "n_total": out["inner"]["n_hits"] + (outer.get("n_hits", 0) if outer else 0),
+        "report": _compact_report(inner_report) if inner_report is not None else {},
     }

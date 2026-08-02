@@ -196,7 +196,8 @@ function patternLabel(p: string): string {
 
     <div class="report-section">
       <div class="block-title">生产建议</div>
-      <div class="recommendation">{{ props.report.min_rr_ratio_recommendation }}</div>
+      <!-- P1-5：字段改名 threshold_recommendation；旧归档仍可能只有 min_rr_ratio_recommendation -->
+      <div class="recommendation">{{ props.report.threshold_recommendation || (props.report as any)?.min_rr_ratio_recommendation || '' }}</div>
     </div>
   </div>
 </template>

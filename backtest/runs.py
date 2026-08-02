@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""caisen.replay_runs 回放结果持久化（方案 A：默认全存 + 支持删除）。
+"""backtest.runs 回放结果持久化（方案 A：默认全存 + 支持删除）。
 
-（待迁·Step4 移出 caisen 包至执行编排层）本模块当前物理位于 caisen/infra/ 过渡子包，
-Step4 将连同 storage/execution/backtest_replay/replay_*/viz_* 整体迁出 caisen 包至独立的
-执行编排层。当前位置仅为 Step3 分层重构的中间态。
+Layer2 阶段4（2026-07）已随执行编排层收口至 backtest/ 包——本文件即真身，
+不再是 caisen/infra/ 过渡态（旧"待迁 Step4"注释已失效，2026-08-02 清理）。
 
 物理定位（CLAUDE.md 极简 + 显式原则）：
     本模块是蔡森「历史回放」结果的仓储层——把每次 run_replay 产出的
@@ -200,7 +199,8 @@ def _summary(run_id: str, created_at: str, request: dict, report: dict) -> dict:
     完整记录由 get_run 读 <run_id>.json 提供。
 
     universe_n 语义：None（全市场）记 -1（前端显示「全市场」），列表记 len。
-    cfg_min_rr：从 cfg_override 取 min_rr_ratio（最关键的调参，列表快览；缺省则 None）。
+    cfg_min_rr：从 cfg_override 取 min_rr（颈线法真实键；caisen 遗产 min_rr_ratio 兜底）。
+        P1-5 修复：旧实现只读 min_rr_ratio → 颈线法参数列表"用了什么阈值"恒为空。
     """
     universe = request.get("universe")
     universe_n = -1 if universe is None else len(universe)
@@ -211,7 +211,7 @@ def _summary(run_id: str, created_at: str, request: dict, report: dict) -> dict:
         "start": request.get("start"),
         "end": request.get("end"),
         "universe_n": universe_n,
-        "cfg_min_rr": cfg.get("min_rr_ratio"),
+        "cfg_min_rr": cfg.get("min_rr", cfg.get("min_rr_ratio")),
         "n_hits": report.get("n_hits", 0),
         "win_rate": report.get("win_rate", 0.0),
         "avg_rr": report.get("avg_rr", 0.0),

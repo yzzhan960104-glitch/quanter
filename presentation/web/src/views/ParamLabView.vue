@@ -240,7 +240,8 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
           <span class="task-status" :class="'st-' + t.status">{{ t.status }}</span>
           <span>{{ t.start || '—' }}~{{ t.end || '—' }}</span>
           <span>{{ t.universe_n == null || t.universe_n === -1 ? '全市场' : (t.universe_n + '只') }}</span>
-          <span>{{ t.cfg_override?.min_rr_ratio ?? '默认' }}</span>
+          <!-- P1-5：颈线法真实键 min_rr（caisen 遗产 min_rr_ratio 兜底老归档） -->
+          <span>{{ t.cfg_override?.min_rr ?? t.cfg_override?.min_rr_ratio ?? '默认' }}</span>
           <span>{{ t.progress }}%</span>
           <span class="task-ai">[AI Spec3]</span>
           <span class="task-actions">

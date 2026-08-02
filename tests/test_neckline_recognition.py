@@ -42,6 +42,7 @@ from strategies.neckline.method_v0 import (  # noqa: E402
     local_minima,
     local_maxima,
     compute_atr,
+    detect_signal,
     DEFAULTS,
 )
 
@@ -249,7 +250,7 @@ def test_scan_symbol_orchestration(monkeypatch):
         entry_price=None,   # scan_symbol 走 simulate_exit 路径，entry 由 simulate 决定，不读此字段
     )
 
-    def fake_detect_signal(symbol, d, id_cfg, exec_cfg, date):
+    def fake_detect_signal(symbol, d, id_cfg, exec_cfg, date, atr_full=None):
         # 仅在输入序列长度 == signal_idx+1（即 i=signal_idx 这一轮）返回 Signal
         if len(d) == signal_idx + 1:
             return fake_sig
@@ -306,7 +307,7 @@ def test_scan_symbol_matches_strategy(monkeypatch):
         neckline=100.0, bottom=90.0, atr=3.6,
     )
 
-    def fake_detect_signal(symbol, d, id_cfg, exec_cfg, date):
+    def fake_detect_signal(symbol, d, id_cfg, exec_cfg, date, atr_full=None):
         if len(d) == signal_idx + 1:
             return fake_sig
         return None
@@ -334,6 +335,98 @@ def test_scan_symbol_matches_strategy(monkeypatch):
     assert a["entry"] == b.entry_price
     assert a["exit_date"] == b.exit_date
     assert a["exit_reason"] == b.exit_reason
+
+
+def test_detect_signal_precomputed_atr_equivalent():
+    """P1-6：detect_signal 传预计算 ATR 与自算 ATR 产出 Signal 逐字段相等。
+
+    生产改动：scan_at/scan_symbol 由"每个 T 全量重算 ATR（O(n²)）"改为预算一次、
+    按 T 截断传入 atr_full。本测试守卫该优化零行为漂移（frozen dataclass 相等断言）。
+    """
+    from strategies.neckline.backtest import EXEC_DEFAULTS
+    df = _ohlc(_synth_pattern())
+    id_cfg = {**DEFAULTS, "window": 20}
+    date = df.index[-1]
+    atr_full = compute_atr(df["high"], df["low"], df["close"], window=id_cfg["window"])
+    base = detect_signal("TEST", df, id_cfg, EXEC_DEFAULTS, date)
+    cached = detect_signal("TEST", df, id_cfg, EXEC_DEFAULTS, date, atr_full=atr_full)
+    assert base is not None
+    assert cached == base
+
+
+def test_detect_signal_truncated_atr_prefix_matches_recompute():
+    """P1-6：detect_signal 收「全序列截断前缀」与「在 df_T 上重算」产出 Signal 相等。
+
+    scan_at/scan_symbol 实际传的是 atr_full.iloc[:T_pos+1]（截断前缀），本测试用真实
+    detect（非 mock）在突破日 T 验证：截断前缀 == df_T 重算（rolling 前向窗口性质）。
+    """
+    from strategies.neckline.backtest import EXEC_DEFAULTS
+    rows = _synth_pattern() + [
+        (102, 106, 98, 102, 500),       # pos20 突破日（close=102>100 带量）
+        (103, 104, 102, 102.5, 100),    # pos21 回踩日（只做长度，不需成交）
+        (100, 101, 99, 100, 100),
+    ]
+    df = _ohlc(rows)
+    id_cfg = {**DEFAULTS, "window": 20}
+    T = df.index[20]
+    df_T = df.loc[:T]
+    atr_full = compute_atr(df["high"], df["low"], df["close"], window=id_cfg["window"])
+    base = detect_signal("TEST", df_T, id_cfg, EXEC_DEFAULTS, T)
+    cached = detect_signal("TEST", df_T, id_cfg, EXEC_DEFAULTS, T,
+                           atr_full=atr_full.iloc[:21])
+    assert base is not None          # 突破日必须真命中（否则本测试空转）
+    assert cached == base
+
+
+def test_scan_at_real_detect_with_precomputed_atr_produces_hit():
+    """P1-6：真实策略 scan_at（预计算 ATR 截断）完整链路产出 1 笔成交。
+
+    覆盖 precompute → scan_at → detect_signal(atr_full 截断) → simulate_exit 全链路，
+    证明优化路径在真实识别/出场下可用（非仅 mock 编排测试）。
+    """
+    rows = _synth_pattern() + [
+        (102, 106, 98, 102, 500),      # pos20 突破日
+        (103, 104, 102, 102.5, 100),   # pos21 回踩：low=102 ≤ buy_limit=103.6 → 成交
+        (96, 99, 95, 96, 100),         # pos22 stop：low=95 ≤ stop=96.4 → stop_loss
+        (100, 101, 99, 100, 100),
+        (100, 101, 99, 100, 100),
+    ]
+    from strategies.neckline.strategy import NecklineMethodStrategy
+    df = _ohlc(rows)
+    strat = NecklineMethodStrategy(cfg_override={"window": 20})
+    state = strat.precompute("TEST", df)
+    hits = []
+    for T in df.index[20:]:
+        hits += strat.scan_at("TEST", df.loc[:T], T, state)
+    assert len(hits) == 1
+    assert hits[0].exit_reason == "stop_loss"
+
+
+def test_replay_fresh_strategy_instances_are_deterministic():
+    """回放契约：每任务新建策略实例 → 两次回放逐字段一致（真实识别+出场链路）。
+
+    生产改动（2026-08-02）：replay/strategy 文档明确"一个实例只能跑一次回放"——实例带
+    cooldown 跨 T 状态，复用会静默吞命中。本测试钉死正确用法（新建实例）的确定性。
+    """
+    from backtest.replay import replay
+    rows = _synth_pattern() + [
+        (102, 106, 98, 102, 500),
+        (103, 104, 102, 102.5, 100),
+        (96, 99, 95, 96, 100),
+        (100, 101, 99, 100, 100),
+        (100, 101, 99, 100, 100),
+    ]
+    df = _ohlc(rows)
+
+    def run_once():
+        from strategies.neckline.strategy import NecklineMethodStrategy
+        strat = NecklineMethodStrategy(cfg_override={"window": 20})
+        return replay({"TEST": df}, strat, "2024-01-01", "2024-02-15")
+
+    r1, r2 = run_once(), run_once()
+    assert r1.n_hits == r2.n_hits == 1
+    assert r1.trades == r2.trades
+    assert r1.equity_curve[-1]["equity"] == r2.equity_curve[-1]["equity"]
 
 
 # ============================================================================

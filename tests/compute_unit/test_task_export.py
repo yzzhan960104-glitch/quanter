@@ -48,3 +48,32 @@ def test_export_task_fields(monkeypatch, tmp_path):
     assert raw["task_id"] == task.task_id
     assert raw["trials"][0]["params"] == params[0]
     assert raw["snapshot_meta"]["universe_def"] == "创板科创"
+
+
+def test_export_task_replay_mode(monkeypatch, tmp_path):
+    """v2：replay 模式导出（mode/start/end/position_model 进 task.json）。"""
+    from compute_unit import task_export
+    from discovery.split import Segment, HoldoutSplit
+
+    monkeypatch.setattr("discovery.snapshot.freeze", lambda lake_start="x": ({}, _fake_meta()))
+    monkeypatch.setattr("discovery.split.holdout_split", lambda embargo_days=5: HoldoutSplit(
+        inner=Segment("inner_2025", date(2025, 1, 1), date(2025, 12, 31)),
+        outer=Segment("outer_2026", date(2026, 1, 1), date(2026, 12, 31)), embargo_days=5))
+    monkeypatch.setattr(task_export, "_git_head_sha", lambda: "a"*40)
+    monkeypatch.setattr(task_export, "_engine_hash", lambda: "abc123def456")
+    monkeypatch.setattr(task_export, "_file_sha256", lambda p: "b"*64)
+
+    params = [{"window": 80, "min_rr": 1.5}]
+    out = tmp_path / "task_replay.json"
+    task = task_export.export_task(
+        params, mode="replay", start="2025-01-01", end="2026-12-31",
+        position_model={"pos_cap": 0.1}, out_path=out)
+    assert task.mode == "replay"
+    assert task.protocol_version == 2
+    assert task.start == "2025-01-01"
+    assert task.end == "2026-12-31"
+    assert task.position_model == {"pos_cap": 0.1}
+    raw = json.loads(out.read_text(encoding="utf-8"))
+    assert raw["mode"] == "replay"
+    assert raw["start"] == "2025-01-01"
+    assert raw["position_model"] == {"pos_cap": 0.1}

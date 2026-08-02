@@ -47,3 +47,24 @@ def test_summarize_no_ok():
     r = _result_with(TrialResult("f", "failed", error="x"))
     out = summarize(r)
     assert "无 ok" in out
+
+
+def test_summarize_replay_metrics_sorted_by_avg_rr():
+    """v2 replay 模式：按 inner avg_rr 排序，行内渲染胜率/均rr/年化/回撤。"""
+    r = _result_with(
+        TrialResult("low", "ok",
+                    inner={"n_hits": 5, "win_rate": 0.4, "avg_rr": 1.0,
+                           "annualized_return": 0.1, "max_drawdown": -0.05},
+                    outer={"n_hits": 2}, n_total=7),
+        TrialResult("high", "ok",
+                    inner={"n_hits": 9, "win_rate": 0.6, "avg_rr": 2.0,
+                           "annualized_return": 0.3, "max_drawdown": -0.08},
+                    outer={"n_hits": 3}, n_total=12),
+    )
+    out = summarize(r, top_n=2)
+    assert out.index("high") < out.index("low")
+    assert "胜率60.0%" in out
+    assert "均rr2.00" in out
+    assert "年化+30.0%" in out
+    # replay 口径 max_drawdown 是累计 rr 峰谷（风险倍数），不能按百分比渲染
+    assert "回撤-0.08rr" in out

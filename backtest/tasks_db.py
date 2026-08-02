@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""caisen.replay_tasks_db 异步回测任务表 SQLite 访问层（Spec 1 · Task 1）。
+"""backtest.tasks_db 异步回测任务表 SQLite 访问层（Spec 1 · Task 1）。
 
-（待迁·Step4 移出 caisen 包至执行编排层）本模块当前物理位于 caisen/infra/ 过渡子包，
-Step4 将连同 storage/execution/backtest_replay/replay_*/viz_* 整体迁出 caisen 包至独立的
-执行编排层。当前位置仅为 Step3 分层重构的中间态。
+Layer2 阶段4（2026-07）已随执行编排层收口至 backtest/ 包——本文件即真身，
+不再是 caisen/infra/ 过渡态（旧"待迁 Step4"注释已失效，2026-08-02 清理）。
 
 物理定位：异步回测任务全生命周期持久化（PENDING/RUNNING/SUCCESS/FAILED/CANCELLED）。
 单一真相源——吸收原 replay_runs JSON 归档（成功 report 内嵌 report_json 列）。

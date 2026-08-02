@@ -422,7 +422,10 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
         # test_scan_symbol_matches_strategy 仍守 simulate_exit/去重链路不分叉。
         #
         # date 入参：sym_df.index[i]（每个候选 i 的自然日，DatetimeIndex label）。
-        sig = detect_signal(None, sym_df.iloc[: i + 1], id_cfg, exec, sym_df.index[i])
+        # P1-6：预算好的 atr_full 按候选日截断传入（与 detect_signal 自算逐位等价，
+        # 由 test_detect_signal_precomputed_atr_equivalent 守卫），省每 i 全量重算。
+        sig = detect_signal(None, sym_df.iloc[: i + 1], id_cfg, exec, sym_df.index[i],
+                            atr_full=atr_full.iloc[: i + 1])
         if sig is not None:
             signals.append((i, sig))
     signals = dedup_signals(signals, cooldown=exec["cooldown"])

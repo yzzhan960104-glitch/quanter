@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""caisen.replay_scheduler 异步回测调度器 daemon 线程（Spec 1 · Task 4）。
+"""backtest.scheduler 异步回测调度器 daemon 线程（Spec 1 · Task 4）。
 
-（待迁·Step4 移出 caisen 包至执行编排层）本模块当前物理位于 caisen/infra/ 过渡子包，
-Step4 将连同 storage/execution/replay_*/viz_* 整体迁出 caisen 包至独立的执行编排层。
-当前位置仅为 Step3 分层重构的中间态。
+Layer2 阶段4（2026-07）已随执行编排层收口至 backtest/ 包——本文件即真身，
+不再是 caisen/infra/ 过渡态（旧"待迁 Step4"注释已失效，2026-08-02 清理）。
 
 物理定位：uvicorn 进程内的 daemon 线程，串行调度（concurrency=1）：
 - 启动时 reset_running_to_failed（重启恢复，spec §3.3）；

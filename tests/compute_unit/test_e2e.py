@@ -48,3 +48,23 @@ def test_e2e_summary_runs(fixed_params, synth_universe):
     out = summarize(result, top_n=3)
     assert "Mac 计算单元" in out
     assert "e2e2_tid" in out
+
+
+def test_e2e_replay_mode_equivalent(fixed_params, synth_universe):
+    """v2 replay 模式：_eval_batch(replay task) 与 evaluate_replay 直跑逐字段相等（C6 同款）。"""
+    from compute_unit.runner import _eval_batch
+    from discovery.objective import evaluate_replay
+    from discovery.split import holdout_split
+
+    task = _task("e2e_rp", fixed_params)
+    task.mode = "replay"
+    results = _eval_batch(task, synth_universe, task.split, n_proc=1)
+    direct = evaluate_replay(fixed_params, synth_universe, holdout_split())
+    if direct["n_total"] > 0:
+        assert results[0].status == "ok"
+        assert results[0].inner == direct["inner"]
+        assert results[0].outer == direct["outer"]
+        assert results[0].n_total == direct["n_total"]
+    else:
+        assert results[0].status == "degenerate"
+        assert results[0].n_total == 0

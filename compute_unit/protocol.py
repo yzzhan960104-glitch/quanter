@@ -4,6 +4,10 @@
 物理定位(C3):纯数据载体,处理 date↔str、确保中文 ensure_ascii=False 保真。
 compute_unit(Mac)与 task_export(Win)共用同一协议,保证跨机字节级一致。
 
+v2(P0-2 · 2026-08-02):Task 增加 replay 模式字段(mode/start/end/position_model)。
+    mode="discovery"(默认,兼容 v1)= 老 kelly/calmar 参数搜索评估;
+    mode="replay" = 用 backtest.replay 引擎按 ReplayReport 口径评估(与 Win 主回测同源)。
+
 设计:Task/Result 是 dataclass;SegmentSpec 的 date 字段在 JSON 里序列化为
 "YYYY-MM-DD" str(isoformat),反序列化 date.fromisoformat 还原为 datetime.date。
 metrics dict(inner/outer)原样透传(数值已是原生 float,evaluate 直出)。
@@ -102,6 +106,11 @@ class Task:
     snapshot_meta: SnapshotMetaSpec
     split: SplitSpec
     trials: list
+    # v2 (P0-2)：评估模式与 replay 模式参数。v1 老 task 无这些键 → 默认 discovery。
+    mode: str = "discovery"          # "discovery"（kelly/calmar 搜索）| "replay"（replay 引擎）
+    start: str | None = None         # replay 模式：显式单段区间起（None → 用 split.inner/outer）
+    end: str | None = None           # replay 模式：显式单段区间止
+    position_model: dict = field(default_factory=dict)   # PositionModel.to_dict()，空=默认
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +120,8 @@ class Task:
             "lake_start": self.lake_start, "embargo_days": self.embargo_days,
             "snapshot_meta": self.snapshot_meta.to_dict(), "split": self.split.to_dict(),
             "trials": [t.to_dict() for t in self.trials],
+            "mode": self.mode, "start": self.start, "end": self.end,
+            "position_model": self.position_model,
         }
 
     @classmethod
@@ -123,6 +134,10 @@ class Task:
             snapshot_meta=SnapshotMetaSpec.from_dict(d["snapshot_meta"]),
             split=SplitSpec.from_dict(d["split"]),
             trials=[TrialSpec.from_dict(t) for t in d["trials"]],
+            mode=d.get("mode", "discovery"),
+            start=d.get("start"),
+            end=d.get("end"),
+            position_model=d.get("position_model") or {},
         )
 
     @classmethod
@@ -138,13 +153,18 @@ class Task:
 # ── result.json ──
 @dataclass
 class TrialResult:
-    """单条 trial 评估结果。status: ok | failed | degenerate。"""
+    """单条 trial 评估结果。status: ok | failed | degenerate。
+
+    report：replay 模式的内段报告快照（ReplayReport 压缩字段，无 trades/equity_curve），
+    discovery 模式为空 dict。
+    """
     trial_id: str
     status: str
     inner: dict = field(default_factory=dict)
     outer: dict = field(default_factory=dict)
     n_total: int = 0
     error: str = ""
+    report: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -34,7 +34,7 @@ def _check_hashes(task: Task) -> None:
     if eng != task.engine_hash:
         raise EnvDriftError(
             f"engine_hash 漂移:Mac 本地 {eng} ≠ task {task.engine_hash}"
-            "(backtest.py/method_v0.py 不一致,请 git pull)")
+            "(回测内核文件不一致,请 git pull)")
     # ③ parquet sha256(数据指纹)
     pq = _file_sha256(_parquet_path())
     if pq != task.parquet_sha256:

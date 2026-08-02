@@ -30,6 +30,7 @@ from typing import Optional
 
 import pandas as pd
 
+from backtest.models import PositionModel, build_equity_curve
 from strategies.base import Strategy
 
 
@@ -49,8 +50,11 @@ class ReplayReport:
         pattern_dist：  信号类型分布（阶段D 改名 signal_dist；颈线法 {"neckline":x}，caisen 形态分布）；
         monthly_returns：月度收益（按 entry_date 月份聚合 rr）；
         avg_holding_bars：平均持仓天数；
-        min_rr_ratio_recommendation：阈值建议（阶段D 改名 threshold_recommendation）；
-        equity_curve：  资金曲线（RISK_FRAC=0.01 模型，归一化 equity_0=1.0）；
+        threshold_recommendation：阈值建议（阶段D 改名；旧名 min_rr_ratio_recommendation
+            保留为属性别名向后兼容）；
+        equity_curve：  资金曲线（PositionModel 模型，默认 pos_cap=5% 单笔仓位加总 +
+            最大并发持仓 6；旧 RISK_FRAC=0.01 复利口径经 PositionModel(risk_frac=0.01)
+            显式启用），归一化 equity_0=1.0；
         trades：        逐笔买卖流水；
         annualized_return：年化 CAGR；
         n_trading_days：区间交易日数；
@@ -63,12 +67,17 @@ class ReplayReport:
     pattern_dist: dict
     monthly_returns: dict
     avg_holding_bars: float
-    min_rr_ratio_recommendation: str
+    threshold_recommendation: str
     equity_curve: list = field(default_factory=list)
     trades: list = field(default_factory=list)
     annualized_return: float = 0.0
     n_trading_days: int = 0
     metadata: dict = field(default_factory=dict, hash=False, compare=False)
+
+    @property
+    def min_rr_ratio_recommendation(self) -> str:
+        """旧字段名别名（caisen 时代归档/调用方向后兼容；新代码用新名）。"""
+        return self.threshold_recommendation
 
 
 class ReplayAborted(Exception):
@@ -135,6 +144,7 @@ def replay(
     *,
     progress_cb=None,           # Callable[[done:int, total:int], None] —— 每 50 symbol 上报一次
     abort_cb=None,              # Callable[[], bool] —— True 即中止（symbol 循环顶抛 ReplayAborted）
+    position_model: Optional[PositionModel] = None,   # 组合资金模型（默认 pos_cap 口径）
 ) -> ReplayReport:
     """对 price_data 滚动调 strategy.scan_at，返回 ReplayReport（策略中立）。
 
@@ -145,6 +155,11 @@ def replay(
 
     引擎职责：逐 symbol×T 滚动（无前视 .loc[:T]）+ abort/progress 调度 + 跨 symbol 聚合统计。
     策略职责：precompute（指标预算）+ scan_at（识别+进场+出场一站式，返回 trade dict 列表）。
+
+    ⚠️ 实例契约（2026-08-02 真实回放验证发现）：strategy 实例带跨 T 状态
+    （scan_at 写 strategy_state / 颈线法 cooldown 锚点），**一个实例只能跑一次回放**——
+    复用同一实例跑第二次会静默污染结果（cooldown 残留 → 命中被吞）。调用方必须
+    每个任务新建策略实例（worker / compute_unit.evaluate_replay 已遵循此契约）。
 
     无前视红线：传给 scan_at 的 df_T 严格 = df.loc[:T]；策略内部预算指标用 .iloc[:T_pos+1] 截断。
 
@@ -188,7 +203,9 @@ def replay(
             progress_cb(_done, total_symbols)
 
     # —— 汇总统计 ——
-    stats = _compute_stats(all_hits)
+    if position_model is None:
+        position_model = PositionModel()
+    stats = _compute_stats(all_hits, position_model)
     recommendation = _recommend_min_rr(stats)
 
     # n_trading_days：回放区间交易日数（各 symbol 同区间，取首个非空 symbol 的计数）。
@@ -205,9 +222,13 @@ def replay(
     else:
         annualized_return = 0.0
 
-    # metadata：策略提供的阈值（caisen=min_rr_ratio；颈线法阶段B 走 min_rr，getattr 安全兜底）
-    _cfg = getattr(strategy, "cfg", None)
-    cfg_threshold = getattr(_cfg, "min_rr_ratio", None)
+    # metadata：策略提供的阈值（颈线法走 id_cfg["min_rr"]；caisen 遗产 cfg.min_rr_ratio 兜底）。
+    # P1-5 修复：旧实现只读 strategy.cfg.min_rr_ratio，颈线法无 .cfg → 恒 None。
+    _id_cfg = getattr(strategy, "id_cfg", None) or {}
+    cfg_threshold = _id_cfg.get("min_rr")
+    if cfg_threshold is None:
+        _cfg = getattr(strategy, "cfg", None)
+        cfg_threshold = getattr(_cfg, "min_rr_ratio", None)
 
     return ReplayReport(
         n_hits=stats["n_hits"],
@@ -217,15 +238,16 @@ def replay(
         pattern_dist=stats["pattern_dist"],
         monthly_returns=stats["monthly_returns"],
         avg_holding_bars=stats["avg_holding_bars"],
-        min_rr_ratio_recommendation=recommendation,
+        threshold_recommendation=recommendation,
         equity_curve=equity_curve,
         trades=stats.get("trades", []),
         annualized_return=annualized_return,
         n_trading_days=n_trading_days,
         metadata={
             "hits": all_hits,
-            "cfg_min_rr_ratio": cfg_threshold,
+            "cfg_min_rr": cfg_threshold,
             "strategy": type(strategy).__name__,
+            "position_model": position_model.to_dict(),
         },
     )
 
@@ -233,8 +255,11 @@ def replay(
 # ---------------------------------------------------------------------------
 # 统计计算（纯函数，策略中立——只依赖 TRADE_REQUIRED_KEYS 字段）
 # ---------------------------------------------------------------------------
-def _compute_stats(hits: list) -> dict:
+def _compute_stats(hits: list, position_model: Optional[PositionModel] = None) -> dict:
     """从命中交易列表计算胜率/平均盈亏比/最大回撤/信号分布/月度收益/平均持仓天数。
+
+    position_model：None → 默认 PositionModel()（pos_cap=5% 加总口径，P0-1）。
+    净值曲线委托 backtest.models.build_equity_curve（回测/计算单元共用单源）。
 
     统计定义：
         - win_rate = 盈利笔数(rr>0) / n_hits；
@@ -301,9 +326,9 @@ def _compute_stats(hits: list) -> dict:
     # 平均持仓天数
     avg_holding = sum(float(h.holding_bars or 0) for h in hits) / n
 
-    # 买卖流水 trades + 资金曲线 equity_curve（按 exit_date 排序）
-    # equity 模型：固定 RISK_FRAC=0.01（每笔冒 AUM 的 1% 风险，盈亏按 rr 放大），
-    # equity_t = Π(1 + rr_i × RISK_FRAC)，归一化 equity_0=1.0。年化由 replay() 用 CAGR 算。
+    # 买卖流水 trades + 资金曲线 equity_curve（按 exit_date 排序）。
+    # equity 模型（P0-1）：PositionModel 单源——默认 pos_cap 单笔仓位加总 + 并发上限；
+    # 旧 RISK_FRAC=0.01 复利经 risk_frac 显式启用。年化由 replay() 用 CAGR 算。
     def _iso(v):
         if v is None:
             return ""
@@ -311,7 +336,6 @@ def _compute_stats(hits: list) -> dict:
             return v.isoformat()
         return str(v)
 
-    RISK_FRAC = 0.01
     sorted_hits = sorted(hits, key=lambda h: str(h.exit_date or ""))
     trades = [
         {
@@ -324,21 +348,11 @@ def _compute_stats(hits: list) -> dict:
             "exit_reason": h.exit_reason,
             "rr": h.rr,
             "holding_bars": h.holding_bars,
+            "avg_pnl_pct": h.avg_pnl_pct,
         }
         for h in sorted_hits
     ]
-    equity_curve: list = []
-    eq = 1.0
-    run_rr = 0.0
-    for h in sorted_hits:
-        rr = float(h.rr or 0.0)
-        run_rr += rr
-        eq *= (1.0 + rr * RISK_FRAC)
-        equity_curve.append({
-            "date": _iso(h.exit_date),
-            "cumulative_rr": run_rr,
-            "equity": eq,
-        })
+    equity_curve = build_equity_curve(trades, position_model or PositionModel())
 
     return {
         "n_hits": n,

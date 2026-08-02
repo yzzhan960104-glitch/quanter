@@ -100,10 +100,10 @@ describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
   // ============ 异步回测任务（Spec 2 Task 2；对应 Spec 1 后端 5 端点） ============
 
   it('submitReplayAsync: POST /replay/async，body 透传，timeout 10000', async () => {
-    await submitReplayAsync({ start: '2024-01-01', end: '2024-06-01', cfg_override: { min_rr_ratio: 1.5 } })
+    await submitReplayAsync({ start: '2024-01-01', end: '2024-06-01', cfg_override: { min_rr: 1.5 } })
     expect(mockPost).toHaveBeenCalledWith(
       '/api/v1/caisen/replay/async',
-      { start: '2024-01-01', end: '2024-06-01', cfg_override: { min_rr_ratio: 1.5 } },
+      { start: '2024-01-01', end: '2024-06-01', cfg_override: { min_rr: 1.5 } },
       { timeout: 10000 },
     )
   })

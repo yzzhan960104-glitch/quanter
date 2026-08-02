@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """跑批核心:verify_and_freeze → spawn Pool 并行 evaluate → 拼 Result。
 
+v2(P0-2 · 2026-08-02):Task.mode 分派——"discovery"走老 evaluate(kelly/calmar),
+"replay"走 discovery.objective.evaluate_replay(backtest.replay 引擎,与 Win 主回测
+同源)。_WORKER_STATE 增加 task 注入(replay 模式需要 split/start/end/position_model)。
+
 物理意图(spec §9.2 拷问②):一组 params × 全 universe ~720s 串行;一批 N 组用 mp.spawn
 Pool 分到 (核数-2) 子进程并发,吞吐 ×(核数-2)。完全沿用 discovery.worker 的 spawn 四铁律
 (C7,Win/Linux/Mac 跨平台一致):
@@ -23,7 +27,7 @@ from compute_unit.protocol import Task, Result, TrialResult, SplitSpec
 
 # 子进程模块全局:initializer 一次注入后填充(主进程也 import 本模块但读 ready=False 占位,
 # 主进程不调 _eval_worker)。
-_WORKER_STATE = {"universe": None, "split": None, "ready": False}
+_WORKER_STATE = {"universe": None, "split": None, "task": None, "ready": False}
 
 
 def _split_to_discovery(split_spec: SplitSpec):
@@ -39,13 +43,29 @@ def _split_to_discovery(split_spec: SplitSpec):
     )
 
 
-def _eval_one(trial, universe, split) -> TrialResult:
+def _eval_one(trial, universe, split, task=None) -> TrialResult:
     """评估单 trial(纯函数,无全局状态)。_eval_worker 是它的 spawn 包装。
 
     两类降级(C7):
     - 异常 → status=failed(单 trial 崩溃不阻断批,对应 discovery._eval_worker 返 None)
     - n_total==0 → status=degenerate(params 退化,全 universe 挂单区间空)
     """
+    if task is not None and task.mode == "replay":
+        # v2 replay 模式：backtest.replay 引擎（与 Win 主回测同源），ReplayReport 口径。
+        from discovery.objective import evaluate_replay
+        try:
+            res = evaluate_replay(trial.params, universe, task.split or split,
+                                  task.start, task.end, task.position_model or None)
+        except Exception as e:
+            return TrialResult(trial_id=trial.trial_id, status="failed", error=repr(e)[:200])
+        if res.get("n_total", 0) == 0:
+            return TrialResult(trial_id=trial.trial_id, status="degenerate", n_total=0)
+        return TrialResult(
+            trial_id=trial.trial_id, status="ok",
+            inner=res["inner"], outer=res["outer"], n_total=res["n_total"],
+            report=res.get("report", {}),
+        )
+
     from discovery.objective import evaluate
     try:
         res = evaluate(trial.params, universe, split)
@@ -57,14 +77,16 @@ def _eval_one(trial, universe, split) -> TrialResult:
                        inner=res["inner"], outer=res["outer"], n_total=res["n_total"])
 
 
-def _init_worker(universe, split_spec: SplitSpec):
-    """Pool initializer:子进程启动时一次注入 universe + split 到 _WORKER_STATE。
+def _init_worker(universe, split_spec: SplitSpec, task=None):
+    """Pool initializer:子进程启动时一次注入 universe + split + task 到 _WORKER_STATE。
 
     顶层定义(spawn 可 pickle)。universe 是 dict(主进程 freeze 好传入),不重读 parquet。
     split 经 _split_to_discovery 转 HoldoutSplit(evaluate 需要的类型)。
+    task:完整 Task(v2 replay 模式需要 mode/start/end/position_model;discovery 可为 None)。
     """
     _WORKER_STATE["universe"] = universe
     _WORKER_STATE["split"] = _split_to_discovery(split_spec)
+    _WORKER_STATE["task"] = task
     _WORKER_STATE["ready"] = True
 
 
@@ -72,7 +94,8 @@ def _eval_worker(trial) -> TrialResult:
     """Pool.map 调用:读 _WORKER_STATE → _eval_one。顶层定义(spawn 可 pickle)。"""
     if not _WORKER_STATE["ready"]:
         return TrialResult(trial_id=trial.trial_id, status="failed", error="worker 未就绪")
-    return _eval_one(trial, _WORKER_STATE["universe"], _WORKER_STATE["split"])
+    return _eval_one(trial, _WORKER_STATE["universe"], _WORKER_STATE["split"],
+                     _WORKER_STATE["task"])
 
 
 def _default_n_proc() -> int:
@@ -95,7 +118,7 @@ def _eval_batch(task: Task, universe: dict, split_spec: SplitSpec,
     n_proc = min(n_proc, len(task.trials))
     ctx = mp.get_context("spawn")   # 跨平台一致(Win 默认 spawn,Linux/Mac 显式更安全,不踩 fork 坑)
     with ctx.Pool(processes=n_proc, initializer=_init_worker,
-                  initargs=(universe, split_spec)) as pool:
+                  initargs=(universe, split_spec, task)) as pool:
         results = pool.map(_eval_worker, task.trials)
     return results
 

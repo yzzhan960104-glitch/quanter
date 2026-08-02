@@ -123,7 +123,7 @@ def load_price_data(symbols: Optional[List[str]], date: str) -> Dict[str, pd.Dat
 def merge_cfg(cfg_override: Dict[str, Any], strategy_name: str = "neckline"):
     """默认 config schema + cfg_override 增量合并（extra=forbid 动态子类全字段校验）。
 
-    物理意图：用户传入 cfg_override（如 {"min_rr_ratio": 1.5}）增量覆盖默认配置，
+    物理意图：用户传入 cfg_override（如 {"min_rr": 1.5}）增量覆盖默认配置，
     不修改全局默认 cfg 实例（每次重新 model_validate 构造新对象）。schema 按 strategy_name
     动态选择（Task 1.3：caisen 形态退役，当前仅颈线法 NecklineConfig）。
 

@@ -30,17 +30,20 @@ from discovery.search import tpe_search, expected_improvement
 
 
 def _engine_hash():
-    """回测内核指纹（复用 cli._engine_hash 模式，避免循环 import：本地重声明）。
+    """回测内核指纹（与 compute_unit.hashes 同款算法，避免循环 import：本地重声明）。
 
-    Plan 1 cli._engine_hash 已实现（backtest.py+method_v0.py sha256[:12]）；本模块独立
-    重声明同款逻辑，避免 discovery.cli → discovery.runner → discovery.cli 循环 import。
-    内核（scan_symbol/risk_metrics）一动，engine_hash 变，老 trial 自然与新跑不可比。
+    P1-3：文件清单与 compute_unit/hashes.ENGINE_FILES 保持一致（tests/compute_unit/
+    test_hashes.py::test_engine_hash_matches_discovery_runner 断言两处输出相等）。
+    内核任一文件一动，engine_hash 变，老 trial 自然与新跑不可比。
     """
     import hashlib
-    from strategies.neckline import backtest, method_v0
+    from pathlib import Path
+    from compute_unit.hashes import ENGINE_FILES
+    root = Path(__file__).resolve().parents[1]
     h = hashlib.sha256()
-    for f in (backtest.__file__, method_v0.__file__):
-        with open(f, "rb") as fh:
+    for rel in ENGINE_FILES:
+        h.update(rel.encode("utf-8"))
+        with open(root / rel, "rb") as fh:
             h.update(fh.read())
     return h.hexdigest()[:12]
 

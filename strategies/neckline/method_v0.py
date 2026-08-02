@@ -299,7 +299,7 @@ def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=No
 #     - cancel_on 守卫用【close】（已是 close 口径，D9 实盘侧就位）—— line 252-258
 #     - 当日突破过滤（formed_at == date，两侧 ISO 日期字符串归一）—— line 264-273
 #     - Signal 装配（entry=颈线+buy_limit_mult×ATR, atr=ATR末值, rr=res["rr"]）—— line 279-299
-def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date):
+def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date, atr_full=None):
     """颈线法识别纯函数：从截至 date 的 df_upto 产出完整 Signal 或 None。
 
     逻辑零改动抽取自 NecklineMethodStrategy.scan_live:218-298（strangler 红线）。
@@ -317,17 +317,23 @@ def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date):
         exec_cfg: 执行层参数 dict（buy_limit_atr_mult/cancel_thresh_mult/...，
                   与 EXEC_DEFAULTS 同键集）
         date: 当前识别日（_eod 传 T-1 收盘日，str 或 pd.Timestamp 均可）
+        atr_full: 可选预计算 ATR 全序列（窗口对齐 id_cfg["window"]，index 与 df_upto
+            对齐；滚动扫描调用方预算一次按 T 截断传入，省每 T 全量重算，P1-6）。
+            None → 内部自算（实盘/单次调用零改动，向后兼容）。
 
     返回：
         Signal（含 symbol/formed_at/breakout_date/neckline/bottom/entry_price/atr/rr）
         或 None（detect 无命中 / cancel_on close 守卫触发 / 非当日突破）。
     """
-    # ATR 全序列预算（窗口对齐 id_cfg["window"]，与 scan_at / precompute 同口径）。
+    # ATR 预算（窗口对齐 id_cfg["window"]，与 scan_at / precompute 同口径）。
     # 物理意图：颈线在 window 天形成，衡量其波动尺度也用 window 天，而非写死 14 天。
     # 截至此处仅用 df_upto（无前视），末根即 date 当日的 ATR。
-    atr_full = compute_atr(
-        df_upto["high"], df_upto["low"], df_upto["close"], window=id_cfg["window"]
-    )
+    # P1-6：调用方可传预计算 atr_full（滚动扫描预算一次按 T 截断）避免每 T 全量重算；
+    # 传入序列须与 df_upto 同 index 前缀（截断至 date），末值即 date 当日 ATR。
+    if atr_full is None:
+        atr_full = compute_atr(
+            df_upto["high"], df_upto["low"], df_upto["close"], window=id_cfg["window"]
+        )
 
     # 识别：detect_neckline_method（df_upto 截至 date，atr_series 末根对齐）。
     # detect 仅在末根突破时返回（内部 close_T = W["close"].iloc[-1] > c_star 才命中），

@@ -63,6 +63,66 @@ def test_eval_one_degenerate(monkeypatch, fixed_params, synth_universe):
     assert r.n_total == 0
 
 
+def test_eval_one_replay_mode_dispatches_evaluate_replay(monkeypatch, fixed_params, synth_universe):
+    """v2 replay 模式：_eval_one 走 evaluate_replay（inner/outer/n_total 透传）。"""
+    from compute_unit import runner
+    from compute_unit.protocol import TrialSpec
+    from discovery.split import holdout_split
+
+    captured = {}
+
+    def fake_evaluate_replay(params, universe, split, start=None, end=None, position_model=None):
+        captured["params"] = params
+        captured["position_model"] = position_model
+        return {"inner": {"n_hits": 3, "win_rate": 0.5},
+                "outer": {"n_hits": 1}, "n_total": 4,
+                "report": {"threshold_recommendation": "建议"}}
+
+    monkeypatch.setattr("discovery.objective.evaluate_replay", fake_evaluate_replay)
+    task = _task_for("tid_replay", fixed_params)
+    task.mode = "replay"
+    task.position_model = {"pos_cap": 0.1}
+    trial = task.trials[0]
+    r = runner._eval_one(trial, synth_universe, holdout_split(), task=task)
+    assert r.status == "ok"
+    assert r.inner == {"n_hits": 3, "win_rate": 0.5}
+    assert r.outer == {"n_hits": 1}
+    assert r.n_total == 4
+    assert r.report["threshold_recommendation"] == "建议"
+    assert captured["params"] == fixed_params
+    assert captured["position_model"] == {"pos_cap": 0.1}
+
+
+def test_eval_one_replay_mode_degenerate(monkeypatch, fixed_params, synth_universe):
+    """replay 模式 n_total==0 → degenerate。"""
+    from compute_unit import runner
+    from compute_unit.protocol import TrialSpec
+    from discovery.split import holdout_split
+    monkeypatch.setattr("discovery.objective.evaluate_replay",
+                        lambda *a, **k: {"inner": {}, "outer": {}, "n_total": 0})
+    task = _task_for("tid_deg_rp", fixed_params)
+    task.mode = "replay"
+    trial = task.trials[0]
+    r = runner._eval_one(trial, synth_universe, holdout_split(), task=task)
+    assert r.status == "degenerate"
+    assert r.n_total == 0
+
+
+def test_eval_one_replay_mode_failed(monkeypatch, fixed_params, synth_universe):
+    """replay 模式 evaluate_replay 异常 → failed（单组崩溃不阻断批）。"""
+    from compute_unit import runner
+    from compute_unit.protocol import TrialSpec
+    from discovery.split import holdout_split
+    monkeypatch.setattr("discovery.objective.evaluate_replay",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("replay boom")))
+    task = _task_for("tid_fail_rp", fixed_params)
+    task.mode = "replay"
+    trial = task.trials[0]
+    r = runner._eval_one(trial, synth_universe, holdout_split(), task=task)
+    assert r.status == "failed"
+    assert "replay boom" in r.error
+
+
 def test_eval_batch_equivalent(fixed_params, synth_universe):
     """_eval_batch(spawn Pool,真实 evaluate)inner == 父进程 evaluate 直跑(红线 C6)。
 

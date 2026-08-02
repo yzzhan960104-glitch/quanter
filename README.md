@@ -201,6 +201,19 @@ Ctrl-C / schtasks 结束 → uvicorn lifespan shutdown：cancel 启动补跑任�
 
 ## 5. 最新功能演进（2026-07 下旬 → 08-02）
 
+### 5.0 2026-08-02 · 回测模块整改（评审 P0-P2）
+
+- **资金/风险模型统一（P0-1）**：`backtest.models.PositionModel` 成为回测净值单源——默认
+  `capital × pos_cap(5%)` 单笔仓位、最大并发 6 仓、现金约束、可配滑点；旧 `RISK_FRAC=0.01`
+  复利口径经 `PositionModel(risk_frac=0.01)` 显式兼容。资金假设随 `report.metadata.position_model`
+  冻结可审计。
+- **计算单元 v2（P0-2）**：`compute_unit` 协议升 v2，新增 replay 模式（`--mode replay`），
+  Mac 端可直接跑 `backtest.replay` 引擎、产出与 Win 主回测同口径的 ReplayReport 指标；
+  engine_hash 指纹同步扩展到完整回测内核（P1-3）。
+- **性能与正确性（P1-4/P1-6）**：replay 核心补齐直接单测；`detect_signal` 支持预计算 ATR
+  按 T 截断，全市场滚动从 O(n²) 降为 O(n)；`ReplayReport.threshold_recommendation` 等
+  caisen 残留字段清理（P1-5）。
+
 ### 5.1 2026-08-02 · C-8 启动补跑
 
 - `trading/job_ledger.py` job 运行台账（sqlite 状态机 running/done/skipped/failed + 启动重置）；
@@ -377,7 +390,45 @@ python -m discovery publish   # 手动把冠军 publish 为 experiment DRAFT 版
 
 > **daemon 纪律**：daemon 进程必须串行单实例（多实例同跑会产生重复参数全去重、ρ 恒 0 的伪收敛）；每轮 seed 按 `42 + run_count` 派生。2026-08 起生产触发点 = engine.sched cron 02:00 + 启动补跑（lifespan），旧的 schtasks 注册已退役（`manage_ops_schtasks` 提供幂等清退）。
 
-### 9.4 测试体系
+### 9.4 Mac 远程计算单元（compute_unit）
+
+**定位**：Mac（封闭工作机 · 只允许 git pull 的离线计算节点）分摊 Win 主机的参数回测算力。
+Win 端把参数批导出成 `task.json` push 进 git → Mac `git pull` 后离线跑批 → 生成钉钉友好
+摘要由人带回（路径 2：结果不回库，好参数 Win 手动补跑，trial_id 一致自动去重）。
+
+**协议 v2 双模式**（`Task.mode`）：
+
+- `discovery`（默认，兼容 v1）：kelly/calmar 参数搜索评估，inner/outer 两段。
+- `replay`：`backtest.replay` 引擎（与 Win 主回测同源），ReplayReport 口径指标
+  （n_hits/胜率/均rr/回撤/年化）；默认按 `split` 的 inner/outer 各跑一段，也可显式
+  `--start/--end` 只评单段；`--position-model` 可覆盖资金模型（空=默认 pos_cap 5%/6 仓）。
+
+**Win 端导出任务**：
+
+```bash
+# discovery 模式（sobol_batch.json = params dict 列表）
+python -m compute_unit.task_export --params-file sobol_batch.json --out tasks/<id>.json
+
+# replay 模式（v2 · 基于最新策略回测）
+python -m compute_unit.task_export --params-file params.json --out tasks/<id>.json \
+  --mode replay --start 2025-01-01 --end 2026-07-31 \
+  --position-model '{"pos_cap": 0.05, "max_positions": 6}'
+```
+
+**Mac 端执行**：
+
+```bash
+git pull                                   # 代码 + a_shares_daily.parquet + task.json 全走 git
+python -m compute_unit verify tasks/<id>.json        # 三件哈希 + snapshot 双校验（漂移退出码 3）
+python -m compute_unit run tasks/<id>.json -o result.json --n-proc 8
+python -m compute_unit summary result.json --top 3   # 钉钉友好 top-N 摘要
+```
+
+> **跨机一致性**：`git_commit` / `engine_hash`（覆盖完整回测内核：strategies/neckline/*
+> + backtest/replay.py + backtest/models.py + discovery/objective.py）/ `parquet_sha256`
+> 三件哈希 + snapshot 双校验，任一漂移拒跑（退出码 3）——先 `git pull` 对齐再跑。
+
+### 9.5 测试体系
 
 ```bash
 pytest                        # 常规回归（默认排除 slow/e2e_long）
@@ -394,6 +445,7 @@ pytest -m e2e_long tests/e2e_long_cycle/   # C1-C7 长周期时序回放（30-90
 | **自动交易引擎** | `python -m trading` | 单进程 uvicorn + TradingEngine：事件链 pipeline/pre_open/盘中巡检/post_close/网关自愈/启动补跑（§4） |
 | **颈线法策略** | CaisenScreen / `strategies/neckline/` | 当前唯一活跃策略，21 维参数由 experiment 发放（§3） |
 | **参数发现引擎** | `python -m discovery` / 02:00 cron | Plan 1-4 闭环：L0 快照 → L1 OOS 裁判 → L2 采样 → L3 帕累托/TPE → L4 daemon → L5 publish |
+| **远程计算单元** | `python -m compute_unit` | Mac 离线跑批：discovery/replay 双模式，跨机三件哈希防漂移（§9.4） |
 | **实验版本中心** | experiment API | 版本切换 + 权重校验 + 审计日志，`resolve_active()` 实时发生效配置 |
 | **回测引擎** | ParamLab / CLI | `replay` 策略中立回测 + 异步任务队列 + 参数优化；回测/实盘共用 `decide_exit` |
 | **数据中心** | DataLake | Tushare 20+ 数据集，registry 反射 + 同步状态（healthy/stale）+ 启动 stale sweep |

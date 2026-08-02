@@ -63,6 +63,10 @@ class NecklineMethodStrategy:
 
     构造：
         cfg_override: 21 维参数覆盖 dict（键在 NecklineConfig.model_fields 内）。
+
+    ⚠️ 实例契约（2026-08-02）：本类实例带跨 T 状态（self._last_signal_pos cooldown 锚点），
+    一次实例只能服务一次回放（replay/scan_symbol）。重复调用会静默少命中——调用方必须
+    每任务新建实例（worker / compute_unit.evaluate_replay 已遵循）。
     """
 
     # 数据集依赖声明（C-2 D3）：本策略仅依赖 daily 日线。本类是普通 class
@@ -125,7 +129,12 @@ class NecklineMethodStrategy:
         # ATR 等价性（brief 澄清 3）：原 scan_at 用 precompute 的 atr_full.iloc[:T_pos+1]
         # （预算截断），detect_signal 在 df_upto(=df_T) 上重算 ATR 全序列。两者都是 ATR
         # rolling 到 T，与 scan_live 同口径（scan_live 也是 df_upto 重算），应等价。
-        sig = detect_signal(symbol, df_T, self.id_cfg, self.exec_cfg, T)
+        # P1-6（2026-08-02）：precompute 预算的 atr_full 按 T 截断传入 detect_signal，
+        # 替代"每 T 对 df_T 全量重算 ATR"（O(n²)→O(n)）。截断前缀与 df_T 上重算
+        # 逐位等价（rolling 前向窗口），等价性由
+        # test_detect_signal_precomputed_atr_equivalent 守卫。
+        sig = detect_signal(symbol, df_T, self.id_cfg, self.exec_cfg, T,
+                            atr_full=atr_full.iloc[:T_pos + 1])
         if sig is None:
             return []
 

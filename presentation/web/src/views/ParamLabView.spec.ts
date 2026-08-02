@@ -5,7 +5,7 @@ import ParamLabView from './ParamLabView.vue'
 
 // mock @/api/caisen：避免真发请求；listReplayTasks 返空 → 触发空态分支
 vi.mock('@/api/caisen', () => ({
-  getConfigSchema: vi.fn().mockResolvedValue({ properties: { min_rr_ratio: { type: 'number', default: 1.5 } } }),
+  getConfigSchema: vi.fn().mockResolvedValue({ properties: { min_rr: { type: 'number', default: 1.5 } } }),
   listReplayTasks: vi.fn().mockResolvedValue([]),
   getReplayTask: vi.fn().mockResolvedValue(null),
   submitReplayAsync: vi.fn(),

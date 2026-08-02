@@ -66,7 +66,7 @@ const { mockTasks, mockDetail } = vi.hoisted(() => ({
       pattern_dist: {},
       monthly_returns: {},
       avg_holding_bars: 5,
-      min_rr_ratio_recommendation: '建议 ≥ 1.5',
+      threshold_recommendation: '建议 ≥ 1.5',
       equity_curve: [{ date: 'd1', cumulative_rr: 0.1, equity: 1.1 }],
       trades: [],
       annualized_return: 0.3,

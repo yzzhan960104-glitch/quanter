@@ -42,7 +42,7 @@ def _mk_request(start="2024-01-01", end="2024-03-31", universe=None,
         "start": start,
         "end": end,
         "universe": universe,
-        "cfg_override": cfg_override or {"min_rr_ratio": 1.5},
+        "cfg_override": cfg_override or {"min_rr": 1.5},
         "save": save,
     }
 
@@ -58,7 +58,7 @@ def _mk_report(n_hits=12, win_rate=0.58, avg_rr=1.42, max_drawdown=-0.21,
         "pattern_dist": {"w_bottom": 8, "head_shoulder": 4},
         "monthly_returns": {"2024-01": 0.6, "2024-02": 0.82},
         "avg_holding_bars": 6.5,
-        "min_rr_ratio_recommendation": "建议保留当前阈值（EV=0.30 > 0.2）。",
+        "threshold_recommendation": "建议保留当前阈值（EV=0.30 > 0.2）。",
         "equity_curve": equity_curve or [{"date": "2024-01-10", "cumulative_rr": 0.1, "equity": 1.001}],
         "trades": trades or [],
         "annualized_return": annualized_return,
@@ -210,7 +210,13 @@ class TestGetRun:
         loaded = replay_runs.get_run(rid)
         assert loaded is not None
         assert loaded["report"]["trades"] == trades
-        assert loaded["request"]["cfg_override"]["min_rr_ratio"] == 1.5
+        assert loaded["request"]["cfg_override"]["min_rr"] == 1.5
+
+    def test_summary_cfg_min_rr_reads_neckline_key(self):
+        """P1-5：摘要 cfg_min_rr 读颈线法真实键 min_rr（旧实现读 min_rr_ratio 恒 None）。"""
+        replay_runs.save_run(_mk_request(cfg_override={"min_rr": 2.0}), _mk_report())
+        runs = replay_runs.list_runs()
+        assert runs[0]["cfg_min_rr"] == 2.0
 
     def test_get_run_nonexistent_returns_none(self):
         """run_id 不存在 → None（路由层转 404）。"""

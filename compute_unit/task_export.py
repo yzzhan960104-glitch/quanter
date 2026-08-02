@@ -49,11 +49,16 @@ def _snapshot_to_spec(meta) -> SnapshotMetaSpec:
 
 def export_task(params_list: list, lake_start: str = "2025-01-01",
                 seed: int = 42, source: str = "discovery_search",
-                out_path="tasks/task.json") -> Task:
+                out_path="tasks/task.json", mode: str = "discovery",
+                start: str | None = None, end: str | None = None,
+                position_model: dict | None = None) -> Task:
     """params 批 → Task → 写 out_path。
 
     流程:freeze 取 SnapshotMeta → 算 trial_id(trial_id_of)→ 算三件哈希(git/engine/parquet)
     → 拼 Task → to_json。trial_id 在此预算(Win 权威 C8),Mac 不算。
+
+    v2(P0-2):mode="replay" 时带 start/end/position_model,Mac 端跑 backtest.replay
+    引擎(ReplayReport 口径);mode 默认 "discovery"(老 kelly/calmar 搜索,兼容 v1)。
     """
     from discovery.snapshot import freeze
     from discovery.store import trial_id_of
@@ -67,7 +72,7 @@ def export_task(params_list: list, lake_start: str = "2025-01-01",
         for p in params_list
     ]
     task = Task(
-        protocol_version=1,
+        protocol_version=2 if mode == "replay" else 1,
         task_id=uuid.uuid4().hex[:8],
         created_at=datetime.utcnow().isoformat(),
         git_commit=_git_head_sha(),
@@ -78,6 +83,10 @@ def export_task(params_list: list, lake_start: str = "2025-01-01",
         snapshot_meta=_snapshot_to_spec(meta),
         split=split_spec,
         trials=trials,
+        mode=mode,
+        start=start,
+        end=end,
+        position_model=position_model or {},
     )
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     task.to_json(out_path)
@@ -92,10 +101,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="tasks/task.json", help="task.json 输出路径")
     p.add_argument("--lake-start", default="2025-01-01", help="freeze 加载起始日")
     p.add_argument("--seed", type=int, default=42, help="trial_id seed")
+    p.add_argument("--mode", choices=["discovery", "replay"], default="discovery",
+                   help="评估模式：discovery=kelly/calmar 搜索（默认）；replay=backtest.replay 引擎")
+    p.add_argument("--start", default=None, help="replay 模式区间起（YYYY-MM-DD）")
+    p.add_argument("--end", default=None, help="replay 模式区间止（YYYY-MM-DD）")
+    p.add_argument("--position-model", default=None,
+                   help="replay 模式资金模型 JSON（如 {\"pos_cap\": 0.05}）")
     args = p.parse_args(argv)
 
     params_list = json.loads(Path(args.params_file).read_text(encoding="utf-8"))
-    task = export_task(params_list, lake_start=args.lake_start, seed=args.seed, out_path=args.out)
+    position_model = json.loads(args.position_model) if args.position_model else None
+    task = export_task(params_list, lake_start=args.lake_start, seed=args.seed,
+                       out_path=args.out, mode=args.mode, start=args.start,
+                       end=args.end, position_model=position_model)
     print(f"✅ 导出 task={task.task_id} → {args.out}({len(task.trials)}组)")
     print(f"   git={task.git_commit[:8]} engine={task.engine_hash} "
           f"parquet={task.parquet_sha256[:8]}…")

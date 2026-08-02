@@ -160,7 +160,7 @@ export interface Trade {
  * 回放报告（字段对齐 server.schemas.caisen.ReplayReportResponse / caisen.ReplayReport）。
  *
  * 物理意图：历史区间滚动回放的聚合统计——前端独立 tab 展示胜率/盈亏比/回撤，
- * 用于策略参数调优（如数据驱动地校准 min_rr_ratio）。
+ * 用于策略参数调优（如数据驱动地校准 min_rr 阈值）。
  */
 export interface ReplayReport {
   n_hits: number                              // 命中（成交）交易笔数
@@ -170,7 +170,7 @@ export interface ReplayReport {
   pattern_dist: Record<string, number>        // 形态分布 {"w_bottom": x, ...}
   monthly_returns: Record<string, number>     // 月度收益（按 entry 月份聚合）
   avg_holding_bars: number                    // 平均持仓天数
-  min_rr_ratio_recommendation: string         // 数据驱动的 min_rr_ratio 建议（中文）
+  threshold_recommendation: string            // 数据驱动的阈值建议（中文；旧名 min_rr_ratio_recommendation）
   equity_curve: EquityPoint[]                 // 资金曲线（年化收益曲线图，按 exit_date 排序）
   trades: Trade[]                             // 买卖流水（前端流水表，逐笔 entry/exit/rr）
   annualized_return: number                   // 年化收益 CAGR = equity_end^(252/n_trading_days)-1
@@ -223,7 +223,7 @@ export interface ReplayTask {
   start?: string | null                       // 回测区间起（可缺省=全市场默认）
   end?: string | null
   universe_n?: number | null                  // -1 = 全市场（前端显示「全市场」）
-  cfg_override?: Record<string, unknown>      // 提交时的参数增量（展示「用了什么 min_rr_ratio」）
+  cfg_override?: Record<string, unknown>      // 提交时的参数增量（展示「用了什么 min_rr」）
 }
 
 /**

@@ -45,6 +45,33 @@ def test_task_roundtrip(tmp_path):
     assert t2.trials[0].seed == 42
 
 
+def test_task_replay_mode_roundtrip(tmp_path):
+    """v2：replay 模式字段（mode/start/end/position_model）JSON 往返无损。"""
+    t = _sample_task()
+    t.mode = "replay"
+    t.start = "2025-01-01"
+    t.end = "2026-12-31"
+    t.position_model = {"capital": 2_000_000.0, "pos_cap": 0.1, "max_positions": 3}
+    out = tmp_path / "task_replay.json"
+    t.to_json(out)
+    t2 = Task.from_json(out)
+    assert t2.mode == "replay"
+    assert t2.start == "2025-01-01"
+    assert t2.end == "2026-12-31"
+    assert t2.position_model == t.position_model
+
+
+def test_task_v1_json_defaults_to_discovery_mode(tmp_path):
+    """v1 老 task.json（无 mode 字段）→ 默认 discovery，新字段 None/空（向后兼容）。"""
+    t = _sample_task()
+    out = tmp_path / "task_v1.json"
+    t.to_json(out)
+    t2 = Task.from_json(out)
+    assert t2.mode == "discovery"
+    assert t2.start is None and t2.end is None
+    assert t2.position_model == {}
+
+
 def test_result_roundtrip(tmp_path):
     """Result → json → Result,含 failed/degenerate/ok 三种 status。"""
     r = Result(
@@ -64,3 +91,18 @@ def test_result_roundtrip(tmp_path):
     assert r2.results[0].inner["calmar"] == 5.0
     assert r2.results[1].status == "failed" and r2.results[1].error == "KeyError"
     assert r2.results[2].status == "degenerate" and r2.results[2].n_total == 0
+
+
+def test_trial_result_report_roundtrip(tmp_path):
+    """TrialResult.report（replay 模式报告快照）JSON 往返无损。"""
+    r = Result(
+        task_id="t", git_commit="a"*40, parquet_sha256="b"*64, ran_at="x",
+        results=[TrialResult(trial_id="r1", status="ok",
+                             inner={"n_hits": 3, "win_rate": 0.5},
+                             outer={"n_hits": 1}, n_total=4,
+                             report={"threshold_recommendation": "建议"})],
+    )
+    out = tmp_path / "result.json"
+    r.to_json(out)
+    r2 = Result.from_json(out)
+    assert r2.results[0].report["threshold_recommendation"] == "建议"
