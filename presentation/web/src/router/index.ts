@@ -1,14 +1,17 @@
 /**
  * Vue Router 配置（蔡森形态学流水线 Phase 3 Task 8：首页改指 /caisen）
  *
- * 当前路由（6 条）：
+ * 当前路由（6 条，Phase 1 · 前端只读化已撤 /review）：
  * - /           → 重定向 /caisen（蔡森筛选作为研究/配置首屏，形态学流水线入口）
  * - /caisen     → CaisenScreenView（蔡森形态学筛选：Tick 缓存 → MA/无敌量/KZ → 结果展示）
  * - /lab        → ParamLabView（参数实验室：异步回测 master-detail + 轮询 + 参数调优，Spec 2）
  * - /dashboard  → DashboardView（宏观·板块驾驶舱）
  * - /live       → LiveCockpitView（实盘交易中控：QMT 连接 + 下单 + 订单/资产）
  * - /data       → DataLakeView（数据湖资产白盒反射）
- * - /review     → ReviewView（AI 复盘：GLM + 实盘日志 → Markdown 诊断报告）
+ *
+ * Why 撤 /review（Phase 1 · 前端只读化 Task 5）：
+ * - ReviewView 唯一功能 diagnose 是写操作（POST LLM 推理），撤后变空壳；
+ * - 前端只读期所有写操作统一收敛到脚本/CLI/QMT 客户端/cron，AI 复盘随之整删。
  *
  * Why 全部懒加载（含 CaisenScreenView/DashboardView）：
  * - 首页 /caisen 形态学筛选面板体量中等，懒加载后主 chunk 更聚焦；
@@ -20,7 +23,6 @@ const CaisenScreenView = () => import('../views/CaisenScreenView.vue')
 const ParamLabView = () => import('../views/ParamLabView.vue')
 const DashboardView = () => import('../views/DashboardView.vue')
 const DataLakeView = () => import('../views/DataLakeView.vue')
-const ReviewView = () => import('../views/ReviewView.vue')
 // 综合看板（Task 12 · 一期观测运营层前端收官）：聚合流水/日志/回测对比/心跳/资金/数据健康。
 const CockpitView = () => import('../views/CockpitView.vue')
 
@@ -37,7 +39,6 @@ const router = createRouter({
     // 综合看板（Task 12）：实盘观测俯瞰入口，聚合心跳/资金/数据健康/流水/日志/回测对比。
     { path: '/cockpit', name: 'cockpit', component: CockpitView },
     { path: '/data', name: 'data', component: DataLakeView },
-    { path: '/review', name: 'review', component: ReviewView },
   ],
 })
 
