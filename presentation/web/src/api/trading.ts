@@ -128,3 +128,30 @@ export function queryTrades(params: {
 }): Promise<TradesPage> {
   return apiClient.get('/api/v1/trading/trades', { params, timeout: 15000 })
 }
+
+// ============ Phase 2 · 作业驾驶舱（GET /trading/jobs，只读） ============
+
+/** 单个 job 台账行（对齐后端 job_ledger.snapshot_for_date 返回项）。 */
+export interface JobRow {
+  name: string                            // pipeline / pre_open / ...
+  status: 'running' | 'done' | 'skipped' | 'failed'
+  started_at: string
+  finished_at: string | null              // running 时为 null
+  message: string                         // gate 拒因（pre_open skipped 时最有价值）
+}
+
+/** 启动补跑四态（对齐后端 _resolve_catchup_state）。 */
+export type CatchupState = 'running' | 'done' | 'failed' | 'not_started'
+
+/** GET /trading/jobs 响应（作业驾驶舱数据源）。 */
+export interface JobsSnapshot {
+  date: string
+  jobs: JobRow[]
+  catchup: { state: CatchupState; result: Record<string, unknown> | null }
+  warning?: string                        // 台账读失败时填，前端可折叠提示
+}
+
+/** GET /trading/jobs?date=：当天 job 台账 + 启动补跑状态（作业驾驶舱数据源，只读）。 */
+export function getJobs(date: string): Promise<JobsSnapshot> {
+  return apiClient.get('/api/v1/trading/jobs', { params: { date }, timeout: 10000 })
+}
