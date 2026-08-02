@@ -16,11 +16,11 @@
  *     GET    /caisen/plans/{plan_id}/chart    → ChartData（candles/markers/priceLines）
  *     GET    /caisen/positions                → { positions: [] }（占位）
  *     GET    /caisen/config/schema            → Record<string,unknown>（/lab 参数表单反射用）
- *     POST   /caisen/replay/async             → { task_id }（Spec 2 异步回测，/lab 消费）
+ *     POST   /caisen/replay/async             → { task_id }（Spec 2 异步回测）  ❌ 前端已撤（Phase 1 Task 3）
  *     GET    /caisen/replay/tasks             → List[ReplayTask]
  *     GET    /caisen/replay/tasks/{id}        → ReplayTaskDetail
- *     POST   /caisen/replay/tasks/{id}/cancel → CancelResponse
- *     DELETE /caisen/replay/tasks/{id}        → { ok: true }
+ *     POST   /caisen/replay/tasks/{id}/cancel → CancelResponse                ❌ 前端已撤（Phase 1 Task 3）
+ *     DELETE /caisen/replay/tasks/{id}        → { ok: true }                  ❌ 前端已撤（Phase 1 Task 3）
  *   注：老同步 POST /caisen/replay + GET/DELETE /caisen/replay/runs 端点后端仍保留（异步
  *   worker + 潜在 CLI 入口复用），但前端在 Spec 2 Task 8 后不再消费（老 /caisen 回放 tab 已下线）。
  *
@@ -28,6 +28,9 @@
  *   scan/reviewPlan/activatePlan 三函数及 ScanRequestBody/PlanReviewBody 两类型已撤除。
  *   三个后端端点仍存活（运维/CLI 入口复用），仅前端不再消费。候选计划产出归 EOD 事件链，
  *   审核否决归 veto_plan.py，激活挂单归 pre_open cron（09:22）。CaisenScreenView 退化为纯观测。
+ *   submitReplayAsync/cancelReplayTask/deleteReplayTask 三函数及 ReplayAsyncRequestBody/
+ *   CancelResponse 两类型已撤除（Task 3）。回测提交/取消/删除迁移至 backtest 域脚本/CLI，
+ *   ParamLabView 退化为纯观测（getConfigSchema/listReplayTasks/getReplayTask + 轮询）。
  *
  * 状态机（与 storage 状态机严格同源，前端只读消费，不本地推断）：
  *   PENDING_APPROVAL → APPROVED → ARMED → FILLED → CLOSED
@@ -237,21 +240,9 @@ export interface ReplayTaskDetail extends ReplayTask {
   last_heartbeat?: string | null              // 最近心跳（调度器据此判 RUNNING 卡死）
 }
 
-/** POST /caisen/replay/async 请求体（对齐 ReplayAsyncRequest）。
- *  无 save 字段——异步任务落 SQLite 是本职，不像同步 replay 需显式 save 开关。 */
-export interface ReplayAsyncRequestBody {
-  start: string
-  end: string
-  universe?: string[] | null                  // null/缺省 = 全市场
-  cfg_override?: Record<string, unknown>
-}
-
-/** POST /caisen/replay/tasks/{id}/cancel 响应（对齐 CancelResponse）。 */
-export interface CancelResponse {
-  task_id: string
-  cancelled: boolean                          // true=已置 abort flag（终态任务返 false）
-  message: string                             // 中文说明（「已取消」/「任务已结束，无法取消」）
-}
+// Phase 1 · 前端只读化（Task 3）：ReplayAsyncRequestBody / CancelResponse 两类型已随
+// submitReplayAsync / cancelReplayTask / deleteReplayTask 三函数一并撤除——回测提交/取消/
+// 删除迁移至 backtest 域脚本/CLI，前端只保留 list/get 观测通道。后端契约端点暂留供 CLI 复用。
 
 // ============ API 封装（仿 trading.ts 风格，超时按端点特性覆写） ============
 
@@ -290,7 +281,7 @@ export function getChart(planId: string): Promise<ChartData> {
  * GET /caisen/config/schema：策略参数 JSON Schema（前端反射渲染参数表单 + 规则清单）。
  *
  * 物理意图：返回 StrategyConfig.model_json_schema()，前端按 Field 的 type/description/约束
- * 动态渲染参数表单（绑定 cfg_override 随 replay/scan 提交），同时作为「规则清单」展示
+ * 动态渲染参数表单（绑定 cfg_override 随 replay 提交），同时作为「规则清单」展示
  * （#2 规则列举 + #4 参数可调 同源解决，一处定义前后端不漂移）。
  */
 export function getConfigSchema(): Promise<Record<string, unknown>> {
@@ -299,16 +290,8 @@ export function getConfigSchema(): Promise<Record<string, unknown>> {
 
 // ============ 异步回测任务 API（Spec 1：SQLite 任务表，/lab 消费） ============
 
-/**
- * POST /caisen/replay/async：提交异步回测（立即返 task_id，不阻塞）。
- *
- * 物理意图：Spec 1 把同步 replay（90s 阻塞）拆为「提交→轮询」——前端提交后立即拿
- * task_id，后台 ProcessPoolExecutor 串行消化 universe，前端轮询 list/get 看进度。
- * 超时 10s 仅约束「提交落 SQLite」动作本身（不等待回测完成）。
- */
-export function submitReplayAsync(body: ReplayAsyncRequestBody): Promise<{ task_id: string }> {
-  return apiClient.post('/api/v1/caisen/replay/async', body, { timeout: 10000 })
-}
+// Phase 1 · Task 3：submitReplayAsync（POST /caisen/replay/async）已撤除——回测提交走
+// backtest 域脚本/CLI，前端 ParamLabView 退化为纯观测（list/get + 轮询）。
 
 /**
  * GET /caisen/replay/tasks：异步任务列表（降序，可按 status 过滤）。
@@ -331,28 +314,14 @@ export function getReplayTask(taskId: string): Promise<ReplayTaskDetail> {
   return apiClient.get(`/api/v1/caisen/replay/tasks/${encodeURIComponent(taskId)}`, { timeout: 10000 })
 }
 
-/**
- * POST /caisen/replay/tasks/{id}/cancel：取消（置 abort flag，轮询到 CANCELLED 生效）。
- *
- * 物理意图：用户点「取消」→ 后端置 abort flag → worker 下次 universe 轮询感知后置
- * CANCELLED 终态（非立即杀进程，避免 SQLite 写半截）。空 body {} 因后端路由签名无入参。
- * 终态任务（SUCCESS/FAILED）后端返 cancelled=false + message 说明「已结束无法取消」。
- */
-export function cancelReplayTask(taskId: string): Promise<CancelResponse> {
-  return apiClient.post(`/api/v1/caisen/replay/tasks/${encodeURIComponent(taskId)}/cancel`, {}, { timeout: 10000 })
-}
-
-/**
- * DELETE /caisen/replay/tasks/{id}：删除任务记录（清理历史）。
- *
- * 物理意图：异步任务跑完看够了就删，防 SQLite 无限膨胀。前端仅对非 RUNNING 行调用
- * （RUNNING 删除由后端守护，但前端按钮置灰更友好）。返 {ok:true}；task_id 不存在后端返 404。
- */
-export function deleteReplayTask(taskId: string): Promise<{ ok: boolean }> {
-  return apiClient.delete(`/api/v1/caisen/replay/tasks/${encodeURIComponent(taskId)}`, { timeout: 10000 })
-}
+// Phase 1 · 前端只读化（Task 3）：以下三个写函数已撤除——
+//   - submitReplayAsync(id, body) → POST   /caisen/replay/async             （回测提交走 backtest CLI）
+//   - cancelReplayTask(id)        → POST   /caisen/replay/tasks/{id}/cancel （取消走 CLI/运维侧）
+//   - deleteReplayTask(id)        → DELETE /caisen/replay/tasks/{id}        （删除走 CLI/运维侧）
+// 后端契约端点暂留，供 backtest 域脚本/CLI 入口复用；前端 ParamLabView 退化为纯观测
+// （getConfigSchema / listReplayTasks / getReplayTask + 轮询）。
 
 // Spec 2 Task 8：同步回放老 API（runReplay / listReplayRuns / getReplayRun / deleteReplayRun）
 // 及其专属类型（ReplayRequestBody / ReplayRunSummary / ReplayRunDetail）已随 /caisen 老
-// 「历史回放」tab 下线一并移除。回测能力由异步任务 5 函数 + /lab 路由承接。后端端点暂留，
-// 供异步任务 worker 与潜在的 CLI 调试入口复用。
+// 「历史回放」tab 下线一并移除。回测能力由异步任务 list/get 端点 + /lab 路由承接。后端端点
+// 暂留，供异步任务 worker 与潜在的 CLI 调试入口复用。

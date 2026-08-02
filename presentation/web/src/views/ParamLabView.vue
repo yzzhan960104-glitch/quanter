@@ -2,16 +2,22 @@
 /**
  * 参数实验室主视图（/lab）。Spec 2 Task 6 核心。
  *
- * 画布（纵向堆叠）：顶栏（选中标识/状态筛选/＋新建回测）→ 左参数详情(只读)｜右收益走势+统计
+ * Phase 1 · 前端只读化（Task 3）：本视图退化为纯观测——参数 schema 查看（getConfigSchema）、
+ * 异步任务列表（listReplayTasks）、任务详情+收益曲线（getReplayTask）、买卖日志。撤除了
+ * 「新建回测抽屉（NewReplayDrawer）」「提交回测（submitReplayAsync）」「取消任务
+ * （cancelReplayTask）」「删除任务（deleteReplayTask）」「FAILED 以此参数重提入口」。回测提交
+ * 走 backtest 域脚本/CLI，前端只看结果。轮询逻辑保留——后台 worker 任务可能仍在跑（CLI 提交），
+ * 轮询让用户看到进度推进与终态收敛，仍是有效观测。
+ *
+ * 画布（纵向堆叠）：顶栏（选中标识/状态筛选）→ 左参数详情(只读)｜右收益走势+统计
  * → 买卖日志 → 任务列表(master)。点任务行 master-detail 灌入上方三区。
  *
  * 轮询（节流省请求）：存在 PENDING/RUNNING 时每 3s 刷 list；选中任务状态/进度变化时重取详情
  *   拿 SUCCESS 的 report；无活跃任务立即停轮询（onUnmounted 兜底清定时器防泄漏）。
  * 边界（spec §11 风控拷问·状态机）：
  *   - 404（任务被删/不存在）→ 清选中 + 提示 + 重拉列表
- *   - 422（参数非法）→ 留抽屉展示后端错误（不关抽屉，便于用户改了再提）
- *   - FAILED → 详情区显 error + 「以此参数重提」按钮
- *   - CANCELLED → 取消信号非同步，轮询到 CANCELLED 终态自然收敛
+ *   - FAILED → 详情区显 error（只读观测，不再提供前端重提入口；重提走 backtest CLI）
+ *   - CANCELLED → 轮询到 CANCELLED 终态自然收敛（取消动作已移至 CLI/运维侧）
  *   - 空态 → 任务列表/买卖日志均有空态提示
  *
  * 走势区 vs 买卖日志区职责分离（控制器裁决）：ReplayReportPanel 内置买卖流水表，与下方独立
@@ -19,15 +25,13 @@
  *   买卖日志区直接渲染 report.trades（详细流水）。职责分明无重复。
  */
 import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
   getConfigSchema, listReplayTasks, getReplayTask,
-  submitReplayAsync, cancelReplayTask, deleteReplayTask,
 } from '@/api/caisen'
-import type { ReplayTask, ReplayTaskDetail, ReplayTaskStatus, ReplayAsyncRequestBody } from '@/api/caisen'
+import type { ReplayTask, ReplayTaskDetail, ReplayTaskStatus } from '@/api/caisen'
 import { PARAM_GROUPS, PARAM_META, isCoreGroup } from '@/components/lab/paramMeta'
 import ReplayReportPanel from '@/components/lab/ReplayReportPanel.vue'
-import NewReplayDrawer from '@/components/lab/NewReplayDrawer.vue'
 import { logger } from '@/utils/logger'
 
 const POLL_MS = 3000
@@ -36,8 +40,6 @@ const tasks = ref<ReplayTask[]>([])
 const selectedId = ref<string | null>(null)
 const selected = shallowRef<ReplayTaskDetail | null>(null)
 const statusFilter = ref<ReplayTaskStatus | ''>('')
-const drawerVisible = ref(false)
-const submitting = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 // —— 参数详情（只读）：schema 默认 ∪ 选中任务 cfg_override，按 PARAM_GROUPS 分组 ——
@@ -125,37 +127,9 @@ function ensurePolling() {
   if (hasActive.value && !pollTimer) pollTimer = setInterval(poll, POLL_MS)
 }
 
-// —— 新建回测（抽屉提交） ——
-async function onSubmit(body: ReplayAsyncRequestBody) {
-  submitting.value = true
-  try {
-    const { task_id } = await submitReplayAsync(body)
-    ElMessage.success('已提交，task_id=' + task_id)
-    drawerVisible.value = false
-    await loadTasks()
-    await selectTask(task_id)   // 选中新任务并起轮询
-    ensurePolling()
-  } catch (e: any) {
-    // 422 参数非法：留抽屉，展示后端错误（不关抽屉，用户可改了再提）
-    ElMessage.error('提交失败：' + (e?.response?.data?.detail || e.message || e))
-  } finally {
-    submitting.value = false
-  }
-}
-
-async function onCancel(t: ReplayTask) {
-  try { await cancelReplayTask(t.task_id); ElMessage.info('取消信号已发送') }
-  catch (e: any) { ElMessage.error('取消失败：' + (e?.response?.data?.detail || e)) }
-}
-async function onDelete(t: ReplayTask) {
-  await ElMessageBox.confirm('确认删除该任务记录？', '删除确认', { type: 'warning' })
-  try {
-    await deleteReplayTask(t.task_id)
-    if (selectedId.value === t.task_id) { selectedId.value = null; selected.value = null }
-    await loadTasks()
-    ElMessage.success('已删除')
-  } catch (e: any) { ElMessage.error('删除失败：' + (e?.response?.data?.detail || e)) }
-}
+// Phase 1 · 前端只读化（Task 3）：撤除 onSubmit/onCancel/onDelete 三个写动作——
+// 回测提交、取消、删除均迁移至 backtest 域脚本/CLI；前端只保留观测（list/get + 轮询）。
+// ElMessage 仍保留：selectTask 的 404 兜底提示（「该任务已不存在」）依赖它。
 
 onMounted(async () => {
   await Promise.all([loadSchema(), loadTasks()])
@@ -179,7 +153,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         <el-option label="已取消" value="CANCELLED" />
         <el-option label="待运行" value="PENDING" />
       </el-select>
-      <el-button type="primary" size="small" @click="drawerVisible = true">＋ 新建回测</el-button>
+      <!-- Phase 1 · Task 3：撤「＋新建回测」按钮——回测改由脚本/CLI 提交，前端只读观测 -->
     </div>
 
     <!-- 第1层：左参数详情(只读) ｜ 右收益走势+统计 -->
@@ -205,10 +179,9 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
         <!-- RUNNING/PENDING：进度占位 -->
         <div v-else-if="selected && (selected.status === 'RUNNING' || selected.status === 'PENDING')"
              class="qt-empty">回测中 {{ selected.progress }}%…</div>
-        <!-- FAILED：显 error + 重提入口 -->
+        <!-- FAILED：显 error（只读观测；重提走 backtest CLI，不再提供前端入口） -->
         <div v-else-if="selected?.status === 'FAILED'" class="qt-empty lab-failed">
           回测失败：{{ selected.error }}
-          <el-button size="small" @click="drawerVisible = true">以此参数重提</el-button>
         </div>
         <div v-else class="qt-empty">选择一个任务查看结果</div>
       </div>
@@ -244,18 +217,11 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
           <span>{{ t.cfg_override?.min_rr ?? t.cfg_override?.min_rr_ratio ?? '默认' }}</span>
           <span>{{ t.progress }}%</span>
           <span class="task-ai">[AI Spec3]</span>
-          <span class="task-actions">
-            <el-button v-if="t.status === 'RUNNING' || t.status === 'PENDING'" size="small" @click.stop="onCancel(t)">取消</el-button>
-            <el-button v-if="t.status !== 'RUNNING'" size="small" type="danger" @click.stop="onDelete(t)">删除</el-button>
-          </span>
+          <!-- Phase 1 · Task 3：撤取消/删除按钮——任务管理动作迁移至 CLI/运维侧，前端只读 -->
         </div>
       </div>
-      <div v-else class="qt-empty">点 ＋新建回测 开始第一次实验</div>
+      <div v-else class="qt-empty">暂无回测任务（回测由脚本/CLI 提交，前端只读观测）</div>
     </div>
-
-    <!-- 新建回测抽屉（v-model:visible 双向；prefill=当前选中任务 cfg 便于微调重跑） -->
-    <NewReplayDrawer v-model:visible="drawerVisible" :config-schema="configSchema"
-                     :prefill="selected?.cfg_override" :submitting="submitting" @submit="onSubmit" />
   </div>
 </template>
 

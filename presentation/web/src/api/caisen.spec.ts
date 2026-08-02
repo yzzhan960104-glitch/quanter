@@ -26,26 +26,22 @@ vi.mock('./client', () => ({
 import { apiClient } from './client'
 import {
   listPlans, getPlan, getChart,
-  submitReplayAsync, listReplayTasks, getReplayTask, cancelReplayTask, deleteReplayTask,
+  listReplayTasks, getReplayTask,
 } from './caisen'
 // Phase 1 · 前端只读化：scan/reviewPlan/activatePlan 三写函数已从 caisen.ts 撤除，
 // 对应契约用例同步移除（候选→EOD 自动产出 / 审核→veto_plan.py / 激活→pre_open cron）。
+// Phase 1 · Task 3：submitReplayAsync/cancelReplayTask/deleteReplayTask 三写函数已从
+// caisen.ts 撤除，对应契约用例同步移除（回测提交/取消/删除走 backtest 域脚本/CLI）。
 
-const mockPost = vi.mocked(apiClient.post)
 const mockGet = vi.mocked(apiClient.get)
-// mockPatch 已随 reviewPlan 用例移除（Phase 1 · 前端只读化）；apiClient.patch 仍保留在 mock
-// 工厂里以如实反映 client.ts 的真实结构，避免测试侧结构漂移。
-const mockDelete = vi.mocked(apiClient.delete)
+// mockPost/mockPatch/mockDelete 已随 replay/scan 写函数用例全部移除（Phase 1 · 前端只读化）；
+// apiClient.post/patch/delete 仍保留在 mock 工厂里以如实反映 client.ts 的真实结构，避免测试侧结构漂移。
 
 beforeEach(() => {
-  mockPost.mockReset()
   mockGet.mockReset()
-  mockDelete.mockReset()
   // facade 期望拿到 response.data（client.ts 响应拦截器剥壳），但 client 被 mock 绕过拦截器，
   // 这里直接 resolve 一个占位值，让 await 不抛；断言只关心「如何调用」而非「返回什么」。
-  mockPost.mockResolvedValue([] as any)
   mockGet.mockResolvedValue([] as any)
-  mockDelete.mockResolvedValue({} as any)
 })
 
 describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
@@ -77,16 +73,10 @@ describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
   // 候选→EOD 自动产出 / 审核→veto_plan.py / 激活→pre_open cron。
   // 回测能力由下方异步任务 5 端点承接（/lab 消费）。
 
-  // ============ 异步回测任务（Spec 2 Task 2；对应 Spec 1 后端 5 端点） ============
+  // ============ 异步回测任务（Spec 2 Task 2；Phase 1 Task 3 撤写后仅余 list/get 观测） ============
 
-  it('submitReplayAsync: POST /replay/async，body 透传，timeout 10000', async () => {
-    await submitReplayAsync({ start: '2024-01-01', end: '2024-06-01', cfg_override: { min_rr: 1.5 } })
-    expect(mockPost).toHaveBeenCalledWith(
-      '/api/v1/caisen/replay/async',
-      { start: '2024-01-01', end: '2024-06-01', cfg_override: { min_rr: 1.5 } },
-      { timeout: 10000 },
-    )
-  })
+  // Phase 1 · Task 3：submitReplayAsync / cancelReplayTask / deleteReplayTask 三写函数用例
+  // 已随 caisen.ts 对应函数撤除同步移除——回测提交/取消/删除走 backtest 域脚本/CLI。
 
   it('listReplayTasks() 无 status：GET /replay/tasks，params 空', async () => {
     await listReplayTasks()
@@ -102,15 +92,5 @@ describe('caisen facade 契约 —— URL / method / payload / timeout', () => {
   it('getReplayTask：task_id 经 encodeURIComponent', async () => {
     await getReplayTask('abc 123')
     expect(mockGet).toHaveBeenCalledWith('/api/v1/caisen/replay/tasks/abc%20123', { timeout: 10000 })
-  })
-
-  it('cancelReplayTask：POST .../cancel，空 body {}', async () => {
-    await cancelReplayTask('t1')
-    expect(mockPost).toHaveBeenCalledWith('/api/v1/caisen/replay/tasks/t1/cancel', {}, { timeout: 10000 })
-  })
-
-  it('deleteReplayTask：DELETE .../tasks/{id}', async () => {
-    await deleteReplayTask('t1')
-    expect(mockDelete).toHaveBeenCalledWith('/api/v1/caisen/replay/tasks/t1', { timeout: 10000 })
   })
 })

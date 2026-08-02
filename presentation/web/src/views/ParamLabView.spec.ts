@@ -4,13 +4,11 @@ import ElementPlus from 'element-plus'
 import ParamLabView from './ParamLabView.vue'
 
 // mock @/api/caisen：避免真发请求；listReplayTasks 返空 → 触发空态分支
+// Phase 1 · Task 3：撤写后 caisen 仅余 getConfigSchema/listReplayTasks/getReplayTask 三个只读函数。
 vi.mock('@/api/caisen', () => ({
   getConfigSchema: vi.fn().mockResolvedValue({ properties: { min_rr: { type: 'number', default: 1.5 } } }),
   listReplayTasks: vi.fn().mockResolvedValue([]),
   getReplayTask: vi.fn().mockResolvedValue(null),
-  submitReplayAsync: vi.fn(),
-  cancelReplayTask: vi.fn(),
-  deleteReplayTask: vi.fn(),
 }))
 
 // jsdom 缺失的浏览器 API 桩（ECharts/vue-echarts 依赖 ResizeObserver）
@@ -23,15 +21,16 @@ class MockObserver { observe() {} unobserve() {} disconnect() {} takeRecords() {
 }))
 
 describe('ParamLabView', () => {
-  it('渲染 4 区 + 新建回测按钮 + 空态提示（无任务时）', async () => {
+  it('渲染 4 区 + 只读空态提示（无任务时；Phase 1 Task 3 撤写后无新建按钮）', async () => {
     const wrapper = mount(ParamLabView, { global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect(wrapper.text()).toContain('参数详情')
     expect(wrapper.text()).toContain('收益率走势')
     expect(wrapper.text()).toContain('买卖日志')
     expect(wrapper.text()).toContain('任务列表')
-    expect(wrapper.text()).toContain('新建回测')
-    // 空态
-    expect(wrapper.text()).toContain('点 ＋新建回测')
+    // Phase 1 · Task 3：撤「＋新建回测」按钮——回测由脚本/CLI 提交，前端只读
+    expect(wrapper.text()).not.toContain('新建回测')
+    // 只读空态文案
+    expect(wrapper.text()).toContain('暂无回测任务')
   })
 })
