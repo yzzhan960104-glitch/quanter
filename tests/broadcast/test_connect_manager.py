@@ -171,3 +171,22 @@ def test_status_dead_clears_pid(monkeypatch, tmp_path):
 def test_status_not_running(monkeypatch, tmp_path):
     monkeypatch.setattr(cm, "_pid_file", lambda bot: tmp_path / f"{bot}.pid")
     assert cm.status("cli") == "not_running"
+
+
+def test_is_alive_real_process():
+    """真实子进程探测：运行中 → True，结束后 → False（替代 tasklist，防误判）。"""
+    import subprocess as sp
+    import sys
+    if sys.platform != "win32":
+        import pytest
+        pytest.skip("ctypes OpenProcess 为 Windows 专用")
+    proc = sp.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert cm._is_alive(proc.pid) is True
+        proc.terminate()
+        proc.wait(timeout=10)
+        assert cm._is_alive(proc.pid) is False
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

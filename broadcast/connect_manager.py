@@ -19,12 +19,25 @@ dev connect 继承项目根 cwd，review 的相对 agent_cmd 才能找到 python
 """
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import subprocess
 from pathlib import Path
+from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
+
+# ctypes 调用签名：OpenProcess 返回 HANDLE（64 位指针），不声明 restype 会被
+# 截断成 c_int → 合法句柄可能变 0 → 活进程误判 dead（本机 64 位 Python 实测风险）。
+_kernel32 = ctypes.windll.kernel32
+_kernel32.OpenProcess.restype = wintypes.HANDLE
+_kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+_kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+_kernel32.GetExitCodeProcess.argtypes = [
+    wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+_kernel32.CloseHandle.restype = wintypes.BOOL
+_kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
 # 项目根（broadcast/ 的上级 = F:/quanter）：作 Popen cwd，锁 dev connect 工作目录
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -108,19 +121,25 @@ def _clear_pid(bot: str) -> None:
 
 
 def _is_alive(pid: int) -> bool:
-    """Windows 存活探测：tasklist /FI "PID eq <pid>"。返 True=在跑。
+    """Windows 存活探测：OpenProcess + GetExitCodeProcess（STILL_ACTIVE）。返 True=在跑。
 
-    tasklist 命中 → stdout 含 PID 数字；未命中 → "INFO: No tasks are running ..."。
-    tasklist 不在 PATH / 超时 → 视为不存活（保守，让 start 重拉）。
+    Why 弃用 tasklist /FI：tasklist 走 WMI/CIM，在部分机器上单次查询 2s+、
+    偶发超时/失败（本机实测），导致**活进程被误判 dead** → status 僵尸清理删
+    PID 文件 → start 重复拉起（同一 bot 多个 dws 实例）。ctypes 直查进程句柄，
+    毫秒级返回、零 WMI 依赖。进程不存在 / 无权访问 → False（保守，让 start 重拉）。
     """
-    try:
-        r = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    handle = _kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
         return False
-    return r.returncode == 0 and str(pid) in (r.stdout or "")
+    try:
+        code = wintypes.DWORD()
+        ok = _kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        return bool(ok) and code.value == STILL_ACTIVE
+    finally:
+        _kernel32.CloseHandle(handle)
 
 
 # ------------------------------------------------------------------ 生命周期
