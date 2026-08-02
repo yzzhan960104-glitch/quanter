@@ -315,7 +315,7 @@ export function getReplayTask(taskId: string): Promise<ReplayTaskDetail> {
 }
 
 // Phase 1 · 前端只读化（Task 3）：以下三个写函数已撤除——
-//   - submitReplayAsync(id, body) → POST   /caisen/replay/async             （回测提交走 backtest CLI）
+//   - submitReplayAsync(body)    → POST   /caisen/replay/async             （回测提交走 backtest CLI）
 //   - cancelReplayTask(id)        → POST   /caisen/replay/tasks/{id}/cancel （取消走 CLI/运维侧）
 //   - deleteReplayTask(id)        → DELETE /caisen/replay/tasks/{id}        （删除走 CLI/运维侧）
 // 后端契约端点暂留，供 backtest 域脚本/CLI 入口复用；前端 ParamLabView 退化为纯观测

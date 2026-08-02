@@ -74,3 +74,22 @@ def test_snapshot_isolates_by_date(tmp_path):
     assert len(snap) == 1
     assert snap[0]["name"] == "pipeline"
     assert snap[0]["started_at"] == "t2"
+
+
+def test_snapshot_coerces_null_message_to_empty(tmp_path):
+    """message 列为 NULL（绕过 finish_run 直接 SQL 写入）→ snapshot 强制 ''（防 None 透传前端）。"""
+    db = str(tmp_path / "job_run.db")
+    job_ledger.init_db(db)
+    import sqlite3
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO job_run (job_name, business_date, status, started_at, finished_at, message) "
+        "VALUES (?, ?, ?, ?, NULL, NULL)",
+        ("pipeline", "2026-08-02", "done", "t1"),
+    )
+    conn.commit()
+    conn.close()
+    snap = job_ledger.snapshot_for_date("2026-08-02", path=db)
+    assert len(snap) == 1
+    assert snap[0]["message"] == ""   # NULL → "" 强制，非 None
+    assert snap[0]["finished_at"] is None or snap[0]["finished_at"] == ""  # NULL 透传 finished_at（仅 message 走守卫）
