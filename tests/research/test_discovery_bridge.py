@@ -85,6 +85,42 @@ def test_auto_publish_skips_when_outer_not_better(tmp_path, monkeypatch):
     assert created == []
 
 
+def test_active_outer_ann_parses_real_experiment_db(tmp_path):
+    """ACTIVE note 的 outer ann 必须能被真实解析（2026-08-04 护栏失效回归）。"""
+    from experiment.models import ExperimentStatus, ExperimentVersion
+    from experiment.store import create_version, init_db
+    exp_db = str(tmp_path / "exp.db")
+    init_db(exp_db)
+    v = ExperimentVersion(
+        experiment_id="neckline_disc_active", strategy_name="neckline",
+        params={"min_rr": 2.0}, weight=1.0, status=ExperimentStatus.ACTIVE,
+        version=1, source="discovery:x", note="outer ann=18.4% calmar=7.24",
+        created_at="2026-07-25T08:00:00", activated_at="2026-07-27T07:00:00")
+    create_version(exp_db, v, operator="test")
+    assert bridge._active_outer_ann(db_path=exp_db) == 0.184
+
+
+def test_auto_publish_guard_works_with_real_active_note(tmp_path, monkeypatch):
+    """护栏回归：ACTIVE outer 可解析时，outer 不优于 ACTIVE → 绝不 publish。"""
+    db = _seed_trial_db(tmp_path)
+    from experiment.models import ExperimentStatus, ExperimentVersion
+    from experiment.store import create_version, init_db
+    exp_db = str(tmp_path / "exp.db")
+    init_db(exp_db)
+    v = ExperimentVersion(
+        experiment_id="neckline_disc_active", strategy_name="neckline",
+        params={"min_rr": 2.0}, weight=1.0, status=ExperimentStatus.ACTIVE,
+        version=1, source="discovery:x", note="outer ann=18.4%",
+        created_at="2026-07-25T08:00:00", activated_at="2026-07-27T07:00:00")
+    create_version(exp_db, v, operator="test")
+    created = []
+    monkeypatch.setattr(bridge.proposals, "_create_experiment_draft",
+                        lambda params, source: created.append(1) or "x")
+    # 低功率 00:05 轮场景复现：outer ann=0%（评估失败/空）→ 必须被护栏拦下
+    assert bridge.auto_publish_champion("trial_aaaa", {"ann": 0.0}, db_path=db) is None
+    assert created == []
+
+
 def test_digest_includes_discovery_progress(monkeypatch):
     """研究摘要含参数探索段（trial 数/k 进度/新冠军 outer）。"""
     from research import digest

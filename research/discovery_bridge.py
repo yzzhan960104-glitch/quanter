@@ -101,13 +101,17 @@ def _parse_outer_ann(note: str) -> float | None:
         return None
 
 
-def _active_outer_ann() -> float | None:
+def _active_outer_ann(db_path: str | None = None) -> float | None:
     """当前 ACTIVE 实验的 outer 去偏年化（note 解析；无 ACTIVE/无 note → None）。"""
     try:
         from experiment.models import ExperimentStatus
-        from experiment.store import list_versions
+        from experiment.store import _DEFAULT_DB as _EXP_DB, list_versions
+        # ⚠️ list_versions 必须显式传 db_path（2026-08-04 实证：缺参 TypeError →
+        # 本函数异常降级 None → auto_publish 护栏失效 → 误建 DRAFT
+        # neckline_prop_20260804_48662a，outer 0% 也 publish 了）。
         versions = [
-            v for v in list_versions() if v.status is ExperimentStatus.ACTIVE and v.weight > 0
+            v for v in list_versions(db_path or _EXP_DB)
+            if v.status is ExperimentStatus.ACTIVE and v.weight > 0
         ]
         if not versions:
             return None
