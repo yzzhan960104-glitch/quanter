@@ -225,6 +225,58 @@ def _alert_account_status(gw, status_int: int, level: str) -> None:
         pass
 
 
+def _stop_trader_safely(trader) -> None:
+    """停掉 XtQuantTrader 实例（释放 sid 会话）；异常吞掉不阻断。
+
+    2026-08-03 根治：同 sid 的 XtQuantTrader 未 stop 即被替换/进程退出，会话会
+    残留共享内存（down_queue_win_{sid} 等队列文件），此后任何同 sid connect 必返
+    -1——包括本进程重试（旧实例未停，新实例自锁）。connect 前必须停旧实例。
+    """
+    if trader is None:
+        return
+    try:
+        trader.stop()
+    except Exception:
+        logger.warning("QMT trader.stop() 异常（已忽略，由 connect -1 清理兜底）",
+                       exc_info=True)
+
+
+def _cleanup_session_files(userdata_path: str, session_id: int) -> list[str]:
+    """删除指定 sid 的残留会话队列文件（仅本 sid，不动客户端 xtmodel/xtquant 队列）。
+
+    物理依据（2026-08-03 系统性实验）：进程未调 stop() 退出（强杀/崩溃）会残留
+    down_queue_win_{sid} 会话文件，同 sid 后续 connect 恒返 -1；清掉即恢复。
+    只按 sid 精确匹配（down_queue_win_{sid} / lock_down_queue_win_{sid}，含 __mutex
+    后缀），绝不误删客户端队列（xtmodel/xtquant 命名不同）。删除失败（文件被
+    其他进程占用）→ 记录并跳过，由上层决定是否继续重试。
+
+    Returns:
+        实际删除的文件名列表（供日志/测试断言）。
+    """
+    import glob as _glob
+
+    removed: list[str] = []
+    if not userdata_path or not os.path.isdir(userdata_path):
+        return removed
+    down_prefix = f"down_queue_win_{session_id}"
+    lock_prefix = f"lock_down_queue_win_{session_id}"
+    candidates = (
+        _glob.glob(os.path.join(userdata_path, "down_queue_win_*"))
+        + _glob.glob(os.path.join(userdata_path, "lock_down_queue_win_*"))
+    )
+    for f in candidates:
+        name = os.path.basename(f)
+        base = name.split("__")[0]          # 去 __mutex 后缀再精确比对
+        if base != down_prefix and base != lock_prefix:
+            continue
+        try:
+            os.remove(f)
+            removed.append(name)
+        except OSError:
+            logger.warning("清理残留会话文件失败 %s（可能被占用，跳过）", f, exc_info=True)
+    return removed
+
+
 class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[misc]
     """
     MiniQMT 实盘执行网关。
@@ -351,34 +403,72 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         Why 全程 run_in_executor：start/connect/subscribe 均为同步阻塞的 C++ 调用，
         直调会卡住 FastAPI 事件循环（连带拖垮所有其他协程，包括行情与心跳）。
         用一个闭包 _bootstrap 把三步串成一次线程池任务，减少跨线程往返。
+
+        2026-08-03 根治（-1 自锁）：
+            - **stop-before-recreate**：重连前必须先 stop 旧 XtQuantTrader 实例。
+              系统性实验证实：同 sid 的旧实例未 stop 即被替换，会话残留共享内存，
+              新实例 connect 恒返 -1（同进程自锁）。
+            - **-1 自愈重试**：connect 返 -1 = 死进程残留会话（强杀/崩溃未 stop），
+              清掉本 sid 队列文件后重试一次，无需人工换 sid / 删文件。
         """
         self._loop = asyncio.get_running_loop()
         self._ensure_xtquant()
         _assert_status_contract()
 
-        # 1. 建实例 + 注册自身为回调（register_callback 必须在 start 之前）
-        self._trader = XtQuantTrader(self._userdata_path, self._session_id)
-        self._trader.register_callback(self)
-        # StockAccount 构造是纯 Python 内存操作，无需线程池
-        self._account = StockAccount(self._account_id)
+        # 1. stop-before-recreate：旧实例未 stop 会继续占用 sid（同进程重试自锁 -1）
+        if self._trader is not None:
+            _stop_trader_safely(self._trader)
+            self._trader = None
 
-        # 2. start/connect/subscribe 同步阻塞，统一投线程池
-        def _bootstrap() -> tuple[int, int]:
-            self._trader.start()
-            connect_rc = self._trader.connect()
-            if connect_rc != 0:
-                # 连接失败时不必 subscribe，直接返回，由外层判定
-                return connect_rc, -1
-            sub_rc = self._trader.subscribe(self._account)
-            return connect_rc, sub_rc
+        # 2. 最多两轮：首轮失败（-1=残留会话）→ 清本 sid 队列文件 → 重试一轮（自愈）
+        connect_rc: int | None = None
+        sub_rc: int = -1
+        for attempt in (1, 2):
+            # 建实例 + 注册自身为回调（register_callback 必须在 start 之前）
+            trader = XtQuantTrader(self._userdata_path, self._session_id)
+            trader.register_callback(self)
+            self._trader = trader          # 失败路径也要能 stop 到本次实例
+            # StockAccount 构造是纯 Python 内存操作，无需线程池
+            self._account = StockAccount(self._account_id)
 
-        try:
-            # #9：wait_for 兜底防柜台无响应永久阻塞事件循环（超时→ConnectionError→_reconnect）。
-            connect_rc, sub_rc = await asyncio.wait_for(
-                self._loop.run_in_executor(None, _bootstrap), timeout=_CONNECT_TIMEOUT)
-        except Exception as exc:
-            self._lock_down = True
-            raise ConnectionError(f"QMT connect 异常/超时(>{_CONNECT_TIMEOUT}s)：{exc}") from exc
+            # start/connect/subscribe 同步阻塞，统一投线程池
+            def _bootstrap() -> tuple[int, int]:
+                trader.start()
+                rc = trader.connect()
+                if rc != 0:
+                    # 连接失败时不必 subscribe，直接返回，由外层判定
+                    return rc, -1
+                sub = trader.subscribe(self._account)
+                return rc, sub
+
+            try:
+                # #9：wait_for 兜底防柜台无响应永久阻塞事件循环
+                # （超时→ConnectionError→_reconnect）。
+                connect_rc, sub_rc = await asyncio.wait_for(
+                    self._loop.run_in_executor(None, _bootstrap),
+                    timeout=_CONNECT_TIMEOUT)
+            except Exception as exc:
+                # 失败也要停掉本次实例（释放 sid），再置锁抛出
+                _stop_trader_safely(self._trader)
+                self._trader = None
+                self._lock_down = True
+                raise ConnectionError(
+                    f"QMT connect 异常/超时(>{_CONNECT_TIMEOUT}s)：{exc}") from exc
+
+            if connect_rc == 0:
+                break                        # 连接成功
+
+            # 连接失败：立即停掉本次实例释放 sid（防止同进程下次重试自锁）
+            _stop_trader_safely(self._trader)
+            self._trader = None
+            if connect_rc == -1 and attempt == 1:
+                # -1 = 死进程残留会话（强杀/崩溃未 stop）→ 清本 sid 队列文件后重试
+                cleaned = _cleanup_session_files(self._userdata_path, self._session_id)
+                logger.warning(
+                    "QMT connect -1（session 残留）：已停旧实例并清理 %s，重试第 2 次",
+                    cleaned or "无残留文件")
+                continue
+            break
 
         if connect_rc != 0:
             # connect 返回非 0 即连接失败（xttrader.md：返回 0 表示成功）
@@ -387,8 +477,8 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             # -1 的物理含义：session 被占用（残留锁 / 他进程已用同一 sid 连上 MiniQMT）。
             # 其他非零码多为环境类故障（客户端未启动 / userdata 路径错 / 版本不匹配）。
             reason = (
-                "session 疑似被占用（残留锁/他进程占用 sid）" if connect_rc == -1
-                else f"返回码 {connect_rc}"
+                "session 疑似被占用（残留锁/他进程占用 sid，自动清理后仍失败）"
+                if connect_rc == -1 else f"返回码 {connect_rc}"
             )
             raise ConnectionError(
                 f"QMT connect 失败（{reason}）；userdata={self._userdata_path}。"
@@ -417,6 +507,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         """优雅断开：stop() 同步阻塞，投线程池；无条件回锁防断开瞬间的发单竞态。"""
         if self._trader is not None and self._loop is not None:
             await self._loop.run_in_executor(None, self._trader.stop)
+        self._trader = None    # 2026-08-03：断开即释放引用，防 connect 重复 stop 已停实例
         self._connected = False
         self._lock_down = True
         logger.info("QMT 网关已断开 account=%s", self._account_id)
@@ -1032,8 +1123,9 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         投递到主线程后，此处方可安全 create_task 触发告警 + 重连。锁定标志已在
         C++ 线程率先置位（见 on_disconnected），此处只负责告警与重连调度。
 
-        B-8：旧实现仅 critical 日志「请人工重新 connect()」（含 TODO 报警未落地），
-        断线期间持仓离场停摆、敞口失控。现启动指数退避自动重连 + 钉钉告警。
+        B-8 修复：旧实现仅 critical 日志「请人工重新 connect()」无告警通道，断线期间持仓
+        离场停摆、敞口失控。现 _on_disconnect_fatal 启动指数退避自动重连（_reconnect）
+        + 钉钉告警（fire_and_forget WARN 推送），重连耗尽由 _reconnect 发 ERROR 告警。
         """
         logger.critical(
             "【QMT 断线】account=%s 网关已锁定，启动自动重连（指数退避 %s）...",

@@ -335,6 +335,118 @@ def test_connect_subscribe_fail_marks_main_push_unavailable(monkeypatch):
     assert gw._connected is True  # 连接成功，只是主推不可用
 
 
+# =========================================================================
+# 2026-08-03 根治：connect -1 自锁（stop-before-recreate + 残留清理重试）
+# =========================================================================
+# 系统性实验结论：
+#   1) 同 sid 的 XtQuantTrader 未 stop 即被替换/进程退出 → 会话残留共享内存，
+#      此后同 sid connect 恒返 -1（含本进程重试自锁）；
+#   2) 干净 stop() 后同 sid 可复用（rc=0）；
+#   3) 进程强杀（不调 stop）后，新进程同 sid connect 必返 -1，清队列文件即恢复。
+# 本组用例锁定修复契约：重连前必 stop 旧实例；-1 时清本 sid 残留文件重试一次。
+
+class _FakeTraderReconnect:
+    """可记录 start/stop/connect 的假 trader（connect 结果可编排）。"""
+    instances: list = []
+    results: list = []          # 跨实例共享的结果序列（每次 connect 取队首）
+
+    def __init__(self):
+        self.stopped = False
+        _FakeTraderReconnect.instances.append(self)
+
+    def register_callback(self, cb):
+        pass
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self.stopped = True
+
+    def connect(self):
+        if _FakeTraderReconnect.results:
+            return _FakeTraderReconnect.results.pop(0)
+        return 0
+
+    def subscribe(self, account):
+        return 0
+
+
+def _install_reconnect_fake(monkeypatch, results):
+    _FakeTraderReconnect.instances = []
+    _FakeTraderReconnect.results = list(results)
+    monkeypatch.setenv("QMT_USERDATA_PATH", "D:\\fake")
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "1000000365")
+    monkeypatch.setattr(qmt_gateway, "_XTQUANT_AVAILABLE", True)
+    monkeypatch.setattr(qmt_gateway, "XtQuantTrader",
+                        lambda path, sid: _FakeTraderReconnect())
+    monkeypatch.setattr(qmt_gateway, "StockAccount", lambda acc: object())
+    return _FakeTraderReconnect.instances
+
+
+def test_connect_stops_previous_trader_before_recreate(monkeypatch):
+    """根治契约①：重连前必须 stop 旧实例（旧实例未停 = 同 sid 自锁 -1 的根因）。"""
+    instances = _install_reconnect_fake(monkeypatch, [0])
+    gw = QmtExecutionGateway()
+    asyncio.run(gw.connect())
+    asyncio.run(gw.connect())
+    assert len(instances) == 2
+    assert instances[0].stopped is True    # 旧实例在创建新实例前已 stop
+    assert instances[1].stopped is False   # 当前实例仍在使用
+    assert gw._connected is True
+
+
+def test_connect_minus_one_cleans_stale_session_and_retries(monkeypatch):
+    """根治契约②：-1（死进程残留会话）→ 停本次实例 + 清本 sid 队列文件 → 重试成功。"""
+    instances = _install_reconnect_fake(monkeypatch, [-1, 0])
+    cleaned = []
+    monkeypatch.setattr(
+        qmt_gateway, "_cleanup_session_files",
+        lambda path, sid: cleaned.append(sid) or ["down_queue_win_123458"])
+    gw = QmtExecutionGateway()
+    asyncio.run(gw.connect())
+    assert gw._connected is True
+    assert cleaned == [gw._session_id]     # 只清自己的 sid
+    assert len(instances) == 2
+    assert instances[0].stopped is True    # 失败实例已 stop 释放 sid
+    assert instances[1].stopped is False
+
+
+def test_connect_minus_one_twice_still_raises(monkeypatch):
+    """重试仍 -1（如客户端未启动）→ 抛 ConnectionError + 置锁，不无限重试。"""
+    instances = _install_reconnect_fake(monkeypatch, [-1, -1])
+    cleaned = []
+    monkeypatch.setattr(qmt_gateway, "_cleanup_session_files",
+                        lambda p, s: cleaned.append(s) or [])
+    gw = QmtExecutionGateway()
+    with pytest.raises(ConnectionError, match="session"):
+        asyncio.run(gw.connect())
+    assert gw._lock_down is True
+    assert len(cleaned) == 1               # 只清理一次（不重试死循环）
+    assert len(instances) == 2
+    assert all(t.stopped for t in instances)
+
+
+def test_cleanup_session_files_only_removes_own_sid(tmp_path):
+    """残留清理只删本 sid 队列文件，绝不误删客户端/其他 sid 队列。"""
+    d = tmp_path / "ud"
+    d.mkdir()
+    for name in ("down_queue_win_123458", "down_queue_win_123458__mutex",
+                 "lock_down_queue_win_123458", "down_queue_win_123459",
+                 "lock_down_queue_win_123456", "down_queue_xtmodel-0",
+                 "up_queue_xtquant", "down_queue_xtmodel-0__mutex"):
+        (d / name).write_bytes(b"x")
+
+    removed = qmt_gateway._cleanup_session_files(str(d), 123458)
+    assert sorted(removed) == ["down_queue_win_123458",
+                               "down_queue_win_123458__mutex",
+                               "lock_down_queue_win_123458"]
+    remain = sorted(p.name for p in d.iterdir())
+    assert remain == ["down_queue_win_123459", "down_queue_xtmodel-0",
+                      "down_queue_xtmodel-0__mutex", "lock_down_queue_win_123456",
+                      "up_queue_xtquant"]
+
+
 def test_sync_orders_if_stale_calls_query_orders_when_unavailable(monkeypatch):
     """_main_push_available=False → _sync_orders_if_stale 调 query_orders 补 _orders。
 
