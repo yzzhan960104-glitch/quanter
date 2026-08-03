@@ -65,8 +65,21 @@ def _eval_worker(params):
 
 
 def _default_n_proc():
-    """默认进程数 = 核数 - 2（留 2 核给系统/主进程，spec §3.6 夜跑吞吐估算用）。"""
-    return max(1, (os.cpu_count() or 4) - 2)
+    """默认进程数：核数-2，但**上限 4**（2026-08-03 资源优化）。
+
+    物理意图：12~18 个 worker 各自 freeze() 全量加载数据湖（每 worker ~1.3GB）是
+    内存峰值来源——曾把 32GB 机器压到 2.7GB 空闲，触发 MemoryError/WinError 5
+    （discovery_cron.log 实证）。颈线法单组 ~3min，4 并发 × 8h 夜跑预算 ≈ 640 组，
+    远高于单夜实际样本量；cap 4 是吞吐/内存的务实平衡。
+    环境变量 DISCOVERY_N_PROC 可显式覆盖（大内存机器可调回 8）。
+    """
+    env = os.environ.get("DISCOVERY_N_PROC")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    return min(4, max(1, (os.cpu_count() or 4) - 2))
 
 
 def eval_batch(params_list, lake_start="2025-01-01", embargo_days=5, n_proc=None):

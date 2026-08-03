@@ -32,6 +32,36 @@ def test_init_worker_not_lambda_not_nested():
     assert "<locals>" not in fn.__qualname__   # 嵌套函数会有 <locals>
 
 
+def test_default_n_proc_capped_at_4(monkeypatch):
+    """回归（2026-08-03 资源优化）：默认进程数上限 4。
+
+    旧实现 cpu-2（20 核机 = 18 worker）→ 12~18 个 worker 各自全量加载数据湖
+    （~1.3GB/个）撑爆内存。cap 4 后 8h 夜跑预算仍覆盖 ~640 组。
+    """
+    from discovery import worker
+    monkeypatch.delenv("DISCOVERY_N_PROC", raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 20)
+    assert worker._default_n_proc() == 4
+
+
+def test_default_n_proc_env_override(monkeypatch):
+    """DISCOVERY_N_PROC 环境变量显式覆盖 cap（大内存机器可放开）。"""
+    from discovery import worker
+    monkeypatch.setenv("DISCOVERY_N_PROC", "8")
+    monkeypatch.setattr("os.cpu_count", lambda: 20)
+    assert worker._default_n_proc() == 8
+
+
+def test_default_n_proc_min_one(monkeypatch):
+    """极端小核数/坏 env → 至少 1 进程。"""
+    from discovery import worker
+    monkeypatch.delenv("DISCOVERY_N_PROC", raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 1)
+    assert worker._default_n_proc() == 1
+    monkeypatch.setenv("DISCOVERY_N_PROC", "abc")
+    assert worker._default_n_proc() == 1
+
+
 def test_eval_worker_uses_state(monkeypatch, champion_params, synth_sym_df):
     """_eval_worker 在 _init_worker 设好 state 后调，返回 (params, evaluate 结果)。
 

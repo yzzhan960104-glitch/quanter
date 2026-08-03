@@ -284,7 +284,7 @@ def main(argv=None):
     ap_r.add_argument("--n-random", type=int, default=5, dest="n_random", help="random 补充组数")
     ap_r.add_argument("--embargo", type=int, default=5, help="inner→outer embargo 天数")
     ap_r.add_argument("--n-proc", type=int, default=None, dest="n_proc",
-                     help="进程数（默认核数-2）")
+                     help="进程数（默认 min(核数-2,4)，DISCOVERY_N_PROC 可覆盖）")
     ap_r.add_argument("--seed", type=int, default=42, help="采样种子（可复现）")
     ap_r.add_argument("--lake-start", type=str, default="2025-01-01", dest="lake_start",
                      help="universe 加载起始日")
@@ -307,7 +307,7 @@ def main(argv=None):
     ap_d.add_argument("--budget", type=int, default=4, help="时间预算小时（默认 4h）")
     ap_d.add_argument("--embargo", type=int, default=5, help="inner→outer embargo 天数")
     ap_d.add_argument("--n-proc", type=int, default=None, dest="n_proc",
-                     help="进程数（默认核数-2）")
+                     help="进程数（默认 min(核数-2,4)，DISCOVERY_N_PROC 可覆盖）")
     ap_d.add_argument("--lake-start", type=str, default="2025-01-01", dest="lake_start",
                      help="universe 加载起始日")
     ap_d.add_argument("--tpe-trials", type=int, default=10, dest="tpe_trials",

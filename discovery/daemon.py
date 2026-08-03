@@ -24,8 +24,11 @@ def estimate_budget(budget_hours, n_proc=None):
     偏高→次夜 trial_id 去重断点续跑接续（不无限跑）。n_proc 默认 CPU-2，保底线留给
     schtasks/日志/OS，避免 daemon 把机器吃满影响其他任务（spec §8 拷问②资源边界）。
     """
-    import os
-    n_proc = n_proc or max(1, (os.cpu_count() or 2) - 2)
+    # 2026-08-03：默认进程数与 worker._default_n_proc 同源（cap 4 + env 覆盖），
+    # 避免此处再写一份 cpu-2 导致两处默认值漂移（daemon 实测 12 worker 全量
+    # 加载数据湖撑爆内存的根因之一）。
+    from discovery.worker import _default_n_proc
+    n_proc = n_proc or _default_n_proc()
     per_group_seconds = 720   # T7 slow E2E 实测单组~12min（原 180 偏乐观 4 倍）
     return max(1, int(budget_hours * 3600 / per_group_seconds) * n_proc)
 

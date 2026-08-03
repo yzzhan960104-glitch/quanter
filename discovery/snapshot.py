@@ -55,8 +55,20 @@ def load_universe(start="2025-01-01"):
     近30日均成交额≥1e5 千元（=1亿元）过滤流动性。sym_df 含 start 至今 OHLCV（含
     2026），供 objective 全历史跑 scan_symbol + 按 signal_date 分段（不硬切 df，
     避免 window/ATR 预热丢失——探查脚本验证过的范式）。
+
+    2026-08-03 资源优化：read_parquet 直接带 pyarrow filters（date>=start），
+    只读 start 之后的行——旧实现先全量读 1019 万行再筛，每 worker ~1.3GB；
+    过滤后（2025 起 ~200 万行）每 worker 降到 ~0.3GB。12 个 worker 同时加载
+    是内存峰值来源，这是最重要的单项削减。
     """
-    lake = pd.read_parquet(LAKE_PATH)
+    try:
+        lake = pd.read_parquet(
+            LAKE_PATH,
+            filters=[("date", ">=", pd.Timestamp(start))],
+        )
+    except Exception:
+        # filters 推送失败（异常湖/旧引擎）→ 回退全量读再筛（语义不变，仅内存优化）
+        lake = pd.read_parquet(LAKE_PATH)
     lake = lake[lake.index.get_level_values("date") >= pd.Timestamp(start)]
     syms = lake.index.get_level_values("symbol").unique().tolist()
     # 近30日均成交额（千元）；按 symbol 取 tail(30) 均值，对齐 param_iter 口径

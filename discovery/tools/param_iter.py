@@ -23,6 +23,10 @@ import random
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 2026-08-03 修复：脚本直跑（python discovery/tools/param_iter.py）时 sys.path[0]
+# 是脚本目录而非仓库根，`from strategies...` 会 ModuleNotFoundError（文档用法即坏）。
+# 补插仓库根（tools → discovery → 仓库根 三级上溯），与 qmt_smoke.py 同款范式。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pandas as pd
 from strategies.neckline.method_v0 import DEFAULTS
