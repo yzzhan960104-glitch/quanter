@@ -174,6 +174,16 @@ def _critical_guard(coro_method):
 # 环境读取辅助
 # ============================================================================
 
+# APScheduler 3.x CronTrigger 工作日语义：day_of_week **0=周一**（非标准 cron 0=周日）。
+# 2026-08-03（周一）实证：``"0 18 * * 1-5"`` 周一不触发（下一次是周二），pipeline
+# 事件链断链、data_pipeline.log 无当日采集。修复：一律用名字 ``mon-fri``，
+# 测试 tests/test_workday_cron.py 钉死语义防回归。.env 里的 ENGINE_*_CRON 覆盖值
+# 同样必须用 mon-fri（2026-08-03 已同步修正 .env）。
+PIPELINE_CRON_DEFAULT = "0 18 * * mon-fri"    # 盘后事件链（采集→校验→eod→brief）
+PRE_OPEN_CRON_DEFAULT = "22 9 * * mon-fri"    # 开盘挂单闸
+POST_CLOSE_CRON_DEFAULT = "30 15 * * mon-fri" # 盘后对账/熔断/trailing
+
+
 # 模块级活跃引擎单例（C-2 scheduling-orchestration W1）：
 #   __init__ 末尾置位 self，供模块级 _submit / pre_open / post_close 反查实例的
 #   ``_dynamic_whitelist`` 属性（engine 与 server 合并进同进程后的物理隔离机制——
@@ -2018,13 +2028,13 @@ class TradingEngine:
         # 替代原外部函数 + ``args=[self]`` 形式——五 job 统一走 L1 停调度 wrapper。
         self.sched.add_job(
             self._pipeline_then_eod, CronTrigger.from_crontab(
-                os.getenv("ENGINE_PIPELINE_CRON", "0 18 * * 1-5")),  # 18:00 盘后触发事件链
+                os.getenv("ENGINE_PIPELINE_CRON", PIPELINE_CRON_DEFAULT)),  # 18:00 盘后
             id="pipeline_then_eod",
         )
         # 四 job 注册：id 显式命名便于 get_jobs 自检与外部调试
         self.sched.add_job(
             self._pre_open, CronTrigger.from_crontab(
-                os.getenv("ENGINE_PRE_OPEN_CRON", "22 9 * * 1-5")),
+                os.getenv("ENGINE_PRE_OPEN_CRON", PRE_OPEN_CRON_DEFAULT)),
             id="pre_open",
         )
         # stop_loss：盘中每 N 秒巡检（海龟时间驱动移动止损 grace/step/floor 在此触发）。
@@ -2042,7 +2052,7 @@ class TradingEngine:
         )
         self.sched.add_job(
             self._post_close, CronTrigger.from_crontab(
-                os.getenv("ENGINE_POST_CLOSE_CRON", "30 15 * * 1-5")),
+                os.getenv("ENGINE_POST_CLOSE_CRON", POST_CLOSE_CRON_DEFAULT)),
             id="post_close",
         )
         # M1 健康守护 job（Task 8）：interval 60s，统一网关自愈入口。

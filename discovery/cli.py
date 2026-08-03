@@ -167,7 +167,10 @@ def cmd_daemon(args):
           f"tpe={args.tpe_trials} proc={args.n_proc} K={args.k_rounds} rho={args.rho_threshold}")
     out = run_daemon(meta, split, _db_path(),
                      budget_hours=args.budget, n_proc=args.n_proc, lake_start=args.lake_start,
-                     tpe_trials=args.tpe_trials, rho_threshold=args.rho_threshold, K=args.k_rounds)
+                     tpe_trials=args.tpe_trials, rho_threshold=args.rho_threshold,
+                     K=args.k_rounds, budget_groups=args.budget_groups,
+                     eval_replay_top=args.eval_replay_top,
+                     auto_publish_fn=_auto_publish)
     # early_exited 短路（跨夜已收敛→不访问 out["summary"]，否则 None.attribute 炸）
     if out["early_exited"]:
         print(f"早退：跨夜已收敛（k={out['latest_k']}），不重复夜跑")
@@ -183,6 +186,16 @@ def cmd_daemon(args):
         print(f"冠军 outer 去偏: ann={o.get('ann',0)*100:.1f}% calmar={o.get('calmar',0):.2f} "
               f"max_dd={o.get('max_dd',0)*100:.1f}%")
         print(f"下一步: python -m discovery publish {s.top_trial_id}")
+
+
+def _auto_publish(trial_id: str, outer: dict | None) -> str | None:
+    """生产装配：新冠军 outer 优于 ACTIVE → 自动建 experiment DRAFT。
+
+    延迟 import research.discovery_bridge（cli 是装配层，可依赖 research；
+    discovery 包本体零 research 依赖，分层干净）。
+    """
+    from research.discovery_bridge import auto_publish_champion
+    return auto_publish_champion(trial_id, outer)
 
 
 def cmd_champions(args):
@@ -305,6 +318,11 @@ def main(argv=None):
     # daemon 子命令（Plan 4 Task 4）：schtasks @02:00 触发 run_daemon.bat → 本命令
     ap_d = sub.add_parser("daemon", help="L4 守护 daemon 夜跑（Plan 4）")
     ap_d.add_argument("--budget", type=int, default=4, help="时间预算小时（默认 4h）")
+    ap_d.add_argument("--budget-groups", type=int, default=None, dest="budget_groups",
+                      help="直给本轮组数上限（24h 低功率模式每轮 1-2 组；None=按小时折算）")
+    ap_d.add_argument("--no-eval-replay-top", action="store_false", dest="eval_replay_top",
+                      help="关闭冠军 replay 口径复评（低功率模式每轮 1 组时复评会拖长一倍；"
+                           "夜间集中跑默认开启）")
     ap_d.add_argument("--embargo", type=int, default=5, help="inner→outer embargo 天数")
     ap_d.add_argument("--n-proc", type=int, default=None, dest="n_proc",
                      help="进程数（默认 min(核数-2,4)，DISCOVERY_N_PROC 可覆盖）")

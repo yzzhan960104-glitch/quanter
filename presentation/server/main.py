@@ -46,6 +46,8 @@ from presentation.server.api.v1.training import router as training_router
 from presentation.server.api.v1.data import router as data_router
 # AI 复盘路由（层级六）：GLM 调用 + 三级降级，CPU/网络阻塞走线程池
 from presentation.server.api.v1.review import router as review_router
+# Phase C 研究提案路由（2026-08-03）：Agent 提案生成/验证/钉钉审批/发布桥。
+from presentation.server.api.v1.research import router as research_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
 from infra.notifier import build_default_manager
 
@@ -58,6 +60,11 @@ from infra.notifier import build_default_manager
 # （startup 内同步调一次）复用同函数，避免逻辑重复。
 import subprocess as _subprocess
 
+# APScheduler 3.x 工作日语义：0=周一（非标准 cron 0=周日）。digest 推送与 engine
+# 的 pipeline/pre_open/post_close 必须用 ``mon-fri``（"1-5" 实为周二~周六，
+# 2026-08-03 周一断链实证，tests/test_workday_cron.py 钉死）。
+_DIGEST_CRON_DEFAULT = "30 18 * * mon-fri"
+
 # Windows DETACHED 标志（broadcast/connect_manager.py 等既有范式，C-7 前 ops/start_all.py 同源）：
 #   CREATE_NEW_PROCESS_GROUP(0x200) → 子进程独立进程组（Ctrl+C 不传播）；
 #   DETACHED_PROCESS(0x8)           → 无控制台（独立于父进程 uvicorn 的 stdio）。
@@ -66,7 +73,19 @@ _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _DETACHED_PROCESS = 0x00000008
 
 
-def _run_discovery_subprocess() -> None:
+def _discovery_low_power_allowed(now=None) -> bool:
+    """24h 低功率模式的窗口判定：避开盘中与数据链时段（2026-08-03）。
+
+    物理意图：低功率 = 全天小批慢跑，但不能抢交易时段资源（9:00-16:59 盘中/
+    盘后对账）与 18:00 pipeline+18:30 digest 窗口。允许小时：0-8 与 17、19-23；
+    9-16、18 跳过。纯函数（now 可注入，默认本地时间）。
+    """
+    from datetime import datetime
+    now = now or datetime.now()
+    return now.hour in (0, 1, 2, 3, 4, 5, 6, 7, 8, 17, 19, 20, 21, 22, 23)
+
+
+def _run_discovery_subprocess(low_power: bool | None = None) -> None:
     """discovery daemon cron job：subprocess 起 ``python -m discovery daemon``（子进程隔离）。
 
     物理意图（spec §3.2）：discovery 收编 lifespan 后，触发点由 schtasks 改为
@@ -80,14 +99,56 @@ def _run_discovery_subprocess() -> None:
     DETACHED：独立进程组，uvicorn 退出不杀 discovery 子进程（夜跑长任务不依附 server）。
     log 重定向 logs/discovery_cron.log（append），cron 触发的 stdout/stderr 落盘可溯源。
     """
+    import os as _os
+    from datetime import datetime
     from pathlib import Path
+    # 24h 低功率模式（2026-08-03）：DISCOVERY_SCHEDULE=low-power 时每小时触发，
+    # 每轮小批（1 组/单进程/K=24）。窗口内跳过（不触发子进程，零资源占用）。
+    if low_power is None:
+        low_power = _os.environ.get("DISCOVERY_SCHEDULE", "").lower() == "low-power"
+    if low_power and not _discovery_low_power_allowed(datetime.now()):
+        logging.getLogger(__name__).debug("discovery 低功率窗口跳过（盘中/数据链时段）")
+        return
     _root = Path(__file__).resolve().parents[2]
     _venv_py = _root / ".venv310" / "Scripts" / "python.exe"
     _log_dir = _root / "logs"
     _log_dir.mkdir(parents=True, exist_ok=True)
     _log_fh = (_log_dir / "discovery_cron.log").open("a", encoding="utf-8")
+    _cmd = [str(_venv_py), "-m", "discovery", "daemon"]
+    if low_power:
+        # 低功率参数：每轮 1 组、单进程、K=24（24 次≈1 天不扩张才收敛）
+        # --no-eval-replay-top：冠军 replay 复评全市场两段会拖长一倍，低功率每轮省掉
+        # --tpe-trials 0：默认 10 个 TPE 会拖到 ~80min/轮，低功率每轮只跑 1 组 Sobol
+        _cmd += ["--budget-groups", "1", "--n-proc", "1", "--k-rounds", "24",
+                 "--no-eval-replay-top", "--tpe-trials", "0"]
     _subprocess.Popen(
-        [str(_venv_py), "-m", "discovery", "daemon"],
+        _cmd,
+        cwd=str(_root),
+        stdout=_log_fh,
+        stderr=_subprocess.STDOUT,
+        stdin=_subprocess.DEVNULL,
+        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
+        close_fds=True,
+    )
+
+
+def _run_research_digest_push() -> None:
+    """research digest 周期推送 cron job：DETACHED 子进程跑 ``research.digest --push``。
+
+    物理意图（2026-08-03 · Agent 观察环推送腿）：每日盘后把研究摘要（实盘成交 +
+    state_store 已实现盈亏 + 回测期望 + 漂移状态）推钉钉。用子进程而非进程内直调：
+      (1) digest 读 CSV/SQLite + 钉钉 webhook 网络 IO，子进程隔离不阻塞 uvicorn 事件循环；
+      (2) 与 discovery cron 同范式（DETACHED 独立进程组，server 重启不杀推送）；
+      (3) 日志重定向 logs/research_digest.log（append），推送失败可溯源。
+    """
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    _venv_py = _root / ".venv310" / "Scripts" / "python.exe"
+    _log_dir = _root / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_fh = (_log_dir / "research_digest.log").open("a", encoding="utf-8")
+    _subprocess.Popen(
+        [str(_venv_py), "-m", "research.digest", "--push", "--proposals"],
         cwd=str(_root),
         stdout=_log_fh,
         stderr=_subprocess.STDOUT,
@@ -381,18 +442,52 @@ async def lifespan(app: FastAPI):
     try:
         _eng = getattr(app.state, "trading_engine", None)
         if _eng is not None:
+            import os as _os_cron
             from apscheduler.triggers.cron import CronTrigger
-            _eng.sched.add_job(
-                _run_discovery_subprocess,
-                CronTrigger(hour=2, minute=0),
-                id="discovery_daemon",
-                replace_existing=True,
-            )
-            logging.getLogger(__name__).info(
-                "discovery cron 02:00 已注册到 engine.sched")
+            # 24h 低功率（2026-08-03）：DISCOVERY_SCHEDULE=low-power → 每小时整点+5 分
+            # 触发，job 内窗口判定（盘中/数据链时段跳过）；否则保持 02:00 夜间集中跑。
+            if _os_cron.environ.get("DISCOVERY_SCHEDULE", "").lower() == "low-power":
+                _eng.sched.add_job(
+                    _run_discovery_subprocess,
+                    CronTrigger.from_crontab("5 * * * *"),
+                    id="discovery_daemon",
+                    replace_existing=True,
+                )
+                logging.getLogger(__name__).info(
+                    "discovery cron 每小时+5 分已注册到 engine.sched（24h 低功率模式）")
+            else:
+                _eng.sched.add_job(
+                    _run_discovery_subprocess,
+                    CronTrigger(hour=2, minute=0),
+                    id="discovery_daemon",
+                    replace_existing=True,
+                )
+                logging.getLogger(__name__).info(
+                    "discovery cron 02:00 已注册到 engine.sched")
     except Exception:
         logging.getLogger(__name__).exception(
             "lifespan 装 discovery cron 异常（已忽略）")
+
+    # research digest 周期推送 cron（2026-08-03 · Agent 观察环推送腿）。
+    # 默认每交易日 18:30（pipeline_then_eod 18:00 之后，数据/回测期望已就绪），
+    # env RESEARCH_DIGEST_CRON 可覆盖（crontab 5 段格式）。软降级同 discovery cron。
+    try:
+        _eng_digest = getattr(app.state, "trading_engine", None)
+        if _eng_digest is not None:
+            import os as _os_cron
+            from apscheduler.triggers.cron import CronTrigger
+            _digest_cron = _os_cron.environ.get("RESEARCH_DIGEST_CRON", _DIGEST_CRON_DEFAULT)
+            _eng_digest.sched.add_job(
+                _run_research_digest_push,
+                CronTrigger.from_crontab(_digest_cron),
+                id="research_digest_push",
+                replace_existing=True,
+            )
+            logging.getLogger(__name__).info(
+                "research digest cron %s 已注册到 engine.sched", _digest_cron)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan 装 research digest cron 异常（已忽略）")
 
     # C-7 V3：discovery 启动补跑（offline 容错，收编自洽必需）。
     # 物理意图（spec §3.3）：offline 跨昨晚 02:00 → 启动补跑（DETACHED subprocess，
@@ -538,6 +633,7 @@ app.include_router(data_router, prefix="/api/v1", dependencies=[Depends(require_
 # AI 复盘（层级六）：GLM 调用 + 三级降级（缺凭证/调用失败/无数据均不阻断）
 # diagnose 触发外部 LLM 调用（成本/滥用面），路由级鉴权保护。
 app.include_router(review_router, prefix="/api/v1", dependencies=[Depends(require_write)])
+app.include_router(research_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 
 
 # ============ 健康检查端点 ============

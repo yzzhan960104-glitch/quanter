@@ -13,7 +13,12 @@
 纯函数可单测：run_search/notify/eval_outer 均可注入（测试 mock，不触达真实 schtasks/钉钉）。
 信息隔离（spec §6.2）：eval_outer_fn 的结果只进返回 dict 供报告，严禁回写 run_search 排序。
 """
-from discovery.store import init_db, connect, read_latest_search_run, write_daemon_state
+import logging
+
+from discovery.store import (init_db, connect, read_latest_search_run,
+                             read_latest_search_run_any, write_daemon_state)
+
+logger = logging.getLogger(__name__)
 
 
 def estimate_budget(budget_hours, n_proc=None):
@@ -35,7 +40,8 @@ def estimate_budget(budget_hours, n_proc=None):
 
 def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=None,
                      lake_start="2025-01-01", tpe_trials=0, rho_threshold=0.8, K=3,
-                     run_search_fn=None, notify_fn=None, eval_outer_fn=None):
+                     run_search_fn=None, notify_fn=None, eval_outer_fn=None,
+                     eval_replay_top=False, budget_groups=None, auto_publish_fn=None):
     """单夜 daemon 编排（读跨夜状态→跑批→比对前沿→更新 k→告警/outer）。
 
     Args:
@@ -49,6 +55,13 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
       run_search_fn: 注入 run_search（默认 discovery.runner.run_search）。测试 mock。
       notify_fn: 新冠军/收敛告警回调（默认 None=noop；T3 接 fire_and_forget+notify_risk_event）。
       eval_outer_fn: 冠军 outer 去偏回调（默认 None=noop；T3 接 evaluate）。签名 (trial_id)->dict。
+      eval_replay_top: P1-2（2026-08-03）：冠军补跑 replay 口径复评（默认 False；
+        run_daemon 生产入口默认开，测试可关）。
+      budget_groups: 直给本轮组数上限（24h 低功率模式用：每轮 1-2 组、单进程、
+        每小时触发；None=按 budget_hours 折算，夜间集中跑语义不变）。
+      auto_publish_fn: 新冠军自动 publish 桥（签名 (trial_id, outer)->experiment_id|None，
+        由 cli 装配 research.discovery_bridge.auto_publish_champion；默认 None=不自动）。
+        只建 experiment DRAFT（promote 留人审），失败软降级不阻断 daemon。
     Returns:
       dict（run_id/summary/latest_k/converged_cross/early_exited/outer/status）。
 
@@ -59,17 +72,31 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
     #    daemon 每夜 write_search_run 落一行，最新即上夜 daemon 算完的最终状态。
     with connect(db_path) as conn:
         latest = read_latest_search_run(conn, snapshot_meta.snapshot_hash)
+        # P1-3（2026-08-03）：精确 hash 查不到时，查全局最新行判别"数据版本变化"——
+        # 每晚数据增量/复权重算 → snapshot_hash 变 → 跨夜收敛重置是数据不可比的
+        # 必然结果，旧实现静默 k=0 无法审计。data_changed=True 显式标注（通知/日志）。
+        data_changed = False
+        if latest is None:
+            latest_any = read_latest_search_run_any(conn)
+            if latest_any is not None and latest_any["snapshot_hash"] != snapshot_meta.snapshot_hash:
+                data_changed = True
+                logger.warning(
+                    "跨夜 snapshot 数据版本变化：上夜 %s vs 今夜 %s（数据增量/复权）→"
+                    " 跨夜判据①重置，k 从 0 起算", latest_any["snapshot_hash"],
+                    snapshot_meta.snapshot_hash)
 
     # 早退：上夜已收敛 → 本夜跳过跑批（幂等，schtasks 多触发/人误触不重跑浪费算力）。
     if latest and latest.get("status") == "converged":
         return {"early_exited": True, "run_id": None, "summary": None,
                 "latest_k": latest.get("k_rounds_no_expansion", 0),
-                "converged_cross": True, "outer": None, "status": "converged"}
+                "converged_cross": True, "outer": None, "status": "converged",
+                "data_changed": False, "data_hash": snapshot_meta.data_hash}
 
     # 2. 调 run_search（注入默认；测试 mock 替换以隔离真实跑批）。
     if run_search_fn is None:
         from discovery.runner import run_search as run_search_fn
-    n_budget = estimate_budget(budget_hours, n_proc)
+    n_budget = (budget_groups if budget_groups is not None
+                else estimate_budget(budget_hours, n_proc))
     # daemon 轮次（seed 派生用）：每次夜跑换 seed，否则相同 seed+snapshot 产相同参数序列
     # → trial_id 全去重 → 无新探索（rho 永远 0，伪收敛）。run_count 上移到 run_search 前。
     run_count = (latest["daemon_run_count"] + 1 if latest else 1)
@@ -77,7 +104,8 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
         snapshot_meta, split, budget=n_budget, n_sobol=min(5, n_budget),
         n_random=min(5, max(0, n_budget - 5)), seed=42 + run_count, db_path=db_path,
         n_proc=n_proc, lake_start=lake_start,
-        tpe_trials=tpe_trials, rho_threshold=rho_threshold)
+        tpe_trials=tpe_trials, rho_threshold=rho_threshold,
+        eval_replay_top=eval_replay_top)
 
     # 3. 跨夜判据①：比对本次 vs 上夜前沿。
     #    首次 latest=None → k=0（从 0 起算，不死板 -1 占位绕弯）。
@@ -114,8 +142,19 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
         except Exception:
             pass           # 告警软降级：钉钉失败不阻断 daemon
 
+    # 6. 自动 publish 桥（2026-08-03 · 与实验平台打通）：新冠军 outer 优于当前
+    #    ACTIVE 才建 DRAFT；异常软降级（不阻断 daemon 主流程）。
+    auto_exp_id = None
+    if auto_publish_fn is not None and summary.top_trial_id:
+        try:
+            auto_exp_id = auto_publish_fn(summary.top_trial_id, outer)
+        except Exception:
+            auto_exp_id = None
+
     return {"early_exited": False, "run_id": summary.run_id, "summary": summary,
-            "latest_k": k, "converged_cross": converged_cross, "outer": outer, "status": status}
+            "latest_k": k, "converged_cross": converged_cross, "outer": outer, "status": status,
+            "data_changed": data_changed, "data_hash": snapshot_meta.data_hash,
+            "auto_published_experiment": auto_exp_id}
 
 
 def _eval_outer(trial_id, db_path, split, lake_start="2025-01-01"):
@@ -219,5 +258,8 @@ def run_daemon(snapshot_meta, split, db_path, *, notify_fn=None, eval_outer_fn=N
     if eval_outer_fn is None:
         # 闭包捕获 db_path/split（显式形参，非 *args——这是本函数不用透传版的根本原因）。
         eval_outer_fn = lambda tid: _eval_outer(tid, db_path, split)
+    # P1-2（2026-08-03）：生产入口默认开冠军 replay 口径复评（报告/告警对拍用）；
+    # 调用方可显式 eval_replay_top=False 关闭（测试/资源受限场景）。
+    kwargs.setdefault("eval_replay_top", True)
     return run_daemon_cycle(snapshot_meta, split, db_path,
                             notify_fn=notify_fn, eval_outer_fn=eval_outer_fn, **kwargs)

@@ -94,6 +94,79 @@ def test_daemon_first_run_k_zero_when_no_latest(tmp_path):
     assert out["converged_cross"] is False
 
 
+def test_daemon_marks_data_changed_when_snapshot_differs(tmp_path):
+    """P1-3：上夜 snapshot_hash 与今夜不同（数据增量/复权）→ data_changed=True，k 重置。
+
+    物理意图：每晚数据湖增量落湖 → snapshot_hash 变 → read_latest_search_run 查不到
+    上夜记录 → 跨夜判据①静默重置（旧实现无任何提示，k=0/3 原因不可见）。本测试
+    锁定 daemon 显式标注 data_changed，让"数据版本变化导致收敛重置"可审计。
+    """
+    from discovery.daemon import run_daemon_cycle
+    from discovery.snapshot import SnapshotMeta
+    from discovery.store import connect, init_db, write_search_run
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    # 上夜：snap_old（旧数据版本）
+    with connect(db) as conn:
+        write_search_run(conn, run_id="old_run", snapshot_hash="snap_old",
+                         started_at="t0", ended_at="t0e", n_trials=1,
+                         status="budget_exhausted", frontier_size=5,
+                         k_rounds_no_expansion=2, daemon_run_count=2, note="")
+    meta = SnapshotMeta("snap_new", "u", 10, "d2", "2025-01-01", data_hash="h_new")
+    split = holdout_split()
+    rs_fn, _ = _make_run_search_fn([_fake_summary("r1", 3)], db, "snap_new")
+    out = run_daemon_cycle(meta, split, db, run_search_fn=rs_fn, K=3)
+    assert out["data_changed"] is True
+    assert out["data_hash"] == "h_new"
+    assert out["latest_k"] == 0
+
+
+def test_daemon_data_unchanged_when_same_snapshot(tmp_path):
+    """同 snapshot（数据版本一致）→ data_changed=False（跨夜收敛可正常累积）。"""
+    from discovery.daemon import run_daemon_cycle
+    from discovery.snapshot import SnapshotMeta
+    from discovery.store import init_db
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    meta = SnapshotMeta("snap1", "u", 10, "d", "2025-01-01", data_hash="h")
+    split = holdout_split()
+    rs_fn, _ = _make_run_search_fn([_fake_summary("r1", 3)], db, "snap1")
+    out = run_daemon_cycle(meta, split, db, run_search_fn=rs_fn, K=3)
+    assert out["data_changed"] is False
+
+
+def test_daemon_passes_eval_replay_top_to_run_search(tmp_path):
+    """P1-2：run_daemon_cycle 透传 eval_replay_top=True（生产默认开，冠军补 replay 口径）。"""
+    from discovery.daemon import run_daemon_cycle
+    from discovery.snapshot import SnapshotMeta
+    from discovery.store import connect, init_db, write_search_run
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    # 先落一行上夜记录（避免首次 k 分支干扰断言，专注透传）
+    with connect(db) as conn:
+        write_search_run(conn, run_id="r0", snapshot_hash="snap1", started_at="t0",
+                         ended_at="t0e", n_trials=1, status="budget_exhausted",
+                         frontier_size=3, k_rounds_no_expansion=0,
+                         daemon_run_count=1, note="")
+    meta = SnapshotMeta("snap1", "u", 10, "d", "2025-01-01", data_hash="h")
+    split = holdout_split()
+    seen = {}
+
+    def _rs(*a, **kw):
+        seen.update(kw)
+        s = _fake_summary("r1", 3)
+        from discovery.store import connect as _c, write_search_run as _w
+        with _c(db) as conn:
+            _w(conn, run_id=s.run_id, snapshot_hash="snap1", started_at="t1",
+               ended_at="t1e", n_trials=1, status=s.status,
+               frontier_size=s.frontier_size, k_rounds_no_expansion=0,
+               daemon_run_count=2, note="")
+        return s
+
+    run_daemon_cycle(meta, split, db, run_search_fn=_rs, K=3, eval_replay_top=True)
+    assert seen.get("eval_replay_top") is True
+
+
 def test_daemon_alerts_on_new_champion(tmp_path, monkeypatch):
     """有冠军 → notify_fn 被调（验注入语义：消息含 summary/k/converged_cross/outer）。
 
@@ -156,3 +229,41 @@ def test_daemon_early_exit_when_converged(tmp_path):
     out = run_daemon_cycle(meta, split, db, run_search_fn=_rs, K=3)
     assert out["early_exited"] is True
     assert called["n"] == 0    # 未触达 run_search
+
+
+def test_daemon_calls_auto_publish_with_champion_and_outer(tmp_path):
+    """auto_publish_fn 注入：daemon 用冠军 trial_id + outer 调自动 publish 桥。"""
+    from discovery.daemon import run_daemon_cycle
+    from discovery.snapshot import SnapshotMeta
+    from discovery.store import connect, init_db, write_search_run
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    with connect(db) as conn:
+        write_search_run(conn, run_id="r0", snapshot_hash="snap1", started_at="t0",
+                         ended_at="t0e", n_trials=1, status="budget_exhausted",
+                         frontier_size=3, k_rounds_no_expansion=0,
+                         daemon_run_count=1, note="")
+    meta = SnapshotMeta("snap1", "u", 10, "d", "2025-01-01", data_hash="h")
+    split = holdout_split()
+    calls = {}
+
+    def _rs(*a, **kw):
+        s = _fake_summary("r1", 3)
+        from discovery.store import connect as _c, write_search_run as _w
+        with _c(db) as conn:
+            _w(conn, run_id=s.run_id, snapshot_hash="snap1", started_at="t1",
+               ended_at="t1e", n_trials=1, status=s.status,
+               frontier_size=s.frontier_size, k_rounds_no_expansion=0,
+               daemon_run_count=2, note="")
+        return s
+
+    def _ap(trial_id, outer):
+        calls["trial_id"] = trial_id
+        calls["outer"] = outer
+        return "exp_auto"
+
+    out = run_daemon_cycle(meta, split, db, run_search_fn=_rs, K=3,
+                           auto_publish_fn=_ap,
+                           eval_outer_fn=lambda tid: {"ann": 0.12})
+    assert calls == {"trial_id": "t1", "outer": {"ann": 0.12}}
+    assert out["auto_published_experiment"] == "exp_auto"
