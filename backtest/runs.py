@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """backtest.runs 回放结果持久化（方案 A：默认全存 + 支持删除）。
 
+⚠️ 2026-08-03 治理：**遗留只读模块，生产代码已无调用方**。
+回测结果单一真相源 = ``data/replay_tasks.db``（backtest/tasks_db.py，Spec 1 起
+worker 落 report_json）；本模块的 ``replay_runs/*.json`` 归档已由
+``ops/migrate_replay_runs_to_sqlite.py`` 全量迁入 SQLite，目录仅作历史只读归档
+（见 replay_runs/README.md）。保留本模块仅为兼容旧调用/测试，新代码禁止写入。
+
 Layer2 阶段4（2026-07）已随执行编排层收口至 backtest/ 包——本文件即真身，
 不再是 caisen/infra/ 过渡态（旧"待迁 Step4"注释已失效，2026-08-02 清理）。
 

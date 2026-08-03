@@ -47,6 +47,21 @@ logger = logging.getLogger(__name__)
 _reader = None
 
 
+def _replay_lake_min_date() -> str:
+    """回测 worker 加载 daily 湖的起点（2026-08-03 资源优化，env 可覆盖）。
+
+    物理意图：策略 window（≤80 bar）+ ATR 预热最多需 ~1 年历史；全量湖 10 年
+    原表 + ffill 副本 ≈ 3GB/worker。回测任务窗口通常是近期，3 年缓冲足够，
+    内存降 ~70%。若回测老窗口（如 2024 年段）被截断，用
+    REPLAY_LAKE_MIN_DATE=YYYY-MM-DD 显式放宽。
+    """
+    env = os.environ.get("REPLAY_LAKE_MIN_DATE")
+    if env:
+        return env
+    from datetime import date, timedelta
+    return (date.today() - timedelta(days=3 * 365)).isoformat()
+
+
 def _init_worker():
     """ProcessPoolExecutor initializer：加载 daily 湖一次（子进程常驻复用）。
 
@@ -67,7 +82,7 @@ def _init_worker():
     loaded = getattr(_reader, "loaded", False)
     lakes = _reader.lakes() if hasattr(_reader, "lakes") else []
     if daily_path and os.path.exists(daily_path) and (not loaded or "daily" not in lakes):
-        _reader.load(daily_path, key="daily")
+        _reader.load(daily_path, key="daily", date_min=_replay_lake_min_date())
 
 
 def run_replay_worker(task_id: str, abort_flag, progress_q, heartbeat_q) -> None:

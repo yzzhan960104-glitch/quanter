@@ -79,6 +79,20 @@ def test_compute_stats_empty():
     }
 
 
+def test_compute_stats_first_trade_loss_captures_drawdown():
+    """回归（2026-08-02）：首笔即亏损时回撤必须被记录。
+
+    旧实现 peak 从 -inf 起，把亏损首笔当作「峰值」，单笔 rr=-1 的回测显示
+    max_drawdown=0.0（漏算）——2026-07-12 回测的「胜率 0.0% / 回撤 0.0% /
+    年化 -10.9%」即此病灶。净值归一化 equity_0=1.0，peak 必须从 0.0 起。
+    """
+    hits = [_sig(rr=-1.0, pnl=-5.0)]
+    stats = _compute_stats(hits, PositionModel())
+    assert stats["n_hits"] == 1
+    assert stats["win_rate"] == 0.0
+    assert stats["max_drawdown"] == pytest.approx(-1.0)
+
+
 def test_replay_report_uses_renamed_threshold_field_with_legacy_alias():
     """P1-5：min_rr_ratio_recommendation → threshold_recommendation（旧名保留别名）。"""
     df = _df()

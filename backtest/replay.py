@@ -290,13 +290,16 @@ def _compute_stats(hits: list, position_model: Optional[PositionModel] = None) -
     rrs = [float(h.rr) for h in hits]
     wins = sum(1 for r in rrs if r > 0)
 
-    # 累计 rr 曲线 → 最大回撤（peak-to-trough）
+    # 累计 rr 曲线 → 最大回撤（peak-to-trough）。
+    # 2026-08-02 修复：peak 必须从 0.0 起（净值归一化 equity_0=1.0）。
+    # 旧实现 peak=float('-inf') 会把「首笔即亏损」的曲线起点当作峰值，
+    # 单笔亏损 rr=-1 的回测显示 max_drawdown=0.0（漏算回撤，误导播报/复盘）。
     cumulative = []
     running = 0.0
     for r in rrs:
         running += r
         cumulative.append(running)
-    peak = float("-inf")
+    peak = 0.0
     max_dd = 0.0
     for v in cumulative:
         peak = max(peak, v)
