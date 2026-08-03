@@ -12,7 +12,10 @@
   stop_loss 每 5min 盘中：查 gw 真实持仓 + 现价（qmt_market_data.get_quote / xtdata），
               跌破止损价 → 发卖出单（qty 必须来自 gw 持仓，绝不硬编码——live 卖错数量 = 致命）。
               ⚠️ 止损链路依赖 xtdata 行情源（miniQMT 通道），无 xtdata 时 live 前需另接行情源（C1 follow-up）。
-  post_close 15:30 盘后：对账（run_reconcile）+ 清动态白名单。熔断连线见 TODO（本 task 不做）。
+  post_close 15:30 盘后：对账（run_reconcile）+ 日内熔断判定（Task 10·R-2：读 pre_open 快照
+              start_equity → check_daily_loss_limit → 触发即 cancel_all + emergency_halt）
+              + trailing 盘后演进（Task 9·R-3：_evolve_trailing_stops 按 holding_days 重算次日
+              stop 写回 plan）+ 清动态白名单。
 
 ============================================================================
 ⚠️ 不变量（Task5 M2 风险官要求 · 绝对红线 · W1 已重构为进程内隔离）
@@ -225,10 +228,11 @@ def _trade_cfg() -> dict:
         # 物理意图：挂单等待期 high≥此价 → 涨幅已兑现撤买单（过滤「猛突破后回踩」陷阱）。
         # env 缺省 → 对齐回测基准 1.0；显式 env 可覆盖（灰度调参用）。
         "cancel_thresh_mult": float(os.getenv("TRADE_CANCEL_THRESH_MULT", "1.0")),
-        # 占位（M1）：海龟 trailing 动态止损参数——grace/step/floor 三件套本 task 未实际消费，
-        # compute_stop_price 盘后重算（Task2 已就绪）需 Task 10 在引擎状态层维护
-        # {symbol: stop_price} 并每日/盘中更新后注入 stop_loss_monitor；本 task 的
-        # stop_loss_monitor 直接用活跃计划里的静态 stop_prices，不涉及 trailing 动态更新。
+        # 海龟 trailing 动态止损参数（Task 9/10 已落地）：grace/step/floor 三件套由
+        # _evolve_trailing_stops 在 post_close 步骤④盘后消费——按 holding_days 重算次日
+        # stop_price 写回 plan（holding_days<=grace 用 base_stop 给趋势确认空间，超 grace
+        # 每日收紧 step×ATR，floor 卡底）。盘中 stop_loss_monitor 用演进后的静态 stop_prices，
+        # 不盘中追踪 ATR high（live-readiness spec §2 决策：R-3 选盘后演进，否决盘中跟踪）。
         "grace": int(os.getenv("TRADE_STOPLOSS_GRACE_DAYS", "5")),
         "step": float(os.getenv("TRADE_STOPLOSS_STEP_ATR", "0.1")),
         "floor": float(os.getenv("TRADE_STOPLOSS_FLOOR", "0.5")),

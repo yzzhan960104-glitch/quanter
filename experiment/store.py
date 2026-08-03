@@ -3,7 +3,9 @@
 
 Why SQLite 而非 JSON（design ADR3）：结构化查询（按 status/experiment_id 索引）、
 事务一致性（promote = 更新版本表 + 写审计，原子）、并发写安全（WAL）。
-plan 归因仍走 plans/<date>.json（execution/storage 不动底层），SQLite 只管实验版本/审计。
+（2026-08-03 治理：旧注释「plan 归因走 plans/<date>.json / execution/storage」已随
+scan 落盘格式退役失效——交易计划单一真相源是 logs/trading_plans/plan_<date>.json，
+见 trading/trading_plan.py；本模块只管实验版本/审计，不读写计划文件。）
 
 复用范式：execution/replay_tasks_db.py 的 SQLite 用法（标准库 sqlite3，WAL，上下文管理器）。
 """
