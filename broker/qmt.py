@@ -369,9 +369,13 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
     def is_client_ready(self, staleness_sec: int = 300) -> bool:
         """探测 miniQMT 客户端是否就绪（M1 · 纯文件系统检查，不触 xtquant）。
 
-        判据：userdata_mini 下 down_queue_win_* / miniqmtShm*Cache / up_queue_win_*
-        任一文件 mtime 在近 staleness_sec（默认5min）内 = 客户端在跑且活跃。
+        判据：userdata_mini 下 miniqmtShm*Cache* / up_queue_win_* 任一文件 mtime 在近
+        staleness_sec（默认5min）内 = 客户端在跑且活跃。
         若全部文件老旧/不存在 → 客户端未启动或未登录 → connect 必返 -1，不空跑重连。
+
+        ⚠️ 不含 ``down_queue_win_*``（2026-08-04 根治）：那是引擎 XtQuantTrader 自建的
+        会话文件，会被引擎自己刷新——若把它当客户端信号，客户端未起时引擎会「自证
+        就绪」并提前 connect，先于客户端创建会话文件 → 客户端后起挂上后同 sid 恒 -1。
 
         Why 纯文件检查：不触达 xtquant（C++ 扩展），CI/单测/无 SDK 环境可安全调用；
         且文件 mtime 是客户端存活的最可靠信号（进程名因东财定制不定匹配）。
@@ -380,7 +384,7 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         if not self._userdata_path or not os.path.isdir(self._userdata_path):
             return False
         now = time.time()
-        for pat in ("down_queue_win_*", "miniqmtShm*Cache*", "up_queue_win_*"):
+        for pat in ("miniqmtShm*Cache*", "up_queue_win_*"):
             for f in _glob.glob(os.path.join(self._userdata_path, pat)):
                 try:
                     if now - os.path.getmtime(f) < staleness_sec:

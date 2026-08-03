@@ -2086,6 +2086,9 @@ class TradingEngine:
         #   （重启本身已是一次「连接重置」，无需继承历史失败计数）；持久化反增复杂度（YAGNI）。
         self._guard_fail_count: int = 0
         self._guard_rounds_since_fail: int = 0
+        # P0-3（2026-08-04）：上次观测的客户端就绪态（None=首轮），False→True 跃迁时
+        # 清零退避立即重连（外部条件恢复 ≠ 失败重试）。
+        self._guard_client_ready_prev: Optional[bool] = None
 
         # C-4 U2：停调度 flag（_halt=True 后所有被 _critical_guard 装饰的 job 入口即跳过）。
         # Why 进程内存（不持久化）：致命停调度需人工介入重启，重启后 _halted=False 重新就绪；
@@ -2266,16 +2269,28 @@ class TradingEngine:
             self._instance_lock = _lock
 
         gw = get_gateway()
-        if gw is not None:
-            try:
-                await gw.connect()  # async：内部 run_in_executor 包 xtquant C++ 阻塞 connect
-                gw.set_order_update_callback(self._handle_order_update)  # sync 注入成交回报回调
-                self._gw = gw  # 供 handler 反查 _orders 判 BUY/SELL side（见 engine._side_from_update）
-                logger.info("网关已连接 + 成交回调已注册")
-            except Exception:
-                logger.exception("网关连接失败（cron 仍启动，触发点内部 get_gateway 兜底）")
-        else:
+        if gw is None:
             logger.warning("未装配网关（AUTO_TRADE_MODE=dry_run 影子模式，回调链路不生效）")
+        else:
+            # 回报回调先接好（幂等，不依赖 connect）：health_guard 稍后连接时链路即就绪。
+            try:
+                gw.set_order_update_callback(self._handle_order_update)  # sync 注入成交回报回调
+            except Exception:
+                logger.exception("set_order_update_callback 注入异常（继续启动）")
+            self._gw = gw  # 供 handler 反查 _orders 判 BUY/SELL side（见 engine._side_from_update）
+            # P0-1（2026-08-04 connect -1 根治）：客户端就绪前绝不 connect——
+            # xtquant trader.start() 会先于客户端创建 down_queue_win_{sid} 会话文件，
+            # 客户端后起挂上后同 sid 恒 -1，只能靠进程级重启/换 sid 恢复。
+            if gw.is_client_ready():
+                try:
+                    await gw.connect()  # async：内部 run_in_executor 包 xtquant C++ 阻塞 connect
+                    logger.info("网关已连接 + 成交回调已注册")
+                except Exception:
+                    logger.exception("网关连接失败（cron 仍启动，触发点内部 get_gateway 兜底）")
+            else:
+                logger.warning(
+                    "miniQMT 客户端未就绪（is_client_ready=False），bootstrap 跳过 connect——"
+                    "由 health_guard 在客户端就绪后连接（避免先于客户端创建会话文件）")
 
         # 初始化本地持仓账本（gap4 · 幂等建表，对齐 experiment/store.init_db 范式）。
         # 必须在 start() 之前：cron 一旦启动，_handle_order_update/_post_close 就可能
@@ -2341,8 +2356,17 @@ class TradingEngine:
         # ④ 客户端未就绪 → 不空跑 connect（防刷柜台）。
         #    is_client_ready 是纯文件 mtime 探测（T6）：False 意味 miniQMT 客户端进程
         #    未起 / userdata 共享内存文件老旧 → connect 必返 -1 或超时，空跑无意义。
-        if not gw.is_client_ready():
+        ready = gw.is_client_ready()
+        if not ready:
+            self._guard_client_ready_prev = False
             return
+        # P0-3（2026-08-04）：客户端从不可用→可用是「外部条件恢复」而非失败重试——
+        # 清零退避立即重连，避免被历史失败计数拖到 7 轮（≈7min）后才试探。
+        if self._guard_client_ready_prev is False:
+            self._guard_fail_count = 0
+            self._guard_rounds_since_fail = 0
+            logger.info("health_guard 检测到 miniQMT 客户端就绪，清零退避立即重连")
+        self._guard_client_ready_prev = True
         # ⑤ 退避：失败次数→应跳过轮数（等效指数退避，不改 apscheduler 60s 调度）。
         #   skip=0 立即试，skip>0 时累加 _guard_rounds_since_fail 直到达阈值再试一次。
         skip = self._guard_skip_rounds(self._guard_fail_count)

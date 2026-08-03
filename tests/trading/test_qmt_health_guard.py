@@ -26,6 +26,20 @@ def test_is_client_ready_true_when_file_fresh(tmp_path):
     assert gw.is_client_ready(staleness_sec=300) is True
 
 
+def test_is_client_ready_false_when_only_engine_down_queue_fresh(tmp_path):
+    """引擎自建 down_queue_win_{sid} 新鲜 ≠ 客户端就绪（P0-2：防「自证自」）。"""
+    (tmp_path / "down_queue_win_777888").write_bytes(b"x")  # 引擎 XtQuantTrader 创建
+    gw = _gw(str(tmp_path))
+    assert gw.is_client_ready(staleness_sec=300) is False
+
+
+def test_is_client_ready_true_when_client_up_queue_fresh(tmp_path):
+    """客户端 up_queue_win_xtquant 新鲜 → 就绪（客户端所有文件是可信信号）。"""
+    (tmp_path / "up_queue_win_xtquant").write_bytes(b"x")
+    gw = _gw(str(tmp_path))
+    assert gw.is_client_ready(staleness_sec=300) is True
+
+
 # ============================================================ M1 重连互斥
 def test_reconnecting_flag_default_false(tmp_path):
     """构造后 _reconnecting 默认 False（未在重连）——互斥标志的干净初态。"""
@@ -225,6 +239,31 @@ async def test_health_guard_no_catchup_when_already_connected():
         await eng._health_guard()
     gw.connect.assert_not_awaited()
     cp.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_health_guard_resets_backoff_when_client_becomes_ready():
+    """客户端从不可用→可用：清零退避并立即重连（不被旧失败计数拖慢，P0-3）。"""
+    from unittest.mock import MagicMock, patch
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    eng._guard_fail_count = 5          # 历史失败已把退避推到 7 轮
+    eng._guard_rounds_since_fail = 0
+    gw = MagicMock()
+    gw._risk_halted = False
+    gw._connected = False
+    gw._reconnecting = False
+    gw.is_client_ready = MagicMock(return_value=False)
+    gw.connect = AsyncMock()
+    with patch("trading.engine.get_gateway", return_value=gw):
+        await eng._health_guard()
+    gw.connect.assert_not_awaited()            # 未就绪不空跑
+    assert eng._guard_fail_count == 5
+    gw.is_client_ready.return_value = True     # 客户端就绪（False→True 跃迁）
+    with patch("trading.engine.get_gateway", return_value=gw):
+        await eng._health_guard()
+    gw.connect.assert_awaited_once()           # 跃迁后立即重连，不再等 7 轮退避
+    assert eng._guard_fail_count == 0
 
 
 def test_guard_skip_rounds_mapping():
