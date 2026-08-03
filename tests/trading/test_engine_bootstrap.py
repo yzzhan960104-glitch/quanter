@@ -47,3 +47,65 @@ async def test_bootstrap_no_gateway_degrades():
          patch("trading.state_store._migrate_env_to_account"):
         await eng.bootstrap()  # 不抛
         assert eng._gw is None
+
+
+# ============================================================================
+# QMT session 单实例锁（live 专属）：双引擎抢 session → connect -1 防御
+# ============================================================================
+@pytest.mark.asyncio
+async def test_bootstrap_live_acquires_and_shutdown_releases_lock(monkeypatch, tmp_path):
+    """live 模式 bootstrap 持有 session 锁；shutdown 释放（可再 acquire）。"""
+    from trading import single_instance
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setenv("QMT_SESSION_ID", "999")
+    monkeypatch.setenv("TRADING_ENGINE_LOCK_DIR", str(tmp_path))
+    eng = TradingEngine()
+    with patch("trading.engine.get_gateway") as gg, \
+         patch("trading.position_book.init_db"), \
+         patch("trading.state_store.init_store"), \
+         patch("trading.state_store._migrate_env_to_account"):
+        gg.return_value = AsyncMock()
+        await eng.bootstrap()
+    assert (tmp_path / "trading_engine_999.lock").exists()
+    assert getattr(eng, "_instance_lock", None) is not None
+    eng.shutdown()  # 优雅停机 → 释放锁
+    reacquired = single_instance.acquire("999", lock_dir=str(tmp_path))
+    assert reacquired is not None
+    reacquired.release()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_live_refuses_when_lock_held(monkeypatch, tmp_path):
+    """第二实例拿不到锁 → 拒连网关（raise）+ CRITICAL 告警。"""
+    from trading import single_instance
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setenv("QMT_SESSION_ID", "999")
+    monkeypatch.setenv("TRADING_ENGINE_LOCK_DIR", str(tmp_path))
+    held = single_instance.acquire("999", lock_dir=str(tmp_path))
+    assert held is not None
+    eng = TradingEngine()
+    with patch("trading.engine.get_gateway") as gg, \
+         patch("trading.engine._alert_critical") as alert:
+        gg.return_value = AsyncMock()
+        with pytest.raises(RuntimeError, match="单实例锁"):
+            await eng.bootstrap()
+    gg.return_value.connect.assert_not_awaited()
+    alert.assert_called_once()
+    held.release()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_dry_run_skips_session_lock(monkeypatch, tmp_path):
+    """dry_run 不持锁（无真 session，不干扰开发多开/测试）。"""
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    monkeypatch.setenv("QMT_SESSION_ID", "999")
+    monkeypatch.setenv("TRADING_ENGINE_LOCK_DIR", str(tmp_path))
+    eng = TradingEngine()
+    with patch("trading.engine.get_gateway") as gg, \
+         patch("trading.position_book.init_db"), \
+         patch("trading.state_store.init_store"), \
+         patch("trading.state_store._migrate_env_to_account"):
+        gg.return_value = AsyncMock()
+        await eng.bootstrap()
+    assert not (tmp_path / "trading_engine_999.lock").exists()
+    assert getattr(eng, "_instance_lock", None) is None

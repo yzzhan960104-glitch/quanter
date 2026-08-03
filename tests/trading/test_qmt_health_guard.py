@@ -172,6 +172,61 @@ async def test_health_guard_backoff_after_connect_failure():
         assert eng._guard_fail_count == 3
 
 
+@pytest.mark.asyncio
+async def test_health_guard_reconnect_triggers_pre_open_catchup():
+    """重连成功后 → 调 pre_open 补挂（R1：窗口内补挂，ledger 幂等由 catchup 守）。"""
+    from unittest.mock import MagicMock, patch
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._risk_halted = False
+    gw._connected = False
+    gw._reconnecting = False
+    gw.is_client_ready = MagicMock(return_value=True)
+    gw.connect = AsyncMock()
+    with patch("trading.engine.get_gateway", return_value=gw), \
+         patch("trading.catchup._catchup_pre_open",
+               new=AsyncMock(return_value=(True, "已补跑"))) as cp:
+        await eng._health_guard()
+    gw.connect.assert_awaited_once()
+    cp.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_health_guard_no_catchup_when_connect_fails():
+    """重连失败 → 不调 pre_open 补挂（等下次重连成功）。"""
+    from unittest.mock import MagicMock, patch
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._risk_halted = False
+    gw._connected = False
+    gw._reconnecting = False
+    gw.is_client_ready = MagicMock(return_value=True)
+    gw.connect = AsyncMock(side_effect=RuntimeError("柜台拒绝"))
+    with patch("trading.engine.get_gateway", return_value=gw), \
+         patch("trading.catchup._catchup_pre_open", new=AsyncMock()) as cp:
+        await eng._health_guard()
+    gw.connect.assert_awaited_once()
+    cp.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_health_guard_no_catchup_when_already_connected():
+    """已连接 → 不重连也不补挂（活跃连接不捣乱）。"""
+    from unittest.mock import MagicMock, patch
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._connected = True
+    gw.connect = AsyncMock()
+    with patch("trading.engine.get_gateway", return_value=gw), \
+         patch("trading.catchup._catchup_pre_open", new=AsyncMock()) as cp:
+        await eng._health_guard()
+    gw.connect.assert_not_awaited()
+    cp.assert_not_awaited()
+
+
 def test_guard_skip_rounds_mapping():
     """_guard_skip_rounds 退避映射：0→0,1→0,2→1,3→3,≥4→7。"""
     from trading.engine import TradingEngine

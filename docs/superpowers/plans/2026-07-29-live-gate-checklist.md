@@ -304,6 +304,16 @@ F:/quanter/.venv310/Scripts/python.exe backtest/tools/regression_neckline_golden
 - Task5 非冠军 trailing 开档 golden 补齐（当前 golden 只覆盖默认档 trailing 关）
 - [[neckline-algorithm-gaps]] 3 缺口（R1 cancel_on 替代 / cancel_on + 1/4 成交可行性 / 两套 stop 口径 rr 守卫脱节）
 
+**收口记录（2026-08-03 · codex/live-followup-hardening）**：
+- R1 pre_open 补挂：已做——`health_guard` 重连成功后调 `catchup._catchup_pre_open`（窗口
+  [09:22, `ENGINE_PRE_OPEN_CATCHUP_UNTIL`)，ledger 幂等，已 done 跳过、过窗 CRITICAL）。
+- R2 xtdata fallback：降级收口——EMT 已废弃不另接行情源；补「行情源整体失效（全标的
+  last_price 缺失）→ live CRITICAL 告警（30min 节流）」兜底止损链路裸奔。
+- QMT connect -1：新增 session 级单实例锁（`trading/single_instance.py`，live bootstrap
+  连网关前持有，第二实例拒连），补齐 SERVER_PORT 覆盖时端口天然单例失效的缺口。
+- 仍 backlog（按必要性评估）：R6 极端行情保护（限价单 + DB 幂等已覆盖大部分，可选现金
+  预检）、plan→SQLite、scripts/ 清空；C-7 运维前置为实机操作（重启前执行）。
+
 ---
 
 ## 5. 自检（文档质量）
