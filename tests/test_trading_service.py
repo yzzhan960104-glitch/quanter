@@ -187,6 +187,10 @@ def test_submit_order_live_calls_gateway(monkeypatch):
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
+    # 2026-08-02：隔离 CSV 写盘——此前未 patch record_live_trade，反复跑本用例会把
+    # `_FakeGW:SUBMITTED:ok` 冒烟行刷进生产 live_trades.csv（07-31 播报「买 12 笔」
+    # 假繁荣的根因之一）。本用例只验证网关调用，不验证 CSV 落盘（后者有专门用例）。
+    monkeypatch.setattr(trading_service, "record_live_trade", lambda *a, **kw: None)
     monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
     monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
     monkeypatch.setattr(trading_service, "_max_amount", lambda: 10000.0, raising=False)
@@ -241,6 +245,9 @@ def test_submit_order_disconnected_blocks(monkeypatch):
     gw = _fake_gw_connected()
     gw._connected = False
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
+    # 2026-08-02：隔离 CSV 写盘（同 test_submit_order_live_calls_gateway，防测试
+    # BLOCKED 行污染生产流水）。
+    monkeypatch.setattr(trading_service, "record_live_trade", lambda *a, **kw: None)
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
     with pytest.raises(RuntimeError, match="连接"):

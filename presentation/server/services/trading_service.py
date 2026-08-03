@@ -529,6 +529,7 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
         record_live_trade(
             order.symbol, "BLOCKED", order.qty, order.price or 0.0,
             rationale=f"{decision.stage}:{decision.reason}",
+            kind="submit",  # 2026-08-02：拦截/拒单是下单审计行，不是成交回报（kind=fill）
         )
         raise RuntimeError(decision.reason)
 

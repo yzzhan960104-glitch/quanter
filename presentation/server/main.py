@@ -195,6 +195,37 @@ async def lifespan(app: FastAPI):
             "lifespan 装配异步回测调度器异常（已忽略，cancel 端点将返 503）"
         )
 
+    # 启动：周度「近期回测」自动提交（daemon 线程，幂等）
+    # Why（2026-08-03）：策略播报「近期回测」需要新鲜样本，但没有任何周期生产端
+    # （前端写按钮已撤），曾停摆半个月。本线程寄生 uvicorn，每 6h 检查一次
+    # replay_tasks 最近任务；距今 ≥7 天且无未终态任务时，提交「全市场 × 冠军参数
+    # × 近 3 个月」回测任务，由上方 ReplayScheduler 异步派发执行（提交只 INSERT
+    # 一行 PENDING，绝不阻塞）。
+    try:
+        import threading as _replay_threading
+
+        def _weekly_replay_loop() -> None:
+            import time as _replay_time
+            from backtest.weekly_replay import maybe_enqueue_weekly_replay
+            while True:
+                try:
+                    _tid = maybe_enqueue_weekly_replay()
+                    if _tid:
+                        logging.getLogger(__name__).info(
+                            "已自动提交周度近期回测 task=%s", _tid)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "周度回测自动提交异常（吞掉继续）")
+                _replay_time.sleep(6 * 3600)
+
+        _replay_threading.Thread(
+            target=_weekly_replay_loop, daemon=True,
+            name="weekly-replay-enqueuer").start()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan 装配周度回测提交线程异常（已忽略，播报新鲜度降级为只读）"
+        )
+
     # 启动：训练 loop 编排器 + webhook 推报告 notifier（Spec 3 Task 7）
     # Why 寄生 uvicorn（合「零守护进程」哲学）：orchestrator daemon 线程寄生主进程，
     # 非独立 Celery/PM2。与上面 replay_scheduler / data sweep 同源。

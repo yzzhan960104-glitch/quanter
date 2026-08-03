@@ -101,18 +101,24 @@ class DataLakeReader:
         """
         return self._lakes.get(key)
 
-    def load(self, path: str | None = None, *, key: str | None = None) -> None:
+    def load(self, path: str | None = None, *, key: str | None = None,
+             date_min: str | None = None) -> None:
         """加载 parquet 到内存（多湖）。#3：委托 _load_impl 并加锁防并发重复 read。
 
         - key 缺省=path：便于单湖老用法 `load(path)` 自动以 path 为 key，向后兼容。
         - 首个成功 load 的 key 设为 `_default_key`，作为 `get_*(lake=None)` 的默认湖。
+        - date_min（2026-08-03 资源优化）：只加载 >= date_min 的行（parquet 读层
+          filters 推送）。回测 worker 策略只需 window+ATR 预热（≤2 年），不必把
+          10 年全量湖（原表 + ffill 副本 ≈ 3GB）搬进内存。None=全量（向后兼容，
+          server lifespan / 数据 API 不动）。
         """
         # 锁包 _load_impl 的 check-then-set：锁内含 read_parquet（秒级 IO），load 非热路径
         # （启动/ensure），序列化保证不重复 read；不同 key 也序列化——可接受（启动本就串行）。
         with self._load_lock:
-            self._load_impl(path, key=key)
+            self._load_impl(path, key=key, date_min=date_min)
 
-    def _load_impl(self, path: str | None = None, *, key: str | None = None) -> None:
+    def _load_impl(self, path: str | None = None, *, key: str | None = None,
+                   date_min: str | None = None) -> None:
         """实际加载逻辑（多湖）。缺失则进入离线模式（不阻断启动、不写入缓存）。"""
         path = path or LAKE_CONFIG["default_path"]
         key = key or path
@@ -126,7 +132,18 @@ class DataLakeReader:
         if not os.path.exists(path):
             logger.warning("数据湖缺失：%s(key=%s)，跳过加载（离线模式）", path, key)
             return
-        df = pd.read_parquet(path)
+        if date_min is not None:
+            try:
+                df = pd.read_parquet(
+                    path, filters=[("date", ">=", pd.Timestamp(date_min))])
+            except Exception:
+                # date_min 过滤失败（如无 date 列的湖/旧 pyarrow）→ 回退全量读，
+                # 语义不变（内存优化失败不等于加载失败）。
+                logger.warning("date_min=%s 过滤读取失败，回退全量加载（key=%s）",
+                               date_min, key, exc_info=True)
+                df = pd.read_parquet(path)
+        else:
+            df = pd.read_parquet(path)
         # 按索引形态分流（修复跨任务硬阻塞 T11 审查发现）：
         # - MultiIndex(date, symbol)：daily/minute/sector 等价格湖，走 xs(symbol)/
         #   groupby(symbol).ffill 价格补齐路径，与既有语义完全一致（不动）。

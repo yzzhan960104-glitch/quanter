@@ -44,6 +44,70 @@ def test_symbols_returns_all_unique_symbols(tmp_path, monkeypatch):
     assert len(syms) == 3
 
 
+def test_load_with_date_min_filters_rows(tmp_path):
+    """回归（2026-08-03 资源优化）：load(date_min=...) 只保留 >= 起点的行。
+
+    回测 worker 用 date_min 避免把 10 年全量湖（原表+ffill 副本 ≈3GB）搬进内存；
+    过滤在 parquet 读层完成，get_timeseries 只看到起点之后的数据。
+    """
+    df = pd.DataFrame(
+        {"open": [10.0, 11.0, 20.0, 21.0],
+         "high": [11.0, 12.0, 22.0, 23.0],
+         "low": [9.0, 10.0, 18.0, 19.0],
+         "close": [10.5, 11.5, 21.0, 22.0],
+         "volume": [1000.0, 1100.0, 2000.0, 2100.0],
+         "amount": [100.0, 110.0, 200.0, 210.0]},
+        index=pd.MultiIndex.from_tuples(
+            [(pd.Timestamp("2023-12-29"), "000001.SZ"),
+             (pd.Timestamp("2024-01-02"), "000001.SZ"),
+             (pd.Timestamp("2023-12-29"), "600000.SH"),
+             (pd.Timestamp("2024-01-02"), "600000.SH")],
+            names=["date", "symbol"],
+        ),
+    )
+    path = tmp_path / "daily_filtered.parquet"
+    df.to_parquet(path)
+
+    reader = DataLakeReader()
+    reader.load(str(path), key="daily", date_min="2024-01-01")
+
+    # symbols 完整保留（只滤日期，不滤标的）
+    assert set(reader.symbols()) == {"000001.SZ", "600000.SH"}
+    ts = reader.get_timeseries("000001.SZ", "2010-01-01", "2024-12-31")
+    assert list(ts.index) == [pd.Timestamp("2024-01-02")]
+
+
+def test_load_date_min_fallback_full_when_filter_fails(tmp_path, monkeypatch):
+    """date_min 过滤读失败 → 回退全量加载，不把内存优化失败变成加载失败。"""
+    import data.lake_reader as lake_reader_module
+    real_read = lake_reader_module.pd.read_parquet
+    calls = {"n": 0}
+
+    def fake_read(path, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("filter boom")
+        return real_read(path)
+
+    monkeypatch.setattr(lake_reader_module.pd, "read_parquet", fake_read)
+
+    df = pd.DataFrame(
+        {"open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5],
+         "volume": [1000.0], "amount": [100.0]},
+        index=pd.MultiIndex.from_tuples(
+            [(pd.Timestamp("2024-01-02"), "000001.SZ")],
+            names=["date", "symbol"],
+        ),
+    )
+    path = tmp_path / "daily_fallback.parquet"
+    df.to_parquet(path)
+
+    reader = DataLakeReader()
+    reader.load(str(path), key="daily", date_min="2024-01-01")
+    assert calls["n"] == 2               # 第一次过滤失败，第二次全量成功
+    assert set(reader.symbols()) == {"000001.SZ"}
+
+
 def test_symbols_empty_when_no_lake_loaded():
     """无任何湖 load 时 symbols() 返空列表（离线降级，不抛）。"""
     reader = DataLakeReader()   # 全新实例，未 load
