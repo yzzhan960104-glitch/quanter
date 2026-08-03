@@ -54,6 +54,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import replace as _dc_replace
 from datetime import datetime
 from typing import Any, Mapping, Optional
@@ -181,6 +182,10 @@ def _critical_guard(coro_method):
 #   故该单例在 server 进程内恒为 None——server 路径 submit_order 不传 whitelist，
 #   _submit 见 None 即走旧路径（_whitelist() = 纯 env），向后兼容不变。
 _ACTIVE_ENGINE: "TradingEngine | None" = None
+
+# R2 降级告警节流：行情源整体失效（xtdata 黑屏）→ live CRITICAL（30min 至多一条）。
+_last_quote_blackout_alert_ts: float = 0.0
+_QUOTE_BLACKOUT_ALERT_INTERVAL_S = 30 * 60
 
 
 def _mode() -> str:
@@ -1068,6 +1073,26 @@ async def stop_loss_monitor(
     if has_pending:
         relevant_syms |= set(pending_ctx.keys())
     quotes = await qmt_market_data.get_quotes(list(relevant_syms)) if relevant_syms else {}
+
+    # R2 降级告警（live）：行情源整体失效（xtdata 黑屏）→ 止损链路裸奔，CRITICAL 知会。
+    # Why 30min 节流：避免 5min 巡检每轮推一条（M4 告警风暴红线）。
+    if _mode() == "live" and relevant_syms:
+        _n_valid = sum(
+            1 for q in quotes.values()
+            if isinstance(q, dict)
+            and isinstance(q.get("last_price"), (int, float))
+            and q["last_price"] == q["last_price"]  # NaN 判无效
+            and q["last_price"] > 0
+        )
+        if _n_valid == 0:
+            global _last_quote_blackout_alert_ts
+            _now_mono = time.monotonic()
+            if _now_mono - _last_quote_blackout_alert_ts >= _QUOTE_BLACKOUT_ALERT_INTERVAL_S:
+                _last_quote_blackout_alert_ts = _now_mono
+                _alert_critical(
+                    f"stop_loss 行情源整体失效：{len(relevant_syms)} 个标的全无有效 "
+                    f"last_price（xtdata 不可用？止损链路裸奔，请人工介入）")
+
     n_triggered = 0
     n_checked = 0
     n_fallback = 0
@@ -2203,6 +2228,10 @@ class TradingEngine:
         Why 从 ``__main__._run_forever`` 提取：让独立 ``python -m trading`` 与 uvicorn
             server lifespan 复用同一段 I/O 初始化（W3 收口），避免两处复制漂移。
 
+        QMT session 单实例锁（live 专属）在连网关前 acquire：SERVER_PORT 被覆盖 /
+            直跑 server 时端口 8000 天然单例失效，第二个引擎仍可能连同一 session
+            （xtquant -1 全天锁死）；锁被占用即拒启动。
+
         物理意图（保留原 ``__main__`` 注释，行为完全等价 · W3 不改启动语义）：
             - 网关 connect + set_order_update_callback（修 G5：成交回报回流链路就绪）。
             - 异常兜底不抛：连接失败时仍让 cron 起来——触发点内部 get_gateway() 会再次
@@ -2210,6 +2239,22 @@ class TradingEngine:
             - position_book.init_db / state_store.init_store / state_store._migrate_env_to_account
               建表 + 从 .env 落 account 行（state-store-redesign T13）。
         """
+        # 单实例守护（QMT session 级 · live 专属）：防双引擎抢同一 session。
+        # 端口 8000 已拦同端口双起（C-5 V1），本锁补「不同端口双实例」的剩余缺口。
+        # Why 只 live：dry_run 无真 session，锁会干扰开发多开/测试。
+        if _mode() == "live":
+            from trading import single_instance
+            _session = os.getenv("QMT_SESSION_ID") or "default"
+            _lock = single_instance.acquire(_session)
+            if _lock is None:
+                _alert_critical(
+                    f"检测到另一 TradingEngine 实例持有 QMT session={_session} 锁，"
+                    f"拒绝重复连接（防 connect -1 双起，请先停旧实例）")
+                raise RuntimeError(
+                    f"QMT session={_session} 单实例锁被占用"
+                    f"（logs/trading_engine_*.lock），另一引擎已在运行，拒绝启动")
+            self._instance_lock = _lock
+
         gw = get_gateway()
         if gw is not None:
             try:
@@ -2303,6 +2348,18 @@ class TradingEngine:
             logger.warning(
                 "【health_guard 重连成功】网关恢复 live（前累计失败 %s 次），"
                 "pre_open/stop_loss 链路恢复可用", prev_fails)
+            # R1（live 后排期收口）：重连成功后窗口内补挂 pre_open——网关断线/锁死
+            # 期间漏挂的订单由 catchup ledger 幂等判定补挂（窗口 [09:22, catchup_until)，
+            # 已 done 跳过，过窗 CRITICAL）。补挂异常不阻断守护（下轮重试由 ledger 守卫）。
+            try:
+                from trading.catchup import _catchup_pre_open
+                _caught, _note = await _catchup_pre_open()
+                if _caught:
+                    logger.warning("health_guard 重连成功 → pre_open 补挂完成（%s）", _note)
+                else:
+                    logger.info("health_guard 重连成功 → pre_open 无需补挂（%s）", _note)
+            except Exception:
+                logger.exception("health_guard 重连后 pre_open 补挂异常（不阻断守护）")
         except Exception as exc:
             self._guard_fail_count += 1
             self._guard_rounds_since_fail = 0  # 失败后从 0 重新累计等待轮数
@@ -3120,5 +3177,13 @@ class TradingEngine:
 
     def shutdown(self) -> None:
         """优雅停机（wait=False：不等 pending job，进程退出场景）。"""
-        self.sched.shutdown(wait=False)
+        try:
+            self.sched.shutdown(wait=False)
+        except Exception:
+            # scheduler 未 start / 已 shutdown → 幂等忽略（锁释放不依赖调度器状态）。
+            logger.debug("sched 未启动或已停机，跳过（幂等）", exc_info=True)
+        _lock = getattr(self, "_instance_lock", None)
+        if _lock is not None:
+            _lock.release()
+            self._instance_lock = None
         logger.info("TradingEngine 已停机")

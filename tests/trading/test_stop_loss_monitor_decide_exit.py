@@ -390,3 +390,45 @@ def test_tp_missing_places_fallback(monkeypatch):
         result = _run_monitor({SYM: ctx}, positions, quotes)
     assert placed["n"] == 1, "TP 漏挂必须触发盘中补挂"
     assert result["stop_triggered"] == 0, "补挂走限价单路径，monitor 不发市价单"
+
+
+# ============================================================================
+# R2 降级告警：行情源整体失效（xtdata 黑屏）→ live CRITICAL，30min 节流
+# ============================================================================
+def test_quote_blackout_alerts_critical_in_live(monkeypatch):
+    """live 模式全标的 last_price 缺失 → CRITICAL（止损链路裸奔必须叫醒人）。"""
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)
+    with patch("trading.engine._alert_critical") as alert:
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None})
+    alert.assert_called_once()
+    assert "行情源整体失效" in alert.call_args.args[0]
+
+
+def test_quote_blackout_throttled_30min(monkeypatch):
+    """30min 节流：连续两轮黑屏只推一条 CRITICAL（防告警风暴）。"""
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)
+    with patch("trading.engine._alert_critical") as alert:
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None})
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None})
+    alert.assert_called_once()
+
+
+def test_quote_blackout_no_alert_when_price_valid(monkeypatch):
+    """任一标的有价 → 不告警（行情源正常）。"""
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)
+    quotes = {SYM: {"last_price": 10.0, "high": 10.2, "low": 9.8}}
+    with patch("trading.engine._alert_critical") as alert:
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, quotes)
+    alert.assert_not_called()
+
+
+def test_quote_blackout_no_alert_in_dry_run(monkeypatch):
+    """dry_run 无真金风险 → 不告警（防影子模式误报）。"""
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)
+    with patch("trading.engine._alert_critical") as alert:
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None})
+    alert.assert_not_called()
