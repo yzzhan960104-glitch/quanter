@@ -34,6 +34,10 @@ from data.lake_reader import DataLakeReader
 
 logger = logging.getLogger(__name__)
 
+# 实验中心 DB 路径（策略播报单一真相源，2026-08-03 双轨治理）。
+# 与 experiment/store._DEFAULT_DB 同源常量；测试可 monkeypatch 本模块属性指向 tmp DB。
+_EXPERIMENT_DB = "experiment/experiments.db"
+
 # ===========================================================================
 # 机器人总管配置（push 播报类 + connect 对话类）
 # ===========================================================================
@@ -392,32 +396,40 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
             logger.warning("读 plans/%s.json 失败，scan_count 降级为 None", date, exc_info=True)
             scan_count = None
 
-    # ── param_iter_state：读 logs/param_iter_state.json，适配 {best_annual, iter} ──
+    # ── param_iter_state：优先 experiment.db ACTIVE（单一真相源，2026-08-03）──
+    # legacy param_iter 已退役，其 state 文件不再更新；播报必须先读实盘同源的
+    # experiment 库（ACTIVE 版本 + outer 去偏年化），无 ACTIVE 才回退旧文件（告警）。
     param_iter_state: dict | None = None
     try:
-        pi_path = Path("logs") / "param_iter_state.json"
-        if pi_path.exists():
-            with pi_path.open("r", encoding="utf-8") as f:
-                raw_pi = json.load(f)
-            tried = raw_pi.get("tried") if isinstance(raw_pi, dict) else None
-            if isinstance(tried, dict) and tried:
-                # 2026-08-02：优先读文件自带冠军 best_ann（param_iter 直接维护的
-                # 主键），失败才从 tried 重算 max(ann)——重算口径与 best_ann 等价，
-                # 但读冠军更稳（tried 未来若含非参数字段也不受影响）。
-                best_ann = raw_pi.get("best_ann")
-                if not isinstance(best_ann, (int, float)):
-                    anns = [
-                        v.get("ann")
-                        for v in tried.values()
-                        if isinstance(v, dict) and isinstance(v.get("ann"), (int, float))
-                    ]
-                    best_ann = max(anns) if anns else None
-                if best_ann is not None:
-                    param_iter_state = {
-                        "best_annual": best_ann,
-                        "iter": len(tried),
-                    }
-                # best_ann 空（文件无冠军且所有项都没 ann 字段）→ None，brief 降级
+        param_iter_state = _experiment_active_state()
+        if param_iter_state is None:
+            # legacy 回退（过渡期）：param_iter 退役后此文件停更，读到即陈旧——
+            # 显式告警让运维知道播报已不在实验中心口径。
+            logger.warning("experiment ACTIVE 为空，回退 legacy logs/param_iter_state.json"
+                           "（param_iter 已退役，此文件可能陈旧）")
+            pi_path = Path("logs") / "param_iter_state.json"
+            if pi_path.exists():
+                with pi_path.open("r", encoding="utf-8") as f:
+                    raw_pi = json.load(f)
+                tried = raw_pi.get("tried") if isinstance(raw_pi, dict) else None
+                if isinstance(tried, dict) and tried:
+                    # 2026-08-02：优先读文件自带冠军 best_ann（param_iter 直接维护的
+                    # 主键），失败才从 tried 重算 max(ann)——重算口径与 best_ann 等价，
+                    # 但读冠军更稳（tried 未来若含非参数字段也不受影响）。
+                    best_ann = raw_pi.get("best_ann")
+                    if not isinstance(best_ann, (int, float)):
+                        anns = [
+                            v.get("ann")
+                            for v in tried.values()
+                            if isinstance(v, dict) and isinstance(v.get("ann"), (int, float))
+                        ]
+                        best_ann = max(anns) if anns else None
+                    if best_ann is not None:
+                        param_iter_state = {
+                            "best_annual": best_ann,
+                            "iter": len(tried),
+                        }
+                    # best_ann 空（文件无冠军且所有项都没 ann 字段）→ None，brief 降级
     except Exception:
         # 文件损坏/JSON 解析失败 → None（brief 降级「—」），不阻断播报
         logger.warning("读 logs/param_iter_state.json 失败，param_iter 降级为 None", exc_info=True)
@@ -443,6 +455,42 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
             recent_runs = []
 
     return scan_count, param_iter_state, recent_runs
+
+
+def _experiment_active_state() -> dict | None:
+    """读 experiment.db 当前 ACTIVE 实验 → {experiment_id, version, best_annual}。
+
+    单一真相源（2026-08-03 双轨治理）：策略播报的「参数迭代状态」改由实验中心提供，
+    与实盘 _eod（resolve_active）同源。best_annual = ACTIVE 版本 note 里的 outer 去偏
+    年化（discovery publish 写入，如 "outer ann=1.9% ..."），无 note/解析失败 → None
+    （brief 只渲染版本号）。无 ACTIVE / DB 缺失 → None（调用方回退 legacy 文件并告警）。
+    """
+    try:
+        from experiment.models import ExperimentStatus
+        from experiment.store import list_versions
+        versions = [
+            v for v in list_versions(_EXPERIMENT_DB, status=ExperimentStatus.ACTIVE)
+            if v.weight > 0
+        ]
+        if not versions:
+            return None
+        # 多 ACTIVE 灰度并存时取权重最大者展示（当前唯一 ACTIVE weight=1.0）
+        top = max(versions, key=lambda v: v.weight)
+        best_annual = None
+        note = top.note or ""
+        if "outer ann=" in note:
+            try:
+                best_annual = float(note.split("outer ann=", 1)[1].split("%", 1)[0]) / 100.0
+            except (ValueError, IndexError):
+                best_annual = None
+        return {
+            "experiment_id": top.experiment_id,
+            "version": top.version,
+            "best_annual": best_annual,
+        }
+    except Exception:
+        logger.warning("读 experiment ACTIVE 失败，param_iter 段降级为 None", exc_info=True)
+        return None
 
 
 def _recent_runs_from_tasks_db() -> list:

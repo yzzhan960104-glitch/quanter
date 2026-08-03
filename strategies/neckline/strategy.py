@@ -33,7 +33,7 @@ import logging
 # 颈线法算法本体（识别/执行/契约）原挂 scripts/ 靠 sys.path hack，Layer2 Task 1.5 收口
 # 进 strategies/neckline/ 子包，本类从同包相对 import 拿算法原语——sys.path hack 已彻底删除。
 from .method_v0 import DEFAULTS, compute_atr, detect_signal
-from .backtest import simulate_exit, EXEC_DEFAULTS
+from .backtest import _accumulate_sim_stats, simulate_exit, EXEC_DEFAULTS
 from .schema import NecklineConfig
 from .signal import Signal
 # Strategy Protocol 注册器（strategies 包级，非本子包）：``@register_strategy`` 把本类挂进
@@ -78,6 +78,9 @@ class NecklineMethodStrategy:
         self.id_cfg = {**DEFAULTS, **{k: ov[k] for k in _NECKLINE_ID_KEYS if k in ov}}
         self.exec_cfg = {**EXEC_DEFAULTS, **{k: ov[k] for k in _NECKLINE_EXEC_KEYS if k in ov}}
         self._last_signal_pos: dict = {}   # per-symbol cooldown 锚点（跨 T）
+        # A3 事件统计（2026-08-03）：跳过/同日竞争/跳空止损计数，replay 读入
+        # metadata 供归因（量化回测方向性假设的规模，防自主优化视而不见）。
+        self.skip_stats: dict = {"n_skipped": 0, "same_day_both": 0, "stop_gap": 0}
 
     @property
     def config_schema(self) -> type:
@@ -152,7 +155,11 @@ class NecklineMethodStrategy:
 
         # 未成交 / 撤单 → 不计入 hits（exit_reason 标识）
         if sim is None or sim["exit_reason"] in ("skip_no_pullback", "skip_target_met"):
+            _accumulate_sim_stats(self.skip_stats, sim)
             return []
+
+        # 成交路径也统计跳空止损（stop_gap 标记）
+        _accumulate_sim_stats(self.skip_stats, sim)
 
         # rr 口径对齐 caisen：颈线法 avg_pnl_pct(%) / risk_pct(%) = 风险倍数。
         # 边界：entry≤stop（跳空低开过止损，risk_pct≤0）→ 用 avg_pnl 符号兜底（防 rr 符号反转）。

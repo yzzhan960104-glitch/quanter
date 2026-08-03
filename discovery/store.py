@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS snapshot (
   universe_count  INTEGER,
   date_range      TEXT NOT NULL,
   lake_start      TEXT,
+  data_hash       TEXT DEFAULT '',
   created_at      TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS trial (
   trial_id        TEXT PRIMARY KEY,
@@ -84,6 +85,10 @@ def init_db(db_path=DEFAULT_DB_PATH):
     """
     with _write_lock, connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        # P1-3（2026-08-03）：snapshot 表 data_hash 列 migration（老库补列；新库已建）。
+        snap_cols = {r[1] for r in conn.execute("PRAGMA table_info(snapshot)")}
+        if "data_hash" not in snap_cols:
+            conn.execute("ALTER TABLE snapshot ADD COLUMN data_hash TEXT DEFAULT ''")
         # Plan 4 跨夜列 migration（老库补列；新库 SCHEMA 已建，下方 PRAGMA 检测会跳过）
         cols = {r[1] for r in conn.execute("PRAGMA table_info(search_run)")}
         for col, decl in [
@@ -117,10 +122,10 @@ def write_snapshot(conn, meta):
     with _write_lock:
         conn.execute(
             "INSERT OR REPLACE INTO snapshot "
-            "(snapshot_hash, universe_def, universe_count, date_range, lake_start, created_at) "
-            "VALUES (?,?,?,?,?,?)",
+            "(snapshot_hash, universe_def, universe_count, date_range, lake_start, data_hash,"
+            " created_at) VALUES (?,?,?,?,?,?,?)",
             (meta.snapshot_hash, meta.universe_def, meta.universe_count,
-             meta.date_range, meta.lake_start, _now_iso()))
+             meta.date_range, meta.lake_start, getattr(meta, "data_hash", ""), _now_iso()))
 
 
 def write_trial(conn, trial_id, params, snapshot_hash, engine_hash, split,
@@ -190,6 +195,20 @@ def read_latest_search_run(conn, snapshot_hash):
         "SELECT run_id, frontier_size_prev, k_rounds_no_expansion, daemon_run_count, status "
         "FROM search_run WHERE snapshot_hash=? ORDER BY started_at DESC LIMIT 1",
         (snapshot_hash,)).fetchone()
+    return dict(row) if row else None
+
+
+def read_latest_search_run_any(conn):
+    """读最近一次 search_run（不限 snapshot，P1-3 数据版本审计用）。
+
+    物理意图：每晚数据增量 → snapshot_hash 变 → read_latest_search_run 按精确 hash
+    查不到上夜记录，跨夜判据①静默重置且原因不可见。本函数取全局最新一行（含
+    snapshot_hash），daemon 据此判别"数据版本变化"（data_changed）并显式标注。
+    """
+    row = conn.execute(
+        "SELECT run_id, snapshot_hash, frontier_size_prev, k_rounds_no_expansion,"
+        " daemon_run_count, status "
+        "FROM search_run ORDER BY started_at DESC LIMIT 1").fetchone()
     return dict(row) if row else None
 
 

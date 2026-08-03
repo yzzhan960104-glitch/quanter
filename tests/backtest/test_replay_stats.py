@@ -50,17 +50,23 @@ class _FakeStrategy:
 
 
 def test_compute_stats_aggregation_hand_derived():
-    """三笔 rr=2/-1/3：胜率 2/3、均 rr 4/3、最大回撤 -1（累计 2→1→4）、月度 4。"""
+    """三笔 rr=2/-1/3：胜率 2/3、均 rr 4/3、月度 4。
+
+    P1-1（2026-08-03）：max_drawdown 改为净值口径（equity 曲线峰谷，百分比），
+    旧 rr 曲线口径保留为 max_dd_signal（累计 rr 2→1→4 → -1.0）。
+    """
     hits = [
         _sig(rr=2.0, pnl=10.0),
         _sig(symbol="B", rr=-1.0, pnl=-5.0),
         _sig(symbol="C", rr=3.0, pnl=12.0),
     ]
-    stats = _compute_stats(hits, PositionModel())
+    stats = _compute_stats(hits, PositionModel(slippage_bps=0))
     assert stats["n_hits"] == 3
     assert stats["win_rate"] == pytest.approx(2 / 3)
     assert stats["avg_rr"] == pytest.approx(4 / 3)
-    assert stats["max_drawdown"] == pytest.approx(-1.0)
+    # 净值口径：equity 1.005 → 1.0025（-0.2488%）→ 1.0085
+    assert stats["max_drawdown"] == pytest.approx(1.0025 / 1.005 - 1.0)
+    assert stats["max_dd_signal"] == pytest.approx(-1.0)
     assert stats["monthly_returns"] == {"2024-01": 4.0}
     assert stats["avg_holding_bars"] == 5
     assert stats["pattern_dist"] == {"neckline": 3}
@@ -71,26 +77,26 @@ def test_compute_stats_aggregation_hand_derived():
 
 def test_compute_stats_empty():
     """空命中 → 全零统计 + 空净值曲线（不除零）。"""
-    stats = _compute_stats([], PositionModel())
+    stats = _compute_stats([], PositionModel(slippage_bps=0))
     assert stats == {
         "n_hits": 0, "win_rate": 0.0, "avg_rr": 0.0, "max_drawdown": 0.0,
         "pattern_dist": {}, "monthly_returns": {}, "avg_holding_bars": 0.0,
-        "equity_curve": [], "trades": [],
+        "max_dd_signal": 0.0, "equity_curve": [], "trades": [],
     }
 
 
 def test_compute_stats_first_trade_loss_captures_drawdown():
-    """回归（2026-08-02）：首笔即亏损时回撤必须被记录。
+    """回归（2026-08-02 + P1-1）：首笔即亏损时回撤必须被记录。
 
-    旧实现 peak 从 -inf 起，把亏损首笔当作「峰值」，单笔 rr=-1 的回测显示
-    max_drawdown=0.0（漏算）——2026-07-12 回测的「胜率 0.0% / 回撤 0.0% /
-    年化 -10.9%」即此病灶。净值归一化 equity_0=1.0，peak 必须从 0.0 起。
+    净值口径：equity 从 1.0 起，首笔 -5%×5% 仓位 → 0.9975，回撤 -0.25%；
+    signal 口径保留（rr=-1 → -1.0），两条口径都不许漏算。
     """
     hits = [_sig(rr=-1.0, pnl=-5.0)]
-    stats = _compute_stats(hits, PositionModel())
+    stats = _compute_stats(hits, PositionModel(slippage_bps=0))
     assert stats["n_hits"] == 1
     assert stats["win_rate"] == 0.0
-    assert stats["max_drawdown"] == pytest.approx(-1.0)
+    assert stats["max_drawdown"] == pytest.approx(0.9975 - 1.0)
+    assert stats["max_dd_signal"] == pytest.approx(-1.0)
 
 
 def test_replay_report_uses_renamed_threshold_field_with_legacy_alias():
@@ -130,7 +136,10 @@ def test_replay_annualized_return_uses_equity_end_and_trading_days():
     df = _df()
     T = df.index[2]
     strat = _FakeStrategy(signals_by_T={T: _sig(rr=1.0, pnl=10.0)})
-    report = replay({"A": df}, strat, "2024-01-01", "2024-01-12")
+    # 零滑点显式传入：本测试聚焦年化公式，滑点扣减由
+    # test_replay_default_position_model_applies_slippage_and_records_it 专项钉死。
+    report = replay({"A": df}, strat, "2024-01-01", "2024-01-12",
+                    position_model=PositionModel(slippage_bps=0))
     n_days = report.n_trading_days
     assert n_days == len(df)
     equity_end = 1.0 + 0.05 * 0.10
@@ -148,3 +157,52 @@ def test_replay_position_model_metadata_and_legacy_risk_frac():
     report = replay({"A": df}, strat, "2024-01-01", "2024-01-12", position_model=model)
     assert report.metadata["position_model"] == model.to_dict()
     assert report.equity_curve[-1]["equity"] == pytest.approx(1.02)
+
+
+def test_replay_default_position_model_applies_slippage_and_records_it():
+    """P0-2：replay 默认资金模型带保守 5bps 双边滑点，且 metadata 可见（可审计）。"""
+    df = _df()
+    T = df.index[2]
+    strat = _FakeStrategy(signals_by_T={T: _sig(rr=1.0, pnl=10.0)})
+    report = replay({"A": df}, strat, "2024-01-01", "2024-01-12")
+    assert report.metadata["position_model"]["slippage_bps"] == 5.0
+    # 默认模型：10% 收益 − 双边 10bps，pos_cap=5% 贡献 0.00495
+    assert report.equity_curve[-1]["equity"] == pytest.approx(1.0 + 0.05 * (0.10 - 0.0010))
+
+
+def test_replay_metadata_counts_single_t_exceptions_and_marks_degraded():
+    """P1-4：单 T 异常不再静默——计数进 metadata，异常存在即 degraded=True。"""
+    df = _df()
+    strat = _FakeStrategy(raise_on=[df.index[0], df.index[1]])
+    report = replay({"A": df}, strat, "2024-01-01", "2024-01-12")
+    assert report.metadata["n_exceptions"] == 2
+    assert report.metadata["degraded"] is True
+
+
+def test_replay_clean_run_not_degraded():
+    """无异常 → n_exceptions=0、degraded=False（自主管道只信任干净报告）。"""
+    df = _df()
+    strat = _FakeStrategy()
+    report = replay({"A": df}, strat, "2024-01-01", "2024-01-12")
+    assert report.metadata["n_exceptions"] == 0
+    assert report.metadata["degraded"] is False
+
+
+def test_replay_metadata_includes_strategy_skip_stats():
+    """A3：策略级 skip/事件统计（same_day_both/stop_gap）透传进 metadata 供归因。"""
+    df = _df()
+    strat = _FakeStrategy()
+    strat.skip_stats = {"n_skipped": 3, "same_day_both": 1, "stop_gap": 2}
+    report = replay({"A": df}, strat, "2024-01-01", "2024-01-12")
+    assert report.metadata["strategy_stats"] == {
+        "n_skipped": 3, "same_day_both": 1, "stop_gap": 2,
+    }
+
+
+def test_replay_rejects_reused_strategy_instance():
+    """P1-5：策略实例带跨 T 状态（cooldown 锚点）复用 → fail-fast 拒绝。"""
+    df = _df()
+    strat = _FakeStrategy()
+    strat._last_signal_pos = {"A": 5}   # 模拟已跑过一次的颈线策略残留状态
+    with pytest.raises(ValueError, match="新建策略实例"):
+        replay({"A": df}, strat, "2024-01-01", "2024-01-12")

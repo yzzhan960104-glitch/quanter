@@ -172,6 +172,15 @@ def replay(
         隐式覆盖（df_T 是 .loc[:T] 截断，中段漏采会持续命中末端窗口直到滚出）。
         fail-open：susp/trade_days 加载失败 → trade_days 空集 → filter 全放行（不阻断回测）。
     """
+    # ── P1-5（2026-08-03）：实例复用 fail-fast ──
+    # 颈线策略实例带跨 T 状态（_last_signal_pos cooldown 锚点），同一实例跑第二次
+    # 会静默吞信号（污染结果）。契约由文档警告升级为运行时拒绝——自主优化管道
+    # 自动批量跑实验时最易踩，必须 fail-fast 而不是产出污染报告。
+    if getattr(strategy, "_last_signal_pos", None):
+        raise ValueError(
+            "strategy 实例已带跨 T 状态（cooldown 锚点非空）：复用会静默污染回测结果；"
+            "请为每个任务新建策略实例")
+
     # ── Task 7 U5：完整性 gate pre-filter（回测/实盘同源 data.integrity.filter）──
     price_data = _apply_continuity_filter(price_data, strategy, start, end)
 
@@ -179,6 +188,7 @@ def replay(
     state = {sym: strategy.precompute(sym, df) for sym, df in price_data.items()}
 
     all_hits: list = []
+    n_exceptions = 0   # P1-4：单 T 异常计数（不再静默吞，进 metadata 供审计）
     total_symbols = len(price_data)
     _done = 0
     _PROGRESS_EVERY = 50        # 全市场 5000 只 ≈ 100 次上报
@@ -194,6 +204,7 @@ def replay(
                 all_hits.extend(hits)
             except Exception as exc:
                 # 单 T 日异常不中断回放（边界审查）
+                n_exceptions += 1
                 _logger.debug("replay 跳过 symbol=%s T=%s 异常=%s",
                               symbol, T, type(exc).__name__)
                 continue
@@ -248,6 +259,11 @@ def replay(
             "cfg_min_rr": cfg_threshold,
             "strategy": type(strategy).__name__,
             "position_model": position_model.to_dict(),
+            # P1-4 异常 telemetry：n_exceptions>0 → degraded（自主管道据此弃用报告）
+            "n_exceptions": n_exceptions,
+            "degraded": n_exceptions > 0,
+            # A3 策略级事件统计（跳过/同日竞争/跳空止损），策略无此属性 → 空 dict
+            "strategy_stats": dict(getattr(strategy, "skip_stats", {})),
         },
     )
 
@@ -280,6 +296,7 @@ def _compute_stats(hits: list, position_model: Optional[PositionModel] = None) -
             "pattern_dist": {},
             "monthly_returns": {},
             "avg_holding_bars": 0.0,
+            "max_dd_signal": 0.0,
             "equity_curve": [],
             "trades": [],
         }
@@ -290,7 +307,7 @@ def _compute_stats(hits: list, position_model: Optional[PositionModel] = None) -
     rrs = [float(h.rr) for h in hits]
     wins = sum(1 for r in rrs if r > 0)
 
-    # 累计 rr 曲线 → 最大回撤（peak-to-trough）。
+    # 累计 rr 曲线 → signal 级最大回撤（peak-to-trough，保留为 max_dd_signal）。
     # 2026-08-02 修复：peak 必须从 0.0 起（净值归一化 equity_0=1.0）。
     # 旧实现 peak=float('-inf') 会把「首笔即亏损」的曲线起点当作峰值，
     # 单笔亏损 rr=-1 的回测显示 max_drawdown=0.0（漏算回撤，误导播报/复盘）。
@@ -300,12 +317,12 @@ def _compute_stats(hits: list, position_model: Optional[PositionModel] = None) -
         running += r
         cumulative.append(running)
     peak = 0.0
-    max_dd = 0.0
+    max_dd_signal = 0.0
     for v in cumulative:
         peak = max(peak, v)
         dd = v - peak   # dd ≤ 0（谷值低于峰值时为负）
-        if dd < max_dd:
-            max_dd = dd   # 保留最负值（最大回撤）
+        if dd < max_dd_signal:
+            max_dd_signal = dd   # 保留最负值（signal 级最大回撤）
 
     # 信号类型分布（阶段A：兼容 caisen 的 pattern_type；阶段D 统一 signal_type）
     pattern_dist: dict = {}
@@ -357,11 +374,24 @@ def _compute_stats(hits: list, position_model: Optional[PositionModel] = None) -
     ]
     equity_curve = build_equity_curve(trades, position_model or PositionModel())
 
+    # P1-1（2026-08-03）：max_drawdown 改从净值曲线计算（净值百分比口径）——
+    # 与 annualized_return / equity_curve 同一条曲线，解决"回撤是 signal 口径、
+    # 年化是组合口径"的指标错配。旧 rr 曲线口径保留为 max_dd_signal。
+    max_dd = 0.0
+    eq_peak = 1.0   # 净值归一化 equity_0=1.0，峰值从 1.0 起
+    for point in equity_curve:
+        eq = float(point["equity"])
+        eq_peak = max(eq_peak, eq)
+        dd = eq / eq_peak - 1.0   # ≤0（谷值低于峰值）
+        if dd < max_dd:
+            max_dd = dd
+
     return {
         "n_hits": n,
         "win_rate": wins / n,
         "avg_rr": sum(rrs) / n,
         "max_drawdown": max_dd,
+        "max_dd_signal": max_dd_signal,
         "pattern_dist": pattern_dist,
         "monthly_returns": monthly_returns,
         "avg_holding_bars": avg_holding,

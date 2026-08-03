@@ -205,8 +205,9 @@ def test_trailing_tightens_stop():
     ])
     res = simulate_exit(df, 0, C_STAR, BOTTOM, ATR, exec=exec_cfg)
     assert res["exit_reason"] == "stop_loss"
-    # stop=98.6, entry=102 raw=−3.33%，扣费后 net（plan Task 12）
-    assert res["avg_pnl_pct"] == _net_pct((98.6 - 102) / 102 * 100)
+    # P0-1（2026-08-03）：bar6 open=98.5 < trailing stop=98.6 → 跳空低开止损按
+    # open=98.5 保守成交（不再假设完美按 stop 价成交）。raw=(98.5−102)/102=−3.43%。
+    assert res["avg_pnl_pct"] == _net_pct((98.5 - 102) / 102 * 100)
 
     # 对照：同样 sym_df 但 trailing 关闭（默认 grace=0/step=0 → 固定 base_stop=98），
     # bar6 low=98.3>98 不触发 stop_loss@bar6 —— 证明 trailing 是 bar6 触发的唯一原因。

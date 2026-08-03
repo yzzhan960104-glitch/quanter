@@ -29,9 +29,11 @@ def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs,
         date: 播报日（YYYY-MM-DD）。
         scan_count: int|None，当日颈线法扫描信号数（T 日盘后 EOD 落盘计划文件的
             len(orders)，见 __main__ 候选链）。
-        param_iter_state: dict|None，期望字段 ``best_annual``（float, 如 0.997）
-            与 ``iter``（int, 第几轮）；由 ``__main__`` 从真实
-            ``logs/param_iter_state.json``（结构 ``{tried: {...}}``）适配而来。
+        param_iter_state: dict|None，两种形态：
+            - 实验中心形态（2026-08-03 起优先）：``experiment_id``（str）+ ``version``
+              （int）+ 可选 ``best_annual``（float，ACTIVE 的 outer 去偏年化）；
+            - legacy 形态：``best_annual``（float, 如 0.997）+ ``iter``（int, 第几轮），
+              由 ``__main__`` 从真实 ``logs/param_iter_state.json`` 适配而来。
         recent_runs: list[dict]|None，近期回测摘要，每条期望字段
             ``run_id/win_rate/max_drawdown/annualized_return``（与 replay_runs/index.json 同源）。
 
@@ -44,13 +46,27 @@ def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs,
     sc = scan_count if isinstance(scan_count, int) else "—"
     scan_block = f"- 当日颈线法扫描信号：{sc} 个"
 
-    # 参数迭代：best_annual float → 百分比；iter int → 第 N 轮；缺字段 → 「—」
+    # 参数迭代：实验中心形态优先（当前生效实验 + 版本 + outer 年化）；
+    # legacy 形态兜底（best_annual float → 百分比；iter int → 第 N 轮）。
     pi = param_iter_state or {}
-    best = pi.get("best_annual")
-    it = pi.get("iter")
-    best_s = f"{best * 100:.1f}%" if isinstance(best, (int, float)) else "—"
-    iter_s = it if it is not None else "—"
-    param_block = f"- 参数迭代最优年化：{best_s}（第 {iter_s} 轮）"
+    exp_id = pi.get("experiment_id")
+    if exp_id:
+        # 实验中心单一真相源（2026-08-03）：播报展示 ACTIVE 版本 + outer 去偏年化，
+        # 不再展示 legacy param_iter 的 kelly 口径数字（115.8% 类不可实现收益）。
+        # experiment_id 形如 "neckline_disc_20260725_25c602"：尾部含 trial 短码，
+        # 截尾部 8 位便于人眼追溯 discovery 来源（前段 "neckline_disc_" 无区分度）。
+        exp_short = str(exp_id)[-8:]
+        ver = pi.get("version")
+        ver_s = f"v{ver}" if isinstance(ver, int) else "—"
+        best = pi.get("best_annual")
+        ann_s = f"（outer 年化 {best * 100:.1f}%）" if isinstance(best, (int, float)) else ""
+        param_block = f"- 当前生效实验：{exp_short}（{ver_s}）{ann_s}"
+    else:
+        best = pi.get("best_annual")
+        it = pi.get("iter")
+        best_s = f"{best * 100:.1f}%" if isinstance(best, (int, float)) else "—"
+        iter_s = it if it is not None else "—"
+        param_block = f"- 参数迭代最优年化：{best_s}（第 {iter_s} 轮）"
 
     # 近期回测：最多列 5 条防刷屏；run_id 截前 8 位；胜率/年化走 _pct 容错。
     # 回撤口径（2026-08-02 对齐 compute_unit/summary.py）：replay_runs 的
@@ -79,7 +95,7 @@ def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs,
             run_lines.append(f"- {rid}：无成交")
             continue
         wr = _pct(r.get("win_rate"))
-        dd = _fmt_rr(r.get("max_drawdown"))
+        dd = _fmt_dd(r.get("max_drawdown"))
         ar = _pct(r.get("annualized_return"))
         run_lines.append(f"- {rid}：胜率 {wr} / 回撤 {dd} / 年化 {ar}")
     # 新鲜度提示：最近完成回测距今 >7 天（now 注入，缺省 datetime.now()）
@@ -114,9 +130,9 @@ def _pct(v) -> str:
         return "—"
 
 
-def _fmt_rr(v) -> str:
-    """回测 max_drawdown（累计 rr 峰谷，风险倍数）→ 「-1.00rr」；异常 → 「—」。"""
+def _fmt_dd(v) -> str:
+    """回测 max_drawdown（P1-1 起为净值百分比，负值）→ 「-12.0%」；异常 → 「—」。"""
     try:
-        return f"{float(v):.2f}rr"
+        return f"{float(v) * 100:.1f}%"
     except (TypeError, ValueError):
         return "—"

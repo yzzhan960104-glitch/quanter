@@ -256,15 +256,25 @@ def upsert_account(account_id: str, broker: str, *, name: str | None = None,
     """写/覆盖 account 配置行（INSERT OR REPLACE 幂等）。
 
     物理意图：engine 启动期把 .env 的 QMT_* 配置落库（spec §7.2），让账户配置成为 DB 真相源
-    （而非散在环境变量）。REPLACE 同 account_id 覆盖（env 变更后重启即更新），不报错。
-    None 字段用 DEFAULT（strategy_name='quanter'/mode='dry_run'/active=1），保证最小配置可写。
+    （而非散在环境变量）。**必须用 UPSERT（ON CONFLICT DO UPDATE）而非 INSERT OR REPLACE**：
+    REPLACE 语义是"先 DELETE 旧行再 INSERT"，而 trade_event/order/fill 等子表
+    `REFERENCES account(account_id) ON DELETE RESTRICT`——账户已有成交/事件后，
+    REPLACE 的 DELETE 被 RESTRICT 挡住 → `FOREIGN KEY constraint failed` →
+    engine bootstrap 装配失败（2026-08-03 23:01 实证：QMT 已连接但 TradingEngine 未装配）。
+    UPSERT 只 UPDATE 不删行，子表引用安全。None 字段用 DEFAULT（strategy_name='quanter'
+    /mode='dry_run'/active=1），保证最小配置可写。
     """
     db_path = db_path or _DEFAULT_DB
     now = clock.now().isoformat()
     with _connect(db_path) as con:
         con.execute(
-            "INSERT OR REPLACE INTO account(account_id, broker, name, userdata_path,"
-            " session_id, strategy_name, mode, active, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO account(account_id, broker, name, userdata_path,"
+            " session_id, strategy_name, mode, active, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(account_id) DO UPDATE SET"
+            " broker=excluded.broker, name=excluded.name,"
+            " userdata_path=excluded.userdata_path, session_id=excluded.session_id,"
+            " strategy_name=excluded.strategy_name, mode=excluded.mode,"
+            " active=excluded.active",
             (account_id, broker, name, userdata_path, session_id,
              strategy_name or "quanter", mode or "dry_run",
              1 if active is None else active, now))

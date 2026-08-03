@@ -30,6 +30,9 @@ class SnapshotMeta:
     universe_count: int         # 标的数
     date_range: str             # 实际数据日期范围 "start~end"
     lake_start: str             # 加载起始日（参数化用）
+    data_hash: str = ""         # P1-3（2026-08-03）：universe 价格内容指纹（close 序列
+                                # sha256 聚合）。数据增量/复权重算历史 → 指纹变，供
+                                # daemon 审计"跨夜收敛因数据版本变化而重置"。
 
 
 def is_target_board(sym):
@@ -47,6 +50,27 @@ def snapshot_hash(universe_count, date_range, lake_start, universe_def=DEFAULT_U
         "lake_start": str(lake_start),
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
+
+
+def data_content_hash(universe, lake_start="2025-01-01"):
+    """universe 价格内容指纹（P1-3 · 2026-08-03 Phase A）。
+
+    物理意图：snapshot_hash 只含 universe_count/date_range/lake_start/universe_def，
+    不含价格内容——若数据湖增量同步重算 qfq 基准（除权标的，sync_daily_incremental
+    已知 follow-up），同一 snapshot_hash 下历史价格变化，新旧 trial "假可比"。
+    本函数对每 symbol 的 close 序列（date>=lake_start）做 sha256 聚合：
+        - 数据没变 → 指纹稳定（同内容同 hash）；
+        - 新增交易日（增量落湖）→ close 序列变长 → 指纹变；
+        - 历史价被重算（除权）→ 指纹变。
+    daemon 用它标注"数据版本变化导致跨夜收敛重置"（k=0 不再不可见）。
+    """
+    h = hashlib.sha256()
+    for sym in sorted(universe):
+        df = universe[sym]
+        closes = df["close"].astype("float64").values
+        h.update(sym.encode("utf-8"))
+        h.update(closes.tobytes())
+    return h.hexdigest()[:16]
 
 
 def load_universe(start="2025-01-01"):
@@ -104,5 +128,6 @@ def freeze(lake_start="2025-01-01"):
         universe_count=len(universe),
         date_range=date_range,
         lake_start=lake_start,
+        data_hash=data_content_hash(universe, lake_start),
     )
     return universe, meta

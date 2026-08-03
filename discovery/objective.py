@@ -146,6 +146,10 @@ def evaluate_replay(params, universe, split, start=None, end=None,
         ]
     out, inner_report = {}, None
     for name, seg_start, seg_end in segments:
+        # P1-5（2026-08-03）：每段新建策略实例——颈线策略带跨 T cooldown 状态，
+        # inner/outer 复用同一实例会让 outer 被 inner 的锚点污染（A8 fail-fast
+        # 已把这种复用升级为 ValueError，此处是真实路径修复）。
+        strategy = NecklineMethodStrategy(cfg_override=params)
         rep = replay(universe, strategy, str(seg_start), str(seg_end), position_model=pm)
         out[name] = report_metrics(rep)
         if name == "inner":

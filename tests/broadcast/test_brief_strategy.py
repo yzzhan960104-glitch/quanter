@@ -39,19 +39,19 @@ def test_strategy_brief_run_without_hits_shows_no_trade():
     assert "0.0%" not in md
 
 
-def test_strategy_brief_drawdown_uses_rr_unit():
-    """replay max_drawdown 是累计 rr 峰谷（风险倍数）→ 以 rr 为单位渲染，不当百分比。"""
+def test_strategy_brief_drawdown_uses_percent_unit():
+    """P1-1（2026-08-03）：replay max_drawdown 已是净值百分比口径 → 以 % 渲染。"""
     r = build_strategy_brief(
         "2026-07-31",
         scan_count=1,
         param_iter_state=None,
         recent_runs=[{
             "run_id": "20260712-230158-289322", "n_hits": 1,
-            "win_rate": 0.0, "max_drawdown": -1.0, "annualized_return": -0.1087,
+            "win_rate": 0.0, "max_drawdown": -0.12, "annualized_return": -0.1087,
         }],
     )
     md = r.markdown
-    assert "回撤 -1.00rr" in md
+    assert "回撤 -12.0%" in md
     assert "胜率 0.0%" in md
     assert "年化 -10.9%" in md
 
@@ -102,3 +102,36 @@ def test_strategy_brief_no_stale_note_when_fresh():
         now=datetime(2026, 8, 3, 12, 0, 0),
     )
     assert "最近回测已是" not in r.markdown
+
+
+def test_strategy_brief_active_experiment_block():
+    """param_iter_state 带 experiment_id → 渲染「当前生效实验」（vN + outer 年化）。"""
+    r = build_strategy_brief(
+        "2026-08-03",
+        scan_count=1,
+        param_iter_state={
+            "experiment_id": "neckline_disc_20260725_25c602",
+            "version": 1,
+            "best_annual": 0.019,
+        },
+        recent_runs=[],
+    )
+    md = r.markdown
+    assert "当前生效实验" in md
+    assert "25c602" in md
+    assert "v1" in md
+    assert "1.9%" in md
+
+
+def test_strategy_brief_experiment_block_without_annual():
+    """experiment 块缺 outer 年化 → 只渲染版本号，不抛。"""
+    r = build_strategy_brief(
+        "2026-08-03",
+        scan_count=0,
+        param_iter_state={"experiment_id": "neckline_disc_xyz", "version": 2},
+        recent_runs=[],
+    )
+    md = r.markdown
+    assert "当前生效实验" in md
+    assert "xyz" in md
+    assert "—" not in md.split("当前生效实验")[1]

@@ -1,6 +1,15 @@
 # -*- coding: utf-8 -*-
 """颈线法参数迭代引擎 v2（创板科创 / 2025至今 / 22维概念 / 时间预算）。
 
+⚠️ LEGACY 退役入口（2026-08-03 双轨治理）：
+    参数搜索的单一真相源已收编为 ``discovery daemon``（L0-L5：快照冻结 → holdout →
+    Sobol/TPE → Pareto/DSR → 跨夜收敛 → publish 到 experiment DRAFT）。本模块继续
+    运行会产生双轨冠军（logs/param_iter_state.json vs experiment.db ACTIVE），
+    且其 kelly/freq_cap 口径高估年化（如 115.8% ann / 0.9% dd），误导播报与周度回测。
+    入口已 fail-closed：**必须显式传 ``--legacy`` 才会执行**，否则立即拒绝并提示
+    改用 ``python -m discovery daemon``。PARAM_SPACE 仍被 discovery.sampler 复用
+    （import 本模块不触发守卫，仅 main() 拒绝）。
+
 重构（2026-07-20，详见 memory caisen-neckline-paramiter-baseline）：
   ① universe 收窄：创业板(300/301)+科创板(688/689)，2025-01-01 至今，可交易(≥1亿) ≈1334 只
      （原 param_iter 砍 top100=死区2.3%，代理目标错配；现用创板科创近年，胜率49%、空间大）
@@ -204,14 +213,26 @@ def save_state(state):
     json.dump(state, open(STATE_FILE, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="颈线法参数迭代 v2（创板科创/2025至今/22维概念）")
+    ap.add_argument("--legacy", action="store_true",
+                    help="显式承认 legacy 入口（2026-08-03 起必须携带，否则拒绝运行）")
     ap.add_argument("--time-budget", type=int, default=28800, help="时间预算秒数（默认 28800=8h）")
     ap.add_argument("--n-random", type=int, default=80, help="阶段1随机采样组数（默认80）")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--breadth-boost", action="store_true",
                     help="P1-c 宽度顺势加权（信号日 breadth≥0.4 → pnl×1.5，验证非熊市加仓）")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    # ── legacy 退役守卫（fail-closed）──
+    # 物理意图（2026-08-03 双轨治理）：param_iter 与 discovery daemon 并行会产生
+    # 两套冠军（param_iter_state.json vs experiment.db），周度回测/播报若读错源就
+    # 与实盘 ACTIVE 参数不可比。此处不带 --legacy 一律拒绝，防外部脚本/手动启动
+    # 再次拉起旧搜索；PARAM_SPACE 复用不受影响（import 不经过 main）。
+    if not args.legacy:
+        print("[RETIRED] legacy param_iter 已退役：参数搜索请改用 `python -m discovery daemon`"
+              "（L0-L5 单一真相源）。确需手动续跑请显式加 --legacy。", file=sys.stderr)
+        sys.exit(2)
 
     rng = random.Random(args.seed)
     print(f"=== 颈线法参数迭代 v2 ===")

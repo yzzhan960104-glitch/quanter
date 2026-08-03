@@ -28,6 +28,50 @@ def test_snapshot_hash_differs_on_date_range():
     assert h1 != h2
 
 
+def _mini_universe():
+    """两 symbol 迷你 universe（close 序列稳定可复现，供内容指纹测试）。"""
+    idx = pd.date_range("2025-01-01", periods=3)
+    return {
+        "300001.SZ": pd.DataFrame({"close": [10.0, 10.5, 11.0]}, index=idx),
+        "300002.SZ": pd.DataFrame({"close": [20.0, 19.5, 21.0]}, index=idx),
+    }
+
+
+def test_data_content_hash_stable_and_sensitive():
+    """P1-3（2026-08-03）：价格内容指纹——同内容稳定；历史价变动（qfq 重算）必变。"""
+    from discovery.snapshot import data_content_hash
+    u = _mini_universe()
+    h1 = data_content_hash(u, "2025-01-01")
+    assert h1 == data_content_hash(_mini_universe(), "2025-01-01")   # 同内容同 hash
+    u2 = _mini_universe()
+    u2["300001.SZ"].iloc[1, 0] = 99.0   # 模拟除权重算历史价（qfq 基准漂移）
+    assert data_content_hash(u2, "2025-01-01") != h1
+
+
+def test_freeze_meta_includes_data_hash(monkeypatch):
+    """freeze 产出 SnapshotMeta.data_hash（与内容指纹一致，落库审计用）。"""
+    from discovery import snapshot
+    monkeypatch.setattr(snapshot, "load_universe",
+                        lambda start="2025-01-01": _mini_universe())
+    u, meta = snapshot.freeze(lake_start="2025-01-01")
+    assert meta.data_hash == snapshot.data_content_hash(u, "2025-01-01")
+    assert len(meta.data_hash) == 16
+
+
+def test_write_snapshot_persists_data_hash(tmp_path):
+    """store.write_snapshot 落 data_hash 列（老库 ALTER 迁移后亦可用）。"""
+    from discovery.snapshot import SnapshotMeta
+    from discovery.store import connect, init_db, write_snapshot
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    meta = SnapshotMeta("snap1", "u", 10, "2025~2026", "2025-01-01", data_hash="abc123")
+    with connect(db) as conn:
+        write_snapshot(conn, meta)
+        row = conn.execute(
+            "SELECT data_hash FROM snapshot WHERE snapshot_hash='snap1'").fetchone()
+    assert row["data_hash"] == "abc123"
+
+
 def test_load_universe_reads_with_date_filter(monkeypatch):
     """回归（2026-08-03 资源优化）：read_parquet 必须带 filters（date>=start）。
 

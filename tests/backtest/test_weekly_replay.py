@@ -72,3 +72,37 @@ def test_no_enqueue_when_active_task_pending(tmp_path, monkeypatch):
         now=datetime(2026, 8, 3, 12, 0), db_path=db)
     assert tid is None
     assert len(replay_tasks_db.list_tasks(path=db)) == 1
+
+
+def test_champion_cfg_override_prefers_active_experiment(tmp_path, monkeypatch):
+    """有 ACTIVE 实验 → 周度回测用 experiment 参数（单一真相源，不再读 legacy state）。"""
+    from experiment.models import ActiveExperiment
+    monkeypatch.setattr(
+        weekly_replay, "resolve_active",
+        lambda: [ActiveExperiment(
+            experiment_id="neckline_disc_20260725_25c602", strategy_name="neckline",
+            params={"min_rr": 1.7, "window": 80}, weight=1.0,
+            activated_at="2026-07-27T07:20:02")])
+    state_file = tmp_path / "param_iter_state.json"
+    state_file.write_text(json.dumps({"best": {"min_rr": 2.0}}), encoding="utf-8")
+    monkeypatch.setattr(weekly_replay, "_STATE_FILE", str(state_file))
+
+    assert weekly_replay._champion_cfg_override() == {"min_rr": 1.7, "window": 80}
+
+
+def test_champion_cfg_override_falls_back_to_state_file_when_no_active(tmp_path, monkeypatch):
+    """无 ACTIVE 实验 → 回退 legacy state 文件（兼容过渡期，附 warning 语义由调用方承担）。"""
+    monkeypatch.setattr(weekly_replay, "resolve_active", lambda: [])
+    state_file = tmp_path / "param_iter_state.json"
+    state_file.write_text(json.dumps({"best": {"min_rr": 2.0}}), encoding="utf-8")
+    monkeypatch.setattr(weekly_replay, "_STATE_FILE", str(state_file))
+
+    assert weekly_replay._champion_cfg_override() == {"min_rr": 2.0}
+
+
+def test_champion_cfg_override_empty_when_no_sources(tmp_path, monkeypatch):
+    """无 ACTIVE 且 state 文件缺失/损坏 → 返回 {}（跑默认参数，不抛）。"""
+    monkeypatch.setattr(weekly_replay, "resolve_active", lambda: [])
+    monkeypatch.setattr(weekly_replay, "_STATE_FILE", str(tmp_path / "missing.json"))
+
+    assert weekly_replay._champion_cfg_override() == {}

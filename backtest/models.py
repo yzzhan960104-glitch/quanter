@@ -31,12 +31,16 @@ class PositionModel:
     max_positions:  最大并发持仓（0=不限制；默认 6 ≈ 6×5%=30% 组合仓位）。
     risk_frac:      旧模型开关：非 None 时退化为 Π(1+rr×risk_frac) 复利（默认 None）。
     slippage_bps:   双边滑点（bps，买卖各一次，从每笔收益扣除）。
+                    P0-2（2026-08-03）：默认 5.0（双边共 10bps）保守口径——
+                    旧默认 0.0 使主回测零滑点，而真实止损/超时市价卖出有冲击
+                    成本（限价买入/止盈可近似无滑点，止损不可）。任务级可显式
+                    覆盖（如零费率研究传 0.0）。
     """
     capital: float = 1_000_000.0
     pos_cap: float = 0.05
     max_positions: int = 6
     risk_frac: float | None = None
-    slippage_bps: float = 0.0
+    slippage_bps: float = 5.0
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -11,7 +11,7 @@ Plan 2 范围：budget 驱动跑 N 组新 trial，落 SQLite，返回 RunSummary
 信息隔离（spec §6.2）：落库写 inner+outer（完整记录），但 RunSummary.top_inner_calmar
 只用 inner（feasibility_gate 过滤后 calmar 最高）——搜索不反馈 outer，outer 留报告。
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 
 from discovery.sampler import sample_search
@@ -21,7 +21,7 @@ from discovery.store import (init_db, connect, write_trial, write_snapshot,
                              write_search_run, _now_iso)
 from discovery.snapshot import SnapshotMeta, freeze
 from discovery.split import HoldoutSplit
-from discovery.objective import evaluate
+from discovery.objective import evaluate, evaluate_replay
 from discovery.judging import feasibility_gate
 from discovery.coverage import grid_coverage, coverage_gate
 from discovery.pareto import pareto_frontier
@@ -68,6 +68,9 @@ class RunSummary:
     frontier_size: int = 0         # Pareto 前沿大小
     dsr_top: float = 0.0           # top-1 DSR（L2 统计裁决）
     run_id: str = ""               # Plan 4：本次 run 的 search_run 行 id（daemon 跨夜状态键）
+    top_replay_metrics: dict = field(default_factory=dict)  # P1-2（2026-08-03）：冠军
+                                # 的 replay 口径复评（backtest.replay 引擎，主回测同源）。
+                                # 搜索排序仍用 kelly/calmar，此字段供报告/告警对拍两口径。
 
 
 def _params_key(params):
@@ -106,7 +109,7 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
                n_sobol: int, n_random: int, seed: int,
                db_path: str, n_proc=None, lake_start="2025-01-01",
                tpe_trials: int = 0, rho_threshold: float = 0.8,
-               ei_eps: float = 1e-3) -> RunSummary:
+               ei_eps: float = 1e-3, eval_replay_top: bool = False) -> RunSummary:
     """跑批主函数（Plan 3：两阶段搜索 + 收敛自停 + DSR）。
 
     阶段一（Plan 2 Sobol 批量并发）：sample_search→去重→eval_batch→落库。
@@ -206,6 +209,28 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         dsr_top = deflated_sharpe(top_m.get("sharpe", 0.0),
                                   n_trials=len(trials_db), n_obs=top_m.get("n", 30))
 
+    # === P1-2：冠军 replay 口径复评（可选，daemon 生产默认开） ===
+    # 物理意图：搜索排序用 kelly/calmar（risk_metrics 近似），与主回测/实盘
+    # PositionModel 口径不同源。冠军额外用 evaluate_replay（backtest.replay 引擎）
+    # 复评 inner 段，产出可对拍的 replay 口径（n_hits/win_rate/avg_rr/max_drawdown/
+    # annualized_return），进 RunSummary 供报告/钉钉告警展示——不参与排序（信息隔离）。
+    top_replay_metrics: dict = {}
+    if eval_replay_top and top_tid:
+        try:
+            universe_replay, _ = freeze(lake_start=lake_start)
+            # read_trials_by_snapshot 不 SELECT params 列，按 trial_id 单查（与
+            # daemon._eval_outer 同款模式）。
+            with connect(db_path) as conn:
+                p_row = conn.execute(
+                    "SELECT params FROM trial WHERE trial_id=?", (top_tid,)).fetchone()
+            if p_row is not None:
+                top_params = json.loads(p_row["params"])
+                replay_out = evaluate_replay(top_params, universe_replay, split)
+                top_replay_metrics = replay_out.get("inner") or {}
+        except Exception:
+            # 软降级：replay 复评失败不阻断跑批（报告字段留空，告警可见缺失）
+            top_replay_metrics = {}
+
     # === Plan 4：落 search_run 行（daemon 跨夜状态源；cmd_run 亦受益可追溯） ===
     # 每次 run_search 写一行，同 snapshot 下多行按 started_at DESC 取最新做跨夜比对。
     # run_id = snapshot前缀 + uuid4 前8，保证同 snapshot 多夜跑批各行唯一（uuid4 每次新）。
@@ -226,5 +251,5 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         db_path=db_path, snapshot_hash=snapshot_meta.snapshot_hash,
         status=status, convergence_reason=reason,
         rho=rho, ei=ei, frontier_size=len(frontier_idxs), dsr_top=dsr_top,
-        run_id=run_id,
+        run_id=run_id, top_replay_metrics=top_replay_metrics,
     )

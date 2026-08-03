@@ -64,6 +64,27 @@ EXEC_DEFAULTS = {
 }
 
 
+def _accumulate_sim_stats(stats: dict, sim: dict | None) -> None:
+    """策略级事件统计累加（A3 · 2026-08-03 Phase A 归因基础设施）。
+
+    物理意图：simulate_exit 返回的 same_day_both / stop_gap 是"逐信号"方向性
+    假设标记，自主优化管道需要聚合计数才能量化偏差规模：
+        - n_skipped：等待期放弃的信号（skip_no_pullback / skip_target_met）；
+        - same_day_both：同日"撤单阈值与成交价都触及"（回测按 cancel 优先的假设）；
+        - stop_gap：止损触发日跳空低开（open<stop，成交价被下修，回测保守化）。
+    stats 由调用方持有（NecklineMethodStrategy.skip_stats），本函数原地累加。
+    """
+    if sim is None:
+        return
+    reason = sim.get("exit_reason")
+    if reason in ("skip_no_pullback", "skip_target_met"):
+        stats["n_skipped"] += 1
+        if sim.get("same_day_both"):
+            stats["same_day_both"] += 1
+    elif reason == "stop_loss" and sim.get("stop_gap"):
+        stats["stop_gap"] += 1
+
+
 def _cost(side: str, qty: float, price: float) -> float:
     """交易成本（金额口径，实盘用）：万三佣金 min5 + 卖0.05%印花 + 0.001%过户。
 
@@ -132,14 +153,21 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     wait_end = min(signal_idx + max_wait, len(sym_df) - 1)
     buy_idx = None
     for i in range(signal_idx + 1, wait_end + 1):
+        low_i = float(sym_df["low"].iloc[i])
+        high_i = float(sym_df["high"].iloc[i])
         # 等待期价格已达撤单阈值 → 涨幅已兑现，回踩是退潮，撤单不买（过滤"猛突破后回踩"陷阱）
-        if cancel_on is not None and float(sym_df["high"].iloc[i]) >= cancel_on:
+        if cancel_on is not None and high_i >= cancel_on:
+            # P0-3 事件顺序量化（2026-08-03）：同根 K 线 high≥cancel_on 且 low≤buy_limit
+            # 时回测按 cancel 优先（假设先摸高后回踩）。same_day_both=True 标记这类
+            # 方向性假设，供报告归因；若真实顺序是先回踩成交，本信号应算成交。
+            same_day_both = low_i <= buy_limit
             return {"signal_date": sym_df.index[signal_idx].date(),
                     "exit_reason": "skip_target_met",
                     "avg_pnl_pct": 0.0, "lot1_pnl_pct": 0.0, "lot2_pnl_pct": 0.0,
                     "neckline": round(c_star, 3), "entry": None,
-                    "risk_pct": None, "tp1": round(tp1, 3), "tp2": round(tp2, 3)}
-        if float(sym_df["low"].iloc[i]) <= buy_limit:
+                    "risk_pct": None, "tp1": round(tp1, 3), "tp2": round(tp2, 3),
+                    "same_day_both": same_day_both, "stop_gap": False}
+        if low_i <= buy_limit:
             buy_idx = i
             break
     if buy_idx is None:
@@ -147,7 +175,8 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
                 "exit_reason": "skip_no_pullback",
                 "avg_pnl_pct": 0.0, "lot1_pnl_pct": 0.0, "lot2_pnl_pct": 0.0,
                 "neckline": round(c_star, 3), "entry": None,
-                "risk_pct": None, "tp1": round(tp1, 3), "tp2": round(tp2, 3)}
+                "risk_pct": None, "tp1": round(tp1, 3), "tp2": round(tp2, 3),
+                "same_day_both": False, "stop_gap": False}
 
     entry = min(buy_limit, float(sym_df["open"].iloc[buy_idx]))
     # 限价买单成交价：open>buy_limit（盘中回踩）→ 成交 buy_limit；open<=buy_limit（跳空低开）
@@ -169,6 +198,7 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     lot1_pnl, lot2_pnl = None, None
     exit_reason = "timeout"
     exit_pos = end_idx   # 默认超时（is_last 或循环自然结束）；stop_loss/tp2 break 时覆盖
+    stop_gap = False     # P0-1：止损触发日跳空低开（open<stop）标记（2026-08-03 Phase A）
 
     # cfg：decide_exit 需要的静态参数（整个持有期不变）。参数映射红线（resolution §7）：
     #   stop_atr_mult ← id_cfg（与原内联 :167 id_cfg["stop_atr_mult"] 同源）；
@@ -214,8 +244,14 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             continue
 
         if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.STOP_LOSS:
-            # 优先级1（原 :174-179）：止损全平。lot1/lot2 用 stop（=dec.new_stop）算 pnl。
-            lot1_pnl = lot2_pnl = (stop - entry) / entry
+            # 优先级1（原 :174-179）：止损全平。lot1/lot2 用当根成交价算 pnl。
+            # P0-1 跳空修正（2026-08-03）：若开盘已低于止损（open<stop），真实市价/
+            # 限价止损单成交于更差的开盘价附近——回测按 min(stop, open) 保守成交，
+            # 不再假设"完美按 stop 价成交"（防回测高估止损保护、Agent 过拟合紧止损）。
+            open_i = float(sym_df["open"].iloc[i])
+            stop_fill = min(stop, open_i)
+            stop_gap = open_i < stop
+            lot1_pnl = lot2_pnl = (stop_fill - entry) / entry
             lot1_open = lot2_open = False
             exit_reason = "stop_loss"
             exit_pos = i
@@ -286,6 +322,10 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         "exit_date": sym_df.index[exit_pos].date(),
         "exit_price": round(exit_price_avg, 3),
         "holding_bars": exit_pos - buy_idx,
+        # P0-3 事件顺序量化：本信号等待期是否出现过"同日撤单阈值与成交价都触及"；
+        # P0-1 跳空标记：止损触发日 open<stop（成交价被下修）。
+        "same_day_both": False,
+        "stop_gap": stop_gap,
     }
 
 

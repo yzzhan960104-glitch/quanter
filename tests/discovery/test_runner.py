@@ -111,6 +111,64 @@ def test_run_search_summary_fields(tmp_path, monkeypatch):
     assert s.status == "budget_exhausted"
 
 
+def test_run_search_eval_replay_top_fills_replay_metrics(tmp_path, monkeypatch):
+    """P1-2（2026-08-03）：eval_replay_top=True 时冠军补跑 replay 口径（主回测同源）。
+
+    物理意图：搜索排序用 kelly/calmar 近似口径，与主回测/实盘 PositionModel 口径
+    不同源。冠军额外用 evaluate_replay（backtest.replay 引擎）复评 inner 段，
+    产出可对拍的 replay 口径指标（n_hits/win_rate/avg_rr/max_drawdown/annualized）。
+    """
+    from discovery import runner
+    from discovery.store import init_db
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    monkeypatch.setattr(runner, "sample_search", lambda **kw: [
+        {"window": 80, "min_rr": 2.0, "tp1_h_mult": 1.0, "tp_h_mult": 2.5,
+         "cancel_thresh_mult": 3.0, "trailing_grace": 5, "trailing_step": 0.1,
+         "trailing_floor": 0.0}])
+    monkeypatch.setattr(runner, "eval_batch", lambda plist, **kw: [
+        (plist[0], {"inner": {"ann": 0.5, "calmar": 3.5, "max_dd": 0.2, "n": 100},
+                    "outer": {"ann": 1.5, "calmar": 5.0, "max_dd": 0.3, "n": 80},
+                    "n_total": 180})])
+    monkeypatch.setattr(runner, "_engine_hash", lambda: "eng1")
+
+    fake_replay = {
+        "inner": {"n_hits": 88, "win_rate": 0.55, "avg_rr": 1.8,
+                  "max_drawdown": -0.12, "annualized_return": 0.3,
+                  "n_trading_days": 240},
+        "outer": {}, "n_total": 88, "report": {},
+    }
+    monkeypatch.setattr(runner, "evaluate_replay",
+                        lambda params, universe, split: fake_replay)
+    monkeypatch.setattr(runner, "freeze",
+                        lambda lake_start="2025-01-01": ({"300001.SZ": 1}, _fake_meta()))
+
+    s = runner.run_search(_fake_meta(), _fake_split(), budget=1, n_sobol=1, n_random=0,
+                          seed=1, db_path=db, eval_replay_top=True)
+    assert s.top_replay_metrics == fake_replay["inner"]
+
+
+def test_run_search_eval_replay_top_default_off(tmp_path, monkeypatch):
+    """eval_replay_top 默认 False（不额外跑 replay，普通跑批零开销）。"""
+    from discovery import runner
+    from discovery.store import init_db
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    monkeypatch.setattr(runner, "sample_search", lambda **kw: [
+        {"window": 80, "min_rr": 2.0, "tp1_h_mult": 1.0, "tp_h_mult": 2.5,
+         "cancel_thresh_mult": 3.0, "trailing_grace": 5, "trailing_step": 0.1,
+         "trailing_floor": 0.0}])
+    monkeypatch.setattr(runner, "eval_batch", lambda plist, **kw: [
+        (plist[0], {"inner": {"ann": 0.5, "calmar": 3.5, "max_dd": 0.2, "n": 100},
+                    "outer": {}, "n_total": 100})])
+    monkeypatch.setattr(runner, "_engine_hash", lambda: "eng1")
+    monkeypatch.setattr(runner, "evaluate_replay",
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不应被调用")))
+    s = runner.run_search(_fake_meta(), _fake_split(), budget=1, n_sobol=1, n_random=0,
+                          seed=1, db_path=db)
+    assert s.top_replay_metrics == {}
+
+
 def test_run_search_failed_trial_filtered(tmp_path, monkeypatch):
     """eval_batch 返回 None（异常组）→ n_failed 计数，不落库。"""
     from discovery import runner

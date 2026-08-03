@@ -28,7 +28,8 @@ def test_pos_cap_additive_equity_hand_derived():
         _t("A", "2024-01-02", "2024-01-05", 2.0, 10.0),
         _t("B", "2024-02-01", "2024-02-03", -1.0, -5.0),
     ]
-    curve = build_equity_curve(trades, PositionModel(capital=1_000_000, pos_cap=0.05, max_positions=10))
+    curve = build_equity_curve(trades, PositionModel(
+        capital=1_000_000, pos_cap=0.05, max_positions=10, slippage_bps=0))
     assert len(curve) == 2
     assert curve[0]["equity"] == pytest.approx(1.005)
     assert curve[1]["equity"] == pytest.approx(1.0025)
@@ -43,7 +44,8 @@ def test_max_positions_skips_overlapping_trades():
         _t("B", "2024-01-03", "2024-01-11", 1.0, 5.0),
         _t("C", "2024-01-04", "2024-01-12", 1.0, 5.0),
     ]
-    curve = build_equity_curve(trades, PositionModel(capital=1_000_000, pos_cap=0.05, max_positions=2))
+    curve = build_equity_curve(trades, PositionModel(
+        capital=1_000_000, pos_cap=0.05, max_positions=2, slippage_bps=0))
     assert len(curve) == 2
     assert curve[-1]["equity"] == pytest.approx(1.005)
     assert curve[-1]["cumulative_rr"] == pytest.approx(2.0)
@@ -55,7 +57,8 @@ def test_cash_insufficient_skips_trade():
         _t("A", "2024-01-02", "2024-01-10", 1.0, 5.0),
         _t("B", "2024-01-03", "2024-01-11", 1.0, 5.0),
     ]
-    curve = build_equity_curve(trades, PositionModel(capital=100.0, pos_cap=0.6, max_positions=10))
+    curve = build_equity_curve(trades, PositionModel(
+        capital=100.0, pos_cap=0.6, max_positions=10, slippage_bps=0))
     assert len(curve) == 1
     assert curve[0]["equity"] == pytest.approx(1.03)
 
@@ -66,7 +69,8 @@ def test_sequential_positions_not_counted_concurrent():
         _t("A", "2024-01-02", "2024-01-05", 1.0, 5.0),
         _t("B", "2024-01-06", "2024-01-09", 1.0, 5.0),
     ]
-    curve = build_equity_curve(trades, PositionModel(capital=1_000_000, pos_cap=0.05, max_positions=1))
+    curve = build_equity_curve(trades, PositionModel(
+        capital=1_000_000, pos_cap=0.05, max_positions=1, slippage_bps=0))
     assert len(curve) == 2
 
 
@@ -90,3 +94,16 @@ def test_slippage_reduces_position_return():
 def test_empty_trades_returns_empty_curve():
     """空流水 → 空曲线（不除零、不抛）。"""
     assert build_equity_curve([], PositionModel()) == []
+
+
+def test_default_slippage_is_conservative_5bps():
+    """P0-2（2026-08-03）：PositionModel 默认双边滑点 5bps（共 10bps）。
+
+    物理意图：主回测链路此前零滑点，而真实止损/超时卖出有冲击成本。默认保守
+    5bps 让回测收益不再系统性高估；任务级可显式覆盖（如零费率研究任务传 0）。
+    """
+    assert PositionModel().slippage_bps == 5.0
+    trades = [_t("A", "2024-01-02", "2024-01-05", 2.0, 10.0)]
+    curve = build_equity_curve(trades, PositionModel(pos_cap=0.05))
+    # 10% 收益 − 双边 10bps → 净 9.9%，pos_cap 5% 贡献 = 0.00495
+    assert curve[0]["equity"] == pytest.approx(1.0 + 0.05 * (0.10 - 0.0010))
