@@ -16,7 +16,7 @@ Mock 策略：patch ``trading.engine.get_gateway``（模块级函数）+ ``tradi
 （bootstrap 内函数局部 import 这些子模块，故 patch 源模块路径）。
 """
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from trading.engine import TradingEngine
 
 
@@ -27,7 +27,9 @@ async def test_bootstrap_inits_db_and_connects():
          patch("trading.position_book.init_db") as pb, \
          patch("trading.state_store.init_store") as ss, \
          patch("trading.state_store._migrate_env_to_account") as mig:
-        gw = AsyncMock()
+        gw = MagicMock()
+        gw.is_client_ready = lambda: True      # 客户端就绪 → 走连接主路径
+        gw.connect = AsyncMock()
         gg.return_value = gw
         await eng.bootstrap()
         gw.connect.assert_awaited_once()
@@ -49,6 +51,25 @@ async def test_bootstrap_no_gateway_degrades():
         assert eng._gw is None
 
 
+@pytest.mark.asyncio
+async def test_bootstrap_skips_connect_when_client_not_ready():
+    """客户端未就绪 → bootstrap 不调 connect（防先于客户端创建会话文件 → -1 中毒，P0-1）。"""
+    from unittest.mock import MagicMock
+    eng = TradingEngine()
+    with patch("trading.engine.get_gateway") as gg, \
+         patch("trading.position_book.init_db"), \
+         patch("trading.state_store.init_store"), \
+         patch("trading.state_store._migrate_env_to_account"):
+        gw = MagicMock()
+        gw.is_client_ready.return_value = False
+        gw.connect = AsyncMock()
+        gg.return_value = gw
+        await eng.bootstrap()
+    gw.connect.assert_not_awaited()                # 未就绪绝不 connect
+    gw.set_order_update_callback.assert_called_once()  # 回调仍先接好，health_guard 连接后回报链路就绪
+    assert eng._gw is gw
+
+
 # ============================================================================
 # QMT session 单实例锁（live 专属）：双引擎抢 session → connect -1 防御
 # ============================================================================
@@ -64,7 +85,10 @@ async def test_bootstrap_live_acquires_and_shutdown_releases_lock(monkeypatch, t
          patch("trading.position_book.init_db"), \
          patch("trading.state_store.init_store"), \
          patch("trading.state_store._migrate_env_to_account"):
-        gg.return_value = AsyncMock()
+        gw = MagicMock()
+        gw.is_client_ready = lambda: True
+        gw.connect = AsyncMock()
+        gg.return_value = gw
         await eng.bootstrap()
     assert (tmp_path / "trading_engine_999.lock").exists()
     assert getattr(eng, "_instance_lock", None) is not None
@@ -105,7 +129,10 @@ async def test_bootstrap_dry_run_skips_session_lock(monkeypatch, tmp_path):
          patch("trading.position_book.init_db"), \
          patch("trading.state_store.init_store"), \
          patch("trading.state_store._migrate_env_to_account"):
-        gg.return_value = AsyncMock()
+        gw = MagicMock()
+        gw.is_client_ready = lambda: True
+        gw.connect = AsyncMock()
+        gg.return_value = gw
         await eng.bootstrap()
     assert not (tmp_path / "trading_engine_999.lock").exists()
     assert getattr(eng, "_instance_lock", None) is None
