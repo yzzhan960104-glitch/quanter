@@ -17,7 +17,6 @@ market 已下线（2026-07-26）：本模块不再含行情播报分支与 build
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import os
 import sys
@@ -155,62 +154,82 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
     """取交易机器人当日快照四件套：(trades, asset, positions, status)。
 
     Why 集中取数 + 兜底降级：
-    - __main__ 是同步 CLI，但 trading_service.get_asset/get_positions 是 async（网关
-      查询走 broker 回调/线程池）。用 asyncio.run 一次性并发取两个 async（单 event loop），
-      避免两次 asyncio.run 各启一个 loop 的开销。
     - 网关未连接/取数失败：asset 传 None、positions 传 None，brief 自动降级文案，绝不抛
       （trading 播报是观测层，断线不应阻断播报，而应如实把「断线」播出去）。
-    - status 始终可取（trading_service.get_status 同步，四态之一）。
     - trades 走同步 query_trades（CSV 全表扫描，本身即降级契约：文件不存在返空列表）。
+    - **2026-08-03 修复**：asset/positions/status 不再在本进程自建 QMT 网关
+      （独立进程从未 connect → 恒 disconnected 降级；且同 sid 双进程会互斥抢 session），
+      改为读运行中 server 的 API（网关所有权唯一归 server/engine）。server 不在/超时
+      → 走既有降级文案（观测层绝不阻断播报）。
     """
-    # 延迟 import：trading_service 顶层 import 了 infra.notifier/broker.base/
-    # trading.compute.types 等较重链路，且 __main__ 仅 trading 分支需要 → 放函数内，
-    # data/strategy 分支零负担。
-    from presentation.server.services import trading_service
-
-    # 同步取数：trades（CSV 流水）/ status（四态镜像）
+    # 同步取数：trades（CSV 流水，与 server 同源单文件）
     try:
+        from presentation.server.services import trading_service
         trades_payload = trading_service.query_trades(date, date, limit=100)
         trades = list(trades_payload.get("trades", [])) if trades_payload else []
     except Exception:
         logger.warning("query_trades 取数失败，trading brief 成交节降级为空", exc_info=True)
         trades = []
+
+    # 网关态/资金/持仓：读运行中 server 的 API（网关唯一属主 = server 进程）。
     try:
-        status = trading_service.get_status() or {}
+        status = _server_json("/api/v1/trading/status") or {}
     except Exception:
         logger.warning("get_status 取数失败，trading brief 网关态降级为空", exc_info=True)
         status = {}
 
-    # async 取数：asset / positions。单 event loop 并发取，失败兜底 None（brief 降级）。
-    async def _fetch_pair():
-        # gather + return_exceptions：任一异常转对象返回，不互相阻塞
-        return await asyncio.gather(
-            trading_service.get_asset(),
-            trading_service.get_positions(),
-            return_exceptions=True,
-        )
-
     asset: dict | None = None
     positions: list | None = None
     try:
-        results = asyncio.run(_fetch_pair())
-    except RuntimeError as e:
-        # asyncio.run 在已有 event loop 的环境（如 Jupyter/某些测试）会抛 RuntimeError；
-        # 同步 CLI 正常不会触发，兜底日志 + 降级。
-        logger.warning("asyncio.run 取 asset/positions 失败（环境无新 event loop?）：%s", e)
-        results = []
+        raw_asset = (_server_json("/api/v1/trading/asset", timeout=8.0) or {}).get("asset") or {}
+        asset = raw_asset if raw_asset else None
     except Exception:
-        logger.warning("取 asset/positions 异常，trading brief 资金/持仓节降级", exc_info=True)
-        results = []
-
-    if len(results) >= 2:
-        a, p = results[0], results[1]
-        # get_asset：无网关/未连接返 {}（falsy → brief 视为 None 降级，等价语义）
-        asset = a if (not isinstance(a, Exception) and a) else None
-        # get_positions：无网关/未连接 raise RuntimeError → 兜底 None
-        positions = None if isinstance(p, Exception) else (p or None)
+        logger.warning("取 asset 失败，trading brief 资金节降级", exc_info=True)
+        asset = None
+    try:
+        p = (_server_json("/api/v1/trading/positions", timeout=12.0) or {}).get("positions")
+        # broker 明确返 [] = 权威空仓（不回退本地账本）；仅取数失败（异常）
+        # 才退回 position_book，避免本地账本滞后把已平仓显示成持仓。
+        positions = p if p is not None else _local_positions_fallback()
+    except Exception:
+        logger.warning("取 positions 失败，trading brief 持仓段退回本地账本", exc_info=True)
+        positions = _local_positions_fallback()
 
     return trades, asset, positions, status
+
+
+def _server_json(path: str, timeout: float = 5.0):
+    """读运行中 server 的 JSON API（播报独立进程不连 QMT，网关属主=server）。
+
+    base 可用环境变量 TRADING_API_BASE 覆盖（默认 http://127.0.0.1:8000）。
+    鉴权：QUANTER_API_TOKEN 已配置时自动带 Bearer（server 无鉴权开发态则忽略）。
+    任一异常上抛，由调用方降级（观测层绝不阻断播报）。
+    """
+    import json as _json
+    import urllib.request as _request
+
+    base = os.getenv("TRADING_API_BASE", "http://127.0.0.1:8000").rstrip("/")
+    req = _request.Request(f"{base}{path}")
+    token = os.getenv("QUANTER_API_TOKEN", "")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with _request.urlopen(req, timeout=timeout) as resp:
+        return _json.loads(resp.read().decode("utf-8"))
+
+
+def _local_positions_fallback() -> list[dict] | None:
+    """broker 持仓不可用时的本地账本兜底：{symbol: qty} → [{symbol, qty}]。
+
+    失败返 None（brief 渲染「当前无持仓」），绝不抛——观测层断线降级纪律。
+    """
+    try:
+        from trading import position_book
+        position_book.init_db()
+        local = position_book.get_local_positions()
+        return [{"symbol": s, "qty": q} for s, q in local.items()] or None
+    except Exception:
+        logger.warning("读本地持仓失败（brief 持仓段降级为空）", exc_info=True)
+        return None
 
 
 def _fetch_data_snapshot() -> list[dict]:
@@ -314,34 +333,64 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
     Why 集中取数 + 兜底降级（与 _fetch_trading_snapshot/_fetch_data_snapshot 同纪律）：
     - 策略观测层**绝不阻塞播报**：任一取数异常均降级，brief 自动走「—」/「无记录」文案。
     - **scan_count 不走 facade.scan**（全市场扫描重且不稳，可能几十秒~分钟级，钉钉播报
-      不能挂在这上面）：直接读 ``plans/<date>.json`` 的 ``len(plans)``（scan 落盘格式，
-      见 execution/storage.py docstring：``{date, plans: [...], n_plans: N}``），
-      零重活、稳。文件不存在（当日未扫描/周末）→ None（brief 降级「—」）。
+      不能挂在这上面）：读 T 日盘后 EOD 落盘的 T+1 计划文件
+      ``logs/trading_plans/plan_<trading_day>.json`` 的 ``len(orders)``
+      （2026-08-02 修复：旧实现读 ``plans/<date>.json``——该 scan 落盘格式早已停用，
+      EOD 现走 trading_plan.save_plan → 恒读不到文件 → 信号数恒「—」）。
+      候选链：plan_<next_trading_day(date)>（T 日盘后产出的次日计划）→
+      plan_<date>（同日计划，兼容跨日/补跑）→ 旧 plans/<date>.json（{plans: [...]}）。
+      文件都不存在（当日未扫描/周末）→ None（brief 降级「—」）。
     - **param_iter_state 适配真实结构**：``logs/param_iter_state.json`` 真实结构是
       ``{tried: {param_json: {ann, kelly, curve, ...}}}``，而 build_strategy_brief 期望
       ``{best_annual, iter}`` 简字段——本函数负责适配：``best_annual = max(ann)``、
       ``iter = len(tried)``，把适配逻辑收口在取数层（brief 纯函数保持极简）。文件不存在/
       损坏/空 tried → None（brief 降级「—」）。
-    - **recent_runs**：``replay_runs/index.json`` 已是 list[{run_id, win_rate,
-      max_drawdown, annualized_return, ...}]，直接 json.load + 按创建序取最近 5 条。
-      文件不存在/损坏 → []。
+    - **recent_runs**（2026-08-03 修复）：优先读当前回测单一真相源
+      ``data/replay_tasks.db`` 的 SUCCESS 任务（Spec 1 起 worker 结果落
+      report_json，老 JSON 归档已停更——旧实现读 replay_runs/index.json 导致
+      「近期回测」恒停在 07-14）；DB 无 SUCCESS 时回退老 JSON 归档。
+      进行中任务（PENDING/RUNNING）置顶提示，让播报如实显示「回测已提交但未完成」。
     """
     import json
+    from trading.calendar import next_trading_day
 
-    # ── scan_count：读 plans/<date>.json 的信号数（scan 落盘格式，零重活） ──
+    # ── scan_count：读 EOD 落盘计划文件的订单数（零重活） ──
     scan_count: int | None = None
+    # T 日盘后 EOD 落盘的是 **T+1（计划生效日）** 计划文件：date 播报日对应
+    # plan_<next_trading_day(date)>（如 07-31 周五盘后 → plan_2026-08-03.json）。
+    plan_dir = Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
     try:
-        plans_path = Path("plans") / f"{date}.json"
-        if plans_path.exists():
-            with plans_path.open("r", encoding="utf-8") as f:
-                payload = json.load(f)
-            plans_list = payload.get("plans") if isinstance(payload, dict) else None
-            if isinstance(plans_list, list):
-                scan_count = len(plans_list)
+        candidates = [next_trading_day(date), date]
     except Exception:
-        # 文件损坏/JSON 解析失败 → None（brief 降级「—」），不阻断播报
-        logger.warning("读 plans/%s.json 失败，scan_count 降级为 None", date, exc_info=True)
-        scan_count = None
+        candidates = [date]
+    for cand in candidates:
+        try:
+            p = plan_dir / f"plan_{cand}.json"
+            if not p.exists():
+                continue
+            with p.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+            orders = payload.get("orders") if isinstance(payload, dict) else None
+            if isinstance(orders, list):
+                scan_count = len(orders)
+                break
+        except Exception:
+            logger.warning("读 %s 失败，scan_count 降级为 None", p, exc_info=True)
+            scan_count = None
+            break
+    # 旧格式兜底：plans/<date>.json（{date, plans: [...], n_plans: N}，已停用但兼容）
+    if scan_count is None:
+        try:
+            plans_path = Path("plans") / f"{date}.json"
+            if plans_path.exists():
+                with plans_path.open("r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                plans_list = payload.get("plans") if isinstance(payload, dict) else None
+                if isinstance(plans_list, list):
+                    scan_count = len(plans_list)
+        except Exception:
+            logger.warning("读 plans/%s.json 失败，scan_count 降级为 None", date, exc_info=True)
+            scan_count = None
 
     # ── param_iter_state：读 logs/param_iter_state.json，适配 {best_annual, iter} ──
     param_iter_state: dict | None = None
@@ -352,44 +401,89 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
                 raw_pi = json.load(f)
             tried = raw_pi.get("tried") if isinstance(raw_pi, dict) else None
             if isinstance(tried, dict) and tried:
-                # 从 tried 字典每项的 metrics 里取 ann，求 max；轮数 = 已尝试参数组数
-                anns = [
-                    v.get("ann")
-                    for v in tried.values()
-                    if isinstance(v, dict) and isinstance(v.get("ann"), (int, float))
-                ]
-                if anns:
+                # 2026-08-02：优先读文件自带冠军 best_ann（param_iter 直接维护的
+                # 主键），失败才从 tried 重算 max(ann)——重算口径与 best_ann 等价，
+                # 但读冠军更稳（tried 未来若含非参数字段也不受影响）。
+                best_ann = raw_pi.get("best_ann")
+                if not isinstance(best_ann, (int, float)):
+                    anns = [
+                        v.get("ann")
+                        for v in tried.values()
+                        if isinstance(v, dict) and isinstance(v.get("ann"), (int, float))
+                    ]
+                    best_ann = max(anns) if anns else None
+                if best_ann is not None:
                     param_iter_state = {
-                        "best_annual": max(anns),
+                        "best_annual": best_ann,
                         "iter": len(tried),
                     }
-                # anns 空（所有项都没 ann 字段）→ param_iter_state 留 None，brief 降级
+                # best_ann 空（文件无冠军且所有项都没 ann 字段）→ None，brief 降级
     except Exception:
         # 文件损坏/JSON 解析失败 → None（brief 降级「—」），不阻断播报
         logger.warning("读 logs/param_iter_state.json 失败，param_iter 降级为 None", exc_info=True)
         param_iter_state = None
 
-    # ── recent_runs：读 replay_runs/index.json，取最近 5 条摘要 ──
-    recent_runs: list = []
-    try:
-        idx_path = Path("replay_runs") / "index.json"
-        if idx_path.exists():
-            with idx_path.open("r", encoding="utf-8") as f:
-                raw_runs = json.load(f)
-            if isinstance(raw_runs, list):
-                # 按 created_at 降序（字符串 ISO 字典序 = 时间序）取最近 5 条；
-                # 缺 created_at 的条目排末尾（key=lambda 兜底空串，不抛）
-                recent_runs = sorted(
-                    raw_runs,
-                    key=lambda r: r.get("created_at", "") if isinstance(r, dict) else "",
-                    reverse=True,
-                )[:5]
-    except Exception:
-        # 文件不存在/损坏 → []（brief 渲染「近期无回测记录」），不阻断播报
-        logger.warning("读 replay_runs/index.json 失败，recent_runs 降级为空", exc_info=True)
-        recent_runs = []
+    # ── recent_runs：优先读 replay_tasks.db（当前单一真相源） ──
+    recent_runs = _recent_runs_from_tasks_db()
+    if not recent_runs:
+        # 回退：老 JSON 归档（replay_runs/index.json），取最近 5 条摘要
+        try:
+            idx_path = Path("replay_runs") / "index.json"
+            if idx_path.exists():
+                with idx_path.open("r", encoding="utf-8") as f:
+                    raw_runs = json.load(f)
+                if isinstance(raw_runs, list):
+                    recent_runs = sorted(
+                        raw_runs,
+                        key=lambda r: r.get("created_at", "") if isinstance(r, dict) else "",
+                        reverse=True,
+                    )[:5]
+        except Exception:
+            logger.warning("读 replay_runs/index.json 失败，recent_runs 降级为空", exc_info=True)
+            recent_runs = []
 
     return scan_count, param_iter_state, recent_runs
+
+
+def _recent_runs_from_tasks_db() -> list:
+    """从 data/replay_tasks.db 读最近回测摘要（SUCCESS 5 条 + 进行中置顶提示）。
+
+    字段映射对齐 build_strategy_brief 期望（run_id/n_hits/win_rate/max_drawdown/
+    annualized_return），并透传 created_at 供 brief 计算「距今 N 天」。
+    DB 缺失/损坏 → []（调用方回退老 JSON 归档）。
+    """
+    try:
+        from backtest import tasks_db as replay_tasks_db
+        replay_tasks_db.init_db()
+        tasks = replay_tasks_db.list_tasks(limit=100) or []
+    except Exception:
+        logger.warning("读 replay_tasks.db 失败，recent_runs 降级为空", exc_info=True)
+        return []
+
+    active = [t for t in tasks if t.get("status") in ("PENDING", "RUNNING")]
+    done = [t for t in tasks if t.get("status") == "SUCCESS"]
+    out: list = []
+    # 进行中任务置顶（比已完成更新才提示；旧 PENDING 卡死由调度器 sweep 兜底）
+    if active and (not done or active[0].get("created_at", "") > done[0].get("created_at", "")):
+        out.append({
+            "run_id": "回测中",
+            "pending": True,
+            "created_at": active[0].get("created_at", ""),
+            "n_hits": -1,
+        })
+    for t in done[:5]:
+        rep = t.get("report") or {}
+        out.append({
+            "run_id": (t.get("created_at") or "")[:10].replace("-", ""),
+            "created_at": t.get("created_at", ""),
+            "start": t.get("start") or "",
+            "end": t.get("end") or "",
+            "n_hits": rep.get("n_hits") or 0,
+            "win_rate": rep.get("win_rate") or 0.0,
+            "max_drawdown": rep.get("max_drawdown") or 0.0,
+            "annualized_return": rep.get("annualized_return") or 0.0,
+        })
+    return out
 
 
 def _build_brief(bot: str, date: str, reader: DataLakeReader):

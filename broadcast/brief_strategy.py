@@ -3,8 +3,10 @@
 
 内容：颈线法当日扫描信号数 + 参数迭代状态 + 近期回测胜率/回撤/年化。
 
-物理定位：取数由 ``__main__._fetch_strategy_snapshot`` 完成（读 plans/<date>.json +
-logs/param_iter_state.json + replay_runs/index.json），本函数零 IO 副作用，仅做
+物理定位：取数由 ``__main__._fetch_strategy_snapshot`` 完成（读
+logs/trading_plans/plan_<T+1>.json + logs/param_iter_state.json +
+data/replay_tasks.db；2026-08-03 起回测结果以 SQLite 为单一真相源，replay_runs/
+JSON 归档仅作只读回退），本函数零 IO 副作用，仅做
 模板渲染与百分比格式化，便于单测。任一字段缺失均降级为「—」或「无记录」文案，绝不抛。
 
 鲁棒性（CLAUDE.md 量化风控·边界审查）：
@@ -14,15 +16,19 @@ logs/param_iter_state.json + replay_runs/index.json），本函数零 IO 副作�
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from broadcast.brief import BriefResult, _clean_markdown, _weekday_zh
 
 
-def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs) -> BriefResult:
+def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs,
+                         now=None) -> BriefResult:
     """生成策略机器人每日健康度 Markdown。
 
     参数（全部注入式，本函数不读文件/不联网）：
         date: 播报日（YYYY-MM-DD）。
-        scan_count: int|None，当日颈线法扫描信号数（plans/<date>.json 的 len(plans)）。
+        scan_count: int|None，当日颈线法扫描信号数（T 日盘后 EOD 落盘计划文件的
+            len(orders)，见 __main__ 候选链）。
         param_iter_state: dict|None，期望字段 ``best_annual``（float, 如 0.997）
             与 ``iter``（int, 第几轮）；由 ``__main__`` 从真实
             ``logs/param_iter_state.json``（结构 ``{tried: {...}}``）适配而来。
@@ -46,14 +52,45 @@ def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs) -> 
     iter_s = it if it is not None else "—"
     param_block = f"- 参数迭代最优年化：{best_s}（第 {iter_s} 轮）"
 
-    # 近期回测：最多列 5 条防刷屏；run_id 截前 8 位；胜率/回撤/年化走 _pct 容错
+    # 近期回测：最多列 5 条防刷屏；run_id 截前 8 位；胜率/年化走 _pct 容错。
+    # 回撤口径（2026-08-02 对齐 compute_unit/summary.py）：replay_runs 的
+    # max_drawdown 是**累计 rr 峰谷（风险倍数）**，不是净值百分比——旧实现把它
+    # 当百分比渲染（如单笔亏损 rr=-1 → 显示「回撤 0.0%」，既漏算又错单位）。
+    # n_hits=0 的回测无交易样本，胜率/回撤/年化全是 0.0 无意义 → 显式「无成交」。
+    # 进行中任务（pending=True）置顶提示「回测进行中」，不冒充已完成结果。
+    # 新鲜度（2026-08-03）：最近完成回测距今 >7 天 → 显式标注「N 天前」，
+    # 让「近期回测」的滞后可见（旧数据 + 无提示 = 被误读为当天的健康度）。
     run_lines = []
+    latest_dt = None
     for r in recent_runs[:5]:
+        if r.get("pending"):
+            run_lines.append("- 回测进行中：任务已提交，等待调度器完成")
+            continue
         rid = r.get("run_id", "?")[:8]
+        n_hits = r.get("n_hits")
+        ca = r.get("created_at")
+        try:
+            dt = datetime.fromisoformat(str(ca)) if ca else None
+        except ValueError:
+            dt = None
+        if dt is not None and (latest_dt is None or dt > latest_dt):
+            latest_dt = dt
+        if isinstance(n_hits, int) and n_hits <= 0:
+            run_lines.append(f"- {rid}：无成交")
+            continue
         wr = _pct(r.get("win_rate"))
-        dd = _pct(r.get("max_drawdown"))
+        dd = _fmt_rr(r.get("max_drawdown"))
         ar = _pct(r.get("annualized_return"))
         run_lines.append(f"- {rid}：胜率 {wr} / 回撤 {dd} / 年化 {ar}")
+    # 新鲜度提示：最近完成回测距今 >7 天（now 注入，缺省 datetime.now()）
+    now = now or datetime.now()
+    stale_note = ""
+    if latest_dt is not None:
+        age_days = (now - latest_dt).days
+        if age_days > 7:
+            stale_note = (
+                f"\n> ⚠️ 最近回测已是 {age_days} 天前（{latest_dt.date().isoformat()}）"
+            )
     runs_block = "\n".join(run_lines) if run_lines else "- 近期无回测记录"
 
     sections = [
@@ -63,7 +100,7 @@ def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs) -> 
         param_block,
         "",
         "**近期回测**",
-        runs_block,
+        runs_block + stale_note,
     ]
     md = _clean_markdown("\n".join(sections))
     return BriefResult(date=date, markdown=md)
@@ -73,5 +110,13 @@ def _pct(v) -> str:
     """浮点 → 百分比字符串（如 0.55 → 「55.0%」）；None/异常 → 「—」。"""
     try:
         return f"{float(v) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_rr(v) -> str:
+    """回测 max_drawdown（累计 rr 峰谷，风险倍数）→ 「-1.00rr」；异常 → 「—」。"""
+    try:
+        return f"{float(v):.2f}rr"
     except (TypeError, ValueError):
         return "—"
