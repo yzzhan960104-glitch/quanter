@@ -89,3 +89,91 @@ def test_trading_brief_real_fill_plus_blocked():
     assert "买 1 笔 / 卖 0 笔 / 拦截 1 笔" in md
     assert "688538.SH BUY 20300股 @ 2.46" in md
     assert "**拦截/拒单**" in md
+
+
+# ============================= W3.2 简报去重 + 持仓三态 =============================
+
+
+def test_trading_brief_dedup_replayed_fill():
+    """W3.2: 同一成交（traded_time/symbol/shares/price 完全相同）重放 N 次 →
+    简报成交计数仍为 1 笔（去重），且 N>1 时输出「同一成交重放 N 次」提示段。
+
+    08-04 事故根因：消费端读 CSV 镜像且不去重，把 24 行重复当成「买 24 笔」
+    误导决策。T6 已让写入端幂等（DB fill 表真相源），简报消费段再补一道
+    (traded_time, symbol, shares, price) 去重防线。
+    """
+    # 同一笔成交回报被上层重放 3 次（典型场景：成交回报主推 + on_traded 兜底轮询 + 重建）
+    trades = [
+        {"timestamp": "2026-08-04 09:35:00", "symbol": "300001.SZ", "direction": "BUY",
+         "shares": 100, "price": 10.5, "strategy": "neckline", "rationale": "",
+         "kind": "fill", "traded_time": "20260804093500"},
+    ] * 3
+    r = build_trading_brief(
+        "2026-08-04", trades=trades, asset=None, positions=[],
+        status={"connected": True, "locked": False, "mode": "live"},
+    )
+    md = r.markdown
+    # 去重后成交笔数是 1（不是 3）
+    assert "买 1 笔" in md
+    # N>1 时显式提示重放次数（让研究员看到「重放」而非「多笔」）
+    assert "重放" in md and "3" in md
+
+
+def test_trading_brief_dedup_no_replay_no_hint():
+    """W3.2: 无重放（每笔 traded_time/shares/price 唯一）→ 不输出「重放」段。"""
+    trades = [
+        {"timestamp": "2026-08-04 09:35:00", "symbol": "300001.SZ", "direction": "BUY",
+         "shares": 100, "price": 10.5, "kind": "fill", "traded_time": "20260804093500"},
+        {"timestamp": "2026-08-04 09:36:00", "symbol": "300002.SZ", "direction": "BUY",
+         "shares": 200, "price": 20.0, "kind": "fill", "traded_time": "20260804093600"},
+    ]
+    r = build_trading_brief(
+        "2026-08-04", trades=trades, asset=None, positions=[],
+        status={"connected": True, "locked": False, "mode": "live"},
+    )
+    md = r.markdown
+    assert "买 2 笔" in md
+    # 无重放时不刷「重放」噪声
+    assert "重放" not in md
+
+
+def test_trading_brief_positions_three_states_unknown():
+    """W3.2 持仓三态（spec §3.3.3）：取数失败/网关未连 → 「持仓未知（网关未连接）」。
+
+    08-04 事故：消费端把「未知」（网关断/取数失败）渲染成「当前无持仓」，
+    误导研究员以为真零敞口。修复：positions=None 且网关未连 → 明确「持仓未知」。
+    与「broker 权威空仓（positions=[]）」严格区分。
+    """
+    # 状态 1：未知 —— 取数失败/网关未连，positions=None
+    r_unknown = build_trading_brief(
+        "2026-08-04", trades=[], asset=None, positions=None,
+        status={"connected": False, "locked": False, "mode": "disconnected"},
+    )
+    md = r_unknown.markdown
+    assert "持仓未知" in md
+    # 不渲染成「当前无持仓」（08-04 事故把未知当零误导决策）
+    assert "当前无持仓" not in md
+
+
+def test_trading_brief_positions_three_states_empty():
+    """W3.2 持仓三态：broker 权威空仓（positions=[]）→ 「当前无持仓」。"""
+    r_empty = build_trading_brief(
+        "2026-08-04", trades=[], asset=None, positions=[],
+        status={"connected": True, "locked": False, "mode": "live"},
+    )
+    md = r_empty.markdown
+    assert "当前无持仓" in md
+    assert "持仓未知" not in md
+
+
+def test_trading_brief_positions_three_states_detail():
+    """W3.2 持仓三态：有持仓 → 明细行。"""
+    r_detail = build_trading_brief(
+        "2026-08-04", trades=[], asset=None,
+        positions=[{"symbol": "510300.SH", "qty": 100}],
+        status={"connected": True, "locked": False, "mode": "live"},
+    )
+    md = r_detail.markdown
+    assert "510300.SH" in md and "100" in md
+    assert "持仓未知" not in md
+    assert "当前无持仓" not in md

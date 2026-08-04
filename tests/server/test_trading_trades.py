@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """交易流水分页查询单测（Task 1）。
 
-覆盖 query_trades 契约：
-- 分页（limit/offset）+ total 计数
-- 日期闭区间（timestamp 日期前缀比较）
-- symbol/direction 精确过滤
-- CSV 不存在的诚实空降级（不抛）
+W3.2 起 query_trades 默认读 state_store.fill（真相源），CSV 是降级镜像。本组
+测试锁定 CSV 读口的分页/过滤/大小写/小写规范化契约 —— 显式设 LIVE_TRADE_READ_SOURCE=csv
+走 CSV 回退读口（仍是 spec §5 支持的一键回滚路径，契约必须保持不变）。
 """
 import csv
 import os
+
+import pytest
 
 from presentation.server.services import trading_service
 
@@ -28,7 +28,8 @@ def _write_csv(path, rows):
 
 
 def test_query_trades_pagination_and_filter(tmp_path, monkeypatch):
-    """分页 + 日期/标的/方向过滤。"""
+    """分页 + 日期/标的/方向过滤（CSV 读口契约，W3.2 走 env=csv 回退路径）。"""
+    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
     log = tmp_path / "live_trades.csv"
     monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(log))
     _write_csv(str(log), [
@@ -60,18 +61,20 @@ def test_query_trades_pagination_and_filter(tmp_path, monkeypatch):
 
 
 def test_query_trades_empty_log(tmp_path, monkeypatch):
-    """CSV 不存在 → 空 trades、total=0（诚实空，不抛）。"""
+    """CSV 不存在 → 空 trades、total=0（诚实空，不抛；CSV 回退读口）。"""
+    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
     monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(tmp_path / "nope.csv"))
     r = trading_service.query_trades("2026-07-21", "2026-07-21")
     assert r["total"] == 0 and r["trades"] == []
 
 
 def test_query_trades_direction_case_insensitive(tmp_path, monkeypatch):
-    """direction 过滤大小写不敏感（跨 Task 1 latent 回归）。
+    """direction 过滤大小写不敏感（CSV 读口契约，W3.2 走 env=csv 回退路径）。
 
     生产落 CSV 的是大写口径（server/services/trading_service.py:432 写 BUY/SELL），
     前端/调用方传小写 "buy" 亦应命中，避免 direction 过滤恒空。
     """
+    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
     log = tmp_path / "live_trades.csv"
     monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(log))
     _write_csv(str(log), [
@@ -91,7 +94,7 @@ def test_query_trades_direction_case_insensitive(tmp_path, monkeypatch):
 
 
 def test_query_trades_direction_normalized_to_lowercase(tmp_path, monkeypatch):
-    """返回的 direction 必须规范化为小写（final review I1 · 交易 UI 红线）。
+    """返回的 direction 必须规范化为小写（final review I1 · 交易 UI 红线，CSV 读口）。
 
     生产落 CSV 是大写 BUY/SELL，但前端 TradesTable.vue 用 `row.direction === 'buy'`
     小写精确匹配做方向徽章着色（buy=danger 红 / sell=success 绿）。若 query_trades
@@ -101,6 +104,7 @@ def test_query_trades_direction_normalized_to_lowercase(tmp_path, monkeypatch):
     本测试断言：即便 CSV 写盘是大写，query_trades 返回的 trades[].direction 也必须是小写，
     保证服务端是方向口径的单一真相源（消费者一律拿小写）。
     """
+    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
     log = tmp_path / "live_trades.csv"
     monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(log))
     _write_csv(str(log), [

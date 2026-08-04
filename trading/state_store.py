@@ -545,6 +545,52 @@ def insert_fill(order_id: str, account_id: str, traded_time: str, symbol: str,
             return False
 
 
+def query_fills(start: str, end: str, *, symbol: str | None = None,
+                direction: str | None = None, db_path: str | None = None) -> list[dict]:
+    """查 [start, end]（YYYY-MM-DD）闭区间内 fill 表成交流水（W3.2 消费端真相源读口）。
+
+    物理意图（08-04 事故修复）：
+        消费端（query_trades/简报/导出/复盘）必须读 fill 表而非 CSV 镜像。CSV 在
+        重放/补推场景下会重复（同一笔成交被 record_live_trade 多次 append），而 fill
+        表 UNIQUE(order_id, traded_time) 天然去重，是成交流水的真相源（spec §2.4）。
+        T6 已让 insert_fill 幂等，本函数是消费端切真相源的纯查询读口。
+
+    traded_time 口径（与 insert_fill 一致）：
+        YYYYMMDDHHMMSS 整数串（如 "20260805101000"），按日期前缀（前 8 位）与
+        [start, end] 闭区间字典序比较（与 query_trades 的 timestamp 日期前缀比较同口径）。
+
+    返回结构（对齐 query_trades 消费契约，direction 规范化为小写）：
+        [{order_id, traded_time, symbol, direction(小写), shares(float), price(float),
+          account_id}, ...] 按 traded_time 升序（与 CSV 时间序一致，简报明细保持原序）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        # substr(traded_time,1,8) 取 YYYYMMDD 日期前缀，与 [start,end] 闭区间字典序比较；
+        # start/end 入参为 YYYY-MM-DD，去掉 "-" 后比较（与 fill 表 traded_time 同口径）。
+        sql = ("SELECT order_id, traded_time, symbol, direction, qty, price, account_id"
+               " FROM fill WHERE substr(traded_time, 1, 8) BETWEEN ? AND ?")
+        params: list = [start.replace("-", ""), end.replace("-", "")]
+        if symbol:
+            sql += " AND symbol = ?"
+            params.append(symbol)
+        if direction:
+            # DB 存大写（BUY/SELL，与 insert_fill 入参一致），调用方传小写亦能命中
+            sql += " AND direction = ?"
+            params.append(direction.upper())
+        rows = con.execute(sql + " ORDER BY traded_time", params).fetchall()
+    # 返 dict 列表，direction 统一小写口径（与 query_trades 的 CSV 读口一致，
+    # 前端/简报消费者一律拿小写，避免 BUY/SELL 大写导致前端着色颠倒）
+    return [{
+        "order_id": r["order_id"],
+        "traded_time": r["traded_time"],
+        "symbol": r["symbol"],
+        "direction": (r["direction"] or "").lower(),
+        "shares": float(r["qty"]),
+        "price": float(r["price"]),
+        "account_id": r["account_id"],
+    } for r in rows]
+
+
 # ============================= T4：position / account_daily 读写 =============================
 
 def apply_fill_to_position(account_id: str, symbol: str, direction: str, qty: float,
