@@ -3142,7 +3142,7 @@ class TradingEngine:
                 traded_time = str(update.get("traded_time", ""))
                 _fill_inserted = _state_store.insert_fill(
                     order_id, _account_id, traded_time, symbol, direction,
-                    float(qty), float(price))
+                    float(qty), float(price), strategy="neckline")
                 if _fill_inserted:
                     # insert_fill 首次入账才更新 position（避免重推重复累加）
                     _state_store.apply_fill_to_position(
@@ -3198,20 +3198,10 @@ class TradingEngine:
         #   告警由上方 _alert_critical 承担（人工对账线索），CSV 旁证在重放时反而污染真相
         #   源判定。direction is None 时不进入下方 if 块（CSV/钉钉双跳过）。
         if _fill_inserted:
-            try:
-                from presentation.server.services.trading_service import record_live_trade
-                record_live_trade(
-                    symbol,
-                    direction or "TRADE",  # _fill_inserted=True 仅在 direction in (BUY,SELL) 时 → 此处 direction 必非 None
-                    float(qty),
-                    float(price),
-                    strategy="neckline",
-                    rationale=f"成交回报@{update.get('traded_time')}",
-                    kind="fill",  # #3：真实成交，post_close 据此聚合净持仓
-                )
-            except Exception:
-                logger.exception("成交日志补写失败 symbol=%s（不影响后续通知）", symbol)
-
+            # SSoT Phase A · Task A1：原 record_live_trade CSV 审计块已删除（审计平移 trade_event，
+            # fill 表本身已是真相源 + 上面 insert_trade_event FILLED 已记事件流，CSV 镜像冗余）。
+            # 重放幂等性由 fill 表 UNIQUE(order_id, traded_time) + _fill_inserted 守卫共同保证，
+            # 不再依赖 CSV 旁证。NotificationManager 钉钉通知保留（与 fill 表同判定点，首次才推）。
             try:
                 from infra.notifier import NotificationManager, fire_and_forget
                 fire_and_forget(NotificationManager.get_default().notify_trade_event(

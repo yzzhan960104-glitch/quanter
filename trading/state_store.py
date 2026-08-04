@@ -189,6 +189,15 @@ def init_store(db_path: str | None = None) -> None:
         if not _has_column(con, "fill", "account_id"):
             con.execute("ALTER TABLE fill ADD COLUMN account_id TEXT REFERENCES account(account_id)")
             logger.info("state_store 迁移：fill 表加 account_id 列（FK 引用 account）")
+        # fill 加 strategy 列（SSoT Phase A · Task A1：digest 过滤口径的真相源字段）。
+        # 物理意图：digest/filter 消费端按 strategy 过滤成交流水（如「只看颈线法」），
+        # 若 strategy 散在 CSV 而 fill 表无对应字段，真相源（fill）与消费诉求脱钩——
+        # 重放/补推场景下 CSV 重复但 fill 去重会导致 strategy 漏过滤。A1 把 strategy
+        # 持久化到 fill 表，让真相源本身带 strategy 维度，消费端无需旁路 CSV。
+        # 默认 NULL：向后兼容既有 insert_fill 调用（A1 后续 task 才迁 engine 老调用方）。
+        if not _has_column(con, "fill", "strategy"):
+            con.execute("ALTER TABLE fill ADD COLUMN strategy TEXT")
+            logger.info("state_store 迁移：fill 表加 strategy 列（A1 断点-4 真相源字段）")
         con.execute("CREATE INDEX IF NOT EXISTS idx_fill_symbol ON fill(symbol)")
         # ⑤ position（当前持仓 · fill 累加汇总，可变）——升级为复合 PK
         if _table_exists(con, "position") and (
@@ -537,12 +546,19 @@ def update_order_state_by_broker_oid(
 
 def insert_fill(order_id: str, account_id: str, traded_time: str, symbol: str,
                 direction: str, qty: float, price: float, *,
+                strategy: str | None = None,
                 db_path: str | None = None) -> bool:
     """写 fill（成交流水，append-only，幂等）。
 
     幂等（spec §2.4）：UNIQUE(order_id, traded_time) —— 同笔成交（同 order_id + 同 traded_time）
     重推 IntegrityError → 返 False（不重复记）。部分成交（同 order_id 不同 traded_time）各自一行，
     累加到 position（apply_fill_to_position）。
+
+    strategy（A1 新增，默认 None 保向后兼容）：成交流水的策略归属（如 "neckline"），
+    落 fill.strategy 列——digest/filter 消费端按 strategy 过滤的真相源字段。Why 必须落
+    fill 而非仅 CSV：CSV 在重放/补推下重复，fill 表去重才是真相源，strategy 必须与真相
+    源同字段才能在重放场景下正确过滤。
+
     Returns: True=首次写入；False=重复 (order_id, traded_time) 跳过。
     """
     db_path = db_path or _DEFAULT_DB
@@ -551,9 +567,9 @@ def insert_fill(order_id: str, account_id: str, traded_time: str, symbol: str,
         try:
             con.execute(
                 "INSERT INTO fill(order_id, traded_time, symbol, direction, qty, price,"
-                " applied_at, account_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                " applied_at, account_id, strategy) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (order_id, traded_time, symbol, direction, float(qty), float(price), now,
-                 account_id))
+                 account_id, strategy))
             return True
         except sqlite3.IntegrityError:
             # 同 (order_id, traded_time) 成交回报重推幂等跳过。

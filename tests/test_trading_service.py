@@ -136,40 +136,47 @@ def test_connect_gateway_unavailable(monkeypatch):
         asyncio.run(trading_service.connect_gateway())
 
 
-def test_submit_order_dry_run_records_and_returns(monkeypatch):
-    """dry_run=True → 不调网关下单，落 DRY_RUN_BUY 流水，返 state=DRY_RUN。
+def test_submit_order_dry_run_records_and_returns(tmp_db, monkeypatch):
+    """dry_run=True → 不调网关下单，落 DRY_RUN trade_event 事件，返 state=DRY_RUN。
 
+    SSoT Phase A · Task A1：审计从 CSV（record_live_trade）平移到 trade_event 表。
+    本测试断言真相源（trade_event DRY_RUN 行），不再依赖 CSV 旁证。
     不 patch get_quote：conftest 假 xtdata.get_full_tick 返 {} → get_quote 返 None，
     挡板跳过涨跌停关（dry_run 在第 2 关即命中，根本到不了第 9 关）。
     """
     from presentation.server.services import trading_service
-    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
+    from trading.compute.types import OrderRequest
+    import sqlite3
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
-
-    recorded = []
-    monkeypatch.setattr(trading_service, "record_live_trade",
-                        lambda *a, **kw: recorded.append((a, kw)))
+    monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
     r = asyncio.run(trading_service.submit_order(order, dry_run=True, confirm=True))
     assert r["state"] == "DRY_RUN"
     assert gw.submit_calls == []  # 未真下单
-    assert recorded and recorded[0][0][1] == "DRY_RUN_BUY"  # 落 DRY_RUN 流水
+    # 真相源断言：trade_event 落 DRY_RUN 行
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    ev = con.execute("SELECT * FROM trade_event WHERE action='DRY_RUN'").fetchone()
+    assert ev is not None, "dry_run 未落 trade_event(DRY_RUN) 事件"
+    assert ev["symbol"] == "510300.SH"
+    con.close()
 
 
-def test_submit_order_blocked_raises(monkeypatch):
-    """挡板命中（白名单外）→ raise RuntimeError + 落 BLOCKED 流水。"""
+def test_submit_order_blocked_raises(tmp_db, monkeypatch):
+    """挡板命中（白名单外）→ raise RuntimeError + 落 BLOCKED trade_event 事件。
+
+    SSoT Phase A · Task A1 平移后：BLOCKED 审计走 trade_event 表真相源（UNIQUE 幂等），
+    不再依赖 CSV record_live_trade。
+    """
     from presentation.server.services import trading_service
-    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
+    from trading.compute.types import OrderRequest
+    import sqlite3
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
-
-    recorded = []
-    monkeypatch.setattr(trading_service, "record_live_trade",
-                        lambda *a, **kw: recorded.append(a))
+    monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
     # env helper 用 raising=False：实现前属性可能不存在，不报错直接创建
     monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
     monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
@@ -177,20 +184,27 @@ def test_submit_order_blocked_raises(monkeypatch):
     order = OrderRequest(symbol="000001.SZ", qty=100, side="buy", price=5.0)
     with pytest.raises(RuntimeError):
         asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
-    assert recorded and recorded[0][1] == "BLOCKED"
+    # 真相源断言：trade_event 落 BLOCKED 行 + meta 含白名单拒因
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    hit = con.execute("SELECT * FROM trade_event WHERE action='BLOCKED'").fetchone()
+    assert hit is not None, "挡板命中未落 trade_event(BLOCKED) 事件"
+    assert hit["symbol"] == "000001.SZ"
+    assert "whitelist" in (hit["meta"] or "").lower()  # meta 含白名单拒因
+    con.close()
 
 
-def test_submit_order_live_calls_gateway(monkeypatch):
-    """dry_run=False + 全过 → 调网关 submit_order。"""
+def test_submit_order_live_calls_gateway(tmp_db, monkeypatch):
+    """dry_run=False + 全过 → 调网关 submit_order。
+
+    SSoT Phase A · Task A1：审计走 trade_event 表，本用例聚焦「网关调用」断言，
+    trade_event 落盘由专门用例覆盖。
+    """
     from presentation.server.services import trading_service
-    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
+    from trading.compute.types import OrderRequest
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
-    # 2026-08-02：隔离 CSV 写盘——此前未 patch record_live_trade，反复跑本用例会把
-    # `_FakeGW:SUBMITTED:ok` 冒烟行刷进生产 live_trades.csv（07-31 播报「买 12 笔」
-    # 假繁荣的根因之一）。本用例只验证网关调用，不验证 CSV 落盘（后者有专门用例）。
-    monkeypatch.setattr(trading_service, "record_live_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
     monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
     monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
     monkeypatch.setattr(trading_service, "_max_amount", lambda: 10000.0, raising=False)
@@ -203,55 +217,101 @@ def test_submit_order_live_calls_gateway(monkeypatch):
     assert gw.submit_calls and gw.submit_calls[0].symbol == "510300.SH"
 
 
-def test_submit_order_live_records_audit(monkeypatch):
-    """真单成功路径必须落 record_live_trade 审计流水（spec §6.3 可追溯性，B-6/应修项1）。
+def test_submit_order_live_records_audit(tmp_db, monkeypatch):
+    """真单成功路径必须落 trade_event 审计事件（spec §6.3 可追溯性，B-6/应修项1）。
 
-    背景：submit_order docstring 声称「真单/废单/撤单均落 CSV」，但此前的真单成功
-    路径（370-376 行）拿到 OrderResult 后直接 return，未落任何流水——真实成交在
-    logs/live_trades.csv 中完全缺失，违反审计合规红线。
+    背景：submit_order docstring 声称「真单/废单/撤单均落审计」，但此前的真单成功
+    路径拿到 OrderResult 后直接 return，未落任何审计——真实成交在审计流水中完全缺失，
+    违反量化交易审计合规红线。SSoT Phase A · Task A1 平移后：审计走 trade_event 表
+    真相源（UNIQUE 幂等），不再依赖 CSV record_live_trade。
     """
     from presentation.server.services import trading_service
-    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
+    from trading.compute.types import OrderRequest
+    import sqlite3
 
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
     monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
     monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
     monkeypatch.setattr(trading_service, "_max_amount", lambda: 10000.0, raising=False)
     monkeypatch.setattr(trading_service, "_max_shares", lambda: 1000, raising=False)
     monkeypatch.setattr(trading_service, "_enforce_session", lambda: False, raising=False)
 
-    recorded = []
-    monkeypatch.setattr(trading_service, "record_live_trade",
-                        lambda *a, **kw: recorded.append((a, kw)))
-
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
     asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
 
-    # 真单成功必须落审计流水（此前缺失）
-    assert recorded, "真单成功未落 record_live_trade 审计流水（B-6）"
-    # direction 为 BUY（真单语义，非 DRY_RUN_/BLOCKED 前缀）
-    assert recorded[0][0][1] == "BUY"
-    # rationale 应含网关类名 + 真实 state（便于事后复盘）
-    rationale = recorded[0][1].get("rationale", "")
-    assert "SUBMITTED" in rationale
+    # 真相源断言：真单成功必须落 trade_event(ORDERED) 事件（_FakeGW.submit_order 返 SUBMITTED，
+    # A1 后 action=OrderState.name="SUBMITTED"，不再固定 "ORDERED"）
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    ev = con.execute(
+        "SELECT * FROM trade_event WHERE symbol='510300.SH' AND action='SUBMITTED'").fetchone()
+    assert ev is not None, "真单成功未落 trade_event(SUBMITTED) 审计事件（B-6）"
+    # meta 应含网关类名 + 真实 state（便于事后复盘）
+    meta = ev["meta"] or ""
+    assert "SUBMITTED" in meta
+    # qty/price 落盘正确
+    assert ev["qty"] == 100
+    assert ev["price"] == 5.0
+    con.close()
 
 
-def test_submit_order_disconnected_blocks(monkeypatch):
-    """网关未连接 → 挡板 connection 关命中。"""
+def test_submit_order_disconnected_blocks(tmp_db, monkeypatch):
+    """网关未连接 → 挡板 connection 关命中。
+
+    SSoT Phase A · Task A1：审计走 trade_event 表，connection 关 BLOCKED 也落事件。
+    """
     from presentation.server.services import trading_service
-    from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：垫片已删，直指 compute.types 真身
+    from trading.compute.types import OrderRequest
+    import sqlite3
 
     gw = _fake_gw_connected()
     gw._connected = False
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
-    # 2026-08-02：隔离 CSV 写盘（同 test_submit_order_live_calls_gateway，防测试
-    # BLOCKED 行污染生产流水）。
-    monkeypatch.setattr(trading_service, "record_live_trade", lambda *a, **kw: None)
+    monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
     with pytest.raises(RuntimeError, match="连接"):
         asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
+    # 真相源断言：connection 关 BLOCKED 落事件
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    ev = con.execute(
+        "SELECT * FROM trade_event WHERE action='BLOCKED' AND symbol='510300.SH'").fetchone()
+    assert ev is not None, "connection 关 BLOCKED 未落 trade_event"
+    con.close()
+
+
+def test_submit_order_blocked_writes_trade_event(tmp_db, monkeypatch):
+    """SSoT Phase A · Task A1 新增：挡板命中（白名单外）→ trade_event(BLOCKED) 落库。
+
+    断点-1：submit_order 审计平移 trade_event 的核心断言。独立于既有 test_submit_order_blocked_raises
+    （后者断言 RuntimeError 抛出 + symbol/whitelist meta），本测试聚焦真相源行落库 +
+    action/symbol/qty/price 字段完整性，确保归因/复盘消费端切 DB 时字段不缺。
+    """
+    from presentation.server.services import trading_service
+    from trading.compute.types import OrderRequest
+    import sqlite3
+
+    # 单点 account_id 注入（与 engine._resolve_account_id 同口径的 server 侧实现）
+    monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
+    # 白名单仅放行 600000.SH（600001.SH 将被拒）
+    monkeypatch.setattr(trading_service, "_whitelist", lambda: {"600000.SH"}, raising=False)
+    monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: _fake_gw_connected())
+
+    order = OrderRequest(symbol="600001.SH", qty=100, side="buy", price=10.0)
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
+
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    hit = con.execute("SELECT symbol, meta, qty, price FROM trade_event WHERE action='BLOCKED'").fetchone()
+    assert hit is not None
+    assert hit["symbol"] == "600001.SH"
+    assert "whitelist" in (hit["meta"] or "").lower()  # meta 含白名单拒因
+    assert hit["qty"] == 100.0
+    assert hit["price"] == 10.0
+    con.close()
 
 
 def test_emergency_halt_sets_risk_halt(monkeypatch):

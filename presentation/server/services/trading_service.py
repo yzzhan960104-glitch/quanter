@@ -594,6 +594,18 @@ def _dry_run_direction(side: str) -> str:
     return "DRY_RUN_BUY" if side.lower() == "buy" else "DRY_RUN_SELL"
 
 
+def _resolve_account_id() -> str:
+    """submit_order 写 trade_event 用的 account_id（UNIQUE 键之一）。
+
+    与 engine._resolve_account_id:455 同口径（QMT_ACCOUNT_ID env 优先，缺失走默认 "default"）。
+    Why 本地实现而非 import engine：trading_service 在 server 进程内 import engine 会触发
+    APScheduler/网关装配等副作用（engine 模块顶层有重型 import），且 server 与 engine 在
+    C-7 后合并进同进程但两套 _resolve_account_id 各管各的下单路径（server 手动 vs engine
+    自动），保持独立函数便于测试 monkeypatch 隔离。**改口径必须两处同步**（注释锁）。
+    """
+    return os.getenv("QMT_ACCOUNT_ID") or "default"
+
+
 async def connect_gateway() -> None:
     """触发网关连接（Cockpit /connect 调用）。
 
@@ -614,9 +626,54 @@ async def disconnect_gateway() -> None:
     await gw.disconnect()
 
 
+def _write_submit_trade_event(
+    order: OrderRequest,
+    action: str,
+    *,
+    order_id: str | None = None,
+    meta_reason: str = "",
+    meta_kind: str = "fill",
+    meta_direction: str | None = None,
+) -> None:
+    """submit_order 审计事件落 trade_event 表（SSoT Phase A · Task A1 平移）。
+
+    物理意图：把 submit_order 四态（DRY_RUN/BLOCKED/ORDERED/REJECTED）从 CSV 镜像
+    平移到 trade_event 表真相源（UNIQUE(account_id, trade_id, action) 天然幂等）。
+    trade_id 用 build_trade_id(account_id, symbol, clock.today()) 单点构造（与
+    engine ORDERED 事件 + eod_plan trade_id 同口径单点，改口径必须同步 [[gateway-ssot-hardening]]）。
+
+    软降级（spec §6.3）：DB 写失败不阻断下单主路径——审计旁路仅 WARN，业务结果（网关
+    返回值）优先返回。Why：下单已成功后 DB 写失败若 raise，会让用户看到 500 但实际订单
+    已挂出，敞口更危险；审计缺失通过 _alert_critical 旁路告警人工补对账。
+
+    meta 携带的字段（事件流的事后归因线索）：
+    - reason：风控拒因 / 网关 state + message（便于事后复盘「为什么被拒/挂了什么状态」）
+    - kind：submit（下单审计）/ fill（真实成交）—— 与原 CSV record_live_trade kind 同语义，
+      post_close 聚合只认 fill，submit 行不计入净持仓（与原 CSV kind 口径一致）
+    - direction：真单路径补 BUY/SELL（dry_run/BLOCKED 无 direction，由 action 间接表达）
+    """
+    from trading import state_store, clock  # lazy import：避免 server 启动期 import 副作用
+    aid = _resolve_account_id()
+    trade_id = state_store.build_trade_id(aid, order.symbol, clock.today().replace("-", ""))
+    meta_parts = [f"reason={meta_reason}"] if meta_reason else []
+    meta_parts.append(f"kind={meta_kind}")
+    if meta_direction is not None:
+        meta_parts.append(f"direction={meta_direction}")
+    meta = "|".join(meta_parts)
+    try:
+        state_store.insert_trade_event(
+            aid, trade_id, order.symbol, action,
+            order_id=order_id, qty=float(order.qty), price=float(order.price or 0.0),
+            meta=meta,
+        )
+    except Exception:
+        # 审计旁路：DB 写失败不阻断下单（业务结果优先），告警 + 日志供人工补对账。
+        logger.exception("submit_order trade_event 写失败 action=%s symbol=%s", action, order.symbol)
+
+
 async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
                        whitelist: set | None = None) -> dict:
-    """下单业务编排：预取 quote → 风控挡板 → 真单/模拟/拒单 → 落流水。
+    """下单业务编排：预取 quote → 风控挡板 → 真单/模拟/拒单 → 落审计事件。
 
     返回：
     - dry_run 命中：{"order_id":"", "state":"DRY_RUN", "message":<reason>}（不真下单）
@@ -655,36 +712,38 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
         in_session=_in_a_share_session(),
     )
 
-    # 3. 命中处理：落流水 + 返回/抛错
+    # 3. 命中处理：落 trade_event 审计事件 + 返回/抛错
+    # SSoT Phase A · Task A1：审计真相源从 CSV（record_live_trade）平移到 trade_event 表。
+    # Why 平移：CSV 在重放/补推下重复 append（无 UNIQUE 约束），trade_event 表
+    # UNIQUE(account_id, trade_id, action) 天然幂等，是审计事件的真相源。submit_order
+    # 的四态（DRY_RUN/BLOCKED/ORDERED/REJECTED）全部落 trade_event，归因/复盘消费端切 DB。
     if decision.blocked:
         if decision.is_dry_run:
-            # 模拟：落 DRY_RUN 流水后返回成功语义（非错误）
-            record_live_trade(
-                order.symbol, _dry_run_direction(order.side),
-                order.qty, order.price or 0.0,
-                rationale=decision.reason,
-            )
+            # 模拟：落 DRY_RUN 事件后返回成功语义（非错误）
+            _write_submit_trade_event(order, "DRY_RUN", meta_reason=decision.reason)
             return {"order_id": "", "state": "DRY_RUN", "message": decision.reason}
-        # 真拒单：落 BLOCKED 流水 + raise（路由层转 409）
-        record_live_trade(
-            order.symbol, "BLOCKED", order.qty, order.price or 0.0,
-            rationale=f"{decision.stage}:{decision.reason}",
-            kind="submit",  # 2026-08-02：拦截/拒单是下单审计行，不是成交回报（kind=fill）
+        # 真拒单：落 BLOCKED 事件 + raise（路由层转 409）
+        _write_submit_trade_event(
+            order, "BLOCKED",
+            meta_reason=f"{decision.stage}:{decision.reason}",
+            meta_kind="submit",  # 拦截/拒单是下单审计事件（非真实成交）
         )
         raise RuntimeError(decision.reason)
 
     # 4. 全过 → 真下单
     result: OrderResult = await gw.submit_order(order)
-    # 真单审计落盘（spec §6.3 可追溯性契约：真单/废单/撤单均落 CSV）。
-    # Why 此前缺失：原实现拿到 OrderResult 直接 return，真实成交在
-    # logs/live_trades.csv 完全缺失，进程崩溃后存在「真实已成交但系统不知情」的
-    # 敞口黑洞，违反量化交易审计合规红线（B-6/应修项1）。
-    # rationale 记录网关类名 + 真实 state + message，便于事后复盘/对账。
+    # 真单审计落 trade_event（spec §6.3 可追溯性契约：真单/废单/撤单均落审计）。
+    # Why 此前缺失：原实现拿到 OrderResult 直接 return，真实成交在审计流水中完全缺失，
+    # 进程崩溃后存在「真实已成交但系统不知情」的敞口黑洞，违反量化交易审计合规红线
+    # （B-6/应修项1）。A1 平移后落 trade_event（真相源，UNIQUE 幂等），归因消费端切 DB。
+    # action 取真实 OrderState.name（SUBMITTED/FILLED/REJECTED/FAILED…），便于事后复盘/对账。
     direction = "BUY" if order.side.lower() == "buy" else "SELL"
-    record_live_trade(
-        order.symbol, direction, order.qty, order.price or 0.0,
-        rationale=f"{gw.__class__.__name__}:{result.state.name}:{result.message}",
-        kind="submit",  # 下单审计行（含 REJECTED/FAILED），post_close 不计入净持仓
+    _write_submit_trade_event(
+        order, result.state.name,
+        order_id=result.order_id,
+        meta_reason=f"{gw.__class__.__name__}:{result.state.name}:{result.message}",
+        meta_kind="submit",  # 下单审计事件（含 REJECTED/FAILED），post_close 不计入净持仓
+        meta_direction=direction,
     )
     return {
         "order_id": result.order_id,

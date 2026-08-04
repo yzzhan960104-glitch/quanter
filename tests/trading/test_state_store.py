@@ -323,6 +323,62 @@ def test_get_latest_action(db):
     assert state_store.get_latest_action("ACC1_600000.SH_2026-07-30") == "CONFIRMED"
 
 # ============================================================================
+# SSoT Phase A · Task A1：fill 表加 strategy 列（新断点-4，保 digest 过滤口径）
+# ============================================================================
+def test_insert_fill_with_strategy(tmp_db):
+    """fill 表 strategy 列落盘校验（A1 新断点-4，保 digest 过滤口径）。
+
+    物理意图：digest/filter 等消费端按 strategy 过滤成交流水时，需要 fill 表本身
+    持久化 strategy 字段。本测试断点切在「insert_fill 调用是否接 strategy 参数 +
+    是否写入 fill.strategy 列」——一旦签名漏加或 INSERT 漏字段，断言 row["strategy"]
+    会 KeyError 或 None，立刻暴露。
+    """
+    from trading import state_store
+    ok = state_store.insert_fill("O1", "ACC_TEST", "20260805101000", "600000.SH",
+                                 "BUY", 100, 10.0, strategy="neckline")
+    assert ok is True
+    import sqlite3
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    row = con.execute("SELECT strategy FROM fill WHERE order_id='O1'").fetchone()
+    assert row is not None
+    assert row["strategy"] == "neckline"
+
+
+def test_insert_fill_strategy_optional_default_null(tmp_db):
+    """strategy 参数可选，缺省写 NULL（向后兼容既有调用方）。
+
+    物理意图：engine 既有 insert_fill 调用（pre_open 自动下单路径）会逐步迁到 A1
+    后续 task 补 strategy；过渡期缺省必须落 NULL 而非报错，保证迁移非破坏式。
+    """
+    from trading import state_store
+    ok = state_store.insert_fill("O2", "ACC_TEST", "20260805101001", "600000.SH",
+                                 "BUY", 100, 10.0)  # 不传 strategy
+    assert ok is True
+    import sqlite3
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    row = con.execute("SELECT strategy FROM fill WHERE order_id='O2'").fetchone()
+    assert row is not None
+    assert row["strategy"] is None  # 缺省 NULL
+
+
+def test_init_store_strategy_column_migration_idempotent(tmp_db):
+    """init_store 多次跑 strategy 列迁移不报错（幂等，ALTER TABLE IF NOT EXISTS 语义）。
+
+    物理意图：engine 启动期会重复调 init_store（boot/lifespan/补跑等多入口），
+    _has_column 守卫必须挡住重复 ALTER，否则第二次 ALTER TABLE ADD COLUMN 会抛
+    duplicate column name 致 boot 崩。
+    """
+    from trading import state_store
+    # tmp_db fixture 首次 init_store 已建表；再调两次应不报错
+    state_store.init_store(tmp_db)
+    state_store.init_store(tmp_db)
+    import sqlite3
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(fill)").fetchall()}
+    assert "strategy" in cols
+
+
+# ============================================================================
 # Task D1（live-mainchain-fixes）：get_order_placed_qty（止盈差额补挂）
 # ============================================================================
 def test_get_order_placed_qty_excludes_terminal(monkeypatch, tmp_path):

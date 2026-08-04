@@ -54,13 +54,17 @@ def db(tmp_path, monkeypatch):
 
 
 def test_trade_update_writes_log_and_notifies(db):
-    """成交回报 → 补写成交日志 + 推钉钉成交通知（三连中的 a + b）。
+    """成交回报 → 落 fill 表 + trade_event(FILLED) + 推钉钉成交通知（三连中的 a + b）。
 
-    断言：
-      1) ``record_live_trade`` 被调一次（成交日志补写，方向由 gw._orders 判定）；
-      2) 成交日志首参（symbol）含回报里的 stock_code（防字段拼错）；
-      3) ``notify_trade_event`` 被调一次（钉钉成交通知）。
+    SSoT Phase A · Task A1 平移后：审计真相源从 CSV（record_live_trade）迁到 fill 表 +
+    trade_event(FILLED)（_handle_order_update 内 insert_fill + insert_trade_event 已是
+    真相源，record_live_trade CSV 块已删）。本测试断言迁移后的真相源：
+      1) fill 表落 1 行（symbol/direction/qty/price + strategy=neckline）；
+      2) trade_event 落 FILLED 行（与 fill 表同判定点）；
+      3) notify_trade_event 被调一次（钉钉成交通知保留）。
     """
+    from trading import state_store
+    import sqlite3
     eng = TradingEngine()
     # 成交回报 update（on_stock_trade 推送的真实契约：kind=trade + 量价齐全）
     update = {
@@ -76,20 +80,27 @@ def test_trade_update_writes_log_and_notifies(db):
     eng._tp_placed = set()           # 幂等标记初始化（与 __init__ 同语义，显式重申）
     eng._gw = MagicMock()
     eng._gw._orders = {"123": {"order_type": 23}}  # 23=STOCK_BUY（买单标记）
-    # patch 真实模块路径（_handle_order_update 内 lazy import 这些符号，故 patch 真身模块
-    # 而非 trading.engine —— engine 模块顶层不 import 这两个符号，避免循环依赖）：
-    #   - record_live_trade 实身：presentation.server.services.trading_service
-    #   - NotificationManager 实身：infra.notifier（infra.notifier 是转发垫片）
+    # patch NotificationManager（钉钉通知副作用，与真相源断言解耦）
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    with patch("presentation.server.services.trading_service.record_live_trade") as rec, \
+    with patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))
-    # a. 成交日志补写：record_live_trade 被调一次，首参=symbol
-    rec.assert_called_once()
-    assert "300001.SZ" in str(rec.call_args)
-    # b. 钉钉成交通知：notify_trade_event 被调一次（symbol/direction/qty/price 四要素）
+    # a. 真相源断言：fill 表落 1 行（symbol/direction/qty/price + strategy=neckline）
+    con = sqlite3.connect(db); con.row_factory = sqlite3.Row
+    fill = con.execute("SELECT * FROM fill WHERE order_id='123'").fetchone()
+    assert fill is not None, "fill 表未落成交回报行"
+    assert fill["symbol"] == "300001.SZ"
+    assert fill["direction"] == "BUY"
+    assert fill["qty"] == 100
+    assert fill["price"] == 10.5
+    assert fill["strategy"] == "neckline"  # A1：strategy 持久化到 fill 表真相源
+    # b. 真相源断言：trade_event 落 FILLED 行（与 fill 表同判定点，首次才记）
+    ev = con.execute("SELECT * FROM trade_event WHERE action='FILLED' AND symbol='300001.SZ'").fetchone()
+    assert ev is not None, "trade_event 未落 FILLED 行"
+    con.close()
+    # c. 钉钉成交通知：notify_trade_event 被调一次（symbol/direction/qty/price 四要素）
     fake_mgr.notify_trade_event.assert_called_once()
     ntf_args, _ = fake_mgr.notify_trade_event.call_args
     assert ntf_args[0] == "300001.SZ"  # symbol
@@ -778,18 +789,16 @@ def test_trade_replay_writes_csv_and_notifies_only_once(state_db, monkeypatch, t
 
 
 def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path):
-    """W3.1 真 CSV 落盘断言（非 mock）：重放同 (order_id, traded_time) → CSV 只 1 行 kind=fill。
+    """W3.1 真相源重放幂等断言（非 mock）：重放同 (order_id, traded_time) → fill 表只 1 行。
 
-    与上一测试的区别：本测试**不 patch record_live_trade**，让真函数写真 CSV 到 tmp，
-    读回断言行数。这是「非 mock 自欺」的证据 —— 证明改动后 record_live_trade 真的被
-    幂等挡住（而非被 mock 替身假装挡住）。
+    SSoT Phase A · Task A1 平移后：record_live_trade CSV 审计块已删，重放幂等的真相源
+    证据点改为「fill 表行数」（UNIQUE(order_id, traded_time) 天然去重）+ trade_event
+    FILLED 行只 1 行（与 fill 同判定点）。本测试**不 patch 真相源写入**，让真 insert_fill /
+    insert_trade_event 落 DB，读回断言 —— 比 CSV 落盘更硬，因为 DB UNIQUE 是物理约束，
+    CSV 只是约定。
     """
-    import csv as _csv
+    import sqlite3
     from trading import state_store
-
-    csv_path = tmp_path / "live_trades.csv"
-    monkeypatch.setattr(
-        "presentation.server.services.trading_service.LIVE_TRADE_LOG", str(csv_path))
 
     eng = TradingEngine()
     eng._tp_placed = set()
@@ -816,7 +825,7 @@ def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path
     }
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    # 关键：不 patch record_live_trade —— 让真函数写真 CSV
+    # 关键：不 patch state_store.insert_fill / insert_trade_event —— 让真函数写真 DB
     with patch("infra.notifier.NotificationManager") as NM, \
          patch.object(eng, "_place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
@@ -824,16 +833,22 @@ def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path
         asyncio.run(eng._handle_order_update(update))   # 重放
         asyncio.run(eng._handle_order_update(update))   # 三放（验证 ≥2 次重放也挡住）
 
-    # 真 CSV 读回：只 1 行 kind=fill
-    assert csv_path.exists(), "CSV 应被首次写入创建"
-    with open(csv_path, encoding="utf-8-sig", newline="") as f:
-        rows = list(_csv.DictReader(f))
-    fill_rows = [r for r in rows if r.get("kind") == "fill"]
+    # 真相源读回：fill 表只 1 行（UNIQUE(order_id, traded_time) 物理挡住）
+    con = sqlite3.connect(state_db); con.row_factory = sqlite3.Row
+    fill_rows = con.execute(
+        "SELECT * FROM fill WHERE order_id='600000_SEQ_2'").fetchall()
     assert len(fill_rows) == 1, \
-        f"重放只应写 1 行 kind=fill，实际 {len(fill_rows)}（总行 {len(rows)}）"
+        f"重放只应写 1 行 fill，实际 {len(fill_rows)}"
     assert fill_rows[0]["symbol"] == "600000.SH"
-    assert float(fill_rows[0]["shares"]) == 100.0
-    # 钉钉同样只 1 次
+    # trade_event FILLED 也只 1 行（与 fill 表同判定点，首次才记）
+    ev_rows = con.execute(
+        "SELECT * FROM trade_event WHERE action='FILLED' AND symbol='600000.SH'").fetchall()
+    assert len(ev_rows) == 1, \
+        f"重放只应记 1 行 FILLED 事件，实际 {len(ev_rows)}"
+    assert float(fill_rows[0]["qty"]) == 100.0
+    assert float(fill_rows[0]["price"]) == 10.5
+    con.close()
+    # 钉钉同样只 1 次（与 fill 表同判定点，重放跳过）
     assert fake_mgr.notify_trade_event.call_count == 1
 
 
