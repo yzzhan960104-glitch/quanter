@@ -1866,7 +1866,10 @@ def test_post_close_query_trades_no_drift_is_noop(monkeypatch):
     position_book.init_db()
     position_book.apply_fill("ord1", "A.SH", "BUY", 100, 10.0, "2099-01-01 10:00:00")
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)
+    # T9 M-1 收口（final review 建议）：基线预置迁 _seed_breaker_baseline，与生产同口径
+    # （account_daily，C-1 后熔断读口）。原 position_book.snapshot_start_equity 写 daily_equity
+    # 死表——该测试虽不测熔断（mock _fake_rec is_ok=True），但口径不一致，防未来复用假 PASS。
+    _seed_breaker_baseline(today, 1_000_000.0)
 
     def _fake_agg(start, end):
         return {"A.SH": 100.0}
