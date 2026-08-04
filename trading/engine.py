@@ -786,11 +786,23 @@ async def _pre_open_impl(date: str) -> dict:
             # 撤单失败不阻塞挂单主路径（单笔失败已在 cancel_all 内被吞，此处兜整体异常）
             logger.exception("pre_open 撤昨日单整体异常（继续挂新单）")
 
-    # ②.5 抓日内熔断基线（Task 10 · R-2 日内熔断 · spec §5.2）：
+    # ②.5 抓日内熔断基线 + account_daily start 快照（W4 · 08-04 断链根治 · spec §5.2）：
     # 物理意图：post_close 判 -3% 熔断需要 start_equity 基线，开盘前是唯一可靠的
-    # 「未受当日交易影响」时点。pre_open 在确认闸 + 撤昨日单后调 gw.query_asset
-    # 抓当日开盘总资产 → snapshot_start_equity 写 daily_equity 表（幂等 INSERT OR REPLACE，
-    # 进程崩溃重启重入安全）。
+    # 「未受当日交易影响」时点。pre_open 在确认闸 + 撤昨日单后调 gw.query_asset 抓当日
+    # 开盘总资产 → 写 **account_daily** 表的 start 字段。
+    #
+    # W4 断链根治（08-04 发现 2）：原调 ``_position_book.snapshot_start_equity`` 写
+    # **daily_equity** 表，而 post_close 的 ``snapshot_close_equity`` 写 **account_daily**
+    # 表并读同表 ``start_total_asset`` 算 ``daily_pnl = close - start``——两表断链致
+    # account_daily.start_total_asset 恒为 NULL → daily_pnl 恒 NULL（start 落在 daily_equity，
+    # post_close 在 account_daily 找不到）。改调 ``_state_store.snapshot_start_equity``
+    # 写 account_daily.start，与 post_close 同表 → daily_pnl 闭合。
+    #
+    # daily_equity 表读口保留（W6 决策降级/迁移）：position_book.snapshot_start_equity
+    # 函数与 daily_equity 表均不删，但本 task 后 pre_open 不再写它——熔断读口
+    # （``_position_book.get_start_equity``）在 W6 前将缺基线，属已知遗留（本 task 范围
+    #  仅切 pre_open 写口，读口迁移归 W6）。
+    #
     # 边界（红线）：
     # - gw=None / query_asset 返 {}（未连接/锁定/超时）→ 跳过 + WARN，绝不拿 0/None
     #   写基线（否则 post_close check_daily_loss_limit(0, curr) 返 False 反永不熔断）；
@@ -804,7 +816,12 @@ async def _pre_open_impl(date: str) -> dict:
             asset = await gw.query_asset() if hasattr(gw, "query_asset") else {}
             total = (asset or {}).get("total_asset")
             if total is not None and float(total) > 0:
-                _position_book.snapshot_start_equity(today_eq, float(total))
+                # W4：cash 取 asset dict 的 cash 字段（与 post_close snapshot_close_equity
+                # 的 close_cash 同口径，gw.query_asset 返 {total_asset, cash, market_value}）。
+                cash = (asset or {}).get("cash")
+                _state_store.snapshot_start_equity(
+                    _resolve_account_id(), today_eq, float(total),
+                    float(cash) if cash is not None else None)
                 logger.info("pre_open 日内熔断基线已抓取 date=%s start_equity=%s",
                             today_eq, float(total))
             else:

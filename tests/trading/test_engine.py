@@ -743,20 +743,19 @@ def test_post_close_tp1_filled_event(monkeypatch, tmp_path):
 # 4.7 Task 10（R-2 日内熔断）：pre_open 快照 + post_close 三步串联
 # ============================================================================
 def test_pre_open_snapshot_start_equity(monkeypatch):
-    """pre_open：确认闸通过后调 query_asset → snapshot_start_equity 写 daily_equity。
+    """pre_open：确认闸通过后调 query_asset → snapshot_start_equity 写 account_daily。
 
-    物理意图（plan Task 10 Step 2 · 对齐缺口 R-2）：
-        熔断判定需要 start_equity 基线。pre_open 在确认闸后（撤昨日单前或后均可，
-        关键是开盘前抓基线）调 gw.query_asset 拿当日开盘总资产，写 daily_equity 表。
+    物理意图（W4 · 08-04 断链根治）：
+        pre_open 抓日内熔断基线改调 ``_state_store.snapshot_start_equity(account_id,
+        date, total, cash)`` 写 **account_daily** 表（与 post_close 的
+        ``snapshot_close_equity`` 同表），让 ``daily_pnl = close - start`` 闭合。
+        原调 ``_position_book.snapshot_start_equity`` 写 daily_equity 表，两表断链
+        致 post_close 读 account_daily.start_total_asset 恒为 NULL → daily_pnl 恒 NULL
+        （memory 发现 2：start 在 daily_equity、close 在 account_daily，无法相减）。
         - query_asset 返 {}（未连接/锁定/异常）→ 跳过快照 + WARN（不拿 0 误触发熔断）
-        - 重入幂等：snapshot_start_equity 用 INSERT OR REPLACE，重启安全
+        - 重入幂等：snapshot_start_equity 用 INSERT ... ON CONFLICT UPDATE，重启安全
     """
-    from trading import position_book
-
-    # 隔离 position_book db（防污染生产账本）
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
+    from trading import state_store
 
     # 已确认计划
     orders = [{
@@ -766,7 +765,7 @@ def test_pre_open_snapshot_start_equity(monkeypatch):
     trading_plan.save_plan("2099-01-02", orders)
     trading_plan.confirm_plan("2099-01-02")
 
-    # 假 gw：query_asset 返 total_asset=1_000_000
+    # 假 gw：query_asset 返 total_asset=1_000_000 + cash=500_000
     class _FakeGw:
         async def query_asset(self):
             return {"total_asset": 1_000_000.0, "cash": 500_000.0,
@@ -782,11 +781,139 @@ def test_pre_open_snapshot_start_equity(monkeypatch):
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
-    # 验证 daily_equity 快照已写
+    # 验证 account_daily 已写入 start_total_asset + start_cash（W4 新口径）
     # C-6 V2：pre_open 内部 today_eq 改用传入 date 参数（入口缓存传递），故快照 date=2099-01-02
     # （与 _pre_open 入口 clock.today 传 pre_open(date) 同口径），不再用 datetime.now() 当日。
-    start_eq = position_book.get_start_equity("2099-01-02")
-    assert start_eq == 1_000_000.0
+    account_id = engine._resolve_account_id()
+    import sqlite3
+    db_path = state_store._DEFAULT_DB
+    with sqlite3.connect(db_path) as con:
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT start_total_asset, start_cash FROM account_daily"
+            " WHERE account_id=? AND date=?", (account_id, "2099-01-02")).fetchone()
+    assert row is not None, "account_daily 未写入 start 快照（W4 断链未修复）"
+    assert row["start_total_asset"] == 1_000_000.0
+    assert row["start_cash"] == 500_000.0
+
+
+def test_pre_open_snapshot_calls_state_store_not_position_book(monkeypatch):
+    """W4 调用点切换：pre_open 实际调 ``_state_store.snapshot_start_equity`` 而非
+    ``_position_book.snapshot_start_equity``（spy 断言，非 mock 自欺）。
+
+    物理意图（plan Step2 备注）：
+        单测 snapshot_start/close 同表闭合本就 PASS（验证函数本身正确）；真正需断言的
+        是「pre_open 实际调 state_store 版」——用 monkeypatch spy 包裹真函数，跑完
+        pre_open 后断言 state_store 版被调 + position_book 版未被调。
+    """
+    from trading import state_store, position_book
+
+    # 已确认计划
+    trading_plan.save_plan("2099-01-02", [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0,
+    }])
+    trading_plan.confirm_plan("2099-01-02")
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 1_000_000.0, "cash": 500_000.0}
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
+
+    # spy 包裹 state_store 版（记录被调参数，仍透传真函数写 DB）
+    ss_calls = []
+    _real_ss = state_store.snapshot_start_equity
+    def _spy_ss(account_id, date, total_asset, cash=None, **kw):
+        ss_calls.append((account_id, date, total_asset, cash))
+        return _real_ss(account_id, date, total_asset, cash, **kw)
+    monkeypatch.setattr(engine._state_store, "snapshot_start_equity", _spy_ss)
+
+    # spy 包裹 position_book 版（断言「未被调」）
+    pb_calls = []
+    _real_pb = position_book.snapshot_start_equity
+    def _spy_pb(date, total_asset, **kw):
+        pb_calls.append((date, total_asset))
+        return _real_pb(date, total_asset, **kw)
+    monkeypatch.setattr(engine._position_book, "snapshot_start_equity", _spy_pb)
+
+    asyncio.run(engine.pre_open("2099-01-02"))
+
+    # W4 断言：state_store 版被调（写 account_daily），position_book 版未被调（断链已切）
+    assert len(ss_calls) == 1, f"state_store.snapshot_start_equity 应被调 1 次，实际 {len(ss_calls)}"
+    assert ss_calls[0][1] == "2099-01-02"           # date
+    assert ss_calls[0][2] == 1_000_000.0            # total_asset
+    assert ss_calls[0][3] == 500_000.0              # cash
+    assert pb_calls == [], (
+        "W4 断链未修复：pre_open 仍调 position_book.snapshot_start_equity（应改调 state_store 版）")
+
+
+def test_daily_pnl_closes_after_pre_open_and_post_close(monkeypatch):
+    """W4 e2e 闭合：pre_open 写 start + post_close 写 close → account_daily 同 date
+    有 start+close，daily_pnl 非空（= close - start）。
+
+    物理意图（spec §5.2 daily_pnl 闭合）：
+        两表断链根治验证——跑真 pre_open（写 account_daily.start）+ 真 post_close
+        （写 account_daily.close 并算 daily_pnl），断言同 date 行 start/close/daily_pnl
+        三字段齐全且 daily_pnl = close - start。原断链下 daily_pnl 恒 NULL
+        （start 在 daily_equity 表，post_close 读 account_daily.start_total_asset 找不到）。
+    """
+    from trading import state_store
+
+    # 用固定 date 让 pre_open/post_close 写同一行（post_close 用 clock.today，
+    # 故 monkeypatch clock.today 返固定 date；pre_open 用传入 date 参数）
+    fixed_date = "2099-01-02"
+    from trading import clock
+    monkeypatch.setattr(clock, "today", lambda: fixed_date)
+
+    trading_plan.save_plan(fixed_date, [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0,
+    }])
+    trading_plan.confirm_plan(fixed_date)
+
+    # 假 gw：pre_open 抓 start=100w / post_close 抓 close=101.5w（+1.5% 不触发熔断）
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 1_000_000.0, "cash": 500_000.0}
+        async def _fetch_broker_positions(self):
+            return {}
+    # post_close 写 close 需要不同值——用可变总资产模拟盘中上涨
+    class _FakeGwClose(_FakeGw):
+        async def query_asset(self):
+            return {"total_asset": 1_015_000.0, "cash": 510_000.0,
+                    "market_value": 505_000.0}
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
+
+    # pre_open 写 start（account_daily.start_total_asset=1_000_000）
+    asyncio.run(engine.pre_open(fixed_date))
+
+    # post_close 写 close + 算 daily_pnl（account_daily.close_total_asset=1_015_000）
+    from trading.compute.reconcile import ReconciliationResult
+    async def _fake_rec(gw, local, tolerance=0.0):
+        return ReconciliationResult([], [], [], [], 0.0, True)
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
+    asyncio.run(engine.post_close(fixed_date, gw=_FakeGwClose(), local_positions={}))
+
+    # 验证 account_daily 同 date 有 start+close+daily_pnl（闭合）
+    account_id = engine._resolve_account_id()
+    import sqlite3
+    db_path = state_store._DEFAULT_DB
+    with sqlite3.connect(db_path) as con:
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT start_total_asset, close_total_asset, daily_pnl"
+            " FROM account_daily WHERE account_id=? AND date=?",
+            (account_id, fixed_date)).fetchone()
+    assert row is not None, "account_daily 行不存在（pre_open/post_close 未同表写入）"
+    assert row["start_total_asset"] == 1_000_000.0
+    assert row["close_total_asset"] == 1_015_000.0
+    # daily_pnl = close - start = 15000（W4 断链前恒 NULL，修复后非空）
+    assert row["daily_pnl"] == 15_000.0, (
+        f"daily_pnl 未闭合：期望 15000.0，实际 {row['daily_pnl']}（两表断链？）")
 
 
 def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch):
