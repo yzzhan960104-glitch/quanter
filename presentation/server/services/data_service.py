@@ -27,7 +27,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import DATASET_REGISTRY, LAKE_CONFIG, SYNCING_DIR
+from config import DATASET_REGISTRY, LAKE_CONFIG, SYNCING_DIR, TUSHARE_DATASETS
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +95,19 @@ def _derive_status(key: str, parquet_path: Optional[str]) -> Tuple[str, Optional
     """联合「哨兵 + parquet 存在性 + mtime 新鲜度」推导状态。
 
     返回 (status, last_error)。优先级（状态机单值，前者压倒后者）：
+      0. _unavailable 标记（代理接口不支持，设计使然）→ unavailable（最强，压倒一切）
       1. .syncing/{key} 存在 → syncing（同步进行中是最强状态，覆盖健康/陈旧判定）
       2. .syncing/{key}.failed 存在 → failed（上次同步失败，读尾部错误）
       3. parquet 不存在 → missing（从未同步成功过）
       4. parquet mtime 距今 ≤ freshness_hours → healthy
       5. 否则 → stale（数据陈旧，建议重同步）
     """
+    # 0. C-9 A2：_unavailable 数据集是代理不支持（设计使然），不参与 failed/missing 告警。
+    # 物理意图：top_list/hsgt_top10/concept/concept_detail 标 _unavailable = tnskhdata 代理
+    # 无对应方法或直连积分不足（接口下线），非同步故障。若落入 failed 分支会永久误报，掩盖
+    # 真实故障信号——故在状态机顶部短路返 unavailable，前端按"设计不可用"展示而非告警。
+    if TUSHARE_DATASETS.get(key, {}).get("_unavailable"):
+        return "unavailable", "代理接口不支持（_unavailable）"
     # 1. syncing 哨兵优先
     if os.path.exists(_sentinel_path(key)):
         return "syncing", None

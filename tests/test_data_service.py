@@ -108,3 +108,15 @@ def test_trigger_sync_concurrent_same_key_only_one_dispatches(monkeypatch, tmp_p
     msgs = [r["message"] for r in results]
     assert sum("请勿重复" in m for m in msgs) == 1   # 恰一个被拒（看到哨兵）
     assert sum("已触发" in m for m in msgs) == 1      # 恰一个派发（写了哨兵）
+
+
+def test_derive_status_unavailable(monkeypatch, tmp_path):
+    """_unavailable 数据集 → 'unavailable'，哨兵/缺失均不压倒（设计使然，非故障）。"""
+    import presentation.server.services.data_service as ds
+    from config import TUSHARE_DATASETS
+    monkeypatch.setattr(ds, "TUSHARE_DATASETS",
+                        {"top_list": {"_unavailable": "代理无此接口"}})
+    monkeypatch.setattr(ds, "_sentinel_path", lambda key, failed=False: str(tmp_path / f"{key}.failed"))
+    (tmp_path / "top_list.failed").write_text("old error", encoding="utf-8")
+    status, _ = ds._derive_status("top_list", str(tmp_path / "top_list.parquet"))
+    assert status == "unavailable"
