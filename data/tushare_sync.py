@@ -414,16 +414,26 @@ def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, ou
         if resume and os.path.exists(shard):
             # 校验既有 shard 是否有效：空（0 行，历史中断写坏）或损坏（parquet 解析失败）
             # 一律视为缺失，删盘重拉。否则该日数据会被永久跳过，湖永远缺这一天。
+            #
+            # read_parquet 与 os.remove 解耦（final review I-1）：原实现把 os.remove 放在
+            # except 块内裸调，Windows 文件占用/权限（PermissionError）会从 except 块再抛
+            # → 中断 _sync_by_date 循环 → 后续交易日 shard 不再拉取。改为 read 失败置
+            # old=None，remove 单独包 try/except 容忍（后续 df.to_parquet(shard) 会覆盖写）。
             try:
                 old = pd.read_parquet(shard)
-                if old.empty:
-                    logger.warning("by=date shard 空（%s），重拉：%s", key, shard)
-                    os.remove(shard)
-                else:
-                    continue  # 有效 shard：跳过，省配额
             except Exception:
                 logger.warning("by=date shard 损坏（%s），重拉：%s", key, shard, exc_info=True)
+                old = None
+            else:
+                if old is not None and not old.empty:
+                    continue  # 有效 shard：跳过，省配额
+                if old is not None and old.empty:
+                    logger.warning("by=date shard 空（%s），重拉：%s", key, shard)
+            # 空（0 行）或损坏：删 shard；失败容忍（to_parquet 会覆盖）
+            try:
                 os.remove(shard)
+            except OSError as exc:
+                logger.warning("shard 删除失败（将被 to_parquet 覆盖）%s：%s", shard, exc)
         kwargs = {"trade_date": td}
         if fields:
             kwargs["fields"] = fields

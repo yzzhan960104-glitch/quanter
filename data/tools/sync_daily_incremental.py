@@ -263,6 +263,11 @@ def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = F
 
 
 if __name__ == "__main__":
+    # 子进程 stdout UTF-8 治理（final review T7a）：父进程 ops/data_pipeline.py 的
+    # force_utf8_stdout 不影响子进程 stdout，GBK 管道下 ⚠️ 等 emoji 会崩。bat 侧
+    # PYTHONUTF8=1 已兜底 schtasks 路径，此处补 `-m ops.data_pipeline` 直跑缺口。
+    from infra.pyio import force_utf8_stdout
+    force_utf8_stdout()
     import argparse as _ap
     _ap2 = _ap.ArgumentParser(description="A 股日线日频增量同步（含规则5近期回扫 + 除权标的 qfq 全量重算）")
     _ap2.add_argument("--no-backscan", action="store_true",

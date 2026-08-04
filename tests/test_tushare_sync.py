@@ -318,6 +318,43 @@ def test_sync_by_date_skips_only_valid_shard(tmp_path, fake_pro):
     assert len(df) == 1  # 空 shard 被重拉（否则湖空 len==0）
 
 
+def test_sync_by_date_corrupt_shard_refetches(tmp_path, fake_pro):
+    """by=date：损坏 shard（非 parquet 字节）重拉不中断循环（final review I-1）。
+
+    Why 此测试：_sync_by_date 在 resume=True 时校验既有 shard，损坏（parquet 解析失败）
+    要删盘重拉。原实现把 os.remove 放在 except 块内裸调，Windows 文件占用/权限会从
+    except 再抛 → 中断 _sync_by_date 循环 → 后续交易日 shard 不再拉取。本测试预置
+    「非 parquet 字节」损坏 shard，断言重拉成功（len==1）而非中断循环留下空湖。
+
+    覆盖：read_parquet 抛 Exception → old=None → 单独 try os.remove（失败容忍）
+          → _fetch_with_guard 重拉 → to_parquet 覆盖落盘 → 湖 1 行有效数据。
+    """
+    from config import TUSHARE_DATASETS
+    shard_dir = tmp_path / "shards"
+    shard_dir.mkdir()
+    TUSHARE_DATASETS["moneyflow_test"] = {
+        "api": "moneyflow", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,buy_lg_amount",
+        "lake": str(tmp_path / "moneyflow.parquet"),
+        "shard_dir": str(shard_dir),
+    }
+    # 损坏 shard：写入非 parquet 字节（read_parquet 会抛异常）
+    (shard_dir / "20240105.parquet").write_bytes(b"not a parquet")
+    # trade_cal 交易日历（_trade_days 经 fake_pro 拉取，须 mock 2024-01-05 为交易日）
+    fake_pro._data["trade_cal"] = pd.DataFrame(
+        {"cal_date": ["20240105"], "is_open": ["1"]})
+    # fake_pro 替身返该日 1 行有效数据
+    fake_pro._data["moneyflow"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"], "trade_date": ["20240105"],
+        "buy_lg_amount": [1.0],
+    })
+    from data.tushare_sync import sync_dataset
+    sync_dataset("moneyflow_test", "2024-01-05", "2024-01-05", resume=True)
+    df = pd.read_parquet(TUSHARE_DATASETS["moneyflow_test"]["lake"])
+    assert len(df) == 1  # 损坏 shard 被重拉（否则中断循环湖空 len==0）
+
+
 # ============ _fetch_with_guard 限频退避重试测试 ============
 # Why 独立测试组：限频退避是全量下载（by=date 全市场逐日）的关键修复，原实现直接
 # record_failure 返空导致整数据集卡死。此处逐态覆盖（瞬时态退避成功 / 退避耗尽失败 /
