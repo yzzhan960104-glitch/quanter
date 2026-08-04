@@ -126,6 +126,24 @@ def build_job_runner(
                 # data_ready 落库失败不阻断回放（生产 pipeline.py:103 同款软降级）；
                 # 失败会在 pre_open gate ③ 段表现为"未采集"拦截，由测试断言暴露。
                 pass
+            # ── pipeline 台账 done 注入（W5 get_ready 单口 · 2026-08-05 e2e smoke 修复）──
+            # 物理意图：生产 pipeline_then_eod（trading/orchestrate/pipeline.py:55）成功后
+            # 会 job_ledger.finish_run("pipeline", today, "done")；W5 get_ready 要求
+            # data_ready 全绿 AND job_ledger.pipeline done 双绿才放行 pre_open。E2E
+            # orchestrator 之前只注入 data_ready 未写台账 → pre_open gate 拦截 → 全周期
+            # 无单可挂 → fill 空（test_orchestrator_smoke 断言失败）。此处与生产同口径补写。
+            from trading import job_ledger
+            try:
+                # begin_run→finish_run 成对（finish_run 是 UPDATE，无 running 行则 no-op；
+                # 与生产 pipeline_then_eod 的 begin/finish 配对语义一致）。
+                job_ledger.begin_run("pipeline", t_date.isoformat(),
+                                     clock.now().isoformat())
+                job_ledger.finish_run("pipeline", t_date.isoformat(), "done",
+                                      "E2E orchestrator mock pipeline 完成")
+            except Exception:
+                # 台账写失败不阻断回放（与生产软降级同语义）；pre_open gate 会据此拦截并
+                # 由测试断言暴露（fail-closed，不静默）。
+                pass
             return result
 
         # ============================================================

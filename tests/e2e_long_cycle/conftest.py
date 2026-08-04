@@ -30,13 +30,18 @@ def isolated_state(tmp_path, monkeypatch):
       tmp position_book（W3.4 后 CSV 段【只读展示】已不再重写 position_book，但隔离
       仍保留以避免读真实历史 logs/live_trades.csv 产生噪声归因）。
     """
-    from trading import position_book, state_store, engine
+    from trading import job_ledger, position_book, state_store, engine
 
     db_path = str(tmp_path / "state.db")
     monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
     position_book.init_db()
     monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
     state_store.init_store()
+    # job_ledger 隔离（W5 get_ready 需 pipeline 台账 done，2026-08-05 e2e smoke 修复）：
+    # 生产 pre_open gate 读 job_ledger.latest_status(pipeline)；E2E 若写真实 logs/ 台账会
+    # 污染生产环境，且跨测试残留 status 会互相干扰。env 覆盖 + init_db 建表（幂等）。
+    monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "jobs.db"))
+    job_ledger.init_db()
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path / "plans"))
     monkeypatch.setenv("TRADE_STATE_DB", db_path)
     monkeypatch.setenv("QMT_ACCOUNT_ID", "e2e_long_acc")  # 显式 account_id 防 .env 污染
