@@ -336,6 +336,11 @@ python data/tools/sync_all_tushare.py
 
 # 单数据集
 python data/tools/sync_tushare.py <dataset_key>
+
+# 每日增量（18:00 schtasks 入口）：quick 批（by=date/single）+ by=symbol 日频扩展
+# （fund_daily/fund_nav/fund_share/cyq_perf/cyq_chips）；weekly/monthly/index_member
+# 走周期守卫（湖够新自动跳过，避免每日全历史重拉）
+python data/tools/sync_incremental.py
 ```
 
 数据集资产元信息（source / market / granularity / script / freshness）的**单一真相源** = `config/registry.py` 的 `DATASET_REGISTRY` + `TUSHARE_DATASETS`，前端 `DataLakeView` 经 `/api/v1/data/datasets` 反射本表。盘后增量采集已收编进 pipeline 事件链（`ops/data_pipeline.py` 子进程，18:00 触发，`await proc.wait()` 确定性等完成）。

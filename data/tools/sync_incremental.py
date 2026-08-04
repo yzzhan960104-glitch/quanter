@@ -8,6 +8,16 @@
   读现有 parquet 最新日期 d0 → 只拉 [d0+1, today] 窗口新数据 → 与旧 parquet 合并去重
   （同 key 保留新）→ 落盘回原路径。
 
+日频扩展（2026-08-05）：原 quick 批只含 by=date/single，by=symbol 的日频数据集
+（fund_daily/fund_nav/fund_share/cyq_perf/cyq_chips）被 classify 归入 slow 批，18:00 cron
+从不执行 → ETF/筹码类湖断更数周。本脚本在 quick 批后追加 `DAILY_SYMBOL_KEYS`；
+weekly/monthly/index_member 属周期条（bar 只在周期结束变化），用 `_needs_period_refresh`
+年龄守卫（湖最新日距今天数超阈值才重拉），避免每天全历史重拉烧配额。
+
+限流口径：本脚本单进程并行度低，但默认桶 8.3/s≈498/min 贴着官方 500/min 上限，
+实测多进程或长批会触发 500/min churn（退避 2/4/8/16/32s）。main() 里降到 3/s
+（180/min，3 倍余量），quick 批仅慢几分钟，symbol 批稳定不 churn。
+
 核心算法（统一 merge 范式，覆盖三类数据集）：
   1. 读旧 parquet 拿 d0（MultiIndex 时取 date 层 max；DatetimeIndex 时取 idx max；
      无时间索引的静态快照 fund_basic/margin_secs → 视为「首次」，走全量回退）。
@@ -55,6 +65,35 @@ from data.tools.sync_all_tushare import classify
 
 # 致命错误关键词：命中则停整批（与 sync_all_tushare._FATAL 同口径，避免积分耗尽后继续烧）
 _FATAL = ["积分", "频", "limit", "quota", "权限", "无权限", "没有接口"]
+
+# 日频增量扩展：by=symbol 的日频数据集（原归 slow 批，日频 cron 从不跑 → 断更）。
+# 每标的 1 次调用（fund_* ~2600 只 / cyq_* ~5300 只），3/s 限流下合计 ~1-2h。
+DAILY_SYMBOL_KEYS = ["fund_daily", "fund_nav", "fund_share", "cyq_perf", "cyq_chips"]
+
+# 周期条守卫：key -> 湖最新日最大允许年龄（天）。超过才重拉（重拉是全历史 2 调用/标的，
+# ~3h/数据集，不能每天跑）。weekly 6 天 ≈ 每周末收敛一次；monthly/index_member 30 天
+# ≈ 每月末收敛一次；节假日/漏跑自动延迟到下次 cron 收敛。
+PERIODIC_SYMBOL_KEYS = {"weekly": 6, "monthly": 30, "index_member": 30}
+
+
+def _needs_period_refresh(key: str, max_age_days: int, today_str: str) -> bool:
+    """周期数据集（周/月线、月度权重）是否需要在本次 cron 重拉。
+
+    湖最新日距今 > max_age_days（或湖缺失/读失败）→ True；否则 False（跳过，防每天
+    全历史重拉）。Why 用年龄而非周期边界：不依赖节假日日历，漏跑后下次 cron 自动收敛。
+    """
+    path = _lake_path(key)
+    if not os.path.exists(path):
+        return True
+    try:
+        df = pd.read_parquet(path)
+        latest = _latest_date(df)
+    except Exception:
+        return True
+    if latest is None:
+        return True
+    today = datetime.strptime(today_str, "%Y-%m-%d").date()
+    return latest.date() < today - timedelta(days=max_age_days)
 
 
 def _lake_path(key: str) -> str:
@@ -276,26 +315,51 @@ def main():
     args = ap.parse_args()
 
     today_str = datetime.today().strftime("%Y-%m-%d")
-    quick, _ = classify()  # 只取 quick 批（by=date/single），slow 批（财报）不在日频范围
+    # 限流降速：默认桶 8.3/s≈498/min 贴 500/min 上限，长批必 churn。本脚本统一 3/s。
+    from data import resilience as _resilience
+    from data import tushare_sync as _tsync
+    _incremental_limiter = _resilience.RateLimiter(
+        name="tushare_incremental", capacity=3, refill_rate=3.0)
+    for _mod in (_resilience, _tsync):
+        _mod.tushare_rate_limiter_basic = _incremental_limiter
+        _mod.tushare_rate_limiter_special = _incremental_limiter
+        _mod.tushare_rate_limiter = _incremental_limiter
+
+    quick, _ = classify()  # quick 批（by=date/single）
+    # 日频扩展：by=symbol 日频数据集 + 周期条（守卫跳过已最新）
+    symbol_keys = [
+        k for k in DAILY_SYMBOL_KEYS + list(PERIODIC_SYMBOL_KEYS)
+        if k in TUSHARE_DATASETS and not TUSHARE_DATASETS[k].get("_unavailable")
+    ]
+    known = quick + symbol_keys
 
     # --keys 子集过滤：允许用户指定子集（用于排障/单 key 重试）
     if args.keys:
         wanted = {k.strip() for k in args.keys.split(",") if k.strip()}
         quick = [k for k in quick if k in wanted]
-        missed = wanted - set(quick)
+        symbol_keys = [k for k in symbol_keys if k in wanted]
+        missed = wanted - set(known)
         if missed:
-            # 用户指定的 key 不在 quick 批（可能误填 slow 批或拼写错），打印但不致命
-            print(f"⚠️ 这些 key 不在 quick 批（不处理）：{sorted(missed)}", flush=True)
+            # 用户指定的 key 不在增量批（可能误填 slow 财报批或拼写错），打印但不致命
+            print(f"⚠️ 这些 key 不在增量批（不处理）：{sorted(missed)}", flush=True)
 
     os.makedirs(os.path.dirname(args.log), exist_ok=True)
+    batch = quick + symbol_keys
     print(f"=== 增量同步 START {datetime.now()} | today={today_str} | "
-          f"keys={len(quick)} days={args.days} years={args.years} ===", flush=True)
+          f"keys={len(batch)}（quick {len(quick)} + symbol {len(symbol_keys)}）"
+          f" days={args.days} years={args.years} ===", flush=True)
 
     ok, fail = [], []
     with open(args.log, "a", encoding="utf-8") as log:
         print(f"\n=== START {datetime.now()} | today={today_str} | "
-              f"keys={quick} days={args.days} ===", file=log, flush=True)
-        for i, key in enumerate(quick, 1):
+              f"keys={batch} days={args.days} ===", file=log, flush=True)
+        for i, key in enumerate(batch, 1):
+            if key in PERIODIC_SYMBOL_KEYS and not _needs_period_refresh(
+                    key, PERIODIC_SYMBOL_KEYS[key], today_str):
+                msg = "⏭ 周期条已最新（跳过）"
+                print(f"[{key}] {msg}", file=log, flush=True)
+                ok.append(key)
+                continue
             success, msg = sync_one_key(key, today_str, args.years, args.days, log)
             if success:
                 ok.append(key)

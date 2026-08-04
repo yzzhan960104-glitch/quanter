@@ -383,3 +383,66 @@ def test_sync_one_key_merge_with_revision(tmp_path, mock_sync_dataset):
     assert merged.loc[(pd.Timestamp("2024-01-01"), "000001.SZ"), "v"] == 999
     # 1月2日旧值保留
     assert merged.loc[(pd.Timestamp("2024-01-02"), "000001.SZ"), "v"] == 200
+
+
+# ============ 日频 symbol 扩展（2026-08-05）：守卫 + 批顺序 ============
+
+def test_daily_symbol_keys_registered_as_by_symbol():
+    """DAILY/PERIODIC_SYMBOL_KEYS 必须已注册且为 by=symbol（否则日频扩展静默落空）。"""
+    from config import TUSHARE_DATASETS
+    from data.tools.sync_incremental import (
+        DAILY_SYMBOL_KEYS, PERIODIC_SYMBOL_KEYS,
+    )
+    for k in DAILY_SYMBOL_KEYS + list(PERIODIC_SYMBOL_KEYS):
+        assert k in TUSHARE_DATASETS, f"{k} 未注册到 TUSHARE_DATASETS"
+        assert TUSHARE_DATASETS[k]["by"] == "symbol", f"{k} 应为 by=symbol"
+
+
+def test_needs_period_refresh_age_guard(tmp_path):
+    """周期条守卫：湖缺失/过旧 → True（重拉）；湖够新 → False（跳过）。"""
+    from data.tools.sync_incremental import _needs_period_refresh
+
+    lake = str(tmp_path / "weekly.parquet")
+    _setup_key("_test_weekly", lake, by="symbol")
+
+    # 湖缺失 → 需重拉
+    assert _needs_period_refresh("_test_weekly", 6, "2024-01-10") is True
+    # 旧湖（2024-01-01，距今 9 天 > 6）→ 需重拉
+    _make_multiindex_df([("2024-01-01", "000001.SZ", 1)]).to_parquet(lake, engine="pyarrow")
+    assert _needs_period_refresh("_test_weekly", 6, "2024-01-10") is True
+    # 新湖（2024-01-08，距今 2 天 ≤ 6）→ 跳过
+    _make_multiindex_df([("2024-01-08", "000001.SZ", 1)]).to_parquet(lake, engine="pyarrow")
+    assert _needs_period_refresh("_test_weekly", 6, "2024-01-10") is False
+
+
+def test_main_runs_quick_then_symbol_and_skips_fresh_periodic(monkeypatch, tmp_path):
+    """main() 批顺序：quick 先、symbol 后；周期条湖已最新 → 跳过不调 sync_one_key。"""
+    import data.tools.sync_incremental as si
+
+    monkeypatch.setattr(si, "classify", lambda: (["moneyflow"], ["fina_income"]))
+    monkeypatch.setattr(si, "DAILY_SYMBOL_KEYS", ["fund_daily"])
+    monkeypatch.setattr(si, "PERIODIC_SYMBOL_KEYS", {"weekly": 6})
+    monkeypatch.setattr(si, "TUSHARE_DATASETS", {
+        "moneyflow": {"by": "date"},
+        "fund_daily": {"by": "symbol"},
+        "weekly": {"by": "symbol"},
+    })
+    monkeypatch.setattr(si, "_needs_period_refresh",
+                        lambda key, age, today: key != "weekly")  # weekly 已最新
+    called = []
+
+    def _fake_sync_one_key(key, today, years, days, log):
+        called.append(key)
+        return True, "ok"
+
+    monkeypatch.setattr(si, "sync_one_key", _fake_sync_one_key)
+    log = str(tmp_path / "inc.log")
+    monkeypatch.setattr(si.sys, "argv", ["sync_incremental.py", "--log", log])
+
+    with pytest.raises(SystemExit) as exc:
+        si.main()
+    assert exc.value.code == 0
+    # quick 先跑，symbol 日频后跑；weekly 被守卫跳过
+    assert called == ["moneyflow", "fund_daily"]
+    # 日志里应记录 weekly 跳过
+    assert "weekly" in open(log, encoding="utf-8").read()
