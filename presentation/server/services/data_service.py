@@ -43,9 +43,11 @@ _ERR_TAIL_CHARS = 500
 # 必看到第一个写的哨兵而返"进行中"。daemon 子进程在锁外异步跑（不持锁阻塞其它 key）。
 _trigger_lock = threading.Lock()
 
-# 项目根：data_service.py 位于 server/services/，上溯三级 = quanter/。
+# 项目根：data_service.py 位于 presentation/server/services/，上溯四级 = quanter/。
+# （历史版本位于 server/services/ 时为三级；presentation/ 伞盖收编后未同步更新，
+#   导致启动 sweep 拼出 F:\quanter\presentation\data\tools\sync_*.py 而全部失败。）
 # 用绝对路径拼 script，保证 uvicorn 以任意 CWD 启动都能定位 data/tools/sync_*.py。
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 # 数据集中文展示名（表格首列；与 LAKE key 同步维护，单一维护点）
 _DATASET_LABELS: Dict[str, str] = {

@@ -7,6 +7,15 @@
 from presentation.server.services import data_service
 
 
+def test_project_root_resolves_to_repo_root_with_sync_script():
+    """项目根必须上溯到 quanter/（presentation/ 伞盖收编后为四级），
+    否则启动 sweep 会拼出 presentation/data/tools/sync_tushare.py 并全部失败。"""
+    import os
+    assert os.path.isfile(
+        os.path.join(data_service._PROJECT_ROOT, "data", "tools", "sync_tushare.py")
+    ), f"脚本路径错误: {data_service._PROJECT_ROOT}"
+
+
 def test_sweep_stale_on_startup_triggers_stale_and_missing(monkeypatch):
     """sweep 对 stale/missing 调 trigger_sync，跳过 healthy/syncing/failed。"""
     monkeypatch.setattr(data_service, "list_datasets", lambda: [
