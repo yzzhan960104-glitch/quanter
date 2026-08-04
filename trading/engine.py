@@ -3049,25 +3049,41 @@ class TradingEngine:
         _account_id = _resolve_account_id()
         _trade_id = f"{_account_id}_{symbol}_{today_tp}"
 
-        # ── d. 成交账本写入（真相源，最先做——先落账再挂止盈，防 crash 窗口账账不符）──
-        # state-store-redesign §4.2：state_store 是真相源——insert_fill（增量幂等）+
-        # apply_fill_to_position（加权 avg）+ insert_trade_event(FILLED)。
+        # ── d. 成交账本写入（真相源，最先做——先落账再挂止盈/落日志，防 crash 窗口账账不符）──
+        # state-store-redesign §4.2 + W3.1（gateway-ssot-hardening）：
+        #   state_store.insert_fill 是成交回报的**唯一幂等真相源**（UNIQUE(order_id, traded_time)）。
+        #   CSV 审计镜像（record_live_trade kind=fill）+ 钉钉通知（notify_trade_event）+
+        #   position 累加（apply_fill_to_position）+ FILLED 事件（insert_trade_event）
+        #   必须与 insert_fill **同一判定点**——首次写入（inserted=True）才执行，重放（False）
+        #   全部跳过。这是 08-04 事故（同笔成交重放 24 次致简报「买 24 笔」+ 钉钉轰炸）的根因修复：
+        #   原实现把 CSV/钉钉放在 insert_fill 幂等判定**之外**无条件调，与真相源不同判定点 → 镜像失真。
+        _fill_inserted = False  # 是否首次成功落 fill（重放=False 时跳过所有镜像写入）
         if direction in ("BUY", "SELL"):
             try:
                 # 确保 account 行存在（fill/trade_event FK 引用 account）
                 if _state_store.get_account(_account_id) is None:
                     _state_store.upsert_account(_account_id, broker="qmt")
                 traded_time = str(update.get("traded_time", ""))
-                if _state_store.insert_fill(
-                        order_id, _account_id, traded_time, symbol, direction,
-                        float(qty), float(price)):
+                _fill_inserted = _state_store.insert_fill(
+                    order_id, _account_id, traded_time, symbol, direction,
+                    float(qty), float(price))
+                if _fill_inserted:
                     # insert_fill 首次入账才更新 position（避免重推重复累加）
                     _state_store.apply_fill_to_position(
                         _account_id, symbol, direction, float(qty), float(price), traded_time)
-                # FILLED 事件（幂等：同 trade 同 action 跳过）
-                _state_store.insert_trade_event(
-                    _account_id, _trade_id, symbol, "FILLED",
-                    order_id=order_id, qty=float(qty), price=float(price))
+                    # FILLED 事件（W3.1：与真相源同判定点——首次 fill 才记 FILLED，
+                    # 重放不再追加事件行，保证事件流与 fill 表 1:1 对齐）
+                    _state_store.insert_trade_event(
+                        _account_id, _trade_id, symbol, "FILLED",
+                        order_id=order_id, qty=float(qty), price=float(price))
+                else:
+                    # 重放（insert_fill 命中 UNIQUE 返 False）：CSV/钉钉/position 全部跳过。
+                    # 物理意图：on_stock_trade 在部分成交/柜台重推时会重放同一 (order_id, traded_time)，
+                    # 真相源已挡住重复入库，镜像（CSV/钉钉）必须同判定点同步挡住，否则审计旁路与
+                    # 真相源漂移（08-04 事故 1 笔成交被记 24 次）。
+                    logger.info(
+                        "成交回报重复，跳过 CSV/钉钉/position（order_id=%s traded_time=%s）",
+                        order_id, traded_time)
             except Exception as e:
                 # #5/A5：C-4 分级——敞口真相失真 = L1 停调度（宁可停不可带病跑）。
                 # 原软降级会让 fill/position 静默缺失，对账只能事后发现。
@@ -3079,6 +3095,8 @@ class TradingEngine:
         # ── c. 买单成交 + 未挂止盈 → 挂限价止盈卖单（DB 幂等防重挂）──
         # 卖单成交（direction=="SELL"）无需挂止盈（卖出即离场，无持仓可止盈）。
         # 方向未知（None）保守不挂——宁可漏挂止盈让人工补，也不误把卖单当买单挂反方向单。
+        # 注：TP 挂单的幂等独立于 fill（has_order(TP1) DB 查询），与 _fill_inserted 不耦合
+        # （fill 重放时 TP 可能因 has_order 已 True 而跳过，但两套幂等各管各的真相源）。
         _tp_already = False
         try:
             _tp_already = _state_store.has_order(_account_id, today_tp, symbol, "TP1")
@@ -3092,29 +3110,35 @@ class TradingEngine:
                 # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
                 logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)
 
-        # ── a. 成交日志（CSV 审计旁路，失败不阻断）──
-        try:
-            from presentation.server.services.trading_service import record_live_trade
-            record_live_trade(
-                symbol,
-                direction or "TRADE",  # 方向未知时落 "TRADE"（保守中性，不误判买卖）
-                float(qty),
-                float(price),
-                strategy="neckline",
-                rationale=f"成交回报@{update.get('traded_time')}",
-                kind="fill",  # #3：真实成交，post_close 据此聚合净持仓
-            )
-        except Exception:
-            logger.exception("成交日志补写失败 symbol=%s（不影响后续通知）", symbol)
+        # ── a/b. 成交日志（CSV）+ 钉钉通知（W3.1：与 fill 真相源同判定点）──
+        # 方向已知（BUY/SELL）：仅在 _fill_inserted=True（首次落账）时写 CSV + 推钉钉。
+        #   重放（_fill_inserted=False）→ 完全跳过，保证 CSV/钉钉与 fill 表 1:1（08-04 事故根因）。
+        # 方向未知（None）：仍无条件写 CSV + 推钉钉（用 "TRADE" 中性标签）——这条路径罕见
+        #   （DB 无 side + 内存无 order_type），且上方 _alert_critical 已告警；此处审计落账
+        #   是「方向未知但回报真实」的旁证，不属于 fill 重放幂等范畴（insert_fill 未被调，
+        #   无重放问题），保留以留下人工对账线索。
+        if _fill_inserted or direction is None:
+            try:
+                from presentation.server.services.trading_service import record_live_trade
+                record_live_trade(
+                    symbol,
+                    direction or "TRADE",  # 方向未知时落 "TRADE"（保守中性，不误判买卖）
+                    float(qty),
+                    float(price),
+                    strategy="neckline",
+                    rationale=f"成交回报@{update.get('traded_time')}",
+                    kind="fill",  # #3：真实成交，post_close 据此聚合净持仓
+                )
+            except Exception:
+                logger.exception("成交日志补写失败 symbol=%s（不影响后续通知）", symbol)
 
-        # ── b. 钉钉成交通知（fire_and_forget 不阻塞回调链）──
-        try:
-            from infra.notifier import NotificationManager, fire_and_forget
-            fire_and_forget(NotificationManager.get_default().notify_trade_event(
-                symbol, direction or "TRADE", float(qty), float(price),
-            ))
-        except Exception:
-            logger.exception("成交通知发送失败 symbol=%s", symbol)
+            try:
+                from infra.notifier import NotificationManager, fire_and_forget
+                fire_and_forget(NotificationManager.get_default().notify_trade_event(
+                    symbol, direction or "TRADE", float(qty), float(price),
+                ))
+            except Exception:
+                logger.exception("成交通知发送失败 symbol=%s", symbol)
     def _order_direction(self, order_id: str) -> Optional[str]:
         """从 ``gw._orders`` 查订单方向（BUY/SELL）。
 

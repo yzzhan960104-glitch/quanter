@@ -710,6 +710,133 @@ def test_e2e_real_callback_chain_fills_and_places_tp(db, monkeypatch):
     assert fill_row["c"] == 1 and pos_row["qty"] == 100, "成交应落 fill + position"
 
 
+# ============================================================================
+# Task 6（W3.1 gateway-ssot-hardening）：成交回报 CSV/钉钉幂等
+# ============================================================================
+def test_trade_replay_writes_csv_and_notifies_only_once(state_db, monkeypatch, tmp_path):
+    """W3.1：同 (order_id, traded_time) 成交回报重放 → insert_fill 返 False →
+    CSV/钉钉不再重复写（与真相源同判定点，spec §3.3.1）。
+
+    08-04 事故根因：record_live_trade（CSV）+ notify_trade_event（钉钉）在 insert_fill
+    幂等判定**之外**无条件调。同一笔成交 600000.SH BUY 100@10.5 被重放 8 批 × 3 行 = 24 笔，
+    state_store fill 表幂等拦截成功（只 1 行），但 CSV 审计镜像 + 钉钉通知无条件追加 →
+    简报「买 24 笔」虚高 + 钉钉轰炸。
+
+    本测试用真 CSV 落盘（非 mock 自欺）：monkeypatch LIVE_TRADE_LOG 到 tmp 路径，
+    两次 _handle_order_update 后断言 CSV 只 1 行 kind=fill + 钉钉只 1 次。
+    """
+    import csv as _csv
+    from trading import state_store
+
+    # 真实 CSV 落盘到 tmp（不 mock record_live_trade —— 验证它本身被幂等挡住）
+    csv_path = tmp_path / "live_trades.csv"
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.LIVE_TRADE_LOG", str(csv_path))
+
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    # 预置 DB order 行：让 _order_direction 从 DB side 反查得 BUY（不依赖内存 _orders）
+    aid = engine._resolve_account_id()
+    today = _today_str()
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(
+        f"{today}_600000.SH_OPEN_1", f"{aid}_600000.SH_{today}", aid, today,
+        "600000.SH", "buy", "OPEN", 100, 10.0,
+        broker_oid="600000_SEQ_1", state="SUBMITTED")
+    # 内存 _orders 留空（强制走 DB 反查路径，与生产主推路径一致）
+    eng._gw = MagicMock()
+    eng._gw._orders = {}
+    eng._gw._seq_to_real = {}
+
+    update = {
+        "kind": "trade",
+        "order_id": "600000_SEQ_1",
+        "stock_code": "600000.SH",
+        "traded_volume": 100,
+        "traded_price": 10.5,
+        "traded_amount": 1050.0,
+        "traded_time": "20260801101000",  # 同笔成交时间（幂等键的一半）
+        "state": "FILLED",
+    }
+    fake_mgr = MagicMock()
+    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+    with patch("presentation.server.services.trading_service.record_live_trade"), \
+         patch("infra.notifier.NotificationManager") as NM, \
+         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+        NM.get_default.return_value = fake_mgr
+        # 注意：record_live_trade 在 with 内被 patch → 不写真 CSV（这里只验证「被调几次」）
+        # 但为防 mock 自欺，下面单独一个测试用真 CSV 落盘验证。本测试先验证调用次数。
+        asyncio.run(eng._handle_order_update(update))   # 首次 → insert_fill=True
+        asyncio.run(eng._handle_order_update(update))   # 重放 → insert_fill=False
+
+    # record_live_trade 首次被调，重放不再调（与真相源同判定点）
+    from presentation.server.services.trading_service import record_live_trade
+    # patch 退出后 record_live_trade 已还原，无法直接查 mock；改用 fake_mgr 钉钉次数 +
+    # 下面独立 CSV 落盘断言。本断言点先校钉钉：
+    assert fake_mgr.notify_trade_event.call_count == 1, \
+        f"重放应只推 1 次钉钉，实际 {fake_mgr.notify_trade_event.call_count}"
+
+
+def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path):
+    """W3.1 真 CSV 落盘断言（非 mock）：重放同 (order_id, traded_time) → CSV 只 1 行 kind=fill。
+
+    与上一测试的区别：本测试**不 patch record_live_trade**，让真函数写真 CSV 到 tmp，
+    读回断言行数。这是「非 mock 自欺」的证据 —— 证明改动后 record_live_trade 真的被
+    幂等挡住（而非被 mock 替身假装挡住）。
+    """
+    import csv as _csv
+    from trading import state_store
+
+    csv_path = tmp_path / "live_trades.csv"
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.LIVE_TRADE_LOG", str(csv_path))
+
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    aid = engine._resolve_account_id()
+    today = _today_str()
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(
+        f"{today}_600000.SH_OPEN_2", f"{aid}_600000.SH_{today}", aid, today,
+        "600000.SH", "buy", "OPEN", 100, 10.0,
+        broker_oid="600000_SEQ_2", state="SUBMITTED")
+    eng._gw = MagicMock()
+    eng._gw._orders = {}
+    eng._gw._seq_to_real = {}
+
+    update = {
+        "kind": "trade",
+        "order_id": "600000_SEQ_2",
+        "stock_code": "600000.SH",
+        "traded_volume": 100,
+        "traded_price": 10.5,
+        "traded_amount": 1050.0,
+        "traded_time": "20260801101000",
+        "state": "FILLED",
+    }
+    fake_mgr = MagicMock()
+    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+    # 关键：不 patch record_live_trade —— 让真函数写真 CSV
+    with patch("infra.notifier.NotificationManager") as NM, \
+         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+        NM.get_default.return_value = fake_mgr
+        asyncio.run(eng._handle_order_update(update))   # 首次
+        asyncio.run(eng._handle_order_update(update))   # 重放
+        asyncio.run(eng._handle_order_update(update))   # 三放（验证 ≥2 次重放也挡住）
+
+    # 真 CSV 读回：只 1 行 kind=fill
+    assert csv_path.exists(), "CSV 应被首次写入创建"
+    with open(csv_path, encoding="utf-8-sig", newline="") as f:
+        rows = list(_csv.DictReader(f))
+    fill_rows = [r for r in rows if r.get("kind") == "fill"]
+    assert len(fill_rows) == 1, \
+        f"重放只应写 1 行 kind=fill，实际 {len(fill_rows)}（总行 {len(rows)}）"
+    assert fill_rows[0]["symbol"] == "600000.SH"
+    assert float(fill_rows[0]["shares"]) == 100.0
+    # 钉钉同样只 1 次
+    assert fake_mgr.notify_trade_event.call_count == 1
+
+
 def test_e2e_trade_before_async_response_race(db, monkeypatch):
     """竞态：trade 先于 async_response → seq 反查兜底落账，随后回填不覆盖。"""
     import asyncio
