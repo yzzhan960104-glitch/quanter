@@ -114,6 +114,25 @@ def _state_db(tmp_path, monkeypatch):
     return db_path
 
 
+def _seed_breaker_baseline(today: str, total_asset: float = 1_000_000.0) -> None:
+    """预置日内熔断 start_equity 基线（W4+C-1 后统一从 account_daily 读）。
+
+    物理（C-1 收口）：原 breaker 测试预置基线调 ``position_book.snapshot_start_equity``
+    写 daily_equity 表——但 W4 后 pre_open 写口已迁 account_daily，post_close 熔断读口也已
+    迁 ``state_store.get_start_equity`` 读 account_daily。基线必须与生产同口径（同表 + 同
+    account_id），否则测试假 PASS（读到旧 daily_equity 或返 None 跳过熔断）。
+
+    本 helper 用 ``engine._resolve_account_id()``（与 pre_open/post_close 同口径）+ upsert
+    default account（FK 满足）+ 写 account_daily.start，让熔断读口真正命中基线。
+    """
+    from trading import state_store
+    account_id = engine._resolve_account_id()
+    # upsert account：account_daily FK REFERENCES account(account_id)，无 account 行写快照
+    # 会 IntegrityError（与 pre_open 生产路径同兜底，见 _ensure_account）。
+    state_store.upsert_account(account_id, broker="qmt")
+    state_store.snapshot_start_equity(account_id, today, total_asset)
+
+
 def _signal_600000():
     from strategies.neckline.signal import Signal
     return [Signal(symbol="600000.SH", entry_price=10.0, neckline=10.5, bottom=9.5)]
@@ -924,12 +943,6 @@ def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch):
         否则 post_close check_daily_loss_limit(0, curr) 会因 start<=0 返 False
         反而永不熔断，或拿 None 参与除法抛 TypeError。正确行为：跳过快照 + 告警。
     """
-    from trading import position_book
-
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
-
     orders = [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
         "stop_price": 9.0, "take_profit": 11.0,
@@ -946,9 +959,11 @@ def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch):
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
-    # 验证未写 daily_equity（get_start_equity 返 None）
+    # 验证未写 account_daily（pre_open query_asset 返空 → 不写 start 基线）
+    # C-1 收口后熔断读 state_store.get_start_equity（读 account_daily），故验它返 None。
     today = datetime.now().strftime("%Y-%m-%d")
-    assert position_book.get_start_equity(today) is None
+    from trading import state_store
+    assert state_store.get_start_equity(engine._resolve_account_id(), today) is None
 
 
 async def _no_op_submit_should_not_be_called_unused(order, **kw):
@@ -962,19 +977,15 @@ def test_post_close_circuit_breaker_triggers(monkeypatch):
 
     物理意图（plan Task 10 Step 3 · 对齐缺口 R-2）：
         post_close 在 reconcile 之后串联三步：
-          1) get_start_equity(today) → start_equity
+          1) state_store.get_start_equity(account_id, today) → start_equity
+             （W4+C-1 后熔断基线统一从 account_daily 读，与 pre_open 写口同表）
           2) query_asset → curr_equity
           3) check_daily_loss_limit(start, curr) → True 即 cancel_all + emergency_halt
         缺基线（start=None）→ 跳过 + WARN（不拿 0 误触发）。
     """
-    from trading import position_book
-
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
-    # 写基线 100w
+    # 写基线 100w（_seed_breaker_baseline：W4+C-1 后基线从 account_daily 读，与生产同口径）
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)
+    _seed_breaker_baseline(today, 1_000_000.0)
 
     class _FakeGw:
         async def query_asset(self):
@@ -1032,13 +1043,9 @@ def test_post_close_circuit_breaker_warns_unconfirmed(monkeypatch, caplog):
         「未确认终态」/「敞口可能残留」。
     """
     import logging
-    from trading import position_book
 
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)
+    _seed_breaker_baseline(today, 1_000_000.0)
 
     class _FakeGw:
         async def query_asset(self):
@@ -1080,13 +1087,8 @@ def test_post_close_circuit_breaker_warns_unconfirmed(monkeypatch, caplog):
 
 def test_post_close_circuit_breaker_skip_when_within_limit(monkeypatch):
     """post_close：curr 只跌 2%（未触 -3%）→ 不熔断，cancel_all/halt 均不调。"""
-    from trading import position_book
-
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)
+    _seed_breaker_baseline(today, 1_000_000.0)
 
     class _FakeGw:
         async def query_asset(self):
@@ -1534,12 +1536,9 @@ def test_post_close_writes_expired_positions(monkeypatch):
     # 隔离 expired_positions.json 到 tmp
     expired_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "expired.json")
     monkeypatch.setattr(engine, "_EXPIRED_POSITIONS_PATH", expired_path)
-    # 隔离 position_book db + 写熔断基线（curr=start → 0% 不熔断）
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
+    # 写熔断基线（curr=start → 0% 不熔断）；_seed_breaker_baseline 走 account_daily 同口径
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)
+    _seed_breaker_baseline(today, 1_000_000.0)
 
     class _FakeGw:
         async def query_asset(self):
@@ -1573,11 +1572,8 @@ def test_post_close_breaker_skips_max_holding(monkeypatch):
     monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 20)
     expired_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "expired_breaker.json")
     monkeypatch.setattr(engine, "_EXPIRED_POSITIONS_PATH", expired_path)
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)
+    _seed_breaker_baseline(today, 1_000_000.0)
 
     class _FakeGw:
         async def query_asset(self):
@@ -1750,12 +1746,8 @@ def test_post_close_trailing_skipped_after_breaker(monkeypatch):
         熔断（-3%）已 emergency_halt + lock_down，次日人工接管——此时再演进 stop 收紧
         可能触发额外卖出与熔断善后冲突。熔断优先于 trailing（同 max_holding 约束）。
     """
-    from trading import position_book
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)
+    _seed_breaker_baseline(today, 1_000_000.0)
     # plan 有持仓 order（若 trailing 跑会演进，验熔断时它不被调）
     trading_plan.save_plan(today, [
         {"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}])
@@ -1794,11 +1786,9 @@ def test_post_close_trailing_evolves_plan_stop(monkeypatch):
         次日 stop_loss 读演进后的 stop（盘中不调，spec「盘中不调整 stop」红线）。
     """
     from trading import position_book
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
+
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)
+    _seed_breaker_baseline(today, 1_000_000.0)
     # plan 有持仓 order（neckline/atr 齐全，可演进）
     orders = [{"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}]
     trading_plan.save_plan(today, orders)
@@ -1837,13 +1827,10 @@ def test_post_close_query_trades_reconcile_drift(monkeypatch):
         只解释「今日变动归因」。故 ② 段降级为展示，drift 真相源唯一在 ① broker。
     """
     from trading import position_book
-    db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    position_book.init_db()
     # position_book 记 30（apply_fill 正确记账）；CSV 聚合返 100（疑似漏回报或重复）
     position_book.apply_fill("ord1", "A.SH", "BUY", 30, 10.0, "2099-01-01 10:00:00")
     today = datetime.now().strftime("%Y-%m-%d")
-    position_book.snapshot_start_equity(today, 1_000_000.0)   # 熔断基线（0% 不触发）
+    _seed_breaker_baseline(today, 1_000_000.0)   # 熔断基线（0% 不触发）
 
     # mock service.aggregate_fills_by_symbol 返 100（与账本 30 不一致——归因展示用）
     def _fake_agg(start, end):

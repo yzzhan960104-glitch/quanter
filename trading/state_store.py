@@ -208,11 +208,15 @@ def init_store(db_path: str | None = None) -> None:
                 PRIMARY KEY (account_id, symbol)
             )
         """)
-        # ⑥ account_daily（账户日级快照 · pre_open 写 start / post_close 写 close）——全新表
-        # 与 position_book 的 daily_equity 共存（后者是单 date PK 的熔断基线，backward compat；
-        # account_daily 是多账户快照 + 收盘字段 + daily_pnl，state_store 收口盈亏用）。
-        # 不 DROP daily_equity：position_book.snapshot_start_equity/get_start_equity 仍读写它
-        # （pre_open/post_close 熔断基线），删了会让 position_book 的权益函数崩。
+        # ⑥ account_daily（账户日级快照 · pre_open 写 start / post_close 写 close + 熔断读 start）
+        # ——全新表，W4 + C-1 后是【权益快照与熔断基线】的唯一真相源：pre_open 写 start_total_asset，
+        # post_close 写 close_total_asset + 算 daily_pnl，并【读 start_total_asset 作 -3% 熔断基线】。
+        #
+        # daily_equity 表状态（C-1 收口后）：W4 把 pre_open 写口迁到 account_daily.start，
+        # C-1 把熔断读口迁到 account_daily.start → daily_equity 表已无生产写入方/读口，是死表。
+        # position_book.snapshot_start_equity / get_start_equity 函数与 daily_equity 表均保留
+        # 不删（W6 决策时统一清理：删表需先收编全部历史调用方 + 评估迁移脚本，scope 超出本 task）。
+        # 死表无副作用：仅占 schema 不被读写，account_daily 已完全替代。
         con.execute("""
             CREATE TABLE IF NOT EXISTS account_daily (
                 account_id          TEXT NOT NULL REFERENCES account(account_id) ON DELETE RESTRICT,
@@ -665,6 +669,38 @@ def snapshot_start_equity(account_id: str, date: str, total_asset: float, cash: 
             " ON CONFLICT(account_id, date) DO UPDATE SET start_total_asset=excluded.start_total_asset,"
             " start_cash=excluded.start_cash, start_snap_at=excluded.start_snap_at",
             (account_id, date, float(total_asset), cash, now))
+
+
+def get_start_equity(account_id: str, date: str, *, db_path: str | None = None) -> float | None:
+    """读 account_daily.start_total_asset（W4 后熔断基线统一读口，与 snapshot_start_equity 同表）。
+
+    物理意图（C-1 收口 · 08-04 Task 9 review 发现）：post_close 熔断步骤1 需要当日开盘前
+    start_equity 作为基线。W4 已把 pre_open 写口迁到 ``snapshot_start_equity``（写 account_daily
+    的 start 字段），但熔断读口仍在读 ``position_book.get_start_equity``（读已无生产写入方的
+    daily_equity 表）→ 恒返 None → ``breaker_skipped=True`` → **日内 -3% 熔断永久失效，实盘
+    敞口失控红线**。本函数是 W4 闭合的最后一块拼图：让熔断读口回到与 pre_open 写口同表的
+    account_daily，基线真正可达。
+
+    Why 与 snapshot_start_equity 同表（account_daily）：pre_open 写 start，post_close 写 close
+    并算 daily_pnl = close - start，全在同一行（account_id, date）；熔断读 start 也命中此行，
+    消除「写 daily_equity / 读 account_daily」的两表断链。
+
+    Args:
+        account_id: 与 pre_open 写入同口径（engine._resolve_account_id，QMT_ACCOUNT_ID 优先，
+                    缺失退默认账户）。口径必须一致，否则读不到 pre_open 写的基线。
+        date:       业务日（与 pre_open/post_close 入参 date 同口径，clock.today）。
+
+    Returns:
+        start_total_asset（float）或 None（pre_open 未写基线 / 查询异常）。
+        None 时调用方 post_close 显式 ``breaker_skipped=True`` 跳过熔断（绝不拿 0 触发，
+        防 check_daily_loss_limit(0, X) 返 False 反永不熔断）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        row = con.execute(
+            "SELECT start_total_asset FROM account_daily WHERE account_id=? AND date=?",
+            (account_id, date)).fetchone()
+    return float(row["start_total_asset"]) if row and row["start_total_asset"] is not None else None
 
 
 def snapshot_close_equity(account_id: str, date: str, close_total_asset: float,

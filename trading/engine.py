@@ -798,10 +798,12 @@ async def _pre_open_impl(date: str) -> dict:
     # post_close 在 account_daily 找不到）。改调 ``_state_store.snapshot_start_equity``
     # 写 account_daily.start，与 post_close 同表 → daily_pnl 闭合。
     #
-    # daily_equity 表读口保留（W6 决策降级/迁移）：position_book.snapshot_start_equity
-    # 函数与 daily_equity 表均不删，但本 task 后 pre_open 不再写它——熔断读口
-    # （``_position_book.get_start_equity``）在 W6 前将缺基线，属已知遗留（本 task 范围
-    #  仅切 pre_open 写口，读口迁移归 W6）。
+    # daily_equity 表读口已迁（C-1 收口 · 08-04 Task 9 review 根因）：原熔断读口
+    # ``_position_book.get_start_equity``（读 daily_equity 表）在 W4 后恒返 None（daily_equity
+    # 再无生产写入方）→ 日内熔断永久失效。post_close 步骤1 已改读
+    # ``_state_store.get_start_equity``（与 pre_open 写口同表 account_daily），熔断基线闭合。
+    # daily_equity 表与 position_book.snapshot/get_start 函数均保留不删（W6 决策时统一清理，
+    # 删表需先收编全部历史调用方）。
     #
     # 边界（红线）：
     # - gw=None / query_asset 返 {}（未连接/锁定/超时）→ 跳过 + WARN，绝不拿 0/None
@@ -1605,7 +1607,8 @@ async def post_close(
         各段独立 try-except 软降级（单段异常不阻塞下一段）。
 
     ⚠️ 熔断三步（Task 10 · R-2 日内熔断 · spec §5.2）：
-        1) get_start_equity(today) → start_equity（pre_open 快照的基线）
+        1) state_store.get_start_equity(account_id, today) → start_equity
+           （pre_open 写 account_daily.start_total_asset 的基线；W4 + C-1 已迁同表读口）
         2) gw.query_asset → curr_equity（盘后总资产）
         3) check_daily_loss_limit(start, curr) → True 即 cancel_all_open_orders +
            emergency_halt + ERROR 告警
@@ -1695,10 +1698,17 @@ async def post_close(
     circuit_breaker_triggered = False
     breaker_skipped = False
     try:
-        # 步骤 1：读 start_equity 基线（pre_open snapshot 写入 daily_equity 表）
+        # 步骤 1：读 start_equity 基线（pre_open 写 account_daily.start_total_asset 表）
+        # C-1 收口（W4 + 08-04 Task 9 review 根因）：原读 ``_position_book.get_start_equity``
+        # （读 **daily_equity** 表），但 W4 已把 pre_open 写口迁到 ``_state_store.snapshot_start_equity``
+        # （写 **account_daily** 表）—— daily_equity 表再无生产写入方，读口恒返 None →
+        # ``breaker_skipped=True`` → 日内 -3% 熔断永久失效（实盘敞口失控红线）。
+        # 改读 ``_state_store.get_start_equity``（与 pre_open 写口同表同口径 account_id），
+        # 熔断基线闭合。account_id 沿用 ``_resolve_account_id``（与 pre_open W4 写入口径一致，
+        # 否则读不到 pre_open 写的基线）。
         # C-6 V2：熔断基线 date（start/close equity 同口径）走 clock.today。
         today_eq = clock.today()
-        start_equity = _position_book.get_start_equity(today_eq)
+        start_equity = _state_store.get_start_equity(_resolve_account_id(), today_eq)
         if start_equity is None or start_equity <= 0:
             # 无基线（pre_open 未抓到 / 查询异常）→ 跳过熔断 + WARN
             # Why 显式跳过：check_daily_loss_limit(0, X) 虽返 False 但语义模糊，
