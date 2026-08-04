@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Phase C 提案工作流（模块级 import：main() 内生成提案，测试可 monkeypatch）。
 from research import proposals
 from research import discovery_bridge
+from experiment.resolver import resolve_active
 
 # 漂移判定阈值（原型值，可标定）
 MIN_SAMPLE = 5
@@ -131,9 +132,16 @@ def build_digest(digest_date, live: dict, expectation: dict | None,
     status = _drift_status(live, expectation or {}) if expectation else "无回测期望"
     exp_block = "—"
     if expectation:
+        src = expectation.get("params_source")
+        if src == "ACTIVE":
+            src_note = "（ACTIVE 参数 ✓）"
+        elif src == "OTHER":
+            src_note = "（⚠️ 非 ACTIVE 参数，不代表实盘期望）"
+        else:
+            src_note = ""
         exp_block = (
             f"- 回测期望（task {expectation.get('task_id', '?')[:8]}，"
-            f"窗口 {expectation.get('window', '?')}）：\n"
+            f"窗口 {expectation.get('window', '?')}）{src_note}：\n"
             f"- 期望：成交 {expectation.get('n_hits', '—')} 笔 / "
             f"胜率 {_pct(expectation.get('win_rate'))} / "
             f"均 rr {_fmt_rr(expectation.get('avg_rr'))}"
@@ -215,34 +223,61 @@ def load_live_fills(csv_path: str = "logs/live_trades.csv") -> list[dict]:
 
 
 def load_backtest_expectation(db_path: str | None = None) -> dict | None:
-    """读 replay_tasks.db 最近 SUCCESS 回测报告 → 期望 dict（含 task_id/window）。
+    """读 replay_tasks.db 回测报告 → 期望 dict（含 task_id/window/params_source）。
 
-    无 SUCCESS / DB 缺失 / 报告损坏 → None（摘要期望段降级「—」，不抛）。
+    2026-08-05 修复（窗口/参数误导实证）：原实现取「最近 SUCCESS」——08-03 手动
+    提交的默认参数验证任务（7146fdce，窗口 07-01~08-03）覆盖了 ACTIVE 参数周度
+    任务，digest 期望显示 26%/-0.45 与实盘 ACTIVE（25c602）不符。现改为：
+        1. 优先选 cfg_override 与当前 resolve_active() params 一致的最近 SUCCESS
+           → params_source="ACTIVE"（可信）；
+        2. 无匹配 → 取最近 SUCCESS 并标注 params_source="OTHER"（⚠️ 不代表实盘）；
+        3. 无 SUCCESS / DB 缺失 → None（期望段降级）。
     """
+    try:
+        _active = resolve_active()
+        _active_params = dict(_active[0].params) if _active else None
+    except Exception:
+        _active_params = None
+    _norm = lambda p: json.dumps(p or {}, sort_keys=True, ensure_ascii=False)
+    _target = _norm(_active_params) if _active_params is not None else None
     try:
         from backtest import tasks_db as replay_tasks_db
         replay_tasks_db.init_db(db_path)
-        tasks = replay_tasks_db.list_tasks(limit=20, path=db_path) or []
+        tasks = replay_tasks_db.list_tasks(limit=50, path=db_path) or []
+        active_match = None
+        other = None
         for t in tasks:
-            if t.get("status") != "SUCCESS":
+            if t.get("status") != "SUCCESS" or not t.get("report_json"):
                 continue
-            report = t.get("report_json")
-            if not report:
-                continue
-            r = json.loads(report)
-            return {
-                "task_id": t["task_id"],
-                "window": f"{t.get('start', '?')}~{t.get('end', '?')}",
-                "n_hits": r.get("n_hits"),
-                "win_rate": r.get("win_rate"),
-                "avg_rr": r.get("avg_rr"),
-                "max_drawdown": r.get("max_drawdown"),
-                "annualized_return": r.get("annualized_return"),
-            }
+            # tasks_db._row_to_dict 已把 cfg_override 反序列化为 dict（空 → {}）；
+            # 兼容字符串形态（老库/直查），容错失败置 None（不参与 ACTIVE 匹配）。
+            cfg = t.get("cfg_override") or {}
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg)
+                except (TypeError, ValueError):
+                    cfg = None
+            if _target is not None and cfg is not None and _norm(cfg) == _target:
+                if active_match is None:
+                    active_match = t
+            elif other is None:
+                other = t
+        picked = active_match if active_match is not None else other
+        if picked is None:
+            return None
+        r = json.loads(picked["report_json"])
+        return {
+            "task_id": picked["task_id"],
+            "window": f"{picked.get('start', '?')}~{picked.get('end', '?')}",
+            "params_source": "ACTIVE" if picked is active_match else "OTHER",
+            "n_hits": r.get("n_hits"),
+            "win_rate": r.get("win_rate"),
+            "avg_rr": r.get("avg_rr"),
+            "max_drawdown": r.get("max_drawdown"),
+            "annualized_return": r.get("annualized_return"),
+        }
     except Exception:
         return None
-    return None
-
 
 def load_live_perf_from_state_store(db_path: str = "logs/trading_state.db") -> dict:
     """从 state_store 读已实现盈亏与平仓事件（诚实口径，2026-08-03）。

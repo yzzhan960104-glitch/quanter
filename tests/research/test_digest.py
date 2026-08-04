@@ -111,6 +111,67 @@ def test_load_backtest_expectation_none_when_no_success(tmp_path):
     assert digest.load_backtest_expectation(db_path=db) is None
 
 
+def _seed_tasks(tmp_path, specs):
+    """种子回测任务：specs=[(cfg_override, start, end, report)]。"""
+    from backtest import tasks_db as replay_tasks_db
+    db = str(tmp_path / "tasks.db")
+    replay_tasks_db.init_db(db)
+    import sqlite3
+    ids = []
+    for cfg, start, end, report in specs:
+        tid = replay_tasks_db.create_task({
+            "strategy_name": "neckline", "start": start, "end": end,
+            "universe": None, "cfg_override": cfg,
+        }, path=db)
+        con = sqlite3.connect(db)
+        con.execute("UPDATE replay_tasks SET status='SUCCESS', report_json=? WHERE task_id=?",
+                    (json.dumps(report), tid))
+        con.commit()
+        con.close()
+        ids.append(tid)
+    return db
+
+
+def test_load_backtest_expectation_prefers_active_params_task(monkeypatch, tmp_path):
+    """2026-08-05：期望必须优先取「用 ACTIVE 参数跑」的回测，而不是任意最近任务。"""
+    from experiment.models import ActiveExperiment
+    active_params = {"window": 80, "min_rr": 2.0, "max_holding": 20, "tp_h_mult": 2.5}
+    monkeypatch.setattr(digest, "resolve_active",
+                        lambda: [ActiveExperiment("exp1", "neckline", active_params,
+                                                 1.0, "2026-07-27")])
+    # 最近任务用默认参数（7146fdce 复现），更早任务用 ACTIVE 参数
+    db = _seed_tasks(tmp_path, [
+        ({}, "2026-07-01", "2026-08-03",
+         {"n_hits": 100, "win_rate": 0.26, "avg_rr": -0.45,
+          "max_drawdown": -0.14, "annualized_return": -0.77}),
+        (active_params, "2026-05-05", "2026-08-03",
+         {"n_hits": 1314, "win_rate": 0.311, "avg_rr": -0.31,
+          "max_drawdown": -0.12, "annualized_return": 0.18}),
+    ])
+    exp = digest.load_backtest_expectation(db_path=db)
+    assert exp["params_source"] == "ACTIVE"
+    assert exp["win_rate"] == 0.311
+    assert exp["n_hits"] == 1314
+    assert exp["window"] == "2026-05-05~2026-08-03"
+
+
+def test_load_backtest_expectation_marks_other_params(monkeypatch, tmp_path):
+    """无 ACTIVE 参数任务 → 取最近 SUCCESS 但标注 params_source=OTHER（防误导）。"""
+    from experiment.models import ActiveExperiment
+    active_params = {"window": 80, "min_rr": 2.0}
+    monkeypatch.setattr(digest, "resolve_active",
+                        lambda: [ActiveExperiment("exp1", "neckline", active_params,
+                                                 1.0, "2026-07-27")])
+    db = _seed_tasks(tmp_path, [
+        ({}, "2026-07-01", "2026-08-03",
+         {"n_hits": 100, "win_rate": 0.26, "avg_rr": -0.45,
+          "max_drawdown": -0.14, "annualized_return": -0.77}),
+    ])
+    exp = digest.load_backtest_expectation(db_path=db)
+    assert exp["params_source"] == "OTHER"
+    assert exp["win_rate"] == 0.26
+
+
 def test_load_live_perf_from_state_store_with_filled_pnl(tmp_path):
     """state_store 的 TP_FILLED 事件（含 realized_pnl）→ 已实现盈亏统计（金额口径）。
 
