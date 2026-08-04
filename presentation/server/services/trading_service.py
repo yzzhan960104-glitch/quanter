@@ -258,9 +258,9 @@ def aggregate_fills_by_symbol(start: str, end: str) -> dict[str, float]:
 
     数据源（SSoT spec §2.4 + §3.3.4，A2 删 CSV 回退）：
         - 唯一数据源 state_store.fill 表（UNIQUE(order_id, traded_time) 天然去重，
-          08-04 事故后的成交流水真相源）。原 LIVE_TRADE_READ_SOURCE=csv 回退 + DB 异常
-          自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下重复 append 会聚合出幻象
-          持仓，违反 SSoT 红线）。
+          08-04 事故后的成交流水真相源）。原 env 驱动的 CSV 回退开关（A2 已退役）+
+          DB 异常自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下重复 append 会
+          聚合出幻象持仓，违反 SSoT 红线）。
 
     物理意图（08-04 事故根因）：
         原实现全量流式读 CSV，在重放/补推场景下会把 24 行重复 BUY 100 聚合成 2400
@@ -299,8 +299,8 @@ def export_trades(start: str, end: str) -> str:
 
     数据源（SSoT spec §2.4 + §3.3.2，A2 删 CSV 回退）：
         - 唯一数据源 state_store.fill 表（UNIQUE(order_id, traded_time) 天然去重，
-          08-04 事故后的成交流水真相源）。原 LIVE_TRADE_READ_SOURCE=csv 回退 + DB 异常
-          自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下会重复，违反 SSoT 红线）。
+          08-04 事故后的成交流水真相源）。原 env 驱动的 CSV 回退开关（A2 已退役）+
+          DB 异常自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下会重复，违反 SSoT 红线）。
 
     物理意图（08-04 事故根因）：
         原实现流式读 CSV，重放场景下导出 24 行重复 → Layer6 LLM 复盘输入污染
@@ -365,8 +365,8 @@ def query_trades(
 
     数据源（SSoT 红线，A2 收紧）：
         - 唯一数据源 state_store.fill 表（UNIQUE(order_id, traded_time) 天然去重，
-          08-04 事故后的成交流水真相源）。原 LIVE_TRADE_READ_SOURCE=csv 回退 + DB 异常
-          自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下会重复，违反 SSoT 红线）。
+          08-04 事故后的成交流水真相源）。原 env 驱动的 CSV 回退开关（A2 已退役）+
+          DB 异常自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下会重复，违反 SSoT 红线）。
 
     过滤维度（AND 关系，与原 CSV 读口同口径）：
     - 日期闭区间：query_fills 按 traded_time 前 8 位与 [start,end] 字典序比较。
