@@ -59,6 +59,8 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
+import sys
 
 # 加载 .env（Task4 已装 python-dotenv；环境无 dotenv 时 fallback 跳过，env 由
 # 外层 schtasks/PM2 注入亦可——本行只是开发便利，非业务依赖）。
@@ -89,6 +91,97 @@ from experiment.resolver import resolve_active
 # C-6 V3：单一时间源（_days_since_activation 时点走 clock.now，与 engine.py V2 同款）。
 # 安全性：clock.py 只依赖 trading.calendar，不反向 import __main__，无循环 import。
 from trading import clock
+
+
+# ----------------------------------------------------------------------------
+# W1.4 单引擎启动探测告警（spec §3.3 · [[qmt-connect-1-rootcause]] 根因收口）
+# ----------------------------------------------------------------------------
+# 物理意图：08-04 事故真根因是 ``python -m trading`` 嵌套子进程抢 QMT session
+# （系统 Python 310 + venv310 父子 37168→35736 并存）。多个 ``python -m trading``
+# 并存 → 多写者（CSV/计划/账本）+ QMT session 抢连（connect -1）。
+#
+# 本探测是**告警手段非根治**（controller 已核实探测局限）：
+#   1. Windows 拿不到跨进程 PID：socket connect_ex 只能判端口占用，无法定位持有者 PID
+#      （netstat 在测试里不可靠，psutil 非已有依赖——反魔法原则不引入）；
+#   2. 嵌套父子拦不住：父子进程共享端口归属父，本探测拦不住嵌套父子——
+#      真根治靠运维清理（runbook §1）+ 启动告警；
+#   3. 不自动杀进程：探测命中只 ``sys.exit(1)`` 前 CRITICAL + 钉钉告警，绝不 taskkill
+#      （误杀 schtasks QuanterServer 拉起的合法链风险高）。
+#
+# ``_alert_critical`` 别名：测试 monkeypatch 用（钉钉通道软降级 try/except 已兜底，
+# 测试再 mock 一层避免触发真实网络/通道装配副作用）。
+def _alert_critical(msg: str) -> None:
+    """W1.4 启动探测告警通道（thin wrapper，转发 engine._alert_critical）。
+
+    Why 单独包一层而非直接 ``from trading.engine import _alert_critical`` 顶层 import：
+    engine 顶层 import 会拉起 apscheduler 重链（破坏 __main__ 模块加载性能 + 测试隔离），
+    故延迟到函数体内 import；同时本别名让测试可 ``monkeypatch.setattr(__main__,
+    "_alert_critical", fake)`` 单一断口 mock（避免 patch engine 内部符号）。
+    """
+    try:
+        from trading.engine import _alert_critical as _engine_alert
+        _engine_alert(msg)
+    except Exception:
+        # 软降级：启动期通道未装/网络异常不阻断 sys.exit 决策（exit 是硬约束，告警是辅助）。
+        pass
+
+
+def _port_holder_alive(port: int) -> int | None:
+    """W1.4：探测 ``port`` 是否被占用；被占用返 -1（PID 未知），空闲返 None。
+
+    实现说明（Karpathy 极简 · 纯标准库 socket）：
+        ``socket.connect_ex`` 返 0 表示端口被占（能 connect 上即有监听者）；
+        否则（连接拒绝等）返非 0 → 端口空闲。
+
+    ⚠️ 探测局限（docstring 诚实标注，不可假装能拿 PID）：
+        - **Windows 拿不到跨进程 PID**：socket API 不暴露持有者 PID；netstat 在测试
+          环境不可靠（输出格式/权限波动）；psutil 非已有依赖（反魔法原则不引入）。
+          故被占时统一返 ``-1``（语义=「占用但 PID 未知」），由调用方决定告警文案。
+        - **嵌套父子拦不住**：父子进程共享端口归属父（父 bind、子继承 fd），
+          本探测只能识别「端口被占」无法区分合法父子链 vs 非法双引擎——
+          这是告警手段非根治，真根治靠运维清理（runbook §1）。
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        result = s.connect_ex(("127.0.0.1", port))
+        s.close()
+        if result == 0:
+            return -1  # 端口被占，无法跨进程拿 PID（Windows），返 -1 表示「占用但 PID 未知」
+        return None
+    except OSError:
+        # 探测本身异常（权限/网络栈故障）保守视为未占用：避免探测工具自伤启动链
+        # （宁可漏报双引擎，也不能误杀唯一合法实例；真双引擎靠 runbook §1 人工核验）。
+        return None
+
+
+def _assert_single_instance(port: int = 8000) -> None:
+    """W1.4：单引擎硬约束——``port`` 被既有实例占用 → CRITICAL + 钉钉 + sys.exit(1)。
+
+    物理意图（spec §3.3 · [[qmt-connect-1-rootcause]]）：
+        防双 ``python -m trading`` 并存抢 QMT session。端口 8000 是引擎 server 单例锚点
+        （uvicorn bind 第二实例本应 WSAEADDRINUSE 自退，但 Windows 嵌套父子 fd 继承
+        会绕过 bind 校验——故在 ``run_server`` 入口显式探测兜底）。
+
+    行为：
+        - 探测返 None（端口空闲）→ 直接 return，正常起 server；
+        - 探测返 -1 或 PID（端口被占）→ ``logger.critical`` + 钉钉 ``_alert_critical``
+          + ``sys.exit(1)``（**绝不 taskkill**，误杀 schtasks QuanterServer 链风险高）。
+
+    ⚠️ 局限（同 ``_port_holder_alive`` docstring）：拿不到 PID / 拦不住嵌套父子。
+    """
+    holder = _port_holder_alive(port)
+    if holder is not None:
+        msg = (
+            f"端口 {port} 已被既有引擎实例占用（holder_pid={holder}）。"
+            f"禁止双引擎并行（QMT session 抢连 connect -1 根因，[[qmt-connect-1-rootcause]]）。"
+            f"请先按 runbook §1 清理多余 python.exe 进程（tasklist /FI + schtasks QuanterServer 链核对），"
+            f"再启动本实例。"
+        )
+        logger.critical(msg)
+        _alert_critical(msg)
+        sys.exit(1)
+
 
 
 def _days_since_activation(activated_at):
@@ -231,6 +324,13 @@ def run_server() -> None:
     # 惰性 import：避免模块顶层 import uvicorn 拉起 fastapi/starlette 重链
     # （test_main.py 的 import trading.__main__ 不应连带加载 server 栈）。
     import uvicorn
+
+    # W1.4 单引擎硬约束探测（spec §3.3）：起 uvicorn 前先确认 port 8000 未被既有
+    # 引擎实例占用。命中即 sys.exit(1)（防双进程抢 QMT session，connect -1 根因）。
+    # 局限：嵌套父子拦不住（见 _assert_single_instance docstring），真根治靠 runbook §1。
+    server_port = int(os.getenv("SERVER_PORT", "8000"))
+    _assert_single_instance(server_port)
+
     uvicorn.run(
         "presentation.server.main:app",
         host=os.getenv("SERVER_HOST", "0.0.0.0"),
