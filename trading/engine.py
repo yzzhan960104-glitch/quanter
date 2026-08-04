@@ -615,11 +615,15 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
     # 默认 false → confirmed=False 保持人审（回复「确认」才挂，spec §2 红线，向后兼容）。
     trading_plan.save_plan(date, order_dicts)
     auto_confirmed = os.getenv("AUTO_CONFIRM_PLAN", "").lower() in ("true", "1", "yes")
-    if auto_confirmed:
-        trading_plan.confirm_plan(date)  # 全自动：落盘即确认，pre_open 直挂
     # state-store-redesign §3.3：plan 双写——DB 落 trade_event(SIGNAL, meta=计划参数) 作真相源，
     # JSON 保留给人看/veto CLI/钉钉。SIGNAL 幂等（UNIQUE account_id+trade_id+action）：重跑 eod_plan
     # 已存在则跳过（不重复记）。account_id 缺省走默认账户（_migrate_env_to_account 在启动期落真实账户）。
+    #
+    # W2 顺序约束（不可调）：SIGNAL DB 必须在 confirm_plan 之前写。物理：confirm_plan
+    # （W2 改造）会写 DB CONFIRMED，eod_plan auto 路径在 SIGNAL 之后也写 CONFIRMED（veto 保护
+    # 复检）。若 confirm_plan 先于 SIGNAL，CONFIRMED 的 event_id < SIGNAL，get_latest_action
+    # 返 SIGNAL 掩盖 CONFIRMED（get_latest_action 按 event_id DESC）→ test_eod_plan_auto_confirm_event
+    # 回归。故 SIGNAL 先写保证 CONFIRMED 是最新 action（与 pre_open 防线读取语义一致）。
     try:
         account_id = _resolve_account_id()
         # 确保 account 行存在（trade_event/order FK 引用；init_store 只建表不插行）
@@ -639,6 +643,11 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
     except Exception:
         # DB 写失败不阻断 eod_plan 主流程（plan JSON 已落，DB 软降级，下次 eod 补写）
         logger.exception("eod_plan 落 trade_event(SIGNAL) 失败（不阻断主流程，软降级）")
+    if auto_confirmed:
+        # 全自动：落盘 + SIGNAL DB 写完后才 confirm_plan（顺序保证 CONFIRMED 是最新 action）。
+        # confirm_plan 自身也会写 DB CONFIRMED（W2 补的对齐人审路径），但 eod_plan 上方已
+        # 先写一遍（auto 路径专属），confirm_plan 内部 insert_trade_event(CONFIRMED) 幂等跳过。
+        trading_plan.confirm_plan(date)
     # 持仓段注入 QMT 真实持仓（全量口径，和持仓播报同源）：研究员钉钉人审要看券商实际
     # 仓位（含 T+1 冻结），而非 engine 记账（dry_run 空仓 + 不含 smoke 直接 broker 操作）。
     # 网关未连/异常 → None，push 内部退回 position_book 本地账本（软降级，不阻断推送）。

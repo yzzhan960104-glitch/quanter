@@ -78,6 +78,23 @@ def load_plan(date: str) -> dict | None:
 def confirm_plan(date: str) -> bool:
     """标记 T 日计划为已确认（人工钉钉确认后调）。
 
+    W2 · DB+JSON 双写（与 eod_plan auto_confirm 路径对齐，真相源不漂移）：
+        物理：JSON confirmed=true 是展示镜像，DB trade_event(CONFIRMED) 是 pre_open
+        据放行的真相源。人工钉钉确认触发本函数时，必须与 eod_plan 自动确认路径
+        （engine.py:638 写 DB CONFIRMED）口径一致——否则人审确认的 plan 在 DB 层
+        「没确认」，pre_open 防线查不到 CONFIRMED 仍可能误判（虽然 pre_open 主防线
+        是 JSON confirmed，但 DB 真相源漂移会污染后续 report/对账）。
+
+        veto 保护：``get_latest_action(trade_id) != "VETOED"`` 才写 CONFIRMED——
+        研究员否决是 opt-out 终局动作，不被机器确认覆盖（与 eod_plan:637 同款守卫）。
+
+    失败语义（与 veto 抛错形成对比，设计差异非不一致）：
+        - veto DB 失败 → 抛错（刹车假成功=放行=不可逆实盘敞口）。
+        - confirm DB 失败 → **软降级**（logger.exception，JSON 照写）。物理：人审确认
+          是 opt-in 流程，JSON 已是真相源的展示镜像 + pre_open 主防线读 JSON confirmed，
+          DB 下次 eod 补写即可；若 confirm 因 DB 失败而抛错，会阻断人审钉钉流程
+          （确认回复无响应、研究员以为没确认成功反而重复操作），更糟。
+
     幂等：重复确认返 True，不会改写 orders。
 
     Returns:
@@ -87,6 +104,26 @@ def confirm_plan(date: str) -> bool:
     if plan is None:
         # 计划不存在绝不能仅凭一次调用就置确认位，否则 pre_open 会挂空计划。
         return False
+    # W2：人工确认路径补 DB CONFIRMED（与 eod_plan auto 路径对齐，真相源不漂移）。
+    # 软降级：DB 失败不阻断人审确认（见上方失败语义 docstring）。
+    try:
+        from trading import state_store
+        account_id = os.getenv("QMT_ACCOUNT_ID", state_store._DEFAULT_ACCOUNT_ID)
+        state_store.init_store()
+        if state_store.get_account(account_id) is None:
+            state_store.upsert_account(account_id, broker="qmt")
+        for o in plan.get("orders", []):
+            sym = (o.get("order") or {}).get("symbol")
+            if not sym:
+                continue
+            trade_id = f"{account_id}_{sym}_{date}"  # 与 eod_plan/_pre_open_impl 同口径
+            # veto 保护：最新 action=VETOED 不覆盖（人审否决不被机器确认推翻）
+            if state_store.get_latest_action(trade_id) != "VETOED":
+                state_store.insert_trade_event(account_id, trade_id, sym, "CONFIRMED")
+    except Exception:
+        # 软降级：JSON 已是真相源展示镜像，pre_open 主防线读 JSON confirmed；
+        # DB 下次 eod 补写。不阻断人审确认流程（见 docstring 失败语义）。
+        logger.exception("confirm_plan DB 写 CONFIRMED 失败（软降级，JSON 照写）")
     plan["confirmed"] = True
     _plan_path(date).write_text(
         json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
