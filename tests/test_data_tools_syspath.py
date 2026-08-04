@@ -9,10 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-# 受影响 11 文件(迁移遗留 2 层 dirname,需为 3 层)
+# 受影响 10 文件(迁移遗留 2 层 dirname,需为 3 层;sync_rate_data.py 已随旧 akshare
+# 湖退役删除——shibor 走 Tushare 管线,lpr/cn_m 不再采集)
 SYNC_SCRIPTS = [
     "data/tools/sync_tushare.py",
-    "data/tools/sync_rate_data.py",
     "data/tools/scan_integrity.py",
     "data/tools/sync_data_lake.py",
     "data/tools/probe_tushare_fields.py",
