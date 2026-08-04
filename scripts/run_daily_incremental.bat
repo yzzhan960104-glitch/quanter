@@ -10,5 +10,7 @@
 ::
 :: 退出码 0=成功/已最新；1=失败（schtasks 层默认不熔断，仅 Last Run Result 可观测）。
 cd /d F:\quanter
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 call .venv310\Scripts\activate.bat
 python data\tools\sync_daily_incremental.py

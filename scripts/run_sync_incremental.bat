@@ -6,4 +6,6 @@ REM 日志重定向到 data_lake/.syncing/sync_incremental.stdout.log（脚本�
 REM sync_incremental.log，此处的 stdout 捕获异常 traceback 与控制台总结，方便排障）。
 
 cd /d F:\quanter
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 "F:\quanter\.venv310\Scripts\python.exe" data/tools/sync_incremental.py >> data_lake/.syncing/sync_incremental.stdout.log 2>&1

@@ -59,11 +59,14 @@ async def run_brief_all() -> int:
             log_fh.close()
         rcs.append((bot, rc))
         if rc != 0:
-            print(f"⚠️ {bot} 播报失败 rc={rc}（继续其余 bot）")
+            print(f"[!] {bot} 播报失败 rc={rc}（继续其余 bot）")
     return 1 if any(rc != 0 for _, rc in rcs) else 0
 
 
 def main() -> int:
+    # stdout UTF-8 治理:防 schtasks bat 直跑下 GBK 管道崩 emoji(详见 infra/pyio.py)
+    from infra.pyio import force_utf8_stdout
+    force_utf8_stdout()
     print(f"=== brief_all 启动（{len(BOTS)} 个 bot 串行）===")
     rcs = []
     for bot in BOTS:
@@ -71,7 +74,7 @@ def main() -> int:
         rc = subprocess.call([PY, "-m", "broadcast", "--bot", bot], cwd=str(ROOT))
         rcs.append((bot, rc))
         if rc != 0:
-            print(f"⚠️ {bot} 播报失败 rc={rc}（继续其余 bot）")
+            print(f"[!] {bot} 播报失败 rc={rc}（继续其余 bot）")
     print("\n=== brief_all 汇总 ===")
     for bot, rc in rcs:
         print(f"  {'OK' if rc == 0 else 'FAIL'} {bot}: rc={rc}")

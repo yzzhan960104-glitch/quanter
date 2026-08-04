@@ -4,5 +4,7 @@
 :: 单次触发：重采窗口（每 15min 重采至 20:00 deadline）由 run_data_check 进程内 sleep 控制。
 :: 仍 FAIL → 熔断 eod_plan（不交易不自欺，绝不用 T-1 兜底算 T+1＝前视偏差）。
 cd /d F:\quanter
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 call .venv310\Scripts\activate.bat
 python -m data.tools.run_data_check t2

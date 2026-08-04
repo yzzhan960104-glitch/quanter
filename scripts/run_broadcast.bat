@@ -5,4 +5,6 @@ REM 找不到 config/ data_lake/ broadcast/ 而 ModuleNotFoundError。先 cd /d 
 REM 日志重定向到 logs/broadcast.log（与 logs/.last_broadcast 同目录）。
 
 cd /d F:\quanter
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 "F:\quanter\.venv310\Scripts\python.exe" -m broadcast >> logs\broadcast.log 2>&1

@@ -39,6 +39,9 @@ STEPS = [
 
 
 def main() -> int:
+    # stdout UTF-8 治理:防 schtasks bat 直跑下 GBK 管道崩 emoji(详见 infra/pyio.py)
+    from infra.pyio import force_utf8_stdout
+    force_utf8_stdout()
     print(f"=== data_pipeline 启动（{len(STEPS)} 步串行）===")
     rcs = []
     for name, cmd in STEPS:

@@ -95,6 +95,9 @@ def export_task(params_list: list, lake_start: str = "2025-01-01",
 
 def main(argv: list[str] | None = None) -> int:
     """CLI:python -m compute_unit.task_export --params-file <json> --out <path>。"""
+    # stdout UTF-8 治理:防 GBK 管道崩 emoji(详见 infra/pyio.py)
+    from infra.pyio import force_utf8_stdout
+    force_utf8_stdout()
     p = argparse.ArgumentParser(prog="python -m compute_unit.task_export",
                                 description="Win 端导出 task.json(Mac 拉取跑批)")
     p.add_argument("--params-file", required=True, help="JSON 文件,内容为 params dict 的 list")

@@ -20,6 +20,9 @@ from compute_unit.env_check import EnvDriftError   # 异常类是常量,直接�
 
 def main(argv: list[str] | None = None) -> int:
     """CLI 总入口。返 0=成功 / 3=环境漂移 / 1=其他错误。"""
+    # stdout UTF-8 治理:防 GBK 管道崩 emoji(详见 infra/pyio.py)
+    from infra.pyio import force_utf8_stdout
+    force_utf8_stdout()
     p = argparse.ArgumentParser(prog="python -m compute_unit", description="Mac 远程计算单元(回测)")
     sub = p.add_subparsers(dest="cmd", required=True)
 

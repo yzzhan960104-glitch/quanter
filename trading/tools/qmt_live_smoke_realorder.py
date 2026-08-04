@@ -191,6 +191,9 @@ def _summary():
 
 
 if __name__ == "__main__":
+    # stdout UTF-8 治理:防 GBK 管道崩 emoji(详见 infra/pyio.py)
+    from infra.pyio import force_utf8_stdout
+    force_utf8_stdout()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
