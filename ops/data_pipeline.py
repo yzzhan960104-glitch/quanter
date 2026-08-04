@@ -28,6 +28,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 os.chdir(ROOT)  # 锁项目根（子任务用相对路径 data/tools/...）
+# 2026-08-05 事故修复：本脚本以 `python ops/data_pipeline.py` 方式执行时 sys.path[0]=ops/，
+# 仓库根不在 path → `from infra.pyio import force_utf8_stdout` ModuleNotFoundError → rc=1 →
+# pipeline fail-closed 拒产 T+1 计划（08-05 计划缺失根因）。与 trigger_eod_once 同范式锚根。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 PY = sys.executable  # .bat 用 .venv310 跑本脚本，子任务复用同一解释器
 
 # (步骤名, 命令) —— 串行顺序即物理时序

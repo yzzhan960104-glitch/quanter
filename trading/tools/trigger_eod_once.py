@@ -25,18 +25,31 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
-
-# C-6 V3：单一时间源（CLI 今日触发走 clock.today，与 engine.py V2 同款）。
-from trading import clock
 
 # 三层 dirname（与 smoke_trading_engine.py 同范式，防 tools 路径少算一层 bug）：
 # trigger_eod_once.py → tools → trading → quanter（项目根）。
 ROOT = Path(__file__).resolve().parent.parent.parent
 os.chdir(ROOT)
+# 2026-08-05 事故修复：原 `from trading import clock` 在锚根之前执行，脚本直跑必抛
+# ModuleNotFoundError（sys.path[0]=tools/）。仓库根必须先入 path，再做仓库内 import。
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# C-6 V3：单一时间源（CLI 今日触发走 clock.today，与 engine.py V2 同款）。
+from trading import calendar, clock
+
+
+def _plan_path_for(today: str) -> Path:
+    """补跑/触发场景的落盘文件路径：eod 恒产 T+1（plan_date），不能查 today 文件。
+
+    2026-08-05 修复：原复核逻辑查 ``plan_{today}.json``，而 ``_eod()`` 落的是
+    ``plan_{next_trading_day(today)}.json``——补跑场景永远误报「计划未落盘」。
+    """
+    plan_date = calendar.next_trading_day(today)
+    plan_dir = Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
+    return plan_dir / f"plan_{plan_date}.json"
+
 
 # 切 stdio UTF-8（Windows GBK 控制台默认编码不了 ✅/❌ 等 Unicode 符号，与
 # run_trading_engine.bat 的 PYTHONUTF8=1 同理，防中文乱码/UnicodeEncodeError）。
@@ -64,8 +77,7 @@ async def _run() -> int:
     await eng._eod()
 
     # 复核落盘计划（肉眼确认信号标的 + 止损/止盈/盈亏比）
-    plan_dir = Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
-    plan_path = plan_dir / f"plan_{today}.json"
+    plan_path = _plan_path_for(today)
     if plan_path.exists():
         payload = json.loads(plan_path.read_text(encoding="utf-8"))
         orders = payload.get("orders", [])

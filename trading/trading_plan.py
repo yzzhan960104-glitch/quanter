@@ -147,7 +147,15 @@ def _load_name_map() -> dict:
     try:
         import pandas as pd
         sb = pd.read_parquet("data_lake/stock_basic.parquet")
-        _NAME_MAP_CACHE = dict(zip(sb["ts_code"], sb["name"]))
+        # 2026-08-05 schema 兼容：stock_basic.parquet 的 ts_code 在 MultiIndex 索引层
+        # （index, ts_code），历史版本是 ts_code 列；无 ts_code 时回退 symbol 列。
+        if "ts_code" in sb.columns:
+            codes = sb["ts_code"]
+        elif "ts_code" in sb.index.names:
+            codes = sb.index.get_level_values("ts_code")
+        else:
+            codes = sb["symbol"]
+        _NAME_MAP_CACHE = dict(zip(codes, sb["name"]))
     except Exception:
         logger.exception("加载 stock_basic 名称映射失败（推送将只显代码）")
         _NAME_MAP_CACHE = {}
