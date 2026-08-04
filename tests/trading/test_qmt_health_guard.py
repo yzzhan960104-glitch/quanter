@@ -7,37 +7,105 @@ def _gw(userdata):
     from broker.qmt import QmtExecutionGateway
     return QmtExecutionGateway(userdata_path=userdata, account_id="10110356", session_id=777888)
 
+# ============================================================ W1.1（2026-08-04 根治）
+# is_client_ready 重定义：connect 返回码 = 客户端可用性唯一权威。
+#   userdata 目录在 → True（放行让上层 connect，由返回码定权威结论）；
+#   目录缺失/空 → False（connect 必失败的唯一该挡场景）。
+#   mtime 判据降级为 _client_staleness_diag 的日志分类素材，绝不硬前置。
+# 详见 broker/qmt.py is_client_ready docstring（08-04 事故根因）。
 def test_is_client_ready_false_when_dir_missing():
+    """W1.1：userdata 目录不存在 = 客户端必然未起 → False（connect 必失败的唯一该挡场景）。"""
     gw = _gw("/nonexistent/path/xyz")
     assert gw.is_client_ready() is False
+    # 诊断函数同步描述「不存在/缺失」供 health_guard WARNING 文案用
+    diag = gw._client_staleness_diag()
+    assert "不存在" in diag or "缺失" in diag
 
-def test_is_client_ready_false_when_files_stale(tmp_path):
-    """userdata 下文件都 >5min 未动 → 客户端没在跑 → False。"""
-    (tmp_path / "down_queue_win_777888").write_bytes(b"x")
-    old = time.time() - 9999
-    os.utime(tmp_path / "down_queue_win_777888", (old, old))
+
+def test_is_client_ready_true_when_userdata_dir_exists_even_if_stale(tmp_path):
+    """W1.1 核心：userdata 目录存在即视客户端进程在 → ready，mtime 陈旧不再硬前置。
+
+    物理：connect 返回码才是权威；文件 mtime 只做日志分类，防 08-04 静默跳过复发。
+    故意只放一个老旧缓存文件（旧逻辑会判 stale=False，新逻辑判 True）。"""
+    userdata = tmp_path / "userdata_mini"
+    userdata.mkdir()
+    (userdata / "miniqmtShmCache_old").write_text("x")
+    old = time.time() - 3600  # 1 小时前
+    os.utime(userdata / "miniqmtShmCache_old", (old, old))
+
+    gw = _gw(str(userdata))
+    assert gw.is_client_ready() is True  # 目录存在 → 进程可能在 → 放行 connect
+    # 诊断函数能描述「陈旧」供告警用（文案稳定可断言，是 T2 WARNING 的来源）
+    diag = gw._client_staleness_diag()
+    assert "陈旧" in diag or "正常" in diag
+
+
+def test_is_client_ready_false_when_userdata_dir_empty(tmp_path):
+    """W1.1：目录存在但完全空（刚创建未登录）→ False。
+
+    物理：空目录意味着客户端安装路径被建出但从未登录过，connect 必失败（无会话上下文），
+    与「目录缺失」等价挡掉，避免放行后空跑 connect 撞柜台。"""
+    userdata = tmp_path / "userdata_empty"
+    userdata.mkdir()
+    gw = _gw(str(userdata))
+    assert gw.is_client_ready() is False
+    assert "目录空" in gw._client_staleness_diag()
+
+
+def test_is_client_ready_true_when_only_engine_down_queue_present(tmp_path):
+    """W1.1 语义反转：只有引擎自建 down_queue_win_{sid}（无客户端文件）→ 目录非空 → True。
+
+    Why 反转：旧逻辑把 down_queue 当「自证自」隐患排除（P0-2），但 W1.1 后 connect 返回码
+    才是权威，文件 mtime/类型不再做硬前置——只要目录非空就放行让 connect 自己说话。
+    引擎自建 down_queue 的「自证自」风险由 connect 的 stop-before-recreate + -1 自愈兜底。"""
+    (tmp_path / "down_queue_win_777888").write_bytes(b"x")  # 仅引擎文件，无客户端文件
     gw = _gw(str(tmp_path))
-    assert gw.is_client_ready(staleness_sec=300) is False
+    assert gw.is_client_ready(staleness_sec=300) is True  # 目录非空 → 放行
 
-def test_is_client_ready_true_when_file_fresh(tmp_path):
-    """近 5min 内有活跃 shm/queue 文件 → 客户端在跑 → True。"""
-    (tmp_path / "miniqmtShmStockListCacheSZO").write_bytes(b"x")  # 刚创建=新
+
+# ============================================================ _client_staleness_diag 四态覆盖
+# 诊断函数是 T2 _health_guard WARNING 文案的来源，文案需稳定可断言。
+# 四态：目录缺失 / 目录空 / 无活跃文件（仅目录存在） / 陈旧 N 分钟 / 正常。
+def test_staleness_diag_dir_missing(tmp_path):
+    """诊断态①：userdata 目录不存在 → 文案含「不存在/缺失」。"""
+    gw = _gw(str(tmp_path / "no_such_dir"))
+    diag = gw._client_staleness_diag()
+    assert "不存在" in diag or "缺失" in diag
+
+
+def test_staleness_diag_dir_empty(tmp_path):
+    """诊断态②：目录存在但空 → 文案含「目录空」。"""
+    userdata = tmp_path / "empty_mini"
+    userdata.mkdir()
+    gw = _gw(str(userdata))
+    assert "目录空" in gw._client_staleness_diag()
+
+
+def test_staleness_diag_no_active_files(tmp_path):
+    """诊断态③：目录非空但无 miniqmtShm*/up_queue*/quoter 活跃文件
+    （只有 down_queue 等引擎文件）→ 文案含「无活跃文件」。
+
+    物理：客户端可能未登录或仅引擎跑过，目录在但缺客户端心跳文件。"""
+    (tmp_path / "down_queue_win_777888").write_bytes(b"x")  # 引擎文件，不在活跃 patterns 内
     gw = _gw(str(tmp_path))
-    assert gw.is_client_ready(staleness_sec=300) is True
+    assert "无活跃文件" in gw._client_staleness_diag()
 
 
-def test_is_client_ready_false_when_only_engine_down_queue_fresh(tmp_path):
-    """引擎自建 down_queue_win_{sid} 新鲜 ≠ 客户端就绪（P0-2：防「自证自」）。"""
-    (tmp_path / "down_queue_win_777888").write_bytes(b"x")  # 引擎 XtQuantTrader 创建
+def test_staleness_diag_stale_minutes(tmp_path):
+    """诊断态④：活跃文件存在但 mtime 陈旧（>staleness_sec）→ 文案含「陈旧 N 分钟」。"""
+    (tmp_path / "miniqmtShmStockListCacheSZO").write_text("x")
+    old = time.time() - 3600  # 1 小时前 = 60 分钟陈旧
+    os.utime(tmp_path / "miniqmtShmStockListCacheSZO", (old, old))
     gw = _gw(str(tmp_path))
-    assert gw.is_client_ready(staleness_sec=300) is False
+    diag = gw._client_staleness_diag(staleness_sec=300)
+    assert "陈旧" in diag and "分钟" in diag
 
 
-def test_is_client_ready_true_when_client_up_queue_fresh(tmp_path):
-    """客户端 up_queue_win_xtquant 新鲜 → 就绪（客户端所有文件是可信信号）。"""
-    (tmp_path / "up_queue_win_xtquant").write_bytes(b"x")
+def test_staleness_diag_fresh(tmp_path):
+    """诊断态⑤：活跃文件新鲜（mtime 在 staleness_sec 内）→ 文案含「正常」。"""
+    (tmp_path / "up_queue_win_xtquant").write_bytes(b"x")  # 刚创建=新鲜
     gw = _gw(str(tmp_path))
-    assert gw.is_client_ready(staleness_sec=300) is True
+    assert "正常" in gw._client_staleness_diag()
 
 
 # ============================================================ M1 重连互斥

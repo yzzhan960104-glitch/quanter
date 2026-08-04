@@ -367,31 +367,81 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
 
     # ------------------------------------------------------------------ 连接
     def is_client_ready(self, staleness_sec: int = 300) -> bool:
-        """探测 miniQMT 客户端是否就绪（M1 · 纯文件系统检查，不触 xtquant）。
+        """探测 miniQMT 客户端是否就绪（W1.1 · 2026-08-04 根治后二次重定义）。
 
-        判据：userdata_mini 下 miniqmtShm*Cache* / up_queue_win_* 任一文件 mtime 在近
-        staleness_sec（默认5min）内 = 客户端在跑且活跃。
-        若全部文件老旧/不存在 → 客户端未启动或未登录 → connect 必返 -1，不空跑重连。
+        判据（connect 返回码唯一权威原则）：
+            userdata 目录存在且非空 → True（客户端进程可能在跑，放行让上层 connect，
+            由 trader.connect() 返回码定权威结论：0=成功 / -1=session 残留自愈 / 其他=环境故障）。
+            目录缺失/为空 → False（客户端必然未启动，connect 必失败，唯一该挡的场景）。
 
-        ⚠️ 不含 ``down_queue_win_*``（2026-08-04 根治）：那是引擎 XtQuantTrader 自建的
-        会话文件，会被引擎自己刷新——若把它当客户端信号，客户端未起时引擎会「自证
-        就绪」并提前 connect，先于客户端创建会话文件 → 客户端后起挂上后同 sid 恒 -1。
+        ⚠️ 不再用 miniqmtShm*Cache*/up_queue_win_* 的 mtime 做硬前置：
+            那是客户端【启动时一次性生成】的共享内存镜像，运行期间不刷新，>5min 即判死 →
+            _health_guard 永不 connect（08-04 事故根因：09:22 pre_open 静默跳过、计划正常
+            却一张单没挂）。mtime 降级为 _client_staleness_diag 的日志分类素材，仅供
+            health_guard WARNING 文案用，绝不阻断 connect 尝试（否则换探针复发静默跳过）。
 
-        Why 纯文件检查：不触达 xtquant（C++ 扩展），CI/单测/无 SDK 环境可安全调用；
-        且文件 mtime 是客户端存活的最可靠信号（进程名因东财定制不定匹配）。
+        Args:
+            staleness_sec: 保留入参兼容既有 caller（_gw_health_gate/bootstrap/_health_guard
+                均以默认 300s 调用），本方法已不做 mtime 判据，入参仅透传给诊断函数。
+
+        Why 纯文件检查：不触达 xtquant（C++ 扩展），CI/单测/无 SDK 环境可安全调用。
+        """
+        if not self._userdata_path or not os.path.isdir(self._userdata_path):
+            return False
+        # 目录存在但完全空（刚创建未登录）也视未就绪——connect 必失败（无会话上下文）。
+        # Why 不放行空目录：避免空跑 connect 撞柜台，与「目录缺失」等价挡掉。
+        try:
+            if not any(os.scandir(self._userdata_path)):
+                return False
+        except OSError:
+            # 目录不可读（权限错/IO 错）保守视未就绪，让上层走诊断文案定位
+            return False
+        return True
+
+    def _client_staleness_diag(self, staleness_sec: int = 300) -> str:
+        """客户端活跃度诊断文案（W1.1，仅供 health_guard WARNING 用，不做硬前置）。
+
+        物理：is_client_ready 已不做 mtime 判据（connect 返回码唯一权威），但运维仍需
+        一眼定位「断线是客户端未起 / 未登录 / 仅仅是 shm 陈旧」。本函数把原 mtime 启发式
+        改造成纯日志分类素材，返回稳定文案供 T2 _health_guard WARNING 拼接。
+
+        Returns:
+            四态稳定文案（T2 会断言含「不存在/目录空/无活跃文件/陈旧/正常」之一）：
+              - 目录缺失 → "userdata 目录不存在（客户端未安装/路径错）"
+              - 目录空   → "userdata 目录空（客户端未登录）"
+              - 目录不可读 → "userdata 目录不可读"
+              - 无活跃文件（仅目录存在）→ "无活跃文件（仅目录存在，客户端可能未登录）"
+              - 活跃文件陈旧 → "文件最新 mtime 陈旧 N 分钟"
+              - 活跃文件新鲜 → "正常（文件新鲜）"
         """
         import glob as _glob
         if not self._userdata_path or not os.path.isdir(self._userdata_path):
-            return False
+            return "userdata 目录不存在（客户端未安装/路径错）"
+        try:
+            if not any(os.scandir(self._userdata_path)):
+                return "userdata 目录空（客户端未登录）"
+        except OSError:
+            return "userdata 目录不可读"
+        # 活跃度启发式：quoter 行情目录 + 启动缓存任一新鲜 → 活跃；全老旧 → 陈旧告警。
+        # Why 加 quoter：miniqmtShm*/up_queue_* 是启动时一次性生成（不刷新），quoter
+        #    行情目录在盘中会被行情主推刷新，是更敏感的存活信号。
         now = time.time()
-        for pat in ("miniqmtShm*Cache*", "up_queue_win_*"):
+        patterns = ("miniqmtShm*Cache*", "up_queue_win_*", "quoter")
+        newest = 0.0
+        for pat in patterns:
             for f in _glob.glob(os.path.join(self._userdata_path, pat)):
                 try:
-                    if now - os.path.getmtime(f) < staleness_sec:
-                        return True
+                    m = os.path.getmtime(f)
+                    if m > newest:
+                        newest = m
                 except OSError:
                     continue
-        return False
+        if newest == 0.0:
+            # 目录非空但活跃 patterns 都没匹配（可能只有 down_queue 等引擎文件）
+            return "无活跃文件（仅目录存在，客户端可能未登录）"
+        age_min = int((now - newest) / 60)
+        # staleness_sec//60 把秒阈值换算成分钟阈值，与 mtime age_min 同口径比对
+        return f"文件最新 mtime 陈旧 {age_min} 分钟" if age_min > staleness_sec // 60 else "正常（文件新鲜）"
 
     async def connect(self) -> None:
         """
