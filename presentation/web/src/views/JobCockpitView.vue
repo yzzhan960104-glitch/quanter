@@ -28,10 +28,12 @@ import {
   type CatchupState,
 } from '../api/trading'
 import { logger } from '../utils/logger'
+import { toLocalDateStr } from '../utils/date'
 
 // 进入视图时凝固一次业务日期（防跨午夜漂移：进入时 23:59:59，轮询后跨到次日 00:00:01
 // 不应把"昨日台账"误当作"今日"再次查询）。每次重渲染不刷新。
-const businessDate = new Date().toISOString().slice(0, 10)
+// 用本地时区工具：toISOString 在北京凌晨 0-8 点会取到 UTC 昨日，台账整体错位一天。
+const businessDate = toLocalDateStr()
 
 const snapshot = ref<JobsSnapshot | null>(null)
 const loading = ref(false)

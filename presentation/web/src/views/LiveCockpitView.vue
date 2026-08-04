@@ -31,6 +31,7 @@ import {
   type TradingStatus, type PositionRow, type OrderRow, type Asset,
 } from '../api/trading'
 import { logger } from '../utils/logger'
+import { toLocalDateStr } from '../utils/date'
 
 use([TreemapChart, TooltipComponent, CanvasRenderer])
 
@@ -94,7 +95,9 @@ function sideLabel(row: OrderRow): string {
 const exportRange = ref<[string, string]>(lastNDays(30))
 function lastNDays(n: number): [string, string] {
   const end = new Date(); const start = new Date(); start.setDate(start.getDate() - n)
-  return [start.toISOString().slice(0, 10), end.toISOString().slice(0, 10)]
+  // 区间起止也用本地时区：toISOString 在北京凌晨 0-8 点会把当日归到 UTC 昨日，
+  // 导致导出区间端点整体前移一天，漏掉今日数据。
+  return [toLocalDateStr(start), toLocalDateStr(end)]
 }
 const exporting = ref(false)
 async function onExport() {

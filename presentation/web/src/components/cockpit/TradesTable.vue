@@ -58,9 +58,11 @@ import { ref, reactive, onMounted } from 'vue'
 // 路径修正：本文件在 src/components/cockpit/，src/api/trading.ts 是 ../../api/trading。
 // brief Step 3 骨架写的 '../../../api/trading' 多退一层会跳出 src 目录，此处显式修正。
 import { queryTrades, type TradesPage } from '../../api/trading'
+import { toLocalDateStr } from '../../utils/date'
 
 // 当天日期（YYYY-MM-DD）：流水查询窗口默认只看今天，与驾驶舱「观测运营层」定位一致。
-const today = new Date().toISOString().slice(0, 10)
+// 用本地时区工具：toISOString 在北京凌晨 0-8 点会取到 UTC 昨日，流水查询整体错位一天。
+const today = toLocalDateStr()
 
 const loading = ref(false)
 const currentPage = ref(1)
