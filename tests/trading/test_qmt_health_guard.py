@@ -460,33 +460,51 @@ async def test_health_guard_not_ready_warns_with_diag(monkeypatch, caplog):
              if r.levelno == logging.WARNING and "客户端未就绪" in r.getMessage()]
     assert len(warns) >= 1, "未就绪分支必须打 WARNING"
     assert "目录不存在" in warns[0].getMessage() or "客户端未安装" in warns[0].getMessage()
-    # 首轮不推钉钉（节流：% 10 == 0 才推，第 10/20/... 轮）
+    # 首轮即推钉钉（I-1 收口 · 断线立刻可见：_not_ready_rounds==1 立即首推）
+    assert eng._not_ready_rounds == 1
+
+
+@pytest.mark.asyncio
+async def test_health_guard_not_ready_alert_fires_on_first_round(monkeypatch):
+    """I-1：首次未就绪（第 1 轮）立即推钉钉——断线立刻可见，不延迟到第 10 轮。
+
+    物理意图：盘中 09:22 pre_open 前断线时，旧版节流要等到第 10 轮（≈10min 后）
+    才首推，pre_open 已被 gate 静默跳过。新口径 _not_ready_rounds==1 即推一条，
+    让操作员在 pre_open 窗口关闭前有机会介入。
+    """
+    from unittest.mock import patch
+    eng, gw, fired = _make_engine_with_not_ready_gw(monkeypatch)
+    with patch("trading.engine.get_gateway", return_value=gw):
+        await eng._health_guard()  # 仅 1 轮
+    assert len(fired) == 1, f"首轮应立即推 1 次钉钉（断线立刻可见），实际 {len(fired)}"
+    assert "目录不存在" in fired[0] or "客户端未安装" in fired[0]
+    assert "1 轮" in fired[0]
     assert eng._not_ready_rounds == 1
 
 
 @pytest.mark.asyncio
 async def test_health_guard_not_ready_throttles_alert_every_10_rounds(monkeypatch):
-    """W1.2：连续 12 轮未就绪 → 只在每第 10 轮推一次钉钉（节流防风暴）。"""
+    """I-1：连续 12 轮未就绪 → 第 1 轮首推 + 第 10 轮再推（首轮即推 + 后续 10 轮节流）。"""
     from unittest.mock import patch
     eng, gw, fired = _make_engine_with_not_ready_gw(monkeypatch)
     with patch("trading.engine.get_gateway", return_value=gw):
         for _ in range(12):
             await eng._health_guard()
-    # 12 轮只推 1 次（第 10 轮），第 11/12 轮不推
-    assert len(fired) == 1, f"12 轮应只推 1 次钉钉（每 10 轮），实际 {len(fired)}"
+    # 12 轮推 2 次（第 1 轮首推 + 第 10 轮节流推），第 11/12 轮不推
+    assert len(fired) == 2, f"12 轮应推 2 次钉钉（首推 + 第 10 轮），实际 {len(fired)}"
     assert "目录不存在" in fired[0] or "客户端未安装" in fired[0]
     assert eng._not_ready_rounds == 12
 
 
 @pytest.mark.asyncio
 async def test_health_guard_not_ready_alert_at_round_20(monkeypatch):
-    """W1.2：第 20 轮再推一次（节流是 % 10，不是只推首尾）。"""
+    """I-1：第 20 轮共推 3 次（第 1 轮首推 + 第 10 + 第 20 节流推）。"""
     from unittest.mock import patch
     eng, gw, fired = _make_engine_with_not_ready_gw(monkeypatch)
     with patch("trading.engine.get_gateway", return_value=gw):
         for _ in range(20):
             await eng._health_guard()
-    assert len(fired) == 2, f"20 轮应推 2 次（第 10 + 第 20），实际 {len(fired)}"
+    assert len(fired) == 3, f"20 轮应推 3 次（第 1 + 第 10 + 第 20），实际 {len(fired)}"
 
 
 @pytest.mark.asyncio

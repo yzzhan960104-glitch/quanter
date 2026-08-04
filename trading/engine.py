@@ -2299,10 +2299,10 @@ class TradingEngine:
                 # 旧文案只说「未就绪」不告诉你为什么——操作员看到日志仍要去翻 userdata 找原因。
                 # 接入 gw._client_staleness_diag()（T1 四态文案：目录缺失/目录空/无活跃文件/陈旧 N 分钟）
                 # 让启动失败时日志自带根因，缩短排障时间。hasattr 兜底防 gw 未升级。
-                _bs_diag = gw._client_staleness_diag() if hasattr(gw, "_client_staleness_diag") else "无诊断"
+                diag = gw._client_staleness_diag() if hasattr(gw, "_client_staleness_diag") else "无诊断"
                 logger.warning(
                     "miniQMT 客户端未就绪（is_client_ready=False，%s），bootstrap 跳过 connect——"
-                    "由 health_guard 在客户端就绪后连接（避免先于客户端创建会话文件）", _bs_diag)
+                    "由 health_guard 在客户端就绪后连接（避免先于客户端创建会话文件）", diag)
 
         # 初始化本地持仓账本（gap4 · 幂等建表，对齐 experiment/store.init_db 范式）。
         # 必须在 start() 之前：cron 一旦启动，_handle_order_update/_post_close 就可能
@@ -2381,11 +2381,17 @@ class TradingEngine:
             diag = gw._client_staleness_diag() if hasattr(gw, "_client_staleness_diag") else "无诊断"
             logger.warning("health_guard 客户端未就绪，跳过 connect（%s，连续 %d 轮）",
                            diag, self._not_ready_rounds)
-            # 节流钉钉：每 10 轮推一次（% 10 == 0）。Why 不首推：60s 周期若每轮推，
-            # 一天断线可堆 1440 条告警刷爆通道；首推 ≈ 第 10min（断线已持续足够久，
-            # 确认非瞬时抖动）。_alert_critical 内部 fire_and_forget 软降级——告警失败
-            # 不阻塞守护主链路（try/except 在 _alert_critical 内兜底，C-4 错误分级决议）。
-            if self._not_ready_rounds % 10 == 0:
+            # 节流钉钉（I-1 收口 · 断线立刻可见）：首轮即推 + 后续每 10 轮节流推一次。
+            # 物理意图：盘中 09:22 pre_open 前断线时，旧版「% 10 == 0」要等到第 10 轮
+            # （≈10min 后 = 09:32）才首推，pre_open 已被 gate 静默跳过，错过人审介入窗口。
+            # 新口径 _not_ready_rounds==1（刚发现未就绪）立即推一条让操作员在 pre_open
+            # 窗口关闭前有机会介入；后续 10/20/30... 轮节流推一次防告警风暴。
+            # Why 首推不会引起风暴：风暴是连续推送累积效应（60s/轮 × N 轮），
+            # 单次首推仅 1 条，反而能在断线最早期（最值得告警的时刻）触达操作员。
+            # 断线恢复又断线时 _not_ready_rounds 在 ④ 就绪分支清零再 +1，每次新断线都首推。
+            # _alert_critical 内部 fire_and_forget 软降级——告警失败不阻塞守护主链路
+            # （try/except 在 _alert_critical 内兜底，C-4 错误分级决议）。
+            if self._not_ready_rounds == 1 or self._not_ready_rounds % 10 == 0:
                 _alert_critical(
                     f"health_guard 客户端连续未就绪 {self._not_ready_rounds} 轮"
                     f"（≈{self._not_ready_rounds}min），网关无法自愈重连（{diag}）。"
