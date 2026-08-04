@@ -1699,27 +1699,26 @@ def test_post_close_trailing_evolves_plan_stop(monkeypatch):
 
 
 # ============================================================================
-# 4.10 Task 11（R-1 盘后 query_trades 兜底纠正）：post_close reconcile 后成交流水交叉校验
+# 4.10 W3.4（broker 权威对账）：post_close ① reconcile（broker 权威）+ ② CSV 归因展示
 # ============================================================================
 def test_post_close_query_trades_reconcile_drift(monkeypatch):
-    """post_close ② query_trades 兜底：CSV 流水聚合 vs position_book drift → 以 CSV 为准重写 + 告警。
+    """post_close ② CSV 归因展示：CSV 流水聚合 vs position_book 出入 → 仅日志展示，不重写账本。
 
-    物理意图（plan Task 11 · spec §5.1）：
-        apply_fill 因 db lock/异常漏记（_handle_order_update 软降级），position_book 少记；
-        record_live_trade 写 CSV 是独立 try-except，漏笔概率低于 apply_fill。post_close 用
-        CSV 流水聚合 vs position_book，drift 以 CSV 为准重写 qty（分工：reconcile 查持仓 drift，
-        本步查成交流水漏笔）。
+    W3.4 物理意图（08-04 事故根因修复）：
+        fill 表/CSV 空可能是「网关断线无回报」而非「真无成交」，post_close 不能用 fill/CSV
+        重写 position（否则与柜台漂移）。broker query_stock_positions 才是持仓权威；fill/CSV
+        只解释「今日变动归因」。故 ② 段降级为展示，drift 真相源唯一在 ① broker。
     """
     from trading import position_book
     db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
     monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
     position_book.init_db()
-    # position_book 记 30（apply_fill 漏记致少记：实际成交 100）
+    # position_book 记 30（apply_fill 正确记账）；CSV 聚合返 100（疑似漏回报或重复）
     position_book.apply_fill("ord1", "A.SH", "BUY", 30, 10.0, "2099-01-01 10:00:00")
     today = datetime.now().strftime("%Y-%m-%d")
     position_book.snapshot_start_equity(today, 1_000_000.0)   # 熔断基线（0% 不触发）
 
-    # mock service.aggregate_fills_by_symbol 返当日成交净持仓 100（CSV fill 行权威）
+    # mock service.aggregate_fills_by_symbol 返 100（与账本 30 不一致——归因展示用）
     def _fake_agg(start, end):
         return {"A.SH": 100.0}
     monkeypatch.setattr(
@@ -1738,14 +1737,15 @@ def test_post_close_query_trades_reconcile_drift(monkeypatch):
 
     result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
 
-    assert result.get("trades_reconciled") == 1
-    # 验 position_book 已以 CSV 为准纠正为 100
-    assert position_book.get_local_positions().get("A.SH") == 100.0
+    # W3.4：CSV 归因展示计入 trades_attribution（不再叫 trades_reconciled）
+    assert result.get("trades_attribution") == 1
+    # W3.4 红线：position_book 维持 30，绝不被 CSV 重写成 100（CSV 不再是权威）
+    assert position_book.get_local_positions().get("A.SH") == 30.0
 
 
 def test_post_close_query_trades_no_drift_is_noop(monkeypatch):
     from trading.compute.reconcile import ReconciliationResult
-    """post_close：CSV 聚合 == position_book → 无 drift 不重写（trades_reconciled 不设）。"""
+    """post_close：CSV 聚合 == position_book → 无归因出入（trades_attribution 不设）。"""
     from trading import position_book
     db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
     monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
@@ -1770,15 +1770,15 @@ def test_post_close_query_trades_no_drift_is_noop(monkeypatch):
 
     result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
 
-    assert "trades_reconciled" not in result        # 无 drift 不重写
-    assert position_book.get_local_positions().get("A.SH") == 100.0   # 未改
+    assert "trades_attribution" not in result      # 无出入不设归因
+    assert position_book.get_local_positions().get("A.SH") == 100.0   # 账本未改
 
 
 def test_post_close_query_trades_skipped_when_no_gw(monkeypatch):
-    """post_close：gw=None（dry_run）→ 跳过 query_trades 兜底（无网关无成交可对）。
+    """post_close：gw=None（dry_run）→ 跳过 CSV 归因展示（无网关无成交可归因）。
 
-    物理意图（边界）：dry_run 下 gw=None，无真实成交，CSV 兜底无意义（且避免无网关时
-        误读 CSV 老数据重写账本）。gw=None 跳过 ② 段，与 ① reconcile 同口径。
+    物理意图（边界）：dry_run 下 gw=None，无真实成交，CSV 归因展示无意义（且避免无网关时
+        误读 CSV 老数据产生误导日志）。gw=None 跳过 ② 段，与 ① reconcile 同口径。
     """
     from trading import position_book
     # 隔离 position_book db（防读生产账本 + 误归零真实持仓——live 前影子数据亦不应被测试污染）
@@ -1786,7 +1786,7 @@ def test_post_close_query_trades_skipped_when_no_gw(monkeypatch):
     monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
     position_book.init_db()
     # 确保 gw 全程 None：post_close 内部 ``if gw is None: gw = get_gateway()`` 兜底也要返 None，
-    # 模拟 dry_run 无网关（否则若测试环境残留 gw 单例会误触发 ② 段读 CSV 重写账本）。
+    # 模拟 dry_run 无网关（否则若测试环境残留 gw 单例会误触发 ② 段读 CSV 产误导日志）。
     monkeypatch.setattr(engine, "get_gateway", lambda: None)
 
     agg_calls = []

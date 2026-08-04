@@ -1598,24 +1598,41 @@ async def post_close(
     if gw is None:
         gw = get_gateway()
 
-    # ① 对账：gw + local 齐全才跑（缺一不可，否则伪对账）
+    # ① 对账（W3.4 · broker 权威 · 唯一持仓真相源）：
+    # 拷问 3 结论：broker query_stock_positions 是【钱的真实归属】权威；fill/CSV 只解释
+    # 「今日变动归因」，不能用它重写 position（否则与柜台漂移）。08-04 事故：post_close
+    # 兜底以 CSV 聚合净持仓 diff position_book 并重写 qty，网关恢复后 24 行重复 CSV →
+    # 幻影 2400 股 → 止损/止盈基于幻影持仓挂卖单（超卖敞口）。本段唯一以 broker 为准对账。
+    # run_reconcile → gw.sync_positions → _fetch_broker_positions → reconcile 纯函数：
+    #   - drift（broker vs local）：仅告警，不自动覆盖 position_book（drift 须人工判定，
+    #     自动覆盖会与「断线无回报 fill 表空」类假象互相打架，决定权交风控）。
+    #   - broker 取数失败/返空：绝【不】覆盖 position_book（返空可能是查询失败而非真空仓，
+    #     覆盖会清空真实持仓 → 超卖敞口红线）→ CRITICAL 告警 + 保持既有账本值。
     if gw is not None and local_positions is not None:
         try:
             rec = await reconcile_job.run_reconcile(gw, local_positions, tolerance)
             # drift 判定：not is_ok 综合了 drifted/only_local/only_broker（Task7 契约）
             result["drift"] = not rec.is_ok
         except Exception:
-            logger.exception("post_close 对账异常（不影响清白名单）")
+            # broker 取数失败（断线/未连接/query_stock_positions 抛）—— 绝不覆盖 position_book：
+            # 返空/异常与「真空仓」不可区分，覆盖=清空真实持仓=超卖敞口红线（W3.4）。
+            # 仅标 drift=True + CRITICAL 告警触发人工排查；position_book 既有值原样保留。
+            logger.critical(
+                "post_close 对账异常：broker 取数失败（断线/未连接），"
+                "position_book 保持既有值不覆盖（超卖敞口红线，人工复核柜台真实持仓）",
+                exc_info=True)
             result["drift"] = True  # 异常视作有偏差（保守，触发人工排查）
     else:
         logger.info("post_close 跳过对账：gw=%s local_positions=%s",
                     "有" if gw is not None else "无",
                     "有" if local_positions is not None else "无")
 
-    # ② aggregate_fills 盘后兜底纠正（#3：只认 kind=fill 的真实成交，submit 审计行不计）：
-    # 物理意图：apply_fill 可能因 db lock/异常漏记，position_book 少记；CSV 的 kind=fill 行是
-    # 真实成交的独立审计源，用其净持仓 vs position_book，drift 以 fill 行为准重写 qty + 告警。
-    # gw=None（dry_run）跳过（无真实成交可对，避免误读 CSV 老数据重写账本）。
+    # ② aggregate_fills 盘后归因展示（W3.4 · 降级：不重写 position_book，仅产日志）：
+    # 物理意图：fill 表/CSV 是「今日成交归因」——解释 position_book 今日为何变动，而非
+    # 重写 position 的权威。drift 真相源在 ① broker（钱的归属）；CSV 可能在网关断线期间
+    # 漏回报或恢复后重放，用它重写会与柜台漂移（08-04 事故根因）。
+    # 故本段【只读 CSV 聚合 + 日志展示】，绝不调 reconcile_qty；drift 由 ① broker 路径判定。
+    # gw=None（dry_run）跳过（无真实成交可归因，避免读 CSV 老数据产生误导日志）。
     if gw is not None:
         try:
             from presentation.server.services.trading_service import \
@@ -1624,29 +1641,24 @@ async def post_close(
             today_eq = clock.today()
             net = _svc_agg_fills(today_eq, today_eq)
             local = _position_book.get_local_positions()
-            drifts: list[tuple[str, float, float]] = []
-            # CSV 有：账本少记 → 以 CSV 为准重写
+            # 归因 drift 展示（只读对比，不重写账本）：CSV 净持仓 vs position_book，
+            # 标出哪些 symbol 有出入供研究员复盘「今日成交归因」，但 position_book
+            # 维持 broker 权威口径（drift 真相以 ① broker reconcile 为准）。
+            attribution: list[tuple[str, float, float]] = []
             for sym, net_qty in net.items():
                 if abs(net_qty - local.get(sym, 0.0)) > 0.01:
-                    _position_book.reconcile_qty(sym, net_qty)
-                    drifts.append((sym, local.get(sym, 0.0), net_qty))
-            # CSV 无但账本有：账本多记（疑似外部单/且回报）→ 归零（保守以 CSV 为准）
+                    attribution.append((sym, local.get(sym, 0.0), net_qty))
             for sym, local_qty in local.items():
                 if sym not in net and abs(local_qty) > 0.01:
-                    _position_book.reconcile_qty(sym, 0.0)
-                    drifts.append((sym, local_qty, 0.0))
-            if drifts:
-                result["trades_reconciled"] = len(drifts)
-                msg = "【盘后兜底】aggregate_fills vs position_book drift " + ", ".join(
-                    f"{s}({lo}→{n})" for s, lo, n in drifts)
-                logger.warning(msg)
-                try:
-                    from infra.notifier import NotificationManager, fire_and_forget
-                    fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "WARN"))
-                except Exception:
-                    logger.exception("盘后兜底告警推送失败（不阻塞）")
+                    attribution.append((sym, local_qty, 0.0))
+            if attribution:
+                result["trades_attribution"] = len(attribution)
+                logger.info(
+                    "【盘后归因】aggregate_fills(CSV) vs position_book 出入（仅展示，"
+                    "不重写账本；drift 以 broker 权威为准）: %s",
+                    ", ".join(f"{s}({lo}→{n})" for s, lo, n in attribution))
         except Exception:
-            logger.exception("post_close aggregate_fills 兜底异常（不阻塞熔断/清白名单）")
+            logger.exception("post_close aggregate_fills 归因展示异常（不阻塞熔断/清白名单）")
     # ③ 日内熔断三步（Task 10 · R-2 · 在 reconcile 之后）：
     # Why 在 reconcile 后：reconcile 查持仓 drift 是另一维度观测，与日内总资产 -3% 熔断
     # 互不依赖；放后面让熔断有最完整的 curr_equity（含盘后 reconcile 拉到的最新持仓估值）。
