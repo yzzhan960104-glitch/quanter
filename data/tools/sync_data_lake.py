@@ -29,7 +29,7 @@ import time
 from datetime import datetime, timedelta
 
 # 加项目根到 sys.path：脚本可从任意 cwd 直接 `python scripts/xxx.py` 运行。
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pandas as pd
 from tqdm import tqdm

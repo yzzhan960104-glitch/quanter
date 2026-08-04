@@ -17,7 +17,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from data.tushare_sync import sync_dataset
 from config import TUSHARE_DATASETS
 

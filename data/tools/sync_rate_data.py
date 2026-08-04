@@ -20,7 +20,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from data._tushare_compat import get_pro  # noqa: E402
 
 pro = get_pro()

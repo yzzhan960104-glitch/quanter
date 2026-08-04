@@ -17,7 +17,7 @@ import sys
 from dotenv import load_dotenv
 
 load_dotenv()
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from data._tushare_compat import get_pro, source_name  # noqa: E402
 
 pro = get_pro()

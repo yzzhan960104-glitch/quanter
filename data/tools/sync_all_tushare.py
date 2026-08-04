@@ -21,7 +21,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import config  # 触发 .env 加载（python-dotenv）
 from config import TUSHARE_DATASETS
 from data.tushare_sync import sync_dataset, resolve_symbols

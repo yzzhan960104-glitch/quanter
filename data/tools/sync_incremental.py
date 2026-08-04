@@ -43,7 +43,7 @@ import time
 from datetime import datetime, timedelta
 
 # 把项目根加进 sys.path（独立脚本惯例，与 sync_all_tushare.py 同范式），保证 import config / data 可达
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config  # 触发 .env 加载（python-dotenv），保证 TUSHARE_TOKEN 注入
 import pandas as pd

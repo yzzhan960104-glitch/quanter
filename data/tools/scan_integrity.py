@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 # 加项目根到 sys.path：脚本可从任意 cwd 直接 `python -m data.tools.scan_integrity` 运行
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pandas as pd  # noqa: E402
 
