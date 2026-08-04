@@ -25,5 +25,11 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     include: ['src/**/*.spec.ts'],
+    // 固定时区 Asia/Shanghai（A 股前端业务语义）：toLocalDateStr 等依赖本地时区的
+    // 工具默认服务北京时区，CI ubuntu 默认 UTC 会让 date.spec.ts 期望的「2026-08-04」
+    // 落到「2026-08-03」而红。此处强制 TZ 对齐业务真值，断言语义不变。
+    env: {
+      TZ: 'Asia/Shanghai',
+    },
   },
 })

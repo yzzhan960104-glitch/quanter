@@ -165,3 +165,53 @@ def test_recompute_symbol_空数据返空DF(monkeypatch):
                         lambda api_name, *, quota_type="basic", **kw: getattr(empty_pro, api_name)(**kw))
     out = sdl._recompute_symbol(empty_pro, "000001.SZ", "20240103")
     assert out.empty
+
+
+@pytest.mark.parametrize("adj_response_kind", ["no_columns", "empty_with_cols", "missing_cols"])
+def test_recompute_symbol_adj空响应返空DF不抛(monkeypatch, adj_response_kind):
+    """adj_factor 返空/缺列时 _recompute_symbol 返空 DF 不抛（P1-A 回归）。
+
+    物理意图：adj 返无列空 DF / 有列空 DF / 缺关键列三种异常形态，过去会让
+    ``adj[["ts_code","trade_date","adj_factor"]]`` 抛 KeyError 中断整批；或
+    merge how="left" 后 adj_factor=NaN 致价格×NaN 把整段历史写成 NaN 污染湖。
+    校验守卫现在统一返空 DF 跳过该标的，保护整批 sync 不阻断 + 湖不污染。
+
+    三种异常形态：
+      - no_columns:   _fetch_with_guard 返完全无列的 pd.DataFrame()（如熔断降级返空）
+      - empty_with_cols: 有列但 0 行（接口返表头无数据）
+      - missing_cols: 有数据但缺 adj_factor 列（接口 schema 漂移）
+    """
+    from data.tools import sync_daily_incremental as sdl
+
+    raw = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 2,
+        "trade_date": ["20231229", "20240102"],
+        "open": [9.8, 10.5], "high": [10.2, 10.8],
+        "low": [9.7, 10.2], "close": [10.0, 10.6],
+        "vol": [100, 110], "amount": [1000, 1100],
+    })
+    if adj_response_kind == "no_columns":
+        bad_adj = pd.DataFrame()
+    elif adj_response_kind == "empty_with_cols":
+        bad_adj = pd.DataFrame(columns=["ts_code", "trade_date", "adj_factor"])
+    else:  # missing_cols
+        bad_adj = pd.DataFrame({
+            "ts_code": ["000001.SZ"],
+            "trade_date": ["20231229"],
+            # 故意缺 adj_factor 列
+        })
+
+    class FakePro:
+        pass
+
+    fake_pro = FakePro()
+
+    def fake_fetch(api_name, *, quota_type="basic", **kw):
+        if api_name == "daily":
+            return raw
+        return bad_adj
+
+    monkeypatch.setattr(sdl, "_fetch_with_guard", fake_fetch)
+    # 不抛 + 返空 DF
+    out = sdl._recompute_symbol(fake_pro, "000001.SZ", "20240103")
+    assert out.empty, f"adj 异常形态 {adj_response_kind} 应返空 DF，实际 shape={out.shape}"

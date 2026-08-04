@@ -8,9 +8,8 @@ Why 此脚本存在（数据底座缺口）：
 
 前复权一致性（与 sync_data_lake.fetch_qfq 同语义）：
   price_qfq = price_raw × adj_factor / adj_latest（adj_latest = 该标的最新交易日 adj_factor）
-  ⚠️ 除权标的（adj 在新窗口变化）的历史基准偏移：本脚本仅 append 新日期，不重算历史；
-     除权标的历史 qfq 会有除权断崖位置偏差（少数标的，颈线法形态过滤影响小，
-     follow-up：全量重算除权标的修正）。
+  除权标的（adj 在新窗口变化）的历史 qfq 自动全量重算（⑥ _recompute_symbol），
+  用新窗口最新 adj 重建历史基线，消除除权断崖（守颈线法形态识别不被除权扰动误导）。
 
 用法：
   python data/tools/sync_daily_incremental.py     # 自动读 a_shares_daily 最新日 d0，拉 [d0+1, today]
@@ -121,6 +120,13 @@ def _recompute_symbol(pro, symbol: str, todayc: str) -> pd.DataFrame:
                             start_date="19900101", end_date=todayc)
     if raw is None or raw.empty:
         return pd.DataFrame()
+    # adj 校验（P1-A 修复）：adj 缺失/空/缺列 → 返空跳过该标的，避免下游
+    # adj[["ts_code",...]] 抛 KeyError 中断整批，或 merge how="left" 后
+    # adj_factor=NaN 导致价格×NaN 把整段历史写成 NaN 污染湖。
+    if (adj is None or adj.empty
+            or not {"ts_code", "trade_date", "adj_factor"}.issubset(adj.columns)):
+        logger.warning("除权标的 %s adj_factor 空响应/缺列，跳过重算", symbol)
+        return pd.DataFrame()
     raw = raw.rename(columns={"ts_code": "symbol", "vol": "volume"})
     merged = raw.merge(
         adj[["ts_code", "trade_date", "adj_factor"]],
@@ -221,7 +227,14 @@ def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = F
     if div_syms and not no_recompute_div:
         logger.warning("除权标的 %d 只，全量重算历史 qfq 基线：%s", len(div_syms), div_syms)
         for sym in div_syms:
-            fixed = _recompute_symbol(pro, sym, todayc)
+            # 单标的异常 → warning + continue，不阻断整批（与 docstring「不阻断整批 sync」语义对齐）。
+            # 历史回归：adj 空响应/缺列、merge 异常、Tushare 限频熔断返空等，任一标的失败
+            # 都不应让 combined.to_parquet 不执行（否则非除权标的的日更也不落盘）。
+            try:
+                fixed = _recompute_symbol(pro, sym, todayc)
+            except Exception as e:
+                logger.warning("除权标的 %s 重算异常（跳过，不阻断整批）：%s", sym, e)
+                continue
             if fixed.empty:
                 logger.warning("除权标的 %s 全量重算返空（停牌/退市/接口异常），跳过", sym)
                 continue
