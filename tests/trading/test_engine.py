@@ -1803,6 +1803,9 @@ def test_post_close_query_trades_skipped_when_no_gw(monkeypatch):
 
     assert agg_calls == []                             # gw=None → 未调 aggregate_fills
     assert "trades_reconciled" not in result
+    # M-1（Task 8 review fix）：gw=None 跳过 ② 段整段，新 key trades_attribution 也不应存在
+    # （旧测只断言旧 key trades_reconciled，W3.4 改名后新 key 漏断言 → 补齐锁死跳过语义）。
+    assert "trades_attribution" not in result
 
 
 # ============================================================================

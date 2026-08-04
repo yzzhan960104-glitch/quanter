@@ -1617,10 +1617,22 @@ async def post_close(
             # broker 取数失败（断线/未连接/query_stock_positions 抛）—— 绝不覆盖 position_book：
             # 返空/异常与「真空仓」不可区分，覆盖=清空真实持仓=超卖敞口红线（W3.4）。
             # 仅标 drift=True + CRITICAL 告警触发人工排查；position_book 既有值原样保留。
-            logger.critical(
+            #
+            # I-1（Task 8 review fix）：broker 取数失败 = 持仓真相源失效 + 盘后对账无法进行 +
+            # drift 永久失明，正是 W3.4 最需叫醒人工的场景（08-04「全天锁死无告警」教训）。
+            # 补 live 模式钉钉告警（_alert_critical 不停调度，与 _halt 是两个原语——
+            # engine.py:130 docstring 明示「告警失败不阻塞主流程」；C-4 决议 _health_guard
+            # 不升 L1 但失败时仍走 _alert_critical，本段同口径，盘后对账软降级不停调度，
+            # C-4 既有编排红线不变）。dry_run 不推（避免测试噪音）。
+            msg = (
                 "post_close 对账异常：broker 取数失败（断线/未连接），"
-                "position_book 保持既有值不覆盖（超卖敞口红线，人工复核柜台真实持仓）",
-                exc_info=True)
+                "position_book 保持既有值不覆盖（超卖敞口红线，人工复核柜台真实持仓）")
+            logger.critical(msg, exc_info=True)
+            if _mode() == "live":
+                # live 模式 broker 真链路失败 = 实盘持仓真相源失效，必须钉钉叫醒人工。
+                # _alert_critical 内部 fire_and_forget 软降级——告警失败不阻塞 post_close
+                # 后续段（熔断/trailing/清白名单），与既有 _alert_critical 13 处复用范式一致。
+                _alert_critical(msg)
             result["drift"] = True  # 异常视作有偏差（保守，触发人工排查）
     else:
         logger.info("post_close 跳过对账：gw=%s local_positions=%s",

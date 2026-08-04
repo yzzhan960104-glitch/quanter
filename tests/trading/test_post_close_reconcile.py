@@ -127,7 +127,10 @@ def test_post_close_broker_failure_does_not_clear_position(monkeypatch, _isolate
             raise RuntimeError("QMT 网关未连接，无法对账")
         async def sync_positions(self, local_positions, tolerance=0.0):
             # 真实 BaseExecutionGateway.sync_positions 会调 _fetch_broker_positions
-            # 失败时向上抛——这里复刻真实语义（不做软降级）
+            # 失败时向上抛——这里复刻真实语义（不做软降级）。
+            # ⚠️ M-2（Task 8 review fix）：本 mock 仅复刻 sync_positions 抛语义（非真链路）；
+            # 真链路 sync_positions 对「broker 返空 dict（不抛）」场景的处理（既有 reconcile
+            # 纯函数对空 broker dict 不写 position_book，但隐蔽需测）由 M-3 新测覆盖。
             return await self._fetch_broker_positions()
 
     # ③ 跑 post_close（run_reconcile 走真路径会抛，被 post_close except 捕获标 drift=True）
@@ -147,6 +150,51 @@ def test_post_close_broker_failure_does_not_clear_position(monkeypatch, _isolate
     assert any(r.levelname in ("CRITICAL", "WARNING", "ERROR")
                for r in caplog.records), (
         "W3.4 红线违反：broker 取数失败无任何高级别告警，敞口风险彻底失明。")
+
+
+def test_post_close_broker_empty_dict_does_not_clear_position(monkeypatch, _isolated_book):
+    """W3.4 红线 2 补（M-3）：broker 返空 dict（不抛）→ 账本保持既有值。
+
+    场景（隐蔽形态）：
+        - position_book 真实持仓 300002.SZ = 100（apply_fill 正确记账）；
+        - broker sync_positions 返 ``{}``（query_stock_positions 查询失败/当日空均可能返空，
+          与真空仓不可区分的隐蔽形态——见 broker/qmt.py:_fetch_broker_positions 文档：
+          「query_stock_positions 返回 None（查询失败或当日无持仓）→ 返空 dict」）。
+    红线：既有 reconcile 纯函数对空 broker dict 不写 position_book（broker 空 dict 表
+        「不可知」而非「真空仓」），但此场景隐蔽需测试锁定——防止未来误把空 broker dict
+        当「真实空仓」而清零 position_book（超卖敞口红线）。
+    """
+    # ① 真实账本 300002.SZ = 100
+    today = datetime.now().strftime("%Y-%m-%d")
+    position_book.apply_fill("ord_clean_3", "300002.SZ", "BUY", 100, 10.0,
+                             "20990101100000")
+    assert position_book.get_local_positions().get("300002.SZ") == 100.0
+
+    # ② broker 返空 dict（query_stock_positions 返 None → _fetch_broker_positions 返 {}；
+    #    sync_positions 模板方法对空 dict 不扁平化、reconcile 纯函数对空 broker dict 不写账本）
+    class _EmptyBrokerGw:
+        async def query_asset(self):
+            return {"total_asset": 1_000_000.0}
+        async def _fetch_broker_positions(self, *, tradable_only=True):
+            # 复刻 broker/qmt.py:624 真链路降级语义：query_stock_positions 返 None → 返 {}
+            return {}
+        async def sync_positions(self, local_positions, tolerance=0.0):
+            # 复刻 BaseExecutionGateway.sync_positions 模板方法真链路（不抛，返 reconcile 结果）
+            from trading.compute.reconcile import reconcile
+            broker_positions = await self._fetch_broker_positions(tradable_only=False)
+            # 空 dict 的 next(iter(...), None) 返 None → 不进 isinstance 扁平化分支 → 原样透传
+            if broker_positions and isinstance(next(iter(broker_positions.values()), None), dict):
+                broker_positions = {s: p["volume"] for s, p in broker_positions.items()}
+            return reconcile(local_positions, broker_positions, tolerance)
+
+    # ③ 跑 post_close：run_reconcile 走真路径（sync_positions 返 reconcile(local, {}, 0)）
+    result = asyncio.run(engine.post_close(
+        today, gw=_EmptyBrokerGw(), local_positions={"300002.SZ": 100.0}))
+
+    # ④ 红线断言：position_book 保持 100，绝不被空 dict 清零（超卖敞口红线）
+    assert position_book.get_local_positions().get("300002.SZ") == 100.0, (
+        "W3.4 红线违反：broker 返空 dict 时 position_book 被清零——"
+        "空 dict 与真空仓不可区分，覆盖=清空真实持仓 → 超卖敞口。")
 
 
 def test_post_close_csv_attribution_only_no_qty_rewrite(monkeypatch, _isolated_book):
