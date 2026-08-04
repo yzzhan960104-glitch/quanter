@@ -397,7 +397,10 @@ def test_connect_stops_previous_trader_before_recreate(monkeypatch):
 
 
 def test_connect_minus_one_cleans_stale_session_and_retries(monkeypatch):
-    """根治契约②：-1（死进程残留会话）→ 停本次实例 + 清本 sid 队列文件 → 重试成功。"""
+    """根治契约②：-1（死进程残留会话）→ 停本次实例 + 清本 sid 队列文件 → 重试成功。
+
+    W1.3 后：_cleanup_session_files 现被调 2 次（前置 1 + -1 兜底 1），都是本 sid。
+    """
     instances = _install_reconnect_fake(monkeypatch, [-1, 0])
     cleaned = []
     monkeypatch.setattr(
@@ -406,14 +409,19 @@ def test_connect_minus_one_cleans_stale_session_and_retries(monkeypatch):
     gw = QmtExecutionGateway()
     asyncio.run(gw.connect())
     assert gw._connected is True
-    assert cleaned == [gw._session_id]     # 只清自己的 sid
+    # W1.3 后清理被调 2 次（前置预防 + -1 兜底），都是本 sid
+    assert cleaned.count(gw._session_id) == 2
     assert len(instances) == 2
     assert instances[0].stopped is True    # 失败实例已 stop 释放 sid
     assert instances[1].stopped is False
 
 
 def test_connect_minus_one_twice_still_raises(monkeypatch):
-    """重试仍 -1（如客户端未启动）→ 抛 ConnectionError + 置锁，不无限重试。"""
+    """重试仍 -1（如客户端未启动）→ 抛 ConnectionError + 置锁，不无限重试。
+
+    W1.3 后：_cleanup_session_files 被调 2 次（前置 1 + 首轮 -1 兜底 1，
+    第二轮 -1 不再清直接 break 抛错）。attempt 轮数仍锁定 2（不无限重试）。
+    """
     instances = _install_reconnect_fake(monkeypatch, [-1, -1])
     cleaned = []
     monkeypatch.setattr(qmt_gateway, "_cleanup_session_files",
@@ -422,9 +430,105 @@ def test_connect_minus_one_twice_still_raises(monkeypatch):
     with pytest.raises(ConnectionError, match="session"):
         asyncio.run(gw.connect())
     assert gw._lock_down is True
-    assert len(cleaned) == 1               # 只清理一次（不重试死循环）
-    assert len(instances) == 2
+    # W1.3：前置 1 + 首轮 -1 兜底 1 = 2（第二轮 -1 不再清，直接 break 抛错）
+    assert len(cleaned) == 2
+    assert len(instances) == 2             # attempt 轮数锁定 2（不无限重试）
     assert all(t.stopped for t in instances)
+
+
+def test_connect_cleans_session_files_before_first_attempt(monkeypatch, tmp_path):
+    """W1.3：connect 进入 attempt 循环前预防性清队列，不等 -1 补救。
+
+    Why 前置（08-04 根治）：旧 down_queue_win_{sid} 残留（事故机 75MB）会在连上
+    瞬间被客户端重放，把历史成交回报再推一遍 → CSV 重复（W3 幂等是第二道防线，
+    这里是第一道）。即便首次 connect 就返 0，残留队列也会被客户端在 subscribe
+    之后立即推送——故必须在「构造 XtQuantTrader 之前」清掉。
+
+    断言契约（双保险）：
+    1. 顺序契约：_cleanup_session_files 必须在首次 XtQuantTrader(path, sid)
+       构造之前被调一次（用全局序号计数器比对：cleanup_seq < first_trader_seq）。
+    2. 物理契约：本 sid 残留 down_queue_win_{sid} 文件确实被删。
+    3. 非兜底契约：本次 connect 首轮即返 0（不走 -1 补救分支），证明清理不是
+       由 attempt==1/-1 兜底触发。
+    """
+    userdata = str(tmp_path / "userdata_mini")
+    import os
+    os.makedirs(userdata, exist_ok=True)
+    sid = 123458
+    # 构造残留会话队列（事故机同款命名）
+    stale = os.path.join(userdata, f"down_queue_win_{sid}")
+    open(stale, "w").write("stale 75MB payload")
+    stale_lock = os.path.join(userdata, f"lock_down_queue_win_{sid}")
+    open(stale_lock, "w").write("lock")
+
+    # 序号计数器：记录 _cleanup_session_files 与 XtQuantTrader 构造的全局先后
+    counter = {"seq": 0, "cleanup_at": None, "first_trader_at": None}
+
+    def fake_xttrader(path, sess):
+        if counter["first_trader_at"] is None:
+            counter["first_trader_at"] = counter["seq"]
+            counter["seq"] += 1
+        return _FakeTraderReconnect()
+
+    monkeypatch.setattr(qmt_gateway, "_XTQUANT_AVAILABLE", True)
+    _FakeTraderReconnect.instances = []
+    _FakeTraderReconnect.results = [0]   # 首轮即返 0（证明不走 -1 补救）
+    monkeypatch.setattr(qmt_gateway, "XtQuantTrader", fake_xttrader)
+    monkeypatch.setattr(qmt_gateway, "StockAccount", lambda acc: object())
+
+    real_cleanup = qmt_gateway._cleanup_session_files
+    def spy_cleanup(path, session_id):
+        if counter["cleanup_at"] is None:
+            counter["cleanup_at"] = counter["seq"]
+            counter["seq"] += 1
+        return real_cleanup(path, session_id)
+    monkeypatch.setattr(qmt_gateway, "_cleanup_session_files", spy_cleanup)
+
+    # 显式传 userdata/session_id，与残留文件 sid 严格对齐（不用 env 默认 123456）
+    gw = QmtExecutionGateway(userdata_path=userdata, account_id="t", session_id=sid)
+    asyncio.run(gw.connect())
+
+    # 契约 1：清理发生在首次 XtQuantTrader 构造之前
+    assert counter["cleanup_at"] is not None, "前置清理未被调用"
+    assert counter["first_trader_at"] is not None, "未构造 XtQuantTrader"
+    assert counter["cleanup_at"] < counter["first_trader_at"], (
+        f"前置清理(seq={counter['cleanup_at']}) 未在首次 XtQuantTrader 构造"
+        f"(seq={counter['first_trader_at']}) 之前——防旧队列重放失效")
+    # 契约 2：本 sid 残留文件确实被删
+    assert not os.path.exists(stale), "残留 down_queue_win_{sid} 未被前置清理删除"
+    assert not os.path.exists(stale_lock), "残留 lock_down_queue_win_{sid} 未被前置清理删除"
+    # 契约 3：本次 connect 首轮即成功（-1 补救分支未触发，证明清理是前置而非兜底）
+    assert len(_FakeTraderReconnect.instances) == 1, (
+        "首轮未成功（触发了 -1 重试），无法证明清理是前置预防而非 -1 补救")
+    assert gw._connected is True
+
+
+def test_connect_pre_cleanup_tolerates_exception(monkeypatch, tmp_path):
+    """W1.3 软降级：前置清理异常（如文件被占用）不阻断 connect，仅 warning。
+
+    Why 软降级：清理是「防患于未然」的第一道防线，但不是 connect 的必要条件——
+    即便残留没清掉，connect 仍可能成功（柜台侧未必每次都重放）；若清理异常
+    直接抛出，反而把「可恢复的文件系统问题」升级成「connect 全失败」，
+    违反 fail-safe 原则。attempt 循环内的 -1 兜底是第二道防线。
+    """
+    userdata = str(tmp_path / "ud")
+    import os
+    os.makedirs(userdata, exist_ok=True)
+
+    monkeypatch.setattr(qmt_gateway, "_XTQUANT_AVAILABLE", True)
+    _FakeTraderReconnect.instances = []
+    _FakeTraderReconnect.results = [0]
+    monkeypatch.setattr(qmt_gateway, "XtQuantTrader",
+                        lambda path, sid: _FakeTraderReconnect())
+    monkeypatch.setattr(qmt_gateway, "StockAccount", lambda acc: object())
+    # 前置清理抛异常（模拟文件被占用/OSError）——connect 必须吞掉继续
+    def boom(path, sid):
+        raise OSError("文件被其他进程占用")
+    monkeypatch.setattr(qmt_gateway, "_cleanup_session_files", boom)
+
+    gw = QmtExecutionGateway(userdata_path=userdata, account_id="t", session_id=123458)
+    asyncio.run(gw.connect())   # 不应抛
+    assert gw._connected is True
 
 
 def test_cleanup_session_files_only_removes_own_sid(tmp_path):

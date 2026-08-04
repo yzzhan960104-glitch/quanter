@@ -474,6 +474,24 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             _stop_trader_safely(self._trader)
             self._trader = None
 
+        # W1.3（08-04 根治）：connect 前预防性清本 sid 残留队列，不等 -1 补救。
+        # Why 前置（区别于下方 attempt 内兜底）：事故机 userdata_mini\down_queue_win_123459
+        # 残留 75MB 旧成交回报队列。connect 连上瞬间客户端会重放旧队列 → 历史 24 笔
+        # 成交回报再推一遍 → CSV 重复（W3 幂等是第二道防线，这里是第一道）。即便本次
+        # connect 首轮就返 0（不走 -1 补救），残留队列仍会被客户端在 subscribe 后立即
+        # 推送——故必须在「构造 XtQuantTrader 之前」清掉，attempt 内的 -1 兜底来不及。
+        # Why 软降级：清理是防患于未然的第一道防线，但非 connect 的必要条件——即便
+        # 残留没清掉 connect 仍可能成功（柜台未必每次重放）；若清理异常直接抛，反而
+        # 把「可恢复的文件系统问题」升级成「connect 全失败」，违反 fail-safe。attempt
+        # 循环内的 -1 兜底是第二道防线。只清 down_queue_win_{sid}（引擎自有会话文件），
+        # 不动 xtquant/xtmodel 队列（_cleanup_session_files 按 sid 精确匹配）。
+        try:
+            _pre_cleaned = _cleanup_session_files(self._userdata_path, self._session_id)
+            if _pre_cleaned:
+                logger.info("QMT connect 前置清理本 sid 残留队列：%s", _pre_cleaned)
+        except Exception:
+            logger.warning("QMT connect 前置清理异常（忽略，继续 attempt）", exc_info=True)
+
         # 2. 最多两轮：首轮失败（-1=残留会话）→ 清本 sid 队列文件 → 重试一轮（自愈）
         connect_rc: int | None = None
         sub_rc: int = -1
