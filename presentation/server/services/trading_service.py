@@ -597,13 +597,16 @@ def _dry_run_direction(side: str) -> str:
 def _resolve_account_id() -> str:
     """submit_order 写 trade_event 用的 account_id（UNIQUE 键之一）。
 
-    与 engine._resolve_account_id:455 同口径（QMT_ACCOUNT_ID env 优先，缺失走默认 "default"）。
-    Why 本地实现而非 import engine：trading_service 在 server 进程内 import engine 会触发
-    APScheduler/网关装配等副作用（engine 模块顶层有重型 import），且 server 与 engine 在
-    C-7 后合并进同进程但两套 _resolve_account_id 各管各的下单路径（server 手动 vs engine
-    自动），保持独立函数便于测试 monkeypatch 隔离。**改口径必须两处同步**（注释锁）。
+    与 engine._resolve_account_id:455 同口径（QMT_ACCOUNT_ID env 优先，缺失走
+    state_store._DEFAULT_ACCOUNT_ID）——真正引用常量，engine 改 _DEFAULT_ACCOUNT_ID 时
+    本函数自动跟。Why 本地实现而非 import engine._resolve_account_id：trading_service
+    在 server 进程内 import engine 会触发 APScheduler/网关装配等副作用（engine 模块顶层
+    有重型 import），且 server 与 engine 在 C-7 后合并进同进程但两套 _resolve_account_id
+    各管各的下单路径（server 手动 vs engine 自动），保持独立函数便于测试 monkeypatch 隔离。
+    改口径必须两处同步（注释锁，参见 [[gateway-ssot-hardening]]）。
     """
-    return os.getenv("QMT_ACCOUNT_ID") or "default"
+    from trading import state_store  # lazy import：避免 server 启动期 import 副作用
+    return os.getenv("QMT_ACCOUNT_ID") or state_store._DEFAULT_ACCOUNT_ID
 
 
 async def connect_gateway() -> None:
@@ -641,6 +644,13 @@ def _write_submit_trade_event(
     平移到 trade_event 表真相源（UNIQUE(account_id, trade_id, action) 天然幂等）。
     trade_id 用 build_trade_id(account_id, symbol, clock.today()) 单点构造（与
     engine ORDERED 事件 + eod_plan trade_id 同口径单点，改口径必须同步 [[gateway-ssot-hardening]]）。
+
+    断点-1 双写幂等（action=ORDERED 的设计根源）：engine pre_open 自动下单路径与本函数
+    server 手动下单路径**共用 action=ORDERED**——同 trade_id 时 UNIQUE(account_id, trade_id, action)
+    让二次写 IntegrityError 返 False 自然跳过（双写安全）。若把真单 action 改成 result.state.name
+    （SUBMITTED），engine 写 ORDERED、server 写 SUBMITTED 两行共存，幂等失效，消费端查「所有下单」
+    需 IN ('ORDERED','SUBMITTED') 双值口子——破坏审计真相源的单值契约。真实 OrderState 通过
+    meta_reason 携带保留。
 
     软降级（spec §6.3）：DB 写失败不阻断下单主路径——审计旁路仅 WARN，业务结果（网关
     返回值）优先返回。Why：下单已成功后 DB 写失败若 raise，会让用户看到 500 但实际订单
@@ -736,10 +746,17 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
     # Why 此前缺失：原实现拿到 OrderResult 直接 return，真实成交在审计流水中完全缺失，
     # 进程崩溃后存在「真实已成交但系统不知情」的敞口黑洞，违反量化交易审计合规红线
     # （B-6/应修项1）。A1 平移后落 trade_event（真相源，UNIQUE 幂等），归因消费端切 DB。
-    # action 取真实 OrderState.name（SUBMITTED/FILLED/REJECTED/FAILED…），便于事后复盘/对账。
+    # action 统一用 ORDERED/REJECTED（非 result.state.name 如 SUBMITTED/FILLED）——这是
+    # 断点-1 的「双写幂等」设计：engine pre_open 自动下单与 server 手动下单两路径共用
+    # action=ORDERED，UNIQUE(account_id, trade_id, action) 让同 trade_id 二次写 IntegrityError
+    # 返 False 自然跳过（engine 已写则 server 不重写；反之亦然）。若改用 result.state.name，
+    # engine 写 ORDERED、server 写 SUBMITTED，两行共存 UNIQUE 去重失效，消费端查「所有下单」
+    # 需 IN ('ORDERED','SUBMITTED') 双值口子——破坏审计真相源的单值契约。真实 OrderState
+    # （SUBMITTED/FILLED/REJECTED/FAILED）通过 meta_reason 携带，事后复盘不丢信息。
     direction = "BUY" if order.side.lower() == "buy" else "SELL"
+    _action = "ORDERED" if result.state.name not in ("REJECTED", "FAILED") else "REJECTED"
     _write_submit_trade_event(
-        order, result.state.name,
+        order, _action,
         order_id=result.order_id,
         meta_reason=f"{gw.__class__.__name__}:{result.state.name}:{result.message}",
         meta_kind="submit",  # 下单审计事件（含 REJECTED/FAILED），post_close 不计入净持仓

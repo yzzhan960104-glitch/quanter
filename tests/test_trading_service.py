@@ -241,12 +241,13 @@ def test_submit_order_live_records_audit(tmp_db, monkeypatch):
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
     asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
 
-    # 真相源断言：真单成功必须落 trade_event(ORDERED) 事件（_FakeGW.submit_order 返 SUBMITTED，
-    # A1 后 action=OrderState.name="SUBMITTED"，不再固定 "ORDERED"）
+    # 真相源断言：真单成功必须落 trade_event(ORDERED) 事件（断点-1 双写幂等设计：
+    # engine pre_open 与 server-manual 共用 action=ORDERED，UNIQUE 自然跳过双写；
+    # 真实 OrderState=SUBMITTED 通过 meta 携带，事后复盘不丢信息）
     con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
     ev = con.execute(
-        "SELECT * FROM trade_event WHERE symbol='510300.SH' AND action='SUBMITTED'").fetchone()
-    assert ev is not None, "真单成功未落 trade_event(SUBMITTED) 审计事件（B-6）"
+        "SELECT * FROM trade_event WHERE symbol='510300.SH' AND action='ORDERED'").fetchone()
+    assert ev is not None, "真单成功未落 trade_event(ORDERED) 审计事件（B-6）"
     # meta 应含网关类名 + 真实 state（便于事后复盘）
     meta = ev["meta"] or ""
     assert "SUBMITTED" in meta
