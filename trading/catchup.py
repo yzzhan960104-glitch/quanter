@@ -91,9 +91,27 @@ async def _catchup_pipeline(engine) -> bool:
 
 
 async def _catchup_brief(latest_day: str) -> bool:
-    """brief 独立兜底：pipeline done 但幂等文件 < D → 补播一次。"""
+    """brief 独立兜底：pipeline done 但幂等文件 < D → 补播一次。
+
+    W5 对账（spec #13）：pipeline done 后补一道 get_ready 校验——若台账 done 但
+    data_ready 内容未绿（采集完成了但内容校验失败/未落盘），warning 显式暴露漂移。
+    不阻断补播（brief 本身是观测通道，把漂移信号推给研究员比静默更有价值）。
+    """
     if job_ledger.latest_status("pipeline", latest_day) != "done":
         return False
+    # W5：台账 done 后对账 data_ready + job_ledger 单口判定，暴露「台账 done、内容缺」漂移。
+    # 物理意图：spec #13 三张嘴之一就是「台账 done、内容缺」——catchup 在 pipeline done
+    # 后补播前是发现此漂移的最佳窗口（再晚就要等 pre_open gate 拒单才发现）。
+    from trading.state_store import get_ready
+    try:
+        if not get_ready(latest_day):
+            logger.warning(
+                "C-8 brief 补跑前对账漂移：pipeline done 但 get_ready=False date=%s"
+                "（data_ready 内容未绿/未落盘，详见 get_ready warning）", latest_day)
+    except Exception:
+        # get_ready 异常不阻断补播（守 C-4 软降级；对账是附加防护非主流程）
+        logger.exception("C-8 brief 补跑前 get_ready 对账异常 date=%s（不阻断补播）",
+                         latest_day)
     if not _brief_missed(latest_day):
         return False
     from ops.brief_all import run_brief_all

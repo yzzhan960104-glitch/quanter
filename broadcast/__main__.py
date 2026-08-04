@@ -331,6 +331,41 @@ def _fetch_data_freshness() -> list:
     return out
 
 
+def _fetch_data_ready_signal() -> bool | None:
+    """W5 取数据就绪单口判定（state_store.get_ready），供 brief 对账展示。
+
+    物理意图（spec #13 · T10）：brief 的健康度+实时性是「观测口径」（mtime+内容最新日），
+    pre_open 挂单决策用 get_ready（内容校验① + pipeline 台账②）。本函数取 get_ready(D)
+    注入 brief，让研究员一眼对账「观测 healthy vs 决策 ready」——暴露「播报 healthy、
+    挂单拒」漂移。D = expected_latest_trade_day(now)（与 _fetch_data_freshness 同口径）。
+
+    降级纪律（守观测层绝不阻塞）：
+        - 交易日历异常 → None（跳过 brief 该段）；
+        - get_ready 异常（DB 损坏/表不存在）→ None（跳过，不阻断播报）。
+    """
+    # 延迟 import（与 _fetch_data_freshness 同）：trading.state_store 触发 DB 链路，
+    # 仅 data 分支需要。
+    from datetime import datetime
+
+    from trading.calendar import expected_latest_trade_day
+    from trading.state_store import get_ready
+
+    try:
+        d = expected_latest_trade_day(datetime.now())
+    except Exception:
+        logger.warning("expected_latest_trade_day 失败，data brief 就绪单口段降级跳过",
+                       exc_info=True)
+        return None
+    try:
+        return get_ready(d)
+    except Exception:
+        # get_ready 内部已 try/except 软降级返 False，理论上不会抛；此处兜底防 DB 路径
+        # 解析等模块级异常阻断播报（守「观测层绝不阻塞」纪律）。
+        logger.warning("get_ready(%s) 异常，data brief 就绪单口段降级跳过", d,
+                       exc_info=True)
+        return None
+
+
 def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
     """取策略机器人当日健康度快照三件套：(scan_count, param_iter_state, recent_runs)。
 
@@ -550,9 +585,14 @@ def _build_brief(bot: str, date: str, reader: DataLakeReader):
         # 数据机器人：取 datasets 快照 → 纯函数渲染健康度文案。取数失败降级为空列表。
         # Task5 并入实时性口径：双口径播报（mtime 健康度 + 内容最新日实时性），
         # 主动比对交易日历期望日 vs 数据湖内容最新日，回答「T/T-1 数据到没到」。
+        # W5（spec #13 · T10）：补 get_ready 单口判定，让研究员对账「观测 healthy vs 决策 ready」
+        # ——若 healthy 但 ready=False 即暴露「播报 healthy、挂单拒」漂移。get_ready 异常降级为
+        # None（跳过该段，不阻断播报；守观测层绝不阻塞纪律）。
         datasets = _fetch_data_snapshot()
         freshness = _fetch_data_freshness()
-        return build_data_brief(date, datasets=datasets, freshness=freshness)
+        ready_signal = _fetch_data_ready_signal()
+        return build_data_brief(date, datasets=datasets, freshness=freshness,
+                                ready_signal=ready_signal)
     if bot == "strategy":
         # 策略机器人：取信号数/参数迭代/近期回测三件套 → 纯函数渲染健康度文案。
         # scan_count 不走 facade.scan（全市场扫描太重），改读 plans/<date>.json。

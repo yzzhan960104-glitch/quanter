@@ -16,19 +16,26 @@ def build_data_brief(
     *,
     datasets: list[dict] | None,
     freshness: list | None = None,
+    ready_signal: bool | None = None,
 ) -> BriefResult:
-    """渲染数据机器人每日播报 Markdown（健康度 + 可选实时性段）。
+    """渲染数据机器人每日播报 Markdown（健康度 + 可选实时性段 + 就绪单口）。
 
     参数：
         date:      播报日（YYYY-MM-DD）。
         datasets:  健康度快照（key/status/freshness_hours，来自 data_service.list_datasets）。
         freshness: 数据实时性检查结果列表（FreshnessResult，来自 data.freshness.check_freshness）。
                    None 或空列表 → 跳过实时性段（向后兼容，Task5 前的调用语义不变）。
+        ready_signal: W5 数据就绪单口判定（state_store.get_ready(date)），True=内容校验①
+                   AND pipeline 台账② 全绿。None=未注入（跳过该段，向后兼容）。
 
     双口径物理意图（Task5）：
     - 健康度口径（被动）：看 parquet mtime 新不新鲜——会被「刚重写但内容仍是旧数据」骗过。
     - 实时性口径（主动）：比对交易日历期望日 vs 数据湖内容最新日，真正回答「T/T-1 到没到」。
       两个口径互补：健康度看管线有没有动，实时性看数据对不对，单口径都有盲区。
+
+    W5 就绪单口（spec #13 · T10）：健康度+实时性都是「观测口径」，pre_open 挂单决策
+    用 get_ready（内容校验① + pipeline 台账②）。brief 补一行单口信号让研究员一眼对账
+    「观测 healthy vs 决策 ready」是否一致——暴露 spec #13「播报 healthy、挂单拒」漂移。
     """
     datasets = datasets or []
     weekday = _weekday_zh(date)
@@ -74,6 +81,17 @@ def build_data_brief(
             )
         freshness_lines.append("")
 
+    # ── W5 就绪单口段（spec #13 · T10）──
+    # 物理意图：健康度+实时性是「观测口径」（mtime + 内容最新日），pre_open 挂单决策
+    # 用 get_ready（内容校验① + pipeline 台账②）。补一行单口信号让研究员对账
+    # 「观测 healthy vs 决策 ready」——若 healthy 但 ready=False 即暴露 spec #13 漂移。
+    # ready_signal=None → 跳过（向后兼容，T10 前调用语义不变）。
+    ready_line = ""
+    if ready_signal is not None:
+        mark = "✅" if ready_signal else "⚠️"
+        verdict = "就绪（内容+台账双绿）" if ready_signal else "未就绪（内容或台账漂移，详见日志）"
+        ready_line = f"\n**挂单就绪单口**：{mark} {verdict}\n"
+
     sections = [
         f"### 📊 数据机器人 · 每日健康度\n> {date}（{weekday}）\n",
         f"**健康分**：{health_pct}（{healthy}/{total} healthy）· {oldest}",
@@ -81,6 +99,7 @@ def build_data_brief(
         f"**状态分布**：{summary}",
         "",
         *freshness_lines,
+        ready_line,
         "**异常数据集**",
         bad_block,
     ]

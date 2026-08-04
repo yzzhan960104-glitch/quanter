@@ -865,3 +865,82 @@ def get_data_ready(date: str, dataset: str = "daily",
             "SELECT * FROM data_ready WHERE date=? AND dataset=?", (date, dataset),
         ).fetchone()
     return dict(row) if row else None
+
+
+# 数据就绪单口判定的默认数据集清单。
+# 物理意图：A 股日线引擎当前唯一内容数据集是 daily（a_shares_daily.parquet 对应
+# data_ready.dataset='daily'）。pre_open gate 调 get_ready 不传 datasets 时用此默认。
+# 未来扩展（minute/moneyflow 等）只需在此清单加 key，调用方无需改。
+_DEFAULT_READY_DATASETS = ["daily"]
+
+
+def get_ready(date: str, datasets: list[str] | None = None,
+              db_path: str | None = None) -> bool:
+    """W5 数据就绪单口判定（spec #13 · 消除「三张嘴」漂移）。
+
+    物理意图（spec §4 T10）：
+        08-04 问题——数据「就绪」三源无对账：
+          ① data_ready 表（内容校验，pipeline_then_eod 完成后落盘 ok=1）；
+          ② job_ledger.pipeline 状态（running/done/failed，跨重启运行台账）；
+          ③ parquet mtime + .syncing 哨兵（data_service 派生态，观测健康度）。
+        三源各自写、各自读 → 「台账 done、内容缺、播报 healthy」三方不一致。
+
+        本函数合成 ① + ②（③ 为观测口径，保留双口径展示，不参与放行决策），
+        pre_open gate③ / catchup / 播报端统一消费此函数判定「数据是否就绪」，
+        任一源失败 → False + logger.warning 显式暴露差异（让研究员一眼看见哪源漂移）。
+
+    判定逻辑（任一未绿即 False）：
+        1. 遍历 datasets，逐个查 get_data_ready；None 或 ok!=1 → False + warning；
+        2. job_ledger.latest_status("pipeline", date) != "done" → False + warning。
+
+    错误分级（C-4 软降级语义）：
+        任一源检查异常（DB 损坏/文件缺失/表不存在）→ False + warning/exception，
+        不抛出——pre_open gate 调本函数时走「未就绪」分支软降级（不挂单 + CRITICAL
+        由上层 _critical_guard 兜底），守「数据就绪判定不能猜」的安全底线。
+
+    Args:
+        date:     业务日（YYYY-MM-DD，与 data_ready.date / job_ledger.business_date 同口径）。
+        datasets: 待校验的数据集 key 列表（默认 ["daily"]）。None 用默认清单。
+        db_path:  trading_state.db 路径（测试隔离用）；job_ledger DB 走自己的 env/默认。
+
+    Returns:
+        True = ① 内容全绿 AND ② pipeline 台账 done（可放行挂单）；
+        False = 任一源未绿或检查异常（不可放行，warning 已显式暴露差异原因）。
+    """
+    from trading import job_ledger  # 局部 import 避免模块级循环依赖风险
+
+    keys = datasets if datasets is not None else _DEFAULT_READY_DATASETS
+
+    # ① 内容校验：逐 dataset 查 data_ready 表
+    for k in keys:
+        try:
+            ready = get_data_ready(date, k, db_path=db_path)
+        except Exception:
+            # DB 读异常（文件损坏/表不存在/IO 错）→ False + exception，不阻断 gate
+            logger.exception("get_ready data_ready 检查异常 date=%s dataset=%s",
+                             date, k)
+            return False
+        if ready is None:
+            logger.warning(
+                "get_ready=False：data_ready 未采集 date=%s dataset=%s", date, k)
+            return False
+        if not ready.get("ok"):
+            msg = ready.get("message", "") or "ok=0"
+            logger.warning(
+                "get_ready=False：data_ready 内容校验未绿 date=%s dataset=%s msg=%s",
+                date, k, msg)
+            return False
+
+    # ② pipeline 台账：job_ledger.latest_status("pipeline", date) 必须为 done
+    try:
+        status = job_ledger.latest_status("pipeline", date)
+    except Exception:
+        logger.exception("get_ready job_ledger 检查异常 date=%s", date)
+        return False
+    if status != "done":
+        logger.warning(
+            "get_ready=False：job_ledger.pipeline 非 done date=%s status=%s",
+            date, status)
+        return False
+
+    return True

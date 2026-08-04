@@ -73,7 +73,7 @@ from trading import (
 # / ``patch("trading.engine.get_data_ready")`` 命中（trading_plan.get_data_ready 等其它
 # 调用方仍走各自的命名空间引用，互不污染）。
 from trading.trading_plan import load_plan
-from trading.state_store import get_data_ready
+from trading.state_store import get_data_ready, get_ready
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals
@@ -2218,9 +2218,10 @@ class TradingEngine:
               ② 网关健康（探测，无写副作用）——
                  ``gw is None`` 或 ``gw._connected=False`` → ``"网关未连接"``；
                  ``gw.is_client_ready()=False`` → ``"miniQMT 客户端未就绪"``。
-              ③ 数据就绪（DB 查询；防御性双检）——
-                 遍历 ``self._plan_data_keys(plan)``，``get_data_ready(date, k)`` 返 None
-                 或 ``ok!=1`` → ``f"数据 {k} 未就绪（{message}）"``。
+              ③ 数据就绪（W5 单口判定 · spec #13 T10）——
+                 调 ``get_ready(_data_date, keys)`` 合成 data_ready① 内容校验 AND
+                 job_ledger.pipeline② 台账 done。任一源失败 → False + warning 显式
+                 暴露差异（消除「台账 done、内容缺、播报 healthy」三张嘴漂移）。
 
         Args:
             date: T 日（YYYY-MM-DD，与 ``load_plan`` 读取口径一致）。
@@ -2241,17 +2242,22 @@ class TradingEngine:
         gw_ok, gw_reason = self._gw_health_gate(gw)
         if not gw_ok:
             return False, gw_reason
-        # ③ 数据就绪（DB 查询；防御性双检）
-        # #2 修复：改查 expected_latest_trade_day(now)——T 日盘后落 data_ready(T)，
+        # ③ 数据就绪（W5 单口判定 · spec #13 消除「三张嘴」漂移）
+        # #2 修复（保留）：改查 expected_latest_trade_day(now)——T 日盘后落 data_ready(T)，
         # T+1 日盘前 pre_open 查“最近已收盘交易日”=T 命中。原查 get_data_ready(date=T+1)
         # 永远 None（data_ready 只落 T）→ 整天不挂单。与 _eod next_trading_day 同源口径。
+        #
+        # W5 改造（spec #13）：原遍历 get_data_ready 只查内容校验①，不查 job_ledger②，
+        # 与 catchup（只查②）/ 播报端（mtime+哨兵③）三方各自判定 → 「台账 done、内容缺、
+        # 播报 healthy」漂移。改调 get_ready 合成 ①+②，任一源失败 → False + warning 显式
+        # 暴露差异。datasets 仍用 _plan_data_keys(plan) 反推（保留策略声明数据集语义）。
         from trading.calendar import expected_latest_trade_day
         _data_date = expected_latest_trade_day(clock.now())
-        for k in self._plan_data_keys(plan):
-            ready = get_data_ready(_data_date, k)
-            if ready is None or not ready.get("ok"):
-                msg = ready["message"] if ready else "未采集"
-                return False, f"数据 {k} 未就绪（{_data_date}：{msg}）"
+        keys = sorted(self._plan_data_keys(plan)) or None  # None → get_ready 用默认 ["daily"]
+        if not get_ready(_data_date, keys):
+            # get_ready 内部已 logger.warning 暴露具体哪源漂移（data_ready 内容/job_ledger 台账）；
+            # gate reason 给简短中文供台账 skipped.message 记录。
+            return False, f"数据未就绪（{_data_date}：内容校验或 pipeline 台账未绿，详见日志）"
         return True, ""
 
     def _plan_data_keys(self, plan: dict) -> set[str]:

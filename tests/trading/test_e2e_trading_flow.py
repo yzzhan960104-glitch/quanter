@@ -930,12 +930,17 @@ def test_pre_open_next_day_gate_hits_prev_day_data_ready(isolated, monkeypatch):
     from datetime import datetime as _dt
     from trading import clock, state_store
     from trading.engine import TradingEngine
+    from trading import job_ledger
 
     PIPE_T, PREOPEN_T1 = "2026-07-30", "2026-07-31"
     monkeypatch.setattr(clock, "now", lambda: _dt(2026, 7, 30, 18, 0, 0))
     monkeypatch.setattr(clock, "today", lambda: PIPE_T)
     state_store.upsert_data_ready(PIPE_T, "daily", ok=True, melted=False,
                                   latest_date=PIPE_T, expected_date=PIPE_T, message="ok")
+    # W5（spec #13 T10）：get_ready 单口判定合成 data_ready① + job_ledger.pipeline②，
+    # 须同时写 pipeline 台账 done 才能放行（暴露「内容绿但台账未 done」漂移）。
+    job_ledger.begin_run("pipeline", PIPE_T, "2026-07-30T17:30:00")
+    job_ledger.finish_run("pipeline", PIPE_T, "done", "OK")
     # T+1 日 09:22 pre_open
     monkeypatch.setattr(clock, "now", lambda: _dt(2026, 7, 31, 9, 22, 0))
     monkeypatch.setattr(clock, "today", lambda: PREOPEN_T1)

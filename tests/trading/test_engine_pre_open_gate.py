@@ -88,10 +88,14 @@ def test_gateway_client_not_ready_blocks(eng):
 
 
 # ============================================================================
-# ③ 数据就绪段
+# ③ 数据就绪段（W5 单口判定 · spec #13 T10）
 # ============================================================================
+# W5 改造后 gate ③ 段改调 state_store.get_ready（合成 data_ready① + job_ledger②），
+# 不再分散遍历 get_data_ready。测试随之升级：mock trading.engine.get_ready（单口判定）
+# 模拟三源组合结果，让 gate 测试聚焦「单口结果 → gate 决策」而非内部三源细节
+# （三源组合的覆盖在 tests/trading/test_data_ready.py）。
 def test_data_not_ready_blocks(eng):
-    """③ 数据集就绪记录不存在（get_data_ready 返 None）→ gate False，reason 含「数据」。"""
+    """③ get_ready=False（data_ready 未采集或 job_ledger 未 done）→ gate False，reason 含「数据」。"""
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
@@ -99,14 +103,19 @@ def test_data_not_ready_blocks(eng):
                return_value={"confirmed": True, "orders": []}), \
          patch("trading.engine.TradingEngine._plan_data_keys",
                return_value={"daily"}), \
-         patch("trading.engine.get_data_ready", return_value=None):
+         patch("trading.engine.get_ready", return_value=False):
         ok, reason = asyncio.run(eng._pre_open_gate("2026-07-30", gw))
     assert ok is False
     assert "数据" in reason
 
 
 def test_data_ok_zero_blocks(eng):
-    """③ data_ready 记录存在但 ok=0 → gate False，reason 含「数据」+ message。"""
+    """③ get_ready=False（内容校验未绿 / pipeline 台账未 done）→ gate False，reason 含「数据」。
+
+    W5：原「ok=0 + 行数不足」断言改为单口 False（具体哪源漂移由 get_ready 内部
+    logger.warning 暴露，gate reason 只给汇总中文）。物理意图：gate 不再关心三源
+    分散细节，只消费单口结果——守 W5「单口判定」精神（spec #13）。
+    """
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
@@ -114,19 +123,17 @@ def test_data_ok_zero_blocks(eng):
                return_value={"confirmed": True, "orders": []}), \
          patch("trading.engine.TradingEngine._plan_data_keys",
                return_value={"daily"}), \
-         patch("trading.engine.get_data_ready",
-               return_value={"ok": 0, "message": "行数不足"}):
+         patch("trading.engine.get_ready", return_value=False):
         ok, reason = asyncio.run(eng._pre_open_gate("2026-07-30", gw))
     assert ok is False
     assert "数据" in reason
-    assert "行数不足" in reason
 
 
 # ============================================================================
 # 全绿放行
 # ============================================================================
 def test_all_green_passes(eng):
-    """三段全绿（plan confirmed + gw connected & ready + data ok=1）→ gate (True, "")。"""
+    """三段全绿（plan confirmed + gw connected & ready + get_ready=True）→ gate (True, "")。"""
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
@@ -134,53 +141,48 @@ def test_all_green_passes(eng):
                return_value={"confirmed": True, "orders": []}), \
          patch("trading.engine.TradingEngine._plan_data_keys",
                return_value={"daily"}), \
-         patch("trading.engine.get_data_ready", return_value={"ok": 1}):
+         patch("trading.engine.get_ready", return_value=True):
         ok, reason = asyncio.run(eng._pre_open_gate("2026-07-30", gw))
     assert ok is True
     assert reason == ""
 
 
 def test_all_green_multi_dataset_passes(eng):
-    """_plan_data_keys 返多数据集时全部 ok=1 → gate (True, "")。"""
+    """_plan_data_keys 返多数据集，get_ready=True（全绿）→ gate (True, "")。
+
+    W5：多数据集的组合判定下沉到 get_ready 内部（遍历 datasets 查 data_ready），
+    gate 测试只验证「keys 传入 + get_ready=True → 放行」。
+    """
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
-
-    def _fake_get_data_ready(date, dataset, **kw):
-        # 两个数据集都就绪
-        return {"ok": 1, "message": "ok"}
-
     with patch("trading.engine.load_plan",
                return_value={"confirmed": True, "orders": []}), \
          patch("trading.engine.TradingEngine._plan_data_keys",
                return_value={"daily", "moneyflow"}), \
-         patch("trading.engine.get_data_ready",
-               side_effect=_fake_get_data_ready):
+         patch("trading.engine.get_ready", return_value=True):
         ok, reason = asyncio.run(eng._pre_open_gate("2026-07-30", gw))
     assert ok is True
     assert reason == ""
 
 
 def test_partial_dataset_blocks(eng):
-    """_plan_data_keys 返多数据集，其中之一未就绪 → gate False，reason 含未就绪数据集名。"""
+    """_plan_data_keys 返多数据集，get_ready=False（其中之一未就绪）→ gate False。
+
+    W5：原「reason 含 moneyflow」断言改为单口 False 汇总文案。具体哪源未绿由
+    get_ready 内部 logger.warning 暴露（测试在 test_data_ready.py 覆盖）。
+    """
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
-
-    def _fake_get_data_ready(date, dataset, **kw):
-        if dataset == "moneyflow":
-            return None  # moneyflow 未采集
-        return {"ok": 1, "message": "ok"}
-
     with patch("trading.engine.load_plan",
                return_value={"confirmed": True, "orders": []}), \
          patch("trading.engine.TradingEngine._plan_data_keys",
                return_value={"daily", "moneyflow"}), \
-         patch("trading.engine.get_data_ready",
-               side_effect=_fake_get_data_ready):
+         patch("trading.engine.get_ready", return_value=False):
         ok, reason = asyncio.run(eng._pre_open_gate("2026-07-30", gw))
     assert ok is False
-    assert "moneyflow" in reason
+    assert "数据" in reason
 
 
 # ============================================================================

@@ -27,3 +27,32 @@ def test_data_brief_empty():
     """空 datasets 列表：降级文案（健康分 0 或「无数据集」语义）。"""
     r = build_data_brief("2026-07-21", datasets=[])
     assert "无数据集" in r.markdown or "0" in r.markdown
+
+
+def test_data_brief_ready_signal_section_when_true():
+    """W5：ready_signal=True → brief 含「挂单就绪单口」段 + 就绪文案。
+
+    物理意图（spec #13 T10）：brief 补单口信号让研究员对账「观测 healthy vs 决策 ready」。
+    """
+    r = build_data_brief("2026-07-21",
+                         datasets=[{"key": "daily", "status": "healthy"}],
+                         ready_signal=True)
+    assert "挂单就绪单口" in r.markdown
+    assert "就绪" in r.markdown
+
+
+def test_data_brief_ready_signal_section_when_false():
+    """W5：ready_signal=False → brief 含「未就绪」文案（暴露 healthy 但 ready 漂移）。"""
+    r = build_data_brief("2026-07-21",
+                         datasets=[{"key": "daily", "status": "healthy"}],
+                         ready_signal=False)
+    assert "挂单就绪单口" in r.markdown
+    assert "未就绪" in r.markdown
+
+
+def test_data_brief_ready_signal_none_backward_compat():
+    """W5：ready_signal=None（未注入）→ 跳过该段（向后兼容，T10 前调用语义不变）。"""
+    r = build_data_brief("2026-07-21",
+                         datasets=[{"key": "daily", "status": "healthy"}],
+                         ready_signal=None)
+    assert "挂单就绪单口" not in r.markdown
