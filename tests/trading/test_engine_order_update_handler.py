@@ -837,6 +837,69 @@ def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path
     assert fake_mgr.notify_trade_event.call_count == 1
 
 
+def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, tmp_path):
+    """W3.1 完整收口：direction=None（方向未知旁路）不再写 CSV / 不再推钉钉。
+
+    物理意图（spec §3.3.1「同一判定点」）：
+        原 direction=None 分支无条件写 CSV + 推钉钉（"TRADE" 中性标签），与 insert_fill
+        的幂等判定不同判定点 —— 同一条「方向未知回报」被重放 N 次会重复落 CSV/推钉钉，
+        污染审计镜像与 IM 通知。W3 完整收口选 C：direction=None 时**不写 CSV / 不推钉钉**
+        （上方 _alert_critical 已告警人工对账，CSV 旁证在重放时反而污染真相源判定），
+        与 fill 表「direction 不在 (BUY,SELL) 时 insert_fill 不被调（无 fill 表行）」
+        同判定点（都不写），符合 spec §3.3.1。
+
+    断言：
+      1) record_live_trade 不被调（CSV 0 行）；
+      2) notify_trade_event 不被调（钉钉 0 次）；
+      3) _alert_critical 仍被调（方向未知仍告警人工对账，保留既有红线）。
+    """
+    from trading import state_store
+
+    csv_path = tmp_path / "live_trades.csv"
+    monkeypatch.setattr(
+        "presentation.server.services.trading_service.LIVE_TRADE_LOG", str(csv_path))
+
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    # 不预置 DB order 行、不塞 _orders → _order_direction 返 None（方向未知）
+    eng._gw = MagicMock()
+    eng._gw._orders = {}
+    eng._gw._seq_to_real = {}
+
+    update = {
+        "kind": "trade",
+        "order_id": "999999_UNKNOWN",  # DB 无行 / 内存无 order_type → direction=None
+        "stock_code": "600000.SH",
+        "traded_volume": 100,
+        "traded_price": 10.5,
+        "traded_amount": 1050.0,
+        "traded_time": "20260801101000",
+        "state": "FILLED",
+    }
+    fake_mgr = MagicMock()
+    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+    alert_calls = []
+    monkeypatch.setattr(
+        "trading.engine._alert_critical", lambda msg: alert_calls.append(msg))
+    # 不 patch record_live_trade —— 让真函数在 direction=None 分支不被调（CSV 0 行验证）
+    with patch("infra.notifier.NotificationManager") as NM, \
+         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+        NM.get_default.return_value = fake_mgr
+        asyncio.run(eng._handle_order_update(update))   # 首次（方向未知）
+        asyncio.run(eng._handle_order_update(update))   # 重放（方向未知）
+
+    # 1) CSV 不存在 / 0 行（direction=None 不写）
+    if csv_path.exists():
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            rows = list(__import__("csv").DictReader(f))
+        assert len(rows) == 0, f"direction=None 不应写 CSV，实际 {len(rows)} 行"
+    # 2) 钉钉 0 次
+    assert fake_mgr.notify_trade_event.call_count == 0, (
+        f"direction=None 不应推钉钉，实际 {fake_mgr.notify_trade_event.call_count} 次")
+    # 3) _alert_critical 仍触发（方向未知仍告警人工对账）
+    assert len(alert_calls) >= 1, "direction=None 应触发 _alert_critical 人工对账告警"
+
+
 def test_e2e_trade_before_async_response_race(db, monkeypatch):
     """竞态：trade 先于 async_response → seq 反查兜底落账，随后回填不覆盖。"""
     import asyncio

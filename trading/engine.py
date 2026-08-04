@@ -3170,16 +3170,20 @@ class TradingEngine:
         # ── a/b. 成交日志（CSV）+ 钉钉通知（W3.1：与 fill 真相源同判定点）──
         # 方向已知（BUY/SELL）：仅在 _fill_inserted=True（首次落账）时写 CSV + 推钉钉。
         #   重放（_fill_inserted=False）→ 完全跳过，保证 CSV/钉钉与 fill 表 1:1（08-04 事故根因）。
-        # 方向未知（None）：仍无条件写 CSV + 推钉钉（用 "TRADE" 中性标签）——这条路径罕见
-        #   （DB 无 side + 内存无 order_type），且上方 _alert_critical 已告警；此处审计落账
-        #   是「方向未知但回报真实」的旁证，不属于 fill 重放幂等范畴（insert_fill 未被调，
-        #   无重放问题），保留以留下人工对账线索。
-        if _fill_inserted or direction is None:
+        # 方向未知（None）：W3 完整收口（用户两轴 review，spec §3.3.1「同一判定点」）——
+        #   **不再写 CSV / 不再推钉钉**。Why：原 direction=None 旁路无条件写 CSV/推钉钉
+        #   （"TRADE" 中性标签），与 insert_fill 不同判定点 —— 同一条「方向未知回报」被重放
+        #   N 次会重复落 CSV/推钉钉，污染审计镜像与 IM 通知（重放不幂等）。W3 完整收口选 C
+        #   （最干净 + 符合 spec）：direction=None 时 CSV/钉钉也不写，与 fill 表「direction
+        #   不在 (BUY,SELL) 时 insert_fill 不被调（无 fill 表行）」同判定点（都不写）；
+        #   告警由上方 _alert_critical 承担（人工对账线索），CSV 旁证在重放时反而污染真相
+        #   源判定。direction is None 时不进入下方 if 块（CSV/钉钉双跳过）。
+        if _fill_inserted:
             try:
                 from presentation.server.services.trading_service import record_live_trade
                 record_live_trade(
                     symbol,
-                    direction or "TRADE",  # 方向未知时落 "TRADE"（保守中性，不误判买卖）
+                    direction or "TRADE",  # _fill_inserted=True 仅在 direction in (BUY,SELL) 时 → 此处 direction 必非 None
                     float(qty),
                     float(price),
                     strategy="neckline",
