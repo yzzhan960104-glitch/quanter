@@ -19,6 +19,25 @@ from config import get_credential
 import tushare as ts
 
 
+# 缓存 pro 实例：get_pro 每次调用都 set_token 会重写 ~/tk.csv（tushare 把 token 落盘），
+# 多进程并发同步（server sweep / 手动触发 / 增量 cron 同时跑）时互相争文件句柄 →
+# PermissionError 导致同步整批失败。token 进程内恒定，pro 实例缓存后每进程只写一次。
+_PRO_CACHE = None
+
+
+def _set_token_mem(token: str) -> None:
+    """设置 tushare 模块全局 token，不落盘 ~/tk.csv。
+
+    物理意图（2026-08-05 fund_nav/fund_share/monthly 失败根因）：tushare 的
+    ``set_token`` 会把 token 写入 ``~/tk.csv``；多进程并发同步（server sweep /
+    手动触发 / 增量 cron 同时跑）各自 set_token 互争同一文件句柄 →
+    PermissionError → 整批数据集失败。tushare 的 ``pro_api`` / ``pro_bar`` 实际
+    只读内存 ``ts._token``，落盘纯属 SDK 副作用，故只写内存即可（进程内恒定，
+    进程间零共享文件）。
+    """
+    ts._token = token
+
+
 def get_pro():
     """返回 tushare pro 接口实例（纯直连 tushare 官方 SDK）。
 
@@ -27,8 +46,11 @@ def get_pro():
     调用方（tushare_sync / TushareDataFetcher 等）通过 ``pro.stock_basic`` /
     ``pro.daily`` / ``pro.daily_basic`` 等访问，对代理/直连无感知。
     """
-    ts.set_token(get_credential("tushare", "token"))
-    return ts.pro_api()
+    global _PRO_CACHE
+    if _PRO_CACHE is None:
+        _set_token_mem(get_credential("tushare", "token"))
+        _PRO_CACHE = ts.pro_api()
+    return _PRO_CACHE
 
 
 def ts_module():
@@ -49,7 +71,7 @@ def ensure_token() -> str:
     get_pro / ts_module 三者 token 口径一致。
     """
     token = get_credential("tushare", "token")
-    ts.set_token(token)
+    _set_token_mem(token)
     return token
 
 
