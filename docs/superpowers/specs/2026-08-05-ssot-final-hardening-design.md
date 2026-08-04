@@ -130,11 +130,12 @@ W3 做的是“收敛”而非“清除”：消费端默认读 DB，但 CSV 仍
 
 ### A3 消费端切 DB
 
-- `research/digest.load_live_fills`：改读 `state_store.query_fills`（保留函数签名与去重逻辑，去掉 CSV 读取）。
+- `research/digest.load_live_fills`：改读 `state_store.query_fills`（保留去重逻辑；签名 `csv_path→db_path`——源从 CSV 变 DB，签名不可避免地变更；spec review 2026-08-05 修订「保留签名」表述）。**保留 strategy 非空过滤**（新断点-4，digest 实盘样本口径不变，防 n_hits/胜率漂移）；fill 表 UNIQUE(order_id, traded_time) 已天然去重。
+- `query_fills` SELECT 补 `strategy` 字段（A1 加了表列/INSERT，SELECT 漏改；A3 补齐——digest 过滤依赖此字段）。
 - `review_service` / `schemas/review.py`：文案与 schema 注释改为“DB 生成 CSV 导出”。
 - `position_book.reconcile_qty` docstring 同步。
 
-验收：digest 单测用 tmp state_store 构造 fill，断言 `load_live_fills` 返回去重结果。
+验收：digest 单测用 tmp state_store 构造 fill（含 strategy 非空/空各一笔），断言 `load_live_fills` 仅返回 strategy 非空结果（保原 CSV 口径，新断点-4）。
 
 ### A4 归档与清理
 

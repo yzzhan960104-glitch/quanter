@@ -2,7 +2,7 @@
 """trading.state_store — 统一交易状态库（7 张表 = 6 核心 account/trade_event/order/fill/position/account_daily + C-2 S1 data_ready；幂等写入 + 查询）。
 
 物理定位：trading-state-store-redesign spec §2 的「单一真相源」。把散落在 5+ 处互不同步
-的存储（gw._orders 内存 / _tp_placed 内存 / position_book / live_trades.csv / trading_plan JSON）
+的存储（gw._orders 内存 / _tp_placed 内存 / position_book / fill 表 / trading_plan JSON）
 收口到一个事务一致、跨重启、幂等保护的 SQLite 交易状态库。
 
 Why 一个新模块而非改 position_book：position_book 只覆盖 position/fill（对账用），缺
@@ -593,14 +593,19 @@ def query_fills(start: str, end: str, *, symbol: str | None = None,
 
     返回结构（对齐 query_trades 消费契约，direction 规范化为小写）：
         [{order_id, traded_time, symbol, direction(小写), shares(float), price(float),
-          account_id}, ...] 按 traded_time 升序（与 CSV 时间序一致，简报明细保持原序）。
+          account_id, strategy}, ...] 按 traded_time 升序（与 CSV 时间序一致，简报明细
+          保持原序）。
+
+    strategy 字段（A3 补 SELECT · A1 只加了 INSERT/列，SELECT 漏改）：成交流水的策略归属，
+    digest 消费端按 strategy 过滤（新断点-4，保原 CSV 口径）；老 fill 行（A1 迁移前）此列
+    可能为 NULL，消费端用 `(r.get("strategy") or "").strip()` 防御性兜底。
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
         # substr(traded_time,1,8) 取 YYYYMMDD 日期前缀，与 [start,end] 闭区间字典序比较；
         # start/end 入参为 YYYY-MM-DD，去掉 "-" 后比较（与 fill 表 traded_time 同口径）。
-        sql = ("SELECT order_id, traded_time, symbol, direction, qty, price, account_id"
-               " FROM fill WHERE substr(traded_time, 1, 8) BETWEEN ? AND ?")
+        sql = ("SELECT order_id, traded_time, symbol, direction, qty, price, account_id,"
+               " strategy FROM fill WHERE substr(traded_time, 1, 8) BETWEEN ? AND ?")
         params: list = [start.replace("-", ""), end.replace("-", "")]
         if symbol:
             sql += " AND symbol = ?"
@@ -620,6 +625,7 @@ def query_fills(start: str, end: str, *, symbol: str | None = None,
         "shares": float(r["qty"]),
         "price": float(r["price"]),
         "account_id": r["account_id"],
+        "strategy": r["strategy"],
     } for r in rows]
 
 

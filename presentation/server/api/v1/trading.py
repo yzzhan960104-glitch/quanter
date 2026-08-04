@@ -80,7 +80,7 @@ async def export_live_trades(
     start: str = Query(..., description="起 'YYYY-MM-DD'"),
     end: str = Query(..., description="止 'YYYY-MM-DD'"),
 ) -> Response:
-    """导出 [start,end] 区间实盘成交日志（logs/live_trades.csv）为标准 CSV。
+    """导出 [start,end] 区间实盘成交日志（state_store.fill 导出 CSV）为标准 CSV。
 
     无日志 → 仅表头（诚实空导出，非 404）。Layer 6 LLM 复盘直接消费此 CSV。
     """
@@ -103,7 +103,7 @@ async def trades_endpoint(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ) -> dict:
-    """分页查询 [start, end] 实盘成交流水（读 logs/live_trades.csv）。
+    """分页查询 [start, end] 实盘成交流水（读 state_store.fill 表）。
 
     返回 {trades, total, limit, offset}：trades 为当前页，total 为过滤后命中总数。
     无日志文件 → 空结果（诚实空，不抛 404）。

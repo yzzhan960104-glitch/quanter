@@ -106,7 +106,7 @@ async def main():
             print("（撤单未确认——可能是映射未就绪或已成交，请到 XtItClient 客户端核对）")
 
     await gw.disconnect()
-    print("\n联调完成。请核对 logs/live_trades.csv 与 XtItClient 客户端委托/成交记录。")
+    print("\n联调完成。请核对 state_store.fill 表与 XtItClient 客户端委托/成交记录。")
 
 
 if __name__ == "__main__":

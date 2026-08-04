@@ -25,7 +25,7 @@ router = APIRouter(prefix="/review", tags=["AI 复盘"])
 async def diagnose(req: ReviewRequest) -> ReviewReport:
     """组装实盘日志 + 策略上下文 → GLM → Markdown 复盘报告。
 
-    - 数据源：csv_text（上传）或 start/end（读 logs/live_trades.csv）。
+    - 数据源：csv_text（上传）或 start/end（读 state_store.fill 导出 CSV）。
     - GLM_API_KEY 缺失/调用失败 → 降级返回上下文摘要（degraded=true），不阻断。
     - 超时 60s（LLM 推理耗时，前端请用长超时 + loading）。
     """

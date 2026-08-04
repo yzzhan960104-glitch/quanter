@@ -2,7 +2,7 @@
 """研究摘要生成器（research_digest · 2026-08-03 Phase B 原型）。
 
 物理意图（观察环）：每天盘后给 Agent/人一个"一眼可决策"的摘要：
-    1. 实盘成交清洗（live_trades.csv 只保留 kind=fill 且 strategy 非空，重复回报去重）；
+    1. 实盘成交清洗（state_store.fill 真相源，只保留 strategy 非空；A3 切 DB）；
     2. 回测期望（replay_tasks.db 最近 SUCCESS 报告统计）；
     3. 漂移对比（胜率/均 rr 与期望的差距 → OK / WARN / CRITICAL / 样本不足）；
     4. 数据与实验状态（snapshot data_hash / ACTIVE 实验版本）。
@@ -13,7 +13,7 @@
     WIN_RATE_CRITICAL=0.30 胜率低于期望 >30pp → CRITICAL（fail-closed 信号）；
     RR_WARN=0.30           均 rr 低于期望 >0.3 → WARN。
 
-诚实性：live_trades.csv 只有成交回报（无平仓盈亏），win_rate/avg_rr 需 state_store
+诚实性：fill 表只存成交回报（无平仓盈亏），win_rate/avg_rr 需 state_store
 平仓归因（TODO Phase B 后续接 trading/state_store 的 fill→exit 归因）；字段缺失时
 渲染「—」且不做漂移判定，绝不编造实盘表现。
 """
@@ -194,31 +194,47 @@ def _discovery_block(st: dict | None) -> str:
     return "\n".join(lines)
 
 
-def load_live_fills(csv_path: str = "logs/live_trades.csv") -> list[dict]:
-    """读 live_trades.csv 并清洗：只保留 kind=fill 且 strategy 非空的成交回报。
+def load_live_fills(db_path: str | None = None) -> list[dict]:
+    """读 state_store.fill 并清洗（A3 切 DB · 保 strategy 非空过滤，新断点-4）。
 
-    物理意图（2026-08-03 实盘流水实证）：同笔成交回报会重复落盘（08-02/08-03
-    出现同 timestamp/symbol/shares/price 多行），且有无 strategy 归因的补录行
-    （600000.SH 类）——观察环输入必须先按 (timestamp, symbol, shares, price) 去重，
-    否则 n_hits 虚高、漂移检测输入是脏的。
+    签名变更：csv_path → db_path（spec §A3 已同步修订）。fill 表 A1 加 strategy 列，
+    本函数保留原 CSV 时代的 strategy 非空过滤（只保留有归因的成交，丢弃补录空行），
+    digest 实盘样本口径不变。DB 异常 → []（不抛、不阻断摘要生成）。
+
+    物理意图（2026-08-03 实盘流水实证 + 2026-08-05 A3 切真相源）：原 CSV 时代同笔
+    成交回报会重复落盘（08-02/08-03 出现同 timestamp/symbol/shares/price 多行），
+    且有无 strategy 归因的补录行——观察环输入必须先按 (timestamp, symbol, shares, price)
+    去重，否则 n_hits 虚高、漂移检测输入是脏的。A3 切 state_store.fill 后，
+    UNIQUE(order_id, traded_time) 已天然去重（spec §2.4 真相源），本函数只需做
+    strategy 过滤 + 时间戳规范化（YYYYMMDDHHMMSS → YYYY-MM-DD HH:MM:SS）。
     """
-    path = Path(csv_path)
-    if not path.exists():
+    try:
+        from trading import state_store
+        state_store.init_store(db_path)
+        rows = state_store.query_fills("2000-01-01", "2099-12-31", db_path=db_path)
+    except Exception:
+        logger.exception("load_live_fills 读 state_store 失败，返空")
         return []
-    seen = set()
     fills = []
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            if row.get("kind") != "fill":
-                continue
-            if not (row.get("strategy") or "").strip():
-                continue
-            key = (row.get("timestamp"), row.get("symbol"),
-                   row.get("shares"), row.get("price"))
-            if key in seen:
-                continue
-            seen.add(key)
-            fills.append(row)
+    for r in rows:
+        strategy = (r.get("strategy") or "").strip()  # A1 fill.strategy 列
+        if not strategy:  # 保口径：补录空 strategy 行丢弃（新断点-4）
+            continue
+        tt = str(r.get("traded_time") or "")
+        # fill.traded_time 存 YYYYMMDDHHMMSS 整数串，规范化为 CSV 时代同款
+        # YYYY-MM-DD HH:MM:SS（消费端 build_digest 时间序展示用，下游已适配）
+        ts = (f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
+              if len(tt) >= 14 else tt)
+        fills.append({
+            "timestamp": ts,
+            "symbol": r.get("symbol", ""),
+            "direction": (r.get("direction") or "").upper(),
+            "shares": r.get("shares"),
+            "price": r.get("price"),
+            "strategy": strategy,
+            "rationale": "",
+            "kind": "fill",
+        })
     return fills
 
 
@@ -282,7 +298,7 @@ def load_backtest_expectation(db_path: str | None = None) -> dict | None:
 def load_live_perf_from_state_store(db_path: str = "logs/trading_state.db") -> dict:
     """从 state_store 读已实现盈亏与平仓事件（诚实口径，2026-08-03）。
 
-    物理意图：live_trades.csv 只有成交回报（无盈亏），而 state_store.trade_event
+    物理意图：fill 表只有成交回报（无盈亏），而 state_store.trade_event
     的 TP1_FILLED/TP2_FILLED 行带 realized_pnl（金额 = filled_qty×(卖价−开仓均价)），
     CLOSED 行目前只标事件（realized_pnl=None，post_close 先标、pnl 后续从 fill 算）。
     本 loader：

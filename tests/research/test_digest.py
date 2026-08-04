@@ -56,21 +56,24 @@ def test_build_digest_insufficient_sample():
     assert "CRITICAL" not in md
 
 
-def test_load_live_fills_dedup_and_filters(tmp_path):
-    """live_trades.csv 清洗：只保留 kind=fill 且 strategy 非空；重复回报去重。"""
-    p = tmp_path / "live_trades.csv"
-    p.write_text(
-        "timestamp,symbol,direction,shares,price,strategy,rationale,kind\n"
-        "2026-08-03 09:22:00,300654.SZ,BUY,100,10.5,neckline,成交回报,fill\n"
-        "2026-08-03 09:22:00,300654.SZ,BUY,100,10.5,neckline,成交回报,fill\n"
-        "2026-08-03 09:22:00,300654.SZ,BUY,100,10.5,neckline,成交回报,fill\n"
-        "2026-08-03 09:35:00,600000.SH,BUY,100,10.5,,补录,fill\n"
-        "2026-08-03 09:22:00,300654.SZ,BUY,100,10.5,neckline,已提交,submit\n",
-        encoding="utf-8",
-    )
-    fills = digest.load_live_fills(str(p))
+def test_load_live_fills_filters_empty_strategy(tmp_db):
+    """load_live_fills 读 state_store.fill，保 strategy 非空过滤（新断点-4，原 CSV 口径）。
+
+    strategy 空的 fill 不进 digest 样本。物理意图：原 CSV 时代就过滤 strategy 非空
+    （只保留有 neckline 归因的成交，丢弃补录空 strategy 行）；A3 切 DB 后 fill 表
+    A1 已加 strategy 列，本测试断言该过滤口径不变——digest 实盘样本不应因切换源而
+    混入无归因行（防 n_hits/胜率漂移）。
+    """
+    from trading import state_store
+    # 有归因的成交（neckline）→ 纳入 digest 样本
+    state_store.insert_fill("O1", "ACC_TEST", "20260805101000", "600000.SH", "BUY",
+                            100, 10.0, strategy="neckline")
+    # 补录空 strategy 行 → 过滤掉（保原 CSV 口径，新断点-4）
+    state_store.insert_fill("O2", "ACC_TEST", "20260805101100", "600001.SH", "BUY",
+                            200, 20.0, strategy=None)
+    fills = digest.load_live_fills(db_path=tmp_db)
     assert len(fills) == 1
-    assert fills[0]["symbol"] == "300654.SZ"
+    assert fills[0]["symbol"] == "600000.SH"
 
 
 def test_load_backtest_expectation_from_tasks_db(tmp_path):

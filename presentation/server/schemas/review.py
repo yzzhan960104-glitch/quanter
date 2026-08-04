@@ -14,7 +14,7 @@ class ReviewRequest(BaseModel):
 
     数据源二选一：
     - csv_text：直接粘贴的实盘日志文本（CSV 格式，优先）。
-    - start/end：按日期从 logs/live_trades.csv 读取（csv_text 缺省时生效）。
+    - start/end：按日期从 state_store.fill 导出 CSV 读取（csv_text 缺省时生效）。
     策略上下文（可选，富化 Prompt）：
     - strategy_name / strategy_params / metrics（关键指标如 max_drawdown）。
     """

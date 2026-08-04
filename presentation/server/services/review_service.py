@@ -95,7 +95,7 @@ def diagnose(req: ReviewRequest) -> ReviewReport:
     LLM 不可用（缺凭证/调用失败）→ 降级返回上下文摘要（ok=True, degraded=True）。
     无日志数据 → ok=False 明确提示（非降级，是输入错误）。
     """
-    # 1) 解析数据源：csv_text 优先，否则按 start/end 读 logs/live_trades.csv
+    # 1) 解析数据源：csv_text 优先，否则按 start/end 读 state_store.fill 导出 CSV
     csv_text = req.csv_text
     if not csv_text and req.start and req.end:
         try:
@@ -106,7 +106,7 @@ def diagnose(req: ReviewRequest) -> ReviewReport:
     if not csv_text or not csv_text.strip():
         return ReviewReport(
             ok=False,
-            report="无交易日志可复盘。请提供 csv_text，或有效的 start/end 日期区间（且 logs/live_trades.csv 有数据）。",
+            report="无交易日志可复盘。请提供 csv_text，或有效的 start/end 日期区间（且 state_store.fill 有数据）。",
             degraded=True,
             reason="无日志数据",
         )
