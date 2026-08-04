@@ -5,12 +5,9 @@
 - **前端 DataLakeView 反射契约**：前端表格/下拉框经 /api/v1/data/datasets 反射 DATASET_REGISTRY，
   绝不在前端硬编码数据集名。本测试把「Tushare 新湖必须注册到 DATASET_REGISTRY 且 source=Tushare」
   钉死在配置层——任一新湖漏注册，前端就看不到该资产，宏观切源/数据湖可视直接断档。
-- **剔除 concept_detail**：brief 草稿 new_lakes 含 concept_detail，但该数据集按「概念 id」分页
-  （pro.concept_detail(id=...)），通用同步器只支持 symbol/date/single 三种 by，无 by=concept 模式，
-  Plan A Task 7 已决策跳过。TUSHARE_DATASETS 实际不含 concept_detail，本测试同样不断言它。
-- **复用湖判断**：top_list 复用 dragon_list 湖、hsgt_top10 复用 north_flow 湖（切 Tushare 替代 akshare），
-  这两个 LAKE_CONFIG key 已存在（不重复加），但 DATASET_REGISTRY 仍需补 source=Tushare 元信息
-  （前端要能看到「龙虎榜/北向资金」现在由 Tushare 生产，而非仍标 AKShare）。
+- **退役清理（2026-08-05）**：top_list / hsgt_top10 / concept / concept_detail 因 Tushare
+  无接口权限长期 _unavailable，已整体删除（注册表/TUSHARE_DATASETS/LAKE_CONFIG/探针/测试），
+  本文件不再断言这四个 key。
 - **Plan C Task 6 新增（宏观收尾）**：DATASET_REGISTRY["macro"]（macro_credit 湖，CreditRegime 输入）
   source 从 AKShare 切 Tushare（主源 cn_m + akshare 社融 fallback）；并新增 8 个原始宏观指标数据集
   （cn_cpi/cn_ppi/cn_gdp/cn_pmi/shibor/shibor_quote/szse_daily/sse_daily）的 DATASET_REGISTRY 条目，
@@ -28,21 +25,21 @@ from presentation.server.services.data_service import _parquet_path
 
 
 # ============================================================================
-# 股票类 Tushare 新湖清单（剔除 concept_detail——按概念 id 分页不可行，Task 7 已跳过）
+# 股票类 Tushare 新湖清单（concept/concept_detail 已整体退役删除，2026-08-05）
 # ============================================================================
 # 单一真相 = config.py 里实际的 TUSHARE_DATASETS 的股票类 key。
 # brief 给的列表含 concept_detail（错误）且不完整，此处以实际 TUSHARE_DATASETS 为准。
 STOCK_TUSHARE_KEYS = [
     # 财报 6（fina_income/balance/cashflow/forecast/express/dividend）
     "fina_income", "fina_balance", "fina_cashflow", "forecast", "express", "dividend",
-    # 资金流 / 龙虎榜 3（top_list 复用 dragon_list 湖）
-    "moneyflow", "top_list", "top_inst",
+    # 资金流 / 龙虎榜 2（top_list 已退役删除）
+    "moneyflow", "top_inst",
     # 融资融券 3
     "margin", "margin_detail", "margin_secs",
-    # 北向资金 2（hsgt_top10 复用 north_flow 湖）
-    "hsgt_top10", "moneyflow_hsgt",
-    # 板块 / 概念 2（concept_detail 跳过：按概念 id 分页，通用同步器不支持）
-    "concept", "ths_daily",
+    # 北向资金 1（hsgt_top10 已退役删除）
+    "moneyflow_hsgt",
+    # 板块 1（concept/concept_detail 已退役删除）
+    "ths_daily",
     # 指数 3
     "index_daily", "index_weight", "index_member",
     # 股东 / 解禁 / 停牌 4
@@ -50,19 +47,6 @@ STOCK_TUSHARE_KEYS = [
     # 特色筹码 1（300/分独立通道）
     "cyq_perf",
 ]
-
-
-def test_concept_detail_in_tushare_datasets():
-    """concept_detail 已注册（2026-07-25 决策订正：原跳过，现纳入统一管道）。
-
-    Why 订正：原决策「通用同步器不支持 by=concept 故跳过」已过时——2026-07-25 Plan Task 4 给
-    resolve_symbols 加了 universe=concept 分支（从 concept 湖读 id 列表），concept_detail 复用
-    by=symbol + code_param=id 分页，纳入统一管道。代理废弃后直连 concept_detail 接口可用。
-    """
-    assert "concept_detail" in TUSHARE_DATASETS, "concept_detail 应已注册（universe=concept）"
-    cfg = TUSHARE_DATASETS["concept_detail"]
-    assert cfg["universe"] == "concept", "concept_detail 走 universe=concept 标的池"
-    assert cfg["code_param"] == "id", "concept_detail 传参名=id（非 ts_code）"
 
 
 def test_new_stock_lakes_registered():
@@ -74,18 +58,16 @@ def test_new_stock_lakes_registered():
     Why 机器化守卫：DATASET_REGISTRY 是前端数据湖可视的单一真相源，任一新湖漏注册，
     前端表格就缺这一行，宏观切源/资产盘点直接断档。PR review 漏一眼也守得住。
 
-    Why 复用湖也要注册 DATASET_REGISTRY：top_list 复用 dragon_list 湖、hsgt_top10 复用
-    north_flow 湖，LAKE_CONFIG 的 lake key 已存在（不重复加），但 DATASET_REGISTRY 必须补
-    source=Tushare 元信息——前端要能区分「龙虎榜现在由 Tushare 生产」与「仍标 AKShare」。
-    复用湖的 DATASET_REGISTRY key 用数据集名（top_list/hsgt_top10），与 LAKE_CONFIG 的
-    湖 key（dragon_list/north_flow）解耦，两个注册表语义不同（资产 vs 寻址）。
+    Why 统一注册：每个数据集在 DATASET_REGISTRY 补 source=Tushare 元信息，前端 DataLakeView
+    才能反射「该资产由 Tushare 生产」。退役的 top_list/hsgt_top10/concept/concept_detail
+    已从清单剔除（2026-08-05）。
     """
     for ds_key in STOCK_TUSHARE_KEYS:
         # 1) 数据集必须在 TUSHARE_DATASETS 注册（配置完备性，sync_dataset 依赖）
         assert ds_key in TUSHARE_DATASETS, \
             f"{ds_key} 未在 TUSHARE_DATASETS 注册（配置层缺失）"
 
-        # _unavailable 数据集（代理无接口，如 top_list/hsgt_top10）不落湖，跳过 lake 注册检查
+        # _unavailable 数据集不落湖，跳过 lake 注册检查（当前注册表已无此类，保留机制防回归）
         if TUSHARE_DATASETS[ds_key].get("_unavailable"):
             continue
 
@@ -202,7 +184,7 @@ def test_all_tushare_datasets_lakes_registered():
     「写了但读不到」的静默故障。ETF/宏观虽未进 DATASET_REGISTRY，但其湖路径必须在
     LAKE_CONFIG 注册（通用同步器 + reader 都靠它）。本断言一次性钉死全部 37 个数据集。
     """
-    # _unavailable 数据集（代理无接口，如 concept/top_list/hsgt_top10）不落湖，豁免 lake 注册检查
+    # _unavailable 数据集不落湖，豁免 lake 注册检查（当前注册表已无此类，保留机制防回归）
     missing_lakes = {
         k: spec["lake"]
         for k, spec in TUSHARE_DATASETS.items()
@@ -211,26 +193,6 @@ def test_all_tushare_datasets_lakes_registered():
     }
     assert not missing_lakes, \
         f"TUSHARE_DATASETS 的 lake 路径未注册到 LAKE_CONFIG（reader 无法寻址）：{missing_lakes}"
-
-
-def test_parquet_path_unavailable_datasets_return_none():
-    """代理不可用数据集（top_list/hsgt_top10）_parquet_path 返 None（2026-07-19 盘点订正）。
-
-    What：top_list/hsgt_top10 tushare 无此方法（probe 实测 DataApi has no attribute，
-    2026-07-19 代理口径首次暴露，纯直连后该接口缺口仍在），原 lake_key 复用设计
-    （top_list→dragon_list、hsgt_top10→north_flow）废弃——复用建立在此接口能跑通的假设上，
-    实际跑不通。删 lake_key 后 _parquet_path 经 _lake_key fallback 到数据集 key 自身，
-    LAKE_CONFIG 无 top_list/hsgt_top10 → 返 None（诚实反映无物理湖）。
-
-    Why 返 None 是对的：代理不可用 = 永远无数据，前端 list_datasets 标 missing 比假装读到
-    akshare 老数据（dragon_list hit / north_flow 24 行）更诚实。龙虎榜单用 dragon_list，
-    北向总量用 moneyflow_hsgt.north_money，均独立湖。
-    """
-    # top_list/hsgt_top10：删 lake_key 后无 LAKE_CONFIG 映射 → None（代理不可用，无物理湖）
-    assert _parquet_path("top_list") is None, \
-        f"_parquet_path('top_list') 应返 None（代理不可用，无物理湖），实际 {_parquet_path('top_list')!r}"
-    assert _parquet_path("hsgt_top10") is None, \
-        f"_parquet_path('hsgt_top10') 应返 None（代理不可用，无物理湖），实际 {_parquet_path('hsgt_top10')!r}"
 
 
 def test_parquet_path_non_reused_lake_unchanged():
@@ -247,7 +209,8 @@ def test_parquet_path_non_reused_lake_unchanged():
     # daily：tushare 前复权日线（2026-07-19 订正 source：AKShare→Tushare），路径零回归
     assert _parquet_path("daily") == LAKE_CONFIG["lakes"]["daily"], \
         f"_parquet_path('daily') 应返回 daily 自己的湖路径，实际 {_parquet_path('daily')!r}"
-    # 守卫：lake_key 复用机制已废弃（2026-07-19 盘点：top_list/hsgt_top10 代理不可用，复用无意义），
+    # 守卫：lake_key 复用机制已废弃（2026-07-19 盘点：代理不可用，复用无意义；
+    # 相关数据集 top_list/hsgt_top10 已整体删除，2026-08-05），
     # DATASET_REGISTRY 不应再有任何 lake_key 字段（防误加导致非复用湖被错误重定向）
     reused = {k for k, s in DATASET_REGISTRY.items() if "lake_key" in s}
     assert reused == set(), \

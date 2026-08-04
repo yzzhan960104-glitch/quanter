@@ -44,17 +44,14 @@ PARAMS = {
     "forecast": {"ts_code": "000001.SZ", "period": "20231231"},
     "express": {"ts_code": "000001.SZ", "period": "20231231"},
     "dividend": {"ts_code": "000001.SZ"},
-    # 资金流/龙虎榜/融资融券/北向（按日或按标的）
+    # 资金流/龙虎榜/融资融券/北向（按日或按标的；top_list/hsgt_top10/concept 已退役删除）
     "moneyflow": {"ts_code": "000001.SZ"},
-    "top_list": {"trade_date": "20240105"},
     "top_inst": {"trade_date": "20240105"},
     "margin": {"trade_date": "20240105"},
     "margin_detail": {"trade_date": "20240105"},
     "margin_secs": {"trade_date": "20240105"},
-    "hsgt_top10": {"trade_date": "20240105"},
     "moneyflow_hsgt": {"trade_date": "20240105"},
-    # 板块/概念/指数
-    "concept": {"src": "ts"},
+    # 板块/指数
     "ths_daily": {"ts_code": "885538.TI"},
     "index_daily": {"ts_code": "000300.SH", "trade_date": "20240105"},
     "index_weight": {"index_code": "000300.SH", "start_date": "20240101", "end_date": "20240131"},

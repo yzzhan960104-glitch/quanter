@@ -36,16 +36,6 @@ def test_hs_const_沪深两湖已注册():
     assert TUSHARE_DATASETS["hs_const_sz"]["params"]["hs_type"] == "SZ"
 
 
-def test_concept_detail_按概念id分页():
-    cfg = TUSHARE_DATASETS["concept_detail"]
-    assert cfg["api"] == "concept_detail"
-    assert cfg["by"] == "symbol"
-    assert cfg["universe"] == "concept"
-    assert cfg["code_param"] == "id"
-    assert cfg["quota_type"] == "basic"
-    _assert_schema("concept_detail")
-
-
 # ============ Task 6：特色桶新数据集 ============
 def test_特色桶新数据集已注册():
     for k in ("cyq_chips", "daily_basic", "stk_factor_pro"):
@@ -99,7 +89,7 @@ def test_daily_复用既有a_shares_daily湖():
 # ============ Task 8：DATASET_REGISTRY 元信息（前端 DataLakeView 反射） ============
 def test_新数据集_元信息完整():
     """所有新 TUSHARE_DATASETS key 必须在 DATASET_REGISTRY 有元信息（前端反射）。"""
-    new_keys = ["stock_basic", "hs_const_sh", "hs_const_sz", "concept_detail",
+    new_keys = ["stock_basic", "hs_const_sh", "hs_const_sz",
                 "cyq_chips", "daily_basic", "stk_factor_pro",
                 "weekly", "monthly"]
     for k in new_keys:

@@ -248,8 +248,8 @@ def sync_dataset(key: str, start: str, end: str,
     传 key + 区间，分页细节由 cfg["by"] 决定。新增数据集零新增分支代码。
     """
     cfg = TUSHARE_DATASETS[key]
-    # 不可用数据集跳过（B 类·方法名错订正）：tnskhdata 代理对部分接口无支持
-    # （如 concept），配置层标 _unavailable 后此处检测跳过，不下载/不报错，打印提示。
+    # 不可用数据集跳过（B 类·方法名错订正）：代理/直连对部分接口无权限，
+    # 配置层标 _unavailable 后此处检测跳过，不下载/不报错，打印提示。
     if cfg.get("_unavailable"):
         logger.warning("⚠️ %s 跳过同步（不可用）：%s", key, cfg["_unavailable"])
         return
@@ -462,7 +462,7 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
         合并进 kwargs。shibor 无参返最近 2000 行（2018 起，全历史分页上限），加区间
         后精确返近 3 年 249 行，避免烧配额拉无用历史 + 落盘膨胀。
       - start/end 签名：由 sync_dataset 传入（与 by=symbol/date 共享区间语义），single
-        模式下仅在 date_range=True 时消费，其余 single 数据集（concept/margin_secs 等
+        模式下仅在 date_range=True 时消费，其余 single 数据集（margin_secs 等
         静态快照）不传区间保持原行为。
 
     Why index_mode='datetime' 分支（Plan C 宏观湖）：CPI/PPI/GDP/PMI/Shibor 是单一
@@ -477,7 +477,7 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
       - 日频（YYYYMMDD，8 位数字，如 '20240105'）→ format='%Y%m%d'（兜底）
     format 错配会静默产出 NaT（errors='coerce'）→ dropna 清空整表，故必须按数据形态
     分流，不能一刀切。此处用字符串形态判断而非硬编码 key→format 映射，规避字段漂移。
-    无 index_mode 时保持原扁平落盘（concept/margin_secs 等静态字典/快照不重建索引）。
+    无 index_mode 时保持原扁平落盘（margin_secs 等静态字典/快照不重建索引）。
     """
     cfg = cfg or TUSHARE_DATASETS[key]
     kwargs = {}
@@ -581,24 +581,6 @@ def _load_etf_universe() -> list[str]:
     return df["ts_code"].tolist()
 
 
-def _load_concept_ids() -> list[str]:
-    """概念 id 列表（从已落湖的 concept.parquet 读，供 concept_detail 的 by=symbol 消费）。
-
-    Why 从湖读而非即时拉 concept 接口：concept（概念字典）是 concept_detail 的前置依赖，
-    落湖后复用零额外配额；且 concept 接口静态，即时拉与读湖等价但后者省一次请求。
-    Why 湖不存在返空：concept 未同步时 concept_detail 无标的可拉，返空让 _sync_by_symbol
-    的 symbols=[] 自然跳过（for 空列表不执行），不抛异常阻断编排（编排脚本可先跑 concept
-    再跑 concept_detail，resolve_symbols 在 concept_detail 时读已落湖的 concept）。
-    """
-    lake = os.path.join("data_lake", "concept.parquet")
-    if not os.path.exists(lake):
-        logger.warning("concept.parquet 不存在，concept_detail 无概念 id 可拉（请先同步 concept）")
-        return []
-    df = pd.read_parquet(lake)
-    code_col = "code" if "code" in df.columns else df.columns[0]
-    return df[code_col].astype(str).tolist()
-
-
 # A 股核心宽基指数（覆盖主流规模/板块风格）。指数类数据集（index_daily/index_member）
 # 的标的池——固定常量，无需也不应从股票/基金接口拉（与 _load_universe 股票池语义隔离）。
 CORE_INDEX_CODES: list[str] = [
@@ -621,6 +603,7 @@ def resolve_symbols(key: str, limit: Optional[int] = None) -> list[str]:
     统一喂股票列表，导致 fund_*/index_* 被喂错标的 → 接口返空 → 静默落空（df.empty 直接
     continue，不报错不落盘，湖里缺数据却无感知）。本函数按数据集声明的 universe 字段路由
     到正确 loader，让单数据集 CLI 与编排脚本零特殊分支都自动正确。
+    （concept universe 随 concept/concept_detail 整体退役删除，2026-08-05。）
 
     参数：
         key: TUSHARE_DATASETS 注册的数据集 key
@@ -632,8 +615,6 @@ def resolve_symbols(key: str, limit: Optional[int] = None) -> list[str]:
         syms = _load_etf_universe()
     elif universe == "index":
         syms = list(CORE_INDEX_CODES)
-    elif universe == "concept":
-        syms = _load_concept_ids()
     else:  # stock（含缺省）
         syms = _load_universe()
     if limit:

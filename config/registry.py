@@ -31,9 +31,9 @@ from typing import Dict, Any
 #   schedule:        计划节奏（**仅元信息展示**，无 Beat 守护，不做强约束）
 #   freshness_hours: 「健康」新鲜度阈值（小时）；parquet mtime 距今 ≤ 此值 = healthy，否则 stale
 # key 与 LAKE_CONFIG["lakes"] 的 key 通常一一对应（路径不重复定义，只在此声明资产语义）。
-# 例外——复用湖场景（已废弃 2026-07-27）：原 top_list→dragon_list、hsgt_top10→north_flow 的
-#   lake_key 复用设计已废弃（dragon_list/north_flow 两湖随 AKShare 源退役删除），top_list/
-#   hsgt_top10 改用独立 lake 路径。data_service._parquet_path fallback 到数据集 key 自身（零回归）。
+# 退役（2026-08-05）：top_list / hsgt_top10 / concept / concept_detail 4 个数据集因 Tushare
+# 无接口权限长期 _unavailable（仅前端占位、无物理湖），按用户要求整体删除——注册表、TUSHARE_DATASETS、
+# LAKE_CONFIG、探针与相关测试一并清理，不再占健康度名单。
 DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     # macro（macro_credit 湖）：CreditRegime 的输入湖，由 sync_macro_credit.py 产出。
     # Plan C Task 6 源切换：主源 Tushare cn_m(M0/M1/M2) + akshare 社融(shrzgm)/DR007 fallback。
@@ -61,11 +61,6 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     # 而异——财报季频 vs 资金流日频 vs 指数权重月频。按数据集粒度注册才能精确表达各自节奏，
     # 前端表格也能逐行展示「哪个数据集何时同步、是否过期」。
     #
-    # Why 复用湖仍单独注册数据集：top_list 复用 dragon_list 湖、hsgt_top10 复用 north_flow 湖
-    # （TUSHARE_DATASETS lake 路径相同），但 DATASET_REGISTRY 用数据集名（top_list/hsgt_top10）
-    # 作 key——前端要能区分「龙虎榜现在由 Tushare 生产」vs「dragon_list 仍标 AKShare」，
-    # 两个注册表语义不同（资产元信息 vs 寻址路径），key 解耦。
-    #
     # 字段口径：
     #   script=data/tools/sync_tushare.py —— 通用同步器（POST /sync/{key} 子进程拉起）
     #   freshness_hours —— 「健康」新鲜度阈值：日频=24h、季频=2190h（90天*24.3）、月频=730h、
@@ -84,15 +79,8 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "script": "data/tools/sync_tushare.py", "schedule": "每季报披露窗口", "freshness_hours": 2190},
     "dividend":        {"source": "Tushare", "market": "A股", "granularity": "不定期",
                         "script": "data/tools/sync_tushare.py", "schedule": "每年预案公告季", "freshness_hours": 2190},
-    # —— 资金流 / 龙虎榜 3（日频，trade_date 索引）——
-    # top_list 复用 dragon_list 湖（切 Tushare 替代 akshare sync_dragon_list）。
+    # —— 资金流 / 龙虎榜 2（日频，trade_date 索引）——
     "moneyflow":       {"source": "Tushare", "market": "A股", "granularity": "1d",
-                        "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
-    # top_list（龙虎榜个股明细）：⚠️ 代理 tnskhdata 无此方法（2026-07-19 probe 实测 DataApi has no
-    # attribute，间歇返字段不可靠），TUSHARE_DATASETS 标 _unavailable，前端展示但无数据。
-    # lake_key 复用已废弃：top_list 用独立 lake（data_lake/top_list.parquet）；代理跑不通 top_list
-    # 标 _unavailable 前端展示 missing。原 dragon_list 湖（akshare hit 标记）已随 AKShare 源退役删除。
-    "top_list":        {"source": "Tushare", "market": "A股", "granularity": "1d",
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "top_inst":        {"source": "Tushare", "market": "A股", "granularity": "1d",
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
@@ -103,19 +91,10 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     "margin_secs":     {"source": "Tushare", "market": "A股", "granularity": "快照",
                         "script": "data/tools/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
-    # —— 北向资金 2（hsgt_top10 / moneyflow_hsgt）——
-    # hsgt_top10（沪深港通十大成交股）：⚠️ 代理 tnskhdata 无此方法（同 top_list，probe 实测），_unavailable。
-    # hsgt_top10 用独立 lake（data_lake/hsgt_top10.parquet）；原 north_flow 湖（akshare 北向总量，废弃态）
-    # 已随 AKShare 源退役删除；北向总量读 moneyflow_hsgt.north_money（全期 700 行可用）。
-    "hsgt_top10":      {"source": "Tushare", "market": "A股", "granularity": "1d",
-                        "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
+    # —— 北向资金 1（moneyflow_hsgt）——
     "moneyflow_hsgt":  {"source": "Tushare", "market": "A股", "granularity": "1d",
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
-    # —— 板块 / 概念 2（concept 静态字典，ths_daily 板块指数日频）——
-    # concept_detail 按概念 id 分页（pro.concept_detail(id=...)），通用同步器不支持 by=concept，
-    # Plan A Task 7 已决策跳过，此处不注册 concept_detail。
-    "concept":         {"source": "Tushare", "market": "板块", "granularity": "快照",
-                        "script": "data/tools/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
+    # —— 板块 1（ths_daily 板块指数日频）——
     "ths_daily":       {"source": "Tushare", "market": "板块", "granularity": "1d",
                         "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
     # —— 指数 3（index_daily 日频，index_weight 月频，index_member 快照）——
@@ -194,8 +173,6 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
                        "script": "data/tools/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
     "hs_const_sz":    {"source": "Tushare", "market": "A股", "granularity": "快照",
                        "script": "data/tools/sync_tushare.py", "schedule": "每季", "freshness_hours": 2190},
-    "concept_detail": {"source": "Tushare", "market": "板块", "granularity": "快照",
-                       "script": "data/tools/sync_tushare.py", "schedule": "每月", "freshness_hours": 730},
     # —— 特色桶：筹码明细 / 因子 ——
     "cyq_chips":      {"source": "Tushare", "market": "A股", "granularity": "1d",
                        "script": "data/tools/sync_tushare.py", "schedule": "每日18:00", "freshness_hours": 24},
@@ -286,20 +263,9 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "lake": "data_lake/moneyflow.parquet",
         "quota_type": "special",  # 资金流向按 Tushare 官方归特色数据（300/min，2026-07-25 Task 6）
     },
-    # —— 龙虎榜（top_list/top_inst）：单日全市场，按 date 分页 ——
-    # dragon_list 湖切 Tushare（原 akshare 源退役）；top_inst 机构席位单独湖。
-    "top_list": {
-        # ⚠️ 事实订正：龙虎榜个股买卖额真实列名是 l_buy / l_sell（非 buy_amount/sell_amount）。
-        # l_amount=龙虎榜成交总额 / net_amount=净额 / amount=全市场成交额。
-        # ⚠️ 代理不可用（2026-07-19 probe）：tnskhdata 无 top_list 方法（DataApi has no
-        #   attribute，间歇返字段不可靠），标 _unavailable，sync_dataset 跳过不下载。
-        #   龙虎榜单用 dragon_list（akshare hit，brief.py 播报消费），个股明细待 akshare 换源。
-        "api": "top_list", "by": "date",
-        "date_col": "trade_date", "symbol_col": "ts_code",
-        "fields": "ts_code,trade_date,name,close,pct_change,amount,net_amount,l_buy,l_sell",
-        "lake": "data_lake/top_list.parquet",
-        "_unavailable": "tnskhdata 代理无 top_list 方法（DataApi has no attribute），龙虎榜单用 dragon_list，待 akshare 换源",
-    },
+    # —— 龙虎榜（top_inst）：单日全市场，按 date 分页 ——
+    # dragon_list 湖切 Tushare（原 akshare 源退役）；top_list 因代理/直连均无权限已整体删除
+    # （2026-08-05），仅保留机构席位 top_inst。
     "top_inst": {
         # ⚠️ 事实订正（结构重写）：config 原误配成 top_list 同款字段，实际 top_inst 是
         # 「龙虎榜机构席位」明细——exalter=营业部/机构名 / buy,buy_rate=买入额及占比 /
@@ -335,20 +301,9 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "ts_code,trade_date,name,exchange",
         "lake": "data_lake/margin_secs.parquet",
     },
-    # —— 北向资金（hsgt_top10/moneyflow_hsgt）：切 Tushare 替代 akshare sync_north_flow ——
-    # hsgt_top10 当日十大成交股（有 ts_code，by=date），复用 north_flow 湖（切源）。
-    "hsgt_top10": {
-        # ⚠️ 事实订正：删幻觉列 vol / north_direction（API 不返回）。真实列为
-        # close/change/rank/market_type/amount/net_amount/buy/sell。north_money 在
-        # moneyflow_hsgt 市场级接口里，hsgt_top10 只返个股十大成交明细。
-        # ⚠️ 代理不可用（2026-07-19 probe）：tnskhdata 无 hsgt_top10 方法（DataApi has no
-        #   attribute），标 _unavailable。北向总量用 moneyflow_hsgt.north_money（全期 700 行）。
-        "api": "hsgt_top10", "by": "date",
-        "date_col": "trade_date", "symbol_col": "ts_code",
-        "fields": "trade_date,ts_code,name,close,rank,amount,net_amount,buy,sell",
-        "lake": "data_lake/hsgt_top10.parquet",
-        "_unavailable": "tnskhdata 代理无 hsgt_top10 方法（DataApi has no attribute），北向总量用 moneyflow_hsgt 替代",
-    },
+    # —— 北向资金（moneyflow_hsgt）：切 Tushare 替代 akshare sync_north_flow ——
+    # hsgt_top10（十大成交股）因代理/直连均无权限已整体删除（2026-08-05），北向总量
+    # 读 moneyflow_hsgt.north_money。
     # moneyflow_hsgt 市场级北/南向资金（无个股 symbol）→ by=date 逐日拉（市场级时序）。
     # ⚠️ quick 批订正（by=single → by=date）：原 single 模式 _sync_single 只传 fields 不传
     # 任何日期参数，实测 moneyflow_hsgt() 无参抛 Invalid request parameters（接口硬性要求
@@ -363,26 +318,9 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "trade_date,ggt_ss,ggt_sz,hgt,sgt,north_money,south_money",
         "lake": "data_lake/moneyflow_hsgt.parquet",
     },
-    # —— 板块/概念（Plan A Task 7）：补 sector 的 Tushare 维度 ——
-    # concept（概念列表）：单次返回全量概念字典（code+name），无时间维度 → by=single 落扁平 df。
-    # date_col 填 code 仅为占位（single 模式 _sync_single 不触碰索引，原样 to_parquet），
-    # 概念字典本身是静态参照表，无时序索引语义。
-    "concept": {
-        # ⚠️ 事实订正（B 类·方法名错）：tnskhdata 代理无任何概念接口
-        # （concept / stock_concept / concept_detail 均 No such method），本数据集不可下载。
-        # 标 _unavailable 由通用同步器 sync_dataset 检测后跳过并打印提示，不下载/不报错。
-        # 待 akshare 换源（akshare 有概念板块接口）后恢复。
-        "api": "concept", "by": "single",
-        "date_col": "code", "symbol_col": "code",
-        "fields": "code,name",
-        "lake": "data_lake/concept.parquet",
-        "quota_type": "basic",
-        # 2026-07-25 Task 11 dry-run 订正：代理废弃后纯直连 tushare，但 concept 接口服务端仍返
-        # 「无正确的接口名」（hasattr True 但调用失败——SDK __getattr__ 动态返回不验证，积分不足或
-        # 接口下线）。标 _unavailable 由 sync_dataset 跳过，待积分提升/换源（akshare 概念接口）恢复。
-        # 原 Task 4 误删 _unavailable（以为代理废弃即可用），dry-run 探测发现直连仍不可用，加回。
-        "_unavailable": "直连 tushare concept 接口服务端返「无正确的接口名」（积分不足/接口下线），待换源恢复",
-    },
+    # —— 板块（Plan A Task 7）：补 sector 的 Tushare 维度 ——
+    # concept/concept_detail（概念字典/概念成分）因直连 tushare 无接口权限已整体删除
+    # （2026-08-05），仅保留 ths_daily 板块指数日线。
     # ths_daily（同花顺板块指数日线）：单日全市场板块行情一次返（ts_code 为板块指数代码如 885572.TI，
     # 非个股）→ by=date 分页。symbol 从 ts_code 列取（Task 1 fix 已保证 by=date 不从文件名取 symbol）。
     # 物理意图：板块指数动量/轮动因子核心，与 sector 湖（akshare 申万行业日线）互补——
@@ -682,7 +620,7 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
     # ============================================================================
     # 数据快照扩容（2026-07-25 Plan Task 5）：基础桶新数据集（500/min）
     # ============================================================================
-    # 物理意图：补齐标的池源头（stock_basic）、互联互通成分（hs_const 沪/深）、概念成分股（concept_detail）。
+    # 物理意图：补齐标的池源头（stock_basic）、互联互通成分（hs_const 沪/深）。
     "stock_basic": {
         # 股票列表（标的池源头）：单次拉全市场在售（list_status='L'），by=single 落扁平 df。
         # Why 落湖：原仅 _load_universe 内部即时调用拿 universe 不落 parquet；提升为正式数据集
@@ -714,22 +652,6 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "ts_code,hs_type,in_date,out_date,is_new",
         "lake": "data_lake/hs_const_sz.parquet",
         "quota_type": "basic",
-    },
-    "concept_detail": {
-        # 概念成分股（concept_detail）：按概念 id 分页（pro.concept_detail(id=...)）。
-        # Why by=symbol + universe=concept + code_param=id：复用 _sync_by_symbol 逐标的分页，
-        # 标的池=concept 湖的 id 列表（resolve_symbols universe=concept 分支），传参名=id 非 ts_code。
-        # ⚠️ 2026-07-25 Task 11 dry-run：前置依赖 concept 不可用（直连积分不足，见 concept _unavailable），
-        # concept_detail 无概念 id 来源（_load_concept_ids 返空），标 _unavailable 跳过。
-        # 待 concept 恢复（积分提升/换源）后，concept_detail 自动恢复（_load_concept_ids 读 concept 湖）。
-        "api": "concept_detail", "by": "symbol",
-        "universe": "concept",
-        "code_param": "id",
-        "date_col": "in_date", "symbol_col": "ts_code",
-        "fields": "id,concept_name,ts_code,name,in_date,out_date",
-        "lake": "data_lake/concept_detail.parquet",
-        "quota_type": "basic",
-        "_unavailable": "前置 concept 不可用（直连积分不足），concept_detail 无概念 id 来源，待 concept 恢复后自动恢复",
     },
     # ============================================================================
     # 数据快照扩容（2026-07-25 Plan Task 6）：特色桶新数据集（300/min）

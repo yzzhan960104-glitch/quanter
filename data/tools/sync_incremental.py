@@ -31,7 +31,7 @@ weekly/monthly/index_member 属周期条（bar 只在周期结束变化），用
 
 边界与防御性：
   - parquet 不存在（首次或被删）→ 回退 sync_dataset 全量拉（用固定窗口 --years 3）。
-  - cfg['_unavailable']=True → 跳过（top_list/hsgt_top10/concept 代理不可用）。
+  - cfg['_unavailable']=True → 跳过（注册表已无此类，机制保留防回归）。
   - sync_dataset 拉到空（节假日/接口异常/限频返空）→ 跳过不覆盖旧 parquet（关键防线：防止
     临时性接口故障把旧历史覆盖成空）。
   - by=symbol 类财报数据集（fina_*）走 slow 批，**不在日频增量范围**——本脚本仅同步 quick 批。
@@ -177,7 +177,7 @@ def sync_one_key(key: str, today_str: str, fallback_years: int,
       [6] merge 旧+新，落盘回原路径
     """
     cfg = TUSHARE_DATASETS[key]
-    # [1] _unavailable 早返：proxy 无此接口（top_list/hsgt_top10/concept），与 sync_dataset 内置
+    # [1] _unavailable 早返：与 sync_dataset 内置
     # 跳过对齐，但此处早返省一次函数调用 + 日志层级更清晰。
     if cfg.get("_unavailable"):
         msg = f"⚠️ 跳过（不可用）：{cfg['_unavailable'][:60]}"

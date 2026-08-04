@@ -203,12 +203,10 @@ def test_forecast_express_dividend_lake(tmp_path, fake_pro, monkeypatch):
 def test_task3to5_datasets_registered():
     """Task 3-5 数据集配置完备性 + 落湖注册契约。
 
-    top_list 复用 dragon_list 湖（切 Tushare 替代 akshare sync_dragon_list），
-    不在 LAKE_CONFIG 新增 key；其余 5 个各自独立湖。
+    top_list 已退役删除（2026-08-05，Tushare 无接口权限）；其余各自独立湖。
     """
     by_date_specs = {
         "moneyflow": ("trade_date", "ts_code"),
-        "top_list": ("trade_date", "ts_code"),
         "top_inst": ("trade_date", "ts_code"),
         "margin": ("trade_date", "exchange_id"),
         "margin_detail": ("trade_date", "ts_code"),
@@ -225,16 +223,12 @@ def test_task3to5_datasets_registered():
         assert key in LAKE_CONFIG["lakes"], f"{key} 未注册到 LAKE_CONFIG"
         assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
             f"{key} LAKE_CONFIG 与 TUSHARE_DATASETS 路径不一致"
-    # top_list 代理不可用（2026-07-19 probe：tnskhdata 无此方法），标 _unavailable + 独立湖路径
-    # （不注册 LAKE_CONFIG——代理跑不通无数据，龙虎榜单用 dragon_list）
-    assert TUSHARE_DATASETS["top_list"]["lake"] == "data_lake/top_list.parquet", \
-        "top_list 应独立湖路径（复用废弃）"
-    assert "_unavailable" in TUSHARE_DATASETS["top_list"], \
-        "top_list 代理不可用应标 _unavailable"
+    # top_list 已退役删除：不得残留注册
+    assert "top_list" not in TUSHARE_DATASETS, "top_list 已退役（2026-08-05），不应再注册"
 
 
-def test_moneyflow_top_list_by_date(tmp_path, fake_pro, monkeypatch):
-    """by=date 数据集（moneyflow/top_list）落 MultiIndex，symbol 从 symbol_col 列取（非文件名）。
+def test_moneyflow_by_date(tmp_path, fake_pro, monkeypatch):
+    """by=date 数据集（moneyflow）落 MultiIndex，symbol 从 symbol_col 列取（非文件名）。
 
     Why 守卫 Task 1 fix：by=date 的 shard 文件名是交易日（20240105.parquet），
     _build_multiindex 必须从 df[symbol_col] 取 symbol——若误从文件名取，symbol 全错成交易日。
@@ -247,7 +241,6 @@ def test_moneyflow_top_list_by_date(tmp_path, fake_pro, monkeypatch):
             "buy_sm_amount": [1e8, 2e8], "sell_sm_amount": [9e7, 1.5e8],
             "buy_elg_amount": [3e8, 4e8], "sell_elg_amount": [2e8, 3e8],
             "net_mf_amount": [1e7, 5e7]})),
-        # top_list 原同测，2026-07-19 盘点后 _unavailable（代理无 top_list 方法），剔除
     }
     for key, (api, data) in cases.items():
         fake_pro.set(api, data)
@@ -325,22 +318,15 @@ def test_moneyflow_hsgt_by_date(tmp_path, fake_pro, monkeypatch):
 # Plan A Task 7/8/10：板块概念 / 指数 / 股东解禁停牌
 # ====================================================================
 
-def test_concept_ths_daily_registered():
-    """Task 7 板块概念数据集配置完备性 + 落湖注册契约。
+def test_ths_daily_registered():
+    """Task 7 板块数据集配置完备性 + 落湖注册契约。
 
     Why 守卫完备性：sync_dataset 直接 cfg = TUSHARE_DATASETS[key]，缺任一字段运行时崩在深处。
-    concept 是静态概念字典（by=single 扁平），ths_daily 是同花顺板块指数日线（by=date，单日全市场）。
-    concept_detail 按「概念 id」分页（pro.concept_detail(id=...)），通用同步器只支持
-    symbol/date/single 三种 by，无 by=concept 模式 → 本 task 跳过 concept_detail，
-    待框架扩展 by=concept 后再接入（见 notes）。
+    concept/concept_detail 已退役删除（2026-08-05，直连无接口权限）；ths_daily 是同花顺
+    板块指数日线（by=date，单日全市场）。
     """
-    # concept：静态字典，single 模式
-    assert "concept" in TUSHARE_DATASETS, "concept 未注册"
-    cfg_concept = TUSHARE_DATASETS["concept"]
-    for f in ("api", "by", "date_col", "symbol_col", "fields", "lake"):
-        assert f in cfg_concept, f"concept 配置缺字段 {f}"
-    assert cfg_concept["by"] == "single", "concept 应为 single（静态字典，单次拉全量）"
-    assert cfg_concept["api"] == "concept"
+    assert "concept" not in TUSHARE_DATASETS, "concept 已退役（2026-08-05），不应再注册"
+    assert "concept_detail" not in TUSHARE_DATASETS, "concept_detail 已退役（2026-08-05），不应再注册"
     # ths_daily：板块指数日线，date 模式（单日全市场板块行情一次返）
     assert "ths_daily" in TUSHARE_DATASETS, "ths_daily 未注册"
     cfg_ths = TUSHARE_DATASETS["ths_daily"]
@@ -349,25 +335,20 @@ def test_concept_ths_daily_registered():
     assert cfg_ths["by"] == "date", "ths_daily 应为 date（单日全市场板块行情）"
     assert cfg_ths["date_col"] == "trade_date", "ths_daily date_col 应为 trade_date"
     assert cfg_ths["symbol_col"] == "ts_code", "ths_daily symbol_col 应为 ts_code（板块指数代码）"
-    # concept_detail（2026-07-25 订正）：原决策跳过，现 resolve_symbols 支持 universe=concept，
-    # concept_detail 复用 by=symbol + code_param=id 分页纳入统一管道（详见 test_resolve_symbols_concept）
-    assert "concept_detail" in TUSHARE_DATASETS, "concept_detail 应已注册（universe=concept）"
-    cfg_cd = TUSHARE_DATASETS["concept_detail"]
-    assert cfg_cd["universe"] == "concept" and cfg_cd["code_param"] == "id", \
-        "concept_detail 走 universe=concept + code_param=id"
 
 
-def test_concept_ths_daily_lake_registered():
-    """concept/ths_daily 必须在 LAKE_CONFIG['lakes'] 注册（DataLakeReader 寻址依赖）。
+def test_ths_daily_lake_registered():
+    """ths_daily 必须在 LAKE_CONFIG['lakes'] 注册（DataLakeReader 寻址依赖）。
 
     Why 不复用 sector 湖：sector 湖由 akshare 写申万行业日线（sync_sector_daily），
     ths_daily 是同花顺概念板块指数日线（不同分类口径 + 不同 ts_code 空间），
     混写会互相覆盖。两者独立湖，各走各的 ts_code 空间。
     """
-    for key in ("concept", "ths_daily"):
-        assert key in LAKE_CONFIG["lakes"], f"{key} 未在 LAKE_CONFIG['lakes'] 注册"
-        assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
-            f"{key} LAKE_CONFIG 路径与 TUSHARE_DATASETS 不一致"
+    key = "ths_daily"
+    assert key in LAKE_CONFIG["lakes"], f"{key} 未在 LAKE_CONFIG['lakes'] 注册"
+    assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
+        f"{key} LAKE_CONFIG 路径与 TUSHARE_DATASETS 不一致"
+    assert "concept" not in LAKE_CONFIG["lakes"], "concept 湖已退役删除（2026-08-05）"
 
 
 def test_ths_daily_by_date(tmp_path, fake_pro, monkeypatch):
@@ -396,26 +377,6 @@ def test_ths_daily_by_date(tmp_path, fake_pro, monkeypatch):
     # symbol 必须来自 ts_code 列（板块指数代码），绝不能是文件名里的交易日
     assert "20240105" not in syms, "ths_daily symbol 误取自文件名（交易日）"
     assert syms == {"885572.TI", "885538.TI"}, "ths_daily symbol 不在 ts_code 列"
-
-
-def test_concept_unavailable_skipped(tmp_path, fake_pro, monkeypatch):
-    """concept 标 _unavailable 时跳过（2026-07-25 Task 11 dry-run：直连积分不足仍不可用）。
-
-    Why 守卫：代理废弃后纯直连 tushare，但 concept 接口服务端仍返「无正确的接口名」
-    （hasattr True 但调用失败，积分不足/接口下线）。Task 11 dry-run 探测确认，标 _unavailable
-    跳过。Task 4 曾误删 _unavailable（以为代理废弃即可用），dry-run 订正加回。
-    """
-    import data.tushare_sync as ts
-    import os
-    # concept 必须标 _unavailable（直连积分不足）
-    assert TUSHARE_DATASETS["concept"].get("_unavailable"), \
-        "concept 必须标 _unavailable（直连积分不足，服务端返「无正确的接口名」）"
-    fake_pro.set("concept", pd.DataFrame({"code": ["TS2"], "name": ["新能源汽车"]}))
-    lake = str(tmp_path / "concept.parquet")
-    monkeypatch.setitem(TUSHARE_DATASETS["concept"], "lake", lake)
-    ts.sync_dataset("concept", "2024-01-05", "2024-12-31", resume=False)
-    # _unavailable 时跳过，不落盘
-    assert not os.path.exists(lake), "concept 标 _unavailable 后不应落盘 parquet"
 
 
 def test_index_datasets_registered():

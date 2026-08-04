@@ -233,7 +233,7 @@ def test_sync_one_key_skip_unavailable(tmp_path, mock_sync_dataset):
     from data.tools.sync_incremental import sync_one_key
     from config import TUSHARE_DATASETS
 
-    lake = str(tmp_path / "top_list.parquet")
+    lake = str(tmp_path / "unavailable.parquet")
     _setup_key("_test_unavail", lake, by="date",
                _unavailable="测试：代理无此接口")
     # 即使旧 parquet 存在，sync_one_key 也不应触碰它

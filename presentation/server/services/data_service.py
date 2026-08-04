@@ -74,10 +74,9 @@ def _sentinel_path(key: str, *, failed: bool = False) -> str:
 def _lake_key(key: str) -> str:
     """取数据集 key 对应的「物理湖 key」（LAKE_CONFIG["lakes"] 索引键）。
 
-    物理意图：多数数据集 key 与湖 key 一一相等；但复用湖场景（top_list→dragon_list、
-    hsgt_top10→north_flow，切 Tushare 替代 akshare）数据集名 ≠ 湖 key，需在 DATASET_REGISTRY
-    用 lake_key 字段显式指向既有湖。本函数读 lake_key，缺省 fallback 到数据集 key 自身——
-    保证既有 daily/macro 等正常数据集零回归。
+    物理意图：多数数据集 key 与湖 key 一一相等；lake_key 复用机制已废弃
+    （2026-07-27，相关数据集 top_list/hsgt_top10 已整体退役删除 2026-08-05），
+    本函数读 lake_key 仅作向后兼容，缺省 fallback 到数据集 key 自身——零回归。
 
     Why 集中在此：_parquet_path / _loaded_data_span 都靠它作湖索引，单一维护点防分叉。
     """
@@ -87,8 +86,7 @@ def _lake_key(key: str) -> str:
 def _parquet_path(key: str) -> Optional[str]:
     """取湖 key 对应的 parquet 路径（LAKE_CONFIG["lakes"] 单一真相源）；未登记返 None。
 
-    复用湖（top_list/hsgt_top10）经 _lake_key 映射到 dragon_list/north_flow 的物理路径，
-    否则前端 list_datasets 会误报这两个数据集 status=missing（即便物理湖已同步）。
+    经 _lake_key 取物理湖索引（复用机制已废弃，缺省 key 自身），未登记返 None。
     """
     return LAKE_CONFIG.get("lakes", {}).get(_lake_key(key))
 
@@ -104,10 +102,9 @@ def _derive_status(key: str, parquet_path: Optional[str]) -> Tuple[str, Optional
       4. parquet mtime 距今 ≤ freshness_hours → healthy
       5. 否则 → stale（数据陈旧，建议重同步）
     """
-    # 0. C-9 A2：_unavailable 数据集是代理不支持（设计使然），不参与 failed/missing 告警。
-    # 物理意图：top_list/hsgt_top10/concept/concept_detail 标 _unavailable = tnskhdata 代理
-    # 无对应方法或直连积分不足（接口下线），非同步故障。若落入 failed 分支会永久误报，掩盖
-    # 真实故障信号——故在状态机顶部短路返 unavailable，前端按"设计不可用"展示而非告警。
+    # 0. C-9 A2：_unavailable 数据集是代理/接口不支持（设计使然），不参与 failed/missing 告警。
+    # 物理意图：接口无权限 = 非同步故障。若落入 failed 分支会永久误报，掩盖真实故障信号——
+    # 故在状态机顶部短路返 unavailable，前端按"设计不可用"展示而非告警。
     if TUSHARE_DATASETS.get(key, {}).get("_unavailable"):
         return "unavailable", "代理接口不支持（_unavailable）"
     # 1. syncing 哨兵优先
@@ -144,7 +141,7 @@ def _loaded_data_span(key: str) -> Tuple[Optional[str], Optional[str]]:
         import pandas as pd  # 延迟 import，避免模块级耦合
         from data.lake_reader import DataLakeReader
         reader = DataLakeReader.get_instance()
-        df = reader.get_lake(_lake_key(key))  # 复用湖（top_list→dragon_list 等）映射到物理湖 key
+        df = reader.get_lake(_lake_key(key))  # 按物理湖 key 取湖（缺省=数据集 key）
         if df is None or len(df) == 0:
             return None, None
         idx = df.index

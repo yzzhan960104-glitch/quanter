@@ -124,8 +124,8 @@ def test_derive_status_unavailable(monkeypatch, tmp_path):
     import presentation.server.services.data_service as ds
     from config import TUSHARE_DATASETS
     monkeypatch.setattr(ds, "TUSHARE_DATASETS",
-                        {"top_list": {"_unavailable": "代理无此接口"}})
+                        {"_unavailable_x": {"_unavailable": "代理无此接口"}})
     monkeypatch.setattr(ds, "_sentinel_path", lambda key, failed=False: str(tmp_path / f"{key}.failed"))
-    (tmp_path / "top_list.failed").write_text("old error", encoding="utf-8")
-    status, _ = ds._derive_status("top_list", str(tmp_path / "top_list.parquet"))
+    (tmp_path / "_unavailable_x.failed").write_text("old error", encoding="utf-8")
+    status, _ = ds._derive_status("_unavailable_x", str(tmp_path / "_unavailable_x.parquet"))
     assert status == "unavailable"
