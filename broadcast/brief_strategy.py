@@ -131,8 +131,15 @@ def _pct(v) -> str:
 
 
 def _fmt_dd(v) -> str:
-    """回测 max_drawdown（P1-1 起为净值百分比，负值）→ 「-12.0%」；异常 → 「—」。"""
+    """回测 max_drawdown（P1-1 起为净值百分比，∈[-1, 0]）→ 「-12.0%」；异常/越界 → 「—」。
+
+    2026-08-05：legacy 报告 max_drawdown 是累计 rr 口径（如 -412.62），越界即不渲染，
+    避免把 rr 当百分比显示成 -41262%（重算在 broadcast.__main__ 数据源侧完成）。
+    """
     try:
-        return f"{float(v) * 100:.1f}%"
+        v = float(v)
+        if v < -1.0 or v > 0.0:
+            return "—"
+        return f"{v * 100:.1f}%"
     except (TypeError, ValueError):
         return "—"

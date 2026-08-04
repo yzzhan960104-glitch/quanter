@@ -35,13 +35,27 @@ def test_old_rows_without_kind_default_submit(csv_log):
     assert rows[0].get("kind", "submit") == "submit"
 
 
-def test_aggregate_fills_only_kind_fill(csv_log):
-    """aggregate_fills_by_symbol 只聚合 kind=fill 的 BUY/SELL，submit/拒单不计。"""
-    ts.record_live_trade("600000.SH", "BUY", 100, 10.0, kind="submit",
-                         rationale="QmtExecutionGateway:REJECTED:资金不足")
+def test_aggregate_fills_only_kind_fill(csv_log, monkeypatch):
+    """aggregate_fills_by_symbol（DB 真相源，W3.4）只聚合 fill 表 BUY/SELL，净 60。"""
+    from trading import state_store
+    db = csv_log.parent / "state.db"
+    state_store.init_store(str(db))
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", str(db))
+    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "db")
+    state_store.upsert_account("acc", broker="qmt", db_path=str(db))
+    state_store.insert_fill("o1", "acc", "20260805093000", "600000.SH", "BUY", 100, 10.5,
+                            db_path=str(db))
+    state_store.insert_fill("o2", "acc", "20260805093100", "600000.SH", "SELL", 40, 11.0,
+                            db_path=str(db))
+    net = ts.aggregate_fills_by_symbol("2026-08-05", "2026-08-05")
+    assert net == {"600000.SH": 60.0}, f"只聚合 fill 行应得净 60，实际 {net}"
+
+
+def test_aggregate_fills_csv_fallback_env(csv_log, monkeypatch):
+    """LIVE_TRADE_READ_SOURCE=csv 时回退 CSV 读口（一键回滚开关）。"""
+    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
     ts.record_live_trade("600000.SH", "BUY", 100, 10.5, kind="fill", rationale="成交回报")
     ts.record_live_trade("600000.SH", "SELL", 40, 11.0, kind="fill", rationale="成交回报")
-    # 查询范围用当天（record_live_trade 时间戳 = datetime.now）；硬编码 8/1 随日期轮转失效
     _today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
     net = ts.aggregate_fills_by_symbol(_today, _today)
-    assert net == {"600000.SH": 60.0}, f"只聚合 fill 行应得净 60，实际 {net}"
+    assert net == {"600000.SH": 60.0}

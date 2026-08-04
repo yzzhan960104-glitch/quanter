@@ -563,6 +563,15 @@ def _recent_runs_from_tasks_db() -> list:
         })
     for t in done[:5]:
         rep = t.get("report") or {}
+        dd = rep.get("max_drawdown")
+        if dd is not None:
+            try:
+                if not (-1.0 < float(dd) <= 0.0):
+                    # 2026-08-05：legacy 报告 max_drawdown 是累计 rr 口径（如 -412.62），
+                    # 不是净值百分比——从 equity_curve 重算，避免播报渲染 -41262%。
+                    dd = _recompute_drawdown_from_curve(rep.get("equity_curve"))
+            except (TypeError, ValueError):
+                dd = None
         out.append({
             "run_id": (t.get("created_at") or "")[:10].replace("-", ""),
             "created_at": t.get("created_at", ""),
@@ -570,10 +579,26 @@ def _recent_runs_from_tasks_db() -> list:
             "end": t.get("end") or "",
             "n_hits": rep.get("n_hits") or 0,
             "win_rate": rep.get("win_rate") or 0.0,
-            "max_drawdown": rep.get("max_drawdown") or 0.0,
+            "max_drawdown": dd,
             "annualized_return": rep.get("annualized_return") or 0.0,
         })
     return out
+
+
+def _recompute_drawdown_from_curve(curve) -> float | None:
+    """legacy 报告回撤重算：净值曲线 peak-to-trough（equity_0=1.0），返负值；无曲线返 None。"""
+    if not curve:
+        return None
+    peak = 1.0
+    dd = 0.0
+    for p in curve:
+        try:
+            eq = float((p or {}).get("equity") or 1.0)
+        except (TypeError, ValueError):
+            continue
+        peak = max(peak, eq)
+        dd = min(dd, eq / peak - 1.0)
+    return dd
 
 
 def _build_brief(bot: str, date: str, reader: DataLakeReader):
