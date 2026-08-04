@@ -141,3 +141,24 @@ def _isolate_trade_env(monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolate_job_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "job_run.db"))
+
+
+# ============ SSoT Phase A：tmp_db fixture（共享隔离 state_store DB）============
+# Why 非 autouse：state_store 的 trade_event/order/fill/account 读写需显式 tmp DB 隔离，
+# 但许多既有测试不触及 state_store（直接走 .venv310/logs/ 默认 DB 亦无副作用）。autouse 会
+# 给每条用例强加 init_store + upsert_account 开销，且要求 trading 包可 import（部分纯算法
+# 测试不需）。故采用显式注入：`def test_x(tmp_db, ...)`。物理意图：tmp_path 每测试唯一，
+# monkeypatch state_store._DEFAULT_DB 让所有未显式传 db_path 的 insert_* 写入落到 tmp，
+# account 行预置（trade_event.account_id 是 FK 引用，缺失会破坏 UNIQUE 约束语义）。
+@pytest.fixture
+def tmp_db(tmp_path, monkeypatch):
+    """tmp state_store DB + 默认 account 行（SSoT plan 共享 fixture）。
+
+    返回 db_path str；测试用 `def test_x(tmp_db, ...)` 注入。
+    """
+    from trading import state_store
+    db = tmp_path / "state.db"
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", str(db))
+    state_store.init_store(str(db))
+    state_store.upsert_account("ACC_TEST", broker="qmt")
+    return str(db)
