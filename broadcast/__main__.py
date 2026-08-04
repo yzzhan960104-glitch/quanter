@@ -166,7 +166,10 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
       改为读运行中 server 的 API（网关所有权唯一归 server/engine）。server 不在/超时
       → 走既有降级文案（观测层绝不阻断播报）。
     """
-    # 同步取数：trades（CSV 流水，与 server 同源单文件）
+    # 同步取数：trades 走 query_trades（默认 state_store.fill，env LIVE_TRADE_READ_SOURCE=csv 回退 CSV）。
+    # Fix2（用户两轴 review · 注释脱节）：原注释「trades 走同步 query_trades（CSV 全表扫描…
+    # 与 server 同源单文件）」是 T7 前的口径——query_trades 默认已切 DB（T7 state_store.fill），
+    # CSV 仅 env LIVE_TRADE_READ_SOURCE=csv 时回退。注释与代码同步，防运维误以为必走 CSV。
     try:
         from presentation.server.services import trading_service
         trades_payload = trading_service.query_trades(date, date, limit=100)
@@ -224,7 +227,11 @@ def _server_json(path: str, timeout: float = 5.0):
 def _local_positions_fallback() -> list[dict] | None:
     """broker 持仓不可用时的本地账本兜底：{symbol: qty} → [{symbol, qty}]。
 
-    失败返 None（brief 渲染「当前无持仓」），绝不抛——观测层断线降级纪律。
+    失败返 None（brief 渲染「持仓未知（网关未连接）」，不折叠成空仓），绝不抛——
+    观测层断线降级纪律。
+    Fix2（用户两轴 review · 注释脱节）：原 docstring「渲染『当前无持仓』」是 T7 前口径，
+    T7 后 None 渲染「持仓未知（网关未连接）」以区分「真无仓」与「取数失败」，避免研究员
+    把断线误判成空仓而忽略网关故障。注释与渲染逻辑同步。
     """
     try:
         from trading import position_book

@@ -425,8 +425,12 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # 活跃度启发式：quoter 行情目录 + 启动缓存任一新鲜 → 活跃；全老旧 → 陈旧告警。
         # Why 加 quoter：miniqmtShm*/up_queue_* 是启动时一次性生成（不刷新），quoter
         #    行情目录在盘中会被行情主推刷新，是更敏感的存活信号。
+        # Fix3（用户两轴 review · Windows mtime 失效）："quoter" 只匹配目录本身，Windows
+        #    目录 mtime 仅在内部文件增删时刷新（行情主推覆盖写已有文件不动目录 mtime），
+        #    一天只变一次 → 客户端正常收行情时仍误报陈旧。加 "quoter/*" glob 到文件级，
+        #    行情刷新文件 mtime 即更新，是 Windows 下唯一可靠的存活信号。
         now = time.time()
-        patterns = ("miniqmtShm*Cache*", "up_queue_win_*", "quoter")
+        patterns = ("miniqmtShm*Cache*", "up_queue_win_*", "quoter", "quoter/*")
         newest = 0.0
         for pat in patterns:
             for f in _glob.glob(os.path.join(self._userdata_path, pat)):

@@ -427,10 +427,15 @@ def test_account_status_ok_does_not_clear_risk_halt(tmp_path):
 # ============================================================ W1.2（08-04 静默断线根治）
 # _health_guard ④ 未就绪分支旧版静默 return（无日志无告警）→ 网关断线 9 小时无人知，
 # 直到 pre_open 失败才暴露。本组补可见性：WARNING + 诊断文案 + 每 10 轮节流钉钉。
-def _make_engine_with_not_ready_gw(monkeypatch, *, diag_text="userdata 目录不存在（客户端未安装/路径错）"):
+def _make_engine_with_not_ready_gw(monkeypatch, *, diag_text="userdata 目录不存在（客户端未安装/路径错）",
+                                   mode="live"):
     """构造 engine + 一个未就绪 gw 的共用 helper（复用既有 TradingEngine() 范式）。
 
     返回 (eng, gw, fired)。fired 收集 _alert_critical 收到的告警正文（节流断言用）。
+
+    Why mode 参数（Fix1 · 用户两轴 review）：_alert_critical 加了 `if _mode()=="live"` 守卫，
+        dry_run 模式不推钉钉（防开发/测试环境误推运营群）。既有 5 个测试断「推了几次」
+        必须显式 patch _mode=live 才能命中守卫；默认 live 与既有断言一致（行为零变化）。
     """
     from unittest.mock import MagicMock, patch
     import trading.engine as eng_mod
@@ -442,6 +447,8 @@ def _make_engine_with_not_ready_gw(monkeypatch, *, diag_text="userdata 目录不
     gw._reconnecting = False
     gw.is_client_ready = MagicMock(return_value=False)
     gw._client_staleness_diag = MagicMock(return_value=diag_text)
+    # Fix1 关键：_alert_critical 已加 live 守卫，必须 patch _mode 才能命中告警分支
+    monkeypatch.setattr(eng_mod, "_mode", lambda: mode)
     fired = []
     monkeypatch.setattr(eng_mod, "_alert_critical", lambda msg: fired.append(msg))
     return eng, gw, fired
@@ -561,3 +568,92 @@ async def test_health_guard_not_ready_does_not_block_on_alert_failure(monkeypatc
         for _ in range(10):
             await eng._health_guard()  # 第 10 轮触发 _alert_critical，内部 import 失败被兜底
     assert eng._not_ready_rounds == 10  # 计数仍累加（主链路未被异常打断）
+
+
+# ============================================================ Fix1（用户两轴 review · 告警模式闸）
+# _alert_critical 全部调用点加 `if _mode()=="live"` 守卫（既有 7 处 + 新增 6 处 = 13 处）。
+# 物理意图：dry_run 模式无真金风险，开发/测试环境误推钉钉到生产运营群是噪音污染，
+# 长期会致研究员对告警麻木（真断线时忽略）。守卫与既有 7 处范式一致（pre_open gate 等）。
+# 唯一例外：_halt 致命停调度保留无条件（L1 致命 = 真金风险红线，dry_run 永不触发 _halted）。
+@pytest.mark.asyncio
+async def test_health_guard_not_ready_no_alert_in_dry_run(monkeypatch):
+    """Fix1：dry_run 模式下 _health_guard 未就绪 → _alert_critical 不应被调用（防误推钉钉）。
+
+    物理意图：dry_run 是影子/开发模式，无真金风险；客户端未就绪是环境问题（miniQMT 未起），
+    推 CRITICAL 到生产运营钉钉群只会污染通道，致研究员对真告警麻木。live 模式才该推。
+    """
+    from unittest.mock import MagicMock, patch
+    import trading.engine as eng_mod
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._risk_halted = False; gw._connected = False; gw._reconnecting = False
+    gw.is_client_ready = MagicMock(return_value=False)
+    gw._client_staleness_diag = MagicMock(return_value="userdata 目录不存在（客户端未安装/路径错）")
+    # Fix1 核心：dry_run 模式 + _alert_critical 被 spy
+    monkeypatch.setattr(eng_mod, "_mode", lambda: "dry_run")
+    call_count = {"n": 0}
+    monkeypatch.setattr(eng_mod, "_alert_critical", lambda msg: call_count.__setitem__("n", call_count["n"] + 1))
+    with patch("trading.engine.get_gateway", return_value=gw):
+        # 连续 12 轮（live 模式下应推 2 次：第 1 + 第 10；dry_run 必须推 0 次）
+        for _ in range(12):
+            await eng._health_guard()
+    assert call_count["n"] == 0, f"dry_run 模式不应推钉钉（防误推运营群），实际推了 {call_count['n']} 次"
+    assert eng._not_ready_rounds == 12  # 守卫不影响计数（日志/计数照常，只是不推钉钉）
+
+
+@pytest.mark.asyncio
+async def test_health_guard_not_ready_alerts_in_live_mode(monkeypatch):
+    """Fix1 对照：live 模式下 _health_guard 未就绪 → _alert_critical 照常被调用（守卫不误伤 live）。
+
+    Why 对照测试：防守卫逻辑写反（if _mode()=="dry_run" 才推），live 漏推比 dry_run 误推严重 100 倍
+    （真金断线漏告警 = 08-04 事故重演）。本测试与上一测试共同锁定「dry_run 0 次 / live N 次」语义。
+    """
+    from unittest.mock import MagicMock, patch
+    import trading.engine as eng_mod
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._risk_halted = False; gw._connected = False; gw._reconnecting = False
+    gw.is_client_ready = MagicMock(return_value=False)
+    gw._client_staleness_diag = MagicMock(return_value="userdata 目录不存在（客户端未安装/路径错）")
+    monkeypatch.setattr(eng_mod, "_mode", lambda: "live")
+    fired = []
+    monkeypatch.setattr(eng_mod, "_alert_critical", lambda msg: fired.append(msg))
+    with patch("trading.engine.get_gateway", return_value=gw):
+        for _ in range(12):
+            await eng._health_guard()
+    assert len(fired) == 2, f"live 模式 12 轮应推 2 次（第 1 + 第 10），实际 {len(fired)}"
+
+
+# ============================================================ Fix3（用户两轴 review · quoter 文件级诊断）
+def test_staleness_diag_quoter_inner_files_fresh(tmp_path):
+    """Fix3：quoter 目录下文件新鲜（mtime=now）→ 诊断应返「正常」（不报陈旧）。
+
+    物理意图（Windows mtime 失效）：原 patterns 含 "quoter" 匹配目录本身，Windows 目录
+    mtime 只在内部文件增删时刷新（行情主推覆盖写已有文件不动目录 mtime）→ 一天只变一次 →
+    客户端正常收行情时仍误报陈旧。修复加 "quoter/*" glob 到文件级，行情刷新文件 mtime 即更新。
+
+    本测试复现 Windows 真实场景：
+      1. 开盘前创建 quoter/SH/600000.tick（mtime=now，目录 mtime 也 now）；
+      2. 等效开盘后：把 quoter/SH/600000.tick mtime 设为 now（行情主推刷新），但
+         手动把 quoter 目录本身 mtime 设为 1 小时前（模拟 Windows 不随内部文件内容变）。
+      旧逻辑只 glob 到目录 mtime（1 小时前 = 陈旧）→ 误报陈旧；
+      新逻辑 glob quoter/* 文件 mtime（now = 新鲜）→ 正确判正常。
+    """
+    import time as _t, os as _os
+    # 构造 quoter 目录 + 内部文件（模拟开盘前建立）
+    quoter_dir = tmp_path / "quoter"
+    quoter_sh = quoter_dir / "SH"
+    quoter_sh.mkdir(parents=True)
+    tick_file = quoter_sh / "600000.tick"
+    tick_file.write_bytes(b"x")
+    # 模拟 Windows 目录 mtime 失效：把 quoter 目录 mtime 设为 1 小时前（陈旧），
+    # 但 quoter/SH/600000.tick 文件 mtime 设为 now（新鲜，模拟盘中行情主推刷新文件内容）。
+    # Windows 下目录 mtime 不随内部文件内容覆盖而变，只有创建/删除子项才变。
+    one_hour_ago = _t.time() - 3600
+    _os.utime(quoter_dir, (one_hour_ago, one_hour_ago))   # 目录 mtime 陈旧（Windows 真实行为）
+    _os.utime(tick_file, (_t.time(), _t.time()))          # 文件 mtime 新鲜（行情主推刷新）
+    gw = _gw(str(tmp_path))
+    diag = gw._client_staleness_diag(staleness_sec=300)
+    assert "正常" in diag, f"quoter 内部文件新鲜应判正常（Windows mtime 修复），实际：{diag}"

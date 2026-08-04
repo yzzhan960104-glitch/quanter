@@ -881,6 +881,10 @@ def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, 
     alert_calls = []
     monkeypatch.setattr(
         "trading.engine._alert_critical", lambda msg: alert_calls.append(msg))
+    # Fix1：方向未知 _alert_critical 加了 live 守卫，dry_run 不推钉钉。
+    # 本测试断「_alert_critical 仍触发」必须 patch _mode=live 才能命中守卫。
+    import trading.engine as _eng_mod
+    monkeypatch.setattr(_eng_mod, "_mode", lambda: "live")
     # 不 patch record_live_trade —— 让真函数在 direction=None 分支不被调（CSV 0 行验证）
     with patch("infra.notifier.NotificationManager") as NM, \
          patch.object(eng, "_place_take_profit", new=AsyncMock()):

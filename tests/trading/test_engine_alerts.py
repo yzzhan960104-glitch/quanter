@@ -212,6 +212,9 @@ def test_sanity_check_fail_alerts_critical(monkeypatch, captured_alerts):
     eng = engine.TradingEngine()
     monkeypatch.setattr(eng.sched, "start", lambda: None)
     monkeypatch.setattr(engine.calendar, "next_trading_day", lambda d: d)  # 返 today（口径坏）
+    # Fix1：口径自检 _alert_critical 加了 live 守卫，dry_run 模式不推钉钉。
+    # 本测试断「推 CRITICAL」必须 patch _mode=live 才能命中守卫。
+    monkeypatch.setattr(engine, "_mode", lambda: "live")
 
     eng.start()
     # I-2：fire_and_forget 同步执行，start() 返回即已投递。
@@ -242,6 +245,9 @@ def test_health_guard_fail_threshold_alerts_critical(monkeypatch, captured_alert
     # 强制每轮都试（退避调度本身有 _guard_skip_rounds 的单元语义，不在此重复验）。
     monkeypatch.setattr(engine.TradingEngine, "_guard_skip_rounds",
                         staticmethod(lambda fail_count: 0))
+    # Fix1：health_guard 重连失败 _alert_critical 加了 live 守卫，dry_run 模式不推钉钉。
+    # 本测试断「推 CRITICAL」必须 patch _mode=live 才能命中守卫。
+    monkeypatch.setattr(engine, "_mode", lambda: "live")
 
     # 跑 10 轮（每轮 fail_count+1），第 10 轮 fail_count=10 应触发 CRITICAL。
     for _ in range(10):

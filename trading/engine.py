@@ -2458,10 +2458,15 @@ class TradingEngine:
             # _alert_critical 内部 fire_and_forget 软降级——告警失败不阻塞守护主链路
             # （try/except 在 _alert_critical 内兜底，C-4 错误分级决议）。
             if self._not_ready_rounds == 1 or self._not_ready_rounds % 10 == 0:
-                _alert_critical(
-                    f"health_guard 客户端连续未就绪 {self._not_ready_rounds} 轮"
-                    f"（≈{self._not_ready_rounds}min），网关无法自愈重连（{diag}）。"
-                    f"请人工检查 miniQMT 客户端是否启动/登录")
+                # Fix1（用户两轴 review · 告警模式闸）：dry_run 模式无真金风险，
+                # 客户端未就绪是环境问题（miniQMT 未起/路径错），推钉钉只会污染运营群
+                # 致研究员对真告警麻木。守卫与既有 7 处 _alert_critical 范式一致
+                # （pre_open gate/部分拒/漏挂等）。日志/计数照常，只是不推钉钉。
+                if _mode() == "live":
+                    _alert_critical(
+                        f"health_guard 客户端连续未就绪 {self._not_ready_rounds} 轮"
+                        f"（≈{self._not_ready_rounds}min），网关无法自愈重连（{diag}）。"
+                        f"请人工检查 miniQMT 客户端是否启动/登录")
             return
         # 就绪后清零未就绪计数（W1.2）：防计数漂移——上次断线遗留计数若不清，
         # 下次新断线第 1 轮即历史值 + 1 触发错位告警（语义错位为「累计」非「连续」）。
@@ -2513,11 +2518,15 @@ class TradingEngine:
             # 物理阈值：fail_count=10 意味 connect 已连续失败 10 轮（含退避至少数十分钟），
             # 自愈无望，必须人工重启 miniQMT 客户端 / 排查 session 占用。
             if self._guard_fail_count % 10 == 0 and self._guard_fail_count > 0:
-                _alert_critical(
-                    f"health_guard 重连累计失败 {self._guard_fail_count} 次，"
-                    f"网关持续锁死（_reconnect 已耗尽 backoffs 仍未恢复），"
-                    f"请人工介入：检查 miniQMT 客户端是否启动 / session 是否被占用 / "
-                    f"userdata shm 文件是否过期")
+                # Fix1（用户两轴 review · 告警模式闸）：dry_run 模式无真金风险，
+                # connect 重连失败多是开发环境 xtquant/客户端未装，推钉钉纯噪音。
+                # live 模式才是真金断线需叫醒人工。守卫与未就绪分支同范式。
+                if _mode() == "live":
+                    _alert_critical(
+                        f"health_guard 重连累计失败 {self._guard_fail_count} 次，"
+                        f"网关持续锁死（_reconnect 已耗尽 backoffs 仍未恢复），"
+                        f"请人工介入：检查 miniQMT 客户端是否启动 / session 是否被占用 / "
+                        f"userdata shm 文件是否过期")
 
     def _halt(self, msg: str) -> None:
         """L1 统一停调度原语：置 _halted + CRITICAL + sched.shutdown（幂等）。
@@ -2895,7 +2904,10 @@ class TradingEngine:
         gw = get_gateway()
         ok, reason = self._gw_health_gate(gw)
         if not ok:
-            _alert_critical(f"stop_loss 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
+            # Fix1（用户两轴 review · 告警模式闸）：dry_run 模式 gw 锁态无真金风险，
+            # 推钉钉纯噪音（dry_run 网关常未装/未起）。守卫与既有 _alert_critical 范式一致。
+            if _mode() == "live":
+                _alert_critical(f"stop_loss 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
             return
         # C-6 V2：单一时间源 + 入口缓存（clock.today，防同轮跨午夜漂移）。
         today = clock.today()
@@ -3007,7 +3019,10 @@ class TradingEngine:
         gw = get_gateway()
         ok, reason = self._gw_health_gate(gw)
         if not ok:
-            _alert_critical(f"post_close 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
+            # Fix1（用户两轴 review · 告警模式闸）：dry_run 模式 gw 锁态无真金风险，
+            # 推钉钉纯噪音（dry_run 网关常未装/未起）。守卫与既有 _alert_critical 范式一致。
+            if _mode() == "live":
+                _alert_critical(f"post_close 跳过：{reason}（gw 锁态，等 _health_guard 自愈）")
             return
         # C-6 V2：单一时间源 + 入口缓存（clock.today，防同轮跨午夜漂移）。
         today = clock.today()
@@ -3097,9 +3112,13 @@ class TradingEngine:
         direction = self._order_direction(order_id)
         if direction is None:
             # #1：方向未知 = 审计黑洞（不挂止盈 + 不落账），必须叫醒人工对账，禁止静默。
-            _alert_critical(
-                f"成交回报方向未知 order_id={order_id} symbol={symbol} qty={qty} "
-                f"（DB 无 side、内存无 order_type，需人工对账补账）")
+            # Fix1（用户两轴 review · 告警模式闸）：dry_run 模式理论上无真实成交回报
+            # （无真单），方向未知只会在脏 mock/测试数据中出现，推钉钉纯噪音。
+            # live 模式才是真审计黑洞需叫醒人工。守卫与既有 _alert_critical 范式一致。
+            if _mode() == "live":
+                _alert_critical(
+                    f"成交回报方向未知 order_id={order_id} symbol={symbol} qty={qty} "
+                    f"（DB 无 side、内存无 order_type，需人工对账补账）")
 
         # C-6 V2：TP1 幂等 key（trade_date 口径）与账本 account/trade_id 同源计算一次。
         today_tp = clock.today()
@@ -3337,9 +3356,13 @@ class TradingEngine:
             # Task 9（M4）：口径自检失败补钉钉 CRITICAL（原 T5 仅 logger.error，钉钉不推）。
             # ⚠️ 不改 T5「仅告警不阻断」行为（cron 照起，硬阻断升级是 R4 follow-up）。
             # 降级运行是真隐患（旧代码口径会让标的错位 + 永不挂单），必须叫醒人工。
-            _alert_critical(
-                "口径自检失败：next_trading_day 未算出次日（疑似跑旧代码），"
-                "已降级启动，请立即重启 engine 加载新代码并核查 next_trading_day 口径")
+            # Fix1（用户两轴 review · 告警模式闸）：dry_run 模式跑旧代码风险低（无真单），
+            # 推钉钉纯噪音（开发/测试常跑旧代码做回归）；live 模式才是真隐患需叫醒人工。
+            # 守卫与既有 _alert_critical 范式一致。logger.error 仍打（运维可见）。
+            if _mode() == "live":
+                _alert_critical(
+                    "口径自检失败：next_trading_day 未算出次日（疑似跑旧代码），"
+                    "已降级启动，请立即重启 engine 加载新代码并核查 next_trading_day 口径")
         self.sched.start()
         logger.warning("TradingEngine 已启动（mode=%s）——独立常驻进程运行", _mode())
 

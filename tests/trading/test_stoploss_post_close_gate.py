@@ -30,6 +30,7 @@ def test_stoploss_gw_locked_skips_and_alerts():
     gw._connected = False   # 锁态：未连接
     with patch("trading.engine.get_gateway", return_value=gw), \
          patch("trading.engine._alert_critical") as ac, \
+         patch("trading.engine._mode", return_value="live"), \
          patch("trading.engine.calendar.is_trading_day", return_value=True), \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon, \
          patch("trading.engine.trading_plan.load_plan") as lp:
@@ -66,6 +67,7 @@ def test_post_close_gw_locked_skips_and_alerts():
     gw._connected = False
     with patch("trading.engine.get_gateway", return_value=gw), \
          patch("trading.engine._alert_critical") as ac, \
+         patch("trading.engine._mode", return_value="live"), \
          patch("trading.engine.calendar.is_trading_day", return_value=True), \
          patch("trading.engine.post_close", new=AsyncMock()) as pc, \
          patch("trading.position_book.get_local_positions", return_value={}):
