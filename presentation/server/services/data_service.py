@@ -188,6 +188,11 @@ def _run_sync_subprocess(key: str) -> None:
         script_abs = os.path.join(_PROJECT_ROOT, script_rel)
         # sys.executable 保证用当前解释器（含 venv），与开发机/生产一致
         cmd = [sys.executable, script_abs, *args]
+        # C-9 A1：sync_tushare.py 的 argparse 要求位置参数 key（registry 未配 args 的历史缺陷），
+        # 缺 key 必报 usage 退出码 2 → 写 .failed 哨兵致服务器端同步全坏。
+        # sync_macro_credit.py 无 argparse（__main__ 忽略 argv），不注入 key 保持零回归。
+        if os.path.basename(script_rel) == "sync_tushare.py":
+            cmd.insert(2, key)
         logger.info("数据集同步开始: %s → %s", key, " ".join(cmd))
         proc = subprocess.run(
             cmd, capture_output=True, text=True,

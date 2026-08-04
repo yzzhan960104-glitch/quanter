@@ -40,6 +40,41 @@ def test_sweep_stale_on_startup_skips_keyerror_silently(monkeypatch):
     assert result == ["stale_b"]   # stale_a 抛 KeyError 被跳过，stale_b 正常触发
 
 
+def test_run_sync_subprocess_injects_key_for_sync_tushare(monkeypatch):
+    """sync_tushare.py 必须带数据集 key（否则 argparse usage 退出码 2 → .failed）。"""
+    import presentation.server.services.data_service as ds
+    captured = {}
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    monkeypatch.setattr(ds.subprocess, "run", fake_run)
+    monkeypatch.setattr(ds, "_clear_sentinel", lambda key: None)
+    monkeypatch.setattr(ds, "_mark_failed", lambda key, msg: None)
+    monkeypatch.setattr(ds, "_PROJECT_ROOT", r"F:\quanter")
+    monkeypatch.setattr(ds, "DATASET_REGISTRY", {
+        "moneyflow": {"script": "data/tools/sync_tushare.py"}})
+    ds._run_sync_subprocess("moneyflow")
+    assert captured["cmd"][2] == "moneyflow"
+
+
+def test_run_sync_subprocess_no_key_for_macro(monkeypatch):
+    """sync_macro_credit.py 不消费 key（argv 忽略），不得注入。"""
+    import presentation.server.services.data_service as ds
+    captured = {}
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    monkeypatch.setattr(ds.subprocess, "run", fake_run)
+    monkeypatch.setattr(ds, "_clear_sentinel", lambda key: None)
+    monkeypatch.setattr(ds, "_mark_failed", lambda key, msg: None)
+    monkeypatch.setattr(ds, "_PROJECT_ROOT", r"F:\quanter")
+    monkeypatch.setattr(ds, "DATASET_REGISTRY", {
+        "macro": {"script": "data/tools/sync_macro_credit.py"}})
+    ds._run_sync_subprocess("macro")
+    assert len(captured["cmd"]) == 2          # [python, script]，不得注入任何 key
+    assert captured["cmd"][1].endswith("sync_macro_credit.py")
+
+
 def test_trigger_sync_concurrent_same_key_only_one_dispatches(monkeypatch, tmp_path):
     """#15：并发 trigger 同 key → 锁保证只一个派发（返"已触发"），另一个返"进行中"。
 
