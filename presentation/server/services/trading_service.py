@@ -42,6 +42,16 @@ LIVE_TRADE_COLUMNS = [
     "timestamp", "symbol", "direction", "shares", "price", "strategy", "rationale", "kind",
 ]
 
+# 前端下载/导出 CSV 字段顺序契约（SSoT Phase A · A2 抽出）。
+# Why 单独抽常量：export/query 两函数都需要这个字段顺序定义，原都引用
+# LIVE_TRADE_COLUMNS；A4 计划删 record_live_trade 写盘链路 + LIVE_TRADE_COLUMNS，
+# 提前抽出 _EXPORT_COLUMNS 让 export/query 不依赖 LIVE_TRADE_COLUMNS，A4 删它时
+# 消费端零改动（字段顺序 = 前端 TradesPage/下载 CSV 契约红线，不能随写盘退役而改）。
+_EXPORT_COLUMNS = [
+    "timestamp", "symbol", "direction", "shares", "price",
+    "strategy", "rationale", "kind",
+]
+
 # 持仓归因注册表（内存）：symbol → {strategy, rationale}。
 # 实盘 submit_order 成交时调 record_position_attribution 登记；get_positions 据此富化。
 # Why 内存而非落盘：持仓归因是「当前态」快照（平仓即清除），与成交日志（历史态）语义不同。
@@ -244,135 +254,102 @@ def record_live_trade(
 
 
 def aggregate_fills_by_symbol(start: str, end: str) -> dict[str, float]:
-    """聚合 [start, end]（YYYY-MM-DD 闭区间）内 BUY/SELL 净持仓（post_close 归因用）。
+    """聚合 [start, end]（YYYY-MM-DD 闭区间）内 BUY/SELL 净持仓（post_close 归因用）·DB-only。
 
-    数据源（spec §3.3.4 + W3.4 完整收口，用户两轴 review）：
-        - LIVE_TRADE_READ_SOURCE=db（缺省）：读 state_store.query_fills（fill 表真相源，
-          UNIQUE(order_id, traded_time) 天然去重）。
-        - LIVE_TRADE_READ_SOURCE=csv：回退原 CSV 流式聚合（一键回滚开关，与
-          query_trades/export_trades 同 env 同口径）。
-        - DB 分支异常时也自动回退 CSV（观测层纪律，断线不阻断归因）。
+    数据源（SSoT spec §2.4 + §3.3.4，A2 删 CSV 回退）：
+        - 唯一数据源 state_store.fill 表（UNIQUE(order_id, traded_time) 天然去重，
+          08-04 事故后的成交流水真相源）。原 LIVE_TRADE_READ_SOURCE=csv 回退 + DB 异常
+          自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下重复 append 会聚合出幻象
+          持仓，违反 SSoT 红线）。
 
     物理意图（08-04 事故根因）：
         原实现全量流式读 CSV，在重放/补推场景下会把 24 行重复 BUY 100 聚合成 2400
         股幻影 → post_close 归因日志误报 drift。切 fill 表后，同笔成交只 1 行 →
         净 100，与 position_book 对齐，归因日志正确。
 
+    降级纪律（A2 收紧）：
+        DB 异常 → logger.exception + 返 {}（绝不静默回退 CSV 让消费端拿到幻象数据；
+        归因日志诚实标记空，运维据告警跟进 DB 修复，而非用 CSV 假象掩盖）。
+
     返回 shape {symbol: net_float}（不变，post_close 归因契约）：
         BUY 为正、SELL 为负，按 symbol 累加。
     """
-    # W3.4 数据源开关：缺省 db（真相源），env=csv 时回退 CSV 流式聚合（一键回滚保险）
-    if os.getenv("LIVE_TRADE_READ_SOURCE", "db").lower() == "db":
-        try:
-            from trading import state_store
-            rows = state_store.query_fills(start, end)
-        except Exception:
-            # DB 异常不阻断归因 —— 观测层纪律，自动回退 CSV 镜像
-            logger.warning("query_fills 读 DB 失败，aggregate 回退 CSV 流式", exc_info=True)
-            rows = None
-        if rows is not None:
-            net: dict[str, float] = {}
-            for r in rows:
-                sym = r.get("symbol")
-                direction = (r.get("direction") or "").upper()  # DB 存大写
-                shares = r.get("shares")
-                if not sym or direction not in ("BUY", "SELL") or shares is None:
-                    continue
-                # BUY 累加 / SELL 累减 → 净持仓（与原 CSV 聚合口径一致）
-                net[sym] = net.get(sym, 0.0) + (
-                    float(shares) if direction == "BUY" else -float(shares))
-            return net
-        # rows is None（DB 异常）→ 落到下面 CSV 流式聚合
-
-    # CSV 读口（env=csv 或 DB 异常回退）：原逻辑保持不变
+    from trading import state_store
+    try:
+        rows = state_store.query_fills(start, end)
+    except Exception:
+        # DB 异常不阻断归因流程，但绝不回退 CSV —— SSoT 红线：fill 表是唯一真相源，
+        # CSV 在重放场景下会重复。诚实返 {} 让归因日志标记「读失败」，运维跟进修复。
+        logger.exception("query_fills 读 DB 失败，aggregate 返空（不回退 CSV）")
+        return {}
     net: dict[str, float] = {}
-    if not os.path.exists(LIVE_TRADE_LOG):
-        return net
-    with open(LIVE_TRADE_LOG, "r", encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            day = (r.get("timestamp") or "").split(" ")[0]
-            if not (start <= day <= end):
-                continue
-            if (r.get("kind") or "submit") != "fill":
-                continue
-            sym = r.get("symbol")
-            direction = (r.get("direction") or "").upper()
-            shares = r.get("shares")
-            if not sym or direction not in ("BUY", "SELL") or shares is None:
-                continue
-            net[sym] = net.get(sym, 0.0) + (float(shares) if direction == "BUY" else -float(shares))
+    for r in rows:
+        sym = r.get("symbol")
+        direction = (r.get("direction") or "").upper()  # query_fills 返小写，统一转大写匹配
+        shares = r.get("shares")
+        if not sym or direction not in ("BUY", "SELL") or shares is None:
+            continue
+        # BUY 累加 / SELL 累减 → 净持仓（与原 CSV 聚合口径一致，但数据源是去重后的 fill 表）
+        net[sym] = net.get(sym, 0.0) + (
+            float(shares) if direction == "BUY" else -float(shares))
     return net
 
 def export_trades(start: str, end: str) -> str:
-    """按日期区间 [start, end]（YYYY-MM-DD）导出实盘成交 CSV 字符串。
+    """按日期区间 [start, end]（YYYY-MM-DD）导出实盘成交 CSV 字符串·DB-only。
 
-    数据源（spec §3.3.2 + W3.2 完整收口，用户两轴 review）：
-        - LIVE_TRADE_READ_SOURCE=db（缺省）：读 state_store.query_fills（fill 表真相源，
-          UNIQUE(order_id, traded_time) 天然去重），格式化成 CSV 字符串（保持
-          LIVE_TRADE_COLUMNS 表头 + 行 shape，前端下载契约不变）。
-        - LIVE_TRADE_READ_SOURCE=csv：回退原 CSV 读口（一键回滚开关，与 query_trades
-          同 env 同口径）。
-        - DB 分支异常时也自动回退 CSV（绝不抛给上层 —— 观测层纪律）。
+    数据源（SSoT spec §2.4 + §3.3.2，A2 删 CSV 回退）：
+        - 唯一数据源 state_store.fill 表（UNIQUE(order_id, traded_time) 天然去重，
+          08-04 事故后的成交流水真相源）。原 LIVE_TRADE_READ_SOURCE=csv 回退 + DB 异常
+          自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下会重复，违反 SSoT 红线）。
 
     物理意图（08-04 事故根因）：
         原实现流式读 CSV，重放场景下导出 24 行重复 → Layer6 LLM 复盘输入污染
         （LLM 把 24 行当 24 笔分析）。切 fill 表后导出永远是真相源 1 行。
 
-    返回 shape：CSV 字符串（LIVE_TRADE_COLUMNS 表头 + 0..N 数据行），前端下载契约红线。
+    字段顺序契约（A2 抽出 _EXPORT_COLUMNS）：
+        export/query 格式化都用 _EXPORT_COLUMNS（与原 LIVE_TRADE_COLUMNS 同值同序，
+        前端 TradesPage 下载 CSV 契约红线）。A4 删 LIVE_TRADE_COLUMNS 后
+        _EXPORT_COLUMNS 是唯一字段顺序源，消费端零改动。
+
+    降级纪律（A2 收紧）：
+        DB 异常 → logger.exception + 返仅表头字符串（不抛、不回退 CSV；前端照常下载
+        空导出，运维据告警跟进 DB 修复）。
+
+    返回 shape：CSV 字符串（_EXPORT_COLUMNS 表头 + 0..N 数据行），前端下载契约红线。
     无日志/空 DB → 仅返回表头（诚实空导出，非 404；前端照常下载）。
     """
-    # W3.2 数据源开关：缺省 db（真相源），env=csv 时回退 CSV 读口（一键回滚保险）
-    if os.getenv("LIVE_TRADE_READ_SOURCE", "db").lower() == "db":
-        try:
-            from trading import state_store
-            rows = state_store.query_fills(start, end)
-        except Exception:
-            # DB 异常不阻断导出 —— 观测层纪律，自动回退 CSV 镜像
-            logger.warning("query_fills 读 DB 失败，export 回退 CSV 读口", exc_info=True)
-            rows = None
-        if rows is not None:
-            buf = io.StringIO()
-            writer = csv.DictWriter(buf, fieldnames=LIVE_TRADE_COLUMNS)
-            writer.writeheader()
-            for r in rows:
-                # DB 行 → LIVE_TRADE_COLUMNS 行 shape（前端下载契约）
-                # traded_time(YYYYMMDDHHMMSS) → timestamp("YYYY-MM-DD HH:MM:SS") 兼容前端展示；
-                # direction 落大写口径（与原 CSV 写盘一致，消费者按需小写化）；
-                # strategy/rationale 留空（fill 表不含这两列，复盘/审计按需回查 order 表）；
-                # kind='fill' 标注（DB fill 表本身就是成交回报，与 CSV 的 kind='fill' 等价）。
-                tt = str(r.get("traded_time") or "")
-                ts = (
-                    f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
-                    if len(tt) >= 14 else tt
-                )
-                writer.writerow({
-                    "timestamp": ts,
-                    "symbol": r.get("symbol", ""),
-                    "direction": (r.get("direction") or "").upper(),  # 落大写口径
-                    "shares": r.get("shares", ""),
-                    "price": r.get("price", ""),
-                    "strategy": "",
-                    "rationale": "",
-                    "kind": "fill",
-                })
-            return buf.getvalue()
-        # rows is None（DB 异常）→ 落到下面 CSV 读口
-
-    # CSV 读口（env=csv 或 DB 异常回退）：原逻辑保持不变
-    if not os.path.exists(LIVE_TRADE_LOG):
-        return ",".join(LIVE_TRADE_COLUMNS) + "\n"
-    rows = []
-    with open(LIVE_TRADE_LOG, "r", encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            ts = r.get("timestamp", "")
-            day = ts.split(" ")[0]
-            if start <= day <= end:
-                rows.append(r)
+    from trading import state_store
+    try:
+        rows = state_store.query_fills(start, end)
+    except Exception:
+        # DB 异常不阻断导出，但绝不回退 CSV —— SSoT 红线：fill 表是唯一真相源，
+        # CSV 在重放场景下会重复。诚实返仅表头让前端下载空导出，运维跟进修复。
+        logger.exception("query_fills 读 DB 失败，export 返仅表头（不回退 CSV）")
+        return ",".join(_EXPORT_COLUMNS) + "\n"
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=LIVE_TRADE_COLUMNS)
+    writer = csv.DictWriter(buf, fieldnames=_EXPORT_COLUMNS)
     writer.writeheader()
     for r in rows:
-        writer.writerow({k: r.get(k, "") for k in LIVE_TRADE_COLUMNS})
+        # DB 行 → _EXPORT_COLUMNS 行 shape（前端下载契约）
+        # traded_time(YYYYMMDDHHMMSS) → timestamp("YYYY-MM-DD HH:MM:SS") 兼容前端展示；
+        # direction 落大写口径（与原 CSV 写盘一致，消费者按需小写化）；
+        # strategy/rationale 留空（fill 表不含这两列，复盘/审计按需回查 order 表）；
+        # kind='fill' 标注（DB fill 表本身就是成交回报，与 CSV 的 kind='fill' 等价）。
+        tt = str(r.get("traded_time") or "")
+        ts = (
+            f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
+            if len(tt) >= 14 else tt
+        )
+        writer.writerow({
+            "timestamp": ts,
+            "symbol": r.get("symbol", ""),
+            "direction": (r.get("direction") or "").upper(),  # 落大写口径
+            "shares": r.get("shares", ""),
+            "price": r.get("price", ""),
+            "strategy": "",
+            "rationale": "",
+            "kind": "fill",
+        })
     return buf.getvalue()
 
 
@@ -384,114 +361,71 @@ def query_trades(
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
-    """分页查询实盘成交流水（W3.2：优先读 state_store.fill 真相源，CSV 降级镜像）。
+    """分页查询实盘成交流水·DB-only（SSoT spec §2.4，A2 删 CSV 回退）。
 
-    数据源优先级（spec §5 回滚策略）：
-    - LIVE_TRADE_READ_SOURCE=db（缺省）：读 state_store.fill 表（UNIQUE(order_id,
-      traded_time) 天然去重，是 08-04 事故后的成交流水真相源，T6 写入端已幂等）。
-    - LIVE_TRADE_READ_SOURCE=csv：回退原 CSV 读口（logs/live_trades.csv）。这是消费端
-      切 DB 期间的一键回滚保险：DB 异常或运维主动回退时，消费端能从 CSV 镜像继续读。
-    - DB 分支异常时也自动回退 CSV（绝不抛给上层 —— 观测层纪律，断线不阻断展示）。
+    数据源（SSoT 红线，A2 收紧）：
+        - 唯一数据源 state_store.fill 表（UNIQUE(order_id, traded_time) 天然去重，
+          08-04 事故后的成交流水真相源）。原 LIVE_TRADE_READ_SOURCE=csv 回退 + DB 异常
+          自动回退 CSV 镜像两路在 A2 已删（CSV 在重放场景下会重复，违反 SSoT 红线）。
 
-    过滤维度（AND 关系，两数据源同口径）：
-    - 日期闭区间：按 timestamp/traded_time 的日期前缀（YYYY-MM-DD）字典序比较。
-    - symbol：精确匹配（标的代码全字串，如 "510300.SH"）。
-    - direction：大小写不敏感匹配（"buy" / "sell"），DB 存大写、CSV 落盘大写，
-      消费端统一返小写口径（与前端着色、简报 _dir lambda 一致）。
+    过滤维度（AND 关系，与原 CSV 读口同口径）：
+    - 日期闭区间：query_fills 按 traded_time 前 8 位与 [start,end] 字典序比较。
+    - symbol：精确匹配（标的代码全字串，如 "510300.SH"），透传给 query_fills。
+    - direction：大小写不敏感匹配（"buy" / "sell"），query_fills 内部已统一大写匹配；
+      消费端返小写口径（与前端着色、简报 _dir lambda 一致）。
     分页：limit/offset 在「过滤后全集」上切片；total 始终是过滤后命中总数（前端据此渲染分页器）。
     返回：{trades: [...], total: int, limit, offset}（shape 不变，前端 TradesPage 契约红线）。
-    降级：DB 异常或 CSV 文件不存在 → 空结果（诚实空，不抛）。
+    降级：DB 异常 → logger.exception + 空结果（诚实空，不抛、不回退 CSV）。
 
-    Why limit 上限 1000：live_trades.csv 是单文件全表扫描（无索引），不设上限会被
-    前端误传大 limit 拖垮（CSV 读取 + Python 行迭代在数万行级别已明显延迟）；
-    1000 既覆盖看板单页可视上限，又给运维查最近一段留足空间。
-    Why 数值字段 float 转换：CSV 原生皆 str，前端 TS 类型期望 shares/price 为 number；
-    在服务端兜底转一次（转不动保留原串，让前端 parse 兜底而非整列空）。
+    Why limit 上限 1000：原 CSV 单文件全表扫描无索引、Python 行迭代在数万行已延迟；
+    切 fill 表后 query_fills 走 SQLite 索引仍保留上限护栏（防前端误传大 limit + LIMIT
+    在大结果集下仍占内存）。
+    Why 数值字段 float 转换：消费端（前端 TS）期望 shares/price 为 number；DB 取出
+    已是 float（query_fills 返 dict 强转），这里再 float() 兜底（NULL/异常值安全）。
 
     消费端防御层（保持不变）：direction not in ("BUY","SELL") 的行（如 BLOCKED/
-    DRY_RUN_*）在两数据源下均被聚合层 aggregate_fills_by_symbol / 简报 _dir 过滤，
-    本函数只做日期/symbol/direction 三维过滤，不替消费端决定成交口径（kind 闸在
-    brief_trading）。
+    DRY_RUN_*）在聚合层 aggregate_fills_by_symbol / 简报 _dir 都会被过滤，本函数
+    只做日期/symbol/direction 三维过滤，不替消费端决定成交口径（kind 闸在 brief_trading）。
     """
     # 入参兜底：limit 钳到 [1, 1000]，offset 钳到 >= 0（防前端传负/超大值）
     limit = max(1, min(int(limit), 1000))
     offset = max(0, int(offset))
 
-    # W3.2 数据源开关：缺省 db（真相源），env=csv 时回退 CSV 读口（一键回滚保险）
-    if os.getenv("LIVE_TRADE_READ_SOURCE", "db").lower() == "db":
-        try:
-            from trading import state_store
-            rows = state_store.query_fills(start, end, symbol=symbol, direction=direction)
-        except Exception:
-            # DB 异常不阻断消费端 —— 观测层纪律，自动回退 CSV 镜像
-            logger.warning("query_fills 读 DB 失败，回退 CSV 读口", exc_info=True)
-            rows = None
-        if rows is not None:
-            # DB 命中：normalize 成 CSV 读口的输出 shape（前端契约：trades 字段对齐
-            # LIVE_TRADE_COLUMNS，但 DB 行只含成交四要素 + traded_time）。
-            # traded_time(YYYYMMDDHHMMSS) → timestamp("YYYY-MM-DD HH:MM:SS") 兼容前端展示；
-            # kind='fill' 标注（DB fill 表本身就是成交回报，与 CSV 的 kind='fill' 行等价）。
-            matched: list = []
-            for r in rows:
-                tt = str(r.get("traded_time") or "")
-                # traded_time "20260805101000" → "2026-08-05 10:10:00"（前端 TradeRecord.timestamp）
-                ts = (
-                    f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
-                    if len(tt) >= 14 else tt
-                )
-                matched.append({
-                    "timestamp": ts,
-                    "traded_time": tt,
-                    "symbol": r.get("symbol", ""),
-                    "direction": (r.get("direction") or "").lower(),  # 小写口径
-                    "shares": float(r.get("shares") or 0.0),
-                    "price": float(r.get("price") or 0.0),
-                    "strategy": "",
-                    "rationale": "",
-                    # DB fill 表就是成交回报 → kind='fill'（brief/聚合按 kind 闸识别）
-                    "kind": "fill",
-                    "order_id": r.get("order_id", ""),
-                })
-            total = len(matched)
-            page = matched[offset: offset + limit]
-            return {"trades": page, "total": total, "limit": limit, "offset": offset}
-        # rows is None（DB 异常）→ 落到下面 CSV 读口
-
-    # CSV 读口（env=csv 或 DB 异常回退）：原逻辑保持不变
-    if not os.path.exists(LIVE_TRADE_LOG):
-        # 诚实空：文件尚未生成（未成交过）→ 直接返空，不抛 FileNotFoundError
+    from trading import state_store
+    try:
+        rows = state_store.query_fills(start, end, symbol=symbol, direction=direction)
+    except Exception:
+        # DB 异常不阻断消费端展示，但绝不回退 CSV —— SSoT 红线：fill 表是唯一真相源，
+        # CSV 在重放场景下会重复。诚实返空让前端展示「无成交」，运维据告警跟进修复。
+        logger.exception("query_fills 读 DB 失败，query_trades 返空（不回退 CSV）")
         return {"trades": [], "total": 0, "limit": limit, "offset": offset}
+
+    # normalize 成前端契约 shape（字段对齐 _EXPORT_COLUMNS，但 DB 行只含成交四要素 +
+    # traded_time）。
+    # traded_time(YYYYMMDDHHMMSS) → timestamp("YYYY-MM-DD HH:MM:SS") 兼容前端展示；
+    # kind='fill' 标注（DB fill 表本身就是成交回报，与 CSV 的 kind='fill' 行等价）。
     matched: list = []
-    with open(LIVE_TRADE_LOG, "r", encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            # 日期闭区间：timestamp 形如 "2026-07-21 09:35:00"，取日期前缀字典序比较
-            day = r.get("timestamp", "").split(" ")[0]
-            if not (start <= day <= end):
-                continue
-            if symbol and r.get("symbol") != symbol:
-                continue
-            # direction 过滤：大小写不敏感。CSV 大写口径（BUY/SELL），
-            # 前端/调用方传小写（"buy"/"sell"）亦能命中，避免前端 direction 过滤恒空。
-            if direction and (r.get("direction") or "").lower() != direction.lower():
-                continue
-            # 数值字段尽力转 float：转不动（空串/脏数据）保留原串，前端兜底
-            row = dict(r)
-            row.setdefault("kind", "submit")  # 老行无 kind 保守按 submit（#3）
-            for k in ("shares", "price"):
-                try:
-                    row[k] = float(row[k])
-                except (TypeError, ValueError):
-                    pass
-            # direction 规范化为小写口径：CSV 落盘是大写（BUY/SELL/DRY_RUN_BUY/BLOCKED，
-            # 见 record_live_trade / submit_order 写盘点），但前端 TradesTable 用
-            # `row.direction === 'buy'` 小写精确匹配做买入红(danger)/卖出绿(success)着色。
-            # 若不在服务端统一小写化，BUY 行会被前端判为「非 buy」→ 错挂 success（卖色·绿），
-            # SELL 行才挂 danger（买色·红）—— 视觉警示与交易动作完全颠倒，是交易 UI 红线 bug。
-            # 与 brief_trading 的 `_dir` lambda 一致，消费者（前端/告警/复盘）一律拿小写口径。
-            row["direction"] = (row.get("direction") or "").lower()
-            matched.append(row)
+    for r in rows:
+        tt = str(r.get("traded_time") or "")
+        # traded_time "20260805101000" → "2026-08-05 10:10:00"（前端 TradeRecord.timestamp）
+        ts = (
+            f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
+            if len(tt) >= 14 else tt
+        )
+        matched.append({
+            "timestamp": ts,
+            "traded_time": tt,
+            "symbol": r.get("symbol", ""),
+            "direction": (r.get("direction") or "").lower(),  # 小写口径（query_fills 已小写，兜底）
+            "shares": float(r.get("shares") or 0.0),
+            "price": float(r.get("price") or 0.0),
+            "strategy": "",
+            "rationale": "",
+            # DB fill 表就是成交回报 → kind='fill'（brief/聚合按 kind 闸识别）
+            "kind": "fill",
+            "order_id": r.get("order_id", ""),
+        })
     total = len(matched)
-    # 分页切片：在「过滤后全集」上做 offset/limit（total 仍是全集计数，前端按 total 渲染分页器）
     page = matched[offset: offset + limit]
     return {"trades": page, "total": total, "limit": limit, "offset": offset}
 
