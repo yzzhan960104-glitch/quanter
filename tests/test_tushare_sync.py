@@ -283,6 +283,41 @@ def test_build_multiindex_by_date_symbol_from_column(tmp_path):
     assert "total_revenue" in df.columns
 
 
+def test_sync_by_date_skips_only_valid_shard(tmp_path, fake_pro):
+    """by=date：空 shard（0 行）不得永久跳过——视为缺失重拉。
+
+    Why 此测试：_sync_by_date 在 resume=True 时原实现只判 os.path.exists(shard) 即
+    continue，不校验 shard 是否空/损坏。历史中断写坏的空 shard（0 行）会被永久跳过，
+    该日数据永远拉不到。本测试预置一个 0 行 shard（模拟历史中断落盘的坏文件），
+    断言 resume=True 同步会重拉并落 1 行有效数据，而非继续跳过留下空湖。
+    """
+    from config import TUSHARE_DATASETS
+    shard_dir = tmp_path / "shards"
+    shard_dir.mkdir()
+    TUSHARE_DATASETS["moneyflow_test"] = {
+        "api": "moneyflow", "by": "date",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,buy_lg_amount",
+        "lake": str(tmp_path / "moneyflow.parquet"),
+        "shard_dir": str(shard_dir),
+    }
+    # 空 shard（历史中断写坏：列齐全但零行）
+    pd.DataFrame(columns=["ts_code", "trade_date", "buy_lg_amount"]) \
+        .to_parquet(shard_dir / "20240105.parquet")
+    # trade_cal 交易日历（_trade_days 经 fake_pro 拉取，须 mock 2024-01-05 为交易日）
+    fake_pro._data["trade_cal"] = pd.DataFrame(
+        {"cal_date": ["20240105"], "is_open": ["1"]})
+    # fake_pro 替身返该日 1 行有效数据
+    fake_pro._data["moneyflow"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"], "trade_date": ["20240105"],
+        "buy_lg_amount": [1.0],
+    })
+    from data.tushare_sync import sync_dataset
+    sync_dataset("moneyflow_test", "2024-01-05", "2024-01-05", resume=True)
+    df = pd.read_parquet(TUSHARE_DATASETS["moneyflow_test"]["lake"])
+    assert len(df) == 1  # 空 shard 被重拉（否则湖空 len==0）
+
+
 # ============ _fetch_with_guard 限频退避重试测试 ============
 # Why 独立测试组：限频退避是全量下载（by=date 全市场逐日）的关键修复，原实现直接
 # record_failure 返空导致整数据集卡死。此处逐态覆盖（瞬时态退避成功 / 退避耗尽失败 /

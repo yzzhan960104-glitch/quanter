@@ -412,7 +412,18 @@ def _sync_by_date(key, api, fields, date_col, symbol_col, start, end, resume, ou
     for td in trade_dates:
         shard = os.path.join(shard_dir, f"{td}.parquet")
         if resume and os.path.exists(shard):
-            continue
+            # 校验既有 shard 是否有效：空（0 行，历史中断写坏）或损坏（parquet 解析失败）
+            # 一律视为缺失，删盘重拉。否则该日数据会被永久跳过，湖永远缺这一天。
+            try:
+                old = pd.read_parquet(shard)
+                if old.empty:
+                    logger.warning("by=date shard 空（%s），重拉：%s", key, shard)
+                    os.remove(shard)
+                else:
+                    continue  # 有效 shard：跳过，省配额
+            except Exception:
+                logger.warning("by=date shard 损坏（%s），重拉：%s", key, shard, exc_info=True)
+                os.remove(shard)
         kwargs = {"trade_date": td}
         if fields:
             kwargs["fields"] = fields
