@@ -30,6 +30,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import pandas as pd
 from datetime import datetime
 from data._tushare_compat import get_pro
+# 复用 tushare_sync 统一限频守卫：basic 桶 500/min + 熔断三态退避（_recompute_symbol
+# per-symbol 全历史调用走 basic 桶；P2 防新增配额路径绕过限频触发 Tushare 限流封禁）。
+from data.tushare_sync import _fetch_with_guard
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -90,10 +93,56 @@ def _backscan_recent(df, trade_days_set, suspend_intervals, days=30):
     return [g for g in gaps if not g.suspend_justified]
 
 
-def sync_daily_incremental(no_backscan: bool = False) -> str:
+def _recompute_symbol(pro, symbol: str, todayc: str) -> pd.DataFrame:
+    """按标的拉全历史 raw + adj，用窗口最新 adj 重建 qfq，返 MultiIndex(date, symbol)。
+
+    物理意图：除权事件后，旧 qfq 基准（旧 latest_adj）失效，历史行停留在旧基线会形成
+    除权断崖（close 跳空）；本函数按新窗口最新 adj_factor 重算全历史，把基准拉到最新日，
+    消除断崖，使 detect_signal 形态识别不被除权扰动误导。
+
+    前复权公式（与 sync_data_lake.fetch_qfq 同语义）：
+        price_qfq = price_raw × adj_factor / latest_adj（latest_adj = 窗口最新交易日 adj）
+
+    Args:
+        pro: tushare pro 接口（保留参数语义对齐 fetch_qfq(pro, ...)，实际通过
+            _fetch_with_guard 内部 get_pro() 解析；显式传 pro 仅为 API 形态一致）。
+        symbol: 标的代码（如 000001.SZ）。
+        todayc: 窗口截止日（YYYYMMDD，不含连字符）。
+    Returns:
+        MultiIndex(date, symbol) DataFrame；raw 拉空（停牌/退市/接口异常）返空 DF，
+        不抛异常（守数据底座鲁棒性——单只除权标的失败不应阻断整批 sync）。
+
+    起点 19900101 是哨兵下限，Tushare 按上市日自动截取（老股 1990-1999 段返空属正常，
+    非 bug——P3 防后人误判）。
+    """
+    raw = _fetch_with_guard("daily", ts_code=symbol,
+                            start_date="19900101", end_date=todayc)
+    adj = _fetch_with_guard("adj_factor", ts_code=symbol,
+                            start_date="19900101", end_date=todayc)
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    raw = raw.rename(columns={"ts_code": "symbol", "vol": "volume"})
+    merged = raw.merge(
+        adj[["ts_code", "trade_date", "adj_factor"]],
+        left_on=["symbol", "trade_date"], right_on=["ts_code", "trade_date"],
+        how="left",
+    ).drop(columns=["ts_code"], errors="ignore")
+    latest_adj = merged.sort_values("trade_date")["adj_factor"].iloc[-1]
+    if pd.isna(latest_adj) or latest_adj == 0:
+        latest_adj = 1.0
+    for col in PRICE_COLS:
+        if col in merged.columns:
+            merged[col] = merged[col] * merged["adj_factor"] / latest_adj
+    merged["trade_date"] = pd.to_datetime(merged["trade_date"], format="%Y%m%d")
+    merged = merged.rename(columns={"trade_date": "date"})
+    return merged[["date", "symbol"] + OUT_COLS].set_index(["date", "symbol"]).sort_index()
+
+
+def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = False) -> str:
     """增量同步入口：读 d0 → 拉新交易日 raw daily + adj_factor → 前复权 → append 落盘。
 
     no_backscan=True 禁用规则5近期连续性回扫（调试用；生产默认开启回扫防缺口累积）。
+    no_recompute_div=True 禁用除权标的历史 qfq 全量重算（调试用；生产默认开启消除除权断崖）。
     """
     df = pd.read_parquet(LAKE)
     d0 = str(pd.Timestamp(df.index.get_level_values("date").max()).date())
@@ -144,7 +193,7 @@ def sync_daily_incremental(no_backscan: bool = False) -> str:
         if col in merged.columns:
             merged[col] = merged[col] * merged["adj_factor"] / merged["latest_adj"]
 
-    # ④ 除权检测（adj 在 [d0, today] 变化）→ 历史基准偏移标注（follow-up 全量重算）
+    # ④ 除权检测（adj 在 [d0, today] 变化）→ 全量重算历史 qfq 基线（消除除权断崖）
     adj_pivot = adj.assign(td=adj["trade_date"].dt.strftime("%Y%m%d"))
     d0c, todayc = d0.replace("-", ""), today.replace("-", "")
     adj_d0 = adj_pivot[adj_pivot["td"] == d0c].set_index("ts_code")["adj_factor"]
@@ -153,7 +202,7 @@ def sync_daily_incremental(no_backscan: bool = False) -> str:
                 if s in adj_d0.index and s in adj_today.index
                 and abs(adj_d0[s] - adj_today[s]) > 1e-6]
     if div_syms:
-        logger.warning("⚠️ 除权标的 %d 只（adj %s→%s 变化），历史 qfq 基准未重算（follow-up）：%s",
+        logger.warning("⚠️ 除权标的 %d 只（adj %s→%s 变化），历史 qfq 基准将重算：%s",
                        len(div_syms), d0, today, div_syms[:10])
 
     # ⑤ 组装新行 → MultiIndex(date, symbol) + append + 去重（保留新）+ 落盘
@@ -162,6 +211,23 @@ def sync_daily_incremental(no_backscan: bool = False) -> str:
     new = new.set_index(["date", "symbol"]).sort_index()
     combined = pd.concat([df, new])
     combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+
+    # ⑥ 除权标的历史全量重算（默认开启；--no-recompute-div 可禁用）
+    # 物理意图：步骤⑤ append 后，除权标的旧行仍停留在旧 latest_adj 基准，形成除权断崖；
+    # 这里按标的拉全历史 raw+adj，用新窗口最新 adj 重算，替换该标的全部历史行。
+    # ⚠️ 配额影响（P2）：per-symbol 全历史调用（1 标的 ≈ 2 次 daily/adj_factor 请求），
+    # 除权季单次可能几十只；_fetch_with_guard 统一限频兜底（basic 桶 ~500/min），
+    # 超时/熔断按数据集语义返空跳过该标的（不阻断整批 sync）。
+    if div_syms and not no_recompute_div:
+        logger.warning("除权标的 %d 只，全量重算历史 qfq 基线：%s", len(div_syms), div_syms)
+        for sym in div_syms:
+            fixed = _recompute_symbol(pro, sym, todayc)
+            if fixed.empty:
+                logger.warning("除权标的 %s 全量重算返空（停牌/退市/接口异常），跳过", sym)
+                continue
+            combined = combined[combined.index.get_level_values("symbol") != sym]
+            combined = pd.concat([combined, fixed])
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
     combined.to_parquet(LAKE, engine="pyarrow")
     new_d0 = str(pd.Timestamp(combined.index.get_level_values("date").max()).date())
     logger.info("完成：a_shares_daily %d 行，最新日 %s（新增 %d 行）",
@@ -191,17 +257,22 @@ def sync_daily_incremental(no_backscan: bool = False) -> str:
             # 回扫异常不阻断主流程（增量已落盘，回扫是附加防护）
             logger.warning("sync 回扫异常（不阻断主流程）：%s", e)
 
-    return f"OK 最新日 {new_d0}（+{len(new)} 行，除权标的 {len(div_syms)} 只待重算{backscan_msg}）"
+    recompute_msg = "" if (div_syms and not no_recompute_div) else (
+        f"，除权标的 {len(div_syms)} 只未重算" if div_syms else "")
+    return f"OK 最新日 {new_d0}（+{len(new)} 行，除权标的 {len(div_syms)} 只{recompute_msg}{backscan_msg}）"
 
 
 if __name__ == "__main__":
     import argparse as _ap
-    _ap2 = _ap.ArgumentParser(description="A 股日线日频增量同步（含规则5近期回扫）")
+    _ap2 = _ap.ArgumentParser(description="A 股日线日频增量同步（含规则5近期回扫 + 除权标的 qfq 全量重算）")
     _ap2.add_argument("--no-backscan", action="store_true",
                       help="禁用近期连续性回扫（调试用）")
+    _ap2.add_argument("--no-recompute-div", action="store_true",
+                      help="禁用除权标的历史 qfq 全量重算（调试用；生产默认开启消除除权断崖）")
     _args = _ap2.parse_args()
     try:
-        print(sync_daily_incremental(no_backscan=_args.no_backscan))
+        print(sync_daily_incremental(no_backscan=_args.no_backscan,
+                                     no_recompute_div=_args.no_recompute_div))
         sys.exit(0)
     except Exception as e:
         logger.exception("增量同步失败")

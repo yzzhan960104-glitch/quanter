@@ -101,3 +101,67 @@ def test_adj_api_缺省时不触发前复权(tmp_path, monkeypatch):
     out = pd.read_parquet(lake_out)
     row = out.xs(pd.Timestamp("2025-01-01"), level="date").loc[ts_code]
     assert row["close"] == pytest.approx(10.0, rel=1e-6)  # 原始价未复权
+
+
+# ─── Task 9：qfq 除权标的历史全量重算 ─────────────────────────────────────────
+def test_recompute_symbol_rebuilds_full_history_baseline(monkeypatch):
+    """除权标的：历史行用新窗口最新 adj 重建（旧行不再停留在旧基线）。
+
+    物理意图：adj_factor 在窗口内从 0.9→1.0 变化（除权事件），latest_adj=1.0（最新日）。
+    前复权公式 close_qfq = raw × adj / latest：
+      12-29: 10.0 × 0.9 / 1.0 = 9.0（历史行基准回退至新基线，消除除权断崖）
+      01-03: 11.2 × 1.0 / 1.0 = 11.2（基准日不变）
+    _recompute_symbol 走 _fetch_with_guard（tushare_sync.basic 桶 500/min），测试 monkeypatch
+    绕过真实限频/熔断，直接调 FakePro。
+    """
+    from data.tools import sync_daily_incremental as sdl
+
+    class FakePro:
+        # _fetch_with_guard 内部走 getattr(pro, api_name)(**kwargs)，FakePro 按 kwargs 接收
+        def daily(self, ts_code, start_date, end_date, **_):
+            return pd.DataFrame({
+                "ts_code": [ts_code] * 3,
+                "trade_date": ["20231229", "20240102", "20240103"],
+                "open": [9.8, 10.5, 11.0],
+                "high": [10.2, 10.8, 11.3],
+                "low": [9.7, 10.2, 10.8],
+                "close": [10.0, 10.6, 11.2],
+                "vol": [100, 110, 120],
+                "amount": [1000, 1100, 1200],
+            })
+
+        def adj_factor(self, ts_code, start_date, end_date, **_):
+            return pd.DataFrame({
+                "ts_code": [ts_code] * 3,
+                "trade_date": ["20231229", "20240102", "20240103"],
+                "adj_factor": [0.9, 0.95, 1.0],
+            })
+
+    # 绕过 _fetch_with_guard 的 get_pro/限频/熔断：直接调 FakePro 的方法
+    fake_pro = FakePro()
+    monkeypatch.setattr(sdl, "_fetch_with_guard",
+                        lambda api_name, *, quota_type="basic", **kw: getattr(fake_pro, api_name)(**kw))
+
+    out = sdl._recompute_symbol(fake_pro, "000001.SZ", "20240103")
+    assert not out.empty, "_recompute_symbol 应返回非空 DataFrame"
+    closes = out.sort_index()["close"].astype(float)
+    assert closes.iloc[-1] == pytest.approx(11.2)   # 最新日 adj/latest = 1.0
+    assert closes.iloc[0] == pytest.approx(9.0)     # 12-29: 10.0 × 0.9 / 1.0
+
+
+def test_recompute_symbol_空数据返空DF(monkeypatch):
+    """raw 拉空（停牌/退市/接口异常）→ 返空 DF，不抛异常（守数据底座鲁棒性）。"""
+    from data.tools import sync_daily_incremental as sdl
+
+    class EmptyPro:
+        def daily(self, **_):
+            return pd.DataFrame()
+
+        def adj_factor(self, **_):
+            return pd.DataFrame()
+
+    empty_pro = EmptyPro()
+    monkeypatch.setattr(sdl, "_fetch_with_guard",
+                        lambda api_name, *, quota_type="basic", **kw: getattr(empty_pro, api_name)(**kw))
+    out = sdl._recompute_symbol(empty_pro, "000001.SZ", "20240103")
+    assert out.empty
