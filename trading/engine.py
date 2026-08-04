@@ -2089,6 +2089,12 @@ class TradingEngine:
         # P0-3（2026-08-04）：上次观测的客户端就绪态（None=首轮），False→True 跃迁时
         # 清零退避立即重连（外部条件恢复 ≠ 失败重试）。
         self._guard_client_ready_prev: Optional[bool] = None
+        # W1.2（08-04 静默断线根治）：未就绪连续轮数计数。
+        # Why 进程内存且就绪后清零：与 _guard_fail_count 同生命周期（自愈 job 分钟级，
+        # 重启从 0 开始无副作用）；就绪后必须清零，否则下次新断线第 1 轮即
+        # 历史遗留 + 1 触发错位告警（语义应是「连续 N 轮」而非「累计 N 轮」）。
+        # 节流 % 10：每 10 轮推一次钉钉（≈10min），避免 60s 周期刷爆告警通道。
+        self._not_ready_rounds: int = 0
 
         # C-4 U2：停调度 flag（_halt=True 后所有被 _critical_guard 装饰的 job 入口即跳过）。
         # Why 进程内存（不持久化）：致命停调度需人工介入重启，重启后 _halted=False 重新就绪；
@@ -2122,8 +2128,9 @@ class TradingEngine:
         判据（与 _pre_open_gate ② 段逐行等价，DRY 抽离零行为变更）：
             ① ``gw is None`` 或 ``gw._connected=False`` → ``"网关未连接"``；
             ② ``gw.is_client_ready()=False`` → ``"miniQMT 客户端未就绪"``。
-        ``is_client_ready`` 是纯文件 mtime 探测（broker/qmt.py:311），不触达 xtquant，
-        CI/单测/无 SDK 环境安全调用。
+        ``is_client_ready`` 是目录存在性探测（W1.1 重定义：userdata 目录在即 True，
+        connect 返回码才是客户端可用性唯一权威；mtime 已降级为 ``_client_staleness_diag``
+        日志分类素材，绝不硬前置），不触达 xtquant，CI/单测/无 SDK 环境安全调用。
 
         Args:
             gw: 交易网关实例（``get_gateway()`` 取，可能为 None）。鸭子类型：读
@@ -2288,9 +2295,14 @@ class TradingEngine:
                 except Exception:
                     logger.exception("网关连接失败（cron 仍启动，触发点内部 get_gateway 兜底）")
             else:
+                # W1.2（收口 A）：启动期断线也要有诊断文案（与 _health_guard ④ 同口径）。
+                # 旧文案只说「未就绪」不告诉你为什么——操作员看到日志仍要去翻 userdata 找原因。
+                # 接入 gw._client_staleness_diag()（T1 四态文案：目录缺失/目录空/无活跃文件/陈旧 N 分钟）
+                # 让启动失败时日志自带根因，缩短排障时间。hasattr 兜底防 gw 未升级。
+                _bs_diag = gw._client_staleness_diag() if hasattr(gw, "_client_staleness_diag") else "无诊断"
                 logger.warning(
-                    "miniQMT 客户端未就绪（is_client_ready=False），bootstrap 跳过 connect——"
-                    "由 health_guard 在客户端就绪后连接（避免先于客户端创建会话文件）")
+                    "miniQMT 客户端未就绪（is_client_ready=False，%s），bootstrap 跳过 connect——"
+                    "由 health_guard 在客户端就绪后连接（避免先于客户端创建会话文件）", _bs_diag)
 
         # 初始化本地持仓账本（gap4 · 幂等建表，对齐 experiment/store.init_db 范式）。
         # 必须在 start() 之前：cron 一旦启动，_handle_order_update/_post_close 就可能
@@ -2354,12 +2366,34 @@ class TradingEngine:
         if getattr(gw, "_reconnecting", False):
             return
         # ④ 客户端未就绪 → 不空跑 connect（防刷柜台）。
-        #    is_client_ready 是纯文件 mtime 探测（T6）：False 意味 miniQMT 客户端进程
-        #    未起 / userdata 共享内存文件老旧 → connect 必返 -1 或超时，空跑无意义。
+        #    is_client_ready 是目录存在性探测（W1.1 重定义）：False 意味 miniQMT 客户端
+        #    userdata 目录缺失/空（进程必然未起）→ connect 必返 -1 或超时，空跑无意义。
+        #    W1.2（08-04 静默跳过根治）：旧版此分支静默 return 致网关断线 9 小时无人知
+        #    （直到 pre_open 失败才暴露）。现补可见性——WARNING + 诊断文案（来源
+        #    gw._client_staleness_diag，四态分类素材）+ 每 10 轮节流推一次钉钉
+        #    （复用 _alert_critical 通道，60s/轮 × 10 ≈ 10min 一次，防告警风暴）。
         ready = gw.is_client_ready()
         if not ready:
             self._guard_client_ready_prev = False
+            self._not_ready_rounds += 1
+            # 诊断文案：T1 提供的四态稳定文案（目录缺失/目录空/无活跃文件/陈旧 N 分钟）。
+            # hasattr 兜底防 gw 未升级（T1 未合入的旧网关），降级为「无诊断」不阻断告警。
+            diag = gw._client_staleness_diag() if hasattr(gw, "_client_staleness_diag") else "无诊断"
+            logger.warning("health_guard 客户端未就绪，跳过 connect（%s，连续 %d 轮）",
+                           diag, self._not_ready_rounds)
+            # 节流钉钉：每 10 轮推一次（% 10 == 0）。Why 不首推：60s 周期若每轮推，
+            # 一天断线可堆 1440 条告警刷爆通道；首推 ≈ 第 10min（断线已持续足够久，
+            # 确认非瞬时抖动）。_alert_critical 内部 fire_and_forget 软降级——告警失败
+            # 不阻塞守护主链路（try/except 在 _alert_critical 内兜底，C-4 错误分级决议）。
+            if self._not_ready_rounds % 10 == 0:
+                _alert_critical(
+                    f"health_guard 客户端连续未就绪 {self._not_ready_rounds} 轮"
+                    f"（≈{self._not_ready_rounds}min），网关无法自愈重连（{diag}）。"
+                    f"请人工检查 miniQMT 客户端是否启动/登录")
             return
+        # 就绪后清零未就绪计数（W1.2）：防计数漂移——上次断线遗留计数若不清，
+        # 下次新断线第 1 轮即历史值 + 1 触发错位告警（语义错位为「累计」非「连续」）。
+        self._not_ready_rounds = 0
         # P0-3（2026-08-04）：客户端从不可用→可用是「外部条件恢复」而非失败重试——
         # 清零退避立即重连，避免被历史失败计数拖到 7 轮（≈7min）后才试探。
         if self._guard_client_ready_prev is False:

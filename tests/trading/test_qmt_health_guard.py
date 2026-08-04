@@ -422,3 +422,124 @@ def test_account_status_ok_does_not_clear_risk_halt(tmp_path):
     gw.clear_risk_halt()
     gw._on_account_status_change(0)
     assert gw._lock_down is False
+
+
+# ============================================================ W1.2（08-04 静默断线根治）
+# _health_guard ④ 未就绪分支旧版静默 return（无日志无告警）→ 网关断线 9 小时无人知，
+# 直到 pre_open 失败才暴露。本组补可见性：WARNING + 诊断文案 + 每 10 轮节流钉钉。
+def _make_engine_with_not_ready_gw(monkeypatch, *, diag_text="userdata 目录不存在（客户端未安装/路径错）"):
+    """构造 engine + 一个未就绪 gw 的共用 helper（复用既有 TradingEngine() 范式）。
+
+    返回 (eng, gw, fired)。fired 收集 _alert_critical 收到的告警正文（节流断言用）。
+    """
+    from unittest.mock import MagicMock, patch
+    import trading.engine as eng_mod
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._risk_halted = False
+    gw._connected = False
+    gw._reconnecting = False
+    gw.is_client_ready = MagicMock(return_value=False)
+    gw._client_staleness_diag = MagicMock(return_value=diag_text)
+    fired = []
+    monkeypatch.setattr(eng_mod, "_alert_critical", lambda msg: fired.append(msg))
+    return eng, gw, fired
+
+
+@pytest.mark.asyncio
+async def test_health_guard_not_ready_warns_with_diag(monkeypatch, caplog):
+    """W1.2：客户端未就绪 → WARNING 日志带诊断文案（不再静默 return）。"""
+    import logging
+    from unittest.mock import patch
+    eng, gw, _ = _make_engine_with_not_ready_gw(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="trading.engine")
+    with patch("trading.engine.get_gateway", return_value=gw):
+        await eng._health_guard()
+    warns = [r for r in caplog.records
+             if r.levelno == logging.WARNING and "客户端未就绪" in r.getMessage()]
+    assert len(warns) >= 1, "未就绪分支必须打 WARNING"
+    assert "目录不存在" in warns[0].getMessage() or "客户端未安装" in warns[0].getMessage()
+    # 首轮不推钉钉（节流：% 10 == 0 才推，第 10/20/... 轮）
+    assert eng._not_ready_rounds == 1
+
+
+@pytest.mark.asyncio
+async def test_health_guard_not_ready_throttles_alert_every_10_rounds(monkeypatch):
+    """W1.2：连续 12 轮未就绪 → 只在每第 10 轮推一次钉钉（节流防风暴）。"""
+    from unittest.mock import patch
+    eng, gw, fired = _make_engine_with_not_ready_gw(monkeypatch)
+    with patch("trading.engine.get_gateway", return_value=gw):
+        for _ in range(12):
+            await eng._health_guard()
+    # 12 轮只推 1 次（第 10 轮），第 11/12 轮不推
+    assert len(fired) == 1, f"12 轮应只推 1 次钉钉（每 10 轮），实际 {len(fired)}"
+    assert "目录不存在" in fired[0] or "客户端未安装" in fired[0]
+    assert eng._not_ready_rounds == 12
+
+
+@pytest.mark.asyncio
+async def test_health_guard_not_ready_alert_at_round_20(monkeypatch):
+    """W1.2：第 20 轮再推一次（节流是 % 10，不是只推首尾）。"""
+    from unittest.mock import patch
+    eng, gw, fired = _make_engine_with_not_ready_gw(monkeypatch)
+    with patch("trading.engine.get_gateway", return_value=gw):
+        for _ in range(20):
+            await eng._health_guard()
+    assert len(fired) == 2, f"20 轮应推 2 次（第 10 + 第 20），实际 {len(fired)}"
+
+
+@pytest.mark.asyncio
+async def test_health_guard_resets_not_ready_rounds_when_ready(monkeypatch):
+    """W1.2：客户端恢复就绪后 _not_ready_rounds 必须清零（避免下次断线首推延迟）。
+
+    物理意图：清零防计数漂移——若上次断线累计 9 轮不清零，下次新断线第 1 轮即
+    9+1=10 触发告警，语义错位（应是连续 10 轮才告警，而非历史遗留 + 1）。
+    """
+    from unittest.mock import patch
+    eng, gw, _ = _make_engine_with_not_ready_gw(monkeypatch)
+    with patch("trading.engine.get_gateway", return_value=gw):
+        # 先 5 轮未就绪
+        for _ in range(5):
+            await eng._health_guard()
+    assert eng._not_ready_rounds == 5
+    # 客户端恢复就绪
+    gw.is_client_ready.return_value = True
+    gw._connected = False  # 仍断线，触发重连
+    gw.connect = AsyncMock()
+    with patch("trading.engine.get_gateway", return_value=gw):
+        await eng._health_guard()
+    # 就绪后清零
+    assert eng._not_ready_rounds == 0, "就绪后未就绪计数必须清零"
+
+
+@pytest.mark.asyncio
+async def test_health_guard_not_ready_does_not_block_on_alert_failure(monkeypatch):
+    """W1.2：_alert_critical 内部失败不阻塞 _health_guard 主链路（C-4 错误分级：告警软降级）。
+
+    物理意图：告警系统绝不能成为交易主链路的单点故障源。_alert_critical 内部
+    fire_and_forget / notifier import 失败时由其自身 try/except 兜底（engine.py
+    _alert_critical 函数体 except），守护 job 主路径不被拖垮。本测试构造 notifier
+    import 失败场景（_alert_critical 内部 try 块首行就抛），验证守护仍照常累加计数。
+    """
+    import trading.engine as eng_mod
+    from unittest.mock import MagicMock, patch
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._risk_halted = False; gw._connected = False; gw._reconnecting = False
+    gw.is_client_ready = MagicMock(return_value=False)
+    gw._client_staleness_diag = MagicMock(return_value="无活跃文件")
+    # 让 _alert_critical 内部 `from infra.notifier import ...` 抛异常
+    # （真实告警通道最常见的失败模式：notifier 模块/import 链断）。
+    import builtins
+    real_import = builtins.__import__
+    def _block_notifier(name, *a, **kw):
+        if name == "infra.notifier":
+            raise ImportError("模拟 notifier 模块不可用")
+        return real_import(name, *a, **kw)
+    monkeypatch.setattr(builtins, "__import__", _block_notifier)
+    with patch("trading.engine.get_gateway", return_value=gw):
+        for _ in range(10):
+            await eng._health_guard()  # 第 10 轮触发 _alert_critical，内部 import 失败被兜底
+    assert eng._not_ready_rounds == 10  # 计数仍累加（主链路未被异常打断）

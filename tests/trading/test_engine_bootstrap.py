@@ -70,6 +70,35 @@ async def test_bootstrap_skips_connect_when_client_not_ready():
     assert eng._gw is gw
 
 
+@pytest.mark.asyncio
+async def test_bootstrap_not_ready_warning_carries_diag(caplog):
+    """W1.2 收口 A：bootstrap 未就绪 WARNING 文案接入 _client_staleness_diag（启动期断线带根因）。
+
+    物理意图：旧 WARNING 只说「未就绪」不带根因，操作员看到日志还要去翻 userdata 找原因。
+    W1.2 接入 gw._client_staleness_diag()（T1 四态文案）让启动失败时日志自带诊断，
+    与 _health_guard ④ 文案同口径（启动期 + 守护期断线可见性统一）。
+    """
+    import logging
+    eng = TradingEngine()
+    with patch("trading.engine.get_gateway") as gg, \
+         patch("trading.position_book.init_db"), \
+         patch("trading.state_store.init_store"), \
+         patch("trading.state_store._migrate_env_to_account"):
+        gw = MagicMock()
+        gw.is_client_ready.return_value = False
+        gw._client_staleness_diag.return_value = "userdata 目录不存在（客户端未安装/路径错）"
+        gw.connect = AsyncMock()
+        gg.return_value = gw
+        caplog.set_level(logging.WARNING, logger="trading.engine")
+        await eng.bootstrap()
+    gw.connect.assert_not_awaited()
+    # 收口 A 核心断言：WARNING 文案含诊断
+    diag_warns = [r for r in caplog.records
+                  if r.levelno == logging.WARNING
+                  and "目录不存在" in r.getMessage()]
+    assert len(diag_warns) >= 1, "bootstrap 未就绪 WARNING 必须带 _client_staleness_diag 文案"
+
+
 # ============================================================================
 # QMT session 单实例锁（live 专属）：双引擎抢 session → connect -1 防御
 # ============================================================================
