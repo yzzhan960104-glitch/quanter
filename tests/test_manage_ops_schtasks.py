@@ -92,3 +92,19 @@ def test_main_unregister_discovery_flag():
         rc = main(["--unregister-discovery"])
     assert rc == 0
     ud.assert_called_once()
+
+
+# ============ T8 / C-9 A3：RETIRED_TASKS 补 QuanterDailyBrief ============
+
+
+def test_retired_tasks_contains_daily_brief():
+    """QuanterDailyBrief 已从系统删除；若被重建，--unregister-pipeline-brief 必须能清。
+
+    物理意图（C-8 + T8）：``QuanterDailyBrief`` 在 C-8 后已删系统 schtasks，但
+    ``RETIRED_TASKS`` 之前只列 ``QuanterDataPipeline`` / ``QuanterBrief`` 两个，
+    缺 ``QuanterDailyBrief`` —— 升级环境若残留该任务（或被误重建），现有
+    --unregister-pipeline-brief / --unregister / --register 三处清退都查
+    RETIRED_TASKS，漏列会导致该任务不被幂等清退、残留双触发。本测试锁定名单完整性。
+    """
+    from ops.manage_ops_schtasks import RETIRED_TASKS
+    assert "QuanterDailyBrief" in RETIRED_TASKS

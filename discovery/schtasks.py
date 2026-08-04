@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
-"""discovery 夜跑 daemon 的 schtasks 注册（spec §10，Plan 4 Task 4）。
+"""discovery 夜跑 daemon 的 schtasks 管理（spec §10，Plan 4 Task 4 / T8 C-9 A3）。
 
 Why 包自包含调度（不依赖 ops/manage_ops_schtasks.py）：
   - discovery 是 L4 生产入口，调度配置必须跟随包走——scripts/ 后续废弃时 discovery
-    夜跑不能断链。把 DAEMON_TASK_NAME/TIME/BAT 常量 + register/unregister 收进包内，
-    `python -m discovery.schtasks --register` 一键自治。
+    夜跑不能断链。把 DAEMON_TASK_NAME/TIME/BAT 常量 + unregister/list 收进包内，
+    `python -m discovery.schtasks --unregister` 一键自治清退残留。
   - 与 broadcast（scripts/manage_ops_schtasks）解耦：两者调度对象/时序无关
     （broadcast 是盘后播报，daemon 是 02:00 跑批），合并管理会引入虚假耦合。
 
-幂等模式（先 /Delete /F 再 /Create /SC DAILY）复用 ops/manage_ops_schtasks.py
-既有纪律：schtasks /Create 非 /F 遇到已存在会失败，先删保证重跑 register 不报错
-（改时间 / 误触 / schtasks 多触发都安全）。
+⚠️ T8 / C-9 A3 退役（C-7 V2 收编后）：``QuanterDiscoveryDaemon`` 的 schtasks DAILY 02:00
+  已收编进 uvicorn lifespan 的 ``engine.sched`` cron 02:00（见 presentation/server/main.py），
+  且 lifespan 启动补跑会读 search_run 最新 started_at 兜底漏跑。``register()`` **拒绝重建**
+  （旧实现幂等"先 /Delete /F 再 /Create /SC DAILY"会复活该任务），否则 lifespan cron +
+  schtasks 同一晚双触发——双进程读 discovery_trials.db 锁竞争 + 4h budget × 2 浪费。
 
-改夜跑时间 = 改本模块 DAEMON_TIME 常量 + `python -m discovery.schtasks --register`。
+  本模块仅保留 ``--unregister``（清残留）/ ``--list``（查状态）两个有效入口；
+  ``--register`` 打印退役提示并返非零（main 的 argparse 仍接受该 flag 以保持向后兼容，
+  避免旧脚本/cron 调 ``--register`` 时 argparse 报错中断）。
 """
 from __future__ import annotations
 import argparse
@@ -56,19 +60,22 @@ def _schtasks(args: list[str]) -> int:
 
 
 def register() -> None:
-    """幂等注册：先 /Delete /F（不存在也返 0）再 /Create /F 覆盖。
+    """已退役（C-7 V2 收编 lifespan cron 02:00）：拒绝重建，防双跑。
 
-    幂等序保证：
-      - 首次注册：/Delete 对不存在的任务返 0（schtasks 对 /TN 不存在的 /Delete /F
-        不报错），紧接 /Create 落任务。
-      - 重跑注册（改时间后）：先 /Delete 删旧任务，再 /Create 覆盖——避免 /Create
-        非 /F 模式遇到已存在报"任务已存在"错。
+    物理意图（T8 / C-9 A3）：``QuanterDiscoveryDaemon`` 的 schtasks DAILY 02:00 已收编进
+    uvicorn lifespan 的 ``engine.sched`` cron 02:00（C-7 V2，见 presentation/server/main.py），
+    且 lifespan 启动补跑会读 search_run 最新 started_at 兜底漏跑（C-8）。旧实现的幂等序
+    （先 /Delete /F 再 /Create /SC DAILY）会**复活**该任务，导致同一晚 lifespan cron +
+    schtasks 双触发——双进程同时读 discovery_trials.db 有 SQLite 锁竞争风险，且 4h budget
+    被吃两份。故本函数改为只打印退役提示，不发任何 schtasks 子进程命令（不 /Create、不
+    /Delete；``--unregister`` 子命令独立清残留）。
+
+    Why 不删函数 / 不删 --register flag：保持向后兼容——旧脚本 / cron / 文档可能仍调
+    ``python -m discovery.schtasks --register``，删 flag 会让 argparse 报错中断（隐性失败
+    比显式拒绝危险）。改为打印退役信息 + main 返非零，运维一眼看到"已退役"提示。
     """
-    for c in build_register_commands():
-        _schtasks(["/Delete", "/TN", c["task"], "/F"])   # 幂等：先删（不存在也返 0）
-        rc = _schtasks(["/Create", "/SC", "DAILY", "/TN", c["task"],
-                        "/TR", c["bat"], "/ST", c["time"], "/F"])
-        print(f"{'OK' if rc == 0 else 'FAIL'} {c['task']} @ {c['time']} → {c['bat']}")
+    print("QuanterDiscoveryDaemon 已退役：discovery 收编 uvicorn lifespan "
+          "（engine.sched cron 02:00 + 启动补跑）。禁止重建，请用 --unregister 清残留。")
 
 
 def unregister() -> None:
@@ -85,16 +92,24 @@ def list_tasks() -> None:
 def main(argv=None) -> int:
     """cli 入口：--register/--unregister/--list 三选一（互斥）。
 
-    argv=None 走 sys.argv（`python -m discovery.schtasks --register`）。
+    argv=None 走 sys.argv（``python -m discovery.schtasks --unregister``）。
+
+    ⚠️ T8 / C-9 A3：``--register`` 已退役（收编 lifespan cron 02:00），调用时打印退役
+    提示并返 ``1``（非零——供运维脚本/CI 判失败）。``--unregister`` / ``--list`` 仍返 0。
+
+    Why 保留 ``--register`` flag：向后兼容旧脚本/cron（删 flag 会让 argparse 报错中断，
+    隐性失败比显式拒绝危险）；改为打印 + 返非零，运维一眼看到"已退役"。
     """
     p = argparse.ArgumentParser(description="discovery daemon schtasks 管理（包自包含）")
     g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--register", action="store_true", help="幂等注册夜跑任务（先删后建）")
-    g.add_argument("--unregister", action="store_true", help="清退夜跑任务")
+    g.add_argument("--register", action="store_true",
+                   help="已退役（C-7 V2 收编 lifespan）——打印提示并返非零")
+    g.add_argument("--unregister", action="store_true", help="清退残留夜跑任务")
     g.add_argument("--list", action="store_true", help="查询任务当前状态")
     args = p.parse_args(argv)
     if args.register:
-        register()
+        register()  # 已退役：只打印提示
+        return 1     # 非零：--register 不再是有效操作（防双跑）
     elif args.unregister:
         unregister()
     elif args.list:

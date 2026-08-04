@@ -29,10 +29,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-# ⚠️ C-2 Task 9：以下两个 schtasks 已退役，职责收进 uvicorn 的 pipeline_then_eod cron
-#   事件链。register()/unregister()/unregister_pipeline_brief() 清退时用这份名单删
-#   （幂等 /Delete /F，不存在不报错）。绝不可在 register() 里 /Create 它们。
-RETIRED_TASKS = ["QuanterDataPipeline", "QuanterBrief"]
+# ⚠️ C-2 Task 9 / C-8 / T8：以下 schtasks 已退役，职责收进 uvicorn 的 pipeline_then_eod
+#   cron 事件链（QuanterDataPipeline / QuanterBrief）或已从系统删除（QuanterDailyBrief）。
+#   register()/unregister()/unregister_pipeline_brief() 清退时用这份名单删（幂等
+#   /Delete /F，不存在不报错）。绝不可在 register() 里 /Create 它们。
+# T8 补 QuanterDailyBrief：C-8 后该系统 schtasks 已删，加入名单幂等清退防被误重建后残留。
+RETIRED_TASKS = ["QuanterDataPipeline", "QuanterBrief", "QuanterDailyBrief"]
 
 # 方案 C 历史的 2 个 supervisor 任务定义（时间 + bat 路径）。
 # ⚠️ Final Fix：``register()`` 不再迭代本表创建任务（两个任务已退役，重建=与新事件链

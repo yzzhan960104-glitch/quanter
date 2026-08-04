@@ -19,13 +19,20 @@ from ops import manage_ops_schtasks as m
 
 
 def test_retired_tasks_covers_pipeline_brief():
-    """RETIRED_TASKS：两个已退役 schtasks（register/unregister/pipeline-brief 清退）。
+    """RETIRED_TASKS：至少覆盖 Task 9 收编的两个退役 schtasks（pipeline/brief）。
 
     Why 完整覆盖：这两个任务的职责已收进 uvicorn ``pipeline_then_eod`` 事件链，升级环境
     若残留旧 schtasks 会与新链重复触发（采集@17:00 schtask + 事件链采集）。RETIRED_TASKS
-    必须列全这两个，register()/unregister()/unregister_pipeline_brief() 清退时都查这份。
+    必须至少列全这两个，register()/unregister()/unregister_pipeline_brief() 清退时都查这份。
+
+    ⚠️ T8 / C-9 A3 调整：原断言用严格集合相等 ``==`` 锁死两个成员，但 C-8 后
+    ``QuanterDailyBrief`` 也需加入 RETIRED_TASKS 幂等清退（已删系统任务，防残留/误重建）。
+    严格相等会让本次补充失败，故改为子集断言 ``>=`` —— 锁住"两个原成员必在"的回归红线，
+    同时允许后续补充（如 QuanterDailyBrief）而不破坏既有意图。新成员的完整性由
+    tests/test_manage_ops_schtasks.py::test_retired_tasks_contains_daily_brief 锁定。
     """
-    assert set(m.RETIRED_TASKS) == {"QuanterDataPipeline", "QuanterBrief"}
+    # 子集断言：Task 9 两个原成员必须在（回归红线），允许后续补充（如 QuanterDailyBrief）
+    assert {"QuanterDataPipeline", "QuanterBrief"} <= set(m.RETIRED_TASKS)
 
 
 def test_pipeline_tasks_kept_as_historical_metadata():
