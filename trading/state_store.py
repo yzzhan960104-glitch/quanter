@@ -740,6 +740,70 @@ def clear_position_attribution(account_id: str, symbol: str, *, db_path: str | N
             (account_id, symbol))
 
 
+def rebuild_position_attribution(account_id: str, *, db_path: str | None = None) -> int:
+    """从 trade_event(SIGNAL).meta 回填 position.strategy/entry_rationale（C1 弥补 B2 重启窗口）。
+
+    物理意图（spec §5 断点-3 弥补 · C1）：
+        B2 把归因落到 position 表（strategy/entry_rationale 列），但只做「落列 + upsert/clear」，
+        不做重启重建。重启丢失窗口内：BUY 成交 apply_fill_to_position 建 position 行（strategy IS NULL）
+        + B2 归因未及写就崩，position 行裸奔无归因。本函数在 engine lifespan 启动期补扫：
+        反查 trade_event(SIGNAL).meta 真实 strategy_name/rationale 回填。
+
+    红线（IS NULL 守卫，绝不覆盖 B2 已写）：
+        SQL UPDATE WHERE strategy IS NULL OR strategy='' —— 已写归因（B2 算法/人工 upsert）
+        的行不被覆盖。验收 test_rebuild_skips_already_attributed：已写 "manual" 的行 rebuild
+        后仍是 "manual"，不被 SIGNAL.meta 的 "neckline" 改写。
+
+    读真实 strategy_name（非默认）：
+        meta.get("strategy_name") or "neckline" —— 读 SIGNAL.meta 真实字段（C1 eod_plan 补），
+        多策略扩展的物理基础（未来多策略并存时归因随真实值）。无 strategy_name 字段兜底单策略
+        "neckline"（向后兼容老 SIGNAL.meta）。验收 test_rebuild_reads_alternative_strategy_name：
+        meta strategy_name='momentum' → 回填 'momentum'（非写死 neckline）。
+
+    无 SIGNAL.meta 处理：
+        position 行可能由历史迁移/手动建仓产生（无 SIGNAL 事件）→ 静默跳过（continue），
+        不 raise 中断整批回填。验收 test_rebuild_skips_position_without_signal：回填 0 行。
+
+    Args:
+        account_id: 账户 ID（与 position.account_id / trade_event.account_id 同口径）。
+        db_path: DB 路径（测试注入；缺省 _DEFAULT_DB）。
+    Returns:
+        回填行数（IS NULL 守卫下的实际 UPDATE 命中数）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    n = 0
+    with _connect(db_path) as con:
+        # 仅扫 strategy IS NULL 的行（红线守卫：不覆盖 B2 已写归因）
+        positions = con.execute(
+            "SELECT symbol FROM position"
+            " WHERE account_id=? AND (strategy IS NULL OR strategy='')",
+            (account_id,)).fetchall()
+        for p in positions:
+            # 反查最新 SIGNAL.meta（同 symbol 可能多次信号，取最新 event_id DESC LIMIT 1）
+            row = con.execute(
+                "SELECT meta FROM trade_event"
+                " WHERE account_id=? AND symbol=? AND action='SIGNAL'"
+                " ORDER BY event_id DESC LIMIT 1",
+                (account_id, p["symbol"])).fetchone()
+            if not row or not row["meta"]:
+                continue  # 无 SIGNAL.meta 静默跳过（历史/手动建仓）
+            try:
+                meta = json.loads(row["meta"])
+            except Exception:
+                # meta 损坏（非合法 JSON）跳过不阻断（保护整批回填不被单条脏数据中断）
+                continue
+            # 读真实 strategy_name（非默认 neckline）；rationale 兜底 formed_at 拼
+            strategy = meta.get("strategy_name") or "neckline"
+            rationale = meta.get("rationale") or f"颈线法@{meta.get('formed_at', '')}"
+            # UPDATE 再加 IS NULL 守卫（双保险，防并发写竞争：SELECT 到 UPDATE 之间 B2 可能已写）
+            con.execute(
+                "UPDATE position SET strategy=?, entry_rationale=?"
+                " WHERE account_id=? AND symbol=? AND (strategy IS NULL OR strategy='')",
+                (strategy, rationale, account_id, p["symbol"]))
+            n += 1
+    return n
+
+
 def snapshot_start_equity(account_id: str, date: str, total_asset: float, cash: float | None = None,
                           *, db_path: str | None = None) -> None:
     """开盘前总资产快照（pre_open 写，熔断 start_equity 基线 + post_close daily_pnl 计算）。

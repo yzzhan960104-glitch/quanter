@@ -637,8 +637,22 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
                 continue
             trade_id = _state_store.build_trade_id(account_id, sym, date)
             # SIGNAL meta 存计划参数快照（stop_loss/pre_open 改从 DB 读，spec §3.3）
+            # SSoT Phase C · C1：meta 补 plan_date/strategy_name/rationale（C2 前置 + 归因重建真相源）。
+            # 物理意图（C2 前置语义）：
+            #   - plan_date=date（T+1 计划生效日，与 trade_id 同口径）：C2a scan_count 按 plan_date
+            #     LIKE 查；C2d experiment report/trigger 按 plan_date 聚合。timestamp=写入日 T ≠ 计划
+            #     日 T+1（致命日期轴，若按 timestamp 查会把 T 日盘后写入归到 T 日计划，错位一天）。
+            #   - strategy_name="neckline"（当前单策略，未来多策略时由 build_orders 透传）：C2c
+            #     review_report/review_service 按 strategy_name 过滤；rebuild_position_attribution 读
+            #     真实 strategy_name 回填 position（弥补 B2 重启窗口）。
+            #   - rationale=「颈线法@{formed_at}」（人类可读归因，formed_at=T 信号突破日）。
+            # 非破坏扩展：{**o, ...} 在原 order_dict（stop_price/take_profit/neckline/formed_at/
+            #   experiment_id 等）基础上扩展，不动 o 既有字段——消费方读 meta 不受影响。
+            meta_obj = {**o, "plan_date": date, "strategy_name": "neckline",
+                        "rationale": f"颈线法@{o.get('formed_at', '')}"}
             _state_store.insert_trade_event(
-                account_id, trade_id, sym, "SIGNAL", meta=json.dumps(o, ensure_ascii=False))
+                account_id, trade_id, sym, "SIGNAL",
+                meta=json.dumps(meta_obj, ensure_ascii=False))
             # CONFIRMED 仅在 auto_confirmed 且未被 veto 时写（veto 保护：最新 action=VETOED 不覆盖）
             if auto_confirmed and _state_store.get_latest_action(trade_id) != "VETOED":
                 _state_store.insert_trade_event(account_id, trade_id, sym, "CONFIRMED")
@@ -2352,6 +2366,20 @@ class TradingEngine:
         position_book.init_db()
         state_store.init_store()
         state_store._migrate_env_to_account()
+        # SSoT Phase C · C1：启动归因重建（弥补 B2 重启丢失窗口）。
+        # 物理意图（spec §5 断点-3 弥补）：B2 把归因落 position 列但**不做重启重建**——重启窗口
+        # 内 BUY 成交 + B2 归因未及写就崩的 position 行 strategy IS NULL 裸奔。本补扫从
+        # trade_event(SIGNAL).meta 真实 strategy_name 回填（IS NULL 守卫不覆盖 B2 已写）。
+        # Why 在 bootstrap：state_store.init_store + _migrate_env_to_account 已就绪（建表+账户
+        # 已落），position/trade_event 表可读写；cron 启动前补归因，避免首触发点读到 NULL 归因。
+        # Why try/except 不阻断：归因是审计维度（非交易红线），失败不能让 engine 启动崩——
+        # 启动是红线（C-5/C-4 决议：归因重建软降级，启动硬约束）。
+        try:
+            _n = state_store.rebuild_position_attribution(_resolve_account_id())
+            if _n:
+                logger.info("启动归因重建：从 SIGNAL.meta 回填 %d 个持仓归因（C1 弥补 B2 重启窗口）", _n)
+        except Exception:
+            logger.exception("启动归因重建失败（不阻断 engine 启动，归因审计维度软降级）")
 
     @_critical_guard
     async def _health_guard(self) -> None:

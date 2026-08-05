@@ -139,7 +139,10 @@ def _signal_600000():
 
 
 def test_eod_plan_inserts_signal_event(monkeypatch, _state_db):
-    """eod_plan 后 trade_event 有 SIGNAL 行（meta 含计划参数 stop_price/take_profit）。"""
+    """eod_plan 后 trade_event 有 SIGNAL 行（meta 含计划参数 stop_price/take_profit）。
+
+    SSoT Phase C · C1：meta 含 plan_date/strategy_name（C2 前置 + 归因重建真相源）。
+    """
     import sqlite3
     from trading import state_store
     monkeypatch.setattr(engine, "_submit", _no_op_submit)
@@ -151,6 +154,11 @@ def test_eod_plan_inserts_signal_event(monkeypatch, _state_db):
     assert plan_meta is not None
     assert "stop_price" in plan_meta
     assert "take_profit" in plan_meta
+    # C1：meta 补字段断言（plan_date=T+1 计划生效日；strategy_name=当前单策略）
+    assert plan_meta.get("plan_date") == "2099-01-01"
+    assert plan_meta.get("strategy_name") == "neckline"
+    # rationale 形如「颈线法@{formed_at}」（formed_at 来自 _signal_600000 的信号突破日）
+    assert plan_meta.get("rationale", "").startswith("颈线法@")
 
 
 def test_eod_plan_auto_confirm_event(monkeypatch, _state_db):

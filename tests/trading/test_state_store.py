@@ -458,3 +458,112 @@ def test_position_attribution_sell_clears_via_row_delete(tmp_db):
     state_store.apply_fill_to_position("ACC_TEST", "600000.SH", "SELL", 100, 11.0, "20260805")
     # 持仓行被删 → 归因随行消失（get_position 返 None）
     assert state_store.get_position("ACC_TEST", "600000.SH") is None
+
+
+# ============================================================================
+# SSoT Phase C · C1：归因重建（从 SIGNAL.meta 读真实 strategy_name 回填 position）
+# ============================================================================
+# 物理意图（spec §5 断点-3 弥补）：
+#   B2 把归因落到 position 表（重启存活），但**只落列 + upsert/clear，不做重启重建**——
+#   进程重启窗口内 BUY 成交（apply_fill_to_position 建行）+ B2 归因未及写就崩，position 行
+#   strategy IS NULL 裸奔。C1 从 trade_event(SIGNAL).meta 反查真实 strategy_name/rationale
+#   回填，弥补 B2 的重启丢失窗口。
+#   红线：IS NULL 守卫——只回填 strategy IS NULL 的行，绝不覆盖 B2 已写归因（人工/算法已写）。
+def test_rebuild_position_attribution_reads_real_meta(tmp_db):
+    """rebuild 从 SIGNAL.meta 真实 strategy_name 回填（C1，读真实字段非默认 neckline）。
+
+    验收口径（brief Step 2 红线）：
+        - apply_fill_to_position 建行（strategy IS NULL）
+        - 插真实 shape SIGNAL.meta（C1 补字段：plan_date/strategy_name/rationale）
+        - rebuild 读 meta.strategy_name 真实值回填 position（非写死 "neckline"）
+        - 返回回填行数 = 1
+    """
+    from trading import state_store
+    import json
+    # 建仓（apply_fill_to_position 建 position 行，strategy IS NULL）
+    state_store.apply_fill_to_position("ACC_TEST", "600000.SH", "BUY", 100, 10.0, "20260805")
+    # 真实 shape SIGNAL.meta（engine.py:605-639 order_dict + C1 补字段）
+    trade_id = state_store.build_trade_id("ACC_TEST", "600000.SH", "2026-08-05")
+    state_store.insert_trade_event(
+        "ACC_TEST", trade_id, "600000.SH", "SIGNAL",
+        meta=json.dumps({"order": {"symbol": "600000.SH", "qty": 100, "side": "BUY", "price": 10.0},
+                         "stop_price": 9.5, "take_profit": 11.5, "neckline": 10.5,
+                         "formed_at": "2026-08-04",
+                         "plan_date": "2026-08-05", "strategy_name": "neckline",
+                         "rationale": "颈线法@2026-08-04"}))
+    n = state_store.rebuild_position_attribution("ACC_TEST")
+    assert n == 1
+    row = state_store.get_position("ACC_TEST", "600000.SH")
+    assert row is not None
+    # 读 meta 真实值（非默认）—— 若 meta strategy_name 改值，回填跟着改（test_rebuild_reads_alternative_meta 验证）
+    assert row["strategy"] == "neckline"
+    assert row["entry_rationale"] == "颈线法@2026-08-04"
+
+
+def test_rebuild_reads_alternative_strategy_name(tmp_db):
+    """rebuild 读 meta 真实 strategy_name（非写死 neckline 兜底）—— 字段切值验证。
+
+    物理意图：C1 简报红线「读真实 strategy_name（非默认）」。若 rebuild 写死 "neckline"，
+    本测试会失败（meta strategy_name='momentum' 但回填 'neckline'）。读真实字段是多策略
+    扩展的物理基础（未来多策略并存时，归因必须随 SIGNAL.meta 真实值，不能全归 neckline）。
+    """
+    from trading import state_store
+    import json
+    state_store.apply_fill_to_position("ACC_TEST", "000001.SZ", "BUY", 200, 15.0, "20260805")
+    trade_id = state_store.build_trade_id("ACC_TEST", "000001.SZ", "2026-08-05")
+    # 故意把 strategy_name 写成 "momentum"（非默认 neckline）
+    state_store.insert_trade_event(
+        "ACC_TEST", trade_id, "000001.SZ", "SIGNAL",
+        meta=json.dumps({"formed_at": "2026-08-04", "plan_date": "2026-08-05",
+                         "strategy_name": "momentum", "rationale": "动量突破@2026-08-04"}))
+    state_store.rebuild_position_attribution("ACC_TEST")
+    row = state_store.get_position("ACC_TEST", "000001.SZ")
+    assert row is not None
+    assert row["strategy"] == "momentum"  # 读真实值，非写死 neckline
+    assert row["entry_rationale"] == "动量突破@2026-08-04"
+
+
+def test_rebuild_skips_already_attributed(tmp_db):
+    """已写归因的行（strategy IS NOT NULL）不被覆盖（IS NULL 守卫红线）。
+
+    验收口径（brief Step 2 红线）：
+        - apply_fill_to_position 建行 → upsert 写 "manual" 归因（模拟 B2 已写或人工标注）
+        - 插 SIGNAL.meta（strategy_name="neckline"）
+        - rebuild IS NULL 守卫：UPDATE 命中 0 行（"manual" 行不覆盖）
+        - get_position strategy 仍是 "manual"（不被改写为 "neckline"）
+    物理意图：B2 落列 + 算法/人工已写归因的行，C1 rebuild 必须保留原值——否则
+        重启补扫会把人工标注的 "manual" 覆盖为 SIGNAL.meta 的 "neckline"，归因失真。
+    """
+    from trading import state_store
+    import json
+    state_store.apply_fill_to_position("ACC_TEST", "600000.SH", "BUY", 100, 10.0, "20260805")
+    # B2 已写归因（人工/算法路径）
+    state_store.upsert_position_attribution("ACC_TEST", "600000.SH", "manual", "人工标注")
+    state_store.insert_trade_event(
+        "ACC_TEST",
+        state_store.build_trade_id("ACC_TEST", "600000.SH", "2026-08-05"),
+        "600000.SH", "SIGNAL",
+        meta=json.dumps({"strategy_name": "neckline", "formed_at": "2026-08-04",
+                         "rationale": "颈线法@2026-08-04"}))
+    state_store.rebuild_position_attribution("ACC_TEST")
+    row = state_store.get_position("ACC_TEST", "600000.SH")
+    assert row is not None
+    assert row["strategy"] == "manual"  # IS NULL 守卫：不覆盖已写归因
+    assert row["entry_rationale"] == "人工标注"
+
+
+def test_rebuild_skips_position_without_signal(tmp_db):
+    """rebuild 对无 SIGNAL.meta 的持仓行跳过（不报错、不回填、不计入回填行数）。
+
+    物理意图：position 行可能由历史数据迁移/手动建仓（无 SIGNAL 事件）产生，rebuild
+        找不到对应 SIGNAL.meta 必须静默跳过（continue），不能 raise 中断整批回填。
+        多策略/手动建仓的归因由各自路径处理，不依赖 SIGNAL.meta 回填。
+    """
+    from trading import state_store
+    # 建仓但无 SIGNAL 事件
+    state_store.apply_fill_to_position("ACC_TEST", "600000.SH", "BUY", 100, 10.0, "20260805")
+    n = state_store.rebuild_position_attribution("ACC_TEST")
+    assert n == 0  # 无 SIGNAL → 跳过，回填 0 行
+    row = state_store.get_position("ACC_TEST", "600000.SH")
+    assert row is not None
+    assert row["strategy"] is None  # 不回填，保持 NULL
