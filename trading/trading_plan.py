@@ -60,10 +60,67 @@ def save_plan(date: str, orders: list, *, confirmed: bool = False) -> Path:
 
 
 def load_plan(date: str) -> dict | None:
-    """读计划。不存在返 None；损坏（非法 JSON/IO 错误）也返 None 不抛。
+    """读计划 · DB 优先（SIGNAL.meta 真相源）+ JSON 回退（C3 只读兼容窗口）。
 
-    返回 None 的物理含义：pre_open 检查时据此跳过挂单——宁可漏挂，不挂脏计划。
+    物理意图（SSoT Phase C · C3）：单一真相源硬化后，DB trade_event(SIGNAL).meta 是
+    「精确 per-symbol 计划参数」真相源（C2c 已切 pre_open/_stoploss/review_report/
+    review_service）。本函数消费方契约不变（返 ``{date, confirmed, orders}``）：
+        - orders：从 DB SIGNAL.meta 列表构造（每项即原 order_dict + C1 补的
+          plan_date/strategy_name/rationale 字段，消费方读 meta.stop_price 等不变）；
+        - confirmed：按 per-symbol ``get_latest_action(trade_id)`` 判断——所有标的
+          latest=CONFIRMED 才整体确认，任一 VETOED/未确认 → confirmed=False（veto
+          终局防线：VETOED 晚于 CONFIRMED → 该标的最新的 action=VETOED → 未确认）。
+
+    **致命日期轴（与 list_signals_with_meta_by_plan_date 同口径）**：
+        trade_event.timestamp = T 日盘后写入时间（非计划日 T+1），按 timestamp 查恒空。
+        计划日仅在 trade_id 后缀（build_trade_id 单点 ``{account_id}_{symbol}_{date}``），
+        故按 ``substr(trade_id,-10)=date`` 查。
+
+    build_trade_id 单点（消原 load_plan 内裸拼 trade_id 的 _account_id 未定义问题）：
+        与 eod_plan/_pre_open_impl/veto_plan 完全一致口径，否则 get_latest_action 查的
+        trade_id 与写 SIGNAL 的 trade_id 对不上，防线失效。
+
+    回退窗口（C3 只读兼容）：DB 异常 / 无 SIGNAL 行 → 退回读 plan_*.json（如果存在）。
+    物理：C2c 切 DB 是渐进的（部分老数据/老测试仍 JSON 落盘），保留一个发布周期的
+    只读兼容窗口；C3 删 save_plan/confirm_plan 写路径后，JSON 仅历史回退入参，不再
+    被生产代码写盘。无 SIGNAL 且无 JSON → None（pre_open 保守跳过挂单，不挂脏计划）。
+
+    Returns:
+        ``{date, confirmed, orders}`` dict；无 SIGNAL 且无 JSON 返 None；DB 异常且
+        JSON 损坏/不存在也返 None（双重降级，pre_open 据此安全跳过）。
     """
+    # —— DB 优先路径 ——
+    # 物理意图：DB 是真相源；list_signals_with_meta_by_plan_date 按 trade_id 后缀
+    # substr(-10)=date 查（非 timestamp），返每行 SIGNAL 的 meta 解析 dict + symbol。
+    try:
+        from trading import state_store
+        account_id = os.getenv("QMT_ACCOUNT_ID", state_store._DEFAULT_ACCOUNT_ID)
+        metas = state_store.list_signals_with_meta_by_plan_date(date)
+        if metas:
+            # 有 SIGNAL 行 → 走 DB 真相源路径，按 per-symbol latest_action 判 confirmed。
+            orders: list = []
+            confirmed_all = True
+            for m in metas:
+                # meta shape：{symbol, **原 order_dict（含 order/stop_price/.../C1 字段）}。
+                sym = (m.get("order") or {}).get("symbol", m.get("symbol"))
+                # trade_id 单点：build_trade_id（与 eod_plan/veto 同口径，消 _account_id 未定义）
+                tid = state_store.build_trade_id(account_id, sym, date)
+                action = state_store.get_latest_action(tid)
+                # VETOED 晚于 CONFIRMED → latest=VETOED → confirmed=False（veto 终局防线）。
+                # 非 CONFIRMED（SIGNAL-only 未确认 / VETOED）→ 整体未确认。
+                if action != "CONFIRMED":
+                    confirmed_all = False
+                orders.append(m)
+            return {"date": date, "confirmed": confirmed_all, "orders": orders}
+    except Exception:
+        # DB 读异常（state_store 未初始化 / 表不存在 / 文件锁等）→ 软降级回退 JSON。
+        # 物理：load_plan 是 pre_open/place_take_profit/veto 多入口的依赖，抛错会阻断
+        # 调度链；回退 JSON 是「展示镜像」语义（C3 后 JSON 是导出产物，非真相源），
+        # 历史数据/老测试仍有 JSON 落盘，保留一发布周期的只读兼容窗口。
+        logger.exception("load_plan 读 DB SIGNAL 失败，回退 JSON（C3 只读兼容窗口）")
+
+    # —— JSON 回退（只读兼容窗口）——
+    # C3 后无生产写盘方（save_plan 已删），JSON 仅历史/测试种子用，不再被覆盖写。
     p = _plan_path(date)
     if not p.exists():
         return None
@@ -71,7 +128,7 @@ def load_plan(date: str) -> dict | None:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         # 损坏计划：记录完整堆栈供排查，但返 None 让 pre_open 安全降级（不挂单）。
-        logger.exception("计划损坏 %s", p)
+        logger.exception("计划损坏 %s（C3 JSON 回退窗口）", p)
         return None
 
 

@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""T-1 交易计划单测（Task 8）。
+"""T-1 交易计划单测（Task 8 + SSoT Phase C · C3）。
 
-覆盖：save/load/confirm 落盘 + 确认闸 + 钉钉推送格式化。
+覆盖：save/load/confirm 落盘 + 确认闸 + 钉钉推送格式化 + C3 load_plan DB 优先。
 orders 统一用嵌套格式（与 Task 9 engine.eod_plan 生产侧、push_plan_to_dingtalk 消费侧
 全链路一致）：
     {"order": {symbol/qty/side/price}, "stop_price": ..., "take_profit": ...}
 """
-from trading import trading_plan as tp
+import json
+
+from trading import state_store, trading_plan as tp
 
 
 def _sample_nested_orders():
@@ -36,6 +38,119 @@ def test_save_load_confirm(tmp_path, monkeypatch):
 def test_load_plan_missing(tmp_path, monkeypatch):
     """计划不存在返 None（pre_open 检查时会据此跳过挂单）。"""
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
+    assert tp.load_plan("2099-01-01") is None
+
+
+# ============================================================================
+# SSoT Phase C · C3：load_plan DB 优先（SIGNAL.meta 真相源）
+# ============================================================================
+def _seed_signal_db(tmp_db, account_id, symbol, date, *, confirmed=False, vetoed=False,
+                    order_dict_extra=None):
+    """写 DB SIGNAL + 可选 CONFIRMED/VETOED 行（C3 load_plan DB 优先种子）。
+
+    顺序约束（与 eod_plan/_confirmed_plan_one_order 同口径）：SIGNAL 必须先写保证
+    event_id < CONFIRMED/VETOED（latest_action ORDER BY event_id DESC 才会返最新 action）。
+    """
+    order = {"symbol": symbol, "qty": 100, "side": "buy", "price": 10.0}
+    od = {"order": order, "stop_price": 9.0, "take_profit": 11.0,
+          "formed_at": date, "max_wait": 5}
+    if order_dict_extra:
+        od.update(order_dict_extra)
+    meta_obj = {**od, "plan_date": date, "strategy_name": "neckline",
+                "rationale": f"颈线法@{od.get('formed_at', '')}"}
+    tid = state_store.build_trade_id(account_id, symbol, date)
+    state_store.insert_trade_event(
+        account_id, tid, symbol, "SIGNAL",
+        meta=json.dumps(meta_obj, ensure_ascii=False))
+    if confirmed:
+        state_store.insert_trade_event(account_id, tid, symbol, "CONFIRMED")
+    if vetoed:
+        # VETOED 必须在 CONFIRMED 之后写（latest_action 返最新=VETOED）
+        state_store.insert_trade_event(account_id, tid, symbol, "VETOED")
+
+
+def test_load_plan_db_first_confirmed(tmp_db, monkeypatch):
+    """C3：DB 优先 · 全部标的 latest=CONFIRMED → confirmed=True（消费方契约不变）。"""
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "ACC_TEST")
+    monkeypatch.setenv("TRADE_PLAN_DIR", "/nonexistent/no_json_fallback")  # 防 JSON 回退
+    date = "2026-08-05"
+    _seed_signal_db(tmp_db, "ACC_TEST", "600000.SH", date, confirmed=True)
+    _seed_signal_db(tmp_db, "ACC_TEST", "600001.SH", date, confirmed=True)
+
+    plan = tp.load_plan(date)
+
+    assert plan is not None
+    assert plan["date"] == date
+    assert plan["confirmed"] is True  # 全部 CONFIRMED
+    assert len(plan["orders"]) == 2   # 两个 SIGNAL meta
+    # orders 来自 SIGNAL.meta（含 C1 字段 plan_date/strategy_name）
+    syms = [(o.get("order") or {}).get("symbol") for o in plan["orders"]]
+    assert "600000.SH" in syms and "600001.SH" in syms
+
+
+def test_load_plan_db_first_signal_only_unconfirmed(tmp_db, monkeypatch):
+    """C3：DB 有 SIGNAL 但无 CONFIRMED 行 → confirmed=False（SIGNAL-only = 未确认）。"""
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "ACC_TEST")
+    monkeypatch.setenv("TRADE_PLAN_DIR", "/nonexistent/no_json_fallback")
+    date = "2026-08-05"
+    _seed_signal_db(tmp_db, "ACC_TEST", "600000.SH", date, confirmed=False)
+
+    plan = tp.load_plan(date)
+
+    assert plan is not None
+    assert plan["confirmed"] is False  # latest=SIGNAL 非 CONFIRMED
+    assert len(plan["orders"]) == 1
+
+
+def test_load_plan_vetoed_after_confirmed(tmp_db, monkeypatch):
+    """C3 边界（veto 终局防线）：VETOED 事件晚于 CONFIRMED → load_plan confirmed=False。
+
+    物理红线：研究员否决是 opt-out 终局动作。即使 eod_plan auto_confirm 已写 CONFIRMED，
+    研究员 pre_open 前 veto 写 VETOED（event_id > CONFIRMED），get_latest_action
+    按 event_id DESC 返 VETOED → load_plan 视作未确认 → pre_open/place_take_profit
+    跳过该标的。这是全自动模式下 veto 防线的最后一道闸（spec §6 C3）。
+    """
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "ACC_TEST")
+    monkeypatch.setenv("TRADE_PLAN_DIR", "/nonexistent/no_json_fallback")
+    date = "2026-08-05"
+    _seed_signal_db(tmp_db, "ACC_TEST", "600000.SH", date,
+                    confirmed=True, vetoed=True)  # VETOED 晚于 CONFIRMED
+
+    plan = tp.load_plan(date)
+
+    assert plan is not None
+    assert plan["confirmed"] is False  # VETOED 是最新 action
+
+
+def test_load_plan_db_exception_falls_back_to_json(tmp_path, monkeypatch):
+    """C3 兼容窗口：DB 异常 → 回退读 plan_*.json（只读兼容，保留一发布周期）。
+
+    物理：DB 未初始化 / 表不存在 / 文件锁等异常时，load_plan 不抛错，回退 JSON。
+    历史/老测试 JSON 仍可读，平滑迁移。
+    """
+    monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
+    # 制造 DB 异常：monkeypatch list_signals_with_meta_by_plan_date 抛错
+    def boom(*a, **kw):
+        raise RuntimeError("DB down")
+    monkeypatch.setattr(state_store, "list_signals_with_meta_by_plan_date", boom)
+    # 落 JSON（模拟历史 plan）
+    orders = _sample_nested_orders()
+    p = tp._plan_path("2026-08-05")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"date": "2026-08-05", "confirmed": True, "orders": orders}),
+                 encoding="utf-8")
+
+    plan = tp.load_plan("2026-08-05")
+
+    assert plan is not None
+    assert plan["confirmed"] is True
+    assert plan["orders"] == orders
+
+
+def test_load_plan_no_signal_no_json_returns_none(tmp_db, monkeypatch):
+    """C3：DB 无 SIGNAL + JSON 不存在 → None（pre_open 保守跳过）。"""
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "ACC_TEST")
+    monkeypatch.setenv("TRADE_PLAN_DIR", "/nonexistent/no_json_either")
     assert tp.load_plan("2099-01-01") is None
 
 
