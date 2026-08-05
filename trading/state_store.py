@@ -234,11 +234,11 @@ def init_store(db_path: str | None = None) -> None:
         # ——全新表，W4 + C-1 后是【权益快照与熔断基线】的唯一真相源：pre_open 写 start_total_asset，
         # post_close 写 close_total_asset + 算 daily_pnl，并【读 start_total_asset 作 -3% 熔断基线】。
         #
-        # daily_equity 表状态（C-1 收口后）：W4 把 pre_open 写口迁到 account_daily.start，
-        # C-1 把熔断读口迁到 account_daily.start → daily_equity 表已无生产写入方/读口，是死表。
-        # position_book.snapshot_start_equity / get_start_equity 函数与 daily_equity 表均保留
-        # 不删（W6 决策时统一清理：删表需先收编全部历史调用方 + 评估迁移脚本，scope 超出本 task）。
-        # 死表无副作用：仅占 schema 不被读写，account_daily 已完全替代。
+        # daily_equity 表状态（B5 已收口）：C-1 把熔断读口迁到 account_daily.start，
+        # W4 把 pre_open 写口迁到 account_daily.start → daily_equity 表已无生产写入方/读口。
+        # B5（SSoT Phase B）已删 position_book.snapshot_start_equity / get_start_equity
+        # 函数 + init_db 不再 CREATE daily_equity。**旧库残留 daily_equity 表无害**：
+        # init_store/init_db 都不再 CREATE，旧表存在=历史残留，不读写，account_daily 已完全替代。
         con.execute("""
             CREATE TABLE IF NOT EXISTS account_daily (
                 account_id          TEXT NOT NULL REFERENCES account(account_id) ON DELETE RESTRICT,

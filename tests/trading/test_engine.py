@@ -825,7 +825,7 @@ def test_pre_open_snapshot_calls_state_store_not_position_book(monkeypatch):
         是「pre_open 实际调 state_store 版」——用 monkeypatch spy 包裹真函数，跑完
         pre_open 后断言 state_store 版被调 + position_book 版未被调。
     """
-    from trading import state_store, position_book
+    from trading import state_store
 
     # 已确认计划
     trading_plan.save_plan("2099-01-02", [{
@@ -849,23 +849,16 @@ def test_pre_open_snapshot_calls_state_store_not_position_book(monkeypatch):
         return _real_ss(account_id, date, total_asset, cash, **kw)
     monkeypatch.setattr(engine._state_store, "snapshot_start_equity", _spy_ss)
 
-    # spy 包裹 position_book 版（断言「未被调」）
-    pb_calls = []
-    _real_pb = position_book.snapshot_start_equity
-    def _spy_pb(date, total_asset, **kw):
-        pb_calls.append((date, total_asset))
-        return _real_pb(date, total_asset, **kw)
-    monkeypatch.setattr(engine._position_book, "snapshot_start_equity", _spy_pb)
+    # 注（B5）：原 position_book.snapshot_start_equity 已删（C-1/W4 读写口迁 account_daily），
+    # 不再需要 spy 断言「position_book 版未被调」——该函数已不存在，调无可调。
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
-    # W4 断言：state_store 版被调（写 account_daily），position_book 版未被调（断链已切）
+    # W4 断言：state_store 版被调（写 account_daily）。
     assert len(ss_calls) == 1, f"state_store.snapshot_start_equity 应被调 1 次，实际 {len(ss_calls)}"
     assert ss_calls[0][1] == "2099-01-02"           # date
     assert ss_calls[0][2] == 1_000_000.0            # total_asset
     assert ss_calls[0][3] == 500_000.0              # cash
-    assert pb_calls == [], (
-        "W4 断链未修复：pre_open 仍调 position_book.snapshot_start_equity（应改调 state_store 版）")
 
 
 def test_daily_pnl_closes_after_pre_open_and_post_close(monkeypatch):

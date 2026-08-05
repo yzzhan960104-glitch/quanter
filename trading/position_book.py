@@ -9,7 +9,11 @@ Why SQLite（对齐 experiment/store.py ADR3）：幂等天然（UNIQUE）/事�
 schema（live 准入升级 · 2026-07-28 live-readiness spec §3 地基）：
   - fill 表：UNIQUE(order_id, traded_time) —— 按成交笔增量幂等（非整笔去重），部分成交累加精度
   - position 表：加 avg_price（加权成本，浮盈对账）+ entry_date（首次建仓日，max_holding/trailing 用）
-  - daily_equity 表（新）：熔断 start_equity 基线快照（pre_open 写，post_close 读）
+
+注：熔断 start_equity 基线快照原用 daily_equity 表（pre_open 写/post_close 读），
+B5（SSoT Phase B）已删除本模块的 snapshot_start_equity/get_start_equity 与 daily_equity DDL——
+熔断基线唯一读口 = state_store.snapshot/get_start_equity(account_daily 表)。
+旧库残留 daily_equity 表无害（init_store/init_db 不再 CREATE，旧表存在=历史残留，不读写）。
 
 迁移：init_db 列存在性检测，旧 schema（无 traded_time/avg_price）DROP+重建
 （live 前无生产成交，可丢影子数据）。
@@ -80,8 +84,11 @@ def init_db(db_path: str | None = None) -> None:
     不引 schema_version（YAGNI）。
 
     与 state_store.init_store 的关系：state_store 是真相源，建完整 6 张表（含 account/origin/
-    FK）。本函数只建 position_book 自身读写需要的子集（position/fill/daily_equity），与
-    state_store 共用同一 db 文件，表结构一致（复合 PK），二者对同一表互不破坏。
+    FK）。本函数只建 position_book 自身读写需要的子集（position/fill），与 state_store
+    共用同一 db 文件，表结构一致（复合 PK），二者对同一表互不破坏。
+
+    daily_equity 表（B5 已删）：原熔断 start_equity 基线快照表，C-1/W4 已把读写口迁到
+    state_store.account_daily，本模块不再 CREATE/读写 daily_equity。旧库残留表无害（不读写）。
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
@@ -124,13 +131,8 @@ def init_db(db_path: str | None = None) -> None:
                 UNIQUE(order_id, traded_time)
             )
         """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS daily_equity (
-                date               TEXT PRIMARY KEY,
-                start_total_asset  REAL NOT NULL,
-                snap_at            TEXT NOT NULL
-            )
-        """)
+        # 注：daily_equity 表 B5 已删（C-1/W4 读写口迁 state_store.account_daily），
+        # init_db 不再 CREATE daily_equity，旧库残留表无害（不读写）。
         con.execute("CREATE INDEX IF NOT EXISTS idx_fill_symbol ON fill(symbol)")
 
 
@@ -259,24 +261,3 @@ def get_entry_dates(*, db_path: str | None = None) -> dict[str, str]:
     return {r["symbol"]: r["entry_date"] for r in rows}
 
 
-def snapshot_start_equity(date: str, total_asset: float, *, db_path: str | None = None) -> None:
-    """当日开盘前总资产快照（pre_open 写，熔断 start_equity 基线）。
-
-    INSERT OR REPLACE 幂等：pre_open 仅 09:22 一次，但崩溃重启重入覆盖安全。
-    """
-    db_path = db_path or _DEFAULT_DB
-    now = clock.now().isoformat()
-    with _connect(db_path) as con:
-        con.execute(
-            "INSERT OR REPLACE INTO daily_equity(date, start_total_asset, snap_at) VALUES(?, ?, ?)",
-            (date, float(total_asset), now))
-
-
-def get_start_equity(date: str, *, db_path: str | None = None) -> float | None:
-    """读当日 start_equity（post_close 熔断判定用）。无快照返 None（调用方跳过+告警）。"""
-    db_path = db_path or _DEFAULT_DB
-    with _connect(db_path) as con:
-        row = con.execute(
-            "SELECT start_total_asset FROM daily_equity WHERE date=?", (date,)
-        ).fetchone()
-    return float(row["start_total_asset"]) if row else None

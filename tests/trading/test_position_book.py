@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""position_book 单测：本地持仓账本 schema/增量幂等/加权avg/entry_date/熔断基线。
+"""position_book 单测：本地持仓账本 schema/增量幂等/加权avg/entry_date。
 
 物理意图（live-readiness spec §3 地基）：验证对账「本地侧」单一真理源 ACID 行为——
 - fill 增量幂等 UNIQUE(order_id, traded_time)（部分成交累加精度，R1 红线）
 - BUY 加权 avg_price / SELL avg 不变（A 股口径）/ entry_date 首次锁定
-- daily_equity 快照（熔断 start_equity 基线）
 - schema 迁移（旧表 DROP 重建）
+
+注（B5）：daily_equity 快照 reader/writer（snapshot_start_equity/get_start_equity）
+已删——熔断基线快照迁 state_store.account_daily（test_state_store.py 覆盖）。
 """
 from __future__ import annotations
 
@@ -158,11 +160,3 @@ def test_position_schema_migration_avg_price(db):
         assert "avg_price" in cols and "entry_date" in cols
 
 
-def test_snapshot_and_get_start_equity(db):
-    """daily_equity 快照幂等 + 读取（熔断基线 R-2）。"""
-    assert position_book.get_start_equity("2026-07-28") is None  # 无快照
-    position_book.snapshot_start_equity("2026-07-28", 1_000_000.0)
-    assert position_book.get_start_equity("2026-07-28") == 1_000_000.0
-    # 重写幂等（INSERT OR REPLACE）
-    position_book.snapshot_start_equity("2026-07-28", 999_000.0)
-    assert position_book.get_start_equity("2026-07-28") == 999_000.0

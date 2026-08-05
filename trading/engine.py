@@ -84,7 +84,9 @@ from trading.compute.stop import should_trigger_stop, trading_days_between as _t
 from strategies.neckline.execution import decide_exit, ExitAction, ExitReason
 # Task 10（R-2 日内熔断）：check_daily_loss_limit 纯判定 functional core
 from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
-# Task 10（R-2）：position_book 的 daily_equity reader/writer（snapshot/get_start）
+# Task 10（R-2）：position_book 持仓账本（apply_fill/持仓读口）。
+# 注（B5 收口）：daily_equity reader/writer（snapshot_start_equity/get_start_equity）
+# 已删——熔断基线唯一读口 = _state_store.snapshot/get_start_equity(account_daily)。
 from trading import position_book as _position_book
 # state-store-redesign：统一交易状态库（6 表，trade_event/order/fill/position/account_daily）。
 # 是 position_book 的超集（真相源）。engine 落 SIGNAL/CONFIRMED 事件、写 order/fill 幂等、读
@@ -802,8 +804,9 @@ async def _pre_open_impl(date: str) -> dict:
     # ``_position_book.get_start_equity``（读 daily_equity 表）在 W4 后恒返 None（daily_equity
     # 再无生产写入方）→ 日内熔断永久失效。post_close 步骤1 已改读
     # ``_state_store.get_start_equity``（与 pre_open 写口同表 account_daily），熔断基线闭合。
-    # daily_equity 表与 position_book.snapshot/get_start 函数均保留不删（W6 决策时统一清理，
-    # 删表需先收编全部历史调用方）。
+    # B5（SSoT Phase B）已删 position_book.snapshot/get_start 函数 + daily_equity DDL，
+    # 熔断基线唯一读口 = state_store.get_start_equity(account_daily)。旧库残留 daily_equity
+    # 表无害（init 不再 CREATE，不读写）。
     #
     # 边界（红线）：
     # - gw=None / query_asset 返 {}（未连接/锁定/超时）→ 跳过 + WARN，绝不拿 0/None
@@ -1681,7 +1684,8 @@ async def post_close(
         # （写 **account_daily** 表）—— daily_equity 表再无生产写入方，读口恒返 None →
         # ``breaker_skipped=True`` → 日内 -3% 熔断永久失效（实盘敞口失控红线）。
         # 改读 ``_state_store.get_start_equity``（与 pre_open 写口同表同口径 account_id），
-        # 熔断基线闭合。account_id 沿用 ``_resolve_account_id``（与 pre_open W4 写入口径一致，
+        # 熔断基线闭合。B5 已删 position_book.snapshot/get_start 函数 + daily_equity DDL，
+        # 此处是熔断基线唯一读口。account_id 沿用 ``_resolve_account_id``（与 pre_open W4 写入口径一致，
         # 否则读不到 pre_open 写的基线）。
         # C-6 V2：熔断基线 date（start/close equity 同口径）走 clock.today。
         today_eq = clock.today()
