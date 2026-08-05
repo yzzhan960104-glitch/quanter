@@ -18,7 +18,7 @@
        - logs/live_trades.csv            → 纯测试污染（439 行 510300/DRYRUN.SZ）
        - presentation/logs/live_trades.csv → 迁移源
 
-运行：python scripts/migrate_live_trades_csv.py
+运行：python scripts/archive/migrate_live_trades_csv.py
 ⚠️ 迁移后需重启 uvicorn / trading 进程（模块级 LIVE_TRADE_LOG 常量已求值）。
 """
 from __future__ import annotations
@@ -27,7 +27,10 @@ import csv
 import shutil
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# **ssot-review P3 fix**：scripts/archive/ 子目录，parents[1] 解析到 F:\quanter\scripts
+# （非仓库根）。改 parents[2]：archive → scripts → 仓库根。原 parents[1] 仅在脚本位于
+# scripts/ 直下时成立，迁移到 archive/ 后路径失效（ROOT_CSV/PRES_CSV 全错）。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ROOT_CSV = PROJECT_ROOT / "logs" / "live_trades.csv"
 PRES_CSV = PROJECT_ROOT / "presentation" / "logs" / "live_trades.csv"
 

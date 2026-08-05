@@ -92,7 +92,6 @@ def load_plan(date: str) -> dict | None:
                 sym = (m.get("order") or {}).get("symbol", m.get("symbol"))
                 # trade_id 单点：build_trade_id（与 eod_plan/veto 同口径，消 _account_id 未定义）
                 tid = state_store.build_trade_id(account_id, sym, date)
-                action = state_store.get_latest_action(tid)
                 # veto 终局防线：VETOED 晚于 CONFIRMED → latest=VETOED → confirmed=False。
                 # 其他状态语义（spec §6 / spec §2.4 trade_event 事件流）：
                 #   - SIGNAL-only（未确认）→ 未确认（pre_open 据不放行）
@@ -102,7 +101,10 @@ def load_plan(date: str) -> dict | None:
                 #     避免 post_close snapshot 等读已成交 plan 时误判未确认）。
                 # 故判据：latest == "SIGNAL"（仅 SIGNAL 无 CONFIRMED）= 未确认；
                 #         latest == "VETOED" = veto 终局未确认；其余 = 已确认。
-                if action in ("SIGNAL", "VETOED", None):
+                # **ssot-review P1 fix**：抽 state_store.is_trade_confirmed 单点（语义统一：
+                # latest ∈ {None,SIGNAL,VETOED}=未确认；其余=已确认），与 _stoploss /
+                # pre_open 三处复用，防语义漂移。
+                if not state_store.is_trade_confirmed(tid):
                     # None 理论不会出现（meta 行至少有 SIGNAL），保守视作未确认
                     confirmed_all = False
                 orders.append(m)

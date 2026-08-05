@@ -70,7 +70,22 @@ def generate_review(
         except Exception:
             # DB 读失败软降级：渲染「无计划」（不阻断复盘报告其余段落）。
             sigs = []
-        plan = {"orders": sigs, "confirmed": bool(sigs)} if sigs else None
+        # **ssot-review P2 fix**：confirmed 不能只看「有 SIGNAL 行」（bool(sigs)）——
+        #研究员复盘看到未审核计划被标「已确认」会误导决策。改 per-trade 查 latest action：
+        # 全部 ∈ 已确认集合才 confirmed=True（与 load_plan/pre_open/_stoploss 语义对齐，
+        # is_trade_confirmed 单点）。无 sigs（None/[]）→ plan=None（落「无计划」分支）。
+        # account_id 解析与 trading_plan.load_plan:84 同口径（env > 默认）。
+        if sigs:
+            import os as _os
+            _aid = _os.getenv("QMT_ACCOUNT_ID", _ss._DEFAULT_ACCOUNT_ID)
+            confirmed_all = all(
+                _ss.is_trade_confirmed(
+                    _ss.build_trade_id(_aid, (s.get("order") or {}).get("symbol", s.get("symbol")), date))
+                for s in sigs
+            )
+            plan = {"orders": sigs, "confirmed": confirmed_all}
+        else:
+            plan = None
     plan_lines: list[str] = []
     if plan and plan.get("orders"):
         confirmed = "已确认" if plan.get("confirmed") else "待确认"

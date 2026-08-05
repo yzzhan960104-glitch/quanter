@@ -992,6 +992,32 @@ def get_latest_action(trade_id: str, *, db_path: str | None = None) -> str | Non
     return row["action"] if row else None
 
 
+def is_trade_confirmed(trade_id: str, *, db_path: str | None = None) -> bool:
+    """某 trade_id 是否已通过研究员人审闸（confirmed gate，语义单点）。
+
+    物理意图（ssot-review P1 fix · 与 trading_plan.load_plan:95 语义对齐）：
+        pre_open 挂单后 trade_event 会写 ORDERED（event_id > CONFIRMED），导致
+        ``get_latest_action(tid) == "CONFIRMED"`` 严格匹配在挂单后失效——_stoploss
+        取不到 confirmed_signals、pre_open 重入判 all_confirmed=False，止损监控
+        静默失效（live 红线）。
+
+    语义统一（生命周期晚于 CONFIRMED 均视作已确认）：
+        - 未确认集合 = {None, "SIGNAL", "VETOED"}（VETOED 是 veto 终局，仍视作未确认）
+        - 已确认集合 = {"CONFIRMED", "ORDERED", "FILLED", "CLOSED", "TP_FILLED"}
+          （ORDERED/FILLED/CLOSED/TP_FILLED 生命周期晚于 CONFIRMED，意味着 plan 已
+          确认且已挂单/成交；_stoploss 必须 continues 监控这些标的，pre_open 重入
+          必须把它们视作「已处理」不再阻塞补挂剩余标的）。
+
+    单点职责（DRY）：_stoploss / pre_open / load_plan 三处确认闸统一调本函数，
+        防语义漂移（避免某处改了未确认集合另一处漏改，再现 P1 静默失效）。
+
+    Returns:
+        True  = latest action ∈ 已确认集合
+        False = latest action ∈ 未确认集合（None/SIGNAL-only/VETOED）
+    """
+    return get_latest_action(trade_id, db_path=db_path) not in (None, "SIGNAL", "VETOED")
+
+
 def count_signals_by_plan_date(plan_date: str, *, db_path: str | None = None) -> int:
     """读某计划日（T+1）的 SIGNAL 数（即当日选股/扫描出多少标的）。
 

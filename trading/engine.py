@@ -767,7 +767,12 @@ async def _pre_open_impl(date: str) -> dict:
     all_confirmed = True
     for sig in signals:
         _tid = _state_store.build_trade_id(account_id_pre, sig["symbol"], date)
-        if _state_store.get_latest_action(_tid) != "CONFIRMED":
+        # **ssot-review P1 fix**：原严格 !=CONFIRMED 在部分标的已挂单（ORDERED）后判
+        # 未确认 → pre_open 重入时剩余标的永不补挂（live 红线）。改用 is_trade_confirmed
+        # 单点（CONFIRMED + ORDERED/FILLED/CLOSED/TP_FILLED 均视作已确认，与 _stoploss /
+        # trading_plan.load_plan 三处语义单点对齐）。VETOED 仍视作未确认（veto 终局，
+        # is_trade_confirmed 返 False → all_confirmed=False → 不放行）。
+        if not _state_store.is_trade_confirmed(_tid):
             all_confirmed = False
             break
     if not all_confirmed:
@@ -2952,14 +2957,18 @@ class TradingEngine:
         pending_ctx: dict[str, float] = {}
         # 仅在 confirmed SIGNAL 下抽取（CONFIRMED 是人审闸——研究员未确认就不监控止损，
         # 避免研究员明确否决的计划仍触发卖出，破坏人审语义）。逐 SIGNAL 校验 latest_action
-        # == CONFIRMED（VETOED/SIGNAL-only 跳过，per-trade 精细化）。
+        # ∈ 已确认集合（VETOED/SIGNAL-only 跳过，per-trade 精细化）。
+        # **ssot-review P1 fix**：原严格 ==CONFIRMED 在挂单后失效（pre_open 写 ORDERED，
+        # event_id > CONFIRMED，latest=ORDERED）→ 止损监控静默失效（live 红线）。
+        # 改用 is_trade_confirmed 单点（CONFIRMED + ORDERED/FILLED/CLOSED/TP_FILLED 视作
+        # 已确认，与 trading_plan.load_plan:95 语义对齐）。
         if signals:
             _aid_sl = _resolve_account_id()
-            # 过滤已确认 SIGNAL（per-trade CONFIRMED gate）
+            # 过滤已确认 SIGNAL（per-trade confirmed gate · is_trade_confirmed 单点）
             confirmed_signals = []
             for sig in signals:
                 _tid_sl = _state_store.build_trade_id(_aid_sl, sig["symbol"], today)
-                if _state_store.get_latest_action(_tid_sl) == "CONFIRMED":
+                if _state_store.is_trade_confirmed(_tid_sl):
                     confirmed_signals.append(sig)
             # entry_dates / avg_prices 来自 position_book（持仓账本，holding_days + entry 基准）
             try:

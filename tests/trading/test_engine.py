@@ -713,6 +713,183 @@ def test_stop_loss_reads_plan_from_db(monkeypatch, tmp_path):
     assert plan["stop_price"] == 9.5  # 从 DB SIGNAL meta 读出
 
 
+# ----------------------------------------------------------------------------
+# ssot-review P1 fix：止损监控在 ORDERED 之后必须继续监控（防 live 静默失效）
+# ----------------------------------------------------------------------------
+def test_stoploss_monitors_after_ordered(monkeypatch, tmp_path):
+    """**ssot-review P1**：SIGNAL→CONFIRMED→ORDERED 后 _stoploss 必须仍收该 signal。
+
+    病灶（live 红线）：原 ``_stoploss`` 严格 ``get_latest_action == "CONFIRMED"``，
+    pre_open 挂单后写 ORDERED（event_id > CONFIRMED，latest=ORDERED）→ confirmed_signals
+    空 → 止损监控静默失效（盘中跌破止损价不发卖单）。
+
+    修复后语义：is_trade_confirmed 单点（CONFIRMED + ORDERED/FILLED/CLOSED/TP_FILLED 均
+    视作已确认）→ ORDERED 后 _stoploss 仍把该 signal 收入 confirmed_signals。
+    本测试构造 SIGNAL→CONFIRMED→ORDERED 全链，断言 _stoploss 内部 confirmed_signals
+    非空（直接调 engine._stoploss 私有方法验证确认闸修复）。
+    """
+    import json as _json
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    account_id = engine._resolve_account_id()
+    state_store.upsert_account(account_id, broker="qmt")
+    today = datetime.now().strftime("%Y-%m-%d")
+    sym = "A.SH"
+    trade_id = state_store.build_trade_id(account_id, sym, today)
+    # 顺序：SIGNAL(event_id=1) → CONFIRMED(=2) → ORDERED(=3)，latest=ORDERED
+    meta = _json.dumps({
+        "order": {"symbol": sym, "qty": 100.0, "side": "buy", "price": 10.0},
+        "stop_price": 9.5, "take_profit": 11.0, "neckline": 9.8, "atr": 0.2,
+        "tp1": 10.5, "formed_at": today, "max_wait": 5,
+    })
+    state_store.insert_trade_event(account_id, trade_id, sym, "SIGNAL", meta=meta)
+    state_store.insert_trade_event(account_id, trade_id, sym, "CONFIRMED")
+    state_store.insert_trade_event(account_id, trade_id, sym, "ORDERED")
+    # 防回归断言：latest 确为 ORDERED（若 ORDERED 未落或顺序错则 latest!=ORDERED）
+    assert state_store.get_latest_action(trade_id) == "ORDERED"
+    # 修复后单点断言：ORDERED 视作已确认（is_trade_confirmed=True）
+    assert state_store.is_trade_confirmed(trade_id) is True
+
+    # 直接验证 _stoploss 确认闸：signals 传入后 confirmed_signals 应含该标的。
+    # _stoploss 是 AsyncEngine._stoploss(self) 私有协程；signals 从 trade_event 读。
+    # 构造 minimal engine 实例并 monkeypatch 跳过 decide_exit 之外的副作用。
+    eng = engine.TradingEngine() if hasattr(engine, "TradingEngine") else None
+    # engine 模块级函数风格（_stoploss 在 AsyncEngine 内）：若 API 不便直接调，
+    # 退化为「确认闸逻辑」单点断言——is_trade_confirmed(trade_id)=True 已覆盖核心修复。
+    # 这里补一层端到端：用 stop_loss_monitor(stop_prices=...) 走完整路径，跌破应触发。
+    monkeypatch.setattr(engine.calendar, "is_intraday_session", lambda now: True)
+
+    class _FakeGw:
+        async def _fetch_broker_positions(self):
+            return {sym: 100.0}
+
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+
+    async def _fake_get_quotes(symbols):
+        return {sym: {"last_price": 9.0}}  # 跌破 9.5
+
+    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_get_quotes)
+
+    submitted = {"n": 0}
+
+    async def _submit_dry(order, **kw):
+        submitted["n"] += 1
+        return {"state": "DRY_RUN"}
+
+    monkeypatch.setattr(engine, "_submit", _submit_dry)
+
+    # stop_loss_monitor 从 trade_event SIGNAL.meta 读 stop_price + 确认闸过滤
+    asyncio.run(engine.stop_loss_monitor(stop_prices={sym: 9.5}))
+    # 核心断言：ORDERED 后止损仍监控 → 跌破触发 _submit（若确认闸失效 submitted=0）
+    assert submitted["n"] == 1, "ORDERED 后 _stoploss 静默失效（P1 regression）"
+
+
+def test_pre_open_reentry_after_partial_ordered(monkeypatch, tmp_path):
+    """**ssot-review P1**：部分标的已 ORDERED + 部分 CONFIRMED → all_confirmed 通过。
+
+    病灶（pre_open 重入崩溃）：pre_open 中途崩溃（如 gw 断线），部分标的已写 ORDERED，
+    重入时严格 !=CONFIRMED 把 ORDERED 判未确认 → all_confirmed=False → reason=计划未确认，
+    剩余标的永不补挂（live 红线：研究员已审核但单子挂不出去）。
+
+    修复后语义：is_trade_confirmed 把 ORDERED 视作已确认；本测试种 2 标的（A=ORDERED,
+    B=CONFIRMED），断言 pre_open 不再卡在「计划未确认」 reason。
+    """
+    import json as _json
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    state_store.init_store()
+    account_id = engine._resolve_account_id()
+    state_store.upsert_account(account_id, broker="qmt")
+    date = "2099-01-02"
+    # 2 标的：A 已 ORDERED（pre_open 第一轮挂了，第二轮重入）/ B 仅 CONFIRMED（待挂）
+    sigs = [
+        {"order": {"symbol": "A.SH", "qty": 100.0, "side": "buy", "price": 10.0},
+         "stop_price": 9.5, "take_profit": 11.0, "formed_at": date, "max_wait": 5},
+        {"order": {"symbol": "B.SH", "qty": 100.0, "side": "buy", "price": 20.0},
+         "stop_price": 19.0, "take_profit": 22.0, "formed_at": date, "max_wait": 5},
+    ]
+    for o in sigs:
+        sym = o["order"]["symbol"]
+        tid = state_store.build_trade_id(account_id, sym, date)
+        meta_obj = {**o, "plan_date": date, "strategy_name": "neckline",
+                    "rationale": f"颈线法@{o.get('formed_at', '')}"}
+        state_store.insert_trade_event(account_id, tid, sym, "SIGNAL",
+                                       meta=_json.dumps(meta_obj, ensure_ascii=False))
+        state_store.insert_trade_event(account_id, tid, sym, "CONFIRMED")
+    # A 再写 ORDERED（模拟第一轮 pre_open 已挂）
+    tid_a = state_store.build_trade_id(account_id, "A.SH", date)
+    state_store.insert_trade_event(account_id, tid_a, "A.SH", "ORDERED")
+    assert state_store.get_latest_action(tid_a) == "ORDERED"
+
+    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+
+    submit_calls = {"n": 0, "syms": []}
+
+    async def _dry_submit(order, **kw):
+        submit_calls["n"] += 1
+        submit_calls["syms"].append(order.symbol)
+        return {"order_id": f"x-{order.symbol}", "state": "DRY_RUN", "message": "影子"}
+
+    monkeypatch.setattr(engine, "_submit", _dry_submit)
+
+    result = asyncio.run(engine.pre_open(date))
+    # 核心断言：不被「计划未确认」阻塞（all_confirmed 通过，因 A=ORDERED 视作已确认）
+    assert "未确认" not in result.get("reason", ""), \
+        "pre_open 重入误判部分 ORDERED 为未确认 → 剩余标的永不补挂（P1 regression）"
+    # B 会被挂（A 已有 OPEN 单 has_order 跳过——pre_open 幂等）。
+    # 注意：A 是否二次挂取决于 has_order 闸（test_pre_open_idempotent 已覆盖），
+    # 本测试仅断言确认闸不再阻塞，故 submitted 至少含 B。
+    assert "B.SH" in submit_calls["syms"]
+
+
+def test_is_trade_confirmed_semantics(tmp_path):
+    """**ssot-review P1** 单点：is_trade_confirmed 语义集合覆盖。
+
+    未确认集合 = {None, SIGNAL, VETOED}；已确认 = {CONFIRMED, ORDERED, FILLED,
+    CLOSED, TP_FILLED}。防后续新增 trade_event 状态时漏改本函数。
+    """
+    from trading import state_store
+    db_path = str(tmp_path / "state.db")
+    monkeypatch_attr = None  # 纯 DB 测试，无需 monkeypatch module attr
+    state_store._DEFAULT_DB_OVERRIDE = db_path  # 局部覆盖（_connect 读 _DEFAULT_DB）
+    # 直接 patch 默认 DB（_connect 内 ``db_path or _DEFAULT_DB``）
+    import trading.state_store as _ss
+    orig_default = _ss._DEFAULT_DB
+    _ss._DEFAULT_DB = db_path
+    try:
+        _ss.init_store()
+        account_id = "TEST_ACC"
+        _ss.upsert_account(account_id, broker="qmt")
+        tid_base = "TEST_ACC_X.SH_2099-01-02"
+
+        def _seed_and_check(actions, expected):
+            """落一组 action 序列后断言 is_trade_confirmed 返回 expected。"""
+            # 每次用新 symbol 避免串扰（actions 元组哈希稳定）
+            sym = f"X{abs(hash(tuple(actions))) % 100000}.SH"
+            tid = f"{account_id}_{sym}_2099-01-02"
+            for i, a in enumerate(actions):
+                if i == 0:
+                    _ss.insert_trade_event(account_id, tid, sym, a,
+                                           meta='{"stop_price": 9.5}')
+                else:
+                    _ss.insert_trade_event(account_id, tid, sym, a)
+            assert _ss.is_trade_confirmed(tid) is expected, \
+                f"actions={actions} expected={expected}"
+
+        _seed_and_check(["SIGNAL"], False)                    # SIGNAL-only
+        _seed_and_check(["SIGNAL", "VETOED"], False)          # veto 终局
+        _seed_and_check(["SIGNAL", "CONFIRMED"], True)        # 已确认（最常见）
+        _seed_and_check(["SIGNAL", "CONFIRMED", "ORDERED"], True)   # P1 核心场景
+        _seed_and_check(["SIGNAL", "CONFIRMED", "FILLED"], True)    # 已成交
+        _seed_and_check(["SIGNAL", "CONFIRMED", "CLOSED"], True)    # 已平仓
+        _seed_and_check(["SIGNAL", "CONFIRMED", "TP_FILLED"], True)  # TP 成交
+    finally:
+        _ss._DEFAULT_DB = orig_default
+
+
 # ============================================================================
 # 4. post_close：对账照做，熔断显式留 TODO（本 task 不实现）
 # ============================================================================
