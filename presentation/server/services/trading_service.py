@@ -497,18 +497,20 @@ def _enforce_session() -> bool:
     return os.getenv("QMT_ENFORCE_SESSION", "true").lower() == "true"
 
 
-def _in_a_share_session() -> bool:
-    """粗略判断当前是否 A 股交易时段（9:30-11:30 / 13:00-15:00，工作日）。
+def _in_a_share_session(now=None) -> bool:
+    """粗略判断当前是否 A 股交易时段（09:15-11:30 / 13:00-15:00，工作日）。
 
-    Why 粗略：精确时段需考虑节假日/集合竞价/港股通差异；此处仅做基本盘挡板，
-    避免隔夜/周末误下单。生产可替换为更精确的日历服务。
+    A1（08-05 废单根治）：上午起点 09:30 → 09:15，含集合竞价——pre_open 调度在
+    09:22 挂单，旧口径把自家调度时间当非法时段（300358 废单根因）。隔夜/周末保护
+    仍保留（09:15 前、周末均拦）。
+    Why now 可注入：纯函数便于单测（避免 datetime.now() 不可控）。
     """
     from datetime import datetime
-    now = datetime.now()
+    now = now or datetime.now()
     if now.weekday() >= 5:  # 5=周六 6=周日
         return False
     t = now.hour * 60 + now.minute
-    morning = 9 * 60 + 30 <= t <= 11 * 60 + 30
+    morning = 9 * 60 + 15 <= t <= 11 * 60 + 30
     afternoon = 13 * 60 <= t <= 15 * 60
     return morning or afternoon
 
