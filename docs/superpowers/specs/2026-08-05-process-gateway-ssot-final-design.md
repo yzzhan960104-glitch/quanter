@@ -254,6 +254,8 @@ TradingEngine（唯一消费者）
 3. 按 DRAFT Phase 2 顺序删除：配置层 → 挡板层 → 引擎闸 → 熔断层（未决）→
    启动层（未决）→ 状态机（未决）；每步独立提交可回滚。
 4. 未决问题（§2.4）实施前裁定；裁定结果回写本 spec，不留口头决定。
+   - 实施 plan：`docs/superpowers/plans/2026-08-06-process-gateway-phase-a-risk-removal.md`
+     （§0 裁定门 D1-D7 通过后启动）。
 
 ### Phase B：进程·网关·miniQMT 一体化治理（本 spec 主体）
 
@@ -275,6 +277,8 @@ TradingEngine（唯一消费者）
 2. 客户端「自动登录」配置 SOP + `restart_trading.py --adopt-client-session` 半自动修正通道。
 3. `GET /api/v1/ops/processes` 观测端点 + 钉钉告警。
 4. §4.4 L2 sid 自动轮换：preferred 被占 / connect -1 → 自动换未占用 sid 并记 runtime SSoT。
+   - 实施 plan：`docs/superpowers/plans/2026-08-06-process-gateway-phase-b2-guard.md`
+     （裁定门 G1-G4）+ `...phase-b2-l2-sid-rotation.md`（裁定门 L1-L4）。
 
 #### B3：真相源收敛（SSoT 合并）
 
