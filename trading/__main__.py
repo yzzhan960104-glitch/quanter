@@ -128,6 +128,11 @@ def _alert_critical(msg: str) -> None:
         pass
 
 
+def _in_testing() -> bool:
+    """QUANTER_TESTING=1 → 跳过端口/单实例断言（pytest 不 bind 8000、不抢 session）。"""
+    return os.getenv("QUANTER_TESTING") == "1"
+
+
 def _port_holder_alive(port: int) -> int | None:
     """W1.4：探测 ``port`` 是否被占用；被占用返 -1（PID 未知），空闲返 None。
 
@@ -172,6 +177,8 @@ def _assert_single_instance(port: int = 8000) -> None:
 
     ⚠️ 局限（同 ``_port_holder_alive`` docstring）：拿不到 PID / 拦不住嵌套父子。
     """
+    if _in_testing():
+        return
     holder = _port_holder_alive(port)
     if holder is not None:
         msg = (
@@ -355,7 +362,8 @@ def run_server() -> None:
             os.getenv("AUTO_TRADE_MODE"))
         sys.exit(1)
     server_port = int(os.getenv("SERVER_PORT", "8000"))
-    _assert_single_instance(server_port)
+    if not _in_testing():
+        _assert_single_instance(server_port)
 
     uvicorn.run(
         "presentation.server.main:app",

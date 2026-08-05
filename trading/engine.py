@@ -2317,7 +2317,10 @@ class TradingEngine:
         # 单实例守护（QMT session 级 · live 专属）：防双引擎抢同一 session。
         # 端口 8000 已拦同端口双起（C-5 V1），本锁补「不同端口双实例」的剩余缺口。
         # Why 只 live：dry_run 无真 session，锁会干扰开发多开/测试。
-        if _mode() == "live":
+        # B3：QUANTER_TESTING=1 时跳过 session 锁（pytest 多实例并行不抢生产锁）。
+        # Why 只 testing 跳过：测试进程不是真实引擎，acquire 会写 pid 文件/占锁，
+        # 干扰同机生产实例的三合一校验（supervisor 会看到「锁被持有但端口无监听」漂移）。
+        if _mode() == "live" and os.getenv("QUANTER_TESTING") != "1":
             from trading import single_instance
             _session = os.getenv("QMT_SESSION_ID") or "default"
             _lock = single_instance.acquire(_session)

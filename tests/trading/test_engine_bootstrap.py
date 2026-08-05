@@ -165,3 +165,24 @@ async def test_bootstrap_dry_run_skips_session_lock(monkeypatch, tmp_path):
         await eng.bootstrap()
     assert not (tmp_path / "trading_engine_999.lock").exists()
     assert getattr(eng, "_instance_lock", None) is None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_live_skips_session_lock_when_testing(monkeypatch, tmp_path):
+    """B3: live + QUANTER_TESTING=1 → 不 acquire session 锁（测试不抢生产锁）。"""
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setenv("QUANTER_TESTING", "1")
+    monkeypatch.setenv("QMT_SESSION_ID", "999")
+    monkeypatch.setenv("TRADING_ENGINE_LOCK_DIR", str(tmp_path))
+    eng = TradingEngine()
+    with patch("trading.engine.get_gateway") as gg, \
+         patch("trading.position_book.init_db"), \
+         patch("trading.state_store.init_store"), \
+         patch("trading.state_store._migrate_env_to_account"):
+        gw = MagicMock()
+        gw.is_client_ready = lambda: True
+        gw.connect = AsyncMock()
+        gg.return_value = gw
+        await eng.bootstrap()
+    assert not (tmp_path / "trading_engine_999.lock").exists()
+    assert getattr(eng, "_instance_lock", None) is None
