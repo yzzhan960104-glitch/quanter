@@ -75,7 +75,27 @@ PARAM_SPACE = [
 ]
 # universe（创板+科创 2025至今）固定不调 = 第 22 个"概念参数"（21 可调 + universe）
 
-STATE_FILE = "logs/param_iter_state.json"
+# ── legacy 冠军治理 JSON 路径（2026-08-05 B3 双轨治理收口后的保留说明）─────────
+# 物理意图：B3 把全部生产读口切到 experiment.db ACTIVE（resolve_active 单一真相源），
+# legacy ``logs/param_iter_state.json`` 已归档到 logs/archive/。本模块仍保留 STATE_FILE
+# 模块级常量是【历史遗留】，**仅 main() 体内（load_state/save_state 调用）使用**——
+# 即仅 ``python -m discovery.tools.param_iter --legacy`` 显式 legacy 续跑路径才会触及，
+# 生产链路对它【零写入零读取】：
+#   ① discovery.sampler 仅 ``from discovery.tools.param_iter import PARAM_SPACE``，
+#     不触发 main()/load_state()/save_state()，本常量永不求值；
+#   ② 生产参数源 = experiment.db ACTIVE（discovery daemon L0-L5），不经过本文件；
+#   ③ main() 入口 fail-closed 守卫（不带 --legacy 立即 sys.exit(2)），即便有人误跑
+#     也不会执行 load_state/save_state，更不会写 JSON。
+#
+# 为何 A5 静态护栏（tests/test_ssot_static_guard.py）不扫此处：
+#   护栏 PROD_DIRS = [trading, presentation/server, broadcast, research, scripts]
+#   （brief 指定的生产写盘热点目录），**不含 discovery/**——discovery/ 是参数搜索
+#   实验/探查工具集，非生产链路；PARAM_SPACE 库 + legacy 入口在此目录合法保留。
+#   若将 discovery/ 纳入 PROD_DIRS，则本行 ``["']param_iter_state\.json`` pattern 会
+#   命中，需进一步把 STATE_FILE 移进 main() 局部（或删 main/load_state/save_state
+#   整体退役）。当前 SSoT 不受影响——prod 零调用 = prod 零写入。
+# ──────────────────────────────────────────────────────────────────────────
+STATE_FILE = "logs/param_iter_state.json"   # legacy 冠军治理 JSON（仅 main() 体内用，见上方说明）
 TARGET_ANN = 0.90          # 目标凯利年化 90%（用户 2026-07-21：≥90% 同时高夏普低回撤）
 START_DATE = "2025-01-01"  # 回测起始日（缩短年限提速）
 
