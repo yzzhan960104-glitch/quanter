@@ -6,11 +6,16 @@
   - connect：cli / trading_q / data_q / strategy_q / review（dev connect 后台常驻，
              由 connect_manager 管理，Task 4 接入 CLI 子命令路由）
 
-push 机器人独立幂等文件 `logs/.last_<bot>_brief`，互不干扰：
-同日不重发（除非 --force）；周末/节假日 index_daily 最新日不变 → 天然跳过，零废报。
-比维护一张 A 股交易日历表极简得多。
+B4（2026-08-05）播报幂等收敛 job_ledger 单口：
+  - 旧：`logs/.last_<bot>_brief` 文件（每 bot 独立，同日不重发）
+  - 新：job_ledger 行（job_name=`brief_<bot>`，business_date=播报日）
+    begin_run/finish_run 成对 + latest_status 查幂等（与 pipeline/pre_open 同源台账）
+  - --force 跳过台账检查（强制重推），但推送成功后仍 begin/finish 更新台账为最新 done
+  - 跨进程幂等：job_ledger 是 sqlite 共享真相源（取代文件锁）
+  - dry_run 不读/写台账（仅打印文案）
+  - 周末/节假日 index_daily 最新日不变 → 天然跳过，零废报
 
-降级：dws 推送失败不写 last_brief（下次触发重试）；dry_run 不读/写 last_brief。
+降级：dws 推送失败不写台账 done（下次触发重试）；dry_run 不读/写台账。
 
 market 已下线（2026-07-26）：本模块不再含行情播报分支与 build_daily_brief 依赖。
 """
@@ -43,14 +48,14 @@ _EXPERIMENT_DB = "experiment/experiments.db"
 # ===========================================================================
 # 播报类（push）：一次性 → schtasks 到点 / 手工 --force 触发
 #   robot_env：对应 .env 中该机器人 dws 应用 robot_code（不同机器人=不同 dws 应用=不同群）
-#   last      ：幂等去重文件名；分文件防跨机器人误判已播
 #   title     ：钉钉消息标题前缀，便于一眼区分来源
+# B4：删 `last` 键——幂等去重迁 job_ledger（job_name=`brief_<bot>`），不再走文件。
 PUSH_BOTS = {
-    "trading":  {"robot_env": "TRADING_BOT_ROBOT_CODE",  "last": ".last_trading_brief",
+    "trading":  {"robot_env": "TRADING_BOT_ROBOT_CODE",
                  "title": "💰 每日交易播报"},
-    "data":     {"robot_env": "DATA_BOT_ROBOT_CODE",     "last": ".last_data_brief",
+    "data":     {"robot_env": "DATA_BOT_ROBOT_CODE",
                  "title": "🗄 每日数据播报"},
-    "strategy": {"robot_env": "STRATEGY_BOT_ROBOT_CODE", "last": ".last_strategy_brief",
+    "strategy": {"robot_env": "STRATEGY_BOT_ROBOT_CODE",
                  "title": "♟ 每日策略播报"},
 }
 # market 已下线（2026-07-26）：代码/配置/文档全清，钉钉侧资源由用户移除。
@@ -78,19 +83,6 @@ CONNECT_DEFAULTS = {
 
 # 钉钉群组（所有 push 机器人共用一个运营群；机器人身份靠 robot_code 区分）
 _GROUP_ID_ENV = "BROADCAST_GROUP_ID"
-
-
-def last_brief_file(bot: str) -> Path:
-    """返回某 push 机器人的幂等去重文件路径（logs/.last_<bot>_brief）。
-
-    Why 工厂式：每机器人独立幂等文件，防跨机器人误判已播。
-    未知 bot 抛 ValueError（CLI argparse choices 已挡一道，这里是第二道防线）。
-
-    market 下线后特例消除：所有 push bot 统一走 Path("logs")/PUSH_BOTS[bot]["last"]。
-    """
-    if bot not in PUSH_BOTS:
-        raise ValueError(f"未知 bot={bot}，支持：{SUPPORTED_BOTS}")
-    return Path("logs") / PUSH_BOTS[bot]["last"]
 
 
 # 播报只用 index_daily 这 1 个湖（market 下线后 ths_daily/moneyflow/dragon_list 无人用）：
@@ -127,27 +119,6 @@ def _latest_trade_date(reader: DataLakeReader) -> str | None:
         return pd.Timestamp(dates.max()).strftime("%Y-%m-%d")
     except Exception:
         return None
-
-
-# ===========================================================================
-# 幂等读写（泛化：按 last_file 路径读写；旧函数名保留兼容）
-# ===========================================================================
-
-def _read_last(last_file: Path) -> str:
-    """读上次播报日期；文件不存在/损坏 → 空串（首次播报或容错）。"""
-    try:
-        return last_file.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
-
-
-def _write_last(date: str, last_file: Path) -> None:
-    """记录本次播报日期（幂等依据）。写失败仅 warning：不影响本次推送，但下次可能重复发。"""
-    try:
-        last_file.parent.mkdir(parents=True, exist_ok=True)
-        last_file.write_text(date, encoding="utf-8")
-    except Exception:
-        logger.warning("写 %s 失败（不影响本次推送，但下次可能重复）", last_file, exc_info=True)
 
 
 # ===========================================================================
@@ -636,7 +607,22 @@ def _main_push(argv: list[str]) -> int:
     """push 子命令（播报）：生成文案 → push_brief → 退出。无子命令默认即此路径。
 
     返回 0=成功/跳过，1=无法定播报日，2=推送失败。
+
+    B4 幂等迁 job_ledger（取代旧 .last_<bot>_brief 文件）：
+      - job_name = `brief_<bot>`，business_date = 播报日
+      - 推送前查 latest_status：已 done 且非 --force → 跳过
+      - 推送成功 → begin_run(INSERT OR REPLACE) + finish_run(UPDATE done) 成对落台账
+      - --force 跳过台账检查（强制重推），但仍 begin/finish 更新台账为最新 done
+      - finish_run 只 UPDATE——必须先 begin_run INSERT，否则 0 行受影响（台账无记录→幂等失效）
+
+    Why job_ledger 取代文件：
+      - 跨进程幂等：sqlite 共享真相源（多进程读 latest_status 一致），取代文件锁竞态
+      - 与 pipeline/pre_open 同源台账（C-8 范式统一），减少幂等机制种类
+      - SSoT 收口：spec §A2 .last_<bot>_brief 与 job_ledger 双幂等机制合并
     """
+    from trading import job_ledger
+    from trading.clock import now as _now  # started_at 用统一时钟源（C-6 单口）
+
     p = argparse.ArgumentParser(
         prog="python -m broadcast", description="钉钉播报（push 类 · 一次性）"
     )
@@ -652,10 +638,19 @@ def _main_push(argv: list[str]) -> int:
         logger.error("无法确定播报日（index_daily 未加载/为空）；用 --date 显式指定")
         return 1
 
-    last_file = last_brief_file(args.bot)
-    if not args.dry_run and not args.force and _read_last(last_file) == date:
-        print(f"{args.bot} 今日({date})已播报，跳过（--force 可重发）")
-        return 0
+    # B4 幂等查台账：job_name=`brief_<bot>`，已 done 且非 --force → 跳过
+    # dry_run 不查台账（仅打印文案，不消费幂等额度）
+    job_name = f"brief_{args.bot}"
+    if not args.dry_run and not args.force:
+        try:
+            if job_ledger.latest_status(job_name, date) == "done":
+                print(f"{args.bot} 今日({date})已播报，跳过（--force 可重发）")
+                return 0
+        except Exception:
+            # 台账读异常（DB 损坏/路径解析）→ 软降级：warning 但继续推送
+            # （观测层纪律：台账故障不应阻断播报；最坏情况重复推送一次，比漏推可控）
+            logger.warning("查 brief 台账失败 date=%s（继续推送，幂等降级）", date,
+                           exc_info=True)
 
     brief = _build_brief(args.bot, date, reader)
     title = f"{PUSH_BOTS[args.bot]['title']} {date}"
@@ -669,10 +664,18 @@ def _main_push(argv: list[str]) -> int:
     if args.dry_run:
         return 0
     if ok:
-        _write_last(date, last_file)
+        # 推送成功 → begin/finish 成对落台账（finish 只 UPDATE，须先 begin INSERT）
+        # --force 重推路径也走这里：把台账更新为最新 done（覆盖之前的 done 终态）
+        try:
+            job_ledger.begin_run(job_name, date, started_at=_now().isoformat())
+            job_ledger.finish_run(job_name, date, "done")
+        except Exception:
+            # 台账写异常 → warning，不影响本次推送结果（下次触发可能重复推，可接受）
+            logger.warning("写 brief 台账失败 date=%s（不影响本次推送，下次可能重复）",
+                           date, exc_info=True)
         print(f"{args.bot} 播报已推送({date})")
         return 0
-    logger.error("%s 推送失败，未写 %s（下次触发重试）", args.bot, last_file)
+    logger.error("%s 推送失败，未写台账 done（下次触发重试）", args.bot)
     return 2
 
 

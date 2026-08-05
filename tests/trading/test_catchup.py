@@ -108,33 +108,59 @@ async def test_weekend_catchup_produces_monday_plan(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_brief_catchup_when_last_file_stale(monkeypatch, tmp_path):
-    """pipeline(D) done 但 .last 文件缺失/陈旧 → run_brief_all 补播一次。"""
+async def test_brief_catchup_when_ledger_missing(monkeypatch, tmp_path):
+    """B4：pipeline(D) done 但 brief_<bot> 台账缺失 → run_brief_all 补播一次。
+
+    取代旧 test_brief_catchup_when_last_file_stale（.last 文件退役）。
+    物理意图：catchup._brief_missed 改读 job_ledger.latest_status(brief_<bot>, D)，
+    任一 bot != "done" → 补播。
+    """
     from trading import calendar as cal
     from trading import clock as clk
     monkeypatch.setattr(clk, "now", lambda: _now(2026, 8, 3, 9, 40))
     monkeypatch.setattr(cal, "expected_latest_trade_day", lambda now: "2026-07-31")
     monkeypatch.setattr(cal, "next_trading_day", lambda d: "2026-08-03")
     monkeypatch.setattr(cal, "is_trading_day", lambda d: True)
+    # 台账 DB 隔离到 tmp（避免污染真实 logs/trading_job_run.db）
+    monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "job_run.db"))
+    job_ledger.init_db(str(tmp_path / "job_run.db"))
     job_ledger.begin_run("pipeline", "2026-07-31", "t")
     job_ledger.finish_run("pipeline", "2026-07-31", "done")
-    # 三个幂等文件重定向到 tmp：trading 陈旧、其余缺失 → 判定需补播
-    files = {
-        "trading": tmp_path / ".last_trading_brief",
-        "strategy": tmp_path / ".last_strategy_brief",
-        "data": tmp_path / ".last_data_brief",
-    }
-    files["trading"].write_text("2026-07-30", encoding="utf-8")
-    def _fake_last(bot):
-        return files[bot]
-    with patch("broadcast.__main__.last_brief_file", side_effect=_fake_last), \
-         patch("ops.brief_all.run_brief_all", new=AsyncMock()) as rba, \
+    # brief_<bot> 台账全部缺失（latest_status 返 None）→ 判定需补播
+    with patch("ops.brief_all.run_brief_all", new=AsyncMock()) as rba, \
          patch("trading.engine.pre_open", new=AsyncMock()) as po:
         from trading.catchup import run_startup_catchup
         result = await run_startup_catchup(MagicMock())
     assert result["brief"] is True
     rba.assert_awaited_once()
     po.assert_awaited_once_with("2026-08-03")   # brief 兜底不影响 pre_open
+
+
+@pytest.mark.asyncio
+async def test_brief_catchup_skipped_when_ledger_done(monkeypatch, tmp_path):
+    """B4：brief_<bot> 全部 done → _brief_missed 返 False，不补播（幂等查台账）。
+
+    取代文件口径「.last == D」语义；任一 bot 非 done 才补。
+    """
+    from trading import calendar as cal
+    from trading import clock as clk
+    monkeypatch.setattr(clk, "now", lambda: _now(2026, 8, 3, 9, 40))
+    monkeypatch.setattr(cal, "expected_latest_trade_day", lambda now: "2026-07-31")
+    monkeypatch.setattr(cal, "next_trading_day", lambda d: "2026-08-03")
+    monkeypatch.setattr(cal, "is_trading_day", lambda d: True)
+    monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "job_run.db"))
+    job_ledger.init_db(str(tmp_path / "job_run.db"))
+    job_ledger.begin_run("pipeline", "2026-07-31", "t")
+    job_ledger.finish_run("pipeline", "2026-07-31", "done")
+    # 三个 brief bot 全部预置 done → 不补播
+    for bot in ("trading", "strategy", "data"):
+        job_ledger.begin_run(f"brief_{bot}", "2026-07-31", "t")
+        job_ledger.finish_run(f"brief_{bot}", "2026-07-31", "done")
+    with patch("ops.brief_all.run_brief_all", new=AsyncMock()) as rba:
+        from trading.catchup import run_startup_catchup
+        result = await run_startup_catchup(MagicMock())
+    assert result["brief"] is False
+    rba.assert_not_awaited()
 
 
 @pytest.mark.asyncio

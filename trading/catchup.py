@@ -5,7 +5,7 @@
     ① pipeline(D) 未 done 且其 18:00 已过 → 补 采集→校验→data_ready→eod→brief
        （D = expected_latest_trade_day(now) = 最近已收盘交易日）；
     ② plan 日期已过 pre_open 窗口 → run_eod=False 只补数据+brief（政策 A，不产废计划）；
-    ③ brief 独立兜底：pipeline done 但 .last_<bot>_brief < D → 补播一次；
+    ③ brief 独立兜底：pipeline done 但 brief_<bot> 台账非 done → 补播一次；
     ④ pre_open 窗口 [09:22, ENGINE_PRE_OPEN_CATCHUP_UNTIL) 内且未 done → 补挂单；
       窗口已过且未 done → CRITICAL 知会（政策 A 显式不静默）。
 
@@ -51,14 +51,21 @@ def _alert_critical(msg: str) -> None:
 
 
 def _brief_missed(latest_day: str) -> bool:
-    """任一 .last_<bot>_brief 文件缺失或内容 < latest_day → 需补播（幂等文件去重）。"""
-    from broadcast.__main__ import _read_last, last_brief_file
+    """任一 brief_<bot> 台账非 done → 需补播（B4 幂等查 job_ledger）。
+
+    取代旧 .last_<bot>_brief 文件口径（B4 SSoT 收口）：
+      - 旧：文件缺失或内容 < latest_day → 补播
+      - 新：job_ledger.latest_status(`brief_<bot>`, latest_day) != "done" 任一为真 → 补播
+    跨进程一致：sqlite 共享真相源取代文件锁；job_name 与 broadcast._main_push 同口径。
+    """
     for bot in ("trading", "strategy", "data"):
         try:
-            last = _read_last(last_brief_file(bot))
+            if job_ledger.latest_status(f"brief_{bot}", latest_day) != "done":
+                return True
         except Exception:
-            last = ""
-        if not last or last < latest_day:
+            # 台账读异常（DB 损坏）→ 视为需补播（保守不漏播；最坏重复推一次）
+            logger.warning("查 brief_%s 台账失败 date=%s（视为需补播）",
+                           bot, latest_day, exc_info=True)
             return True
     return False
 
@@ -91,7 +98,7 @@ async def _catchup_pipeline(engine) -> bool:
 
 
 async def _catchup_brief(latest_day: str) -> bool:
-    """brief 独立兜底：pipeline done 但幂等文件 < D → 补播一次。
+    """brief 独立兜底：pipeline done 但 brief 台账非 done → 补播一次。
 
     W5 对账（spec #13）：pipeline done 后补一道 get_ready 校验——若台账 done 但
     data_ready 内容未绿（采集完成了但内容校验失败/未落盘），warning 显式暴露漂移。
@@ -115,7 +122,7 @@ async def _catchup_brief(latest_day: str) -> bool:
     if not _brief_missed(latest_day):
         return False
     from ops.brief_all import run_brief_all
-    logger.warning("C-8 启动补跑 brief：D=%s（.last_*_brief 缺失/陈旧）", latest_day)
+    logger.warning("C-8 启动补跑 brief：D=%s（brief_*_brief 台账非 done）", latest_day)
     await run_brief_all()
     return True
 

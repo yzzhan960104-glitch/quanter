@@ -3,7 +3,10 @@
 
 market 下线后，默认 bot=trading。trading 分支取数走 _fetch_trading_snapshot（重 import），
 测试 mock 它 + build_trading_brief，避免依赖真实 trading_service。
-幂等文件隔离：monkeypatch last_brief_file 返回 tmp_path，不碰真实 logs/。
+
+B4（2026-08-05）：幂等源从文件（.last_<bot>_brief）迁到 job_ledger（job_name=brief_<bot>），
+begin_run/finish_run 成对 + latest_status 查幂等。旧 last_brief_file/_read_last/_write_last 退役。
+台账隔离：monkeypatch.setenv("TRADING_JOB_LEDGER_DB", tmp DB)，不碰真实 logs/trading_job_run.db。
 """
 import json
 
@@ -25,11 +28,16 @@ def _stub_trading(monkeypatch, date="2026-07-15"):
     )
 
 
-def _isolate_last_file(monkeypatch, tmp_path, date="2026-07-15"):
-    """把 trading 幂等文件重定向到 tmp_path（不碰真实 logs/.last_trading_brief）。"""
-    f = tmp_path / ".last_trading_brief"
-    monkeypatch.setattr(bm, "last_brief_file", lambda bot: f)
-    return f
+def _isolate_job_ledger(monkeypatch, tmp_path):
+    """把 job_ledger DB 重定向到 tmp_path（不碰真实 logs/trading_job_run.db）。
+
+    B4 取代旧 _isolate_last_file：幂等源迁 job_ledger 后，测试隔离由文件改 DB 路径。
+    """
+    from trading import job_ledger
+    db = str(tmp_path / "job_run.db")
+    monkeypatch.setenv("TRADING_JOB_LEDGER_DB", db)
+    job_ledger.init_db(db)
+    return db
 
 
 def test_main_dry_run_prints_and_pushes_dry(monkeypatch):
@@ -43,9 +51,13 @@ def test_main_dry_run_prints_and_pushes_dry(monkeypatch):
 
 
 def test_main_dedup_skips_when_already_broadcast(monkeypatch, tmp_path):
+    """B4：台账 brief_trading=done → 跳过推送（幂等查 job_ledger.latest_status）。"""
+    from trading import job_ledger
     _stub_trading(monkeypatch, date="2026-07-15")
-    f = _isolate_last_file(monkeypatch, tmp_path)
-    f.write_text("2026-07-15", encoding="utf-8")
+    _isolate_job_ledger(monkeypatch, tmp_path)
+    # 预置台账：brief_trading 已 done（先 begin_run INSERT，再 finish_run UPDATE）
+    job_ledger.begin_run("brief_trading", "2026-07-15", started_at="2026-07-15T16:00:00")
+    job_ledger.finish_run("brief_trading", "2026-07-15", "done")
     pushed = []
     monkeypatch.setattr(bm, "push_brief", lambda *a, **k: pushed.append(1) or True)
     rc = bm.main([])
@@ -54,38 +66,81 @@ def test_main_dedup_skips_when_already_broadcast(monkeypatch, tmp_path):
 
 
 def test_main_force_overrides_dedup(monkeypatch, tmp_path):
+    """B4：--force 跳过台账检查（强制重推），但推送成功后仍 begin/finish 更新台账。"""
+    from trading import job_ledger
     _stub_trading(monkeypatch, date="2026-07-15")
-    f = _isolate_last_file(monkeypatch, tmp_path)
-    f.write_text("2026-07-15", encoding="utf-8")
+    db = _isolate_job_ledger(monkeypatch, tmp_path)
+    # 预置台账：brief_trading 已 done
+    job_ledger.begin_run("brief_trading", "2026-07-15", started_at="2026-07-15T16:00:00")
+    job_ledger.finish_run("brief_trading", "2026-07-15", "done")
     pushed = []
     monkeypatch.setattr(bm, "push_brief", lambda *a, **k: pushed.append(1) or True)
     rc = bm.main(["--force"])
     assert rc == 0
     assert pushed == [1]                     # --force 覆盖去重
-    assert f.read_text(encoding="utf-8") == "2026-07-15"
+    # --force 重推后台账仍为 done（finish 写最新 done）
+    assert job_ledger.latest_status("brief_trading", "2026-07-15") == "done"
 
 
-def test_main_success_writes_last(monkeypatch, tmp_path):
+def test_main_success_writes_ledger(monkeypatch, tmp_path):
+    """B4：推送成功 → begin_run/finish_run("done") 成对落台账。"""
+    from trading import job_ledger
     _stub_trading(monkeypatch, date="2026-07-15")
-    f = _isolate_last_file(monkeypatch, tmp_path)
+    _isolate_job_ledger(monkeypatch, tmp_path)
     monkeypatch.setattr(bm, "push_brief", lambda *a, **k: True)
     rc = bm.main([])
     assert rc == 0
-    assert f.read_text(encoding="utf-8") == "2026-07-15"
+    assert job_ledger.latest_status("brief_trading", "2026-07-15") == "done"
 
 
-def test_main_push_failure_no_last(monkeypatch, tmp_path):
+def test_main_push_failure_no_ledger_done(monkeypatch, tmp_path):
+    """B4：推送失败 → 不写 done（台账无 done 记录，下次触发重试）。
+
+    finish_run 只 UPDATE——没先 begin_run 时 0 行受影响，latest_status 仍为 None/非 done。
+    """
+    from trading import job_ledger
     _stub_trading(monkeypatch, date="2026-07-15")
-    f = _isolate_last_file(monkeypatch, tmp_path)
+    _isolate_job_ledger(monkeypatch, tmp_path)
     monkeypatch.setattr(bm, "push_brief", lambda *a, **k: False)
     rc = bm.main([])
     assert rc == 2                           # 推送失败
-    assert not f.exists()                    # 失败不写 last（下次重试）
+    # 失败 → 不应留下 done（下次重试）
+    assert job_ledger.latest_status("brief_trading", "2026-07-15") != "done"
 
 
 def test_main_no_date_returns_1(monkeypatch):
     _stub_trading(monkeypatch, date=None)
     assert bm.main([]) == 1
+
+
+def test_brief_idempotent_via_job_ledger(tmp_path, monkeypatch):
+    """B4 brief 幂等读台账（begin/finish 成对，无多余 kwargs）。
+
+    红线验证：
+    - begin_run/finish_run 成对（finish 只 UPDATE，须先 begin INSERT）；
+    - 「未 begin 直接 finish」不产生 done 记录（防误用，幂等失效）；
+    - latest_status=="done" → broadcast 主流程跳过推送。
+    """
+    from trading import job_ledger
+    db = tmp_path / "job.db"
+    monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(db))
+
+    # 成对 begin/finish → latest_status=="done"（finish UPDATE 命中 begin INSERT 的行）
+    job_ledger.begin_run("brief_trading", "2026-08-05", started_at="2026-08-05T16:00:00")
+    job_ledger.finish_run("brief_trading", "2026-08-05", "done")
+    assert job_ledger.latest_status("brief_trading", "2026-08-05") == "done"
+
+    # 防误用：未 begin 直接 finish → UPDATE 0 行，无 done 记录（latest_status 仍 None）
+    job_ledger.finish_run("brief_data", "2026-08-05", "done")
+    assert job_ledger.latest_status("brief_data", "2026-08-05") is None
+
+    # broadcast 主流程：brief_trading 台账 done → 不重复推
+    _stub_trading(monkeypatch, date="2026-08-05")
+    pushed = []
+    monkeypatch.setattr(bm, "push_brief", lambda *a, **k: pushed.append(1) or True)
+    rc = bm.main(["--bot", "trading"])
+    assert rc == 0
+    assert pushed == []                      # 台账 done → 跳过
 
 
 def test_fetch_strategy_snapshot_scan_count_reads_plan_file(monkeypatch, tmp_path):
