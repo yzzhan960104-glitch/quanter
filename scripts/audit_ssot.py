@@ -22,6 +22,8 @@ BANNED pattern 边界（B6 决策 / C3 收尾）：
     CONFIRMED) 唯一真相源）。tests/_legacy_plan_io.py 测试专用 legacy shim 例外（PROD_DIRS
     不扫 tests/，不会误命中）。
 """
+import json
+import os
 import platform
 import re
 import subprocess
@@ -162,26 +164,101 @@ def check_engine_process_count():
     若出现 ≥2 个 `python -m trading` 进程 = 双进程抢 QMT session（[[qmt-connect-1-rootcause]]
     事故重演）/ 端口冲突 / session 漂移。
 
-    跨平台实现：
-      - Windows: wmic process 取 commandline，计数含 "-m trading" 的行
-        （wmic 比 tasklist 信息更全 —— tasklist 不给 commandline）
+    跨平台实现（A6）：
+      - Windows: PowerShell Get-CimInstance 取 commandline（弃 wmic——新 Windows 已
+        deprecated 且 08-06 实测 RPC 失败/超时），失败降级为空（宁可漏报不假报）
       - 非 Windows: pgrep -f "python.*-m trading"
     """
-    if platform.system() == "Windows":
-        # wmic 在新 Windows 11 已 deprecated 但仍可用；check=False 容错
-        # shell=True 必需（wmic 的 WHERE 子句含引号）
-        result = subprocess.run(
-            'wmic process where "name=\'python.exe\'" get commandline',
-            shell=True, capture_output=True, text=True, check=False,
-        )
-        n = sum(1 for line in result.stdout.splitlines() if "-m trading" in line)
-    else:
+    if platform.system() != "Windows":
         result = subprocess.run(
             ["pgrep", "-f", "python.*-m trading"],
             capture_output=True, text=True, check=False,
         )
         n = len([line for line in result.stdout.splitlines() if line.strip()])
+    else:
+        n = len(_engine_processes())
     return f"引擎进程数 {n} > 1（C-5 单例红线，端口 8000 / QMT session 抢占）" if n > 1 else None
+
+
+def _engine_processes() -> list[dict]:
+    """列引擎 python 进程（cmdline 含 -m trading / presentation.server.main:app）。
+
+    A6：弃 wmic（新 Windows 已 deprecated，本机实测 RPC 失败/超时），改 PowerShell
+    Get-CimInstance（短超时）；任何异常返空（巡检宁可漏报，不因探针故障假报）。
+    """
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python' } | "
+             "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"],
+            capture_output=True, text=True, timeout=8)
+        raw = json.loads(r.stdout) if r.stdout.strip() else []
+        if isinstance(raw, dict):
+            raw = [raw]
+        return [
+            {"pid": int(x["ProcessId"]), "exe": x.get("ExecutablePath"),
+             "cmdline": x.get("CommandLine") or ""}
+            for x in raw
+            if "-m trading" in (x.get("CommandLine") or "")
+            or "presentation.server.main:app" in (x.get("CommandLine") or "")
+        ]
+    except Exception:
+        return []
+
+
+def check_client_process():
+    """miniQMT 客户端进程数 == 1（A6；0=客户端未起，>1=多客户端实例）。"""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-Process -Name 'XtMiniQmt*' -ErrorAction SilentlyContinue).Id"],
+            capture_output=True, text=True, timeout=8)
+        pids = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
+    except Exception:
+        return "miniQMT 客户端进程探测失败（PowerShell 不可用/超时）"
+    if len(pids) != 1:
+        return f"miniQMT 客户端进程数 {len(pids)} != 1（应恰好一个 XtMiniQmt.exe）"
+    return None
+
+
+def _port_holder_pid(port: int = 8000) -> int | None:
+    """netstat -ano 解析 :port LISTENING 的 PID（A6，与 trading_supervisor 同源）。"""
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                             text=True, errors="replace", timeout=10).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "LISTENING" in line and f":{port} " in line:
+            parts = line.split()
+            try:
+                return int(parts[-1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def _pid_file_owner(session_id: str | None = None) -> int | None:
+    """logs/trading_engine_<sid>.pid 首字段（引擎持有者 PID）。"""
+    sid = session_id or os.environ.get("QMT_SESSION_ID", "default")
+    try:
+        p = ROOT / "logs" / f"trading_engine_{sid}.pid"
+        return int(p.read_text(encoding="utf-8").split()[0])
+    except Exception:
+        return None
+
+
+def check_port_owner_consistency(port: int = 8000):
+    """端口属主 == pid 文件 PID（A6；不一致 = 旧链/非法链，与 supervisor 三合一同口径）。"""
+    owner = _port_holder_pid(port)
+    pidf = _pid_file_owner()
+    if owner is not None and pidf is not None and owner != pidf:
+        return f"端口 {port} 属主 {owner} != pid 文件 {pidf}"
+    if owner is not None and pidf is None:
+        return f"端口 {port} 被 {owner} 占用但无 pid 文件（旧链/非法链）"
+    if owner is None and pidf is not None:
+        return f"pid 文件存在（{pidf}）但端口 {port} 无监听（进程已死/未绑定）"
+    return None
 
 
 def _iter_prod_py_files(targets):
@@ -246,6 +323,8 @@ def main():
     ]
     checks_runtime = [
         ("引擎进程数", check_engine_process_count),
+        ("miniQMT 客户端进程", check_client_process),
+        ("端口属主一致性", check_port_owner_consistency),
         ("护栏 BANNED", check_guard_ripgrep),
     ]
 
