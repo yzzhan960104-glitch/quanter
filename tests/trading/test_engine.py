@@ -2043,3 +2043,95 @@ def test_close_expired_positions_skips_already_placed(monkeypatch, tmp_path):
                                                      "holding_days": 20, "max_holding": 15}]))
     assert res["closed"] == 0
     assert submit_calls == [], "已挂 EXPIRED_CLOSE 不得重复 submit"
+
+
+# ============================================================================
+# SSoT Phase B · B2b：engine BUY 成交路径接线 record_position_attribution
+# ============================================================================
+# 物理意图（spec §5 B2）：
+#   原 record_position_attribution 全仓无生产调用方（仅 trading_service 定义）。
+#   B2 在 engine._handle_order_update 的 apply_fill_to_position 后接线：BUY 成交写归因。
+#   不接线则「重启后归因不丢」验收无数据来源（apply_fill 只写 qty/avg_price，不写归因）。
+#   SELL 不调 clear：apply_fill_to_position 归零删 position 行（state_store.py:676），
+#   归因随行消失（Resolution：position 行删除即归因消失，非 clear 调用）。
+def test_buy_fill_records_attribution(tmp_db, monkeypatch):
+    """BUY 成交（首次 fill）→ record_position_attribution 落 position.strategy == "neckline"。
+
+    验收：apply_fill_to_position 后接线 record_position_attribution，
+    position 行 strategy 列 = "neckline"、entry_rationale 含"成交建仓@<traded_time>"。
+    """
+    from unittest.mock import MagicMock, AsyncMock, patch
+    from trading import state_store
+    from trading.engine import TradingEngine
+
+    # tmp_db 已预置 ACC_TEST 账户（conftest fixture）
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "ACC_TEST")  # _resolve_account_id 返 ACC_TEST 与订单同账户
+    eng = TradingEngine()
+    update = {
+        "kind": "trade", "order_id": "O_BUY_1", "stock_code": "600000.SH",
+        "traded_volume": 100, "traded_price": 10.5, "traded_time": "20260805143025",
+        "state": "FILLED",
+    }
+    eng._gw = MagicMock()
+    eng._gw._orders = {}  # 方向来自 DB（#1 口径），不手塞 _orders
+    state_store.insert_order(
+        "2026-08-05_600000.SH_OPEN_1", "ACC_TEST_600000.SH_2026-08-05",
+        "ACC_TEST", "2026-08-05", "600000.SH", "buy", "OPEN", 100, 10.0,
+        broker_oid="O_BUY_1", state="SUBMITTED")
+
+    fake_mgr = MagicMock()
+    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+    with patch("infra.notifier.NotificationManager") as NM:
+        NM.get_default.return_value = fake_mgr
+        with patch.object(eng, "_place_take_profit", new=AsyncMock()):
+            asyncio.run(eng._handle_order_update(update))
+
+    # 断言：position 行已建 + 归因已落（strategy/entry_rationale）
+    row = state_store.get_position("ACC_TEST", "600000.SH")
+    assert row is not None, "BUY 成交未建 position 行（apply_fill_to_position 未执行？）"
+    assert row["strategy"] == "neckline", f"BUY 成交未落归因 strategy，实际 row={row}"
+    assert "成交建仓" in (row["entry_rationale"] or ""), (
+        f"entry_rationale 应含「成交建仓@<traded_time>」，实际 row={row}")
+
+
+def test_buy_fill_attribution_failure_does_not_block(tmp_db, monkeypatch):
+    """归因登记失败（trading_service 抛异常）→ 不阻断成交主路径（风控红线）。
+
+    物理意图：成交是交易红线（必须落账），归因是审计（失败可补偿）。
+    B2b 接线必须 try/except + logger.exception——归因异常不能让成交 handler 升 _CriticalHalt。
+    """
+    from unittest.mock import MagicMock, AsyncMock, patch
+    from trading import state_store
+    from trading.engine import TradingEngine
+
+    eng = TradingEngine()
+    update = {
+        "kind": "trade", "order_id": "O_BUY_2", "stock_code": "600000.SH",
+        "traded_volume": 100, "traded_price": 10.5, "traded_time": "20260805143100",
+        "state": "FILLED",
+    }
+    eng._gw = MagicMock()
+    eng._gw._orders = {}
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "ACC_TEST")  # _resolve_account_id 返 ACC_TEST 与订单同账户
+    state_store.insert_order(
+        "2026-08-05_600000.SH_OPEN_2", "ACC_TEST_600000.SH_2026-08-05",
+        "ACC_TEST", "2026-08-05", "600000.SH", "buy", "OPEN", 100, 10.0,
+        broker_oid="O_BUY_2", state="SUBMITTED")
+
+    fake_mgr = MagicMock()
+    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+
+    # 让 record_position_attribution 抛异常（模拟归因 DB 写失败）
+    def _boom(*a, **kw):
+        raise RuntimeError("归因 DB 写失败模拟")
+    with patch("infra.notifier.NotificationManager") as NM:
+        NM.get_default.return_value = fake_mgr
+        with patch.object(eng, "_place_take_profit", new=AsyncMock()), \
+             patch("presentation.server.services.trading_service.record_position_attribution",
+                   side_effect=_boom):
+            # 不应抛异常（归因失败软降级，成交主路径继续）
+            asyncio.run(eng._handle_order_update(update))
+
+    # 成交主路径仍生效（position 行已建，只是归因未落）
+    row = state_store.get_position("ACC_TEST", "600000.SH")
+    assert row is not None, "归因失败不应阻断 apply_fill_to_position（成交红线优先）"

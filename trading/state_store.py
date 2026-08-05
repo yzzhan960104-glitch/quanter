@@ -217,6 +217,19 @@ def init_store(db_path: str | None = None) -> None:
                 PRIMARY KEY (account_id, symbol)
             )
         """)
+        # SSoT Phase B · B2：position 加 strategy/entry_rationale 列（持仓归因落 DB 真相源）。
+        # 物理意图：原持仓归因散在 trading_service._position_attribution 内存字典，进程
+        # 重启即丢，且与持仓真相源（position 表）分立两处——对账无法回答「这只票是哪个
+        # 策略建的仓」。B2 把归因与 qty/avg_price 同行持久化，重启后归因随持仓行存活。
+        # 断点-3：B2 只做「落列 + upsert/clear」，不做重启重建（C1 从 SIGNAL.meta 补 rebuild）。
+        # 向後兼容：旧库 position 表无此列，ALTER ADD COLUMN 补（参考 fill.account_id 范式，
+        # 不能 DROP 重建——DROP 会丢既有持仓数据 = 敞口真相失真红线）。默认 NULL。
+        if not _has_column(con, "position", "strategy"):
+            con.execute("ALTER TABLE position ADD COLUMN strategy TEXT")
+            logger.info("state_store 迁移：position 表加 strategy 列（B2 持仓归因）")
+        if not _has_column(con, "position", "entry_rationale"):
+            con.execute("ALTER TABLE position ADD COLUMN entry_rationale TEXT")
+            logger.info("state_store 迁移：position 表加 entry_rationale 列（B2 持仓归因）")
         # ⑥ account_daily（账户日级快照 · pre_open 写 start / post_close 写 close + 熔断读 start）
         # ——全新表，W4 + C-1 后是【权益快照与熔断基线】的唯一真相源：pre_open 写 start_total_asset，
         # post_close 写 close_total_asset + 算 daily_pnl，并【读 start_total_asset 作 -3% 熔断基线】。
@@ -677,14 +690,54 @@ def apply_fill_to_position(account_id: str, symbol: str, direction: str, qty: fl
 
 
 def get_position(account_id: str, symbol: str, *, db_path: str | None = None) -> dict | None:
-    """读单标的当前持仓 {qty, avg_price, entry_date}。不存在返 None。"""
+    """读单标的当前持仓 {qty, avg_price, entry_date, strategy, entry_rationale}。不存在返 None。
+
+    B2 后追加 strategy/entry_rationale（持仓归因，与 qty/avg_price 同行）。
+    """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
         row = con.execute(
-            "SELECT qty, avg_price, entry_date FROM position WHERE account_id=? AND symbol=?",
+            "SELECT qty, avg_price, entry_date, strategy, entry_rationale"
+            " FROM position WHERE account_id=? AND symbol=?",
             (account_id, symbol)
         ).fetchone()
     return dict(row) if row else None
+
+
+def upsert_position_attribution(account_id: str, symbol: str, strategy: str,
+                                entry_rationale: str = "", *, db_path: str | None = None) -> None:
+    """写/覆盖持仓归因（strategy + entry_rationale），持仓行须已存在（由 apply_fill_to_position 建）。
+
+    物理意图（spec §5 B2）：
+        BUY 成交 → apply_fill_to_position 建 position 行（qty/avg_price）→ 本函数补写归因。
+        分两步而非合并到 apply_fill：apply_fill 是「账本累加」语义（每次成交都调），归因是
+        「建仓元数据」语义（首次建仓写一次）——职责分离避免重复覆盖。
+    幂等：UPDATE 同 (account_id, symbol) 多次调用覆盖写（最后一次生效）。
+    持仓行不存在（SELL 平仓删行后/未建仓）：UPDATE 命中 0 行，无副作用（不报错——
+        engine BUY 路径 apply_fill_to_position 必先建行，正常不会触此分支）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        con.execute(
+            "UPDATE position SET strategy=?, entry_rationale=?"
+            " WHERE account_id=? AND symbol=?",
+            (strategy, entry_rationale, account_id, symbol))
+
+
+def clear_position_attribution(account_id: str, symbol: str, *, db_path: str | None = None) -> None:
+    """清空持仓归因（strategy/entry_rationale 置 NULL），持仓行保留。
+
+    物理意图：与 upsert 对称的清除语义。B2 实际生产中**不调用本函数**——SELL 平仓
+    apply_fill_to_position 归零删 position 行（state_store.py DELETE WHERE qty=0），
+    归因随行消失，clear 会 UPDATE 0 行（空操作）。本函数保留供显式清除场景（如
+    人审发现归因错标需擦除，但持仓仍留）+ 测试断言 upsert/clear 往返幂等。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        con.execute(
+            "UPDATE position SET strategy=NULL, entry_rationale=NULL"
+            " WHERE account_id=? AND symbol=?",
+            (account_id, symbol))
 
 
 def snapshot_start_equity(account_id: str, date: str, total_asset: float, cash: float | None = None,

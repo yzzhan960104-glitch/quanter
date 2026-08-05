@@ -3142,6 +3142,26 @@ class TradingEngine:
                     _state_store.insert_trade_event(
                         _account_id, _trade_id, symbol, "FILLED",
                         order_id=order_id, qty=float(qty), price=float(price))
+                    # SSoT Phase B · B2b：BUY 成交写持仓归因（接线 engine 成交路径）。
+                    # 物理意图：原 record_position_attribution 全仓无生产调用方，归因散在
+                    # trading_service 内存字典重启即丢。B2 在 apply_fill_to_position 后接线，
+                    # 把 strategy/entry_rationale 落 position 表（与 qty/avg_price 同行）。
+                    # 重启后归因随持仓行存活——「重启后归因不丢」验收数据来源。
+                    # SELL 不调 clear：apply_fill_to_position 归零删 position 行（state_store.py
+                    # DELETE WHERE qty=0），归因随行消失——clear 会 UPDATE 0 行（空操作）。
+                    # 断点-3 Resolution：position 行删除即归因消失（非 clear 调用）。
+                    # 风控红线：try/except 不阻断成交主路径（成交是交易红线，归因是审计，
+                    # 失败可补偿——与上方 fill/position 异常升 L1 不同，归因异常软降级）。
+                    if direction == "BUY":
+                        try:
+                            from presentation.server.services.trading_service import \
+                                record_position_attribution
+                            record_position_attribution(
+                                symbol, "neckline", f"成交建仓@{traded_time}")
+                        except Exception:
+                            logger.exception(
+                                "归因登记失败 symbol=%s traded_time=%s（不阻断成交主路径）",
+                                symbol, traded_time)
                 else:
                     # 重放（insert_fill 命中 UNIQUE 返 False）：CSV/钉钉/position 全部跳过。
                     # 物理意图：on_stock_trade 在部分成交/柜台重推时会重放同一 (order_id, traded_time)，

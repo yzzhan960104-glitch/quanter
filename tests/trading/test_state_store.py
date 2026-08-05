@@ -392,3 +392,69 @@ def test_get_order_placed_qty_excludes_terminal(monkeypatch, tmp_path):
     state_store.insert_order(f"{d}_{sym}_TP2_1", f"{aid}_{sym}_{d}", aid, d, sym, "sell", "TP2", 100, 11.0, state="SUBMITTED")
     state_store.insert_order(f"{d}_{sym}_TP2_2", f"{aid}_{sym}_{d}", aid, d, sym, "sell", "TP2", 100, 11.0, state="REJECTED")
     assert state_store.get_order_placed_qty(aid, d, sym, "TP2") == 100.0
+
+
+# ============================================================================
+# SSoT Phase B · B2a-1：持仓归因落 position 表 strategy/entry_rationale 列
+# ============================================================================
+# 物理意图（spec §5 B2 断点-3）：
+#   原持仓归因存 trading_service._position_attribution 内存字典——进程重启即丢，
+#   且与持仓真相源（position 表）分立两处，对账时无法回答「这只票是哪个策略建的仓」。
+#   B2 把归因落到 position 表（与 qty/avg_price 同行），重启后归因随持仓行存活。
+#   断点-3：B2 只做「落列 + upsert/clear」，不做重启重建（C1 从 SIGNAL.meta 补 rebuild）。
+def test_position_attribution_upsert_clear(tmp_db):
+    """upsert_position_attribution / clear_position_attribution + get_position 返新列。
+
+    验收口径（brief B2a-1）：
+        - BUY 建仓后 upsert 归因 → get_position 返 strategy/entry_rationale
+        - clear → 归因置 NULL（持仓行仍在）
+    """
+    from trading import state_store
+    # 先建仓（apply_fill_to_position BUY 100 @ 10.0，date 口径 YYYYMMDD 无横线）
+    state_store.apply_fill_to_position("ACC_TEST", "600000.SH", "BUY", 100, 10.0, "20260805")
+    # 落归因
+    state_store.upsert_position_attribution("ACC_TEST", "600000.SH", "neckline", "颈线突破")
+    row = state_store.get_position("ACC_TEST", "600000.SH")
+    assert row is not None
+    assert row["strategy"] == "neckline"
+    assert row["entry_rationale"] == "颈线突破"
+    # 清归因（持仓行不删，仅 strategy/entry_rationale 置 NULL）
+    state_store.clear_position_attribution("ACC_TEST", "600000.SH")
+    row2 = state_store.get_position("ACC_TEST", "600000.SH")
+    assert row2 is not None
+    assert row2["strategy"] is None
+    assert row2["entry_rationale"] is None
+
+
+def test_position_attribution_migration_adds_columns(tmp_db):
+    """旧库 position 表无 strategy/entry_rationale 列 → init_store ALTER ADD COLUMN 迁移。
+
+    物理意图（向後兼容红线）：生产库已存在 position 表（无 strategy/entry_rationale 列），
+    升级到 B2 后 init_store 必须用 ALTER ADD COLUMN 补列（参考 fill.account_id 范式），
+    不能 DROP 重建（DROP 会丢既有持仓数据 = 敞口真相失真红线）。
+    """
+    import sqlite3
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(position)").fetchall()}
+    con.close()
+    assert "strategy" in cols, "position 表缺 strategy 列（迁移未执行）"
+    assert "entry_rationale" in cols, "position 表缺 entry_rationale 列（迁移未执行）"
+
+
+def test_position_attribution_sell_clears_via_row_delete(tmp_db):
+    """SELL 归零 → apply_fill_to_position 删 position 行 → 归因随行消失（不调 clear）。
+
+    断点-3 Resolution（代码事实优先）：
+        apply_fill_to_position 在 SELL 归零时执行 ``DELETE FROM position WHERE qty=0``
+        （state_store.py:676），归因随行消失——clear_position_attribution 会 UPDATE 0 行
+        （空操作）。验收口径：**position 行删除即归因消失（非 clear 调用）**。
+    """
+    from trading import state_store
+    # 建仓 + 落归因
+    state_store.apply_fill_to_position("ACC_TEST", "600000.SH", "BUY", 100, 10.0, "20260805")
+    state_store.upsert_position_attribution("ACC_TEST", "600000.SH", "neckline", "颈线突破")
+    assert state_store.get_position("ACC_TEST", "600000.SH") is not None
+    # SELL 平仓（同量反向）→ apply_fill_to_position 归零删行
+    state_store.apply_fill_to_position("ACC_TEST", "600000.SH", "SELL", 100, 11.0, "20260805")
+    # 持仓行被删 → 归因随行消失（get_position 返 None）
+    assert state_store.get_position("ACC_TEST", "600000.SH") is None

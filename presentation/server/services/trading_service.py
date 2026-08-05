@@ -49,11 +49,6 @@ _EXPORT_COLUMNS = [
     "strategy", "rationale", "kind",
 ]
 
-# 持仓归因注册表（内存）：symbol → {strategy, rationale}。
-# 实盘 submit_order 成交时调 record_position_attribution 登记；get_positions 据此富化。
-# Why 内存而非落盘：持仓归因是「当前态」快照（平仓即清除），与成交日志（历史态）语义不同。
-_position_attribution: dict = {}
-
 # 模块级单例（lazy：首次 get_qmt_gateway 调用时构造）
 _gateway_singleton: Optional[object] = None
 
@@ -183,10 +178,13 @@ async def get_positions() -> list:
             pnl = (float(last) - float(avg)) * qty
             # 盈亏百分比（供钉钉持仓播报「+N.N%」+ 前端列）：avg==0 除零防御（柜台成本恒>0，理论不会）
             pnl_pct = (float(last) - float(avg)) / float(avg) * 100 if float(avg) != 0 else None
-        # 层级五·持仓富化：join 归因注册表，附 strategy/entry_rationale（未登记则 None，
-        # 前端显示 '—'）。富化逻辑与 Task5 完全一致，本次仅补现价查询与 pnl 计算。
+        # 层级五·持仓富化（SSoT Phase B · B2：归因从 position 表读，原内存字典已删）：
+        # 附 strategy/entry_rationale（未登记则 None，前端显示 '—'）。归因与 qty/avg_price
+        # 同行落 position 表，重启后随持仓行存活；SELL 平仓 apply_fill_to_position 归零
+        # 删行 → 归因随行消失（断点-3 Resolution：position 行删除即归因消失）。
         # 成本/现价/盈亏%（Task12+）：avg_price/last_price/pnl_pct 透出供钉钉持仓播报 + 前端展示。
         # last_price 存「有效现价或 None」——NaN 在上方 if 已被 last!=last 拦截，此处再守一道。
+        attr = _read_position_attribution(sym)
         result.append({
             "symbol": str(sym),
             "qty": qty,
@@ -195,25 +193,51 @@ async def get_positions() -> list:
             "market_value": market_value,
             "pnl": pnl,
             "pnl_pct": pnl_pct,
-            "strategy": _position_attribution.get(sym, {}).get("strategy"),
-            "entry_rationale": _position_attribution.get(sym, {}).get("rationale"),
+            "strategy": attr.get("strategy"),
+            "entry_rationale": attr.get("entry_rationale"),
         })
     return result
 
 
-def record_position_attribution(symbol: str, strategy: str, rationale: str = "") -> None:
-    """登记某标的的建仓策略与因子逻辑（供 get_positions 富化）。
+def _read_position_attribution(symbol: str) -> dict:
+    """从 position 表读单标的归因 {strategy, entry_rationale}（B2 后归因真相源是 DB）。
 
-    供实盘 submit_order 成交回调调用：把「策略 + 入场因子逻辑」与标的绑定，
-    使 Cockpit 持仓表能回答「这只票是哪个策略、因什么因子建的仓」。
-    平仓后应清除（调 clear_position_attribution）。
+    Why 抽小函数：get_positions 循环内每标的查一次，封装便于异常软降级（DB 读失败
+    不阻断持仓查询主路径——持仓 qty/avg_price 是真相，归因是衍生审计字段）。
     """
-    _position_attribution[symbol] = {"strategy": strategy, "rationale": rationale}
+    try:
+        from trading import state_store
+        row = state_store.get_position(_resolve_account_id(), symbol)
+        if row is None:
+            return {}  # 持仓行不存在（broker 有持仓但 DB 无行——对账漂移场景，归因自然空）
+        return {"strategy": row.get("strategy"), "entry_rationale": row.get("entry_rationale")}
+    except Exception:
+        # 软降级：归因读失败不应阻断 get_positions（持仓主路径优先），返空归因。
+        logger.exception("读 position 归因失败 symbol=%s（软降级返空归因）", symbol)
+        return {}
+
+
+def record_position_attribution(symbol: str, strategy: str, rationale: str = "") -> None:
+    """登记某标的的建仓策略与因子逻辑（B2：落 position 表 strategy/entry_rationale 列）。
+
+    供实盘 BUY 成交回调（engine._handle_order_update 接线）调用：把「策略 + 入场因子逻辑」
+    与标的绑定，使 Cockpit 持仓表能回答「这只票是哪个策略、因什么因子建的仓」。
+    持仓行须已由 apply_fill_to_position 建立（BUY 成交必先建行），UPDATE 命中 1 行；
+    SELL 平仓 apply_fill_to_position 归零删行，归因随行消失（不调 clear——断点-3 Resolution）。
+    """
+    from trading import state_store
+    state_store.upsert_position_attribution(_resolve_account_id(), symbol, strategy, rationale)
 
 
 def clear_position_attribution(symbol: str) -> None:
-    """清除某标的的归因（平仓后调用，防过期归因污染后续持仓）。"""
-    _position_attribution.pop(symbol, None)
+    """清除某标的的归因（B2：position 表 strategy/entry_rationale 置 NULL）。
+
+    Note: B2 实际生产中**不调用本函数**——SELL 平仓 apply_fill_to_position 归零删
+    position 行，归因随行消失。本函数保留供显式清除场景（人审纠错擦除但持仓留）+
+    测试断言 upsert/clear 往返幂等。
+    """
+    from trading import state_store
+    state_store.clear_position_attribution(_resolve_account_id(), symbol)
 
 
 def aggregate_fills_by_symbol(start: str, end: str) -> dict[str, float]:
