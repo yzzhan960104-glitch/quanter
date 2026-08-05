@@ -345,6 +345,15 @@ def run_server() -> None:
     # W1.4 单引擎硬约束探测（spec §3.3）：起 uvicorn 前先确认 port 8000 未被既有
     # 引擎实例占用。命中即 sys.exit(1)（防双进程抢 QMT session，connect -1 根因）。
     # 局限：嵌套父子拦不住（见 _assert_single_instance docstring），真根治靠 runbook §1。
+    # A5（P1-2）：生产链 fail-closed——QUANTER_REQUIRE_LIVE=1 时非 live 一律拒绝启动。
+    # Why 硬闸：08-05 日志约 20 次 dry_run 实例反复起停（system Python），一旦抢占
+    # 8000/日志即「dry_run 接管生产」；生产链（start_server.bat）显式置此 env，
+    # 手动/开发入口不置则行为不变（向后兼容）。
+    if os.getenv("QUANTER_REQUIRE_LIVE") == "1" and os.getenv("AUTO_TRADE_MODE") != "live":
+        logger.critical(
+            "生产链要求 AUTO_TRADE_MODE=live，当前=%s，拒绝启动（fail-closed）",
+            os.getenv("AUTO_TRADE_MODE"))
+        sys.exit(1)
     server_port = int(os.getenv("SERVER_PORT", "8000"))
     _assert_single_instance(server_port)
 
@@ -354,7 +363,8 @@ def run_server() -> None:
         port=int(os.getenv("SERVER_PORT", "8000")),
         # 显式不传 reuse_port（spec §3.3 R6）：uvicorn 默认 SO_REUSEPORT=False，
         # 第二实例 bind 8000 即 WSAEADDRINUSE exit（端口单例防护）。
-        reload=(os.getenv("AUTO_TRADE_MODE", "dry_run") != "live"),
+        reload=(os.getenv("AUTO_TRADE_MODE", "dry_run") != "live"
+                and os.getenv("QUANTER_DEV_NO_RELOAD") != "1"),
     )
 
 

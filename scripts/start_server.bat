@@ -16,4 +16,6 @@ REM   启动链（消除历史双进程抢 QMT session，[[qmt-connect-1-rootcau
 cd /d "F:\quanter"
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
+REM A5（P1-2）：生产链 fail-closed——非 live 一律拒绝（防 dry_run 实例接管生产端口/日志）
+set QUANTER_REQUIRE_LIVE=1
 ".venv310\Scripts\python.exe" -m trading

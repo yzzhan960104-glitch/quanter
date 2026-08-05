@@ -24,6 +24,7 @@ Why 存在（用户诉求「根本杜绝」反复踩的 10013/僵尸）：
 from __future__ import annotations
 
 import atexit
+import os
 import signal
 import socket
 import subprocess
@@ -76,6 +77,26 @@ def _cleanup() -> None:
             p.kill()
 
 
+def _backend_cmd(reload: bool) -> list[str]:
+    """A5：后端统一走 `python -m trading`（supervisor 语义：单入口 + .env 加载 + 端口断言）。
+
+    Why 不再直跑 uvicorn：`python -m trading` 是 C-5 唯一引擎入口（含 _assert_single_instance
+    与 banner），dev 与生产共用同一入口可避免「dev 起的进程不受端口/单实例约束」的老问题；
+    热重载由 QUANTER_DEV_NO_RELOAD env 控制（不传 uvicorn --reload，防 reloader 子进程僵尸）。
+    """
+    return [str(VENV_PY), "-m", "trading"]
+
+
+def _backend_env(reload: bool) -> dict:
+    """A5：dev 后端 env——标记 dev 实例、跳过 connect bot、默认关热重载、锁定 8000。"""
+    env = dict(os.environ)
+    env["QUANTER_DEV_MODE"] = "1"
+    env["QUANTER_DEV_SKIP_CONNECT_BOTS"] = "1"
+    env["QUANTER_DEV_NO_RELOAD"] = "0" if reload else "1"
+    env["SERVER_PORT"] = str(BACKEND_PORT)
+    return env
+
+
 def main() -> int:
     reload = "--reload" in sys.argv
     # 1. 启动前端口检测 + 清残留（根治坑 ② ③）
@@ -86,15 +107,14 @@ def main() -> int:
     # Windows SIGINT（Ctrl+C）→ 干净清子进程（根治坑 ②：Ctrl+C 不残留）
     signal.signal(signal.SIGINT, lambda *_: (_cleanup(), sys.exit(0)))
 
-    # 2. 起 uvicorn（默认不带 --reload，根治坑 ①：reloader 子进程僵尸）
-    backend_cmd = [str(VENV_PY), "-m", "uvicorn", "presentation.server.main:app",
-                   "--port", str(BACKEND_PORT)]
+    # 2. 起后端（python -m trading 统一入口；默认不带热重载，根治坑 ①：reloader 子进程僵尸）
+    backend_cmd = _backend_cmd(reload)
+    backend_env = _backend_env(reload)
     if reload:
-        backend_cmd.append("--reload")
-        print("[dev] 后端带 --reload（热重载，但 reloader 子进程可能残留，Ctrl+C 务必干净退出）")
+        print("[dev] 后端带热重载（QUANTER_DEV_NO_RELOAD=0，改代码自动重启）")
     else:
-        print("[dev] 后端不带 --reload（默认，杜绝 reloader 子进程僵尸；改代码手动重启）")
-    backend = subprocess.Popen(backend_cmd, cwd=ROOT)
+        print("[dev] 后端不带热重载（默认，杜绝 reloader 子进程僵尸；改代码手动重启）")
+    backend = subprocess.Popen(backend_cmd, cwd=ROOT, env=backend_env)
     _children.append(backend)
 
     # 3. 起 vite（npm run dev，shell=True 兼容 Windows npm.cmd）

@@ -18,6 +18,7 @@ FastAPI 应用入口
 """
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -410,23 +411,34 @@ async def lifespan(app: FastAPI):
     # app.state.connect_bots：记录已起 bot，供 shutdown stop 对偶（树杀 dev connect +
     # Claude Code 子进程，防资源泄漏）。
     try:
-        from broadcast.__main__ import CONNECT_BOTS, CONNECT_DEFAULTS
-        from broadcast import connect_manager
-        started_bots: list[str] = []
-        for _bot in CONNECT_BOTS:                # cli/trading_q/data_q/strategy_q/review
-            try:
-                connect_manager.start(_bot, CONNECT_BOTS[_bot], CONNECT_DEFAULTS)
-                started_bots.append(_bot)
-            except RuntimeError:
-                # 配置缺失（unified_app_id 未填 / 身份闸缺失）→ 跳过该 bot，
-                # 同 broadcast.__main__._connect_start 语义（不让单点阻断其余）
-                logging.getLogger(__name__).warning(
-                    "connect bot=%s 配置缺失跳过", _bot, exc_info=True)
-            except Exception:
-                # 其它异常（subprocess 拉起失败等）→ 同样跳过，不阻断 uvicorn
-                logging.getLogger(__name__).exception(
-                    "connect bot=%s 起异常（跳过，不阻断 uvicorn）", _bot)
-        app.state.connect_bots = started_bots
+        # A5（P1-2）：dev/测试实例不随服务器拉起 5 个 connect bot——dev.py 显式注入
+        # QUANTER_DEV_SKIP_CONNECT_BOTS=1；pytest 用 QUANTER_TESTING=1。否则每个
+        # dev 起停都带 5 个 bot 起停（08-05 日志 taskkill 30s 超时实证），且测试会
+        # 拉起真 bot 污染环境。
+        _skip_bots = (os.environ.get("QUANTER_TESTING") == "1"
+                      or os.environ.get("QUANTER_DEV_SKIP_CONNECT_BOTS") == "1")
+        if _skip_bots:
+            logging.getLogger(__name__).info(
+                "lifespan 跳过 connect bot（QUANTER_TESTING / QUANTER_DEV_SKIP_CONNECT_BOTS=1）")
+            app.state.connect_bots = []
+        else:
+            from broadcast.__main__ import CONNECT_BOTS, CONNECT_DEFAULTS
+            from broadcast import connect_manager
+            started_bots: list[str] = []
+            for _bot in CONNECT_BOTS:            # cli/trading_q/data_q/strategy_q/review
+                try:
+                    connect_manager.start(_bot, CONNECT_BOTS[_bot], CONNECT_DEFAULTS)
+                    started_bots.append(_bot)
+                except RuntimeError:
+                    # 配置缺失（unified_app_id 未填 / 身份闸缺失）→ 跳过该 bot，
+                    # 同 broadcast.__main__._connect_start 语义（不让单点阻断其余）
+                    logging.getLogger(__name__).warning(
+                        "connect bot=%s 配置缺失跳过", _bot, exc_info=True)
+                except Exception:
+                    # 其它异常（subprocess 拉起失败等）→ 同样跳过，不阻断 uvicorn
+                    logging.getLogger(__name__).exception(
+                        "connect bot=%s 起异常（跳过，不阻断 uvicorn）", _bot)
+            app.state.connect_bots = started_bots
     except Exception:
         # 外层兜底：CONNECT_BOTS import 失败等极端情况——已忽略，不阻断 lifespan
         logging.getLogger(__name__).exception("lifespan 装 connect 异常（已忽略）")

@@ -123,3 +123,26 @@ def test_log_startup_banner_includes_git_rev_and_started(monkeypatch, caplog):
         main_mod.log_startup_banner()
     assert "git=abc1234" in caplog.text
     assert "started=" in caplog.text
+
+
+def test_run_server_requires_live_when_env_set(monkeypatch):
+    """A5: QUANTER_REQUIRE_LIVE=1 且 mode!=live → 拒绝启动（生产 fail-closed）。"""
+    import pytest
+
+    monkeypatch.setenv("QUANTER_REQUIRE_LIVE", "1")
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    monkeypatch.setattr(main_mod, "_assert_single_instance", lambda port: None)
+    with pytest.raises(SystemExit) as ei:
+        main_mod.run_server()
+    assert ei.value.code == 1
+
+
+def test_run_server_live_passes_require_live_gate(monkeypatch):
+    """A5: QUANTER_REQUIRE_LIVE=1 且 mode=live → 放行（不误杀生产）。"""
+    captured = {}
+    monkeypatch.setenv("QUANTER_REQUIRE_LIVE", "1")
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setattr(main_mod, "_assert_single_instance", lambda port: None)
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
+    main_mod.run_server()
+    assert captured.get("reload") is False

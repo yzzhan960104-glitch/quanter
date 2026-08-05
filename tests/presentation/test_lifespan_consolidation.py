@@ -91,6 +91,21 @@ async def test_lifespan_starts_all_5_connect_bots():
 
 
 @pytest.mark.asyncio
+async def test_lifespan_skips_connect_bots_when_dev_flag(monkeypatch):
+    """A5: QUANTER_DEV_SKIP_CONNECT_BOTS=1 → 不 start 任何 connect bot（dev 解耦）。"""
+    from fastapi import FastAPI
+    from presentation.server.main import lifespan
+
+    monkeypatch.setenv("QUANTER_DEV_SKIP_CONNECT_BOTS", "1")
+    app = FastAPI()
+    stack, start_mock, _stop_mock, _eng = _mock_lifespan_dependencies()
+    with stack:
+        async with lifespan(app):
+            assert app.state.connect_bots == []
+    start_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_lifespan_connect_soft_degrade_on_single_bot_failure():
     """单 bot start 抛 RuntimeError → 跳过该 bot，其余 4 bot 正常起，不阻断 uvicorn。
 
