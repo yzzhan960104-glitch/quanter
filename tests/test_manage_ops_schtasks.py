@@ -20,36 +20,62 @@ from ops.manage_ops_schtasks import main, register_server, unregister_discovery
 # ============ register_server：QuanterServer ONSTART ============
 
 
-def test_register_server_creates_onstart_task():
-    """register_server(user)：schtasks /Create /SC ONSTART /TN QuanterServer /TR start_server.bat /RU <user>。
+class _FakeProc:
+    def __init__(self, returncode: int = 0, stdout: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
 
-    物理意图（spec §3.4）：ONSTART 开机 session 0 后台起 server，替代 ONLOGON 启动文件夹。
-    /TR 指向 scripts/start_server.bat（绝对路径，本测试用子串 ``start_server.bat`` 匹配）。
+
+def test_register_server_uses_boot_trigger_with_restart_on_failure():
+    """A4: 主路径 = PowerShell Register-ScheduledTask（BootTrigger + RestartCount）。
+
+    物理意图（spec §7.1-6 · 08-06 实测 LogonTrigger 无重启策略）：schtasks CLI 不支持
+    RestartOnFailure，必须走 PowerShell ScheduledTasks；S4U 不存密码（本地 bat 无网络需求）。
     """
-    cmds: list[list[str]] = []
-    with patch("ops.manage_ops_schtasks._schtasks",
-               side_effect=lambda a: cmds.append(a) or 0):
+    calls: list[list[str]] = []
+    with patch("ops.manage_ops_schtasks.subprocess.run",
+               side_effect=lambda *a, **kw: calls.append(a[0]) or _FakeProc()):
         register_server(user="TestUser")
-    # 找到 /Create 命令（register_server 仅发一条 /Create）
-    create_cmds = [c for c in cmds if "/Create" in c]
-    assert len(create_cmds) == 1, f"期望恰好 1 条 /Create，实际 {create_cmds}"
-    cmd = " ".join(create_cmds[0])  # list→str：元素绝对路径需子串匹配，join 后统一子串断言
-    assert "/SC" in cmd and "ONSTART" in cmd   # 开机触发（非 ONLOGON/DAILY）
-    assert "/TN" in cmd and "QuanterServer" in cmd
-    assert "/TR" in cmd and "start_server.bat" in cmd   # 入口 bat（绝对路径子串）
-    assert "/RU" in cmd and "TestUser" in cmd           # 运行账户
-    assert "/F" in cmd                                  # 强制覆盖（幂等重注册）
+    ps_calls = [c for c in calls if "powershell" in c]
+    assert len(ps_calls) == 1, f"期望恰好 1 条 PowerShell 注册，实际 {ps_calls}"
+    script = " ".join(ps_calls[0])
+    assert "Register-ScheduledTask" in script
+    assert "AtStartup" in script                 # BootTrigger（ONSTART 语义）
+    assert "RestartCount" in script and "RestartInterval" in script
+    assert "start_server.bat" in script
+    assert "QuanterServer" in script
+    assert "TestUser" in script
+    # 主路径成功时不走 schtasks /Create 回退
+    assert not any("/Create" in c for c in calls)
 
 
 def test_register_server_default_user_from_env(monkeypatch):
-    """register_server() 无 user → /RU 取 os.environ USERNAME（缺省当前用户）。"""
+    """register_server() 无 user → PowerShell 命令取 os.environ USERNAME（缺省当前用户）。"""
     monkeypatch.setenv("USERNAME", "EnvUser")
-    cmds: list[list[str]] = []
-    with patch("ops.manage_ops_schtasks._schtasks",
-               side_effect=lambda a: cmds.append(a) or 0):
-        register_server()  # 不传 user
-    cmd = " ".join([c for c in cmds if "/Create" in c][0])
-    assert "/RU" in cmd and "EnvUser" in cmd
+    calls: list[list[str]] = []
+    with patch("ops.manage_ops_schtasks.subprocess.run",
+               side_effect=lambda *a, **kw: calls.append(a[0]) or _FakeProc()):
+        register_server()
+    ps_calls = [c for c in calls if "powershell" in c]
+    assert len(ps_calls) == 1
+    assert "EnvUser" in " ".join(ps_calls[0])
+
+
+def test_register_server_falls_back_to_schtasks_when_powershell_fails():
+    """A4: PowerShell 注册失败（rc≠0）→ 回退 schtasks /SC ONSTART 并保持入口不变。"""
+    schtasks_cmds: list[list[str]] = []
+    with patch("ops.manage_ops_schtasks.subprocess.run",
+               side_effect=lambda *a, **kw: _FakeProc(returncode=1)):
+        with patch("ops.manage_ops_schtasks._schtasks",
+                   side_effect=lambda a: schtasks_cmds.append(a) or 0):
+            register_server(user="TestUser")
+    create_cmds = [c for c in schtasks_cmds if "/Create" in c]
+    assert len(create_cmds) == 1
+    cmd = " ".join(create_cmds[0])
+    assert "/SC" in cmd and "ONSTART" in cmd
+    assert "/TN" in cmd and "QuanterServer" in cmd
+    assert "/TR" in cmd and "start_server.bat" in cmd
+    assert "/RU" in cmd and "TestUser" in cmd
 
 
 # ============ unregister_discovery：退 QuanterDiscoveryDaemon ============

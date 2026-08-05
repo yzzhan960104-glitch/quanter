@@ -112,37 +112,56 @@ def unregister_pipeline_brief() -> None:
 
 
 def register_server(user: str | None = None) -> None:
-    """C-7 V4：注册 QuanterServer schtasks ONSTART（开机 session 0 后台起 ``python -m trading``）。
+    """A4：注册 QuanterServer = BootTrigger(ONSTART) + RestartOnFailure。
 
-    物理意图（spec §3.4）：替代 ``ops/start_all.py`` 的「subprocess.Popen DETACHED uvicorn
-    + 启动文件夹 ONLOGON」启动链。ONSTART 开机即跑（session 0 后台，不依赖用户登录/RDP
-    会话——logoff 不会杀进程），适配生产机不 7x24（会关机/断电，重启即自动恢复服务）。
-
-    Why ONSTART 而非 ONLOGON：ONLOGON 仅在用户登录的会话里跑，断 RDP / logoff 则 server
-    被 terminating（旧 start_all.bat 自安快捷式的痛点）；ONSTART 在 session 0 服务上下文
-    跑，与交互登录解耦。
-
-    /TR 指向 scripts/start_server.bat（cd /d F:\\quanter + venv python -m trading），
-    由 schtasks 包裹成后台进程（无需 start_all.py 的 DETACHED 代码）。
-
-    /RU：运行账户（user 参数；缺省 %USERNAME%）。/RP 密码由调用方交互输入——schtasks
-    ONSTART 需用户密码（session 0 需凭证），密码不进代码（安全 + 不硬编码）。若本函数
-    不带 /RP 导致 /Create 失败（rc≠0），打印手动命令提示由运维补密码重跑。
-
-    幂等：/F 强制覆盖（重复注册不报错，更新即有任务）。
+    物理意图（spec §7.1-6 · 08-06 实测 LogonTrigger 且无重启策略）：ONSTART 开机 session 0
+    后台起引擎（不依赖登录），RestartOnFailure 崩溃自愈（3 次/1 分钟）。schtasks CLI 不支持
+    RestartOnFailure，改走 PowerShell ScheduledTasks（S4U 登录类型：本地 bat 无网络需求，
+    不存密码）；失败回退 schtasks /SC ONSTART 并打印手动补配提示。
     """
     user = user or os.environ.get("USERNAME", "")
+    rc = _register_with_powershell(user)
+    if rc == 0:
+        print(f"OK QuanterServer @ BootTrigger+RestartOnFailure → "
+              f"start_server.bat (user={user})")
+        return
+    # 回退：schtasks /SC ONSTART（不带 RestartOnFailure），打印手动 XML 提示
     rc = _schtasks(["/Create", "/SC", "ONSTART", "/TN", "QuanterServer",
                     "/TR", str(ROOT / "scripts" / "start_server.bat"),
                     "/RU", user, "/F"])
-    print(f"{'OK' if rc == 0 else 'FAIL(需 /RP 密码?)'} QuanterServer @ ONSTART → "
-          f"start_server.bat (user={user})")
+    print(f"{'OK' if rc == 0 else 'FAIL(需 /RP 密码?)'} QuanterServer @ ONSTART"
+          f"（回退，无 RestartOnFailure）→ start_server.bat (user={user})")
     if rc != 0:
         # schtasks ONSTART 在无密码时 /Create 会失败（session 0 需用户凭证）。提示运维
         # 手动带 /RP 跑一次（密码不进代码，避免硬编码 + git 泄露）。
         print("[!] schtasks ONSTART 需用户密码，手动跑：\n"
               "   schtasks /Create /SC ONSTART /TN QuanterServer "
               f"/TR \"{ROOT / 'scripts' / 'start_server.bat'}\" /RU {user} /RP <密码> /F")
+    else:
+        print("[!] 已回退注册（无 RestartOnFailure）。如需崩溃自愈，用任务计划程序补：\n"
+              "    设置 → 如果任务失败，按以下频率重新启动: 1 分钟 / 尝试重启次数: 3")
+
+
+def _register_with_powershell(user: str) -> int:
+    """用 PowerShell ScheduledTasks 注册 BootTrigger + RestartOnFailure。
+
+    Why S4U 登录类型：ONSTART + 本地 bat（无网络资源需求）可用 S4U——不存储密码，
+    避免把 /RP 密码写进代码/命令历史；若 PowerShell 注册失败（rc≠0）由 register_server
+    回退 schtasks 并提示人工。
+    """
+    script = (
+        "$action = New-ScheduledTaskAction -Execute "
+        f"'{ROOT / 'scripts' / 'start_server.bat'}';"
+        "$trigger = New-ScheduledTaskTrigger -AtStartup;"
+        "$settings = New-ScheduledTaskSettingsSet -RestartCount 3 "
+        "-RestartInterval (New-TimeSpan -Minutes 1);"
+        f"$principal = New-ScheduledTaskPrincipal -UserId '{user}' -LogonType S4U;"
+        "Register-ScheduledTask -TaskName 'QuanterServer' -Action $action "
+        "-Trigger $trigger -Settings $settings -Principal $principal -Force"
+    )
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True, text=True).returncode
 
 
 def unregister_discovery() -> None:
