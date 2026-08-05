@@ -61,6 +61,8 @@ import logging
 import os
 import socket
 import sys
+from datetime import datetime
+from pathlib import Path
 
 # 加载 .env（Task4 已装 python-dotenv；环境无 dotenv 时 fallback 跳过，env 由
 # 外层 schtasks/PM2 注入亦可——本行只是开发便利，非业务依赖）。
@@ -284,13 +286,28 @@ def log_startup_banner():
     """
     logger.info(
         "=== 启动 banner === session=%s account=%s userdata=%s mode=%s confirm=%s | "
-        "口径: eod=next_trading_day, pre_open=today（标的 T+1 对齐）",
+        "git=%s started=%s | 口径: eod=next_trading_day, pre_open=today（标的 T+1 对齐）",
         os.environ.get("QMT_SESSION_ID", "?"),
         os.environ.get("QMT_ACCOUNT_ID", "?"),
         os.environ.get("QMT_USERDATA_PATH", "?"),
         os.environ.get("AUTO_TRADE_MODE", "?"),
         os.environ.get("AUTO_CONFIRM_PLAN", "?"),
+        _git_rev(),
+        datetime.now().isoformat(timespec="seconds"),
     )
+
+
+def _git_rev() -> str:
+    """当前 HEAD 短哈希（P0-3：代码更新后未重启可一眼识别；失败降级 unknown）。"""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parents[1]),
+             "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def run_server() -> None:

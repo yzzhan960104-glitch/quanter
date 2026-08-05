@@ -112,3 +112,14 @@ def test_no_asyncio_run_at_top_level():
                     raise AssertionError(
                         f"{func.value.id}.run() 不应在模块顶层调用（必须在 "
                         "run_server() 内或 if __name__ 守卫内，否则 import 阻塞）")
+
+
+def test_log_startup_banner_includes_git_rev_and_started(monkeypatch, caplog):
+    """A3: banner 必须含 git 版本与启动时间（代码更新后未重启可识别）。"""
+    import logging
+
+    monkeypatch.setattr(main_mod, "_git_rev", lambda: "abc1234")
+    with caplog.at_level(logging.INFO, logger="trading.__main__"):
+        main_mod.log_startup_banner()
+    assert "git=abc1234" in caplog.text
+    assert "started=" in caplog.text
