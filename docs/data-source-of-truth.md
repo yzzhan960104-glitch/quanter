@@ -1,56 +1,131 @@
 # 数据单一真相源清单（Data Source of Truth）
 
-> 治理日期：2026-08-03。目的：消灭「同一逻辑数据存在多份来源、读写各指各的」的
-> 历史债务（典型事故：策略播报读 `replay_runs/index.json` 旧归档，而回测结果早已
-> 迁入 SQLite，导致「近期回测」半个月不更新）。
+> 适用版本：SSoT Phase A + Phase B 收口后（2026-08-05）。
+> 依据：`docs/superpowers/specs/2026-08-05-ssot-final-hardening-design.md` §3.1。
+> 目的：消灭「同一逻辑数据存在多份来源、读写各指各的」历史债务；为引擎/服务/
+> 播报/复盘/巡检提供**唯一读入口**，为新代码提供**唯一写入口**。
+
+---
 
 ## 总原则
 
-1. **每个数据域只有一个写入口（单一真相源，SSoT）**；其余路径只允许「只读归档」或
-   「审计镜像」。
-2. 新代码一律读写 SSoT；发现新双源立即在下方表格登记并治理。
-3. 允许的双写模式仅限：**DB 真相源 + 审计/展示镜像**（如成交 CSV、计划 JSON），
-   镜像必须可从真相源重建，且由同一事务/同一调用点写。
-4. 遗留文件统一归档到 `logs/archive/`（只移动不删除，可恢复）。
+1. **每个数据域只有一个写入口（单一真相源，SSoT）** —— 即下方表格的「唯一真相源」列。
+   其余路径只允许「只读归档」「审计镜像」「按需导出产物」三种身份之一。
+2. **新代码一律读写 SSoT**；发现新双源立即在本清单登记并按 SSoT spec 治理。
+3. **允许的双写模式仅限：DB 真相源 + 可重建镜像**（如 `account` 同步镜像、按需导出
+   CSV/JSON）。镜像必须可从真相源重建，且由同一事务/同一调用点写。
+4. **遗留文件统一归档到 `logs/archive/`**（只移动不删除，可恢复）。
+5. **写入口被静态护栏 + 巡检双保险守卫**：
+   - 静态护栏：`tests/test_ssot_static_guard.py`（CI / pytest 时炸）
+   - 运维巡检：`scripts/audit_ssot.py`（调度 / 手动跑时炸）
+   - BANNED pattern 同口径（精确正则，跳注释），命中即 FAIL。
 
-## 数据域清单
+---
 
-| # | 数据域 | 单一真相源（SSoT） | 遗留/镜像路径 | 状态 |
-|---|--------|--------------------|---------------|------|
-| 1 | 回测任务与结果 | `data/replay_tasks.db`（`backtest/tasks_db.py`，worker 落 `report_json`） | `replay_runs/*.json` + `index.json`（历史归档，已全量迁移，见 `replay_runs/README.md`）；`backtest/runs.py` 为遗留模块 | ✅ 已治理 |
-| 2 | 交易计划 | `logs/trading_plans/plan_<date>.json`（`trading/trading_plan.py`，EOD 写、pre_open/veto 读、钉钉推送） | `plans/<date>.json` 旧 scan 格式（已停用，文件已归档）；`trading_state.db` 的 `trade_event(SIGNAL/CONFIRMED)` 为 DB 镜像（by design 双写） | ✅ 已治理 |
-| 3 | 成交流水（审计） | `logs/live_trades.csv`（`trading_service.record_live_trade` 单点写） | `presentation/logs/live_trades.csv`（旧路径，已归档）；仓库根旧 CSV（测试污染，已清理归档） | ✅ 已治理（需重启旧 server 生效，见下） |
-| 4 | 持仓/成交账本 | `logs/trading_state.db`（`position/fill/order/trade_event`，`state_store`+`position_book` 共用） | 券商 QMT 真实持仓（对账 reconcile 用，by design）；CSV 审计镜像 | ✅ by design |
-| 5 | 作业台账 | `logs/trading_job_run.db`（`job_ledger`，独立库不与 trading_state 混） | — | ✅ by design |
-| 6 | 实验版本/审计 | `experiment/experiments.db`（`experiment/store.py`） | — | ✅ 已治理（docstring 陈旧注释已修正） |
-| 7 | 参数迭代状态 | `logs/param_iter_state.json`（`discovery/tools/param_iter.py` 写、策略播报读） | — | ✅ 单源 |
-| 8 | 参数搜索 trial | `logs/discovery_trials.db`（discovery L4 daemon） | — | ✅ 单源（与 #7 是两个独立实验系统，勿混） |
-| 9 | 数据健康度 | 双口径 by design：`data_service`（parquet mtime + 哨兵）与 `trading_state.data_ready`（检查点内容校验） | — | ✅ by design |
-| 10 | 应用日志 | `logs/quanter.log`（`LOG_CONFIG`） | `presentation/logs/quanter.log`（旧路径，已归档） | ✅ 已治理 |
-| 11 | 播报幂等 | `logs/.last_<bot>_brief`（每 bot 独立） | — | ✅ 单源 |
-| 12 | symbol→名称映射 | 双源同源（Tushare）：`data_lake/stock_basic.parquet`（同步落盘，`trading_plan` 用）vs `data/symbol_names`（启动实时拉取，/plans 用） | — | ⚠️ 待统一（建议统一读 parquet，symbol_names 复用同文件） |
-| 13 | 前端回测/计划客户端 | — | `presentation/web/src/api/caisen.ts` 的 `listPlans/listReplayTasks/getChart` 指向已下线后端路由（`/api/v1/caisen/*` 已移除） | ⚠️ 待治理（死代码；首页 `/caisen` 会 404 空态） |
-| 14 | 环境变量 | `.env`（`load_dotenv(override=True)` 单一真相源） | 系统环境变量（会被 .env 覆盖） | ✅ 单源 |
+## 数据域最终表（9 域，spec §3.1 目标态）
 
-## 本次治理动作（2026-08-03）
+| # | 数据域 | 唯一真相源 | 导出产物（可重建） |
+|---|--------|-----------|-------------------|
+| 1 | **成交流水** | `state_store.fill`（`logs/trading_state.db`，UNIQUE(order_id, traded_time) 幂等） | 导出接口（`export_trades`）按需生成 CSV；镜像不入库 |
+| 2 | **订单/委托** | `state_store.order`（order_id PK，状态机 SUBMITTED/FILLED/CANCELED 等） | — |
+| 3 | **持仓** | `state_store.position`（含归因列 `strategy` + `entry_rationale`，Phase B2） | 券商 QMT 真实持仓（对账 reconcile 用，by design 外部参照，非内部真相源） |
+| 4 | **交易生命周期** | `state_store.trade_event`（`UNIQUE(account_id, trade_id, action)` 幂等；动作枚举 SIGNAL / CONFIRMED / VETOED / BLOCKED / ORDERED / SUBMITTED / REJECTED / DRY_RUN / FILLED / CLOSED 等） | — |
+| 5 | **日权益/熔断基线** | `state_store.account_daily`（PRIMARY KEY (account_id, date)；start_total_asset 是 C-1 熔断 -3% 读口基线，close_total_asset 是日终闭合校验） | `daily_equity` 表已退役（Phase B5，死表清理） |
+| 6 | **交易计划** | `state_store.trade_event(SIGNAL).meta`（Phase C 升格为真相源；当前 Phase B 阶段 `logs/trading_plans/plan_<date>.json` 仍是生产写入口，**Phase C 将删除 save_plan/load_plan，切 DB 优先**） | `plan_<date>.json` 当前仍由 `trading_plan.save_plan` 落盘（过渡期镜像）；Phase C 后改为按需导出 |
+| 7 | **数据就绪** | `state_store.data_ready` + `job_ledger`（`get_ready` 单口读，PRIMARY KEY (date, dataset)） | — |
+| 8 | **播报幂等** | `job_ledger`（`logs/trading_job_run.db`，brief_<bot> 行 begin/finish 成对，独立库不与 trading_state 混） | — |
+| 9 | **参数迭代/实验** | `experiment/experiments.db`（ACTIVE 表，Phase B3 收口） | — |
 
-1. **回测结果统一到 SQLite**：`ops/migrate_replay_runs_to_sqlite.py` 把遗留 JSON
-   归档（`20260712-*`、`20260714-*`）全量迁入 `data/replay_tasks.db`（幂等，共 8 条
-   任务）；播报已改读 SQLite（JSON 仅作只读回退）。
-2. **遗留文件归档**：`presentation/logs/quanter.log`、`presentation/logs/live_trades.csv`、
-   CSV 备份、`plans/2024-06-01.json` + `.lock` → `logs/archive/`（只移动不删除）。
-3. **遗留目录标记**：`replay_runs/README.md` 声明只读归档；`backtest/runs.py` 标注
-   「遗留只读模块，生产禁止写入」。
-4. **陈旧注释修正**：`broadcast/brief_strategy.py`、`broadcast/__main__.py`、
-   `experiment/store.py` 中指向已停用 `plans/<date>.json` / `replay_runs/index.json`
-   的注释全部更新。
+> 注 1：第 6 域当前处于过渡态。`logs/trading_plans/plan_<date>.json`（`trading_plan.save_plan`）
+> 在 Phase C 删除前仍是生产写入口，**不构成违规双源**。`trade_event(SIGNAL)` 已双写
+> （`UNIQUE(account_id,trade_id,action)` 幂等），Phase C 升格为真相源后 JSON 降级为按需导出。
+> 注 2：`save_plan` 不在 `scripts/audit_ssot.py` BANNED 集合内 —— Phase C 才删，
+> 当前命中不算回归。Phase C 完成后应将 `save_plan`/`load_plan` 加入 BANNED。
+
+---
+
+## 读写拓扑（spec §3.2）
+
+```
+引擎/服务 ──写──▶ state_store（logs/trading_state.db 唯一写入口）
+                    │
+                    ├─▶ 导出接口（CSV/JSON 按需生成，不落盘）
+                    ├─▶ 播报/复盘/digest（唯一读入口）
+                    └─▶ 巡检 audit_ssot.py（一致性校验 + 护栏）
+```
+
+**禁止模式**：
+- 任何模块读 `logs/live_trades.csv` / `logs/param_iter_state.json` 回退（已删，命中护栏）。
+- 任何模块写 `logs/live_trades.csv`（Phase A 已删 record_live_trade / LIVE_TRADE_LOG）。
+- 任何模块写 `logs/param_iter_state.json`（Phase B3 已切 experiment.db ACTIVE）。
+- 任何模块读 `replay_runs/*.json` 旧归档作「近期回测」真相（已迁 `data/replay_tasks.db`）。
+
+---
+
+## 守卫机制（防回归）
+
+### 静态护栏（CI 时炸）
+
+`tests/test_ssot_static_guard.py`：精确正则扫生产目录 .py 文件（跳 archive/tests），
+BANNED pattern 命中即 FAIL：
+- `record_live_trade\(` / `LIVE_TRADE_LOG\s*=` / `LIVE_TRADE_COLUMNS\s*=`
+- `os\.getenv.*LIVE_TRADE_READ_SOURCE` / `["']live_trades\.csv`
+- `\bimport\b.*\brecord_live_trade\b`
+- `["']param_iter_state\.json`
+
+精确 pattern 跳注释：A4 删除时按 CLAUDE.md「注释说明为什么」保留 11 行审计追溯注释
+（如「原 record_live_trade CSV 审计块已删除」），注释里只出现【名字】无括号/等号/import/
+引号/csv 字面，不构成代码引用，pattern 不命中。
+
+### 运维巡检（调度/手动跑时炸）
+
+`scripts/audit_ssot.py`：跑 5 项检查，任一 FAIL 退出码 1：
+- `check_fill_position`：fill 流水 ↔ position 持仓一致（BUY+ / SELL- 累加 = position.qty，容差 1e-6）
+- `check_account_daily_closed`：每交易日 start+close 非空（熔断基线闭合）
+- `check_trade_event_chain`：孤儿 SIGNAL（>7 日无后续 CONFIRMED/VETOED/OPEN/FILLED/CLOSED）告警
+- `check_engine_process_count`：引擎进程数 ≤1（C-5 单例，wmic/pgrep 跨平台）
+- `check_guard_ripgrep`：复用 A5 BANNED（同口径 pattern，运维侧镜像）
+
+退出码语义：0=全绿，1=有不一致。可挂 schtasks / cron 定期跑。
+
+---
+
+## 历史 / 已治理动作
+
+### Phase A（2026-08-05，CSV 镜像彻底退役）
+
+- 删除 `record_live_trade` / `LIVE_TRADE_LOG` / `LIVE_TRADE_COLUMNS`（CSV 写盘三件套）。
+- 删除 `LIVE_TRADE_READ_SOURCE` env 回退分支（`aggregate_fills_by_symbol` / `export_trades` /
+  `query_trades` 三处读口）—— 只读 `state_store.query_fills`。
+- `submit_order` 审计平移 `trade_event`（BLOCKED / ORDERED / REJECTED / DRY_RUN），
+  `trade_event UNIQUE(account_id,trade_id,action)` 幂等双写（engine 路径 + server 手动路径）。
+- `logs/live_trades.csv` 归档到 `logs/archive/`。
+
+### Phase B（2026-08-05，DB schema 硬化 + 收口）
+
+- **B1**：expired 改 pre_open 现算（previous_trading_day 基准日，holding_days 边界断言 ==不平/>平）。
+- **B2**：归因落 DB 列（`position.strategy` + `position.entry_rationale`），engine 成交路径接线。
+- **B3**：`param_iter_state.json` 全切 `experiment.db` ACTIVE（`--legacy` fail-closed 入口）。
+- **B4**：播报幂等迁 `job_ledger`（brief_<bot> 行 begin/finish 成对，删 `logs/.last_<bot>_brief`）。
+- **B5**：`daily_equity` 死表退役 + `position_book` 清理（`account_daily` 是日权益唯一真相源）。
+- **B6**：`scripts/audit_ssot.py` 精确巡检（本文件配套）+ 本清单重写。
+
+### 历史（2026-08-03，CSV → SQLite 迁移）
+
+- 回测结果迁 `data/replay_tasks.db`（`replay_runs/*.json` 只读归档）。
+- `logs/quanter.log` 路径统一（旧 `presentation/logs/` 归档）。
+
+---
 
 ## 遗留风险与下一步
 
-- **运行中的旧 server**（2026-08-03 00:44 启动）仍以旧 `PROJECT_ROOT` 解析
-  `presentation/logs/`；重启后才会完全切到新路径（期间若产生成交流水会写回旧路径，
-  需在重启后再次检查归档）。
-- **前端 `/caisen` 死端点**：后端 caisen 路由已下线但前端 API 客户端仍在调用
-  （首页会报错/空态）；建议后续从 `caisen.ts` 移除死函数或恢复只读后端。
-- **名称映射双源**（#12）：内容同源（Tushare），但落盘 parquet 与实时拉取可能漂移；
-  建议统一以 `data_lake/stock_basic.parquet` 为 SSoT，`symbol_names` 改读同文件。
+- **第 6 域过渡**：Phase C 升格 `trade_event(SIGNAL).meta` 为真相源 + 删 `save_plan/load_plan`。
+  过渡期内 JSON 仍是生产写入口，不违规。Phase C 完成后应将 `save_plan/load_plan` 加入
+  BANNED pattern。
+- **account_daily start_total_asset 漏采**：模拟盘 / 非盘前启动场景下 start 可能 NULL
+  （`audit_ssot.check_account_daily_closed` 会告警）。生产 live 前需保证 pre_open 窗口
+  `[09:22, 10:00)` 内 engine 起来并写了 start snap_at；否则当日熔断基线裸奔。
+- **第 12 域 symbol→名称映射**：双源同源（Tushare），`data_lake/stock_basic.parquet`
+  （落盘）与 `data/symbol_names`（实时拉取）内容可能漂移；建议统一以 parquet 为 SSoT。
+- **前端 caisen 死视图**：`presentation/web/src/api/caisen.ts` 的 `listPlans/listReplayTasks`
+  指向已下线后端路由，是死代码（首页 `/caisen` 空态）。不阻塞 SSoT，但待后续清理。
