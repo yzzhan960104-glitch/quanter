@@ -40,6 +40,8 @@ PROD_DIRS = ["trading", "presentation/server", "broadcast", "research", "scripts
 # - os\.getenv.*LIVE_TRADE_READ_SOURCE → env 读口回退（A2 已删，回退口禁用）
 # - ["']live_trades\.csv  → 字符串字面量（open/Path 用，注释里「logs/live_trades.csv」无引号不命中）
 # - import record_live_trade → import 语句（A4 删函数定义后无导入目标）
+# - ["']param_iter_state\.json → B3（2026-08-05）legacy 冠军治理 JSON 字符串字面量（open/Path 用，
+#   注释/docstring 裸名无引号不命中；B3 切 ACTIVE 后生产代码不再 open 此文件，命中即回归）
 #
 # 注：ripgrep 默认不跳注释；本护栏「跳注释」语义完全来自 pattern 精确性
 #     （要求括号/等号/引号/import 关键字），而非 rg 自动识别注释。
@@ -50,6 +52,7 @@ BANNED_PATTERNS = [
     r"os\.getenv.*LIVE_TRADE_READ_SOURCE",
     r"[\"']live_trades\.csv",
     r"\bimport\b.*\brecord_live_trade\b",
+    r"[\"']param_iter_state\.json",
 ]
 
 # 预编译 pattern（性能 + 一次性校验正则合法性）
@@ -125,6 +128,20 @@ def test_no_disk_live_trades_csv():
     """
     assert not (ROOT / "logs" / "live_trades.csv").exists(), (
         "logs/live_trades.csv 仍存在（应归档到 logs/archive/）"
+    )
+
+
+def test_no_disk_param_iter_state_json():
+    """logs/param_iter_state.json 不存在（B3 收口，仅 logs/archive/ 允许）。
+
+    物理意图：legacy 冠军治理 JSON 已被 experiment.db ACTIVE 取代（单一真相源）。
+    根 logs/ 下不应再有此文件（应归档到 logs/archive/）。若存在 = 上次又有进程写了
+    legacy JSON = 双轨未消除。param_iter 入口已 fail-closed（不带 --legacy 拒绝运行），
+    生产链路无写入路径——若文件重生说明 param_iter 又被外部脚本拉起。
+    """
+    assert not (ROOT / "logs" / "param_iter_state.json").exists(), (
+        "logs/param_iter_state.json 仍存在（B3 已收口，应归档到 logs/archive/）；"
+        "若文件重生说明 param_iter 又被外部脚本拉起，需停调度"
     )
 
 

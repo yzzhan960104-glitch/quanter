@@ -10,17 +10,17 @@ report_json）——归档 07-14 后再无新条目，且没有任何周期性�
 任务参数：
     - strategy_name = neckline；
     - cfg_override = experiment.db 当前 ACTIVE 实验参数（resolve_active，单一真相源）；
-      无 ACTIVE 时回退 logs/param_iter_state.json（legacy 过渡，2026-08-03 治理后
-      param_iter 已退役，此回退仅在旧环境/手工场景兜底）；
+      无 ACTIVE 时返 {}（跑默认参数，B3 2026-08-05 起彻底切断 legacy JSON 回退——
+      双轨治理收口：legacy 文件已停更且不再读，单一真相源是 experiment.db）；
     - universe = None（全市场，与历史近期回测口径一致）；
     - 窗口 = 最近 3 个月 → 今天。
 
-    参数源治理（2026-08-03 · 双轨分叉修复）：
-    旧实现读 logs/param_iter_state.json 的 best——legacy param_iter 仍在夜跑时该文件
-    会与 experiment.db ACTIVE（实盘 _eod 实际使用的参数）分叉，导致周度回测播报与
-    实盘不可比。现改为优先 ``experiment.resolver.resolve_active()``（实盘同源），
-    无 ACTIVE 才回退旧文件。backtest→experiment 是合法正向依赖（experiment 纯配置
-    叶子，test_layer_contract 铁律 4 只禁 broker/execution/trading.engine）。
+    参数源治理（2026-08-03 双轨分叉 → 2026-08-05 B3 收口）：
+    旧实现读 legacy 冠军治理 JSON 的 best——与 experiment.db ACTIVE（实盘 _eod 实际
+    使用的参数）分叉，导致周度回测播报与实盘不可比。现单一真相源为
+    ``experiment.resolver.resolve_active()``（实盘同源），无 ACTIVE → {} 默认参数。
+    backtest→experiment 是合法正向依赖（experiment 纯配置叶子，test_layer_contract
+    铁律 4 只禁 broker/execution/trading.engine）。
 
     幂等：以 replay_tasks 最近任务 created_at 为闸——阈值内不重复提交；存在未终态
 （PENDING/RUNNING）任务也不重复提交（避免调度器堆积双跑）。
@@ -29,7 +29,6 @@ daemon）异步派发 worker 执行——本函数绝不阻塞、绝不跑重活
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta
 
@@ -38,33 +37,26 @@ from experiment.resolver import resolve_active
 
 logger = logging.getLogger(__name__)
 
-_STATE_FILE = "logs/param_iter_state.json"
 _WINDOW_DAYS = 90      # 回测窗口：最近 3 个月
 _MIN_INTERVAL_DAYS = 7  # 距上次任务 ≥7 天才提交下一次
 
 
 def _champion_cfg_override() -> dict:
-    """读当前生效实验参数（experiment.db ACTIVE，实盘同源）；无 ACTIVE 回退 legacy 文件。
+    """读当前生效实验参数（experiment.db ACTIVE，实盘同源）；无 ACTIVE 返 {}。
 
-    单一真相源（2026-08-03）：实盘 _eod 经 ``resolve_active()`` 发放参数，周度回测
-    必须读同一来源才可比。返回第一个 ACTIVE（weight>0）版本的 params；空则回退
-    ``logs/param_iter_state.json`` 的 best（legacy 过渡），仍失败返 {}（跑默认参数，
-    不抛——周度回测是观测旁路，数据源缺失不应阻断提交）。
+    单一真相源（2026-08-03 双轨治理 → 2026-08-05 B3 收口）：实盘 _eod 经
+    ``resolve_active()`` 发放参数，周度回测必须读同一来源才可比。返回第一个 ACTIVE
+    （weight>0）版本的 params；无 ACTIVE / DB 缺失 → {}（跑默认参数，不抛——周度回测
+    是观测旁路，数据源缺失不应阻断提交）。**不再回退 legacy JSON**：双轨治理收口，
+    legacy 冠军治理 JSON 已停更且不再读，单一真相源是 experiment.db。
     """
     try:
         active = resolve_active()
         if active:
             return dict(active[0].params)
     except Exception:
-        logger.warning("读 experiment ACTIVE 失败，回退 legacy state 文件", exc_info=True)
-    try:
-        with open(_STATE_FILE, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        best = payload.get("best") if isinstance(payload, dict) else None
-        return best if isinstance(best, dict) else {}
-    except Exception:
-        logger.warning("读 %s 冠军参数失败，周度回测用默认参数", _STATE_FILE, exc_info=True)
-        return {}
+        logger.warning("读 experiment ACTIVE 失败，周度回测用默认参数", exc_info=True)
+    return {}
 
 
 def maybe_enqueue_weekly_replay(now: datetime | None = None,

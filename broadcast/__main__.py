@@ -386,11 +386,11 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
       候选链：plan_<next_trading_day(date)>（T 日盘后产出的次日计划）→
       plan_<date>（同日计划，兼容跨日/补跑）→ 旧 plans/<date>.json（{plans: [...]}）。
       文件都不存在（当日未扫描/周末）→ None（brief 降级「—」）。
-    - **param_iter_state 适配真实结构**：``logs/param_iter_state.json`` 真实结构是
-      ``{tried: {param_json: {ann, kelly, curve, ...}}}``，而 build_strategy_brief 期望
-      ``{best_annual, iter}`` 简字段——本函数负责适配：``best_annual = max(ann)``、
-      ``iter = len(tried)``，把适配逻辑收口在取数层（brief 纯函数保持极简）。文件不存在/
-      损坏/空 tried → None（brief 降级「—」）。
+    - **param_iter_state 单一真相源（B3 2026-08-05 收口）**：仅读 experiment.db ACTIVE
+      （``_experiment_active_state``）。无 ACTIVE → None（brief 降级「—」）。**不再回退**
+      legacy 冠军治理 JSON——双轨治理收口，单一真相源是 experiment.db，旧文件已停更
+      且归档（logs/archive/）。原 legacy 适配逻辑（best_annual=max(ann)、iter=len(tried)）
+      随之移除，brief 只渲染 experiment 形态。
     - **recent_runs**（2026-08-03 修复）：优先读当前回测单一真相源
       ``data/replay_tasks.db`` 的 SUCCESS 任务（Spec 1 起 worker 结果落
       report_json，老 JSON 归档已停更——旧实现读 replay_runs/index.json 导致
@@ -438,43 +438,15 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
             logger.warning("读 plans/%s.json 失败，scan_count 降级为 None", date, exc_info=True)
             scan_count = None
 
-    # ── param_iter_state：优先 experiment.db ACTIVE（单一真相源，2026-08-03）──
-    # legacy param_iter 已退役，其 state 文件不再更新；播报必须先读实盘同源的
-    # experiment 库（ACTIVE 版本 + outer 去偏年化），无 ACTIVE 才回退旧文件（告警）。
+    # ── param_iter_state：单一真相源 experiment.db ACTIVE（B3 2026-08-05 收口）──
+    # 双轨治理收口：legacy 冠军治理 JSON 已归档（logs/archive/），不再回退读旧文件。
+    # 无 ACTIVE → None（brief 降级「—」），由 _experiment_active_state 单口负责。
     param_iter_state: dict | None = None
     try:
         param_iter_state = _experiment_active_state()
-        if param_iter_state is None:
-            # legacy 回退（过渡期）：param_iter 退役后此文件停更，读到即陈旧——
-            # 显式告警让运维知道播报已不在实验中心口径。
-            logger.warning("experiment ACTIVE 为空，回退 legacy logs/param_iter_state.json"
-                           "（param_iter 已退役，此文件可能陈旧）")
-            pi_path = Path("logs") / "param_iter_state.json"
-            if pi_path.exists():
-                with pi_path.open("r", encoding="utf-8") as f:
-                    raw_pi = json.load(f)
-                tried = raw_pi.get("tried") if isinstance(raw_pi, dict) else None
-                if isinstance(tried, dict) and tried:
-                    # 2026-08-02：优先读文件自带冠军 best_ann（param_iter 直接维护的
-                    # 主键），失败才从 tried 重算 max(ann)——重算口径与 best_ann 等价，
-                    # 但读冠军更稳（tried 未来若含非参数字段也不受影响）。
-                    best_ann = raw_pi.get("best_ann")
-                    if not isinstance(best_ann, (int, float)):
-                        anns = [
-                            v.get("ann")
-                            for v in tried.values()
-                            if isinstance(v, dict) and isinstance(v.get("ann"), (int, float))
-                        ]
-                        best_ann = max(anns) if anns else None
-                    if best_ann is not None:
-                        param_iter_state = {
-                            "best_annual": best_ann,
-                            "iter": len(tried),
-                        }
-                    # best_ann 空（文件无冠军且所有项都没 ann 字段）→ None，brief 降级
     except Exception:
-        # 文件损坏/JSON 解析失败 → None（brief 降级「—」），不阻断播报
-        logger.warning("读 logs/param_iter_state.json 失败，param_iter 降级为 None", exc_info=True)
+        # _experiment_active_state 内部已有 try/except 返 None，此处兜底防未预期异常
+        logger.warning("取 param_iter_state 异常，降级为 None", exc_info=True)
         param_iter_state = None
 
     # ── recent_runs：优先读 replay_tasks.db（当前单一真相源） ──
@@ -502,10 +474,11 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
 def _experiment_active_state() -> dict | None:
     """读 experiment.db 当前 ACTIVE 实验 → {experiment_id, version, best_annual}。
 
-    单一真相源（2026-08-03 双轨治理）：策略播报的「参数迭代状态」改由实验中心提供，
-    与实盘 _eod（resolve_active）同源。best_annual = ACTIVE 版本 note 里的 outer 去偏
-    年化（discovery publish 写入，如 "outer ann=1.9% ..."），无 note/解析失败 → None
-    （brief 只渲染版本号）。无 ACTIVE / DB 缺失 → None（调用方回退 legacy 文件并告警）。
+    单一真相源（2026-08-03 双轨治理 → 2026-08-05 B3 收口）：策略播报的「参数迭代状态」
+    仅由实验中心提供，与实盘 _eod（resolve_active）同源。best_annual = ACTIVE 版本 note
+    里的 outer 去偏年化（discovery publish 写入，如 "outer ann=1.9% ..."），无 note/解析
+    失败 → None（brief 只渲染版本号）。无 ACTIVE / DB 缺失 → None（调用方降级「—」，
+    **不再回退 legacy JSON**——双轨治理收口）。
     """
     try:
         from experiment.models import ExperimentStatus

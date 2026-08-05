@@ -29,7 +29,6 @@
 """
 import os
 import sys
-import json
 import time
 import argparse
 
@@ -47,7 +46,8 @@ except Exception:
 import pandas as pd
 from strategies.neckline.method_v0 import DEFAULTS
 from strategies.neckline.backtest import scan_symbol, risk_metrics, EXEC_DEFAULTS
-from param_iter import load_universe, PARAM_SPACE, STATE_FILE  # 复用：universe 加载 + 21 维参数分层 + state 路径
+from param_iter import load_universe, PARAM_SPACE  # 复用：universe 加载 + 21 维参数分层
+from experiment.resolver import resolve_active  # 当前生效冠军参数（B3 2026-08-05 收口单一真相源）
 
 
 def run_full_then_split(params, universe):
@@ -93,45 +93,43 @@ def metrics_of(pairs):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="颈线法冠军 2026 近期 OOS 去偏探查（L1 Go/No-Go 最小版）")
-    ap.add_argument("--top", type=int, default=1, help="跑全段 score top-N 冠军（默认 1=best；扩到 5 看是否孤峰）")
+    ap = argparse.ArgumentParser(description="颈线法 ACTIVE 冠军 2026 近期 OOS 去偏探查（L1 Go/No-Go 最小版）")
+    ap.add_argument("--top", type=int, default=1, help="(已退役) top-N 概念在 ACTIVE 单源下无意义，保留兼容旧调用")
     args = ap.parse_args()
 
-    state = json.load(open(STATE_FILE, encoding="utf-8"))
-    # 按全段 score 降序取 top-N（best 即 top1）。history 存了每组的 params + 全段 ann/sharpe/max_dd/score。
-    ranked = sorted(state["history"], key=lambda x: x.get("score", 0), reverse=True)[:args.top]
+    # 冠军来源（B3 2026-08-05 收口）：experiment.db ACTIVE（实盘 _eod 同源，单一真相源）。
+    # 不再读 legacy 冠军治理 JSON。无 ACTIVE → 拒绝运行（探查工具无当前冠军无从跑）。
+    active = resolve_active()
+    if not active:
+        print("[probe_champion_oos] 无 experiment.db ACTIVE 实验——探查需要当前生效冠军参数。\n"
+              "  promote 一个实验：python -m experiment promote <id> --weight 0.1",
+              file=sys.stderr)
+        sys.exit(2)
+    # 多 ACTIVE 灰度并存时取权重最大者（与 broadcast _experiment_active_state 同口径）
+    top_active = max(active, key=lambda e: e.weight)
+    params = dict(top_active.params)
 
-    print(f"=== L1 Go/No-Go 探查：param_iter 冠军 2026 近期 OOS 去偏 ===")
-    print(f"state: 已试 {len(state['tried'])} 组 | best_ann(全段记录)={state.get('best_ann', 0) * 100:.1f}% | "
-          f"best_score={state.get('best_score', 0):.3f}")
+    print(f"=== L1 Go/No-Go 探查：ACTIVE 冠军 2026 近期 OOS 去偏 ===")
+    print(f"experiment: {top_active.experiment_id} | weight={top_active.weight}")
     print(f"加载 universe（创板科创 2025至今，load_universe 复用）...")
     t_load = time.time()
     universe = load_universe()   # 复用 param_iter 的 universe（2025 截面，含 2026 短外推）
     print(f"universe: {len(universe)} 只（加载 {time.time() - t_load:.0f}s）\n")
 
-    for i, h in enumerate(ranked):
-        params = h["params"]
-        print(f"[top{i + 1}] 全段 score={h.get('score', 0):.3f}（history 记录 ann={h.get('ann', 0) * 100:.1f}%）")
-        t0 = time.time()
-        segs = run_full_then_split(params, universe)
-        dt = time.time() - t0
+    print(f"[ACTIVE] {top_active.experiment_id}")
+    t0 = time.time()
+    segs = run_full_then_split(params, universe)
+    dt = time.time() - t0
 
-        for seg in ("full", "2025", "2026"):
-            m = metrics_of(segs[seg])
-            tag = "★2026(OOS代理)" if seg == "2026" else ("◇full(复现锚)" if seg == "full" else "  2025(样本内)")
-            print(f"  {tag:<18} ann{m['ann'] * 100:>7.1f}%  夏普{m['sharpe']:>5.2f}  "
-                  f"回撤{m['max_dd'] * 100:>6.1f}%  {m['n']:>5}笔  kelly{m['kelly'] * 100:>5.1f}%")
+    for seg in ("full", "2025", "2026"):
+        m = metrics_of(segs[seg])
+        tag = "★2026(OOS代理)" if seg == "2026" else ("◇full(评估锚)" if seg == "full" else "  2025(样本内)")
+        print(f"  {tag:<18} ann{m['ann'] * 100:>7.1f}%  夏普{m['sharpe']:>5.2f}  "
+              f"回撤{m['max_dd'] * 100:>6.1f}%  {m['n']:>5}笔  kelly{m['kelly'] * 100:>5.1f}%")
 
-        # 复现校验：full 段 ann 应与 param_iter history 记录吻合（同源内核），漂移>1% 报警
-        m_full = metrics_of(segs["full"])
-        hist_ann = h.get("ann", 0)
-        drift = abs(m_full["ann"] - hist_ann)
-        flag = "✓复现(脚本可信)" if drift < 0.01 else f"⚠漂移 {drift * 100:.1f}%（脚本/universe 有差异，结果存疑）"
-        print(f"  复现校验: full ann {m_full['ann'] * 100:.1f}% vs history {hist_ann * 100:.1f}% → {flag}")
-        print(f"  本组耗时 {dt:.0f}s\n")
+    print(f"  本组耗时 {dt:.0f}s\n")
 
-    print(f"=== 解读：看每组 ★2026 行。ann 塌到个位数/为负 → 冠军依赖 2025 段、过拟合信号 ===")
-    print(f"          top-N 多组都塌 → 2026 整体行情不利颈线法；仅 best 塌 → best 是过拟合尖峰 ===")
+    print(f"=== 解读：看 ★2026 行。ann 塌到个位数/为负 → 冠军依赖 2025 段、过拟合信号 ===")
 
 
 if __name__ == "__main__":

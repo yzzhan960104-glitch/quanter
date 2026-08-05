@@ -6,17 +6,18 @@
 
 用法：PowerShell Start-Process
 """
-import json
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pandas as pd
 from strategies.neckline.method_v0 import DEFAULTS
 from strategies.neckline.backtest import scan_symbol, kelly_metrics, EXEC_DEFAULTS
+from experiment.resolver import resolve_active  # B3 2026-08-05：当前生效冠军参数（单一真相源）
 
 
 def is_kbkg(sym):
@@ -39,16 +40,23 @@ for holding_days in range(0, 21):
     if holding_days % 2 == 0 or holding_days in (1, 5, 6, 15):
         print(f"  day{holding_days:>2}: eff_mult={eff:.2f} stop={stop:.3f}{tag}", flush=True)
 
-# ② top1 创板+科创 2026，固定 vs trailing
-state = json.load(open("logs/param_iter_state.json", encoding="utf-8"))
-top1 = sorted(state["tried"].items(), key=lambda x: x[1]["ann"], reverse=True)[0]
-params = json.loads(top1[0])
+# ② ACTIVE 冠军 创板+科创 2026，固定 vs trailing
+# B3 2026-08-05：冠军参数从 experiment.db ACTIVE 取（实盘 _eod 同源，单一真相源）。
+# 不再读 legacy 冠军治理 JSON。无 ACTIVE → 拒绝运行（验证工具无当前冠军无从对比）。
+_active = resolve_active()
+if not _active:
+    print("[kbkg_trailing_verify] 无 experiment.db ACTIVE 实验——验证需要当前生效冠军参数。",
+          file=sys.stderr)
+    sys.exit(2)
+_top_active = max(_active, key=lambda e: e.weight)
+params = dict(_top_active.params)
 id_keys = ["window", "min_touches", "min_suppression", "local_extrema_window", "min_bottoms",
            "breakout_vol_mult", "min_rr", "max_h_atr", "stop_atr_mult", "tp_h_mult", "decay_tau"]
 exec_keys = ["max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
              "tp1_h_mult", "tp1_portion", "cancel_thresh_mult"]
 id_p = {k: params[k] for k in id_keys if k in params}
 exec_p_base = {k: params[k] for k in exec_keys if k in params}
+print(f"[ACTIVE] {_top_active.experiment_id} | weight={_top_active.weight}", flush=True)
 
 lake = pd.read_parquet("data_lake/a_shares_daily.parquet").reset_index()
 lake["date"] = pd.to_datetime(lake["date"])

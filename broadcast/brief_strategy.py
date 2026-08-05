@@ -4,14 +4,14 @@
 内容：颈线法当日扫描信号数 + 参数迭代状态 + 近期回测胜率/回撤/年化。
 
 物理定位：取数由 ``__main__._fetch_strategy_snapshot`` 完成（读
-logs/trading_plans/plan_<T+1>.json + logs/param_iter_state.json +
+logs/trading_plans/plan_<T+1>.json + experiment.db ACTIVE（参数迭代状态单一真相源）+
 data/replay_tasks.db；2026-08-03 起回测结果以 SQLite 为单一真相源，replay_runs/
 JSON 归档仅作只读回退），本函数零 IO 副作用，仅做
 模板渲染与百分比格式化，便于单测。任一字段缺失均降级为「—」或「无记录」文案，绝不抛。
 
 鲁棒性（CLAUDE.md 量化风控·边界审查）：
 - ``scan_count`` 非 int（如 None）→ 渲染「—」，不阻断；
-- ``param_iter_state`` None / 缺 best_annual / 缺 iter → 对应位降级「—」；
+- ``param_iter_state`` None / 缺 experiment_id / 缺 version → 对应位降级「—」；
 - ``recent_runs`` 空 / 字段类型错 → 渲染「近期无回测记录」或单条「—」。
 """
 from __future__ import annotations
@@ -30,10 +30,10 @@ def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs,
         scan_count: int|None，当日颈线法扫描信号数（T 日盘后 EOD 落盘计划文件的
             len(orders)，见 __main__ 候选链）。
         param_iter_state: dict|None，两种形态：
-            - 实验中心形态（2026-08-03 起优先）：``experiment_id``（str）+ ``version``
-              （int）+ 可选 ``best_annual``（float，ACTIVE 的 outer 去偏年化）；
-            - legacy 形态：``best_annual``（float, 如 0.997）+ ``iter``（int, 第几轮），
-              由 ``__main__`` 从真实 ``logs/param_iter_state.json`` 适配而来。
+            - 实验中心形态（B3 2026-08-05 起唯一真相源）：``experiment_id``（str）+
+              ``version``（int）+ 可选 ``best_annual``（float，ACTIVE 的 outer 去偏年化）；
+            - legacy 形态（已退役，仅单测兜底）：``best_annual``（float, 如 0.997）+
+              ``iter``（int, 第几轮）。生产取数已不注入 legacy 形态（双轨治理收口）。
         recent_runs: list[dict]|None，近期回测摘要，每条期望字段
             ``run_id/win_rate/max_drawdown/annualized_return``（与 replay_runs/index.json 同源）。
 

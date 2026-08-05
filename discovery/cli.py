@@ -1,18 +1,23 @@
 # -*- coding: utf-8 -*-
 """命令行：python -m discovery {oos,verify}。
 
-oos：对当前 param_iter 冠军（logs/param_iter_state.json 的 best）跑 2025/2026 holdout
-嵌套评估，固化其 2026 去偏水平（L1 验收锚），落 SQLite。解决探查实证的快照漂移。
+oos：对当前生效实验（experiment.db ACTIVE，resolve_active 单一真相源）跑 2025/2026
+holdout 嵌套评估，固化其 2026 去偏水平（L1 验收锚），落 SQLite。解决探查实证的快照漂移。
 
 物理意图：探查脚本 probe_champion_oos.py 因 data_lake 增量 + 流动性边界票浮动，两次跑
 universe 漂 6%——"连复现自己都做不到"。本 cli 把"冠军 2026 去偏水平"固化成一个带快照
 指纹 + 引擎指纹的 trial 记录，后续内核/数据变了老 trial 自动标 stale（engine_hash/
 snapshot_hash 双指纹），给 L1 验收一个不漂移的锚。
+
+参数源（2026-08-05 B3 收口）：冠军参数从 ``experiment.resolver.resolve_active()`` 取
+（实盘 _eod 同源，单一真相源）；无 ACTIVE → 拒绝运行（oos/verify 是人审探查工具，
+    无 ACTIVE 无从跑「当前冠军」）。**不再读 legacy 冠军治理 JSON**——双轨治理收口。
 """
 import argparse
 import hashlib
 import json
 import os
+import sys
 
 from discovery.snapshot import freeze
 from discovery.split import holdout_split
@@ -20,8 +25,7 @@ from discovery.objective import evaluate
 from discovery.store import (init_db, connect, write_snapshot, write_trial,
                              trial_id_of, DEFAULT_DB_PATH)
 from discovery.judging import feasibility_gate
-
-STATE_FILE = "logs/param_iter_state.json"
+from experiment.resolver import resolve_active
 
 
 def _db_path():
@@ -47,15 +51,22 @@ def _engine_hash():
 def cmd_oos(args):
     """当前冠军 2026 去偏评估 + 落库。
 
-    串起 freeze→holdout_split→evaluate→judging→store 全链。冠军从 param_iter_state.json
-    的 best 读（与探查脚本同源），跑一次全历史 scan，分 inner(2025)/outer(2026) 两段报指标。
-    outer 不反馈任何选择（冠军已由 param_iter 用 2025+2026 全段 score 选出——诚实标注见下）。
+    串起 freeze→holdout_split→evaluate→judging→store 全链。冠军从 experiment.db ACTIVE
+    （resolve_active 单一真相源，实盘 _eod 同源）读，跑一次全历史 scan，分 inner(2025)/
+    outer(2026) 两段报指标。outer 不反馈任何选择（冠军已由 param_iter 用 2025+2026 全段
+    score 选出——诚实标注见下）。
+
+    无 ACTIVE 实验 → 拒绝运行（人审探查工具，无当前生效实验无从跑「当前冠军」）。
     """
+    active = resolve_active()
+    if not active:
+        print("[oos] 无 experiment.db ACTIVE 实验——oos/verify 探查需要当前生效冠军参数。\n"
+              "  promote 一个实验：python -m experiment promote <id> --weight 0.1",
+              file=sys.stderr)
+        sys.exit(2)
+    params = dict(active[0].params)
     universe, meta = freeze()
     split = holdout_split(args.embargo)
-    with open(STATE_FILE, encoding="utf-8") as f:
-        state = json.load(f)
-    params = state["best"]
     print(f"=== discovery oos：当前冠军 2026 去偏（snapshot={meta.snapshot_hash}）===")
     print(f"snapshot: {meta.universe_count} 只 | {meta.date_range} | hash {meta.snapshot_hash}")
     res = evaluate(params, universe, split)
@@ -87,16 +98,23 @@ def cmd_verify(args):
 
     物理意图：oos 固化了冠军的 2026 去偏水平（L1 验收锚），但"一组参数出高 calmar"
     可能是过拟合尖峰——本命令在冠军 21 维邻域 ±perturb 扰动采样，看 outer calmar 是否
-    稳健（高原放行）还是塌掉（孤峰否决）。叠加基线对照（state best_ann 全段 vs outer 2026）
-    给人审一个"去偏幅度"的直觉（spec §1.4 漂移实证）。
+    稳健（高原放行）还是塌掉（孤峰否决）。叠加基线对照（ACTIVE 版本 note 的 outer ann
+    vs 当前跑出的 outer 2026）给人审一个"去偏幅度"的直觉（spec §1.4 漂移实证）。
     Plan 1 手动验收：判定结果打印不进排序（排序留 Plan 3 搜索）。
+
+    冠军来源（2026-08-05 B3 收口）：experiment.db ACTIVE（resolve_active 单一真相源，
+    实盘 _eod 同源）；无 ACTIVE → 拒绝运行。
     """
+    active = resolve_active()
+    if not active:
+        print("[verify] 无 experiment.db ACTIVE 实验——verify 探查需要当前生效冠军参数。\n"
+              "  promote 一个实验：python -m experiment promote <id> --weight 0.1",
+              file=sys.stderr)
+        sys.exit(2)
+    params = dict(active[0].params)
     from discovery.neighborhood import neighborhood_stability
     universe, meta = freeze()
     split = holdout_split(args.embargo)
-    with open(STATE_FILE, encoding="utf-8") as f:
-        state = json.load(f)
-    params = state["best"]
     print(f"=== discovery verify：邻域稳定性 + 基线对照（snapshot={meta.snapshot_hash}）===")
     stab = neighborhood_stability(params, universe, split,
                                   perturb=args.perturb, n_samples=args.n_samples)
@@ -106,8 +124,7 @@ def cmd_verify(args):
           f"mean={stab['neighbor_mean']:.2f} std={stab['std']:.2f}")
     verdict = "是（高原稳健，放行）" if stab["is_plateau"] else "否（孤峰，spec §12⑥ 否决——冠军是过拟合尖峰）"
     print(f"邻域稳定性判定: {verdict}")
-    print(f"基线对照: state best_ann(全段)={state.get('best_ann', 0)*100:.1f}% "
-          f"vs outer 2026 ann={stab['base_outer']['ann']*100:.1f}% "
+    print(f"基线对照: ACTIVE 当前 outer ann={stab['base_outer']['ann']*100:.1f}% "
           f"（去偏幅度见 spec §1.4）")
 
 
