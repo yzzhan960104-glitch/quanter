@@ -97,6 +97,32 @@ def next_trading_day(date_str: str) -> str:
     return (d + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
+def previous_trading_day(date_str: str) -> str:
+    """``date_str``（YYYY-MM-DD）之前最近的一个 A 股交易日。
+
+    用途（SSoT Phase B 断点-2 · B1 pre_open 超期现算基准日）：
+        expired_positions 改 pre_open 现算（删除 post_close 写盘 + pre_open 读盘），
+        基准日 = ``previous_trading_day(today)`` = 上一交易日（holding_days 计算的 asof）。
+        Why 上一交易日非 today：pre_open 在 T 日开盘前跑，T 日尚未收盘，entry_date 与
+        T 日做差会把 T 日算入 holding_days（自然多算一天）→ 超期判定整体提前一日 →
+        误平窗口内的持仓（致命）。基准日取上一交易日（= T-1 收盘口径）保证零漂移。
+
+    实现（与 ``next_trading_day`` 对称）：从 ``date_str-1`` 起逐日 ``is_trading_day`` 回溯，
+    最多 15 自然日（覆盖周末 + 春节/国庆等长假）。跨年（1 月初 → 上年 12 月底）由
+    ``is_trading_day`` 内部按候选日的 year 拉 trade_cal 自动处理，无需特判。
+    """
+    from datetime import datetime, timedelta
+    d = datetime.strptime(date_str, "%Y-%m-%d")
+    for i in range(1, 16):
+        cand = (d - timedelta(days=i)).strftime("%Y-%m-%d")
+        if is_trading_day(cand):
+            return cand
+    # 兜底：15 自然日内无交易日（极端长假叠加，A 股无此场景但 defensive 防 IndexError）
+    # → 返 date_str-1。该值可能非交易日，交由上层 _pre_open 的 is_trading_day 守卫
+    # 自然告警拦截（宁可显式失败，不静默误算超期）。
+    return (d - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def is_intraday_session(now: datetime) -> bool:
     """是否 A 股盘中（9:30-11:30 / 13:00-15:00）。"""
     t = now.time()

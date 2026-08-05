@@ -37,7 +37,7 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
     with patch("trading.engine.get_gateway", return_value=None), \
             patch("trading.engine._cancel_all_open_orders",
                   new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-            patch("trading.engine._load_expired_positions", return_value=[]), \
+            patch("trading.engine._scan_expired_positions", return_value=[]), \
             patch("trading.engine._ACTIVE_ENGINE", eng), \
             patch("trading.engine._mode", return_value="live"), \
             patch("trading.engine._alert_critical") as ac, \

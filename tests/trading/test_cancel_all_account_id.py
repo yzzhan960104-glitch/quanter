@@ -76,7 +76,7 @@ def test_pre_open_cancel_passes_account_id(isolated_eng, monkeypatch):
          patch("trading.engine.get_gateway", return_value=AsyncMock(**{"query_asset.return_value": {}})), \
          patch("trading.engine._cancel_all_open_orders", new=_spy_cancel), \
          patch("trading.engine._resolve_account_id", return_value="ACC_QMT_001"), \
-         patch("trading.engine._load_expired_positions", return_value=[]):
+         patch("trading.engine._scan_expired_positions", return_value=[]):
         tp.load_plan.return_value = {"confirmed": True, "orders": []}
         asyncio.run(engine.pre_open("2026-07-31"))
 

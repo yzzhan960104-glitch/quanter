@@ -96,7 +96,7 @@ def test_insert_order_failure_raises_critical_halt(isolated_eng, monkeypatch):
     with patch("trading.engine.trading_plan") as tp, \
          patch("trading.engine._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._load_expired_positions", return_value=[]), \
+         patch("trading.engine._scan_expired_positions", return_value=[]), \
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
@@ -130,7 +130,7 @@ def test_idempotent_read_failure_raises_critical_halt(isolated_eng, monkeypatch)
     with patch("trading.engine.trading_plan") as tp, \
          patch("trading.engine._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._load_expired_positions", return_value=[]), \
+         patch("trading.engine._scan_expired_positions", return_value=[]), \
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
@@ -164,7 +164,7 @@ def test_submit_backfill_failure_raises_critical_halt(isolated_eng, monkeypatch)
     with patch("trading.engine.trading_plan") as tp, \
          patch("trading.engine._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._load_expired_positions", return_value=[]), \
+         patch("trading.engine._scan_expired_positions", return_value=[]), \
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
@@ -195,7 +195,7 @@ def test_account_row_failure_raises_critical_halt(isolated_eng, monkeypatch):
     with patch("trading.engine.trading_plan") as tp, \
          patch("trading.engine._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._load_expired_positions", return_value=[]), \
+         patch("trading.engine._scan_expired_positions", return_value=[]), \
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
@@ -227,7 +227,7 @@ def test_submit_runtime_error_stays_l2_not_halt(isolated_eng, monkeypatch):
     with patch("trading.engine.trading_plan") as tp, \
          patch("trading.engine._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._load_expired_positions", return_value=[]), \
+         patch("trading.engine._scan_expired_positions", return_value=[]), \
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:

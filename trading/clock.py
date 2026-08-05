@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from trading.calendar import next_trading_day
+from trading.calendar import next_trading_day, previous_trading_day
 
 
 def now() -> datetime:
@@ -47,3 +47,15 @@ def trading_day() -> str:
     （[[eod-date-offbyone-fix]] 病灶：原 eod 用 today 落盘，pre_open 读 today 永远差一天）。
     """
     return next_trading_day(today())
+
+
+def pretrade_date(date: str) -> str:
+    """``date`` 的上一交易日（薄转发 calendar.previous_trading_day）。
+
+    物理意图（SSoT Phase B 断点-2 · B1 pre_open 超期现算基准日）：
+        pre_open 在 T 日开盘前算超期持仓，基准日必须取 T-1（上一交易日收盘口径）而非
+        today（T 日未收盘会把 T 日算入 holding_days → 超期整体提前一日 → 误平窗口内持仓）。
+        集中口子（与 today/trading_day 同源）便于测试 monkeypatch trading.clock.pretrade_date
+        冻结基准日，避免散落调用 previous_trading_day 难以 patch。
+    """
+    return previous_trading_day(date)
