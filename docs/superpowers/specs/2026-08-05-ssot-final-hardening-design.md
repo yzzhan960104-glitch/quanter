@@ -148,8 +148,10 @@ W3 做的是“收敛”而非“清除”：消费端默认读 DB，但 CSV 仍
 ### A5 静态护栏
 
 - 新增 `tests/test_ssot_static_guard.py`：
-  - 生产代码（trading/presentation/broadcast/research）无 `live_trades.csv`、`LIVE_TRADE_READ_SOURCE`、`record_live_trade` 引用；
-  - `logs/live_trades.csv` 不存在（或仅在 archive 目录）。
+  - 生产代码（trading/presentation/broadcast/research/scripts）零 `live_trades.csv`/`LIVE_TRADE_READ_SOURCE`/`record_live_trade`/`LIVE_TRADE_LOG` **代码引用**（精确 pattern：`record_live_trade\(`/`LIVE_TRADE_LOG\s*=`/`LIVE_TRADE_COLUMNS\s*=`/`os.getenv.*LIVE_TRADE_READ_SOURCE`/`["']live_trades\.csv`/`import.*record_live_trade`，**跳注释/docstring**——兼容 A4 保留的审计追溯注释，符合 CLAUDE.md「注释说明为什么」；纯 Python `re` 实现跨平台，非 ripgrep——Windows 兼容 + pattern 语义零损失）；
+  - 内置敏感性自检（注释注入不命中 + 代码注入命中），防 pattern 误放宽；
+  - `logs/live_trades.csv` 不存在（仅 `logs/archive/` 允许）。
+- **spec 字面「扫含注释」 → 实施修订为「扫代码引用（跳注释）」**（final review 2026-08-05 共识：审计追溯注释有价值，护栏防回归本意是代码引用）。
 
 ---
 

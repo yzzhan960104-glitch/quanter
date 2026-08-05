@@ -1686,7 +1686,7 @@ async def post_close(
             if attribution:
                 result["trades_attribution"] = len(attribution)
                 logger.info(
-                    "【盘后归因】aggregate_fills(CSV) vs position_book 出入（仅展示，"
+                    "【盘后归因】aggregate_fills(DB fill) vs position_book 出入（仅展示，"
                     "不重写账本；drift 以 broker 权威为准）: %s",
                     ", ".join(f"{s}({lo}→{n})" for s, lo, n in attribution))
         except Exception:
