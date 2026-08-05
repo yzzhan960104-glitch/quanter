@@ -161,7 +161,7 @@ def _register_with_powershell(user: str) -> int:
     )
     return subprocess.run(
         ["powershell", "-NoProfile", "-Command", script],
-        capture_output=True, text=True).returncode
+        capture_output=True, text=True, timeout=30).returncode
 
 
 def unregister_discovery() -> None:

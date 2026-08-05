@@ -25,4 +25,7 @@ chcp 65001 >nul
 cd /d "F:\quanter"
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
+REM code-review 修复：本 bat 是历史第二入口，统一 fail-closed（防 dry_run 接管生产）。
+REM 唯一入口请用 scripts/start_server.bat / ops/restart_trading.py（B1/B5）。
+set QUANTER_REQUIRE_LIVE=1
 ".venv310\Scripts\python.exe" -m trading

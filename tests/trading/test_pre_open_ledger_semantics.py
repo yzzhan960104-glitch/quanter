@@ -46,6 +46,14 @@ async def test_pre_open_partial_rejected_marks_done(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pre_open_live_zero_rejected_marks_done(monkeypatch, tmp_path):
+    """code-review: 全部 veto/超期/已挂（submitted=0 且 rejected=0）→ done，不是 failed。"""
+    _, row = await _run_pre_open(monkeypatch, tmp_path, {
+        "submitted": 0, "rejected": 0, "total": 3, "mode": "live"})
+    assert row["status"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_pre_open_gate_reason_marks_skipped(monkeypatch, tmp_path):
     """A2: gate 未过（skipped/reason）→ 保持 skipped（补跑窗口内可重试）。"""
     _, row = await _run_pre_open(monkeypatch, tmp_path, {

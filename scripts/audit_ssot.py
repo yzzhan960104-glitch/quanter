@@ -22,8 +22,6 @@ BANNED pattern 边界（B6 决策 / C3 收尾）：
     CONFIRMED) 唯一真相源）。tests/_legacy_plan_io.py 测试专用 legacy shim 例外（PROD_DIRS
     不扫 tests/，不会误命中）。
 """
-import json
-import os
 import platform
 import re
 import subprocess
@@ -42,6 +40,16 @@ except (AttributeError, OSError):
     pass
 
 ROOT = Path(__file__).resolve().parents[1]
+# code-review 修复：进程拓扑探测与 trading_supervisor 共用 ops/process_topology.py
+# （原实现复制两份 → 端口/pid 文件/引擎进程口径漂移，如 audit 版漏了 LOCK_DIR env）。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from ops.process_topology import (
+    client_status as _client_status,
+    engine_processes as _engine_processes,
+    pid_file_owner as _pid_file_owner,
+    port_holder_pid as _port_holder_pid,
+)
 DB_PATH = ROOT / "logs" / "trading_state.db"
 
 # 护栏扫描的生产目录（与 tests/test_ssot_static_guard.py PROD_DIRS 同口径）
@@ -180,72 +188,14 @@ def check_engine_process_count():
     return f"引擎进程数 {n} > 1（C-5 单例红线，端口 8000 / QMT session 抢占）" if n > 1 else None
 
 
-def _engine_processes() -> list[dict]:
-    """列引擎 python 进程（cmdline 含 -m trading / presentation.server.main:app）。
-
-    A6：弃 wmic（新 Windows 已 deprecated，本机实测 RPC 失败/超时），改 PowerShell
-    Get-CimInstance（短超时）；任何异常返空（巡检宁可漏报，不因探针故障假报）。
-    """
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python' } | "
-             "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"],
-            capture_output=True, text=True, timeout=8)
-        raw = json.loads(r.stdout) if r.stdout.strip() else []
-        if isinstance(raw, dict):
-            raw = [raw]
-        return [
-            {"pid": int(x["ProcessId"]), "exe": x.get("ExecutablePath"),
-             "cmdline": x.get("CommandLine") or ""}
-            for x in raw
-            if "-m trading" in (x.get("CommandLine") or "")
-            or "presentation.server.main:app" in (x.get("CommandLine") or "")
-        ]
-    except Exception:
-        return []
-
-
 def check_client_process():
-    """miniQMT 客户端进程数 == 1（A6；0=客户端未起，>1=多客户端实例）。"""
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-Process -Name 'XtMiniQmt*' -ErrorAction SilentlyContinue).Id"],
-            capture_output=True, text=True, timeout=8)
-        pids = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
-    except Exception:
+    """miniQMT 客户端进程数 == 1（A6；0=未起，>1=多实例，None=探测失败）。"""
+    st = _client_status()
+    if st.get("count") is None:
         return "miniQMT 客户端进程探测失败（PowerShell 不可用/超时）"
-    if len(pids) != 1:
-        return f"miniQMT 客户端进程数 {len(pids)} != 1（应恰好一个 XtMiniQmt.exe）"
+    if st["count"] != 1:
+        return f"miniQMT 客户端进程数 {st['count']} != 1（应恰好一个 XtMiniQmt.exe）"
     return None
-
-
-def _port_holder_pid(port: int = 8000) -> int | None:
-    """netstat -ano 解析 :port LISTENING 的 PID（A6，与 trading_supervisor 同源）。"""
-    try:
-        out = subprocess.run(["netstat", "-ano"], capture_output=True,
-                             text=True, errors="replace", timeout=10).stdout
-    except Exception:
-        return None
-    for line in out.splitlines():
-        if "LISTENING" in line and f":{port} " in line:
-            parts = line.split()
-            try:
-                return int(parts[-1])
-            except (IndexError, ValueError):
-                return None
-    return None
-
-
-def _pid_file_owner(session_id: str | None = None) -> int | None:
-    """logs/trading_engine_<sid>.pid 首字段（引擎持有者 PID）。"""
-    sid = session_id or os.environ.get("QMT_SESSION_ID", "default")
-    try:
-        p = ROOT / "logs" / f"trading_engine_{sid}.pid"
-        return int(p.read_text(encoding="utf-8").split()[0])
-    except Exception:
-        return None
 
 
 def check_port_owner_consistency(port: int = 8000):

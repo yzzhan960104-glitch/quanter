@@ -704,10 +704,13 @@ async def pre_open(date: str) -> dict:
     elif result.get("submitted", 0) > 0:
         status = "done"
         message = ""
-    elif result.get("mode") == "live" and result.get("total", 0) > 0:
+    elif (result.get("mode") == "live" and result.get("submitted", 0) == 0
+          and result.get("rejected", 0) > 0):
         # Why failed 而非 done：done 会被 catchup._catchup_pre_open 跳过（status in
         # ("running","done")），08-05 09:22 全拒后 09:30 本可补挂却因 done 永久关闭。
         # failed 不在跳过集 → C-8 窗口 [09:22,10:00) 内自动重试（has_order OPEN 幂等防重复挂）。
+        # Why 必须 rejected>0（code-review 修复）：veto/超期/has_order 已挂等「有意跳过」
+        # 不是失败（submitted=0 且 rejected=0），记 failed 会误触发 C-8 重试噪音。
         status = "failed"
         message = f"submitted=0/{result.get('total')} rejected={result.get('rejected')}"
     else:

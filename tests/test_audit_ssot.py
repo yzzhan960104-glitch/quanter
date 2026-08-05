@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import scripts.audit_ssot as a
+import ops.process_topology as pt
 
 
 class _FakeProc:
@@ -27,7 +28,7 @@ def test_engine_process_count_fails_when_two(monkeypatch):
 
 def test_engine_processes_parses_powershell_json(monkeypatch):
     """_engine_processes 解析 PowerShell JSON，只留 -m trading / uvicorn main。"""
-    monkeypatch.setattr(a.subprocess, "run", lambda *args, **kw: _FakeProc(
+    monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
         '[{"ProcessId": 11, "ExecutablePath": "x", "CommandLine": "python -m trading"},'
         '{"ProcessId": 22, "ExecutablePath": "x", "CommandLine": "python -c print(1)"}]'))
     procs = a._engine_processes()
@@ -36,15 +37,25 @@ def test_engine_processes_parses_powershell_json(monkeypatch):
 
 def test_client_process_ok_when_one(monkeypatch):
     """恰好 1 个 XtMiniQmt → None。"""
-    monkeypatch.setattr(a.subprocess, "run", lambda *args, **kw: _FakeProc("44044\n"))
+    monkeypatch.setattr(a, "_client_status",
+                        lambda: {"running": True, "pid": 44044, "count": 1})
     assert a.check_client_process() is None
 
 
 def test_client_process_fails_when_missing(monkeypatch):
     """0 个客户端 → 告警（不能假装活）。"""
-    monkeypatch.setattr(a.subprocess, "run", lambda *args, **kw: _FakeProc(""))
+    monkeypatch.setattr(a, "_client_status",
+                        lambda: {"running": False, "pid": None, "count": 0})
     msg = a.check_client_process()
     assert msg is not None and "进程数 0 != 1" in msg
+
+
+def test_client_process_fails_when_probe_error(monkeypatch):
+    """探测失败（count=None）→ 显式告警，不假装 0 个。"""
+    monkeypatch.setattr(a, "_client_status",
+                        lambda: {"running": None, "pid": None, "count": None})
+    msg = a.check_client_process()
+    assert msg is not None and "探测失败" in msg
 
 
 def test_port_owner_consistency_ok_when_same(monkeypatch):
@@ -64,6 +75,6 @@ def test_port_owner_consistency_drift(monkeypatch):
 
 def test_port_holder_parses_netstat(monkeypatch):
     """netstat 行 → LISTENING PID。"""
-    monkeypatch.setattr(a.subprocess, "run", lambda *args, **kw: _FakeProc(
+    monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
         "  TCP    0.0.0.0:8000    0.0.0.0:0    LISTENING       27592\n"))
     assert a._port_holder_pid() == 27592

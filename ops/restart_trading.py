@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
 
     trading_supervisor.stop(port=args.port, yes=args.yes)
     if not args.yes:
-        print("dry-run：以上为将停止的进程树；加 --yes 执行原子重启")
+        print("dry-run：以上为将停止的进程树（无输出=当前无引擎进程）；加 --yes 执行原子重启")
         return 0
     return trading_supervisor.start(port=args.port)
 

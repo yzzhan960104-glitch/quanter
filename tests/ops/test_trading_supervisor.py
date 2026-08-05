@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from trading import single_instance
 from ops import trading_supervisor as s
+import ops.process_topology as pt
 
 
 class _FakeProc:
@@ -14,14 +15,14 @@ class _FakeProc:
 
 def test_port_holder_parses_netstat(monkeypatch):
     """netstat 行 → LISTENING PID（B1 三合一端口腿）。"""
-    monkeypatch.setattr(s.subprocess, "run", lambda *a, **kw: _FakeProc(
+    monkeypatch.setattr(pt.subprocess, "run", lambda *a, **kw: _FakeProc(
         "  TCP    0.0.0.0:8000    0.0.0.0:0    LISTENING       27592\n"))
     assert s.port_holder_pid() == 27592
 
 
 def test_port_holder_none_when_free(monkeypatch):
     """无 LISTENING 行 → None（未启动）。"""
-    monkeypatch.setattr(s.subprocess, "run", lambda *a, **kw: _FakeProc(""))
+    monkeypatch.setattr(pt.subprocess, "run", lambda *a, **kw: _FakeProc(""))
     assert s.port_holder_pid() is None
 
 
@@ -122,3 +123,11 @@ def test_stop_yes_kills_tree(monkeypatch):
     killed = [c for c in calls if "taskkill" in c]
     assert len(killed) == 2
     assert all("/F" in c and "/T" in c for c in killed)
+
+
+def test_main_defaults_to_status(monkeypatch, capsys):
+    """code-review: 无参数 → 默认 --status（plan 契约），输出 JSON 拓扑。"""
+    monkeypatch.setattr(s, "status", lambda port=8000, session_id=None: {"consistent": True})
+    assert s.main([]) == 0
+    out = capsys.readouterr().out
+    assert '"consistent": true' in out

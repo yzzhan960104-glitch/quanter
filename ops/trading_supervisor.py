@@ -38,37 +38,15 @@ DEFAULT_PORT = 8000
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _DETACHED_PROCESS = 0x00000008
 
-
-def _session_id(session_id: str | None = None) -> str:
-    """锁/pid 文件键：显式 > env QMT_SESSION_ID > default。"""
-    return session_id or os.environ.get("QMT_SESSION_ID", "default")
-
-
-def port_holder_pid(port: int = DEFAULT_PORT) -> int | None:
-    """netstat -ano 解析 :port LISTENING 的 PID；无监听/解析失败返 None。"""
-    try:
-        out = subprocess.run(["netstat", "-ano"], capture_output=True,
-                             text=True, errors="replace", timeout=10).stdout
-    except Exception:
-        return None
-    for line in out.splitlines():
-        if "LISTENING" in line and f":{port} " in line:
-            parts = line.split()
-            try:
-                return int(parts[-1])
-            except (IndexError, ValueError):
-                return None
-    return None
-
-
-def pid_file_owner(session_id: str | None = None, lock_dir: str | None = None) -> int | None:
-    """logs/trading_engine_<sid>.pid 首字段（引擎持有者 PID）。"""
-    from trading.single_instance import _pid_path
-    try:
-        text = _pid_path(_session_id(session_id), lock_dir).read_text(encoding="utf-8")
-        return int(text.split()[0])
-    except Exception:
-        return None
+# code-review 修复：端口/进程/客户端探测抽到 ops/process_topology.py 共享
+# （trading_supervisor 与 audit_ssot 同源，防两处漂移）。
+from ops.process_topology import (
+    client_status as _client_status,
+    engine_processes,
+    pid_file_owner,
+    port_holder_pid,
+    session_id as _session_id,
+)
 
 
 def lock_held(session_id: str | None = None, lock_dir: str | None = None) -> bool:
@@ -97,61 +75,6 @@ def lock_held(session_id: str | None = None, lock_dir: str | None = None) -> boo
     finally:
         lock.release()
     return False
-
-
-def engine_processes() -> list[dict]:
-    """列项目引擎 python 进程（cmdline 含 -m trading / presentation.server.main:app）。
-
-    优先 PowerShell Get-CimInstance（短超时）；失败降级 Get-Process exe 路径匹配
-    （venv python 进程视为候选，交由三合一校验再收敛）。诚实降级，不假装精确。
-    """
-    out: list[dict] = []
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python' } | "
-             "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"],
-            capture_output=True, text=True, timeout=8)
-        raw = json.loads(r.stdout) if r.stdout.strip() else []
-        if isinstance(raw, dict):
-            raw = [raw]
-        for item in raw:
-            cmd = item.get("CommandLine") or ""
-            if "-m trading" in cmd or "presentation.server.main:app" in cmd:
-                out.append({"pid": int(item["ProcessId"]),
-                            "exe": item.get("ExecutablePath"), "cmdline": cmd})
-    except Exception:
-        # 降级：Get-Process 只给 exe 路径；venv python 且是引擎入口的进程视为候选。
-        try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-Process python* | Select-Object Id,Path | ConvertTo-Json -Compress"],
-                capture_output=True, text=True, timeout=8)
-            raw = json.loads(r.stdout) if r.stdout.strip() else []
-            if isinstance(raw, dict):
-                raw = [raw]
-            for item in raw:
-                exe = str(item.get("Path") or "")
-                if exe.lower().startswith(str(VENV_PY).lower()):
-                    out.append({"pid": int(item["Id"]), "exe": exe, "cmdline": None})
-        except Exception:
-            pass
-    return out
-
-
-def _client_status() -> dict:
-    """miniQMT 客户端进程探测（XtMiniQmt*；探测失败返 None 表示未知）。"""
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-Process -Name 'XtMiniQmt*' -ErrorAction SilentlyContinue | "
-             "Select-Object -First 1).Id"],
-            capture_output=True, text=True, timeout=8)
-        text = (r.stdout or "").strip()
-        pid = int(text) if text.isdigit() else None
-        return {"running": pid is not None, "pid": pid}
-    except Exception:
-        return {"running": None, "pid": None}
 
 
 def _git_rev() -> str | None:
@@ -264,7 +187,8 @@ def stop(port: int = DEFAULT_PORT, yes: bool = False) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Quanter 引擎进程超级管理器（三合一校验）")
-    g = p.add_mutually_exclusive_group(required=True)
+    # code-review 修复：--status 为无参默认（plan 契约），start/stop 才需显式。
+    g = p.add_mutually_exclusive_group(required=False)
     g.add_argument("--status", action="store_true", help="一屏拓扑 + 三合一一致性（默认）")
     g.add_argument("--start", action="store_true", help="校验通过后拉起引擎")
     g.add_argument("--stop", action="store_true", help="停引擎进程树（需 --yes 执行）")
@@ -272,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--session", default=None, help="QMT_SESSION_ID 覆盖（缺省 env）")
     args = p.parse_args(argv)
+    if not (args.status or args.start or args.stop):
+        args.status = True
     if args.status:
         print(json.dumps(status(args.port, args.session), ensure_ascii=False, indent=2))
         return 0

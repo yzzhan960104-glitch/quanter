@@ -930,6 +930,24 @@ git commit -m "docs(ops): B5 runbook 统一重启入口为 restart_trading.py"
 
 ---
 
+## 实现偏差说明（code-review 修正 · 2026-08-06）
+
+主 agent 深度 review（033e4a85..HEAD）后修正 4 处实现偏差，均已在对应 commit 落地：
+
+1. **A2 failed 判定收窄**：plan 原文「live 有计划单但 submitted=0 → failed」误伤
+   veto/超期/has_order 已挂等「有意跳过」（submitted=0 且 rejected=0）。修正为
+   `rejected>0` 才算 failed，防 C-8 重试噪音。对应测试
+   `test_pre_open_live_zero_rejected_marks_done`。
+2. **B1 CLI --status 默认**：plan 写「--status（默认）」，首版实现用 required 组；
+   修正为无参默认 status。
+3. **共享探测模块**：端口属主/pid 文件/引擎进程/客户端探测从 trading_supervisor 与
+   audit_ssot 两份复制抽为 `ops/process_topology.py` 单源（消除重复代码 + audit 版
+   漏 TRADING_ENGINE_LOCK_DIR 的问题）。
+4. **run_trading_engine.bat 统一 fail-closed**：第二入口补 `QUANTER_REQUIRE_LIVE=1`，
+   标注唯一入口为 start_server.bat / restart_trading.py。
+
+---
+
 ## Self-Review
 
 **1. Spec 覆盖**：

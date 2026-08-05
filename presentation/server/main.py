@@ -415,7 +415,10 @@ async def lifespan(app: FastAPI):
         # QUANTER_DEV_SKIP_CONNECT_BOTS=1；pytest 用 QUANTER_TESTING=1。否则每个
         # dev 起停都带 5 个 bot 起停（08-05 日志 taskkill 30s 超时实证），且测试会
         # 拉起真 bot 污染环境。
+        # QUANTER_DEV_MODE 是 dev.py 注入的「dev 实例」总开关（code-review：消除只写
+        # 不读的死 env）；SKIP_CONNECT_BOTS 保留为更细粒度开关，任一命中即跳过。
         _skip_bots = (os.environ.get("QUANTER_TESTING") == "1"
+                      or os.environ.get("QUANTER_DEV_MODE") == "1"
                       or os.environ.get("QUANTER_DEV_SKIP_CONNECT_BOTS") == "1")
         if _skip_bots:
             logging.getLogger(__name__).info(
