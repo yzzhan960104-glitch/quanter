@@ -349,14 +349,12 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
 
     Why 集中取数 + 兜底降级（与 _fetch_trading_snapshot/_fetch_data_snapshot 同纪律）：
     - 策略观测层**绝不阻塞播报**：任一取数异常均降级，brief 自动走「—」/「无记录」文案。
-    - **scan_count 不走 facade.scan**（全市场扫描重且不稳，可能几十秒~分钟级，钉钉播报
-      不能挂在这上面）：读 T 日盘后 EOD 落盘的 T+1 计划文件
-      ``logs/trading_plans/plan_<trading_day>.json`` 的 ``len(orders)``
-      （2026-08-02 修复：旧实现读 ``plans/<date>.json``——该 scan 落盘格式早已停用，
-      EOD 现走 trading_plan.save_plan → 恒读不到文件 → 信号数恒「—」）。
-      候选链：plan_<next_trading_day(date)>（T 日盘后产出的次日计划）→
-      plan_<date>（同日计划，兼容跨日/补跑）→ 旧 plans/<date>.json（{plans: [...]}）。
-      文件都不存在（当日未扫描/周末）→ None（brief 降级「—」）。
+    - **scan_count 走 DB count_signals_by_plan_date（C2a 2026-08-05 收口）**：读 T 日盘后
+      写入 trade_event 的 SIGNAL 数（计划日=next_trading_day(date)）。**致命日期轴**：按
+      ``trade_id`` 后缀（``{account_id}_{symbol}_{plan_date}``）查 plan_date，**非 timestamp**
+      （timestamp=T 日盘后写入日，非 T+1 计划日，按 timestamp 查恒 0）。C2a 前读
+      ``plan_*.json`` 文件，现 SSoT 已迁 DB（trade_event SIGNAL 行 + build_trade_id 单点），
+      文件双轨退役。DB 异常降级 None（brief 走「—」）。
     - **param_iter_state 单一真相源（B3 2026-08-05 收口）**：仅读 experiment.db ACTIVE
       （``_experiment_active_state``）。无 ACTIVE → None（brief 降级「—」）。**不再回退**
       legacy 冠军治理 JSON——双轨治理收口，单一真相源是 experiment.db，旧文件已停更
@@ -370,44 +368,22 @@ def _fetch_strategy_snapshot(date: str) -> tuple[int | None, dict | None, list]:
     """
     import json
     from trading.calendar import next_trading_day
+    from trading import state_store
 
-    # ── scan_count：读 EOD 落盘计划文件的订单数（零重活） ──
+    # ── scan_count：读 DB SIGNAL 数（C2a 2026-08-05，致命日期轴按 trade_id 后缀查） ──
+    # Why 不走 facade.scan：全市场扫描重且不稳（几十秒~分钟级），钉钉播报不能挂这上面。
+    # Why 按 trade_id 后缀而非 timestamp：trade_event.timestamp=T 日盘后写入日（clock.now），
+    #   非 T+1 计划日；按 timestamp 查 plan_date 恒 0（致命日期轴红线）。
+    #   trade_id={account_id}_{symbol}_{plan_date}（build_trade_id 单点），plan_date 恰 10 字符
+    #   （YYYY-MM-DD），substr(trade_id,-10)=plan_date 精确（A 股 ts_code 不含下划线）。
     scan_count: int | None = None
-    # T 日盘后 EOD 落盘的是 **T+1（计划生效日）** 计划文件：date 播报日对应
-    # plan_<next_trading_day(date)>（如 07-31 周五盘后 → plan_2026-08-03.json）。
-    plan_dir = Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
     try:
-        candidates = [next_trading_day(date), date]
+        plan_date = next_trading_day(date)  # T 日盘后产出的 T+1 计划
+        scan_count = state_store.count_signals_by_plan_date(plan_date)
     except Exception:
-        candidates = [date]
-    for cand in candidates:
-        try:
-            p = plan_dir / f"plan_{cand}.json"
-            if not p.exists():
-                continue
-            with p.open("r", encoding="utf-8") as f:
-                payload = json.load(f)
-            orders = payload.get("orders") if isinstance(payload, dict) else None
-            if isinstance(orders, list):
-                scan_count = len(orders)
-                break
-        except Exception:
-            logger.warning("读 %s 失败，scan_count 降级为 None", p, exc_info=True)
-            scan_count = None
-            break
-    # 旧格式兜底：plans/<date>.json（{date, plans: [...], n_plans: N}，已停用但兼容）
-    if scan_count is None:
-        try:
-            plans_path = Path("plans") / f"{date}.json"
-            if plans_path.exists():
-                with plans_path.open("r", encoding="utf-8") as f:
-                    payload = json.load(f)
-                plans_list = payload.get("plans") if isinstance(payload, dict) else None
-                if isinstance(plans_list, list):
-                    scan_count = len(plans_list)
-        except Exception:
-            logger.warning("读 plans/%s.json 失败，scan_count 降级为 None", date, exc_info=True)
-            scan_count = None
+        # DB 异常（连不上/表缺/SQL 错）→ 降级 None，brief 走「—」；绝不阻断播报。
+        logger.exception("scan_count 读 DB 失败（plan_date=%s），降级 None", date)
+        scan_count = None
 
     # ── param_iter_state：单一真相源 experiment.db ACTIVE（B3 2026-08-05 收口）──
     # 双轨治理收口：legacy 冠军治理 JSON 已归档（logs/archive/），不再回退读旧文件。

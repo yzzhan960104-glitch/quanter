@@ -143,37 +143,75 @@ def test_brief_idempotent_via_job_ledger(tmp_path, monkeypatch):
     assert pushed == []                      # 台账 done → 跳过
 
 
-def test_fetch_strategy_snapshot_scan_count_reads_plan_file(monkeypatch, tmp_path):
-    """回归（2026-08-02）：scan_count 读 EOD 落盘的 plan_<date>.json。
+def test_scan_count_by_plan_date(tmp_db, monkeypatch):
+    """C2a（2026-08-05）：scan_count = 计划日=next_trading_day(date) 的 SIGNAL 数。
 
-    旧实现读已停用的 plans/<date>.json → 恒「— 个」；T 日盘后 EOD 把计划写进
-    logs/trading_plans/plan_<trading_day>.json（T+1 计划生效日）。07-31 周五盘后
-    → plan_2026-08-03.json，2 单 → scan_count=2。
+    红线（致命日期轴）：按 trade_id 后缀（plan_date）查，**非 timestamp**。
+    - trade_event.timestamp = clock.now() 写入时间 = T 日盘后（state_store.insert_trade_event）
+      —— 不是计划日 T+1。
+    - 计划日仅在 trade_id 后缀（{account_id}_{symbol}_{plan_date}，build_trade_id 单点）。
+    - 若误用 timestamp 查计划日：T 日盘后写（timestamp=T）查 T+1 恒 0 → 致命错误。
+
+    数学验证（substr(trade_id,-10)=plan_date）：
+    - trade_id = "ACC_TEST_A.SH_2026-08-05"（A 股 ts_code 不含下划线，YYYY-MM-DD 恰 10 字符）
+    - substr(trade_id,-10) = "2026-08-05" = plan_date ✓
     """
-    plan_dir = tmp_path / "plans"
-    plan_dir.mkdir()
-    (plan_dir / "plan_2026-08-03.json").write_text(
-        json.dumps({"date": "2026-08-03", "confirmed": True, "orders": [{"o": 1}, {"o": 2}]}),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("TRADE_PLAN_DIR", str(plan_dir))
+    from trading import state_store
+    # 插 2 个 SIGNAL（A.SH/B.SH 计划日 2026-08-05）
+    state_store.insert_trade_event(
+        "ACC_TEST", state_store.build_trade_id("ACC_TEST", "A.SH", "2026-08-05"),
+        "A.SH", "SIGNAL", meta='{"plan_date":"2026-08-05"}')
+    state_store.insert_trade_event(
+        "ACC_TEST", state_store.build_trade_id("ACC_TEST", "B.SH", "2026-08-05"),
+        "B.SH", "SIGNAL", meta='{"plan_date":"2026-08-05"}')
 
-    scan_count, _, _ = bm._fetch_strategy_snapshot("2026-07-31")
+    # param_iter_state 单口（B3 收口 experiment.db）：无 ACTIVE 返 None，不影响 scan_count
+    monkeypatch.setattr(bm, "_experiment_active_state", lambda: None)
+
+    # next_trading_day("2026-08-04") → "2026-08-05"，两 SIGNAL → scan_count=2
+    scan_count, param_iter_state, _ = bm._fetch_strategy_snapshot("2026-08-04")
     assert scan_count == 2
+    assert param_iter_state is None  # 三件套其他部分不动（B3 收口）
 
 
-def test_fetch_strategy_snapshot_scan_count_falls_back_same_day_plan(monkeypatch, tmp_path):
-    """无 T+1 计划文件时回退同日 plan_<date>.json（兼容补跑/周末）。"""
-    plan_dir = tmp_path / "plans"
-    plan_dir.mkdir()
-    (plan_dir / "plan_2026-07-31.json").write_text(
-        json.dumps({"date": "2026-07-31", "confirmed": False, "orders": [{"o": 1}]}),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("TRADE_PLAN_DIR", str(plan_dir))
+def test_scan_count_by_plan_date_distinct_symbol(tmp_db, monkeypatch):
+    """C2a 边界：同 symbol 同 plan_date 多 SIGNAL（理论 UNIQUE 约束防不住多 account）→ COUNT DISTINCT symbol 保守。
 
-    scan_count, _, _ = bm._fetch_strategy_snapshot("2026-07-31")
+    物理意图：UNIQUE(account_id, trade_id, action) 只防同 account 同 trade 同 action 重推；
+    多 account 写同 symbol 同 plan_date 不会触发 UNIQUE（trade_id account 段不同）。生产
+    只一个 account 不会出现，但 DISTINCT 保守——查到的是「当日选股数」非「事件数」。"""
+    from trading import state_store
+    # 两个 account 各写一个 A.SH SIGNAL（trade_id 不同 account 段）
+    state_store.upsert_account("ACC_OTHER", broker="qmt")
+    state_store.insert_trade_event(
+        "ACC_TEST", state_store.build_trade_id("ACC_TEST", "A.SH", "2026-08-05"),
+        "A.SH", "SIGNAL", meta='{"plan_date":"2026-08-05"}')
+    state_store.insert_trade_event(
+        "ACC_OTHER", state_store.build_trade_id("ACC_OTHER", "A.SH", "2026-08-05"),
+        "A.SH", "SIGNAL", meta='{"plan_date":"2026-08-05"}')
+
+    monkeypatch.setattr(bm, "_experiment_active_state", lambda: None)
+    scan_count, _, _ = bm._fetch_strategy_snapshot("2026-08-04")
+    # DISTINCT symbol → 1（A.SH 一个标的，不是事件数 2）；「当日选股数」语义对齐
     assert scan_count == 1
+
+
+def test_scan_count_db_exception_degrades_none(monkeypatch, tmp_db):
+    """C2a 边界：DB 异常（count_signals_by_plan_date 抛）→ scan_count 降级 None，不阻断 brief。"""
+    from trading import state_store
+    monkeypatch.setattr(bm, "_experiment_active_state", lambda: None)
+    # 让 count_signals_by_plan_date 抛异常模拟 DB 路径错误
+    monkeypatch.setattr(state_store, "count_signals_by_plan_date",
+                        lambda plan_date: (_ for _ in ()).throw(RuntimeError("DB boom")))
+    scan_count, _, _ = bm._fetch_strategy_snapshot("2026-08-04")
+    assert scan_count is None  # 降级，不阻断三件套
+
+
+def test_scan_count_empty_returns_zero(tmp_db, monkeypatch):
+    """C2a 边界：无 SIGNAL（当日未扫描/周末）→ scan_count=0（不是 None）。"""
+    monkeypatch.setattr(bm, "_experiment_active_state", lambda: None)
+    scan_count, _, _ = bm._fetch_strategy_snapshot("2026-08-04")
+    assert scan_count == 0
 
 
 def test_recent_runs_reads_tasks_db_with_pending_marker(monkeypatch, tmp_path):

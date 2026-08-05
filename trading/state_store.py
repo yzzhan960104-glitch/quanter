@@ -992,6 +992,34 @@ def get_latest_action(trade_id: str, *, db_path: str | None = None) -> str | Non
     return row["action"] if row else None
 
 
+def count_signals_by_plan_date(plan_date: str, *, db_path: str | None = None) -> int:
+    """读某计划日（T+1）的 SIGNAL 数（即当日选股/扫描出多少标的）。
+
+    物理意图（SSoT C2a）：broadcast 的 scan_count 不再读 plan_*.json，改读 DB。
+    **致命日期轴**：trade_event.timestamp = clock.now() 写入时间 = T 日盘后（非计划日 T+1），
+    计划日仅在 trade_id 后缀（``{account_id}_{symbol}_{plan_date}``，build_trade_id 单点）。
+    按 timestamp 查计划日恒 0（T 日写，查 T+1 永远漏），故必须按 trade_id 后缀查。
+
+    数学验证（substr(trade_id,-10)=plan_date）：
+    - trade_id = "ACC1_600000.SH_2026-08-05"（A 股 ts_code 不含下划线，YYYY-MM-DD 恰 10 字符）
+    - substr(trade_id,-10) = "2026-08-05" = plan_date ✓
+    - 用 substr(trade_id,-10)=? 而非 LIKE '%_2026-08-05'——``_`` 是 LIKE 通配符，
+      LIKE 会误匹配（如 "...SH_2026X08-05"），substr 精确。
+
+    去重口径：COUNT(DISTINCT symbol)（同 symbol 同 plan_date 多 SIGNAL 理论上 UNIQUE 约束防不住
+    多 account，生产只一个 account 不会出现；DISTINCT 保守取「当日选股数」语义对齐，无害）。
+    无 SIGNAL 行返 0（不是 None，调用方判 None=降级 / 0=当日未扫描）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        row = con.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT symbol FROM trade_event "
+            "WHERE action='SIGNAL' AND substr(trade_id, -10) = ?)",
+            (plan_date,)
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 # ============================= C-2 S1：data_ready 数据就绪信号 =============================
 
 def upsert_data_ready(date: str, dataset: str, *, ok: bool, melted: bool,
