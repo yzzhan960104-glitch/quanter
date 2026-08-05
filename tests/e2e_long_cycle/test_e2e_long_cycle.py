@@ -83,9 +83,10 @@ def test_orchestrator_smoke(isolated_state, monkeypatch, tmp_path):
         保证 latest_action=CONFIRMED（确认闸通过）。
         """
         from trading import engine, state_store
+        from tests._legacy_plan_io import save_plan_legacy
         import json as _json
         t_plus_1 = engine.calendar.next_trading_day(t_date.isoformat())
-        trading_plan.save_plan(t_plus_1, fake_orders, confirmed=True)
+        save_plan_legacy(t_plus_1, fake_orders, confirmed=True)  # C3：legacy shim
         # C2c：落 DB SIGNAL+CONFIRMED（pre_open/_stoploss C2c 真相源）
         _aid = engine._resolve_account_id()
         if state_store.get_account(_aid) is None:

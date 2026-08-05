@@ -10,7 +10,7 @@
     - **连线四触发点**：eod_plan / pre_open / stop_loss_monitor / post_close。
 
 四触发点物理节奏（术语对齐 T 日盘后扫盘 → T+1 执行）：
-    eod_plan   15:35 T 日盘后：扫颈线法信号 → build_orders → save_plan（confirmed=False）
+    eod_plan   15:35 T 日盘后：扫颈线法信号 → build_orders → DB trade_event(SIGNAL)
                 → push 钉钉（待研究员确认）。本阶段绝不下单（机器只产计划，人审是闸）。
     pre_open   09:22 T 日开盘前：① 撤昨日遗留未成交单 ② 读已确认计划 → 注入动态白名单
                 → 挂限价买 + 止盈限价卖（逐单 try-except 兜底）。

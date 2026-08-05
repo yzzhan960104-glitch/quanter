@@ -1,13 +1,19 @@
 # -*- coding: utf-8 -*-
-"""T-1 交易计划（JSON 落盘 + 人工确认闸 + 钉钉推送）。
+"""T-1 交易计划（DB 优先真相源 + 钉钉推送 + JSON 只读兼容窗口）。
 
-二期引擎 T-1 确认闸（spec 红线）物理意图：
+SSoT Phase C · C3 重构（spec §6）：
+    生产写路径已删——原 JSON 落盘/确认函数 移至 ``tests/_legacy_plan_io.py``
+    作测试专用 legacy shim（保留原 JSON 落盘 + DB CONFIRMED 双写语义给历史测试种子）。
+    生产 eod_plan 直接写 DB trade_event(SIGNAL, meta) + （AUTO_CONFIRM）CONFIRMED 行，
+    不再走 JSON 镜像双写。
+
+二期引擎 T-1 确认闸（spec 红线）物理意图（C3 后）：
     eod_plan（T-1 晚 15:35）扫信号生成 orders
-    → save_plan（confirmed=false）落盘
-    → push_plan_to_dingtalk 推交易机器人群（研究员人审）
-    → 研究员钉钉回复「确认」
-    → confirm_plan（confirmed=true）
-    → 次日 pre_open（09:22）**检查 confirmed 才挂单**，未确认不挂任何单。
+    → DB trade_event(SIGNAL, meta=计划参数) 落真相源
+    → push_plan_to_dingtalk 推交易机器人群（研究员人审，orders 作入参不落盘）
+    → 研究员钉钉回复「确认」（生产路径无）或 AUTO_CONFIRM_PLAN=true 全自动
+    → DB trade_event(CONFIRMED) 落放行标志
+    → 次日 pre_open（09:22）读 DB latest_action=CONFIRMED 才挂单，未确认/VETOED 不挂。
 
 为什么需要确认闸：机器自动扫信号可能因数据瑕疵/前视偏差/极端行情误判，
 T-1 晚给人一次否决机会，防止机器盲发导致不可逆的实盘敞口。
@@ -15,7 +21,6 @@ T-1 晚给人一次否决机会，防止机器盲发导致不可逆的实盘敞�
 orders 采用嵌套格式（与 Task 9 engine.eod_plan 生产侧、本模块 push_plan_to_dingtalk
 消费侧全链路统一）：
     {"order": {symbol/qty/side/price}, "stop_price": ..., "take_profit": ...}
-save_plan 是 JSON 透传，不关心内部结构。
 """
 from __future__ import annotations
 
@@ -33,30 +38,12 @@ def _plan_path(date: str) -> Path:
     """T 日计划文件路径：<TRADE_PLAN_DIR>/plan_<date>.json。
 
     TRADE_PLAN_DIR 默认 logs/trading_plans；生产环境由调度器/启动脚本显式注入。
+
+    C3 后本函数仅供 load_plan JSON 回退（只读兼容窗口）使用；无生产写盘方。
+    测试种子可用 ``tests/_legacy_plan_io._plan_path`` 同口径读取。
     """
     base = Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
     return base / f"plan_{date}.json"
-
-
-def save_plan(date: str, orders: list, *, confirmed: bool = False) -> Path:
-    """落盘 T 日交易计划（默认 confirmed=false 待人审）。
-
-    Args:
-        date:      交易日（T），如 "2026-07-22"。
-        orders:    PlannedOrder 嵌套字典列表，JSON 透传不校验内部结构。
-        confirmed: 人审确认标志（默认 False）。Task 9 trailing 盘后演进重写 plan 时
-                   传 ``confirmed=原值``——保留人审状态（止损价演进不改确认闸，否则次日
-                   _stoploss 读 confirmed=False 会跳过止损监控致敞口裸奔）。
-
-    Returns:
-        落盘文件 Path。父目录自动创建（parents=True，支持嵌套 TRADE_PLAN_DIR）。
-    """
-    p = _plan_path(date)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"date": date, "confirmed": confirmed, "orders": orders}
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("T-1 计划已落盘 %s（%d 单，待确认）", p, len(orders))
-    return p
 
 
 def load_plan(date: str) -> dict | None:
@@ -82,7 +69,7 @@ def load_plan(date: str) -> dict | None:
 
     回退窗口（C3 只读兼容）：DB 异常 / 无 SIGNAL 行 → 退回读 plan_*.json（如果存在）。
     物理：C2c 切 DB 是渐进的（部分老数据/老测试仍 JSON 落盘），保留一个发布周期的
-    只读兼容窗口；C3 删 save_plan/confirm_plan 写路径后，JSON 仅历史回退入参，不再
+    只读兼容窗口；C3 删写路径后，JSON 仅历史回退入参，不再
     被生产代码写盘。无 SIGNAL 且无 JSON → None（pre_open 保守跳过挂单，不挂脏计划）。
 
     Returns:
@@ -106,9 +93,17 @@ def load_plan(date: str) -> dict | None:
                 # trade_id 单点：build_trade_id（与 eod_plan/veto 同口径，消 _account_id 未定义）
                 tid = state_store.build_trade_id(account_id, sym, date)
                 action = state_store.get_latest_action(tid)
-                # VETOED 晚于 CONFIRMED → latest=VETOED → confirmed=False（veto 终局防线）。
-                # 非 CONFIRMED（SIGNAL-only 未确认 / VETOED）→ 整体未确认。
-                if action != "CONFIRMED":
+                # veto 终局防线：VETOED 晚于 CONFIRMED → latest=VETOED → confirmed=False。
+                # 其他状态语义（spec §6 / spec §2.4 trade_event 事件流）：
+                #   - SIGNAL-only（未确认）→ 未确认（pre_open 据不放行）
+                #   - CONFIRMED → 已确认（pre_open 放行）
+                #   - ORDERED/FILLED/CLOSED/TP_FILLED → 已确认且已挂单/成交（生命周期晚于
+                #     CONFIRMED，这些状态出现意味着 plan 已确认 + 已挂单，视作 confirmed=True
+                #     避免 post_close snapshot 等读已成交 plan 时误判未确认）。
+                # 故判据：latest == "SIGNAL"（仅 SIGNAL 无 CONFIRMED）= 未确认；
+                #         latest == "VETOED" = veto 终局未确认；其余 = 已确认。
+                if action in ("SIGNAL", "VETOED", None):
+                    # None 理论不会出现（meta 行至少有 SIGNAL），保守视作未确认
                     confirmed_all = False
                 orders.append(m)
             return {"date": date, "confirmed": confirmed_all, "orders": orders}
@@ -120,7 +115,7 @@ def load_plan(date: str) -> dict | None:
         logger.exception("load_plan 读 DB SIGNAL 失败，回退 JSON（C3 只读兼容窗口）")
 
     # —— JSON 回退（只读兼容窗口）——
-    # C3 后无生产写盘方（save_plan 已删），JSON 仅历史/测试种子用，不再被覆盖写。
+    # C3 后无生产写盘方（写路径已删），JSON 仅历史/测试种子用，不再被覆盖写。
     p = _plan_path(date)
     if not p.exists():
         return None
@@ -132,62 +127,12 @@ def load_plan(date: str) -> dict | None:
         return None
 
 
-def confirm_plan(date: str) -> bool:
-    """标记 T 日计划为已确认（人工钉钉确认后调）。
-
-    W2 · DB+JSON 双写（与 eod_plan auto_confirm 路径对齐，真相源不漂移）：
-        物理：JSON confirmed=true 是展示镜像，DB trade_event(CONFIRMED) 是 pre_open
-        据放行的真相源。人工钉钉确认触发本函数时，必须与 eod_plan 自动确认路径
-        （engine.py:638 写 DB CONFIRMED）口径一致——否则人审确认的 plan 在 DB 层
-        「没确认」，pre_open 防线查不到 CONFIRMED 仍可能误判（虽然 pre_open 主防线
-        是 JSON confirmed，但 DB 真相源漂移会污染后续 report/对账）。
-
-        veto 保护：``get_latest_action(trade_id) != "VETOED"`` 才写 CONFIRMED——
-        研究员否决是 opt-out 终局动作，不被机器确认覆盖（与 eod_plan:637 同款守卫）。
-
-    失败语义（与 veto 抛错形成对比，设计差异非不一致）：
-        - veto DB 失败 → 抛错（刹车假成功=放行=不可逆实盘敞口）。
-        - confirm DB 失败 → **软降级**（logger.exception，JSON 照写）。物理：人审确认
-          是 opt-in 流程，JSON 已是真相源的展示镜像 + pre_open 主防线读 JSON confirmed，
-          DB 下次 eod 补写即可；若 confirm 因 DB 失败而抛错，会阻断人审钉钉流程
-          （确认回复无响应、研究员以为没确认成功反而重复操作），更糟。
-
-    幂等：重复确认返 True，不会改写 orders。
-
-    Returns:
-        True 计划存在并已置 confirmed=true；False 计划不存在（防幻觉确认）。
-    """
-    plan = load_plan(date)
-    if plan is None:
-        # 计划不存在绝不能仅凭一次调用就置确认位，否则 pre_open 会挂空计划。
-        return False
-    # W2：人工确认路径补 DB CONFIRMED（与 eod_plan auto 路径对齐，真相源不漂移）。
-    # 软降级：DB 失败不阻断人审确认（见上方失败语义 docstring）。
-    try:
-        from trading import state_store
-        account_id = os.getenv("QMT_ACCOUNT_ID", state_store._DEFAULT_ACCOUNT_ID)
-        state_store.init_store()
-        if state_store.get_account(account_id) is None:
-            state_store.upsert_account(account_id, broker="qmt")
-        for o in plan.get("orders", []):
-            sym = (o.get("order") or {}).get("symbol")
-            if not sym:
-                continue
-            # trade_id 单点：state_store.build_trade_id（与 eod_plan/_pre_open_impl/veto 同口径）
-            trade_id = state_store.build_trade_id(account_id, sym, date)
-            # veto 保护：最新 action=VETOED 不覆盖（人审否决不被机器确认推翻）
-            if state_store.get_latest_action(trade_id) != "VETOED":
-                state_store.insert_trade_event(account_id, trade_id, sym, "CONFIRMED")
-    except Exception:
-        # 软降级：JSON 已是真相源展示镜像，pre_open 主防线读 JSON confirmed；
-        # DB 下次 eod 补写。不阻断人审确认流程（见 docstring 失败语义）。
-        logger.exception("confirm_plan DB 写 CONFIRMED 失败（软降级，JSON 照写）")
-    plan["confirmed"] = True
-    _plan_path(date).write_text(
-        json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    logger.info("计划 %s 已确认", date)
-    return True
+# ============================================================================
+# 注：原 JSON 落盘 / 确认函数 已删除（SSoT Phase C · C3 收尾）。
+# 生产 eod_plan 直接写 DB trade_event(SIGNAL/CONFIRMED)（engine.py:619-644）。
+# 测试种子若需 JSON 镜像落盘 + DB CONFIRMED 双写语义，import
+# ``tests._legacy_plan_io`` 模块的 legacy shim 函数（测试专用）。
+# ============================================================================
 
 
 _NAME_MAP_CACHE = None
@@ -244,7 +189,7 @@ def push_plan_to_dingtalk(date: str, orders: list, broker_positions: list | None
 
     Args:
         date: 交易日。
-        orders: 嵌套格式 list（同 save_plan）。
+        orders: 嵌套格式 list（同 DB SIGNAL.meta order_dict 结构）。
 
     Returns:
         push_brief 返回值透传：成功 True；缺凭证/超时/dws 不在/returncode≠0 → False（不抛）。

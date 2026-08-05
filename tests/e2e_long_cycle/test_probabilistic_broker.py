@@ -110,10 +110,11 @@ def test_resting_tp_stays_submitted_when_high_below_price(isolated_state, monkey
     from datetime import date, time
 
     from trading import trading_plan
+    from tests._legacy_plan_io import save_plan_legacy
     from tests.e2e_long_cycle.min_bar_feeder import MinBarFeeder
     from tests.e2e_long_cycle.probabilistic_broker import ProbabilisticBroker
 
-    trading_plan.save_plan("2026-07-02", [{
+    save_plan_legacy("2026-07-02", [{  # C3：legacy shim
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "BUY", "price": 10.0},
         "stop_price": 9.5, "take_profit": 11.0, "tp1": 10.5, "tp1_portion": 50,
     }], confirmed=True)
@@ -150,8 +151,9 @@ def test_resting_tp_fills_when_high_reaches_price(isolated_state, monkeypatch):
     from tests.e2e_long_cycle.min_bar_feeder import MinBarFeeder
     from tests.e2e_long_cycle.probabilistic_broker import ProbabilisticBroker
     from trading import trading_plan
+    from tests._legacy_plan_io import save_plan_legacy
 
-    trading_plan.save_plan("2026-07-02", [{
+    save_plan_legacy("2026-07-02", [{  # C3：legacy shim
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "BUY", "price": 10.0},
         "stop_price": 9.5, "take_profit": 11.0, "tp1": 10.5, "tp1_portion": 50,
     }], confirmed=True)

@@ -71,10 +71,11 @@ def test_eod_plan_dry_run_no_real_order(monkeypatch):
     assert result["n_orders"] == 0
     assert result["mode"] == "dry_run"
     assert pushed["n"] == 1            # 调了一次 push（mock 拦截，未真发）
-    # 落盘计划应是 confirmed=False（待人工确认）
+    # C3：空信号 eod_plan 不写 DB SIGNAL、不落 JSON（写路径已删）→ load_plan 返 None。
+    # 语义：空信号 = 无计划（pre_open 据此保守跳过挂单，更清晰）。原 save_plan 落空 orders
+    # JSON 的行为已废（C3 删 save_plan）。
     plan = trading_plan.load_plan("2099-01-01")
-    assert plan is not None
-    assert plan["confirmed"] is False
+    assert plan is None
 
 
 def test_eod_plan_produces_nested_orders(monkeypatch):
@@ -304,17 +305,20 @@ def _confirmed_plan_one_order(date="2099-01-02"):
     必须再写 SIGNAL + CONFIRMED 行（与 eod_plan 生产路径同构）。JSON 保留供 trailing/
     brief/veto 等 C3 路径 + load_plan 断言使用（兼容窗口期）。
 
-    **顺序约束（W2，与 eod_plan 同口径）**：SIGNAL DB 必须在 confirm_plan 之前写——
-    confirm_plan 会写 CONFIRMED，若 SIGNAL 在其后写，SIGNAL 的 event_id > CONFIRMED，
+    C3：save_plan/confirm_plan 改用 tests/_legacy_plan_io legacy shim（生产已删）。
+
+    **顺序约束（W2，与 eod_plan 同口径）**：SIGNAL DB 必须在 confirm 之前写——
+    legacy confirm_plan_legacy 会写 CONFIRMED，若 SIGNAL 在其后写，SIGNAL 的 event_id > CONFIRMED，
     get_latest_action（ORDER BY event_id DESC）会返 SIGNAL 掩盖 CONFIRMED → pre_open
     确认闸误判未确认。
     """
+    from tests._legacy_plan_io import save_plan_legacy, confirm_plan_legacy
     orders_nested = [
         {"order": {"symbol": "600000.SH", "qty": 100.0, "side": "buy", "price": 10.0},
          "stop_price": 9.5, "take_profit": 11.0, "formed_at": date, "max_wait": 5},
     ]
-    trading_plan.save_plan(date, orders_nested)
-    # 落 DB SIGNAL（pre_open C2c 真相源）—— 必须在 confirm_plan 之前（顺序约束见 docstring）
+    save_plan_legacy(date, orders_nested)
+    # 落 DB SIGNAL（pre_open C2c 真相源）—— 必须在 confirm 之前（顺序约束见 docstring）
     from trading import state_store
     account_id = engine._resolve_account_id()
     if state_store.get_account(account_id) is None:
@@ -327,7 +331,7 @@ def _confirmed_plan_one_order(date="2099-01-02"):
         state_store.insert_trade_event(
             account_id, tid, sym, "SIGNAL",
             meta=json.dumps(meta_obj, ensure_ascii=False))
-    trading_plan.confirm_plan(date)  # 写 CONFIRMED DB 行（event_id > SIGNAL，latest=CONFIRMED）
+    confirm_plan_legacy(date)  # 写 CONFIRMED DB 行（event_id > SIGNAL，latest=CONFIRMED）
 
 
 def _seed_signals_db(date, orders_nested, *, confirmed=True):
@@ -1821,7 +1825,9 @@ def test_post_close_trailing_skipped_after_breaker(monkeypatch):
     today = datetime.now().strftime("%Y-%m-%d")
     _seed_breaker_baseline(today, 1_000_000.0)
     # plan 有持仓 order（若 trailing 跑会演进，验熔断时它不被调）
-    trading_plan.save_plan(today, [
+    # C3：save_plan 改用 legacy shim
+    from tests._legacy_plan_io import save_plan_legacy
+    save_plan_legacy(today, [
         {"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}])
 
     evolve_calls = []
@@ -1850,20 +1856,29 @@ def test_post_close_trailing_skipped_after_breaker(monkeypatch):
     assert "trailing_evolved" not in result
 
 
-def test_post_close_trailing_evolves_plan_stop(monkeypatch):
-    """post_close：未熔断 + plan 有成交持仓 → trailing 演进 stop 写回 plan（保留 confirmed）。
+def test_post_close_trailing_evolves_count_only(monkeypatch):
+    """post_close：未熔断 + plan 有成交持仓 → trailing 演进计数（C3 删写回，仅可观测）。
 
-    物理意图（plan Task 9 Step 4）：post_close ④ 段串联 _evolve_trailing_stops ——
-        load_plan(today) → entry_date 算 holding_days → compute_stop_price → 写回 plan.stop_price。
-        次日 stop_loss 读演进后的 stop（盘中不调，spec「盘中不调整 stop」红线）。
+    物理意图（plan Task 9 Step 4 / SSoT C3）：
+        post_close ④ 段串联 _evolve_trailing_stops —— load_plan(today) → entry_date 算
+        holding_days → compute_stop_price → result["trailing_evolved"] 计数。
+
+    **C3 决策（删写回）**：原 trailing 把演进后的 stop_price 写回 plan["orders"]（落盘 JSON），
+    但 C2c 切 _stoploss 直接读 DB SIGNAL.meta 后该写回成孤儿（写盘无消费方）。
+    C3 删 save_plan 写回，保留 _evolve_trailing_stops 计算（结果用于 result["trailing_evolved"]
+    可观测性 + 为后续 follow-up「盘中动态 stop_prices map / DB meta update」铺垫）。
+
+    验证点（C3 后）：trailing_evolved 计数仍正确；plan 不被写回（stop_price 保持原值 9.0）。
+    follow-up：演进值若要落真相源，应改写 DB SIGNAL.meta（update stop_price 字段）。
     """
     from trading import position_book
+    from tests._legacy_plan_io import save_plan_legacy
 
     today = datetime.now().strftime("%Y-%m-%d")
     _seed_breaker_baseline(today, 1_000_000.0)
     # plan 有持仓 order（neckline/atr 齐全，可演进）
     orders = [{"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}]
-    trading_plan.save_plan(today, orders)
+    save_plan_legacy(today, orders)
     # A.SH 已成交（entry_dates 有）+ holding_days=7>grace=5 → 收紧
     monkeypatch.setattr(position_book, "get_entry_dates",
                         lambda **kw: {"A.SH": "2099-01-01"})
@@ -1882,9 +1897,9 @@ def test_post_close_trailing_evolves_plan_stop(monkeypatch):
 
     result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
     assert result.get("trailing_evolved") == 1
-    # 验 plan 已写回演进后的 stop（holding_days=7 → 9.6）
+    # C3：plan 不被写回（stop_price 保持原值 9.0；演进值待 follow-up 落 DB meta）
     plan = trading_plan.load_plan(today)
-    assert plan["orders"][0]["stop_price"] == 9.6
+    assert plan["orders"][0]["stop_price"] == 9.0
 
 
 # ============================================================================

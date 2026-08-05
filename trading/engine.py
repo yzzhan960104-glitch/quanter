@@ -2,7 +2,7 @@
 """二期自动交易引擎：APScheduler 四触发点编排 + 影子模式分流。
 
 物理意图（四触发点的真实业务节奏 · 术语对齐 T 日盘后扫盘 → T+1 执行）：
-  eod_plan  19:00 T 日盘后：扫颈线法信号 → build_orders → save_plan（confirmed=False）
+  eod_plan  19:00 T 日盘后：扫颈线法信号 → build_orders → DB trade_event(SIGNAL)
               → push 钉钉（待研究员确认）。本阶段绝不下单（机器只产计划，人审是闸）。
               次日（T+1 日）pre_open 才挂单执行。
               ⚠️ 非 15:35：须等 18:00 增量采集落湖 + 18:30 数据检查点② 通过，否则用
@@ -93,7 +93,7 @@ from trading import position_book as _position_book
 # stop_price/has_order 走 DB（替代 plan JSON 单一依赖 + _tp_placed 内存）。
 from trading import state_store as _state_store
 # C-6 V2：单一时间源口子（替代散落 18 处 datetime.now）。三函数分工：
-#   clock.today()       = 业务日期 key（load_plan/save_plan/is_trading_day/熔断基线 date）
+#   clock.today()       = 业务日期 key（load_plan/is_trading_day/熔断基线 date）
 #   clock.trading_day() = eod 落盘 key（=next_trading_day(today)，eod 专用，禁混用）
 #   clock.now()         = 事件时间戳（submitted_at/written_at/is_intraday_session 时点）
 # 触发点入口缓存（_eod/_pre_open/_stoploss/_post_close 入口算一次）防同轮跨午夜漂移。
@@ -531,7 +531,7 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
     Returns:
         {"date":..., "n_orders":..., "mode":...}，n_orders=0 亦正常（当日无信号）。
 
-    嵌套 orders 结构（scope #1，与 Task8 push_plan_to_dingtalk + save_plan 全链路一致）：
+    嵌套 orders 结构（scope #1，与 Task8 push_plan_to_dingtalk 全链路一致）：
         [{"order":{symbol,qty,side,price}, "stop_price":..., "take_profit":...}, ...]
     """
     cfg = _trade_cfg()
@@ -602,20 +602,16 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
         }
         for o in orders
     ]
-    # 落盘 + 确认闸：AUTO_CONFIRM_PLAN=true（全自动模式）→ 落盘后自动 confirm_plan 置
-    # confirmed=True，pre_open 次日直接挂单（opt-out：研究员 pre_open 前可 veto 拦截）；
-    # 默认 false → confirmed=False 保持人审（回复「确认」才挂，spec §2 红线，向后兼容）。
-    trading_plan.save_plan(date, order_dicts)
+    # SSoT Phase C · C3：写盘路径已删（DB SIGNAL/CONFIRMED 是真相源）。
+    # 确认闸（AUTO_CONFIRM_PLAN=true 全自动 → 写 DB CONFIRMED；默认 false 人审）：
+    # pre_open 次日据 DB latest_action=CONFIRMED 直挂（opt-out：研究员 pre_open 前 veto 拦截）；
+    # 默认 false → DB 只写 SIGNAL 无 CONFIRMED → pre_open 据未确认跳过（spec §2 红线）。
     auto_confirmed = os.getenv("AUTO_CONFIRM_PLAN", "").lower() in ("true", "1", "yes")
-    # state-store-redesign §3.3：plan 双写——DB 落 trade_event(SIGNAL, meta=计划参数) 作真相源，
-    # JSON 保留给人看/veto CLI/钉钉。SIGNAL 幂等（UNIQUE account_id+trade_id+action）：重跑 eod_plan
-    # 已存在则跳过（不重复记）。account_id 缺省走默认账户（_migrate_env_to_account 在启动期落真实账户）。
-    #
-    # W2 顺序约束（不可调）：SIGNAL DB 必须在 confirm_plan 之前写。物理：confirm_plan
-    # （W2 改造）会写 DB CONFIRMED，eod_plan auto 路径在 SIGNAL 之后也写 CONFIRMED（veto 保护
-    # 复检）。若 confirm_plan 先于 SIGNAL，CONFIRMED 的 event_id < SIGNAL，get_latest_action
-    # 返 SIGNAL 掩盖 CONFIRMED（get_latest_action 按 event_id DESC）→ test_eod_plan_auto_confirm_event
-    # 回归。故 SIGNAL 先写保证 CONFIRMED 是最新 action（与 pre_open 防线读取语义一致）。
+    # state-store-redesign §3.3 · C3 真相源：DB trade_event(SIGNAL, meta=计划参数) 唯一真相源。
+    # SIGNAL 幂等（UNIQUE account_id+trade_id+action）：重跑 eod_plan 已存在则跳过（不重复记）。
+    # account_id 缺省走默认账户（_migrate_env_to_account 在启动期落真实账户）。
+    # C2c：pre_open/_stoploss/review_report/review_service 全切 DB SIGNAL.meta；C3：load_plan
+    # DB 优先 + JSON 只读兼容窗口（C3 删写路径后 JSON 不再被生产代码写盘）。
     try:
         account_id = _resolve_account_id()
         # 确保 account 行存在（trade_event/order FK 引用；init_store 只建表不插行）
@@ -647,13 +643,11 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
             if auto_confirmed and _state_store.get_latest_action(trade_id) != "VETOED":
                 _state_store.insert_trade_event(account_id, trade_id, sym, "CONFIRMED")
     except Exception:
-        # DB 写失败不阻断 eod_plan 主流程（plan JSON 已落，DB 软降级，下次 eod 补写）
+        # DB 写失败不阻断 eod_plan 主流程（C3：DB 是真相源，但失败软降级不抛，下次 eod 补写）
         logger.exception("eod_plan 落 trade_event(SIGNAL) 失败（不阻断主流程，软降级）")
-    if auto_confirmed:
-        # 全自动：落盘 + SIGNAL DB 写完后才 confirm_plan（顺序保证 CONFIRMED 是最新 action）。
-        # confirm_plan 自身也会写 DB CONFIRMED（W2 补的对齐人审路径），但 eod_plan 上方已
-        # 先写一遍（auto 路径专属），confirm_plan 内部 insert_trade_event(CONFIRMED) 幂等跳过。
-        trading_plan.confirm_plan(date)
+    # C3：删 confirm 调用——auto 路径的 DB CONFIRMED 已在上方 642-644（W2）写。
+    # 原确认函数是 JSON 写盘+DB CONFIRMED 双写对齐，C3 删写路径后 DB CONFIRMED
+    # 由 eod_plan auto 路径单点写（顺序：SIGNAL 先、CONFIRMED 后，保证 latest=CONFIRMED）。
     # 持仓段注入 QMT 真实持仓（全量口径，和持仓播报同源）：研究员钉钉人审要看券商实际
     # 仓位（含 T+1 冻结），而非 engine 记账（dry_run 空仓 + 不含 smoke 直接 broker 操作）。
     # 网关未连/异常 → None，push 内部退回 position_book 本地账本（软降级，不阻断推送）。
@@ -762,8 +756,8 @@ async def _pre_open_impl(date: str) -> dict:
     if not signals:
         # DB 无 SIGNAL → 当日无扫描/无计划，保守不挂（spec 红线）。
         return {"submitted": 0, "reason": "无计划"}
-    # 确认闸（DB per-trade CONFIRMED）：研究员人审的「确认」走 confirm_plan 写 trade_event
-    # CONFIRMED 行；eod_plan auto 路径（AUTO_CONFIRM_PLAN=true）也写 CONFIRMED。
+    # 确认闸（DB per-trade CONFIRMED）：研究员人审的「确认」（生产路径已废，仅测试 legacy）
+    # 或 eod_plan auto 路径（AUTO_CONFIRM_PLAN=true）写 trade_event CONFIRMED 行。
     # 任一 SIGNAL 的 latest_action 非 CONFIRMED（仅 SIGNAL/VETOED/未确认）→ 整体未确认。
     # 物理意图（spec 红线）：宁可漏挂，不挂研究员未审核的单。
     # Why 整体判断而非逐笔：原 plan["confirmed"] 是整张计划级布尔（研究员一次性确认全部），
@@ -1790,7 +1784,16 @@ async def post_close(
     # 额外卖出与熔断善后冲突（熔断应全场停摆，同 ⑤ max_holding 的熔断优先约束）。
     if not circuit_breaker_triggered:
         try:
-            # C-6 V2：trailing 演进读/写 plan key（load_plan/save_plan 当日口径）走 clock.today。
+            # C-6 V2 / C3：trailing 盘后演进。
+            # **C3 决策（写盘路径已删后）**：原 trailing 把演进后的 stop_price 写回
+            # plan["orders"]（落盘 JSON），但 C2c 已切 _stoploss 直接读 DB
+            # SIGNAL.meta（不再读 JSON），故此写回**已是孤儿**（写盘无消费方）。
+            # file:2905-2907 注释印证「时间驱动 trailing ... 属另一个 follow-up」。
+            # C3 改：保留 _evolve_trailing_stops 计算（结果用于 result["trailing_evolved"]
+            # 可观测性 + 为后续 follow-up「盘中动态 stop_prices map」铺垫），删写回
+            # （避免无谓 I/O + C3 后写盘已移除）。演进值若要落真相源，
+            # follow-up 应改写 DB SIGNAL.meta（update stop_price 字段）而非 JSON，目前
+            # 未实现——pre_open 当日 base_stop（pre_open 挂单落盘的初始止损价）继续生效。
             today_eq = clock.today()
             plan = trading_plan.load_plan(today_eq)
             if plan and plan.get("orders"):
@@ -1798,12 +1801,11 @@ async def post_close(
                 n = _evolve_trailing_stops(
                     plan["orders"], entry_dates, today_eq, _trade_cfg())
                 if n:
-                    # 写回 plan（保留 confirmed——trailing 是止损价演进不改人审状态；
-                    # 否则 confirmed 重置 False 会让次日 _stoploss 跳过止损监控致敞口裸奔）
-                    trading_plan.save_plan(
-                        today_eq, plan["orders"], confirmed=plan.get("confirmed", False))
+                    # 不再写回 plan（C2c 后 _stoploss 读 DB SIGNAL.meta，JSON 写回是孤儿）。
+                    # 计数值保留供 post_close 结果可观测性。
                     result["trailing_evolved"] = n
-                    logger.info("post_close trailing 演进 %d 单 stop（holding_days 驱动）", n)
+                    logger.info("post_close trailing 演进 %d 单 stop（holding_days 驱动，"
+                                "C3 删写路径后回写已废，演进值待 follow-up 落 DB meta）", n)
         except Exception:
             logger.exception("post_close trailing 演进异常（不阻塞 max_holding/清白名单）")
 
@@ -1927,6 +1929,16 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
     plan = trading_plan.load_plan(today)
     if not plan:
         logger.warning("挂止盈跳过：无活跃计划 symbol=%s（计划未落盘/已失效）", symbol)
+        return
+    # SSoT C3 follow-up（C2c reviewer 标注）：per-symbol veto 守卫。
+    # 物理意图：place_take_profit 经 load_plan 读 plan.orders，C3 load_plan DB 优先返所有
+    # SIGNAL.meta 行（含已被 veto 的标的）。pre_open 已 per-symbol 跳过 vetoed 不挂单（C2c），
+    # 故 vetoed 标的永不成交、本函数理论上不会被 vetoed 标的触发；但保险起见，此处再查一次
+    # latest_action=VETOED 显式跳过（防 pre_open/veto 时序窗口漏挂导致 vetoed 标的意外成交）。
+    _aid_pre_tp = _resolve_account_id()
+    _tid_tp = _state_store.build_trade_id(_aid_pre_tp, symbol, today)
+    if _state_store.get_latest_action(_tid_tp) == "VETOED":
+        logger.warning("挂止盈跳过：标的已被否决 symbol=%s（veto 终局防线，C3 follow-up）", symbol)
         return
     tp2 = tp1 = None
     tp1_portion = 0.0

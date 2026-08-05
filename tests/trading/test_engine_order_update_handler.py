@@ -327,6 +327,42 @@ def test_place_take_profit_two_legs(db):
     assert tp2_leg.qty == 500
 
 
+def test_place_take_profit_skips_vetoed_symbol(db, monkeypatch):
+    """C3 follow-up（C2c reviewer 标注）：vetoed 标的 place_take_profit 跳过（veto 终局防线）。
+
+    物理意图（SSoT C3）：
+        place_take_profit 经 load_plan 读 plan.orders，C3 load_plan DB 优先返所有 SIGNAL.meta
+        行（含已被 veto 的标的）。pre_open 已 per-symbol 跳过 vetoed 不挂单（C2c），故 vetoed
+        标的永不成交、本函数理论上不会被 vetoed 标的触发；但保险起见，place_take_profit 再查
+        latest_action=VETOED 显式跳过（防 pre_open/veto 时序窗口漏挂导致 vetoed 标的意外成交）。
+
+    断言：
+      - vetoed 标的 place_take_profit 不调 _submit（不挂止盈单）。
+    """
+    from trading import state_store
+    plan = {
+        "date": "2026-08-05", "confirmed": False,  # vetoed → confirmed=False（C3 load_plan 语义）
+        "orders": [{
+            "order": {"symbol": "300009.SZ", "qty": 1000, "side": "buy", "price": 10.0},
+            "stop_price": 9.0, "take_profit": 13.0, "tp1": 11.5, "tp1_portion": 0.5,
+        }],
+    }
+    # DB 种 SIGNAL + VETOED（latest_action=VETOED）
+    _aid = "test_veto_tp"
+    monkeypatch.setenv("QMT_ACCOUNT_ID", _aid)
+    state_store.upsert_account(_aid, broker="qmt")
+    _tid = state_store.build_trade_id(_aid, "300009.SZ", __import__("trading").clock.today())
+    state_store.insert_trade_event(_aid, _tid, "300009.SZ", "SIGNAL", meta='{"order":{"symbol":"300009.SZ"}}')
+    state_store.insert_trade_event(_aid, _tid, "300009.SZ", "VETOED")
+
+    eng = engine.TradingEngine()
+    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+        asyncio.run(eng._place_take_profit("300009.SZ", 1000, 10.5, order_id="ord-veto"))
+    # vetoed 标的 _submit 不应被调
+    assert submit_mock.call_count == 0
+
+
 def test_place_take_profit_tp1_qty_round_to_lot(db):
     """filled=430/portion=0.5 → tp1=200（int(215/100)*100），tp2=230（余量含零股）。
 

@@ -188,7 +188,9 @@ def test_step3_trade_next_day(isolated, monkeypatch):
     asyncio.run(engine.eod_plan("2026-07-28", [sig], {"300001.SZ": 0.5}, 1_000_000.0))
 
     # ① 研究员确认（T-1 确认闸）—— confirmed=False 转 True，pre_open 的硬前置
-    assert trading_plan.confirm_plan("2026-07-28") is True
+    # C3：eod_plan 不落 JSON，confirm_plan_legacy 不适用；用 confirm_plan_db_only 直接写 DB CONFIRMED
+    from tests._legacy_plan_io import confirm_plan_db_only
+    assert confirm_plan_db_only("2026-07-28") >= 1
     assert trading_plan.load_plan("2026-07-28")["confirmed"] is True
 
     # ② pre_open 挂单：mock gw + _submit 返 DRY_RUN + cancel_all no-op
@@ -304,7 +306,9 @@ def test_e2e_full_flow_symbol_propagates(isolated, monkeypatch):
     assert plan["orders"][0]["order"]["symbol"] == "688001.SH"
 
     # 第 3 步：confirm + 成交回报写账本
-    trading_plan.confirm_plan("2026-07-28")
+    # C3：eod_plan 不落 JSON，用 confirm_plan_db_only 写 DB CONFIRMED
+    from tests._legacy_plan_io import confirm_plan_db_only
+    confirm_plan_db_only("2026-07-28")
     eng = engine.TradingEngine()
     eng._gw = MagicMock()
     eng._gw._orders = {"o1": {"order_type": 23}}
@@ -396,9 +400,11 @@ def _save_confirmed_plan(date: str, symbols: list[str]) -> None:
     「漏挂」语义），与 T9 test_engine_alerts.py 同范式。
 
     C2c（SSoT Phase C）：pre_open 直读 DB trade_event(SIGNAL).meta，故种子除 JSON 外
-    必须再写 SIGNAL 行（confirm_plan 写 CONFIRMED，SIGNAL 必须先写保证 latest=CONFIRMED）。
+    必须再写 SIGNAL 行（confirm 写 CONFIRMED，SIGNAL 必须先写保证 latest=CONFIRMED）。
+    C3：save_plan/confirm_plan 改用 tests/_legacy_plan_io legacy shim（生产已删）。
     """
     from trading import state_store
+    from tests._legacy_plan_io import save_plan_legacy, confirm_plan_legacy
     import json as _json
     orders = [
         {"order": {"symbol": sym, "qty": 100, "side": "buy", "price": 10.0},
@@ -407,8 +413,8 @@ def _save_confirmed_plan(date: str, symbols: list[str]) -> None:
          "cancel_on": None, "experiment_id": None, "experiment_weight": 1.0, "rr": 1.0}
         for sym in symbols
     ]
-    trading_plan.save_plan(date, orders)
-    # C2c：先写 DB SIGNAL（必须在 confirm_plan 之前，保证 CONFIRMED event_id > SIGNAL）
+    save_plan_legacy(date, orders)
+    # C2c：先写 DB SIGNAL（必须在 confirm 之前，保证 CONFIRMED event_id > SIGNAL）
     account_id = engine._resolve_account_id()
     if state_store.get_account(account_id) is None:
         state_store.upsert_account(account_id, broker="qmt")
@@ -420,7 +426,7 @@ def _save_confirmed_plan(date: str, symbols: list[str]) -> None:
         state_store.insert_trade_event(
             account_id, tid, sym, "SIGNAL",
             meta=_json.dumps(meta_obj, ensure_ascii=False))
-    assert trading_plan.confirm_plan(date) is True
+    assert confirm_plan_legacy(date) is True
 
 
 # ============================================================================
@@ -674,7 +680,9 @@ def test_e2e_sanity_date_alignment_loads_right_plan(isolated, monkeypatch):
     # 阶段③：T+1 日盘前 pre_open，load_plan(today=T+1) 拿到 T 日落的计划（key 对齐）
     #     旧 bug 下：eod 落 today=T，pre_open 读 T+1 → load_plan(T+1) 返 None → reason=「无计划」
     #     修复后：eod 落 plan_date=T+1，pre_open 读 T+1 → load_plan(T+1) 命中 → 正常挂单
-    trading_plan.confirm_plan(plan_date)  # 研究员 T-1 确认闸
+    # C3：eod_plan 不落 JSON，用 confirm_plan_db_only 写 DB CONFIRMED（pre_open 据放行）
+    from tests._legacy_plan_io import confirm_plan_db_only
+    confirm_plan_db_only(plan_date)  # 研究员 T-1 确认闸
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
 
     fake_gw = MagicMock()
@@ -965,12 +973,29 @@ def test_pre_open_next_day_gate_hits_prev_day_data_ready(isolated, monkeypatch):
     fake_gw = MagicMock()
     fake_gw._connected = True
     fake_gw.is_client_ready = lambda *a, **kw: True
-    # 确认计划：gate ① 段需通过
-    trading_plan.save_plan(PREOPEN_T1, [{
+    # 确认计划：gate ① 段需通过（C3：save_plan 改用 legacy shim + 写 DB SIGNAL/CONFIRMED）
+    from tests._legacy_plan_io import save_plan_legacy
+    from trading import state_store
+    import json as _json
+    _orders_pre = [{
         "order": {"symbol": "300077.SZ", "qty": 100, "side": "BUY", "price": 10.0},
         "stop_price": 9.5, "take_profit": 11.0, "neckline": 10.0, "atr": 0.25,
         "formed_at": PIPE_T, "max_wait": 5, "tp1": None, "tp1_portion": 0.0,
         "cancel_on": None, "experiment_id": None, "experiment_weight": None, "rr": 2.0,
-    }], confirmed=True)
+    }]
+    save_plan_legacy(PREOPEN_T1, _orders_pre, confirmed=True)
+    # C3：gate ① 段读 load_plan DB 优先，需落 DB SIGNAL + CONFIRMED
+    _aid_pre = engine._resolve_account_id()
+    if state_store.get_account(_aid_pre) is None:
+        state_store.upsert_account(_aid_pre, broker="qmt")
+    for o in _orders_pre:
+        sym = o["order"]["symbol"]
+        _tid_pre = state_store.build_trade_id(_aid_pre, sym, PREOPEN_T1)
+        _meta_pre = {**o, "plan_date": PREOPEN_T1, "strategy_name": "neckline",
+                     "rationale": f"颈线法@{o.get('formed_at', '')}"}
+        state_store.insert_trade_event(
+            _aid_pre, _tid_pre, sym, "SIGNAL",
+            meta=_json.dumps(_meta_pre, ensure_ascii=False))
+        state_store.insert_trade_event(_aid_pre, _tid_pre, sym, "CONFIRMED")
     ok, reason = asyncio.run(eng._pre_open_gate(PREOPEN_T1, fake_gw))
     assert ok, f"T+1 pre_open gate 应放行（命中 T 日 data_ready），reason={reason}"

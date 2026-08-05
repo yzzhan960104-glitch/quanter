@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
-"""eod_plan order_dict 透传归因 + trading_plan save/load 往返保真。
+"""eod_plan order_dict 透传归因 + JSON save/load 往返保真（C3：legacy shim）。
 
 物理意图：Task 5 让 PlannedOrder 携带 experiment_id/experiment_weight，
-本套测试验证 trading_plan 落盘 JSON 透传这两个归因字段——既保证新 plan
+本套测试验证 legacy shim 落盘 JSON 透传这两个归因字段——既保证新 plan
 往返保真（report 阶段聚合实验归因的物理基础），又保证老 plan（无归因字段）
 向后兼容不崩（report 归「未归因」桶）。
+
+C3：生产 save_plan 已删（DB SIGNAL 真相源）；测试改用 tests/_legacy_plan_io
+legacy shim 验证 JSON 往返保真（C3 后 JSON 是导出产物，往返保真仍需保证）。
+load_plan DB 优先，无 DB SIGNAL 时回退读 JSON，本测走回退路径。
 """
 import pytest
 
 from trading import trading_plan
+from tests._legacy_plan_io import save_plan_legacy
 
 
 def test_save_plan_preserves_experiment_attribution(tmp_path, monkeypatch):
@@ -23,8 +28,8 @@ def test_save_plan_preserves_experiment_attribution(tmp_path, monkeypatch):
         "stop_price": 9.0, "take_profit": 11.0,
         "experiment_id": "neckline_v6_20260722", "experiment_weight": 0.2,
     }]
-    trading_plan.save_plan("2026-07-22", orders)
-    loaded = trading_plan.load_plan("2026-07-22")
+    save_plan_legacy("2026-07-22", orders)
+    loaded = trading_plan.load_plan("2026-07-22")  # 无 DB SIGNAL → 回退 JSON
     assert loaded["orders"][0]["experiment_id"] == "neckline_v6_20260722"
     assert loaded["orders"][0]["experiment_weight"] == 0.2
 
@@ -38,6 +43,6 @@ def test_old_plan_without_attribution_loads_ok(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
     orders = [{"order": {"symbol": "X", "qty": 100, "side": "buy", "price": 10},
                "stop_price": 9, "take_profit": 11}]
-    trading_plan.save_plan("2026-07-20", orders)
+    save_plan_legacy("2026-07-20", orders)
     loaded = trading_plan.load_plan("2026-07-20")
     assert "experiment_id" not in loaded["orders"][0]   # 老无字段，不崩

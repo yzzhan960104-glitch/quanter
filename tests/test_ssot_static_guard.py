@@ -53,6 +53,15 @@ BANNED_PATTERNS = [
     r"[\"']live_trades\.csv",
     r"\bimport\b.*\brecord_live_trade\b",
     r"[\"']param_iter_state\.json",
+    # C3：trading_plan 写路径已删（DB trade_event(SIGNAL/CONFIRMED) 唯一真相源）。
+    # 精确 pattern（防 legacy shim save_plan_legacy/confirm_plan_legacy 误命中：
+    # \b 边界保证 confirm_plan 后紧跟 ( 不匹配 confirm_plan_legacy()）
+    r"\bsave_plan\s*\(",
+    r"\bconfirm_plan\s*\(",
+    r"\bdef\s+save_plan\b",
+    r"\bdef\s+confirm_plan\b",
+    r"trading_plan\.save_plan\b",
+    r"trading_plan\.confirm_plan\b",
 ]
 
 # 预编译 pattern（性能 + 一次性校验正则合法性）
@@ -72,6 +81,11 @@ def _iter_prod_py_files(targets: list[str]):
             # 路径标准化为正斜杠做包含判断（兼容 win 反斜杠）
             s = str(py).replace("\\", "/")
             if "/archive/" in s or "/tests/" in s:
+                continue
+            # C3：排除 BANNED 防御者自身（pattern 字面字符串会被同 pattern 命中）
+            if py.name == "audit_ssot.py" and "scripts" in s:
+                continue
+            if py.name == "test_ssot_static_guard.py":
                 continue
             yield py
 

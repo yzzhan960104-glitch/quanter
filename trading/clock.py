@@ -33,7 +33,7 @@ def now() -> datetime:
 def today() -> str:
     """今日 YYYY-MM-DD（pre_open 读 plan key 口径）。
 
-    用途：load_plan/save_plan 读 key、is_trading_day 守卫、holding_days 计算。
+    用途：load_plan 读 key、is_trading_day 守卫、holding_days 计算（C3 写路径已删）。
     禁止 eod 落盘用本函数（eod 必用 trading_day，避免 key 错位）。
     """
     return now().strftime("%Y-%m-%d")

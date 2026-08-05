@@ -114,15 +114,17 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
     # 告警，不是 gate。模块级 _ACTIVE_ENGINE 可能从前序测试泄漏（构造 TradingEngine 残留），
     # 不重置会让 pre_open 入口的三段式 gate 先拦截早返，到不了 submit 逻辑。
     monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
-    # I-1（测试卫生）：TRADE_PLAN_DIR 指向 tmp_path，save_plan/confirm_plan 落到临时目录，
+    # I-1（测试卫生）：TRADE_PLAN_DIR 指向 tmp_path，legacy shim 落到临时目录，
     # 不污染实盘 logs/trading_plans/（_plan_path 读 os.getenv("TRADE_PLAN_DIR")）。
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
 
     # 落一份已确认计划（pre_open 必须有 orders 才有「漏挂」语义——0 orders 是正常无计划，
-    # 不应触发 CRITICAL）。直 save_plan 跳过 build_orders_from_signals（本测聚焦告警点，
+    # 不应触发 CRITICAL）。直落盘跳过 build_orders_from_signals（本测聚焦告警点，
     # 非 signal 构造），写两条订单确保 len(orders)>0。
     # C2c：pre_open 直读 DB SIGNAL.meta，需先落 SIGNAL 再 confirm（顺序保证 latest=CONFIRMED）
+    # C3：save_plan/confirm_plan 改用 tests/_legacy_plan_io legacy shim（生产已删）
     from trading import trading_plan, state_store
+    from tests._legacy_plan_io import save_plan_legacy, confirm_plan_legacy
     import json as _json
     orders = [
         {"order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
@@ -134,8 +136,8 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
          "formed_at": "2026-07-25", "max_wait": 5, "tp1": None, "tp1_portion": None,
          "cancel_on": None, "experiment_id": None, "experiment_weight": 1.0, "rr": 1.0},
     ]
-    trading_plan.save_plan("2026-07-28", orders)
-    # C2c：落 DB SIGNAL（先于 confirm_plan）
+    save_plan_legacy("2026-07-28", orders)
+    # C2c：落 DB SIGNAL（先于 confirm）
     _aid = engine._resolve_account_id()
     if state_store.get_account(_aid) is None:
         state_store.upsert_account(_aid, broker="qmt")
@@ -147,7 +149,7 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
         state_store.insert_trade_event(
             _aid, tid, sym, "SIGNAL",
             meta=_json.dumps(meta_obj, ensure_ascii=False))
-    assert trading_plan.confirm_plan("2026-07-28") is True
+    assert confirm_plan_legacy("2026-07-28") is True
 
     # gw 锁死：_submit 全部 raise（模拟 lock_down 拒所有单）
     fake_gw = MagicMock()
@@ -187,6 +189,7 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
     # I-1（测试卫生）：TRADE_PLAN_DIR 指向 tmp_path，落盘不污染实盘 logs/trading_plans/。
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
     from trading import trading_plan, state_store
+    from tests._legacy_plan_io import save_plan_legacy, confirm_plan_legacy
     import json as _json
     orders = [
         {"order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
@@ -194,8 +197,8 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
          "formed_at": "2026-07-25", "max_wait": 5, "tp1": None, "tp1_portion": None,
          "cancel_on": None, "experiment_id": None, "experiment_weight": 1.0, "rr": 1.0},
     ]
-    trading_plan.save_plan("2026-07-28", orders)
-    # C2c：落 DB SIGNAL（先于 confirm_plan，保证 latest=CONFIRMED）
+    save_plan_legacy("2026-07-28", orders)
+    # C2c：落 DB SIGNAL（先于 confirm，保证 latest=CONFIRMED）
     _aid = engine._resolve_account_id()
     if state_store.get_account(_aid) is None:
         state_store.upsert_account(_aid, broker="qmt")
@@ -206,7 +209,7 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
             _aid, tid, sym, "SIGNAL",
             meta=_json.dumps({**o, "plan_date": "2026-07-28", "strategy_name": "neckline",
                               "rationale": ""}, ensure_ascii=False))
-    assert trading_plan.confirm_plan("2026-07-28") is True
+    assert confirm_plan_legacy("2026-07-28") is True
 
     fake_gw = MagicMock()
     monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)

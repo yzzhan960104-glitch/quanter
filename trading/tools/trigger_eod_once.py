@@ -4,7 +4,7 @@
 物理意图（A2 验证 · schtasks 未上线前的手动入口）：
     不依赖 schtasks / 常驻 APScheduler，独立触发一次真实 ``_eod``，确认全链路：
       ① scan_live 能扫出真实颈线法信号
-      ② trading_plan.save_plan 落盘 confirmed=False
+      ② DB trade_event(SIGNAL) 落真相源
       ③ trading_plan.push_plan_to_dingtalk 真发钉钉（不拦推送）
     不连网关、不下单——``_eod`` 本身只产计划（confirmed=False 待人审），下单是次日
     pre_open 且需研究员确认；叠加 AUTO_TRADE_MODE=dry_run 双保险。

@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """T-1 交易计划单测（Task 8 + SSoT Phase C · C3）。
 
-覆盖：save/load/confirm 落盘 + 确认闸 + 钉钉推送格式化 + C3 load_plan DB 优先。
+覆盖：C3 load_plan DB 优先 + 钉钉推送格式化 + legacy shim（测试专用 JSON 落盘/确认）。
 orders 统一用嵌套格式（与 Task 9 engine.eod_plan 生产侧、push_plan_to_dingtalk 消费侧
 全链路一致）：
     {"order": {symbol/qty/side/price}, "stop_price": ..., "take_profit": ...}
+
+C3：生产 save_plan/confirm_plan 已删（DB SIGNAL/CONFIRMED 真相源），原 save/confirm 落盘
+测试改测 tests/_legacy_plan_io.py 的 legacy shim（保留测试种子能力，~50 处历史调用依赖）。
 """
 import json
 
@@ -22,17 +25,23 @@ def _sample_nested_orders():
     ]
 
 
-def test_save_load_confirm(tmp_path, monkeypatch):
-    """save_plan 落盘 confirmed=false → load_plan 回读一致 → confirm_plan 置 true。"""
+def test_save_load_confirm(tmp_db, tmp_path, monkeypatch):
+    """C3：测试专用 legacy shim save_plan_legacy/confirm_plan_legacy 仍可用（保留测试种子能力）。
+
+    物理：生产 save_plan/confirm_plan 已删（DB SIGNAL/CONFIRMED 真相源）；本测试验证
+    tests/_legacy_plan_io.py 的 shim 仍能正确落盘 JSON + 写 DB CONFIRMED——历史测试种子
+    继续工作（覆盖 test_critical_guard / test_engine_alerts / test_e2e_trading_flow 等
+    ~50 处种子调用）。
+    """
+    from tests import _legacy_plan_io as legacy
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
     orders = _sample_nested_orders()
-    p = tp.save_plan("2026-07-22", orders)
+    p = legacy.save_plan_legacy("2026-07-22", orders)
     assert p.exists()
-    plan = tp.load_plan("2026-07-22")
-    assert plan is not None and plan["orders"] == orders
-    assert plan["confirmed"] is False
-    assert tp.confirm_plan("2026-07-22") is True
-    assert tp.load_plan("2026-07-22")["confirmed"] is True
+    # legacy.confirm_plan_legacy 写 DB CONFIRMED + JSON confirmed=true
+    assert legacy.confirm_plan_legacy("2026-07-22") is True
+    plan = json.loads(p.read_text(encoding="utf-8"))
+    assert plan["confirmed"] is True
 
 
 def test_load_plan_missing(tmp_path, monkeypatch):
@@ -163,28 +172,33 @@ def test_load_plan_corrupt(tmp_path, monkeypatch):
     assert tp.load_plan("2026-07-23") is None
 
 
-def test_confirm_plan_missing(tmp_path, monkeypatch):
-    """对不存在的计划调 confirm_plan 返 False（防幻觉确认）。"""
+def test_confirm_plan_missing_legacy_shim(tmp_path, monkeypatch):
+    """C3：legacy shim confirm_plan_legacy 对不存在的计划返 False（防幻觉确认）。"""
+    from tests import _legacy_plan_io as legacy
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
-    assert tp.confirm_plan("2099-01-01") is False
+    assert legacy.confirm_plan_legacy("2099-01-01") is False
 
 
-def test_confirm_plan_idempotent(tmp_path, monkeypatch):
-    """重复确认幂等：二次调用仍返 True，文件保持 confirmed=true。"""
+def test_confirm_plan_idempotent_legacy_shim(tmp_db, tmp_path, monkeypatch):
+    """C3：legacy shim 重复确认幂等（二次调用仍 True，DB CONFIRMED 幂等跳过）。"""
+    from tests import _legacy_plan_io as legacy
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
+    monkeypatch.setenv("QMT_ACCOUNT_ID", "ACC_TEST")
     orders = _sample_nested_orders()
-    tp.save_plan("2026-07-22", orders)
-    assert tp.confirm_plan("2026-07-22") is True
-    assert tp.confirm_plan("2026-07-22") is True  # 二次确认仍成功
-    assert tp.load_plan("2026-07-22")["confirmed"] is True
+    legacy.save_plan_legacy("2026-07-22", orders)
+    assert legacy.confirm_plan_legacy("2026-07-22") is True
+    assert legacy.confirm_plan_legacy("2026-07-22") is True  # 二次确认仍成功（DB UNIQUE 幂等）
+    plan = json.loads(legacy._plan_path("2026-07-22").read_text(encoding="utf-8"))
+    assert plan["confirmed"] is True
 
 
-def test_save_plan_uses_custom_dir(tmp_path, monkeypatch):
-    """TRADE_PLAN_DIR 自定义路径生效，且自动建父目录。"""
+def test_save_plan_legacy_uses_custom_dir(tmp_path, monkeypatch):
+    """C3：legacy shim TRADE_PLAN_DIR 自定义路径生效，自动建父目录。"""
+    from tests import _legacy_plan_io as legacy
     custom = tmp_path / "nested" / "plans"
     monkeypatch.setenv("TRADE_PLAN_DIR", str(custom))
     orders = _sample_nested_orders()
-    p = tp.save_plan("2026-07-24", orders)
+    p = legacy.save_plan_legacy("2026-07-24", orders)
     assert p.parent == custom
     assert p.exists()
 

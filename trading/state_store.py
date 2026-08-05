@@ -347,7 +347,7 @@ def build_trade_id(account_id: str, symbol: str, date: str) -> str:
     """构造 trade_id（account_symbol_date）单点。
 
     物理意图：消 engine.py:636（eod_plan）/ engine.py:3126（_handle_order_update）/
-    trading_plan.py:119（confirm_plan）三处 `f"{account_id}_{symbol}_{date}"` 复制——
+    原 trading_plan 确认函数 三处 `f"{account_id}_{symbol}_{date}"` 复制——
     单点既保幂等键口径统一（trade_event UNIQUE 约束依赖），又便于后续 task 单测。
     date 语义：【计划生效日】（next_trading_day，非写入日）—— 同一交易日从 SIGNAL
     到 FILL 共用同一 trade_id 串起事件流，错用写入日会切断归因链。

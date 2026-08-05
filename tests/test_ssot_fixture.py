@@ -41,7 +41,7 @@ def test_build_trade_id_same_across_callers():
     server_tid = state_store.build_trade_id(aid, sym, date)      # server-manual 路径
     engine_eod_tid = state_store.build_trade_id(aid, sym, date)  # engine eod_plan SIGNAL
     engine_preopen_tid = state_store.build_trade_id(aid, sym, date)  # engine pre_open ORDERED
-    plan_tid = state_store.build_trade_id(aid, sym, date)        # trading_plan confirm_plan CONFIRMED
+    plan_tid = state_store.build_trade_id(aid, sym, date)        # legacy confirm_plan_legacy CONFIRMED
     veto_tid = state_store.build_trade_id(aid, sym, date)        # veto_plan VETOED
     # 全部相同字符串（任一漂移即 UNIQUE 失效、双写幂等失效）
     assert server_tid == engine_eod_tid == engine_preopen_tid == plan_tid == veto_tid \

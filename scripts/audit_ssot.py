@@ -14,12 +14,13 @@ r"""SSoT 一致性巡检（B6）。
   - 跨平台：Windows wmic / 非 Windows pgrep（C-5 单例约束）。
   - 护栏复用 A5 静态护栏的精确 pattern 哲学（跳注释：要求括号/等号/引号/import 关键字）。
 
-BANNED pattern 边界（B6 决策）：
+BANNED pattern 边界（B6 决策 / C3 收尾）：
   - live_trades.csv / record_live_trade / LIVE_TRADE_LOG / LIVE_TRADE_COLUMNS /
     LIVE_TRADE_READ_SOURCE —— Phase A 已删，命中即第二真相源回归。
   - param_iter_state.json —— B3 已收口（experiment.db ACTIVE 唯一真相源），命中即 legacy 回归。
-  - **save_plan 不在 BANNED**：Phase C 才删（trading_plan.save_plan 当前仍是生产写入口，
-    engine eod/build_orders/pre_open 链路依赖）。本巡检只查已删的真相源，避免误报。
+  - trading_plan.save_plan / trading_plan.confirm_plan —— C3 已删（DB trade_event(SIGNAL/
+    CONFIRMED) 唯一真相源）。tests/_legacy_plan_io.py 测试专用 legacy shim 例外（PROD_DIRS
+    不扫 tests/，不会误命中）。
 """
 import platform
 import re
@@ -62,6 +63,14 @@ BANNED_PATTERNS = [
     r"[\"']live_trades\.csv",        # 字符串字面量（注释「logs/live_trades.csv」无引号不命中）
     r"\bimport\b.*\brecord_live_trade\b",   # import 语句
     r"[\"']param_iter_state\.json",  # B3 legacy 冠军治理 JSON 字符串字面量
+    # C3：trading_plan 写路径已删（DB trade_event(SIGNAL/CONFIRMED) 唯一真相源）。
+    # 精确 pattern（函数调用 + 模块属性访问 + def 定义）：
+    r"\bsave_plan\s*\(",             # save_plan( 调用（不含 legacy shim 的 save_plan_legacy）
+    r"\bconfirm_plan\s*\(",          # confirm_plan( 调用（不含 legacy shim 的 confirm_plan_legacy）
+    r"\bdef\s+save_plan\b",          # def save_plan 函数定义（防 trading_plan.py 内回写）
+    r"\bdef\s+confirm_plan\b",       # def confirm_plan 函数定义
+    r"trading_plan\.save_plan\b",    # 模块属性访问（trading_plan.save_plan）
+    r"trading_plan\.confirm_plan\b", # 模块属性访问（trading_plan.confirm_plan）
 ]
 _BANNED_COMPILED = [re.compile(p) for p in BANNED_PATTERNS]
 
@@ -176,7 +185,11 @@ def check_engine_process_count():
 
 
 def _iter_prod_py_files(targets):
-    """遍历 targets 下所有 .py 文件，排除 archive/ 与 tests/。yield 绝对 Path。"""
+    """遍历 targets 下所有 .py 文件，排除 archive/ 与 tests/ + 本巡检自身。yield 绝对 Path。
+
+    C3：排除 scripts/audit_ssot.py 自身——BANNED_PATTERNS 的 pattern 字面字符串（如
+    ``r"\\bsave_plan\\s*\\("``）会被同文件 pattern 命中（防御者不能扫自己）。
+    """
     for t in targets:
         base = ROOT / t
         if not base.exists():
@@ -184,6 +197,11 @@ def _iter_prod_py_files(targets):
         for py in base.rglob("*.py"):
             s = str(py).replace("\\", "/")
             if "/archive/" in s or "/tests/" in s:
+                continue
+            # 排除本巡检（防御者）+ 静态守卫测试（同款 pattern 字面）
+            if py.name == "audit_ssot.py" and "scripts" in s:
+                continue
+            if py.name == "test_ssot_static_guard.py":
                 continue
             yield py
 
