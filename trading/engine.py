@@ -694,8 +694,25 @@ async def pre_open(date: str) -> dict:
         except Exception:
             logger.exception("job_ledger finish_run 失败（不阻断 pre_open）")
         raise
-    status = "skipped" if (result.get("skipped") or result.get("reason")) else "done"
-    message = str(result.get("skipped") or result.get("reason") or "")
+    # A2（08-05 废单根治）：台账不能再拿 done 掩盖 0 成交。
+    #   skipped = gate 未过（无计划/未确认/网关/数据未就绪）→ 窗口内可重试；
+    #   done    = submitted>0（至少挂出去一张，重试有 has_order 幂等兜底，无需再跑）；
+    #   failed  = live 有计划单但 submitted=0（全部被拒/网关全拒）→ C-8 窗口内自动重试。
+    if result.get("skipped") or result.get("reason"):
+        status = "skipped"
+        message = str(result.get("skipped") or result.get("reason") or "")
+    elif result.get("submitted", 0) > 0:
+        status = "done"
+        message = ""
+    elif result.get("mode") == "live" and result.get("total", 0) > 0:
+        # Why failed 而非 done：done 会被 catchup._catchup_pre_open 跳过（status in
+        # ("running","done")），08-05 09:22 全拒后 09:30 本可补挂却因 done 永久关闭。
+        # failed 不在跳过集 → C-8 窗口 [09:22,10:00) 内自动重试（has_order OPEN 幂等防重复挂）。
+        status = "failed"
+        message = f"submitted=0/{result.get('total')} rejected={result.get('rejected')}"
+    else:
+        status = "done"
+        message = ""
     try:
         job_ledger.finish_run("pre_open", date, status, message)
     except Exception:
@@ -1025,7 +1042,9 @@ async def _pre_open_impl(date: str) -> dict:
         _alert_critical(
             f"pre_open 漏挂 submitted=0/{len(signals)} date={date}"
             f"（网关锁死? 网关拒绝所有单? 人工核查 gw 状态与挡板日志）")
-    return {"submitted": n_submitted, "mode": _mode()}
+    # A2：返回 submitted/rejected/total 供台账判定（submitted=0 且有单 → failed，不再 done 掩盖）。
+    return {"submitted": n_submitted, "rejected": n_rejected,
+            "total": len(signals), "mode": _mode()}
 
 
 # ============================================================================
