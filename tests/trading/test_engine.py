@@ -1944,139 +1944,15 @@ def test_pre_open_close_expired_skip_when_no_price(monkeypatch, _state_db):
 
 
 # ============================================================================
-# 4.9 Task 9（R-3 trailing 盘后演进）：post_close 演进 plan stop（compute_stop_price 消费 grace/step/floor）
+# 4.9 Task 9（R-3 trailing 盘后演进）测试已删除（SSoT review P2 · 死计算）
 # ============================================================================
-def test_evolve_trailing_stops_writeback(monkeypatch):
-    """_evolve_trailing_stops：holding_days>grace → 收紧 stop 写回 round2。
-
-    物理意图（plan Task 9 · spec §5.3）：
-        compute_stop_price 已实现但实盘零调用（env 读 grace/step/floor 未消费）。盘后演进
-        让 trailing 真正生效：对每个【已成交持仓】按 holding_days 重算 stop_price。
-        holding_days=7, grace=5, step=0.1 → eff_mult=1.0-(7-5)*0.1=0.8 → stop=10-0.8×0.5=9.6。
-    """
-    orders = [{"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}]
-    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 7)
-    cfg = {"stop_atr_mult": 1.0, "grace": 5, "step": 0.1, "floor": 0.5}
-    n = engine._evolve_trailing_stops(orders, {"A.SH": "2099-01-01"}, "2099-01-10", cfg)
-
-    assert n == 1
-    assert orders[0]["stop_price"] == 9.6   # 10 - 0.8×0.5（grace 后收紧 0.2 mult）
-
-
-def test_evolve_trailing_stops_holding_days_zero_base_stop(monkeypatch):
-    """holding_days=0（今日成交 / 缺 entry_date）→ stop=base_stop 零回归（不收紧）。
-
-    物理意图（边界 · spec §5.3）：holding_days=0 视作 grace 内，compute_stop_price 返
-        base_stop（颈线-stop_atr_mult×ATR）。零回归保证 Task 9 上线日不改变今日新成交持仓的止损。
-    """
-    orders = [{"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}]
-    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 0)
-    cfg = {"stop_atr_mult": 1.0, "grace": 5, "step": 0.1, "floor": 0.5}
-    # entry_dates 空（未成交 / 缺 entry）→ holding_days=0
-    engine._evolve_trailing_stops(orders, {}, "2099-01-10", cfg)
-    # base_stop = 10 - 1.0×0.5 = 9.5（grace 内不收紧）
-    assert orders[0]["stop_price"] == 9.5
-
-
-def test_evolve_trailing_stops_skips_missing_neckline_atr():
-    """缺 neckline/atr 的 order 跳过不改（无基准无法重算 stop）。"""
-    orders = [
-        {"order": {"symbol": "A.SH"}, "neckline": None, "atr": 0.5, "stop_price": 9.0},
-        {"order": {"symbol": "B.SH"}, "neckline": 10.0, "atr": None, "stop_price": 9.0},
-    ]
-    n = engine._evolve_trailing_stops(
-        orders, {}, "2099-01-10",
-        {"stop_atr_mult": 1.0, "grace": 5, "step": 0.1, "floor": 0.5})
-    assert n == 0
-    assert orders[0]["stop_price"] == 9.0   # 未改
-    assert orders[1]["stop_price"] == 9.0
-
-
-def test_post_close_trailing_skipped_after_breaker(monkeypatch):
-    """post_close：日内熔断触发 → 跳过 trailing 演进（熔断优先，不收紧 stop）。
-
-    物理意图（plan Task 9 Step 4 · spec §5.3 边界）：
-        熔断（-3%）已 emergency_halt + lock_down，次日人工接管——此时再演进 stop 收紧
-        可能触发额外卖出与熔断善后冲突。熔断优先于 trailing（同 max_holding 约束）。
-    """
-    today = datetime.now().strftime("%Y-%m-%d")
-    _seed_breaker_baseline(today, 1_000_000.0)
-    # plan 有持仓 order（若 trailing 跑会演进，验熔断时它不被调）
-    # C3：save_plan 改用 legacy shim
-    from tests._legacy_plan_io import save_plan_legacy
-    save_plan_legacy(today, [
-        {"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}])
-
-    evolve_calls = []
-    def _fake_evolve(orders, ed, t, cfg):
-        evolve_calls.append(True)
-        return 0
-    monkeypatch.setattr(engine, "_evolve_trailing_stops", _fake_evolve)
-
-    class _FakeGw:
-        async def query_asset(self):
-            return {"total_asset": 950_000.0}  # -5% 触发熔断（限 -3%）
-        async def _fetch_broker_positions(self):
-            return {}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(
-        "presentation.server.services.trading_service.emergency_halt",
-        lambda: {"halted": True})
-    from trading.compute.reconcile import ReconciliationResult
-    async def _fake_rec(gw, local, tolerance=0.0):
-        return ReconciliationResult([], [], [], [], 0.0, True)
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
-
-    result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
-    assert result.get("circuit_breaker") is True
-    assert evolve_calls == []                # 熔断 → trailing 演进未跑
-    assert "trailing_evolved" not in result
-
-
-def test_post_close_trailing_evolves_count_only(monkeypatch):
-    """post_close：未熔断 + plan 有成交持仓 → trailing 演进计数（C3 删写回，仅可观测）。
-
-    物理意图（plan Task 9 Step 4 / SSoT C3）：
-        post_close ④ 段串联 _evolve_trailing_stops —— load_plan(today) → entry_date 算
-        holding_days → compute_stop_price → result["trailing_evolved"] 计数。
-
-    **C3 决策（删写回）**：原 trailing 把演进后的 stop_price 写回 plan["orders"]（落盘 JSON），
-    但 C2c 切 _stoploss 直接读 DB SIGNAL.meta 后该写回成孤儿（写盘无消费方）。
-    C3 删 save_plan 写回，保留 _evolve_trailing_stops 计算（结果用于 result["trailing_evolved"]
-    可观测性 + 为后续 follow-up「盘中动态 stop_prices map / DB meta update」铺垫）。
-
-    验证点（C3 后）：trailing_evolved 计数仍正确；plan 不被写回（stop_price 保持原值 9.0）。
-    follow-up：演进值若要落真相源，应改写 DB SIGNAL.meta（update stop_price 字段）。
-    """
-    from trading import position_book
-    from tests._legacy_plan_io import save_plan_legacy
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    _seed_breaker_baseline(today, 1_000_000.0)
-    # plan 有持仓 order（neckline/atr 齐全，可演进）
-    orders = [{"order": {"symbol": "A.SH"}, "neckline": 10.0, "atr": 0.5, "stop_price": 9.0}]
-    save_plan_legacy(today, orders)
-    # A.SH 已成交（entry_dates 有）+ holding_days=7>grace=5 → 收紧
-    monkeypatch.setattr(position_book, "get_entry_dates",
-                        lambda **kw: {"A.SH": "2099-01-01"})
-    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 7)
-
-    class _FakeGw:
-        async def query_asset(self):
-            return {"total_asset": 1_000_000.0}  # 0% 不熔断
-        async def _fetch_broker_positions(self):
-            return {}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
-    from trading.compute.reconcile import ReconciliationResult
-    async def _fake_rec(gw, local, tolerance=0.0):
-        return ReconciliationResult([], [], [], [], 0.0, True)
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
-
-    result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
-    assert result.get("trailing_evolved") == 1
-    # C3：plan 不被写回（stop_price 保持原值 9.0；演进值待 follow-up 落 DB meta）
-    plan = trading_plan.load_plan(today)
-    assert plan["orders"][0]["stop_price"] == 9.0
+# Why 删除：_evolve_trailing_stops 函数 + result["trailing_evolved"] 字段已从 engine 删除
+#   （C3 删 save_plan 写回 + C2c 切 _stoploss 读 DB SIGNAL.meta 后演进值无消费方，死计算 +
+#   误导可观测）。原 5 个测试（test_evolve_trailing_stops_*  3 个 + test_post_close_trailing_*
+#   2 个）断言全部依赖已删除 API/字段，随功能一并删除。
+# Follow-up：trailing 收紧作为独立 live P0 task 重实现（post_close 写 position.current_stop +
+#   _stoploss 读最新）后，重写演进算法 + 落盘真相源测试。参 memory plan-backtest-live-alignment
+#   trailing / neckline-algorithm-gaps R3。
 
 
 # ============================================================================

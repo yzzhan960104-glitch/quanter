@@ -14,8 +14,10 @@
               ⚠️ 止损链路依赖 xtdata 行情源（miniQMT 通道），无 xtdata 时 live 前需另接行情源（C1 follow-up）。
   post_close 15:30 盘后：对账（run_reconcile）+ 日内熔断判定（Task 10·R-2：读 pre_open 快照
               start_equity → check_daily_loss_limit → 触发即 cancel_all + emergency_halt）
-              + trailing 盘后演进（Task 9·R-3：_evolve_trailing_stops 按 holding_days 重算次日
-              stop 写回 plan）+ 清动态白名单。
+              + 清动态白名单。
+              ⚠️ trailing 盘后演进（Task 9·R-3）已删除（SSoT review P2 · 死计算）：
+              C3 删写回 + C2c 切 _stoploss 读 DB SIGNAL.meta 后演进值无消费方。trailing 收紧
+              作为独立 live P0 task 重实现（post_close 写 position.current_stop + _stoploss 读最新）。
 
 ============================================================================
 ⚠️ 不变量（Task5 M2 风险官要求 · 绝对红线 · W1 已重构为进程内隔离）
@@ -77,7 +79,10 @@ from trading.state_store import get_data_ready, get_ready
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals
-from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between, compute_stop_price as _compute_stop_price
+# ⚠️ compute_stop_price 不再 engine 内导入（SSoT review P2 · 删 _evolve_trailing_stops 后
+#   该 import 成孤儿，CLAUDE.md 无死代码）；trailing 收紧作独立 live P0 task 重实现时若需在
+#   engine 内消费，再 from trading.compute.stop import compute_stop_price 即可。
+from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between
 # Task 9（U6 实盘执行统一）：decide_exit 执行单源纯函数（Task 4 · simulate_exit 已切，实盘 stop_loss_monitor 切）
 # strangler 等价红线：decide_exit 已证等价 simulate_exit（Task 5 golden 守护），实盘切用后
 # 止损判定行为等价 should_trigger_stop（price≤stop → CLOSE/STOP_LOSS）；D12 fallback 保底。
@@ -245,11 +250,13 @@ def _trade_cfg() -> dict:
         # 物理意图：挂单等待期 high≥此价 → 涨幅已兑现撤买单（过滤「猛突破后回踩」陷阱）。
         # env 缺省 → 对齐回测基准 1.0；显式 env 可覆盖（灰度调参用）。
         "cancel_thresh_mult": float(os.getenv("TRADE_CANCEL_THRESH_MULT", "1.0")),
-        # 海龟 trailing 动态止损参数（Task 9/10 已落地）：grace/step/floor 三件套由
-        # _evolve_trailing_stops 在 post_close 步骤④盘后消费——按 holding_days 重算次日
-        # stop_price 写回 plan（holding_days<=grace 用 base_stop 给趋势确认空间，超 grace
-        # 每日收紧 step×ATR，floor 卡底）。盘中 stop_loss_monitor 用演进后的静态 stop_prices，
-        # 不盘中追踪 ATR high（live-readiness spec §2 决策：R-3 选盘后演进，否决盘中跟踪）。
+        # 海龟 trailing 动态止损参数（grace/step/floor）：
+        # ⚠️ 原 _evolve_trailing_stops 消费方已删除（SSoT review P2 · 死计算）——C3 删写回 +
+        #   C2c 切 _stoploss 读 DB SIGNAL.meta 后演进值无消费方。env 三件套保留供 follow-up
+        #   「trailing 收紧作独立 live P0 task」（post_close 写 position.current_stop +
+        #   _stoploss 读最新）重实现时复用，compute_stop_price 函数（trading.compute.stop）
+        #   本身仍在库内可用。spec §5.3 红线（holding_days<=grace 用 base_stop 给趋势确认空间，
+        #   超 grace 每日收紧 step×ATR，floor 卡底；盘中不调整 stop，盘后演进一步/日）不变。
         "grace": int(os.getenv("TRADE_STOPLOSS_GRACE_DAYS", "5")),
         "step": float(os.getenv("TRADE_STOPLOSS_STEP_ATR", "0.1")),
         "floor": float(os.getenv("TRADE_STOPLOSS_FLOOR", "0.5")),
@@ -1535,49 +1542,22 @@ async def _close_expired_positions(gw: Any, expired: list[dict]) -> dict:
     return {"closed": n_closed}
 
 
-def _evolve_trailing_stops(
-    orders: list[dict], entry_dates: Mapping[str, str], today: str, cfg: dict,
-) -> int:
-    """盘后演进 plan orders 的 stop_price（海龟 trailing，holding_days 驱动）。
-
-    物理意图（plan Task 9 · spec §5.3）：
-        compute_stop_price 已实现但实盘零调用（env 读 grace/step/floor 未消费）。post_close
-        盘后演进让 trailing 真正生效——对每个【已成交持仓】按 holding_days 重算【次日】固定
-        stop_price：holding_days<=grace 用 base_stop（颈线-stop_mult×ATR，给趋势确认空间），
-        holding_days>grace 每日收紧 step×ATR（eff_mult 递减），到 floor 卡底。盘中监控用此
-        固定价不移动（spec「盘中不调整 stop」红线），故仅盘后演进一步/日。
-
-    边界（spec §5.3）：
-        - holding_days=0（今日成交 / 缺 entry_date）→ compute_stop_price 返 base_stop（零回归，
-          Task 9 上线日不改变今日新成交持仓的止损）；
-        - 缺 neckline/atr 的 order 跳过（无基准无法重算，老 plan 向后兼容）；
-        - entry_dates 无该 symbol（未成交）→ holding_days=0（等同 base_stop）。
-
-    Args:
-        orders:      plan["orders"]（嵌套 dict，含 order.symbol/neckline/atr/stop_price）。
-        entry_dates: position_book.get_entry_dates() 的 {symbol: entry_date}。
-        today:       今日（holding_days 的 end）。
-        cfg:         _trade_cfg()（取 stop_atr_mult/grace/step/floor）。
-
-    Returns:
-        演进成功的 order 数（缺 neckline/atr 的不计）。
-    """
-    n_evolved = 0
-    for o in orders:
-        sym = (o.get("order") or {}).get("symbol")
-        neckline = o.get("neckline")
-        atr = o.get("atr")
-        # 缺基准（老 plan 无 neckline/atr 或数据瑕疵）跳过——不拿 None 算 stop_price
-        if not sym or neckline is None or not atr:
-            continue
-        entry_date = entry_dates.get(sym)
-        holding_days = _trading_days_between(entry_date, today) if entry_date else 0
-        new_stop = _compute_stop_price(
-            float(neckline), float(atr), holding_days,
-            cfg["stop_atr_mult"], cfg["grace"], cfg["step"], cfg["floor"])
-        o["stop_price"] = round(new_stop, 2)   # round 2 对齐 A 股 0.01 元精度
-        n_evolved += 1
-    return n_evolved
+# ============================================================================
+# trailing 盘后演进（Task 9·R-3）已删除（SSoT review P2 · 死计算）
+# ============================================================================
+# Why 删除（CLAUDE.md 无死代码）：
+#   原 ``_evolve_trailing_stops`` 在 post_close ④ 段按 holding_days 重算 plan orders 的
+#   stop_price。C3 删了 save_plan 写回路径 + C2c 把 ``_stoploss`` 改读 DB SIGNAL.meta
+#   （初始 stop_price）——演进值不再有消费方（写盘是孤儿，可观测字段 ``trailing_evolved``
+#   反而误导「演进 N 单」）。整个 trailing 收紧链路实际停摆。
+# 决策（本分支 SSoT B/C scope 外）：
+#   彻底删函数 + post_close 调用 + result["trailing_evolved"] 字段 + 全部测试断言。
+# Follow-up（独立 live P0 task，非本分支）：
+#   trailing 收紧作为 memory「live 前 P0 4 项」（部分成交精度/熔断/trailing/EMT）之一独立
+#   重实现——post_close 写 ``position.current_stop``（DB 真相源）+ ``_stoploss`` 改读最新
+#   （而非读 SIGNAL.meta 初始 stop_price）。spec §5.3 红线（盘中不调整 stop / 盘后演进一步/日）
+#   不变；演进算法仍由 ``compute_stop_price`` + holding_days 驱动，仅落盘真相源从 JSON 改 DB。
+#   参 memory：plan-backtest-live-alignment trailing / neckline-algorithm-gaps R3。
 
 
 # ============================================================================
@@ -1606,8 +1586,8 @@ async def post_close(
 
     编排顺序（plan 红线 · spec §6 数据流）：
         ① reconcile（持仓对账）→ ② query_trades 兜底（Task 11 follow-up）
-        → ③ 熔断（本 Task 10）→ ④ trailing（Task 9，未熔断时跑）
-        → ⑤ max_holding 标记（Task 8，未熔断时跑）
+        → ③ 熔断（本 Task 10）→ ④ trailing（Task 9，**已删除 SSoT review P2 死计算**）
+        → ⑤ max_holding 标记（Task 8，已迁 pre_open B1）
         各段独立 try-except 软降级（单段异常不阻塞下一段）。
 
     ⚠️ 熔断三步（Task 10 · R-2 日内熔断 · spec §5.2）：
@@ -1784,35 +1764,13 @@ async def post_close(
     if breaker_skipped:
         result["breaker_skipped"] = True
 
-    # ④ trailing 盘后演进（Task 9 · R-3 · 未熔断时跑）：
-    # Why 熔断后跳过：熔断已 lock_down，次日人工接管——此时再演进 stop 收紧可能触发
-    # 额外卖出与熔断善后冲突（熔断应全场停摆，同 ⑤ max_holding 的熔断优先约束）。
-    if not circuit_breaker_triggered:
-        try:
-            # C-6 V2 / C3：trailing 盘后演进。
-            # **C3 决策（写盘路径已删后）**：原 trailing 把演进后的 stop_price 写回
-            # plan["orders"]（落盘 JSON），但 C2c 已切 _stoploss 直接读 DB
-            # SIGNAL.meta（不再读 JSON），故此写回**已是孤儿**（写盘无消费方）。
-            # file:2905-2907 注释印证「时间驱动 trailing ... 属另一个 follow-up」。
-            # C3 改：保留 _evolve_trailing_stops 计算（结果用于 result["trailing_evolved"]
-            # 可观测性 + 为后续 follow-up「盘中动态 stop_prices map」铺垫），删写回
-            # （避免无谓 I/O + C3 后写盘已移除）。演进值若要落真相源，
-            # follow-up 应改写 DB SIGNAL.meta（update stop_price 字段）而非 JSON，目前
-            # 未实现——pre_open 当日 base_stop（pre_open 挂单落盘的初始止损价）继续生效。
-            today_eq = clock.today()
-            plan = trading_plan.load_plan(today_eq)
-            if plan and plan.get("orders"):
-                entry_dates = _position_book.get_entry_dates()
-                n = _evolve_trailing_stops(
-                    plan["orders"], entry_dates, today_eq, _trade_cfg())
-                if n:
-                    # 不再写回 plan（C2c 后 _stoploss 读 DB SIGNAL.meta，JSON 写回是孤儿）。
-                    # 计数值保留供 post_close 结果可观测性。
-                    result["trailing_evolved"] = n
-                    logger.info("post_close trailing 演进 %d 单 stop（holding_days 驱动，"
-                                "C3 删写路径后回写已废，演进值待 follow-up 落 DB meta）", n)
-        except Exception:
-            logger.exception("post_close trailing 演进异常（不阻塞 max_holding/清白名单）")
+    # ④ trailing 盘后演进（Task 9 · R-3）：已删除（SSoT review P2 · 死计算）
+    # Why 删除：C3 删 save_plan 写回 + C2c 切 _stoploss 读 DB SIGNAL.meta 后，演进值无消费方
+    #   （可观测字段 ``trailing_evolved`` 误导「演进 N 单」），整个 trailing 收紧链路停摆。
+    #   详见本模块 ``_evolve_trailing_stops`` 删除注释（follow-up：独立 live P0 task 重实现，
+    #   post_close 写 position.current_stop + _stoploss 读最新）。post_close 其他段不受影响。
+    # 熔断优先约束（原 if not circuit_breaker_triggered）随 ④ 段一并失效——④ 已空，
+    #   ⑤ max_holding 早已迁 pre_open（B1），post_close 不再有熔断后跳过逻辑。
 
     # ⑤ max_holding 超期标记（Task 8 · P0-4）：SSoT Phase B 断点-2（B1）已迁至 pre_open 现算
     # （基准日=上一交易日=clock.pretrade_date(today)，见 _pre_open ②.6）。原 post_close 写盘 +
