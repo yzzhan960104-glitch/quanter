@@ -20,6 +20,11 @@
 
 ---
 
+> **2026-08-06 起（B5）**：引擎启动/重启唯一入口 =
+> `python ops/restart_trading.py restart [--yes]`；状态查看 = `python ops/restart_trading.py status`。
+> 不再手动 `schtasks /Run` / `python -m trading`（A5 已加生产 fail-closed：`start_server.bat`
+> 置 `QUANTER_REQUIRE_LIVE=1`，非 live 实例拒绝启动）。
+
 ## 1. 多余引擎进程清理（W1.4 · 真根治）
 
 ### 1.1 现象识别
@@ -27,6 +32,10 @@
 - 启动日志见 `端口 8000 已被既有引擎实例占用` CRITICAL → 本实例已 sys.exit(1)
 - `gw.connect()` 返 -1（session 占用）
 - `tasklist` 见多个 `python.exe` 且命令行含 `trading`
+
+> B5：先跑 `python ops/restart_trading.py status` 看三合一拓扑（端口/pid 文件/session 锁）；
+> 确认为旧链/多余链后再 `python ops/restart_trading.py restart --yes`（默认 dry-run，
+> 三合一不一致会拒绝重启，绝不自动 taskkill 未知链）。
 
 ### 1.2 清理步骤
 
