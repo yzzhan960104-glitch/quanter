@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.migrate_live_trades_csv import _is_test_row  # noqa: E402 历史清理口径复用
+from scripts.archive.migrate_live_trades_csv import _is_test_row  # noqa: E402 历史清理口径复用（A4 归档：两脚本同迁 archive/）
 from trading import state_store  # noqa: E402
 
 
@@ -102,7 +102,10 @@ def backfill(csv_path: str, *, apply: bool = False, db_path: str | None = None,
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="历史 CSV 成交可信回填 state_store（默认 dry-run）")
-    p.add_argument("--csv", default="logs/live_trades.csv", help="源 CSV（默认 logs/live_trades.csv）")
+    # 默认源 CSV 指向归档目录（A4 归档：logs/live_trades.csv 已 mv 到 logs/archive/，
+    # 归档后此脚本仍可重跑，--csv 显式覆盖亦兼容老路径）
+    p.add_argument("--csv", default="logs/archive/live_trades.csv.final-20260805",
+                   help="源 CSV（默认 logs/archive/live_trades.csv.final-20260805）")
     p.add_argument("--apply", action="store_true", help="真正落库（默认只统计）")
     p.add_argument("--db", default=None, help="state_store DB 路径（默认 logs/trading_state.db）")
     p.add_argument("--account", default=None, help="account_id（默认 QMT_ACCOUNT_ID / default）")

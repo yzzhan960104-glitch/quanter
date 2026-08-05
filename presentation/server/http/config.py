@@ -18,9 +18,10 @@ from typing import Dict, Any, List
 
 # ============ 项目根目录 ============
 # server/http/config.py → presentation/server/http → 上溯三级 = 仓库根 F:\quanter
-# （2026-08-02 修复：旧实现只上溯两级落到 presentation/，导致 LIVE_TRADE_LOG 写
+# （2026-08-02 修复：旧实现只上溯两级落到 presentation/，导致原 LIVE_TRADE_LOG 写
 #  presentation/logs/ 下的导出 CSV、quanter.log 写 presentation/logs/，与仓库根
-#  logs/ 双份并存——交易流水/日志路径分裂，播报与复盘各读各的。）
+#  logs/ 双份并存——交易流水/日志路径分裂，播报与复盘各读各的。注：LIVE_TRADE_LOG
+#  常量已在 SSoT Phase A · A4 删除，但 PROJECT_ROOT 仍驱动 logs/quanter.log 等其他路径。）
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 # 将项目根目录加入 sys.path，确保 import data / strategies / trading 等顶层模块可用

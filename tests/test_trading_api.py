@@ -34,7 +34,6 @@ def test_submit_order_dry_run(client, monkeypatch):
         def is_locked(self):
             return False
     monkeypatch.setattr(trading_service, "get_gateway", lambda: _FakeGW())
-    monkeypatch.setattr(trading_service, "record_live_trade", lambda *a, **kw: None)
 
     r = client.post("/api/v1/trading/submit_order", json={
         "symbol": "510300.SH", "qty": 100, "side": "buy", "price": 5.0,
@@ -55,7 +54,6 @@ def test_submit_order_no_confirm_returns_409(client, monkeypatch):
         def is_locked(self):
             return False
     monkeypatch.setattr(trading_service, "get_gateway", lambda: _FakeGW())
-    monkeypatch.setattr(trading_service, "record_live_trade", lambda *a, **kw: None)
     monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
 
     r = client.post("/api/v1/trading/submit_order", json={

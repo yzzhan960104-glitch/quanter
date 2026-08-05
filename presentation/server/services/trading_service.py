@@ -34,19 +34,16 @@ from trading.compute.risk import check_order  # Layer2 阶段6：直指 function
 logger = logging.getLogger(__name__)
 
 # ============ 层级五·实盘可追溯性 ============
-# 实盘交易日志（CSV 持久化）：record_live_trade 追加，export_trades 按日期过滤读取。
-# 设计意图（反黑盒）：CSV 是标准化、可审计、可被 Layer 6 LLM 复盘消费的格式；
-# 落盘而非仅内存，进程重启后历史成交可追溯（实盘合规基线）。
-LIVE_TRADE_LOG = os.path.join(str(PROJECT_ROOT), "logs", "live_trades.csv")
-LIVE_TRADE_COLUMNS = [
-    "timestamp", "symbol", "direction", "shares", "price", "strategy", "rationale", "kind",
-]
-
-# 前端下载/导出 CSV 字段顺序契约（SSoT Phase A · A2 抽出）。
-# Why 单独抽常量：export/query 两函数都需要这个字段顺序定义，原都引用
-# LIVE_TRADE_COLUMNS；A4 计划删 record_live_trade 写盘链路 + LIVE_TRADE_COLUMNS，
-# 提前抽出 _EXPORT_COLUMNS 让 export/query 不依赖 LIVE_TRADE_COLUMNS，A4 删它时
-# 消费端零改动（字段顺序 = 前端 TradesPage/下载 CSV 契约红线，不能随写盘退役而改）。
+# SSoT Phase A · A4：原 CSV 写盘链路（record_live_trade → logs/live_trades.csv +
+# LIVE_TRADE_LOG/LIVE_TRADE_COLUMNS）已整体退役。成交流水真相源平移到 state_store.fill
+# 表（UNIQUE(order_id, traded_time) 天然幂等，08-04 事故根因修复），submit 审计事件
+# 平移到 state_store.trade_event 表（A1 完成）。CSV 在重放/补推下重复 append 的缺陷
+# 不复存在，消费端（query_trades/export/post_close 归因/digest）一律读 DB。
+#
+# 前端下载/导出 CSV 字段顺序契约（SSoT Phase A · A2 抽出 _EXPORT_COLUMNS）。
+# Why 单独抽常量：原 export/query 引用 LIVE_TRADE_COLUMNS；A4 删 LIVE_TRADE_COLUMNS 后
+# _EXPORT_COLUMNS 是唯一字段顺序源（字段顺序 = 前端 TradesPage/下载 CSV 契约红线，
+# 不能随写盘退役而改），消费端零改动。
 _EXPORT_COLUMNS = [
     "timestamp", "symbol", "direction", "shares", "price",
     "strategy", "rationale", "kind",
@@ -217,40 +214,6 @@ def record_position_attribution(symbol: str, strategy: str, rationale: str = "")
 def clear_position_attribution(symbol: str) -> None:
     """清除某标的的归因（平仓后调用，防过期归因污染后续持仓）。"""
     _position_attribution.pop(symbol, None)
-
-
-def record_live_trade(
-    symbol: str,
-    direction: str,
-    shares: float,
-    price: float,
-    strategy: str = "",
-    rationale: str = "",
-    kind: str = "fill",  # "submit"=下单审计（含 REJECTED/FAILED）/"fill"=真实成交回报
-) -> None:
-    """追加一笔实盘记录到 logs/live_trades.csv（CSV 导出 + Layer 6 LLM 复盘数据源）。
-
-    kind 区分（#3 修复）：post_close 聚合净持仓只认 kind='fill'，避免 submit 行
-    （拒单/重单）混入致幻影持仓。submit 行仍落盘满足审计合规（spec §6.3）。
-    """
-    os.makedirs(os.path.dirname(LIVE_TRADE_LOG), exist_ok=True)
-    is_new = (not os.path.exists(LIVE_TRADE_LOG)) or os.path.getsize(LIVE_TRADE_LOG) == 0
-    row = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol,
-        "direction": direction,
-        "shares": shares,
-        "price": price,
-        "strategy": strategy,
-        "rationale": rationale,
-        "kind": kind,
-    }
-    with open(LIVE_TRADE_LOG, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=LIVE_TRADE_COLUMNS)
-        if is_new:
-            writer.writeheader()
-        writer.writerow(row)
-
 
 
 def aggregate_fills_by_symbol(start: str, end: str) -> dict[str, float]:

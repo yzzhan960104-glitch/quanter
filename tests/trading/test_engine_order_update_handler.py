@@ -83,8 +83,7 @@ def test_trade_update_writes_log_and_notifies(db):
     # patch NotificationManager（钉钉通知副作用，与真相源断言解耦）
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager") as NM:
+    with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))
     # a. 真相源断言：fill 表落 1 行（symbol/direction/qty/price + strategy=neckline）
@@ -151,7 +150,6 @@ def test_buy_fill_places_take_profit_once_idempotent(db):
     # Phase 2：不 mock _place_take_profit（让 DB insert_order 自然写入 → 幂等键生效）
     # 只 mock _submit（不真挂单到 broker），让 _place_take_profit 内部 insert_order 落 DB
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager"), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(eng._handle_order_update(update))  # 首次成交回报 → 挂 TP1
@@ -216,8 +214,7 @@ def test_trade_update_inserts_fill_and_event(state_db):
     eng._gw._orders = {"123": {"order_type": 23}}  # BUY
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager") as NM:
+    with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         with patch.object(eng, "_place_take_profit", new=AsyncMock()):
             asyncio.run(eng._handle_order_update(_buy_fill_update()))
@@ -254,7 +251,6 @@ def test_tp_idempotent_via_db(state_db, monkeypatch):
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     with patch("trading.engine.trading_plan.load_plan", return_value=_plan_with_tp()), \
-         patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         with patch.object(eng, "_place_take_profit", new=_counting_tp):
@@ -494,7 +490,6 @@ def test_place_take_profit_truncates_fractional_qty_to_int(db):
     #   - ``trading.engine.trading_plan.load_plan`` 返含 take_profit 的计划；
     #   - record_live_trade / NotificationManager patch 掉日志与通知副作用。
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("presentation.server.services.trading_service.record_live_trade"), \
          patch("infra.notifier.NotificationManager"), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(eng._handle_order_update(update))
@@ -724,25 +719,19 @@ def test_e2e_real_callback_chain_fills_and_places_tp(db, monkeypatch):
 # ============================================================================
 # Task 6（W3.1 gateway-ssot-hardening）：成交回报 CSV/钉钉幂等
 # ============================================================================
-def test_trade_replay_writes_csv_and_notifies_only_once(state_db, monkeypatch, tmp_path):
+def test_trade_replay_notifies_only_once(state_db, monkeypatch, tmp_path):
     """W3.1：同 (order_id, traded_time) 成交回报重放 → insert_fill 返 False →
-    CSV/钉钉不再重复写（与真相源同判定点，spec §3.3.1）。
+    钉钉不再重复推（与真相源同判定点，spec §3.3.1）。
 
-    08-04 事故根因：record_live_trade（CSV）+ notify_trade_event（钉钉）在 insert_fill
-    幂等判定**之外**无条件调。同一笔成交 600000.SH BUY 100@10.5 被重放 8 批 × 3 行 = 24 笔，
-    state_store fill 表幂等拦截成功（只 1 行），但 CSV 审计镜像 + 钉钉通知无条件追加 →
-    简报「买 24 笔」虚高 + 钉钉轰炸。
+    08-04 事故根因：原 record_live_trade（CSV）+ notify_trade_event（钉钉）在 insert_fill
+    幂等判定**之外**无条件调，重放会轰炸钉钉。A1 平移后两路均与 _fill_inserted 同判定点，
+    重放（insert_fill=False）→ 钉钉不推。
 
-    本测试用真 CSV 落盘（非 mock 自欺）：monkeypatch LIVE_TRADE_LOG 到 tmp 路径，
-    两次 _handle_order_update 后断言 CSV 只 1 行 kind=fill + 钉钉只 1 次。
+    A4 收口：原测试 monkeypatch LIVE_TRADE_LOG + 断言 CSV 只 1 行，CSV 写盘链路 A4 整体
+    退役后 LIVE_TRADE_LOG 常量删（monkeypatch AttributeError）。本测试去掉 CSV 断言，
+    保留「钉钉只 1 次」断言（fill 表只 1 行的硬证据在 test_trade_replay_csv_real_file_only_one_row）。
     """
-    import csv as _csv
     from trading import state_store
-
-    # 真实 CSV 落盘到 tmp（不 mock record_live_trade —— 验证它本身被幂等挡住）
-    csv_path = tmp_path / "live_trades.csv"
-    monkeypatch.setattr(
-        "presentation.server.services.trading_service.LIVE_TRADE_LOG", str(csv_path))
 
     eng = TradingEngine()
     eng._tp_placed = set()
@@ -771,19 +760,13 @@ def test_trade_replay_writes_csv_and_notifies_only_once(state_db, monkeypatch, t
     }
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager") as NM, \
+    with patch("infra.notifier.NotificationManager") as NM, \
          patch.object(eng, "_place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
-        # 注意：record_live_trade 在 with 内被 patch → 不写真 CSV（这里只验证「被调几次」）
-        # 但为防 mock 自欺，下面单独一个测试用真 CSV 落盘验证。本测试先验证调用次数。
-        asyncio.run(eng._handle_order_update(update))   # 首次 → insert_fill=True
-        asyncio.run(eng._handle_order_update(update))   # 重放 → insert_fill=False
+        asyncio.run(eng._handle_order_update(update))   # 首次 → insert_fill=True → 钉钉推 1 次
+        asyncio.run(eng._handle_order_update(update))   # 重放 → insert_fill=False → 钉钉不推
 
-    # record_live_trade 首次被调，重放不再调（与真相源同判定点）
-    from presentation.server.services.trading_service import record_live_trade
-    # patch 退出后 record_live_trade 已还原，无法直接查 mock；改用 fake_mgr 钉钉次数 +
-    # 下面独立 CSV 落盘断言。本断言点先校钉钉：
+    # 重放应只推 1 次钉钉（与 _fill_inserted 同判定点）
     assert fake_mgr.notify_trade_event.call_count == 1, \
         f"重放应只推 1 次钉钉，实际 {fake_mgr.notify_trade_event.call_count}"
 
@@ -863,16 +846,13 @@ def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, 
         与 fill 表「direction 不在 (BUY,SELL) 时 insert_fill 不被调（无 fill 表行）」
         同判定点（都不写），符合 spec §3.3.1。
 
-    断言：
-      1) record_live_trade 不被调（CSV 0 行）；
+    断言（A4 平移：CSV 写盘链路退役，原「CSV 0 行」断言改为「fill 表 0 行」）：
+      1) fill 表不落行（direction 不在 BUY/SELL → insert_fill 不被调）；
       2) notify_trade_event 不被调（钉钉 0 次）；
       3) _alert_critical 仍被调（方向未知仍告警人工对账，保留既有红线）。
     """
+    import sqlite3
     from trading import state_store
-
-    csv_path = tmp_path / "live_trades.csv"
-    monkeypatch.setattr(
-        "presentation.server.services.trading_service.LIVE_TRADE_LOG", str(csv_path))
 
     eng = TradingEngine()
     eng._tp_placed = set()
@@ -900,18 +880,16 @@ def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, 
     # 本测试断「_alert_critical 仍触发」必须 patch _mode=live 才能命中守卫。
     import trading.engine as _eng_mod
     monkeypatch.setattr(_eng_mod, "_mode", lambda: "live")
-    # 不 patch record_live_trade —— 让真函数在 direction=None 分支不被调（CSV 0 行验证）
     with patch("infra.notifier.NotificationManager") as NM, \
          patch.object(eng, "_place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次（方向未知）
         asyncio.run(eng._handle_order_update(update))   # 重放（方向未知）
 
-    # 1) CSV 不存在 / 0 行（direction=None 不写）
-    if csv_path.exists():
-        with open(csv_path, encoding="utf-8-sig", newline="") as f:
-            rows = list(__import__("csv").DictReader(f))
-        assert len(rows) == 0, f"direction=None 不应写 CSV，实际 {len(rows)} 行"
+    # 1) fill 表不落行（direction=None 时 _fill_inserted=False，insert_fill 根本不被调）
+    with sqlite3.connect(state_db) as con:
+        n = con.execute("SELECT COUNT(*) FROM fill WHERE symbol='600000.SH'").fetchone()[0]
+    assert n == 0, f"direction=None 不应写 fill 表，实际 {n} 行"
     # 2) 钉钉 0 次
     assert fake_mgr.notify_trade_event.call_count == 0, (
         f"direction=None 不应推钉钉，实际 {fake_mgr.notify_trade_event.call_count} 次")

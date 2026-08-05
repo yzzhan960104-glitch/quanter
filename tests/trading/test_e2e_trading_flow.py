@@ -220,10 +220,10 @@ def test_step3_trade_next_day(isolated, monkeypatch):
         "kind": "trade", "order_id": "1", "stock_code": "300001.SZ",
         "traded_volume": 100, "traded_price": 10.5, "state": "FILLED",
     }
-    # patch 真身模块路径：record_live_trade（CSV 日志）+ NotificationManager（钉钉推送）
+    # patch 真身模块路径：NotificationManager（钉钉推送）
     # + _place_take_profit（避免再走 _submit 挂止盈——已 patch _submit 但走限频复杂度，禁掉更稳）
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager"), \
+    # A4 删 record_live_trade，原 CSV 日志 patch 行随之删（审计平移 trade_event 表）
+    with patch("infra.notifier.NotificationManager"), \
          patch.object(eng, "_place_take_profit", new=AsyncMock()):
         asyncio.run(eng._handle_order_update(update))
     # 账本写入：BUY 100 股 300001.SZ（gap4 第四连写入实证）
@@ -312,8 +312,7 @@ def test_e2e_full_flow_symbol_propagates(isolated, monkeypatch):
         "kind": "trade", "order_id": "o1", "stock_code": "688001.SH",
         "traded_volume": 100, "traded_price": 10.5, "state": "FILLED",
     }
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager"), \
+    with patch("infra.notifier.NotificationManager"), \
          patch.object(eng, "_place_take_profit", new=AsyncMock()):
         asyncio.run(eng._handle_order_update(update))
 
@@ -744,8 +743,7 @@ def test_e2e_full_chain_db_consistency(isolated, monkeypatch):
     eng = engine.TradingEngine()
     eng._gw = MagicMock()
     eng._gw._orders = {"seq1": {"order_type": 23}}  # BUY
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager") as NM:
+    with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value.notify_trade_event = AsyncMock(return_value=[])
         trade_update = {
             "kind": "trade", "order_id": "seq1", "stock_code": "300001.SZ",

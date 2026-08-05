@@ -1417,8 +1417,7 @@ def test_handle_order_update_writes_book(monkeypatch, tmp_path):
                              "direction_test", "2026-08-01", "300001.SZ", "buy", "OPEN", 100, 10.0,
                              broker_oid="999", state="SUBMITTED")
 
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager") as NM1:
+    with patch("infra.notifier.NotificationManager") as NM1:
         NM1.get_default.return_value = fake_mgr
         with patch.object(eng, "_place_take_profit", new=AsyncMock()), \
              patch.object(state_store, "insert_fill", return_value=True) as if_buy:
@@ -1432,8 +1431,7 @@ def test_handle_order_update_writes_book(monkeypatch, tmp_path):
     eng._gw = MagicMock()
     eng._gw._orders = {}  # 清空 _orders：_order_direction 查无 order_type → None
 
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager") as NM2:
+    with patch("infra.notifier.NotificationManager") as NM2:
         NM2.get_default.return_value = fake_mgr
         with patch.object(eng, "_place_take_profit", new=AsyncMock()), \
              patch.object(state_store, "insert_fill", return_value=True) as if_none:
@@ -1476,8 +1474,7 @@ def test_handle_order_update_book_failure_raises_l1(monkeypatch, tmp_path):
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     # state_store 账本写抛异常（state-store-redesign 后账本入口改 insert_fill）
-    with patch("presentation.server.services.trading_service.record_live_trade"), \
-         patch("infra.notifier.NotificationManager") as NM:
+    with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         with patch.object(state_store, "insert_fill", side_effect=RuntimeError("db locked")), \
              patch.object(eng, "_place_take_profit", new=_tp):

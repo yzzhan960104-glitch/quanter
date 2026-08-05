@@ -25,10 +25,12 @@ def isolated_state(tmp_path, monkeypatch):
     - init_db / init_store 建表。
     - 重置 _ACTIVE_ENGINE 单例（防 gate 泄漏，同 test_e2e_trading_flow 范式）。
     - query_trades mock 返空（full_run 集成修复 · 根因 2）：post_close ② 归因展示段
-      读真实 CSV 流水聚合净持仓 vs position_book 产归因日志；E2E 用 tmp DB 做真相源，
-      record_live_trade 也被 mock 不写真 CSV，故归因段聚合为空、不产误导日志、不污染
-      tmp position_book（W3.4 后 CSV 段【只读展示】已不再重写 position_book，但隔离
-      仍保留以避免读真实历史 logs/live_trades.csv 产生噪声归因）。
+      读 query_trades 聚合净持仓 vs position_book 产归因日志；E2E 用 tmp DB 做真相源，
+      归因段聚合为空、不产误导日志、不污染 tmp position_book（W3.4 后归因段【只读展示】
+      已不再重写 position_book，但隔离仍保留以避免读真实 DB 历史成交产生噪声归因）。
+
+    A4 收口：record_live_trade（CSV 写盘）已删，conftest 不再 patch 它（patch 会
+    AttributeError）。query_trades mock 保留（post_close 归因仍调它）。
     """
     from trading import job_ledger, position_book, state_store, engine
 
@@ -47,17 +49,14 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("QMT_ACCOUNT_ID", "e2e_long_acc")  # 显式 account_id 防 .env 污染
     monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)  # 防 gate 泄漏
 
-    # query_trades / record_live_trade 隔离（full_run 集成修复 · 根因 2）：
-    # 物理意图——engine.post_close ② 段读 record_live_trade 写的 CSV 流水（logs/ 真实路径）
-    # 聚合净持仓 vs position_book（tmp 空）。E2E 用 tmp DB 做真相源，不让真实 logs/live_trades.csv
-    # 历史成交污染归因展示（W3.4 后归因段已降级为【只读展示】，不再 reconcile_qty 改账本，
-    # 但仍隔离避免噪声日志）。record_live_trade mock 不写真 CSV 让聚合为空。
+    # query_trades 隔离（full_run 集成修复 · 根因 2）：
+    # 物理意图——engine.post_close ② 段读 query_trades 聚合净持仓 vs position_book
+    # （tmp 空）。E2E 用 tmp DB 做真相源，mock query_trades 返空让归因段聚合为空、
+    # 不产误导日志（W3.4 后归因段已降级为【只读展示】，仍隔离避免噪声日志）。
     # 范式参考 tests/trading/test_e2e_trading_flow.py:777 同款 patch。
+    # A4 注：原 record_live_trade patch 已删（函数 A4 删，patch 会 AttributeError）。
     from presentation.server.services import trading_service as _svc
     monkeypatch.setattr(_svc, "query_trades", lambda *a, **k: {"trades": []})
-    # record_live_trade 隔离（design §4.3）：成交回报 _handle_order_update 会补写真实 CSV
-    # （logs/live_trades.csv）；E2E 用 tmp DB 做真相源，不污染真实流水（同 query_trades 范式）。
-    monkeypatch.setattr(_svc, "record_live_trade", lambda *a, **k: None)
     return tmp_path
 
 

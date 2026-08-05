@@ -166,10 +166,10 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
       改为读运行中 server 的 API（网关所有权唯一归 server/engine）。server 不在/超时
       → 走既有降级文案（观测层绝不阻断播报）。
     """
-    # 同步取数：trades 走 query_trades（默认 state_store.fill，env LIVE_TRADE_READ_SOURCE=csv 回退 CSV）。
-    # Fix2（用户两轴 review · 注释脱节）：原注释「trades 走同步 query_trades（CSV 全表扫描…
-    # 与 server 同源单文件）」是 T7 前的口径——query_trades 默认已切 DB（T7 state_store.fill），
-    # CSV 仅 env LIVE_TRADE_READ_SOURCE=csv 时回退。注释与代码同步，防运维误以为必走 CSV。
+    # 同步取数：trades 走 query_trades（读 state_store.fill 表，DB-only 真相源）。
+    # 历史口径演进：T7 前 query_trades 全表扫 CSV（与 server 同源单文件）；T7 切 fill 表 DB
+    # 默认 + env LIVE_TRADE_READ_SOURCE=csv 回退；A2/A4 删 CSV 回退读口（spec §2.4 SSoT），
+    # fill 表是成交流水唯一真相源。注释与代码同步，防运维误以为仍走 CSV。
     try:
         from presentation.server.services import trading_service
         trades_payload = trading_service.query_trades(date, date, limit=100)

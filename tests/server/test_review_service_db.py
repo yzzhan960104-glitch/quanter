@@ -5,10 +5,10 @@
 会把 24 行重复喂给 LLM。切 DB 后 export_trades 已走 fill 表真相源，diagnose 复用
 export_trades 即自然切到 DB —— 本测试锁定该行为：无 csv_text 上传 → export_trades
 读 DB → 1 行真相（不被 CSV 重复污染）。
+
+A4 注：原 fixture 的 LIVE_TRADE_LOG monkeypatch 已删（常量 A4 删），fixture 只返 db。
 """
 from __future__ import annotations
-
-import os
 
 import pytest
 
@@ -16,15 +16,11 @@ import pytest
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
     db = str(tmp_path / "ts.db")
-    csv_path = str(tmp_path / "live_trades.csv")
     monkeypatch.setattr("trading.state_store._DEFAULT_DB", db)
-    monkeypatch.setattr(
-        "presentation.server.services.trading_service.LIVE_TRADE_LOG", csv_path)
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "db")
     from trading import state_store
     state_store.init_store(db)
     state_store.upsert_account("acct1", broker="qmt")
-    return db, csv_path
+    return db
 
 
 def test_diagnose_reads_db_when_no_csv_text(isolated_db, monkeypatch):
@@ -36,17 +32,9 @@ def test_diagnose_reads_db_when_no_csv_text(isolated_db, monkeypatch):
     from trading import state_store
     state_store.insert_fill(
         "oid_r1", "acct1", "20260805101000", "300001.SZ", "BUY", 100, 10.5)
-    # CSV 24 行重复（事故场景）
-    import csv as _csv
-    db, csv_path = isolated_db
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = _csv.writer(f)
-        w.writerow(["timestamp", "symbol", "direction", "shares", "price",
-                    "strategy", "rationale", "kind"])
-        for i in range(24):
-            w.writerow([f"2026-08-05 10:00:{i:02d}", "300001.SZ", "BUY", 100,
-                        10.5, "", "", "fill"])
+    # A4 注：原测试写 24 行重复 CSV 证明 diagnose 不读 CSV（只读 DB 1 行真相）。
+    # CSV 写盘链路退役后无重复源，但保留断言锁定 export_trades 读 fill 的契约。
+    db = isolated_db
 
     from presentation.server.schemas.review import ReviewRequest
     from presentation.server.services import review_service

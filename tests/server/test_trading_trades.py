@@ -1,44 +1,49 @@
 # -*- coding: utf-8 -*-
-"""交易流水分页查询单测（Task 1）。
+"""交易流水分页查询单测（Task 1 · SSoT Phase A · A4 改造）。
 
-W3.2 起 query_trades 默认读 state_store.fill（真相源），CSV 是降级镜像。本组
-测试锁定 CSV 读口的分页/过滤/大小写/小写规范化契约 —— 显式设 LIVE_TRADE_READ_SOURCE=csv
-走 CSV 回退读口（仍是 spec §5 支持的一键回滚路径，契约必须保持不变）。
+A4 改造（CSV 契约 → DB 契约）：
+    原测试锁定 CSV 读口的分页/过滤/大小写/小写规范化契约（显式设
+    LIVE_TRADE_READ_SOURCE=csv 走 CSV 回退读口）。A2/A4 删了 CSV 回退读口 +
+    LIVE_TRADE_COLUMNS，旧测试用 LIVE_TRADE_LOG monkeypatch + _write_csv 已失效。
+    本文件锁定**同一组契约**（分页/方向过滤/标的过滤/小写规范化/空诚实返），
+    数据源平移到 state_store.fill 表（A0 tmp_db fixture 构造真相源）。
+
+    物理意图不变：query_trades 是消费端（前端 TradesPage）读成交流水的唯一读口，
+    契约红线（direction 必须小写、过滤大小写不敏感、空不抛）必须保持 —— 只是
+    真相源从 CSV 镜像改为 fill 表（spec §2.4 SSoT）。
 """
-import csv
-import os
-
 import pytest
 
 from presentation.server.services import trading_service
+from trading import state_store
 
 
-def _write_csv(path, rows):
-    """写样本 live_trades.csv（覆盖 trading_service.LIVE_TRADE_LOG）。
+def _insert_fills(db, rows):
+    """构造 fill 表真相源（替代 _write_csv · A4 改 DB）。
 
-    utf-8-sig 与生产 record_live_trade 写盘一致（带 BOM，DictReader 可透明读）。
+    rows: [{traded_time, symbol, direction, shares, price, strategy}]
+    traded_time 口径：YYYYMMDDHHMMSS 数字串（与 insert_fill 契约一致）。
     """
-    cols = trading_service.LIVE_TRADE_COLUMNS
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        w.writeheader()
-        for r in rows:
-            w.writerow({k: r.get(k, "") for k in cols})
+    for i, r in enumerate(rows):
+        state_store.insert_fill(
+            f"O{i}", "ACC_TEST", r["traded_time"], r["symbol"],
+            r["direction"], r["shares"], r["price"],
+            strategy=r.get("strategy"), db_path=db,
+        )
 
 
-def test_query_trades_pagination_and_filter(tmp_path, monkeypatch):
-    """分页 + 日期/标的/方向过滤（CSV 读口契约，W3.2 走 env=csv 回退路径）。"""
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
-    log = tmp_path / "live_trades.csv"
-    monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(log))
-    _write_csv(str(log), [
-        {"timestamp": "2026-07-21 09:35:00", "symbol": "510300.SH", "direction": "buy",
-         "shares": 100, "price": 4.0, "strategy": "neckline", "rationale": "test"},
-        {"timestamp": "2026-07-21 10:00:00", "symbol": "159915.SZ", "direction": "sell",
-         "shares": 100, "price": 5.0, "strategy": "neckline", "rationale": "tp"},
-        {"timestamp": "2026-07-20 14:00:00", "symbol": "510300.SH", "direction": "buy",
-         "shares": 200, "price": 3.9, "strategy": "neckline", "rationale": "test"},
+def test_query_trades_pagination_and_filter(tmp_db):
+    """分页 + 日期/标的/方向过滤（DB 读口契约，A4 平移 from CSV）。
+
+    覆盖：全量 / direction 过滤 / symbol 过滤 / limit-offset 分页。
+    """
+    _insert_fills(tmp_db, [
+        {"traded_time": "20260721093500", "symbol": "510300.SH", "direction": "BUY",
+         "shares": 100, "price": 4.0, "strategy": "neckline"},
+        {"traded_time": "20260721100000", "symbol": "159915.SZ", "direction": "SELL",
+         "shares": 100, "price": 5.0, "strategy": "neckline"},
+        {"traded_time": "20260720140000", "symbol": "510300.SH", "direction": "BUY",
+         "shares": 200, "price": 3.9, "strategy": "neckline"},
     ])
 
     # 全量（该日）
@@ -60,28 +65,23 @@ def test_query_trades_pagination_and_filter(tmp_path, monkeypatch):
     assert r["limit"] == 1 and r["offset"] == 0
 
 
-def test_query_trades_empty_log(tmp_path, monkeypatch):
-    """CSV 不存在 → 空 trades、total=0（诚实空，不抛；CSV 回退读口）。"""
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
-    monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(tmp_path / "nope.csv"))
+def test_query_trades_empty_log(tmp_db):
+    """DB 空 → trades 空、total=0（诚实空，不抛；DB 读口契约，A4 平移 from CSV）。"""
     r = trading_service.query_trades("2026-07-21", "2026-07-21")
     assert r["total"] == 0 and r["trades"] == []
 
 
-def test_query_trades_direction_case_insensitive(tmp_path, monkeypatch):
-    """direction 过滤大小写不敏感（CSV 读口契约，W3.2 走 env=csv 回退路径）。
+def test_query_trades_direction_case_insensitive(tmp_db):
+    """direction 过滤大小写不敏感（DB 读口契约，A4 平移 from CSV）。
 
-    生产落 CSV 的是大写口径（server/services/trading_service.py:432 写 BUY/SELL），
-    前端/调用方传小写 "buy" 亦应命中，避免 direction 过滤恒空。
+    生产 fill 表存大写 BUY/SELL（与 insert_fill 入参一致），前端/调用方传小写 "buy"
+    亦应命中，避免 direction 过滤恒空（query_fills 已 .upper() 归一）。
     """
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
-    log = tmp_path / "live_trades.csv"
-    monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(log))
-    _write_csv(str(log), [
-        {"timestamp": "2026-07-21 09:35:00", "symbol": "510300.SH", "direction": "BUY",
-         "shares": 100, "price": 4.0, "strategy": "neckline", "rationale": "test"},
-        {"timestamp": "2026-07-21 10:00:00", "symbol": "159915.SZ", "direction": "SELL",
-         "shares": 100, "price": 5.0, "strategy": "neckline", "rationale": "tp"},
+    _insert_fills(tmp_db, [
+        {"traded_time": "20260721093500", "symbol": "510300.SH", "direction": "BUY",
+         "shares": 100, "price": 4.0, "strategy": "neckline"},
+        {"traded_time": "20260721100000", "symbol": "159915.SZ", "direction": "SELL",
+         "shares": 100, "price": 5.0, "strategy": "neckline"},
     ])
 
     # 小写 "buy" 过滤 → 命中大写 BUY 那行（证明大小写不敏感）
@@ -93,25 +93,22 @@ def test_query_trades_direction_case_insensitive(tmp_path, monkeypatch):
     assert r["total"] == 1 and r["trades"][0]["symbol"] == "159915.SZ"
 
 
-def test_query_trades_direction_normalized_to_lowercase(tmp_path, monkeypatch):
-    """返回的 direction 必须规范化为小写（final review I1 · 交易 UI 红线，CSV 读口）。
+def test_query_trades_direction_normalized_to_lowercase(tmp_db):
+    """返回的 direction 必须规范化为小写（final review I1 · 交易 UI 红线，DB 读口）。
 
-    生产落 CSV 是大写 BUY/SELL，但前端 TradesTable.vue 用 `row.direction === 'buy'`
+    生产 fill 表存大写 BUY/SELL，但前端 TradesTable.vue 用 `row.direction === 'buy'`
     小写精确匹配做方向徽章着色（buy=danger 红 / sell=success 绿）。若 query_trades
-    原样透传大写，BUY 行会被前端误判为「非 buy」→ 错挂 success（绿·卖色），
-    SELL 行才挂 danger（红·买色）—— 视觉警示与交易动作完全颠倒，是交易 UI 红线 bug。
+    原样透传大写，BUY 行会被前端误判为「非 buy」→ 错挂 success（绿·卖色），SELL 行
+    才挂 danger（红·买色）—— 视觉警示与交易动作完全颠倒，是交易 UI 红线 bug。
 
-    本测试断言：即便 CSV 写盘是大写，query_trades 返回的 trades[].direction 也必须是小写，
-    保证服务端是方向口径的单一真相源（消费者一律拿小写）。
+    本测试断言：即便 DB 存的是大写，query_trades 返回的 trades[].direction 也必须
+    是小写，保证服务端是方向口径的单一真相源（消费者一律拿小写）。
     """
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
-    log = tmp_path / "live_trades.csv"
-    monkeypatch.setattr(trading_service, "LIVE_TRADE_LOG", str(log))
-    _write_csv(str(log), [
-        {"timestamp": "2026-07-21 09:35:00", "symbol": "510300.SH", "direction": "BUY",
-         "shares": 100, "price": 4.0, "strategy": "neckline", "rationale": "test"},
-        {"timestamp": "2026-07-21 10:00:00", "symbol": "159915.SZ", "direction": "SELL",
-         "shares": 100, "price": 5.0, "strategy": "neckline", "rationale": "tp"},
+    _insert_fills(tmp_db, [
+        {"traded_time": "20260721093500", "symbol": "510300.SH", "direction": "BUY",
+         "shares": 100, "price": 4.0, "strategy": "neckline"},
+        {"traded_time": "20260721100000", "symbol": "159915.SZ", "direction": "SELL",
+         "shares": 100, "price": 5.0, "strategy": "neckline"},
     ])
 
     r = trading_service.query_trades("2026-07-21", "2026-07-21")

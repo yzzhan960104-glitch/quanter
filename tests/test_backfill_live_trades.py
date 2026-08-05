@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""历史 CSV 成交可信回填 state_store 测试（一次性迁移，排除测试/冒烟行，幂等）。"""
+"""历史 CSV 成交可信回填 state_store 测试（一次性迁移，排除测试/冒烟行，幂等）。
+
+A4 注：脚本已归档到 scripts/archive/（CSV 写盘链路整体退役，backfill 是一次性
+可信回填工具，保留可重跑能力但移出主 scripts/）。import 路径随之改为
+scripts.archive.backfill_live_trades_to_state_store。"""
 import csv
 import sqlite3
 
@@ -40,7 +44,7 @@ def test_backfill_dry_run_inserts_nothing(tmp_path, monkeypatch):
     db = str(tmp_path / "state.db")
     state_store.init_store(db)
     monkeypatch.setattr(state_store, "_DEFAULT_DB", db)
-    from scripts.backfill_live_trades_to_state_store import backfill
+    from scripts.archive.backfill_live_trades_to_state_store import backfill
     res = backfill(str(csv_p))
     assert res["candidates"] == 1
     assert res["applied"] == 0
@@ -64,7 +68,7 @@ def test_backfill_applies_trusted_fills_excluding_test_rows(tmp_path, monkeypatc
     db = str(tmp_path / "state.db")
     state_store.init_store(db)
     monkeypatch.setattr(state_store, "_DEFAULT_DB", db)
-    from scripts.backfill_live_trades_to_state_store import backfill
+    from scripts.archive.backfill_live_trades_to_state_store import backfill
     res = backfill(str(csv_p), apply=True)
     assert res["applied"] == 4
     assert _count(db, "fill") == 4
@@ -85,7 +89,7 @@ def test_backfill_is_idempotent(tmp_path, monkeypatch):
     db = str(tmp_path / "state.db")
     state_store.init_store(db)
     monkeypatch.setattr(state_store, "_DEFAULT_DB", db)
-    from scripts.backfill_live_trades_to_state_store import backfill
+    from scripts.archive.backfill_live_trades_to_state_store import backfill
     assert backfill(str(csv_p), apply=True)["applied"] == 1
     res2 = backfill(str(csv_p), apply=True)
     assert res2["applied"] == 0

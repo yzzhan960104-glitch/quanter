@@ -94,8 +94,8 @@ def test_inject_fills_writes_fill_and_position_via_engine(isolated_state, monkey
     with broker.attach(date(2026, 7, 2), time(9, 25)) as gw:
         eng._gw = gw
         broker.simulate_submit(order, date(2026, 7, 2), time(9, 25))
-        with patch("presentation.server.services.trading_service.record_live_trade"), \
-             patch("infra.notifier.fire_and_forget", lambda coro: coro.close()):
+        # A4 删 record_live_trade，原 patch 行随之删（审计平移 trade_event 表）
+        with patch("infra.notifier.fire_and_forget", lambda coro: coro.close()):
             asyncio.run(broker.inject_fills(eng))
     account = engine_mod._resolve_account_id()
     assert state_store.get_position(account, "300001.SZ") is not None, "BUY 成交应落 position"
@@ -175,8 +175,8 @@ def test_resting_tp_fills_when_high_reaches_price(isolated_state, monkeypatch):
         broker.simulate_submit(
             {"symbol": "300001.SZ", "qty": 50, "side": "SELL", "price": 10.5},
             date(2026, 7, 2), time(10, 0))
-        with patch("presentation.server.services.trading_service.record_live_trade"), \
-             patch("infra.notifier.fire_and_forget", lambda coro: coro.close()):
+        # A4 删 record_live_trade，原 patch 行随之删（审计平移 trade_event 表）
+        with patch("infra.notifier.fire_and_forget", lambda coro: coro.close()):
             asyncio.run(broker.scan_resting_and_inject(eng, date(2026, 7, 2), time(10, 0)))
     assert broker._positions["300001.SZ"]["volume"] == 50, "TP 成交后镜像持仓应减半"
     pos = state_store.get_position(account, "300001.SZ")

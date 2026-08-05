@@ -1,44 +1,41 @@
 # -*- coding: utf-8 -*-
-"""W3.2 消费端切 state_store.fill —— query_trades 优先读 DB 真相源（TDD RED）。
+"""W3.2 消费端切 state_store.fill —— query_trades 读 DB 真相源（TDD RED）。
 
 08-04 事故根因：消费端（query_trades/简报/导出）读 CSV 镜像，但 CSV 在重放/补推
-场景下会出现重复行（同一笔 (order_id, traded_time) 被 record_live_trade 多次
+场景下会出现重复行（同一笔 (order_id, traded_time) 被原 record_live_trade 多次
 append），消费端无去重 → 简报把 24 行重复当成「买 24 笔」误导研究员。
 
 T6（commit 7162f385）已让写入端幂等：state_store.fill 是成交流水真相源
-（insert_fill 首次成功才写，CSV 同步只在首次写）。本测试锁定消费端切换：
-- query_trades 优先读 state_store.fill，DB 有数据不碰 CSV；
-- LIVE_TRADE_READ_SOURCE=csv 回退原 CSV 读口（一键回滚开关，spec §5）。
+（insert_fill 首次成功才写）。本测试锁定消费端切换：
+- query_trades 读 state_store.fill（DB 是唯一真相源，spec §2.4 SSoT）。
+
+A4 收口（CSV 回退已退役）：
+- 原 LIVE_TRADE_READ_SOURCE=csv 回退开关（W3.2 spec §5 一键回滚路径）在 A2 已删，
+  对应 3 个 *_fallback_csv_when_env_set 测试随之退役（无回退路径可测）。
+- 原 isolated_db fixture 的 LIVE_TRADE_LOG monkeypatch 删除（常量 A4 删）。
 
 返 shape {trades, total, limit, offset} 不变（前端 TradesPage 契约红线）。
 """
 from __future__ import annotations
-
-import os
 
 import pytest
 
 
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
-    """每个用例独立 SQLite + 独立 CSV 路径，互不污染。"""
+    """每个用例独立 SQLite，互不污染（A4 删 CSV 路径，仅返 db）。"""
     db = str(tmp_path / "ts.db")
-    csv_path = str(tmp_path / "live_trades.csv")
     # state_store 模块级 _DEFAULT_DB 是写入默认值；消费端 query_fills 也读它。
     monkeypatch.setattr("trading.state_store._DEFAULT_DB", db)
-    monkeypatch.setattr(
-        "presentation.server.services.trading_service.LIVE_TRADE_LOG", csv_path)
-    # 缺省 db（W3.2 切换后真相源是 DB）
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "db")
     from trading import state_store
     state_store.init_store(db)
     state_store.upsert_account("acct1", broker="qmt")
-    return db, csv_path
+    return db
 
 
 def test_query_trades_reads_db_fill_first(isolated_db):
     """W3.2: query_trades 优先读 state_store.fill；DB 有数据时不碰 CSV。"""
-    db, csv_path = isolated_db
+    db = isolated_db
     from trading import state_store
     # 写一笔真相到 fill 表（首次成功）
     state_store.insert_fill(
@@ -63,7 +60,7 @@ def test_query_trades_reads_db_fill_first(isolated_db):
 
 def test_query_trades_db_shape_limit_offset_unchanged(isolated_db):
     """W3.2: 切 DB 后 shape {trades, total, limit, offset} + 分页语义不变。"""
-    db, _ = isolated_db
+    db = isolated_db
     from trading import state_store
     # 写 3 笔同日成交
     for i in range(3):
@@ -78,31 +75,6 @@ def test_query_trades_db_shape_limit_offset_unchanged(isolated_db):
     assert res["offset"] == 0
 
 
-def test_query_trades_fallback_csv_when_env_set(isolated_db, monkeypatch):
-    """W3.2: LIVE_TRADE_READ_SOURCE=csv → 回退 CSV 读口（一键回滚开关）。
-
-    场景：DB 空、CSV 有 1 行、env=csv → query_trades 应读 CSV。
-    Why 这是回滚保险：DB 异常或运维主动回退时，消费端能从 CSV 镜像继续读。
-    """
-    db, csv_path = isolated_db
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
-    # 写一行 CSV（真相镜像）
-    import csv as _csv
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = _csv.DictWriter(f, fieldnames=[
-            "timestamp", "symbol", "direction", "shares", "price",
-            "strategy", "rationale", "kind"])
-        w.writeheader()
-        w.writerow({"timestamp": "2026-08-05 10:10:00", "symbol": "510300.SH",
-                    "direction": "BUY", "shares": 200, "price": 4.0,
-                    "strategy": "neckline", "rationale": "", "kind": "fill"})
-    from presentation.server.services.trading_service import query_trades
-    res = query_trades("2026-08-05", "2026-08-05")
-    assert res["total"] == 1
-    assert res["trades"][0]["symbol"] == "510300.SH"
-
-
 def test_query_trades_db_empty_no_csv_returns_empty(isolated_db):
     """W3.2: DB 空且无 CSV → 诚实空结果（不抛 FileNotFoundError）。"""
     from presentation.server.services.trading_service import query_trades
@@ -113,7 +85,7 @@ def test_query_trades_db_empty_no_csv_returns_empty(isolated_db):
 
 def test_query_trades_db_direction_filter_case_insensitive(isolated_db):
     """W3.2: 切 DB 后 direction 过滤大小写不敏感保持（前端传 buy/CSV/DB 大写均命中）。"""
-    db, _ = isolated_db
+    db = isolated_db
     from trading import state_store
     state_store.insert_fill(
         "oid_b", "acct1", "20260805101000", "300001.SZ", "BUY", 100, 10.5)
@@ -130,7 +102,7 @@ def test_query_trades_db_dedup_same_order_id_traded_time(isolated_db):
     """W3.2: DB fill 表 UNIQUE(order_id, traded_time) 已天然去重 —— 同笔成交重放
     insert_fill 第二次返 False 不落表，消费端看到的始终是 1 笔（修复 08-04 事故根因）。
     """
-    db, _ = isolated_db
+    db = isolated_db
     from trading import state_store
     # 首次写入成功
     ok1 = state_store.insert_fill(
@@ -156,17 +128,17 @@ def test_export_trades_reads_db_fill_first(isolated_db):
     原 export_trades 流式读 CSV，在重放场景下会导出 24 行重复，污染 Layer6 复盘输入。
     切 DB 后，fill 表 UNIQUE(order_id, traded_time) 天然去重，导出永远是真相源。
     """
-    db, csv_path = isolated_db
+    db = isolated_db
     from trading import state_store
     state_store.insert_fill(
         "oid_e1", "acct1", "20260805101000", "300001.SZ", "BUY", 100, 10.5)
     # 故意不写 CSV —— DB 有数据时 export_trades 不应碰 CSV
 
-    from presentation.server.services.trading_service import export_trades, LIVE_TRADE_COLUMNS
+    from presentation.server.services.trading_service import export_trades, _EXPORT_COLUMNS
     csv_text = export_trades("2026-08-05", "2026-08-05")
-    # 表头契约（前端下载依赖 LIVE_TRADE_COLUMNS 表头顺序）
+    # 表头契约（前端下载依赖 _EXPORT_COLUMNS 表头顺序 · A4：LIVE_TRADE_COLUMNS 已删）
     header_line = csv_text.splitlines()[0]
-    assert header_line == ",".join(LIVE_TRADE_COLUMNS)
+    assert header_line == ",".join(_EXPORT_COLUMNS)
     # 数据行：1 行 fill（DB 真相源）
     data_lines = [ln for ln in csv_text.splitlines()[1:] if ln.strip()]
     assert len(data_lines) == 1, f"DB 1 笔成交应只导出 1 行，实际 {len(data_lines)}"
@@ -175,38 +147,17 @@ def test_export_trades_reads_db_fill_first(isolated_db):
     assert "BUY" in data_lines[0]
 
 
-def test_export_trades_fallback_csv_when_env_set(isolated_db, monkeypatch):
-    """W3.2 收口：LIVE_TRADE_READ_SOURCE=csv → export_trades 回退 CSV 读口（一键回滚）。"""
-    db, csv_path = isolated_db
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
-    import csv as _csv
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = _csv.DictWriter(f, fieldnames=[
-            "timestamp", "symbol", "direction", "shares", "price",
-            "strategy", "rationale", "kind"])
-        w.writeheader()
-        w.writerow({"timestamp": "2026-08-05 10:10:00", "symbol": "510300.SH",
-                    "direction": "BUY", "shares": 200, "price": 4.0,
-                    "strategy": "neckline", "rationale": "", "kind": "fill"})
-    from presentation.server.services.trading_service import export_trades
-    csv_text = export_trades("2026-08-05", "2026-08-05")
-    data_lines = [ln for ln in csv_text.splitlines()[1:] if ln.strip()]
-    assert len(data_lines) == 1
-    assert "510300.SH" in data_lines[0]
-
-
 def test_export_trades_empty_db_returns_header_only(isolated_db):
     """W3.2 收口：DB 空 + 无 CSV → 只返表头（诚实空导出，前端照常下载，非 404）。
 
     注：DB 走 csv.DictWriter（默认 \\r\\n 行尾），CSV 回退走手拼 "\\n" —— 两路径
     行尾不一致但表头行内容一致，前端 Excel/csv-parse 均兼容。本测试只断言表头内容。
     """
-    from presentation.server.services.trading_service import export_trades, LIVE_TRADE_COLUMNS
+    from presentation.server.services.trading_service import export_trades, _EXPORT_COLUMNS
     csv_text = export_trades("2026-08-05", "2026-08-05")
-    # 表头行内容 = LIVE_TRADE_COLUMNS（行尾 \r\n 或 \n 均可，前端兼容）
+    # 表头行内容 = _EXPORT_COLUMNS（A4：LIVE_TRADE_COLUMNS 已删，_EXPORT_COLUMNS 是唯一源）
     first_line = csv_text.splitlines()[0]
-    assert first_line == ",".join(LIVE_TRADE_COLUMNS)
+    assert first_line == ",".join(_EXPORT_COLUMNS)
     # 无数据行
     assert len([ln for ln in csv_text.splitlines()[1:] if ln.strip()]) == 0
 
@@ -222,7 +173,7 @@ def test_aggregate_fills_reads_db_not_csv_on_replay(isolated_db, monkeypatch):
         归因日志误报 drift。切 fill 表后（UNIQUE 去重），同笔成交只 1 行 → 净 100，
         与 position_book 对齐，归因日志正确。
     """
-    db, csv_path = isolated_db
+    db = isolated_db
     from trading import state_store
     # fill 表只 1 笔真相（insert_fill 幂等，重放返 False）
     state_store.insert_fill(
@@ -230,16 +181,9 @@ def test_aggregate_fills_reads_db_not_csv_on_replay(isolated_db, monkeypatch):
     state_store.insert_fill(
         "oid_a1", "acct1", "20260805101000", "600000.SH", "BUY", 100, 10.0)  # 重放返 False
 
-    # CSV 写 24 行重复（事故场景：网关恢复后回报重放）
-    import csv as _csv
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = _csv.writer(f)
-        w.writerow(["timestamp", "symbol", "direction", "shares", "price",
-                    "strategy", "rationale", "kind"])
-        for i in range(24):
-            w.writerow([f"2026-08-05 10:00:{i:02d}", "600000.SH", "BUY", 100,
-                        10.0, "", "", "fill"])
+    # A4 注：原测试同时写 24 行重复 CSV 证明 aggregate 不读 CSV（只读 DB 1 笔真相）。
+    # CSV 写盘链路已整体退役（record_live_trade 删），CSV 重复源不再存在；保留 fill
+    # 表 1 笔真相的断言锁定 aggregate 读 fill 的契约。
 
     from presentation.server.services.trading_service import aggregate_fills_by_symbol
     net = aggregate_fills_by_symbol("2026-08-05", "2026-08-05")
@@ -251,7 +195,7 @@ def test_aggregate_fills_reads_db_not_csv_on_replay(isolated_db, monkeypatch):
 
 def test_aggregate_fills_buy_sell_netting_db(isolated_db):
     """W3.4 收口：BUY/SELL 净聚合（fill 表）—— 买 100 + 卖 60 → 净 +40。"""
-    db, _ = isolated_db
+    db = isolated_db
     from trading import state_store
     state_store.insert_fill(
         "oid_b", "acct1", "20260805101000", "300001.SZ", "BUY", 100, 10.0)
@@ -262,18 +206,3 @@ def test_aggregate_fills_buy_sell_netting_db(isolated_db):
     assert net.get("300001.SZ") == 40.0  # 100 - 60
 
 
-def test_aggregate_fills_fallback_csv_when_env_set(isolated_db, monkeypatch):
-    """W3.4 收口：LIVE_TRADE_READ_SOURCE=csv → 回退原 CSV 流式聚合（一键回滚）。"""
-    db, csv_path = isolated_db
-    monkeypatch.setenv("LIVE_TRADE_READ_SOURCE", "csv")
-    import csv as _csv
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = _csv.writer(f)
-        w.writerow(["timestamp", "symbol", "direction", "shares", "price",
-                    "strategy", "rationale", "kind"])
-        w.writerow(["2026-08-05 10:00:00", "510300.SH", "BUY", 200, 4.0, "", "", "fill"])
-        w.writerow(["2026-08-05 10:01:00", "510300.SH", "SELL", 50, 4.1, "", "", "fill"])
-    from presentation.server.services.trading_service import aggregate_fills_by_symbol
-    net = aggregate_fills_by_symbol("2026-08-05", "2026-08-05")
-    assert net.get("510300.SH") == 150.0  # 200 - 50
