@@ -89,6 +89,43 @@ def test_aggregate_fills_db_exception_returns_empty(tmp_db, monkeypatch, tmp_pat
     assert svc.aggregate_fills_by_symbol("2000-01-01", "2099-12-31") == {}
 
 
+def test_export_trades_carries_strategy_value(tmp_db):
+    """export 读 fill.strategy 值（A1 加列，Fix 2 修 export 不再硬编码空）。
+
+    物理意图：A1 给 fill 表加 strategy 列、A3 让 query_fills SELECT 返 strategy 字段，
+    export_trades 作为消费端必须把 fill.strategy 透出（策略归属是复盘/过滤的真相字段）。
+    旧代码 ``"strategy": ""`` 硬编码空 → strategy 字段在导出流水里永久丢失，违反 SSoT
+    「fill 表是成交流水唯一真相源」契约（消费端拿不到真相源字段）。
+    """
+    from trading import state_store
+    import presentation.server.services.trading_service as svc
+    # 落 1 行带 strategy="neckline" 的 fill（A1 加列 + A3 SELECT 已就绪）
+    state_store.insert_fill(
+        "O1", "ACC_TEST", "20260805101000", "600000.SH", "BUY", 100, 10.0,
+        strategy="neckline")
+    out = svc.export_trades("2026-08-05", "2026-08-05")
+    # strategy 值应出现（旧代码硬编码 "" → 此断言 FAIL）
+    assert "neckline" in out, f"export 未透出 fill.strategy 值：\n{out}"
+
+
+def test_query_trades_carries_strategy_value(tmp_db):
+    """query 读 fill.strategy 值（A1 加列，Fix 2 修 query 不再硬编码空）。
+
+    与 export 同语义：query_trades 是前端 TradesPage 的数据源，strategy 字段丢失
+    会让前端流水展示「无策略归属」，复盘/过滤功能失效。
+    """
+    from trading import state_store
+    import presentation.server.services.trading_service as svc
+    state_store.insert_fill(
+        "O1", "ACC_TEST", "20260805101000", "600000.SH", "BUY", 100, 10.0,
+        strategy="neckline")
+    res = svc.query_trades("2026-08-05", "2026-08-05")
+    assert res["trades"], "query_trades 未返成交行"
+    # strategy 值应为 "neckline"（旧代码硬编码 "" → 此断言 FAIL）
+    assert res["trades"][0]["strategy"] == "neckline", (
+        f"query_trades 未透出 fill.strategy 值：{res['trades'][0]}")
+
+
 def test_export_trades_db_empty_header_only(tmp_db, tmp_path):
     """DB 空 + 有 CSV 残留：新代码返仅表头（不读 CSV）。
 

@@ -897,6 +897,80 @@ def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, 
     assert len(alert_calls) >= 1, "direction=None 应触发 _alert_critical 人工对账告警"
 
 
+def test_direction_none_writes_trade_event_audit(state_db, monkeypatch):
+    """direction=None 回报 → trade_event 落 DIRECTION_UNKNOWN 审计行（spec §A1）。
+
+    物理意图（Fix 3b，用户 final review 抓出）：
+        spec §A1 要求「direction=None 旁路不再写 CSV（保留告警 + trade_event 审计）」。
+        原实现只有 _alert_critical（仅 live 模式推钉钉）+ 不写 CSV/不推钉钉，
+        **trade_event 审计事件缺失** → 事件流留痕断裂：dry_run 模式下不推钉钉，
+        方向未知回报在 trade_event 表里完全无痕迹，事后复盘无法对账（审计黑洞）。
+        Fix：在 _alert_critical 后补 trade_event(DIRECTION_UNKNOWN) 审计行（与真相源
+        同表，不依赖模式闸，重放天然幂等——UNIQUE(account_id, trade_id, action)）。
+
+    断言：
+      1) trade_event 落 DIRECTION_UNKNOWN 行（action + meta 含 reason=direction_unknown）；
+      2) fill 表仍 0 行（direction=None 不进 insert_fill 分支，既有防线不变）；
+      3) _alert_critical 仍触发（live 模式下告警人工对账，既有红线保留）；
+      4) 重放幂等：二次推送不新增 trade_event 行（UNIQUE 去重）。
+    """
+    import sqlite3
+    from trading import state_store
+
+    eng = TradingEngine()
+    eng._tp_placed = set()
+    # 不预置 DB order 行、不塞 _orders → _order_direction 返 None（方向未知）
+    eng._gw = MagicMock()
+    eng._gw._orders = {}
+    eng._gw._seq_to_real = {}
+
+    update = {
+        "kind": "trade",
+        "order_id": "999999_UNKNOWN",
+        "stock_code": "600000.SH",
+        "traded_volume": 100,
+        "traded_price": 10.5,
+        "traded_amount": 1050.0,
+        "traded_time": "20260801101000",
+        "state": "FILLED",
+    }
+    fake_mgr = MagicMock()
+    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+    alert_calls = []
+    monkeypatch.setattr(
+        "trading.engine._alert_critical", lambda msg: alert_calls.append(msg))
+    # patch _mode=live 让 _alert_critical 守卫命中（与既有 direction=None 测试同口径）
+    import trading.engine as _eng_mod
+    monkeypatch.setattr(_eng_mod, "_mode", lambda: "live")
+    with patch("infra.notifier.NotificationManager") as NM, \
+         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+        NM.get_default.return_value = fake_mgr
+        asyncio.run(eng._handle_order_update(update))   # 首次（方向未知）
+        asyncio.run(eng._handle_order_update(update))   # 重放（方向未知，幂等校验）
+
+    with sqlite3.connect(state_db) as con:
+        con.row_factory = sqlite3.Row
+        # 1) trade_event 落 DIRECTION_UNKNOWN 行（Fix 3b 核心）
+        ev = con.execute(
+            "SELECT * FROM trade_event WHERE action='DIRECTION_UNKNOWN' "
+            "AND symbol='600000.SH'").fetchone()
+        assert ev is not None, (
+            "direction=None 旁路未补 trade_event(DIRECTION_UNKNOWN) 审计行（spec §A1）")
+        assert "reason=direction_unknown" in (ev["meta"] or ""), (
+            f"DIRECTION_UNKNOWN meta 应含 reason=direction_unknown，实际 meta={ev['meta']!r}")
+        # 重放幂等：DIRECTION_UNKNOWN 仅 1 行（UNIQUE 去重）
+        n_ev = con.execute(
+            "SELECT COUNT(*) FROM trade_event WHERE action='DIRECTION_UNKNOWN' "
+            "AND symbol='600000.SH'").fetchone()[0]
+        assert n_ev == 1, f"direction=None 重放应幂等（UNIQUE 去重），实际 {n_ev} 行"
+        # 2) fill 表仍 0 行（direction=None 不进 insert_fill 分支，既有防线不变）
+        n_fill = con.execute(
+            "SELECT COUNT(*) FROM fill WHERE symbol='600000.SH'").fetchone()[0]
+        assert n_fill == 0, f"direction=None 不应写 fill 表，实际 {n_fill} 行"
+    # 3) _alert_critical 仍触发（既有红线保留）
+    assert len(alert_calls) >= 1, "direction=None 应触发 _alert_critical 人工对账告警"
+
+
 def test_e2e_trade_before_async_response_race(db, monkeypatch):
     """竞态：trade 先于 async_response → seq 反查兜底落账，随后回填不覆盖。"""
     import asyncio

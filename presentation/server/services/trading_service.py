@@ -296,8 +296,9 @@ def export_trades(start: str, end: str) -> str:
         # DB 行 → _EXPORT_COLUMNS 行 shape（前端下载契约）
         # traded_time(YYYYMMDDHHMMSS) → timestamp("YYYY-MM-DD HH:MM:SS") 兼容前端展示；
         # direction 落大写口径（与原 CSV 写盘一致，消费者按需小写化）；
-        # strategy/rationale 留空（fill 表不含这两列，复盘/审计按需回查 order 表）；
-        # kind='fill' 标注（DB fill 表本身就是成交回报，与 CSV 的 kind='fill' 等价）。
+        # strategy 读 fill.strategy 列（A1 加，A3 SELECT 补）；rationale 仍空
+        # （fill 表无此列，复盘按需回查 order 表）；kind='fill' 标注（DB fill 表本身就是
+        # 成交回报，与 CSV 的 kind='fill' 等价）。
         tt = str(r.get("traded_time") or "")
         ts = (
             f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
@@ -309,7 +310,8 @@ def export_trades(start: str, end: str) -> str:
             "direction": (r.get("direction") or "").upper(),  # 落大写口径
             "shares": r.get("shares", ""),
             "price": r.get("price", ""),
-            "strategy": "",
+            # 读 fill.strategy 值（A1 加列，A3 SELECT 已返此字段）；保 _EXPORT_COLUMNS shape
+            "strategy": r.get("strategy") or "",
             "rationale": "",
             "kind": "fill",
         })
@@ -382,7 +384,8 @@ def query_trades(
             "direction": (r.get("direction") or "").lower(),  # 小写口径（query_fills 已小写，兜底）
             "shares": float(r.get("shares") or 0.0),
             "price": float(r.get("price") or 0.0),
-            "strategy": "",
+            # 读 fill.strategy 值（A1 加列，A3 SELECT 已返此字段）
+            "strategy": r.get("strategy") or "",
             "rationale": "",
             # DB fill 表就是成交回报 → kind='fill'（brief/聚合按 kind 闸识别）
             "kind": "fill",
@@ -633,7 +636,10 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
     if decision.blocked:
         if decision.is_dry_run:
             # 模拟：落 DRY_RUN 事件后返回成功语义（非错误）
-            _write_submit_trade_event(order, "DRY_RUN", meta_reason=decision.reason)
+            # meta_kind=submit 显式传：防默认 "fill" 误标成交（DRY_RUN 是下单审计，
+            # 与 BLOCKED/ORDERED 同语义，post_close 聚合按 kind=fill 闸识别真实成交）
+            _write_submit_trade_event(
+                order, "DRY_RUN", meta_reason=decision.reason, meta_kind="submit")
             return {"order_id": "", "state": "DRY_RUN", "message": decision.reason}
         # 真拒单：落 BLOCKED 事件 + raise（路由层转 409）
         _write_submit_trade_event(

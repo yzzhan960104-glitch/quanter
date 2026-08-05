@@ -3125,6 +3125,30 @@ class TradingEngine:
         _account_id = _resolve_account_id()
         _trade_id = _state_store.build_trade_id(_account_id, symbol, today_tp)
 
+        # spec §A1：direction=None 旁路补 trade_event(DIRECTION_UNKNOWN) 审计（Fix 3b，
+        # 用户 final review 抓出）。原旁路只有 _alert_critical（仅 live 模式推钉钉），
+        # dry_run 模式下方向未知回报在事件流里完全无痕迹 → 事后复盘无法对账（审计黑洞）。
+        # trade_event 审计不受 _mode 守卫限制（任何模式都该留痕），与 _alert_critical
+        # （live 才推钉钉的告警通道）解耦。UNIQUE(account_id, trade_id, action) 天然幂等，
+        # 同 (order_id, traded_time) 重放不重复落行（与 fill 表去重同口径）。
+        if direction is None:
+            try:
+                # 确保 account 行存在（trade_event FK 引用 account，与下方 BUY/SELL
+                # 分支同范式——dry_run 影子期可能未预置 default 账户，缺失则 FK 失败）
+                if _state_store.get_account(_account_id) is None:
+                    _state_store.upsert_account(_account_id, broker="qmt")
+                _state_store.insert_trade_event(
+                    _account_id, _trade_id, symbol, "DIRECTION_UNKNOWN",
+                    order_id=order_id, qty=float(qty) if qty else None,
+                    price=float(price) if price else None,
+                    meta=f"reason=direction_unknown|update={update.get('traded_time')}")
+            except Exception:
+                # 审计旁路软降级：不阻断 handler 主路径（与 _alert_critical 同范式，
+                # DB 写失败不抛——审计缺失由日志告警供人工补对账）
+                logger.exception(
+                    "direction=None trade_event 审计失败 symbol=%s order_id=%s",
+                    symbol, order_id)
+
         # ── d. 成交账本写入（真相源，最先做——先落账再挂止盈/落日志，防 crash 窗口账账不符）──
         # state-store-redesign §4.2 + W3.1（gateway-ssot-hardening）：
         #   state_store.insert_fill 是成交回报的**唯一幂等真相源**（UNIQUE(order_id, traded_time)）。

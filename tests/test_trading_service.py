@@ -164,6 +164,35 @@ def test_submit_order_dry_run_records_and_returns(tmp_db, monkeypatch):
     con.close()
 
 
+def test_submit_order_dry_run_meta_kind_is_submit(tmp_db, monkeypatch):
+    """DRY_RUN 审计事件 meta_kind=submit（非 fill，防误标成交）。
+
+    物理意图（Fix 3a，用户 final review 抓出）：
+        _write_submit_trade_event 默认 ``meta_kind="fill"``，DRY_RUN 调用未显式传
+        meta_kind → meta 落 ``kind=fill``。但 DRY_RUN 是**模拟挡板命中**，非真实成交，
+        post_close 聚合层按 ``kind=fill`` 闸识别真实成交——若 DRY_RUN 误标 fill，会被
+        计入净持仓口径，污染审计真相源。BLOCKED/ORDERED 都显式传 ``meta_kind="submit"``，
+        DRY_RUN 与两者语义同源（下单审计），应保持一致。
+    """
+    from presentation.server.services import trading_service
+    from trading.compute.types import OrderRequest
+    import sqlite3
+
+    gw = _fake_gw_connected()
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
+
+    order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
+    asyncio.run(trading_service.submit_order(order, dry_run=True, confirm=True))
+    # 断言 trade_event DRY_RUN 行的 meta 含 kind=submit（旧代码默认 fill → FAIL）
+    con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
+    ev = con.execute("SELECT * FROM trade_event WHERE action='DRY_RUN'").fetchone()
+    assert ev is not None, "dry_run 未落 trade_event(DRY_RUN) 事件"
+    assert "kind=submit" in (ev["meta"] or ""), (
+        f"DRY_RUN meta_kind 应为 submit（非 fill），实际 meta={ev['meta']!r}")
+    con.close()
+
+
 def test_submit_order_blocked_raises(tmp_db, monkeypatch):
     """挡板命中（白名单外）→ raise RuntimeError + 落 BLOCKED trade_event 事件。
 
