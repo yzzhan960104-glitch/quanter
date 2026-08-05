@@ -40,13 +40,22 @@ if str(ROOT) not in sys.path:
 from trading import calendar, clock
 
 
-def _plan_path_for(today: str) -> Path:
-    """补跑/触发场景的落盘文件路径：eod 恒产 T+1（plan_date），不能查 today 文件。
+def _plan_date_for(today: str) -> str:
+    """补跑/触发场景的计划日：eod 恒产 T+1（plan_date），不能查 today。
 
     2026-08-05 修复：原复核逻辑查 ``plan_{today}.json``，而 ``_eod()`` 落的是
     ``plan_{next_trading_day(today)}.json``——补跑场景永远误报「计划未落盘」。
     """
-    plan_date = calendar.next_trading_day(today)
+    return calendar.next_trading_day(today)
+
+
+def _plan_path_for(today: str) -> Path:
+    """【保留 · C3 JSON 回退窗口】补跑/触发场景的落盘文件路径（仅 fallback 显示用）。
+
+    C2d：复核主语义改查 ``count_signals_by_plan_date``（计划已落 DB），文件路径仅作
+    操作员肉眼 fallback 显示（C3 load_plan 同款 DB 优先 + JSON 回退窗口，保留一发布周期）。
+    """
+    plan_date = _plan_date_for(today)
     plan_dir = Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
     return plan_dir / f"plan_{plan_date}.json"
 
@@ -76,21 +85,42 @@ async def _run() -> int:
     #        → _broadcast_positions_pnl（网关 None 软降级，不阻断主流程）
     await eng._eod()
 
-    # 复核落盘计划（肉眼确认信号标的 + 止损/止盈/盈亏比）
-    plan_path = _plan_path_for(today)
-    if plan_path.exists():
-        payload = json.loads(plan_path.read_text(encoding="utf-8"))
-        orders = payload.get("orders", [])
-        print(f"[trigger] ✅ 落盘 {plan_path}")
-        print(f"[trigger] date={payload.get('date')} confirmed={payload.get('confirmed')} n_orders={len(orders)}")
-        for o in orders[:10]:
-            od = o.get("order", {})
-            print(f"  - {od.get('symbol')} {od.get('side')} {od.get('qty')}@{od.get('price')}"
-                  f" 止损={o.get('stop_price')} 止盈={o.get('take_profit')} rr={o.get('rr')}")
-        if len(orders) > 10:
-            print(f"  ...（其余 {len(orders) - 10} 单见 plan json）")
+    # 复核计划落 DB（C2d：真相源 = trade_event(SIGNAL).meta，按 plan_date 查）。
+    # 物理意图：eod 产计划 = SIGNAL 行落 DB；count>0 即「计划已落」。plan_date=T+1
+    # （与 _eod 内部 next_trading_day 同口径）。文件路径仅作操作员肉眼 fallback 显示
+    # （C3 load_plan DB 优先 + JSON 回退窗口，保留一发布周期）。
+    from trading import state_store
+
+    plan_date = _plan_date_for(today)
+    try:
+        n_signals = state_store.count_signals_by_plan_date(plan_date)
+    except Exception:
+        # DB 读失败（无 init / 文件锁 / 表缺失）：保守视为「未落」，提示操作员排查。
+        n_signals = -1
+    if n_signals > 0:
+        # 读 DB meta 拿「精确 per-symbol 计划参数」（真相源，非 JSON 落盘副本）。
+        metas = state_store.list_signals_with_meta_by_plan_date(plan_date)
+        print(f"[trigger] ✅ 计划落 DB plan_date={plan_date} n_signals={n_signals}")
+        for m in metas[:10]:
+            od = m.get("order") or {}
+            print(f"  - {m.get('symbol')} {od.get('side')} {od.get('qty')}@{od.get('price')}"
+                  f" 止损={m.get('stop_price')} 止盈={m.get('take_profit')} rr={m.get('rr')}")
+        if len(metas) > 10:
+            print(f"  ...（其余 {len(metas) - 10} 单见 DB）")
     else:
-        print(f"[trigger] ⚠️ 计划未落盘（{plan_path}）——可能无在线实验/非交易日/信号为空")
+        # DB 无 SIGNAL：fallback 看老 JSON（C3 兼容窗口）+ 友好提示。
+        plan_path = _plan_path_for(today)
+        if plan_path.exists():
+            try:
+                payload = json.loads(plan_path.read_text(encoding="utf-8"))
+                orders = payload.get("orders", [])
+                print(f"[trigger] ⚠️ DB 无 SIGNAL 但 JSON 存在（兼容窗口）{plan_path}")
+                print(f"[trigger] date={payload.get('date')} n_orders={len(orders)}")
+            except Exception:
+                print(f"[trigger] ⚠️ DB 无 SIGNAL 且 JSON 损坏：{plan_path}")
+        else:
+            print(f"[trigger] ⚠️ 计划未落（DB count={n_signals}，{plan_path} 亦不存在）"
+                  "——可能无在线实验/非交易日/信号为空")
     return 0
 
 

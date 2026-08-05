@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""二期 engine 影子模式端到端冒烟脚本（一次性 · 不真发钉钉）。
+"""【已归档 · C2d 2026-08-05】二期 engine 影子模式端到端冒烟脚本（一次性 · 不真发钉钉）。
+
+归档原因：本脚本验证的是 ``trading_plan.save_plan`` 落盘 JSON 路径（assert plan_<today>.json
+存在 + 内容正确）。SSoT Phase C 已把计划真相源切到 ``trade_event(SIGNAL).meta``（DB），
+C3 将删 ``save_plan``——本脚本的断言链对 DB 化后的 engine 失去意义，归档保留历史。
+新链路冒烟改由 ``tests/e2e_long_cycle``（C1-C7 长周期 E2E）+ ``trigger_eod_once.py``
+（真实信号 + DB 复核 count_signals_by_plan_date）覆盖。
+"""
 
 物理意图：Task 11 上线前验证 engine.eod_plan 全链路正常——
   signals=[] + atr_map={} + capital=1_000_000

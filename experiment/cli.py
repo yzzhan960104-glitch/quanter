@@ -7,7 +7,6 @@ now 时间戳由调用方传或取当前；测试传固定值保证可复现。
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import sys
@@ -29,31 +28,43 @@ def _now() -> str:
 
 
 def _load_all_plans(since: str = None) -> list:
-    """扫描交易计划目录下所有 plan_*.json，返回 plan dict 列表。
+    """读全量交易计划返回 plan dict 列表（C2d 切 DB · SSoT 真相源）。
 
-    Why：trading_plan 每日落一个 JSON，内部 orders[] 每单带 experiment_id/experiment_weight；
-    report 子命令要按实验维度聚合归因，必须先把全量 plan 读出来供下游分组。
+    Why：experiment report 要按 experiment_id 聚合归因，必须先把全量计划读出来供下游分组。
     设计要点：
-    - 目录默认 logs/trading_plans，可由环境变量 TRADE_PLAN_DIR 覆盖（本地/CI 切换）。
-    - 文件名按 plan_<date>.json 命名，glob 出来再 sorted 保证可复现。
-    - since 走日期字符串字典序比较：因 date 是 ISO 格式（YYYY-MM-DD），字典序==时间序，
-      简单且零依赖，避免引入 dateutil 这类黑盒。
-    - 单文件解析失败静默跳过：脏 plan 不能让整条归因链路炸掉（防御性，老 plan 漂移常见）。
+    - **数据源（C2d）**：从 state_store.trade_event(SIGNAL).meta 读，**不再扫 plan_*.json**。
+      Why DB：plan_*.json 的文件 mtime = T 日盘后写入时间，**非计划日 T+1**；若 since 按
+      mtime/文件 date 字段过滤，T 日盘后写入与 T+1 计划生效日差一天，since 永远偏移。
+      DB 查 ``substr(trade_id,-10) >= since``（trade_id 后缀 = plan_date，build_trade_id 单点）
+      保证 since 锚的是真实计划日。详见 state_store.list_signals_with_meta_by_plan_date_range。
+    - **shape 兼容**：DB 返 ``[{symbol, plan_date, **meta}]``，这里按 plan_date 分组包成
+      ``[{date: plan_date, orders: [...]}]``（orders[] 每项即 SIGNAL meta，含 experiment_id /
+      experiment_weight / order 字段）——下游 report 聚合逻辑（``p["orders"]`` + ``o["order"]["symbol"]``）
+      完全不动，纯换数据源。
+    - since/until 走 plan_date 字典序（YYYY-MM-DD 字典序 == 时间序，与原 JSON 口径一致）。
+    - DB 读失败静默返空列表（防御性，不让 audit 链路炸；下游 groups={} 自然打出空表）。
     """
-    plan_dir = os.getenv("TRADE_PLAN_DIR", "logs/trading_plans")
-    plans = []
-    for path in sorted(glob.glob(os.path.join(plan_dir, "plan_*.json"))):
-        try:
-            with open(path, encoding="utf-8") as f:
-                p = json.load(f)
-            # 字典序比较 ISO 日期：since 含日以上的精度都能正确裁剪
-            if since and p.get("date", "") < since:
-                continue
-            plans.append(p)
-        except Exception:
-            # 脏 plan（非合法 JSON / 缺字段 / 编码异常）跳过，不让整盘归因失败
+    # 延迟 import 避免循环（experiment 包可能先于 trading 包加载的场景）。
+    try:
+        from trading import state_store
+    except Exception:
+        # trading 包未就绪（如纯实验系统单测场景）：返空，report 出空表，不崩。
+        return []
+    try:
+        rows = state_store.list_signals_with_meta_by_plan_date_range(since=since)
+    except Exception:
+        # DB 读失败（无 init / 表缺失 / 文件锁）：防御性返空，不阻断 CLI 主流程。
+        return []
+    # 按 plan_date 分组包成 plan dict 列表（shape 与原 JSON 版本兼容）。
+    by_date: dict[str, dict] = {}
+    for r in rows:
+        pd = r.get("plan_date")
+        if not pd:
             continue
-    return plans
+        # meta 行即 order 项（含 order/experiment_id/experiment_weight/stop_price 等全字段）。
+        by_date.setdefault(pd, {"date": pd, "orders": []})["orders"].append(r)
+    # 按 date 字典序返（与原 sorted(glob) 同口径，保证 report 输出可复现）。
+    return [by_date[k] for k in sorted(by_date.keys())]
 
 
 def _report(args) -> int:
@@ -117,8 +128,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("list", help="列所有版本")
 
-    # report：扫 logs/trading_plans 按 experiment_id 聚合归因（事后审计 prod vs candidate）
-    sp = sub.add_parser("report", help="扫 trading_plans 按 experiment_id 聚合归因")
+    # report：读 DB SIGNAL.meta 按 experiment_id 聚合归因（事后审计 prod vs candidate）
+    sp = sub.add_parser("report", help="读 DB 计划按 experiment_id 聚合归因")
     sp.add_argument("--since", default=None, help="起始日期 YYYY-MM-DD（含），留空全量")
     return p
 

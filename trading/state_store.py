@@ -1079,6 +1079,66 @@ def list_signals_with_meta_by_plan_date(plan_date: str, *,
     return out
 
 
+def list_signals_with_meta_by_plan_date_range(since: str | None = None,
+                                              until: str | None = None, *,
+                                              db_path: str | None = None) -> list[dict]:
+    """读 plan_date 落在 [since, until] 区间内的全部 SIGNAL meta 列表（C2d 真相源）。
+
+    物理意图（SSoT Phase C · C2d）：experiment report 的 ``_load_all_plans(since)`` 不再
+    扫 ``plan_*.json``（文件 mtime = T 日盘后写入 ≠ 计划日 T+1，since 按 mtime 恒错），
+    改读 ``trade_event(SIGNAL)`` 按 ``plan_date``（trade_id 后缀）做区间聚合。
+
+    **致命日期轴（红线，与 list_signals_with_meta_by_plan_date 同口径）**：
+        过滤按 ``plan_date``（trade_id 后缀 ``substr(trade_id,-10)``），**非文件 mtime /
+        非 trade_event.timestamp**。timestamp = T 日盘后写入时间，plan_date = T+1 计划生效日，
+        二者差一天——若误用 timestamp 做 since 过滤，experiment report 的 since 永远偏移一天。
+
+    数学验证（字典序 = ISO 日期序）：
+        - since="2026-07-01" / until=None → ``substr(trade_id,-10) >= '2026-07-01'``
+        - since="2026-07-01" / until="2026-07-31" → BETWEEN '2026-07-01' AND '2026-07-31'
+        - trade_id="ACC1_600000.SH_2026-07-15" → substr(-10)="2026-07-15" 命中区间 ✓
+        - YYYY-MM-DD 10 字符字典序 == 时间序（C2d 同 list_signals_with_meta_by_plan_date 论证）。
+
+    返 shape：``list[dict]`` 每项 ``{symbol, plan_date, **meta}``（含 plan_date 字段方便
+    experiment report 按 ``p["date"]`` 聚合）。since/until 任一为 None 表示该侧不约束。
+    since 与 until 同为 None → 返全量 SIGNAL（等价于扫盘）。
+
+    Args:
+        since: 起始 plan_date（YYYY-MM-DD，含）；None = 不设下界。
+        until: 结束 plan_date（YYYY-MM-DD，含）；None = 不设上界。
+    Returns:
+        meta dict 列表（每项含 symbol / plan_date / **meta）；无命中返 []。
+    """
+    db_path = db_path or _DEFAULT_DB
+    # 动态拼 WHERE：since/until 可选，参数化绑定防 SQL 注入。
+    where = ["action='SIGNAL'"]
+    params: list = []
+    if since is not None:
+        where.append("substr(trade_id, -10) >= ?")
+        params.append(since)
+    if until is not None:
+        where.append("substr(trade_id, -10) <= ?")
+        params.append(until)
+    sql = ("SELECT symbol, meta, substr(trade_id, -10) AS plan_date FROM trade_event "
+           "WHERE " + " AND ".join(where) + " ORDER BY event_id ASC")
+    out: list[dict] = []
+    with _connect(db_path) as con:
+        rows = con.execute(sql, params).fetchall()
+    for r in rows:
+        if r["meta"] is None:
+            continue
+        try:
+            meta = json.loads(r["meta"])
+        except (TypeError, ValueError):
+            logger.warning("list_signals_with_meta_by_plan_date_range meta JSON 解析失败 "
+                           "symbol=%s plan_date=%s", r["symbol"], r["plan_date"])
+            continue
+        if not isinstance(meta, dict):
+            continue
+        out.append({"symbol": r["symbol"], "plan_date": r["plan_date"], **meta})
+    return out
+
+
 def list_signal_symbols_by_formed_at(dates: list[str], *,
                                      db_path: str | None = None) -> set[str]:
     """读 formed_at 落在给定自然日列表内的 SIGNAL 标的集（C2b cooldown 锚点查询）。

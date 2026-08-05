@@ -567,3 +567,50 @@ def test_rebuild_skips_position_without_signal(tmp_db):
     row = state_store.get_position("ACC_TEST", "600000.SH")
     assert row is not None
     assert row["strategy"] is None  # 不回填，保持 NULL
+
+
+# ============ C2d：list_signals_with_meta_by_plan_date_range（致命日期轴）============
+
+
+def _seed_signal(tmp_db, symbol, plan_date, *, experiment_id=None):
+    """落一行 trade_event(SIGNAL) helper（C2d 测试共用）。"""
+    import json
+    from trading import state_store
+    tid = state_store.build_trade_id("ACC_TEST", symbol, plan_date)
+    meta = {"plan_date": plan_date, "stop_price": 9.0}
+    if experiment_id:
+        meta["experiment_id"] = experiment_id
+    state_store.insert_trade_event("ACC_TEST", tid, symbol, "SIGNAL", meta=json.dumps(meta))
+
+
+def test_list_signals_with_meta_by_plan_date_range_since_filter(tmp_db):
+    """since 区间按 plan_date（trade_id 后缀 substr(-10)），非 timestamp。
+
+    致命日期轴：若误用 timestamp（写入时间 = 测试当下）做 since 过滤，
+    since=2026-07-05 会因 now < 2026-07-05 把所有 SIGNAL 滤掉。
+    """
+    _seed_signal(tmp_db, "600000.SH", "2026-07-01")
+    _seed_signal(tmp_db, "600001.SH", "2026-07-03")
+    _seed_signal(tmp_db, "600002.SH", "2026-07-05")
+    rows = state_store.list_signals_with_meta_by_plan_date_range(since="2026-07-03")
+    assert {r["symbol"] for r in rows} == {"600001.SH", "600002.SH"}
+    # 每项含 plan_date 字段（C2d experiment report 按 p["date"] 聚合所需）
+    assert all("plan_date" in r for r in rows)
+
+
+def test_list_signals_with_meta_by_plan_date_range_until_filter(tmp_db):
+    """until 上界按 plan_date（含）。"""
+    _seed_signal(tmp_db, "600000.SH", "2026-07-01")
+    _seed_signal(tmp_db, "600001.SH", "2026-07-03")
+    _seed_signal(tmp_db, "600002.SH", "2026-07-05")
+    rows = state_store.list_signals_with_meta_by_plan_date_range(
+        since="2026-07-02", until="2026-07-04")
+    assert {r["symbol"] for r in rows} == {"600001.SH"}
+
+
+def test_list_signals_with_meta_by_plan_date_range_no_filter_returns_all(tmp_db):
+    """since/until 均 None → 全量 SIGNAL。"""
+    _seed_signal(tmp_db, "600000.SH", "2026-07-01")
+    _seed_signal(tmp_db, "600001.SH", "2026-07-05")
+    rows = state_store.list_signals_with_meta_by_plan_date_range()
+    assert len(rows) == 2
