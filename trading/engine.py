@@ -752,11 +752,31 @@ async def _pre_open_impl(date: str) -> dict:
             # 富信息）+ 补 submitted/mode 让任何读 result["submitted"] 的调用方不 KeyError。
             return {"submitted": 0, "mode": _mode(), "skipped": gate_reason}
 
-    plan = trading_plan.load_plan(date)
-    if plan is None:
+    # SSoT Phase C · C2c：pre_open 直接读 DB trade_event(SIGNAL).meta（真相源），
+    # 不再依赖 plan_*.json。每 SIGNAL 行的 meta 是「精确 per-symbol 计划参数」快照
+    # （stop_price/take_profit/neckline/atr/formed_at/max_wait/cancel_on/order/tp1 等），
+    # 由 eod_plan 落盘（engine.py:643）。致命日期轴：按 substr(trade_id,-10)=date 查
+    # （非 timestamp，timestamp=T 日盘后写入日 ≠ T+1 计划日）。
+    account_id_pre = _resolve_account_id()
+    signals = _state_store.list_signals_with_meta_by_plan_date(date)
+    if not signals:
+        # DB 无 SIGNAL → 当日无扫描/无计划，保守不挂（spec 红线）。
         return {"submitted": 0, "reason": "无计划"}
-    if not plan.get("confirmed"):
-        # 未确认绝不挂单（spec 红线）：宁可漏挂，不挂研究员未审核的单。
+    # 确认闸（DB per-trade CONFIRMED）：研究员人审的「确认」走 confirm_plan 写 trade_event
+    # CONFIRMED 行；eod_plan auto 路径（AUTO_CONFIRM_PLAN=true）也写 CONFIRMED。
+    # 任一 SIGNAL 的 latest_action 非 CONFIRMED（仅 SIGNAL/VETOED/未确认）→ 整体未确认。
+    # 物理意图（spec 红线）：宁可漏挂，不挂研究员未审核的单。
+    # Why 整体判断而非逐笔：原 plan["confirmed"] 是整张计划级布尔（研究员一次性确认全部），
+    # DB 化后 per-trade CONFIRMED 但语义保持「全部确认才挂」——若部分未确认而挂已确认部分，
+    # 会破坏研究员「整张计划审核」的工作流。逐笔 CONFIRMED 校验在下方循环内再防一次
+    # （VETOED per-symbol 跳过）。
+    all_confirmed = True
+    for sig in signals:
+        _tid = _state_store.build_trade_id(account_id_pre, sig["symbol"], date)
+        if _state_store.get_latest_action(_tid) != "CONFIRMED":
+            all_confirmed = False
+            break
+    if not all_confirmed:
         return {"submitted": 0, "reason": "计划未确认，跳过挂单"}
 
     # ② 撤昨日未成交（scope #2）：仅在确认闸（①）通过后才撤，避免误撤昨日已确认单。
@@ -864,7 +884,8 @@ async def _pre_open_impl(date: str) -> dict:
     # 而非模块级 _DYNAMIC 全局——engine 与 server 合并进同进程后，实例属性化是两端
     # 白名单物理隔离的唯一手段（server 路径不读实例属性）。_ACTIVE_ENGINE 理论非空
     # （pre_open 由 TradingEngine 装配的 job 触发），None 守卫为防御性兜底（回退旧路径）。
-    symbols = {o["order"]["symbol"] for o in plan["orders"]}
+    # C2c：signals 项 shape = {symbol, **meta}，meta 含 order 子 dict（meta["order"]）
+    symbols = {sig["order"]["symbol"] for sig in signals if sig.get("order")}
     if _ACTIVE_ENGINE is not None:
         _ACTIVE_ENGINE._dynamic_whitelist |= symbols
     else:  # pragma: no cover - 防御性回退：未构造 TradingEngine（理论不会）
@@ -893,7 +914,7 @@ async def _pre_open_impl(date: str) -> dict:
     except Exception as e:
         raise _CriticalHalt(
             f"pre_open 确保 account 行失败 account={account_id}（DB 真故障，下游 FK 全失效）") from e
-    for o in plan["orders"]:
+    for o in signals:
         od = o["order"]
         # max_wait 窗口过滤（plan Task 6）
         formed_at = o.get("formed_at")
@@ -981,22 +1002,22 @@ async def _pre_open_impl(date: str) -> dict:
                 logger.exception("pre_open 失败回填 %s 失败 symbol=%s", _dead, od["symbol"])
 
     logger.info("pre_open 完成 date=%s submitted=%d/%d expired=%d mode=%s",
-                date, n_submitted, len(plan["orders"]), n_expired, _mode())
+                date, n_submitted, len(signals), n_expired, _mode())
     # C-4 U4：部分拒单（L2）聚合一条 CRITICAL——单只研究员要知情，但整批继续不炸。
     # Why 聚合非逐只：防 N 只全拒告警风暴（spec R3）。整批 submitted=0 已有下方 CRITICAL（保留）。
     # Why 限 live：dry_run/测试的拒单非真金风险，防误告警。n_submitted>0 守卫：全拒走下方 submitted=0 通道。
     if n_rejected > 0 and _mode() == "live" and n_submitted > 0:
         _alert_critical(
-            f"pre_open 部分挂单被拒 rejected={n_rejected}/{len(plan['orders'])} "
+            f"pre_open 部分挂单被拒 rejected={n_rejected}/{len(signals)} "
             f"submitted={n_submitted} date={date}（查挡板日志：涨跌停/资金/白名单）")
     # Task 9（M4 静默漏单消灭）：live 模式 submitted=0 且有计划单 → 钉钉 CRITICAL。
     # 物理意图：live 下「全部挂单失败」= 当日废单日（网关锁死 / 涨跌停挡板 / 资金不足），
     # 仅 logger.warning 不足以叫醒用户（[[qmt-connect-1-rootcause]] 全天锁死无告警教训）。
     # Why 限 live：dry_run submitted=0 多半是 DRY_RUN 状态误判或测试 mock，非真漏单风险；
     # Why 限 len(orders)>0：无计划单（0/0）是「当日无信号」正常态，不该误告警。
-    if n_submitted == 0 and _mode() == "live" and len(plan["orders"]) > 0:
+    if n_submitted == 0 and _mode() == "live" and len(signals) > 0:
         _alert_critical(
-            f"pre_open 漏挂 submitted=0/{len(plan['orders'])} date={date}"
+            f"pre_open 漏挂 submitted=0/{len(signals)} date={date}"
             f"（网关锁死? 网关拒绝所有单? 人工核查 gw 状态与挡板日志）")
     return {"submitted": n_submitted, "mode": _mode()}
 
@@ -2904,18 +2925,30 @@ class TradingEngine:
         if not calendar.is_trading_day(today):
             logger.info("stop_loss 跳过：今日非交易日 %s", today)
             return
-        plan = trading_plan.load_plan(today)
+        # SSoT Phase C · C2c：_stoploss 直接读 DB trade_event(SIGNAL).meta（真相源），
+        # 不再依赖 plan_*.json。每 SIGNAL meta 是 per-symbol 计划参数快照（stop_price/
+        # take_profit/neckline/atr/cancel_on/tp1 等），由 eod_plan 落盘（engine.py:643）。
+        # 致命日期轴：按 substr(trade_id,-10)=today 查（非 timestamp）。
+        signals = _state_store.list_signals_with_meta_by_plan_date(today)
         # ── Task 9（U6 执行统一）：构造 monitor_ctx（state+cfg）+ pending_ctx（cancel_on）+ stop_prices（D12 fallback）──
-        # 三 map 均从同一张 confirmed 计划 orders 派生（单源一致）：
+        # 三 map 均从同一张 confirmed 计划 SIGNAL meta 派生（单源一致）：
         #   - stop_prices：{sym: stop_price}（D12 fallback 基准，decide_exit 异常时兜底比价）；
         #   - monitor_ctx：{sym: {state, cfg}}（主路径 decide_exit 输入）；
         #   - pending_ctx：{sym: cancel_on}（D11 pending 期撤单阈值）。
         stop_prices: dict[str, float] = {}
         monitor_ctx: dict[str, dict] = {}
         pending_ctx: dict[str, float] = {}
-        # 仅在 confirmed 计划下抽取（confirmed=False 是人审闸——研究员未确认就不监控止损，
-        # 避免研究员明确否决的计划仍触发卖出，破坏人审语义）。
-        if plan and plan.get("confirmed"):
+        # 仅在 confirmed SIGNAL 下抽取（CONFIRMED 是人审闸——研究员未确认就不监控止损，
+        # 避免研究员明确否决的计划仍触发卖出，破坏人审语义）。逐 SIGNAL 校验 latest_action
+        # == CONFIRMED（VETOED/SIGNAL-only 跳过，per-trade 精细化）。
+        if signals:
+            _aid_sl = _resolve_account_id()
+            # 过滤已确认 SIGNAL（per-trade CONFIRMED gate）
+            confirmed_signals = []
+            for sig in signals:
+                _tid_sl = _state_store.build_trade_id(_aid_sl, sig["symbol"], today)
+                if _state_store.get_latest_action(_tid_sl) == "CONFIRMED":
+                    confirmed_signals.append(sig)
             # entry_dates / avg_prices 来自 position_book（持仓账本，holding_days + entry 基准）
             try:
                 entry_dates = _position_book.get_entry_dates()
@@ -2935,8 +2968,8 @@ class TradingEngine:
                 "max_holding": cfg_trade.get("max_holding", 15),
             }
             max_holding = decide_cfg["max_holding"]
-            for o in plan.get("orders", []):
-                sym = (o.get("order") or {}).get("symbol")
+            for o in confirmed_signals:
+                sym = (o.get("order") or {}).get("symbol") or o.get("symbol")
                 sp = o.get("stop_price")
                 # 双重防御：symbol 缺失或 stop_price 非数（NaN/None）一律跳过——
                 # stop_prices 的每一项都必须是「能拿来比价」的合法 (sym, price) 对。

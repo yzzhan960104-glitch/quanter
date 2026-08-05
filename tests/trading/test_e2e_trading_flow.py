@@ -394,7 +394,12 @@ def _save_confirmed_plan(date: str, symbols: list[str]) -> None:
     Why 直 save_plan 跳 eod_plan：韧性 e2e 的断言点是「网关锁死/恢复/撤单确认/口径」，
     非「信号→订单」构造；直写两条订单让 pre_open 有 orders 可挂（len(orders)>0 才有
     「漏挂」语义），与 T9 test_engine_alerts.py 同范式。
+
+    C2c（SSoT Phase C）：pre_open 直读 DB trade_event(SIGNAL).meta，故种子除 JSON 外
+    必须再写 SIGNAL 行（confirm_plan 写 CONFIRMED，SIGNAL 必须先写保证 latest=CONFIRMED）。
     """
+    from trading import state_store
+    import json as _json
     orders = [
         {"order": {"symbol": sym, "qty": 100, "side": "buy", "price": 10.0},
          "stop_price": 9.0, "take_profit": 11.0, "neckline": 10.0, "atr": 0.5,
@@ -403,6 +408,18 @@ def _save_confirmed_plan(date: str, symbols: list[str]) -> None:
         for sym in symbols
     ]
     trading_plan.save_plan(date, orders)
+    # C2c：先写 DB SIGNAL（必须在 confirm_plan 之前，保证 CONFIRMED event_id > SIGNAL）
+    account_id = engine._resolve_account_id()
+    if state_store.get_account(account_id) is None:
+        state_store.upsert_account(account_id, broker="qmt")
+    for o in orders:
+        sym = o["order"]["symbol"]
+        tid = state_store.build_trade_id(account_id, sym, date)
+        meta_obj = {**o, "plan_date": date, "strategy_name": "neckline",
+                    "rationale": f"颈线法@{o.get('formed_at', '')}"}
+        state_store.insert_trade_event(
+            account_id, tid, sym, "SIGNAL",
+            meta=_json.dumps(meta_obj, ensure_ascii=False))
     assert trading_plan.confirm_plan(date) is True
 
 

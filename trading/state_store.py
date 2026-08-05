@@ -1020,6 +1020,65 @@ def count_signals_by_plan_date(plan_date: str, *, db_path: str | None = None) ->
     return int(row[0]) if row else 0
 
 
+def list_signals_with_meta_by_plan_date(plan_date: str, *,
+                                        db_path: str | None = None) -> list[dict]:
+    """读某计划日（T+1）全部 SIGNAL 行的 meta 列表（C2c 真相源）。
+
+    物理意图（SSoT Phase C · C2c）：pre_open / _stoploss / review_report / review_service
+    不再读 plan_*.json 的 orders 集合，改直接读 trade_event(SIGNAL).meta 拿「精确 per-symbol
+    计划参数」（stop_price / take_profit / neckline / atr / formed_at / max_wait /
+    cancel_on / order / tp1 / experiment_id 等）。
+
+    **致命日期轴（红线，与 count_signals_by_plan_date 同口径）**：
+        trade_event.timestamp = T 日盘后写入时间（非计划日 T+1），按 timestamp 查计划日
+        恒空（T 日写、查 T+1 永远漏）。计划日仅在 trade_id 后缀（build_trade_id 单点
+        ``{account_id}_{symbol}_{plan_date}``，YYYY-MM-DD 恰 10 字符），故必须按
+        ``substr(trade_id, -10) = plan_date`` 查。
+
+    数学验证（substr(trade_id,-10)=plan_date）：
+        - trade_id = "ACC1_600000.SH_2026-08-05" → substr(trade_id,-10)="2026-08-05" ✓
+        - 用 substr 而非 LIKE '%_plan_date'——``_`` 是 LIKE 通配符会误匹配，substr 精确。
+
+    返 shape：``list[dict]``，每项 ``{symbol: str, **meta_dict}``（meta JSON 解析后展开 +
+    symbol 字段）。meta 解析失败/为 None 的行跳过（保守，不喂脏数据给消费方）。返空列表
+    表示当日无 SIGNAL（调用方 pre_open 视作「无计划」返 ``{"submitted":0,"reason":"无计划"}``）。
+
+    去重：同 (account, trade_id, action) UNIQUE 约束 + build_trade_id 单点保证同一 symbol
+    同一计划日只有一行 SIGNAL（多 account 生产不出现）。ORDER BY event_id ASC 取最早一条
+    （SIGNAL 是事件流起点，最早一条即「首次落盘的计划参数快照」，避免后续重跑 eod_plan
+    写入更新 meta 时取到新值与 confirm 时序错位）。
+
+    Args:
+        plan_date: 计划日（YYYY-MM-DD，与 trade_id 后缀同口径 = T+1 计划生效日）。
+    Returns:
+        meta dict 列表（每项含 symbol + meta 全部字段）；无 SIGNAL 返 []。
+    """
+    db_path = db_path or _DEFAULT_DB
+    out: list[dict] = []
+    with _connect(db_path) as con:
+        rows = con.execute(
+            "SELECT symbol, meta FROM trade_event "
+            "WHERE action='SIGNAL' AND substr(trade_id, -10) = ? "
+            "ORDER BY event_id ASC",
+            (plan_date,)
+        ).fetchall()
+    for r in rows:
+        if r["meta"] is None:
+            continue
+        try:
+            meta = json.loads(r["meta"])
+        except (TypeError, ValueError):
+            logger.warning("list_signals_with_meta_by_plan_date meta JSON 解析失败 "
+                           "symbol=%s plan_date=%s", r["symbol"], plan_date)
+            continue
+        if not isinstance(meta, dict):
+            continue
+        # shape：{symbol: str, **meta_dict}——消费方读 meta.stop_price 等字段 +
+        # symbol 用于 build_trade_id(account_id, symbol, plan_date)。
+        out.append({"symbol": r["symbol"], **meta})
+    return out
+
+
 def list_signal_symbols_by_formed_at(dates: list[str], *,
                                      db_path: str | None = None) -> set[str]:
     """读 formed_at 落在给定自然日列表内的 SIGNAL 标的集（C2b cooldown 锚点查询）。

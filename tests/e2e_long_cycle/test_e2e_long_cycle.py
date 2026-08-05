@@ -76,10 +76,29 @@ def test_orchestrator_smoke(isolated_state, monkeypatch, tmp_path):
     ]
 
     async def _fake_run_eod_phase(t_date):
-        """fake eod：直接落 T+1 plan（绕开 universe 扫描 + detect_signal）。"""
-        from trading import engine
+        """fake eod：直接落 T+1 plan（绕开 universe 扫描 + detect_signal）。
+
+        C2c：pre_open/_stoploss 直读 DB trade_event(SIGNAL).meta，故 fake eod 除 JSON 外
+        必须落 SIGNAL+CONFIRMED DB 行（与生产 eod_plan 同构）。先 SIGNAL 再 CONFIRMED
+        保证 latest_action=CONFIRMED（确认闸通过）。
+        """
+        from trading import engine, state_store
+        import json as _json
         t_plus_1 = engine.calendar.next_trading_day(t_date.isoformat())
         trading_plan.save_plan(t_plus_1, fake_orders, confirmed=True)
+        # C2c：落 DB SIGNAL+CONFIRMED（pre_open/_stoploss C2c 真相源）
+        _aid = engine._resolve_account_id()
+        if state_store.get_account(_aid) is None:
+            state_store.upsert_account(_aid, broker="qmt")
+        for o in fake_orders:
+            sym = o["order"]["symbol"]
+            tid = state_store.build_trade_id(_aid, sym, t_plus_1)
+            meta_obj = {**o, "plan_date": t_plus_1, "strategy_name": "neckline",
+                        "rationale": ""}
+            state_store.insert_trade_event(
+                _aid, tid, sym, "SIGNAL",
+                meta=_json.dumps(meta_obj, ensure_ascii=False))
+            state_store.insert_trade_event(_aid, tid, sym, "CONFIRMED")
         return {"date": t_plus_1, "n_orders": len(fake_orders), "mode": "dry_run",
                 "auto_confirmed": True}
 

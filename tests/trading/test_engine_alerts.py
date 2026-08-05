@@ -121,7 +121,9 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
     # 落一份已确认计划（pre_open 必须有 orders 才有「漏挂」语义——0 orders 是正常无计划，
     # 不应触发 CRITICAL）。直 save_plan 跳过 build_orders_from_signals（本测聚焦告警点，
     # 非 signal 构造），写两条订单确保 len(orders)>0。
-    from trading import trading_plan
+    # C2c：pre_open 直读 DB SIGNAL.meta，需先落 SIGNAL 再 confirm（顺序保证 latest=CONFIRMED）
+    from trading import trading_plan, state_store
+    import json as _json
     orders = [
         {"order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
          "stop_price": 9.0, "take_profit": 11.0, "neckline": 10.0, "atr": 0.5,
@@ -133,6 +135,18 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
          "cancel_on": None, "experiment_id": None, "experiment_weight": 1.0, "rr": 1.0},
     ]
     trading_plan.save_plan("2026-07-28", orders)
+    # C2c：落 DB SIGNAL（先于 confirm_plan）
+    _aid = engine._resolve_account_id()
+    if state_store.get_account(_aid) is None:
+        state_store.upsert_account(_aid, broker="qmt")
+    for o in orders:
+        sym = o["order"]["symbol"]
+        tid = state_store.build_trade_id(_aid, sym, "2026-07-28")
+        meta_obj = {**o, "plan_date": "2026-07-28", "strategy_name": "neckline",
+                    "rationale": ""}
+        state_store.insert_trade_event(
+            _aid, tid, sym, "SIGNAL",
+            meta=_json.dumps(meta_obj, ensure_ascii=False))
     assert trading_plan.confirm_plan("2026-07-28") is True
 
     # gw 锁死：_submit 全部 raise（模拟 lock_down 拒所有单）
@@ -172,7 +186,8 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
     monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
     # I-1（测试卫生）：TRADE_PLAN_DIR 指向 tmp_path，落盘不污染实盘 logs/trading_plans/。
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
-    from trading import trading_plan
+    from trading import trading_plan, state_store
+    import json as _json
     orders = [
         {"order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
          "stop_price": 9.0, "take_profit": 11.0, "neckline": 10.0, "atr": 0.5,
@@ -180,6 +195,17 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
          "cancel_on": None, "experiment_id": None, "experiment_weight": 1.0, "rr": 1.0},
     ]
     trading_plan.save_plan("2026-07-28", orders)
+    # C2c：落 DB SIGNAL（先于 confirm_plan，保证 latest=CONFIRMED）
+    _aid = engine._resolve_account_id()
+    if state_store.get_account(_aid) is None:
+        state_store.upsert_account(_aid, broker="qmt")
+    for o in orders:
+        sym = o["order"]["symbol"]
+        tid = state_store.build_trade_id(_aid, sym, "2026-07-28")
+        state_store.insert_trade_event(
+            _aid, tid, sym, "SIGNAL",
+            meta=_json.dumps({**o, "plan_date": "2026-07-28", "strategy_name": "neckline",
+                              "rationale": ""}, ensure_ascii=False))
     assert trading_plan.confirm_plan("2026-07-28") is True
 
     fake_gw = MagicMock()

@@ -62,11 +62,25 @@ def isolated_eng(monkeypatch, tmp_path):
 
 
 def _green_plan():
-    """1 只标的 + 已确认的 plan（让 pre_open 走到挂单循环）。"""
+    """1 只标的 + 已确认的 plan（C2c 前老接口形态，部分 patch trading_plan 时仍用）。"""
     return {"confirmed": True, "orders": [{
         "order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
         "formed_at": None,  # None → 不走 max_wait 窗口过滤（days=0，挂单）
     }]}
+
+
+def _green_signals():
+    """C2c：pre_open 直读 DB SIGNAL.meta，mock list_signals_with_meta_by_plan_date 返此列表。
+
+    shape = list[dict]，每项 {symbol, **meta}（meta 含 order 子 dict + formed_at/max_wait 等）。
+    formed_at=None → pre_open max_wait 窗口跳过过滤（days=0，挂单）。
+    """
+    return [{
+        "symbol": "300214.SZ",
+        "order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "formed_at": None,  # None → 不走 max_wait 窗口过滤（days=0，挂单）
+        "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5,
+    }]
 
 
 def _walk_to_submit_chain(engine_mod):
@@ -100,10 +114,13 @@ def test_insert_order_failure_raises_critical_halt(isolated_eng, monkeypatch):
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
+            # C2c：list_signals 返绿信号 + build_trade_id mock + latest=CONFIRMED 通过确认闸
+            ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
+            ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             # account 行存在（跳过 upsert 分支）
             ss.get_account.return_value = MagicMock()
-            # 幂等读通过（无 veto / 无已挂 OPEN）
-            ss.get_latest_action.return_value = None
+            # 确认闸 + 幂等读通过（latest=CONFIRMED 走挂单循环；has_order=False 不幂等跳过）
+            ss.get_latest_action.return_value = "CONFIRMED"
             ss.has_order.return_value = False
             # insert_order 抛异常 → 应 raise _CriticalHalt
             ss.insert_order.side_effect = RuntimeError("sqlite locked")
@@ -134,9 +151,11 @@ def test_idempotent_read_failure_raises_critical_halt(isolated_eng, monkeypatch)
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
+            ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
+            ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             ss.get_account.return_value = MagicMock()
-            # get_latest_action 通过，has_order 抛异常
-            ss.get_latest_action.return_value = None
+            # get_latest_action 通过（确认闸+per-symbol veto 检查），has_order 抛异常
+            ss.get_latest_action.return_value = "CONFIRMED"
             ss.has_order.side_effect = RuntimeError("db disk full")
 
             async def _should_not_submit(*a, **kw):
@@ -168,8 +187,10 @@ def test_submit_backfill_failure_raises_critical_halt(isolated_eng, monkeypatch)
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
+            ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
+            ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             ss.get_account.return_value = MagicMock()
-            ss.get_latest_action.return_value = None
+            ss.get_latest_action.return_value = "CONFIRMED"
             ss.has_order.return_value = False
             # insert_order(OPEN) 通过（这是 case (a) 的职责，不在这测）
             ss.insert_order.return_value = None
@@ -199,6 +220,10 @@ def test_account_row_failure_raises_critical_halt(isolated_eng, monkeypatch):
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
+            ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
+            ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
+            # get_latest_action=CONFIRMED 通过确认闸 + 撤单 / 基线 / 过期持仓阶段后到 account 检查
+            ss.get_latest_action.return_value = "CONFIRMED"
             # get_account 抛异常 → account 行无法确认 → L1
             ss.get_account.side_effect = RuntimeError("sqlite corruption")
 
@@ -231,8 +256,10 @@ def test_submit_runtime_error_stays_l2_not_halt(isolated_eng, monkeypatch):
          patch("trading.engine._submit") as submit_mock:
         tp.load_plan.return_value = plan
         with patch("trading.engine._state_store") as ss:
+            ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
+            ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             ss.get_account.return_value = MagicMock()
-            ss.get_latest_action.return_value = None
+            ss.get_latest_action.return_value = "CONFIRMED"
             ss.has_order.return_value = False
             ss.insert_order.return_value = None
             # _submit 业务拒单（L2 路径，应被外层 try 吞掉，不抛 _CriticalHalt）

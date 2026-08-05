@@ -278,9 +278,17 @@ def test_cancel_updates_order_state_db(monkeypatch, tmp_path):
 # ============================================================================
 # 2. pre_open：未确认不挂 / 确认后挂 / 撤昨日单 / submit raise 兜底
 # ============================================================================
-def test_pre_open_blocks_unconfirmed_plan():
-    """pre_open：计划未确认 → 不挂单，reason 含「未确认」。"""
-    trading_plan.save_plan("2099-01-02", [])  # confirmed=False
+def test_pre_open_blocks_unconfirmed_plan(monkeypatch, _state_db):
+    """pre_open：SIGNAL 落 DB 但 latest_action 非 CONFIRMED → 不挂单，reason 含「未确认」。
+
+    C2c：原 JSON confirmed=False 等价改 DB「SIGNAL-only（无 CONFIRMED 行）」。
+    边界：SIGNAL 存在但未确认 = 研究员未审核，绝不挂（spec 红线）。
+    """
+    # 种 SIGNAL-only（无 CONFIRMED）—— 等价 confirmed=False
+    _seed_signals_db("2099-01-02", [
+        {"order": {"symbol": "600000.SH", "qty": 100.0, "side": "buy", "price": 10.0},
+         "stop_price": 9.5, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5},
+    ], confirmed=False)
     result = asyncio.run(engine.pre_open("2099-01-02"))
     assert result["submitted"] == 0
     assert "未确认" in result["reason"]
@@ -290,13 +298,62 @@ def test_pre_open_blocks_unconfirmed_plan():
 # T8（state-store-redesign）：pre_open DB 幂等挂单
 # ----------------------------------------------------------------------------
 def _confirmed_plan_one_order(date="2099-01-02"):
-    """落一份已确认的单标的计划（pre_open 挂单测试共用种子）。"""
+    """落一份已确认的单标的计划（pre_open 挂单测试共用种子）。
+
+    C2c（SSoT Phase C）：pre_open 直读 DB trade_event(SIGNAL).meta，故种子除 JSON 外
+    必须再写 SIGNAL + CONFIRMED 行（与 eod_plan 生产路径同构）。JSON 保留供 trailing/
+    brief/veto 等 C3 路径 + load_plan 断言使用（兼容窗口期）。
+
+    **顺序约束（W2，与 eod_plan 同口径）**：SIGNAL DB 必须在 confirm_plan 之前写——
+    confirm_plan 会写 CONFIRMED，若 SIGNAL 在其后写，SIGNAL 的 event_id > CONFIRMED，
+    get_latest_action（ORDER BY event_id DESC）会返 SIGNAL 掩盖 CONFIRMED → pre_open
+    确认闸误判未确认。
+    """
     orders_nested = [
         {"order": {"symbol": "600000.SH", "qty": 100.0, "side": "buy", "price": 10.0},
          "stop_price": 9.5, "take_profit": 11.0, "formed_at": date, "max_wait": 5},
     ]
     trading_plan.save_plan(date, orders_nested)
-    trading_plan.confirm_plan(date)
+    # 落 DB SIGNAL（pre_open C2c 真相源）—— 必须在 confirm_plan 之前（顺序约束见 docstring）
+    from trading import state_store
+    account_id = engine._resolve_account_id()
+    if state_store.get_account(account_id) is None:
+        state_store.upsert_account(account_id, broker="qmt")
+    for o in orders_nested:
+        sym = o["order"]["symbol"]
+        tid = state_store.build_trade_id(account_id, sym, date)
+        meta_obj = {**o, "plan_date": date, "strategy_name": "neckline",
+                    "rationale": f"颈线法@{o.get('formed_at', '')}"}
+        state_store.insert_trade_event(
+            account_id, tid, sym, "SIGNAL",
+            meta=json.dumps(meta_obj, ensure_ascii=False))
+    trading_plan.confirm_plan(date)  # 写 CONFIRMED DB 行（event_id > SIGNAL，latest=CONFIRMED）
+
+
+def _seed_signals_db(date, orders_nested, *, confirmed=True):
+    """C2c 通用种子：直接写 DB SIGNAL（+可选 CONFIRMED）行（不落 JSON）。
+
+    物理意图：max_wait/expired 等测试仅断言 pre_open 行为，不需要 JSON 镜像。
+    比 _confirmed_plan_one_order 更轻（少一次 save_plan/confirm_plan JSON 写盘），
+    用于 pre_open 测试中 only-DB 种子路径。
+
+    **顺序约束**：SIGNAL 先写、CONFIRMED 后写（CONFIRMED event_id > SIGNAL →
+    get_latest_action 返 CONFIRMED；若反序会返 SIGNAL，pre_open 确认闸误判未确认）。
+    """
+    from trading import state_store
+    account_id = engine._resolve_account_id()
+    if state_store.get_account(account_id) is None:
+        state_store.upsert_account(account_id, broker="qmt")
+    for o in orders_nested:
+        sym = o["order"]["symbol"]
+        tid = state_store.build_trade_id(account_id, sym, date)
+        meta_obj = {**o, "plan_date": date, "strategy_name": "neckline",
+                    "rationale": f"颈线法@{o.get('formed_at', '')}"}
+        state_store.insert_trade_event(
+            account_id, tid, sym, "SIGNAL",
+            meta=json.dumps(meta_obj, ensure_ascii=False))
+        if confirmed:
+            state_store.insert_trade_event(account_id, tid, sym, "CONFIRMED")
 
 
 def test_pre_open_inserts_order_and_event(monkeypatch, _state_db):
@@ -375,11 +432,13 @@ def test_no_tp_placed_memory():
     assert "_tp_placed.add" not in src, "engine.py 仍写 _tp_placed.add（应已废弃，改用 DB insert_order）"
 
 
-def test_pre_open_cancels_yesterday_open_orders(monkeypatch):
+def test_pre_open_cancels_yesterday_open_orders(monkeypatch, _state_db):
     """scope #2：pre_open 开头必须调 cancel_all_open_orders 撤昨日未成交单。"""
-    # 准备一份已确认但 orders 空的计划（聚焦撤单断言，不挂单）
-    trading_plan.save_plan("2099-01-02", [])
-    assert trading_plan.confirm_plan("2099-01-02")
+    # C2c：种一份已确认 SIGNAL（撤单步骤在确认闸之后，需至少一只 SIGNAL 才触达撤单）
+    _seed_signals_db("2099-01-02", [
+        {"order": {"symbol": "600000.SH", "qty": 100.0, "side": "buy", "price": 10.0},
+         "stop_price": 9.5, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5},
+    ])
 
     cancelled = {"n": 0}
 
@@ -400,10 +459,12 @@ def test_pre_open_cancels_yesterday_open_orders(monkeypatch):
     assert cancelled["n"] == 1, "pre_open 必须在挂单前撤昨日未成交单（scope #2）"
 
 
-def test_pre_open_skip_cancel_when_no_gateway(monkeypatch):
+def test_pre_open_skip_cancel_when_no_gateway(monkeypatch, _state_db):
     """scope #2：gw=None 时跳过撤单（logger.warning），不抛。"""
-    trading_plan.save_plan("2099-01-02", [])
-    trading_plan.confirm_plan("2099-01-02")
+    _seed_signals_db("2099-01-02", [
+        {"order": {"symbol": "600000.SH", "qty": 100.0, "side": "buy", "price": 10.0},
+         "stop_price": 9.5, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5},
+    ])
 
     cancelled = {"n": 0}
 
@@ -418,16 +479,15 @@ def test_pre_open_skip_cancel_when_no_gateway(monkeypatch):
     assert cancelled["n"] == 0   # gw=None 没调撤单
 
 
-def test_pre_open_submit_raise_continues(monkeypatch):
+def test_pre_open_submit_raise_continues(monkeypatch, _state_db):
     """scope #7：单标的 submit_order raise（挡板命中）不炸整批，继续挂下一只。"""
     orders_nested = [
         {"order": {"symbol": "A.SH", "qty": 100.0, "side": "buy", "price": 10.0},
-         "stop_price": 9.5, "take_profit": 11.0},
+         "stop_price": 9.5, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5},
         {"order": {"symbol": "B.SH", "qty": 100.0, "side": "buy", "price": 20.0},
-         "stop_price": 19.0, "take_profit": 22.0},
+         "stop_price": 19.0, "take_profit": 22.0, "formed_at": "2099-01-02", "max_wait": 5},
     ]
-    trading_plan.save_plan("2099-01-02", orders_nested)
-    trading_plan.confirm_plan("2099-01-02")
+    _seed_signals_db("2099-01-02", orders_nested)
 
     monkeypatch.setattr(engine, "get_gateway", lambda: object())
     monkeypatch.setattr(engine, "_cancel_all_open_orders",
@@ -769,7 +829,7 @@ def test_post_close_tp1_filled_event(monkeypatch, tmp_path):
 # ============================================================================
 # 4.7 Task 10（R-2 日内熔断）：pre_open 快照 + post_close 三步串联
 # ============================================================================
-def test_pre_open_snapshot_start_equity(monkeypatch):
+def test_pre_open_snapshot_start_equity(monkeypatch, _state_db):
     """pre_open：确认闸通过后调 query_asset → snapshot_start_equity 写 account_daily。
 
     物理意图（W4 · 08-04 断链根治）：
@@ -784,13 +844,11 @@ def test_pre_open_snapshot_start_equity(monkeypatch):
     """
     from trading import state_store
 
-    # 已确认计划
-    orders = [{
+    # C2c：DB 种已确认 SIGNAL（取代 JSON save_plan/confirm_plan）
+    _seed_signals_db("2099-01-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-        "stop_price": 9.0, "take_profit": 11.0,
-    }]
-    trading_plan.save_plan("2099-01-02", orders)
-    trading_plan.confirm_plan("2099-01-02")
+        "stop_price": 9.0, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5,
+    }])
 
     # 假 gw：query_asset 返 total_asset=1_000_000 + cash=500_000
     class _FakeGw:
@@ -824,7 +882,7 @@ def test_pre_open_snapshot_start_equity(monkeypatch):
     assert row["start_cash"] == 500_000.0
 
 
-def test_pre_open_snapshot_calls_state_store_not_position_book(monkeypatch):
+def test_pre_open_snapshot_calls_state_store_not_position_book(monkeypatch, _state_db):
     """W4 调用点切换：pre_open 实际调 ``_state_store.snapshot_start_equity`` 而非
     ``_position_book.snapshot_start_equity``（spy 断言，非 mock 自欺）。
 
@@ -835,12 +893,11 @@ def test_pre_open_snapshot_calls_state_store_not_position_book(monkeypatch):
     """
     from trading import state_store
 
-    # 已确认计划
-    trading_plan.save_plan("2099-01-02", [{
+    # C2c：DB 种已确认 SIGNAL
+    _seed_signals_db("2099-01-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-        "stop_price": 9.0, "take_profit": 11.0,
+        "stop_price": 9.0, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5,
     }])
-    trading_plan.confirm_plan("2099-01-02")
 
     class _FakeGw:
         async def query_asset(self):
@@ -869,7 +926,7 @@ def test_pre_open_snapshot_calls_state_store_not_position_book(monkeypatch):
     assert ss_calls[0][3] == 500_000.0              # cash
 
 
-def test_daily_pnl_closes_after_pre_open_and_post_close(monkeypatch):
+def test_daily_pnl_closes_after_pre_open_and_post_close(monkeypatch, _state_db):
     """W4 e2e 闭合：pre_open 写 start + post_close 写 close → account_daily 同 date
     有 start+close，daily_pnl 非空（= close - start）。
 
@@ -887,11 +944,13 @@ def test_daily_pnl_closes_after_pre_open_and_post_close(monkeypatch):
     from trading import clock
     monkeypatch.setattr(clock, "today", lambda: fixed_date)
 
-    trading_plan.save_plan(fixed_date, [{
+    # C2c：DB 种已确认 SIGNAL（pre_open 真相源）。不调 confirm_plan——_seed_signals_db
+    # 已写 SIGNAL+CONFIRMED，再调 confirm_plan 会因 UNIQUE 约束导致 CONFIRMED 不重写，
+    # 顺序错乱（SIGNAL event_id > CONFIRMED → latest=SIGNAL 误判未确认）。
+    _seed_signals_db(fixed_date, [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-        "stop_price": 9.0, "take_profit": 11.0,
+        "stop_price": 9.0, "take_profit": 11.0, "formed_at": fixed_date, "max_wait": 5,
     }])
-    trading_plan.confirm_plan(fixed_date)
 
     # 假 gw：pre_open 抓 start=100w / post_close 抓 close=101.5w（+1.5% 不触发熔断）
     class _FakeGw:
@@ -936,7 +995,7 @@ def test_daily_pnl_closes_after_pre_open_and_post_close(monkeypatch):
         f"daily_pnl 未闭合：期望 15000.0，实际 {row['daily_pnl']}（两表断链？）")
 
 
-def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch):
+def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch, _state_db):
     """query_asset 返 {}（未连接）→ 跳过快照 + WARN（不拿 0 误触发熔断）。
 
     物理意图（边界 · spec §5.2）：
@@ -944,12 +1003,11 @@ def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch):
         否则 post_close check_daily_loss_limit(0, curr) 会因 start<=0 返 False
         反而永不熔断，或拿 None 参与除法抛 TypeError。正确行为：跳过快照 + 告警。
     """
-    orders = [{
+    # C2c：DB 种已确认 SIGNAL
+    _seed_signals_db("2099-01-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-        "stop_price": 9.0, "take_profit": 11.0,
-    }]
-    trading_plan.save_plan("2099-01-02", orders)
-    trading_plan.confirm_plan("2099-01-02")
+        "stop_price": 9.0, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5,
+    }])
 
     class _FakeGw:
         async def query_asset(self):
@@ -1211,22 +1269,20 @@ def test_trade_cfg_stop_atr_mult_env_overrides(monkeypatch):
 # ============================================================================
 # 4.6 Task 6（P0-2 max_wait 等待窗口）：pre_open 按 formed_at+max_wait 过滤超期信号
 # ============================================================================
-def test_pre_open_skip_expired_signal(monkeypatch):
+def test_pre_open_skip_expired_signal(monkeypatch, _state_db):
     """pre_open：order.formed_at 距今 > max_wait 交易日 → 跳过；<= max_wait → 挂。
 
     物理意图（plan Task 6 · 对齐缺口 P0-2）：
         回测信号后 max_wait 天窗口等回踩，实盘只挂 1 天（次日 pre_open 撤昨日）。
         pre_open 按 ``_trading_days_between(formed_at, today) > max_wait`` 过滤超期。
     """
-    # 已确认计划，单 order formed_at=10 交易日之前，max_wait=5 → 应跳过不挂
-    orders = [{
+    # C2c：DB 种已确认 SIGNAL，formed_at 远早 → 超期
+    _seed_signals_db("2099-01-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
         "stop_price": 9.0, "take_profit": 11.0,
         "formed_at": "2026-07-01",   # 远早于 today（2026-07-22），距 > 5 交易日
         "max_wait": 5,
-    }]
-    trading_plan.save_plan("2099-01-02", orders)
-    trading_plan.confirm_plan("2099-01-02")
+    }])
 
     # monkeypatch _trading_days_between 返 10（> max_wait=5）→ 该单应被跳过
     monkeypatch.setattr(engine, "get_gateway", lambda: object())
@@ -1244,16 +1300,14 @@ def test_pre_open_skip_expired_signal(monkeypatch):
     assert result["submitted"] == 0
 
 
-def test_pre_open_within_max_wait_window_is_placed(monkeypatch):
+def test_pre_open_within_max_wait_window_is_placed(monkeypatch, _state_db):
     """pre_open：order.formed_at 距今 <= max_wait → 挂单（窗口内每日可挂）。"""
-    orders = [{
+    _seed_signals_db("2099-01-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
         "stop_price": 9.0, "take_profit": 11.0,
         "formed_at": "2026-07-18",   # 3 交易日之前
         "max_wait": 5,                # <= max_wait → 应挂
-    }]
-    trading_plan.save_plan("2099-01-02", orders)
-    trading_plan.confirm_plan("2099-01-02")
+    }])
 
     monkeypatch.setattr(engine, "get_gateway", lambda: object())
     monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
@@ -1270,16 +1324,14 @@ def test_pre_open_within_max_wait_window_is_placed(monkeypatch):
     assert result["submitted"] == 1
 
 
-def test_pre_open_formed_at_missing_fallback_places(monkeypatch):
+def test_pre_open_formed_at_missing_fallback_places(monkeypatch, _state_db):
     """pre_open：order 缺 formed_at → days=0 视作窗口内，挂单（向后兼容老 plan）。"""
-    orders = [{
+    _seed_signals_db("2099-01-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
         "stop_price": 9.0, "take_profit": 11.0,
         # 无 formed_at（老 plan，Task 2 前落盘的）
         "max_wait": 5,
-    }]
-    trading_plan.save_plan("2099-01-02", orders)
-    trading_plan.confirm_plan("2099-01-02")
+    }])
 
     monkeypatch.setattr(engine, "get_gateway", lambda: object())
     monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
@@ -1614,7 +1666,7 @@ def test_post_close_no_longer_scans_max_holding(monkeypatch):
         "B1 后 post_close 不应再扫 max_holding；result['expired_positions'] 字段已废")
 
 
-def test_pre_open_closes_expired_positions(monkeypatch):
+def test_pre_open_closes_expired_positions(monkeypatch, _state_db):
     """pre_open：现算超期 → 查 gw 持仓 → 跌停价卖（SSoT Phase B 断点-2 · B1）。
 
     物理意图（plan Task 8 Step 3 · B1 改造）：
@@ -1629,11 +1681,11 @@ def test_pre_open_closes_expired_positions(monkeypatch):
     position_book.apply_fill(
         "order_expired_pre", "300001.SZ", "BUY", 200, 10.0,
         "2099-01-01T09:30:00")
-    # 当日已确认计划（买单标的与超期标的不同，互不干扰）
-    orders = [{"order": {"symbol": "300002.SZ", "qty": 100, "side": "buy", "price": 10.0},
-               "stop_price": 9.0, "take_profit": 11.0}]
-    trading_plan.save_plan("2099-01-02", orders)
-    trading_plan.confirm_plan("2099-01-02")
+    # C2c：当日已确认 SIGNAL（买单标的与超期标的不同，互不干扰）
+    _seed_signals_db("2099-01-02", [{
+        "order": {"symbol": "300002.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5,
+    }])
     # monkeypatch 基准日 + holding_days（避开真实日历漂移，锁定现算→平仓链路）
     monkeypatch.setattr(engine.clock, "today", lambda: "2099-01-02")
     monkeypatch.setattr(engine.clock, "pretrade_date", lambda d: "2099-01-01")
@@ -1663,7 +1715,7 @@ def test_pre_open_closes_expired_positions(monkeypatch):
     assert sell_orders[0] == ("300001.SZ", "sell", 200, 8.5)
 
 
-def test_pre_open_close_expired_skip_when_no_price(monkeypatch):
+def test_pre_open_close_expired_skip_when_no_price(monkeypatch, _state_db):
     """pre_open：无跌停价/现价 → 跳过该标的（拒发盲单）。
 
     物理意图（边界 · Grill Me 风控 · B1 改造）：
@@ -1678,8 +1730,11 @@ def test_pre_open_close_expired_skip_when_no_price(monkeypatch):
         "2099-01-01T09:30:00")
     orders = [{"order": {"symbol": "300002.SZ", "qty": 100, "side": "buy", "price": 10.0},
                "stop_price": 9.0, "take_profit": 11.0}]
-    trading_plan.save_plan("2099-01-02", orders)
-    trading_plan.confirm_plan("2099-01-02")
+    # C2c：DB 种已确认 SIGNAL
+    _seed_signals_db("2099-01-02", [{
+        "order": {"symbol": "300002.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5,
+    }])
     monkeypatch.setattr(engine.clock, "today", lambda: "2099-01-02")
     monkeypatch.setattr(engine.clock, "pretrade_date", lambda d: "2099-01-01")
     monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 20)  # 标超期

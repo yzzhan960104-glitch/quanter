@@ -104,13 +104,26 @@ async def test_e2e_pre_open_halt_then_stoploss_skipped(monkeypatch, tmp_path):
 
     # ② 落一份已确认 plan（1 只标的，让 _pre_open → pre_open 走到挂单循环）
     # ⚠️ 日期用「今日」（_pre_open 内部 datetime.now() 取 today，非写死 2099-01-02）
+    # C2c：pre_open 直读 DB SIGNAL.meta，需先落 SIGNAL 再 confirm（顺序保证 latest=CONFIRMED）
     from datetime import datetime
     from trading import trading_plan
+    import json as _json
     _today = datetime.now().strftime("%Y-%m-%d")
     trading_plan.save_plan(_today, [{
         "order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
         "formed_at": None,   # 不走 max_wait 窗口过滤
     }])
+    # C2c：落 DB SIGNAL（必须在 confirm_plan 之前，保证 latest=CONFIRMED）
+    _aid = engine._resolve_account_id()
+    if state_store.get_account(_aid) is None:
+        state_store.upsert_account(_aid, broker="qmt")
+    _tid = state_store.build_trade_id(_aid, "300214.SZ", _today)
+    state_store.insert_trade_event(
+        _aid, _tid, "300214.SZ", "SIGNAL",
+        meta=_json.dumps({"order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
+                          "formed_at": None, "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5,
+                          "plan_date": _today, "strategy_name": "neckline", "rationale": ""},
+                         ensure_ascii=False))
     trading_plan.confirm_plan(_today)
 
     # ③ patch calendar 放行交易日（否则 _pre_open 顶部 is_trading_day 守卫早返）

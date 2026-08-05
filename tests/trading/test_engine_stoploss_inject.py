@@ -26,39 +26,40 @@ def test_stoploss_injects_stop_prices_from_plan():
 
     断言：``stop_loss_monitor(stop_prices={"300001.SZ": 9.5})`` 被精确调用，
     而非 None（现状 bug）。
+
+    C2c：_stoploss 直读 DB list_signals_with_meta_by_plan_date（不再 load_plan），
+    每个 SIGNAL 须 latest=CONFIRMED 才塞 stop_prices（确认闸 per-trade）。
     """
     eng = TradingEngine()
-    # confirmed=True 的活跃计划：1 个标的 stop_price=9.5
-    plan = {
-        "confirmed": True,
-        "orders": [
-            {
-                "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-                "stop_price": 9.5,
-                "take_profit": 12.0,
-            }
-        ],
-    }
+    # C2c：DB SIGNAL meta（shape = {symbol, **meta}）
+    signals = [{
+        "symbol": "300001.SZ",
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.5, "take_profit": 12.0,
+    }]
     # C-5 V4：_stoploss 入口先过 _gw_health_gate，须 patch get_gateway 返 connected+ready
     # gw 让 gate 放行，否则 gate skip 到不了 stop_prices 注入逻辑。
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
     with patch("trading.engine.get_gateway", return_value=gw), \
-         patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine.calendar") as cal, \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:
-        # calendar 被 patch 成 MagicMock（is_intraday_session 返 truthy），
-        # 但因 stop_loss_monitor 也被 AsyncMock 拦截，calendar 实际不会被真调到；
-        # 此处 patch 仅保持环境洁净 + 对齐 brief 给的口径。
-        asyncio.run(eng._stoploss())
+        # C2c：mock _state_store.list_signals + get_latest_action=CONFIRMED
+        cal.is_trading_day.return_value = True
+        cal.today.return_value = "2026-08-05"
+        with patch("trading.engine._state_store") as ss:
+            ss.list_signals_with_meta_by_plan_date.return_value = signals
+            ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
+            ss.get_latest_action.return_value = "CONFIRMED"
+            asyncio.run(eng._stoploss())
     # 断言 stop_prices 被注入（非 None）：symbol→stop_price 精确映射
     _, kwargs = mon.call_args
     assert kwargs.get("stop_prices") == {"300001.SZ": 9.5}
 
 
 def test_stoploss_no_plan_injects_none():
-    """无计划 / load_plan 返 None → 注入 None（monitor 内部 no-op，不崩、不盲卖）。
+    """无计划 / list_signals 返空 → 注入 None（monitor 内部 no-op，不崩、不盲卖）。
 
     物理边界（保守降级红线）：无 confirmed 计划时绝不能构造出非空 stop_prices，
     否则 monitor 拿脏数据误判跌破 → 盲卖。此处断言 stop_prices ∈ {None, {}}。
@@ -68,24 +69,26 @@ def test_stoploss_no_plan_injects_none():
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
-    # 显式 patch is_trading_day=True 让测试与运行日无关（原测试依赖运行日为交易日，
-    # 周末跑会被交易日守卫拦在 monitor 之前——与 V4 gate 无关，deterministic 修正）。
+    # 显式 patch is_trading_day=True 让测试与运行日无关
     with patch("trading.engine.get_gateway", return_value=gw), \
          patch("trading.engine.calendar.is_trading_day", return_value=True), \
-         patch("trading.engine.trading_plan.load_plan", return_value=None), \
+         patch("trading.engine.clock.today", return_value="2026-08-05"), \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:
-        asyncio.run(eng._stoploss())
+        # C2c：list_signals 返空（无计划）
+        with patch("trading.engine._state_store") as ss:
+            ss.list_signals_with_meta_by_plan_date.return_value = []
+            asyncio.run(eng._stoploss())
     _, kwargs = mon.call_args
     assert kwargs.get("stop_prices") in (None, {})
 
 
 def test_stoploss_skips_non_trading_day():
-    """非交易日 _stoploss 直接返回，不查 plan 不调 monitor（Task 8 fix · review I1）。
+    """非交易日 _stoploss 直接返回，不查 DB SIGNAL 不调 monitor（Task 8 fix · review I1）。
 
     物理意图：旧 stop_loss cron ``*/5 9-14 * * 1-5`` 的 ``1-5`` 限制工作日；Task 8
     迁 IntervalTrigger(seconds=30) 后丢掉工作日过滤，周末盘中时段也会触发。
     守卫补在 _stoploss 顶部（与 _eod/_pre_open/_post_close 同口径 is_trading_day），
-    非交易日不查 plan、不调 monitor——避免无谓调用 + 不依赖 monitor 内 is_intraday_session
+    非交易日不查 SIGNAL、不调 monitor——避免无谓调用 + 不依赖 monitor 内 is_intraday_session
     兜底（该兜底只查时间不查工作日，挡不住周末）。
     """
     eng = TradingEngine()
@@ -95,8 +98,9 @@ def test_stoploss_skips_non_trading_day():
     gw.is_client_ready.return_value = True
     with patch("trading.engine.get_gateway", return_value=gw), \
          patch("trading.engine.calendar.is_trading_day", return_value=False), \
-         patch("trading.engine.trading_plan.load_plan") as lp, \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:
-        asyncio.run(eng._stoploss())
-    lp.assert_not_called()    # 非交易日不查 plan
+        # C2c：非交易日不应查 list_signals
+        with patch("trading.engine._state_store") as ss:
+            asyncio.run(eng._stoploss())
+            ss.list_signals_with_meta_by_plan_date.assert_not_called()
     mon.assert_not_called()   # 非交易日不调 monitor

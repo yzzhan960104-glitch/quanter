@@ -58,8 +58,19 @@ def generate_review(
     db_path = db_path or position_book._DEFAULT_DB
 
     # ---- 计划段 ----
+    # SSoT Phase C · C2c：plan=None 时直接读 DB trade_event(SIGNAL).meta（真相源），
+    # 不再 fallback trading_plan.load_plan(date)。SIGNAL meta 形态与原 plan orders dict
+    # 同构（meta = order_dict + plan_date/strategy_name/rationale，C1 落盘），渲染逻辑零改动。
+    # 致命日期轴：按 substr(trade_id,-10)=date 查（非 timestamp）。
+    # 透传 plan 参数仍保留（避免重复查 DB；post_close 等已持有 plan 的调用方复用）。
     if plan is None:
-        plan = trading_plan.load_plan(date)
+        from trading import state_store as _ss
+        try:
+            sigs = _ss.list_signals_with_meta_by_plan_date(date)
+        except Exception:
+            # DB 读失败软降级：渲染「无计划」（不阻断复盘报告其余段落）。
+            sigs = []
+        plan = {"orders": sigs, "confirmed": bool(sigs)} if sigs else None
     plan_lines: list[str] = []
     if plan and plan.get("orders"):
         confirmed = "已确认" if plan.get("confirmed") else "待确认"

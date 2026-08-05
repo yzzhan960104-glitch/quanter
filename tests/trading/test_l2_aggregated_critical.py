@@ -46,12 +46,20 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
                 RuntimeError("涨停拒单")])), \
             patch("trading.engine._state_store") as ss, \
             patch("trading.engine.trading_plan") as tp:
+        # C2c：pre_open 直读 DB list_signals_with_meta_by_plan_date
+        ss.list_signals_with_meta_by_plan_date.return_value = [
+            {"symbol": "300214.SZ",
+             "order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
+             "formed_at": None, "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5},
+            {"symbol": "300215.SZ",
+             "order": {"symbol": "300215.SZ", "qty": 100, "side": "buy", "price": 10.0},
+             "formed_at": None, "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5}]
+        ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
         ss.get_account.return_value = MagicMock()
-        ss.get_latest_action.return_value = None
+        ss.get_latest_action.return_value = "CONFIRMED"  # 确认闸 + per-symbol veto 通过
         ss.has_order.return_value = False
-        tp.load_plan.return_value = {"confirmed": True, "orders": [
-            {"order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0}, "formed_at": None},
-            {"order": {"symbol": "300215.SZ", "qty": 100, "side": "buy", "price": 10.0}, "formed_at": None}]}
+        ss.insert_order.return_value = None
+        ss.update_order_state.return_value = None
         monkeypatch.setattr(eng, "_pre_open_gate", AsyncMock(return_value=(True, "")))
         from trading.engine import pre_open
         result = await pre_open("2026-07-31")

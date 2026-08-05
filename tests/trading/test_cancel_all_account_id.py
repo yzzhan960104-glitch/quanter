@@ -70,15 +70,27 @@ def test_pre_open_cancel_passes_account_id(isolated_eng, monkeypatch):
         captured["account_id"] = account_id
         return {"cancelled": 0, "unconfirmed": 0}
 
-    # 空 orders：让 pre_open 撤单段后走完挂单循环（无单可挂）快速返回。
-    # 重点断言在 cancel spy，后续链路只要不抛即可。
+    # C2c：pre_open 直读 DB list_signals_with_meta_by_plan_date；至少一只已确认 SIGNAL
+    # 才触达撤单段（无 SIGNAL → 「无计划」早返，cancel 不调，account_id 断言失效）。
+    _signals = [{"symbol": "300214.SZ",
+                 "order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
+                 "formed_at": None, "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5}]
     with patch("trading.engine.trading_plan") as tp, \
          patch("trading.engine.get_gateway", return_value=AsyncMock(**{"query_asset.return_value": {}})), \
          patch("trading.engine._cancel_all_open_orders", new=_spy_cancel), \
          patch("trading.engine._resolve_account_id", return_value="ACC_QMT_001"), \
          patch("trading.engine._scan_expired_positions", return_value=[]):
-        tp.load_plan.return_value = {"confirmed": True, "orders": []}
-        asyncio.run(engine.pre_open("2026-07-31"))
+        # C2c：mock list_signals 返一只 + get_latest_action=CONFIRMED 通过确认闸
+        from trading import state_store
+        with patch("trading.engine._state_store") as ss:
+            ss.list_signals_with_meta_by_plan_date.return_value = _signals
+            ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
+            ss.get_latest_action.return_value = "CONFIRMED"
+            ss.get_account.return_value = AsyncMock()
+            ss.has_order.return_value = False
+            ss.insert_order.return_value = None
+            ss.update_order_state.return_value = None
+            asyncio.run(engine.pre_open("2026-07-31"))
 
     assert captured.get("account_id") == "ACC_QMT_001", (
         "pre_open 必须透传 account_id 激活柜台路径 cancel_order_by_broker_oid_db 回写 "
