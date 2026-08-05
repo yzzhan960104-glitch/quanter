@@ -9,9 +9,10 @@ universe 漂 6%——"连复现自己都做不到"。本 cli 把"冠军 2026 去
 指纹 + 引擎指纹的 trial 记录，后续内核/数据变了老 trial 自动标 stale（engine_hash/
 snapshot_hash 双指纹），给 L1 验收一个不漂移的锚。
 
-参数源（2026-08-05 B3 收口）：冠军参数从 ``experiment.resolver.resolve_active()`` 取
-（实盘 _eod 同源，单一真相源）；无 ACTIVE → 拒绝运行（oos/verify 是人审探查工具，
-    无 ACTIVE 无从跑「当前冠军」）。**不再读 legacy 冠军治理 JSON**——双轨治理收口。
+参数源（2026-08-05 B3 收口 → SSoT review-fix2 P2 统一选择口径）：冠军参数从
+``experiment.resolver.resolve_champion()`` 取（max(weight) 单一选择口径，实盘 _eod
+同源）；无 ACTIVE → 拒绝运行（oos/verify 是人审探查工具，无 ACTIVE 无从跑「当前
+冠军」）。**不再读 legacy 冠军治理 JSON**——双轨治理收口。
 """
 import argparse
 import hashlib
@@ -25,7 +26,7 @@ from discovery.objective import evaluate
 from discovery.store import (init_db, connect, write_snapshot, write_trial,
                              trial_id_of, DEFAULT_DB_PATH)
 from discovery.judging import feasibility_gate
-from experiment.resolver import resolve_active
+from experiment.resolver import resolve_champion
 
 
 def _db_path():
@@ -52,19 +53,19 @@ def cmd_oos(args):
     """当前冠军 2026 去偏评估 + 落库。
 
     串起 freeze→holdout_split→evaluate→judging→store 全链。冠军从 experiment.db ACTIVE
-    （resolve_active 单一真相源，实盘 _eod 同源）读，跑一次全历史 scan，分 inner(2025)/
+    （resolve_champion 单一选择口径，实盘 _eod 同源）读，跑一次全历史 scan，分 inner(2025)/
     outer(2026) 两段报指标。outer 不反馈任何选择（冠军已由 param_iter 用 2025+2026 全段
     score 选出——诚实标注见下）。
 
     无 ACTIVE 实验 → 拒绝运行（人审探查工具，无当前生效实验无从跑「当前冠军」）。
     """
-    active = resolve_active()
-    if not active:
+    champion = resolve_champion()
+    if champion is None:
         print("[oos] 无 experiment.db ACTIVE 实验——oos/verify 探查需要当前生效冠军参数。\n"
               "  promote 一个实验：python -m experiment promote <id> --weight 0.1",
               file=sys.stderr)
         sys.exit(2)
-    params = dict(active[0].params)
+    params = dict(champion.params)
     universe, meta = freeze()
     split = holdout_split(args.embargo)
     print(f"=== discovery oos：当前冠军 2026 去偏（snapshot={meta.snapshot_hash}）===")
@@ -102,16 +103,16 @@ def cmd_verify(args):
     vs 当前跑出的 outer 2026）给人审一个"去偏幅度"的直觉（spec §1.4 漂移实证）。
     Plan 1 手动验收：判定结果打印不进排序（排序留 Plan 3 搜索）。
 
-    冠军来源（2026-08-05 B3 收口）：experiment.db ACTIVE（resolve_active 单一真相源，
-    实盘 _eod 同源）；无 ACTIVE → 拒绝运行。
+    冠军来源（2026-08-05 B3 收口 → SSoT review-fix2 P2 统一选择口径）：experiment.db
+    ACTIVE（resolve_champion 单一选择口径，实盘 _eod 同源）；无 ACTIVE → 拒绝运行。
     """
-    active = resolve_active()
-    if not active:
+    champion = resolve_champion()
+    if champion is None:
         print("[verify] 无 experiment.db ACTIVE 实验——verify 探查需要当前生效冠军参数。\n"
               "  promote 一个实验：python -m experiment promote <id> --weight 0.1",
               file=sys.stderr)
         sys.exit(2)
-    params = dict(active[0].params)
+    params = dict(champion.params)
     from discovery.neighborhood import neighborhood_stability
     universe, meta = freeze()
     split = holdout_split(args.embargo)

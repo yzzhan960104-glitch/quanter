@@ -426,18 +426,17 @@ def _experiment_active_state() -> dict | None:
     里的 outer 去偏年化（discovery publish 写入，如 "outer ann=1.9% ..."），无 note/解析
     失败 → None（brief 只渲染版本号）。无 ACTIVE / DB 缺失 → None（调用方降级「—」，
     **不再回退 legacy JSON**——双轨治理收口）。
+
+    冠军选择口径（2026-08-05 SSoT review-fix2 P2 统一）：复用 ``resolve_champion()``——
+    多 ACTIVE 灰度时取 ``max(weight)``，与 probe_champion_oos / weekly_replay / cli `oos`
+    同口径；broadcast 需读 ``note``（解析 outer 年化）/``version``（渲染版本号），故传
+    ``_EXPERIMENT_DB`` 让 resolve_champion 返回完整 ``ExperimentVersion``。
     """
     try:
-        from experiment.models import ExperimentStatus
-        from experiment.store import list_versions
-        versions = [
-            v for v in list_versions(_EXPERIMENT_DB, status=ExperimentStatus.ACTIVE)
-            if v.weight > 0
-        ]
-        if not versions:
+        from experiment.resolver import resolve_champion
+        top = resolve_champion(_EXPERIMENT_DB)
+        if top is None:
             return None
-        # 多 ACTIVE 灰度并存时取权重最大者展示（当前唯一 ACTIVE weight=1.0）
-        top = max(versions, key=lambda v: v.weight)
         best_annual = None
         note = top.note or ""
         if "outer ann=" in note:

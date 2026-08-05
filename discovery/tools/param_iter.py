@@ -1,45 +1,40 @@
 # -*- coding: utf-8 -*-
-"""颈线法参数迭代引擎 v2（创板科创 / 2025至今 / 22维概念 / 时间预算）。
+"""颈线法参数空间定义（PARAM_SPACE）——discovery 搜索层与 sampler 的共享配置源。
 
-⚠️ LEGACY 退役入口（2026-08-03 双轨治理）：
-    参数搜索的单一真相源已收编为 ``discovery daemon``（L0-L5：快照冻结 → holdout →
-    Sobol/TPE → Pareto/DSR → 跨夜收敛 → publish 到 experiment DRAFT）。本模块继续
-    运行会产生双轨冠军（logs/param_iter_state.json vs experiment.db ACTIVE），
+⚠️ 已退役说明（2026-08-05 SSoT review-fix2，B3 收口彻底落地）：
+    legacy 参数搜索入口（main / load_state / save_state / STATE_FILE）已**整块删除**。
+    参数搜索的单一真相源是 ``discovery daemon``（L0-L5：快照冻结 → holdout →
+    Sobol/TPE → Pareto/DSR → 跨夜收敛 → publish 到 experiment DRAFT）；继续保留 legacy
+    入口会产生双轨冠军（logs/param_iter_state.json vs experiment.db ACTIVE），
     且其 kelly/freq_cap 口径高估年化（如 115.8% ann / 0.9% dd），误导播报与周度回测。
-    入口已 fail-closed：**必须显式传 ``--legacy`` 才会执行**，否则立即拒绝并提示
-    改用 ``python -m discovery daemon``。PARAM_SPACE 仍被 discovery.sampler 复用
-    （import 本模块不触发守卫，仅 main() 拒绝）。
 
-重构（2026-07-20，详见 memory caisen-neckline-paramiter-baseline）：
+    本模块当前职责**仅剩 PARAM_SPACE 配置**（21 维候选档，分层标记 id/exec）：
+      · ``discovery.sampler`` 通过 ``from discovery.tools.param_iter import PARAM_SPACE``
+        复用同源候选档（避免重造 21 维空间定义）；
+      · 其它 legacy 函数（score_of / run_one / load_universe / random_params /
+        neighbor_params / params_key / is_target_board / _breadth_at）保留为
+        内核数值回归测试与 discovery 子模块（snapshot/objective）的「同口径锚」参考
+        ——它们**不被生产链路调用**，仅作为参照实现存在（删除会破坏 golden 回归基线
+        与 discovery snapshot 的同源契约注释链，且无 SSoT 风险——零写入零状态）。
+
+历史重构（2026-07-20，详见 memory caisen-neckline-paramiter-baseline）：
   ① universe 收窄：创业板(300/301)+科创板(688/689)，2025-01-01 至今，可交易(≥1亿) ≈1334 只
-     （原 param_iter 砍 top100=死区2.3%，代理目标错配；现用创板科创近年，胜率49%、空间大）
-  ② 时间窗缩短：仅 2025 至今（~130 交易日），单组 ~167s，8h 可跑 ~173 组
-  ③ 目标函数修复：kelly_metrics 用 pos=min(f*, 0.05) 实盘年化（旧版满仓复利爆炸至7257%）
-  ④ 22 维概念全调：识别层 11（DEFAULTS）+ 执行层 10（EXEC_DEFAULTS 7 原硬编码 + trailing 3 移动止损）= 21 可调
-                   + universe(创板科创2025至今) 固定 = 22 概念
-  ⑤ 搜索策略：阶段1 随机采样 n_random 组（覆盖18维空间）→ 阶段2 top-K 邻域贪心 ±1 档细化
-  ⑥ 运行模式：--time-budget 秒数跑到时间耗尽，state 持久化可续（kill/重启自动接续）
-
-用法：
-    PYTHONIOENCODING=utf-8 python -u discovery/tools/param_iter.py --time-budget 28800   # 8h
+  ② 22 维概念全调：识别层 11（DEFAULTS）+ 执行层 10（EXEC_DEFAULTS 7 + trailing 3）= 21 可调
+                   + universe 固定 = 22 概念
 """
 import os
 import sys
 import json
-import time
-import argparse
-import random
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# 2026-08-03 修复：脚本直跑（python discovery/tools/param_iter.py）时 sys.path[0]
-# 是脚本目录而非仓库根，`from strategies...` 会 ModuleNotFoundError（文档用法即坏）。
+# 脚本直跑时 sys.path[0] 是脚本目录而非仓库根，`from strategies...` 会 ModuleNotFoundError。
 # 补插仓库根（tools → discovery → 仓库根 三级上溯），与 qmt_smoke.py 同款范式。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pandas as pd
 from strategies.neckline.method_v0 import DEFAULTS
-from strategies.neckline.backtest import scan_symbol, kelly_metrics, risk_metrics, EXEC_DEFAULTS
+from strategies.neckline.backtest import scan_symbol, risk_metrics, EXEC_DEFAULTS
 
 
 # ===== 21 维参数空间（识别层 id=DEFAULTS / 执行层 exec=EXEC_DEFAULTS）=====
@@ -75,27 +70,9 @@ PARAM_SPACE = [
 ]
 # universe（创板+科创 2025至今）固定不调 = 第 22 个"概念参数"（21 可调 + universe）
 
-# ── legacy 冠军治理 JSON 路径（2026-08-05 B3 双轨治理收口后的保留说明）─────────
-# 物理意图：B3 把全部生产读口切到 experiment.db ACTIVE（resolve_active 单一真相源），
-# legacy ``logs/param_iter_state.json`` 已归档到 logs/archive/。本模块仍保留 STATE_FILE
-# 模块级常量是【历史遗留】，**仅 main() 体内（load_state/save_state 调用）使用**——
-# 即仅 ``python -m discovery.tools.param_iter --legacy`` 显式 legacy 续跑路径才会触及，
-# 生产链路对它【零写入零读取】：
-#   ① discovery.sampler 仅 ``from discovery.tools.param_iter import PARAM_SPACE``，
-#     不触发 main()/load_state()/save_state()，本常量永不求值；
-#   ② 生产参数源 = experiment.db ACTIVE（discovery daemon L0-L5），不经过本文件；
-#   ③ main() 入口 fail-closed 守卫（不带 --legacy 立即 sys.exit(2)），即便有人误跑
-#     也不会执行 load_state/save_state，更不会写 JSON。
-#
-# 为何 A5 静态护栏（tests/test_ssot_static_guard.py）不扫此处：
-#   护栏 PROD_DIRS = [trading, presentation/server, broadcast, research, scripts]
-#   （brief 指定的生产写盘热点目录），**不含 discovery/**——discovery/ 是参数搜索
-#   实验/探查工具集，非生产链路；PARAM_SPACE 库 + legacy 入口在此目录合法保留。
-#   若将 discovery/ 纳入 PROD_DIRS，则本行 ``["']param_iter_state\.json`` pattern 会
-#   命中，需进一步把 STATE_FILE 移进 main() 局部（或删 main/load_state/save_state
-#   整体退役）。当前 SSoT 不受影响——prod 零调用 = prod 零写入。
-# ──────────────────────────────────────────────────────────────────────────
-STATE_FILE = "logs/param_iter_state.json"   # legacy 冠军治理 JSON（仅 main() 体内用，见上方说明）
+# 目标年化与回测起始日（保留供内核回归测试 / discovery snapshot 同源契约参照）。
+# legacy STATE_FILE / load_state / save_state / main 已于 2026-08-05（SSoT review-fix2）
+# 整块删除——参数搜索单一真相源是 discovery daemon + experiment.db ACTIVE。
 TARGET_ANN = 0.90          # 目标凯利年化 90%（用户 2026-07-21：≥90% 同时高夏普低回撤）
 START_DATE = "2025-01-01"  # 回测起始日（缩短年限提速）
 
@@ -218,140 +195,12 @@ def run_one(params, universe, breadth=None):
     return ann, kelly, curve, len(all_filled), sharpe, max_dd
 
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            return json.load(open(STATE_FILE, encoding="utf-8"))
-        except Exception:
-            pass
-    return {"tried": {}, "best": None, "best_score": 0.0, "best_ann": -1.0,
-            "best_sharpe": 0.0, "best_max_dd": 0.0, "history": []}
-
-
-def save_state(state):
-    os.makedirs("logs", exist_ok=True)
-    json.dump(state, open(STATE_FILE, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="颈线法参数迭代 v2（创板科创/2025至今/22维概念）")
-    ap.add_argument("--legacy", action="store_true",
-                    help="显式承认 legacy 入口（2026-08-03 起必须携带，否则拒绝运行）")
-    ap.add_argument("--time-budget", type=int, default=28800, help="时间预算秒数（默认 28800=8h）")
-    ap.add_argument("--n-random", type=int, default=80, help="阶段1随机采样组数（默认80）")
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--breadth-boost", action="store_true",
-                    help="P1-c 宽度顺势加权（信号日 breadth≥0.4 → pnl×1.5，验证非熊市加仓）")
-    args = ap.parse_args(argv)
-
-    # ── legacy 退役守卫（fail-closed）──
-    # 物理意图（2026-08-03 双轨治理）：param_iter 与 discovery daemon 并行会产生
-    # 两套冠军（param_iter_state.json vs experiment.db），周度回测/播报若读错源就
-    # 与实盘 ACTIVE 参数不可比。此处不带 --legacy 一律拒绝，防外部脚本/手动启动
-    # 再次拉起旧搜索；PARAM_SPACE 复用不受影响（import 不经过 main）。
-    if not args.legacy:
-        print("[RETIRED] legacy param_iter 已退役：参数搜索请改用 `python -m discovery daemon`"
-              "（L0-L5 单一真相源）。确需手动续跑请显式加 --legacy。", file=sys.stderr)
-        sys.exit(2)
-
-    rng = random.Random(args.seed)
-    print(f"=== 颈线法参数迭代 v2 ===")
-    print(f"universe: 创板+科创 {START_DATE} 至今 | 目标: 凯利年化≥{TARGET_ANN*100:.0f}% | 预算: {args.time_budget/3600:.1f}h")
-    print(f"加载 universe ...")
-    universe = load_universe()
-    print(f"universe: {len(universe)} 只标的")
-
-    # P1-c 宽度顺势加权（可选，--breadth-boost 开启）
-    breadth = None
-    if args.breadth_boost:
-        bp = "data_lake/market_breadth.parquet"
-        if os.path.exists(bp):
-            breadth = pd.read_parquet(bp)["breadth"]
-            n_boost = int((breadth >= 0.4).sum())
-            print(f"宽度顺势加权开启：{bp} {len(breadth)} 日，≥0.4 占 {n_boost/len(breadth)*100:.0f}% → pnl×1.5")
-        else:
-            print(f"[warn] {bp} 不存在，--breadth-boost 失效（回退无加权）")
-
-    state = load_state()
-    # 兼容旧 state（v2 18维 ann 单目标 → v3 21维 score 多目标）：补 score 字段
-    state.setdefault("best_score", 0.0)
-    state.setdefault("best_sharpe", 0.0)
-    state.setdefault("best_max_dd", 0.0)
-    state.setdefault("best_ann", -1.0)
-    print(f"state 续跑: 已试 {len(state['tried'])} 组 | v3.1 软约束(ann×夏普/(1+回撤)) best_score={state['best_score']:.3f}")
-
-    t_start = time.time()
-    n_eval_this_run = 0
-
-    while time.time() - t_start < args.time_budget:
-        n_tried = len(state["tried"])
-        # 采样策略：阶段1 随机（前 n_random 组）→ 阶段2 贪心（top-K 邻域）
-        if n_tried < args.n_random:
-            params = random_params(rng)
-            phase = "random"
-        else:
-            top = sorted(state["history"], key=lambda x: x.get("score", 0), reverse=True)[:10]
-            if not top:
-                params = random_params(rng); phase = "random"
-            else:
-                base = rng.choice(top)["params"]
-                params = neighbor_params(base, rng)
-                phase = "greedy"
-
-        pk = params_key(params)
-        if pk in state["tried"]:
-            continue   # 去重（21维空间大，重复概率低）
-
-        t0 = time.time()
-        ann, kelly, curve, n, sharpe, max_dd = run_one(params, universe, breadth=breadth)
-        dt = time.time() - t0
-        n_eval_this_run += 1
-        score = score_of(ann, sharpe, max_dd)
-
-        state["tried"][pk] = {"ann": round(ann, 4), "kelly": round(kelly, 4),
-                              "curve": round(curve, 3), "n": n,
-                              "sharpe": round(sharpe, 3), "max_dd": round(max_dd, 4),
-                              "score": round(score, 4), "phase": phase}
-        state["history"].append({"idx": n_tried, "ann": round(ann, 4),
-                                 "sharpe": round(sharpe, 3), "max_dd": round(max_dd, 4),
-                                 "score": round(score, 4), "params": params, "phase": phase})
-        improved = ""
-        if score > state["best_score"]:
-            state["best_score"] = score
-            state["best"] = params
-            state["best_ann"] = ann
-            state["best_sharpe"] = sharpe
-            state["best_max_dd"] = max_dd
-            improved = " ★新最优"
-
-        # 控制历史长度（防无限膨胀；tried 字典才是真·去重源），v3 按 score 截断
-        if len(state["history"]) > 2000:
-            state["history"] = sorted(state["history"], key=lambda x: x.get("score", 0), reverse=True)[:1000]
-
-        save_state(state)
-
-        elapsed = time.time() - t_start
-        remain = max(0, args.time_budget - elapsed)
-        print(f"[{n_tried+1}|{phase:6s}|{dt:5.0f}s|剩{remain/60:4.0f}min] "
-              f"年化{ann*100:6.1f}% 夏普{sharpe:5.2f} 回撤{max_dd*100:5.1f}% 得分{score:6.3f} "
-              f"{n:5d}笔{improved} | 最优得分{state['best_score']:.3f}"
-              f"(年化{state['best_ann']*100:.1f}%/夏普{state['best_sharpe']:.2f}/回撤{state['best_max_dd']*100:.1f}%)")
-
-        if ann >= TARGET_ANN and score == state["best_score"] and score > 0:
-            print(f"  🎯 达标 ann≥90% 且 score 新高！参数: {params}")
-
-        if n_eval_this_run % 10 == 0:
-            print(f"  --- 进度 {len(state['tried'])} 组 | best_score={state['best_score']:.3f} "
-                  f"(年化{state['best_ann']*100:.1f}%/夏普{state['best_sharpe']:.2f}/回撤{state['best_max_dd']*100:.1f}%) ---")
-
-    print(f"\n=== 时间预算耗尽（本轮 {n_eval_this_run} 组，累计 {len(state['tried'])} 组）===")
-    print(f"最优 score: {state['best_score']:.3f}（约束式 ann≥90% 内 夏普/(1+回撤)）")
-    print(f"  年化 {state['best_ann']*100:.1f}% | 夏普 {state['best_sharpe']:.2f} | 回撤 {state['best_max_dd']*100:.1f}%")
-    print(f"最优参数: {state['best']}")
-
-
-if __name__ == "__main__":
-    # stdout UTF-8 治理:防 GBK 管道崩 emoji(详见 infra/pyio.py)
-    from infra.pyio import force_utf8_stdout
-    force_utf8_stdout()
-    main()
+# [已退役 2026-08-05 SSoT review-fix2] 下列 legacy 入口已整块删除：
+#   - STATE_FILE（"logs/param_iter_state.json" 模块级常量）
+#   - load_state() / save_state(state)（legacy 冠军治理 JSON 读/写口）
+#   - main(argv)（argparse + --legacy fail-closed 守卫的搜索入口）
+#   - __main__ 块（force_utf8_stdout + main()）
+# 物理意图：参数搜索单一真相源是 discovery daemon（L0-L5）→ experiment.db ACTIVE；
+# 任何残留外部调用（grep 全仓库零命中）现已无入口。生产读口统一走
+# ``experiment.resolver.resolve_active / resolve_champion``。PARAM_SPACE 仍被
+# discovery.sampler 复用（同源候选档，不重造 21 维空间定义）。

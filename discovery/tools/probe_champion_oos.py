@@ -47,7 +47,7 @@ import pandas as pd
 from strategies.neckline.method_v0 import DEFAULTS
 from strategies.neckline.backtest import scan_symbol, risk_metrics, EXEC_DEFAULTS
 from param_iter import load_universe, PARAM_SPACE  # 复用：universe 加载 + 21 维参数分层
-from experiment.resolver import resolve_active  # 当前生效冠军参数（B3 2026-08-05 收口单一真相源）
+from experiment.resolver import resolve_champion  # 当前冠军（max weight）单一选择口径（SSoT review-fix2 P2）
 
 
 def run_full_then_split(params, universe):
@@ -97,16 +97,17 @@ def main():
     ap.add_argument("--top", type=int, default=1, help="(已退役) top-N 概念在 ACTIVE 单源下无意义，保留兼容旧调用")
     args = ap.parse_args()
 
-    # 冠军来源（B3 2026-08-05 收口）：experiment.db ACTIVE（实盘 _eod 同源，单一真相源）。
-    # 不再读 legacy 冠军治理 JSON。无 ACTIVE → 拒绝运行（探查工具无当前冠军无从跑）。
-    active = resolve_active()
-    if not active:
+    # 冠军来源（B3 2026-08-05 收口 → 2026-08-05 SSoT review-fix2 P2 统一选择口径）：
+    # experiment.db ACTIVE（实盘 _eod 同源，单一真相源）。复用 ``resolve_champion()``，
+    # 多 ACTIVE 灰度时取 ``max(weight)``——与 broadcast / weekly_replay / discovery cli
+    # 同口径，避免多 ACTIVE 时各工具「当前冠军」漂移。无 ACTIVE → 拒绝运行（探查工具
+    # 无当前冠军无从跑）。不再读 legacy 冠军治理 JSON。
+    top_active = resolve_champion()
+    if top_active is None:
         print("[probe_champion_oos] 无 experiment.db ACTIVE 实验——探查需要当前生效冠军参数。\n"
               "  promote 一个实验：python -m experiment promote <id> --weight 0.1",
               file=sys.stderr)
         sys.exit(2)
-    # 多 ACTIVE 灰度并存时取权重最大者（与 broadcast _experiment_active_state 同口径）
-    top_active = max(active, key=lambda e: e.weight)
     params = dict(top_active.params)
 
     print(f"=== L1 Go/No-Go 探查：ACTIVE 冠军 2026 近期 OOS 去偏 ===")

@@ -28,7 +28,7 @@ def test_weekly_replay_no_active_returns_default_not_legacy_json(monkeypatch):
     """无 ACTIVE 实验 → _champion_cfg_override 返 {}（不读 legacy JSON）。
 
     切 ACTIVE 后 weekly_replay 已无 _STATE_FILE 常量（彻底切断 legacy 回退）。
-    monkeypatch resolve_active 返 []（无 ACTIVE）→ 必须返 {}，绝不读任何 JSON。
+    monkeypatch resolve_champion 返 None（无 ACTIVE）→ 必须返 {}，绝不读任何 JSON。
     """
     from backtest import weekly_replay
 
@@ -38,20 +38,20 @@ def test_weekly_replay_no_active_returns_default_not_legacy_json(monkeypatch):
     )
 
     # 无 ACTIVE 实验
-    monkeypatch.setattr(weekly_replay, "resolve_active", lambda: [])
+    monkeypatch.setattr(weekly_replay, "resolve_champion", lambda: None)
 
     out = weekly_replay._champion_cfg_override()
     assert out == {}, f"无 ACTIVE 应返 {{}}（不回退 legacy JSON），got {out}"
 
 
 def test_weekly_replay_no_active_resolve_active_exception_returns_default(monkeypatch):
-    """resolve_active 抛异常 → {}（兜底防未预期异常，不抛不读 legacy）。"""
+    """resolve_champion 抛异常 → {}（兜底防未预期异常，不抛不读 legacy）。"""
     from backtest import weekly_replay
 
     def _boom():
         raise RuntimeError("experiment.db locked")
 
-    monkeypatch.setattr(weekly_replay, "resolve_active", _boom)
+    monkeypatch.setattr(weekly_replay, "resolve_champion", _boom)
 
     assert weekly_replay._champion_cfg_override() == {}
 

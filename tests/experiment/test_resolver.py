@@ -70,3 +70,58 @@ def test_resolve_active_includes_activated_at(tmp_path, monkeypatch):
     active = resolver.resolve_active(db)
     assert len(active) == 1
     assert active[0].activated_at == "2026-01-01T00:00:00"
+
+
+# ── resolve_champion：当前冠军 = max(weight) ACTIVE 单一选择口径 ──────────────
+# SSoT review-fix2 P2（2026-08-05）：多 ACTIVE 灰度并存时，broadcast / probe /
+# weekly_replay / discovery cli 四处复用 resolve_champion 统一「当前冠军」口径，
+# 避免各工具取不同版本致播报/回测/探查漂移。返 ExperimentVersion（带 note/version）。
+# ────────────────────────────────────────────────────────────────────────────
+def test_resolve_champion_returns_none_when_no_active(tmp_path):
+    """无 ACTIVE 实验 → resolve_champion 返 None（调用方各自 fail-fast）。"""
+    db = str(tmp_path / "t.db")
+    store.init_db(db)
+    assert resolver.resolve_champion(db) is None
+
+
+def test_resolve_champion_picks_highest_weight(tmp_path):
+    """多 ACTIVE 灰度 → resolve_champion 返 max(weight)（当前主导版本）。"""
+    db = str(tmp_path / "t.db")
+    store.init_db(db)
+    _make(db, "e_low", weight=0.3, version=1)   # ACTIVE 0.3
+    _make(db, "e_high", weight=0.7, version=2)  # ACTIVE 0.7
+    store.promote(db, "e_low", weight=0.3, operator="cli", now="t1")
+    store.promote(db, "e_high", weight=0.7, operator="cli", now="t2")
+    champion = resolver.resolve_champion(db)
+    assert champion is not None
+    assert champion.experiment_id == "e_high"   # 0.7 > 0.3
+    assert champion.weight == 0.7
+
+
+def test_resolve_champion_single_active_returns_itself(tmp_path):
+    """唯一 ACTIVE → resolve_champion 直接返该版本（与 max(weight) 退化一致）。"""
+    db = str(tmp_path / "t.db")
+    store.init_db(db)
+    _make(db, "e_solo", params={"window": 80}, weight=1.0, version=1)
+    store.promote(db, "e_solo", weight=1.0, operator="cli", now="t")
+    champion = resolver.resolve_champion(db)
+    assert champion is not None
+    assert champion.experiment_id == "e_solo"
+    assert champion.params == {"window": 80}
+
+
+def test_resolve_champion_returns_full_experiment_version(tmp_path):
+    """返完整 ExperimentVersion（含 note/version）—— broadcast/verify 需读 note。"""
+    db = str(tmp_path / "t.db")
+    store.init_db(db)
+    # 直接落 ExperimentVersion 带 note（promote 后 note 保留）
+    v = ExperimentVersion("exp_note", "neckline", {"window": 60}, 1.0,
+                          ExperimentStatus.DRAFT, 1, source="test",
+                          note="outer ann=1.9% inner calmar=7.24")
+    store.create_version(db, v, operator="cli")
+    store.promote(db, "exp_note", weight=1.0, operator="cli", now="t")
+    champion = resolver.resolve_champion(db)
+    assert champion is not None
+    assert champion.version == 1
+    assert "outer ann=" in (champion.note or "")
+

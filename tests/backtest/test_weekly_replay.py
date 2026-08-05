@@ -76,19 +76,20 @@ def test_no_enqueue_when_active_task_pending(tmp_path, monkeypatch):
 
 def test_champion_cfg_override_prefers_active_experiment(monkeypatch):
     """有 ACTIVE 实验 → 周度回测用 experiment 参数（单一真相源，不再读 legacy state）。"""
-    from experiment.models import ActiveExperiment
+    from experiment.models import ExperimentVersion, ExperimentStatus
     monkeypatch.setattr(
-        weekly_replay, "resolve_active",
-        lambda: [ActiveExperiment(
+        weekly_replay, "resolve_champion",
+        lambda: ExperimentVersion(
             experiment_id="neckline_disc_20260725_25c602", strategy_name="neckline",
             params={"min_rr": 1.7, "window": 80}, weight=1.0,
-            activated_at="2026-07-27T07:20:02")])
+            status=ExperimentStatus.ACTIVE, version=1,
+            activated_at="2026-07-27T07:20:02"))
 
     assert weekly_replay._champion_cfg_override() == {"min_rr": 1.7, "window": 80}
 
 
 def test_champion_cfg_override_empty_when_no_active(monkeypatch):
     """无 ACTIVE 实验 → {}（B3 2026-08-05 起彻底切断 legacy JSON 回退，单一真相源）。"""
-    monkeypatch.setattr(weekly_replay, "resolve_active", lambda: [])
+    monkeypatch.setattr(weekly_replay, "resolve_champion", lambda: None)
 
     assert weekly_replay._champion_cfg_override() == {}

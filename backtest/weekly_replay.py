@@ -9,7 +9,7 @@ report_json）——归档 07-14 后再无新条目，且没有任何周期性�
 本模块提供唯一职责：**当最近一次回测任务距今超过阈值时，自动提交一个新任务**。
 任务参数：
     - strategy_name = neckline；
-    - cfg_override = experiment.db 当前 ACTIVE 实验参数（resolve_active，单一真相源）；
+    - cfg_override = experiment.db 当前 ACTIVE 实验参数（resolve_champion，单一选择口径）；
       无 ACTIVE 时返 {}（跑默认参数，B3 2026-08-05 起彻底切断 legacy JSON 回退——
       双轨治理收口：legacy 文件已停更且不再读，单一真相源是 experiment.db）；
     - universe = None（全市场，与历史近期回测口径一致）；
@@ -17,8 +17,8 @@ report_json）——归档 07-14 后再无新条目，且没有任何周期性�
 
     参数源治理（2026-08-03 双轨分叉 → 2026-08-05 B3 收口）：
     旧实现读 legacy 冠军治理 JSON 的 best——与 experiment.db ACTIVE（实盘 _eod 实际
-    使用的参数）分叉，导致周度回测播报与实盘不可比。现单一真相源为
-    ``experiment.resolver.resolve_active()``（实盘同源），无 ACTIVE → {} 默认参数。
+    使用的参数）分叉，导致周度回测播报与实盘不可比。现单一选择口径为
+    ``experiment.resolver.resolve_champion()``（max(weight)，实盘同源），无 ACTIVE → {} 默认参数。
     backtest→experiment 是合法正向依赖（experiment 纯配置叶子，test_layer_contract
     铁律 4 只禁 broker/execution/trading.engine）。
 
@@ -33,7 +33,7 @@ import logging
 from datetime import datetime, timedelta
 
 from backtest import tasks_db as replay_tasks_db
-from experiment.resolver import resolve_active
+from experiment.resolver import resolve_champion
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +45,17 @@ def _champion_cfg_override() -> dict:
     """读当前生效实验参数（experiment.db ACTIVE，实盘同源）；无 ACTIVE 返 {}。
 
     单一真相源（2026-08-03 双轨治理 → 2026-08-05 B3 收口）：实盘 _eod 经
-    ``resolve_active()`` 发放参数，周度回测必须读同一来源才可比。返回第一个 ACTIVE
-    （weight>0）版本的 params；无 ACTIVE / DB 缺失 → {}（跑默认参数，不抛——周度回测
-    是观测旁路，数据源缺失不应阻断提交）。**不再回退 legacy JSON**：双轨治理收口，
-    legacy 冠军治理 JSON 已停更且不再读，单一真相源是 experiment.db。
+    ``resolve_active()`` 发放参数，周度回测必须读同一来源才可比。复用
+    ``resolve_champion()``（SSoT review-fix2 P2 统一选择口径）——多 ACTIVE 灰度时
+    取 ``max(weight)``，与 broadcast / probe_champion_oos / cli `oos` 同口径；
+    无 ACTIVE / DB 缺失 → {}（跑默认参数，不抛——周度回测是观测旁路，数据源缺失
+    不应阻断提交）。**不再回退 legacy JSON**：双轨治理收口，legacy 冠军治理 JSON
+    已停更且不再读，单一真相源是 experiment.db。
     """
     try:
-        active = resolve_active()
-        if active:
-            return dict(active[0].params)
+        champion = resolve_champion()
+        if champion is not None:
+            return dict(champion.params)
     except Exception:
         logger.warning("读 experiment ACTIVE 失败，周度回测用默认参数", exc_info=True)
     return {}
