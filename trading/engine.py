@@ -633,7 +633,7 @@ async def eod_plan(date: str, signals: list, atr_map: dict, capital: float) -> d
             sym = (o.get("order") or {}).get("symbol")
             if not sym:
                 continue
-            trade_id = f"{account_id}_{sym}_{date}"
+            trade_id = _state_store.build_trade_id(account_id, sym, date)
             # SIGNAL meta 存计划参数快照（stop_loss/pre_open 改从 DB 读，spec §3.3）
             _state_store.insert_trade_event(
                 account_id, trade_id, sym, "SIGNAL", meta=json.dumps(o, ensure_ascii=False))
@@ -892,7 +892,7 @@ async def _pre_open_impl(date: str) -> dict:
         # T8（state-store-redesign §4.1）DB 幂等挂单：
         # ① veto 保护：trade_event 最新 action=VETOED → 跳过（研究员否决不挂）
         # ② has_order(OPEN)：同日同标的已挂过 OPEN → 跳过（pre_open 重跑/崩溃重启不重复挂）
-        trade_id = f"{account_id}_{od['symbol']}_{date}"
+        trade_id = _state_store.build_trade_id(account_id, od['symbol'], date)
         try:
             if _state_store.get_latest_action(trade_id) == "VETOED":
                 logger.info("pre_open 跳过 vetoed 标的 symbol=%s", od["symbol"])
@@ -1071,7 +1071,7 @@ async def stop_loss_monitor(
         try:
             if _state_store.get_account(_aid) is None:
                 _state_store.upsert_account(_aid, broker="qmt")
-            trade_id = f"{_aid}_{sym}_{_today}"
+            trade_id = _state_store.build_trade_id(_aid, sym, _today)
             oid = f"{_today}_{sym}_STOP_1"
             _state_store.insert_order(
                 oid, trade_id, _aid, _today, sym, "sell", "STOP",
@@ -1521,7 +1521,7 @@ async def _close_expired_positions(gw: Any, expired: list[dict]) -> dict:
                     _state_store.upsert_account(_aid, broker="qmt")
                 _state_store.insert_order(
                     f"{today_close}_{sym}_EXPIRED_CLOSE_1",
-                    f"{_aid}_{sym}_{today_close}", _aid, today_close, sym, "sell",
+                    _state_store.build_trade_id(_aid, sym, today_close), _aid, today_close, sym, "sell",
                     "EXPIRED_CLOSE", float(qty), float(price), state="SUBMITTED")
             except Exception:
                 logger.exception("insert_order(EXPIRED_CLOSE) 失败 symbol=%s（告警人工复核）", sym)
@@ -1951,7 +1951,7 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
 
     from trading.compute.types import OrderRequest
     _aid = _resolve_account_id()
-    _tid = f"{_aid}_{symbol}_{today}"
+    _tid = _state_store.build_trade_id(_aid, symbol, today)
 
     # 已成交总量：OPEN 行 filled_qty（order 事件累计）优先，入参兜底
     total_filled = float(filled_int)
@@ -3123,7 +3123,7 @@ class TradingEngine:
         # C-6 V2：TP1 幂等 key（trade_date 口径）与账本 account/trade_id 同源计算一次。
         today_tp = clock.today()
         _account_id = _resolve_account_id()
-        _trade_id = f"{_account_id}_{symbol}_{today_tp}"
+        _trade_id = _state_store.build_trade_id(_account_id, symbol, today_tp)
 
         # ── d. 成交账本写入（真相源，最先做——先落账再挂止盈/落日志，防 crash 窗口账账不符）──
         # state-store-redesign §4.2 + W3.1（gateway-ssot-hardening）：

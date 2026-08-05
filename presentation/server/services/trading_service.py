@@ -561,7 +561,13 @@ def _write_submit_trade_event(
     """
     from trading import state_store, clock  # lazy import：避免 server 启动期 import 副作用
     aid = _resolve_account_id()
-    trade_id = state_store.build_trade_id(aid, order.symbol, clock.today().replace("-", ""))
+    # date 统一带横线（YYYY-MM-DD，与 clock.today()/next_trading_day 返回一致）—— Fix1 rework：
+    # 原传 ``.replace('-', '')``（无横线 20260805）与 engine（带横线 2026-08-05）不同 trade_id，
+    # UNIQUE(account_id, trade_id, action) 不去重，A1 断点-1 双写幂等失效（server-manual 与
+    # engine pre_open 同 symbol+date 各写一行 ORDERED 共存）。此处去掉 replace 恢复同构。
+    # 注：server-manual 用当日 clock.today()，engine pre_open 用 next_trading_day（T+1 计划日），
+    # 日期语义由调用方负责；build_trade_id 只管格式统一。
+    trade_id = state_store.build_trade_id(aid, order.symbol, clock.today())
     meta_parts = [f"reason={meta_reason}"] if meta_reason else []
     meta_parts.append(f"kind={meta_kind}")
     if meta_direction is not None:

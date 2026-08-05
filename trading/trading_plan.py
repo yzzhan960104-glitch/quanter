@@ -116,7 +116,8 @@ def confirm_plan(date: str) -> bool:
             sym = (o.get("order") or {}).get("symbol")
             if not sym:
                 continue
-            trade_id = f"{account_id}_{sym}_{date}"  # 与 eod_plan/_pre_open_impl 同口径
+            # trade_id 单点：state_store.build_trade_id（与 eod_plan/_pre_open_impl/veto 同口径）
+            trade_id = state_store.build_trade_id(account_id, sym, date)
             # veto 保护：最新 action=VETOED 不覆盖（人审否决不被机器确认推翻）
             if state_store.get_latest_action(trade_id) != "VETOED":
                 state_store.insert_trade_event(account_id, trade_id, sym, "CONFIRMED")

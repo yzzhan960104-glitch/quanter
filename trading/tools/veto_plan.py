@@ -63,10 +63,11 @@ def _ensure_account(account_id: str) -> None:
 def _veto_symbol_in_db(account_id: str, symbol: str, date: str) -> None:
     """DB trade_event(VETOED) 真相源写入（幂等 UNIQUE，重复不报错）。
 
-    trade_id 口径 ``f"{account_id}_{symbol}_{date}"`` —— 与 _pre_open_impl:867 /
-    eod_plan:632 完全一致，否则 get_latest_action(trade_id) 查不到防线失效。
+    trade_id 口径 ``state_store.build_trade_id(account_id, symbol, date)`` —— 与
+    _pre_open_impl / eod_plan / trading_plan.confirm_plan 完全一致，否则
+    get_latest_action(trade_id) 查不到防线失效。Fix1 rework：迁移 build_trade_id 单点。
     """
-    trade_id = f"{account_id}_{symbol}_{date}"
+    trade_id = state_store.build_trade_id(account_id, symbol, date)
     state_store.insert_trade_event(account_id, trade_id, symbol, "VETOED")
 
 
