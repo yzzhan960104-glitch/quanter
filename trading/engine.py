@@ -315,20 +315,28 @@ def _load_df_upto(lake, symbol: str, date: str):
 
 
 # ============================================================================
-# plan Task 5（P0-5 cooldown 信号去重）：扫最近 cooldown 日 plan formed_at 标的集
+# plan Task 5（P0-5 cooldown 信号去重 · SSoT C2b）：扫最近 cooldown 自然日
+# trade_event SIGNAL.formed_at 标的集（原扫 plan_*.json formed_at，C2b 切 DB）。
 # ============================================================================
 def _load_recent_plan_symbols(days_back: int, today: str) -> set[str]:
-    """扫 logs/trading_plans/plan_*.json 最近 N 自然日（含 today）含 formed_at 的 symbol 集。
+    """扫最近 days_back 自然日（含 today）trade_event SIGNAL 的 symbol 集（按 meta.formed_at）。
 
-    物理意图（plan Task 5 · 对齐缺口 P0-5）：
-        scan_live 无跨日去重，同形态被持续突破会连续多日触发信号 → 实盘连续挂单超额成交。
-        spec §4.5：_eod scan 后查最近 cooldown 日 plan formed_at，同标的丢弃。
+    物理意图（plan Task 5 · SSoT C2b）：scan_live 无跨日去重，同形态被持续突破会连续多日
+        触发信号 → 实盘连续挂单超额成交。spec §4.5：_eod scan 后查最近 cooldown 日 SIGNAL
+        formed_at 标的集，同标的丢弃。C2b 切换真相源：plan_*.json formed_at（C2b 前）→
+        trade_event SIGNAL.meta.formed_at（C2b 后，SSoT 红线：DB 是唯一真相源）。
 
-    Why 用 formed_at 而非 order.symbol：
-        formed_at（Task 2 落盘）= 信号突破日，是「该标的最近一次被识别为信号」的真实时间锚点；
-        order.symbol 仅在「该标的进了 plan」时存在，但形成的信号可能被 max_wait 过滤掉未进 plan
-        ——用 formed_at 才能覆盖所有「被识别为信号」的标的（无论是否最终挂单）。
-        老 plan（Task 2 前，无 formed_at）兜底用 order.symbol（粗近似）。
+    Why formed_at 是 cooldown 锚点（非 timestamp / 非 plan_date）：
+        formed_at（信号突破日 T）=「该标的最近一次被识别为信号」的真实时间锚点；
+        timestamp（clock.now 写入日）= T 日盘后（实际写入），跨日漂移会污染窗口；
+        plan_date（T+1 计划生效日）晚一日，T+1 才生效的标的会被错算入 T 的窗口。
+        唯一正确锚点 = formed_at。
+
+    **致命日期轴·formed_at 时间戳坑（红线）**：
+        meta.formed_at 落盘格式 = str(pd.Timestamp) = ``"2026-08-03 00:00:00"``（带时间戳，
+        method_v0.py:268 ``W.index[-1]`` → plan.py:158 ``str(s.formed_at)``），非纯日期。
+        list_signal_symbols_by_formed_at 内部用 ``substr(json_extract(meta,'$.formed_at'),1,10)``
+        取前 10 字符匹配纯日期 IN 列表（数学验证见 state_store.list_signal_symbols_by_formed_at）。
 
     Why 自然日回溯而非交易日：
         cooldown 参数（exec_cfg["cooldown"]）本身是【交易日】单位（颈线法 EXEC_DEFAULTS），
@@ -341,39 +349,21 @@ def _load_recent_plan_symbols(days_back: int, today: str) -> set[str]:
         today:     YYYY-MM-DD（_eod 调用时传 clock.today()）。
 
     Returns:
-        最近 days_back 自然日 plan 含 formed_at 的 symbol 集；plan 损坏/无 plan 返空集（保守不误杀）。
+        最近 days_back 自然日发过 SIGNAL 的 symbol 集；DB 异常返空集
+        （保守不去重——可能重复发信号，但比 cooldown 误杀或崩盘好；logger.exception 留痕）。
     """
-    import json as _json
     from datetime import datetime as _dt, timedelta as _td
-    from pathlib import Path as _Path
-    syms: set[str] = set()
+    from trading import state_store
+    today_dt = _dt.strptime(today, "%Y-%m-%d")
+    # 回溯窗口：[today - days_back + 1, today]（含 today）→ 纯日期列表传 IN 参数化
+    dates = [(today_dt - _td(days=i)).strftime("%Y-%m-%d") for i in range(days_back)]
     try:
-        plan_dir = _Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
-        if not plan_dir.exists():
-            return syms
-        today_dt = _dt.strptime(today, "%Y-%m-%d")
-        # 回溯窗口：[today - days_back + 1, today]（含 today）
-        for i in range(days_back):
-            d = (today_dt - _td(days=i)).strftime("%Y-%m-%d")
-            p = plan_dir / f"plan_{d}.json"
-            if not p.exists():
-                continue
-            try:
-                plan = _json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                # 单 plan 损坏不影响其他 plan 扫描（保守继续，不抛）
-                continue
-            for o in plan.get("orders", []):
-                # 优先 formed_at（真实信号突破日）；老 plan 无 formed_at 兜底用 order.symbol
-                if o.get("formed_at") or (o.get("order") or {}).get("symbol"):
-                    sym = (o.get("order") or {}).get("symbol")
-                    if sym:
-                        syms.add(sym)
+        return state_store.list_signal_symbols_by_formed_at(dates)
     except Exception:
-        # 整体异常（IO/权限）返空集，保守不误杀（让所有新信号都通过，由人审闸兜底）
-        logger.exception("_load_recent_plan_symbols 异常返空集（cooldown 不去重）")
+        # DB 异常（连接/损坏/锁）返空集：保守不去重（让所有新信号通过，由人审闸兜底），
+        # 比 cooldown 误杀或 engine 崩盘好。logger.exception 留痕供运维定位。
+        logger.exception("_load_recent_plan_symbols 读 DB 失败返空集（cooldown 不去重）")
         return set()
-    return syms
 
 
 def _resolve_cooldown_days(experiments: list) -> int:

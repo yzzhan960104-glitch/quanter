@@ -1020,6 +1020,54 @@ def count_signals_by_plan_date(plan_date: str, *, db_path: str | None = None) ->
     return int(row[0]) if row else 0
 
 
+def list_signal_symbols_by_formed_at(dates: list[str], *,
+                                     db_path: str | None = None) -> set[str]:
+    """读 formed_at 落在给定自然日列表内的 SIGNAL 标的集（C2b cooldown 锚点查询）。
+
+    物理意图（SSoT C2b）：engine._load_recent_plan_symbols 不再扫 plan_*.json，改读
+    trade_event SIGNAL 行的 meta.formed_at（信号突破日 T）做 cooldown 跨日去重——
+    cooldown 锚点是 formed_at（T 日信号突破）而非 timestamp（写入日 T 盘后）也非
+    plan_date（T+1 计划生效日），用错锚点会把 T+1 才生效的标的算入 T 的 cooldown 窗口。
+
+    **致命日期轴·formed_at 时间戳坑（红线）**：
+        meta.formed_at 来源 = str(pd.Timestamp)（method_v0.py:268 ``W.index[-1]`` →
+        plan.py:158 ``str(s.formed_at)``），落盘格式 = ``"2026-08-03 00:00:00"``（带时间戳），
+        **非纯日期 "2026-08-03"**。若直接 ``json_extract(meta,'$.formed_at') IN (纯日期列表)``
+        恒空（"2026-08-03 00:00:00" != "2026-08-03"）——同款查询轴坑（cf. count_signals_by_plan_date
+        substr(trade_id,-10) 坑）。
+        故必须 ``substr(json_extract(meta,'$.formed_at'),1,10)`` 取前 10 字符（YYYY-MM-DD）匹配。
+
+    数学验证（substr(1,10)）：
+        - formed_at="2026-08-03 00:00:00" → substr(1,10)="2026-08-03" ✓
+        - dates=["2026-08-03","2026-08-04","2026-08-05"] → "2026-08-03" IN (...) 命中 ✓
+        - 漏 substr：json_extract="2026-08-03 00:00:00" ∉ 纯日期列表 → 恒空（隐藏坑）。
+
+    SQL 注入防护：IN 列表用 ``?, ?, ...`` 占位符参数化（非字符串拼接），dates 元素经 SQLite
+    绑定参数类型安全。空列表返空集（不构造空 IN（）——SQL 语法错）。
+
+    去重：SELECT DISTINCT symbol（同 symbol 同日多 SIGNAL 由 UNIQUE(account_id,trade_id,action)
+    在 build_trade_id 单点口径下天然防重；DISTINCT 保守取「该日是否发过此标的」语义对齐）。
+
+    Args:
+        dates: 纯日期列表（YYYY-MM-DD，engine._load_recent_plan_symbols 算最近 N 自然日传入）。
+    Returns:
+        标的集；dates 为空返空集（短路，避免空 IN SQL 语法错）。
+    """
+    if not dates:
+        return set()
+    db_path = db_path or _DEFAULT_DB
+    # IN 参数化：构造 len(dates) 个占位符（?,?,...,?），values 经绑定传入防 SQL 注入。
+    placeholders = ",".join("?" * len(dates))
+    sql = (
+        "SELECT DISTINCT symbol FROM trade_event "
+        "WHERE action='SIGNAL' "
+        f"AND substr(json_extract(meta, '$.formed_at'), 1, 10) IN ({placeholders})"
+    )
+    with _connect(db_path) as con:
+        rows = con.execute(sql, list(dates)).fetchall()
+    return {r[0] for r in rows}
+
+
 # ============================= C-2 S1：data_ready 数据就绪信号 =============================
 
 def upsert_data_ready(date: str, dataset: str, *, ok: bool, melted: bool,

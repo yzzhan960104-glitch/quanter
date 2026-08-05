@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 from datetime import datetime
 
 import pandas as pd
@@ -264,21 +265,70 @@ def test_load_df_upto_no_lookahead():
 
 
 # ============================================================================
-# 5. Task 5（P0-5 cooldown）：_eod scan 后查最近 cooldown 日 plan formed_at 同标的丢弃
+# 5. Task 5（P0-5 cooldown · SSoT C2b）：_eod scan 后按 trade_event SIGNAL.formed_at
+#    查最近 cooldown 自然日已发信号标的集，同标的丢弃（防连续日超额成交）。
+#    切换：原扫 plan_*.json formed_at（C2b 前）→ 现 substr(json_extract(meta,'$.formed_at'),1,10)
+#    IN (最近 N 自然日) 查 DB（C2b）。致命日期轴：meta.formed_at = str(pd.Timestamp) =
+#    "2026-08-03 00:00:00"（带时间戳，method_v0.py:268 W.index[-1] → plan.py:158 str(s.formed_at)），
+#    必须 substr(1,10) 取前 10 字符（YYYY-MM-DD）匹配纯日期 IN 列表，否则恒空。
 # ============================================================================
-def test_eod_cooldown_dedup_recent_signal_dropped(monkeypatch, tmp_path):
-    """同标的最近 cooldown 日 plan 已含 formed_at → 新信号丢弃；超 cooldown 日 → 保留。
 
-    物理意图（plan Task 5 · 对齐缺口 P0-5）：
-        scan_live 无去重时，同形态在多日窗口内连续触发（颈线被持续突破），实盘会
-        连续挂单超额成交。spec §4.5：_eod scan 后查最近 cooldown 日 plan，同标的丢弃。
+def test_load_recent_plan_symbols_by_formed_at(tmp_db):
+    """_load_recent_plan_symbols 按 meta.formed_at 查 DB（C2b 单测，验证 substr(1,10) 红线）。
 
-    场景：
-      - 最近 3 日内 plan 含 300001.SZ formed_at → cooldown=5 内新信号丢弃；
-      - 6 日前 plan 含 300001.SZ → 超过 cooldown=5 保留。
+    红线验证：formed_at 用**生产格式 "2026-08-03 00:00:00"**（带时间戳，非纯日期）。
+    若查询漏 substr(1,10) 直接 json_extract IN ('2026-08-03') 恒空 → 测试红；
+    substr(1,10)="2026-08-03" IN ('2026-08-03','2026-08-04','2026-08-05') 命中 → 绿。
+    纯日期测试无法暴露此坑（恰是 brief 反复强调的红线）。
     """
+    import json
+    from trading import state_store, engine
+    # 插一行 SIGNAL，meta.formed_at 用生产格式（带时间戳），plan_date=T+1
+    state_store.insert_trade_event(
+        "ACC_TEST",
+        state_store.build_trade_id("ACC_TEST", "A.SH", "2026-08-05"),
+        "A.SH", "SIGNAL",
+        meta=json.dumps({"formed_at": "2026-08-03 00:00:00", "plan_date": "2026-08-05"}),
+    )
+    # days_back=3, today=2026-08-05 → 窗口 [08-03, 08-04, 08-05]（含 08-03 formed_at）
+    syms = engine._load_recent_plan_symbols(days_back=3, today="2026-08-05")
+    assert "A.SH" in syms, f"formed_at=2026-08-03 00:00:00 应被 substr(1,10) 命中，实际 {syms}"
+
+    # 反向验证：days_back=2（窗口 08-04~08-05，不含 08-03）→ 不命中
+    syms_out = engine._load_recent_plan_symbols(days_back=2, today="2026-08-05")
+    assert "A.SH" not in syms_out, f"窗口外应漏，实际 {syms_out}"
+
+
+def test_load_recent_plan_symbols_db_error_degrades_empty(tmp_db, monkeypatch):
+    """DB 异常 → 返空集（保守 cooldown 不去重，比崩好）。"""
+    from trading import engine, state_store
+
+    def _boom(dates, *, db_path=None):
+        raise sqlite3.OperationalError("模拟 DB 损坏")
+
+    monkeypatch.setattr(state_store, "list_signal_symbols_by_formed_at", _boom)
+    # 不抛即降级（logger.exception 记录但返空集，让所有新信号通过）
+    syms = engine._load_recent_plan_symbols(days_back=3, today="2026-08-05")
+    assert syms == set()
+
+
+def test_eod_cooldown_dedup_recent_signal_dropped(monkeypatch, tmp_db):
+    """同标的最近 cooldown 日已发 SIGNAL（meta.formed_at 在窗口内）→ 新信号丢弃。
+
+    C2b 迁移：原构造 plan_*.json formed_at → 现插 trade_event SIGNAL 行（SSoT）。
+    物理意图不变：scan_live 无跨日去重，同形态在多日窗口内连续触发（颈线被持续突破），
+    实盘会连续挂单超额成交。spec §4.5：_eod scan 后查最近 cooldown 日 SIGNAL.formed_at，
+    同标的丢弃。
+
+    场景：2 日前插一行 300001.SZ SIGNAL（formed_at 在 cooldown=5+2=7 自然日窗口内）→
+          新信号 300001.SZ 丢弃，688001.SH 保留。
+    """
+    import json
+    import sqlite3  # noqa: F401  （test_load_recent_plan_symbols_db_error_degrades 用）
+    from datetime import datetime, timedelta
     from experiment.models import ActiveExperiment
     from strategies.neckline.signal import Signal
+    from trading import state_store
 
     fake_exp = ActiveExperiment(
         experiment_id="exp-cooldown", strategy_name="neckline",
@@ -313,26 +363,23 @@ def test_eod_cooldown_dedup_recent_signal_dropped(monkeypatch, tmp_path):
         index=pd.date_range("2026-01-01", periods=80, freq="D"),
     ))
 
-    # 构造历史 plan：3 日前 plan 含 300001.SZ formed_at（在 cooldown=5 内）
-    # 用 tmp_path 作为 TRADE_PLAN_DIR 隔离（fixture 已设）
-    from datetime import datetime, timedelta
+    # C2b：构造历史 SIGNAL（替代原 plan_*.json）。2 日前插 300001.SZ（cooldown=5+2 自然日窗口内）
+    # 固定 today 便于窗口断言（避免跨日漂移）；_eod 内部用 clock.today() 取今天。
     today = datetime.now().strftime("%Y-%m-%d")
     today_ts = datetime.strptime(today, "%Y-%m-%d")
     recent_date = (today_ts - timedelta(days=2)).strftime("%Y-%m-%d")  # 2 日前（cooldown=5 内）
     old_date = (today_ts - timedelta(days=10)).strftime("%Y-%m-%d")   # 10 日前（cooldown 外）
-    import json
-    from pathlib import Path
-    plan_dir = Path(os.environ["TRADE_PLAN_DIR"])
-    plan_dir.mkdir(parents=True, exist_ok=True)
-    # 最近 plan 含 300001.SZ（在 cooldown 内 → 新信号丢弃）
-    (plan_dir / f"plan_{recent_date}.json").write_text(json.dumps({
-        "date": recent_date, "confirmed": True,
-        "orders": [{
-            "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-            "stop_price": 9.0, "take_profit": 11.0,
-            "formed_at": recent_date,  # 关键：Task 2 落盘的 formed_at
-        }],
-    }), encoding="utf-8")
+
+    # 关键：formed_at 用生产格式（带时间戳），plan_date=T+1（build_trade_id 单点口径）
+    state_store.insert_trade_event(
+        "ACC_TEST",
+        state_store.build_trade_id("ACC_TEST", "300001.SZ", recent_date),
+        "300001.SZ", "SIGNAL",
+        meta=json.dumps({
+            "formed_at": f"{recent_date} 00:00:00",  # 生产格式（pd.Timestamp str 落盘）
+            "plan_date": recent_date,
+        }),
+    )
 
     captured = {}
 
@@ -350,10 +397,16 @@ def test_eod_cooldown_dedup_recent_signal_dropped(monkeypatch, tmp_path):
     assert "688001.SH" in syms
 
 
-def test_eod_cooldown_dedup_old_signal_kept(monkeypatch):
-    """超 cooldown 日的历史 plan 不影响新信号（旧 plan 标的可重出信号）。"""
+def test_eod_cooldown_dedup_old_signal_kept(monkeypatch, tmp_db):
+    """超 cooldown 日的历史 SIGNAL 不影响新信号（超窗口查不到，标的可重出信号）。
+
+    C2b 迁移：原 10 日前 plan_*.json → 现 10 日前 trade_event SIGNAL（窗口外查不到）。
+    """
+    import json
+    from datetime import datetime, timedelta
     from experiment.models import ActiveExperiment
     from strategies.neckline.signal import Signal
+    from trading import state_store
 
     fake_exp = ActiveExperiment(
         experiment_id="exp-cooldown2", strategy_name="neckline",
@@ -381,22 +434,15 @@ def test_eod_cooldown_dedup_old_signal_kept(monkeypatch):
         index=pd.date_range("2026-01-01", periods=80, freq="D"),
     ))
 
-    # 10 日前 plan（cooldown=5 外）含 300001.SZ → 新信号应保留
-    from datetime import datetime, timedelta
-    import json
-    from pathlib import Path
+    # 10 日前插 SIGNAL（cooldown=5+2=7 自然日窗口外 → 查不到 → 新信号保留）
     today = datetime.now().strftime("%Y-%m-%d")
     old_date = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=10)).strftime("%Y-%m-%d")
-    plan_dir = Path(os.environ["TRADE_PLAN_DIR"])
-    plan_dir.mkdir(parents=True, exist_ok=True)
-    (plan_dir / f"plan_{old_date}.json").write_text(json.dumps({
-        "date": old_date, "confirmed": True,
-        "orders": [{
-            "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-            "stop_price": 9.0, "take_profit": 11.0,
-            "formed_at": old_date,
-        }],
-    }), encoding="utf-8")
+    state_store.insert_trade_event(
+        "ACC_TEST",
+        state_store.build_trade_id("ACC_TEST", "300001.SZ", old_date),
+        "300001.SZ", "SIGNAL",
+        meta=json.dumps({"formed_at": f"{old_date} 00:00:00", "plan_date": old_date}),
+    )
 
     captured = {}
 
@@ -408,6 +454,6 @@ def test_eod_cooldown_dedup_old_signal_kept(monkeypatch):
 
     asyncio.run(engine.TradingEngine()._eod())
 
-    # 10 日前 plan 超 cooldown=5 → 300001.SZ 保留
+    # 10 日前 SIGNAL 超 cooldown=5 → 300001.SZ 保留
     syms = [s.symbol for s in captured["signals"]]
     assert "300001.SZ" in syms
