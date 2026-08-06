@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -30,6 +31,18 @@ ROOT = Path(__file__).resolve().parent.parent
 # 脚本直接运行时 sys.path[0]=ops/，需锚定项目根（与 ops/manage_ops_schtasks.py 同范式）
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# GBK 控制台打印中文会乱码（08-06 实测），强制 stdout/stderr UTF-8（同 audit_ssot 范式）。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except (AttributeError, OSError):
+    pass
+# 读 .env 拿 QMT_SESSION_ID 等配置（override=False：显式 shell env 优先）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env", override=False)
+except ImportError:
+    pass
 VENV_PY = ROOT / ".venv310" / "Scripts" / "python.exe"
 DEFAULT_PORT = 8000
 
@@ -61,10 +74,17 @@ def lock_held(session_id: str | None = None, lock_dir: str | None = None) -> boo
     path = single_instance._pid_path(sid, lock_dir)
     backup: str | None = None
     try:
+        # 静默探测：锁被持有是正常状态，不让 single_instance 的「拒绝重复连接」WARNING
+        # 每次 status 都刷屏（只读探测不应制造告警噪音）。
+        _lock_logger = logging.getLogger("trading.single_instance")
+        _was_disabled = _lock_logger.disabled
+        _lock_logger.disabled = True
         backup = path.read_text(encoding="utf-8") if path.exists() else None
         lock = single_instance.acquire(sid, lock_dir)
     except Exception:
         return True
+    finally:
+        _lock_logger.disabled = _was_disabled
     if lock is None:
         return True
     try:
@@ -81,7 +101,7 @@ def _git_rev() -> str | None:
     """当前 HEAD 短哈希（P0-3；失败返 None，不阻断）。"""
     try:
         out = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, errors="replace", timeout=5)
         return out.stdout.strip() or None
     except Exception:
         return None
@@ -154,7 +174,7 @@ def start(port: int = DEFAULT_PORT) -> int:
         print("引擎已在运行 pids=", st["engine_pids"])
         return 0
     rc = subprocess.run(["schtasks", "/Run", "/TN", "QuanterServer"],
-                        capture_output=True, text=True, timeout=15).returncode
+                        capture_output=True, text=True, errors="replace", timeout=15).returncode
     if rc == 0:
         print("已通过 schtasks /Run QuanterServer 拉起")
         return 0
@@ -181,7 +201,7 @@ def stop(port: int = DEFAULT_PORT, yes: bool = False) -> int:
         return 0
     for pid in pids:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True, errors="replace", timeout=30)
     return 0
 
 

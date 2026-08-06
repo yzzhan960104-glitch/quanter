@@ -35,6 +35,28 @@ def test_engine_processes_parses_powershell_json(monkeypatch):
     assert [p["pid"] for p in procs] == [11]
 
 
+def test_engine_processes_dedupes_venv_parent_child(monkeypatch):
+    """venv 启动器+base 子进程都匹配 -m trading → 只留树根（引擎数=1 不误报）。"""
+    monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
+        '[{"ProcessId": 11, "ParentProcessId": 0, "ExecutablePath": "x",'
+        ' "CommandLine": "F:\\\\quanter\\\\.venv310\\\\Scripts\\\\python.exe -m trading"},'
+        '{"ProcessId": 12, "ParentProcessId": 11, "ExecutablePath": "x",'
+        ' "CommandLine": "C:\\\\Python310\\\\python.exe -m trading"}]'))
+    procs = a._engine_processes()
+    assert [p["pid"] for p in procs] == [11]
+
+
+def test_engine_processes_fallback_uses_anchors_not_all_venv(monkeypatch):
+    """CIM 失败 → 只回退到端口/pid 文件锚点，绝不把所有 venv python 当引擎。"""
+    def _boom(*args, **kw):
+        raise RuntimeError("CIM unavailable")
+    monkeypatch.setattr(pt.subprocess, "run", _boom)
+    monkeypatch.setattr(pt, "port_holder_pid", lambda port=8000: 79788)
+    monkeypatch.setattr(pt, "pid_file_owner", lambda *a, **kw: 79788)
+    procs = a._engine_processes()
+    assert [p["pid"] for p in procs] == [79788]
+
+
 def test_client_process_ok_when_one(monkeypatch):
     """恰好 1 个 XtMiniQmt → None。"""
     monkeypatch.setattr(a, "_client_status",
