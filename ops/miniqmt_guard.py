@@ -92,7 +92,7 @@ def check_client() -> dict:
         # 引擎已连接（端口/锁存在）时，文件 mtime 不是假活判据——connect 返回码才是
         # 权威（W1.1）；health_guard 管重连。仅无引擎时才按陈旧报「假活」（防盘前/
         # 收盘 5 分钟 WARN 风暴——08-06 实测引擎连接中文件仍可能 >5min 未动）。
-        if process_topology.port_holder_pid(8000) is not None:
+        if process_topology.port_holder_pid() is not None:
             return {"status": "healthy",
                     "detail": f"引擎已连接，客户端可用（文件 mtime {age}s 非活跃期参考）",
                     "pid": st.get("pid")}
@@ -149,7 +149,7 @@ def ensure_engine(dry_run: bool = False) -> str | None:
     """
     if os.environ.get("QUANTER_GUARD_DISABLE_ENGINE") == "1":
         return "guard 引擎自愈已禁用（QUANTER_GUARD_DISABLE_ENGINE=1）"
-    if process_topology.port_holder_pid(8000) is not None:
+    if process_topology.port_holder_pid() is not None:
         return None  # 引擎在，不动作
     if dry_run:
         return "[dry-run] 引擎缺失，将 schtasks /Run QuanterServer"
@@ -160,19 +160,28 @@ def ensure_engine(dry_run: bool = False) -> str | None:
     return f"引擎缺失且拉起失败 rc={r.returncode}（{r.stdout.strip() or r.stderr.strip()}）"
 
 
+def _notify(level: str, msg: str) -> None:
+    """钉钉告警（复用 infra.notifier；失败软降级不阻断 guard 主链路）。"""
+    try:
+        from infra.notifier import NotificationManager, fire_and_forget
+        fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, level))
+    except Exception:
+        pass
+
+
 def run_once(dry_run: bool = False, alert: bool = True) -> dict:
     """跑一轮：确保客户端 + 陈旧告警 + 队列兜底。"""
     st = check_client()
     launched = ensure_client(dry_run=dry_run) if st["status"] == "missing" else None
     cleaned = cleanup_stale_queues(dry_run=dry_run)
     engine = ensure_engine(dry_run=dry_run)
-    if alert and st["status"] in ("missing", "stale") and not dry_run:
-        try:
-            from infra.notifier import NotificationManager, fire_and_forget
-            fire_and_forget(NotificationManager.get_default().notify_risk_event(
-                f"miniQMT guard: {st['detail']}", "WARN"))
-        except Exception:
-            pass
+    if alert and not dry_run:
+        # code-review：引擎自愈失败不能静默——看门狗对「引擎缺失且拉起失败」必须
+        # CRITICAL 告警（客户端 WARN 之外的第二条告警腿）。
+        if st["status"] in ("missing", "stale"):
+            _notify("WARN", f"miniQMT guard: {st['detail']}")
+        if engine and engine.startswith("引擎缺失且拉起失败"):
+            _notify("CRITICAL", f"miniQMT guard: {engine}")
     return {"client": st, "launched": launched, "cleaned": cleaned, "engine": engine}
 
 

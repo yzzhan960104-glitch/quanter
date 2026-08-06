@@ -88,3 +88,28 @@ async def test_try_rotate_session_skips_used_sid(monkeypatch, tmp_path):
     monkeypatch.setattr(gw, "_run_bootstrap", fake_bootstrap)
     await gw._try_rotate_session()
     assert used_sids == [123461]  # 123460 在用 → 跳过
+
+
+def test_read_runtime_session_matches_writer_keys(tmp_path, monkeypatch):
+    """code-review：读取侧键名必须与 _write_runtime_session 写入键一致（actual 非 session_id）。"""
+    import json
+    from ops import trading_supervisor as ts
+
+    p = tmp_path / "logs" / "engine_session.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"preferred": 123459, "actual": 123460,
+                             "rotated_at": "2026-08-06T12:00:00"}), encoding="utf-8")
+    monkeypatch.setattr(ts, "ROOT", tmp_path)
+    assert ts._read_runtime_session() == 123460
+
+
+def test_read_runtime_session_fallback_legacy_session_id(tmp_path, monkeypatch):
+    """兼容旧键 session_id（早期文件）也能读出。"""
+    import json
+    from ops import trading_supervisor as ts
+
+    p = tmp_path / "logs" / "engine_session.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"session_id": 123457}), encoding="utf-8")
+    monkeypatch.setattr(ts, "ROOT", tmp_path)
+    assert ts._read_runtime_session() == 123457

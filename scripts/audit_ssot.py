@@ -46,6 +46,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from ops.process_topology import (
     client_status as _client_status,
+    default_port as _default_port,
     engine_processes as _engine_processes,
     pid_file_owner as _pid_file_owner,
     port_holder_pid as _port_holder_pid,
@@ -198,8 +199,9 @@ def check_client_process():
     return None
 
 
-def check_port_owner_consistency(port: int = 8000):
+def check_port_owner_consistency(port: int | None = None):
     """端口属主 == pid 文件 PID（A6；不一致 = 旧链/非法链，与 supervisor 三合一同口径）。"""
+    port = _default_port() if port is None else port
     owner = _port_holder_pid(port)
     pidf = _pid_file_owner()
     if owner is not None and pidf is not None and owner != pidf:

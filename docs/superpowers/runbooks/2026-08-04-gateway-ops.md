@@ -76,6 +76,14 @@ W1.4 探测命中只 `sys.exit(1)` + CRITICAL 告警，**绝不自动 taskkill**
   `_port_holder_alive` docstring）；
 - 真根治是「预防嵌套」（统一 venv 入口 + schtasks 单一拉起方），非「事后清理」。
 
+### B2-4（G4）：miniQMT 客户端「自动登录」配置 SOP
+
+1. 打开 miniQMT 客户端，进入「系统设置 / 交易设置」。
+2. 勾选「记住账号/自动登录」（人工一次性配置；guard 不负责输密码）。
+3. 验证：重启 XtMiniQmt.exe 后无需输入密码即进入已登录态。
+4. guard 职责边界：进程不在 → 拉起 `XtMiniQmt.exe`；登录态/会话文件陈旧 → 钉钉 WARN；
+   **不代为输入密码、不误杀进程**。
+
 ---
 
 ## 2. .env 配置回正（spec #7）

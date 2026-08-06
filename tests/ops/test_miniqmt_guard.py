@@ -127,3 +127,14 @@ def test_ensure_engine_disabled_by_env(monkeypatch):
     monkeypatch.setattr(g.subprocess, "run", lambda *a, **kw: calls.append(a))
     msg = g.ensure_engine()
     assert "已禁用" in msg and calls == []
+
+
+def test_run_once_alerts_critical_when_engine_restart_fails(monkeypatch):
+    """code-review：引擎缺失且拉起失败 → CRITICAL 钉钉（看门狗不静默失语）。"""
+    monkeypatch.setattr(pt, "client_status", lambda: _fake_client("healthy"))
+    monkeypatch.setattr(g, "ensure_engine",
+                        lambda dry_run=False: "引擎缺失且拉起失败 rc=1（Access denied）")
+    fired = []
+    monkeypatch.setattr(g, "_notify", lambda level, msg: fired.append((level, msg)))
+    g.run_once(dry_run=False, alert=True)
+    assert any(level == "CRITICAL" and "拉起失败" in msg for level, msg in fired)

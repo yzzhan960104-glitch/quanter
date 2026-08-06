@@ -20,13 +20,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def default_port() -> int:
+    """引擎 API 端口单一来源（code-review：端口 8000 硬编码漂移修复）。
+
+    读 SERVER_PORT env（与 trading.__main__.run_server 同口径），缺省 8000；
+    guard/supervisor/audit 全部从这里取，不再各自写死 8000。
+    """
+    try:
+        return int(os.environ.get("SERVER_PORT", "8000"))
+    except (TypeError, ValueError):
+        return 8000
+
+
 def session_id(session_id: str | None = None) -> str:
     """锁/pid 文件键：显式 > env QMT_SESSION_ID > default（与 single_instance 同口径）。"""
     return session_id or os.environ.get("QMT_SESSION_ID", "default")
 
 
-def port_holder_pid(port: int = 8000) -> int | None:
+def port_holder_pid(port: int | None = None) -> int | None:
     """netstat -ano 解析 :port LISTENING 的 PID；无监听/解析失败返 None。"""
+    port = default_port() if port is None else port
     try:
         out = subprocess.run(["netstat", "-ano"], capture_output=True,
                              text=True, errors="replace", timeout=10).stdout
@@ -100,7 +113,7 @@ def engine_processes() -> list[dict]:
         # 降级：PowerShell/CIM 不可用时，用「端口属主 + pid 文件属主」两个引擎锚点——
         # 宁可漏报（返回空）也不把 bot/数据同步误判成引擎（stop 误杀风险高于漏报）。
         # 只保留存活锚点：陈旧 pid 文件（进程已死）不算引擎，否则 start 误判「已在运行」。
-        anchors = {x for x in (port_holder_pid(8000), pid_file_owner()) if x and _pid_alive(x)}
+        anchors = {x for x in (port_holder_pid(), pid_file_owner()) if x and _pid_alive(x)}
         return [{"pid": p, "ppid": 0, "exe": None, "cmdline": None} for p in anchors]
     # 去重：子进程的 ppid 落在引擎集合内 → 只留树根（launcher）。
     pids = {p["pid"] for p in out}

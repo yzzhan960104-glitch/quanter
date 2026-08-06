@@ -68,6 +68,16 @@
 - [ ] Step 2: runbook 增「客户端自动登录配置 SOP」（G4）
 - [ ] Step 3: Commit `feat(ops): B2-4 guard 5min 调度 + 自动登录 SOP`
 
+## Task B2-5: 引擎失踪自愈 + 失败告警（2026-08-06 code-review 后正式纳入）
+
+> 背景：08-06 引擎多次被外部终止（无 traceback），schtasks RestartOnFailure 因权限未注册；
+> guard 顺带检查引擎，失踪即 `schtasks /Run` 拉起（≤5min 自愈），拉起失败必须 CRITICAL 钉钉。
+> 已实现：commit 366d7c57（自愈）+ 告警腿（`run_once` CRITICAL）。
+
+- [x] Step 1: `ensure_engine`（8000 无监听 → schtasks /Run；env `QUANTER_GUARD_DISABLE_ENGINE=1` 维护期关闭）
+- [x] Step 2: 拉起失败 → `notify_risk_event(CRITICAL)`（不静默）
+- [ ] Step 3: 验收——引擎缺失 ≤5min 拉起；拉起失败钉钉 CRITICAL
+
 ---
 
 ## 验收

@@ -1083,7 +1083,7 @@ async def stop_loss_monitor(
     # ① 盘中时段判定（Task1）
     # C-6 V2：时点判定走 clock.now（单一时间源口子）。
     if not calendar.is_intraday_session(clock.now()):
-        return {"checked": 0, "reason": "非盘中时段（9:30-11:30 / 13:00-15:00），跳过止损监控"}
+        return {"checked": 0, "reason": "非盘中时段（09:15-15:00 连续，D2 修订后），跳过止损监控"}
 
     # ② 取网关与持仓
     if gw is None:
@@ -2020,7 +2020,7 @@ class TradingEngine:
         ⚠️ 触发器形态分轨（Task8）：
             pipeline_then_eod / pre_open / post_close：分钟粒度 CronTrigger（标准 5 字段）。
             stop_loss：**IntervalTrigger（秒级）**——cron 最小粒度是分钟，
-            30s 巡检必须用 interval。时段约束（9:30-11:30 / 13:00-15:00）下放给
+            30s 巡检必须用 interval。时段约束（09:15-15:00 连续，D2 修订）下放给
             ``stop_loss_monitor`` 内 ``calendar.is_intraday_session`` 兜底，
             非盘中由 monitor 直接 no-op（不在 trigger 层做时段过滤，避免 interval
             在午休 / 盘后空跑也只是命中 no-op，零副作用）。
@@ -2068,8 +2068,9 @@ class TradingEngine:
         # stop_loss：盘中每 N 秒巡检（海龟时间驱动移动止损 grace/step/floor 在此触发）。
         # ⚠️ Task8：cron `*/5 9-14`（5min）→ IntervalTrigger(seconds=30)。
         # Why interval：cron 最小粒度是分钟，30s 必须 interval。原 `9-14` 时段约束
-        # 下放给 ``stop_loss_monitor`` 内 ``calendar.is_intraday_session``（9:30-11:30 /
-        # 13:00-15:00）——trigger 全天每 30s 触发，非盘中由 monitor 内 no-op 兜底。
+        # 下放给 ``stop_loss_monitor`` 内 ``calendar.is_intraday_session``
+        # （09:15-15:00 连续，D2 修订）——trigger 全天每 30s 触发，非盘中由 monitor 内
+        # no-op 兜底。
         # ⚠️ ENGINE_STOPLOSS_INTERVAL_SECONDS：30s 目标，**spec §10 限频实测后定终值**——
         # 若 miniQMT 模拟盘连续 get_quotes+query_stock_positions 撞柜台限流，上调 60s。
         stoploss_seconds = int(os.getenv("ENGINE_STOPLOSS_INTERVAL_SECONDS", "30"))
@@ -2085,7 +2086,7 @@ class TradingEngine:
         )
         # M1 健康守护 job（Task 8）：interval 60s，统一网关自愈入口。
         # Why interval：与 _stoploss 同机制（cron 最小粒度分钟，秒级周期必须 IntervalTrigger）；
-        #   时段约束下放给 _health_guard 内 is_client_ready/_connected 判据——非盘中或已连
+    #   时段约束下放给 _health_guard 内 is_client_ready/_connected 判据——非盘中或已连
         #   时直接 no-op，全天跑零副作用。
         # Why 60s：connect 是重操作（start/connect/subscribe C++ 阻塞链），60s 周期既能在
         #   断线/启动失败后分钟级恢复 live，又不至于刷柜台（QMT connect 返 -1 session 占用

@@ -194,6 +194,7 @@ TradingEngine（唯一消费者）
 | 客户端进程在但没登录/文件陈旧；引擎无法自动重启客户端 | 独立 `ops/miniqmt_guard.py`：进程不在 → 拉起 XtMiniQmt.exe linkMini；进程在但 quoter 目录/登录文件陈旧 → WARN + 钉钉（不误杀、不假装活） |
 | 重启时机混乱 | 客户端配置启用「自动登录」（人工勾一次，之后重启免输入）；启动顺序强制 guard → 引擎就绪 gate |
 | session 队列残留 | 引擎 connect 前清 `down_queue_win_{sid}`（W1.3 已做）；guard 兜底清残留 |
+| 引擎进程被外部终止后无人拉起（08-06 三次复现） | guard 顺带检查引擎：8000 无监听 → `schtasks /Run` 拉起（≤5min 自愈）；拉起失败 → CRITICAL 钉钉；维护期 `QUANTER_GUARD_DISABLE_ENGINE=1` 关闭 |
 
 > D2 修订（2026-08-06 用户选项 1）：session 关保留但窗口放宽为 **09:15–15:00 连续**
 > （午休 11:30–13:00 不拦——柜台可接收排队单），隔夜/周末保护不变。

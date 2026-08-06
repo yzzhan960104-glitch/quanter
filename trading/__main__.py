@@ -371,6 +371,8 @@ def run_server() -> None:
         port=int(os.getenv("SERVER_PORT", "8000")),
         # 显式不传 reuse_port（spec §3.3 R6）：uvicorn 默认 SO_REUSEPORT=False，
         # 第二实例 bind 8000 即 WSAEADDRINUSE exit（端口单例防护）。
+        # QUANTER_DEV_NO_RELOAD=1：dev.py 默认关热重载（防 reloader 子进程僵尸，
+        # 见 ops/dev.py 注释）；仅 --reload 时才置 0。live 恒 reload=False（R6）。
         reload=(os.getenv("AUTO_TRADE_MODE", "dry_run") != "live"
                 and os.getenv("QUANTER_DEV_NO_RELOAD") != "1"),
     )

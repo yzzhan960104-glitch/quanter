@@ -101,3 +101,12 @@ def test_port_holder_parses_netstat(monkeypatch):
     monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
         "  TCP    0.0.0.0:8000    0.0.0.0:0    LISTENING       27592\n"))
     assert a._port_holder_pid() == 27592
+
+
+def test_default_port_honors_server_port_env(monkeypatch):
+    """端口单一来源：SERVER_PORT env 覆盖缺省 8000（防硬编码漂移）。"""
+    monkeypatch.setenv("SERVER_PORT", "9999")
+    assert pt.default_port() == 9999
+    monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
+        "  TCP    0.0.0.0:9999    0.0.0.0:0    LISTENING       111\n"))
+    assert pt.port_holder_pid() == 111

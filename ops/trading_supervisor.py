@@ -45,7 +45,6 @@ try:
 except ImportError:
     pass
 VENV_PY = ROOT / ".venv310" / "Scripts" / "python.exe"
-DEFAULT_PORT = 8000
 
 # Windows DETACHED 标志（与 presentation/server/main.py discovery 子进程同范式）：
 # CREATE_NEW_PROCESS_GROUP(0x200) → 独立进程组；DETACHED_PROCESS(0x8) → 无控制台。
@@ -55,12 +54,14 @@ _DETACHED_PROCESS = 0x00000008
 # code-review 修复：端口/进程/客户端探测抽到 ops/process_topology.py 共享
 # （trading_supervisor 与 audit_ssot 同源，防两处漂移）。
 from ops.process_topology import (
+    default_port,
     client_status as _client_status,
     engine_processes,
     pid_file_owner,
     port_holder_pid,
     session_id as _session_id,
 )
+DEFAULT_PORT = default_port()
 
 
 def lock_held(session_id: str | None = None, lock_dir: str | None = None) -> bool:
@@ -113,7 +114,12 @@ def _read_runtime_session() -> int | None:
     try:
         p = ROOT / "logs" / "engine_session.json"
         if p.exists():
-            return int(json.loads(p.read_text(encoding="utf-8")).get("session_id"))
+            data = json.loads(p.read_text(encoding="utf-8"))
+            # code-review 修复：broker 写键为 actual/preferred/rotated_at；
+            # 旧版误读 session_id → actual_sid 恒 None（L2 观测死字段）。
+            # 兼容回退 session_id：早期文件若存在旧键也能读出。
+            raw = data.get("actual", data.get("session_id"))
+            return int(raw) if raw is not None else None
     except Exception:
         pass
     return None
