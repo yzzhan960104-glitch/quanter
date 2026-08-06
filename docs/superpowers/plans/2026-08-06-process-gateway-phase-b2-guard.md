@@ -17,6 +17,11 @@
 
 ## 0. 裁定门（执行前必须确认）
 
+> **已裁定（2026-08-06 · 用户整体采纳默认）**：
+> G1=`QMT_CLIENT_EXE` env（缺省从 QMT_USERDATA_PATH 反推安装目录）；
+> G2=userdata 非空 + `down_queue_win_*` 存在 + mtime≤5min；
+> G3=独立 5min schtasks `QuanterMiniQmtGuard`；G4=人工勾「自动登录」一次（SOP 文档）。
+
 | # | 问题 | 默认建议 |
 |---|---|---|
 | G1 | XtMiniQmt.exe 绝对路径与启动参数（`linkMini`） | 从 QMT_USERDATA_PATH 反推安装目录或显式 env `QMT_CLIENT_EXE` |
