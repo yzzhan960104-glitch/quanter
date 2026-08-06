@@ -24,7 +24,7 @@
 调用面（ExecutionEngine 实际使用，Step1 审计结论·最小集）：
     - get_status() -> dict（同步）：返 {connected: bool, locked: bool, mode: str}，
       tick_pullback 判 locked/not-connected 跳过本轮断线保护；tick_exit 判 not-connected 跳过。
-    - submit_order(order, *, dry_run, confirm) -> dict（async）：
+    - submit_order(order, *, dry_run) -> dict（async）：
       过 risk_shield.check_order 10 关风控 + 网关真单；返
       {order_id, state, message}，state ∈ {FILLED, PARTIAL_FILLED, REJECTED, FAILED,
       SUBMITTED, DRY_RUN, ...}。ExecutionEngine 据 state 推进状态机（仅真实成交才 FILLED/CLOSED）。
@@ -63,7 +63,7 @@ class ExecutionExecutor(Protocol):
             - locked: 风控否决/emergency_halt 锁定（tick_pullback 据此停新开仓；
               tick_exit【不】因此跳过——离场是风险缩减须持续）；
             - mode: unavailable/disconnected/live/vetoed_by_risk。
-        submit_order(order, *, dry_run, confirm) -> dict（async）：
+        submit_order(order, *, dry_run) -> dict（async）：
             下单编排：预取行情 → check_order 10 关风控 → 真单/模拟/拒单 → 落流水。
             返回 {order_id, state, message}；非 dry_run 挡板命中 raise RuntimeError。
             state 语义：FILLED/PARTIAL_FILLED（真实成交）/ REJECTED/FAILED（废单）/

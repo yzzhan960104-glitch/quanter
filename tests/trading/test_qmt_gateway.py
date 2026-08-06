@@ -448,10 +448,11 @@ def test_connect_rotates_sid_after_two_minus_one(monkeypatch):
     monkeypatch.setattr(qmt_gateway, "_write_runtime_session",
                         lambda p, a: written.update(preferred=p, actual=a))
     gw = QmtExecutionGateway()
+    preferred = gw._session_id
     asyncio.run(gw.connect())
     assert gw._connected is True
-    assert gw._session_id == 123457       # 默认 preferred 123456 → +1 轮换
-    assert written == {"preferred": 123456, "actual": 123457}
+    assert gw._session_id == preferred + 1   # preferred → +1 轮换
+    assert written == {"preferred": preferred, "actual": preferred + 1}
     assert len(instances) == 3            # 首选 2 轮 + 轮换 1 次
 
 

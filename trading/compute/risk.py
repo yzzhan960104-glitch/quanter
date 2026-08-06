@@ -51,91 +51,31 @@ def check_order(
     order: OrderRequest,
     *,
     dry_run: bool,
-    allow_live: bool,
-    whitelist: set,
-    max_amount: float,
-    max_shares: float,
-    quote: Mapping[str, Any] | None,
     enforce_session: bool,
     is_locked: bool,
     connected: bool,
-    confirm: bool,
     in_session: bool = True,
 ) -> RiskDecision:
-    """10 关短路校验。任一关命中即返 RiskDecision(blocked=True, stage=<关卡名>)。
+    """A-2 短路校验（2026-08-06 裁定 D1-D3/D5 后仅剩 3 道闸）。
 
-    关卡顺序即优先级（短路）：
-      1 connection  断线/未连接          — 状态机边界，最高优先
+    被删闸（决策记录 Annotation 1 + 裁定）：
+      allow_live / confirm / whitelist / lot / max_amount / max_shares / high_low_limit
+      ——业务拦截阈值全部移除：A 股整手/涨跌停由柜台与交易所兜底，白名单前端同步放开（D3），
+      二次确认由计划确认闸（T-1 人审/自动确认）承担。
+    保留闸（链路正确性原语，D1/D2）：
+      1 connection  断线/未连接          — 状态机边界，最高优先（D1）
       2 dry_run     请求级模拟           — is_dry_run=True，非错误
-      3 allow_live  实盘总闸(env)        — 强制模拟
-      4 confirm     二次确认             — 防误触
-      5 whitelist   标的白名单
-      6 lot         A 股 100 整手契约
-      7 max_amount  单笔金额上限
-      8 max_shares  单笔股数上限
-      9 high/low_limit  涨跌停封板（quote 缺失则跳过）
-     10 session     A 股交易时段（enforce_session=True 时生效）
+      3 session     A 股交易时段（enforce_session=True 时生效；上午起点 09:15，A1 已修）
     """
-    # 关1：断线/连接（最高优先——断线时其他校验无意义）
+    # 闸1：断线/连接（最高优先——断线时其他校验无意义）
     if is_locked or not connected:
         return RiskDecision(True, "网关未连接或已锁定（断线保护）", "connection")
 
-    # 关2：dry_run（请求级，前端控制）—— 模拟语义，is_dry_run=True
+    # 闸2：dry_run（请求级，前端控制）—— 模拟语义，is_dry_run=True
     if dry_run:
         return RiskDecision(True, "dry_run 模拟（前端请求不真下单）", "dry_run", is_dry_run=True)
 
-    # 关3：实盘总闸（env QMT_ALLOW_LIVE_TRADE）
-    if not allow_live:
-        return RiskDecision(True, "实盘总闸 QMT_ALLOW_LIVE_TRADE=false，禁止真下单", "allow_live")
-
-    # 关4：二次确认
-    if not confirm:
-        return RiskDecision(True, "缺少二次确认 confirm=true", "confirm")
-
-    # 关5：标的白名单
-    if order.symbol not in whitelist:
-        return RiskDecision(True, f"标的 {order.symbol} 不在白名单", "whitelist")
-
-    # 关6：A 股 100 整手契约（qty<=0 或非 100 整数倍 → 拒）
-    if order.qty <= 0 or int(order.qty) % 100 != 0:
-        return RiskDecision(True, f"数量 {order.qty} 非 100 整数倍（A 股整手契约）", "lot")
-
-    # 关7：单笔金额上限（限价用 order.price，市价用 quote.last_price 估算）
-    ref_price = order.price
-    if ref_price is None and quote is not None:
-        ref_price = quote.get("last_price")
-    if ref_price is not None and order.qty * ref_price > max_amount:
-        return RiskDecision(
-            True,
-            f"单笔金额 {order.qty * ref_price:.2f} 超上限 {max_amount}",
-            "max_amount",
-        )
-
-    # 关8：单笔股数上限
-    if order.qty > max_shares:
-        return RiskDecision(True, f"单笔股数 {order.qty} 超上限 {max_shares}", "max_shares")
-
-    # 关9：涨跌停封板（quote 缺失 → 跳过，xtdata 不可用时的降级）
-    # #6 修复：按 side 区分（A 股涨跌停物理正确性）。
-    #   涨停(last≥high)：买盘封死 → 能卖不能买 → 仅 BUY 拦（买不进），SELL 放行。
-    #   跌停(last≤low)：卖盘封死 → 能买不能卖 → 仅 SELL 拦（卖不出），BUY 放行。
-    #   原实现不分 side：SELL 涨停被拦=止盈/止损 SELL 无法发出（错过离场=敞口失控，
-    #   本关最致命的实盘风险）；BUY 跌停被拦=错过建仓。蔡森 tick_exit 的止损/止盈/
-    #   时间止损全走 SELL，涨停时必须放行 SELL。stage 名沿用 high_limit/low_limit
-    #   不破前端/审计契约。
-    if quote is not None:
-        last = quote.get("last_price")
-        high = quote.get("high_limit")
-        low = quote.get("low_limit")
-        side = order.side.lower()
-        if side == "buy" and last is not None and high is not None and last >= high:
-            return RiskDecision(
-                True, f"{order.symbol} 涨停封板，BUY 无法成交（{last}≥{high}）", "high_limit")
-        if side == "sell" and last is not None and low is not None and last <= low:
-            return RiskDecision(
-                True, f"{order.symbol} 跌停封板，SELL 无法成交（{last}≤{low}）", "low_limit")
-
-    # 关10：A 股交易时段
+    # 闸3：A 股交易时段（enforce_session=True 时生效；D2 保留，09:15 起点 A1 已修）
     if enforce_session and not in_session:
         return RiskDecision(True, "非 A 股交易时段", "session")
 

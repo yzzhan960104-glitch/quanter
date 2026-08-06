@@ -27,7 +27,6 @@ from infra.notifier import NotificationManager, fire_and_forget
 from presentation.server.http.config import PROJECT_ROOT
 from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 broker.base 真身
 from trading import qmt_market_data
-from trading.dynamic_whitelist import get_effective_whitelist
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from trading.compute.risk import check_order  # Layer2 阶段6：直指 functional core 真身（risk_shield 垫片已删）
 
@@ -465,34 +464,6 @@ def emergency_halt() -> dict:
 # ============================================================================
 # Why 函数而非模块级常量：便于测试 monkeypatch 覆盖（直改函数返回值，无需 setenv），
 # 且 env 可在进程运行中被 reload，函数读取总能拿到最新值。
-def _allow_live() -> bool:
-    """实盘总闸 QMT_ALLOW_LIVE_TRADE（true 时才允许前端 dry_run=false 真下单）。"""
-    return os.getenv("QMT_ALLOW_LIVE_TRADE", "false").lower() == "true"
-
-
-def _whitelist() -> set:
-    """标的白名单（静态 env ∪ engine 动态注入）。
-
-    Why 改造前是纯 env 解析，现在委托 dynamic_whitelist.get_effective_whitelist()：
-    二期 engine 在 pre_open 把当日颈线法扫出的标的（创板/科创个股）临时注入白名单，
-    才能过 risk_shield 关5；盘后 post_close 清空。详见 trading/dynamic_whitelist.py。
-
-    跨进程语义：engine 与 server 是独立进程，_DYNAMIC 模块级全局只在 engine 进程内
-    有效——server（手动下单）进程内 _DYNAMIC 恒空，返回值 = 纯 env，与改造前完全等价
-    （向后兼容，前端手动下单语义不被 engine 内部状态污染）。
-    空配置 → 空集（一切标的被挡板拒）。
-    """
-    return get_effective_whitelist()
-
-
-def _max_amount() -> float:
-    return float(os.getenv("QMT_ORDER_MAX_AMOUNT", "1000"))
-
-
-def _max_shares() -> float:
-    return float(os.getenv("QMT_ORDER_MAX_SHARES", "100"))
-
-
 def _enforce_session() -> bool:
     return os.getenv("QMT_ENFORCE_SESSION", "true").lower() == "true"
 
@@ -613,48 +584,34 @@ def _write_submit_trade_event(
         logger.exception("submit_order trade_event 写失败 action=%s symbol=%s", action, order.symbol)
 
 
-async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
-                       whitelist: set | None = None) -> dict:
-    """下单业务编排：预取 quote → 风控挡板 → 真单/模拟/拒单 → 落审计事件。
+async def submit_order(order: OrderRequest, *, dry_run: bool) -> dict:
+    """下单业务编排：风控挡板（A-2 三闸）→ 真单/模拟/拒单 → 落审计事件。
 
     返回：
     - dry_run 命中：{"order_id":"", "state":"DRY_RUN", "message":<reason>}（不真下单）
     - 真单成功：{"order_id":<seq-str>, "state":<OrderState.name>, "message":<...>}
     挡板命中（非 dry_run）：raise RuntimeError(reason)（路由层转 409）
 
-    交易流水全覆盖（spec §6.3）：dry_run / BLOCKED / 真单 / 废单 / 撤单 均落 CSV。
+    交易流水全覆盖（spec §6.3）：dry_run / BLOCKED / 真单 / 废单 / 撤单 均落 trade_event。
 
-    ``whitelist`` 参数（C-2 scheduling-orchestration W1 物理隔离）：
-    - server 手动下单路径不传（默认 None）→ 走 ``_whitelist()`` = get_effective_whitelist()
-      （_DYNAMIC 恒空 = 纯 env，向后兼容不变）。
-    - engine 自动下单通道显式传 ``self._dynamic_whitelist | static_env_whitelist()``
-      （来自 engine 实例属性，不读模块全局 _DYNAMIC）——engine 与 server 合并进同进程后，
-      两端白名单靠参数显式隔离，不再共享模块级全局态。
+    A-2（2026-08-06 裁定 D1-D3/D5）：confirm/whitelist/quote 相关挡板已删除——confirm
+    由计划确认闸承担，白名单前端同步放开（D3），涨跌停/金额/股数由柜台与交易所兜底。
     """
     gw = get_gateway()
     if gw is None:
         raise RuntimeError("交易网关未装配（unavailable）")
 
-    # 1. 预取行情（涨跌停关 + 金额估算用）；失败返 None，挡板跳过涨跌停关
-    quote = await qmt_market_data.get_quote(order.symbol)
-
-    # 2. 风控挡板（10 关短路）
+    # 1. 风控挡板（A-2 三闸短路：connection / dry_run / session）
     decision = check_order(
         order,
         dry_run=dry_run,
-        allow_live=_allow_live(),
-        whitelist=whitelist if whitelist is not None else _whitelist(),
-        max_amount=_max_amount(),
-        max_shares=_max_shares(),
-        quote=quote,
         enforce_session=_enforce_session(),
         is_locked=bool(getattr(gw, "is_locked", False)),
         connected=bool(getattr(gw, "_connected", False)),
-        confirm=confirm,
         in_session=_in_a_share_session(),
     )
 
-    # 3. 命中处理：落 trade_event 审计事件 + 返回/抛错
+    # 2. 命中处理：落 trade_event 审计事件 + 返回/抛错
     # SSoT Phase A · Task A1：审计真相源从 CSV（record_live_trade）平移到 trade_event 表。
     # Why 平移：CSV 在重放/补推下重复 append（无 UNIQUE 约束），trade_event 表
     # UNIQUE(account_id, trade_id, action) 天然幂等，是审计事件的真相源。submit_order
@@ -675,7 +632,7 @@ async def submit_order(order: OrderRequest, *, dry_run: bool, confirm: bool,
         )
         raise RuntimeError(decision.reason)
 
-    # 4. 全过 → 真下单
+    # 3. 全过 → 真下单
     result: OrderResult = await gw.submit_order(order)
     # 真单审计落 trade_event（spec §6.3 可追溯性契约：真单/废单/撤单均落审计）。
     # Why 此前缺失：原实现拿到 OrderResult 直接 return，真实成交在审计流水中完全缺失，

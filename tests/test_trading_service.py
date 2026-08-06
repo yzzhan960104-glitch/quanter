@@ -153,7 +153,7 @@ def test_submit_order_dry_run_records_and_returns(tmp_db, monkeypatch):
     monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
-    r = asyncio.run(trading_service.submit_order(order, dry_run=True, confirm=True))
+    r = asyncio.run(trading_service.submit_order(order, dry_run=True))
     assert r["state"] == "DRY_RUN"
     assert gw.submit_calls == []  # 未真下单
     # 真相源断言：trade_event 落 DRY_RUN 行
@@ -183,7 +183,7 @@ def test_submit_order_dry_run_meta_kind_is_submit(tmp_db, monkeypatch):
     monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
-    asyncio.run(trading_service.submit_order(order, dry_run=True, confirm=True))
+    asyncio.run(trading_service.submit_order(order, dry_run=True))
     # 断言 trade_event DRY_RUN 行的 meta 含 kind=submit（旧代码默认 fill → FAIL）
     con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
     ev = con.execute("SELECT * FROM trade_event WHERE action='DRY_RUN'").fetchone()
@@ -194,7 +194,7 @@ def test_submit_order_dry_run_meta_kind_is_submit(tmp_db, monkeypatch):
 
 
 def test_submit_order_blocked_raises(tmp_db, monkeypatch):
-    """挡板命中（白名单外）→ raise RuntimeError + 落 BLOCKED trade_event 事件。
+    """挡板命中（session 关，A-2 后三闸之一）→ raise RuntimeError + 落 BLOCKED 事件。
 
     SSoT Phase A · Task A1 平移后：BLOCKED 审计走 trade_event 表真相源（UNIQUE 幂等），
     不再依赖 CSV record_live_trade。
@@ -206,19 +206,17 @@ def test_submit_order_blocked_raises(tmp_db, monkeypatch):
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
-    # env helper 用 raising=False：实现前属性可能不存在，不报错直接创建
-    monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
-    monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
+    monkeypatch.setattr(trading_service, "_in_a_share_session", lambda now=None: False)
 
     order = OrderRequest(symbol="000001.SZ", qty=100, side="buy", price=5.0)
     with pytest.raises(RuntimeError):
-        asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
-    # 真相源断言：trade_event 落 BLOCKED 行 + meta 含白名单拒因
+        asyncio.run(trading_service.submit_order(order, dry_run=False))
+    # 真相源断言：trade_event 落 BLOCKED 行 + meta 含 session 拒因
     con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
     hit = con.execute("SELECT * FROM trade_event WHERE action='BLOCKED'").fetchone()
     assert hit is not None, "挡板命中未落 trade_event(BLOCKED) 事件"
     assert hit["symbol"] == "000001.SZ"
-    assert "whitelist" in (hit["meta"] or "").lower()  # meta 含白名单拒因
+    assert "session" in (hit["meta"] or "").lower()  # meta 含 session 拒因
     con.close()
 
 
@@ -234,14 +232,10 @@ def test_submit_order_live_calls_gateway(tmp_db, monkeypatch):
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
-    monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
-    monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
-    monkeypatch.setattr(trading_service, "_max_amount", lambda: 10000.0, raising=False)
-    monkeypatch.setattr(trading_service, "_max_shares", lambda: 1000, raising=False)
     monkeypatch.setattr(trading_service, "_enforce_session", lambda: False, raising=False)
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
-    r = asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
+    r = asyncio.run(trading_service.submit_order(order, dry_run=False))
     assert r["order_id"] == "100"
     assert gw.submit_calls and gw.submit_calls[0].symbol == "510300.SH"
 
@@ -261,14 +255,10 @@ def test_submit_order_live_records_audit(tmp_db, monkeypatch):
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
-    monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
-    monkeypatch.setattr(trading_service, "_whitelist", lambda: {"510300.SH"}, raising=False)
-    monkeypatch.setattr(trading_service, "_max_amount", lambda: 10000.0, raising=False)
-    monkeypatch.setattr(trading_service, "_max_shares", lambda: 1000, raising=False)
     monkeypatch.setattr(trading_service, "_enforce_session", lambda: False, raising=False)
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
-    asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
+    asyncio.run(trading_service.submit_order(order, dry_run=False))
 
     # 真相源断言：真单成功必须落 trade_event(ORDERED) 事件（断点-1 双写幂等设计：
     # engine pre_open 与 server-manual 共用 action=ORDERED，UNIQUE 自然跳过双写；
@@ -302,7 +292,7 @@ def test_submit_order_disconnected_blocks(tmp_db, monkeypatch):
 
     order = OrderRequest(symbol="510300.SH", qty=100, side="buy", price=5.0)
     with pytest.raises(RuntimeError, match="连接"):
-        asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
+        asyncio.run(trading_service.submit_order(order, dry_run=False))
     # 真相源断言：connection 关 BLOCKED 落事件
     con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
     ev = con.execute(
@@ -324,21 +314,20 @@ def test_submit_order_blocked_writes_trade_event(tmp_db, monkeypatch):
 
     # 单点 account_id 注入（与 engine._resolve_account_id 同口径的 server 侧实现）
     monkeypatch.setattr(trading_service, "_resolve_account_id", lambda: "ACC_TEST")
-    # 白名单仅放行 600000.SH（600001.SH 将被拒）
-    monkeypatch.setattr(trading_service, "_whitelist", lambda: {"600000.SH"}, raising=False)
-    monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
+    # session 关拦截（A-2 三闸之一）
+    monkeypatch.setattr(trading_service, "_in_a_share_session", lambda now=None: False)
     monkeypatch.setattr(trading_service, "get_gateway", lambda: _fake_gw_connected())
 
     order = OrderRequest(symbol="600001.SH", qty=100, side="buy", price=10.0)
     import pytest as _pytest
     with _pytest.raises(RuntimeError):
-        asyncio.run(trading_service.submit_order(order, dry_run=False, confirm=True))
+        asyncio.run(trading_service.submit_order(order, dry_run=False))
 
     con = sqlite3.connect(tmp_db); con.row_factory = sqlite3.Row
     hit = con.execute("SELECT symbol, meta, qty, price FROM trade_event WHERE action='BLOCKED'").fetchone()
     assert hit is not None
     assert hit["symbol"] == "600001.SH"
-    assert "whitelist" in (hit["meta"] or "").lower()  # meta 含白名单拒因
+    assert "session" in (hit["meta"] or "").lower()  # meta 含 session 拒因
     assert hit["qty"] == 100.0
     assert hit["price"] == 10.0
     con.close()

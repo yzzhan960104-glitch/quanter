@@ -57,6 +57,8 @@ def test_run_server_calls_uvicorn_port_8000(monkeypatch):
     monkeypatch.setattr("uvicorn.run", _fake_run)
     monkeypatch.setenv("SERVER_PORT", "8000")
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    # 真实引擎可能正占 8000（08-06 实测）：本测试只验 uvicorn 调用，不验单实例
+    monkeypatch.setattr(main_mod, "_assert_single_instance", lambda port: None)
     main_mod.run_server()
     assert captured["app"] == "presentation.server.main:app"
     assert captured["port"] == 8000
@@ -72,6 +74,7 @@ def test_run_server_live_no_reload(monkeypatch):
     captured = {}
     monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    monkeypatch.setattr(main_mod, "_assert_single_instance", lambda port: None)
     main_mod.run_server()
     assert captured.get("reload") is False, "live 模式必须 reload=False（防子进程抢 session）"
 
@@ -81,6 +84,7 @@ def test_run_server_dry_run_reload_true(monkeypatch):
     captured = {}
     monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    monkeypatch.setattr(main_mod, "_assert_single_instance", lambda port: None)
     main_mod.run_server()
     assert captured.get("reload") is True
 

@@ -154,7 +154,8 @@ async def submit_order_endpoint(body: SubmitOrderBody) -> dict:
     """
     order = OrderRequest(symbol=body.symbol, qty=body.qty, side=body.side, price=body.price)
     try:
-        return await svc_submit_order(order, dry_run=body.dry_run, confirm=body.confirm)
+        # A-2：confirm 挡板已删（由计划确认闸承担），路由不再透传 confirm
+        return await svc_submit_order(order, dry_run=body.dry_run)
     except RuntimeError as e:
         # 挡板命中（非 dry_run）→ 409
         raise HTTPException(409, str(e))

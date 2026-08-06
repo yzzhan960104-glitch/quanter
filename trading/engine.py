@@ -474,8 +474,8 @@ def get_gateway():
     return _svc_get_gw()
 
 
-async def _submit(order, *, confirm: bool = True, whitelist: set | None = None) -> dict:
-    """下单分流（dry_run 据 _mode）。
+async def _submit(order) -> dict:
+    """下单分流（dry_run 据 _mode；A-2 后无 confirm/whitelist 参数）。
 
     透传 trading_service.submit_order，其契约：
     - dry_run 命中 → 返 {"order_id":"", "state":"DRY_RUN", "message":<reason>}（不真下单）
@@ -485,33 +485,11 @@ async def _submit(order, *, confirm: bool = True, whitelist: set | None = None) 
     Why dry_run 用 _mode() 而非参数注入：pre_open/stop_loss 都是「影子即整批不真单」
     语义，_mode 是进程级开关，逐单传参反而引入「单只切 live」的误操作面。
 
-    Why confirm 默认 True（I2）：引擎是**自动批量下单通道**，盘中无人工在场做二次确认；
-    风控由 risk_shield 10 关挡板（资金/涨跌停/白名单/熔断 lock_down）+ T-1 确认闸
-    （pre_open 必须研究员人工 confirmed=True 才挂单）+ 影子模式前置（≥5 天影子观测）
-    三层保障，**而非** confirm 开关——confirm 是 server 手动下单路径的防误触开关，
-    引擎通道若走 confirm=False 会导致批量挂单逐单等待人工点确认，盘中不可行。
-
-    whitelist 物理隔离（C-2 scheduling-orchestration W1）：
-        调用方（pre_open/stop_loss_monitor）均不显式传 whitelist（默认 None），
-        由本函数从模块级 ``_ACTIVE_ENGINE`` 单例取 engine 实例的 ``_dynamic_whitelist``
-        并拼静态 env（``self._dynamic_whitelist | static_env_whitelist()``），显式透传
-        给 svc_submit。这样 engine 自动下单通道的白名单与模块级 ``_DYNAMIC`` 全局物理解耦——
-        engine 与 server 合并进同进程后，server 路径的 submit_order（不传 whitelist）仍走
-        ``_whitelist() = get_effective_whitelist()``（_DYNAMIC 恒空 = 纯 env），向后兼容不变。
-        ``_ACTIVE_ENGINE is None`` 仅在未构造 TradingEngine 时发生（理论上不会，__init__ 必置），
-        此防御性分支回退到旧路径（读 get_effective_whitelist），保证 ``python -m trading``
-        单进程语义不变。
+    A-2（2026-08-06 裁定 D3）：confirm 由计划确认闸承担（pre_open 必须 confirmed=True），
+    白名单挡板已删（前端同步放开）；此处不再拼 whitelist/confirm，直接透传 dry_run。
     """
     from presentation.server.services.trading_service import submit_order as svc_submit
-    from trading.dynamic_whitelist import get_effective_whitelist, static_env_whitelist
-    if whitelist is None:
-        if _ACTIVE_ENGINE is not None:
-            whitelist = _ACTIVE_ENGINE._dynamic_whitelist | static_env_whitelist()
-        else:
-            # 防御性回退：未构造 TradingEngine（理论不会，__init__ 必置 _ACTIVE_ENGINE）
-            whitelist = get_effective_whitelist()
-    return await svc_submit(order, dry_run=(_mode() == "dry_run"), confirm=confirm,
-                            whitelist=whitelist)
+    return await svc_submit(order, dry_run=(_mode() == "dry_run"))
 
 
 # ============================================================================
@@ -985,7 +963,7 @@ async def _pre_open_impl(date: str) -> dict:
             raise _CriticalHalt(
                 f"pre_open insert_order(OPEN) 失败 symbol={od['symbol']}（DB 真相源失真）") from e
         try:
-            result = await _submit(order_req, confirm=True)
+            result = await _submit(order_req)
         except Exception as exc:
             # 挡板命中（资金不足/涨跌停/不在白名单等）会 raise RuntimeError
             # （trading_service.submit_order 契约）——必须逐单吞，一只拒单不炸整批。
@@ -1292,7 +1270,6 @@ async def stop_loss_monitor(
                         try:
                             result = await _submit(
                                 OrderRequest(symbol=sym, qty=sell_qty, side="sell", price=price),
-                                confirm=True,
                             )
                         except Exception as exc:
                             logger.warning(
@@ -1337,7 +1314,6 @@ async def stop_loss_monitor(
             try:
                 result = await _submit(
                     OrderRequest(symbol=sym, qty=qty, side="sell", price=price),
-                    confirm=True,
                 )
             except Exception as exc:
                 # 挡板 raise（如断线 lock_down）：单只失败不阻塞其他标的止损
@@ -1540,7 +1516,7 @@ async def _close_expired_positions(gw: Any, expired: list[dict]) -> dict:
         try:
             result = await _submit(
                 OrderRequest(symbol=sym, qty=qty, side="sell", price=price),
-                confirm=True)
+            )
         except Exception as exc:
             # 挡板 raise（断线 lock_down 等）：单只失败不阻塞其他标的平仓
             logger.warning("平超期持仓失败 symbol=%s qty=%s 原因=%s", sym, qty, exc)
@@ -1983,7 +1959,7 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
         if need2 <= 0:
             return
         result = await _submit(
-            OrderRequest(symbol=symbol, qty=need2, side="sell", price=tp2), confirm=True)
+            OrderRequest(symbol=symbol, qty=need2, side="sell", price=tp2))
         if result.get("state") not in ("REJECTED", "FAILED"):
             logger.info("【止盈单已挂】%s %s股 @%s（单笔全平 tp2 差额补挂）", symbol, need2, tp2)
             _record_tp("TP2", need2, tp2)
@@ -1999,7 +1975,7 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
     need2 = tp2_target - int(_placed("TP2"))
     if need1 > 0:
         r1 = await _submit(
-            OrderRequest(symbol=symbol, qty=need1, side="sell", price=tp1), confirm=True)
+            OrderRequest(symbol=symbol, qty=need1, side="sell", price=tp1))
         if r1.get("state") not in ("REJECTED", "FAILED"):
             _record_tp("TP1", need1, tp1)
         else:
@@ -2007,7 +1983,7 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
                            symbol, r1.get("state"), r1.get("message"))
     if need2 > 0:
         r2 = await _submit(
-            OrderRequest(symbol=symbol, qty=need2, side="sell", price=tp2), confirm=True)
+            OrderRequest(symbol=symbol, qty=need2, side="sell", price=tp2))
         if r2.get("state") not in ("REJECTED", "FAILED"):
             _record_tp("TP2", need2, tp2)
         else:
