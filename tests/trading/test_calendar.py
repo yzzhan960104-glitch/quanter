@@ -17,11 +17,13 @@ def test_is_trading_day_uses_cache(monkeypatch, tmp_path):
 
 
 def test_is_intraday_session():
-    """A 股盘中时段判定（9:30-11:30 / 13:00-15:00）。"""
+    """A 股盘中时段判定（09:15-15:00 连续，D2 修订含午休）。"""
     assert calendar.is_intraday_session(datetime(2026, 7, 21, 10, 0)) is True
-    assert calendar.is_intraday_session(datetime(2026, 7, 21, 12, 0)) is False  # 午休
+    assert calendar.is_intraday_session(datetime(2026, 7, 21, 12, 0)) is True  # 午休放行
     assert calendar.is_intraday_session(datetime(2026, 7, 21, 14, 30)) is True
     assert calendar.is_intraday_session(datetime(2026, 7, 21, 15, 30)) is False  # 收盘后
+    assert calendar.is_intraday_session(datetime(2026, 7, 21, 9, 22)) is True  # 集合竞价
+    assert calendar.is_intraday_session(datetime(2026, 7, 21, 9, 10)) is False  # 开盘前
 
 
 def test_fetch_trade_cal_uses_tushare_compat_get_pro(tmp_path):

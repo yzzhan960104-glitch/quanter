@@ -124,9 +124,13 @@ def previous_trading_day(date_str: str) -> str:
 
 
 def is_intraday_session(now: datetime) -> bool:
-    """是否 A 股盘中（9:30-11:30 / 13:00-15:00）。"""
+    """是否 A 股盘中（09:15-15:00 连续；含集合竞价与午休）。
+
+    D2 修订（2026-08-06 用户选项 1）：与 trading_service._in_a_share_session 对齐——
+    午休不拦（柜台可接收排队单），隔夜/周末仍由交易日判定拦。
+    """
     t = now.time()
-    return (time(9, 30) <= t < time(11, 30)) or (time(13, 0) <= t < time(15, 0))
+    return time(9, 15) <= t <= time(15, 0)
 
 
 # 物理意图：数据实时性检查的期望锚点——盘后查 T 数据是否落湖，盘前查 T-1 是否齐全。

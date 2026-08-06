@@ -15,6 +15,11 @@ def test_session_blocks_before_0915():
     assert _in_a_share_session(datetime(2026, 8, 5, 9, 10)) is False
 
 
+def test_session_allows_lunch_break():
+    """D2 修订（选项 1）：午休 12:33 放行（柜台可接收排队单）。"""
+    assert _in_a_share_session(datetime(2026, 8, 5, 12, 33)) is True
+
+
 def test_session_blocks_weekend():
     """周末必须拦截（防周末误单）。"""
     assert _in_a_share_session(datetime(2026, 8, 8, 10, 0)) is False  # 周六

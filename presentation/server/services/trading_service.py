@@ -469,11 +469,13 @@ def _enforce_session() -> bool:
 
 
 def _in_a_share_session(now=None) -> bool:
-    """粗略判断当前是否 A 股交易时段（09:15-11:30 / 13:00-15:00，工作日）。
+    """粗略判断当前是否 A 股交易时段（09:15-15:00 连续，工作日）。
 
     A1（08-05 废单根治）：上午起点 09:30 → 09:15，含集合竞价——pre_open 调度在
     09:22 挂单，旧口径把自家调度时间当非法时段（300358 废单根因）。隔夜/周末保护
     仍保留（09:15 前、周末均拦）。
+    D2 修订（2026-08-06 用户选项 1）：09:15-15:00 **连续**（午休 11:30-13:00 不拦）——
+    柜台午休可接收排队单（08-06 实测直连可 SUBMITTED），引擎链路应同样允许。
     Why now 可注入：纯函数便于单测（避免 datetime.now() 不可控）。
     """
     from datetime import datetime
@@ -481,9 +483,7 @@ def _in_a_share_session(now=None) -> bool:
     if now.weekday() >= 5:  # 5=周六 6=周日
         return False
     t = now.hour * 60 + now.minute
-    morning = 9 * 60 + 15 <= t <= 11 * 60 + 30
-    afternoon = 13 * 60 <= t <= 15 * 60
-    return morning or afternoon
+    return 9 * 60 + 15 <= t <= 15 * 60
 
 
 def _dry_run_direction(side: str) -> str:
