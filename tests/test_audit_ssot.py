@@ -53,6 +53,7 @@ def test_engine_processes_fallback_uses_anchors_not_all_venv(monkeypatch):
     monkeypatch.setattr(pt.subprocess, "run", _boom)
     monkeypatch.setattr(pt, "port_holder_pid", lambda port=8000: 79788)
     monkeypatch.setattr(pt, "pid_file_owner", lambda *a, **kw: 79788)
+    monkeypatch.setattr(pt, "_pid_alive", lambda pid: True)
     procs = a._engine_processes()
     assert [p["pid"] for p in procs] == [79788]
 

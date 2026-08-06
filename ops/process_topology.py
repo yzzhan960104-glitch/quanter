@@ -54,6 +54,18 @@ def pid_file_owner(sid: str | None = None, lock_dir: str | None = None) -> int |
         return None
 
 
+def _pid_alive(pid: int) -> bool:
+    """PID 是否存活（Get-Process 探测；异常保守视为 False）。"""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-Process -Id {pid} -ErrorAction SilentlyContinue | Measure-Object).Count"],
+            capture_output=True, text=True, errors="replace", timeout=8)
+        return (r.stdout or "").strip() == "1"
+    except Exception:
+        return False
+
+
 def engine_processes() -> list[dict]:
     """列项目引擎 python 进程根（cmdline 含 -m trading / presentation.server.main:app）。
 
@@ -87,7 +99,8 @@ def engine_processes() -> list[dict]:
     except Exception:
         # 降级：PowerShell/CIM 不可用时，用「端口属主 + pid 文件属主」两个引擎锚点——
         # 宁可漏报（返回空）也不把 bot/数据同步误判成引擎（stop 误杀风险高于漏报）。
-        anchors = {x for x in (port_holder_pid(8000), pid_file_owner()) if x}
+        # 只保留存活锚点：陈旧 pid 文件（进程已死）不算引擎，否则 start 误判「已在运行」。
+        anchors = {x for x in (port_holder_pid(8000), pid_file_owner()) if x and _pid_alive(x)}
         return [{"pid": p, "ppid": 0, "exe": None, "cmdline": None} for p in anchors]
     # 去重：子进程的 ppid 落在引擎集合内 → 只留树根（launcher）。
     pids = {p["pid"] for p in out}

@@ -37,6 +37,7 @@ try:
     sys.stderr.reconfigure(encoding="utf-8")
 except (AttributeError, OSError):
     pass
+logger = logging.getLogger(__name__)
 # 读 .env 拿 QMT_SESSION_ID 等配置（override=False：显式 shell env 优先）
 try:
     from dotenv import load_dotenv
@@ -200,8 +201,28 @@ def stop(port: int = DEFAULT_PORT, yes: bool = False) -> int:
         print("dry-run：加 --yes 才执行 taskkill /F /T")
         return 0
     for pid in pids:
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                       capture_output=True, text=True, errors="replace", timeout=30)
+        # taskkill 在本机对巨型引擎树会 OOM（08-06 实测）→ 先试 taskkill，rc≠0 降级
+        # Stop-Process -Force（单进程；子进程由引擎父退出自然收编/孤儿由下次巡检清理）。
+        r = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, text=True, errors="replace", timeout=30)
+        if r.returncode != 0:
+            print(f"taskkill {pid} rc={r.returncode}（{r.stdout.strip() or r.stderr.strip()}）"
+                  f"，降级 Stop-Process -Force")
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"],
+                capture_output=True, text=True, errors="replace", timeout=30)
+        # 停后清陈旧 pid 文件：进程已死但 pid 文件残留会让三合一 status 误报 drift，
+        # 并让 start() 误判「引擎已在运行」。锁由 OS 自动释放，无需清 .lock。
+        if port_holder_pid(port) is None:
+            _pf = pid_file_owner()
+            if _pf == pid:
+                from trading.single_instance import _pid_path
+                try:
+                    _pid_path(_session_id()).unlink(missing_ok=True)
+                    print(f"已清理陈旧 pid 文件（engine={pid} 已停）")
+                except Exception:
+                    logger.warning("陈旧 pid 文件清理失败（不阻断）", exc_info=True)
     return 0
 
 
