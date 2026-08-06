@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from ops.manage_ops_schtasks import main, register_server, unregister_discovery
+from ops.manage_ops_schtasks import (
+    main,
+    register_guard,
+    register_server,
+    unregister_discovery,
+)
 
 
 # ============ register_server：QuanterServer ONSTART ============
@@ -76,6 +81,20 @@ def test_register_server_falls_back_to_schtasks_when_powershell_fails():
     assert "/TN" in cmd and "QuanterServer" in cmd
     assert "/TR" in cmd and "start_server.bat" in cmd
     assert "/RU" in cmd and "TestUser" in cmd
+
+
+def test_register_guard_creates_minute_task():
+    """B2-4: QuanterMiniQmtGuard = /SC MINUTE /MO 5 + venv python miniqmt_guard.py --once。"""
+    cmds: list[list[str]] = []
+    with patch("ops.manage_ops_schtasks._schtasks",
+               side_effect=lambda a: cmds.append(a) or 0):
+        register_guard()
+    create_cmds = [c for c in cmds if "/Create" in c]
+    assert len(create_cmds) == 1
+    cmd = " ".join(create_cmds[0])
+    assert "/SC" in cmd and "MINUTE" in cmd and "/MO" in cmd and "5" in cmd
+    assert "QuanterMiniQmtGuard" in cmd
+    assert "miniqmt_guard.py" in cmd and "--once" in cmd
 
 
 # ============ unregister_discovery：退 QuanterDiscoveryDaemon ============

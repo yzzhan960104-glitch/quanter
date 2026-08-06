@@ -34,6 +34,8 @@ from presentation.server.api.v1.logs import (
     log_stream_hub,
     router as logs_router,
 )
+# B2-3：进程拓扑观测端点（三合一 + 客户端 + 队列 + 网关态一屏）
+from presentation.server.api.v1.ops import router as ops_router
 # 宏观/板块/因子只读端点（T16）：读内存湖 + CreditRegime，零写入，
 # 供给前端驾驶舱（T17 /dashboard）宏观灯/信贷曲线/板块流/ATR 四视图。
 from presentation.server.api.v1.macro import router as macro_router
@@ -649,6 +651,7 @@ app.include_router(data_router, prefix="/api/v1", dependencies=[Depends(require_
 # diagnose 触发外部 LLM 调用（成本/滥用面），路由级鉴权保护。
 app.include_router(review_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 app.include_router(research_router, prefix="/api/v1", dependencies=[Depends(require_write)])
+app.include_router(ops_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 
 
 # ============ 健康检查端点 ============

@@ -164,6 +164,24 @@ def _register_with_powershell(user: str) -> int:
         capture_output=True, text=True, timeout=30).returncode
 
 
+def register_guard() -> None:
+    """B2-4：注册 QuanterMiniQmtGuard（每 5 分钟一轮，独立于引擎生命周期）。
+
+    物理意图（spec §4.3）：miniQMT 客户端保活不能寄生在引擎里（引擎崩了 guard 还在）；
+    用 schtasks /SC MINUTE /MO 5 独立调度，与引擎解耦。G3 裁定。
+    """
+    tr = (f'"{ROOT / ".venv310" / "Scripts" / "python.exe"}" '
+          f'"{ROOT / "ops" / "miniqmt_guard.py"}" --once')
+    rc = _schtasks(["/Create", "/SC", "MINUTE", "/MO", "5",
+                    "/TN", "QuanterMiniQmtGuard", "/TR", tr, "/F"])
+    print(f"{'OK' if rc == 0 else 'FAIL(权限/语法)'} QuanterMiniQmtGuard @ 每5分钟 → "
+          f"miniqmt_guard.py --once")
+    if rc != 0:
+        print("[!] 手动注册：\n"
+              f"   schtasks /Create /SC MINUTE /MO 5 /TN QuanterMiniQmtGuard "
+              f"/TR \"{tr}\" /F")
+
+
 def unregister_discovery() -> None:
     """C-7 V4：退 discovery ``QuanterDiscoveryDaemon`` schtasks（收编 lifespan 后防双触发）。
 
@@ -212,6 +230,8 @@ def main(argv=None) -> int:
                    help="清退历史零散 + 退役 schtasks（不再创建；Task 9 收口）")
     g.add_argument("--register-server", action="store_true",
                    help="C-7：注册 QuanterServer ONSTART（开机 session 0 后台起 python -m trading）")
+    g.add_argument("--register-guard", action="store_true",
+                   help="B2-4：注册 QuanterMiniQmtGuard（每 5 分钟客户端看门狗）")
     g.add_argument("--unregister", action="store_true")
     g.add_argument("--unregister-pipeline-brief", action="store_true",
                    help="清退已收编进 uvicorn 的 DataPipeline/Brief（幂等，Task 9）")
@@ -225,6 +245,8 @@ def main(argv=None) -> int:
         register()
     elif args.register_server:
         register_server(user=args.user)
+    elif args.register_guard:
+        register_guard()
     elif args.unregister:
         unregister()
     elif args.unregister_pipeline_brief:
