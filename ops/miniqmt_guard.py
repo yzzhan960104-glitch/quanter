@@ -139,11 +139,33 @@ def cleanup_stale_queues(dry_run: bool = False) -> list[str]:
     return removed
 
 
+def ensure_engine(dry_run: bool = False) -> str | None:
+    """B2 扩展：引擎失踪（8000 无监听）→ schtasks /Run 拉起（5min 自愈兜底）。
+
+    物理意图：08-06 引擎多次被外部终止（无 traceback，12:28 复现），schtasks
+    RestartOnFailure 又因权限未注册——guard 每 5 分钟顺带检查引擎，失踪即拉起，
+    把「引擎死了没人救」的窗口压到 ≤5 分钟。维护期可用
+    QUANTER_GUARD_DISABLE_ENGINE=1 显式关闭（人工重启流程中避免误拉起）。
+    """
+    if os.environ.get("QUANTER_GUARD_DISABLE_ENGINE") == "1":
+        return "guard 引擎自愈已禁用（QUANTER_GUARD_DISABLE_ENGINE=1）"
+    if process_topology.port_holder_pid(8000) is not None:
+        return None  # 引擎在，不动作
+    if dry_run:
+        return "[dry-run] 引擎缺失，将 schtasks /Run QuanterServer"
+    r = subprocess.run(["schtasks", "/Run", "/TN", "QuanterServer"],
+                       capture_output=True, text=True, errors="replace", timeout=15)
+    if r.returncode == 0:
+        return "引擎缺失，已 schtasks /Run QuanterServer 拉起"
+    return f"引擎缺失且拉起失败 rc={r.returncode}（{r.stdout.strip() or r.stderr.strip()}）"
+
+
 def run_once(dry_run: bool = False, alert: bool = True) -> dict:
     """跑一轮：确保客户端 + 陈旧告警 + 队列兜底。"""
     st = check_client()
     launched = ensure_client(dry_run=dry_run) if st["status"] == "missing" else None
     cleaned = cleanup_stale_queues(dry_run=dry_run)
+    engine = ensure_engine(dry_run=dry_run)
     if alert and st["status"] in ("missing", "stale") and not dry_run:
         try:
             from infra.notifier import NotificationManager, fire_and_forget
@@ -151,7 +173,7 @@ def run_once(dry_run: bool = False, alert: bool = True) -> dict:
                 f"miniQMT guard: {st['detail']}", "WARN"))
         except Exception:
             pass
-    return {"client": st, "launched": launched, "cleaned": cleaned}
+    return {"client": st, "launched": launched, "cleaned": cleaned, "engine": engine}
 
 
 def main(argv: list[str] | None = None) -> int:

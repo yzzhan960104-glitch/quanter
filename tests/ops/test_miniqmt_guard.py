@@ -8,6 +8,12 @@ from ops import miniqmt_guard as g
 from ops import process_topology as pt
 
 
+class _FakeRun:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
 def _fake_client(status: str, pid: int | None = 9):
     return {"running": status in ("healthy", "stale"), "pid": pid,
             "count": 1 if pid else 0}
@@ -91,3 +97,33 @@ def test_run_once_cleans_stale_queues(tmp_path, monkeypatch):
     os.utime(stale, (old, old))
     res = g.run_once(dry_run=False, alert=False)
     assert any("111111" in name for name in res["cleaned"])
+
+
+def test_ensure_engine_noop_when_alive(monkeypatch):
+    """引擎在（端口有属主）→ guard 不动作。"""
+    monkeypatch.setattr(pt, "port_holder_pid", lambda port=8000: 94432)
+    calls = []
+    monkeypatch.setattr(g.subprocess, "run", lambda *a, **kw: calls.append(a) or object())
+    assert g.ensure_engine() is None
+    assert calls == []
+
+
+def test_ensure_engine_restarts_when_missing(monkeypatch):
+    """引擎失踪 → schtasks /Run QuanterServer 拉起。"""
+    monkeypatch.setattr(pt, "port_holder_pid", lambda port=8000: None)
+    calls = []
+    monkeypatch.setattr(g.subprocess, "run",
+                        lambda *a, **kw: calls.append(a[0]) or _FakeRun())
+    msg = g.ensure_engine()
+    assert "已 schtasks /Run" in msg
+    assert any("/Run" in c and "QuanterServer" in c for c in calls)
+
+
+def test_ensure_engine_disabled_by_env(monkeypatch):
+    """QUANTER_GUARD_DISABLE_ENGINE=1 → 不自愈（人工维护期）。"""
+    monkeypatch.setenv("QUANTER_GUARD_DISABLE_ENGINE", "1")
+    monkeypatch.setattr(pt, "port_holder_pid", lambda port=8000: None)
+    calls = []
+    monkeypatch.setattr(g.subprocess, "run", lambda *a, **kw: calls.append(a))
+    msg = g.ensure_engine()
+    assert "已禁用" in msg and calls == []
