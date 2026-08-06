@@ -65,7 +65,7 @@ def _mock_lifespan_dependencies():
 
 
 @pytest.mark.asyncio
-async def test_lifespan_starts_all_5_connect_bots():
+async def test_lifespan_starts_all_5_connect_bots(monkeypatch):
     """lifespan startup 遍历 5 CONNECT_BOTS 调 connect_manager.start。
 
     验：start 对每个 bot 各调一次，app.state.connect_bots 记录全部 5 bot。
@@ -75,6 +75,8 @@ async def test_lifespan_starts_all_5_connect_bots():
     from fastapi import FastAPI
     from presentation.server.main import lifespan
 
+    # 本用例测生产路径（5 bot 真起）：显式取消 conftest 的 QUANTER_TESTING 隔离 env
+    monkeypatch.delenv("QUANTER_TESTING", raising=False)
     app = FastAPI()
     stack, start_mock, stop_mock, _eng = _mock_lifespan_dependencies()
     with stack:
@@ -106,7 +108,22 @@ async def test_lifespan_skips_connect_bots_when_dev_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lifespan_connect_soft_degrade_on_single_bot_failure():
+async def test_lifespan_testing_skips_production_file_handler(monkeypatch):
+    """测试隔离：QUANTER_TESTING=1 → lifespan 不挂生产文件 handler（防污染 quanter.log）。"""
+    from fastapi import FastAPI
+    from presentation.server.main import lifespan
+
+    app = FastAPI()
+    stack, _start, _stop, _eng = _mock_lifespan_dependencies()
+    with stack:
+        async with lifespan(app):
+            assert app.state.log_file_handler is None
+            # 前端 SSE 流 handler 仍装配（测试不依赖文件，但保持原结构）
+            assert getattr(app.state, "log_handler", None) is not None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_connect_soft_degrade_on_single_bot_failure(monkeypatch):
     """单 bot start 抛 RuntimeError → 跳过该 bot，其余 4 bot 正常起，不阻断 uvicorn。
 
     物理意图（spec §3.1 软降级）：配置缺失（unified_app_id 未填等）抛 RuntimeError
@@ -117,6 +134,7 @@ async def test_lifespan_connect_soft_degrade_on_single_bot_failure():
     from fastapi import FastAPI
     from presentation.server.main import lifespan
 
+    monkeypatch.delenv("QUANTER_TESTING", raising=False)
     app = FastAPI()
     stack, start_mock, stop_mock, _eng = _mock_lifespan_dependencies()
     # 覆盖 start：review bot 抛 RuntimeError（模拟配置缺失），其余正常
@@ -144,7 +162,7 @@ async def test_lifespan_connect_soft_degrade_on_single_bot_failure():
 
 
 @pytest.mark.asyncio
-async def test_lifespan_stops_connect_bots_on_shutdown():
+async def test_lifespan_stops_connect_bots_on_shutdown(monkeypatch):
     """lifespan shutdown 遍历 app.state.connect_bots 调 connect_manager.stop（树杀）。
 
     物理意图：shutdown 与 startup start 对偶——startup 起的 bot，shutdown 必须停
@@ -156,6 +174,7 @@ async def test_lifespan_stops_connect_bots_on_shutdown():
     from fastapi import FastAPI
     from presentation.server.main import lifespan
 
+    monkeypatch.delenv("QUANTER_TESTING", raising=False)
     app = FastAPI()
     stack, start_mock, stop_mock, _eng = _mock_lifespan_dependencies()
     with stack:
@@ -209,7 +228,7 @@ async def test_lifespan_registers_discovery_cron_02():
     assert "discovery_daemon" in added_jobs    # discovery cron 02:00 注册
 
 
-def test_run_discovery_subprocess_detached():
+def test_run_discovery_subprocess_detached(monkeypatch):
     """_run_discovery_subprocess 起 DETACHED 子进程 ``python -m discovery daemon``。
 
     验：(1) subprocess.Popen 调一次；(2) cmd=[venv_py, -m, discovery, daemon]（复用
@@ -218,6 +237,9 @@ def test_run_discovery_subprocess_detached():
     """
     from presentation.server.main import _run_discovery_subprocess
 
+    # 固定非 low-power：机器 env DISCOVERY_SCHEDULE=low-power 时按当前时段可能跳过
+    # （如 12:58 在 9-16 窗口外），导致 Popen 不触发——本测试只验 detach 语义，不验调度。
+    monkeypatch.setenv("DISCOVERY_SCHEDULE", "")
     with patch("presentation.server.main._subprocess.Popen") as popen:
         _run_discovery_subprocess()
     popen.assert_called_once()

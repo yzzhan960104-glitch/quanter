@@ -10,6 +10,27 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 
+@pytest.fixture(autouse=True)
+def _no_production_log_leak():
+    """测试隔离兜底：每个用例结束后清掉指向 logs/quanter.log 的根 logger FileHandler。
+
+    Why：lifespan 测试会给 root logger 挂生产文件 handler（LOG_CONFIG file），用例
+    中途失败时 shutdown 段不执行 → handler 泄漏；后续任何真实 scheduler 日志都会
+    写进生产 quanter.log（08-06 实证 pytest traceback 出现在生产日志）。本 fixture
+    兜底清理，与 presentation/conftest 的 QUANTER_TESTING=1 双保险。
+    """
+    yield
+    import logging
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if isinstance(h, logging.FileHandler) and str(getattr(h, "baseFilename", "")).endswith("quanter.log"):
+            root.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+
+
 # ============ Phase 1 Task 4：全局注入假 xtquant（collection 前生效）============
 # Why 全局注入：qmt_gateway 顶部 `from xtquant.xttrader import XtQuantTrader` 在
 # 真实 xtquant 可用时会绑定真实 C++ 类（实例化即连真实柜台，测试不可控）。conftest

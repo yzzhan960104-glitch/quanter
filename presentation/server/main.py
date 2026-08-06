@@ -362,12 +362,19 @@ async def lifespan(app: FastAPI):
 
     # 本地文件 handler：自动建 logs/ 目录；事后定位 NaN/异常的核心证据来源
     import os as _os
-    _os.makedirs(_os.path.dirname(LOG_CONFIG["file"]), exist_ok=True)
-    file_handler = logging.FileHandler(LOG_CONFIG["file"], encoding="utf-8")
-    file_handler.setFormatter(log_format)
-    file_handler.setLevel(LOG_CONFIG["level"])
-    root_logger.addHandler(file_handler)
-    app.state.log_file_handler = file_handler
+    if os.environ.get("QUANTER_TESTING") == "1":
+        # 测试隔离（08-06 用户拷问）：QUANTER_TESTING 下不挂生产文件 handler——
+        # 否则 pytest 里任何真实 scheduler/logger 日志都会写进 logs/quanter.log，
+        # 污染生产排查（实证：08:32 quanter.log 出现 pytest traceback）。
+        logging.getLogger(__name__).info("QUANTER_TESTING=1：跳过本地文件日志 handler")
+        app.state.log_file_handler = None
+    else:
+        _os.makedirs(_os.path.dirname(LOG_CONFIG["file"]), exist_ok=True)
+        file_handler = logging.FileHandler(LOG_CONFIG["file"], encoding="utf-8")
+        file_handler.setFormatter(log_format)
+        file_handler.setLevel(LOG_CONFIG["level"])
+        root_logger.addHandler(file_handler)
+        app.state.log_file_handler = file_handler
 
     # 前端 SSE 流 handler（既有，保留 name|message 简格式供 TerminalLogs 展示）
     log_handler = RingBufferLogHandler(log_stream_hub)
@@ -586,7 +593,8 @@ async def lifespan(app: FastAPI):
     # （reload 或测试复用进程时关键，否则 handler 单调累积致日志重复输出）
     root_logger = logging.getLogger()
     root_logger.removeHandler(app.state.log_handler)
-    root_logger.removeHandler(app.state.log_file_handler)
+    if getattr(app.state, "log_file_handler", None) is not None:
+        root_logger.removeHandler(app.state.log_file_handler)
     # 销毁：异步回测调度器（Spec 1 · Task 7）——停调度线程 + 关进程池（不等在跑回测，最快退出）
     _sched = getattr(app.state, "replay_scheduler", None)
     if _sched is not None:
