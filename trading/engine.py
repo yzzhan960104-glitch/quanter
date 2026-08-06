@@ -2377,6 +2377,16 @@ class TradingEngine:
         position_book.init_db()
         state_store.init_store()
         state_store._migrate_env_to_account()
+        # L3（spec §4.4 · 裁定 L3）：L2 轮换后把实际 sid 回写 account 行（观测对照源）。
+        # Why 不阻断：DB 回写失败只是观测缺值，连接本身已成功（端点仍可读
+        # engine_session.json）。
+        _actual_sid = getattr(self._gw, "_session_id", None)
+        if _actual_sid is not None:
+            try:
+                _state_store.upsert_account(_resolve_account_id(), broker="qmt",
+                                            session_id=int(_actual_sid))
+            except Exception:
+                logger.exception("L3 回写 account.session_id 失败（不阻断）")
         # SSoT Phase C · C1：启动归因重建（弥补 B2 重启丢失窗口）。
         # 物理意图（spec §5 断点-3 弥补）：B2 把归因落 position 列但**不做重启重建**——重启窗口
         # 内 BUY 成交 + B2 归因未及写就崩的 position 行 strategy IS NULL 裸奔。本补扫从

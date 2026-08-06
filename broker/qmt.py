@@ -277,6 +277,53 @@ def _cleanup_session_files(userdata_path: str, session_id: int) -> list[str]:
     return removed
 
 
+def _used_session_ids(userdata_path: str) -> set[int]:
+    """扫 down_queue_win_* / lock_*queue_win_* 提取在用 sid（L2 轮换的占用登记表）。
+
+    物理依据（spec §4.4）：userdata 目录就是 sid 占用登记表——同一 sid 同一时刻只能
+    被一个进程独占，目录里出现 down_queue_win_{sid} 即该 sid 在用/残留；轮换前必须
+    避开，否则新 sid 与其它进程撞车（connect -1 复发）。
+    """
+    import glob as _glob
+    import re as _re
+
+    used: set[int] = set()
+    if not userdata_path or not os.path.isdir(userdata_path):
+        return used
+    for pat in ("down_queue_win_*", "lock_*queue_win_*"):
+        for f in _glob.glob(os.path.join(userdata_path, pat)):
+            m = _re.search(r"(\d+)\s*$", os.path.basename(f).split("__")[0])
+            if m:
+                used.add(int(m.group(1)))
+    return used
+
+
+def _candidate_session_ids(preferred: int, used: set[int], limit: int = 100) -> list[int]:
+    """preferred 起有界递增找未占用 sid（裁定 L1=100；同段递增=不跨账号区间）。"""
+    return [preferred + i for i in range(1, limit + 1) if (preferred + i) not in used]
+
+
+def _write_runtime_session(preferred: int, actual: int) -> None:
+    """实际 sid runtime SSoT：logs/engine_session.json（supervisor/ops 端点读 actual_sid）。
+
+    Why 不动 .env（spec §4.4）：preferred 是引擎身份/锁键/观测锚点，轮换只记录实际
+    值——.env 仍是人工期望值，两个值同时在观测端点展示，漂移可见但不阻断。
+    """
+    import json as _json
+    from datetime import datetime as _dt
+    from pathlib import Path as _Path
+    try:
+        p = _Path(__file__).resolve().parent.parent / "logs" / "engine_session.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            _json.dumps({"preferred": preferred, "actual": actual,
+                         "rotated_at": _dt.now().isoformat(timespec="seconds")},
+                        ensure_ascii=False),
+            encoding="utf-8")
+    except Exception:
+        logger.warning("L2 runtime SSoT 写入失败（不阻断连接）", exc_info=True)
+
+
 class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[misc]
     """
     MiniQMT 实盘执行网关。
@@ -447,6 +494,77 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # staleness_sec//60 把秒阈值换算成分钟阈值，与 mtime age_min 同口径比对
         return f"文件最新 mtime 陈旧 {age_min} 分钟" if age_min > staleness_sec // 60 else "正常（文件新鲜）"
 
+    async def _run_bootstrap(self, sid: int) -> tuple[int, int]:
+        """构造 XtQuantTrader(sid) → start/connect/subscribe（L2 参数化 sid 共用）。
+
+        Why 抽方法：connect 的首选两轮重试与 L2 sid 轮换都要走同一段
+        start/connect/subscribe 时序（含异常兜底），复制两份会漂移。
+        """
+        trader = XtQuantTrader(self._userdata_path, sid)
+        trader.register_callback(self)
+        self._trader = trader          # 失败路径也要能 stop 到本次实例
+        self._account = StockAccount(self._account_id)
+
+        def _bootstrap() -> tuple[int, int]:
+            trader.start()
+            rc = trader.connect()
+            if rc != 0:
+                # 连接失败时不必 subscribe，直接返回，由外层判定
+                return rc, -1
+            sub = trader.subscribe(self._account)
+            return rc, sub
+
+        try:
+            # #9：wait_for 兜底防柜台无响应永久阻塞事件循环
+            # （超时→ConnectionError→_reconnect）。
+            return await asyncio.wait_for(
+                self._loop.run_in_executor(None, _bootstrap),
+                timeout=_CONNECT_TIMEOUT)
+        except Exception as exc:
+            # 失败也要停掉本次实例（释放 sid），再置锁抛出
+            _stop_trader_safely(self._trader)
+            self._trader = None
+            self._lock_down = True
+            raise ConnectionError(
+                f"QMT connect 异常/超时(>{_CONNECT_TIMEOUT}s)：{exc}") from exc
+
+    async def _try_rotate_session(self) -> int | None:
+        """L2：preferred -1 后自动轮换未占用 sid；成功返 sub_rc，失败返 None。
+
+        物理意图（spec §4.4 · 裁定 L1-L4）：connect -1 = 该 sid 被占/残留，清理两轮
+        后仍失败 → 从 preferred 起有界找未占用 sid（上限 100）自动重连，成功把实际
+        sid 写入 runtime SSoT（engine_session.json），.env preferred 不变。轮换耗尽
+        返 None，由 connect 走既有 L3 失败路径（fail-closed + 告警文案）。
+        """
+        preferred = self._session_id
+        used = _used_session_ids(self._userdata_path)
+        candidates = _candidate_session_ids(preferred, used, limit=100)
+        if not candidates:
+            logger.warning("L2 无可用 sid（preferred=%s used=%s）→ L3 人工兜底",
+                           preferred, sorted(used))
+            return None
+        for candidate in candidates:
+            try:
+                _cleanup_session_files(self._userdata_path, candidate)
+            except Exception:
+                pass
+            try:
+                rc2, sub2 = await self._run_bootstrap(candidate)
+            except ConnectionError:
+                continue
+            if rc2 == 0:
+                self._session_id = candidate
+                _write_runtime_session(preferred, candidate)
+                logger.warning(
+                    "L2 sid 自动轮换 preferred=%s → actual=%s（connect -1 自愈）",
+                    preferred, candidate)
+                return sub2
+            _stop_trader_safely(self._trader)
+            self._trader = None
+        logger.warning("L2 sid 轮换耗尽（preferred=%s 前 5 候选=%s）→ L3 人工兜底",
+                       preferred, candidates[:5])
+        return None
+
     async def connect(self) -> None:
         """
         建立并保活 QMT 连接（BaseExecutionGateway.connect 实现）。
@@ -496,40 +614,15 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         except Exception:
             logger.warning("QMT connect 前置清理异常（忽略，继续 attempt）", exc_info=True)
 
-        # 2. 最多两轮：首轮失败（-1=残留会话）→ 清本 sid 队列文件 → 重试一轮（自愈）
+        # 2. 首选 sid 最多两轮：首轮失败（-1=残留会话）→ 清本 sid 队列文件 → 重试一轮
         connect_rc: int | None = None
         sub_rc: int = -1
+        sid = self._session_id
         for attempt in (1, 2):
-            # 建实例 + 注册自身为回调（register_callback 必须在 start 之前）
-            trader = XtQuantTrader(self._userdata_path, self._session_id)
-            trader.register_callback(self)
-            self._trader = trader          # 失败路径也要能 stop 到本次实例
-            # StockAccount 构造是纯 Python 内存操作，无需线程池
-            self._account = StockAccount(self._account_id)
-
-            # start/connect/subscribe 同步阻塞，统一投线程池
-            def _bootstrap() -> tuple[int, int]:
-                trader.start()
-                rc = trader.connect()
-                if rc != 0:
-                    # 连接失败时不必 subscribe，直接返回，由外层判定
-                    return rc, -1
-                sub = trader.subscribe(self._account)
-                return rc, sub
-
             try:
-                # #9：wait_for 兜底防柜台无响应永久阻塞事件循环
-                # （超时→ConnectionError→_reconnect）。
-                connect_rc, sub_rc = await asyncio.wait_for(
-                    self._loop.run_in_executor(None, _bootstrap),
-                    timeout=_CONNECT_TIMEOUT)
-            except Exception as exc:
-                # 失败也要停掉本次实例（释放 sid），再置锁抛出
-                _stop_trader_safely(self._trader)
-                self._trader = None
-                self._lock_down = True
-                raise ConnectionError(
-                    f"QMT connect 异常/超时(>{_CONNECT_TIMEOUT}s)：{exc}") from exc
+                connect_rc, sub_rc = await self._run_bootstrap(sid)
+            except ConnectionError:
+                raise
 
             if connect_rc == 0:
                 break                        # 连接成功
@@ -539,12 +632,19 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             self._trader = None
             if connect_rc == -1 and attempt == 1:
                 # -1 = 死进程残留会话（强杀/崩溃未 stop）→ 清本 sid 队列文件后重试
-                cleaned = _cleanup_session_files(self._userdata_path, self._session_id)
+                cleaned = _cleanup_session_files(self._userdata_path, sid)
                 logger.warning(
                     "QMT connect -1（session 残留）：已停旧实例并清理 %s，重试第 2 次",
                     cleaned or "无残留文件")
                 continue
             break
+
+        # L2（spec §4.4 · 裁定 L1-L4）：-1 清理两轮后仍失败 → 自动轮换未占用 sid。
+        # 单实例锁仍以 preferred 为键（引擎身份），轮换只改 trader 会话 sid。
+        if connect_rc == -1:
+            _rot_sub = await self._try_rotate_session()
+            if _rot_sub is not None:
+                connect_rc, sub_rc = 0, _rot_sub
 
         if connect_rc != 0:
             # connect 返回非 0 即连接失败（xttrader.md：返回 0 表示成功）

@@ -417,15 +417,20 @@ def test_connect_minus_one_cleans_stale_session_and_retries(monkeypatch):
 
 
 def test_connect_minus_one_twice_still_raises(monkeypatch):
-    """重试仍 -1（如客户端未启动）→ 抛 ConnectionError + 置锁，不无限重试。
+    """L2：重试仍 -1 且 sid 轮换耗尽 → 抛 ConnectionError + 置锁，不无限重试。
 
     W1.3 后：_cleanup_session_files 被调 2 次（前置 1 + 首轮 -1 兜底 1，
-    第二轮 -1 不再清直接 break 抛错）。attempt 轮数仍锁定 2（不无限重试）。
+    第二轮 -1 不再清直接 break）。L2 轮换被 mock 为耗尽（返 None）→ 走 L3 失败路径。
     """
     instances = _install_reconnect_fake(monkeypatch, [-1, -1])
     cleaned = []
     monkeypatch.setattr(qmt_gateway, "_cleanup_session_files",
                         lambda p, s: cleaned.append(s) or [])
+
+    async def _no_rotate(self):
+        return None
+
+    monkeypatch.setattr(QmtExecutionGateway, "_try_rotate_session", _no_rotate)
     gw = QmtExecutionGateway()
     with pytest.raises(ConnectionError, match="session"):
         asyncio.run(gw.connect())
@@ -434,6 +439,20 @@ def test_connect_minus_one_twice_still_raises(monkeypatch):
     assert len(cleaned) == 2
     assert len(instances) == 2             # attempt 轮数锁定 2（不无限重试）
     assert all(t.stopped for t in instances)
+
+
+def test_connect_rotates_sid_after_two_minus_one(monkeypatch):
+    """L2：首选 sid -1 两轮 → 自动轮换未占用 sid 重连成功（自愈，不抛错）。"""
+    instances = _install_reconnect_fake(monkeypatch, [-1, -1, 0])
+    written = {}
+    monkeypatch.setattr(qmt_gateway, "_write_runtime_session",
+                        lambda p, a: written.update(preferred=p, actual=a))
+    gw = QmtExecutionGateway()
+    asyncio.run(gw.connect())
+    assert gw._connected is True
+    assert gw._session_id == 123457       # 默认 preferred 123456 → +1 轮换
+    assert written == {"preferred": 123456, "actual": 123457}
+    assert len(instances) == 3            # 首选 2 轮 + 轮换 1 次
 
 
 def test_connect_cleans_session_files_before_first_attempt(monkeypatch, tmp_path):
