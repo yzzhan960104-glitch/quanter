@@ -3351,15 +3351,26 @@ class TradingEngine:
             return
         traded_volume = update.get("traded_volume")
         traded_price = update.get("traded_price")
+        new_state = _order_state_to_db(update.get("state"))
+        old_state = row["state"]
+        # 拒因观测补全（08-06 实测：688160.SH 订单被柜台 REJECTED，日志零痕迹——废单
+        # 原因黑盒。柜台 status_msg/order_remark 必须随状态变化落日志，否则无法回答
+        # 「为什么没成交」）。
+        status_msg = str(update.get("status_msg") or update.get("order_remark") or "")
         try:
             n = _state_store.update_order_state_by_broker_oid(
                 row["broker_oid"] or lookup,
-                state=_order_state_to_db(update.get("state")),
+                state=new_state,
                 filled_qty=float(traded_volume) if traded_volume is not None else None,
                 filled_price=float(traded_price) if traded_price is not None else None,
             )
             if n == 0:
                 logger.warning("order 状态推进未命中 broker_oid=%s（下个事件补推进）", row.get("broker_oid"))
+            elif old_state != new_state:
+                logger.info(
+                    "订单状态推进 oid=%s symbol=%s %s → %s status_msg=%r",
+                    row["broker_oid"] or lookup, row.get("symbol", "?"),
+                    old_state, new_state, status_msg)
         except Exception:
             logger.exception("order 状态推进失败 lookup=%s（软降级，下个事件补推进）", lookup)
 

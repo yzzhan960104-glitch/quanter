@@ -664,6 +664,32 @@ def test_trade_push_keeps_order_type_after_merge(db):
         traded_price=10.5, traded_amount=1050.0, traded_time="20260801101000"))))
     assert gw._orders["987654"].get("order_type") == 23, "trade 覆盖后 order_type 必须保留"
 
+
+def test_order_event_rejected_logs_status_msg(db, caplog):
+    """拒单观测：order 事件推进到 REJECTED 必须落日志并带 status_msg（拒因不黑盒）。"""
+    import asyncio
+    import logging
+    from types import SimpleNamespace
+    from trading import state_store
+
+    eng, gw = _make_real_chain_engine()
+    aid, real = "TEST_ACC", 987654
+    oid = "2026-08-01_600000.SH_OPEN_7"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(oid, f"{aid}_600000.SH_2026-08-01", aid, "2026-08-01",
+                             "600000.SH", "buy", "OPEN", 100, 10.0,
+                             broker_oid=str(real), state="SUBMITTED")
+    caplog.set_level(logging.INFO, logger="trading.engine")
+    asyncio.run(_pump(gw, lambda: gw.on_stock_order(SimpleNamespace(
+        order_id=real, stock_code="600000.SH", order_status=57, order_type=23,
+        order_volume=100, traded_volume=0, traded_price=0.0,
+        status_msg="价格超出涨跌停范围"))))
+    with state_store._connect(state_store._DEFAULT_DB) as con:
+        row = con.execute('SELECT state FROM "order" WHERE order_id=?', (oid,)).fetchone()
+    assert row["state"] == "REJECTED"
+    assert any("订单状态推进" in r.getMessage() and "REJECTED" in r.getMessage()
+               and "价格超出涨跌停范围" in r.getMessage() for r in caplog.records)
+
 # ============================================================================
 # Task A3（live-mainchain-fixes）：方向反查 DB 优先 + 内存兜底
 # ============================================================================
