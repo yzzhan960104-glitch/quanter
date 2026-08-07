@@ -209,11 +209,17 @@ def stop(port: int = DEFAULT_PORT, yes: bool = False) -> int:
     for pid in pids:
         # taskkill 在本机对巨型引擎树会 OOM（08-06 实测）→ 先试 taskkill，rc≠0 降级
         # Stop-Process -Force（单进程；子进程由引擎父退出自然收编/孤儿由下次巡检清理）。
-        r = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                           capture_output=True, text=True, errors="replace", timeout=30)
-        if r.returncode != 0:
-            print(f"taskkill {pid} rc={r.returncode}（{r.stdout.strip() or r.stderr.strip()}）"
-                  f"，降级 Stop-Process -Force")
+        try:
+            r = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                               capture_output=True, text=True, errors="replace", timeout=30)
+        except subprocess.TimeoutExpired:
+            # taskkill 巨型引擎树 OOM/超时（08-06/08-07 实测）→ 打印后走 Stop-Process 兜底
+            print(f"taskkill {pid} 超时（30s），降级 Stop-Process -Force")
+            r = None
+        if r is None or r.returncode != 0:
+            if r is not None:
+                print(f"taskkill {pid} rc={r.returncode}（{r.stdout.strip() or r.stderr.strip()}）"
+                      f"，降级 Stop-Process -Force")
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"],
