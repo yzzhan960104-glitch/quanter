@@ -24,8 +24,10 @@ experiment/experiments.db
 data/cache/
 
 # 蔡森 CLI 运行时输出（plans/<date>.json 为 screen 子命令产物，不入库）
-# 锚定根目录（/plans/），避免误伤 docs/superpowers/plans/ 设计文档
-/plans/
+# 锚定根目录（/plans/*），避免误伤 docs/superpowers/plans/ 设计文档
+/plans/*
+# wayfinder tracker 入库（/plans/* 原为 caisen CLI plans/<date>.json 输出忽略，误伤 plans/wayfinder/；同 data_lake/* + !a_shares_daily 模式例外放行）
+!/plans/wayfinder/
 
 # 依赖包
 node_modules/
