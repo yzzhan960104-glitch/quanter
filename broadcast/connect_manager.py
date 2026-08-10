@@ -22,6 +22,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from ctypes import wintypes
@@ -39,7 +40,7 @@ _kernel32.GetExitCodeProcess.argtypes = [
 _kernel32.CloseHandle.restype = wintypes.BOOL
 _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
-# 项目根（broadcast/ 的上级 = F:/quanter）：作 Popen cwd，锁 dev connect 工作目录
+# 项目根（broadcast/ 的上级 = E:/quanter）：作 Popen cwd，锁 dev connect 工作目录
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # PID/日志目录（运行时幂等文件，.gitignore 已含 logs/）
 RUN_DIR = Path("logs") / "broadcast_connect"
@@ -65,8 +66,14 @@ def build_cmd(bot: str, cfg: dict, defaults: dict) -> list[str]:
     if not allowed:
         raise RuntimeError(f"缺身份闸 {defaults['allowed_users_env']}（省略=全放行，高危）")
 
+    # Windows 健壮性：dws 经 npm 全局安装时是 .cmd shim（dws / dws.cmd / dws.ps1）。
+    # subprocess.Popen 直接把 "dws" 喂给 CreateProcess，而 CreateProcess 搜 PATH 时
+    # 不查 PATHEXT（只匹配 dws.exe）→ FileNotFoundError [WinError 2]。用 shutil.which
+    # 解析出含 .CMD 扩展名的绝对路径，CreateProcess 才能经 cmd.exe 正确启动 .cmd shim；
+    # which 失败则回退 "dws"（保留原报错语义，不静默掩盖缺 dws 的真实情况）。
+    dws_bin = shutil.which("dws") or "dws"
     cmd: list[str] = [
-        "dws", "dev", "connect",
+        dws_bin, "dev", "connect",
         "--unified-app-id", unified,
         "--channel", cfg["channel"],
     ]

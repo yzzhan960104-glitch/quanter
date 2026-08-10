@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import sys
 
@@ -43,8 +44,13 @@ def push_brief(
     if not robot_code or not group_id:
         logger.error("push_brief 缺凭证（robot_code/group_id 为空），跳过推送")
         return False
+    # Windows 健壮性：dws 经 npm 全局安装为 .cmd shim，CreateProcess 搜 PATH 时不查
+    # PATHEXT（只匹配 dws.exe），直接 Popen "dws" 会 FileNotFoundError [WinError 2]
+    # （同源根因见 connect_manager.build_cmd 注释）。用 shutil.which 解析绝对路径
+    # （含 .CMD 扩展名），失败回退 "dws" 保留原报错语义。
+    dws_bin = shutil.which("dws") or "dws"
     cmd = [
-        "dws", "chat", "message", "send-by-bot",
+        dws_bin, "chat", "message", "send-by-bot",
         "--robot-code", robot_code,
         "--group", group_id,
         "--title", title,
