@@ -80,6 +80,23 @@ from trading.trading_plan import load_plan
 from trading.state_store import get_data_ready, get_ready
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 from trading.ports import EnginePorts  # T1 缝合点 #1：phases 外迁函数的窄依赖接口（无循环：ports 仅依赖 stdlib）
+# T1-Task2 集群 A re-export（trading.critical · L1 停调度 + 告警基础设施 · 最独立）。
+# 物理意图：_alert_critical / _CriticalHalt / _critical_guard / _mode / _trade_cfg 已迁
+# trading.critical.py（零下游交易耦合），此处 re-export 保「公共/半公开 API 不变形」红线：
+#   - 既有 ``from trading.engine import _CriticalHalt, _critical_guard`` 等路径不断；
+#   - ``patch("trading.engine._alert_critical")`` / ``patch("trading.engine._mode", ...)`` 等
+#     monkeypatch 命中（engine 内部调用点经模块全局名解析，re-export 后仍是 engine 模块属性；
+#     _halt 薄 wrapper 透传 alert=_alert_critical 同理命中既有断言）。
+# halt / guard_skip_rounds 为内部别名（驱动下方 _halt / _guard_skip_rounds 薄实例 wrapper，
+# 「critical 留纯函数 + engine 留薄 wrapper」避免 critical → engine 耦合）。
+from trading.critical import (  # noqa: F401  公共 API 兼容（cluster A re-export）
+    _alert_critical,
+    _CriticalHalt,
+    _critical_guard,
+    _mode,
+    _trade_cfg,
+)
+from trading.critical import halt as _halt_logic, guard_skip_rounds as _gskip_fn
 # Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
 from trading.compute.plan import build_orders_from_signals
 # ⚠️ compute_stop_price 不再 engine 内导入（SSoT review P2 · 删 _evolve_trailing_stops 后
@@ -112,72 +129,9 @@ from trading import clock
 logger = logging.getLogger(__name__)
 
 
-def _alert_critical(msg: str) -> None:
-    """Task 9（M4）：致命事件钉钉 CRITICAL（fire_and_forget 不阻塞主流程）。
-
-    物理意图（spec M4 · [[qmt-connect-1-rootcase]] 教训）：
-        引擎致命事件（pre_open 漏挂 / 口径自检失败 / health_guard 重连耗尽）若只写日志，
-        钉钉不推 → 用户事后才发现漏单（全天锁死无告警 = 实盘废单日）。本函数是这些事件
-        点的统一收口：复用 infra.notifier 推 CRITICAL 级钉钉（与 broker _reconnect 同通道）。
-
-    Why level=CRITICAL：notify_risk_event 按 level 加前缀（🚨），CRITICAL 限致命事件
-        避免告警风暴（撤单超时/WARN 级不升级）。三事件点均已用业务语义过滤过：
-
-    Why fire_and_forget：告警在 daemon 线程跑（见 infra.notifier.fire_and_forget docstring），
-        跨线程触发异步告警的最简显式做法，不阻塞 pre_open/start/health_guard 主路径——
-        告警系统绝不能成为交易主链路的单点故障源（告警失败由 except 兜底记日志）。
-
-    Args:
-        msg: 告警正文（不含 level 前缀，notify_risk_event 自动加 🚨）。
-    """
-    try:
-        from infra.notifier import NotificationManager, fire_and_forget
-        fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, "CRITICAL"))
-    except Exception:
-        # 告警发送失败不阻塞主流程（fire_and_forget 内部 asyncio.run 异常已被它自己 except，
-        # 此处仅兜底 import/get_default 等同步异常）。告警是「尽最大努力」的观测通道，
-        # 不能拖垮 pre_open/start/health_guard 主路径。
-        logger.exception("CRITICAL 告警发送失败（不阻塞主流程）：%s", msg)
-
-
-# C-4 U2：L1 致命异常 + 停调度 wrapper。
-class _CriticalHalt(Exception):
-    """L1 致命异常：交易关键路径失败（DB 写/读失真·网关断线·整批失败·敞口未明）。
-
-    物理意图（spec §3 L1 + review 补强边界）：
-        抛出本异常 = 「继续跑会致真金损失或状态真相源失真」，_critical_guard 捕获后调
-        _halt() 停所有 job。与单只业务拒单（RuntimeError，L2 聚合 CRITICAL 不停）区分。
-
-    边界判定线（review 补强 · 基础设施 > 单只计数）：
-        - DB 写异常（insert_order/update_order_state/insert_trade_event/insert_fill 抛错）= L1
-          （哪怕只挂一只，DB 真相源失真优先于「单只」语义，硬抛）；
-        - 单只 _submit RuntimeError（业务拒单：涨跌停/资金不足/限频）= L2（不抛本异常）。
-    """
-
-
-def _critical_guard(coro_method):
-    """L1 路径 wrapper：_halted 检查 + 捕获 _CriticalHalt → _halt 停调度。
-
-    in-flight 语义（review 补强）：
-        - 当前 job：raise _CriticalHalt → 异常向上传播，当前 job 在 raise 处立即中断
-          后续写（不会 continue 把半截状态写完）；本 wrapper except 捕获后 _halt + 再 raise
-          （APScheduler 顶层吞 job 异常记日志，不影响其他 job）。
-        - 其他 job / 下一轮：_halted flag 在本 wrapper 顶 if 兜底——max_instance=1 下，
-          被触发或堆积补跑的 job 入口即跳过，不再写。
-        即 raise 中断「当前轮」，_halted 防「下一轮/其他 job」，覆盖 in-flight 全部窗口。
-    """
-    import functools
-    @functools.wraps(coro_method)
-    async def wrapped(self, *a, **kw):
-        if getattr(self, "_halted", False):
-            logger.warning("引擎已停调度（_halted），跳过 %s", coro_method.__name__)
-            return
-        try:
-            return await coro_method(self, *a, **kw)
-        except _CriticalHalt as e:
-            self._halt(f"[{coro_method.__name__}] {e}")
-            raise   # 再抛：APScheduler 顶层记 job 异常日志；_halt 已生效
-    return wrapped
+# （T1-Task2）_alert_critical / _CriticalHalt / _critical_guard 已迁 trading.critical.py
+# （集群 A · L1 停调度 + 告警基础设施），见文件顶部 re-export。下方原模块级定义已删，
+# 保 logger 供本模块其余路径用；行为逐行等价（critical 持纯逻辑，engine 经 re-export 复用）。
 
 
 # ============================================================================
@@ -204,66 +158,9 @@ _last_quote_blackout_alert_ts: float = 0.0
 _QUOTE_BLACKOUT_ALERT_INTERVAL_S = 30 * 60
 
 
-def _mode() -> str:
-    """当前交易模式：dry_run（默认·影子）/ live。
-
-    Why 默认 dry_run：spec 红线，未显式 AUTO_TRADE_MODE=live 一律按影子处理，
-    宁可漏挂单也不在未观测足够天数时盲发真单（live 前必修见报告 follow-up）。
-    """
-    return os.getenv("AUTO_TRADE_MODE", "dry_run")
-
-
-def _trade_cfg() -> dict:
-    """交易参数（从 env 读，缺省值与颈线法 v6 基线对齐）。
-
-    Why env 化：实盘调参不改代码（十二期自动化原则），且独立进程的 env 与 server
-    解耦（server 不应感知这些参数，进一步隔离两端状态）。
-
-    ⚠️ stop_atr_mult 默认值对齐回测（plan Task 4 · P1-6 修复 · 2026-07-28）：
-        历史默认 env=2.0 与回测 neckline/method_v0.DEFAULTS["stop_atr_mult"]=1.0 不一致，
-        导致回测冠军档套实盘时止损价偏宽（颈线−2×ATR vs 颈线−1×ATR），风险敞口与
-        回测预期脱钩。改默认 1.0 对齐回测基线；env 显式设置仍可覆盖（向后兼容）。
-
-    TODO(follow-up · plan Task 14 param_iter 重跑后落地)：spec §4.6 原设计是「_trade_cfg
-        加 active_experiments 参数，从主力实验 params 读 stop_atr_mult」——待 param_iter
-        新冠军档稳定后单独落地（避免此时引入「读实验」耦合扩大本 task 改动面）。
-    """
-    return {
-        "pos_cap": float(os.getenv("TRADE_POS_CAP", "0.05")),
-        # 颈线法 id_cfg 默认；实盘从 NecklineConfig 读（本引擎薄编排，不重算）
-        # P1-6 修复：默认 1.0 对齐回测 DEFAULTS（原 2.0 与回测不一致致风险敞口翻倍）
-        "stop_atr_mult": float(os.getenv("TRADE_STOP_ATR_MULT", "1.0")),
-        "tp_h_mult": float(os.getenv("TRADE_TP_H_MULT", "2.0")),
-        # 地基（live-readiness Task 2）：挂单等待回踩有效期日，pre_open max_wait 窗口过滤用
-        "max_wait": int(os.getenv("TRADE_MAX_WAIT", "5")),
-        # 分级止盈（Task 7 · P0-3 对齐）：tp1_h_mult×H 锁利位 + tp1_portion 比例。
-        # Why 默认 1.0/0.5 对齐 NecklineConfig EXEC_DEFAULTS（颈线+1.0×H 锁 50% 仓）：
-        #     simulate_exit 用同口径加权两批，实盘 _place_take_profit 据此挂两张限价卖单。
-        # env 缺省 → 对齐回测；显式 env 可覆盖（灰度调参用）。
-        "tp1_h_mult": float(os.getenv("TRADE_TP1_H_MULT", "1.0")),
-        "tp1_portion": float(os.getenv("TRADE_TP1_PORTION", "0.5")),
-        # pending 期撤单阈值（Task 9 · D11 · 对齐 simulate_exit:128 + NecklineConfig EXEC）：
-        # cancel_on = 颈线 + cancel_thresh_mult×H。I-3 修正：默认 1.0（对齐回测 EXEC_DEFAULTS
-        # backtest.py:49 + NecklineConfig schema.py:45，二者均为 1.0；原 Task 9 误设 0.75
-        # 致实盘 env 缺省与回测分叉，违背 spec D9/「回测实盘一套逻辑」宗旨）。
-        # 物理意图：挂单等待期 high≥此价 → 涨幅已兑现撤买单（过滤「猛突破后回踩」陷阱）。
-        # env 缺省 → 对齐回测基准 1.0；显式 env 可覆盖（灰度调参用）。
-        "cancel_thresh_mult": float(os.getenv("TRADE_CANCEL_THRESH_MULT", "1.0")),
-        # 海龟 trailing 动态止损参数（grace/step/floor）：
-        # ⚠️ 原 _evolve_trailing_stops 消费方已删除（SSoT review P2 · 死计算）——C3 删写回 +
-        #   C2c 切 _stoploss 读 DB SIGNAL.meta 后演进值无消费方。env 三件套保留供 follow-up
-        #   「trailing 收紧作独立 live P0 task」（post_close 写 position.current_stop +
-        #   _stoploss 读最新）重实现时复用，compute_stop_price 函数（trading.compute.stop）
-        #   本身仍在库内可用。spec §5.3 红线（holding_days<=grace 用 base_stop 给趋势确认空间，
-        #   超 grace 每日收紧 step×ATR，floor 卡底；盘中不调整 stop，盘后演进一步/日）不变。
-        "grace": int(os.getenv("TRADE_STOPLOSS_GRACE_DAYS", "5")),
-        "step": float(os.getenv("TRADE_STOPLOSS_STEP_ATR", "0.1")),
-        "floor": float(os.getenv("TRADE_STOPLOSS_FLOOR", "0.5")),
-        # max_holding（Task 8 · P0-4 超时平仓）：成交后超时持仓周期（交易日），对齐回测
-        # strategies/neckline/backtest.py MAX_HOLDING=15。post_close 扫超期 → 次日 pre_open
-        # 跌停价平仓释放资金（对齐回测「成交后 max_holding 日未达止盈收盘卖剩余」语义）。
-        "max_holding": int(os.getenv("TRADE_MAX_HOLDING", "15")),
-    }
+# （T1-Task2）_mode / _trade_cfg 已迁 trading.critical.py（集群 A 基础设施），见文件顶部
+# re-export。下方原模块级定义已删；engine 内部 ``_mode()`` / ``_trade_cfg()`` 调用点经模块
+# 全局名解析，re-export 后仍是 engine 模块属性（``patch("trading.engine._mode", ...)`` 命中）。
 
 
 # ============================================================================
@@ -2543,44 +2440,38 @@ class TradingEngine:
                         f"userdata shm 文件是否过期")
 
     def _halt(self, msg: str) -> None:
-        """L1 统一停调度原语：置 _halted + CRITICAL + sched.shutdown（幂等）。
+        """L1 统一停调度薄 wrapper（T1-Task2 · 行为零变更）：注入 engine 副作用闭包给 critical.halt。
 
-        物理意图（spec §5 双层保障）：
+        物理意图（spec §5 双层保障 · 与原 _halt 逐行等价）：
             sched.shutdown 停「新触发」+ _halted flag 防「in-flight job 继续写」。
             幂等：已 _halted 时直接返回（多路径同时致命不重复 shutdown/alert）。
 
-        Why shutdown(wait=False) 而非 pause()（review 决议）：
-            致命场景下「带病跑不如停」——pause 可被误恢复，留口子；shutdown 硬停 + CRITICAL
-            唤醒人工，是 live 真金保护取向（spec R4）。
+        T1 缝合点（「critical 留纯函数 + engine 留薄 wrapper」红线）：
+            纯顺序契约（幂等检查 → mark_halted → alert → shutdown）在 critical.halt；
+            engine 侧仅注入四个副作用闭包（is_halted / mark_halted / shutdown / alert），
+            critical 不反向依赖 TradingEngine 类（无 import 级耦合）。
+
+        Why alert=_alert_critical（engine 模块全局名解析）：
+            保 ``patch("trading.engine._alert_critical")`` 命中——_alert_critical 在调用时
+            经 engine 模块全局名解析（re-export 自 critical），patch 替换该属性即被本 wrapper
+            捕获，既有测试断言路径（test_critical_guard / test_engine_alerts 等）不变。
         """
-        if self._halted:
-            return
-        self._halted = True
-        _alert_critical(f"致命停调度 {msg}")
-        try:
-            self.sched.shutdown(wait=False)   # 先例 engine.py shutdown()
-        except Exception:
-            # shutdown 自身抛（如 scheduler 未 start / 已 shutdown）→ _halted 已置，
-            # 被 _critical_guard 装饰的 job 顶检查兜底，不再写。
-            logger.exception("sched.shutdown 失败（_halted 已置，job 顶检查兜底）")
+        _halt_logic(
+            msg,
+            is_halted=lambda: self._halted,
+            mark_halted=lambda: setattr(self, "_halted", True),
+            shutdown=lambda: self.sched.shutdown(wait=False),
+            alert=_alert_critical,
+        )
 
     @staticmethod
     def _guard_skip_rounds(fail_count: int) -> int:
-        """失败次数→跳过轮数（指数退避近似，60s/轮）。
+        """失败次数→跳过轮数（指数退避近似，60s/轮）薄 wrapper。
 
-        映射：0→0, 1→0, 2→1, 3→3, ≥4→7。
-        物理意图：connect 连续失败（柜台持续不可用）时空跑无意义，按失败次数拉长间隔
-        （60→120→240→480s），等效指数退避但不引入 apscheduler reschedule 复杂度
-        （只在本方法内累加计数）。
-        上限 7 轮 ≈ 8min：再长则恢复延迟过大（盘中断线 8min 不恢复 = 实盘敞口失控）。
+        T1-Task2：纯映射已迁 critical.guard_skip_rounds；此处保 ``TradingEngine._guard_skip_rounds(n)``
+        类方法调用路径不变（test_qmt_health_guard.test_guard_skip_rounds_mapping 直接以类名调）。
         """
-        if fail_count < 2:
-            return 0
-        if fail_count == 2:
-            return 1
-        if fail_count == 3:
-            return 3
-        return 7  # 上限≈8min（60s×8 含本轮）
+        return _gskip_fn(fail_count)
 
     def _sanity_check_date_alignment(self, today: str | None = None) -> bool:
         """M3：启动口径自检——确认 _eod 落盘用 next_trading_day、_pre_open 读 today。
