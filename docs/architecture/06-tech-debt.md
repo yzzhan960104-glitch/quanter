@@ -17,7 +17,7 @@ flowchart LR
   end
 
   E["✅ engine.py god module<br/>T1 完成 (2026-08-10)<br/>3437→1546 行 · 8 集群外迁<br/>_ACTIVE_ENGINE 单例桥清零"]:::done
-  DI["data 完整性<br/>生产 gate 只校验实时性<br/>scan/repair 孤立 CLI<br/>历史缺口永不发现"]:::crit
+  DI["data 完整性<br/>生产 gate 只校验实时性<br/>scan/repair 孤立 CLI<br/>历史缺口永不发现<br/>✅ L1 写入守卫已治理(T13-A)"]:::crit
   AS["account_daily.start 漏采<br/>非盘前启动→NULL<br/>熔断基线裸奔"]:::crit
 
   Q["broker/qmt.py 1540 行<br/>业务层堆补丁<br/>连接层不需重构"]:::high
@@ -58,7 +58,7 @@ flowchart LR
 | 项 | 物理事实 | 治理归宿 |
 |---|---|---|
 | ✅ **engine.py god module —— T1 完成（2026-08-10）** | **已治理**：3437→1546 行（-55%），10 集群外迁 8 个（A critical / B data_ctx / D eod_plan / E-F-G-H phases×4 / I order_state），`_ACTIVE_ENGINE` 单例桥代码清零（仅注释/docstring 引用历史），engine 仅留调度/装配/gate/job wrapper + re-export 兼容块。终验：trading 515 单测 + e2e 长周期 26 测全绿（行为等价）。历史态内部结构 → [deep-dives/engine-current-state](deep-dives/engine-current-state.md) | ✅ [T1 done](../../plans/wayfinder/T1.md) |
-| **data 完整性 gate 缺陷** | 生产 gate 只校验实时性不校验历史连续性；`scan_integrity`/`repair_gaps` 孤立 CLI 无调度；历史缺口被动跳过永不发现（[T5](../../plans/wayfinder/T5.md)） | [T13](../../plans/wayfinder/T13.md) |
+| **data 完整性 gate 缺陷** | 生产 gate 只校验实时性不校验历史连续性；`scan_integrity`/`repair_gaps` 孤立 CLI 无调度；历史缺口被动跳过永不发现（[T5](../../plans/wayfinder/T5.md)）。**L1 写入守卫 + daily 双轨收口 + freshness 行数骤降已治理（T13-A · 2026-08-11）；L2 scan gate + L3 自动补采仍欠（T13-B）** | [T13](../../plans/wayfinder/T13.md) |
 | **account_daily.start 漏采** | 模拟盘/非盘前启动 → `start_total_asset` NULL → C-1 熔断 -3% 基线裸奔 | live P0 运维（pre_open 窗口内必须起） |
 
 ### High（演进主脊柱缝合点）
