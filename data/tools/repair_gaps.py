@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pandas as pd
 
-from data.integrity import GapRange
+from data.integrity import GapRange, assert_safe_overwrite
 # 复用 sync_daily_incremental 的 _fetch_paged（按日分页）——同源同口径，避免重复实现
 from data.tools.sync_daily_incremental import _fetch_paged
 
@@ -169,6 +169,10 @@ def main(argv: list[str] | None = None) -> int:
     pro = get_pro()
     new_lake = repair_gaps(gaps, lake_df, pro)
     delta = len(new_lake) - len(lake_df)
+    # 写入前历史行数守卫（T13-A）：repair 重写全湖（覆盖写），防御 dedup/recompute bug
+    # 致 new_lake 异常收缩被静默落盘。force=QUANTER_FORCE_WRITE=1 为人为重采逃生口。
+    assert_safe_overwrite(str(lake_path), new_lake,
+                          force=os.environ.get("QUANTER_FORCE_WRITE") == "1")
     new_lake.to_parquet(lake_path, engine="pyarrow")
     print(f"补采完成：a_shares_daily {len(lake_df)} → {len(new_lake)} 行（+{delta}）")
     return 0

@@ -150,9 +150,12 @@ def test_sync_incremental_recomputes_qfq_and_appends():
     written = {}
     def fake_to_parquet(df, path, **kw):
         written["df"] = df
+    # 守卫放行 stub（T13-A）：本测聚焦前复权数学，combined 是 3 行小数据 vs 生产湖 1020万，
+    # 接入 assert_safe_overwrite 后会被真实守卫拒写；stub 放行以聚焦原测试目标（数学断言）。
     with patch.object(mod.pd, "read_parquet", return_value=fake_lake), \
          patch.object(mod, "get_pro", return_value=pro), \
          patch.object(mod.pd.DataFrame, "to_parquet", fake_to_parquet), \
+         patch.object(mod, "assert_safe_overwrite", lambda *a, **k: None), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
         msg = mod.sync_daily_incremental()
@@ -195,10 +198,13 @@ def test_sync_detects_dividend_when_adj_changes():
     }
     pro = _build_pro(trade_days, raw_by_day, adj_by_day)
     written = {}
+    # 守卫放行 stub（T13-A）：本测聚焦除权检测，combined 是 2 行小数据 vs 生产湖 1020万，
+    # 接入 assert_safe_overwrite 后会被真实守卫拒写；stub 放行以聚焦原测试目标（除权 detect）。
     with patch.object(mod.pd, "read_parquet", return_value=fake_lake), \
          patch.object(mod, "get_pro", return_value=pro), \
          patch.object(mod.pd.DataFrame, "to_parquet",
                       lambda df, path, **kw: written.update(df=df)), \
+         patch.object(mod, "assert_safe_overwrite", lambda *a, **k: None), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
         msg = mod.sync_daily_incremental()

@@ -12,7 +12,10 @@
 """
 from __future__ import annotations
 
+import json
+
 import pandas as pd
+import pytest
 
 from data.integrity import GapRange
 
@@ -114,3 +117,52 @@ def test_repair_gaps_skips_justified_gaps():
 
     # justified gap 不触发补采，lake 不变
     assert len(new_lake) == len(lake)
+
+
+# ============================================================================
+# main 写入守卫接入（T13-A · Task 4）
+# ============================================================================
+# 物理意图：repair_gaps.main 重写 a_shares_daily 湖（全量覆盖，非 append），是潜在抹除
+# 路径。接入 assert_safe_overwrite 后，若 repair_gaps 产出的 new_lake 异常收缩（dedup/
+# recompute bug）→ 落盘前守卫拒写，原湖完好。本测试用 --report 模式绕开 --auto 的 scan
+# 触网，mock repair_gaps 返回收缩湖，证明守卫拒写能传播、不静默落盘。
+
+
+def _big_lake(n):
+    """造 n 行连续日期的 daily 湖（守卫只看 parquet num_rows，OHLCV 值任意）。"""
+    idx = pd.MultiIndex.from_product(
+        [pd.date_range("2024-01-01", periods=n), ["000001.SZ"]], names=["date", "symbol"])
+    return pd.DataFrame({"close": range(n)}, index=idx)
+
+
+def test_repair_gaps_main_refuses_shrink(tmp_path, monkeypatch):
+    """repair_gaps 重写湖：若 new_lake 异常收缩（mock 出 bug）→ 守卫拒写，文件不变。
+
+    --report 模式（传报告 JSON）绕开 --auto 的 scan 触网；mock repair_gaps 返回异常小 df
+    模拟 dedup/recompute bug 致 5000→100，证明守卫拒写能传播、不静默落盘。
+    """
+    from data.integrity import WriteGuardError, existing_row_count
+    from data.tools import repair_gaps as rg
+
+    lake_path = tmp_path / "a_shares_daily.parquet"
+    _big_lake(5000).to_parquet(lake_path)
+
+    # 报告 JSON：1 个 unjustified 漏采段（--report 模式，绕开 scan）
+    report = {"gaps": [{"symbol": "000001.SZ", "start": "2024-09-04",
+                        "end": "2024-09-05",
+                        "missing_dates": ["2024-09-04", "2024-09-05"],
+                        "suspend_justified": False}]}
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    # 拦截 main 内局部 import 的 get_pro（`from data._tushare_compat import get_pro`）
+    # Why patch 源模块属性：局部 import 绑定的是 data._tushare_compat.get_pro，patch
+    # rg.get_pro 拦不住（与 tushare_sync.get_pro 双绑定的 get_pro fixture 同理）。
+    monkeypatch.setattr("data._tushare_compat.get_pro", lambda: object())
+    # mock repair_gaps 返回异常收缩的湖（模拟 dedup/recompute bug 致 5000→100）
+    monkeypatch.setattr(rg, "repair_gaps", lambda gaps, lake_df, pro: _big_lake(100))
+
+    with pytest.raises(WriteGuardError):
+        rg.main(["--report", str(report_path), "--lake-dir", str(tmp_path)])
+    # 原湖未被覆盖（守卫在 to_parquet 前拒写）
+    assert existing_row_count(str(lake_path)) == 5000
