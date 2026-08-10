@@ -23,7 +23,7 @@
 |---|---|---|
 | `trading/ports.py` | `EnginePorts` dataclass（窄依赖接口） | Create（Task 1） |
 | `trading/critical.py` | 集群 A：L1 停调度 + 告警 | Create（Task 2） |
-| `trading/order_state.py` | 集群 I：订单回调三分支 + 状态推进 | Create（Task 3） |
+| `trading/order_state.py` | 集群 I：订单回调三分支 + 状态推进 | **追加进既有文件**（Task 3，与 `OrderStateMachine` 共存不覆盖） |
 | `trading/data_ctx.py` | 集群 B：lake 数据加载 helper | Create（Task 4） |
 | `trading/eod_plan.py` | 集群 D：盘后计划生成 | Create（Task 5） |
 | `trading/phases/__init__.py` | phases 包标记 | Create（Task 6） |
@@ -110,6 +110,8 @@ self._ports = EnginePorts(
 )
 ```
 > 实现时核对 `_dynamic_whitelist` 的真实类型（set/list/dict）与初始化点，`whitelist_add`/`clear` 的 lambda 体对齐其真实 mutate 语义（深剖 L893 注入 / L1843 清空）。若 `_dynamic_whitelist` 是 dict，`add` 改为按 key 置位、`clear` 改为 `.clear()`。
+>
+> **whitelist fallback 红线（§5.3 逐行原样）**：原 `_ACTIVE_ENGINE is None` 的 else 回退分支（模块级 `dynamic_whitelist.inject_dynamic_whitelist` / `clear_dynamic_whitelist`）不可丢。此 lambda 仅装配实例路径（engine 已构造时）；`ports is None` 的回退分支放在 **phases/pre_open.py + post_close.py 内**（Task 6/8 落地：`if ports is not None: ports.whitelist_add(...) else: dynamic_whitelist.inject_dynamic_whitelist(...)`），保双路径语义完整。
 
 - [ ] **Step 6: 消除 _ACTIVE_ENGINE 3 处使用点（gate/whitelist）**
 
@@ -182,7 +184,7 @@ git commit -m "refactor(engine): T1-2 抽 critical.py（集群 A 停调度/告�
 ## Task 3: 抽 order_state.py（集群 I · 缝合点 #2）
 
 **Files:**
-- Create: `trading/order_state.py`
+- Create/追加: `trading/order_state.py`（**与既有 `OrderStateMachine` 共存**——文件 Layer2 #4c 已含 OrderStateMachine 252 行，集群 I 3 函数追加不覆盖；`trading/__init__.py` 的 `OrderStateMachine` 导出 + `tests/test_order_state_machine.py` 不受影响）
 - Modify: `trading/engine.py`
 
 **Interfaces:**
@@ -198,7 +200,7 @@ git commit -m "refactor(engine): T1-2 抽 critical.py（集群 A 停调度/告�
 Run: `PYTHONUTF8=1 .venv310/Scripts/python.exe -m pytest tests/trading/test_engine_order_update_handler.py tests/trading/test_fill_db_contract.py -v`
 Expected: 全绿。
 
-- [ ] **Step 2: 创建 trading/order_state.py，移入 3 符号**
+- [ ] **Step 2: 追加进 trading/order_state.py（与既有 OrderStateMachine 共存），移入 3 符号**
 
 逐字移入。`_handle_order_update` 改为 `async def handle_order_update(self_or_engine, update)`——因 bootstrap 注册的是 `self._on_order_update`（实例绑定），最简形态是把这 3 个方法**保留为接受 engine 实例的函数**：`async def handle_order_update(engine, update)`，内部 `engine._gw`/`engine._place_take_profit` 等访问不变（临时耦合 engine，Task 9 后收口）。
 

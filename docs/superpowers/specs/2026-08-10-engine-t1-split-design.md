@@ -34,7 +34,7 @@ engine.py 3437 行 → **~800 行**（仅集群 J 生命周期/调度 + 集群 C
 | `trading/critical.py` | A | 201 | L1 致命停调度语义 + 模式/配置读口 | `_alert_critical`/`_CriticalHalt`/`_critical_guard` + 类方法 `_halt`/`_guard_skip_rounds` |
 | `trading/data_ctx.py` | B | 201 | 从 lake 读标的宇宙/日线/计划/完整性上下文 | 6 个 `_load_*` + `_resolve_cooldown_days`/`_resolve_id_window` + `_plan_data_keys` |
 | `trading/eod_plan.py` | D | 361 | 颈线法信号 → 计划参数 + trade_event SIGNAL/CONFIRMED 落 DB | `eod_plan` + `_sanity_check_date_alignment` |
-| `trading/order_state.py` | I | 325 | broker 订单回调三分支 + 订单状态推进（缝合点 #2） | `_handle_order_update` + `_order_direction`/`_advance_order_state_from_status` |
+| `trading/order_state.py` | I | 325 | broker 订单回调三分支 + 订单状态推进（缝合点 #2） | `_handle_order_update` + `_order_direction`/`_advance_order_state_from_status`（**与既有 `OrderStateMachine` 共存**——文件 Layer2 #4c 已含 OrderStateMachine 252 行，集群 I 函数追加进同文件不覆盖） |
 | `trading/phases/pre_open.py` | E | 389 | 盘前：确认闸→撤昨→熔断基线→平超期→挂单 | `pre_open`（job_ledger 包裹）+ `_pre_open_impl` |
 | `trading/phases/stop_loss.py` | F | 695 | 盘中海龟移动止损（grace/step/floor）+ 超期平仓 | `stop_loss_monitor` + `_scan_expired_positions`/`_close_expired_positions` |
 | `trading/phases/post_close.py` | G | 344 | 盘后熔断 -3% + 持仓快照 + TP 对账 + 清白名单 | `post_close` + `_seq_for_real_oid`/`_order_state_to_db` |
@@ -115,8 +115,9 @@ engine.py 原 export 的符号（`pre_open`/`post_close`/`stop_loss_monitor`/`eo
 ```python
 # trading/engine.py 顶部
 from trading.critical import _alert_critical, _CriticalHalt, _critical_guard  # noqa: F401
-from trading.data_ctx import _load_universe, _load_df_upto, ...               # noqa: F401
-from trading.eod_plan import eod_plan                                          # noqa: F401
+from trading.data_ctx import load_universe, load_df_upto, ...                 # noqa: F401（新名，去前导 _）
+_load_universe, _load_df_upto = load_universe, load_df_upto                   # 旧名兼容别名（保 patch 命中）
+from trading.eod_plan import compute as eod_plan                               # noqa: F401（compute→eod_plan 别名）
 from trading.order_state import _handle_order_update                           # noqa: F401
 from trading.phases.pre_open import pre_open                                   # noqa: F401
 from trading.phases.stop_loss import stop_loss_monitor                         # noqa: F401
