@@ -446,3 +446,43 @@ def test_main_runs_quick_then_symbol_and_skips_fresh_periodic(monkeypatch, tmp_p
     assert called == ["moneyflow", "fund_daily"]
     # 日志里应记录 weekly 跳过
     assert "weekly" in open(log, encoding="utf-8").read()
+
+
+# ============ [6] merged 最终落盘守卫（T13-A · review P1 修复） ============
+# 物理意图：date_range 数据集（shibor）的 _sync_single 窗口中间写放行后，[4] 已把 lake
+# 覆盖成窗口；最终防线在 [6] 用内存 old_df 行数作基线（非读文件，因文件已被覆盖）。
+# merged 骤降则拒写并用 old_df 还原 lake（回滚 [4] 的窗口中间写）。
+
+
+def test_sync_one_key_merged_guard_rejects_shrink(tmp_path, mock_sync_dataset, monkeypatch):
+    """[6] merged 守卫：merge/dedup bug 致 merged << old → 拒写 + 还原旧湖（不留窗口抹除态）。"""
+    from data.tools.sync_incremental import sync_one_key
+    from data.integrity import existing_row_count
+    from config import TUSHARE_DATASETS
+
+    lake = str(tmp_path / "shibor.parquet")
+    _setup_key("_test_shrink", lake, by="single", date_range=True)
+    # 现有大湖 1000 行
+    old_df = pd.DataFrame({"rate": range(1000)},
+                          index=pd.DatetimeIndex(pd.date_range("2023-01-01", periods=1000)))
+    old_df.to_parquet(lake, engine="pyarrow")
+
+    # sync_dataset 写窗口（1 行，模拟 _sync_single 窗口中间写）
+    def writer(key, start, end):
+        pd.DataFrame({"rate": [1.0]}, index=pd.DatetimeIndex(["2026-08-11"])) \
+            .to_parquet(TUSHARE_DATASETS[key]["lake"], engine="pyarrow")
+    mock_sync_dataset[1].writer = writer
+
+    # mock _merge_dedup 返回异常小 df（10 行 << 旧 1000，模拟 bug 致 merged 收缩）
+    import data.tools.sync_incremental as si
+    tiny = pd.DataFrame({"rate": range(10)},
+                        index=pd.DatetimeIndex(pd.date_range("2026-08-01", periods=10)))
+    monkeypatch.setattr(si, "_merge_dedup", lambda old, new: tiny)
+
+    import io
+    log = io.StringIO()
+    ok, msg = sync_one_key("_test_shrink", "2026-08-11", 3, None, log)
+    assert ok is False, "merge 骤降应拒写 return False"
+    assert "骤降" in msg or "拒写" in msg
+    # 旧湖还原（1000 行，非 [4] 窗口的 1 行抹除态）
+    assert existing_row_count(lake) == 1000

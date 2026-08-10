@@ -802,3 +802,27 @@ def test_sync_single_refuses_crater_overwrite(tmp_path, monkeypatch):
                                        "symbol_col": "ts_code"})
     # 原湖未被覆盖（守卫拒写，行数不变）
     assert existing_row_count(out) == 10000
+
+
+def test_sync_single_date_range_bypasses_guard(tmp_path, monkeypatch):
+    """date_range 数据集（shibor 范式）_sync_single 窗口写放行（避免误伤增量致断更）。
+
+    物理意图：sync_incremental 对 date_range 数据集做窗口增量（_sync_single 覆盖写只含
+    新窗口，[6] merge 还原）；_sync_single 守卫若触发会拒写致每日断更。date_range 旁路
+    让 _sync_single 放行，最终落盘由 sync_incremental [6] old_df 基线守卫负责。
+    """
+    from data.integrity import existing_row_count
+    from data import tushare_sync
+    out = str(tmp_path / "shibor.parquet")
+    # 现有大湖（模拟 shibor 近 3 年 249 行，DatetimeIndex）
+    pd.DataFrame({"rate": range(249)},
+                 index=pd.DatetimeIndex(pd.date_range("2023-01-01", periods=249))).to_parquet(out)
+    # 窗口写：_fetch_with_guard 回 1 行（增量窗口），cfg date_range=True
+    window = pd.DataFrame({"trade_date": ["20260811"], "rate": [1.5]})
+    monkeypatch.setattr(tushare_sync, "_fetch_with_guard", lambda api, **kw: window)
+    # date_range=True → 守卫旁路，不抛 WriteGuardError（窗口中间写由 sync_incremental [6] 守卫）
+    tushare_sync._sync_single("shibor", "shibor", "rate", "trade_date", out,
+                              cfg={"api": "shibor", "by": "single", "date_range": True,
+                                   "date_col": "trade_date"})
+    # 窗口写覆盖成功（_sync_single 中间态，由调用方 merge 还原）
+    assert existing_row_count(out) == 1

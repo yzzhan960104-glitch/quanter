@@ -59,6 +59,8 @@ import config  # 触发 .env 加载（python-dotenv），保证 TUSHARE_TOKEN �
 import pandas as pd
 from config import TUSHARE_DATASETS
 from data.tushare_sync import sync_dataset
+# 写入守卫行数检查 SSoT（T13-A）：[6] merged 最终落盘防 merge bug 致异常收缩抹除。
+from data.integrity import check_row_count_drop
 
 # 复用 sync_all_tushare.classify() 拿 quick 批 keys（单一真相源：分批口径不在两处维护）
 from data.tools.sync_all_tushare import classify
@@ -284,6 +286,17 @@ def sync_one_key(key: str, today_str: str, fallback_years: int,
     else:
         # 首次同步无旧数据：merged=new（无需 merge，但要排序保证索引有序）
         merged = new_df.sort_index() if not isinstance(new_df.index, pd.MultiIndex) else new_df.sort_index()
+
+    # 写入守卫（T13-A）：lake 在 [4] 被 _sync_single 窗口中间写覆盖，此处用内存 old_df
+    # 行数作基线（check_row_count_drop 直接比对，免读已被覆盖的文件）。merged 异常收缩
+    # → 拒写 + 还原 old_df（防 [4] 窗口中间写留抹除态）。date_range 数据集的 _sync_single
+    # 窗口写已放行（避免误伤增量），此处为最终防线。首次（old_df=None）无基线跳过。
+    if old_df is not None and not old_df.empty:
+        _ok, _reason = check_row_count_drop(len(old_df), len(merged))
+        if not _ok:
+            print(f"[{key}] ❌ 写入守卫拒写：{_reason}（还原旧湖）", file=log, flush=True)
+            old_df.to_parquet(lake, engine="pyarrow")
+            return False, f"merged 骤降拒写：{_reason}"
 
     # 落盘回原路径（pyarrow 引擎与 _build_multiindex / _sync_single 一致，避免引擎混用）
     try:

@@ -526,10 +526,12 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
         if keep:
             df = df[keep]
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    # 写入前历史行数守卫（T13-A）：防 T12 式残片覆盖——新行数相对现有骤降则拒写。
-    # force=QUANTER_FORCE_WRITE=1 为人为重采的逃生口（守卫内仍 critical 留痕）。
-    assert_safe_overwrite(out, df,
-                          force=os.environ.get("QUANTER_FORCE_WRITE") == "1")
+    # 写入前历史行数守卫（T13-A）：防全量覆盖残片。date_range 数据集（shibor 等）的
+    # _sync_single 覆盖写是「窗口中间态」（只含新窗口，由调用方 sync_incremental [6]
+    # merge 后的最终落盘守卫负责）；此处放行避免误伤窗口增量写致 shibor 每日断更。
+    if not (cfg or {}).get("date_range"):
+        assert_safe_overwrite(out, df,
+                              force=os.environ.get("QUANTER_FORCE_WRITE") == "1")
     df.to_parquet(out, engine="pyarrow")
     logger.info("%s 写入：%s，%d 行", key, out, len(df))
 
