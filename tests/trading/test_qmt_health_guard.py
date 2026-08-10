@@ -271,7 +271,7 @@ async def test_health_guard_reconnect_triggers_pre_open_catchup():
                new=AsyncMock(return_value=(True, "已补跑"))) as cp:
         await eng._health_guard()
     gw.connect.assert_awaited_once()
-    cp.assert_awaited_once_with()
+    cp.assert_awaited_once_with(ports=eng._ports)  # T1：health_guard 补挂透传 engine._ports
 
 
 @pytest.mark.asyncio

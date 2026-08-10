@@ -127,8 +127,14 @@ async def _catchup_brief(latest_day: str) -> bool:
     return True
 
 
-async def _catchup_pre_open() -> tuple[bool, str]:
-    """补跑 pre_open（今日窗口内且未 done）；窗口已过且未 done → CRITICAL 知会。"""
+async def _catchup_pre_open(ports=None) -> tuple[bool, str]:
+    """补跑 pre_open（今日窗口内且未 done）；窗口已过且未 done → CRITICAL 知会。
+
+    Args:
+        ports: T1 缝合点 #1——engine 实例特有依赖（gate + 动态白名单）。由调用方
+            （``run_startup_catchup(engine)`` / ``engine._health_guard``）传 ``engine._ports``，
+            让补跑 pre_open 与 cron 路径一样经三段闸（行为等价原 ``_ACTIVE_ENGINE`` 全局置位）。
+    """
     from trading.engine import pre_open
     now = clock.now()
     today = clock.today()
@@ -147,7 +153,7 @@ async def _catchup_pre_open() -> tuple[bool, str]:
         _alert_critical(msg)
         return False, msg
     logger.warning("C-8 启动补跑 pre_open：today=%s", today)
-    await pre_open(today)
+    await pre_open(today, ports=ports)
     return True, "已补跑"
 
 
@@ -171,7 +177,8 @@ async def run_startup_catchup(engine) -> dict:
         latest_day = calendar.expected_latest_trade_day(clock.now())
         result["pipeline"] = await _catchup_pipeline(engine)
         result["brief"] = await _catchup_brief(latest_day)
-        result["pre_open"], result["pre_open_note"] = await _catchup_pre_open()
+        result["pre_open"], result["pre_open_note"] = await _catchup_pre_open(
+            ports=getattr(engine, "_ports", None))
     except Exception as e:
         logger.exception("C-8 启动补跑失败")
         _alert_critical(f"C-8 启动补跑失败：{e}")

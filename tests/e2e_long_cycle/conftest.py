@@ -23,7 +23,8 @@ def isolated_state(tmp_path, monkeypatch):
     - patch position_book._DEFAULT_DB / state_store._DEFAULT_DB 到 tmp（engine 间接链路命中）。
     - TRADE_PLAN_DIR / TRADE_STATE_DB env 注入。
     - init_db / init_store 建表。
-    - 重置 _ACTIVE_ENGINE 单例（防 gate 泄漏，同 test_e2e_trading_flow 范式）。
+    - T1：_ACTIVE_ENGINE 单例桥已删，pre_open 改经 ports 参数；E2E 不传 ports（默认 None）
+      → 跳过三段闸（与原「重置单例为 None」语义等价，无全局单例可泄漏）。
     - query_trades mock 返空（full_run 集成修复 · 根因 2）：post_close ② 归因展示段
       读 query_trades 聚合净持仓 vs position_book 产归因日志；E2E 用 tmp DB 做真相源，
       归因段聚合为空、不产误导日志、不污染 tmp position_book（W3.4 后归因段【只读展示】
@@ -47,7 +48,6 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path / "plans"))
     monkeypatch.setenv("TRADE_STATE_DB", db_path)
     monkeypatch.setenv("QMT_ACCOUNT_ID", "e2e_long_acc")  # 显式 account_id 防 .env 污染
-    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)  # 防 gate 泄漏
 
     # query_trades 隔离（full_run 集成修复 · 根因 2）：
     # 物理意图——engine.post_close ② 段读 query_trades 聚合净持仓 vs position_book

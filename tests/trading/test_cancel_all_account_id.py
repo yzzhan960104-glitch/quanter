@@ -33,7 +33,7 @@ import pytest
 # ----------------------------------------------------------------------------
 @pytest.fixture
 def isolated_eng(monkeypatch, tmp_path):
-    """隔离环境 + 构造 TradingEngine + 注入 _ACTIVE_ENGINE 单例。
+    """隔离环境 + 构造 TradingEngine（T1：__init__ 构造 self._ports，gate 经它注入）。
 
     与 test_pre_open_l1_halt.py 同款隔离，杜绝污染真实 .db / .json。
     """
@@ -47,8 +47,7 @@ def isolated_eng(monkeypatch, tmp_path):
     state_store.init_store()
 
     from trading import engine
-    eng = engine.TradingEngine()
-    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", eng)
+    eng = engine.TradingEngine()  # T1：__init__ 构造 self._ports（gate 经 lambda 延迟解析）
     return eng
 
 
@@ -60,8 +59,9 @@ def test_pre_open_cancel_passes_account_id(isolated_eng, monkeypatch):
     """
     from trading import engine
 
-    # gate 绿（撤单段在挂单循环之前，gate 是第一道）
-    engine._ACTIVE_ENGINE._pre_open_gate = AsyncMock(return_value=(True, ""))
+    # gate 绿（撤单段在挂单循环之前，gate 是第一道）。T1：gate 经 ports.gate（lambda 延迟
+    # 解析 self._pre_open_gate），故 monkeypatch 实例方法后 ports 调用即时生效。
+    isolated_eng._pre_open_gate = AsyncMock(return_value=(True, ""))
 
     captured: dict = {}
 
@@ -90,7 +90,7 @@ def test_pre_open_cancel_passes_account_id(isolated_eng, monkeypatch):
             ss.has_order.return_value = False
             ss.insert_order.return_value = None
             ss.update_order_state.return_value = None
-            asyncio.run(engine.pre_open("2026-07-31"))
+            asyncio.run(engine.pre_open("2026-07-31", ports=isolated_eng._ports))
 
     assert captured.get("account_id") == "ACC_QMT_001", (
         "pre_open 必须透传 account_id 激活柜台路径 cancel_order_by_broker_oid_db 回写 "

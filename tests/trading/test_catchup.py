@@ -8,7 +8,7 @@ plan 日期已过 pre_open 窗口 → run_eod=False 只补数据；pre_open 窗�
 import pytest
 from datetime import datetime, time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from trading import job_ledger
 
@@ -51,7 +51,7 @@ async def test_pipeline_catchup_runs_full_chain_in_window(monkeypatch):
     pl.assert_awaited_once()
     assert pl.await_args.kwargs == {"for_date": "2026-07-31", "run_eod": True}
     assert result["pre_open"] is True
-    po.assert_awaited_once_with("2026-08-03")
+    po.assert_awaited_once_with("2026-08-03", ports=ANY)  # T1：catchup 透传 engine._ports（MagicMock 占位）
 
 
 @pytest.mark.asyncio
@@ -133,7 +133,7 @@ async def test_brief_catchup_when_ledger_missing(monkeypatch, tmp_path):
         result = await run_startup_catchup(MagicMock())
     assert result["brief"] is True
     rba.assert_awaited_once()
-    po.assert_awaited_once_with("2026-08-03")   # brief 兜底不影响 pre_open
+    po.assert_awaited_once_with("2026-08-03", ports=ANY)   # T1：brief 兜底不影响 pre_open（ports 透传）
 
 
 @pytest.mark.asyncio

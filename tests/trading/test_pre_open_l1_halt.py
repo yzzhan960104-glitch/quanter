@@ -35,7 +35,7 @@ from trading.engine import TradingEngine, _CriticalHalt
 # ----------------------------------------------------------------------------
 @pytest.fixture
 def isolated_eng(monkeypatch, tmp_path):
-    """隔离环境 + 构造 TradingEngine + 注入 _ACTIVE_ENGINE 单例。
+    """隔离环境 + 构造 TradingEngine（T1：__init__ 构造 self._ports，gate 经它注入）。
 
     返回 eng，供每个 case 在其上 patch 模块级引用。
     """
@@ -50,8 +50,7 @@ def isolated_eng(monkeypatch, tmp_path):
     state_store.init_store()
 
     from trading import engine
-    eng = TradingEngine()
-    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", eng)
+    eng = TradingEngine()  # T1：__init__ 构造 self._ports（gate=lambda→self._pre_open_gate）
 
     # gw=None（pre_open 内 696 行 warning 跳过撤昨日单 + 746 行跳过基线快照）。
     # dry_run 模式下 _submit 命中 dry_run 分支返 {"state":"DRY_RUN"} 不触达 gw——
@@ -83,15 +82,16 @@ def _green_signals():
     }]
 
 
-def _walk_to_submit_chain(engine_mod):
+def _walk_to_submit_chain(eng):
     """统一构造 pre_open 走到挂单循环的 mock 链：gate 绿 / 撤单 / 基线 / 过期持仓 / 幂等读。
 
+    T1：接收 eng 实例（原经 engine_mod._ACTIVE_ENGINE 反查），在其上 monkeypatch
+    ``_pre_open_gate`` 让 gate 绿——ports.gate 的 lambda 延迟解析会即时生效。
     各 case 在调用方通过 patch("trading.engine._state_store") 注入具体 side_effect
     （决定哪个 DB 调用抛异常）。
     """
     # ① gate 绿（_pre_open_gate 是 async，需 AsyncMock 返 (True, "")）
-    eng = engine_mod._ACTIVE_ENGINE
-    engine_mod._ACTIVE_ENGINE._pre_open_gate = AsyncMock(return_value=(True, ""))
+    eng._pre_open_gate = AsyncMock(return_value=(True, ""))
 
 
 # ============================================================================
@@ -104,7 +104,7 @@ def test_insert_order_failure_raises_critical_halt(isolated_eng, monkeypatch):
     """
     from trading import engine
 
-    _walk_to_submit_chain(engine)
+    _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -131,7 +131,7 @@ def test_insert_order_failure_raises_critical_halt(isolated_eng, monkeypatch):
             submit_mock.side_effect = _should_not_submit
 
             with pytest.raises(_CriticalHalt, match="insert_order"):
-                asyncio.run(engine.pre_open("2026-07-31"))
+                asyncio.run(engine.pre_open("2026-07-31", ports=isolated_eng._ports))
 
 
 # ============================================================================
@@ -141,7 +141,7 @@ def test_idempotent_read_failure_raises_critical_halt(isolated_eng, monkeypatch)
     """has_order 抛异常 → pre_open raise _CriticalHalt（不知是否已挂=可能重复挂=真金损失）。"""
     from trading import engine
 
-    _walk_to_submit_chain(engine)
+    _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -163,7 +163,7 @@ def test_idempotent_read_failure_raises_critical_halt(isolated_eng, monkeypatch)
             submit_mock.side_effect = _should_not_submit
 
             with pytest.raises(_CriticalHalt, match="幂等读"):
-                asyncio.run(engine.pre_open("2026-07-31"))
+                asyncio.run(engine.pre_open("2026-07-31", ports=isolated_eng._ports))
 
 
 # ============================================================================
@@ -177,7 +177,7 @@ def test_submit_backfill_failure_raises_critical_halt(isolated_eng, monkeypatch)
     """
     from trading import engine
 
-    _walk_to_submit_chain(engine)
+    _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -200,7 +200,7 @@ def test_submit_backfill_failure_raises_critical_halt(isolated_eng, monkeypatch)
             ss.update_order_state.side_effect = RuntimeError("db locked")
 
             with pytest.raises(_CriticalHalt, match="SUBMITTED"):
-                asyncio.run(engine.pre_open("2026-07-31"))
+                asyncio.run(engine.pre_open("2026-07-31", ports=isolated_eng._ports))
 
 
 # ============================================================================
@@ -210,7 +210,7 @@ def test_account_row_failure_raises_critical_halt(isolated_eng, monkeypatch):
     """upsert_account / get_account 抛异常 → raise _CriticalHalt（DB 真故障，FK 全失效）。"""
     from trading import engine
 
-    _walk_to_submit_chain(engine)
+    _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -232,7 +232,7 @@ def test_account_row_failure_raises_critical_halt(isolated_eng, monkeypatch):
             submit_mock.side_effect = _should_not_submit
 
             with pytest.raises(_CriticalHalt, match="account"):
-                asyncio.run(engine.pre_open("2026-07-31"))
+                asyncio.run(engine.pre_open("2026-07-31", ports=isolated_eng._ports))
 
 
 # ============================================================================
@@ -246,7 +246,7 @@ def test_submit_runtime_error_stays_l2_not_halt(isolated_eng, monkeypatch):
     """
     from trading import engine
 
-    _walk_to_submit_chain(engine)
+    _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
     with patch("trading.engine.trading_plan") as tp, \
@@ -268,6 +268,6 @@ def test_submit_runtime_error_stays_l2_not_halt(isolated_eng, monkeypatch):
             ss.update_order_state.return_value = None
 
             # 不应 raise _CriticalHalt（应正常返回 submitted=0）
-            result = asyncio.run(engine.pre_open("2026-07-31"))
+            result = asyncio.run(engine.pre_open("2026-07-31", ports=isolated_eng._ports))
 
     assert result["submitted"] == 0

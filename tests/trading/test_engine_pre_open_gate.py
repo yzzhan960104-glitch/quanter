@@ -231,9 +231,9 @@ def test_pre_open_skip_on_gate_failure(monkeypatch, tmp_path):
     position_book.init_db()
     state_store.init_store()
 
-    # 确保模块级 _ACTIVE_ENGINE 是 eng（gate 经它调用实例方法）
+    # T1：gate 经 ports.gate 调用实例方法。eng._ports 在 __init__ 构造（gate=lambda→
+    # self._pre_open_gate），pre_open 显式传 ports=eng._ports 让三段闸生效。
     eng = TradingEngine()
-    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", eng)
 
     # get_gateway 返 None（惰性 singleton getter，只读无写副作用，允许调用）
     monkeypatch.setattr(engine, "get_gateway", lambda: None)
@@ -250,7 +250,7 @@ def test_pre_open_skip_on_gate_failure(monkeypatch, tmp_path):
 
     # load_plan 返 None → gate ① 段失败
     with patch("trading.engine.load_plan", return_value=None):
-        result = asyncio.run(engine.pre_open("2026-07-30"))
+        result = asyncio.run(engine.pre_open("2026-07-30", ports=eng._ports))
 
     # 返回 shape 已规范化为与 pre_open 其它返回一致（success: {"submitted","mode"}；
     # skip: {"submitted","reason"}）。gate skip 保留 skipped（携带 gate reason）+ 补

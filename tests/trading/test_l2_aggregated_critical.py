@@ -38,7 +38,6 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
             patch("trading.engine._cancel_all_open_orders",
                   new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
             patch("trading.engine._scan_expired_positions", return_value=[]), \
-            patch("trading.engine._ACTIVE_ENGINE", eng), \
             patch("trading.engine._mode", return_value="live"), \
             patch("trading.engine._alert_critical") as ac, \
             patch("trading.engine._submit", new=AsyncMock(side_effect=[
@@ -62,7 +61,7 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
         ss.update_order_state.return_value = None
         monkeypatch.setattr(eng, "_pre_open_gate", AsyncMock(return_value=(True, "")))
         from trading.engine import pre_open
-        result = await pre_open("2026-07-31")
+        result = await pre_open("2026-07-31", ports=eng._ports)
     assert result["submitted"] == 1   # 第 1 只挂成 / 第 2 只业务拒单 (部分拒触发 L2 聚合)
     # 聚合 CRITICAL 含 "被拒" 语义, _halted 保持 False (L2 不停调度)
     assert any("被拒" in str(c) for c in ac.call_args_list)

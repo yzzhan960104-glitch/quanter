@@ -95,9 +95,9 @@ async def test_e2e_pre_open_halt_then_stoploss_skipped(monkeypatch, tmp_path):
     position_book.init_db()
     state_store.init_store()
 
-    eng = TradingEngine()
-    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", eng)
-    # gate 绿（_pre_open_gate async 返 (True, "")）
+    eng = TradingEngine()  # T1：__init__ 构造 self._ports；eng._pre_open() wrapper 传 self._ports
+    # gate 绿（_pre_open_gate async 返 (True, "")）。gate 经 ports.gate（lambda 延迟解析
+    # self._pre_open_gate），故 monkeypatch 实例方法后 wrapper 内 ports 调用即时生效。
     eng._pre_open_gate = AsyncMock(return_value=(True, ""))
     # gw=None 跳过撤昨日单 / 基线快照（pre_open 内 696/746 行 warning 路径）
     monkeypatch.setattr(engine, "get_gateway", lambda: None)

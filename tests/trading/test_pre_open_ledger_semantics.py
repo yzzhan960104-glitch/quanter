@@ -11,7 +11,7 @@ async def _run_pre_open(monkeypatch, tmp_path, result):
     monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "job.db"))
     job_ledger.init_db()
 
-    async def fake_impl(date):
+    async def fake_impl(date, ports=None):
         return result
 
     monkeypatch.setattr(engine, "_pre_open_impl", fake_impl)
@@ -74,7 +74,7 @@ async def test_catchup_retries_failed_pre_open(monkeypatch, tmp_path):
 
     ran: list[str] = []
 
-    async def fake_pre_open(date):
+    async def fake_pre_open(date, ports=None):
         ran.append(date)
 
     monkeypatch.setattr(engine_mod, "pre_open", fake_pre_open)

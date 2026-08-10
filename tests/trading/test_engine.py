@@ -36,11 +36,9 @@ def _isolate_plan_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(state_store, "_DEFAULT_DB", _db)
     position_book.init_db()
     state_store.init_store()
-    # Task 8（C-2 S3）：重置模块级 _ACTIVE_ENGINE 单例——pre_open 入口的 gate 经它调用
-    # 实例方法，若不重置会跨测试泄漏（前序构造 TradingEngine 的测试残留），让本文件里
-    # 非 gate 焦点的 pre_open 测试（expired_positions / alerts）被 gate 拦截早返。
-    # 重置为 None 后 pre_open 走防御性分支跳过 gate，保留这些测试原本验证的下游逻辑。
-    monkeypatch.setattr(engine, "_ACTIVE_ENGINE", None)
+    # T1（缝合点 #1）：_ACTIVE_ENGINE 单例桥已删，pre_open 改经 ports 参数接收 gate。
+    # 本文件非 gate 焦点的 pre_open 测试不传 ports（默认 None）→ 走防御分支跳过三段闸，
+    # 与原「重置单例为 None」语义逐行等价（gate 不再可能从前序测试泄漏——无全局单例可泄漏）。
 
 
 # ============================================================================
@@ -1571,7 +1569,7 @@ def test_post_close_reads_position_book(monkeypatch):
                         lambda **kw: {"300001.SZ": 100.0})
     captured = {}
 
-    async def _fake_post_close(date, *, gw=None, local_positions=None, tolerance=0.0):
+    async def _fake_post_close(date, *, gw=None, local_positions=None, tolerance=0.0, ports=None):
         captured["local"] = local_positions
         captured["date"] = date
         return {"date": date}
@@ -1598,7 +1596,7 @@ def test_post_close_empty_book_passes_empty_dict(monkeypatch):
     monkeypatch.setattr(position_book, "get_local_positions", lambda **kw: {})
     captured = {}
 
-    async def _fake_post_close(date, *, gw=None, local_positions=None, tolerance=0.0):
+    async def _fake_post_close(date, *, gw=None, local_positions=None, tolerance=0.0, ports=None):
         captured["local"] = local_positions
         return {"date": date}
 

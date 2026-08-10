@@ -13,9 +13,10 @@ lifespan 装配——与生产 ``start_all.py`` 链**同一入口**，消除历�
 Why engine 可合并进 lifespan（W1 实例属性隔离取代旧进程隔离硬约束）：
 - 历史红线「engine 必须独立进程、绝不嵌入 server」是为了防前视污染（engine 注入的
   动态白名单污染 server 手动下单路径）。W1 已把动态白名单从模块级全局
-  ``_DYNAMIC`` 改为 engine **实例属性** ``_dynamic_whitelist``，``_submit`` 经
-  ``_ACTIVE_ENGINE`` 单例反查实例、显式透传 ``whitelist`` 给 submit_order；server 路径
-  不传 whitelist 即走纯 env 旧路径（见 ``engine.py`` 模块 docstring 不变量块）。
+  ``_DYNAMIC`` 改为 engine **实例属性** ``_dynamic_whitelist``；T1 起原模块级活跃引擎
+  单例桥被 ``EnginePorts``（``TradingEngine._ports``）显式窄接口取代——pre_open / post_close
+  经 ports 注入 gate + 动态白名单读写。server 路径不传 whitelist 即走纯 env 旧路径
+  （见 ``engine.py`` 模块 docstring 不变量块）。
 - 因此 engine 与 server 同进程不再前视污染，合并进 uvicorn lifespan 安全。
 
 职责切分（薄入口原则 · Karpathy 极简）：

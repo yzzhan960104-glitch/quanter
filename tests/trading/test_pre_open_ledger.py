@@ -8,17 +8,20 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from trading import job_ledger
+from trading.ports import EnginePorts  # T1：构造 fake ports 驱动 pre_open gate
 
 
 @pytest.mark.asyncio
 async def test_pre_open_gate_skip_records_skipped():
     """gate 未过（无计划等）→ 台账 skipped（不算完成，补跑可重试）。"""
     from trading.engine import pre_open
-    fake_engine = AsyncMock()
-    fake_engine._pre_open_gate = AsyncMock(return_value=(False, "无计划"))
-    with patch("trading.engine._ACTIVE_ENGINE", fake_engine), \
-         patch("trading.engine.get_gateway", return_value=None):
-        result = await pre_open("2026-08-03")
+    # T1：原 patch _ACTIVE_ENGINE → 改构造 fake EnginePorts 注入 gate 行为。
+    fake_ports = EnginePorts(
+        gate=AsyncMock(return_value=(False, "无计划")),
+        whitelist_add=lambda syms: None,
+        whitelist_clear=lambda: None)
+    with patch("trading.engine.get_gateway", return_value=None):
+        result = await pre_open("2026-08-03", ports=fake_ports)
     assert result["skipped"] == "无计划"
     assert job_ledger.latest_status("pre_open", "2026-08-03") == "skipped"
 
@@ -30,13 +33,14 @@ async def test_pre_open_no_plan_records_skipped():
     C2c：pre_open 直读 DB list_signals_with_meta_by_plan_date；返空 = 无计划 = skipped。
     """
     from trading.engine import pre_open
-    fake_engine = AsyncMock()
-    fake_engine._pre_open_gate = AsyncMock(return_value=(True, ""))
-    with patch("trading.engine._ACTIVE_ENGINE", fake_engine), \
-         patch("trading.engine.get_gateway", return_value=None), \
+    fake_ports = EnginePorts(
+        gate=AsyncMock(return_value=(True, "")),
+        whitelist_add=lambda syms: None,
+        whitelist_clear=lambda: None)
+    with patch("trading.engine.get_gateway", return_value=None), \
          patch("trading.engine._state_store.list_signals_with_meta_by_plan_date",
                return_value=[]):
-        result = await pre_open("2026-08-03")
+        result = await pre_open("2026-08-03", ports=fake_ports)
     assert result["reason"] == "无计划"
     assert job_ledger.latest_status("pre_open", "2026-08-03") == "skipped"
 
@@ -49,13 +53,14 @@ async def test_pre_open_success_records_done():
     让主流程走完（confirmed + has_order=False + insert_order 通过 + _submit 成功）。
     """
     from trading.engine import pre_open
-    fake_engine = AsyncMock()
-    fake_engine._pre_open_gate = AsyncMock(return_value=(True, ""))
+    fake_ports = EnginePorts(
+        gate=AsyncMock(return_value=(True, "")),
+        whitelist_add=lambda syms: None,
+        whitelist_clear=lambda: None)
     _signals = [{"symbol": "300214.SZ",
                  "order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
                  "formed_at": None, "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5}]
-    with patch("trading.engine._ACTIVE_ENGINE", fake_engine), \
-         patch("trading.engine.get_gateway", return_value=None), \
+    with patch("trading.engine.get_gateway", return_value=None), \
          patch("trading.engine._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
          patch("trading.engine._scan_expired_positions", return_value=[]), \
@@ -70,7 +75,7 @@ async def test_pre_open_success_records_done():
         ss.insert_order.return_value = None
         ss.update_order_state.return_value = None
         ss.insert_trade_event.return_value = None
-        result = await pre_open("2026-08-03")
+        result = await pre_open("2026-08-03", ports=fake_ports)
     assert result["submitted"] == 1
     assert job_ledger.latest_status("pre_open", "2026-08-03") == "done"
 
@@ -79,10 +84,11 @@ async def test_pre_open_success_records_done():
 async def test_pre_open_exception_records_failed_and_raises():
     """未预期异常 → 台账 failed 后上抛（cron 路径由 _critical_guard 按 C-4 L1 停调度）。"""
     from trading.engine import pre_open
-    fake_engine = AsyncMock()
-    fake_engine._pre_open_gate = AsyncMock(side_effect=RuntimeError("DB 故障"))
-    with patch("trading.engine._ACTIVE_ENGINE", fake_engine), \
-         patch("trading.engine.get_gateway", return_value=None):
+    fake_ports = EnginePorts(
+        gate=AsyncMock(side_effect=RuntimeError("DB 故障")),
+        whitelist_add=lambda syms: None,
+        whitelist_clear=lambda: None)
+    with patch("trading.engine.get_gateway", return_value=None):
         with pytest.raises(RuntimeError, match="DB 故障"):
-            await pre_open("2026-08-03")
+            await pre_open("2026-08-03", ports=fake_ports)
     assert job_ledger.latest_status("pre_open", "2026-08-03") == "failed"
