@@ -770,3 +770,35 @@ def test_sync_by_symbol_no_date_filter_skips_date(tmp_path, fake_pro, monkeypatc
     assert div_calls, "dividend 应被调用"
     assert "start_date" not in div_calls[0], "no_date_filter 时不应传 start_date（dividend 不认日期）"
     assert "end_date" not in div_calls[0], "no_date_filter 时不应传 end_date"
+
+
+# ============ 写入前历史行数守卫接入（T13-A · Task 3） ============
+# 物理意图：_sync_single / _build_multiindex 做全量覆盖写（非 append），正是 T12 抹除
+# 路径（1020万→3200）。接入 assert_safe_overwrite 后，落盘前若新行数相对现有骤降 → 拒写，
+# 原湖完好。本测试重演 T12：mock _fetch_with_guard 回残片 → _sync_single 拒写。
+
+
+def test_sync_single_refuses_crater_overwrite(tmp_path, monkeypatch):
+    """重演 T12：现有大湖，_fetch_with_guard 回残片 → _sync_single 拒写，文件不变。"""
+    from data.integrity import WriteGuardError, existing_row_count
+    from data import tushare_sync
+    out = str(tmp_path / "lake.parquet")
+
+    # 现有大湖（10000 行 MultiIndex(date, symbol)）
+    pd.DataFrame({"date": pd.date_range("2024-01-01", periods=10000),
+                  "symbol": ["000001.SZ"] * 10000,
+                  "close": range(10000)}).set_index(["date", "symbol"]).to_parquet(out)
+
+    # mock 通用同步器的限频拉取，返回残片（模拟 SOCKS 异常只拿到单日）
+    crater = pd.DataFrame({"trade_date": ["20260724"], "ts_code": ["000001.SZ"],
+                           "close": [10.0]})
+    monkeypatch.setattr(tushare_sync, "_fetch_with_guard",
+                        lambda api, **kw: crater)
+    # _sync_single 签名：(key, api, fields, date_col, out, cfg=None, start=None, end=None)
+    with pytest.raises(WriteGuardError):
+        tushare_sync._sync_single("fakekey", "daily", None, "trade_date", out,
+                                  cfg={"api": "daily", "by": "single",
+                                       "date_col": "trade_date",
+                                       "symbol_col": "ts_code"})
+    # 原湖未被覆盖（守卫拒写，行数不变）
+    assert existing_row_count(out) == 10000
