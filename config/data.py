@@ -56,7 +56,7 @@ MACRO_CLIENT_CONFIG = {
 # 不重定义整个字典，保持 default_path / shard_dir / years_default 不变。
 LAKE_CONFIG["lakes"] = {
     "macro": "data_lake/macro_credit.parquet",
-    "daily": "data_lake/a_shares_daily.parquet",          # 全市场日线（sync_tushare 统一管道写）
+    "daily": "data_lake/a_shares_daily.parquet",          # 全市场日线（T13-A：sync_daily_incremental 增量写）
     # 通用 Tushare 湖同步器（Plan A/B/C）落湖：key 与 TUSHARE_DATASETS 一一对应
     "fina_income": "data_lake/fina_income.parquet",        # 利润表（tushare_sync 写，MultiIndex date/symbol）
     "fina_balance": "data_lake/fina_balance.parquet",      # 资产负债表

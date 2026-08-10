@@ -33,7 +33,7 @@ from data._tushare_compat import get_pro
 # per-symbol 全历史调用走 basic 桶；P2 防新增配额路径绕过限频触发 Tushare 限流封禁）。
 from data.tushare_sync import _fetch_with_guard
 # 写入前历史行数守卫（T13-A）：append 落盘前防御性校验，捕获 dedup/recompute bug 致异常收缩。
-from data.integrity import assert_safe_overwrite
+from data.integrity import safe_overwrite
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -245,8 +245,7 @@ def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = F
         combined = combined[~combined.index.duplicated(keep="last")].sort_index()
     # 写入守卫（T13-A · 防御性）：append 日常 combined >= 现有放行，捕获 dedup/recompute
     # bug 致 combined 异常收缩。force=QUANTER_FORCE_WRITE=1 为人为重采逃生口。
-    assert_safe_overwrite(LAKE, combined,
-                          force=os.environ.get("QUANTER_FORCE_WRITE") == "1")
+    safe_overwrite(LAKE, combined)
     combined.to_parquet(LAKE, engine="pyarrow")
     new_d0 = str(pd.Timestamp(combined.index.get_level_values("date").max()).date())
     logger.info("完成：a_shares_daily %d 行，最新日 %s（新增 %d 行）",

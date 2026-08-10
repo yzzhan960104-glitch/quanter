@@ -51,6 +51,13 @@ def test_select_keys_退役key被过滤():
     assert sel == ["weekly"], "退役 key（daily）应被过滤，保留有效 key"
 
 
+def test_select_keys_退役key配quota不崩():
+    """--keys daily --quota basic：daily 退役先被过滤，quota 过滤不 KeyError（review P2）。"""
+    sel = select_keys(all_keys=False, keys=["daily", "stock_basic"], quota="basic")
+    assert "daily" not in sel, "退役 key 应先被过滤"
+    assert "stock_basic" in sel, "quota basic 有效 key 应保留"
+
+
 def test_run_单key失败不中断后续(monkeypatch):
     """fail-soft：某 key 抛异常，后续 key 仍跑，汇总 exit code=1。用真实注册表 key（run 访问 cfg）。"""
     calls = []

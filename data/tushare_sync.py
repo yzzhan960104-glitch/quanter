@@ -23,7 +23,7 @@ import pandas as pd
 
 from config import TUSHARE_DATASETS, LAKE_CONFIG
 from data._tushare_compat import get_pro, source_name
-from data.integrity import assert_safe_overwrite
+from data.integrity import safe_overwrite
 from data.resilience import (
     tushare_breaker,
     tushare_rate_limiter_basic,
@@ -230,8 +230,7 @@ def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str,
     big = big.set_index(["date", "symbol"]).sort_index()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     # 写入前历史行数守卫（T13-A）：防 T12 式残片覆盖——新行数相对现有骤降则拒写。
-    assert_safe_overwrite(out, big,
-                          force=os.environ.get("QUANTER_FORCE_WRITE") == "1")
+    safe_overwrite(out, big)
     big.to_parquet(out, engine="pyarrow")
     logger.info("湖写入完成：%s，%d 行，%d 标的",
                 out, len(big), big.index.get_level_values("symbol").nunique())
@@ -530,8 +529,7 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
     # _sync_single 覆盖写是「窗口中间态」（只含新窗口，由调用方 sync_incremental [6]
     # merge 后的最终落盘守卫负责）；此处放行避免误伤窗口增量写致 shibor 每日断更。
     if not (cfg or {}).get("date_range"):
-        assert_safe_overwrite(out, df,
-                              force=os.environ.get("QUANTER_FORCE_WRITE") == "1")
+        safe_overwrite(out, df)
     df.to_parquet(out, engine="pyarrow")
     logger.info("%s 写入：%s，%d 行", key, out, len(df))
 

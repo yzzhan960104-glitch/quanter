@@ -9,9 +9,9 @@
 
 用法：
   python -m data.sync --all --since 2021-01-01                  # 全量回填所有数据集
-  python -m data.sync --keys daily,weekly,cyq_chips --since 2021-01-01
+  python -m data.sync --keys weekly,monthly,cyq_chips --since 2021-01-01
   python -m data.sync --keys moneyflow --incremental             # 增量（湖最新日→今天）
-  python -m data.sync --keys daily --dry-run --since 2025-07-01  # 小样例（限2标的/1日）验证字段
+  python -m data.sync --keys weekly --dry-run --since 2025-07-01  # 小样例（限2标的/1日）验证字段
   python -m data.sync --quota basic --since 2021-01-01           # 仅基础桶数据集（500/min）
 
 退出码：0=全成功，1=部分失败（fail-soft，单 key 失败不中断后续），2=无数据集可选。
@@ -69,12 +69,12 @@ def select_keys(*, all_keys: bool, keys: Optional[list[str]],
         sel = list(TUSHARE_DATASETS.keys())
     else:
         sel = list(keys or [])
-    if quota:
-        sel = [k for k in sel if TUSHARE_DATASETS[k].get("quota_type", "basic") == quota]
-    # 过滤 _unavailable + 已退役 key（T13-A：daily 退役后 --keys daily 不应 KeyError 崩，
-    # 而是静默跳过该退役 key）。k in TUSHARE_DATASETS 兜底动态访问，防传无效/退役 key。
+    # 先过滤退役/无效 key（T13-A：daily 退役等）+ _unavailable，再 quota 过滤——
+    # 避免 TUSHARE_DATASETS[k] 对退役 key KeyError（--keys daily --quota basic 崩溃，review P2）。
     sel = [k for k in sel if k in TUSHARE_DATASETS
            and not TUSHARE_DATASETS[k].get("_unavailable")]
+    if quota:
+        sel = [k for k in sel if TUSHARE_DATASETS[k].get("quota_type", "basic") == quota]
     return sel
 
 

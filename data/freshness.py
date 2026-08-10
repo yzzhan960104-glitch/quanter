@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import logging
 
+from data.integrity import existing_row_count
+
 logger = logging.getLogger(__name__)
 
 # registry key → parquet 文件名映射（与 config/registry.py 的 lake_key 口径一致）
@@ -68,7 +70,6 @@ def check_freshness(
     # 读最新日期 + 行数：date index max 取日期，pyarrow metadata 取行数（免全量 IO）
     try:
         import pandas as pd
-        from data.integrity import existing_row_count
         df = pd.read_parquet(path)
         idx = df.index
         # MultiIndex(date, symbol) 或 DatetimeIndex

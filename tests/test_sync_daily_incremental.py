@@ -89,7 +89,7 @@ def test_sync_daily_guard_propagates_reject(tmp_path, monkeypatch):
     # 即 red；接入后 mock 生效 → WriteGuardError 传播 → green）
     def _raise(*a, **k):
         raise WriteGuardError("stub: combined 异常收缩")
-    monkeypatch.setattr(sdi, "assert_safe_overwrite", _raise)
+    monkeypatch.setattr(sdi, "safe_overwrite", _raise)
 
     # no_backscan/no_recompute_div=True 禁用回扫与除权重算，聚焦落盘点守卫路径
     with pytest.raises(WriteGuardError):

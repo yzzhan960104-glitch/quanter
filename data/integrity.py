@@ -191,8 +191,11 @@ def assert_safe_overwrite(lake_path: str, new_df: pd.DataFrame, *,
                           force: bool = False) -> None:
     """写入前历史行数守卫：落盘 to_parquet 前调用，骤降则抛 WriteGuardError 拒写。
 
-    物理意图：封死 T12 式残片覆盖。所有湖写入口（通用同步器全量覆盖、增量 append、
-    repair 重写、未来结果回湖）落盘前必须调本函数。
+    物理意图：封死 T12 式残片覆盖。本次接入的湖写入口：通用同步器 _build_multiindex
+    （大湖全量覆盖）、_sync_single（全量覆盖；date_range 窗口中间写除外，由调用方
+    sync_incremental [6] old_df 基线守卫兜底）、增量 sync_daily_incremental append、
+    repair_gaps 重写。sync_data_lake / sync_macro_credit 等其余写入口未接入（review R3：
+    不夸大为「所有湖写入口」）。
 
     决策矩阵（硬阻断语义，绝不静默）：
         force=True               → 旁路（人为故意缩小重采），CRITICAL 留痕后放行
@@ -229,6 +232,18 @@ def assert_safe_overwrite(lake_path: str, new_df: pd.DataFrame, *,
     if not ok:
         logger.critical("写入守卫拒写 %s：%s", lake_path, reason)
         raise WriteGuardError(f"{lake_path} {reason}")
+
+
+def safe_overwrite(lake_path: str, new_df: pd.DataFrame, *,
+                   min_ratio: float = WRITE_GUARD_MIN_RATIO) -> None:
+    """assert_safe_overwrite 的生产包装：自动从 QUANTER_FORCE_WRITE 读 force 旁路口。
+
+    物理意图：湖写入口的落盘守卫统一调 safe_overwrite(path, df)，消除
+    `force=os.environ.get("QUANTER_FORCE_WRITE") == "1"` 在 4 处的逐字重复（review
+    Duplicated Code）。语义与 assert_safe_overwrite 一致，仅封装 env 读取 + 默认 min_ratio。
+    """
+    assert_safe_overwrite(lake_path, new_df, min_ratio=min_ratio,
+                          force=os.environ.get("QUANTER_FORCE_WRITE") == "1")
 
 
 # ============================================================================
