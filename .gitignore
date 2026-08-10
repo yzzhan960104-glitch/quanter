@@ -119,3 +119,5 @@ tests/e2e/_*.png
 # reasonix 工具本地数据/配置（同 .codex/ 范式，不入库）
 .reasonix/
 reasonix.toml
+# T13-A freshness 行数骤降 sidecar 基线（运行时状态，不入库）
+data_lake/.freshness_baseline.json

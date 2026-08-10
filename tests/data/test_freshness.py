@@ -63,3 +63,51 @@ def test_freshness_pass_when_single_level_datetimeindex(tmp_path):
     r = check_freshness("daily", "2026-07-23", lake_dir=str(tmp_path))
     assert r.ok is True
     assert r.latest_date == "2026-07-23"
+
+
+# ============================================================================
+# 行数骤降维度（T13-A · Task 6）
+# ============================================================================
+# 物理意图：freshness 只比 max-date 会被「刚重写但内容是残片」骗过（T12 单日湖 max-date
+# 仍是今天 → 误判 PASS）。本组加行数骤降检测：与 sidecar 基线（上次健康行数）环比，
+# 骤降则 FAIL + CRITICAL。基线仅健康时更新（防骤降被基线掩盖）。
+
+
+def _write_daily_lake(lake_dir, n_rows):
+    """造 n_rows 行的 daily 湖（date×symbol 笛卡尔积截断到 n_rows）。"""
+    import pandas as pd
+    side = max(1, n_rows // 10)
+    idx = pd.MultiIndex.from_product(
+        [pd.date_range("2026-08-01", periods=side),
+         [f"{i:06d}.SZ" for i in range(side)]],
+        names=["date", "symbol"])[:n_rows]
+    pd.DataFrame({"close": range(len(idx))}, index=idx).to_parquet(
+        lake_dir / "a_shares_daily.parquet")
+
+
+def test_freshness_records_row_count(tmp_path):
+    """健康检查结果记录当前行数（骤降检测的基础字段）。"""
+    _write_daily_lake(tmp_path, 500)
+    r = check_freshness("daily", "2026-08-01", lake_dir=str(tmp_path))
+    assert r.row_count == 500
+
+
+def test_freshness_fails_on_row_count_crater(tmp_path):
+    """基线 10000 → 当前 100（骤降）：freshness 应 FAIL（即便 max-date 仍 >= 期望）。"""
+    _write_daily_lake(tmp_path, 10000)
+    check_freshness("daily", "2026-08-01", lake_dir=str(tmp_path))  # 建基线
+    _write_daily_lake(tmp_path, 100)  # 模拟残片覆盖
+    r = check_freshness("daily", "2026-08-01", lake_dir=str(tmp_path))
+    assert r.ok is False
+    assert "骤降" in r.message or "行数" in r.message
+
+
+def test_freshness_baseline_only_updates_on_healthy(tmp_path):
+    """基线只在健康（非骤降）时更新：骤降检查不应把基线拉低（防被掩盖）。"""
+    import json
+    _write_daily_lake(tmp_path, 10000)
+    check_freshness("daily", "2026-08-01", lake_dir=str(tmp_path))
+    _write_daily_lake(tmp_path, 100)
+    check_freshness("daily", "2026-08-01", lake_dir=str(tmp_path))  # 骤降，不更新基线
+    baseline = json.loads((tmp_path / ".freshness_baseline.json").read_text(encoding="utf-8"))
+    assert baseline["daily"]["row_count"] == 10000
