@@ -15,7 +15,7 @@
     load_env → 构造 TradingEngine（不 start scheduler，无 cron 副作用）
     → get_gateway → connect（带重试，让停 engine 后 session 释放有缓冲）
     → set_order_update_callback（成交回报回流到 _handle_order_update + 账本 + 钉钉）
-    → pre_open(today) → 等数秒收回报 → 退出
+    → pre_open(today, ports=eng._ports)（经 ports 激活三段闸 + 实例白名单）→ 等数秒收回报 → 退出
 
 ⚠️ 前置红线（必须人工先做，qmt-connect-1-rootcause）：
     必须先停掉常驻 engine 进程释放 QMT session，否则脚本 connect 会因
@@ -115,7 +115,12 @@ async def _run() -> int:
     position_book.init_db()
 
     # 跑 pre_open（读当日 plan → 确认闸 → 撤昨日单 → max_wait 过滤 → DB 幂等 → 逐单挂单）。
-    result = await pre_open(today)
+    # fix(T1 C1)：必须显式传 ports=eng._ports——恢复 baseline「TradingEngine().__init__ 置
+    # _ACTIVE_ENGINE=self」语义（三段闸 ACTIVE + 动态白名单注入实例属性）。T1 消单例桥后
+    # gate 仅在 ports 非空时生效；裸调 pre_open(today) 会走 ports is None 防御分支静默跳过
+    # data-ready gate → 可能在 pipeline 数据未就绪时挂单（行为等价红线违规）。本脚本是 live
+    # 应急补挂入口（见模块 docstring L4-8），gate 绝不可被静默旁路。
+    result = await pre_open(today, ports=eng._ports)
     print(f"[trigger_pre_open] pre_open 结果：{result}")
 
     # 等 6s 收成交回报（连续竞价时段限价单若价格匹配可能立即部分成交，
