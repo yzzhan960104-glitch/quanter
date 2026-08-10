@@ -9,7 +9,7 @@
 
 ### Phase 0 — 现状架构全景梳理 ✅（本视图集，[T0](../../plans/wayfinder/T0.md)）
 - 8 全景视图（#1-#8）✅
-- engine 当前态深剖 → **毕业 [T0.1](../../plans/wayfinder/T0.1.md)**（触发式，超载毕业）
+- engine 当前态深剖 → ✅ **[T0.1](../../plans/wayfinder/T0.1.md) 已完成**（产出 [deep-dives/engine-current-state.md](deep-dives/engine-current-state.md)，解封 [T1](../../plans/wayfinder/T1.md)）
 - 过时文档清理 ✅（丙删 data_pool / caisen-summary）
 
 ### Phase 1 — `engine.py` 模块化拆分（[T1](../../plans/wayfinder/T1.md) · 阻塞于 T0.1）

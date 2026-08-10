@@ -38,7 +38,7 @@ try:
 except Exception:
     pass
 
-# 脚本位于 项目根/trading/tools/，须三层 dirname 上溯到项目根（如 F:\quanter）。
+# 脚本位于 项目根/trading/tools/，须三层 dirname 上溯到项目根（如 E:\quanter）。
 # ⚠️ 两层 dirname 只到 trading/，会被 sys.path.insert 进 sys.path[0]，致顶层 `import calendar`
 # 命中 trading/calendar.py（无 day_abbr）→ pandas→_strptime 崩，且 `from trading` 找不到包。
 # 既有 qmt_live_smoke.py 等潜伏此 bug（两层 dirname，从未真跑过）。三层 dirname 从根上修复，

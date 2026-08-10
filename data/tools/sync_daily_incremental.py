@@ -21,8 +21,8 @@ import os
 import logging
 
 # 三层 dirname：sync_daily_incremental.py → tools → data → quanter（项目根）。
-# 历史 bug：两层 dirname → root=F:\quanter\data（错位），脚本模式下 sys.path 无 cwd 兜底，
-# `import data` 找不到 F:\quanter/data 包 → ModuleNotFoundError（与 commit 049db6ce
+# 历史 bug：两层 dirname → root=E:\quanter\data（错位），脚本模式下 sys.path 无 cwd 兜底，
+# `import data` 找不到 E:\quanter/data 包 → ModuleNotFoundError（与 commit 049db6ce
 # 及 smoke_trading_engine.py 同类 tools 路径少算一层 bug）。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 

@@ -5,7 +5,7 @@ REM 会因找不到 config/ data_lake/ data/ 而 ModuleNotFoundError。先 cd /d
 REM 日志重定向到 data_lake/.syncing/sync_incremental.stdout.log（脚本内部也会追加写到
 REM sync_incremental.log，此处的 stdout 捕获异常 traceback 与控制台总结，方便排障）。
 
-cd /d F:\quanter
+cd /d E:\quanter
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
-"F:\quanter\.venv310\Scripts\python.exe" data/tools/sync_incremental.py >> data_lake/.syncing/sync_incremental.stdout.log 2>&1
+"E:\quanter\.venv310\Scripts\python.exe" data/tools/sync_incremental.py >> data_lake/.syncing/sync_incremental.stdout.log 2>&1

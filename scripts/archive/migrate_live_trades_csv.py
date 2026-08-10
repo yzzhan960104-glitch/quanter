@@ -27,7 +27,7 @@ import csv
 import shutil
 from pathlib import Path
 
-# **ssot-review P3 fix**：scripts/archive/ 子目录，parents[1] 解析到 F:\quanter\scripts
+# **ssot-review P3 fix**：scripts/archive/ 子目录，parents[1] 解析到 E:\quanter\scripts
 # （非仓库根）。改 parents[2]：archive → scripts → 仓库根。原 parents[1] 仅在脚本位于
 # scripts/ 直下时成立，迁移到 archive/ 后路径失效（ROOT_CSV/PRES_CSV 全错）。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

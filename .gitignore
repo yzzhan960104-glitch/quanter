@@ -1,6 +1,10 @@
-# IDE
+# IDE / AI 工具本地配置
 .idea/
 .vscode/
+.codex/
+
+# 一次性安装器（用完即删）
+rustup-init.exe
 
 # Python
 __pycache__/

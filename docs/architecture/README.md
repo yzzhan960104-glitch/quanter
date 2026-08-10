@@ -1,4 +1,4 @@
-> 最近复核：2026-08-08 · 维护者：wayfinder-session ·
+> 最近复核：2026-08-09 · 维护者：wayfinder-session ·
 > 权威归宿：本文件是架构文档集的**索引 + 单一归宿映射表**（[T0](../../plans/wayfinder/T0.md) 决策）。
 > 图约定：Mermaid（[T0 Decisions](../../plans/wayfinder/T0.md) (b)）。**活文档**——随代码演进，改动时改文件头「最近复核」。
 
@@ -21,7 +21,7 @@
 | 6 | 技术债/缺口 | [06-tech-debt.md](06-tech-debt.md) _(待产出)_ | `flowchart`（债子集+色块） | **债务判定** |
 | 7 | SSoT 数据层 | [07-ssot-data-layer.md](07-ssot-data-layer.md) _(待产出)_ | `classDiagram`（α 补集） | 数据模型图 |
 | 8 | 控制/时间流 | [08-control-time-flow.md](08-control-time-flow.md) _(待产出)_ | `flowchart`（job 切片） | 时间窗/时钟语义 |
-| — | engine 深剖 | [deep-dives/engine-current-state.md](deep-dives/engine-current-state.md) _(待产出)_ | 多图 | engine 内部结构 |
+| — | engine 深剖 | [deep-dives/engine-current-state.md](deep-dives/engine-current-state.md) ✅ | 多图 | engine 内部结构 |
 | — | 演进路线图 | [roadmap.md](roadmap.md) _(待产出)_ | — | 目标态 / Phase 编排 |
 
 ## 单一归宿映射表（[T0 乙原则](../../plans/wayfinder/T0.md)——每事实只在一处权威定义，他处引用不重抄）

@@ -59,7 +59,7 @@ def test_run_sync_subprocess_injects_key_for_sync_tushare(monkeypatch):
     monkeypatch.setattr(ds.subprocess, "run", fake_run)
     monkeypatch.setattr(ds, "_clear_sentinel", lambda key: None)
     monkeypatch.setattr(ds, "_mark_failed", lambda key, msg: None)
-    monkeypatch.setattr(ds, "_PROJECT_ROOT", r"F:\quanter")
+    monkeypatch.setattr(ds, "_PROJECT_ROOT", r"E:\quanter")
     monkeypatch.setattr(ds, "DATASET_REGISTRY", {
         "moneyflow": {"script": "data/tools/sync_tushare.py"}})
     ds._run_sync_subprocess("moneyflow")
@@ -76,7 +76,7 @@ def test_run_sync_subprocess_no_key_for_macro(monkeypatch):
     monkeypatch.setattr(ds.subprocess, "run", fake_run)
     monkeypatch.setattr(ds, "_clear_sentinel", lambda key: None)
     monkeypatch.setattr(ds, "_mark_failed", lambda key, msg: None)
-    monkeypatch.setattr(ds, "_PROJECT_ROOT", r"F:\quanter")
+    monkeypatch.setattr(ds, "_PROJECT_ROOT", r"E:\quanter")
     monkeypatch.setattr(ds, "DATASET_REGISTRY", {
         "macro": {"script": "data/tools/sync_macro_credit.py"}})
     ds._run_sync_subprocess("macro")

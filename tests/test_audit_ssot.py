@@ -39,7 +39,7 @@ def test_engine_processes_dedupes_venv_parent_child(monkeypatch):
     """venv 启动器+base 子进程都匹配 -m trading → 只留树根（引擎数=1 不误报）。"""
     monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
         '[{"ProcessId": 11, "ParentProcessId": 0, "ExecutablePath": "x",'
-        ' "CommandLine": "F:\\\\quanter\\\\.venv310\\\\Scripts\\\\python.exe -m trading"},'
+        ' "CommandLine": "E:\\\\quanter\\\\.venv310\\\\Scripts\\\\python.exe -m trading"},'
         '{"ProcessId": 12, "ParentProcessId": 11, "ExecutablePath": "x",'
         ' "CommandLine": "C:\\\\Python310\\\\python.exe -m trading"}]'))
     procs = a._engine_processes()

@@ -22,7 +22,7 @@ REM   B. PM2（pm2 start scripts/run_trading_engine.bat --name trading-engine）
 REM   C. schtasks（开机自启 · 影子模式稳定后切生产推荐）
 REM ============================================================================
 chcp 65001 >nul
-cd /d "F:\quanter"
+cd /d "E:\quanter"
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 REM code-review 修复：本 bat 是历史第二入口，统一 fail-closed（防 dry_run 接管生产）。

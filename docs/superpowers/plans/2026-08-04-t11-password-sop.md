@@ -60,7 +60,7 @@ schtasks /Query /TN quanter_sync_incremental /XML | Select-String "<LogonType>"
 
 | Task | 状态 | 备注 |
 |---|---|---|
-| T1 schtasks 路径 | ✅ subagent 完成 | Desktop→F:\quanter 路径 |
+| T1 schtasks 路径 | ✅ subagent 完成 | Desktop→E:\quanter 路径 |
 | T4 补跑同步 | ✅ subagent 完成 | OK 23/FAIL 0,mtime 推进 08-04 |
 | T5 清哨兵 | ✅ subagent 完成 | 26 个 .failed 清除 |
 | T11 Password 化 | ⏸ **本 SOP,用户手动** | 完成后数据观测层长期自启闭环 |

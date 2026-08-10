@@ -1,9 +1,9 @@
 """迁移回归:data/tools/sync_*.py 的 sys.path 必须让 import config 可达。
 
 背景:commit d5f396cc 把 11 个 sync_*.py 从 scripts/ 迁到 data/tools/,
-但 sys.path.insert 的 dirname 深度没跟上(2 层 dirname → F:\\quanter\\data,
+但 sys.path.insert 的 dirname 深度没跟上(2 层 dirname → E:\\quanter\\data,
 无 config/ → ModuleNotFoundError)。本测试复算每个脚本自身的 sys.path 逻辑
-(3 层 dirname → F:\\quanter)后真跑 import config,锁死迁移正确性。
+(3 层 dirname → E:\\quanter)后真跑 import config,锁死迁移正确性。
 """
 import subprocess
 import sys

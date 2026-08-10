@@ -76,7 +76,7 @@ CONNECT_BOTS = {
 # claudecode 类共用的 dev connect 启动参数（DRY，不每 bot 重复）
 CONNECT_DEFAULTS = {
     "allowed_users_env": "DINGTALK_ALLOWED_STAFF_IDS",  # 身份闸（.env 已配）
-    "workdir_env":       "BROADCAST_AGENT_WORKDIR",     # Claude Code 工作目录（新增=F:/quanter）
+    "workdir_env":       "BROADCAST_AGENT_WORKDIR",     # Claude Code 工作目录（新增=E:/quanter）
     "agent_memory":      True,
     "approval_mode":     "ask",  # 审批闸，写死，绝不为任何 bot 留覆盖口子（C2 安全底线）
 }

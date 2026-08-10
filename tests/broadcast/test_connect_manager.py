@@ -26,7 +26,7 @@ def test_build_cmd_claudecode(monkeypatch):
     """claudecode 类：全套 agent 参数，approval_mode 写死 ask，带 workdir。"""
     monkeypatch.setenv("CLI_BOT_UNIFIED_APP_ID", "f0b2740f-c029-4b99-943c-58de139c7463")
     monkeypatch.setenv("DINGTALK_ALLOWED_STAFF_IDS", "staff001")
-    monkeypatch.setenv("BROADCAST_AGENT_WORKDIR", "F:/quanter")
+    monkeypatch.setenv("BROADCAST_AGENT_WORKDIR", "E:/quanter")
     cmd = cm.build_cmd("cli", CLS_CFG, DEFAULTS)
     assert cmd[0:4] == ["dws", "dev", "connect", "--unified-app-id"]
     assert "f0b2740f-c029-4b99-943c-58de139c7463" in cmd
@@ -35,7 +35,7 @@ def test_build_cmd_claudecode(monkeypatch):
     assert "--agent-approval-mode" in cmd
     assert cmd[cmd.index("--agent-approval-mode") + 1] == "ask"  # C2 安全底线
     assert "--allowed-users" in cmd and "staff001" in cmd
-    assert "--agent-workdir" in cmd and "F:/quanter" in cmd
+    assert "--agent-workdir" in cmd and "E:/quanter" in cmd
 
 
 def test_build_cmd_custom_review(monkeypatch):
@@ -76,7 +76,7 @@ def test_start_writes_pid_and_detaches(monkeypatch, tmp_path):
     """start：Popen 用 DETACHED 标志 + cwd=PROJECT_ROOT，落 PID 文件。"""
     monkeypatch.setenv("CLI_BOT_UNIFIED_APP_ID", "u-cli")
     monkeypatch.setenv("DINGTALK_ALLOWED_STAFF_IDS", "s1")
-    monkeypatch.setenv("BROADCAST_AGENT_WORKDIR", "F:/quanter")
+    monkeypatch.setenv("BROADCAST_AGENT_WORKDIR", "E:/quanter")
     monkeypatch.setattr(cm, "_pid_file", lambda bot: tmp_path / f"{bot}.pid")
     monkeypatch.setattr(cm, "_log_file", lambda bot: tmp_path / f"{bot}.log")
 

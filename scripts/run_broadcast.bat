@@ -4,7 +4,7 @@ REM Why .bat 包装：schtasks 默认 cwd=%WINDIR%\System32，直接跑 python -
 REM 找不到 config/ data_lake/ broadcast/ 而 ModuleNotFoundError。先 cd /d 项目根再跑。
 REM 日志重定向到 logs/broadcast.log（与 logs/.last_broadcast 同目录）。
 
-cd /d F:\quanter
+cd /d E:\quanter
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
-"F:\quanter\.venv310\Scripts\python.exe" -m broadcast >> logs\broadcast.log 2>&1
+"E:\quanter\.venv310\Scripts\python.exe" -m broadcast >> logs\broadcast.log 2>&1

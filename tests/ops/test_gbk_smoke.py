@@ -18,7 +18,7 @@ def test_emoji_print_survives_gbk_pipe():
     print('✅') 会抛 UnicodeEncodeError: 'gbk' codec can't encode character。
     """
     code = (
-        "import sys; sys.path.insert(0, r'F:\\quanter'); "
+        "import sys; sys.path.insert(0, r'E:\\quanter'); "
         "from infra.pyio import force_utf8_stdout; force_utf8_stdout(); "
         "print('✅ ok')"
     )
@@ -40,7 +40,7 @@ def test_emoji_stderr_survives_gbk_pipe():
     P2-A 扩展后 stderr 同被治理。
     """
     code = (
-        "import sys; sys.path.insert(0, r'F:\\quanter'); "
+        "import sys; sys.path.insert(0, r'E:\\quanter'); "
         "from infra.pyio import force_utf8_stdout; force_utf8_stdout(); "
         "print('❌ fail', file=sys.stderr)"
     )

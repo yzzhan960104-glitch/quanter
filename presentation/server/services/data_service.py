@@ -45,7 +45,7 @@ _trigger_lock = threading.Lock()
 
 # 项目根：data_service.py 位于 presentation/server/services/，上溯四级 = quanter/。
 # （历史版本位于 server/services/ 时为三级；presentation/ 伞盖收编后未同步更新，
-#   导致启动 sweep 拼出 F:\quanter\presentation\data\tools\sync_*.py 而全部失败。）
+#   导致启动 sweep 拼出 E:\quanter\presentation\data\tools\sync_*.py 而全部失败。）
 # 用绝对路径拼 script，保证 uvicorn 以任意 CWD 启动都能定位 data/tools/sync_*.py。
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 

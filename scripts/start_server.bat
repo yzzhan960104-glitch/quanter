@@ -13,7 +13,7 @@ REM
 REM Why python -m trading 而非 uvicorn：C-5 V1 已让 __main__.run_server 起 uvicorn
 REM   :8000（端口单例 + lifespan 装 engine/connect/discovery）。直接 -m trading = 单进程
 REM   启动链（消除历史双进程抢 QMT session，[[qmt-connect-1-rootcause]] 教训）。
-cd /d "F:\quanter"
+cd /d "E:\quanter"
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 REM A5（P1-2）：生产链 fail-closed——非 live 一律拒绝（防 dry_run 实例接管生产端口/日志）
