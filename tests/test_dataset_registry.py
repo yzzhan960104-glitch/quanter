@@ -325,3 +325,32 @@ def test_macro_lakes_registered():
     assert "sse_daily" not in DATASET_REGISTRY, "sse_daily 资产应删（合并入 mkt_daily）"
 
 
+# ============================================================================
+# daily 双轨收口（T13-A · Task 5）
+# ============================================================================
+# 物理意图：删 TUSHARE_DATASETS["daily"]（通用同步器不再认 daily → 全量重建路径不可达，
+# 防 T12 式无守卫覆盖）+ DATASET_REGISTRY["daily"]["script"] 指向增量脚本（sweep /
+# POST /sync/daily 走增量）。weekly/monthly 保留不动（仍走通用同步器）。
+
+
+def test_daily_removed_from_tushare_datasets():
+    """daily 双轨收口：通用同步器不再认 daily（全量重建路径不可达）。"""
+    assert "daily" not in TUSHARE_DATASETS
+
+
+def test_weekly_monthly_still_in_tushare_datasets():
+    """周/月线仍走通用同步器（只收口 daily，不动周月）。"""
+    assert "weekly" in TUSHARE_DATASETS
+    assert "monthly" in TUSHARE_DATASETS
+
+
+def test_daily_registry_script_points_to_incremental():
+    """sweep/POST /sync/daily 唯一入口 = 增量同步脚本。"""
+    assert DATASET_REGISTRY["daily"]["script"] == "data/tools/sync_daily_incremental.py"
+
+
+def test_sync_tushare_cli_no_longer_accepts_daily():
+    """sync_tushare.py argparse choices 不再含 daily。"""
+    assert "daily" not in list(TUSHARE_DATASETS.keys())
+
+

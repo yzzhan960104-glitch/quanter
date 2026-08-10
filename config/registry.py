@@ -42,11 +42,11 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     # 「宏观信贷现已切 Tushare」，而非仍停留在 AKShare 标签（混合源语义，plan 既定决策非 bug）。
     "macro":         {"source": "Tushare", "market": "宏观", "granularity": "月频→日频",
                       "script": "data/tools/sync_macro_credit.py", "schedule": "每月初",   "freshness_hours": 720},
-    # daily（前复权日线）：2026-07-25 Plan Task 7 纳入统一管道（_sync_by_symbol adj_api 增强），
-    # script 从 sync_data_lake.py 切到 sync_tushare.py（sync_data_lake 转薄壳 deprecated）。
-    # 前复权逻辑照搬 fetch_qfq: price=raw×adj/latest，与既有 a_shares_daily.parquet（903万行）字节级一致。
+    # daily（前复权日线）：T13-A 双轨收口——唯一写入口 = sync_daily_incremental（增量
+    # append + 除权重算 + backscan）。禁止再走 sync_tushare.py daily（通用同步器全量重建，
+    # 无写入守卫，T12 实证致 1020万→3200 抹除）。TUSHARE_DATASETS 已删 "daily" key。
     "daily":         {"source": "Tushare", "market": "A股",  "granularity": "1d",
-                      "script": "data/tools/sync_tushare.py",   "schedule": "每日18:00", "freshness_hours": 24},
+                      "script": "data/tools/sync_daily_incremental.py", "schedule": "每日18:00", "freshness_hours": 24},
     # 退役（2026-07-27）：原 sector/daily_active/minute/north_flow/dragon_list 5 条 AKShare/JQData
     # 数据集注册已删——连同对应 sync 脚本与 lake key 一并下线。北向总量读 moneyflow_hsgt.north_money。
     # ============================================================================
@@ -695,24 +695,18 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "quota_type": "special",
     },
     # ============================================================================
-    # OHLCV 前复权三频（2026-07-25 Plan Task 7）：daily/weekly/monthly 统一管道（基础桶）
+    # OHLCV 前复权（2026-07-25 Plan Task 7）：weekly/monthly 统一管道（基础桶）
     # ============================================================================
     # 物理意图：把 sync_data_lake.fetch_qfq 的前复权逻辑纳入 _sync_by_symbol（adj_api 增强），
-    # daily/weekly/monthly 三频复用同一管道，shard 按标的 + MultiIndex(date,symbol) 落湖。
+    # weekly/monthly 复用同一管道，shard 按标的 + MultiIndex(date,symbol) 落湖。
     # Why by=symbol 非 by=date：与既有 a_shares_daily.parquet 生产方式一致（fetch_qfq 范式），
     # 字节级可复现 + shard 按标的断点续传友好（5000 标的 × 2请求 ≈ 10000，500/min ≈ 20min）。
     # Why adj_api=adj_factor：_sync_by_symbol 检测 adj_api 后拉 adj_factor 重建前复权
     # price_qfq = raw × adj / latest（latest=区间最新），volume/amount 不复权。
     # Why rename vol→volume：Tushare daily/weekly/monthly 返 vol 列，与项目 OHLCV schema（volume）归一。
-    "daily": {
-        # 个股前复权日线：复用既有 a_shares_daily.parquet（903万行已落盘），保持一致性。
-        "api": "daily", "by": "symbol", "adj_api": "adj_factor",
-        "date_col": "trade_date", "symbol_col": "ts_code",
-        "fields": "ts_code,trade_date,open,high,low,close,vol,amount",
-        "rename": {"vol": "volume"},
-        "lake": "data_lake/a_shares_daily.parquet",
-        "quota_type": "basic",
-    },
+    # 退役（T13-A · 2026-08-10）："daily" key 已删——daily 唯一写入口改走
+    # sync_daily_incremental.py（增量），通用同步器不再认 daily（防 T12 式全量覆盖）。
+    # 前复权日线历史全量（a_shares_daily.parquet）由增量脚本 backscan + repair_gaps 维护。
     "weekly": {
         # 个股前复权周线：pro.weekly 接口（周末日 OHLCV + 周聚合成交），同 daily 管道。
         # adj_factor 日频，merge on trade_date（周线 trade_date=周末日，adj 该日有值）。

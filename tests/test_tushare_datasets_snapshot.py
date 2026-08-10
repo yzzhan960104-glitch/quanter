@@ -68,8 +68,12 @@ def test_stk_factor_pro_fields带bfq后缀():
 
 # ============ Task 7：OHLCV 前复权三频 ============
 def test_OHLCV三频_by_symbol_adj_api():
-    """daily/weekly/monthly 走 by=symbol + adj_api 前复权（Task 3 增强）。"""
-    for k, api in [("daily", "daily"), ("weekly", "weekly"), ("monthly", "monthly")]:
+    """weekly/monthly 走 by=symbol + adj_api 前复权（Task 3 增强）。
+
+    T13-A：daily 已从 TUSHARE_DATASETS 退役（改走增量 sync_daily_incremental），此处只
+    守卫仍走通用同步器的周/月线。
+    """
+    for k, api in [("weekly", "weekly"), ("monthly", "monthly")]:
         cfg = TUSHARE_DATASETS[k]
         assert cfg["api"] == api
         assert cfg["by"] == "symbol"
@@ -80,8 +84,11 @@ def test_OHLCV三频_by_symbol_adj_api():
 
 
 def test_daily_复用既有a_shares_daily湖():
-    """daily 复用既有 a_shares_daily.parquet（903万行），保持一致性。"""
-    assert TUSHARE_DATASETS["daily"]["lake"] == "data_lake/a_shares_daily.parquet"
+    """周/月线复用既有 a_shares_* 湖；daily 已退役（T13-A 双轨收口）。
+
+    T13-A：daily 从 TUSHARE_DATASETS 删除（改走增量），此处只守卫 weekly/monthly 的湖路径。
+    """
+    assert "daily" not in TUSHARE_DATASETS, "daily 应已退役（T13-A 双轨收口）"
     assert TUSHARE_DATASETS["weekly"]["lake"] == "data_lake/a_shares_weekly.parquet"
     assert TUSHARE_DATASETS["monthly"]["lake"] == "data_lake/a_shares_monthly.parquet"
 
@@ -100,6 +107,9 @@ def test_新数据集_元信息完整():
         assert "market" in meta and "granularity" in meta and "freshness_hours" in meta
 
 
-def test_daily_脚本切统一入口():
-    """daily 的 script 切到 sync_tushare.py（统一管道，原 sync_data_lake.py 转薄壳 deprecated）。"""
-    assert DATASET_REGISTRY["daily"]["script"] == "data/tools/sync_tushare.py"
+def test_daily_脚本切增量入口():
+    """daily 的 script 切到 sync_daily_incremental.py（T13-A 双轨收口，唯一写入口 = 增量）。
+
+    原 sync_tushare.py 全量重建路径已封死（T12 实证致 1020万→3200 抹除）。
+    """
+    assert DATASET_REGISTRY["daily"]["script"] == "data/tools/sync_daily_incremental.py"
