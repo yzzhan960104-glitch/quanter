@@ -224,7 +224,7 @@ def test_step3_trade_next_day(isolated, monkeypatch):
     # + _place_take_profit（避免再走 _submit 挂止盈——已 patch _submit 但走限频复杂度，禁掉更稳）
     # A4 删 record_live_trade，原 CSV 日志 patch 行随之删（审计平移 trade_event 表）
     with patch("infra.notifier.NotificationManager"), \
-         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+         patch("trading.engine.place_take_profit", new=AsyncMock()):
         asyncio.run(eng._handle_order_update(update))
     # 账本写入：BUY 100 股 300001.SZ（gap4 第四连写入实证）
     assert position_book.get_local_positions() == {"300001.SZ": 100.0}
@@ -315,7 +315,7 @@ def test_e2e_full_flow_symbol_propagates(isolated, monkeypatch):
         "traded_volume": 100, "traded_price": 10.5, "state": "FILLED",
     }
     with patch("infra.notifier.NotificationManager"), \
-         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+         patch("trading.engine.place_take_profit", new=AsyncMock()):
         asyncio.run(eng._handle_order_update(update))
 
     # symbol 贯穿：position 表

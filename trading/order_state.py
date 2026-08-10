@@ -30,9 +30,9 @@ T1 Task 3 缝合点 #2 设计（brief Step 2 · 临时耦合 engine · Task 9 �
     ``def order_direction(engine, order_id)``
     ``def advance_order_state_from_status(engine, update)``
 内部访问点逐行原样（幂等红线零容忍）：
-- 实例属性 ``self._gw`` / ``self._place_take_profit`` → ``engine._gw`` / ``engine._place_take_profit``
-  （保 ``patch.object(eng, "_place_take_profit", ...)`` 命中——止盈挂单临时经 engine 引用，
-   Task 9 抽 phases/exit.py 后收口为 ``from trading.phases.exit import place_take_profit``）。
+- 实例属性 ``self._gw`` → ``engine._gw``（网关实例引用 · 非模块级符号）；
+  止盈挂单 T1-Task9 已收口——``place_take_profit`` 经 ``_eng_mod.place_take_profit`` 反查
+  （engine re-export phases.exit），不再经 engine 实例引用（消除缝合点 #2 耦合）。
 - engine 模块级符号（``_mode`` / ``_alert_critical`` / ``_resolve_account_id`` /
   ``_seq_for_real_oid`` / ``_order_state_to_db``）经函数内 lazy ``import trading.engine as _eng_mod``
   访问——规避循环 import（engine 顶部 re-export order_state）+ 保
@@ -338,9 +338,10 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
           不挂止盈（不误判买卖方向 → 不误挂止盈）。
 
     T1 Task 3 缝合点 #2：本函数原 ``TradingEngine._handle_order_update`` 实例方法，
-    迁 order_state.py 后改为接收 engine 引用的 free function。``self._gw`` /
-    ``self._place_take_profit`` 访问点改 ``engine._gw`` / ``engine._place_take_profit``
-    （保 ``patch.object(eng, "_place_take_profit")`` 命中 + 止盈经 engine 引用 Task 9 收口）；
+    迁 order_state.py 后改为接收 engine 引用的 free function。``self._gw``
+    访问点改 ``engine._gw``（网关实例引用）；止盈挂单 T1-Task9 已收口——
+    ``place_take_profit`` 经 ``_eng_mod.place_take_profit`` 反查（engine re-export
+    phases.exit），不再经 engine 实例引用（消除缝合点 #2 的 take_profit 耦合）；
     engine 模块级符号 ``_mode`` / ``_alert_critical`` / ``_resolve_account_id`` 经函数内
     ``_eng_mod`` 引用访问（保 ``patch("trading.engine._alert_critical")`` /
     ``monkeypatch(engine, "_mode")`` 命中 + 避循环 import）。逐行原样，幂等红线零容忍。
@@ -351,6 +352,12 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
     _mode = _eng_mod._mode
     _alert_critical = _eng_mod._alert_critical
     _resolve_account_id = _eng_mod._resolve_account_id
+    # T1-Task9 收口缝合点 #2：place_take_profit 经 _eng_mod 反查（engine re-export
+    # phases.exit.place_take_profit），不再经 engine 实例引用——消除 order_state→engine
+    # 实例的 take_profit 耦合（单向依赖 order_state→phases.exit 经 engine re-export）。
+    # 保 ``patch("trading.engine.place_take_profit")`` 命中（local alias 绑定于函数入口，
+    # patch 先于调用 → alias 拿 mock；无 patch 拿 phases.exit.place_take_profit 真身）。
+    place_take_profit = _eng_mod.place_take_profit
 
     kind = update.get("kind")
     if kind == "async_response":
@@ -505,7 +512,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
         _tp_already = True  # DB 查询失败保守视为已挂（宁可漏挂人工补，不超卖）
     if direction == "BUY" and not _tp_already:
         try:
-            await engine._place_take_profit(symbol, qty, price, order_id)
+            await place_take_profit(symbol, qty, price, order_id)
         except Exception:
             # 止盈挂单失败（被风控挡板拒/网关断线）不抛——人工补挂（告警已记日志）。
             logger.exception("挂止盈失败 symbol=%s（需人工补挂）", symbol)

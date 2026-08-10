@@ -1651,7 +1651,7 @@ def test_handle_order_update_writes_book(monkeypatch, tmp_path):
 
     with patch("infra.notifier.NotificationManager") as NM1:
         NM1.get_default.return_value = fake_mgr
-        with patch.object(eng, "_place_take_profit", new=AsyncMock()), \
+        with patch("trading.engine.place_take_profit", new=AsyncMock()), \
              patch.object(state_store, "insert_fill", return_value=True) as if_buy:
             asyncio.run(eng._handle_order_update(update))
     if_buy.assert_called_once()
@@ -1665,7 +1665,7 @@ def test_handle_order_update_writes_book(monkeypatch, tmp_path):
 
     with patch("infra.notifier.NotificationManager") as NM2:
         NM2.get_default.return_value = fake_mgr
-        with patch.object(eng, "_place_take_profit", new=AsyncMock()), \
+        with patch("trading.engine.place_take_profit", new=AsyncMock()), \
              patch.object(state_store, "insert_fill", return_value=True) as if_none:
             asyncio.run(eng._handle_order_update(update))
     if_none.assert_not_called()  # 方向 None 守门拦截，账本不写（防误记买当卖/卖当买）
@@ -1709,7 +1709,7 @@ def test_handle_order_update_book_failure_raises_l1(monkeypatch, tmp_path):
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         with patch.object(state_store, "insert_fill", side_effect=RuntimeError("db locked")), \
-             patch.object(eng, "_place_take_profit", new=_tp):
+             patch("trading.engine.place_take_profit", new=_tp):
             with pytest.raises(_CriticalHalt):
                 asyncio.run(eng._handle_order_update(update))
     assert tp_called == [], "账本失败升 L1，止盈不应再执行"
@@ -2205,7 +2205,7 @@ def test_buy_fill_records_attribution(tmp_db, monkeypatch):
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
-        with patch.object(eng, "_place_take_profit", new=AsyncMock()):
+        with patch("trading.engine.place_take_profit", new=AsyncMock()):
             asyncio.run(eng._handle_order_update(update))
 
     # 断言：position 行已建 + 归因已落（strategy/entry_rationale）
@@ -2248,7 +2248,7 @@ def test_buy_fill_attribution_failure_does_not_block(tmp_db, monkeypatch):
         raise RuntimeError("归因 DB 写失败模拟")
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
-        with patch.object(eng, "_place_take_profit", new=AsyncMock()), \
+        with patch("trading.engine.place_take_profit", new=AsyncMock()), \
              patch("presentation.server.services.trading_service.record_position_attribution",
                    side_effect=_boom):
             # 不应抛异常（归因失败软降级，成交主路径继续）

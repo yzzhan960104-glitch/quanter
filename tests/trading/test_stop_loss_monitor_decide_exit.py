@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from trading.engine import TradingEngine, stop_loss_monitor
+from trading.engine import TradingEngine, stop_loss_monitor, place_take_profit
 
 
 # ----------------------------------------------------------------------------
@@ -272,7 +272,7 @@ def test_place_take_profit_tp1_tp2_two_orders_and_same_source():
          patch("trading.engine._submit", new=AsyncMock(
              side_effect=lambda order, **kw: (submitted.append(order),
                                               {"state": "FILLED"})[1])):
-        asyncio.run(eng._place_take_profit(SYM, 1000, 10.0, order_id="ord-x"))
+        asyncio.run(place_take_profit(SYM, 1000, 10.0, order_id="ord-x"))
 
     # 两腿都挂了（tp1 portion=0.5 × 1000 = 500 整手；tp2 = 500）
     assert len(submitted) == 2

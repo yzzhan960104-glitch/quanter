@@ -216,7 +216,7 @@ def test_trade_update_inserts_fill_and_event(state_db):
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
-        with patch.object(eng, "_place_take_profit", new=AsyncMock()):
+        with patch("trading.engine.place_take_profit", new=AsyncMock()):
             asyncio.run(eng._handle_order_update(_buy_fill_update()))
     account_id = engine._resolve_account_id()
     trade_id = f"{account_id}_300001.SZ_{_today_str()}"
@@ -253,7 +253,7 @@ def test_tp_idempotent_via_db(state_db, monkeypatch):
     with patch("trading.engine.trading_plan.load_plan", return_value=_plan_with_tp()), \
          patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
-        with patch.object(eng, "_place_take_profit", new=_counting_tp):
+        with patch("trading.engine.place_take_profit", new=_counting_tp):
             asyncio.run(eng._handle_order_update(_buy_fill_update()))  # 已有 TP1 → 跳过
     assert tp_calls["n"] == 0  # DB 幂等：已有 TP1 不重挂
 
@@ -274,7 +274,7 @@ def test_tp_inserts_two_orders(state_db):
     plan["orders"][0]["order"]["qty"] = 1000
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED", "order_id": "s1"})):
-        asyncio.run(eng._place_take_profit("300001.SZ", 1000, 10.5, order_id="123"))
+        asyncio.run(engine.place_take_profit("300001.SZ", 1000, 10.5, order_id="123"))
     account_id = engine._resolve_account_id()
     today = _today_str()
     # TP1 + TP2 两笔 order 落库（trade_date=今日，与 _place_take_profit 口径一致）
@@ -313,7 +313,7 @@ def test_place_take_profit_two_legs(db):
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(eng._place_take_profit("300001.SZ", 1000, 10.5, order_id="ord-1"))
+        asyncio.run(engine.place_take_profit("300001.SZ", 1000, 10.5, order_id="ord-1"))
     # _submit 必被调两次（两张限价卖单）
     assert submit_mock.call_count == 2
     legs = [call.args[0] for call in submit_mock.call_args_list]
@@ -358,7 +358,7 @@ def test_place_take_profit_skips_vetoed_symbol(db, monkeypatch):
     eng = engine.TradingEngine()
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(eng._place_take_profit("300009.SZ", 1000, 10.5, order_id="ord-veto"))
+        asyncio.run(engine.place_take_profit("300009.SZ", 1000, 10.5, order_id="ord-veto"))
     # vetoed 标的 _submit 不应被调
     assert submit_mock.call_count == 0
 
@@ -382,7 +382,7 @@ def test_place_take_profit_tp1_qty_round_to_lot(db):
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(eng._place_take_profit("300002.SZ", 430, 10.5, order_id="ord-2"))
+        asyncio.run(engine.place_take_profit("300002.SZ", 430, 10.5, order_id="ord-2"))
     legs = [call.args[0] for call in submit_mock.call_args_list]
     tp1_leg = next(leg for leg in legs if leg.price == 11.5)
     tp2_leg = next(leg for leg in legs if leg.price == 13.0)
@@ -404,7 +404,7 @@ def test_place_take_profit_portion_zero_only_tp2(db):
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(eng._place_take_profit("300003.SZ", 1000, 10.5, order_id="ord-3"))
+        asyncio.run(engine.place_take_profit("300003.SZ", 1000, 10.5, order_id="ord-3"))
     # 只调一次（tp2 全量）
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
@@ -425,7 +425,7 @@ def test_place_take_profit_portion_full_only_tp1(db):
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(eng._place_take_profit("300004.SZ", 1000, 10.5, order_id="ord-4"))
+        asyncio.run(engine.place_take_profit("300004.SZ", 1000, 10.5, order_id="ord-4"))
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
     assert leg.price == 11.5 and leg.qty == 1000
@@ -454,7 +454,7 @@ def test_place_take_profit_tp1_ge_tp2_falls_back_to_tp2_only(db):
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(eng._place_take_profit("300005.SZ", 1000, 10.5, order_id="ord-5"))
+        asyncio.run(engine.place_take_profit("300005.SZ", 1000, 10.5, order_id="ord-5"))
     # tp1 ≥ tp2 时 sanity 只挂 tp2
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
@@ -476,7 +476,7 @@ def test_place_take_profit_no_tp1_in_plan_falls_back_to_tp2_only(db):
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(eng._place_take_profit("300006.SZ", 1000, 10.5, order_id="ord-6"))
+        asyncio.run(engine.place_take_profit("300006.SZ", 1000, 10.5, order_id="ord-6"))
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
     assert leg.price == 13.0 and leg.qty == 1000
@@ -823,7 +823,7 @@ def test_trade_replay_notifies_only_once(state_db, monkeypatch, tmp_path):
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     with patch("infra.notifier.NotificationManager") as NM, \
-         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+         patch("trading.engine.place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次 → insert_fill=True → 钉钉推 1 次
         asyncio.run(eng._handle_order_update(update))   # 重放 → insert_fill=False → 钉钉不推
@@ -872,7 +872,7 @@ def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     # 关键：不 patch state_store.insert_fill / insert_trade_event —— 让真函数写真 DB
     with patch("infra.notifier.NotificationManager") as NM, \
-         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+         patch("trading.engine.place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次
         asyncio.run(eng._handle_order_update(update))   # 重放
@@ -943,7 +943,7 @@ def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, 
     import trading.engine as _eng_mod
     monkeypatch.setattr(_eng_mod, "_mode", lambda: "live")
     with patch("infra.notifier.NotificationManager") as NM, \
-         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+         patch("trading.engine.place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次（方向未知）
         asyncio.run(eng._handle_order_update(update))   # 重放（方向未知）
@@ -1005,7 +1005,7 @@ def test_direction_none_writes_trade_event_audit(state_db, monkeypatch):
     import trading.engine as _eng_mod
     monkeypatch.setattr(_eng_mod, "_mode", lambda: "live")
     with patch("infra.notifier.NotificationManager") as NM, \
-         patch.object(eng, "_place_take_profit", new=AsyncMock()):
+         patch("trading.engine.place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次（方向未知）
         asyncio.run(eng._handle_order_update(update))   # 重放（方向未知，幂等校验）

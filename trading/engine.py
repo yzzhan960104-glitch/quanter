@@ -101,7 +101,7 @@ from trading.critical import halt as _halt_logic, guard_skip_rounds as _gskip_fn
 # trading.order_state.py（与 OrderStateMachine 同住，spec §5.1 design L120 共存设计），此处
 # re-export 保「公共/半公开 API 不变形」红线；engine 类内留薄 wrapper（``eng._handle_order_update``
 # 等）保 bootstrap ``set_order_update_callback(self._handle_order_update)`` 绑定 +
-# ``patch.object(eng, "_place_take_profit")`` 命中。order_state 内部经 ``_eng_mod`` 引用反查
+# ``patch("trading.engine.place_take_profit")`` 命中（T1-Task9 收口后）。order_state 内部经 ``_eng_mod`` 引用反查
 # engine 模块级符号（``_mode``/``_alert_critical``/``_resolve_account_id``/``_seq_for_real_oid``/
 # ``_order_state_to_db``），保 ``patch("trading.engine.xxx")`` 命中 + 避循环 import。
 from trading.order_state import (  # noqa: F401
@@ -234,6 +234,18 @@ from trading.phases.post_close import (  # noqa: F401
 )
 _seq_for_real_oid = seq_for_real_oid
 _order_state_to_db = order_state_to_db
+# T1-Task9 集群 H re-export（trading.phases.exit · 挂限价止盈卖单 · #4 差额补挂防超卖）。
+# trading/phases/exit.py（phases 包的止盈阶段模块），此处 re-export 保「公共/半公开 API 不变形」
+# 红线：
+#   - ``place_take_profit`` 经 engine re-export 命中：order_state.handle_order_update trade 分支
+#     + stop_loss_monitor 盘中 TP 漏挂兜底经 ``_eng_mod.place_take_profit`` 调用（call-time 解析
+#     engine 模块属性 → 本 re-export 别名 = phases.exit.place_take_profit 真身）；
+#   - ``patch("trading.engine.place_take_profit")`` / ``from trading.engine import place_take_profit``
+#     旧调用/patch 目标不变（re-export 别名 = engine 模块属性，patch 替换该属性即被调用方命中）；
+#   - 原 TradingEngine._place_take_profit 实例 wrapper 已删（薄 wrapper · 仅转发模块级），成交回报
+#     链路改为直接调模块级 place_take_profit（收口缝合点 #2：消除 order_state→engine 实例的
+#     take_profit 耦合，单向依赖 order_state→phases.exit 经 engine re-export）。
+from trading.phases.exit import place_take_profit  # noqa: F401  公共 API 兼容（cluster H re-export）
 # ⚠️ compute_stop_price 不再 engine 内导入（SSoT review P2 · 删 _evolve_trailing_stops 后
 #   该 import 成孤儿，CLAUDE.md 无死代码）；trailing 收紧作独立 live P0 task 重实现时若需在
 #   engine 内消费，再 from trading.compute.stop import compute_stop_price 即可。
@@ -422,116 +434,13 @@ async def _submit(order) -> dict:
 # 详见 trading/phases/post_close.py 模块 docstring「模块级符号 patch 路径设计」。
 
 
-async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
-                            order_id: str) -> None:
-    """挂限价止盈卖单（#4 差额补挂：目标量 − 已挂量，防超卖/防覆盖缺口）。
+# （T1-Task9）集群 H · place_take_profit（含内嵌闭包 _placed/_record_tp）已迁
+# trading/phases/exit.py（止盈挂单 · #4 差额补挂防超卖 · load_plan 读 tp1/tp2 →
+# 两腿/单腿分流 → _submit 限价卖 + _record_tp 落 DB UPSERT）。本模块经顶部 re-export
+# （``from trading.phases.exit import place_take_profit``）保 ``patch("trading.engine.place_take_profit")``
+# 命中 + order_state/stop_loss 经 ``_eng_mod.place_take_profit`` 反查不断。详见
+# trading/phases/exit.py 模块 docstring「模块级符号 patch 路径设计」。
 
-    Why 模块级：stop_loss_monitor（模块级函数）盘中 TP 漏挂兜底也要调它（#10），
-    实例方法无法被模块级函数引用（原 plan E4 的 self 错误根因）。
-    """
-    today = clock.today()
-    plan = trading_plan.load_plan(today)
-    if not plan:
-        logger.warning("挂止盈跳过：无活跃计划 symbol=%s（计划未落盘/已失效）", symbol)
-        return
-    # SSoT C3 follow-up（C2c reviewer 标注）：per-symbol veto 守卫。
-    # 物理意图：place_take_profit 经 load_plan 读 plan.orders，C3 load_plan DB 优先返所有
-    # SIGNAL.meta 行（含已被 veto 的标的）。pre_open 已 per-symbol 跳过 vetoed 不挂单（C2c），
-    # 故 vetoed 标的永不成交、本函数理论上不会被 vetoed 标的触发；但保险起见，此处再查一次
-    # latest_action=VETOED 显式跳过（防 pre_open/veto 时序窗口漏挂导致 vetoed 标的意外成交）。
-    _aid_pre_tp = _resolve_account_id()
-    _tid_tp = _state_store.build_trade_id(_aid_pre_tp, symbol, today)
-    if _state_store.get_latest_action(_tid_tp) == "VETOED":
-        logger.warning("挂止盈跳过：标的已被否决 symbol=%s（veto 终局防线，C3 follow-up）", symbol)
-        return
-    tp2 = tp1 = None
-    tp1_portion = 0.0
-    for o in plan.get("orders", []):
-        if (o.get("order") or {}).get("symbol") == symbol:
-            tp2 = o.get("take_profit")
-            tp1 = o.get("tp1")
-            tp1_portion = float(o.get("tp1_portion") or 0.0)
-            break
-    if tp2 is None or tp2 <= 0:
-        logger.warning("挂止盈跳过：无止盈价配置 symbol=%s（计划缺 take_profit）", symbol)
-        return
-    filled_int = int(filled_qty)
-    if filled_int <= 0:
-        logger.warning("挂止盈跳过：成交量非正 symbol=%s filled_qty=%s", symbol, filled_qty)
-        return
-
-    from trading.compute.types import OrderRequest
-    _aid = _resolve_account_id()
-    _tid = _state_store.build_trade_id(_aid, symbol, today)
-
-    # 已成交总量：OPEN 行 filled_qty（order 事件累计）优先，入参兜底
-    total_filled = float(filled_int)
-    if order_id:
-        try:
-            _open = _state_store.get_order_by_broker_oid(str(order_id))
-            if _open is not None and _open.get("filled_qty"):
-                total_filled = float(_open["filled_qty"])
-        except Exception:
-            logger.warning("读 OPEN filled_qty 失败 symbol=%s（用入参兜底）", symbol)
-
-    def _placed(purpose: str) -> float:
-        """已挂未终态量（差额基准）。"""
-        try:
-            return _state_store.get_order_placed_qty(_aid, today, symbol, purpose)
-        except Exception:
-            logger.exception("get_order_placed_qty(%s) 失败 symbol=%s（保守视为 0 补挂）", purpose, symbol)
-            return 0.0
-
-    def _record_tp(purpose: str, qty: int, price: float) -> None:
-        """挂止盈单后落 DB order（UPSERT 累加语义）；失败=柜台已发单但 DB 没记 → ERROR 人工复核。"""
-        try:
-            if _state_store.get_account(_aid) is None:
-                _state_store.upsert_account(_aid, broker="qmt")
-            ok = _state_store.add_order_qty(
-                _aid, today, symbol, purpose, float(qty), float(price))
-            if not ok:
-                # #4：DB 记失败但本次 _submit 已发出 → 柜台可能多挂。
-                logger.error("【止盈幂等冲突】%s %s 落 DB 失败但本次 _submit 已发柜台，"
-                             "需人工复核是否多挂超卖", symbol, purpose)
-        except Exception:
-            logger.exception("insert_order(%s) 失败 symbol=%s", purpose, symbol)
-    use_two_legs = (tp1 is not None and tp1 > 0 and tp1_portion > 0.0 and tp1 < tp2)
-    if not use_two_legs:
-        # 单腿全平 tp2：差额 = 总持仓 − 已挂 TP2
-        need2 = int(total_filled) - int(_placed("TP2"))
-        if need2 <= 0:
-            return
-        result = await _submit(
-            OrderRequest(symbol=symbol, qty=need2, side="sell", price=tp2))
-        if result.get("state") not in ("REJECTED", "FAILED"):
-            logger.info("【止盈单已挂】%s %s股 @%s（单笔全平 tp2 差额补挂）", symbol, need2, tp2)
-            _record_tp("TP2", need2, tp2)
-        else:
-            logger.warning("止盈单挂失败 symbol=%s state=%s msg=%s（人工补挂）",
-                           symbol, result.get("state"), result.get("message"))
-        return
-
-    # 分级两腿：目标量 − 已挂量，各腿独立补挂（防超卖 + 防覆盖缺口）
-    tp1_target = int(total_filled * tp1_portion / 100) * 100
-    tp2_target = int(total_filled) - tp1_target
-    need1 = tp1_target - int(_placed("TP1"))
-    need2 = tp2_target - int(_placed("TP2"))
-    if need1 > 0:
-        r1 = await _submit(
-            OrderRequest(symbol=symbol, qty=need1, side="sell", price=tp1))
-        if r1.get("state") not in ("REJECTED", "FAILED"):
-            _record_tp("TP1", need1, tp1)
-        else:
-            logger.warning("止盈单挂失败 symbol=%s leg=tp1 state=%s msg=%s（人工补挂）",
-                           symbol, r1.get("state"), r1.get("message"))
-    if need2 > 0:
-        r2 = await _submit(
-            OrderRequest(symbol=symbol, qty=need2, side="sell", price=tp2))
-        if r2.get("state") not in ("REJECTED", "FAILED"):
-            _record_tp("TP2", need2, tp2)
-        else:
-            logger.warning("止盈单挂失败 symbol=%s leg=tp2 state=%s msg=%s（人工补挂）",
-                           symbol, r2.get("state"), r2.get("message"))
 
 # ============================================================================
 # TradingEngine：APScheduler 四 cron 装配（独立常驻进程 python -m trading）
@@ -1565,7 +1474,7 @@ class TradingEngine:
     # T1 Task 3 缝合点 #2：_handle_order_update / _order_direction /
     # _advance_order_state_from_status 已迁 trading.order_state.py（集群 I），此处留
     # 薄 wrapper 保 ``eng._handle_order_update`` 等既有调用路径（bootstrap
-    # set_order_update_callback 绑实例 + 测试 patch.object(eng, "_place_take_profit") 命中）。
+    # set_order_update_callback 绑实例 + 止盈经 patch("trading.engine.place_take_profit") 命中）。
     # 逐行原样委托，零行为变更（幂等红线零容忍）。
     async def _handle_order_update(self, update: Mapping[str, Any]) -> None:
         """薄 wrapper：委托 trading.order_state.handle_order_update（T1 Task 3 迁出）。"""
@@ -1579,10 +1488,6 @@ class TradingEngine:
         """薄 wrapper：委托 trading.order_state.advance_order_state_from_status（T1 Task 3 迁出）。"""
         advance_order_state_from_status(self, update)
 
-    async def _place_take_profit(self, symbol: str, filled_qty: float,
-                                 fill_price: float, order_id: str) -> None:
-        """薄包装：成交回报链路调模块级 place_take_profit（#4 差额补挂）。"""
-        return await place_take_profit(symbol, filled_qty, fill_price, order_id)
     @_critical_guard
     async def _pipeline_then_eod(self) -> None:
         """C-4 U2：pipeline_then_eod 收编为 method（过 _critical_guard）。
