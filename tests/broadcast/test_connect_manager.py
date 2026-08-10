@@ -28,7 +28,12 @@ def test_build_cmd_claudecode(monkeypatch):
     monkeypatch.setenv("DINGTALK_ALLOWED_STAFF_IDS", "staff001")
     monkeypatch.setenv("BROADCAST_AGENT_WORKDIR", "E:/quanter")
     cmd = cm.build_cmd("cli", CLS_CFG, DEFAULTS)
-    assert cmd[0:4] == ["dws", "dev", "connect", "--unified-app-id"]
+    # cmd[0]=dws_bin=shutil.which("dws") or "dws"：Windows 下 npm 装的 dws 是 .cmd shim，
+    # build_cmd 解析为 dws.CMD 绝对路径（修 Popen WinError 2，见 connect_manager.build_cmd）。
+    # 用文件名 + 后续参数断言：既验证 dws 入口又环境无关（不依赖具体安装路径）。
+    from pathlib import Path
+    assert Path(cmd[0]).name.lower() in ("dws", "dws.cmd", "dws.exe")
+    assert cmd[1:4] == ["dev", "connect", "--unified-app-id"]
     assert "f0b2740f-c029-4b99-943c-58de139c7463" in cmd
     assert "--channel" in cmd and "claudecode" in cmd
     assert "--agent-memory" in cmd                       # agent_memory=True
