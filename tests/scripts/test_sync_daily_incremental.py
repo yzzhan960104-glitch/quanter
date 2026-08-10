@@ -155,7 +155,7 @@ def test_sync_incremental_recomputes_qfq_and_appends():
     with patch.object(mod.pd, "read_parquet", return_value=fake_lake), \
          patch.object(mod, "get_pro", return_value=pro), \
          patch.object(mod.pd.DataFrame, "to_parquet", fake_to_parquet), \
-         patch.object(mod, "assert_safe_overwrite", lambda *a, **k: None), \
+         patch.object(mod, "safe_overwrite", lambda *a, **k: None), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
         msg = mod.sync_daily_incremental()
@@ -204,7 +204,7 @@ def test_sync_detects_dividend_when_adj_changes():
          patch.object(mod, "get_pro", return_value=pro), \
          patch.object(mod.pd.DataFrame, "to_parquet",
                       lambda df, path, **kw: written.update(df=df)), \
-         patch.object(mod, "assert_safe_overwrite", lambda *a, **k: None), \
+         patch.object(mod, "safe_overwrite", lambda *a, **k: None), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
         msg = mod.sync_daily_incremental()
