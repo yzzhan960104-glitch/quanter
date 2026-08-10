@@ -186,6 +186,51 @@ def check_row_count_drop(baseline: int, new: int,
                    f"（baseline={baseline}），疑为残片覆盖/部分回采")
 
 
+def assert_safe_overwrite(lake_path: str, new_df: pd.DataFrame, *,
+                          min_ratio: float = WRITE_GUARD_MIN_RATIO,
+                          force: bool = False) -> None:
+    """写入前历史行数守卫：落盘 to_parquet 前调用，骤降则抛 WriteGuardError 拒写。
+
+    物理意图：封死 T12 式残片覆盖。所有湖写入口（通用同步器全量覆盖、增量 append、
+    repair 重写、未来结果回湖）落盘前必须调本函数。
+
+    决策矩阵（硬阻断语义，绝不静默）：
+        force=True               → 旁路（人为故意缩小重采），CRITICAL 留痕后放行
+        现有文件不存在            → 放行（无基线可比，首次写/新湖）
+        现有文件损坏/不可读       → 拒写（基线不可读，宁拒不盲写）
+        new_df 为空              → 拒写（空写无意义且可能抹除）
+        new < baseline × min_ratio → 拒写（骤降，疑残片覆盖/部分回采）
+        否则                     → 放行
+
+    Args:
+        lake_path: 落盘路径（读现有行数用）。
+        new_df:    待写的 DataFrame（取 len 比对）。
+        min_ratio: 骤降下限比（默认 0.9）。
+        force:     逃生口（配合 QUANTER_FORCE_WRITE=1，调用方传入）。
+
+    Raises:
+        WriteGuardError: 拒写时抛，调用方应让其传播（阻断本次落盘）。
+    """
+    if force:
+        # 逃生口留痕：守卫可拒绝、可强旁、不可静默
+        logger.critical("FORCE 写入 %s（已旁路行数守卫，人为操作留痕）", lake_path)
+        return
+    existing = existing_row_count(lake_path)
+    if existing is None and not os.path.exists(lake_path):
+        return  # 首次写/新湖：无基线，放行
+    new_len = len(new_df)
+    if existing is None:
+        # 文件存在但读不出（损坏）→ 拒写，不静默
+        raise WriteGuardError(
+            f"{lake_path} 现有文件损坏/行数不可读，拒写（基线不可信，宁拒不盲写）")
+    if new_len == 0:
+        raise WriteGuardError(f"{lake_path} 待写为空 df，拒写（空写无意义且可能抹除）")
+    ok, reason = check_row_count_drop(existing, new_len, min_ratio)
+    if not ok:
+        logger.critical("写入守卫拒写 %s：%s", lake_path, reason)
+        raise WriteGuardError(f"{lake_path} {reason}")
+
+
 # ============================================================================
 # 规则 1：全市场连续性扫描
 # ============================================================================

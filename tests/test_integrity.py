@@ -18,6 +18,7 @@ import pytest
 
 from data.integrity import (
     WRITE_GUARD_MIN_RATIO, WriteGuardError,
+    assert_safe_overwrite,
     existing_row_count, check_row_count_drop,
 )
 
@@ -409,3 +410,63 @@ def test_existing_row_count_none_on_corrupt(tmp_path):
     p = tmp_path / "bad.parquet"
     p.write_bytes(b"not a parquet")
     assert existing_row_count(str(p)) is None
+
+
+# ============================================================================
+# 写入守卫编排 assert_safe_overwrite（T13-A · Task 2）
+# ============================================================================
+# 物理意图：所有湖写入口（通用同步器全量覆盖/增量 append/repair 重写）落盘 to_parquet
+# 前调本函数；决策矩阵：force 旁路 / 首次写放行 / 损坏拒写 / 空 df 拒写 / 骤降拒写。
+
+
+def _write_lake(path, n):
+    pd.DataFrame({"a": range(n)}).to_parquet(path)
+
+
+def test_assert_safe_overwrite_raises_on_crater(tmp_path):
+    # T12 核心断言：现有 10000 行，待写 100 行（骤降）→ 拒写抛异常
+    p = tmp_path / "lake.parquet"
+    _write_lake(str(p), 10000)
+    tiny = pd.DataFrame({"a": range(100)})
+    with pytest.raises(WriteGuardError):
+        assert_safe_overwrite(str(p), tiny)
+    # 拒写后原文件未被覆盖（行数不变）
+    assert existing_row_count(str(p)) == 10000
+
+
+def test_assert_safe_overwrite_passes_on_first_write(tmp_path):
+    # 首次写/新湖：无现有文件 → 放行（无基线可比）
+    p = tmp_path / "new.parquet"
+    assert_safe_overwrite(str(p), pd.DataFrame({"a": range(50)}))  # 不抛
+
+
+def test_assert_safe_overwrite_passes_on_growth(tmp_path):
+    # 正常增量：现有 1000，待写 1200（增长）→ 放行
+    p = tmp_path / "lake.parquet"
+    _write_lake(str(p), 1000)
+    assert_safe_overwrite(str(p), pd.DataFrame({"a": range(1200)}))
+
+
+def test_assert_safe_overwrite_rejects_empty_new_df(tmp_path):
+    # 空 df 落盘无意义且可能抹除 → 拒写
+    p = tmp_path / "lake.parquet"
+    _write_lake(str(p), 1000)
+    with pytest.raises(WriteGuardError):
+        assert_safe_overwrite(str(p), pd.DataFrame())
+
+
+def test_assert_safe_overwrite_force_bypasses_but_logs(tmp_path, caplog):
+    # 逃生口：force=True 旁路守卫（人为故意缩小重采），但仍 critical 留痕
+    p = tmp_path / "lake.parquet"
+    _write_lake(str(p), 10000)
+    with caplog.at_level("CRITICAL", logger="data.integrity"):
+        assert_safe_overwrite(str(p), pd.DataFrame({"a": range(100)}), force=True)
+    assert any("FORCE" in r.message or "force" in r.message.lower() for r in caplog.records)
+
+
+def test_assert_safe_overwrite_corrupt_existing_raises(tmp_path):
+    # 现有文件损坏：基线不可读 → 拒写（宁拒不盲写），不静默放行
+    p = tmp_path / "lake.parquet"
+    p.write_bytes(b"not a parquet")
+    with pytest.raises(WriteGuardError):
+        assert_safe_overwrite(str(p), pd.DataFrame({"a": range(100)}))
