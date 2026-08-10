@@ -54,6 +54,8 @@ def test_stoploss_gw_green_proceeds_to_monitor():
          patch("trading.engine._alert_critical") as ac, \
          patch("trading.engine.calendar.is_trading_day", return_value=True), \
          patch("trading.engine.trading_plan.load_plan", return_value=None), \
+         patch("trading.engine._state_store.list_signals_with_meta_by_plan_date",
+               return_value=[]) as _ss_sig, \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:
         asyncio.run(eng._stoploss())
     ac.assert_not_called()        # gate 绿不告警
