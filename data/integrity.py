@@ -16,10 +16,15 @@
 """
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from typing import Set
 
 import pandas as pd
+import pyarrow.parquet as pq
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -127,6 +132,58 @@ def _fetch_year_trade_cal(year: int) -> list[str]:
     """
     from trading.calendar import fetch_trade_cal
     return fetch_trade_cal(year)
+
+
+# ============================================================================
+# 写入前历史行数守卫（T13-A · L1 防抹除）
+# ============================================================================
+# 物理意图（T12 实证）：通用同步器 to_parquet 直接覆盖，无写入前守卫 →
+# a_shares_daily 被 sync_tushare.py daily 残片覆盖（1020万→3200）。所有湖写入口
+# （sync/repair/结果回湖）落盘前必须经本守卫：新行数相对现有骤降 → 拒写 + CRITICAL。
+WRITE_GUARD_MIN_RATIO = 0.9   # 新行数 < 现有 × 0.9 → 视为骤降，拒写
+
+
+class WriteGuardError(RuntimeError):
+    """写入守卫拒绝：新行数相对现有骤降，疑为残片覆盖/部分回采，拒写保护历史。"""
+
+
+def existing_row_count(path: str) -> int | None:
+    """读 parquet 行数（pyarrow 元数据，不读数据体，免 454MB 全量 IO）。
+
+    Returns:
+        行数（文件存在且合法）；None（文件不存在或损坏——调用方据此区分「无基线」
+        vs「基线不可读」）。
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        return pq.read_metadata(path).num_rows
+    except Exception:
+        # 损坏/非 parquet：返 None，由 assert_safe_overwrite 决策（默认拒写，不静默）
+        logger.warning("读 parquet 行数失败（损坏？）：%s", path, exc_info=True)
+        return None
+
+
+def check_row_count_drop(baseline: int, new: int,
+                         min_ratio: float = WRITE_GUARD_MIN_RATIO) -> tuple[bool, str]:
+    """行数骤降判定（SSoT 纯函数）：new < baseline × min_ratio → 骤降。
+
+    freshness 行数骤降维度与写入守卫共用本函数（蓝图 §5 原则 2，禁止两套实现）。
+
+    Args:
+        baseline: 基线行数（写入守卫=现有文件行数；freshness=上次健康检查行数）。
+        new:      待判定行数。
+        min_ratio: 放行下限比（默认 0.9）。
+
+    Returns:
+        (ok, reason)：ok=True 放行；ok=False 骤降，reason 含中文结论供日志/断言。
+    """
+    if baseline <= 0:
+        return True, "基线为 0/无历史，无骤降可言，放行"
+    if new >= baseline * min_ratio:
+        return True, f"new={new} >= baseline×{min_ratio}={int(baseline*min_ratio)}，放行"
+    return False, (f"行数骤降：new={new} < baseline×{min_ratio}={int(baseline*min_ratio)}"
+                   f"（baseline={baseline}），疑为残片覆盖/部分回采")
 
 
 # ============================================================================

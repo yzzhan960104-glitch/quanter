@@ -16,6 +16,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from data.integrity import (
+    WRITE_GUARD_MIN_RATIO, WriteGuardError,
+    existing_row_count, check_row_count_drop,
+)
+
 
 # ============================================================================
 # 测试夹具：suspend_d 构造 + 交易日集
@@ -347,3 +352,60 @@ def test_filter_universe_skips_symbol_missing_from_df_map():
     clean = filter_universe_by_continuity(
         universe, df_map, window=3, susp={}, trade_days=TRADE_DAYS)
     assert clean == ["000001.SZ"], "df_map 缺失的 symbol 应被过滤"
+
+
+# ============================================================================
+# 写入前历史行数守卫 · 行数检查 SSoT 纯函数（T13-A · Task 1）
+# ============================================================================
+# 物理意图（T12 实证）：通用同步器 to_parquet 直接覆盖、无写入前守卫 → a_shares_daily
+# 被残片覆盖（1020万→3200）。本组测试覆盖「行数骤降判定内核」+ parquet 行数元数据读取，
+# 供写入守卫（Task 2）与 freshness 行数骤降（Task 6）共用（SSoT，禁止两套实现）。
+
+
+def test_write_guard_min_ratio_default_is_09():
+    # 蓝图级默认阈值：新行数 < 现有 × 0.9 → 视为骤降拒写
+    assert WRITE_GUARD_MIN_RATIO == 0.9
+
+
+def test_check_row_count_drop_flags_crater():
+    # T12 场景：1020万 → 3200，新行数远小于基线 × 0.9 → 判骤降
+    ok, reason = check_row_count_drop(baseline=10_000_000, new=3200, min_ratio=0.9)
+    assert ok is False
+    assert "骤降" in reason or "drop" in reason.lower()
+
+
+def test_check_row_count_drop_allows_growth():
+    # 正常增量/增长：新行数 >= 基线 → 放行
+    ok, _ = check_row_count_drop(baseline=1000, new=1005, min_ratio=0.9)
+    assert ok is True
+
+
+def test_check_row_count_drop_boundary_just_above_ratio():
+    # 边界：新行数 = baseline × 0.9 → 刚好放行（>= ratio 不算骤降）
+    ok, _ = check_row_count_drop(baseline=1000, new=900, min_ratio=0.9)
+    assert ok is True
+
+
+def test_check_row_count_drop_boundary_just_below_ratio():
+    # 边界：新行数 = baseline × 0.9 - 1 → 拒写
+    ok, _ = check_row_count_drop(baseline=1000, new=899, min_ratio=0.9)
+    assert ok is False
+
+
+def test_existing_row_count_reads_metadata(tmp_path):
+    # 物理意图：用 pyarrow 元数据读行数，免全量读 454MB parquet（freshness 注释 ~1.75s）
+    p = tmp_path / "lake.parquet"
+    pd.DataFrame({"a": range(1234)}).to_parquet(p)
+    assert existing_row_count(str(p)) == 1234
+
+
+def test_existing_row_count_none_when_missing(tmp_path):
+    # 首次写/新湖：文件不存在 → None（无历史可比，放行）
+    assert existing_row_count(str(tmp_path / "nope.parquet")) is None
+
+
+def test_existing_row_count_none_on_corrupt(tmp_path):
+    # 损坏文件 → None（调用方据此判「基线不可读」，由 assert_safe_overwrite 决策）
+    p = tmp_path / "bad.parquet"
+    p.write_bytes(b"not a parquet")
+    assert existing_row_count(str(p)) is None
