@@ -40,8 +40,15 @@ def test_select_keys_按quota过滤():
 
 
 def test_select_keys_指定keys():
+    # daily 已退役（T13-A 双轨收口），用有效 key 验证指定列表原样返回
+    sel = select_keys(all_keys=False, keys=["weekly", "monthly"], quota=None)
+    assert sel == ["weekly", "monthly"]
+
+
+def test_select_keys_退役key被过滤():
+    """daily 已退役（T13-A），--keys 含 daily 应被过滤（不 KeyError 崩 CLI）。"""
     sel = select_keys(all_keys=False, keys=["daily", "weekly"], quota=None)
-    assert sel == ["daily", "weekly"]
+    assert sel == ["weekly"], "退役 key（daily）应被过滤，保留有效 key"
 
 
 def test_run_单key失败不中断后续(monkeypatch):

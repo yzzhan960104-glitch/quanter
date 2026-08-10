@@ -71,7 +71,10 @@ def select_keys(*, all_keys: bool, keys: Optional[list[str]],
         sel = list(keys or [])
     if quota:
         sel = [k for k in sel if TUSHARE_DATASETS[k].get("quota_type", "basic") == quota]
-    sel = [k for k in sel if not TUSHARE_DATASETS[k].get("_unavailable")]
+    # 过滤 _unavailable + 已退役 key（T13-A：daily 退役后 --keys daily 不应 KeyError 崩，
+    # 而是静默跳过该退役 key）。k in TUSHARE_DATASETS 兜底动态访问，防传无效/退役 key。
+    sel = [k for k in sel if k in TUSHARE_DATASETS
+           and not TUSHARE_DATASETS[k].get("_unavailable")]
     return sel
 
 
