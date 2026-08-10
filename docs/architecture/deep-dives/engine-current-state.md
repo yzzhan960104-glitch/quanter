@@ -1,7 +1,16 @@
-> 最近复核：2026-08-09 · 维护者：wayfinder-session ·
+> 最近复核：2026-08-10 · 维护者：wayfinder-session ·
 > 权威归宿：**`trading/engine.py` 内部结构**（[T0.1](../../../plans/wayfinder/T0.1.md) 产出，毕业自 [T0](../../../plans/wayfinder/T0.md)）。
 > 活文档——随 engine 代码演进，改 engine 时同改本文件 + 刷「最近复核」。**行号截至复核日**，代码变更后行号漂移以符号名为准。
 > 单一归宿——他视图（[#2](../02-module-dependencies.md) 模块依赖 / [#5](../05-state-machines.md) 状态机 / [#6](../06-tech-debt.md) 技术债）引用 engine 内部结构时**链此不重抄**。
+
+> 📌 **T1 拆分状态（2026-08-10）：已拆分 · 本文档转为「拆分前历史态」快照**
+>
+> [T1](../../../plans/wayfinder/T1.md)（engine 模块化拆分）已于 2026-08-10 完成：
+> - engine.py **3437 → 1546 行（-55%）**，10 集群外迁 8 个为独立子模块（`critical.py` / `order_state.py` / `data_ctx.py` / `eod_plan.py` / `phases/{pre_open,stop_loss,post_close,exit}.py`）+ `ports.py`（`EnginePorts` 窄接口）。
+> - `_ACTIVE_ENGINE` 单例桥（缝合点 #1）**代码清零**（仅本文件 + 少量注释/docstring 引用历史），phases 函数改经 `EnginePorts` 显式接收 engine 实例特有依赖。
+> - 终验：trading 515 单测 + e2e 长周期 26 测全绿（行为等价零回归）。
+>
+> **下文（§0–§6）保留为拆分前的 god module 解剖快照**，行号/集群/缝合点判定均对应 **3437 行的旧 engine.py**。它仍是理解「为何拆、按什么边界拆」的权威依据（T1 即基于 §5 缝合点排序执行）。重构后 engine 的实际形态见 [#2](../02-module-dependencies.md) 的「trading 内部依赖（T1 拆分后）」小节；god module 债务状态见 [#6](../06-tech-debt.md)。
 
 # `engine.py` 当前态深剖（T0.1）
 

@@ -1,4 +1,4 @@
-> 最近复核：2026-08-08 · 维护者：wayfinder-session ·
+> 最近复核：2026-08-10 · 维护者：wayfinder-session ·
 > 权威归宿：**技术债 / 痛点 / god module 判定**（单一归宿）。模块结构（不判债）见 [#2](02-module-dependencies.md)；本视图是 #2 的「债务切片」——只画债-bearing 项 + 严重度，不重复依赖边。
 
 # #6 技术债 / 已知缺口分布
@@ -16,7 +16,7 @@ flowchart LR
     L["Low"]:::low
   end
 
-  E["engine.py 3437 行<br/>god module<br/>编排+信号+订单+对账 混杂"]:::crit
+  E["✅ engine.py god module<br/>T1 完成 (2026-08-10)<br/>3437→1546 行 · 8 集群外迁<br/>_ACTIVE_ENGINE 单例桥清零"]:::done
   DI["data 完整性<br/>生产 gate 只校验实时性<br/>scan/repair 孤立 CLI<br/>历史缺口永不发现"]:::crit
   AS["account_daily.start 漏采<br/>非盘前启动→NULL<br/>熔断基线裸奔"]:::crit
 
@@ -33,7 +33,7 @@ flowchart LR
   DOC["过时文档<br/>data_pool.md / caisen-summary"]:::low
   DC["死代码/死参（P3 follow-ups）"]:::low
 
-  E --> T1["→ T1 拆分"]
+  E -.->|T1 完成| T1D["✅ T1 done (2026-08-10)"]
   DI --> T13["→ T13 治本"]
   AS --> T13B["→ live P0 运维"]
   Q --> T2["→ T2 适配层"]
@@ -48,6 +48,7 @@ flowchart LR
   classDef high fill:#fc8,stroke:#a60,color:#420
   classDef med fill:#ffd,stroke:#990,color:#440
   classDef low fill:#eef,stroke:#88a,color:#335
+  classDef done fill:#cfc,stroke:#090,color:#030
 ```
 
 ## 债务清单（按严重度）
@@ -56,7 +57,7 @@ flowchart LR
 
 | 项 | 物理事实 | 治理归宿 |
 |---|---|---|
-| **engine.py god module（3437 行）** | 编排+信号触发+订单提交+对账+生命周期混于一文件；T1 拆分直接目标。内部结构 → [deep-dives/engine-current-state](deep-dives/engine-current-state.md) | [T1](../../plans/wayfinder/T1.md) |
+| ✅ **engine.py god module —— T1 完成（2026-08-10）** | **已治理**：3437→1546 行（-55%），10 集群外迁 8 个（A critical / B data_ctx / D eod_plan / E-F-G-H phases×4 / I order_state），`_ACTIVE_ENGINE` 单例桥代码清零（仅注释/docstring 引用历史），engine 仅留调度/装配/gate/job wrapper + re-export 兼容块。终验：trading 515 单测 + e2e 长周期 26 测全绿（行为等价）。历史态内部结构 → [deep-dives/engine-current-state](deep-dives/engine-current-state.md) | ✅ [T1 done](../../plans/wayfinder/T1.md) |
 | **data 完整性 gate 缺陷** | 生产 gate 只校验实时性不校验历史连续性；`scan_integrity`/`repair_gaps` 孤立 CLI 无调度；历史缺口被动跳过永不发现（[T5](../../plans/wayfinder/T5.md)） | [T13](../../plans/wayfinder/T13.md) |
 | **account_daily.start 漏采** | 模拟盘/非盘前启动 → `start_total_asset` NULL → C-1 熔断 -3% 基线裸奔 | live P0 运维（pre_open 窗口内必须起） |
 

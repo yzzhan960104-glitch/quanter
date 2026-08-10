@@ -166,7 +166,7 @@ async def post_close(
         缺基线（start=None）→ 跳过 + WARN（不拿 0 触发，防 check(0,X) 永远 False 反永不熔断）。
     """
     # T1-Task8：经 _eng_mod 引用调 engine 模块级符号（保 patch("trading.engine._xxx") /
-    # monkeypatch.setattr(engine, "_xxx"/"xxx") 命中——test_post_close_snapshot_close_equile 等 4 测
+    # monkeypatch.setattr(engine, "_xxx"/"xxx") 命中——test_post_close_snapshot_close_equity 等 4 测
     # patch engine.get_gateway / engine._resolve_account_id；test_post_close_circuit_breaker 系列 /
     # e2e patch engine._state_store / engine._cancel_all_open_orders / engine._mode / engine._alert_critical；
     # 详见本文件模块 docstring「模块级符号 patch 路径设计」）+ 避循环 import（engine 顶部 re-export 本模块）。
