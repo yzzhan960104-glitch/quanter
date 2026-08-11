@@ -9,16 +9,12 @@ import pandas as pd
 from data.clients.akshare_client import AKShareClient, akshare_breaker
 from data.resilience import CircuitState
 
-
-def _reset():
-    """复位熔断器内部状态，确保不被其它用例污染（与 test_fetcher_resilience 同范式）。"""
-    akshare_breaker._state = CircuitState.CLOSED
-    akshare_breaker._failure_count = 0
+# 注：breaker/limiter 单例跨用例 reset 由根 conftest _reset_resilience_singletons
+# autouse fixture 兜底，本文件不再各自裸写 _state/_failure_count。
 
 
 def test_fetch_daily_hist_cleanses(monkeypatch):
     """日线返回须洗净中文列名为标准 schema（open/high/low/close/volume/amount）。"""
-    _reset()
     fake = pd.DataFrame({"日期": ["2024-01-02"], "开盘": [10], "最高": [11], "最低": [9],
                          "收盘": [10.5], "成交量": [1000], "成交额": [1e7]})
     monkeypatch.setattr("akshare.stock_zh_a_hist", lambda *a, **k: fake)
@@ -35,7 +31,6 @@ def test_fetch_daily_hist_strips_exchange_suffix(monkeypatch):
     而 akshare stock_zh_a_hist 只要纯数字代码——原样透传会实网返空，导致整个活跃池日线
     全量拉空。本测试捕获透传给 ak.* 的真实 symbol，断言已剥离为纯数字。
     """
-    _reset()
     captured = {}
     fake = pd.DataFrame({"日期": ["2024-01-02"], "开盘": [10], "最高": [11], "最低": [9],
                          "收盘": [10.5], "成交量": [1000], "成交额": [1e7]})
@@ -51,8 +46,6 @@ def test_fetch_daily_hist_strips_exchange_suffix(monkeypatch):
 
 def test_failure_returns_empty_df(monkeypatch):
     """底层 ak.* 抛错时必须返回空 DF，绝不向外抛（红线契约）。"""
-    _reset()
-
     def boom(*a, **k):
         raise RuntimeError("network down")
     monkeypatch.setattr("akshare.stock_zh_a_hist", boom)
@@ -68,7 +61,6 @@ def test_call_ak_timeout_returns_empty(monkeypatch):
     由 fetch 外层 except 捕获 → 熔断 record_failure + 空降级（与既有异常同口径）。
     """
     import time
-    _reset()
     monkeypatch.setattr("data.clients.akshare_client._AK_TIMEOUT", 0.05)
 
     def _slow(*a, **k):
@@ -85,7 +77,6 @@ def test_dr007_stale_data_returns_empty(monkeypatch):
     若透传会静默泄漏过期+错列数据。本测试 mock 一个最新日期为 2020 的 DF，断言新鲜度守卫
     生效 → 返空 DF。
     """
-    _reset()
     # 模拟 dead 接口的过期返回（最新日期 2020-10-29，远超 7 天新鲜度阈值）
     stale = pd.DataFrame({
         "日期": ["2020-10-27", "2020-10-28", "2020-10-29"],
@@ -93,19 +84,16 @@ def test_dr007_stale_data_returns_empty(monkeypatch):
     })
     monkeypatch.setattr("akshare.repo_rate_hist", lambda *a, **k: stale)
     df = AKShareClient().fetch_macro_raw("dr007")
-    assert df.empty   # 新鲜度守卫生效，过期数据不泄漏
+    assert df.empty   # 新鲜度守医生效，过期数据不泄漏
 
 
 def test_circuit_open_returns_empty_without_calling_ak(monkeypatch):
     """熔断 OPEN 期间须快速返回空 DF，且绝不触达底层 ak.*（防连环超时）。"""
     import time as _time
-    _reset()
-    # 强制将熔断器置为 OPEN，且 _opened_at 设为【当前 monotonic】（刚跳闸），
-    # 这样 _now - opened_at ≈ 0 < recovery_timeout(60s)，冷却必然未到期，
-    # _maybe_half_open_locked 不会转 HALF_OPEN，allow_request 直接返回 False。
-    # （注意：若设为 float('-inf')，_now - opened_at 为巨大正数会触发半开放行，反例。）
-    akshare_breaker._state = CircuitState.OPEN
-    akshare_breaker._opened_at = _time.monotonic()
+    # 刻意置 OPEN 验证 OPEN-path：用 monkeypatch 自动还原，不裸写私有字段
+    # （conftest _reset_resilience_singletons 已在本用例前 reset 为 CLOSED）
+    monkeypatch.setattr(akshare_breaker, "_state", CircuitState.OPEN)
+    monkeypatch.setattr(akshare_breaker, "_opened_at", _time.monotonic())
 
     called = {"n": 0}
 
@@ -116,4 +104,4 @@ def test_circuit_open_returns_empty_without_calling_ak(monkeypatch):
     monkeypatch.setattr("akshare.stock_zh_a_hist", should_not_be_called)
     df = AKShareClient().fetch_daily_hist("000001.SZ", "2024-01-02", "2024-01-03")
     assert df.empty
-    assert called["n"] == 0   # 熔断守卫生效，底层未被触达
+    assert called["n"] == 0   # 熔断守医生效，底层未被触达

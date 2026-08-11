@@ -105,9 +105,7 @@ def test_fetch_qfq_reconstructs_forward_adjusted_prices():
 
 def test_fetch_qfq_empty_daily_returns_empty():
     """daily 返空 → 空 DF（不抛，停牌/无行情正常态）。"""
-    from data.resilience import CircuitState, tushare_breaker
-    tushare_breaker._state = CircuitState.CLOSED
-    tushare_breaker._failure_count = 0
+    # breaker reset 由根 conftest _reset_resilience_singletons autouse fixture 兜底
 
     class _FakePro:
         def daily(self, **kw):

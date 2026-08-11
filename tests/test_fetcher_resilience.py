@@ -28,9 +28,7 @@ from data.resilience import (
 
 def test_breaker_trips_after_repeated_infra_errors(monkeypatch):
     """连续 3 次基础设施异常 → 熔断 OPEN；第 4 次返回空 DF 且不再触达底层 API。"""
-    # ── 复位熔断器与限流器状态，避免被先前用例/模块加载污染 ──
-    tushare_breaker._state = CircuitState.CLOSED
-    tushare_breaker._failure_count = 0
+    # 入口 reset 已由 conftest _reset_resilience_singletons autouse fixture 兜底，不再裸写
 
     # __new__ 绕过 __init__（无需真实 Token / 网络客户端）
     fetcher = TushareDataFetcher.__new__(TushareDataFetcher)
@@ -74,9 +72,6 @@ def test_breaker_trips_after_repeated_infra_errors(monkeypatch):
 
 def test_permission_error_does_not_trip_breaker(monkeypatch):
     """积分/权限类持久异常不计熔断（60s 内不可恢复，熔断无意义）。"""
-    tushare_breaker._state = CircuitState.CLOSED
-    tushare_breaker._failure_count = 0
-
     fetcher = TushareDataFetcher.__new__(TushareDataFetcher)
 
     def fake_api_call(self, symbol, start, end):
@@ -105,9 +100,6 @@ def test_permission_error_does_not_trip_breaker(monkeypatch):
 
 def test_fred_breaker_trips_on_rate_limit(monkeypatch):
     """FRED 429/限频异常连续 3 次 → 熔断 OPEN，且始终返回空 DF。"""
-    fred_breaker._state = CircuitState.CLOSED
-    fred_breaker._failure_count = 0
-
     fetcher = FredDataFetcher.__new__(FredDataFetcher)
 
     def boom(self, indicator, start, end):
