@@ -164,6 +164,27 @@ def _isolate_job_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "job_run.db"))
 
 
+# ============ M4：resilience 单例跨用例污染根治（autouse reset）============
+# Why autouse：data.resilience 的 breaker/limiter 是模块级共享单例。test_fetcher_resilience
+# / test_akshare_client 等测试置 OPEN 后若无 finally 还原，后续依赖单例的测试读到 OPEN
+# 误判（allow_request=False → 快速返空）。本 fixture 每用例 setup 前 reset 全部单例运行态
+# （不改配置），治本——任何测试忘记还原也不污染。reset() 见 CircuitBreaker/RateLimiter。
+@pytest.fixture(autouse=True)
+def _reset_resilience_singletons():
+    from data import resilience
+    for _singleton in (
+        resilience.tushare_rate_limiter_basic,
+        resilience.tushare_rate_limiter_special,
+        resilience.fred_rate_limiter,
+        resilience.akshare_limiter,
+        resilience.tushare_breaker,
+        resilience.fred_breaker,
+        resilience.akshare_breaker,
+    ):
+        _singleton.reset()
+    yield
+
+
 # ============ SSoT Phase A：tmp_db fixture（共享隔离 state_store DB）============
 # Why 非 autouse：state_store 的 trade_event/order/fill/account 读写需显式 tmp DB 隔离，
 # 但许多既有测试不触及 state_store（直接走 .venv310/logs/ 默认 DB 亦无副作用）。autouse 会

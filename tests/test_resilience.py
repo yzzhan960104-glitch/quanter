@@ -150,3 +150,23 @@ def test_rate_limiter_reset_refills_tokens():
     rl.reset()
     assert rl._tokens == 2
     assert rl.try_acquire(2.0) is True    # reset 后又满
+
+
+def test_resilience_singletons_start_clean():
+    """canary：每个用例入口处，全部 resilience 模块级单例须处于初始态。
+
+    Why：验证 conftest 的 _reset_resilience_singletons autouse fixture 生效——
+    若先前用例污染了单例且 fixture 未复位，本 canary 在全量跑里会捕获（任意顺序）。
+    单文件单跑 trivially 绿；价值在全量跑（Task5）里体现。
+    """
+    from data.resilience import (
+        CircuitState, tushare_breaker, fred_breaker, akshare_breaker,
+        tushare_rate_limiter_basic, tushare_rate_limiter_special,
+        fred_rate_limiter, akshare_limiter,
+    )
+    for cb in (tushare_breaker, fred_breaker, akshare_breaker):
+        assert cb.state == CircuitState.CLOSED, f"{cb.name} 未复位为 CLOSED"
+        assert cb._failure_count == 0, f"{cb.name} _failure_count 残留"
+    for rl in (tushare_rate_limiter_basic, tushare_rate_limiter_special,
+               fred_rate_limiter, akshare_limiter):
+        assert rl._tokens == rl.capacity, f"{rl.name} 令牌未复位为 capacity"
