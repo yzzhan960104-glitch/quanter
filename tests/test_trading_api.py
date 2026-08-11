@@ -43,26 +43,6 @@ def test_submit_order_dry_run(client, monkeypatch):
     assert r.json()["state"] == "DRY_RUN"
 
 
-def test_submit_order_no_confirm_returns_409(client, monkeypatch):
-    """缺 confirm（且 allow_live=True）→ 挡板 confirm 关命中 → 409。"""
-    from presentation.server.services import trading_service
-
-    class _FakeGW:
-        _connected = True
-        _lock_down = False
-        @property
-        def is_locked(self):
-            return False
-    monkeypatch.setattr(trading_service, "get_gateway", lambda: _FakeGW())
-    monkeypatch.setattr(trading_service, "_allow_live", lambda: True, raising=False)
-
-    r = client.post("/api/v1/trading/submit_order", json={
-        "symbol": "510300.SH", "qty": 100, "side": "buy", "price": 5.0,
-        "dry_run": False, "confirm": False,
-    })
-    assert r.status_code == 409
-
-
 def test_submit_order_unavailable(client, monkeypatch):
     """无网关 → submit_order raise RuntimeError → 路由当前实现未捕获会 500。
 

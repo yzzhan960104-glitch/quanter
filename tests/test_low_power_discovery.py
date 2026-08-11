@@ -62,6 +62,10 @@ def test_run_research_digest_push_low_power_command(monkeypatch):
             calls.append(args)
 
     monkeypatch.setattr(main._subprocess, "Popen", _FakePopen)
+    # 时间注入隔离：_run_discovery_subprocess 内部调 _discovery_low_power_allowed
+    # (datetime.now())，真实墙钟落在 9-16/18 点窗口会 return 不调 Popen → calls 空 →
+    # IndexError。本测试聚焦 low_power 参数构造，不应依赖跑测时刻，故强制窗口放行。
+    monkeypatch.setattr(main, "_discovery_low_power_allowed", lambda now=None: True)
     main._run_discovery_subprocess(low_power=True)
     assert calls[0][1:4] == ["-m", "discovery", "daemon"]
     assert calls[0][4:] == ["--budget-groups", "1", "--n-proc", "1", "--k-rounds", "24",
