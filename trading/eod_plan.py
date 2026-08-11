@@ -71,22 +71,9 @@ from trading.critical import _mode, _trade_cfg
 logger = logging.getLogger("trading.engine")
 
 
-def _resolve_account_id() -> str:
-    """解析当前账户 ID（与 engine._resolve_account_id 同口径，避免循环 import 复制一份）。
-
-    物理意图：eod_plan 落 trade_event(SIGNAL/CONFIRMED) 需要归属账户。优先读 .env
-    QMT_ACCOUNT_ID（启动期 _migrate_env_to_account 已落库），缺失（dry_run 无 broker
-    配置）时用 state_store 默认账户。**必须与 engine.py / veto_plan.py /
-    trading_service.py 一致**——否则 eod_plan 写 account_A，pre_open/veto 读 account_B，
-    trade_id 对不上 → SIGNAL/CONFIRMED/VETOED 防线全部失效（致命）。
-
-    Why 复制而非 import engine._resolve_account_id：engine 顶部 re-export eod_plan
-    （``from trading.eod_plan import compute as eod_plan``）→ eod_plan 顶部反向 import
-    engine 会触发循环（engine 尚未完成模块初始化）。trading.tools.veto_plan /
-    trading_service 已确立「复制 2 行 + 注释锁同步」范式，本处从之。改口径必须四处同步。
-    """
-    aid = os.getenv("QMT_ACCOUNT_ID")
-    return aid if aid else _state_store._DEFAULT_ACCOUNT_ID
+# H3/T2 收口（2026-08-12）：_resolve_account_id 单一真相源在 trading/account.py。
+# 不再本地复制（原复制为避免循环 import engine；account 模块无环，可直 import）。
+from trading.account import resolve_account_id as _resolve_account_id
 
 
 # ============================================================================

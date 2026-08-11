@@ -491,19 +491,10 @@ def _dry_run_direction(side: str) -> str:
     return "DRY_RUN_BUY" if side.lower() == "buy" else "DRY_RUN_SELL"
 
 
-def _resolve_account_id() -> str:
-    """submit_order 写 trade_event 用的 account_id（UNIQUE 键之一）。
-
-    与 engine._resolve_account_id:455 同口径（QMT_ACCOUNT_ID env 优先，缺失走
-    state_store._DEFAULT_ACCOUNT_ID）——真正引用常量，engine 改 _DEFAULT_ACCOUNT_ID 时
-    本函数自动跟。Why 本地实现而非 import engine._resolve_account_id：trading_service
-    在 server 进程内 import engine 会触发 APScheduler/网关装配等副作用（engine 模块顶层
-    有重型 import），且 server 与 engine 在 C-7 后合并进同进程但两套 _resolve_account_id
-    各管各的下单路径（server 手动 vs engine 自动），保持独立函数便于测试 monkeypatch 隔离。
-    改口径必须两处同步（注释锁，参见 [[gateway-ssot-hardening]]）。
-    """
-    from trading import state_store  # lazy import：避免 server 启动期 import 副作用
-    return os.getenv("QMT_ACCOUNT_ID") or state_store._DEFAULT_ACCOUNT_ID
+# H3/T2 收口（2026-08-12）：单一真相源 trading/account.py，不再本地复制。
+# 原本地实现避免 import engine 触发 server 启动期副作用；account 模块轻量（os + lazy
+# state_store），import 它无 APScheduler/网关装配副作用，可直 import。
+from trading.account import resolve_account_id as _resolve_account_id
 
 
 async def connect_gateway() -> None:

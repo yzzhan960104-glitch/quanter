@@ -330,14 +330,18 @@ _QUOTE_BLACKOUT_ALERT_INTERVAL_S = 30 * 60
 
 
 def _resolve_account_id() -> str:
-    """解析当前账户 ID（state_store 写事件/委托时的 account_id）。
+    """解析当前账户 ID（canonical 委托 trading.account.resolve_account_id）。
 
     物理意图：engine 落 trade_event/order 需要归属账户。优先读 .env QMT_ACCOUNT_ID（启动期
     _migrate_env_to_account 已落库），缺失（dry_run 无 broker 配置）时用 state_store 默认账户。
-    保证 dry_run 测试/影子期也有稳定 account_id（不依赖真实 QMT 凭证）。
+
+    H3/T2 收口（2026-08-12）：实现下沉到 trading/account.resolve_account_id（单一真相源，
+    eod_plan/veto/trading_service 改 import 它，消四处复制）。本函数名保留——phases 经
+    _eng_mod 反查 + 测试 patch "trading.engine._resolve_account_id" 命中此名（W1-A 切断
+    _eng_mod 后改指 account）。
     """
-    aid = os.getenv("QMT_ACCOUNT_ID")
-    return aid if aid else _state_store._DEFAULT_ACCOUNT_ID
+    from trading.account import resolve_account_id
+    return resolve_account_id()
 
 
 

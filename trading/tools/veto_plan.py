@@ -42,15 +42,8 @@ from trading import state_store, trading_plan
 from trading import clock
 
 
-def _resolve_account_id() -> str:
-    """解析当前账户 ID（与 engine._resolve_account_id 同口径，避免循环 import 复制一份）。
-
-    物理意图：veto 写 trade_event 需要归属账户。优先读 QMT_ACCOUNT_ID（与 engine / eod_plan
-    口径一致），缺失（dry_run）时退 state_store 默认账户。**必须与 engine.py 一致**——
-    否则 veto 写 account_A，pre_open 读 account_B，VETOED 防线对不上 trade_id 而失效。
-    """
-    aid = os.getenv("QMT_ACCOUNT_ID")
-    return aid if aid else state_store._DEFAULT_ACCOUNT_ID
+# H3/T2 收口（2026-08-12）：单一真相源 trading/account.py，不再本地复制。
+from trading.account import resolve_account_id as _resolve_account_id
 
 
 def _ensure_account(account_id: str) -> None:
