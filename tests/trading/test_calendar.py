@@ -1,17 +1,24 @@
 # -*- coding: utf-8 -*-
-"""交易日历单测（Task 1 + Phase 1.5 任务5 token 读取统一）。"""
+"""交易日历单测（Task 1 + Phase 1.5 任务5 token 读取统一 + M1 循环切断）。
+
+M1 循环切断（2026-08-12）：fetch_trade_cal + _cache_path 已下沉到 data/calendar.py。
+- 会话语义（is_trading_day / next_trading_day / 盘中时段）仍测 trading.calendar；
+- trade_cal 拉取 + 缓存（fetch_trade_cal / _cache_path）改测/patch data.calendar。
+"""
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from trading import calendar
+from data import calendar as data_calendar
 
 
 def test_is_trading_day_uses_cache(monkeypatch, tmp_path):
     """缓存命中不调 Tushare；周末返 False。"""
     cache = tmp_path / "trade_cal_2026.json"
     cache.write_text('["2026-07-21", "2026-07-22"]', encoding="utf-8")
-    monkeypatch.setattr(calendar, "_cache_path", lambda y: cache if y == 2026 else tmp_path / f"trade_cal_{y}.json")
+    # _cache_path 物理在 data.calendar（fetch_trade_cal 从该模块查 _cache_path）
+    monkeypatch.setattr(data_calendar, "_cache_path", lambda y: cache if y == 2026 else tmp_path / f"trade_cal_{y}.json")
     assert calendar.is_trading_day("2026-07-21") is True   # 周二在缓存
     assert calendar.is_trading_day("2026-07-19") is False  # 周日不在缓存
 
@@ -32,6 +39,8 @@ def test_fetch_trade_cal_uses_tushare_compat_get_pro(tmp_path):
     Why 此测试存在：原 calendar 自己读 os.getenv(TUSHARE_TOKEN) 与 _tushare_compat
     口径分叉，直连 tushare 切换后会读错 token。固化「calendar 走 get_pro」契约防止
     回归到自读 env 的旧分叉。
+
+    M1：fetch_trade_cal 现住 data/calendar.py，patch/call 改指 data_calendar。
     """
     cache = tmp_path / "trade_cal_2026.json"
     # 构造 pro.trade_cal 返两交易日（is_open=1）+ 一非交易日
@@ -40,9 +49,9 @@ def test_fetch_trade_cal_uses_tushare_compat_get_pro(tmp_path):
         "cal_date": ["20260101", "20260102", "20260103"],
         "is_open": [1, 1, 0],
     }))
-    with patch.object(calendar, "_cache_path", return_value=cache), \
+    with patch.object(data_calendar, "_cache_path", return_value=cache), \
          patch("data._tushare_compat.get_pro", return_value=pro) as mock_get_pro:
-        days = calendar.fetch_trade_cal(2026)
+        days = data_calendar.fetch_trade_cal(2026)
     # 仅 is_open=1 的 01-01 / 01-02 被取（格式化为 YYYY-MM-DD）
     assert days == ["2026-01-01", "2026-01-02"]
     assert mock_get_pro.call_count == 1  # 走 get_pro 而非自读 env
@@ -53,9 +62,9 @@ def test_fetch_trade_cal_uses_tushare_compat_get_pro(tmp_path):
 def test_fetch_trade_cal_weekday_fallback_when_no_token(tmp_path):
     """无 token / get_pro 抛异常 → weekday 兜底（不识节假日仅识周末）。"""
     cache = tmp_path / "trade_cal_2026.json"
-    with patch.object(calendar, "_cache_path", return_value=cache), \
+    with patch.object(data_calendar, "_cache_path", return_value=cache), \
          patch("data._tushare_compat.get_pro", side_effect=RuntimeError("no token")):
-        days = calendar.fetch_trade_cal(2026)
+        days = data_calendar.fetch_trade_cal(2026)
     # weekday 兜底：2026-01-03 是周六（不返），2026-01-05 周一（返）
     assert "2026-01-05" in days
     assert "2026-01-03" not in days  # 周六被 weekday 过滤
@@ -71,7 +80,7 @@ def test_next_trading_day_skips_weekend(monkeypatch, tmp_path):
     cache = tmp_path / "trade_cal_2026.json"
     # 7-24 周五、7-27 周一（25/26 周末不在缓存 → next 必须跳过它们）
     cache.write_text('["2026-07-24", "2026-07-27"]', encoding="utf-8")
-    monkeypatch.setattr(calendar, "_cache_path",
+    monkeypatch.setattr(data_calendar, "_cache_path",
                         lambda y: cache if y == 2026 else tmp_path / f"trade_cal_{y}.json")
     assert calendar.next_trading_day("2026-07-24") == "2026-07-27"
 
@@ -80,6 +89,6 @@ def test_next_trading_day_consecutive(monkeypatch, tmp_path):
     """连续交易日 → +1 天（无周末跳过，最常见路径）。"""
     cache = tmp_path / "trade_cal_2026.json"
     cache.write_text('["2026-07-28", "2026-07-29"]', encoding="utf-8")
-    monkeypatch.setattr(calendar, "_cache_path",
+    monkeypatch.setattr(data_calendar, "_cache_path",
                         lambda y: cache if y == 2026 else tmp_path / f"trade_cal_{y}.json")
     assert calendar.next_trading_day("2026-07-28") == "2026-07-29"

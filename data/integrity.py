@@ -125,12 +125,16 @@ def fetch_trade_days(start: str, end: str) -> Set[str]:
 
 
 def _fetch_year_trade_cal(year: int) -> list[str]:
-    """封装 trading/calendar.fetch_trade_cal（便于测试 monkeypatch，避免触网）。
+    """封装 data/calendar.fetch_trade_cal（便于测试 monkeypatch，避免触网）。
+
+    M1 循环切断（2026-08-12）：fetch_trade_cal 已下沉到 data/calendar.py，本函数
+    改从 data 层取（data→data），不再反查 trading.calendar——断 data.integrity→
+    trading.calendar 真函数级循环。
 
     返回该年交易日列表（YYYY-MM-DD）。无 token/网络时 calendar 内部 weekday 兜底
     （仅识周末不识节假日——上层应据告警排查）。
     """
-    from trading.calendar import fetch_trade_cal
+    from data.calendar import fetch_trade_cal
     return fetch_trade_cal(year)
 
 

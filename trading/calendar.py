@@ -1,68 +1,22 @@
 # -*- coding: utf-8 -*-
-"""A 股交易日历（Tushare trade_cal 缓存 + 盘中时段判定）。
+"""A 股交易日历会话语义（交易日判定 + 盘中时段 + 期望最新交易日）。
 
-Why 独立模块：engine 四触发点都需判交易日/时段（节假日跳过、午休不监控）；
-Tushare pro.trade_cal 每年初拉一次缓存本地 JSON，避免每次调 API。
+Why 与 data/calendar.py 分离（M1 循环切断 · 2026-08-12）：
+  trade_cal 数据拉取 + 缓存已下沉到 data/calendar.py（断 data.integrity→trading.calendar
+  真函数级循环）。本模块保留会话语义——依赖 data.calendar.fetch_trade_cal 取交易日列表，
+  属 trading→data 的正常单向依赖。
+
+兼容 re-export：``trading.calendar.fetch_trade_cal`` 名字保留（外部调用方如 compute/stop.py、
+test_stop_loss 的 patch 目标仍指向 trading.calendar.fetch_trade_cal）——指向 data.calendar
+的同一函数对象，行为等价。
 """
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime, time
-from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
-_CACHE_DIR = Path("logs")
-
-
-def _cache_path(year: int) -> Path:
-    return _CACHE_DIR / f"trade_cal_{year}.json"
-
-
-def fetch_trade_cal(year: int) -> list[str]:
-    """拉 Tushare 某年交易日历，缓存 logs/trade_cal_<year>.json。失败返空 list（降级）。
-
-    token 读取统一走 ``data._tushare_compat.get_pro``（Phase 1.5 任务5 修复）：
-      - 原 calendar 自己读 os.getenv(TUSHARE_TOKEN) 与 _tushare_compat 的凭证读取
-        口径不一致，直连 tushare 切换（2026-07-24，代理 tnskhdata 废弃后纯直连）后
-        calendar 仍按老口径可能漏读/读错 token。
-      - 统一走 get_pro 后：token 读取/未来 provider 切换全在一处，calendar 不再
-        关心凭证细节（守 Layer2 §7 单一职责：凭证归 _tushare_compat）。
-    weekday 兜底仅在 get_pro 抛异常（无 token / 网络失败 / tushare 缺失）时触发。
-    """
-    cache = _cache_path(year)
-    if cache.exists():
-        try:
-            return json.loads(cache.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    try:
-        from data._tushare_compat import get_pro  # 统一凭证入口（与 sync_daily_incremental 同源）
-        pro = get_pro()
-        df = pro.trade_cal(exchange="SSE", start_date=f"{year}0101", end_date=f"{year}1231",
-                           fields="cal_date,is_open")
-        days = df[df["is_open"] == 1]["cal_date"].tolist()
-        days = [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in days]
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(days), encoding="utf-8")
-        return days
-    except Exception as e:
-        # weekday fallback：无 token / 网络失败 / tushare 缺失 的最后兜底
-        # （仅识周末，不识节假日——是物理边界降级，应触发上层告警排查）
-        logger.warning("fetch_trade_cal 失败（%s），用 weekday 兜底（仅识周末不识节假日）", e)
-        return _weekday_fallback(year)
-
-
-def _weekday_fallback(year: int) -> list[str]:
-    """无 Tushare 时退化为「全年非周末」（不识节假日，仅兜底）。"""
-    from datetime import timedelta
-    days, d = [], datetime(year, 1, 1)
-    while d.year == year:
-        if d.weekday() < 5:
-            days.append(d.strftime("%Y-%m-%d"))
-        d += timedelta(days=1)
-    return days
+# 兼容 re-export：fetch_trade_cal 物理实现已下沉到 data/calendar.py（M1 循环切断）。
+# 保留 trading.calendar.fetch_trade_cal 名字空间绑定，外部调用方与 patch 目标不改。
+from data.calendar import fetch_trade_cal  # noqa: F401
 
 
 def is_trading_day(date_str: str) -> bool:
@@ -85,7 +39,7 @@ def next_trading_day(date_str: str) -> str:
     （覆盖周末 + 春节/国庆等长假）。跨年（12 月底 → 次年 1 月）由
     ``is_trading_day`` 内部按候选日的 year 拉 trade_cal 自动处理，无需特判。
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     d = datetime.strptime(date_str, "%Y-%m-%d")
     for i in range(1, 16):
         cand = (d + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -111,7 +65,7 @@ def previous_trading_day(date_str: str) -> str:
     最多 15 自然日（覆盖周末 + 春节/国庆等长假）。跨年（1 月初 → 上年 12 月底）由
     ``is_trading_day`` 内部按候选日的 year 拉 trade_cal 自动处理，无需特判。
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     d = datetime.strptime(date_str, "%Y-%m-%d")
     for i in range(1, 16):
         cand = (d - timedelta(days=i)).strftime("%Y-%m-%d")
