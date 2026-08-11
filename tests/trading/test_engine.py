@@ -1415,6 +1415,112 @@ def test_post_close_circuit_breaker_skip_when_no_baseline(monkeypatch):
 
 
 # ============================================================================
+# account_daily.start 漏采修复（2026-08-11）
+# spec: docs/superpowers/specs/2026-08-11-account-daily-start-baseline-design.md
+# 修复：pre_open 抓基线失败补 CRITICAL 告警 + post_close T-1 close 补基线兜底
+# ============================================================================
+
+def test_pre_open_snapshot_skip_alerts_critical_in_live(monkeypatch, _state_db):
+    """pre_open query_asset 返空 + live 模式 → _alert_critical 被调（开盘前知情）。
+
+    物理意图（漏采修复）：原 query_asset 返空只 logger.warning，基线缺失静默到 post_close
+    （盘后才知，盘中已过无法补）。live 模式补 CRITICAL 钉钉，让用户开盘前即可
+    trigger_pre_open_once 补精确开盘基线。
+    """
+    _seed_signals_db("2099-01-02", [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5,
+    }])
+    class _FakeGw:
+        async def query_asset(self):
+            return {}  # 未连接 → 空 dict
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
+    monkeypatch.setattr(engine, "_mode", lambda: "live")  # live 模式触发 CRITICAL
+    alert_calls = []
+    monkeypatch.setattr(engine, "_alert_critical", lambda msg: alert_calls.append(msg))
+
+    asyncio.run(engine.pre_open("2099-01-02"))
+
+    assert len(alert_calls) == 1, "live 模式 query_asset 返空应推 CRITICAL 告警"
+    assert "query_asset 返空" in alert_calls[0] or "熔断基线缺失" in alert_calls[0]
+
+
+def test_get_prev_close_equity_reads_t1_close(monkeypatch, _state_db):
+    """get_prev_close_equity 读 T-1 的 close_total_asset（补基线兜底用）。"""
+    from trading import state_store, clock
+    aid = engine._resolve_account_id()
+    if state_store.get_account(aid) is None:
+        state_store.upsert_account(aid, broker="qmt")
+    # mock T-1 为固定日期（避免日历依赖），种 T-1 close
+    monkeypatch.setattr(clock, "pretrade_date", lambda d: "2099-01-01")
+    state_store.snapshot_close_equity(aid, "2099-01-01", 1_000_000.0)
+    assert state_store.get_prev_close_equity(aid, "2099-01-02") == 1_000_000.0
+
+
+def test_get_prev_close_equity_none_when_t1_missing(monkeypatch, _state_db):
+    """T-1 行不存在 / close 未写 → 返 None（调用方走 breaker_skipped）。"""
+    from trading import state_store, clock
+    aid = engine._resolve_account_id()
+    monkeypatch.setattr(clock, "pretrade_date", lambda d: "2099-01-01")
+    # 不种 T-1 close
+    assert state_store.get_prev_close_equity(aid, "2099-01-02") is None
+
+
+def test_post_close_uses_prev_close_when_start_missing(monkeypatch, _state_db):
+    """post_close start 缺失 + T-1 close 有值 → 用 T-1 close 作 start 判熔断（不 breaker_skipped）。
+
+    物理意图（补基线兜底）：pre_open 未抓到开盘基线（start=None），post_close 读 T-1 收盘
+    总资产作近似基线（隔夜无交易 T-1 close ≈ T open），熔断仍能工作（不裸奔）。
+    场景：T-1 close=100w，T 日 curr=96w → 相对 T-1 回撤 -4% → 触发熔断。
+    """
+    from trading import state_store, clock
+    today = "2099-01-02"
+    # mock 时间：T-1 = 2099-01-01，today = 2099-01-02
+    monkeypatch.setattr(clock, "pretrade_date", lambda d: "2099-01-01")
+    monkeypatch.setattr(clock, "today", lambda: today)
+    # 不写当日 start（模拟 pre_open 未抓到）；写 T-1 close = 100w
+    aid = engine._resolve_account_id()
+    if state_store.get_account(aid) is None:
+        state_store.upsert_account(aid, broker="qmt")  # account_daily FK 引用 account
+    state_store.snapshot_close_equity(aid, "2099-01-01", 1_000_000.0)
+
+    class _FakeGw:
+        async def query_asset(self):
+            return {"total_asset": 960_000.0}  # 相对 T-1 close(100w) -4% → 触发熔断
+        async def _fetch_broker_positions(self):
+            return {}
+    fake_gw = _FakeGw()
+    cancel_calls = []
+    async def _fake_cancel(gw):
+        cancel_calls.append(gw)
+        return {"cancelled": 0, "unconfirmed": 0}
+    halt_calls = []
+    def _fake_halt():
+        halt_calls.append(True)
+        return {"halted": True}
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr("presentation.server.services.trading_service.emergency_halt", _fake_halt)
+    # 不设 _mode=live：补基线逻辑（get_prev_close_equity→赋值 start）不依赖 _mode，
+    # 熔断判定也不依赖 _mode；避免 live 触发 _alert_critical 钉钉副作用（单测不发告警）。
+    from trading.compute.reconcile import ReconciliationResult
+    fake_rec = ReconciliationResult(
+        matched=[], drifted=[], only_local=[], only_broker=[], max_abs_drift=0.0, is_ok=True)
+    async def _fake_run_rec(gw, local, tolerance=0.0):
+        return fake_rec
+    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+
+    result = asyncio.run(engine.post_close(today, gw=fake_gw, local_positions={}))
+
+    # T-1 close 补基线 → 熔断触发（100w→96w = -4%），不 breaker_skipped
+    assert result.get("circuit_breaker") is True
+    assert result.get("breaker_skipped") is not True, "T-1 close 补基线后不应 breaker_skipped"
+    assert len(cancel_calls) == 1
+    assert len(halt_calls) == 1
+
+
+# ============================================================================
 # 4.5 Task 4（P1-6）：_trade_cfg 默认 stop_atr_mult=1.0（对齐回测 DEFAULTS）
 # ============================================================================
 def test_trade_cfg_stop_atr_mult_default_aligns_backtest(monkeypatch):

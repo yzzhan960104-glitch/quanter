@@ -854,6 +854,34 @@ def get_start_equity(account_id: str, date: str, *, db_path: str | None = None) 
     return float(row["start_total_asset"]) if row and row["start_total_asset"] is not None else None
 
 
+def get_prev_close_equity(account_id: str, date: str, *, db_path: str | None = None) -> float | None:
+    """读 account_daily 上一交易日（T-1）的 close_total_asset（补基线兜底用）。
+
+    物理意图（account_daily.start 漏采修复 · 2026-08-11）：pre_open 抓基线失败
+    （query_asset 返空 / gw=None / 非盘前启动）→ start_total_asset 未写 → post_close
+    熔断缺基线（breaker_skipped）。本函数读 T-1 的 close_total_asset 作 start 近似
+    （隔夜无交易，T-1 收盘 ≈ T 开盘），让 post_close 熔断仍能基于近似基线工作（不裸奔）。
+    详见 docs/superpowers/specs/2026-08-11-account-daily-start-baseline-design.md。
+
+    Args:
+        date: T 日（业务日，clock.today 口径，与 get_start_equity 同）。
+    Returns:
+        T-1 的 close_total_asset（float）或 None（T-1 行不存在 / close 未写 / 日历异常）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    # T-1 = 上一交易日（clock.pretrade_date）；读 account_daily T-1 行的 close_total_asset
+    try:
+        prev_date = clock.pretrade_date(date)
+    except Exception:
+        # 日历未就绪 / date 非法 → 无法算 T-1，返 None（调用方走 breaker_skipped）
+        return None
+    with _connect(db_path) as con:
+        row = con.execute(
+            "SELECT close_total_asset FROM account_daily WHERE account_id=? AND date=?",
+            (account_id, prev_date)).fetchone()
+    return float(row["close_total_asset"]) if row and row["close_total_asset"] is not None else None
+
+
 def snapshot_close_equity(account_id: str, date: str, close_total_asset: float,
                           close_cash: float | None = None, close_market_value: float | None = None,
                           *, db_path: str | None = None) -> None:

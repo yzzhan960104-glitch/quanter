@@ -277,8 +277,21 @@ async def post_close(
         # C-6 V2：熔断基线 date（start/close equity 同口径）走 clock.today。
         today_eq = clock.today()
         start_equity = _state_store.get_start_equity(_resolve_account_id(), today_eq)
+        # 补基线兜底（account_daily.start 漏采修复 · 2026-08-11）：pre_open 抓基线失败
+        # （query_asset 返空 / gw=None / 非盘前启动）→ start 缺失。读 T-1 close_total_asset
+        # 作 start 近似（隔夜无交易，T-1 收盘 ≈ T 开盘），让熔断仍能工作（不裸奔）。
+        # 详见 docs/superpowers/specs/2026-08-11-account-daily-start-baseline-design.md。
         if start_equity is None or start_equity <= 0:
-            # 无基线（pre_open 未抓到 / 查询异常）→ 跳过熔断 + WARN
+            prev_close = _state_store.get_prev_close_equity(_resolve_account_id(), today_eq)
+            if prev_close is not None and prev_close > 0:
+                start_equity = prev_close
+                _msg = (f"post_close 用 T-1 close={prev_close} 作 start 基线近似 date={today_eq}"
+                        f"（pre_open 未抓到开盘基线）")
+                logger.warning(_msg)
+                if _mode() == "live":
+                    _alert_critical(_msg + "（C-1 熔断基线为近似值，人工复盘知悉精度边界）")
+        if start_equity is None or start_equity <= 0:
+            # 无基线（pre_open + T-1 close 都缺）→ 跳过熔断 + WARN
             # Why 显式跳过：check_daily_loss_limit(0, X) 虽返 False 但语义模糊，
             # 显式 breaker_skipped=True 让观测层知道「未判定」而非「判定未触发」。
             breaker_skipped = True

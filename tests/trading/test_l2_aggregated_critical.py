@@ -65,7 +65,11 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
     assert result["submitted"] == 1   # 第 1 只挂成 / 第 2 只业务拒单 (部分拒触发 L2 聚合)
     # 聚合 CRITICAL 含 "被拒" 语义, _halted 保持 False (L2 不停调度)
     assert any("被拒" in str(c) for c in ac.call_args_list)
-    assert len(ac.call_args_list) == 1   # 守护「聚合一条」防未来回归成逐只告警风暴
+    # 「聚合一条」守护：只计「被拒」语义告警（防聚合退化为逐只告警风暴）。
+    # gw=None + live 另触发的「熔断基线缺失」CRITICAL（account_daily 修复 2026-08-11）
+    # 是独立维度告警，不计入本聚合计数（总 alert 数因 gw 装配态而异，不硬断言总数）。
+    reject_alerts = [c for c in ac.call_args_list if "被拒" in str(c)]
+    assert len(reject_alerts) == 1
     assert eng._halted is False
 
 

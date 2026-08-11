@@ -323,12 +323,24 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
                 logger.info("pre_open 日内熔断基线已抓取 date=%s start_equity=%s",
                             today_eq, float(total))
             else:
-                # query_asset 返空（未连接/锁定/超时）→ 不写基线，让 post_close 跳过熔断
-                logger.warning("pre_open 跳过熔断基线快照：query_asset 返空 date=%s", today_eq)
+                # query_asset 返空（未连接/锁定/超时）→ 不写基线，post_close T-1 close 兜底
+                _msg = f"pre_open 跳过熔断基线快照：query_asset 返空 date={today_eq}"
+                logger.warning(_msg)
+                # live 基线缺失 = C-1 熔断将失效（穿仓风险），开盘前必须叫醒人工
+                # （gate 未过 :210 同通道；post_close T-1 close 兜底是第二道防线，
+                # 但开盘前告警让用户可立即 trigger_pre_open_once 补精确开盘基线）。
+                if _mode() == "live":
+                    _alert_critical(
+                        _msg + "（C-1 熔断基线缺失，post_close 将用 T-1 close 近似；"
+                        "可手动 trigger_pre_open_once 补精确开盘基线）")
         except Exception:
             logger.exception("pre_open 抓熔断基线异常（不阻塞挂单主路径） date=%s", today_eq)
     else:
-        logger.warning("pre_open 跳过熔断基线快照：gw=None date=%s", today_eq)
+        _msg = f"pre_open 跳过熔断基线快照：gw=None date={today_eq}"
+        logger.warning(_msg)
+        if _mode() == "live":
+            _alert_critical(
+                _msg + "（C-1 熔断基线缺失，网关未装配；post_close 将用 T-1 close 近似）")
 
     # ②.6 Task 8（P0-4 max_holding）：平超期持仓（跌停价释放资金）。
     # 物理意图：回测 max_holding 超时平仓对齐——持仓超 max_holding 日未达止盈即收盘平，
