@@ -64,3 +64,16 @@ def test_harden_no_proxy_effective_even_with_all_proxy_set(monkeypatch):
     monkeypatch.delenv("NO_PROXY", raising=False)
     tc._harden_no_proxy()
     assert "api.waditu.com" in os.environ["NO_PROXY"].split(",")
+
+
+def test_harden_no_proxy_case_insensitive(monkeypatch):
+    """NO_PROXY 已含大写域名（API.WADITU.COM）时不重复追加小写 api.waditu.com。
+
+    场景：代理软件/用户可能写大写域名，严格比对会重复追加同名异体。lower+strip 比对防重复。
+    """
+    monkeypatch.setenv("NO_PROXY", "API.WADITU.COM")
+    tc._harden_no_proxy()
+    no_proxy_list = os.environ["NO_PROXY"].split(",")
+    assert "API.WADITU.COM" in no_proxy_list  # 用户大写配置保留
+    assert "api.waditu.com" not in no_proxy_list  # 小写不重复追加（大写已覆盖）
+    assert "api.tushare.pro" in no_proxy_list  # 未覆盖的仍追加

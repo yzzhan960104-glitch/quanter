@@ -40,8 +40,11 @@ def _harden_no_proxy() -> None:
     幂等：仅在域名未存在时追加，保留用户既有 NO_PROXY 配置（如其他服务需直连的域名）。
     """
     no_proxy = os.environ.get("NO_PROXY", "")
-    existing = no_proxy.split(",") if no_proxy else []
-    missing = [h for h in _TUSHARE_HOSTS if h not in existing]
+    # 大小写不敏感 + trim 比对：NO_PROXY 域名本应小写，但用户/代理软件可能写大写
+    # （API.WADITU.COM），严格比对会重复追加同名异体。lower+strip 比对防重复，写入
+    # 保留原 no_proxy（用户配置原样）+ 追加规范小写 missing。
+    existing_lower = {h.strip().lower() for h in no_proxy.split(",") if h.strip()}
+    missing = [h for h in _TUSHARE_HOSTS if h.lower() not in existing_lower]
     if missing:
         os.environ["NO_PROXY"] = ",".join(filter(None, [no_proxy] + missing))
 

@@ -1447,6 +1447,34 @@ def test_pre_open_snapshot_skip_alerts_critical_in_live(monkeypatch, _state_db):
     assert "query_asset 返空" in alert_calls[0] or "熔断基线缺失" in alert_calls[0]
 
 
+def test_pre_open_snapshot_alerts_critical_on_query_asset_exception(monkeypatch, _state_db):
+    """pre_open query_asset 抛异常（超时/锁定）→ except 分支也推 CRITICAL（spec 三处站点之一）。
+
+    物理意图（review (a)1 修复）：except 是 query_asset 超时/锁定报错的真实落点，原只
+    logger.exception 无告警（spec 漏实现）。补 _notify_baseline_missing 后三处抓基线失败
+    场景（返空 / 异常 / gw=None）都告警，无缺口。
+    """
+    _seed_signals_db("2099-01-02", [{
+        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
+        "stop_price": 9.0, "take_profit": 11.0, "formed_at": "2099-01-02", "max_wait": 5,
+    }])
+    class _FakeGw:
+        async def query_asset(self):
+            raise RuntimeError("query_stock_asset 超时")  # 抛异常 → except 分支
+    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
+    monkeypatch.setattr(engine, "_mode", lambda: "live")
+    alert_calls = []
+    monkeypatch.setattr(engine, "_alert_critical", lambda msg: alert_calls.append(msg))
+
+    asyncio.run(engine.pre_open("2099-01-02"))
+
+    # except 分支也告警（spec 三处站点之一，review (a)1 修复）
+    assert len(alert_calls) == 1, "query_asset 异常应经 except 分支推 CRITICAL"
+    assert "抓取异常" in alert_calls[0] or "熔断基线缺失" in alert_calls[0]
+
+
 def test_get_prev_close_equity_reads_t1_close(monkeypatch, _state_db):
     """get_prev_close_equity 读 T-1 的 close_total_asset（补基线兜底用）。"""
     from trading import state_store, clock

@@ -309,6 +309,22 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     # 放后面可与撤单共用同一个 gw 引用，且「撤完昨日 → 抓今日基线」语义更清晰。
     # C-6 V2：用传入 date（入口缓存，_pre_open 已算 clock.today 传 pre_open），不重复 datetime.now。
     today_eq = date
+
+    def _notify_baseline_missing(reason: str) -> None:
+        """C-1 熔断基线缺失统一告警（warning + live CRITICAL 钉钉）。
+
+        pre_open 抓基线失败的三种场景（query_asset 返空 / 抓取异常 / gw=None）共用本
+        helper，防 C-1 告警文案漂移 + 确保三处都触发 live CRITICAL。物理意图：基线缺失
+        = 日内 -3% 熔断将失效（穿仓风险），开盘前必须叫醒人工（post_close T-1 close
+        兜底是第二道防线，但开盘前告警让用户可立即 trigger_pre_open_once 补精确基线）。
+        """
+        msg = f"pre_open 跳过熔断基线快照：{reason} date={today_eq}"
+        logger.warning(msg)
+        if _mode() == "live":
+            _alert_critical(
+                msg + "（C-1 熔断基线缺失，post_close 将用 T-1 close 近似；"
+                "可手动 trigger_pre_open_once 补精确开盘基线）")
+
     if gw is not None:
         try:
             asset = await gw.query_asset() if hasattr(gw, "query_asset") else {}
@@ -324,23 +340,13 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
                             today_eq, float(total))
             else:
                 # query_asset 返空（未连接/锁定/超时）→ 不写基线，post_close T-1 close 兜底
-                _msg = f"pre_open 跳过熔断基线快照：query_asset 返空 date={today_eq}"
-                logger.warning(_msg)
-                # live 基线缺失 = C-1 熔断将失效（穿仓风险），开盘前必须叫醒人工
-                # （gate 未过 :210 同通道；post_close T-1 close 兜底是第二道防线，
-                # 但开盘前告警让用户可立即 trigger_pre_open_once 补精确开盘基线）。
-                if _mode() == "live":
-                    _alert_critical(
-                        _msg + "（C-1 熔断基线缺失，post_close 将用 T-1 close 近似；"
-                        "可手动 trigger_pre_open_once 补精确开盘基线）")
+                _notify_baseline_missing("query_asset 返空（未连接/锁定/超时）")
         except Exception:
+            # 抓基线异常（超时/锁定报错的真实落点）→ 记 traceback + 告警（spec 三处站点之一）
             logger.exception("pre_open 抓熔断基线异常（不阻塞挂单主路径） date=%s", today_eq)
+            _notify_baseline_missing("query_asset 抓取异常（见上方 traceback）")
     else:
-        _msg = f"pre_open 跳过熔断基线快照：gw=None date={today_eq}"
-        logger.warning(_msg)
-        if _mode() == "live":
-            _alert_critical(
-                _msg + "（C-1 熔断基线缺失，网关未装配；post_close 将用 T-1 close 近似）")
+        _notify_baseline_missing("gw=None（网关未装配）")
 
     # ②.6 Task 8（P0-4 max_holding）：平超期持仓（跌停价释放资金）。
     # 物理意图：回测 max_holding 超时平仓对齐——持仓超 max_holding 日未达止盈即收盘平，
