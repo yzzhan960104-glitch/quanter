@@ -94,3 +94,34 @@ def test_sync_daily_guard_propagates_reject(tmp_path, monkeypatch):
     # no_backscan/no_recompute_div=True 禁用回扫与除权重算，聚焦落盘点守卫路径
     with pytest.raises(WriteGuardError):
         sdi.sync_daily_incremental(no_backscan=True, no_recompute_div=True)
+
+
+def test_fetch_paged_acquires_rate_limit_per_page(monkeypatch):
+    """_fetch_paged 每页前 acquire basic 桶令牌（T13-B #5，防 Tushare 限频封禁）。
+
+    物理意图：repair 多日补采 + sync 增量连续分页，无限频会撞 Tushare 500/min 封禁。
+    _fetch_paged 每页前 acquire basic 桶，一处改两处受益（sync + repair 共用）。
+    """
+    from unittest.mock import MagicMock
+    from data.tools import sync_daily_incremental as sdi
+    from data.resilience import tushare_rate_limiter_basic
+
+    # mock 限频器 acquire 计数（避免真实令牌消耗 + 断言调用次数 = 页数）
+    acq_calls = []
+    monkeypatch.setattr(tushare_rate_limiter_basic, "acquire",
+                        lambda tokens=1.0: acq_calls.append(tokens))
+
+    # mock pro：第 1 页返 PAGE 行（满页），第 2 页返 100 行（< PAGE，终止）
+    page1 = pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(sdi.PAGE)],
+                          "trade_date": ["20260101"] * sdi.PAGE})
+    page2 = pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(100)],
+                          "trade_date": ["20260101"] * 100})
+    pages = [page1, page2]
+    pro = MagicMock()
+    pro.daily = MagicMock(side_effect=lambda **kw: pages.pop(0) if pages else pd.DataFrame())
+
+    df = sdi._fetch_paged(pro, "daily", "20260101")
+
+    # 2 页 → acquire 2 次（每页前一次：page1 acquire→500 满→page2 acquire→100 末页 break）
+    assert len(acq_calls) == 2, f"每页应 acquire 一次（2 页期望 2 次），实际 {len(acq_calls)}"
+    assert len(df) == sdi.PAGE + 100  # 500 + 100

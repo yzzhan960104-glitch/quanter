@@ -45,9 +45,19 @@ PAGE = 500  # 分页大小：全市场 5530 行单次返会 ConnectionReset，50
 
 
 def _fetch_paged(pro, api: str, trade_date: str) -> pd.DataFrame:
-    """分页拉某接口某日全市场（trade_date + limit=500 + offset 累加，直到返回 < limit）。"""
+    """分页拉某接口某日全市场（trade_date + limit=500 + offset 累加，直到返回 < limit）。
+
+    限频守卫（T13-B #5）：每页前 acquire basic 桶令牌（500/min），防 repair 多日补采 +
+    sync 增量连续分页撞 Tushare 限频封禁。repair 裸调 pro 的历史漏洞随本函数统一收口
+    （_fetch_paged 被 sync_daily_incremental + repair_gaps 共用，一处改两处受益）。
+    详见 docs/superpowers/specs/2026-08-11-t13-b-scan-repair-loop-design.md。
+    """
+    # 延迟 import：data.resilience 无反向依赖，但保模块加载顺序清晰 + 避免顶部 import 扩散
+    from data.resilience import tushare_rate_limiter_basic
     frames, offset = [], 0
     while True:
+        # 每页限频（T13-B #5）：500/min basic 桶令牌，防连续分页撞 Tushare 限频封禁
+        tushare_rate_limiter_basic.acquire(1.0)
         df = getattr(pro, api)(trade_date=trade_date, limit=PAGE, offset=offset)
         if df is None or df.empty:
             break

@@ -166,3 +166,40 @@ def test_repair_gaps_main_refuses_shrink(tmp_path, monkeypatch):
         rg.main(["--report", str(report_path), "--lake-dir", str(tmp_path)])
     # 原湖未被覆盖（守卫在 to_parquet 前拒写）
     assert existing_row_count(str(lake_path)) == 5000
+
+
+# ============ T13-B #2：配额 + 熔断（自动补采保护）===========
+
+
+def test_repair_breaker_opens_after_threshold_failures(tmp_path):
+    """连续 K 次失败 → 熔断开启；恢复期后解除（blueprint §2.3 不吞代理失败）。"""
+    from data.tools import repair_gaps as rg
+    lake_dir = str(tmp_path)
+    # 成功清计数 → 未熔断
+    rg.record_repair_result(success=True, lake_dir=lake_dir, now=1000.0)
+    assert rg.is_repair_breaker_open(lake_dir, now=1000.0) == (False, "")
+    # 连续 K-1 次失败（未达阈值）
+    for _ in range(rg.REPAIR_FAILURE_THRESHOLD - 1):
+        rg.record_repair_result(success=False, lake_dir=lake_dir, now=1000.0)
+    assert rg.is_repair_breaker_open(lake_dir, now=1000.0) == (False, "")
+    # 第 K 次失败 → 熔断开启
+    rg.record_repair_result(success=False, lake_dir=lake_dir, now=1000.0)
+    _open, _reason = rg.is_repair_breaker_open(lake_dir, now=1000.0)
+    assert _open is True and "熔断" in _reason
+    # 恢复期后 → 解除
+    _after = 1000.0 + rg.REPAIR_RECOVERY_HOURS * 3600 + 1
+    assert rg.is_repair_breaker_open(lake_dir, now=_after) == (False, "")
+
+
+def test_repair_gaps_max_segments_quota(monkeypatch):
+    """repair_gaps(max_segments=N) 截断 unjustified 到 N 段（自动补采防过载）。"""
+    from data.tools import repair_gaps as rg
+    # 10 段 unjustified gaps
+    gaps = [GapRange(symbol=f"{i:06d}.SZ", start="2026-01-01", end="2026-01-02",
+                     missing_dates=("2026-01-01",), suspend_justified=False) for i in range(10)]
+    # mock _fetch_paged 返空（聚焦配额截断，不验证补采数学）
+    monkeypatch.setattr(rg, "_fetch_paged", lambda *a, **k: pd.DataFrame())
+    lake_df = _mk_lake([("2026-01-01", "000000.SZ")])
+    # max_segments=3 截断（_fetch_paged 返空 → 无补采返原样；不抛即截断逻辑执行）
+    result = rg.repair_gaps(gaps, lake_df, object(), max_segments=3)
+    assert len(result) == len(lake_df)

@@ -114,3 +114,48 @@ async def test_pipeline_collect_failure_raises_critical_halt(monkeypatch):
     eng = object()   # 占位 engine（raise 在调 engine._eod 之前，不会被触达）
     with pytest.raises(_CriticalHalt, match="采集子进程失败"):
         await pl.pipeline_then_eod(eng)
+
+
+@pytest.mark.asyncio
+async def test_scan_fail_triggers_repair_but_eod_runs(monkeypatch):
+    """T13-B #1：scan FAIL（unjustified_gaps>0）→ subprocess repair 触发，eod 仍跑（不阻断）。
+
+    物理意图：scan 检测历史缺口，FAIL 不阻断当日 eod（历史缺口与当日交易无关，
+    blueprint §2.3）；仅触发异步 repair 子进程。
+    """
+    from data.freshness import FreshnessResult
+    from trading.orchestrate import pipeline as pl
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    class _FakeProc:
+        async def wait(self):
+            return 0  # 采集成功
+    async def _fake_exec(*a, **kw):
+        return _FakeProc()
+    monkeypatch.setattr(pl.asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(pl, "is_trading_day", lambda d: True)
+    monkeypatch.setattr(pl, "resolve_active", lambda: [])
+    monkeypatch.setattr(pl, "expected_latest_trade_day", lambda now: today)
+    monkeypatch.setattr(pl, "check_freshness",
+                        lambda k, exp: FreshnessResult(k, True, today, today, "ok"))
+    # scan 返 unjustified>0（FAIL，触发 repair）
+    monkeypatch.setattr("data.tools.scan_integrity.scan", lambda **kw: {
+        "unjustified_gaps": 3, "unjustified_symbols": ["000001.SZ"],
+        "total_symbols": 1, "total_gaps": 3, "gaps": [], "scan_range": [today, today]})
+    # 拦截 repair 子进程（不真起子进程）
+    popen_calls = []
+    import subprocess as _sp
+    monkeypatch.setattr(_sp, "Popen",
+                        lambda *a, **kw: popen_calls.append((a, kw)) or MagicMock())
+    # 拦截 brief 播报（避免真跑网络/钉钉致测试卡）
+    monkeypatch.setattr("ops.brief_all.run_brief_all", AsyncMock())
+
+    eng = MagicMock()
+    eng._eod = AsyncMock()
+    await pl.pipeline_then_eod(eng)
+
+    # scan FAIL → subprocess repair 触发
+    assert len(popen_calls) == 1, "scan FAIL 应触发 repair 子进程"
+    # eod 仍跑（scan FAIL 不阻断当日交易）
+    eng._eod.assert_awaited()

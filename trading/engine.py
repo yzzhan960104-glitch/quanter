@@ -550,6 +550,15 @@ class TradingEngine:
                 seconds=int(os.getenv("ENGINE_HEALTH_GUARD_INTERVAL_SECONDS", "60"))),
             id="_health_guard",
         )
+        # T13-B #5 调度：每周全扫 cron（周期 backstop，防日级 pipeline scan 漏网的全历史缺口）。
+        # 周六 02:00（周末零实盘 contention）。CronTrigger day_of_week 用名字 'sat' 避数字歧义
+        #（engine.py:288 教训：APScheduler 0=周一非周日）。FAIL 只告警+写报告，不自动 repair
+        #（全历史补采量大，近期缺口已由日级 pipeline scan 自动 repair）。
+        self.sched.add_job(
+            self._weekly_scan, CronTrigger.from_crontab(
+                os.getenv("ENGINE_WEEKLY_SCAN_CRON", "0 2 * * sat")),
+            id="weekly_scan",
+        )
 
         # 成交回调链路状态：
         #   _gw：交易网关引用（_order_direction 查 gw._orders[order_id].order_type 判买卖方向）。
@@ -818,6 +827,31 @@ class TradingEngine:
             logger.exception("启动归因重建失败（不阻断 engine 启动，归因审计维度软降级）")
 
     @_critical_guard
+    async def _weekly_scan(self) -> None:
+        """T13-B #5：每周全市场完整性扫描（周期 backstop，周六 02:00 cron）。
+
+        物理意图：日级 pipeline scan 覆盖近期缺口并自动 repair；全历史缺口由本周扫兜底
+        （防日级漏网）。FAIL 只告警 + 写报告 logs/integrity_weekly.json（人工确认后补；
+        不自动 repair——全历史补采量大，避免周末撞限频）。
+        """
+        try:
+            from pathlib import Path as _Path
+            from data.tools.scan_integrity import scan as _scan_integrity
+            _root = _Path(__file__).resolve().parents[1]
+            _report = _scan_integrity(lake_dir=str(_root / "data_lake"))
+            _n = _report.get("unjustified_gaps", 0)
+            if _n > 0:
+                import json as _json
+                _out = _root / "logs" / "integrity_weekly.json"
+                _out.parent.mkdir(parents=True, exist_ok=True)
+                _out.write_text(_json.dumps(_report, ensure_ascii=False, indent=2), encoding="utf-8")
+                logger.warning("每周全扫发现 %d 段漏采 → %s（人工确认后 repair_gaps --report 补）",
+                               _n, _out)
+            else:
+                logger.info("每周全扫 PASS：无漏采")
+        except Exception:
+            logger.exception("每周全扫异常（不阻断）")
+
     async def _health_guard(self) -> None:
         """M1：网关健康守护——未连接时探测客户端就绪→重连，恢复 live（Task 8）。
 

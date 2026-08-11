@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -40,15 +41,73 @@ logger = logging.getLogger(__name__)
 LAKE = "data_lake/a_shares_daily.parquet"
 PRICE_COLS = ["open", "high", "low", "close"]
 OUT_COLS = ["open", "high", "low", "close", "volume"]
+# repair 总超时（T13-B #4）：超时停止拉新段，已拉部分继续 merge 落盘（部分补采 > 完全不补）。
+# 治 --auto 10min 无输出：有进度 log + 有超时边界，不再「卡住不知在干嘛」。
+REPAIR_TIMEOUT = int(os.getenv("REPAIR_TIMEOUT_SECONDS", "1800"))  # 30min 默认（覆盖全市场多日补采）
+
+# ============ T13-B #2：配额 + 熔断（自动补采保护，仅 pipeline 自动 repair 用）============
+# 配额防单次过载；熔断防连续失败（含代理失败）雪崩。CLI main（人工）不限额/不熔断（人决策）。
+MAX_REPAIR_SEGMENTS = int(os.getenv("REPAIR_MAX_SEGMENTS", "50"))           # 单次最多补 50 段
+REPAIR_FAILURE_THRESHOLD = int(os.getenv("REPAIR_FAILURE_THRESHOLD", "3"))  # 连续 3 次失败熔断
+REPAIR_RECOVERY_HOURS = float(os.getenv("REPAIR_RECOVERY_HOURS", "6"))      # 熔断 6h
 
 
-def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro) -> pd.DataFrame:
+def _repair_breaker_path(lake_dir: str = "data_lake") -> Path:
+    """熔断 sidecar 路径（与 freshness baseline 同目录，运行时状态不入库）。"""
+    return Path(lake_dir) / ".repair_breaker.json"
+
+
+def is_repair_breaker_open(lake_dir: str = "data_lake", *, now: float | None = None) -> tuple[bool, str]:
+    """查熔断是否开启（pipeline 自动补采前置检查）。
+
+    Returns:
+        (open, reason)：open=True 熔断中（跳过自动 repair + 告警）；False 可补采。
+    """
+    bp = _repair_breaker_path(lake_dir)
+    if not bp.exists():
+        return False, ""
+    try:
+        data = json.loads(bp.read_text(encoding="utf-8"))
+        open_until = data.get("open_until", 0)
+        _now = now if now is not None else time.time()
+        if open_until and _now < open_until:
+            return True, f"熔断中（连续 {data.get('fail_count', 0)} 次失败，{REPAIR_RECOVERY_HOURS}h 后恢复）"
+    except Exception:
+        logger.warning("repair 熔断 sidecar 读失败，视为未熔断（fail-open 补采）", exc_info=True)
+    return False, ""
+
+
+def record_repair_result(success: bool, lake_dir: str = "data_lake", *, now: float | None = None) -> None:
+    """记录自动补采结果：成功清计数；失败计数+1，超阈值熔断。
+
+    物理意图（blueprint §2.3）：连续失败（含代理失败）→ 熔断暂停，绝不吞失败当成功。
+    """
+    bp = _repair_breaker_path(lake_dir)
+    try:
+        data = json.loads(bp.read_text(encoding="utf-8")) if bp.exists() else {}
+    except Exception:
+        data = {}
+    _now = now if now is not None else time.time()
+    if success:
+        data = {"fail_count": 0, "open_until": 0}
+    else:
+        fail_count = data.get("fail_count", 0) + 1
+        data["fail_count"] = fail_count
+        if fail_count >= REPAIR_FAILURE_THRESHOLD:
+            data["open_until"] = _now + REPAIR_RECOVERY_HOURS * 3600
+            logger.warning("repair 熔断开启：连续 %d 次失败，暂停 %gh", fail_count, REPAIR_RECOVERY_HOURS)
+    bp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
+                max_segments: int | None = None) -> pd.DataFrame:
     """补采 unjustified gaps 的漏采日，返回 merged lake df（不写盘，调用方负责落盘）。
 
     Args:
         gaps: list[GapRange]（仅 suspend_justified=False 被补；停牌合法跳空跳过）。
         lake_df: 原 daily 湖（MultiIndex(date, symbol)）。
         pro: Tushare pro 接口（需有 daily/adj_factor 方法，按 trade_date 分页）。
+        max_segments: 配额上限（T13-B #2，自动补采防过载）；None=不限（CLI 人工补采）。
 
     Returns:
         合并后的 lake df（dedup keep last，新覆盖旧）。无补采则原样返回。
@@ -61,12 +120,28 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro) -> pd.DataFram
     unjustified = [g for g in gaps if not g.suspend_justified]
     if not unjustified:
         return lake_df
+    # 配额截断（T13-B #2）：自动补采单次最多 max_segments 段（防过载）；None=不限（CLI 人工）
+    if max_segments is not None and len(unjustified) > max_segments:
+        logger.warning("repair_gaps 配额截断：%d → %d 段（剩余下次补采）",
+                       len(unjustified), max_segments)
+        unjustified = unjustified[:max_segments]
     missing = sorted({d for g in unjustified for d in g.missing_dates})
     gap_symbols = {g.symbol for g in unjustified}
 
     # 按日分页拉 raw daily + adj_factor（复用 sync_daily_incremental._fetch_paged）
     raw_frames, adj_frames = [], []
-    for td in missing:
+    _total_days = len(missing)
+    _deadline = time.monotonic() + REPAIR_TIMEOUT  # T13-B #4：总超时边界
+    for _i, td in enumerate(missing):
+        # 进度上报（T13-B #4）：每 10 日 log，治 --auto 10min 无输出（可见进度不再「卡住」）
+        if _total_days > 10 and _i > 0 and _i % 10 == 0:
+            logger.info("repair_gaps 进度：%d/%d 日已拉（raw %d adj %d 帧）",
+                        _i, _total_days, len(raw_frames), len(adj_frames))
+        # 总超时（T13-B #4）：超时停止拉新段，已拉部分继续 merge 落盘（部分补采 > 完全不补）
+        if time.monotonic() > _deadline:
+            logger.warning("repair_gaps 总超时（%ds）：已拉 %d/%d 日，部分补采落盘",
+                           REPAIR_TIMEOUT, _i, _total_days)
+            break
         tdc = td.replace("-", "")
         d = _fetch_paged(pro, "daily", tdc)
         if not d.empty:
@@ -165,16 +240,35 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ...（共 {len(unjustified)} 段，--dry-run 仅显示前 20）")
         return 0
 
+    # T13-B #2：--auto 自动模式（pipeline 子进程触发）用配额 + 熔断；--report 人工模式不限。
+    auto_mode = args.auto and not args.report
+    if auto_mode:
+        _open, _reason = is_repair_breaker_open(args.lake_dir)
+        if _open:
+            print(f"自动补采跳过（{_reason}）")
+            return 0
     from data._tushare_compat import get_pro
     pro = get_pro()
-    new_lake = repair_gaps(gaps, lake_df, pro)
-    delta = len(new_lake) - len(lake_df)
-    # 写入前历史行数守卫（T13-A）：repair 重写全湖（覆盖写），防御 dedup/recompute bug
-    # 致 new_lake 异常收缩被静默落盘。force=QUANTER_FORCE_WRITE=1 为人为重采逃生口。
-    safe_overwrite(str(lake_path), new_lake)
-    new_lake.to_parquet(lake_path, engine="pyarrow")
-    print(f"补采完成：a_shares_daily {len(lake_df)} → {len(new_lake)} 行（+{delta}）")
-    return 0
+    try:
+        # auto 模式传配额；--report 人工模式不传（保原签名，兼容外部 mock）
+        if auto_mode:
+            new_lake = repair_gaps(gaps, lake_df, pro, max_segments=MAX_REPAIR_SEGMENTS)
+        else:
+            new_lake = repair_gaps(gaps, lake_df, pro)
+        delta = len(new_lake) - len(lake_df)
+        # 写入前历史行数守卫（T13-A）：repair 重写全湖（覆盖写），防御 dedup/recompute bug
+        # 致 new_lake 异常收缩被静默落盘。
+        safe_overwrite(str(lake_path), new_lake)
+        new_lake.to_parquet(lake_path, engine="pyarrow")
+        if auto_mode:
+            record_repair_result(success=True, lake_dir=args.lake_dir)
+        print(f"补采完成：a_shares_daily {len(lake_df)} → {len(new_lake)} 行（+{delta}）")
+        return 0
+    except Exception:
+        # 自动模式记熔断失败计数（连续 K 次熔断）；人工模式仅抛
+        if auto_mode:
+            record_repair_result(success=False, lake_dir=args.lake_dir)
+        raise
 
 
 if __name__ == "__main__":

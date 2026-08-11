@@ -148,6 +148,27 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
             except Exception:
                 logger.exception("CRITICAL 告警发送失败")
             return  # 不跑 eod，不产废信号
+        # 3.5 T13-B #1：连续性 scan（freshness 全绿后，eod 前）—— 历史缺口检测（与 freshness
+        # 实时性互补）。scan FAIL **不阻断 eod**（历史缺口与当日交易无关，blueprint §2.3），
+        # 仅触发异步 repair 子进程（fire-and-forget；配额/熔断在 repair_gaps --auto 内）。
+        try:
+            from data.tools.scan_integrity import scan as _scan_integrity
+            _scan_report = _scan_integrity(lake_dir=str(ROOT / "data_lake"))
+            _n_gaps = _scan_report.get("unjustified_gaps", 0)
+            if _n_gaps > 0:
+                logger.warning("T13-B scan 发现 %d 段漏采（%d 标的），触发异步补采",
+                               _n_gaps, len(_scan_report.get("unjustified_symbols", [])))
+                import subprocess as _sp
+                _log_dir = ROOT / "logs"
+                _log_dir.mkdir(parents=True, exist_ok=True)
+                _log_fh = (_log_dir / "repair_auto.log").open("ab")
+                _sp.Popen([sys.executable, "-m", "data.tools.repair_gaps", "--auto",
+                           "--lake-dir", str(ROOT / "data_lake")],
+                          cwd=str(ROOT), stdout=_log_fh, stderr=_sp.STDOUT,
+                          stdin=_sp.DEVNULL, close_fds=True)
+                # _log_fh 由子进程继承，退出后 OS 回收（与 _run_discovery_subprocess 同模式）
+        except Exception:
+            logger.exception("T13-B scan/repair 触发异常（不阻断 eod）")
         # 5. 全绿 → 跑 eod（C-8 V2：补跑传显式 data_day/plan_date；默认路径零变化）
         if run_eod:
             if for_date is not None:
