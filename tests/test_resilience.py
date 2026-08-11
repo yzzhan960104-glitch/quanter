@@ -124,3 +124,29 @@ def test_breaker_half_open_failure_reopens():
     cb.record_failure()                      # 半开试探失败→重回 OPEN
     assert cb.state == CircuitState.OPEN
     assert cb.allow_request() is False       # OPEN 拒绝
+
+
+# ============ M4：reset() 测试隔离 affordance ============
+
+def test_circuit_breaker_reset_restores_closed_after_trip():
+    """reset() 把已跳闸的熔断器恢复到 CLOSED 初始态（计数/时点清零，不动配置）。"""
+    cb = CircuitBreaker(name="t", failure_threshold=2, recovery_timeout=60.0)
+    cb.record_failure()
+    cb.record_failure()  # 达阈值 2 → 跳闸 OPEN
+    assert cb.state == CircuitState.OPEN
+    cb.reset()
+    assert cb.state == CircuitState.CLOSED
+    assert cb._failure_count == 0
+    assert cb._opened_at == 0.0
+    assert cb._half_open_calls == 0
+
+
+def test_rate_limiter_reset_refills_tokens():
+    """reset() 把耗尽的令牌桶恢复到满（capacity），不动配置。"""
+    # refill_rate 极慢，防 _refill_locked 自愈干扰断言
+    rl = RateLimiter(name="t", capacity=2, refill_rate=0.01)
+    assert rl.try_acquire(2.0) is True    # 耗尽全部令牌
+    assert rl.try_acquire(1.0) is False   # 空桶
+    rl.reset()
+    assert rl._tokens == 2
+    assert rl.try_acquire(2.0) is True    # reset 后又满

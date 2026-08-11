@@ -138,6 +138,19 @@ class CircuitBreaker:
                 if self._failure_count >= self.failure_threshold:
                     self._trip_locked()
 
+    def reset(self) -> None:
+        """重置运行态到初始（CLOSED + 计数清零），不动配置（threshold/timeout 等）。
+
+        Why：模块级单例跨用例共享运行态，测试 autouse fixture 每用例前调它防污染
+        （test_fetcher_resilience / test_akshare_client 裸写 _state 无 finally 的治本层）。
+        生产路径不调——仅作测试隔离 affordance。
+        """
+        with self._lock:
+            self._state = CircuitState.CLOSED
+            self._failure_count = 0
+            self._half_open_calls = 0
+            self._opened_at = 0.0
+
     def _trip_locked(self) -> None:
         """跳闸到 OPEN。须持锁。"""
         was_open = self._state == CircuitState.OPEN
@@ -246,6 +259,16 @@ class RateLimiter:
             if deadline is not None and time.monotonic() + min(wait, 0.01) > deadline:
                 return False
             time.sleep(min(wait, 0.01))
+
+    def reset(self) -> None:
+        """重置运行态到初始（满令牌 + 重置补水时点），不动配置（capacity/refill_rate）。
+
+        Why：模块级单例跨用例共享，测试 autouse fixture 每用例前调它防令牌耗尽污染。
+        生产路径不调——仅作测试隔离 affordance。
+        """
+        with self._lock:
+            self._tokens = self.capacity
+            self._last_refill = time.monotonic()
 
     def __call__(self, func: Callable[..., T]) -> Callable[..., T]:
         """装饰器：每次调用前 acquire(1)。同步阻塞 / 异步让出事件循环。"""
