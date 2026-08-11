@@ -851,8 +851,6 @@ def test_is_trade_confirmed_semantics(tmp_path):
     """
     from trading import state_store
     db_path = str(tmp_path / "state.db")
-    monkeypatch_attr = None  # 纯 DB 测试，无需 monkeypatch module attr
-    state_store._DEFAULT_DB_OVERRIDE = db_path  # 局部覆盖（_connect 读 _DEFAULT_DB）
     # 直接 patch 默认 DB（_connect 内 ``db_path or _DEFAULT_DB``）
     import trading.state_store as _ss
     orig_default = _ss._DEFAULT_DB
