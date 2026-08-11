@@ -15,6 +15,40 @@
 """
 from __future__ import annotations
 
+import os
+
+# ============================================================================
+# T15 代码层防复发（2026-08-11 · 决策 C 补全）
+# ============================================================================
+# tushare 域名加入 NO_PROXY，防代理软件（v2ray/clash）复发重写 ALL_PROXY 致 tushare
+# 走失效代理（T14 事故重演）。requests 默认 trust_env=True，读 NO_PROXY——命中域名即
+# 跳过 ALL_PROXY/HTTP_PROXY 直连。T15.md 决策 B 已删注册表 ALL_PROXY（环境层根治），
+# 本层为代码兜底（决策 C），与环境根治形成双层防线。代理软件复发时 quanter 不再受害。
+# 详见 docs/superpowers/specs/2026-08-11-t15-tushare-proxy-hardening-design.md。
+_TUSHARE_HOSTS = ("api.waditu.com", "api.tushare.pro")
+
+
+def _harden_no_proxy() -> None:
+    """把 tushare 域名加入 NO_PROXY（幂等，不覆盖用户既有配置）。
+
+    物理意图：tushare pro_api 底层用 requests（trust_env=True），若进程继承了系统代理
+    env（ALL_PROXY/HTTP_PROXY），requests 会把 tushare 请求走代理——代理失效时全失败
+    （T14 事故根因）。NO_PROXY 是 requests 的「直连白名单」，命中域名即跳过代理。
+    本函数在模块加载时把 tushare 域名加入 NO_PROXY，使代理 env 对 tushare 调用无效
+    （代理软件复发写 ALL_PROXY 也不影响 tushare 直连）。
+
+    幂等：仅在域名未存在时追加，保留用户既有 NO_PROXY 配置（如其他服务需直连的域名）。
+    """
+    no_proxy = os.environ.get("NO_PROXY", "")
+    existing = no_proxy.split(",") if no_proxy else []
+    missing = [h for h in _TUSHARE_HOSTS if h not in existing]
+    if missing:
+        os.environ["NO_PROXY"] = ",".join(filter(None, [no_proxy] + missing))
+
+
+# 模块加载即生效（首次 import 时设置，进程内持久；calendar/sync/fetcher 多处 import 复用）
+_harden_no_proxy()
+
 from config import get_credential
 import tushare as ts
 
