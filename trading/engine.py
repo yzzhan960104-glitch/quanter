@@ -896,6 +896,34 @@ class TradingEngine:
         # ② 已连接 → 清失败计数 + no-op（活跃连接不能被周期 job 重连打断：
         #    重连会断开活跃 session 重建，导致回报回调丢失 / 主推重新订阅抖动）
         if getattr(gw, "_connected", False):
+            # T9 主动探针（option 2 防御性实现）：_connected=True 但客户端可能僵死（重启中/
+            # 假死，on_disconnected 不触发的盲区）。探针 query_account_status 连续 N 次失败
+            # → 判僵死，置 _connected=False 强制下轮走 ④/⑥ 重连（不 no-op 放任废单）。
+            # N 由 env T9_PROBE_FAIL_THRESHOLD 配置（默认 3，待模拟盘 CSV 实证微调）。
+            if hasattr(gw, "probe_account_status"):
+                _threshold = int(os.getenv("T9_PROBE_FAIL_THRESHOLD", "3"))
+                probe_ok, probe_detail = await gw.probe_account_status()
+                if not probe_ok:
+                    _fails = getattr(self, "_probe_fail_count", 0) + 1
+                    self._probe_fail_count = _fails
+                    if _fails >= _threshold:
+                        logger.warning(
+                            "T9 探针连续 %d 次失败判客户端僵死（%s）→ 置 _connected=False 走重连",
+                            _fails, probe_detail)
+                        self._probe_fail_count = 0
+                        gw._connected = False  # 强制走出②，下轮 _reconnecting=False 时走 ④/⑥ 重连
+                        if _mode() == "live":
+                            _alert_critical(
+                                f"T9 探针判客户端僵死（连续失败 {_threshold} 次，{probe_detail}），"
+                                f"已置 _connected=False 触发 health_guard 重连")
+                    else:
+                        logger.warning("T9 探针失败 %d/%d（%s）—— 暂不判僵死，下轮再探",
+                                       _fails, _threshold, probe_detail)
+                    return  # 探针未达稳态：不 no-op（不清 _guard_fail_count）也不重连，等下轮再探
+                # 探针成功 → 连接真活着，清探针失败计数
+                if getattr(self, "_probe_fail_count", 0):
+                    logger.info("T9 探针恢复成功（清前连续失败 %d 次）", self._probe_fail_count)
+                    self._probe_fail_count = 0
             self._guard_fail_count = 0
             self._guard_rounds_since_fail = 0
             return

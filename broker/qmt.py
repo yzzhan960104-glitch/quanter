@@ -817,6 +817,42 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             "market_value": float(getattr(asset, "market_value", 0.0) or 0.0),
         }
 
+    # ---------------------------------------------------------- T9 主动探针
+    async def probe_account_status(self, *, timeout: float = 5.0) -> tuple[bool, str]:
+        """T9 主动探针：query_account_status 判客户端存活性（补 on_disconnected 僵死盲区）。
+
+        物理意图：_health_guard 第②步 _connected=True 时调——socket 看似连着但客户端
+        可能僵死（重启中/假死，on_disconnected 不触发）。query_account_status 无参同步 API
+        （xtquant/xttrader.py:668），客户端僵死时超时/抛异常 → 探针失败。_health_guard 计
+        连续 N 次失败 → 判僵死，置 _connected=False 走重连。
+
+        与 query_asset 的区别：query_asset 失败/正常/锁定均返 {}（不可作僵死判据）；本探针
+        明确区分成功（API 有响应=客户端活着）vs 失败（异常/超时/None）。
+
+        防御性口径（option 2 · N 待模拟盘 CSV 实证微调）：query_account_status 返任何非 None
+        值（含负数 rc，柜台业务错误但客户端仍应答了）= 客户端活着（ok=True）；异常/超时/None
+        = 探针失败（ok=False）。此口径下探针是「严格改进」——比现状（② no-op 完全盲）多抓
+        异常/超时类僵死；若客户端返缓存值假活（false-negative），与现状同（不更糟），CSV 验证。
+
+        Returns:
+            (ok, detail)：ok=True 客户端响应了（活着）；ok=False 探针失败（detail 含原因）。
+        """
+        if self._loop is None or self._trader is None:
+            return False, "loop/trader 未装配"
+        try:
+            rc = await asyncio.wait_for(
+                self._loop.run_in_executor(None, self._trader.query_account_status),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return False, f"探针超时（{timeout}s，疑客户端僵死）"
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        # 任何非 None 返回 = 客户端应答了（活着）；None = 查询无应答（疑僵死）
+        if rc is None:
+            return False, "query_account_status 返 None（无应答）"
+        return True, f"rc={rc}"
+
     # ---------------------------------------------------------- 实时行情
     async def get_quote(self, symbol: str) -> Optional[Mapping[str, Any]]:
         """单标的实时快照（BaseExecutionGateway.get_quote 实现，spec §3.3 新增契约）。

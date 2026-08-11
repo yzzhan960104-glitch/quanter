@@ -174,6 +174,64 @@ def test_query_asset_locked_returns_empty(monkeypatch):
     assert result == {}
 
 
+# === T9: probe_account_status 主动探针（补 on_disconnected 僵死盲区）=====
+
+class _FakeTraderProbe:
+    """模拟 trader 带 query_account_status（T9 探针单测用）。"""
+    def __init__(self, rc, *, exc=None):
+        self._rc = rc
+        self._exc = exc
+    def query_account_status(self):
+        if self._exc is not None:
+            raise self._exc
+        return self._rc
+
+
+def test_probe_account_status_ok_when_api_responds(monkeypatch):
+    """query_account_status 返非 None → 客户端活着（ok=True）。rc<0（柜台业务错误）也算活着——
+    客户端应答了，非僵死。"""
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderProbe(0)
+    ok, detail = asyncio.run(gw.probe_account_status(timeout=1.0))
+    assert ok is True
+    assert "rc=0" in detail
+
+
+def test_probe_account_status_ok_on_negative_rc(monkeypatch):
+    """rc<0（柜台业务错误）→ 客户端仍应答了（活着），ok=True（僵死判据=有无应答，非业务成功）。"""
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderProbe(-1)
+    ok, _ = asyncio.run(gw.probe_account_status(timeout=1.0))
+    assert ok is True
+
+
+def test_probe_account_status_fail_on_exception(monkeypatch):
+    """query_account_status 抛异常（疑客户端僵死/共享内存死）→ ok=False，detail 含异常类名。"""
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderProbe(None, exc=RuntimeError("client dead"))
+    ok, detail = asyncio.run(gw.probe_account_status(timeout=1.0))
+    assert ok is False
+    assert "RuntimeError" in detail
+
+
+def test_probe_account_status_fail_on_none(monkeypatch):
+    """query_account_status 返 None（无应答）→ ok=False（疑僵死）。"""
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = _FakeTraderProbe(None)
+    ok, detail = asyncio.run(gw.probe_account_status(timeout=1.0))
+    assert ok is False
+    assert "None" in detail
+
+
+def test_probe_account_status_fail_when_trader_none(monkeypatch):
+    """trader 未装配（dry_run/未连）→ ok=False，不抛。"""
+    gw = _make_gw_with_fake_loop(monkeypatch)
+    gw._trader = None
+    ok, detail = asyncio.run(gw.probe_account_status())
+    assert ok is False
+    assert "未装配" in detail
+
+
 # === T4: query_orders / query_trades（主动查询，subscribe 兜底 + 对账强化）=====
 
 class _FakeOrder:

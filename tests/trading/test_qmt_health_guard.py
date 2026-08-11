@@ -158,6 +158,52 @@ async def test_health_guard_noop_when_connected():
 
 
 @pytest.mark.asyncio
+async def test_health_guard_probe_zombie_sets_connected_false(monkeypatch):
+    """T9: _connected=True 但探针连续 N 次失败 → 判僵死，置 _connected=False 走重连。
+
+    物理意图：on_disconnected 不触发的盲区（客户端重启中/假死，socket 看似连着）。
+    主动探针 query_account_status 连续 N 次失败 → 不再 no-op 放任废单，置 _connected=False
+    强制下轮走 ④/⑥ 重连。N 由 env T9_PROBE_FAIL_THRESHOLD 配（默认 3）。
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from trading.engine import TradingEngine
+    monkeypatch.setenv("T9_PROBE_FAIL_THRESHOLD", "3")
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._connected = True
+    gw._risk_halted = False
+    gw._reconnecting = False
+    gw.probe_account_status = AsyncMock(return_value=(False, "探针超时"))
+    gw.connect = AsyncMock()  # spy：判僵死本轮只置标志，不应调 connect
+    with patch("trading.engine.get_gateway", return_value=gw):
+        await eng._health_guard()  # fail 1/3
+        assert gw._connected is True, "1 次失败不应判僵死"
+        await eng._health_guard()  # fail 2/3
+        assert gw._connected is True, "2 次失败不应判僵死"
+        await eng._health_guard()  # fail 3/3 → 判僵死
+    assert gw._connected is False, "连续 3 次失败应置 _connected=False 走重连"
+    gw.connect.assert_not_awaited()  # 判僵死本轮只置标志，下轮才重连
+
+
+@pytest.mark.asyncio
+async def test_health_guard_probe_success_keeps_connected():
+    """T9: _connected=True 且探针成功 → 连接真活着，保持 _connected=True（no-op，清探针计数）。"""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    gw = MagicMock()
+    gw._connected = True
+    gw._risk_halted = False
+    gw._reconnecting = False
+    gw.probe_account_status = AsyncMock(return_value=(True, "rc=0"))
+    gw.connect = AsyncMock()  # spy：探针成功不应重连
+    with patch("trading.engine.get_gateway", return_value=gw):
+        await eng._health_guard()
+    assert gw._connected is True
+    gw.connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_health_guard_reconnects_when_ready_and_disconnected():
     """未连接但客户端就绪 → 调 connect 恢复。
 
