@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""T-1 交易计划（DB 优先真相源 + 钉钉推送 + JSON 只读兼容窗口）。
+"""T-1 交易计划（DB 真相源 + 钉钉推送；JSON 读侧窗口已关闭）。
 
-SSoT Phase C · C3 重构（spec §6）：
+SSoT Phase C · C3 → DG-5 收尾（2026-08-12）：
     生产写路径已删——原 JSON 落盘/确认函数 移至 ``tests/_legacy_plan_io.py``
     作测试专用 legacy shim（保留原 JSON 落盘 + DB CONFIRMED 双写语义给历史测试种子）。
     生产 eod_plan 直接写 DB trade_event(SIGNAL, meta) + （AUTO_CONFIRM）CONFIRMED 行，
     不再走 JSON 镜像双写。
+    DG-5 收尾：``load_plan`` 关闭 JSON 读侧 fallback——生产只信 trade_event 表，
+    无 SIGNAL / DB 异常均返 None（消费方保守跳过），不再回退读 plan_*.json。
 
 二期引擎 T-1 确认闸（spec 红线）物理意图（C3 后）：
     eod_plan（T-1 晚 15:35）扫信号生成 orders
@@ -24,7 +26,6 @@ orders 采用嵌套格式（与 Task 9 engine.eod_plan 生产侧、本模块 pus
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
@@ -39,18 +40,19 @@ def _plan_path(date: str) -> Path:
 
     TRADE_PLAN_DIR 默认 logs/trading_plans；生产环境由调度器/启动脚本显式注入。
 
-    C3 后本函数仅供 load_plan JSON 回退（只读兼容窗口）使用；无生产写盘方。
-    测试种子可用 ``tests/_legacy_plan_io._plan_path`` 同口径读取。
+    DG-5 收尾（2026-08-12）：``load_plan`` 已关闭 JSON 读侧 fallback，本函数不再被
+    生产读路径调用。保留供 ``tests/_legacy_plan_io._plan_path`` 同口径镜像读取
+    （legacy shim 落盘 + 测试断言读 JSON 镜像仍需路径计算）。
     """
     base = Path(os.getenv("TRADE_PLAN_DIR", "logs/trading_plans"))
     return base / f"plan_{date}.json"
 
 
 def load_plan(date: str) -> dict | None:
-    """读计划 · DB 优先（SIGNAL.meta 真相源）+ JSON 回退（C3 只读兼容窗口）。
+    """读计划 · DB 真相源（SIGNAL.meta）——JSON 读侧窗口已关闭（DG-5 收尾）。
 
-    物理意图（SSoT Phase C · C3）：单一真相源硬化后，DB trade_event(SIGNAL).meta 是
-    「精确 per-symbol 计划参数」真相源（C2c 已切 pre_open/_stoploss/review_report/
+    物理意图（SSoT Phase C · C3 → DG-5 收尾）：单一真相源硬化后，DB trade_event(SIGNAL).meta
+    是「精确 per-symbol 计划参数」唯一真相源（C2c 已切 pre_open/_stoploss/review_report/
     review_service）。本函数消费方契约不变（返 ``{date, confirmed, orders}``）：
         - orders：从 DB SIGNAL.meta 列表构造（每项即原 order_dict + C1 补的
           plan_date/strategy_name/rationale 字段，消费方读 meta.stop_price 等不变）；
@@ -67,16 +69,18 @@ def load_plan(date: str) -> dict | None:
         与 eod_plan/_pre_open_impl/veto_plan 完全一致口径，否则 get_latest_action 查的
         trade_id 与写 SIGNAL 的 trade_id 对不上，防线失效。
 
-    回退窗口（C3 只读兼容）：DB 异常 / 无 SIGNAL 行 → 退回读 plan_*.json（如果存在）。
-    物理：C2c 切 DB 是渐进的（部分老数据/老测试仍 JSON 落盘），保留一个发布周期的
-    只读兼容窗口；C3 删写路径后，JSON 仅历史回退入参，不再
-    被生产代码写盘。无 SIGNAL 且无 JSON → None（pre_open 保守跳过挂单，不挂脏计划）。
+    DG-5 收尾（2026-08-12，本函数本次改造）：JSON 读侧 fallback 窗口已关闭——
+        生产只信 trade_event 表（C3 删 save_plan 后无生产写盘方，plan_*.json 仅历史
+        测试种子的导出产物，非真相源）。故：
+            - 无 SIGNAL 行 → 返 None（不再回退读 JSON；pre_open 保守跳过挂单）；
+            - DB 读异常 → 记 exception + 返 None（真相源不可达，不挂可能过时的 JSON 镜像）。
+        消费方（pre_open/place_take_profit/veto）已对 None 安全跳过，契约不变。
 
     Returns:
-        ``{date, confirmed, orders}`` dict；无 SIGNAL 且无 JSON 返 None；DB 异常且
-        JSON 损坏/不存在也返 None（双重降级，pre_open 据此安全跳过）。
+        ``{date, confirmed, orders}`` dict；无 SIGNAL 或 DB 异常 → None（pre_open 据此
+        安全跳过，不挂脏计划/不阻断调度链）。
     """
-    # —— DB 优先路径 ——
+    # —— DB 真相源路径（唯一读路径，DG-5 收尾）——
     # 物理意图：DB 是真相源；list_signals_with_meta_by_plan_date 按 trade_id 后缀
     # substr(-10)=date 查（非 timestamp），返每行 SIGNAL 的 meta 解析 dict + symbol。
     try:
@@ -109,23 +113,16 @@ def load_plan(date: str) -> dict | None:
                     confirmed_all = False
                 orders.append(m)
             return {"date": date, "confirmed": confirmed_all, "orders": orders}
-    except Exception:
-        # DB 读异常（state_store 未初始化 / 表不存在 / 文件锁等）→ 软降级回退 JSON。
-        # 物理：load_plan 是 pre_open/place_take_profit/veto 多入口的依赖，抛错会阻断
-        # 调度链；回退 JSON 是「展示镜像」语义（C3 后 JSON 是导出产物，非真相源），
-        # 历史数据/老测试仍有 JSON 落盘，保留一发布周期的只读兼容窗口。
-        logger.exception("load_plan 读 DB SIGNAL 失败，回退 JSON（C3 只读兼容窗口）")
-
-    # —— JSON 回退（只读兼容窗口）——
-    # C3 后无生产写盘方（写路径已删），JSON 仅历史/测试种子用，不再被覆盖写。
-    p = _plan_path(date)
-    if not p.exists():
+        # DG-5 收尾（2026-08-12）：DB 正常但无 SIGNAL → 无计划，显式返 None。
+        # 物理：生产只信 trade_event 表，JSON 读侧窗口已关闭——不再回退读 plan_*.json
+        # 镜像（C3 后无生产写盘方，JSON 已非真相源）。pre_open 据 None 保守跳过不挂单。
         return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
-        # 损坏计划：记录完整堆栈供排查，但返 None 让 pre_open 安全降级（不挂单）。
-        logger.exception("计划损坏 %s（C3 JSON 回退窗口）", p)
+        # DG-5 收尾（2026-08-12）：生产只信 trade_event 表，JSON 读侧窗口已关闭。
+        # DB 读异常 = 真相源不可达（state_store 未初始化 / 表不存在 / 文件锁等），记
+        # exception 告警 + 返 None（pre_open/place_take_profit/veto 据 None 安全跳过，
+        # 不挂可能过时的 JSON 镜像，不阻断调度链）；不再回退读 plan_*.json。
+        logger.exception("load_plan 读 DB SIGNAL 失败，返 None（JSON 窗口已关闭）")
         return None
 
 

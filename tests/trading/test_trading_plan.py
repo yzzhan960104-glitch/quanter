@@ -131,29 +131,19 @@ def test_load_plan_vetoed_after_confirmed(tmp_db, monkeypatch):
     assert plan["confirmed"] is False  # VETOED 是最新 action
 
 
-def test_load_plan_db_exception_falls_back_to_json(tmp_path, monkeypatch):
-    """C3 兼容窗口：DB 异常 → 回退读 plan_*.json（只读兼容，保留一发布周期）。
+def test_load_plan_db_exception_returns_none(tmp_path, monkeypatch):
+    """C3 收尾（DG-5）：DB 读异常时 load_plan 返 None，不再回退 JSON（窗口已关闭）。
 
-    物理：DB 未初始化 / 表不存在 / 文件锁等异常时，load_plan 不抛错，回退 JSON。
-    历史/老测试 JSON 仍可读，平滑迁移。
+    物理：生产只信 trade_event 表。DB 异常 = 真相源不可达，pre_open 据 None 安全跳过
+    （不挂单），不再读可能过时的 plan_*.json 镜像。
     """
-    monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
-    # 制造 DB 异常：monkeypatch list_signals_with_meta_by_plan_date 抛错
-    def boom(*a, **kw):
-        raise RuntimeError("DB down")
-    monkeypatch.setattr(state_store, "list_signals_with_meta_by_plan_date", boom)
-    # 落 JSON（模拟历史 plan）
-    orders = _sample_nested_orders()
-    p = tp._plan_path("2026-08-05")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"date": "2026-08-05", "confirmed": True, "orders": orders}),
-                 encoding="utf-8")
-
-    plan = tp.load_plan("2026-08-05")
-
-    assert plan is not None
-    assert plan["confirmed"] is True
-    assert plan["orders"] == orders
+    def _boom(*a, **kw):
+        raise RuntimeError("DB 不可达")
+    monkeypatch.setattr(state_store, "list_signals_with_meta_by_plan_date", _boom)
+    monkeypatch.setattr(tp, "_plan_path", lambda d: tmp_path / f"plan_{d}.json")
+    (tmp_path / "plan_2026-08-05.json").write_text('{"date":"2026-08-05","orders":[]}', encoding="utf-8")
+    # JSON 存在但不再被读 → DB 异常 → None
+    assert tp.load_plan("2026-08-05") is None
 
 
 def test_load_plan_no_signal_no_json_returns_none(tmp_db, monkeypatch):
@@ -163,13 +153,19 @@ def test_load_plan_no_signal_no_json_returns_none(tmp_db, monkeypatch):
     assert tp.load_plan("2099-01-01") is None
 
 
-def test_load_plan_corrupt(tmp_path, monkeypatch):
-    """计划文件损坏（非法 JSON）返 None 不抛，避免阻塞次日流程。"""
+def test_load_plan_no_signal_returns_none_even_with_legacy_json(tmp_path, monkeypatch):
+    """DG-5 收尾：无 DB SIGNAL → load_plan 返 None，即便 plan_*.json 存在也不再读。
+
+    物理：JSON 读侧窗口已关闭——损坏/历史 JSON 一律不再被 load_plan 触达，load_plan
+    只信 trade_event(SIGNAL)。原「JSON 损坏 fallback」用例随窗口关闭退役，本测改为
+    验证「无 SIGNAL → None」是 load_plan 唯一无计划口径（pre_open 据此保守跳过）。
+    """
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path))
+    # 仍落一份历史 JSON（模拟 C3 前的导出产物）——不应被 load_plan 读到
     p = tp._plan_path("2026-07-23")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("{not valid json", encoding="utf-8")
-    assert tp.load_plan("2026-07-23") is None
+    assert tp.load_plan("2026-07-23") is None  # 无 SIGNAL → None（JSON 不再被读）
 
 
 def test_confirm_plan_missing_legacy_shim(tmp_path, monkeypatch):
