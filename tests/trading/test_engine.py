@@ -363,11 +363,14 @@ def test_pre_open_inserts_order_and_event(monkeypatch, _state_db):
     import sqlite3
     from trading import state_store
     _confirmed_plan_one_order()
-    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    # W1-A/T2-Task19：pre_open 函数体迁 trading.phases.pre_open，get_gateway/_submit 经
+    # 顶部 import 本地绑定（phases.pre_open.__globals__）→ patch trading.engine.X 不命中，
+    # 迁 trading.phases.pre_open.X（Task 9-18 __globals__ 范式 · 下同）。
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: None)
 
     async def _dry_submit(order, **kw):
         return {"order_id": "seq1", "state": "DRY_RUN", "message": "影子"}
-    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _dry_submit)
     asyncio.run(engine.pre_open("2099-01-02"))
     account_id = engine._resolve_account_id()
     assert state_store.has_order(account_id, "2099-01-02", "600000.SH", "OPEN") is True
@@ -378,12 +381,12 @@ def test_pre_open_inserts_order_and_event(monkeypatch, _state_db):
 def test_pre_open_idempotent(monkeypatch, _state_db):
     """同日 pre_open 调两次 → 只挂一次（has_order OPEN 第二次跳过，submit 只调 1 次）。"""
     _confirmed_plan_one_order()
-    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: None)
     submit_calls = {"n": 0}
     async def _counting_submit(order, **kw):
         submit_calls["n"] += 1
         return {"order_id": "x", "state": "DRY_RUN", "message": "影子"}
-    monkeypatch.setattr(engine, "_submit", _counting_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _counting_submit)
     asyncio.run(engine.pre_open("2099-01-02"))
     asyncio.run(engine.pre_open("2099-01-02"))  # 第二次：has_order OPEN → 跳过
     assert submit_calls["n"] == 1  # 只挂一次（DB 幂等）
@@ -454,8 +457,8 @@ def test_pre_open_cancels_yesterday_open_orders(monkeypatch, _state_db):
         cancelled["n"] += 1
         return 0
 
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: _FakeGw())
 
     asyncio.run(engine.pre_open("2099-01-02"))
     assert cancelled["n"] == 1, "pre_open 必须在挂单前撤昨日未成交单（scope #2）"
@@ -491,8 +494,8 @@ def test_pre_open_submit_raise_continues(monkeypatch, _state_db):
     ]
     _seed_signals_db("2099-01-02", orders_nested)
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: object())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders",
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: object())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders",
                         _no_op_cancel)
 
     calls = []
@@ -503,7 +506,7 @@ def test_pre_open_submit_raise_continues(monkeypatch, _state_db):
             raise RuntimeError("挡板命中：资金不足")  # 模拟挡板 raise
         return {"order_id": "seq1", "state": "SUBMITTED", "message": "ok"}
 
-    monkeypatch.setattr(engine, "_submit", _flaky_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _flaky_submit)
 
     result = asyncio.run(engine.pre_open("2099-01-02"))
     # 两只都被尝试（A 抛、B 成），submitted=1（仅 B 成功）
@@ -548,7 +551,10 @@ def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
         async def _fetch_broker_positions(self):
             return {"A.SH": 300.0, "B.SH": 200.0, "C.SH": 150.0}
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    # W1-A/T2-Task19：stop_loss_monitor 函数体迁 trading.phases.stop_loss，get_gateway/_submit
+    # 经顶部 import 本地绑定（phases.stop_loss.__globals__）→ patch trading.engine.X 不命中，
+    # 迁 trading.phases.stop_loss.X（Task 15 范式 · __globals__ 归属）。
+    monkeypatch.setattr("trading.phases.stop_loss.get_gateway", lambda: _FakeGw())
 
     # 现价快照（C1 fix + T3 批量后现价源）：A=9.0（跌破 9.5）/ B=21.0（未跌破 19.0）/ C=None（缺失）
     quote_map = {
@@ -574,7 +580,7 @@ def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
         submitted.append((order.symbol, order.qty, order.side))
         return {"state": "DRY_RUN"}
 
-    monkeypatch.setattr(engine, "_submit", _no_op_submit_dry)
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _no_op_submit_dry)
 
     # 止损价 map：A=9.5（跌破 9.0）/ B=19.0（未跌破 21.0）/ C=9.0（但现价 None 无法判）
     result = asyncio.run(
@@ -599,7 +605,7 @@ def test_stop_loss_monitor_nan_price_skipped(monkeypatch):
         async def _fetch_broker_positions(self):
             return {"X.SH": 100.0}
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.stop_loss.get_gateway", lambda: _FakeGw())
 
     async def _nan_quotes(symbols):
         # last_price 为 NaN（脏数据）：price != price 判定为 NaN，应跳过
@@ -613,7 +619,7 @@ def test_stop_loss_monitor_nan_price_skipped(monkeypatch):
         submitted["n"] += 1
         return {"state": "DRY_RUN"}
 
-    monkeypatch.setattr(engine, "_submit", _no_submit)
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _no_submit)
 
     result = asyncio.run(
         engine.stop_loss_monitor(stop_prices={"X.SH": 10.0})
@@ -625,7 +631,7 @@ def test_stop_loss_monitor_nan_price_skipped(monkeypatch):
 def test_stop_loss_monitor_no_gateway_logs_and_skips(monkeypatch):
     """scope #3：盘中 gw=None → 不抛，记日志跳过（无法查持仓即无法决策）。"""
     monkeypatch.setattr(engine.calendar, "is_intraday_session", lambda now: True)
-    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    monkeypatch.setattr("trading.phases.stop_loss.get_gateway", lambda: None)
 
     submitted = {"n": 0}
 
@@ -633,7 +639,7 @@ def test_stop_loss_monitor_no_gateway_logs_and_skips(monkeypatch):
         submitted["n"] += 1
         return {"state": "DRY_RUN"}
 
-    monkeypatch.setattr(engine, "_submit", _no_submit)
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _no_submit)
 
     result = asyncio.run(engine.stop_loss_monitor(stop_prices={"A.SH": 9.5}))
     assert submitted["n"] == 0
@@ -668,7 +674,7 @@ def test_stop_loss_idempotent(monkeypatch, tmp_path):
         async def _fetch_broker_positions(self):
             return {"A.SH": 300.0}
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.stop_loss.get_gateway", lambda: _FakeGw())
 
     async def _fake_get_quotes(symbols):
         return {"A.SH": {"last_price": 9.0}}  # 跌破 9.5
@@ -681,7 +687,7 @@ def test_stop_loss_idempotent(monkeypatch, tmp_path):
         submit_calls["n"] += 1
         return {"state": "DRY_RUN"}
 
-    monkeypatch.setattr(engine, "_submit", _counting_submit)
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _counting_submit)
 
     asyncio.run(engine.stop_loss_monitor(stop_prices={"A.SH": 9.5}))
     assert submit_calls["n"] == 0  # 已有 STOP 委托 → 跳过（DB 幂等）
@@ -763,7 +769,7 @@ def test_stoploss_monitors_after_ordered(monkeypatch, tmp_path):
         async def _fetch_broker_positions(self):
             return {sym: 100.0}
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.stop_loss.get_gateway", lambda: _FakeGw())
 
     async def _fake_get_quotes(symbols):
         return {sym: {"last_price": 9.0}}  # 跌破 9.5
@@ -776,7 +782,7 @@ def test_stoploss_monitors_after_ordered(monkeypatch, tmp_path):
         submitted["n"] += 1
         return {"state": "DRY_RUN"}
 
-    monkeypatch.setattr(engine, "_submit", _submit_dry)
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _submit_dry)
 
     # stop_loss_monitor 从 trade_event SIGNAL.meta 读 stop_price + 确认闸过滤
     asyncio.run(engine.stop_loss_monitor(stop_prices={sym: 9.5}))
@@ -822,7 +828,7 @@ def test_pre_open_reentry_after_partial_ordered(monkeypatch, tmp_path):
     state_store.insert_trade_event(account_id, tid_a, "A.SH", "ORDERED")
     assert state_store.get_latest_action(tid_a) == "ORDERED"
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: None)
 
     submit_calls = {"n": 0, "syms": []}
 
@@ -831,7 +837,7 @@ def test_pre_open_reentry_after_partial_ordered(monkeypatch, tmp_path):
         submit_calls["syms"].append(order.symbol)
         return {"order_id": f"x-{order.symbol}", "state": "DRY_RUN", "message": "影子"}
 
-    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _dry_submit)
 
     result = asyncio.run(engine.pre_open(date))
     # 核心断言：不被「计划未确认」阻塞（all_confirmed 通过，因 A=ORDERED 视作已确认）
@@ -1032,14 +1038,14 @@ def test_pre_open_snapshot_start_equity(monkeypatch, _state_db):
         async def query_asset(self):
             return {"total_asset": 1_000_000.0, "cash": 500_000.0,
                     "market_value": 500_000.0, "account_id": "test"}
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
 
     submitted = []
     async def _fake_submit(order, **kw):
         submitted.append(order.symbol)
         return {"state": "SUBMITTED"}
-    monkeypatch.setattr(engine, "_submit", _fake_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
@@ -1079,9 +1085,9 @@ def test_pre_open_snapshot_calls_state_store_not_position_book(monkeypatch, _sta
     class _FakeGw:
         async def query_asset(self):
             return {"total_asset": 1_000_000.0, "cash": 500_000.0}
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _no_op_submit_should_not_be_called_unused)
 
     # spy 包裹 state_store 版（记录被调参数，仍透传真函数写 DB）
     ss_calls = []
@@ -1140,9 +1146,9 @@ def test_daily_pnl_closes_after_pre_open_and_post_close(monkeypatch, _state_db):
         async def query_asset(self):
             return {"total_asset": 1_015_000.0, "cash": 510_000.0,
                     "market_value": 505_000.0}
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _no_op_submit_should_not_be_called_unused)
 
     # pre_open 写 start（account_daily.start_total_asset=1_000_000）
     asyncio.run(engine.pre_open(fixed_date))
@@ -1243,7 +1249,7 @@ def test_post_close_circuit_breaker_triggers(monkeypatch):
     def _fake_halt():
         halt_calls.append(True)
         return {"halted": True}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr("trading.phases.post_close._cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(
         "trading.gateway_service.emergency_halt", _fake_halt)
 
@@ -1295,7 +1301,7 @@ def test_post_close_circuit_breaker_warns_unconfirmed(monkeypatch, caplog):
         return {"cancelled": 2, "unconfirmed": 1}
     def _fake_halt():
         return {"halted": True}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr("trading.phases.post_close._cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(
         "trading.gateway_service.emergency_halt", _fake_halt)
 
@@ -1432,12 +1438,12 @@ def test_pre_open_snapshot_skip_alerts_critical_in_live(monkeypatch, _state_db):
     class _FakeGw:
         async def query_asset(self):
             return {}  # 未连接 → 空 dict
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
-    monkeypatch.setattr(engine, "_mode", lambda: "live")  # live 模式触发 CRITICAL
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _no_op_submit_should_not_be_called_unused)
+    monkeypatch.setattr("trading.phases.pre_open._mode", lambda: "live")  # live 模式触发 CRITICAL
     alert_calls = []
-    monkeypatch.setattr(engine, "_alert_critical", lambda msg: alert_calls.append(msg))
+    monkeypatch.setattr("trading.phases.pre_open._alert_critical", lambda msg: alert_calls.append(msg))
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
@@ -1459,12 +1465,12 @@ def test_pre_open_snapshot_alerts_critical_on_query_asset_exception(monkeypatch,
     class _FakeGw:
         async def query_asset(self):
             raise RuntimeError("query_stock_asset 超时")  # 抛异常 → except 分支
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
-    monkeypatch.setattr(engine, "_mode", lambda: "live")
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _no_op_submit_should_not_be_called_unused)
+    monkeypatch.setattr("trading.phases.pre_open._mode", lambda: "live")
     alert_calls = []
-    monkeypatch.setattr(engine, "_alert_critical", lambda msg: alert_calls.append(msg))
+    monkeypatch.setattr("trading.phases.pre_open._alert_critical", lambda msg: alert_calls.append(msg))
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
@@ -1526,7 +1532,7 @@ def test_post_close_uses_prev_close_when_start_missing(monkeypatch, _state_db):
     def _fake_halt():
         halt_calls.append(True)
         return {"halted": True}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr("trading.phases.post_close._cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr("trading.gateway_service.emergency_halt", _fake_halt)
     # 不设 _mode=live：补基线逻辑（get_prev_close_equity→赋值 start）不依赖 _mode，
     # 熔断判定也不依赖 _mode；避免 live 触发 _alert_critical 钉钉副作用（单测不发告警）。
@@ -1620,15 +1626,15 @@ def test_pre_open_within_max_wait_window_is_placed(monkeypatch, _state_db):
         "max_wait": 5,                # <= max_wait → 应挂
     }])
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: object())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 3)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: object())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.phases.pre_open._trading_days_between", lambda s, e: 3)
 
     submitted = []
     async def _fake_submit(order, **kw):
         submitted.append(order.symbol)
         return {"state": "SUBMITTED"}
-    monkeypatch.setattr(engine, "_submit", _fake_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
 
     result = asyncio.run(engine.pre_open("2099-01-02"))
     assert submitted == ["300001.SZ"]
@@ -1644,15 +1650,15 @@ def test_pre_open_formed_at_missing_fallback_places(monkeypatch, _state_db):
         "max_wait": 5,
     }])
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: object())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 0)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: object())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.phases.pre_open._trading_days_between", lambda s, e: 0)
 
     submitted = []
     async def _fake_submit(order, **kw):
         submitted.append(order.symbol)
         return {"state": "SUBMITTED"}
-    monkeypatch.setattr(engine, "_submit", _fake_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
 
     result = asyncio.run(engine.pre_open("2099-01-02"))
     assert submitted == ["300001.SZ"]
@@ -1683,8 +1689,8 @@ async def _no_op_submit(order, **kw):
     raise AssertionError(f"_submit 不应被调（本 case 信号/计划为空）: {order}")
 
 
-async def _no_op_cancel(gw):
-    """占位 cancel_all_open_orders：no-op。"""
+async def _no_op_cancel(gw, account_id=None, **kw):
+    """占位 cancel_all_open_orders：no-op（兼容 pre_open 透传 account_id 关键字 · U5 回写口径）。"""
     return 0
 
 
@@ -1863,7 +1869,10 @@ def test_scan_expired_positions_marks_over_holding(monkeypatch):
     # A 超期（holding_days=20>15）、B 窗口内（5<=15）
     monkeypatch.setattr(position_book, "get_entry_dates",
                         lambda **kw: {"A.SH": "2099-01-01", "B.SH": "2099-01-15"})
-    monkeypatch.setattr(engine, "_trading_days_between",
+    # W1-A/T2-Task19：_scan_expired_positions（= scan_expired_positions）函数体迁
+    # trading.phases.stop_loss，内部 _trading_days_between 经顶部 import 本地绑定
+    # （phases.stop_loss.__globals__）→ 迁 trading.phases.stop_loss._trading_days_between。
+    monkeypatch.setattr("trading.phases.stop_loss._trading_days_between",
                         lambda s, e: 20 if s == "2099-01-01" else 5)
 
     expired = engine._scan_expired_positions("2099-01-21", 15)
@@ -1918,7 +1927,7 @@ def test_scan_expired_boundary_holding_days(monkeypatch):
 
     # 侧 A：holding_days == max_holding（15 == 15）→ 不标超期（窗口内，给足机会）
     monkeypatch.setattr(
-        engine, "_trading_days_between",
+        "trading.phases.stop_loss._trading_days_between",
         lambda s, e: 15 if s == "2099-01-01" else 15)
     expired_at_boundary = engine._scan_expired_positions(asof, 15)
     assert expired_at_boundary == [], (
@@ -1927,7 +1936,7 @@ def test_scan_expired_boundary_holding_days(monkeypatch):
 
     # 侧 B：holding_days > max_holding（16 > 15）→ 标超期
     monkeypatch.setattr(
-        engine, "_trading_days_between",
+        "trading.phases.stop_loss._trading_days_between",
         lambda s, e: 16 if s == "2099-01-01" else 16)
     expired_over = engine._scan_expired_positions(asof, 15)
     assert len(expired_over) == 2, (
@@ -2000,15 +2009,19 @@ def test_pre_open_closes_expired_positions(monkeypatch, _state_db):
     # monkeypatch 基准日 + holding_days（避开真实日历漂移，锁定现算→平仓链路）
     monkeypatch.setattr(engine.clock, "today", lambda: "2099-01-02")
     monkeypatch.setattr(engine.clock, "pretrade_date", lambda d: "2099-01-01")
-    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 20)  # 20>15 标超期
+    # W1-A/T2-Task19：pre_open 现算超期调 _scan_expired_positions（定义于 phases.stop_loss，
+    # 读 phases.stop_loss.__globals__ 的 _trading_days_between）；pre_open 自身 max_wait 亦读
+    # phases.pre_open._trading_days_between。两模块各绑本地引用 → 双 patch 同桩值 20 标超期。
+    monkeypatch.setattr("trading.phases.pre_open._trading_days_between", lambda s, e: 20)
+    monkeypatch.setattr("trading.phases.stop_loss._trading_days_between", lambda s, e: 20)
 
     class _FakeGw:
         async def query_asset(self):
             return {"total_asset": 1_000_000.0}
         async def _fetch_broker_positions(self):
             return {"300001.SZ": {"volume": 200, "avg_price": 10.0}}  # 真实持仓 200 股
-    monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: _FakeGw())
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
     async def _fake_quotes(syms):
         return {sym: {"last_price": 9.0, "low_limit": 8.5} for sym in syms}
     monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_quotes)
@@ -2016,7 +2029,10 @@ def test_pre_open_closes_expired_positions(monkeypatch, _state_db):
     async def _fake_submit(order, **kw):
         submitted.append((order.symbol, order.side, order.qty, order.price))
         return {"state": "SUBMITTED"}
-    monkeypatch.setattr(engine, "_submit", _fake_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
+    # 超期平仓走 _close_expired_positions（定义于 phases.stop_loss · 内读 phases.stop_loss._submit）
+    # → 须同 patch phases.stop_loss._submit 才能让 spy 捕到跌停卖单（双口子 · pre_open/stop_loss 各绑本地 _submit）。
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _fake_submit)
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
@@ -2174,7 +2190,9 @@ def test_post_close_query_trades_skipped_when_no_gw(monkeypatch):
     position_book.init_db()
     # 确保 gw 全程 None：post_close 内部 ``if gw is None: gw = get_gateway()`` 兜底也要返 None，
     # 模拟 dry_run 无网关（否则若测试环境残留 gw 单例会误触发 ② 段读 CSV 产误导日志）。
-    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    # W1-A/T2-Task19：post_close 函数体迁 trading.phases.post_close，get_gateway 经顶部
+    # import 本地绑定（phases.post_close.__globals__）→ 迁 trading.phases.post_close.get_gateway。
+    monkeypatch.setattr("trading.phases.post_close.get_gateway", lambda: None)
 
     agg_calls = []
 
@@ -2220,7 +2238,11 @@ def test_partial_fill_tp_diff_no_oversell_no_gap(monkeypatch, tmp_path):
     async def _fake_submit(order, **kw):
         submit_calls.append((order.symbol, order.side, order.qty, order.price))
         return {"order_id": f"seq{len(submit_calls)}", "state": "SUBMITTED"}
-    monkeypatch.setattr("trading.engine._submit", _fake_submit)
+    # W1-A/T2-Task19：place_take_profit 函数体迁 trading.phases.exit，_submit 经顶部 import
+    # 本地绑定（phases.exit.__globals__）→ 迁 trading.phases.exit._submit（Task 15 范式）。
+    # trading_plan.load_plan 是共享对象属性（engine.trading_plan IS phases.exit.trading_plan）
+    # → patch trading.engine.trading_plan.load_plan 天然全局命中，无需迁。
+    monkeypatch.setattr("trading.phases.exit._submit", _fake_submit)
     # 分 3 笔成交：累计 100/200/300
     for filled in (100, 200, 300):
         state_store.update_order_state_by_broker_oid(
@@ -2258,7 +2280,7 @@ def test_tp_single_leg_portion_zero_incremental(monkeypatch, tmp_path):
     async def _fake_submit(order, **kw):
         submit_calls.append(order.qty)
         return {"order_id": f"seq{len(submit_calls)}", "state": "SUBMITTED"}
-    monkeypatch.setattr("trading.engine._submit", _fake_submit)
+    monkeypatch.setattr("trading.phases.exit._submit", _fake_submit)  # 同上 phases.exit 归属
     for filled in (100, 200, 300):
         asyncio.run(place_take_profit(sym, float(filled), 10.5, "987654"))
     assert submit_calls == [100, 100, 100] and sum(submit_calls) == 300
