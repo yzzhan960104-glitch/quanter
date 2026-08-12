@@ -12,6 +12,47 @@
     cron 在盘中每 5 分钟触发 ``_stoploss``，必须把 T+1 日 pre_open 已挂单 + 人审
     confirmed 的活跃计划的 ``{symbol: stop_price}`` 注入 stop_loss_monitor，
     否则盘中止损监控拿不到止损价 → 永远跳过 → 持仓裸奔。
+
+W1-A/T2-Task16 patch 物理路径迁移（_stoploss inject 调用链归属判定）：
+    本文件 3 测全调 ``eng._stoploss()``——TradingEngine 实例方法（engine.py:1393）。
+    inject 路径上的所有符号均在 **engine 方法函数体内作模块全局名读取** → 经 engine
+    ``__globals__`` 解析。下游 phases 函数（stop_loss_monitor）被 patch 哨兵拦截（C4）
+    → phases ``__globals__`` 全程不经，无需双口子 patch。按「符号被读取时的
+    ``__globals__`` 归属模块」判 → **全 13 patch 保 trading.engine.X 不迁，0 处迁移**：
+
+    - ``get_gateway`` ×3（C3 · 保 engine · L45/73/99）：_stoploss:1431
+      ``gw = get_gateway()`` 读引擎模块全局名 → engine ``__globals__``。engine.py:367
+      自定义薄 wrapper（透传 gateway_service.get_gateway）即物理命中点；phases.stop_loss
+      顶部 ``from trading.gateway_service import get_gateway``（Task 7 切断后）的本地
+      绑定在本组测里因 monitor 被 mock 拦截永不执行 → 迁 phases 反 miss。
+    - ``_state_store`` ×3（C3 engine re-export · 保 engine · L51/78/103）：_stoploss:1450
+      ``_state_store.list_signals_with_meta_by_plan_date`` / :1471 ``build_trade_id`` /
+      :1472 ``is_trade_confirmed`` 三个口子均读引擎模块全局名 → engine ``__globals__``。
+      engine.py:271 ``from trading import state_store as _state_store`` re-export 整体绑定
+      命中 patch（patch 整体替换 engine._state_store 引用，三口子全经 mock）；phases
+      内 ``_state_store``（别名）本地绑定在本组测里 monitor 拦截 + 直调 _stoploss 不经 →
+      不迁。（与 Task 13 C3「_state_store.list_signals... ×1 共享属性」不同：此处是
+      整体替换 patch（无 .attr 路径），但因读取点（_stoploss 函数体）属 engine 方法，
+      仍判保 engine。）
+    - ``stop_loss_monitor`` ×3（C4 engine wrapper · 不迁 · L47/76/101）：engine.py:204-205
+      顶部 ``from trading.phases.stop_loss import stop_loss_monitor`` re-export；
+      _stoploss:1554 ``await stop_loss_monitor(...)`` 经 engine 模块全局名解析命中本
+      re-export → patch trading.engine.stop_loss_monitor 正确拦截（断言 stop_prices 注入
+      参数 / 非交易日不调）。迁 phases 反 miss（phases 本地绑定不经 _stoploss 调用点）。
+    - ``calendar.is_trading_day`` ×2（B 共享属性 · 不迁 · L74/100）：calendar 是共享模块
+      对象（engine.calendar IS trading.calendar IS phases.calendar，sys.modules 同一对象），
+      patch 属性路径改模块对象属性 → 全局命中（_stoploss:1443 经 engine 模块名读同对象）。
+    - ``clock.today`` ×1（B 共享属性 · 不迁 · L75）：clock 同为共享模块对象
+      （engine.clock IS trading.clock），属性路径 patch 全局命中（_stoploss:1440 读）。
+    - ``calendar`` ×1（D 共享整体 · 保 engine · L46）：整体替换 ``patch("trading.engine.calendar")
+      as cal``——_stoploss:1443 ``calendar.is_trading_day`` 读引擎模块全局名 → engine
+      ``__globals__``，替换 engine.calendar 绑定后 cal.is_trading_day.return_value=True
+      命中（test_stoploss_injects_stop_prices_from_plan 显式 mock today/is_trading_day）。
+      calendar 物理真身（trading/calendar.py）不经；phases.calendar 本地绑定因 monitor
+      mock 不经 → 不迁。（D 整体替换默认仅命中 engine 内部，与 _stoploss 实际读取路径
+      一致 → 保 engine 正确。）
+
+    绿门：3 passed（baseline 3 绿 → 仍 3 绿，零行为变更，patch 字符串零修改）。
 """
 from __future__ import annotations
 
