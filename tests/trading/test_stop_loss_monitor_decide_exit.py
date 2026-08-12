@@ -110,10 +110,16 @@ def _run_monitor(monitor_ctx, positions, quotes, submitted=None, gw=None,
             submitted.append(order)
         return {"order_id": "fake", "state": "FILLED"}
 
-    with patch("trading.engine.get_gateway", return_value=gw), \
-         patch("trading.engine.calendar") as cal, \
-         patch("trading.engine.qmt_market_data") as qmd, \
-         patch("trading.engine._submit", new=fake_submit):
+    # W1-A/T2-Task15：stop_loss_monitor 函数体已迁 trading.phases.stop_loss（phases/stop_loss.py），
+    # 其内部 get_gateway/calendar/qmt_market_data/_submit 经【顶部 import 本地绑定】（phases.stop_loss
+    # 模块 __globals__）。patch trading.engine.X 不再命中函数体符号解析（engine re-export 已删），
+    # 故 4 patch 全迁 trading.phases.stop_loss.X（Task 11/12/14 范式 · __globals__ 归属）。
+    # calendar/qmt_market_data 虽是共享模块对象，但本测用「整体 mock + 属性 return_value」模式
+    # （cal.is_intraday_session.return_value=True），整体替换须落在调用方模块属性上才命中。
+    with patch("trading.phases.stop_loss.get_gateway", return_value=gw), \
+         patch("trading.phases.stop_loss.calendar") as cal, \
+         patch("trading.phases.stop_loss.qmt_market_data") as qmd, \
+         patch("trading.phases.stop_loss._submit", new=fake_submit):
         # calendar.is_intraday_session 返 truthy（盘中）；is_trading_day 同理
         cal.is_intraday_session.return_value = True
         cal.is_trading_day.return_value = True
@@ -214,8 +220,11 @@ def test_monitor_decide_exit_fallback(monkeypatch):
     positions = {SYM: {"volume": 100, "avg_price": 10.0}}
 
     # patch decide_exit 抛异常（模拟 state/bar 构造错或 compute_stop_price 异常）
-    import trading.engine as eng_mod
-    with patch.object(eng_mod, "decide_exit", side_effect=RuntimeError("构造 state 错")):
+    # W1-A/T2-Task15：decide_exit 经 phases.stop_loss 顶部 `from strategies.neckline.execution import`
+    # 本地绑定 → patch.object(trading.engine, "decide_exit") 不命中（函数体读 phases.stop_loss
+    # __globals__）→ 迁 patch.object(trading.phases.stop_loss, "decide_exit")。
+    import trading.phases.stop_loss as sl_mod
+    with patch.object(sl_mod, "decide_exit", side_effect=RuntimeError("构造 state 错")):
         result = _run_monitor({SYM: ctx}, positions, quotes, submitted=submitted)
     # fallback 命中：should_trigger_stop(9.4, 9.5)=True → 发卖出单（不裸奔）
     assert result["stop_triggered"] == 1
@@ -274,8 +283,13 @@ def test_place_take_profit_tp1_tp2_two_orders_and_same_source():
     }
     eng = TradingEngine()
     submitted: list = []
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(
+    # W1-A/T2-Task15：place_take_profit 函数体迁 trading.phases.exit，其 trading_plan 经
+    # `from trading import trading_plan`（共享模块对象 · 属性级 load_plan patch 命中调用方绑定），
+    # _submit 经 `from trading.gateway_service import _submit`（本地绑定 · 须 patch 调用方模块）。
+    # 故 trading.engine.trading_plan.load_plan → trading.phases.exit.trading_plan.load_plan；
+    # trading.engine._submit → trading.phases.exit._submit（engine re-export 已删 · 双失效根因）。
+    with patch("trading.phases.exit.trading_plan.load_plan", return_value=plan), \
+         patch("trading.phases.exit._submit", new=AsyncMock(
              side_effect=lambda order, **kw: (submitted.append(order),
                                               {"state": "FILLED"})[1])):
         asyncio.run(place_take_profit(SYM, 1000, 10.0, order_id="ord-x"))
@@ -392,7 +406,10 @@ def test_tp_missing_places_fallback(monkeypatch):
     async def _fake_place(symbol, filled_qty, fill_price, order_id):
         placed["n"] += 1
 
-    with _patch("trading.engine.place_take_profit", new=_fake_place):
+    # W1-A/T2-Task15：stop_loss_monitor 内 place_take_profit 经 phases.stop_loss 顶部
+    # `from trading.phases.exit import place_take_profit` 本地绑定 → patch trading.engine.
+    # place_take_profit 不命中 → 迁 trading.phases.stop_loss.place_take_profit（调用方模块）。
+    with _patch("trading.phases.stop_loss.place_take_profit", new=_fake_place):
         result = _run_monitor({SYM: ctx}, positions, quotes)
     assert placed["n"] == 1, "TP 漏挂必须触发盘中补挂"
     assert result["stop_triggered"] == 0, "补挂走限价单路径，monitor 不发市价单"
@@ -421,7 +438,11 @@ def test_quote_blackout_alerts_critical_in_live(monkeypatch):
     """live 模式全标的 last_price 缺失 → CRITICAL（止损链路裸奔必须叫醒人）。"""
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
     ports = _make_ports_with_fresh_blackout()
-    with patch("trading.engine._alert_critical") as alert:
+    # W1-A/T2-Task15：_alert_critical 经 phases.stop_loss 顶部 `from trading.critical import`
+    # 本地绑定 → patch trading.engine._alert_critical 不命中（live 黑屏告警链路失效）→
+    # 迁 trading.phases.stop_loss._alert_critical。blackout 节流仍走 ports.blackout 注入
+    # （Task 3 机制保留 · 仅迁告警 patch 目标）。
+    with patch("trading.phases.stop_loss._alert_critical") as alert:
         _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None}, ports=ports)
     alert.assert_called_once()
     assert "行情源整体失效" in alert.call_args.args[0]
@@ -435,7 +456,8 @@ def test_quote_blackout_throttled_30min(monkeypatch):
     """
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
     ports = _make_ports_with_fresh_blackout()
-    with patch("trading.engine._alert_critical") as alert:
+    # _alert_critical patch 路径同上（trading.phases.stop_loss._alert_critical · 见首个 blackout 测注）。
+    with patch("trading.phases.stop_loss._alert_critical") as alert:
         _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None}, ports=ports)
         _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None}, ports=ports)
     alert.assert_called_once()
@@ -446,7 +468,8 @@ def test_quote_blackout_no_alert_when_price_valid(monkeypatch):
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
     ports = _make_ports_with_fresh_blackout()
     quotes = {SYM: {"last_price": 10.0, "high": 10.2, "low": 9.8}}
-    with patch("trading.engine._alert_critical") as alert:
+    # _alert_critical patch 路径同上（trading.phases.stop_loss._alert_critical · 见首个 blackout 测注）。
+    with patch("trading.phases.stop_loss._alert_critical") as alert:
         _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, quotes, ports=ports)
     alert.assert_not_called()
 
@@ -455,6 +478,7 @@ def test_quote_blackout_no_alert_in_dry_run(monkeypatch):
     """dry_run 无真金风险 → 不告警（防影子模式误报）。"""
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
     ports = _make_ports_with_fresh_blackout()
-    with patch("trading.engine._alert_critical") as alert:
+    # _alert_critical patch 路径同上（trading.phases.stop_loss._alert_critical · 见首个 blackout 测注）。
+    with patch("trading.phases.stop_loss._alert_critical") as alert:
         _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None}, ports=ports)
     alert.assert_not_called()
