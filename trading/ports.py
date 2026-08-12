@@ -17,7 +17,7 @@
     原经 engine 反查读写）违反「模块级可变状态收口」红线——收敛为
     ``QuoteBlackoutThrottle`` dataclass 实例，经 ``EnginePorts.blackout`` 注入 stop_loss_monitor。
     依赖方向：engine 构造 ``QuoteBlackoutThrottle()`` 装入 ports.blackout → stop_loss 经
-    ``ports.blackout.should_alert/mark`` 读写——与 gate/whitelist 同口径（显式参数透传）。
+    ``ports.blackout.fire_if_due`` 原子读写——与 gate/whitelist 同口径（显式参数透传）。
 
     四个依赖逐一对齐原 ``_ACTIVE_ENGINE`` / 模块级路径的语义（行为零变更）：
         gate            ← TradingEngine._pre_open_gate（盘前三段闸，返 (ok, reason)）

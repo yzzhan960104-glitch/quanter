@@ -72,7 +72,7 @@ def get_gateway() -> Optional[object]:
 
     Why 懒构造不在 import 期：QMT 的 xtquant 是 Windows C++ 扩展，开发机/CI
     无该包时 import 会触发 ImportError；放函数内 + try/except 让无 SDK 环境
-    也能正常 import trading_service（仅 get_gateway 返 None）。
+    也能正常 import gateway_service（仅 get_gateway 返 None）。
     """
     global _gateway_singleton
     if _gateway_singleton is not None:
@@ -88,7 +88,7 @@ def get_gateway() -> Optional[object]:
         except Exception as e:
             logger.warning("QMT 网关构造失败（无 xtquant?），走 unavailable：%s", e)
             return None
-    logger.info("无 QMT 凭证，trading_service 走 unavailable 模式")
+    logger.info("无 QMT 凭证，gateway_service 走 unavailable 模式")
     return None
 
 

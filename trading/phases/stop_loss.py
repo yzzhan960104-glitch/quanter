@@ -68,7 +68,7 @@ W1-A/T2 反查切断收口语义：原 phases 经函数内 lazy ``import trading
       patch engine.place_take_profit 失效 → Task 8-19 迁 monkeypatch phases.exit.place_take_profit）。
     - ``_last_quote_blackout_alert_ts`` / ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S``：**W1-A/T2 已收口**
       ——原 engine 模块级节流状态迁 ``trading.alerting.QuoteBlackoutThrottle`` dataclass，经
-      ``ports.blackout`` 注入本函数（``ports.blackout.should_alert(now)`` / ``mark(now)`` 替代原
+      ``ports.blackout`` 注入本函数（``ports.blackout.fire_if_due(now)`` 原子方法替代原
       engine 反查读写）。测试改经构造 ``QuoteBlackoutThrottle(last_ts=0.0)`` 注入 ports 重置节流
       （详见 test_stop_loss_monitor_decide_exit._make_ports_with_fresh_blackout）。
     - ``clock``（``from trading import clock``）：单一时间源（测试经 ``monkeypatch clock.today/now``
