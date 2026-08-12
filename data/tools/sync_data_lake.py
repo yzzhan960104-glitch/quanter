@@ -155,6 +155,13 @@ def build_multiindex(shard_dir: str, out: str) -> None:
     big["date"] = pd.to_datetime(big["date"])
     big = big.set_index(["date", "symbol"]).sort_index()
     os.makedirs(os.path.dirname(out), exist_ok=True)
+    # write-side 守卫（T13-A deferred 收尾）：防残片覆盖。build_multiindex 是全量重算合并，
+    # 正常行数稳定；骤降（new < 现有×0.9）= 疑残片/部分回采 → 拒写保护历史。
+    # ⚠️ safe_overwrite 只验不写（assert_safe_overwrite 语义：骤降抛 WriteGuardError，
+    # 通过则 return None）——必须紧跟 big.to_parquet(out) 真正落盘（与 sync_macro_credit
+    # /sync_daily_incremental/repair_gaps 同范式：safe_overwrite 先验、to_parquet 后写）。
+    from data.integrity import safe_overwrite
+    safe_overwrite(out, big)
     big.to_parquet(out, engine="pyarrow")
     print(f"数据湖写入完成：{out}，{len(big)} 行，{big.index.get_level_values('symbol').nunique()} 标的")
 
@@ -178,6 +185,11 @@ def main(years: int, out: str, resume: bool = True, limit: int | None = None) ->
         df = fetch_qfq(pro, ts_code, start, end)
         if df.empty:
             continue  # 停牌/退市/空 → 跳过不中断
+        # write-side 守卫（T13-A deferred 收尾）：shard 首次写无基线→放行；续传覆盖时
+        # 若新 shard 残片（行数骤降 new < 现有×0.9）→ 拒写防部分回采抹历史。safe_overwrite
+        # 只验不写，紧跟 df.to_parquet(shard) 落盘（与 build_multiindex/sync_macro_credit 同范式）。
+        from data.integrity import safe_overwrite
+        safe_overwrite(shard, df)
         df.to_parquet(shard)
         time.sleep(0.2)  # 令牌桶外双保险节流
     build_multiindex(shard_dir, out)
