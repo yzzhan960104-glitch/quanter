@@ -62,15 +62,18 @@ from trading.critical import _CriticalHalt, _mode, _alert_critical
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
 from trading.account import resolve_account_id as _resolve_account_id
 # W1-A/T2-Task6：place_take_profit / _seq_for_real_oid / _order_state_to_db 反查切断
-# → 顶部直接 import phases.exit / phases.post_close 真身（Task 1 已验 order_state→phases 无环 ·
-# exit / post_close 模块级不反向 import 本文件 · 别名保局部名 _seq_for_real_oid/_order_state_to_db ·
-# patch engine.place_take_profit / engine._seq_for_real_oid / engine._order_state_to_db 失效 →
-# Task 8-19 迁 monkeypatch phases.exit/post_close 物理路径）。
-from trading.phases.exit import place_take_profit
-from trading.phases.post_close import (
-    seq_for_real_oid as _seq_for_real_oid,
-    order_state_to_db as _order_state_to_db,
-)
+# → 直接 import phases.exit / phases.post_close 真身（非 _eng_mod 反查）。
+# W1-A/T2-Task10 修：改 **函数内 lazy import**（非顶部）。Why：顶部 import 触发跨包环——
+# broker.base → trading.__init__ → order_state → phases.exit → gateway_service → broker.base
+# （broker.base 部分初始化, OrderResult 未定义 → ImportError）。Task 6 Step 3 只验了
+# `import trading.phases.X`（trading 先加载不触发环），未验 `import broker.qmt`（broker 先
+# 加载 → 环）。影响 8 个测试文件（含 test_qmt_health_guard._gw() / Task 12）。
+# plan line 116 明示「若仍环暂保 lazy」——按预授权改 lazy。
+# patch 语义：函数内 `from trading.phases.X import Y` 在 call-time 绑定 local 名 →
+# patch("trading.phases.X.Y") 先于调用 → local 拿 mock（与顶部 import 的 patch 命中等价，
+# 因 patch 改的是模块属性 · call-time from-import 读模块属性拿 mock）。已验无 test patch
+# 直打 order_state.place_take_profit/_seq_for_real_oid/_order_state_to_db（grep 确认）→
+# 改 lazy 对 Task 8-19 patch 迁移语义零影响。
 
 # 日志 logger 名硬编码 ``trading.engine``（而非 ``__name__``=trading.order_state）：
 # 3 个 broker 回调函数原是 TradingEngine 实例方法，日志打到 trading.engine logger。
@@ -519,6 +522,9 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
         logger.exception("查 DB has_order(TP1) 失败 symbol=%s（保守跳过，防重复挂）", symbol)
         _tp_already = True  # DB 查询失败保守视为已挂（宁可漏挂人工补，不超卖）
     if direction == "BUY" and not _tp_already:
+        # W1-A/T2-Task10：函数内 lazy import 防跨包环（broker.base→trading→order_state→
+        # phases.exit→gateway_service→broker.base）；plan line 116「若仍环暂保 lazy」预授权。
+        from trading.phases.exit import place_take_profit
         try:
             await place_take_profit(symbol, qty, price, order_id)
         except Exception:
@@ -592,6 +598,8 @@ def order_direction(engine, order_id: str) -> Optional[str]:
     # 内存 gw._orders.order_type 仅兜底（_sync_orders_if_stale 走 query_orders 时才有 order_type）。
     # 竞态兜底：DB 按 real 查 miss 时经 _seq_to_real 反查 seq 再查一次（async_response 晚到）。
     _row = None
+    # W1-A/T2-Task10：函数内 lazy import 防跨包环（见文件顶部注释 · plan line 116 预授权）
+    from trading.phases.post_close import seq_for_real_oid as _seq_for_real_oid
     try:
         _row = _state_store.get_order_by_broker_oid(order_id)
         if _row is None:
@@ -642,6 +650,11 @@ def advance_order_state_from_status(engine, update: Mapping[str, Any]) -> None:
     lookup = str(update.get("order_id", ""))
     if not lookup:
         return
+    # W1-A/T2-Task10：函数内 lazy import 防跨包环（见文件顶部注释 · plan line 116 预授权）
+    from trading.phases.post_close import (
+        seq_for_real_oid as _seq_for_real_oid,
+        order_state_to_db as _order_state_to_db,
+    )
     row = None
     try:
         row = _state_store.get_order_by_broker_oid(lookup)
