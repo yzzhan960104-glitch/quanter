@@ -35,7 +35,10 @@ stop_loss 路径补挂）。逐符号归类如下（与 pre_open.py / stop_loss.
 
 ①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
     **W1-A/T2-Task4 进展**：_state_store 已切断 _eng_mod 反查 → 顶部直接 import。①段以下
-    叙述保留历史；现行反查仅余 _submit / _resolve_account_id（Task 5/6 切断）。
+    叙述保留历史；现行反查仅余 _submit（Task 6 切断）。
+    **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 _eng_mod 反查 → 顶部直接 import
+    trading.account SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id
+    失效 → Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
     - ``_submit``：engine 模块级函数（下单分流），测试 ``patch("trading.engine._submit")``
       （test_place_take_profit_two_legs / _skips_vetoed_symbol / _tp1_qty_round_to_lot /
       _portion_zero/full / _tp1_ge_tp2 / _no_tp1 / _truncates_fractional + stop_loss 路径）。
@@ -46,8 +49,9 @@ stop_loss 路径补挂）。逐符号归类如下（与 pre_open.py / stop_loss.
       **W1-A/T2-Task4 已切顶部直接 import state_store 真身**（原走 engine._state_store 反查，
       现整体 patch engine._state_store 失效，属性级 patch 仍命中 → Task 8-19 迁）。
     - ``_resolve_account_id``：engine 模块级函数（account_id 解析），测试经 env var
-      ``QMT_ACCOUNT_ID`` 驱动（monkeypatch.setenv）——走 ``_eng_mod._resolve_account_id()``
-      在 call-time 解析（与 pre_open.py / order_state.py 同范式）。
+      ``QMT_ACCOUNT_ID`` 驱动（monkeypatch.setenv）。**W1-A/T2-Task5 已切顶部直接 import
+      trading.account.resolve_account_id 真身**（原走 engine._resolve_account_id() 在
+      call-time 解析，现 patch engine._resolve_account_id 失效 → Task 8-19 迁 patch 物理路径）。
 
 ②顶部直接 import（不涉及 engine patch，无循环风险）：
     - ``clock``（``from trading import clock``）：单一时间源（``clock.today()``）。测试经
@@ -72,6 +76,9 @@ import logging
 from trading import clock
 from trading import trading_plan
 from trading import state_store as _state_store
+# W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
+# SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
+from trading.account import resolve_account_id as _resolve_account_id
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.exit）：place_take_profit 原是
 # engine 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -94,7 +101,6 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
     # _state_store / clock / trading_plan 顶部 import（共享模块对象属性 patch 命中，无循环）。
     # local alias 绑定于函数入口：测试 patch 先于调用 → alias 拿 mock；无 patch 拿真值。
     import trading.engine as _eng_mod
-    _resolve_account_id = _eng_mod._resolve_account_id
     _submit = _eng_mod._submit
 
     today = clock.today()

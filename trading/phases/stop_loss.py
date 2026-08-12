@@ -42,7 +42,10 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
     **W1-A/T2-Task4 进展**：无状态符号（_state_store / _mode / _alert_critical / calendar /
     qmt_market_data / _trading_days_between / decide_exit）已切断 _eng_mod 反查 → 顶部直接 import
     物理叶子（见 ②段）。①段以下叙述保留历史（这些符号已迁走）；现行反查仅余 get_gateway /
-    _submit / place_take_profit / _resolve_account_id（Task 5/6/7 切断）。
+    _submit / place_take_profit（Task 6/7 切断）。
+    **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 _eng_mod 反查 → 顶部直接 import
+    trading.account SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id
+    失效 → Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
     以下符号均在 stop_loss 相关测试中经 ``patch("trading.engine._xxx")`` /
     ``monkeypatch.setattr(engine, "_xxx", ...)`` / ``patch("trading.engine.xxx")`` 注入 mock，且
     engine 顶部 re-export 本模块会触发循环——故必须函数体内 lazy 引用，绝不能顶部
@@ -61,8 +64,10 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
       行情黑屏 4 测 / test_stoploss_post_close_gate）——若本模块顶部 ``from trading.critical import
       _mode`` 则拿到 critical 引用，patch engine._mode 不命中，破坏 live 告警断言。故走 _eng_mod。
     - ``_resolve_account_id``：engine 模块级函数（account_id 解析），测试经整体 patch
-      ``trading.engine._state_store`` 驱动——走 ``_eng_mod._resolve_account_id()`` 在 call-time
-      解析（与 pre_open.py / order_state.py 同范式，待 Task 9 收口）。
+      ``trading.engine._state_store`` 驱动——走 ``engine._resolve_account_id()`` 在 call-time
+      解析（与 pre_open.py / order_state.py 同范式，待 Task 9 收口）。**W1-A/T2-Task5 已切顶部
+      直接 import trading.account.resolve_account_id 真身**（原走 engine 反查，现 patch
+      engine._resolve_account_id 失效 → Task 8-19 迁 patch 物理路径）。
     - ``calendar`` / ``qmt_market_data``：测试既 ``patch("trading.engine.calendar")`` /
       ``patch("trading.engine.qmt_market_data")``（整体 MagicMock · test_stop_loss_monitor_decide_exit
       _run_monitor / test_engine_stoploss_inject）又 ``monkeypatch.setattr(engine.calendar, ...)`` /
@@ -80,10 +85,11 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
       (last_ts=0.0)`` 注入 ports 重置节流（原 ``monkeypatch.setattr("trading.engine._last_quote_
       blackout_alert_ts", 0.0)`` 已删，详见 test_stop_loss_monitor_decide_exit._make_ports_with_
       fresh_blackout）。本项不再属「engine 模块级符号反查」清单（仅历史注释保留）。
-      现行反查项仅余：``get_gateway`` / ``_submit`` / ``place_take_profit`` /
-      ``_resolve_account_id``（Task 5/6/7 切断）。无状态符号（_state_store / _mode /
+      现行反查项仅余：``get_gateway`` / ``_submit`` / ``place_take_profit``（Task 6/7 切断）。
+      无状态符号（_state_store / _mode /
       _alert_critical / calendar / qmt_market_data / _trading_days_between / decide_exit）
       W1-A/T2-Task4 已切断，改顶部直接 import 物理叶子。
+      _resolve_account_id W1-A/T2-Task5 已切断 → 顶部直接 import trading.account 真身。
 
 ②顶部直接 import（不涉及 engine patch，无循环风险）：
     - ``clock``（``from trading import clock``）：单一时间源（测试经 ``monkeypatch clock.today/now``
@@ -121,6 +127,9 @@ from trading import calendar
 from trading import position_book as _position_book
 from trading import qmt_market_data
 from trading import state_store as _state_store
+# W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
+# SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
+from trading.account import resolve_account_id as _resolve_account_id
 # _CriticalHalt（L1 致命停调度异常，按类身份 catch 不被 patch）。
 # W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 顶部直接 import critical 真身
 # （critical 是 SSoT 基础设施域叶子，不反向 import 本文件 · patch engine._mode 失效 → Task 8-19 迁）。
@@ -227,7 +236,7 @@ async def stop_loss_monitor(
     # T10（state-store-redesign §4.3）止损 DB 幂等辅助闭包：
     # _stop_already_placed：查 has_order(STOP)，已挂未终态 → 跳过（不重复发卖）
     # _record_stop：发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)
-    _aid = _eng_mod._resolve_account_id()
+    _aid = _resolve_account_id()
     # C-6 V2：业务日期 key（has_order(STOP)/insert_order(STOP) trade_date）走 clock.today。
     _today = clock.today()
 
@@ -644,7 +653,7 @@ async def close_expired_positions(gw: Any, expired: list[dict]) -> dict:
         logger.exception("平超期持仓取行情异常（按无价处理，逐只跳过）")
     n_closed = 0
     today_close = clock.today()
-    _aid = _eng_mod._resolve_account_id()
+    _aid = _resolve_account_id()
     for e in expired:
         sym = e["symbol"]
         pos = positions.get(sym)

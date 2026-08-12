@@ -39,6 +39,8 @@ T1 Task 3 缝合点 #2 设计（brief Step 2 · 临时耦合 engine · Task 9 �
   **W1-A/T2-Task4 进展**：_mode / _alert_critical 已切断 → 顶部直接 import critical 真身；
   现行反查仅余 _resolve_account_id（Task 5）/ _seq_for_real_oid / _order_state_to_db（Task 6）。
   以下叙述保留历史（patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁）。
+  **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 → 顶部直接 import trading.account SSoT
+  真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
   ``patch("trading.engine._alert_critical")`` / ``monkeypatch(engine, "_mode")`` 等测试命中
   （若 order_state 顶部 ``from trading.critical import _alert_critical`` 则拿到 critical 模块
    引用，patch engine._alert_critical 不命中，破坏 test_direction_unknown_* 等断言）。
@@ -60,6 +62,9 @@ from trading.types.order_state import OrderState
 # W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 同 critical 顶部直接 import
 # （patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁 monkeypatch critical._mode 等）。
 from trading.critical import _CriticalHalt, _mode, _alert_critical
+# W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
+# SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
+from trading.account import resolve_account_id as _resolve_account_id
 
 # 日志 logger 名硬编码 ``trading.engine``（而非 ``__name__``=trading.order_state）：
 # 3 个 broker 回调函数原是 TradingEngine 实例方法，日志打到 trading.engine logger。
@@ -354,7 +359,6 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
     # T1 Task 3：engine 模块级符号经 _eng_mod 引用（保 patch/monkeypatch 命中 + 避循环）。
     # _state_store / clock 顶部 import（不涉及 engine patch），_CriticalHalt 同上（异常类）。
     import trading.engine as _eng_mod
-    _resolve_account_id = _eng_mod._resolve_account_id
     # T1-Task9 收口缝合点 #2：place_take_profit 经 _eng_mod 反查（engine re-export
     # phases.exit.place_take_profit），不再经 engine 实例引用——消除 order_state→engine
     # 实例的 take_profit 耦合（单向依赖 order_state→phases.exit 经 engine re-export）。

@@ -47,8 +47,10 @@ DB / account_daily 收盘快照 / _post_close wrapper 读账本 / e2e probabilis
 ①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
     **W1-A/T2-Task4 进展**：无状态符号（_mode / _alert_critical / _state_store /
     _cancel_all_open_orders）已切断 _eng_mod 反查 → 顶部直接 import 物理叶子（critical /
-    state_store / io.breaker）。①段以下叙述保留历史；现行反查仅余 get_gateway /
-    _resolve_account_id（Task 5/7 切断）。
+    state_store / io.breaker）。①段以下叙述保留历史；现行反查仅余 get_gateway（Task 7 切断）。
+    **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 _eng_mod 反查 → 顶部直接 import
+    trading.account SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id
+    失效 → Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
     以下符号均在 post_close 相关测试中经 ``patch("trading.engine._xxx")`` /
     ``monkeypatch.setattr(engine, "_xxx", ...)`` / ``monkeypatch.setattr(engine, "xxx", ...)`` 注入
     mock，且 engine 顶部 re-export 本模块会触发循环——故必须函数体内 lazy 引用，绝不能顶部
@@ -79,8 +81,10 @@ DB / account_daily 收盘快照 / _post_close wrapper 读账本 / e2e probabilis
     - ``_resolve_account_id``：engine 模块级函数（account_id 解析）。test_post_close_snapshot_close_equity
       / test_post_close_inserts_closed_event / test_post_close_tp1_filled_event 用
       ``account_id = engine._resolve_account_id()`` 预置 state_store，post_close 内必须读同一
-      account_id 才能命中预置行——走 ``_eng_mod._resolve_account_id()`` 在 call-time 解析（与
-      pre_open.py / stop_loss.py / order_state.py 同范式，待 Task 9 收口）。
+      account_id 才能命中预置行——走 ``engine._resolve_account_id()`` 在 call-time 解析（与
+      pre_open.py / stop_loss.py / order_state.py 同范式，待 Task 9 收口）。**W1-A/T2-Task5 已切
+      顶部直接 import trading.account.resolve_account_id 真身**（原走 engine 反查保命中，现
+      patch engine._resolve_account_id 失效 → Task 8-19 迁 patch 物理路径）。
 
 ②顶部直接 import（不涉及 engine patch，无循环风险 · 共享模块对象属性 patch 命中）：
     - ``clock``（``from trading import clock``）：单一时间源（测试经 ``monkeypatch clock.today``
@@ -124,6 +128,9 @@ from trading.ports import EnginePorts
 from trading import clock, dynamic_whitelist, reconcile_job
 from trading import position_book as _position_book
 from trading import state_store as _state_store
+# W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
+# SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
+from trading.account import resolve_account_id as _resolve_account_id
 # W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 顶部直接 import critical 真身
 # （critical 是 SSoT 基础设施域叶子 · patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁）。
 from trading.critical import _mode, _alert_critical
@@ -190,7 +197,6 @@ async def post_close(
     # （不涉及 engine patch · 共享模块对象属性 patch 命中）。
     import trading.engine as _eng_mod
     get_gateway = _eng_mod.get_gateway
-    _resolve_account_id = _eng_mod._resolve_account_id
 
     result: dict = {"date": date}
     if gw is None:

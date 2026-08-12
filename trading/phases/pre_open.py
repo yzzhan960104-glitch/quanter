@@ -28,8 +28,11 @@ engine alerts 等）。逐符号归类如下：
     **W1-A/T2-Task4 进展**：无状态符号（_mode / _alert_critical / _state_store /
     _trading_days_between / _cancel_all_open_orders）已切断 _eng_mod 反查 → 顶部直接 import
     物理叶子（critical / state_store / compute.stop / io.breaker）。①段以下叙述保留历史；
-    现行反查仅余 _resolve_account_id / get_gateway / _submit / _scan_expired_positions /
-    _close_expired_positions（Task 5/6/7 切断）。
+    现行反查仅余 get_gateway / _submit / _scan_expired_positions /
+    _close_expired_positions（Task 6/7 切断）。
+    **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 _eng_mod 反查 → 顶部直接 import
+    trading.account SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id
+    失效 → Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
     以下符号均在 pre_open 相关测试中经 ``patch("trading.engine._xxx")`` /
     ``monkeypatch.setattr(engine, "_xxx", ...)`` 注入 mock，且 engine 顶部 re-export 本模块
     会触发循环——故必须函数体内 lazy 引用，绝不能顶部 ``from trading.engine import _xxx``：
@@ -45,7 +48,9 @@ engine alerts 等）。逐符号归类如下：
     - ``_resolve_account_id``：engine 模块级函数（原 T1-Task5 eod_plan 走「复制 2 行」范式，
       本 Task **不沿用复制范式**——test_cancel_all_account_id 经 ``patch("trading.engine._resolve_account_id")``
       驱动 pre_open 验 account_id 透传，复制版拿不到 patch → 测试红。改走 _eng_mod 反查保命中，
-      待 Task 9 收口为单点）。
+      待 Task 9 收口为单点）。**W1-A/T2-Task5 已切顶部直接 import trading.account.resolve_account_id
+      真身**（原走 engine._resolve_account_id() 在 call-time 解析，现 patch
+      engine._resolve_account_id 失效 → Task 8-19 迁 patch 物理路径）。
     - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，测试既
       ``patch("trading.engine._state_store")``（整体 MagicMock · test_pre_open_l1_halt / test_l2 /
       test_cancel_all_account_id）又 ``patch("trading.engine._state_store.list_signals_with_meta_by_plan_date")``
@@ -84,6 +89,9 @@ from trading.ports import EnginePorts
 # engine._state_store 失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock, dynamic_whitelist, job_ledger
 from trading import state_store as _state_store
+# W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
+# SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
+from trading.account import resolve_account_id as _resolve_account_id
 # _CriticalHalt（L1 致命停调度异常，按类身份 catch 不被 patch）+ _trade_cfg（纯 env 参数读，
 # pre_open 路径无 patch engine._trade_cfg 测试）。critical 是 SSoT 基础设施域，不反向 import 本文件。
 # W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 同 critical 顶部直接 import
@@ -197,7 +205,6 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     # call-time 解析：测试 patch 整体属性时拿 mock，patch 属性级（_state_store.xxx）时拿真模块对象。
     # clock / _trade_cfg / _CriticalHalt / dynamic_whitelist 顶部直接 import（不涉及 engine patch）。
     import trading.engine as _eng_mod
-    _resolve_account_id = _eng_mod._resolve_account_id
     get_gateway = _eng_mod.get_gateway
     _submit = _eng_mod._submit
     _scan_expired_positions = _eng_mod._scan_expired_positions
