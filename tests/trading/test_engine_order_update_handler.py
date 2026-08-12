@@ -18,6 +18,29 @@ TDD 约定（与 Task 7/8/9 一致）：
     本仓库 pytest-asyncio 为 strict 模式（pytest.ini 未配 asyncio_mode），
     历史 engine 测试一律 ``asyncio.run(...)`` 同步驱动 async。本测试沿袭该范式，
     避免引入 @pytest.mark.asyncio 装饰器造成风格分叉（见 Task8 fix 备注）。
+
+W1-A/T2-Task12 patch 物理路径迁移（handle_order_update 调用链归属判定）：
+    本文件测 ``eng._handle_order_update``（engine 薄 wrapper → 委托 order_state.
+    handle_order_update 函数体）+ 直接调 ``engine.place_take_profit``（phases.exit
+    re-export 别名，函数体 ``__globals__`` 属 phases.exit）。调用链全程不经 engine
+    模块全局名解析符号 → patch trading.engine.X 失效，迁物理路径（按「符号被读取时的
+    ``__globals__`` 归属模块」判）：
+
+    - ``_submit`` ×12：phases.exit 顶部 ``from trading.gateway_service import _submit``
+      本地绑定（exit.py），place_take_profit 函数体读 phases.exit._submit → 迁
+      ``trading.phases.exit._submit``（Task7 切断 engine 反查后 patch engine 失效）。
+    - ``place_take_profit`` ×6：order_state.handle_order_update 内 lazy import
+      ``from trading.phases.exit import place_take_profit``（call-time 读 phases.exit
+      模块属性）→ 迁 ``trading.phases.exit.place_take_profit``。
+    - ``_mode`` ×2 / ``_alert_critical`` ×2：handle_order_update 读 order_state 顶部
+      ``from trading.critical import _mode, _alert_critical`` 本地绑定 → 迁
+      ``trading.order_state._mode`` / ``trading.order_state._alert_critical``
+     （Task4 切断 engine 反查后 patch engine / setattr _eng_mod 失效）。
+    - ``trading_plan.load_plan`` ×12（B 共享属性·不迁）：trading_plan 是共享模块对象，
+      patch ``trading.engine.trading_plan.load_plan`` 改模块对象属性 → phases.exit /
+      order_state ``import trading_plan`` 同对象命中，保 engine 路径。
+
+    绿门：28 passed（baseline 12 fail/16 pass → 全绿，修 Task4-7 遗留 patch 失效）。
 """
 from __future__ import annotations
 
@@ -148,10 +171,13 @@ def test_buy_fill_places_take_profit_once_idempotent(db):
     gw._orders = {"123": {"order_type": 23}}
     eng._gw = gw
     # Phase 2：不 mock _place_take_profit（让 DB insert_order 自然写入 → 幂等键生效）
-    # 只 mock _submit（不真挂单到 broker），让 _place_take_profit 内部 insert_order 落 DB
+    # 只 mock _submit（不真挂单到 broker），让 _place_take_profit 内部 insert_order 落 DB。
+    # W1-A/T2-Task12：_submit 迁 trading.phases.exit._submit——handle_order_update →
+    # lazy import phases.exit.place_take_profit → 函数体读 phases.exit 本地 _submit
+    # （exit.py 顶部 ``from trading.gateway_service import _submit``），patch engine 不命中。
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("infra.notifier.NotificationManager"), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(eng._handle_order_update(update))  # 首次成交回报 → 挂 TP1
         assert submit_mock.call_count >= 1  # 至少调了 1 次（tp1 单腿）
         first_count = submit_mock.call_count
@@ -214,9 +240,12 @@ def test_trade_update_inserts_fill_and_event(state_db):
     eng._gw._orders = {"123": {"order_type": 23}}  # BUY
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
+    # W1-A/T2-Task12：place_take_profit 迁 trading.phases.exit.place_take_profit——
+    # handle_order_update 内 lazy import ``from trading.phases.exit import
+    # place_take_profit``（call-time 读 phases.exit 模块属性），patch engine 不命中。
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
-        with patch("trading.engine.place_take_profit", new=AsyncMock()):
+        with patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
             asyncio.run(eng._handle_order_update(_buy_fill_update()))
     account_id = engine._resolve_account_id()
     trade_id = f"{account_id}_300001.SZ_{_today_str()}"
@@ -253,7 +282,7 @@ def test_tp_idempotent_via_db(state_db, monkeypatch):
     with patch("trading.engine.trading_plan.load_plan", return_value=_plan_with_tp()), \
          patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
-        with patch("trading.engine.place_take_profit", new=_counting_tp):
+        with patch("trading.phases.exit.place_take_profit", new=_counting_tp):
             asyncio.run(eng._handle_order_update(_buy_fill_update()))  # 已有 TP1 → 跳过
     assert tp_calls["n"] == 0  # DB 幂等：已有 TP1 不重挂
 
@@ -273,7 +302,7 @@ def test_tp_inserts_two_orders(state_db):
     plan = _plan_with_tp()
     plan["orders"][0]["order"]["qty"] = 1000
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED", "order_id": "s1"})):
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED", "order_id": "s1"})):
         asyncio.run(engine.place_take_profit("300001.SZ", 1000, 10.5, order_id="123"))
     account_id = engine._resolve_account_id()
     today = _today_str()
@@ -312,7 +341,7 @@ def test_place_take_profit_two_legs(db):
         }],
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(engine.place_take_profit("300001.SZ", 1000, 10.5, order_id="ord-1"))
     # _submit 必被调两次（两张限价卖单）
     assert submit_mock.call_count == 2
@@ -357,7 +386,7 @@ def test_place_take_profit_skips_vetoed_symbol(db, monkeypatch):
 
     eng = engine.TradingEngine()
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(engine.place_take_profit("300009.SZ", 1000, 10.5, order_id="ord-veto"))
     # vetoed 标的 _submit 不应被调
     assert submit_mock.call_count == 0
@@ -381,7 +410,7 @@ def test_place_take_profit_tp1_qty_round_to_lot(db):
         }],
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(engine.place_take_profit("300002.SZ", 430, 10.5, order_id="ord-2"))
     legs = [call.args[0] for call in submit_mock.call_args_list]
     tp1_leg = next(leg for leg in legs if leg.price == 11.5)
@@ -403,7 +432,7 @@ def test_place_take_profit_portion_zero_only_tp2(db):
         }],
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(engine.place_take_profit("300003.SZ", 1000, 10.5, order_id="ord-3"))
     # 只调一次（tp2 全量）
     submit_mock.assert_called_once()
@@ -424,7 +453,7 @@ def test_place_take_profit_portion_full_only_tp1(db):
         }],
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(engine.place_take_profit("300004.SZ", 1000, 10.5, order_id="ord-4"))
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
@@ -453,7 +482,7 @@ def test_place_take_profit_tp1_ge_tp2_falls_back_to_tp2_only(db):
         }],
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(engine.place_take_profit("300005.SZ", 1000, 10.5, order_id="ord-5"))
     # tp1 ≥ tp2 时 sanity 只挂 tp2
     submit_mock.assert_called_once()
@@ -475,7 +504,7 @@ def test_place_take_profit_no_tp1_in_plan_falls_back_to_tp2_only(db):
         }],
     }
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(engine.place_take_profit("300006.SZ", 1000, 10.5, order_id="ord-6"))
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
@@ -527,7 +556,7 @@ def test_place_take_profit_truncates_fractional_qty_to_int(db):
     #   - record_live_trade / NotificationManager patch 掉日志与通知副作用。
     with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
          patch("infra.notifier.NotificationManager"), \
-         patch("trading.engine._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
+         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(eng._handle_order_update(update))
     # _submit 必被调一次（挂止盈）；OrderRequest.qty 必须 == 100（int 截断零股）
     submit_mock.assert_called_once()
@@ -755,7 +784,7 @@ def test_e2e_real_callback_chain_fills_and_places_tp(db, monkeypatch):
                         lambda d: {"orders": [{"order": {"symbol": "600000.SH"},
                                                "take_profit": 11.0, "tp1": 10.8,
                                                "tp1_portion": 0.0}]})
-    monkeypatch.setattr("trading.engine._submit",
+    monkeypatch.setattr("trading.phases.exit._submit",
                         AsyncMock(return_value={"order_id": "tp_seq", "state": "SUBMITTED"}))
     # ① async_response 回填 real
     asyncio.run(_pump(gw, lambda: gw.on_order_stock_async_response(
@@ -823,7 +852,7 @@ def test_trade_replay_notifies_only_once(state_db, monkeypatch, tmp_path):
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     with patch("infra.notifier.NotificationManager") as NM, \
-         patch("trading.engine.place_take_profit", new=AsyncMock()):
+         patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次 → insert_fill=True → 钉钉推 1 次
         asyncio.run(eng._handle_order_update(update))   # 重放 → insert_fill=False → 钉钉不推
@@ -872,7 +901,7 @@ def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     # 关键：不 patch state_store.insert_fill / insert_trade_event —— 让真函数写真 DB
     with patch("infra.notifier.NotificationManager") as NM, \
-         patch("trading.engine.place_take_profit", new=AsyncMock()):
+         patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次
         asyncio.run(eng._handle_order_update(update))   # 重放
@@ -937,13 +966,16 @@ def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, 
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     alert_calls = []
     monkeypatch.setattr(
-        "trading.engine._alert_critical", lambda msg: alert_calls.append(msg))
+        "trading.order_state._alert_critical", lambda msg: alert_calls.append(msg))
     # Fix1：方向未知 _alert_critical 加了 live 守卫，dry_run 不推钉钉。
     # 本测试断「_alert_critical 仍触发」必须 patch _mode=live 才能命中守卫。
-    import trading.engine as _eng_mod
-    monkeypatch.setattr(_eng_mod, "_mode", lambda: "live")
+    # W1-A/T2-Task12：handle_order_update（order_state.py:325）读 order_state 顶部
+    # ``from trading.critical import _mode, _alert_critical`` 本地绑定 → patch
+    # engine._mode / engine._alert_critical 不命中函数体（_eng_mod setattr 同理失效）
+    # → 迁 trading.order_state 物理路径（上方 _alert_critical setattr + 本处 _mode）。
+    monkeypatch.setattr("trading.order_state._mode", lambda: "live")
     with patch("infra.notifier.NotificationManager") as NM, \
-         patch("trading.engine.place_take_profit", new=AsyncMock()):
+         patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次（方向未知）
         asyncio.run(eng._handle_order_update(update))   # 重放（方向未知）
@@ -1000,12 +1032,14 @@ def test_direction_none_writes_trade_event_audit(state_db, monkeypatch):
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     alert_calls = []
     monkeypatch.setattr(
-        "trading.engine._alert_critical", lambda msg: alert_calls.append(msg))
-    # patch _mode=live 让 _alert_critical 守卫命中（与既有 direction=None 测试同口径）
-    import trading.engine as _eng_mod
-    monkeypatch.setattr(_eng_mod, "_mode", lambda: "live")
+        "trading.order_state._alert_critical", lambda msg: alert_calls.append(msg))
+    # patch _mode=live 让 _alert_critical 守卫命中（与既有 direction=None 测试同口径）。
+    # W1-A/T2-Task12：handle_order_update 读 order_state 本地 _mode/_alert_critical
+    # （顶部 ``from trading.critical import`` 绑定）→ 迁 trading.order_state 物理路径
+    # （与 test_trade_direction_unknown_writes_no_csv_no_notify 同口径）。
+    monkeypatch.setattr("trading.order_state._mode", lambda: "live")
     with patch("infra.notifier.NotificationManager") as NM, \
-         patch("trading.engine.place_take_profit", new=AsyncMock()):
+         patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
         NM.get_default.return_value = fake_mgr
         asyncio.run(eng._handle_order_update(update))   # 首次（方向未知）
         asyncio.run(eng._handle_order_update(update))   # 重放（方向未知，幂等校验）
@@ -1048,7 +1082,7 @@ def test_e2e_trade_before_async_response_race(db, monkeypatch):
                              "600000.SH", "buy", "OPEN", 100, 10.0,
                              broker_oid=str(seq), state="SUBMITTED")
     gw._seq_to_real = {seq: real}
-    monkeypatch.setattr("trading.engine._submit",
+    monkeypatch.setattr("trading.phases.exit._submit",
                         AsyncMock(return_value={"order_id": "tp_seq", "state": "SUBMITTED"}))
     # trade 先到（async_response 未回填）：方向经 seq 反查 DB side 仍应落账
     asyncio.run(_pump(gw, lambda: gw.on_stock_trade(SimpleNamespace(
