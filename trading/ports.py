@@ -21,7 +21,7 @@
 
     四个依赖逐一对齐原 ``_ACTIVE_ENGINE`` / 模块级路径的语义（行为零变更）：
         gate            ← TradingEngine._pre_open_gate（盘前三段闸，返 (ok, reason)）
-        whitelist_add   ← self._dynamic_whitelist.update（set 原地并集，对齐原 ``|=``
+        whitelist_add   ← self._dynamic_whitelist.update（set 原地并集，对齐原 ``|=``）
         whitelist_clear ← self._dynamic_whitelist.clear（set 原地清空，对齐原 ``.clear()``）
         blackout        ← 模块级 ``_last_quote_blackout_alert_ts`` + ``_INTERVAL``（节流状态机）
 """

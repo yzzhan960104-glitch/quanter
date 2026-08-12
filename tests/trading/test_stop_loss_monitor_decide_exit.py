@@ -399,7 +399,7 @@ def test_tp_missing_places_fallback(monkeypatch):
 
 
 # ============================================================================
-# R2 降级告警：行情源整体失效（xtata 黑屏）→ live CRITICAL，30min 节流
+# R2 降级告警：行情源整体失效（xtdata 黑屏）→ live CRITICAL，30min 节流
 # W1-A/T2：节流状态从 engine 模块级 _last_quote_blackout_alert_ts 迁 ports.blackout
 # （QuoteBlackoutThrottle dataclass）——经 ports 注入 + 重置节流（构造 QuoteBlackoutThrottle
 # (last_ts=0.0) 等价原 monkeypatch("trading.engine._last_quote_blackout_alert_ts", 0.0)）。

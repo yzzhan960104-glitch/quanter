@@ -19,10 +19,10 @@
     - ``mark(now)`` ⟺ ``last_ts = now``（原 ``_last_ts = _now_mono``）。
     - 默认 ``interval=1800.0``（= ``30 * 60``）对齐原 ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S``。
     - 默认 ``last_ts=0.0`` 对齐原模块级初值。
-    - 线程安全（``threading.Lock``，与 ``trading/critical.py`` 同范式）：保护
-      should_alert + mark 的 read-modify-write 原子性。生产路径 IntervalTrigger(30s) 单驱动，
-      但 catchup 补跑 / 手工触发 / fire_and_forget daemon 线程理论可并发；Lock 把节流判定
-      收为互斥区，杜绝告警风暴（M4 红线）。
+    - 线程安全（``threading.Lock``，与 ``trading/critical.py`` 同范式）：``fire_if_due``
+      在单一 Lock 内 check+mark 原子返回——杜绝并发双发告警（M4 红线）。``should_alert`` /
+      ``mark`` 是无跨步原子保证的分解方法（仅供单线程查询/兼容），生产路径勿组合调用
+      （check-then-act 非原子，IntervalTrigger catchup 重叠 / daemon 并发下可双发）。
 
 T1 拆分红线（缝合点设计）：
     本模块属「集群 A · 最独立基础设施」（零下游交易耦合）：不依赖 engine / phases / 网关 /
@@ -46,19 +46,17 @@ class QuoteBlackoutThrottle:
         事件推 60+ 条告警/小时（运营群麻木，违背 M4「告警风暴」红线）。本类把告警频次
         降至「至多每 30min 一条」，平衡「尽快知会」与「不刷屏」。
 
-    线程安全（``threading.RLock``，与 ``trading/critical.py`` ``_halt`` 顺序契约互斥同范式）：
-        ``should_alert`` + ``mark`` 各自加锁（方法级互斥）；调用方需「should_alert → mark」
-        原子串行时显式 ``with throttle._lock:`` 包裹两步——``RLock`` 可重入，允许外部
-        持锁后调用本类方法（``Lock`` 不可重入会自死锁）。
-        生产路径 IntervalTrigger(30s) 单驱动下无须显式组合，但 catchup 补跑 / 手工触发
-        / fire_and_forget daemon 线程理论可重叠；显式 ``with _lock`` 留给需要原子串行的
-        调用方（stop_loss_monitor 当前用 should_alert 判 + mark 写两步，未来可收敛为单
-        ``fire_if_due`` 方法 follow-up）。
+    线程安全（``threading.Lock``，与 ``trading/critical.py`` ``_halt`` 顺序契约互斥同范式）：
+        ``fire_if_due`` 是**生产主路径**——在单一 Lock 内 check+mark 原子返回，并发下至多
+        一条线程拿到 True（杜绝 IntervalTrigger catchup 重叠 / fire_and_forget daemon 线程
+        并发双发）。``should_alert`` / ``mark`` 是**无跨步原子保证**的分解方法，仅供单线程
+        查询/兼容旧调用方语义——生产路径勿组合调用（check-then-act 非原子，并发可双发）。
 
-    Why ``RLock`` 而非 ``Lock``：
-        ``should_alert`` / ``mark`` 单独公开，调用方组合「check-then-act」时需要外层
-        持锁——非重入 ``Lock`` 会在方法二次获取时死锁。``RLock`` 同线程可重入，方法级
-        加锁与外层组合锁并存无冲突（与 GIL 下 Python 互斥语义最小代价对齐）。
+    Why ``Lock``（非 ``RLock``）：
+        ``fire_if_due`` 单方法单次获取锁，无需可重入；``should_alert`` / ``mark`` 各自单次
+        加锁亦无重入需求。``Lock`` 语义更窄、意图更明（对齐 brief 原意「threading.Lock，
+        与 critical.py 同范式」），杜绝「外部 ``with _lock`` 组合 should_alert+mark」这类
+        本不该存在的反模式调用（生产已统一走 ``fire_if_due`` 原子路径）。
 
     Attributes:
         last_ts: 上次告警时间戳（``time.monotonic()`` 域，单调时钟避开系统时钟漂移）。
@@ -72,18 +70,23 @@ class QuoteBlackoutThrottle:
     interval: float = 1800.0  # 30 * 60（原 _QUOTE_BLACKOUT_ALERT_INTERVAL_S）
 
     # ---------------------------------------------------------------------------
-    # __post_init__ 在 dataclass 字段赋值后建立 RLock（field 不能直接持有 RLock ——
-    # threading.RLock 不可 pickle / 不可默认工厂共享，必须在实例化时新建）。
+    # __post_init__ 在 dataclass 字段赋值后建立 Lock（field 不能直接持有 Lock ——
+    # threading.Lock 不可 pickle / 不可默认工厂共享，必须在实例化时新建）。
     # ---------------------------------------------------------------------------
     def __post_init__(self) -> None:
-        # 可重入互斥锁：保护 should_alert / mark 的 read-modify-write 语义，
-        # 允许调用方在 ``with throttle._lock:`` 下原子串行调 should_alert + mark。
+        # 互斥锁：``fire_if_due`` 在单一 Lock 内 check+mark 原子返回，杜绝并发双发。
         # 与 trading/critical.py _halt 顺序契约互斥同范式（critical 是 halt 顺序互斥，
         # 本类是节流状态机互斥——两者都是「daemon 线程下防 race」的同一套手段）。
-        object.__setattr__(self, "_lock", threading.RLock())
+        # dataclass 非 frozen，可直接赋值（M-7：简化 object.__setattr__ 冗余写法）。
+        self._lock = threading.Lock()
 
     def should_alert(self, now: float) -> bool:
         """判定本轮是否应推告警（``now - last_ts >= interval`` 即可告警）。
+
+        ⚠️ 单步查询，无跨步原子保证：调用方组合「should_alert → mark」是非原子的
+        check-then-act——并发下两线程可同时看到 True 都去 mark → 双发告警。生产路径
+        请用 ``fire_if_due``（单一 Lock 内 check+mark 原子返回）。本方法仅供单线程
+        查询/兼容旧调用方语义。
 
         Args:
             now: 当前单调时钟时间戳（``time.monotonic()``，调用方传入）。
@@ -100,6 +103,9 @@ class QuoteBlackoutThrottle:
     def mark(self, now: float) -> None:
         """记录本轮告警时间戳（``last_ts = now``），作为下一轮节流判定基准。
 
+        ⚠️ 单步写入，无跨步原子保证：必须与 ``should_alert`` 原子组合才安全，裸组合
+        见 ``should_alert`` 警告。生产路径用 ``fire_if_due``。本方法仅供单线程/兼容。
+
         必须在 ``should_alert(now)=True`` 后调用以更新基准；忘调 → 节流失效（每轮都触发）。
 
         Args:
@@ -110,3 +116,27 @@ class QuoteBlackoutThrottle:
         """
         with self._lock:
             self.last_ts = now
+
+    def fire_if_due(self, now: float) -> bool:
+        """原子节流判定 + 时间戳更新（**生产主路径**，stop_loss_monitor 唯一调用入口）。
+
+        在单一 ``with self._lock:`` 内完成 check（``now - last_ts >= interval``）+ mark
+        （``last_ts = now``）——check-then-act 跨步被收进互斥区，并发下至多一条线程返回
+        True（其余线程看到已更新的 last_ts → 返回 False），杜绝 IntervalTrigger catchup
+        重叠 / fire_and_forget daemon 线程并发下的告警双发（M4 红线）。
+
+        单线程下与 ``should_alert(now)=True; mark(now)`` 两步语义逐字等价（行为等价红线）；
+        并发下更安全（原子）。故生产路径统一走本方法，``should_alert`` / ``mark`` 不再
+        组合调用。
+
+        Args:
+            now: 当前单调时钟时间戳（``time.monotonic()``，调用方传入）。
+
+        Returns:
+            True=应告警（已过窗口，本调用已原子更新 last_ts）；False=节流窗口内（不动 last_ts）。
+        """
+        with self._lock:
+            if (now - self.last_ts) >= self.interval:
+                self.last_ts = now
+                return True
+            return False

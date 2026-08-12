@@ -218,6 +218,11 @@ def build_job_runner(
                     gw=None,  # 让真身走 patched get_gateway（broker.attach 注入）
                     monitor_ctx=monitor_ctx,
                     pending_ctx=pending_ctx,
+                    # M-1 fix：显式传 eng._ports——保 e2e blackout 节流语义完整（不传则
+                    # ports=None 守卫跳过 blackout 分支，e2e 长周期回测的行情黑屏 30min
+                    # 节流行为将不参与验证；eng._ports 由 TradingEngine 构造时装配默认
+                    # QuoteBlackoutThrottle，与生产 _stoploss 路径同源）。
+                    ports=eng._ports,
                 ))
                 # design §4.2：盘中扫描 TP 限价单（stk_mins 累积 high>=tp 真实价格触发）
                 # + 注入 STOP/TP 成交回报（fill/position/order 状态推进）
