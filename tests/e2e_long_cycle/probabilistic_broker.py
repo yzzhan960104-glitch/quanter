@@ -377,8 +377,28 @@ class ProbabilisticBroker:
                 t_date, up_to)
             return result
 
+        # W1-A/T2-Task20 fix（同 aeb02036 fix(test_e2e_trading_flow) 根因）：
+        # phases 顶部 ``from trading.gateway_service/io.breaker import`` 在 phases 模块
+        # 命名空间绑定【本地引用】——patch ``trading.engine.X``（re-export 别名）不影响
+        # phases 的 from…import 本地绑定，调用方 ``gw = get_gateway()`` 仍读原函数返 None
+        # → e2e orchestrator 三阶段（pre_open/stoploss/post_close）"网关未装配"早返 skip。
+        # broker.attach 是 e2e 单一 gw 注入点（orchestrator.py L157/209/240 三处 with 包裹），
+        # 必须把 4 个 phases 调用方模块（pre_open/stop_loss/post_close/exit）的本地引用同步 patch。
+        # engine.X 保 patch：_health_guard（engine.py 实例方法）读 engine 模块全局 ``get_gateway``
+        # （engine.py:367 自有定义），与 phases 本地引用两口子分离（Task 7 fix 同款双口子）。
+        # _cancel_all_open_orders 仅 pre_open/post_close 读（stop_loss/exit 不 import）。
         with patch("trading.engine.get_gateway", lambda: gw), \
              patch("trading.engine._submit", _submit_mock), \
              patch("trading.engine._cancel_all_open_orders",
-                   AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})):
+                   AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
+             patch("trading.phases.pre_open.get_gateway", lambda: gw), \
+             patch("trading.phases.pre_open._submit", _submit_mock), \
+             patch("trading.phases.pre_open._cancel_all_open_orders",
+                   AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
+             patch("trading.phases.stop_loss.get_gateway", lambda: gw), \
+             patch("trading.phases.stop_loss._submit", _submit_mock), \
+             patch("trading.phases.post_close.get_gateway", lambda: gw), \
+             patch("trading.phases.post_close._cancel_all_open_orders",
+                   AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
+             patch("trading.phases.exit._submit", _submit_mock):
             yield gw
