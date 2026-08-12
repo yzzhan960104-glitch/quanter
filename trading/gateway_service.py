@@ -679,7 +679,9 @@ async def _submit(order) -> dict:
     Why dry_run 用 _mode() 而非参数注入（沿用原 engine._submit 设计）：pre_open/stop_loss
     都是「影子即整批不真单」语义，_mode 是进程级开关，逐单传参反而引入「单只切 live」
     的误操作面。``patch("trading.engine._submit")`` 类测试因 phases 不再经 engine 而失效，
-    Task 8-19 迁 patch 至 ``trading.gateway_service._submit``。
+    Task 8-19 迁 patch 至 **phases 调用方模块**的 ``_submit``（如 ``trading.phases.pre_open._submit``）——
+    因 phases ``from trading.gateway_service import _submit`` 为本地绑定，patch gateway_service
+    只改模块属性、不命中 phases 本地引用，须 patch 调用方模块。
     """
     return await submit_order(order, dry_run=(_mode() == "dry_run"))
 

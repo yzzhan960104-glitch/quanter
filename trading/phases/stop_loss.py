@@ -46,7 +46,8 @@ W1-A/T2 反查切断收口语义：原 phases 经函数内 lazy ``import trading
 顶部直接 import（物理真身 · 无循环 · 共享模块对象属性级 patch 仍命中）：
     - ``get_gateway`` / ``_submit``：**W1-A/T2-Task7 已切**顶部直接 import gateway_service 真身
       （原 engine re-export 反查 · patch engine.get_gateway / engine._submit 失效 → Task 8-19
-      迁 monkeypatch gateway_service.get_gateway / gateway_service._submit）。
+      迁 monkeypatch trading.phases.stop_loss.get_gateway / trading.phases.stop_loss._submit——因本文件
+      ``from…import`` 为本地绑定，patch gateway_service 只改模块属性、不命中本地引用，须 patch 调用方）。
     - ``_state_store``：**W1-A/T2-Task4 已切**顶部直接 import state_store 真身（原 engine re-export
       反查 · 整体 patch engine._state_store 失效，属性级 patch state_store.xxx 仍命中共享模块对象
       → Task 8-19 迁整体 patch 路径）。
@@ -129,7 +130,7 @@ from strategies.neckline.execution import ExitAction, ExitReason, decide_exit
 from trading.phases.exit import place_take_profit
 # W1-A/T2-Task7：get_gateway / _submit 反查切断 → 顶部直接 import gateway_service 真身（原 engine
 # re-export 反查 · gateway_service 不反向 import 本文件 · 无环 · patch engine.get_gateway /
-# engine._submit 失效 → Task 8-19 迁 monkeypatch gateway_service.get_gateway / gateway_service._submit）。
+# engine._submit 失效 → Task 8-19 迁 monkeypatch trading.phases.stop_loss.get_gateway / _submit）。
 from trading.gateway_service import get_gateway, _submit
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.stop_loss）：stop_loss_monitor 原是
@@ -202,9 +203,9 @@ async def stop_loss_monitor(
     # T1-Task7 → W1-A/T2 收口：engine 模块级符号经 engine 反查的设计已全量退役，所有符号
     # 改顶部直接 import 物理真身（gateway_service.get_gateway/_submit / critical / state_store /
     # compute.stop / execution / phases.exit）。patch engine.xxx 失效 → Task 8-19 迁 patch 物理路径
-    # （test_stop_loss_monitor_decide_exit._run_monitor 改 patch trading.gateway_service._submit /
+    # （test_stop_loss_monitor_decide_exit._run_monitor 改 patch trading.phases.stop_loss._submit /
     # get_gateway；test_stop_loss_l1_halt 改 monkeypatch execution.decide_exit /
-    # gateway_service._submit；行情黑屏 4 测改 patch critical._alert_critical · W1-A/T2 节流状态
+    # trading.phases.stop_loss._submit；行情黑屏 4 测改 patch critical._alert_critical · W1-A/T2 节流状态
     # 已迁 ports.blackout）。详见本文件模块 docstring「模块级符号依赖设计」。
     # ① 盘中时段判定（Task1）
     # C-6 V2：时点判定走 clock.now（单一时间源口子）。

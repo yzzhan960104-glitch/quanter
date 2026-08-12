@@ -119,7 +119,8 @@ from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 # W1-A/T2-Task7：get_gateway 反查切断 → 顶部直接 import gateway_service 真身（gateway_service 下沉
 # 自原 presentation/serivces/trading_service.py · gateway_service 不反向 import 本文件 · 无环 ·
-# patch engine.get_gateway 失效 → Task 8-19 迁 monkeypatch gateway_service.get_gateway）。
+# patch engine.get_gateway 失效 → Task 8-19 迁 monkeypatch trading.phases.post_close.get_gateway
+# ——from…import 本地绑定，patch 须命中调用方模块）。
 from trading.gateway_service import get_gateway
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.post_close）：post_close 原是 engine

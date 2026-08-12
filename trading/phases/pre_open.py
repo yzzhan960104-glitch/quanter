@@ -33,7 +33,8 @@ W1-A/T2 反查切断收口语义：原 phases 经函数内 lazy ``import trading
 顶部直接 import（物理真身 · 无循环 · 共享模块对象属性级 patch 仍命中）：
     - ``get_gateway`` / ``_submit``：**W1-A/T2-Task7 已切**顶部直接 import gateway_service 真身
       （原 engine re-export 反查 · patch engine.get_gateway / engine._submit 失效 → Task 8-19
-      迁 monkeypatch gateway_service.get_gateway / gateway_service._submit）。
+      迁 monkeypatch trading.phases.pre_open.get_gateway / trading.phases.pre_open._submit——因本文件
+      ``from…import`` 为本地绑定，patch gateway_service 只改模块属性、不命中本地引用，须 patch 调用方）。
     - ``_mode`` / ``_alert_critical``：**W1-A/T2-Task4 已切**顶部直接 import critical 真身
       （patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁 patch critical._mode /
       critical._alert_critical）。
@@ -102,7 +103,7 @@ from trading.phases.stop_loss import (
 )
 # W1-A/T2-Task7：get_gateway / _submit 反查切断 → 顶部直接 import gateway_service 真身（原 engine
 # re-export 反查 · gateway_service 不反向 import 本文件 · 无环 · patch engine.get_gateway /
-# engine._submit 失效 → Task 8-19 迁 monkeypatch gateway_service.get_gateway / _submit）。
+# engine._submit 失效 → Task 8-19 迁 monkeypatch trading.phases.pre_open.get_gateway / _submit）。
 from trading.gateway_service import get_gateway, _submit
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.pre_open）：pre_open 原是 engine

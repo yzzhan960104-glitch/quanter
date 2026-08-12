@@ -43,7 +43,8 @@ gateway_service._submit / critical._mode / state_store.has_order / account.resol
 顶部直接 import（物理真身 · 无循环 · 共享模块对象属性级 patch 仍命中）：
     - ``_submit``：**W1-A/T2-Task7 已切**顶部直接 import trading.gateway_service._submit 真身
       （原 engine._submit wrapper 下沉 gateway_service · patch engine._submit 失效 → Task 8-19
-      迁 patch("trading.gateway_service._submit")）。
+      迁 patch("trading.phases.exit._submit")——因本文件 ``from…import _submit`` 为本地绑定，
+      patch gateway_service._submit 只改模块属性、不命中本文件本地引用，须 patch 调用方模块）。
     - ``_state_store``：**W1-A/T2-Task4 已切**顶部直接 import state_store 真身（原 engine
       re-export 反查，整体 patch engine._state_store 失效，属性级 patch state_store.has_order /
       add_order_qty 仍命中共享模块对象 → Task 8-19 迁整体 patch 路径）。
@@ -77,7 +78,7 @@ from trading import state_store as _state_store
 from trading.account import resolve_account_id as _resolve_account_id
 # W1-A/T2-Task7：_submit 反查切断 → 顶部直接 import gateway_service._submit 真身（原 engine._submit
 # wrapper 下沉 gateway_service · gateway_service 不反向 import 本文件 · 无环 · patch engine._submit
-# 失效 → Task 8-19 迁 patch("trading.gateway_service._submit")）。
+# 失效 → Task 8-19 迁 patch("trading.phases.exit._submit")——from…import 本地绑定，patch 须命中调用方）。
 from trading.gateway_service import _submit
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.exit）：place_take_profit 原是
@@ -98,7 +99,7 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
     """
     # W1-A/T2-Task7：_submit 反查已切断 → 顶部直接 import gateway_service._submit 真身
     # （原 engine._submit wrapper 下沉 gateway_service · patch("trading.engine._submit") 失效 →
-    # Task 8-19 迁 patch("trading.gateway_service._submit")）。_state_store / clock /
+    # Task 8-19 迁 patch("trading.phases.exit._submit")）。_state_store / clock /
     # trading_plan 顶部 import（共享模块对象属性 patch 命中，无循环）。
 
     today = clock.today()
