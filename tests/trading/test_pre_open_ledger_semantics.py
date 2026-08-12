@@ -8,13 +8,19 @@ import pytest
 async def _run_pre_open(monkeypatch, tmp_path, result):
     """跑 pre_open 包裹（mock _pre_open_impl），返回 (返回体, 台账行)。"""
     from trading import engine, job_ledger
+    import trading.phases.pre_open as pre_open_mod
     monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "job.db"))
     job_ledger.init_db()
 
     async def fake_impl(date, ports=None):
         return result
 
-    monkeypatch.setattr(engine, "_pre_open_impl", fake_impl)
+    # W1-A/T2-Task19：pre_open（C-8 V3 台账包裹）函数体已迁 trading.phases.pre_open，其内部
+    # 调 _pre_open_impl 经【同模块全局名】解析（phases.pre_open.__globals__ · 非跨模块 import）。
+    # patch trading.engine._pre_open_impl 不命中函数体（engine._pre_open_impl 是 re-export 别名 ·
+    # 与 phases.pre_open._pre_open_impl 是两个独立命名空间）→ 真 _pre_open_impl 跑返 skipped →
+    # 台账 4 测全红。迁 trading.phases.pre_open._pre_open_impl（Task 9-18 __globals__ 范式）。
+    monkeypatch.setattr(pre_open_mod, "_pre_open_impl", fake_impl)
     out = await engine.pre_open("2026-08-05")
     row = None
     import sqlite3

@@ -106,15 +106,19 @@ def test_stop_already_placed_read_failure_raises_critical_halt(isolated_stoploss
     fake_dec.action = engine.ExitAction.CLOSE
     fake_dec.reason = engine.ExitReason.STOP_LOSS
     fake_dec.portion = 1.0
-    monkeypatch.setattr(engine, "decide_exit", lambda *a, **kw: fake_dec)
+    # W1-A/T2-Task19：stop_loss_monitor 函数体已迁 trading.phases.stop_loss，其内部
+    # decide_exit/_submit/_state_store 经【顶部 import 本地绑定】（phases.stop_loss 模块
+    # __globals__）。patch trading.engine.X 不命中函数体符号解析（engine re-export 仅保
+    # wrapper 调用点），故 3 patch 全迁 trading.phases.stop_loss.X（Task 15 范式 · __globals__ 归属）。
+    monkeypatch.setattr("trading.phases.stop_loss.decide_exit", lambda *a, **kw: fake_dec)
 
     # _submit 不应被调（幂等读 L1 在 _submit 之前抛，提前中断）
     async def _should_not_submit(*a, **kw):
         raise AssertionError("幂等读 L1 后绝不应触达 _submit")
-    monkeypatch.setattr(engine, "_submit", _should_not_submit)
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _should_not_submit)
 
     # has_order(STOP) 抛异常 → _stop_already_placed raise _CriticalHalt
-    with patch("trading.engine._state_store") as ss:
+    with patch("trading.phases.stop_loss._state_store") as ss:
         ss.has_order.side_effect = RuntimeError("db disk full")
 
         with pytest.raises(_CriticalHalt, match="has_order"):
@@ -147,15 +151,17 @@ def test_record_stop_write_failure_raises_critical_halt(isolated_stoploss, monke
     fake_dec.action = engine.ExitAction.CLOSE
     fake_dec.reason = engine.ExitReason.STOP_LOSS
     fake_dec.portion = 1.0
-    monkeypatch.setattr(engine, "decide_exit", lambda *a, **kw: fake_dec)
+    # decide_exit/_submit/_state_store 全迁 trading.phases.stop_loss.X（同 case (b) 注 ·
+    # __globals__ 归属 · Task 15/19 范式）。
+    monkeypatch.setattr("trading.phases.stop_loss.decide_exit", lambda *a, **kw: fake_dec)
 
     # 幂等读通过（无已挂 STOP）
     # _submit 成功（柜台收单，触发 _record_stop 回填）
-    monkeypatch.setattr(engine, "_submit",
+    monkeypatch.setattr("trading.phases.stop_loss._submit",
                         AsyncMock(return_value={"state": "FILLED", "order_id": "seq_1"}))
 
     # insert_order(STOP) 抛异常 → _record_stop raise _CriticalHalt
-    with patch("trading.engine._state_store") as ss:
+    with patch("trading.phases.stop_loss._state_store") as ss:
         ss.has_order.return_value = False
         ss.get_account.return_value = MagicMock()  # 跳过 upsert_account 分支
         ss.insert_order.side_effect = RuntimeError("sqlite locked")
@@ -187,16 +193,19 @@ def test_decide_exit_exception_stays_l2_fallback_not_halt(isolated_stoploss, mon
                             "last_price": 9.6, "high": 10.5, "low": 9.5}}))
 
     # decide_exit 抛异常 → 应走 D12 fallback（不应 raise _CriticalHalt）
-    monkeypatch.setattr(engine, "decide_exit",
+    # 迁 trading.phases.stop_loss.decide_exit（同上 __globals__ 归属）——迁移后 mock 真正命中
+    # 抛 RuntimeError 触发 fallback（迁移前 mock 失效 · 真实 decide_exit 抛 KeyError 亦凑巧触发
+    # fallback · 现象通过但语义错位 · 本 Task 一并订正）。
+    monkeypatch.setattr("trading.phases.stop_loss.decide_exit",
                         MagicMock(side_effect=RuntimeError("state 缺键")))
 
     # _submit 绝不应被调（fallback 未触发 should_trigger_stop，现价 9.6 > stop 9.0）
     async def _should_not_submit(*a, **kw):
         raise AssertionError("fallback 未触发时应触达 _submit 说明 fallback 逻辑错")
-    monkeypatch.setattr(engine, "_submit", _should_not_submit)
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _should_not_submit)
 
     # _state_store 正常（has_order 返 False，幂等读不抛 L1）
-    with patch("trading.engine._state_store") as ss:
+    with patch("trading.phases.stop_loss._state_store") as ss:
         ss.has_order.return_value = False
 
         # 不应 raise _CriticalHalt（应正常返回，checked=1, fallback_used=1）

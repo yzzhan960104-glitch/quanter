@@ -75,14 +75,21 @@ def test_pre_open_cancel_passes_account_id(isolated_eng, monkeypatch):
     _signals = [{"symbol": "300214.SZ",
                  "order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
                  "formed_at": None, "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5}]
+    # W1-A/T2-Task19：pre_open 函数体已迁 trading.phases.pre_open，其内部 get_gateway/
+    # _cancel_all_open_orders/_resolve_account_id/_scan_expired_positions/_state_store 经
+    # 【顶部 import 本地绑定】（phases.pre_open.__globals__）。patch trading.engine.X 不命中
+    # 函数体符号解析 → _cancel_all_open_orders 真身跑（spy 不触发 · account_id 断言失效）+
+    # _resolve_account_id 真身返默认账户（非 ACC_QMT_001）。5 patch 全迁 trading.phases.pre_open.X
+    # （Task 9-18 __globals__ 范式）。trading_plan 留 engine：phases.pre_open 不 import 它
+    # （pre_open 直读 _state_store.list_signals · 该 patch 为防御性历史遗留 · 本路径不读）。
     with patch("trading.engine.trading_plan") as tp, \
-         patch("trading.engine.get_gateway", return_value=AsyncMock(**{"query_asset.return_value": {}})), \
-         patch("trading.engine._cancel_all_open_orders", new=_spy_cancel), \
-         patch("trading.engine._resolve_account_id", return_value="ACC_QMT_001"), \
-         patch("trading.engine._scan_expired_positions", return_value=[]):
+         patch("trading.phases.pre_open.get_gateway", return_value=AsyncMock(**{"query_asset.return_value": {}})), \
+         patch("trading.phases.pre_open._cancel_all_open_orders", new=_spy_cancel), \
+         patch("trading.phases.pre_open._resolve_account_id", return_value="ACC_QMT_001"), \
+         patch("trading.phases.pre_open._scan_expired_positions", return_value=[]):
         # C2c：mock list_signals 返一只 + get_latest_action=CONFIRMED 通过确认闸
         from trading import state_store
-        with patch("trading.engine._state_store") as ss:
+        with patch("trading.phases.pre_open._state_store") as ss:
             ss.list_signals_with_meta_by_plan_date.return_value = _signals
             ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             ss.get_latest_action.return_value = "CONFIRMED"
