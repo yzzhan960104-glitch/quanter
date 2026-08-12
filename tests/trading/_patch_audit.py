@@ -45,6 +45,11 @@ C. **from…import 本地绑定型**（Task 7 核心红线）：符号经 phases
      L350）→ 既可能被 engine 内部路径（_health_guard / bootstrap / _eod wrapper）读，
      也可能被 phases 读 → 标「需人工判断 engine vs phases」（Task 7 fix 实证：engine 路径
      保 engine.X，phases 路径迁 phases.X，或双口子同 patch）。
+     **同构扩展（ENGINE_REEXPORT_INTERNAL_READ）**：``_alert_critical``/``_mode``/``_trade_cfg``
+     /``_CriticalHalt``/``_state_store``（整体替换型）—— engine re-export 且 engine 内部经
+     模块全局名读（如 _halt ``alert=_alert_critical`` / _submit ``dry_run=(_mode()=="dry_run")``
+     / bootstrap ``_state_store.upsert_account``）→ 盲迁 phases 会破 engine 路径测试 →
+     同归 C3（engine 保 / phases 迁 / 双口子同 patch 三选）。
    - C4 engine 内部 wrapper 符号（不在 phases 本地表，engine 顶部 from…import 或自建）：
      如 ``eod_plan``/``load_plan``/``get_ready``/``get_data_ready``/``sanity_check_date_alignment``
      /``pre_open``/``stop_loss_monitor``/``post_close``/``_pre_open_impl``（engine re-export +
@@ -71,7 +76,6 @@ E. **未识别/孤儿符号**：不在上述任一表 → 标「需人工判断�
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
 import re
@@ -150,6 +154,41 @@ ENGINE_SELF_DEFINED = {
 }
 
 # ============================================================================
+# engine re-export 且 engine 内部经模块全局名读取的符号 —— 同构 ENGINE_SELF_DEFINED
+# ============================================================================
+# 这些符号同时具备三态：
+#   ① engine 顶部 from…import re-export 入 engine 命名空间（保 patch("trading.engine.X") 命中）；
+#   ② engine 内部（L262 后）经【模块全局名】读取——盲迁 phases 会破 engine 路径测试；
+#   ③ phases 顶部亦 from…import 绑本地引用（在 SYMBOL_TO_PHASES 表）。
+# 即与 _submit/get_gateway/_resolve_account_id（ENGINE_SELF_DEFINED）同构 → 归 C3
+# （engine 保 / phases 迁 / 双口子同 patch 三选）。
+#
+# 实证（reviewer 定位）：
+#   - tests/trading/test_critical_guard.py:24 patch("trading.engine._alert_critical")
+#     经 eng._halt 触发 → engine.py L1079 ``alert=_alert_critical``（模块全局名解析）
+#     → patch 当前命中。盲迁 phases.X._alert_critical 后 engine 全局不变 → patch 失效 → 红。
+#   - _state_store（整体替换型 setattr(engine,"_state_store",mock)）：engine 内部 L840
+#     ``_state_store.upsert_account``/L1450 ``list_signals_with_meta_by_plan_date`` 等
+#     读 engine 全局 _state_store → patch 命中。盲迁 phases 仅改 phases 本地绑定 → 破 engine 路径。
+#
+# 成员判定（grep trading/engine.py L262 后内部引用确认，2026-08-12 re-verified）：
+#   - _alert_critical : L785/942/992/1051/1069(_halt alert=)/1231/1437/1572/1643（9 处内部读）
+#   - _mode           : L393/780/941/991/1050/1436/1571/1635/1642/1647（10 处内部读）
+#   - _trade_cfg      : L1481 ``cfg_trade = _trade_cfg()``（1 处内部读；当前 0 patch，收录为规则完整）
+#   - _CriticalHalt   : L1611 ``raise _CriticalHalt``（1 处内部读；当前 0 patch，收录为规则完整）
+#   - _state_store    : L840/1450/1471/1472（4 处内部读；仅【整体替换型】提升 C3，
+#                       【属性型 _state_store.X】仍归 B——共享对象属性天然全局命中，不需迁）
+#
+# 不收录：_cancel_all_open_orders（engine re-export L80 但 L262 后无内部调用 → 仍归 C2）。
+ENGINE_REEXPORT_INTERNAL_READ = {
+    "_alert_critical",  # critical 集群 A · _halt alert= 口子（保 engine 全局命中）
+    "_mode",            # critical 集群 A · _submit/_health_guard 读
+    "_trade_cfg",       # critical 集群 A · _stoploss 内读
+    "_CriticalHalt",    # critical 集群 A · bootstrap raise 口子
+    "_state_store",     # 共享模块对象 · engine 内部 upsert/list_signals/build_trade_id 读
+}
+
+# ============================================================================
 # engine 内部 wrapper 符号（engine re-export 或自建，phases 无本地绑定）—— C4 不迁
 # ============================================================================
 # 这些符号经 engine 顶部 from…import 入 engine 命名空间，engine 内 _eod/_pre_open/
@@ -218,18 +257,11 @@ CAT_UNKNOWN = "unknown_review"                # E 未知符号·需判断
 # ============================================================================
 # 检测对象：trading.engine.* 命中的 patch（含模块/类/实例/setattr 各形式）。
 # 不可用 ast 直接解析（patch 参数常含局部变量 + 字符串字面量混合），故正则。
-_PATCH_PATTERNS = [
-    # 1. patch("trading.engine.X") / patch("trading.engine.X.Y") / patch("trading.engine.TradingEngine.Z")
-    re.compile(r'\bpatch\(\s*["\']trading\.engine\.([^"\']+)["\']'),
-    # 2. patch.object(engine_mod, "X") / patch.object(TradingEngine, "X")
-    re.compile(r'\bpatch\.object\(\s*(\w+)\s*,\s*["\'](\w+)["\']'),
-    # 3. monkeypatch.setattr("trading.engine.X", ...) 字符串路径形式
-    re.compile(r'\.setattr\(\s*["\']trading\.engine\.([^"\']+)["\']'),
-    # 4. monkeypatch.setattr(engine_mod, "X", ...) 模块对象形式（engine/eng/eng_mod/_eng_mod/engine_mod）
-    re.compile(r'\.setattr\(\s*(engine|eng|eng_mod|_eng_mod|engine_mod|trading_engine|te)\s*,\s*["\'](\w+)["\']'),
-    # 5. monkeypatch.setattr(TradingEngine, "X", ...) 类对象形式
-    re.compile(r'\.setattr\(\s*TradingEngine\s*,\s*["\'](\w+)["\']'),
-]
+#
+# ⚠️ 正则逐行匹配，假设 patch 单行（第一参数 + 起始引号在同一物理行）。
+# 理论漏检：多行形态 ``patch(\n    "trading.engine.X",\n    ...)``
+# 实测 tests/trading/ 369 patch 全部单行（2026-08-12 基准），后续新增 patch
+# 若跨行需本脚本重检（或加 re.DOTALL / 预处理 join 行）。
 
 
 def _normalize_engine_alias(alias: str) -> str:
@@ -335,6 +367,25 @@ def _classify(path: str, line: int, col: int, form: str, raw: str, target_path: 
         rec["note"] = (
             f"共享模块对象属性型（engine.{head} IS trading.{head} IS phases.{head}）·"
             f"patch 在共享对象上设 attr · 天然全局命中 · 无需迁"
+        )
+        return rec
+
+    # ---- C3a. engine re-export 且 engine 内部经模块全局名读（_alert_critical/_mode/
+    #         _state_store 等）—— 与 ENGINE_SELF_DEFINED 同构（C3 三选）----
+    # 必须在 D（共享整体替换）/ C1/C2（SYMBOL_TO_PHASES）之前判定，否则被吃掉。
+    # 注意：_state_store.X 属性型已在上面 B 分支返回；此处仅处理裸符号整体替换。
+    if head in ENGINE_REEXPORT_INTERNAL_READ:
+        rec["category"] = CAT_ENGINE_VS_PHASES
+        candidates = SYMBOL_TO_PHASES.get(head, [])
+        rec["suggestion"] = (
+            f"engine 内部路径（engine 全局名读 · 如 _halt alert=/_submit dry_run/_state_store.upsert）"
+            f"→ 保 trading.engine.{head};  "
+            f"phases 路径 → 迁 phases 调用方（候选 {candidates}）;  "
+            f"或双口子同 patch（Task 7 fix aeb02036 实证：engine + phases 双 patch）"
+        )
+        rec["note"] = (
+            f"engine re-export 且 engine 内部经模块全局名读（{head}）·"
+            f"盲迁 phases 会破 engine 路径测试 · 需人工判断 engine vs phases"
         )
         return rec
 
