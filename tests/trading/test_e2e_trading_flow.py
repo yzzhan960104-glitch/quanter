@@ -23,6 +23,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+# W1-A/T2-Task7 fix：phases 顶部 ``from trading.gateway_service import get_gateway/_submit``
+# 在 phases 模块命名空间绑定【本地引用】——monkeypatch 必须注入到 phases 实际调用的
+# 模块（pre_open/post_close）才能命中（patch gateway_service 模块属性不影响 phases 的
+# from...import 本地绑定，否则 pre_open 的 ``gw = get_gateway()`` 仍读原函数返 None →
+# "网关未装配/未连接" 早返 skip）。calendar/reconcile_job 则是共享模块对象（engine.calendar
+# IS trading.calendar），其 patch 无需迁移。engine 仍需 import（e2e 用 TradingEngine/calendar/
+# reconcile_job/pre_open/post_close 等模块级 API）。
+import trading.phases.post_close as _post_close_mod
+import trading.phases.pre_open as _pre_open_mod
 from trading import engine, position_book, review_report, trading_plan
 from strategies.neckline.signal import Signal
 
@@ -195,7 +204,7 @@ def test_step3_trade_next_day(isolated, monkeypatch):
     fake_gw = MagicMock()
     fake_gw._connected = True
     fake_gw.is_locked = False
-    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
     # _cancel_all_open_orders patch 真身（engine 模块别名导入）—— 防真撤昨日单触达 mock gw
     monkeypatch.setattr(engine, "_cancel_all_open_orders", AsyncMock(return_value=0))
 
@@ -203,7 +212,7 @@ def test_step3_trade_next_day(isolated, monkeypatch):
     async def _dry_submit(order, *, confirm=True):
         submitted["n"] += 1
         return {"order_id": str(submitted["n"]), "state": "DRY_RUN", "message": "影子"}
-    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    monkeypatch.setattr(_pre_open_mod, "_submit", _dry_submit)
 
     # dynamic_whitelist 真实跑（pre_open 内部 inject 计划 symbols），不 patch
     # calendar.is_trading_day patch 真：避免非交易日 no-op 走偏（pre_open 内首道闸）
@@ -263,7 +272,7 @@ def test_step4_review_report(isolated, monkeypatch):
 
     async def _fake_run_rec(gw, local, tolerance=0.0):
         return fake_rec
-    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(_post_close_mod, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
 
@@ -482,6 +491,11 @@ def test_e2e_lockdown_recover_full_cycle(isolated, monkeypatch, captured_alerts_
     fake_gw._lock_down = True
     fake_gw._connected = False
 
+    # get_gateway 双口子注入：pre_open 顶部 ``from gateway_service import get_gateway``
+    # 绑定本地引用（读 _pre_open_mod 命名空间）；_health_guard（engine.py 方法）读
+    # engine 模块级 ``get_gateway``（engine.py:367 自有定义 · Task 7 保留）。Task 7
+    # 切断后两口子分离——必须同 patch 两处，否则阶段②守护 job 取 gw=None 直接 no-op。
+    monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(engine, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
@@ -492,7 +506,7 @@ def test_e2e_lockdown_recover_full_cycle(isolated, monkeypatch, captured_alerts_
     async def _submit_lockdown(order, *, confirm=True):
         submit_calls_phase1["n"] += 1
         raise RuntimeError("网关锁死拒单（live 挡板）")
-    monkeypatch.setattr(engine, "_submit", _submit_lockdown)
+    monkeypatch.setattr(_pre_open_mod, "_submit", _submit_lockdown)
 
     # 同步 _lock_down 属性到 gw_state（阶段①锁死态）
     fake_gw._lock_down = True
@@ -533,7 +547,7 @@ def test_e2e_lockdown_recover_full_cycle(isolated, monkeypatch, captured_alerts_
         submit_calls_phase3["n"] += 1
         # 恢复后挂单成功（live 模式下真单返 OrderState.name 字符串）
         return {"order_id": str(submit_calls_phase3["n"]), "state": "SUBMITTED", "message": "ok"}
-    monkeypatch.setattr(engine, "_submit", _submit_recovered)
+    monkeypatch.setattr(_pre_open_mod, "_submit", _submit_recovered)
 
     # T1：_ACTIVE_ENGINE 单例桥已删；本测焦点是韧性恢复链路，不是 gate。不传 ports
     # （默认 None）→ pre_open 跳过三段闸（data_ready 表在隔离环境无记录，gate ③ 段会拦截），
@@ -600,13 +614,13 @@ def test_e2e_cancel_confirm_in_pre_open(isolated, monkeypatch):
         return oid == "o1"
     fake_gw._confirm_cancelled = _confirm
 
-    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
 
     # 不 patch _cancel_all_open_orders——让它真跑（端到端验证 pre_open 串了真身）
     # _submit 返 DRY_RUN 让挂单主路径正常（聚焦撤单链路断言）
     async def _dry_submit(order, *, confirm=True):
         return {"order_id": "new1", "state": "DRY_RUN", "message": "影子"}
-    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    monkeypatch.setattr(_pre_open_mod, "_submit", _dry_submit)
 
     # 记 WARNING 日志（pre_open 据 n_unconfirmed>0 记 WARNING，捕获日志验证串联）
     import logging
@@ -686,7 +700,7 @@ def test_e2e_sanity_date_alignment_loads_right_plan(isolated, monkeypatch):
     fake_gw._connected = True
     fake_gw._lock_down = False
     fake_gw.query_asset = AsyncMock(return_value={})
-    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(engine, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
     submitted = {"n": 0}
@@ -694,7 +708,7 @@ def test_e2e_sanity_date_alignment_loads_right_plan(isolated, monkeypatch):
     async def _dry_submit(order, *, confirm=True):
         submitted["n"] += 1
         return {"order_id": str(submitted["n"]), "state": "DRY_RUN", "message": "影子"}
-    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    monkeypatch.setattr(_pre_open_mod, "_submit", _dry_submit)
 
     # pre_open(today=T+1)——load_plan 命中 T 日落的计划（key 对齐 = 口径自检的端到端兑现）
     # T1：_ACTIVE_ENGINE 单例桥已删；本测焦点是口径自检，不是 gate。不传 ports（默认 None）
@@ -740,12 +754,12 @@ def test_e2e_full_chain_db_consistency(isolated, monkeypatch):
     fake_gw._connected = True
     fake_gw._lock_down = False
     fake_gw.query_asset = AsyncMock(return_value={"total_asset": 1_000_000.0, "cash": 500_000.0})
-    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(engine, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
     async def _dry_submit(order, *, confirm=True):
         return {"order_id": "seq1", "state": "DRY_RUN", "message": "影子"}
-    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    monkeypatch.setattr(_pre_open_mod, "_submit", _dry_submit)
     pre_result = asyncio.run(engine.pre_open("2026-07-28"))
     assert pre_result["submitted"] >= 1
     assert state_store.has_order(account_id, "2026-07-28", "300001.SZ", "OPEN") is True
@@ -755,7 +769,7 @@ def test_e2e_full_chain_db_consistency(isolated, monkeypatch):
     async def _count_submit(order, *, confirm=True):
         sub_count["n"] += 1
         return {"order_id": "x", "state": "DRY_RUN"}
-    monkeypatch.setattr(engine, "_submit", _count_submit)
+    monkeypatch.setattr(_pre_open_mod, "_submit", _count_submit)
     asyncio.run(engine.pre_open("2026-07-28"))
     assert sub_count["n"] == 0  # DB 幂等：第二次跳过
 
@@ -911,7 +925,7 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
     fake_gw._connected = True
     fake_gw.is_client_ready = lambda *a, **kw: True  # gate ② 段客户端就绪
     fake_gw.query_asset = AsyncMock(return_value={})  # 熔断基线兜底（返空跳过 snapshot）
-    monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
+    monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(engine, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
 
@@ -920,7 +934,7 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
     async def _dry_submit(order, *, confirm=True):
         submitted["n"] += 1
         return {"order_id": str(submitted["n"]), "state": "DRY_RUN", "message": "影子"}
-    monkeypatch.setattr(engine, "_submit", _dry_submit)
+    monkeypatch.setattr(_pre_open_mod, "_submit", _dry_submit)
 
     # pre_open(PIPE_DATE)：gate ① 计划 confirmed ✓ / ② 网关 connected&ready ✓ /
     # ③ get_data_ready(PIPE_DATE, daily) 命中 ① 写的记录 ok=1 ✓ → 三段全绿放行挂单
