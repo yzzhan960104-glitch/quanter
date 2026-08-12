@@ -3,7 +3,7 @@
 
 物理意图（Why）：动 P1 向量化前，实测 scan_symbol 的时间去哪了，验证 spec §0.3 假设——
 热点 = search_neckline O(tops²) 双循环 + local_minima O(W) 循环 + 逐日 iloc 双切片
-（sym_df.iloc[:i+1] + atr_full.iloc[:i+1]，单标的 n≈2400 交易日 → O(n²) 拷贝）。
+（sym_df.iloc[:i+1] + atr_full.iloc[:i+1]，单标的 n≈2400 交易日 -> O(n²) 拷贝）。
 
 两段：
   ① 单标的（300750.SZ 全历史）单次 scan_symbol；
@@ -19,8 +19,8 @@
   detect_signal 的 cumtime 已含其调用的 search_neckline/local_minima/numpy 叶子，
   不再漏算。
 
-验收门（spec §1，修正版）：识别路径 cumtime ≥ 50% scan_symbol → [PASS]
-（识别路径主导 → P1 向量化识别路径对症）；否则 [WARN]。
+验收门（spec §1，修正版）：识别路径 cumtime ≥ 50% scan_symbol -> [PASS]
+（识别路径主导 -> P1 向量化识别路径对症）；否则 [WARN]。
 
 只读：不改任何策略/discovery 代码，只 import 调用。测量脚本不硬崩溃于意外结果——
 占比偏离时打 WARN，由 Task 5 复核 P1 优先级（如 simulate_exit 反占大头则 P1 重排）。
