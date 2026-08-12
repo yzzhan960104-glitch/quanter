@@ -71,6 +71,15 @@ def test_select_keys_retired_with_quota_no_keyerror():
     assert sel == [], "退役 key 经 quota 过滤后为空，不崩"
 
 
+def test_select_keys_filters_unavailable_marker(monkeypatch):
+    """P3 守卫：_unavailable 标记的 key 一律被过滤，防 select_keys 漏过滤再生。"""
+    from data import sync_cli
+    fake = {"good": {"quota_type": "basic"}, "bad": {"quota_type": "basic", "_unavailable": True}}
+    monkeypatch.setattr(sync_cli, "TUSHARE_DATASETS", fake)
+    sel = sync_cli.select_keys(all_keys=True, keys=None, quota=None)
+    assert sel == ["good"], "_unavailable key 必须被过滤"
+
+
 def test_run_单key失败不中断后续(monkeypatch):
     """fail-soft：某 key 抛异常，后续 key 仍跑，汇总 exit code=1。用真实注册表 key（run 访问 cfg）。"""
     calls = []
