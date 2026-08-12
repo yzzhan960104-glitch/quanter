@@ -57,3 +57,16 @@ def test_extra_signal_in_current_is_mismatch():
     mm = compare_signals(a, b)
     assert len(mm) == 1
     assert mm[0]["symbol"] == "688001.SH" and mm[0]["field"] == "__extra__"
+
+
+def test_date_str_vs_date_obj_no_mismatch():
+    """str() 类型归一：baseline JSON 往返的 date-str 与 current 现场 date-obj 须判等无 mismatch。
+
+    物理意图（Why）：record_baseline 用 json.dumps(default=str) 序列化，日期变 str；
+    compare() 重跑 scan_symbol 现场 produce datetime.date。compare_signals 必须两侧归一
+    （str()）判等，否则 signal_date/exit_date 全报假阳性（P1 验收门静默失效）。
+    """
+    from datetime import date
+    baseline = [{"symbol": "300001.SZ", "signal_date": "2025-07-21"}]      # JSON 往返 str
+    current = [{"symbol": "300001.SZ", "signal_date": date(2025, 7, 21)}]   # 现场产 date
+    assert compare_signals(baseline, current) == []

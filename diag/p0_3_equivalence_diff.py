@@ -15,6 +15,7 @@ CANONICAL 字段（识别+出场结果的核心数值，剔 debug-only）：
 """
 import json
 import sys
+import warnings
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -103,7 +104,9 @@ def _run_sampling(universe, params):
             for r in filled:
                 r["symbol"] = sym
             all_filled.extend(filled)
-        except Exception:
+        except Exception as e:
+            # 不静默吞——基线/P1 对拍侧任一 scan_symbol 抛错须可观测（防差异被掩盖）
+            warnings.warn(f"[P0-3] scan_symbol threw on {sym}: {e!r}")
             continue
     return all_filled
 
@@ -170,8 +173,8 @@ if __name__ == "__main__":
     payload = record_baseline()
     # 自洽校验：当前实现对自己 must 零 mismatch（证明对拍基建正确）
     self_check = compare()
-    print(f"基线冻结：{payload['n_signals']} 条信号 / {len(payload['symbols'])} 标的 / "
+    print(f"[P0-3] baseline: {payload['n_signals']} signals / {len(payload['symbols'])} symbols / "
           f"data_hash={payload['data_content_hash']}", flush=True)
-    print(f"自洽对拍：data_hash_ok={self_check['data_hash_ok']}  "
-          f"mismatches={self_check['n_mismatch']}（须 0）", flush=True)
+    print(f"[P0-3] self-check: data_hash_ok={self_check['data_hash_ok']} "
+          f"mismatches={self_check['n_mismatch']} (expect 0)", flush=True)
     print(f"-> {BASELINE_PATH}", flush=True)
