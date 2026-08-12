@@ -556,7 +556,7 @@ async def lifespan(app: FastAPI):
     # Why try/except 吞异常：shutdown 路径不应因网关断开失败而阻塞后续 handler 清理；
     # 无网关装配（开发态/CI）时 get_gateway 返 None，直接跳过。
     try:
-        from presentation.server.services.trading_service import get_gateway
+        from trading.gateway_service import get_gateway
         gw = get_gateway()
         if gw is not None:
             await gw.disconnect()

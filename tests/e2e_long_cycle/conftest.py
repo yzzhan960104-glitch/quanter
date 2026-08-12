@@ -55,7 +55,7 @@ def isolated_state(tmp_path, monkeypatch):
     # 不产误导日志（W3.4 后归因段已降级为【只读展示】，仍隔离避免噪声日志）。
     # 范式参考 tests/trading/test_e2e_trading_flow.py:777 同款 patch。
     # A4 注：原 record_live_trade patch 已删（函数 A4 删，patch 会 AttributeError）。
-    from presentation.server.services import trading_service as _svc
+    from trading import gateway_service as _svc
     monkeypatch.setattr(_svc, "query_trades", lambda *a, **k: {"trades": []})
     return tmp_path
 

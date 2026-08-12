@@ -13,7 +13,9 @@ import os
 
 from fastapi import APIRouter
 
-from presentation.server.services import trading_service
+# W1-A/T2：trading_service 已下沉至 trading/gateway_service.py（切断 presentation 反查）。
+# 保局部名 trading_service 以最小化本文件调用方改动（get_status 等），行为零变更。
+from trading import gateway_service as trading_service
 
 router = APIRouter(tags=["ops"])
 

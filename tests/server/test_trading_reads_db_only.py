@@ -61,7 +61,7 @@ def test_query_trades_no_csv_fallback_when_db_empty(tmp_db, tmp_path):
     残留 + DB 空 → 返空」的物理意图（服务无 LIVE_TRADE_LOG 常量 / 无 CSV 读分支，
     磁盘残留 CSV 不影响输出）。
     """
-    import presentation.server.services.trading_service as svc
+    import trading.gateway_service as svc
     csv_log = tmp_path / "live_trades.csv"
     _write_csv_row(str(csv_log))
     # 不 monkeypatch（A4 删 LIVE_TRADE_LOG 常量后无此属性可 patch）；磁盘 CSV 残留
@@ -80,7 +80,7 @@ def test_aggregate_fills_db_exception_returns_empty(tmp_db, monkeypatch, tmp_pat
     A4 收口：删 monkeypatch LIVE_TRADE_LOG + setenv（常量已删，无回退路径）。
     """
     from trading import state_store
-    import presentation.server.services.trading_service as svc
+    import trading.gateway_service as svc
     csv_log = tmp_path / "live_trades.csv"
     _write_csv_row(str(csv_log))
     # 让 query_fills 抛 RuntimeError —— 新代码 logger.exception + 返 {}（不回退 CSV）
@@ -98,7 +98,7 @@ def test_export_trades_carries_strategy_value(tmp_db):
     「fill 表是成交流水唯一真相源」契约（消费端拿不到真相源字段）。
     """
     from trading import state_store
-    import presentation.server.services.trading_service as svc
+    import trading.gateway_service as svc
     # 落 1 行带 strategy="neckline" 的 fill（A1 加列 + A3 SELECT 已就绪）
     state_store.insert_fill(
         "O1", "ACC_TEST", "20260805101000", "600000.SH", "BUY", 100, 10.0,
@@ -115,7 +115,7 @@ def test_query_trades_carries_strategy_value(tmp_db):
     会让前端流水展示「无策略归属」，复盘/过滤功能失效。
     """
     from trading import state_store
-    import presentation.server.services.trading_service as svc
+    import trading.gateway_service as svc
     state_store.insert_fill(
         "O1", "ACC_TEST", "20260805101000", "600000.SH", "BUY", 100, 10.0,
         strategy="neckline")
@@ -132,7 +132,7 @@ def test_export_trades_db_empty_header_only(tmp_db, tmp_path):
     A4 收口：原测试 monkeypatch LIVE_TRADE_LOG + setenv 证明不回退；A4 删常量后
     服务无 CSV 读分支，磁盘 CSV 残留不影响 export_trades（DB 空 → 仅表头一行）。
     """
-    import presentation.server.services.trading_service as svc
+    import trading.gateway_service as svc
     csv_log = tmp_path / "live_trades.csv"
     _write_csv_row(str(csv_log))
     out = svc.export_trades("2000-01-01", "2099-12-31")

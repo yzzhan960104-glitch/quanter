@@ -33,7 +33,7 @@
       纯 env 读函数；eod_plan 路径无测试 ``patch("trading.engine._mode"/"_trade_cfg")`` 命中
       compute 内部的需求——_mode 仅用于 logger.info 尾行日志，_trade_cfg 仅用于读 env 参数）。
     - ``_resolve_account_id``：本模块内复制同口径 2 行实现（与 trading.tools.veto_plan /
-      presentation.server.services.trading_service 同范式——避免循环 import engine，engine
+      trading.gateway_service 同范式——避免循环 import engine，engine
       顶部 re-export eod_plan 时反向 import 会循环）。三处复制以注释锁同步，口径必须一致
       （否则 eod_plan 写 account_A / pre_open 读 account_B，trade_id 对不上 → SIGNAL/VETOED
       防线失效，致命）。
@@ -222,7 +222,7 @@ async def compute(date: str, signals: list, atr_map: dict, capital: float) -> di
     # 网关未连/异常 → None，push 内部退回 position_book 本地账本（软降级，不阻断推送）。
     broker_positions = None
     try:
-        from presentation.server.services.trading_service import get_positions as _get_positions
+        from trading.gateway_service import get_positions as _get_positions
         broker_positions = await _get_positions()
     except Exception:
         logger.warning("eod_plan 拉 QMT 持仓失败，交易计划持仓段退回本地账本")

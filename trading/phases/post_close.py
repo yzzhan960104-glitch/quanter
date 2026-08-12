@@ -234,7 +234,7 @@ async def post_close(
     # gw=None（dry_run）跳过（无真实成交可归因，避免读 CSV 老数据产生误导日志）。
     if gw is not None:
         try:
-            from presentation.server.services.trading_service import \
+            from trading.gateway_service import \
                 aggregate_fills_by_symbol as _svc_agg_fills
             # C-6 V2：业务日期 key（当日成交流水口径）走 clock.today。
             today_eq = clock.today()
@@ -341,7 +341,7 @@ async def post_close(
                             logger.exception("post_close 熔断撤单异常（继续 emergency_halt）")
                     # 置网关 lock_down + ERROR 告警
                     try:
-                        from presentation.server.services.trading_service import (
+                        from trading.gateway_service import (
                             emergency_halt as _emergency_halt,
                         )
                         _emergency_halt()

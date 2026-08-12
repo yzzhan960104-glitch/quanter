@@ -2,7 +2,7 @@
 """A1 回归：pre_open 09:22 集合竞价窗口必须被放行（08-05 废单根因）。"""
 from datetime import datetime
 
-from presentation.server.services.trading_service import _in_a_share_session
+from trading.gateway_service import _in_a_share_session
 
 
 def test_session_allows_call_auction_0915():

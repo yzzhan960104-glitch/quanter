@@ -14,7 +14,7 @@ import pytest
 
 def test_status_unavailable_when_no_gateway(monkeypatch):
     """无网关单例（缺 QMT 凭证）→ mode='unavailable'。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     s = trading_service.get_status()
     assert s == {"connected": False, "locked": False, "mode": "unavailable"}
@@ -22,7 +22,7 @@ def test_status_unavailable_when_no_gateway(monkeypatch):
 
 def test_status_disconnected_when_gateway_not_connected(monkeypatch):
     """网关存在但未 connect → mode='disconnected'。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     gw = type("G", (), {"_connected": False, "is_locked": False})()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     s = trading_service.get_status()
@@ -31,7 +31,7 @@ def test_status_disconnected_when_gateway_not_connected(monkeypatch):
 
 def test_status_live_when_connected(monkeypatch):
     """已连接且未锁定 → mode='live'。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     gw = type("G", (), {"_connected": True, "is_locked": False})()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     assert trading_service.get_status()["mode"] == "live"
@@ -39,7 +39,7 @@ def test_status_live_when_connected(monkeypatch):
 
 def test_status_vetoed_when_locked(monkeypatch):
     """断线锁定 → mode='vetoed_by_risk'（锁定优先于 connected）。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     gw = type("G", (), {"_connected": True, "is_locked": True})()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     assert trading_service.get_status()["mode"] == "vetoed_by_risk"
@@ -47,7 +47,7 @@ def test_status_vetoed_when_locked(monkeypatch):
 
 def test_emergency_halt_idempotent(monkeypatch):
     """连续两次 emergency_halt：第一次置 lock_down，第二次返'已处于'（不重复撤单）。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
 
     class FakeGW:
         def __init__(self):
@@ -79,7 +79,7 @@ def test_emergency_halt_idempotent(monkeypatch):
 
 def test_emergency_halt_unavailable(monkeypatch):
     """无网关 → raise RuntimeError（路由层转 503）。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     with pytest.raises(RuntimeError):
         trading_service.emergency_halt()
@@ -122,7 +122,7 @@ def _fake_gw_connected():
 
 
 def test_connect_gateway(monkeypatch):
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     gw = _fake_gw_connected()
     monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
     asyncio.run(trading_service.connect_gateway())
@@ -130,7 +130,7 @@ def test_connect_gateway(monkeypatch):
 
 
 def test_connect_gateway_unavailable(monkeypatch):
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     with pytest.raises(RuntimeError):
         asyncio.run(trading_service.connect_gateway())
@@ -144,7 +144,7 @@ def test_submit_order_dry_run_records_and_returns(tmp_db, monkeypatch):
     不 patch get_quote：conftest 假 xtdata.get_full_tick 返 {} → get_quote 返 None，
     挡板跳过涨跌停关（dry_run 在第 2 关即命中，根本到不了第 9 关）。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from trading.compute.types import OrderRequest
     import sqlite3
 
@@ -174,7 +174,7 @@ def test_submit_order_dry_run_meta_kind_is_submit(tmp_db, monkeypatch):
         计入净持仓口径，污染审计真相源。BLOCKED/ORDERED 都显式传 ``meta_kind="submit"``，
         DRY_RUN 与两者语义同源（下单审计），应保持一致。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from trading.compute.types import OrderRequest
     import sqlite3
 
@@ -199,7 +199,7 @@ def test_submit_order_blocked_raises(tmp_db, monkeypatch):
     SSoT Phase A · Task A1 平移后：BLOCKED 审计走 trade_event 表真相源（UNIQUE 幂等），
     不再依赖 CSV record_live_trade。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from trading.compute.types import OrderRequest
     import sqlite3
 
@@ -226,7 +226,7 @@ def test_submit_order_live_calls_gateway(tmp_db, monkeypatch):
     SSoT Phase A · Task A1：审计走 trade_event 表，本用例聚焦「网关调用」断言，
     trade_event 落盘由专门用例覆盖。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from trading.compute.types import OrderRequest
 
     gw = _fake_gw_connected()
@@ -248,7 +248,7 @@ def test_submit_order_live_records_audit(tmp_db, monkeypatch):
     违反量化交易审计合规红线。SSoT Phase A · Task A1 平移后：审计走 trade_event 表
     真相源（UNIQUE 幂等），不再依赖 CSV record_live_trade。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from trading.compute.types import OrderRequest
     import sqlite3
 
@@ -281,7 +281,7 @@ def test_submit_order_disconnected_blocks(tmp_db, monkeypatch):
 
     SSoT Phase A · Task A1：审计走 trade_event 表，connection 关 BLOCKED 也落事件。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from trading.compute.types import OrderRequest
     import sqlite3
 
@@ -308,7 +308,7 @@ def test_submit_order_blocked_writes_trade_event(tmp_db, monkeypatch):
     （后者断言 RuntimeError 抛出 + symbol/whitelist meta），本测试聚焦真相源行落库 +
     action/symbol/qty/price 字段完整性，确保归因/复盘消费端切 DB 时字段不缺。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from trading.compute.types import OrderRequest
     import sqlite3
 
@@ -335,7 +335,7 @@ def test_submit_order_blocked_writes_trade_event(tmp_db, monkeypatch):
 
 def test_emergency_halt_sets_risk_halt(monkeypatch):
     """emergency_halt → set_risk_halt(True)（#6：风控熔断粘滞标志）。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from broker.qmt import QmtExecutionGateway
 
     gw = QmtExecutionGateway(userdata_path="C:/tmp/qmt_test", account_id="TEST_ACC")
@@ -387,7 +387,7 @@ class _FakeTask:
 
 def test_get_jobs_catchup_not_started(monkeypatch):
     """catchup_task=None → catchup.state='not_started'，jobs 取台账快照。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     import trading.job_ledger as job_ledger
 
     fake_jobs = [{"name": "pipeline", "status": "done"}]
@@ -402,7 +402,7 @@ def test_get_jobs_catchup_not_started(monkeypatch):
 
 def test_get_jobs_catchup_running(monkeypatch):
     """catchup_task 未 done → catchup.state='running'。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     import trading.job_ledger as job_ledger
 
     monkeypatch.setattr(job_ledger, "snapshot_for_date", lambda d: [])
@@ -414,7 +414,7 @@ def test_get_jobs_catchup_running(monkeypatch):
 
 def test_get_jobs_catchup_done(monkeypatch):
     """catchup_task done 且无异常 → catchup.state='done'，result 透传 run_startup_catchup 返回 dict。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     import trading.job_ledger as job_ledger
 
     monkeypatch.setattr(job_ledger, "snapshot_for_date", lambda d: [])
@@ -435,7 +435,7 @@ def test_get_jobs_catchup_done(monkeypatch):
 
 def test_get_jobs_catchup_failed(monkeypatch):
     """catchup_task done 且抛异常 → catchup.state='failed'，result={'error': <str(exc)>}。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     import trading.job_ledger as job_ledger
 
     monkeypatch.setattr(job_ledger, "snapshot_for_date", lambda d: [])
@@ -453,7 +453,7 @@ def test_get_jobs_ledger_read_failure_warns(monkeypatch):
     Why：台账是操作元数据，绝不阻断观测主路径（spec §5.1）——
     即便 SQLite 被锁/文件损坏，GET /trading/jobs 仍要返回 catchup 状态让前端可见。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     import trading.job_ledger as job_ledger
 
     monkeypatch.setattr(

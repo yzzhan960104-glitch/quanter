@@ -25,7 +25,7 @@ def test_status_endpoint(client):
 
 def test_submit_order_dry_run(client, monkeypatch):
     """dry_run=true → 200 + state=DRY_RUN（不真下单）。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
 
     class _FakeGW:
         _connected = True
@@ -48,7 +48,7 @@ def test_submit_order_unavailable(client, monkeypatch):
 
     本用例锁定：无网关时 submit_order 不静默成功（至少非 200）。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     r = client.post("/api/v1/trading/submit_order", json={
         "symbol": "510300.SH", "qty": 100, "side": "buy",
@@ -59,7 +59,7 @@ def test_submit_order_unavailable(client, monkeypatch):
 
 def test_orders_and_asset_empty(client, monkeypatch):
     """无网关 → orders 返空 list，asset 返空 dict（均 200，非 503）。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     ro = client.get("/api/v1/trading/orders")
     ra = client.get("/api/v1/trading/asset")
@@ -70,7 +70,7 @@ def test_orders_and_asset_empty(client, monkeypatch):
 
 def test_connect_unavailable_503(client, monkeypatch):
     """无网关 → /connect 返 503。"""
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
     r = client.post("/api/v1/trading/connect")
     assert r.status_code == 503

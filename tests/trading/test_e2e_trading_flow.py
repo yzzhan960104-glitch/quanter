@@ -792,7 +792,7 @@ def test_e2e_full_chain_db_consistency(isolated, monkeypatch):
     # reconcile/query_trades 用 mock 兜底（MagicMock 的 sync_positions 非 async，patch 掉）
     from trading import reconcile_job as _rj
     monkeypatch.setattr(_rj, "run_reconcile", AsyncMock(return_value=MagicMock(is_ok=True)))
-    from presentation.server.services import trading_service as _svc
+    from trading import gateway_service as _svc
     monkeypatch.setattr(_svc, "query_trades", lambda *a, **k: {"trades": []})
     asyncio.run(engine.post_close("2026-07-28", gw=fake_gw, local_positions={}))
     # CLOSED 事件 + account_daily 收盘快照（date=clock.today()=2026-07-28，V2 后与 post_close 同源）

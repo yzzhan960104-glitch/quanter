@@ -47,7 +47,7 @@ W1 隔离机制（取代旧的进程隔离硬约束）：
 ============================================================================
 影子模式（AUTO_TRADE_MODE=dry_run，默认）红线
 ============================================================================
-- pre_open / stop_loss_monitor 走 ``_submit`` → trading_service.submit_order 的
+- pre_open / stop_loss_monitor 走 ``_submit`` → gateway_service.submit_order 的
   ``dry_run=(_mode()=="dry_run")`` 分流，命中即返 ``{"state":"DRY_RUN"}`` 不真下单。
 - 未跑满 TRADE_SHADOW_MIN_DAYS（≥5）禁切 live 的告警由 ``trading/__main__.py``
   启动期处理（Task 10），本引擎内 ``_mode()`` 仅忠实读 env，不重复告警逻辑。
@@ -344,7 +344,7 @@ def _resolve_account_id() -> str:
     _migrate_env_to_account 已落库），缺失（dry_run 无 broker 配置）时用 state_store 默认账户。
 
     H3/T2 收口（2026-08-12）：实现下沉到 trading/account.resolve_account_id（单一真相源，
-    eod_plan/veto/trading_service 改 import 它，消四处复制）。本函数名保留——phases 经
+    eod_plan/veto/gateway_service 改 import 它，消四处复制）。本函数名保留——phases 经
     _eng_mod 反查 + 测试 patch "trading.engine._resolve_account_id" 命中此名（W1-A 切断
     _eng_mod 后改指 account）。
     """
@@ -354,20 +354,20 @@ def _resolve_account_id() -> str:
 
 
 def get_gateway():
-    """惰性取交易网关单例（透传 trading_service.get_gateway）。
+    """惰性取交易网关单例（透传 gateway_service.get_gateway）。
 
     Why 透传不重造：网关单例的装配（QMT 唯一，无凭证→None）与懒构造策略已在
-    trading_service.get_gateway 固化，本引擎薄编排不重复，避免双单例漂移。
+    gateway_service.get_gateway 固化，本引擎薄编排不重复，避免双单例漂移。
     本函数独立出来便于测试 monkeypatch（engine.get_gateway）隔离真实网关副作用。
     """
-    from presentation.server.services.trading_service import get_gateway as _svc_get_gw
+    from trading.gateway_service import get_gateway as _svc_get_gw
     return _svc_get_gw()
 
 
 async def _submit(order) -> dict:
     """下单分流（dry_run 据 _mode；A-2 后无 confirm/whitelist 参数）。
 
-    透传 trading_service.submit_order，其契约：
+    透传 gateway_service.submit_order，其契约：
     - dry_run 命中 → 返 {"order_id":"", "state":"DRY_RUN", "message":<reason>}（不真下单）
     - 真单成功   → 返 {"order_id":<seq>, "state":<OrderState.name 字符串>, "message":...}
     - 挡板命中（非 dry_run）→ **raise RuntimeError**（调用方必须 try-except 兜底）
@@ -378,7 +378,7 @@ async def _submit(order) -> dict:
     A-2（2026-08-06 裁定 D3）：confirm 由计划确认闸承担（pre_open 必须 confirmed=True），
     白名单挡板已删（前端同步放开）；此处不再拼 whitelist/confirm，直接透传 dry_run。
     """
-    from presentation.server.services.trading_service import submit_order as svc_submit
+    from trading.gateway_service import submit_order as svc_submit
     return await svc_submit(order, dry_run=(_mode() == "dry_run"))
 
 
@@ -1287,9 +1287,10 @@ class TradingEngine:
             已落盘的计划。播报是「锦上添花」而非「关键路径」，与 fire_and_forget 同语义。
         """
         try:
-            # 局部 import：避免顶层拉起 server/infra 子系统（与 _eod 内 experiment/strategies
-            # 局部 import 同口径，保持引擎薄编排）。
-            from presentation.server.services.trading_service import get_positions
+            # 局部 import：gateway_service（W1-A/T2 已下沉 trading 包）虽不再拉起 presentation
+            # server 子系统，但仍引入 infra.notifier/broker.base；与 _eod 内 experiment/strategies
+            # 局部 import 同口径，保持引擎薄编排。顶层 import 提升见 Task 4/7。
+            from trading.gateway_service import get_positions
             from infra.notifier import NotificationManager, fire_and_forget
 
             gw = get_gateway()

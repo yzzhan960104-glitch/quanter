@@ -14,7 +14,7 @@ A4 改造（CSV 契约 → DB 契约）：
 """
 import pytest
 
-from presentation.server.services import trading_service
+from trading import gateway_service as trading_service
 from trading import state_store
 
 

@@ -13,6 +13,15 @@
 
 Why 模块级 import fire_and_forget：emergency_halt 投递告警走 fire_and_forget，
 模块级暴露该名字便于测试 monkeypatch 屏蔽告警副作用（起 daemon thread）。
+
+W1-A/T2（2026-08-12）：本模块自 presentation/server/services/trading_service.py
+1:1 下沉至 trading 包内，更名为 gateway_service。物理意图：切断 trading→presentation
+反向依赖——网关单例 + HTTP 业务（status/positions/emergency_halt/query_trades/...）
+本属 trading 内部领域逻辑，原挂 presentation 层导致 trading/engine、phases、order_state、
+io.orders 反查 presentation（违反分层：领域层不得依赖表现层）。下沉后所有 trading 内
+调用方直 import trading.gateway_service，presentation 层（main/api/v1/ops/review_service）
+与 broadcast 也改指本模块，源文件 presentation/server/services/trading_service.py 删除。
+行为零变更：符号集逐字一致（仅删未使用的孤儿 import PROJECT_ROOT，无任何引用点）。
 """
 from __future__ import annotations
 
@@ -24,7 +33,6 @@ from datetime import datetime
 from typing import Optional
 
 from infra.notifier import NotificationManager, fire_and_forget
-from presentation.server.http.config import PROJECT_ROOT
 from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 broker.base 真身
 from trading import qmt_market_data
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身

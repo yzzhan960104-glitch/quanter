@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-from presentation.server.services import trading_service
+from trading import gateway_service as trading_service
 
 
 # ----------------------------------------------------------------------------
@@ -48,9 +48,9 @@ def test_get_positions_computes_pnl_from_avg_and_last():
         gw._fetch_broker_positions = AsyncMock(return_value=positions)
         # query_asset 不在 get_positions 链路，但本场景断言不涉及总资产，无需 stub
 
-        with patch("presentation.server.services.trading_service.get_gateway", return_value=gw), \
+        with patch("trading.gateway_service.get_gateway", return_value=gw), \
              patch(
-                 "presentation.server.services.trading_service.qmt_market_data.get_quotes",
+                 "trading.gateway_service.qmt_market_data.get_quotes",
                  new=AsyncMock(return_value=quotes),
              ):
             result = await trading_service.get_positions()
@@ -93,9 +93,9 @@ def test_get_positions_no_quote_pnl_none():
         gw._connected = True
         gw._fetch_broker_positions = AsyncMock(return_value=positions)
 
-        with patch("presentation.server.services.trading_service.get_gateway", return_value=gw), \
+        with patch("trading.gateway_service.get_gateway", return_value=gw), \
              patch(
-                 "presentation.server.services.trading_service.qmt_market_data.get_quotes",
+                 "trading.gateway_service.qmt_market_data.get_quotes",
                  new=AsyncMock(return_value=quotes),
              ):
             result = await trading_service.get_positions()

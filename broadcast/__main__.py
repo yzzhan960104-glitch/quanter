@@ -142,7 +142,9 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
     # 默认 + env LIVE_TRADE_READ_SOURCE=csv 回退；A2/A4 删 CSV 回退读口（spec §2.4 SSoT），
     # fill 表是成交流水唯一真相源。注释与代码同步，防运维误以为仍走 CSV。
     try:
-        from presentation.server.services import trading_service
+        # W1-A/T2：trading_service 下沉至 trading/gateway_service（切断 presentation 反查）；
+        # 保局部名 trading_service 以最小化本块改动（query_trades 调用不动），行为零变更。
+        from trading import gateway_service as trading_service
         trades_payload = trading_service.query_trades(date, date, limit=100)
         trades = list(trades_payload.get("trades", [])) if trades_payload else []
     except Exception:

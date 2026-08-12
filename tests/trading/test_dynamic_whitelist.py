@@ -27,5 +27,5 @@ def test_service_no_longer_consumes_whitelist():
     防止「白名单挡板复活」：若未来有人恢复 _whitelist helper 并接回 check_order，
     本用例即红（配合 test_risk_shield 的 outside_whitelist_no_longer_blocks）。
     """
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     assert not hasattr(trading_service, "_whitelist")

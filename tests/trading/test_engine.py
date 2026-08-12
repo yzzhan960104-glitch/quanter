@@ -1245,7 +1245,7 @@ def test_post_close_circuit_breaker_triggers(monkeypatch):
         return {"halted": True}
     monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.emergency_halt", _fake_halt)
+        "trading.gateway_service.emergency_halt", _fake_halt)
 
     # reconcile mock（返 ok，不干扰熔断路径）
     from trading.compute.reconcile import ReconciliationResult
@@ -1297,7 +1297,7 @@ def test_post_close_circuit_breaker_warns_unconfirmed(monkeypatch, caplog):
         return {"halted": True}
     monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.emergency_halt", _fake_halt)
+        "trading.gateway_service.emergency_halt", _fake_halt)
 
     # reconcile mock
     from trading.compute.reconcile import ReconciliationResult
@@ -1343,7 +1343,7 @@ def test_post_close_circuit_breaker_skip_when_within_limit(monkeypatch):
         return {"halted": True}
     monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.emergency_halt", _fake_halt)
+        "trading.gateway_service.emergency_halt", _fake_halt)
 
     from trading.compute.reconcile import ReconciliationResult
     fake_rec = ReconciliationResult(
@@ -1392,7 +1392,7 @@ def test_post_close_circuit_breaker_skip_when_no_baseline(monkeypatch):
         return {"halted": True}
     monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.emergency_halt", _fake_halt)
+        "trading.gateway_service.emergency_halt", _fake_halt)
 
     from trading.compute.reconcile import ReconciliationResult
     fake_rec = ReconciliationResult(
@@ -1527,7 +1527,7 @@ def test_post_close_uses_prev_close_when_start_missing(monkeypatch, _state_db):
         halt_calls.append(True)
         return {"halted": True}
     monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
-    monkeypatch.setattr("presentation.server.services.trading_service.emergency_halt", _fake_halt)
+    monkeypatch.setattr("trading.gateway_service.emergency_halt", _fake_halt)
     # 不设 _mode=live：补基线逻辑（get_prev_close_equity→赋值 start）不依赖 _mode，
     # 熔断判定也不依赖 _mode；避免 live 触发 _alert_critical 钉钉副作用（单测不发告警）。
     from trading.compute.reconcile import ReconciliationResult
@@ -2106,7 +2106,7 @@ def test_post_close_query_trades_reconcile_drift(monkeypatch):
     def _fake_agg(start, end):
         return {"A.SH": 100.0}
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.aggregate_fills_by_symbol", _fake_agg)
+        "trading.gateway_service.aggregate_fills_by_symbol", _fake_agg)
 
     class _FakeGw:
         async def query_asset(self):
@@ -2144,7 +2144,7 @@ def test_post_close_query_trades_no_drift_is_noop(monkeypatch):
     def _fake_agg(start, end):
         return {"A.SH": 100.0}
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.aggregate_fills_by_symbol", _fake_agg)
+        "trading.gateway_service.aggregate_fills_by_symbol", _fake_agg)
     class _FakeGw:
         async def query_asset(self):
             return {"total_asset": 1_000_000.0}
@@ -2183,7 +2183,7 @@ def test_post_close_query_trades_skipped_when_no_gw(monkeypatch):
         return {}
 
     monkeypatch.setattr(
-        "presentation.server.services.trading_service.aggregate_fills_by_symbol", _fake_agg)
+        "trading.gateway_service.aggregate_fills_by_symbol", _fake_agg)
 
     today = datetime.now().strftime("%Y-%m-%d")
     result = asyncio.run(engine.post_close(today))   # gw=None → get_gateway 也 None
@@ -2381,7 +2381,7 @@ def test_buy_fill_attribution_failure_does_not_block(tmp_db, monkeypatch):
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         with patch("trading.engine.place_take_profit", new=AsyncMock()), \
-             patch("presentation.server.services.trading_service.record_position_attribution",
+             patch("trading.gateway_service.record_position_attribution",
                    side_effect=_boom):
             # 不应抛异常（归因失败软降级，成交主路径继续）
             asyncio.run(eng._handle_order_update(update))

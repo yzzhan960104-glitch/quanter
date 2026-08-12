@@ -15,7 +15,7 @@ def test_queue_size_counts_down_queue_bytes(tmp_path, monkeypatch):
 
 
 def test_processes_endpoint_assembles_one_screen(monkeypatch):
-    from presentation.server.services import trading_service
+    from trading import gateway_service as trading_service
     from ops import trading_supervisor as ts
 
     monkeypatch.setattr(ts, "status", lambda port=8000, session_id=None: {

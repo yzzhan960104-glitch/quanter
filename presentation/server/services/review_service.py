@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional
 from infra.llm import get_llm_client
 from infra.llm.base import LLMConfigError
 from presentation.server.schemas.review import ReviewRequest, ReviewReport
-from presentation.server.services.trading_service import export_trades
+from trading.gateway_service import export_trades
 
 logger = logging.getLogger(__name__)
 

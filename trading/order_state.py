@@ -465,7 +465,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
                     order_id=order_id, qty=float(qty), price=float(price))
                 # SSoT Phase B · B2b：BUY 成交写持仓归因（接线 engine 成交路径）。
                 # 物理意图：原 record_position_attribution 全仓无生产调用方，归因散在
-                # trading_service 内存字典重启即丢。B2 在 apply_fill_to_position 后接线，
+                # gateway_service 内存字典重启即丢。B2 在 apply_fill_to_position 后接线，
                 # 把 strategy/entry_rationale 落 position 表（与 qty/avg_price 同行）。
                 # 重启后归因随持仓行存活——「重启后归因不丢」验收数据来源。
                 # SELL 不调 clear：apply_fill_to_position 归零删 position 行（state_store.py
@@ -475,7 +475,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
                 # 失败可补偿——与上方 fill/position 异常升 L1 不同，归因异常软降级）。
                 if direction == "BUY":
                     try:
-                        from presentation.server.services.trading_service import \
+                        from trading.gateway_service import \
                             record_position_attribution
                         record_position_attribution(
                             symbol, "neckline", f"成交建仓@{traded_time}")

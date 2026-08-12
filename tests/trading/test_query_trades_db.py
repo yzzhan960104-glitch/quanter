@@ -43,7 +43,7 @@ def test_query_trades_reads_db_fill_first(isolated_db):
     # 故意不写 CSV —— DB 有数据时 query_trades 不应碰 CSV（CSV 不存在仍能返出）
 
     # 模块在 fixture 之后 import，确保 monkeypatch 已生效
-    from presentation.server.services.trading_service import query_trades
+    from trading.gateway_service import query_trades
     res = query_trades("2026-08-05", "2026-08-05")
     assert res["total"] == 1
     assert len(res["trades"]) == 1
@@ -66,7 +66,7 @@ def test_query_trades_db_shape_limit_offset_unchanged(isolated_db):
     for i in range(3):
         state_store.insert_fill(
             f"oid{i}", "acct1", f"2026080510100{i}", "300001.SZ", "BUY", 100, 10.5 + i)
-    from presentation.server.services.trading_service import query_trades
+    from trading.gateway_service import query_trades
     # limit=2 offset=0 → 命中全集 total=3，page 只 2 行（分页切片语义保持）
     res = query_trades("2026-08-05", "2026-08-05", limit=2, offset=0)
     assert res["total"] == 3
@@ -77,7 +77,7 @@ def test_query_trades_db_shape_limit_offset_unchanged(isolated_db):
 
 def test_query_trades_db_empty_no_csv_returns_empty(isolated_db):
     """W3.2: DB 空且无 CSV → 诚实空结果（不抛 FileNotFoundError）。"""
-    from presentation.server.services.trading_service import query_trades
+    from trading.gateway_service import query_trades
     res = query_trades("2026-08-05", "2026-08-05")
     assert res["total"] == 0
     assert res["trades"] == []
@@ -91,7 +91,7 @@ def test_query_trades_db_direction_filter_case_insensitive(isolated_db):
         "oid_b", "acct1", "20260805101000", "300001.SZ", "BUY", 100, 10.5)
     state_store.insert_fill(
         "oid_s", "acct1", "20260805101100", "300001.SZ", "SELL", 100, 10.8)
-    from presentation.server.services.trading_service import query_trades
+    from trading.gateway_service import query_trades
     # 前端传小写 buy（与原 CSV 读口一致），DB 存大写 BUY
     res = query_trades("2026-08-05", "2026-08-05", direction="buy")
     assert res["total"] == 1
@@ -112,7 +112,7 @@ def test_query_trades_db_dedup_same_order_id_traded_time(isolated_db):
         "oid_x", "acct1", "20260805101000", "300001.SZ", "BUY", 100, 10.5)
     assert ok1 is True
     assert ok2 is False
-    from presentation.server.services.trading_service import query_trades
+    from trading.gateway_service import query_trades
     res = query_trades("2026-08-05", "2026-08-05")
     # 消费端看到的「买 1 笔」而不是「买 2 笔」（08-04 事故根因修复）
     assert res["total"] == 1
@@ -134,7 +134,7 @@ def test_export_trades_reads_db_fill_first(isolated_db):
         "oid_e1", "acct1", "20260805101000", "300001.SZ", "BUY", 100, 10.5)
     # 故意不写 CSV —— DB 有数据时 export_trades 不应碰 CSV
 
-    from presentation.server.services.trading_service import export_trades, _EXPORT_COLUMNS
+    from trading.gateway_service import export_trades, _EXPORT_COLUMNS
     csv_text = export_trades("2026-08-05", "2026-08-05")
     # 表头契约（前端下载依赖 _EXPORT_COLUMNS 表头顺序 · A4：LIVE_TRADE_COLUMNS 已删）
     header_line = csv_text.splitlines()[0]
@@ -153,7 +153,7 @@ def test_export_trades_empty_db_returns_header_only(isolated_db):
     注：DB 走 csv.DictWriter（默认 \\r\\n 行尾），CSV 回退走手拼 "\\n" —— 两路径
     行尾不一致但表头行内容一致，前端 Excel/csv-parse 均兼容。本测试只断言表头内容。
     """
-    from presentation.server.services.trading_service import export_trades, _EXPORT_COLUMNS
+    from trading.gateway_service import export_trades, _EXPORT_COLUMNS
     csv_text = export_trades("2026-08-05", "2026-08-05")
     # 表头行内容 = _EXPORT_COLUMNS（A4：LIVE_TRADE_COLUMNS 已删，_EXPORT_COLUMNS 是唯一源）
     first_line = csv_text.splitlines()[0]
@@ -185,7 +185,7 @@ def test_aggregate_fills_reads_db_not_csv_on_replay(isolated_db, monkeypatch):
     # CSV 写盘链路已整体退役（record_live_trade 删），CSV 重复源不再存在；保留 fill
     # 表 1 笔真相的断言锁定 aggregate 读 fill 的契约。
 
-    from presentation.server.services.trading_service import aggregate_fills_by_symbol
+    from trading.gateway_service import aggregate_fills_by_symbol
     net = aggregate_fills_by_symbol("2026-08-05", "2026-08-05")
     # 切 fill 表后只 1 笔真相 → 净 100（不是 CSV 24 行污染的 2400）
     assert net.get("600000.SH") == 100.0, (
@@ -201,7 +201,7 @@ def test_aggregate_fills_buy_sell_netting_db(isolated_db):
         "oid_b", "acct1", "20260805101000", "300001.SZ", "BUY", 100, 10.0)
     state_store.insert_fill(
         "oid_s", "acct1", "20260805101100", "300001.SZ", "SELL", 60, 10.5)
-    from presentation.server.services.trading_service import aggregate_fills_by_symbol
+    from trading.gateway_service import aggregate_fills_by_symbol
     net = aggregate_fills_by_symbol("2026-08-05", "2026-08-05")
     assert net.get("300001.SZ") == 40.0  # 100 - 60
 

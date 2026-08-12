@@ -44,7 +44,7 @@ def _run_broadcast(positions: list, total_asset: float = 10000.0) -> str:
         # notify_risk_event 被 fire_and_forget 包裹前先求值（同步调），用 MagicMock 记录 msg
         nm_inst.notify_risk_event = MagicMock(return_value=None)
         with patch("trading.engine.get_gateway", return_value=gw), \
-             patch("presentation.server.services.trading_service.get_positions",
+             patch("trading.gateway_service.get_positions",
                    new=AsyncMock(return_value=positions)), \
              patch("infra.notifier.NotificationManager") as NM, \
              patch("infra.notifier.fire_and_forget"):

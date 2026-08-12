@@ -25,7 +25,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from trading import clock  # Phase 2 Task 10：jobs 端点 date 缺省取 clock.today()（单一时间源 C-6）
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
-from presentation.server.services.trading_service import (
+from trading.gateway_service import (
     emergency_halt,
     export_trades,
     get_jobs,  # Phase 2 Task 10：作业驾驶舱聚合（job 台账 + catchup 四态）
