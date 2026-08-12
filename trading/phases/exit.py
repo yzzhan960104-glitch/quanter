@@ -25,7 +25,7 @@
       - veto 终局防线（latest_action=VETOED 显式跳过，C3 follow-up）不变。
 
 ================================================================================
-模块级符号 patch 路径设计（brief 关键上下文 §4 · 保行为等价 + 测试全绿）
+模块级符号依赖设计（W1-A/T2 收口后 · 保行为等价 + 测试全绿）
 ================================================================================
 止盈挂单路径是成交回报链路（order_state）+ 盘中 TP 漏挂兜底（stop_loss）的关键交汇点。
 测试 patch ``trading.engine._submit`` / ``trading.engine.trading_plan.load_plan`` 驱动
@@ -33,27 +33,23 @@ place_take_profit 单元测（test_place_take_profit_two_legs 等 8 测直调本
 ``trading.engine.place_take_profit`` 整体 mock（test_tp_fallback_preserves_positions 经
 stop_loss 路径补挂）。逐符号归类如下（与 pre_open.py / stop_loss.py 同口径）：
 
-①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
-    **W1-A/T2-Task4 进展**：_state_store 已切断 _eng_mod 反查 → 顶部直接 import。①段以下
-    叙述保留历史；现行反查仅余 _submit（Task 6 切断）。
-    **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 _eng_mod 反查 → 顶部直接 import
-    trading.account SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id
-    失效 → Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
-    - ``_submit``：engine 模块级函数（下单分流），测试 ``patch("trading.engine._submit")``
-      （test_place_take_profit_two_legs / _skips_vetoed_symbol / _tp1_qty_round_to_lot /
-      _portion_zero/full / _tp1_ge_tp2 / _no_tp1 / _truncates_fractional + stop_loss 路径）。
-      走 ``_eng_mod._submit`` 在 call-time 解析（local alias 绑定于函数入口，patch 先于调用）。
-    - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，
-      测试既 ``patch("trading.engine._state_store")``（整体 mock · test_stop_loss_l1_halt）又
-      ``patch("trading.engine._state_store.has_order")`` / ``add_order_qty`` 等（属性级）。
-      **W1-A/T2-Task4 已切顶部直接 import state_store 真身**（原走 engine._state_store 反查，
-      现整体 patch engine._state_store 失效，属性级 patch 仍命中 → Task 8-19 迁）。
-    - ``_resolve_account_id``：engine 模块级函数（account_id 解析），测试经 env var
-      ``QMT_ACCOUNT_ID`` 驱动（monkeypatch.setenv）。**W1-A/T2-Task5 已切顶部直接 import
-      trading.account.resolve_account_id 真身**（原走 engine._resolve_account_id() 在
-      call-time 解析，现 patch engine._resolve_account_id 失效 → Task 8-19 迁 patch 物理路径）。
+W1-A/T2 反查切断收口语义：原 phases 经函数内 lazy ``import trading.engine as`` 反查 engine
+模块级符号的设计**已全量退役**——所有符号改为顶部直接 import 物理真身模块。``patch(
+"trading.engine._xxx")`` / ``monkeypatch.setattr(engine, "_xxx")`` 类测试因 phases 不再
+经 engine 模块属性解析而失效，Task 8-19 将这些 patch 迁到物理真身模块路径（monkeypatch
+gateway_service._submit / critical._mode / state_store.has_order / account.resolve_account_id
+等）。各符号现行依赖如下：
 
-②顶部直接 import（不涉及 engine patch，无循环风险）：
+顶部直接 import（物理真身 · 无循环 · 共享模块对象属性级 patch 仍命中）：
+    - ``_submit``：**W1-A/T2-Task7 已切**顶部直接 import trading.gateway_service._submit 真身
+      （原 engine._submit wrapper 下沉 gateway_service · patch engine._submit 失效 → Task 8-19
+      迁 patch("trading.gateway_service._submit")）。
+    - ``_state_store``：**W1-A/T2-Task4 已切**顶部直接 import state_store 真身（原 engine
+      re-export 反查，整体 patch engine._state_store 失效，属性级 patch state_store.has_order /
+      add_order_qty 仍命中共享模块对象 → Task 8-19 迁整体 patch 路径）。
+    - ``_resolve_account_id``：**W1-A/T2-Task5 已切**顶部直接 import trading.account SSoT 真身
+      （account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁 monkeypatch
+      account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
     - ``clock``（``from trading import clock``）：单一时间源（``clock.today()``）。测试经
       ``monkeypatch clock.today`` 在共享模块对象上 patch → 命中；无整体 mock。
     - ``trading_plan``（``from trading import trading_plan``）：计划加载模块。测试经
@@ -71,14 +67,18 @@ import logging
 
 # 项目级单例（共享模块对象属性 patch 命中）：
 # clock=单一时间源（clock.today）/ trading_plan=计划加载（trading_plan.load_plan）。
-# W1-A/T2-Task4：state_store 从 _eng_mod 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
+# W1-A/T2-Task4：state_store 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
 # engine._state_store 失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock
 from trading import trading_plan
 from trading import state_store as _state_store
-# W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
+# W1-A/T2-Task5：_resolve_account_id 反查切断 → 顶部直接 import trading.account
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
 from trading.account import resolve_account_id as _resolve_account_id
+# W1-A/T2-Task7：_submit 反查切断 → 顶部直接 import gateway_service._submit 真身（原 engine._submit
+# wrapper 下沉 gateway_service · gateway_service 不反向 import 本文件 · 无环 · patch engine._submit
+# 失效 → Task 8-19 迁 patch("trading.gateway_service._submit")）。
+from trading.gateway_service import _submit
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.exit）：place_take_profit 原是
 # engine 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -96,12 +96,10 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
     Why 模块级：stop_loss_monitor（模块级函数）盘中 TP 漏挂兜底也要调它（#10），
     实例方法无法被模块级函数引用（原 plan E4 的 self 错误根因）。
     """
-    # T1-Task9：engine 模块级符号经 _eng_mod 引用（保 patch("trading.engine._xxx") /
-    # monkeypatch.setattr(engine, "_xxx") 命中 + 避循环 import：engine 顶部 re-export 本模块）。
-    # _state_store / clock / trading_plan 顶部 import（共享模块对象属性 patch 命中，无循环）。
-    # local alias 绑定于函数入口：测试 patch 先于调用 → alias 拿 mock；无 patch 拿真值。
-    import trading.engine as _eng_mod
-    _submit = _eng_mod._submit
+    # W1-A/T2-Task7：_submit 反查已切断 → 顶部直接 import gateway_service._submit 真身
+    # （原 engine._submit wrapper 下沉 gateway_service · patch("trading.engine._submit") 失效 →
+    # Task 8-19 迁 patch("trading.gateway_service._submit")）。_state_store / clock /
+    # trading_plan 顶部 import（共享模块对象属性 patch 命中，无循环）。
 
     today = clock.today()
     plan = trading_plan.load_plan(today)

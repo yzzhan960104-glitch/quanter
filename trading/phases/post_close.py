@@ -38,55 +38,33 @@
       - W3.4 CSV 归因降级（aggregate_fills 只展示不重写）不变。
 
 ================================================================================
-模块级符号 patch 路径设计（brief 关键上下文 §3 · 保行为等价 + 测试全绿）
+模块级符号依赖设计（W1-A/T2 收口后 · 保行为等价 + 测试全绿）
 ================================================================================
 盘后对账路径是测试 patch 的重灾区（reconcile broker 取数失败 / 熔断三步 / CLOSED/TP_FILLED 落
-DB / account_daily 收盘快照 / _post_close wrapper 读账本 / e2e probabilistic_broker 等）。逐符号
-归类如下（与 pre_open.py / stop_loss.py 同口径）：
+DB / account_daily 收盘快照 / _post_close wrapper 读账本 / e2e probabilistic_broker 等）。
 
-①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
-    **W1-A/T2-Task4 进展**：无状态符号（_mode / _alert_critical / _state_store /
-    _cancel_all_open_orders）已切断 _eng_mod 反查 → 顶部直接 import 物理叶子（critical /
-    state_store / io.breaker）。①段以下叙述保留历史；现行反查仅余 get_gateway（Task 7 切断）。
-    **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 _eng_mod 反查 → 顶部直接 import
-    trading.account SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id
-    失效 → Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
-    以下符号均在 post_close 相关测试中经 ``patch("trading.engine._xxx")`` /
-    ``monkeypatch.setattr(engine, "_xxx", ...)`` / ``monkeypatch.setattr(engine, "xxx", ...)`` 注入
-    mock，且 engine 顶部 re-export 本模块会触发循环——故必须函数体内 lazy 引用，绝不能顶部
-    ``from trading.engine import _xxx``：
-    - ``get_gateway``：engine 模块级函数。test_engine.py test_post_close_snapshot_close_equity /
-      test_post_close_inserts_closed_event / test_post_close_tp1_filled_event 经
-      ``monkeypatch.setattr(engine, "get_gateway", lambda: ...)`` 驱动 gw=None 路径
-      （post_close 内 ``if gw is None: gw = get_gateway()``）；test_post_close_no_gw_is_noop /
-      test_post_close query_trades skipped_when_no_gw 直调 post_close(date)（gw 缺省 None）走
-      get_gateway 兜底。走 ``_eng_mod.get_gateway()`` 在 call-time 解析保命中。
-    - ``_mode`` / ``_alert_critical``：critical 定义、engine re-export，但 post_close live 告警
-      分支（broker 取数失败 / 熔断触发）测试经 ``patch("trading.engine._mode")`` /
-      ``patch("trading.engine._alert_critical")`` 驱动（test_l2_aggregated_critical / e2e）——若
-      本模块顶部 ``from trading.critical import _mode`` 则拿到 critical 引用，patch engine._mode
-      不命中，破坏 live 告警断言。故走 _eng_mod（与 pre_open / stop_loss 同结论）。
-    - ``_cancel_all_open_orders``：engine 经 ``from trading.io.breaker import cancel_all_open_orders
-      as _cancel_all_open_orders`` 引入，测试经 ``patch("trading.engine._cancel_all_open_orders")``
-      驱动（e2e probabilistic_broker 熔断撤单 spy / test_cancel_all_account_id / test_l2 等）。
-      熔断触发时 post_close 调 ``_cancel_all_open_orders(gw)``——**W1-A/T2-Task4 已切顶部直接
-      import io.breaker 真身**（原走 _eng_mod 反查保命中，现 patch engine._cancel_all_open_orders
-      失效 → Task 8-19 迁 patch io.breaker.cancel_all_open_orders）。
-    - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，测试既
-      ``patch("trading.engine._state_store")``（整体 MagicMock · test_post_close_circuit_breaker 系列
-      等）又 ``monkeypatch`` 属性级 + 直接隔离 ``state_store._DEFAULT_DB``（共享模块对象）。
-      **W1-A/T2-Task4 已切顶部直接 import state_store 真身**（原走 engine._state_store 在
-      call-time 解析，现整体 patch engine._state_store 失效，属性级 patch 仍命中共享模块对象 →
-      Task 8-19 迁整体 patch 路径）。
-    - ``_resolve_account_id``：engine 模块级函数（account_id 解析）。test_post_close_snapshot_close_equity
-      / test_post_close_inserts_closed_event / test_post_close_tp1_filled_event 用
-      ``account_id = engine._resolve_account_id()`` 预置 state_store，post_close 内必须读同一
-      account_id 才能命中预置行——走 ``engine._resolve_account_id()`` 在 call-time 解析（与
-      pre_open.py / stop_loss.py / order_state.py 同范式，待 Task 9 收口）。**W1-A/T2-Task5 已切
-      顶部直接 import trading.account.resolve_account_id 真身**（原走 engine 反查保命中，现
-      patch engine._resolve_account_id 失效 → Task 8-19 迁 patch 物理路径）。
+W1-A/T2 反查切断收口语义：原 phases 经函数内 lazy ``import trading.engine as`` 反查 engine
+模块级符号的设计**已全量退役**——所有符号改为顶部直接 import 物理真身模块。``patch(
+"trading.engine._xxx")`` / ``monkeypatch.setattr(engine, "_xxx"/"xxx")`` 类测试因 post_close
+不再经 engine 模块属性解析而失效，Task 8-19 将这些 patch 迁到物理真身模块路径。各符号现行
+依赖如下（与 pre_open.py / stop_loss.py 同口径）：
 
-②顶部直接 import（不涉及 engine patch，无循环风险 · 共享模块对象属性 patch 命中）：
+顶部直接 import（物理真身 · 无循环 · 共享模块对象属性级 patch 仍命中）：
+    - ``get_gateway``：**W1-A/T2-Task7 已切**顶部直接 import gateway_service 真身（原 engine
+      re-export 反查 · patch engine.get_gateway 失效 → Task 8-19 迁 monkeypatch
+      gateway_service.get_gateway）。test_post_close_no_gw_is_noop / query_trades_skipped_when_no_gw
+      直调 post_close(date)（gw 缺省 None）走 get_gateway 兜底。
+    - ``_mode`` / ``_alert_critical``：**W1-A/T2-Task4 已切**顶部直接 import critical 真身（patch
+      engine._mode / engine._alert_critical 失效 → Task 8-19 迁 patch critical._mode /
+      critical._alert_critical）。
+    - ``_cancel_all_open_orders``：**W1-A/T2-Task4 已切**顶部直接 import io.breaker 真身（patch
+      engine._cancel_all_open_orders 失效 → Task 8-19 迁 patch io.breaker.cancel_all_open_orders）。
+    - ``_state_store``：**W1-A/T2-Task4 已切**顶部直接 import state_store 真身（原 engine re-export
+      反查 · 整体 patch engine._state_store 失效，属性级 patch state_store.xxx 仍命中共享模块对象
+      → Task 8-19 迁整体 patch 路径）。
+    - ``_resolve_account_id``：**W1-A/T2-Task5 已切**顶部直接 import trading.account SSoT 真身
+      （account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁 monkeypatch
+      account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
     - ``clock``（``from trading import clock``）：单一时间源（测试经 ``monkeypatch clock.today``
       在共享模块对象上 patch → 命中；post_close 路径无 ``patch("trading.engine.clock")`` 整体
       mock 驱动熔断/对账）。C-6 V2 业务日期 key（熔断基线 / trade_event / account_daily）均走
@@ -123,22 +101,26 @@ from trading.ports import EnginePorts
 # 项目级单例（共享模块对象属性 patch 命中）：
 # clock=单一时间源（C-6 V2 业务日期 key）/ dynamic_whitelist=ports=None 防御回退分支（pragma no cover）/
 # reconcile_job=持仓对账薄编排壳（属性级 patch 经共享模块对象命中）/ position_book=持仓账本（get_local_positions）。
-# W1-A/T2-Task4：state_store 从 _eng_mod 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
+# W1-A/T2-Task4：state_store 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
 # engine._state_store 失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock, dynamic_whitelist, reconcile_job
 from trading import position_book as _position_book
 from trading import state_store as _state_store
-# W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
+# W1-A/T2-Task5：_resolve_account_id 反查切断 → 顶部直接 import trading.account
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
 from trading.account import resolve_account_id as _resolve_account_id
-# W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 顶部直接 import critical 真身
+# W1-A/T2-Task4：_mode / _alert_critical 反查切断 → 顶部直接 import critical 真身
 # （critical 是 SSoT 基础设施域叶子 · patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁）。
 from trading.critical import _mode, _alert_critical
 # _check_daily_loss_limit（熔断 -3% 纯判定 functional core · compute 单源 · post_close 路径无 engine patch）。
 from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
-# W1-A/T2-Task4：_cancel_all_open_orders 从 _eng_mod 反查切断 → 顶部直接 import io.breaker 真身
+# W1-A/T2-Task4：_cancel_all_open_orders 反查切断 → 顶部直接 import io.breaker 真身
 # （patch engine._cancel_all_open_orders 失效 → Task 8-19 迁 patch io.breaker.cancel_all_open_orders）。
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
+# W1-A/T2-Task7：get_gateway 反查切断 → 顶部直接 import gateway_service 真身（gateway_service 下沉
+# 自原 presentation/serivces/trading_service.py · gateway_service 不反向 import 本文件 · 无环 ·
+# patch engine.get_gateway 失效 → Task 8-19 迁 monkeypatch gateway_service.get_gateway）。
+from trading.gateway_service import get_gateway
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.post_close）：post_close 原是 engine
 # 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -187,16 +169,13 @@ async def post_close(
            emergency_halt + ERROR 告警
         缺基线（start=None）→ 跳过 + WARN（不拿 0 触发，防 check(0,X) 永远 False 反永不熔断）。
     """
-    # T1-Task8：经 _eng_mod 引用调 engine 模块级符号（保 patch("trading.engine._xxx") /
-    # monkeypatch.setattr(engine, "_xxx"/"xxx") 命中——test_post_close_snapshot_close_equity 等 4 测
-    # patch engine.get_gateway / engine._resolve_account_id；test_post_close_circuit_breaker 系列 /
-    # e2e patch engine._state_store / engine._cancel_all_open_orders / engine._mode / engine._alert_critical；
-    # 详见本文件模块 docstring「模块级符号 patch 路径设计」）+ 避循环 import（engine 顶部 re-export 本模块）。
-    # call-time 解析：测试 patch 整体属性时拿 mock，patch 属性级（_state_store.xxx）时拿真模块对象。
-    # clock / reconcile_job / _position_book / _check_daily_loss_limit / dynamic_whitelist 顶部直接 import
-    # （不涉及 engine patch · 共享模块对象属性 patch 命中）。
-    import trading.engine as _eng_mod
-    get_gateway = _eng_mod.get_gateway
+    # T1-Task8 → W1-A/T2 收口：engine 模块级符号经 engine 反查的设计已全量退役，所有符号
+    # 改顶部直接 import 物理真身（gateway_service.get_gateway / state_store / critical /
+    # io.breaker / account）。patch engine.get_gateway / engine._state_store /
+    # engine._cancel_all_open_orders / engine._mode / engine._alert_critical 失效 → Task 8-19
+    # 迁 patch 物理路径（详见本文件模块 docstring「模块级符号依赖设计」）。
+    # clock / reconcile_job / _position_book / _check_daily_loss_limit / dynamic_whitelist 顶部
+    # 直接 import（共享模块对象属性 patch 命中）。
 
     result: dict = {"date": date}
     if gw is None:
@@ -474,7 +453,8 @@ async def post_close(
 # ============================================================================
 # T1-Task8：原 ``_seq_for_real_oid`` / ``_order_state_to_db`` 去 `_` 前缀 → ``seq_for_real_oid`` /
 # ``order_state_to_db``（engine re-export 双名保 ``patch("trading.engine._seq_for_real_oid")`` +
-# order_state.py ``_eng_mod._seq_for_real_oid`` / ``_eng_mod._order_state_to_db`` 命中）。逻辑逐字原样。
+# 历史 order_state.py 反查命中）。W1-A/T2-Task6 后 order_state 改顶部直接 import 本模块真身。
+# 逻辑逐字原样。
 
 
 def seq_for_real_oid(gw, real_oid: str) -> int | None:

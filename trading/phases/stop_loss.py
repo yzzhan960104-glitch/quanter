@@ -32,68 +32,44 @@
         CRITICAL）不变。
 
 ================================================================================
-模块级符号 patch 路径设计（brief 关键上下文 §3 · 保行为等价 + 测试全绿）
+模块级符号依赖设计（W1-A/T2 收口后 · 保行为等价 + 测试全绿）
 ================================================================================
 盘中止损路径是测试 patch 最密集 + 最高风险的域（decide_exit 四分支 / D12 fallback / pending
-cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engine alerts 等）。逐符号
-归类如下（与 pre_open.py / order_state.py 同口径）：
+cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engine alerts 等）。
 
-①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
-    **W1-A/T2-Task4 进展**：无状态符号（_state_store / _mode / _alert_critical / calendar /
-    qmt_market_data / _trading_days_between / decide_exit）已切断 _eng_mod 反查 → 顶部直接 import
-    物理叶子（见 ②段）。①段以下叙述保留历史（这些符号已迁走）；现行反查仅余 get_gateway /
-    _submit / place_take_profit（Task 6/7 切断）。
-    **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 _eng_mod 反查 → 顶部直接 import
-    trading.account SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id
-    失效 → Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
-    以下符号均在 stop_loss 相关测试中经 ``patch("trading.engine._xxx")`` /
-    ``monkeypatch.setattr(engine, "_xxx", ...)`` / ``patch("trading.engine.xxx")`` 注入 mock，且
-    engine 顶部 re-export 本模块会触发循环——故必须函数体内 lazy 引用，绝不能顶部
-    ``from trading.engine import _xxx``：
-    - ``get_gateway`` / ``_submit`` / ``place_take_profit`` / ``decide_exit``：engine 模块级（含
-      re-export）函数，测试 ``patch("trading.engine.get_gateway"/"_submit"/"place_take_profit")``
-      （test_stop_loss_monitor_decide_exit._run_monitor / test_stop_loss_l1_halt）+
-      ``monkeypatch.setattr(engine, "decide_exit"/"_submit")``（test_stop_loss_l1_halt 驱动 L1 分支）。
-      **W1-A/T2-Task6 进展**：place_take_profit 已切断 _eng_mod 反查 → 顶部直接 import phases.exit
-      真身（同包无环 · patch engine.place_take_profit 失效 → Task 8-19 迁）。
-    - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，测试既
-      ``patch("trading.engine._state_store")``（整体 MagicMock · test_stop_loss_l1_halt 三 Case 验
-      has_order/insert_order L1 / test_engine_stoploss_inject）又 ``monkeypatch`` 属性级。走
-      ``_state_store`` 在 call-time 解析：整体 patch 拿 mock，无 patch 拿真模块（autouse
-      fixture 隔离 _DEFAULT_DB）。
-    - ``_mode`` / ``_alert_critical``：critical 定义、engine re-export，但测试 patch 的是
-      ``trading.engine._mode`` / ``trading.engine._alert_critical``（test_stop_loss_monitor_decide_exit
-      行情黑屏 4 测 / test_stoploss_post_close_gate）——若本模块顶部 ``from trading.critical import
-      _mode`` 则拿到 critical 引用，patch engine._mode 不命中，破坏 live 告警断言。故走 _eng_mod。
-    - ``_resolve_account_id``：engine 模块级函数（account_id 解析），测试经整体 patch
-      ``trading.engine._state_store`` 驱动——走 ``engine._resolve_account_id()`` 在 call-time
-      解析（与 pre_open.py / order_state.py 同范式，待 Task 9 收口）。**W1-A/T2-Task5 已切顶部
-      直接 import trading.account.resolve_account_id 真身**（原走 engine 反查，现 patch
-      engine._resolve_account_id 失效 → Task 8-19 迁 patch 物理路径）。
-    - ``calendar`` / ``qmt_market_data``：测试既 ``patch("trading.engine.calendar")`` /
-      ``patch("trading.engine.qmt_market_data")``（整体 MagicMock · test_stop_loss_monitor_decide_exit
-      _run_monitor / test_engine_stoploss_inject）又 ``monkeypatch.setattr(engine.calendar, ...)`` /
-      ``monkeypatch.setattr(engine.qmt_market_data, "get_quotes", ...)``（属性级 · test_stop_loss_l1_halt）。
-      走 ``calendar`` / ``qmt_market_data``：整体 patch 时拿 mock，属性级 patch 时
-      拿真模块对象 → ``.is_intraday_session`` / ``.get_quotes`` patch 同样命中。
-    - ``_trading_days_between``：engine 模块级别名（``from trading.compute.stop import trading_days_between
-      as _trading_days_between``），test_engine.py test_scan_expired_* 经
-      ``monkeypatch.setattr(engine, "_trading_days_between", lambda s,e: N)`` 确定性驱动 scan_expired —
-      走 ``_trading_days_between`` 保命中（与 pre_open.py 同结论）。
+W1-A/T2 反查切断收口语义：原 phases 经函数内 lazy ``import trading.engine as`` 反查 engine
+模块级符号的设计**已全量退役**——所有符号改为顶部直接 import 物理真身模块。``patch(
+"trading.engine._xxx")`` / ``monkeypatch.setattr(engine, "_xxx", ...)`` / ``patch("trading.engine.xxx")``
+类测试因 stop_loss 不再经 engine 模块属性解析而失效，Task 8-19 将这些 patch 迁到物理真身模块
+路径。各符号现行依赖如下（与 pre_open.py / order_state.py 同口径）：
+
+顶部直接 import（物理真身 · 无循环 · 共享模块对象属性级 patch 仍命中）：
+    - ``get_gateway`` / ``_submit``：**W1-A/T2-Task7 已切**顶部直接 import gateway_service 真身
+      （原 engine re-export 反查 · patch engine.get_gateway / engine._submit 失效 → Task 8-19
+      迁 monkeypatch gateway_service.get_gateway / gateway_service._submit）。
+    - ``_state_store``：**W1-A/T2-Task4 已切**顶部直接 import state_store 真身（原 engine re-export
+      反查 · 整体 patch engine._state_store 失效，属性级 patch state_store.xxx 仍命中共享模块对象
+      → Task 8-19 迁整体 patch 路径）。
+    - ``_mode`` / ``_alert_critical``：**W1-A/T2-Task4 已切**顶部直接 import critical 真身
+      （patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁 patch critical._mode /
+      critical._alert_critical）。
+    - ``_resolve_account_id``：**W1-A/T2-Task5 已切**顶部直接 import trading.account SSoT 真身
+      （account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁 monkeypatch
+      account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
+    - ``calendar`` / ``qmt_market_data``：**W1-A/T2-Task4 已切**顶部直接 import（patch engine.calendar /
+      engine.qmt_market_data 整体 mock 失效 → Task 8-19 迁 patch 物理模块路径；属性级 patch
+      calendar.is_intraday_session / qmt_market_data.get_quotes 仍命中共享模块对象）。
+    - ``_trading_days_between``：**W1-A/T2-Task4 已切**顶部直接 import compute.stop 真身
+      （test_scan_expired_* 的 monkeypatch(engine, "_trading_days_between") 失效 → Task 8-19 迁）。
+    - ``decide_exit``：**W1-A/T2-Task4 已切**顶部直接 import execution 真身（monkeypatch(engine,
+      "decide_exit") 失效 → Task 8-19 迁 patch execution.decide_exit）。
+    - ``place_take_profit``：**W1-A/T2-Task6 已切**顶部直接 import phases.exit 真身（同包无环 ·
+      patch engine.place_take_profit 失效 → Task 8-19 迁 monkeypatch phases.exit.place_take_profit）。
     - ``_last_quote_blackout_alert_ts`` / ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S``：**W1-A/T2 已收口**
       ——原 engine 模块级节流状态迁 ``trading.alerting.QuoteBlackoutThrottle`` dataclass，经
-      ``ports.blackout`` 注入本函数（``ports.blackout.should_alert(now)`` / ``mark(now)`` 替代
-      ``_eng_mod._last_quote_blackout_alert_ts`` 反查读写）。测试改经构造 ``QuoteBlackoutThrottle
-      (last_ts=0.0)`` 注入 ports 重置节流（原 ``monkeypatch.setattr("trading.engine._last_quote_
-      blackout_alert_ts", 0.0)`` 已删，详见 test_stop_loss_monitor_decide_exit._make_ports_with_
-      fresh_blackout）。本项不再属「engine 模块级符号反查」清单（仅历史注释保留）。
-      现行反查项仅余：``get_gateway`` / ``_submit``（Task 7 切断）。
-      无状态符号（_state_store / _mode /
-      _alert_critical / calendar / qmt_market_data / _trading_days_between / decide_exit）
-      W1-A/T2-Task4 已切断，改顶部直接 import 物理叶子。
-      _resolve_account_id W1-A/T2-Task5 已切断 → 顶部直接 import trading.account 真身。
-
-②顶部直接 import（不涉及 engine patch，无循环风险）：
+      ``ports.blackout`` 注入本函数（``ports.blackout.should_alert(now)`` / ``mark(now)`` 替代原
+      engine 反查读写）。测试改经构造 ``QuoteBlackoutThrottle(last_ts=0.0)`` 注入 ports 重置节流
+      （详见 test_stop_loss_monitor_decide_exit._make_ports_with_fresh_blackout）。
     - ``clock``（``from trading import clock``）：单一时间源（测试经 ``monkeypatch clock.today/now``
       在共享模块对象上 patch → 命中；无 ``patch("trading.engine.clock")`` 整体 mock 驱动 stop_loss）。
     - ``position_book``（``from trading import position_book as _position_book``）：持仓账本（测试经
@@ -122,35 +98,39 @@ from typing import Any, Mapping, Optional
 
 # 项目级单例（共享模块对象属性 patch 命中）：
 # clock=单一时间源（clock.now/today）/ position_book=持仓账本（get_entry_dates/_DEFAULT_DB）。
-# W1-A/T2-Task4：calendar / qmt_market_data / state_store 从 _eng_mod 反查切断 → 顶部直接 import
+# W1-A/T2-Task4：calendar / qmt_market_data / state_store 反查切断 → 顶部直接 import
 # 物理叶子（底层无环 · 整体 patch engine.X 将失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock
 from trading import calendar
 from trading import position_book as _position_book
 from trading import qmt_market_data
 from trading import state_store as _state_store
-# W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
+# W1-A/T2-Task5：_resolve_account_id 反查切断 → 顶部直接 import trading.account
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
 from trading.account import resolve_account_id as _resolve_account_id
 # _CriticalHalt（L1 致命停调度异常，按类身份 catch 不被 patch）。
-# W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 顶部直接 import critical 真身
+# W1-A/T2-Task4：_mode / _alert_critical 反查切断 → 顶部直接 import critical 真身
 # （critical 是 SSoT 基础设施域叶子，不反向 import 本文件 · patch engine._mode 失效 → Task 8-19 迁）。
 from trading.critical import _CriticalHalt, _mode, _alert_critical
 # W1-A/T2：EnginePorts 经 ports.blackout 注入 QuoteBlackoutThrottle（行情黑屏节流状态）。
 # 窄依赖接口纯 stdlib + alerting 依赖（无循环），与 pre_open.py 同口径顶层 import。
 from trading.ports import EnginePorts
 # should_trigger_stop（D12 fallback 纯判定 · compute 单源 · stop_loss 路径无 engine patch）。
-# W1-A/T2-Task4：_trading_days_between 从 _eng_mod 反查切断 → 同 compute.stop 顶部直接 import
+# W1-A/T2-Task4：_trading_days_between 反查切断 → 同 compute.stop 顶部直接 import
 # （test_scan_expired_* 的 monkeypatch(engine, "_trading_days_between") 失效 → Task 8-19 迁）。
 from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between
 # ExitAction / ExitReason（执行单源枚举 · 按身份 is 比较 · 与 engine re-export 同源同类）。
-# W1-A/T2-Task4：decide_exit 从 _eng_mod 反查切断 → 同 execution 顶部直接 import（无新环 ·
+# W1-A/T2-Task4：decide_exit 反查切断 → 同 execution 顶部直接 import（无新环 ·
 # monkeypatch(engine, "decide_exit") 失效 → Task 8-19 迁 patch execution.decide_exit）。
 from strategies.neckline.execution import ExitAction, ExitReason, decide_exit
-# W1-A/T2-Task6：place_take_profit 从 _eng_mod 反查切断 → 顶部直接 import phases.exit 真身
+# W1-A/T2-Task6：place_take_profit 反查切断 → 顶部直接 import phases.exit 真身
 # （同包 phases · exit 模块级不反向 import 本文件 · 无环 · patch engine.place_take_profit 失效 →
 # Task 8-19 迁 monkeypatch phases.exit.place_take_profit）。
 from trading.phases.exit import place_take_profit
+# W1-A/T2-Task7：get_gateway / _submit 反查切断 → 顶部直接 import gateway_service 真身（原 engine
+# re-export 反查 · gateway_service 不反向 import 本文件 · 无环 · patch engine.get_gateway /
+# engine._submit 失效 → Task 8-19 迁 monkeypatch gateway_service.get_gateway / gateway_service._submit）。
+from trading.gateway_service import get_gateway, _submit
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.stop_loss）：stop_loss_monitor 原是
 # engine 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -219,14 +199,13 @@ async def stop_loss_monitor(
         非盘中：{"checked":0, "reason":"非盘中时段..."}
         无 gw：{"checked":0, "reason":"...网关..."}
     """
-    # T1-Task7：经 _eng_mod 引用调 engine 模块级符号（保 patch("trading.engine.xxx") /
-    # monkeypatch.setattr(engine, "xxx") 命中——test_stop_loss_monitor_decide_exit._run_monitor
-    # 经 patch("trading.engine.calendar"/"qmt_market_data"/"_submit"/"get_gateway") 驱动主路径；
-    # test_stop_loss_l1_halt 经 monkeypatch.setattr(engine, "decide_exit"/"_submit") 驱动 L1 分支；
-    # 行情黑屏 4 测经 patch("trading.engine._alert_critical") 验 _alert_critical 命中
-    # （W1-A/T2：节流状态已迁 ports.blackout，不再 monkeypatch engine 模块级）+ 避循环 import
-    # （engine 顶部 re-export 本模块）。详见本文件模块 docstring「模块级符号 patch 路径设计」。
-    import trading.engine as _eng_mod
+    # T1-Task7 → W1-A/T2 收口：engine 模块级符号经 engine 反查的设计已全量退役，所有符号
+    # 改顶部直接 import 物理真身（gateway_service.get_gateway/_submit / critical / state_store /
+    # compute.stop / execution / phases.exit）。patch engine.xxx 失效 → Task 8-19 迁 patch 物理路径
+    # （test_stop_loss_monitor_decide_exit._run_monitor 改 patch trading.gateway_service._submit /
+    # get_gateway；test_stop_loss_l1_halt 改 monkeypatch execution.decide_exit /
+    # gateway_service._submit；行情黑屏 4 测改 patch critical._alert_critical · W1-A/T2 节流状态
+    # 已迁 ports.blackout）。详见本文件模块 docstring「模块级符号依赖设计」。
     # ① 盘中时段判定（Task1）
     # C-6 V2：时点判定走 clock.now（单一时间源口子）。
     if not calendar.is_intraday_session(clock.now()):
@@ -234,7 +213,7 @@ async def stop_loss_monitor(
 
     # ② 取网关与持仓
     if gw is None:
-        gw = _eng_mod.get_gateway()
+        gw = get_gateway()
     if gw is None:
         logger.warning("stop_loss_monitor 跳过：交易网关未装配（gw=None）")
         return {"checked": 0, "reason": "交易网关未装配，无法查持仓"}
@@ -305,7 +284,7 @@ async def stop_loss_monitor(
     # R2 降级告警（live）：行情源整体失效（xtdata 黑屏）→ 止损链路裸奔，CRITICAL 知会。
     # Why 30min 节流：避免 IntervalTrigger 30s 巡检每轮推一条（M4 告警风暴红线）。
     # W1-A/T2（模块级可变状态收口）：原节流状态 _last_quote_blackout_alert_ts / 间隔常量
-    # _QUOTE_BLACKOUT_ALERT_INTERVAL_S 是 engine 模块级可变 global，经 _eng_mod 反查读写——
+    # _QUOTE_BLACKOUT_ALERT_INTERVAL_S 是 engine 模块级可变 global，原经 engine 反查读写——
     # 违反「模块级可变状态收口」红线。现收敛为 trading.alerting.QuoteBlackoutThrottle dataclass
     # 实例，经 ports.blackout 注入，生产主路径走 ``fire_if_due(now)`` 原子方法（单一 Lock 内
     # check+mark——I-1 fix：原 should_alert+mark 两步 check-then-act 非原子，catchup 重叠 /
@@ -314,7 +293,7 @@ async def stop_loss_monitor(
     # 边界等价触发，逐字对齐原 ``_now_mono - _last >= _INTERVAL`` 语义。
     # ports=None 守卫：ports=None 等价 blackout 跳过——仅非生产裸调（生产 _stoploss 总传
     # self._ports，e2e orchestrator 显式传 eng._ports 保 blackout 语义完整）；不阻断主链路。
-    # _alert_critical 仍经 _eng_mod（Task 4 才切断），本 Task 只迁 blackout 状态。
+    # _alert_critical 仍经 engine 反查（Task 4 才切断），本 Task 只迁 blackout 状态。
     if (ports is not None and _mode() == "live" and relevant_syms):
         _n_valid = sum(
             1 for q in quotes.values()
@@ -425,7 +404,7 @@ async def stop_loss_monitor(
                             logger.info("stop_loss 跳过已挂 STOP（DB 幂等）symbol=%s", sym)
                             continue
                         try:
-                            result = await _eng_mod._submit(
+                            result = await _submit(
                                 OrderRequest(symbol=sym, qty=sell_qty, side="sell", price=price),
                             )
                         except Exception as exc:
@@ -469,7 +448,7 @@ async def stop_loss_monitor(
                 logger.info("stop_loss 跳过已挂 STOP（DB 幂等）symbol=%s", sym)
                 continue
             try:
-                result = await _eng_mod._submit(
+                result = await _submit(
                     OrderRequest(symbol=sym, qty=qty, side="sell", price=price),
                 )
             except Exception as exc:
@@ -569,7 +548,7 @@ async def stop_loss_monitor(
 # 竞态/崩溃丢失风险；holding_days 已可由 position_book.entry_date 任意时刻现算 →
 # 收口到 pre_open 单点，删文件函数全消除。
 # T1-Task7：原 ``_scan_expired_positions`` 去 `_` 前缀 → ``scan_expired_positions``（engine
-# re-export 双名保 ``patch("trading.engine._scan_expired_positions")`` + pre_open ``_eng_mod.
+# re-export 双名保 ``patch("trading.engine._scan_expired_positions")`` + pre_open 历史 engine 反查
 # _scan_expired_positions`` 命中）。逻辑逐字原样。
 
 
@@ -598,11 +577,10 @@ def scan_expired_positions(today: str, max_holding: int) -> list[dict]:
         再挂卖 = 卖空风险（持仓已平再挂卖单）。故 `>` 是兜底设计，与 monitor `>=` 错位
         一日，互不冲突。
     """
-    # T1-Task7：_trading_days_between 经 _eng_mod 反查（test_engine.py test_scan_expired_* 经
-    # monkeypatch.setattr(engine, "_trading_days_between", lambda s,e: N) 确定性驱动本函数验
-    # I-4 `>` 边界——直 import 拿 compute.stop 真身则 patch engine 失效）。_position_book 顶部
+    # T1-Task7 → W1-A/T2-Task4 收口：_trading_days_between 已切顶部直接 import compute.stop 真身
+    # （test_engine.py test_scan_expired_* 原 monkeypatch.setattr(engine, "_trading_days_between")
+    # 失效 → Task 8-19 迁 monkeypatch compute.stop.trading_days_between）。_position_book 顶部
     # import（测试 monkeypatch position_book.get_entry_dates 属性级 patch · 共享模块对象命中）。
-    import trading.engine as _eng_mod
     expired: list[dict] = []
     for sym, entry_date in _position_book.get_entry_dates().items():
         holding_days = _trading_days_between(entry_date, today)
@@ -636,10 +614,10 @@ async def close_expired_positions(gw: Any, expired: list[dict]) -> dict:
     Returns:
         {"closed": <成功挂卖数>, "reason"?: ...}
     """
-    # T1-Task7：经 _eng_mod 反查 engine 模块级符号（_resolve_account_id/_state_store/_submit/
-    # _mode/qmt_market_data · 保 patch("trading.engine.xxx") 命中 + 避循环 import）。clock 顶部
+    # T1-Task7 → W1-A/T2 收口：engine 模块级符号经 engine 反查的设计已全量退役，所有符号
+    # 改顶部直接 import 物理真身（_resolve_account_id / _state_store / _submit / _mode /
+    # qmt_market_data · patch engine.xxx 失效 → Task 8-19 迁 patch 物理路径）。clock 顶部
     # import（单一时间源 · 无整体 patch）。详见本文件模块 docstring。
-    import trading.engine as _eng_mod
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：直指 compute.types 真身
     if gw is None:
         # dry_run 无网关无持仓可平
@@ -683,7 +661,7 @@ async def close_expired_positions(gw: Any, expired: list[dict]) -> dict:
             logger.warning("跳过平超期 %s：无跌停价/现价（拒发盲单，quote=%s）", sym, quote)
             continue
         try:
-            result = await _eng_mod._submit(
+            result = await _submit(
                 OrderRequest(symbol=sym, qty=qty, side="sell", price=price),
             )
         except Exception as exc:

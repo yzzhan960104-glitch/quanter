@@ -6,8 +6,9 @@ Why 独立模块：engine / eod_plan / veto_plan / trading_service 原各自复�
 pre_open/veto 读 account_B，trade_id 对不上 → SIGNAL/CONFIRMED/VETOED 防线全部失效（致命）。
 本模块为单一真相源，四处改 import 此处。
 
-phases 经 `_eng_mod._resolve_account_id` 反查 engine 的 wrapper（保留为测试 patch 目标），
-W1-A 切断 _eng_mod 时再改指本模块。
+W1-A/T2-Task5：phases / order_state 已全量切顶部直接 import 本模块 resolve_account_id 真身
+（原经 engine 反查保 patch 命中的中间层退役 · patch engine._resolve_account_id 失效 →
+Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
 """
 from __future__ import annotations
 

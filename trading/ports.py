@@ -14,7 +14,7 @@
 
     W1-A/T2 追加（行情黑屏节流收口）：原 engine 模块级可变状态
     ``_last_quote_blackout_alert_ts`` + 常量 ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S``（stop_loss
-    经 ``_eng_mod`` 反查读写）违反「模块级可变状态收口」红线——收敛为
+    原经 engine 反查读写）违反「模块级可变状态收口」红线——收敛为
     ``QuoteBlackoutThrottle`` dataclass 实例，经 ``EnginePorts.blackout`` 注入 stop_loss_monitor。
     依赖方向：engine 构造 ``QuoteBlackoutThrottle()`` 装入 ports.blackout → stop_loss 经
     ``ports.blackout.should_alert/mark`` 读写——与 gate/whitelist 同口径（显式参数透传）。
@@ -46,9 +46,9 @@ class EnginePorts:
         whitelist_clear: post_close 清空 ``self._dynamic_whitelist``，保证下一交易日从
             干净状态开始（与 pre_open 注入对称的物理隔离机制）。
         blackout: 行情黑屏 30min 节流告警状态机（W1-A/T2 收口）。原 engine 模块级
-            ``_last_quote_blackout_alert_ts`` + ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S`` 经
-            ``_eng_mod`` 反查读写的可变状态——现收敛为 ``QuoteBlackoutThrottle`` dataclass
-            实例，经 ports 注入。仅 ``stop_loss_monitor`` 消费（live 全标的 last_price
+            ``_last_quote_blackout_alert_ts`` + ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S`` 经 engine
+            反查读写的可变状态——现收敛为 ``QuoteBlackoutThrottle`` dataclass 实例，经 ports
+            注入。仅 ``stop_loss_monitor`` 消费（live 全标的 last_price
             失效时推 CRITICAL，30min 节流防风暴）。默认 ``field(default_factory=...)`` 让
             未传 blackout 的旧调用方（测试裸调 / scan_expired / close_expired）自动装配
             默认实例，无破坏（blackout 默认 last_ts=0.0 + interval=1800.0 等价原模块初值）。

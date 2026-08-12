@@ -95,7 +95,7 @@ class QuoteBlackoutThrottle:
             True=应告警（已过节流窗口或首次调用）；False=节流窗口内（不重复推）。
 
         等价原 engine 模块级：
-            ``_now_mono - _eng_mod._last_quote_blackout_alert_ts >= _eng_mod._QUOTE_BLACKOUT_ALERT_INTERVAL_S``
+            ``_now_mono - _last_quote_blackout_alert_ts >= _QUOTE_BLACKOUT_ALERT_INTERVAL_S``
         """
         with self._lock:
             return (now - self.last_ts) >= self.interval
@@ -112,7 +112,7 @@ class QuoteBlackoutThrottle:
             now: 当前单调时钟时间戳（应与配套 ``should_alert`` 同一 ``now``，保证一致基准）。
 
         等价原 engine 模块级：
-            ``_eng_mod._last_quote_blackout_alert_ts = _now_mono``
+            ``_last_quote_blackout_alert_ts = _now_mono``
         """
         with self._lock:
             self.last_ts = now

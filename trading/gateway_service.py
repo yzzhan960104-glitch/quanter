@@ -37,6 +37,9 @@ from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_
 from trading import qmt_market_data
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from trading.compute.risk import check_order  # Layer2 阶段6：直指 functional core 真身（risk_shield 垫片已删）
+# W1-A/T2-Task7：_mode 从 critical 顶部直 import（critical 是零下游耦合叶子模块 · 无环），
+# 供 _submit wrapper 读进程级交易模式（dry_run/live）补 dry_run kw。原 engine._submit 下沉。
+from trading.critical import _mode
 
 logger = logging.getLogger(__name__)
 
@@ -658,6 +661,27 @@ async def submit_order(order: OrderRequest, *, dry_run: bool) -> dict:
         "state": result.state.name,
         "message": result.message,
     }
+
+
+async def _submit(order) -> dict:
+    """下单 wrapper：补 dry_run=(_mode()=="dry_run")（原 engine._submit 下沉，gateway concern 收口）。
+
+    物理意图（W1-A/T2-Task7 切断 engine 反查）：原 engine 模块级 ``_submit(order)`` 是
+    pre_open / stop_loss / exit phases 的下单入口——单参 order，内部按进程级 ``_mode()``
+    补 ``dry_run`` kw 调 submit_order。本函数把该 wrapper 下沉到 gateway_service（与
+    submit_order / get_gateway 同住），phases 改顶部 ``from trading.gateway_service import _submit``
+    直 import 物理真身，消除「engine 反查」中间层。
+
+    行为等价红线：``_submit(order)`` 与原 ``engine._submit(order)`` 逐字等价——同样
+    ``return await submit_order(order, dry_run=(_mode() == "dry_run"))``，dry_run 判定
+    单点不变（_mode 是进程级开关，pre_open/stop_loss「影子即整批不真单」语义）。
+
+    Why dry_run 用 _mode() 而非参数注入（沿用原 engine._submit 设计）：pre_open/stop_loss
+    都是「影子即整批不真单」语义，_mode 是进程级开关，逐单传参反而引入「单只切 live」
+    的误操作面。``patch("trading.engine._submit")`` 类测试因 phases 不再经 engine 而失效，
+    Task 8-19 迁 patch 至 ``trading.gateway_service._submit``。
+    """
+    return await submit_order(order, dry_run=(_mode() == "dry_run"))
 
 
 async def cancel_order(order_id: str) -> dict:
