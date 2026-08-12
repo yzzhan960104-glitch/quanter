@@ -35,7 +35,7 @@ W1-A/T2-Task12 patch 物理路径迁移（handle_order_update 调用链归属判
     - ``_mode`` ×2 / ``_alert_critical`` ×2：handle_order_update 读 order_state 顶部
       ``from trading.critical import _mode, _alert_critical`` 本地绑定 → 迁
       ``trading.order_state._mode`` / ``trading.order_state._alert_critical``
-     （Task4 切断 engine 反查后 patch engine / setattr _eng_mod 失效）。
+     （Task4 切断 engine 反查后 patch engine / setattr engine 模块属性失效）。
     - ``trading_plan.load_plan`` ×12（B 共享属性·不迁）：trading_plan 是共享模块对象，
       patch ``trading.engine.trading_plan.load_plan`` 改模块对象属性 → phases.exit /
       order_state ``import trading_plan`` 同对象命中，保 engine 路径。
@@ -971,7 +971,7 @@ def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, 
     # 本测试断「_alert_critical 仍触发」必须 patch _mode=live 才能命中守卫。
     # W1-A/T2-Task12：handle_order_update（order_state.py:325）读 order_state 顶部
     # ``from trading.critical import _mode, _alert_critical`` 本地绑定 → patch
-    # engine._mode / engine._alert_critical 不命中函数体（_eng_mod setattr 同理失效）
+    # engine._mode / engine._alert_critical 不命中函数体（setattr engine 模块属性同理失效）
     # → 迁 trading.order_state 物理路径（上方 _alert_critical setattr + 本处 _mode）。
     monkeypatch.setattr("trading.order_state._mode", lambda: "live")
     with patch("infra.notifier.NotificationManager") as NM, \

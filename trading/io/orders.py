@@ -5,7 +5,7 @@
     ``submit_order`` 包装 ``trading.gateway_service.submit_order``（过风控 +
     网关真单），把下单 I/O 收口到 io/ 层。
 
-    **dry_run 作为参数注入**（不读 env）：模式开关（_mode）读取是 orchestrate 职责,
+    **dry_run 作为参数注入**（不读 env）：模式开关（_mode）读取是 orchestrate 职责，
     io/ 只忠实执行调用方给的 dry_run 标志。这样 io/ 可被回测/测试以 dry_run=True
     复用而不耦合进程级 env，且 orchestrate 的「整批影子」语义单点可控。
 

@@ -17,6 +17,7 @@ flowchart LR
   end
 
   E["✅ engine.py god module<br/>T1 完成 (2026-08-10)<br/>3437→1546 行 · 8 集群外迁<br/>_ACTIVE_ENGINE 单例桥清零"]:::done
+  T2I["✅ trading 内 _eng_mod 反查切断<br/>+ trading_service 下沉<br/>W1-A/T2 完成 (2026-08-12)<br/>phases/order_state 直 import 物理叶子<br/>engine re-export 块保留（内部依赖·defer W1-B）<br/>360 patch 迁物理路径（tests/trading + e2e_long_cycle）"]:::done
   DI["data 完整性<br/>生产 gate 只校验实时性<br/>scan/repair 孤立 CLI<br/>历史缺口永不发现<br/>✅ L1 写入守卫已治理(T13-A)"]:::crit
   AS["account_daily.start 漏采<br/>非盘前启动→NULL<br/>熔断基线裸奔"]:::crit
 
@@ -25,7 +26,7 @@ flowchart LR
   PC["Phase C plan ✅ 全治理(2026-08-12)<br/>save_plan 已删+C2d 下沉<br/>JSON 读侧 fallback 已关"]:::done
 
   TD["双向耦合 trading↔data (3/2)"]:::med
-  TP["双向耦合 trading↔presentation (2/3)"]:::med
+  TP["✅ trading→presentation 反查已切断<br/>W1-A/T2 (2026-08-12)<br/>trading_service→gateway_service 下沉<br/>trading→presentation 边权 2→0"]:::done
   SS["state_store SSoT 演进半成品"]:::med
   CN["连接韧性：health_guard 无主动探针<br/>嵌套父子未探测"]:::med
 
@@ -34,6 +35,8 @@ flowchart LR
   DC["死代码/死参（P3 follow-ups）"]:::low
 
   E -.->|T1 完成| T1D["✅ T1 done (2026-08-10)"]
+  T2I -.->|W1-A/T2 完成| T2ID["✅ W1-A/T2 done (2026-08-12)"]
+  TP -.->|下沉生效| T2ID
   DI --> T13["→ T13 治本"]
   AS --> T13B["→ live P0 运维"]
   Q --> T2["→ T2 适配层"]
@@ -73,7 +76,7 @@ flowchart LR
 
 | 项 | 治理归宿 |
 |---|---|
-| 双向耦合 trading↔data (实跑 4/2)、trading↔presentation (实跑 5/3) —— T1 engine 拆分时理顺。**data.integrity→trading.calendar 真函数级循环已切断（M1 · 2026-08-12，`fetch_trade_cal` 下沉 `data/calendar.py`，data 层零 trading 静态依赖）**；trading→presentation 的 8 处 lazy import 全指 `trading_service.py`（位置错配，下沉归 W1-A T2 地基）| [T1](../../plans/wayfinder/T1.md) |
+| 双向耦合 trading↔data (实跑 4/2) —— T1 engine 拆分时理顺。**data.integrity→trading.calendar 真函数级循环已切断（M1 · 2026-08-12，`fetch_trade_cal` 下沉 `data/calendar.py`，data 层零 trading 静态依赖）**。**✅ trading→presentation 反查已切断（W1-A/T2 · 2026-08-12）**：原 trading→presentation 的 8 处 lazy import 全指 `presentation/server/services/trading_service.py`（领域层反依赖表现层·位置错配），下沉为 `trading/gateway_service.py` 后 trading→presentation 边权 **2→0**（presentation→trading 仍 4 文件，单向被依赖合法）。trading 内 `_eng_mod` 反查同批切断（phases/order_state 改顶部直 import 物理叶子）| [T1](../../plans/wayfinder/T1.md) / ✅ W1-A/T2 |
 | state_store SSoT 演进半成品（Phase B+C 收口后剩余） | [T6](../../plans/wayfinder/T6.md) |
 | 连接韧性：health_guard 无主动探针 watchdog / 嵌套父子进程未探测 | [T9](../../plans/wayfinder/T9.md) / [T10](../../plans/wayfinder/T10.md) / [T11](../../plans/wayfinder/T11.md) |
 | **【测试卫生】✅ 已治理（M4 · 2026-08-12）**：真污染源 = 测试**裸写 breaker 内部状态**（`_state`/`_failure_count`）无 finally 还原（非「替换模块属性」，原排查方向落空）。治理：① `CircuitBreaker`/`RateLimiter` 加 `reset()` ② 根 conftest 加 autouse `_reset_resilience_singletons`（每用例前 reset 全部单例，治本）③ 清 4 处裸写（删冗余入口 reset + 刻意 OPEN 改 monkeypatch）④ 删 `_DEFAULT_DB_OVERRIDE` 死代码。全量 1687 绿，canary `test_resilience_singletons_start_clean` 守门 | ✅ [M4 done](../../docs/superpowers/plans/2026-08-11-m4-test-hygiene.md) |
@@ -86,6 +89,7 @@ flowchart LR
 | 过时文档 `data_pool.md` / `caisen-methodology-summary.md` | **本工单 T0 丙删** |
 | 死代码 / 死参数（P3 follow-ups：消息重复 / pro 死参等） | 各源工单 follow-up |
 | **【测试流程】风控闸变更未同步测试**：T1 删 confirm/allow_live 闸时 `test_submit_order_no_confirm` 未同步删（2026-08-11 已删）+ 时间依赖测试 `test_low_power_discovery`（已 mock 时间窗口修）。过时测试积累成「既有红」掩盖真回归（曾阻塞 T13-A 合并判断）。范畴已排查仅此一例（`_allow_live` 无其它遗留） | CI 全量绿门 + 行为变更时 grep 测试同步 |
+| **【测试卫生 follow-up】silently orphaned patch**：W1-A/T2 patch 迁移按「仅迁 fail 相关」红线执行（Task 19 M3），多测因 negative assertion（`assert X not in` / `assert n==0`）或 `gw=None` 早返路径，旧 `setattr(engine,...)` / `patch("trading.engine.X")` 失效仍偶然通过——这些「silently orphaned」patch 未动（保绿·避免扩面）。非阻塞：行为已等价（L4 双跑实证），仅测试与代码耦合漂移；后续可专项审计迁物理路径或加 `pytest --no-header` 断言强化 | W1-A/T2 follow-up（非阻塞） |
 
 ## 非痛点（明确不在债内 — MAP Out of scope）
 
