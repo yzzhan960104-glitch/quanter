@@ -87,3 +87,39 @@ def test_fetch_macro_series_derives_m1m2_gap(fake_pro, monkeypatch):
     from data.tools.sync_macro_credit import fetch_macro_series
     s = fetch_macro_series("2024-01-01", "2024-01-31")
     assert "M1M2_gap" in s.columns   # 剪刀差衍生列
+
+
+def test_sync_macro_merges_narrow_window_keeps_history(tmp_path, monkeypatch):
+    """窄窗口重采不丢历史：existing 有 [d0..d100]，new 只覆盖 [d50..d60]，
+    合并后仍保留 d0..d100（new 同期值更新），不因窄窗口被守卫拒写或抹除历史。
+
+    P1 治理（2026-08-12 W0 收尾）：sync_macro 改合并语义——旧整体覆盖语义下，
+    窄窗口增量重采（11 行 << 现有 100 行）接入 safe_overwrite 会触发骤降守卫拒写，
+    宏观湖永久断更。合并语义（concat 去重 keep='last'）下行数单调≥现有，不误拒、
+    不抹历史。前视红线：合并衔接处仅 ffill（无 bfill）——用过去解释现在，绝不
+    回填未来月度值。
+    """
+    from data.tools.sync_macro_credit import sync_macro
+
+    out = tmp_path / "macro.parquet"
+    # 现有湖：100 个工作日，shrzgm + M1M2_gap 列（CreditRegime 不变量所需列）。
+    idx_old = pd.bdate_range("2026-01-01", periods=100)
+    existing = pd.DataFrame({"shrzgm": range(100), "M1M2_gap": [0.1] * 100}, index=idx_old)
+    existing.index.name = "date"
+    existing.to_parquet(out)
+
+    # new：窄窗口 [d50..d60]，行数 11 << 100（旧覆盖语义会触发骤降守卫或抹除历史）。
+    idx_new = idx_old[50:61]  # 取现有湖 d50..d60 共 11 个工作日为窄窗口
+    new_df = pd.DataFrame({"shrzgm": range(1000, 1011), "M1M2_gap": [0.5] * 11}, index=idx_new)
+    new_df.index.name = "date"
+    monkeypatch.setattr("data.tools.sync_macro_credit.fetch_macro_series", lambda s, e: new_df)
+    monkeypatch.setattr("data.tools.sync_macro_credit.LAKE_CONFIG", {"lakes": {"macro": str(out)}})
+
+    sync_macro("2026-03-01", "2026-03-15")  # 窗口参数（fetch 已 mock，不影响 new_df）
+
+    got = pd.read_parquet(out)
+    assert len(got) >= 100, "窄窗口合并不应丢历史"
+    assert "shrzgm" in got.columns
+    # new 同期值已更新（d50..d60 的 shrzgm = 1000+，旧 0..100 已被同期覆盖）。
+    seg = got.loc[idx_old[50]:idx_old[60], "shrzgm"]
+    assert (seg == pd.Series(range(1000, 1011), index=idx_old[50:61])).all()

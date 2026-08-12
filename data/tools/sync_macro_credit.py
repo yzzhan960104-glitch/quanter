@@ -199,16 +199,56 @@ def fetch_macro_series(start: str, end: str) -> pd.DataFrame:
 def sync_macro(start: str, end: str, out: str | None = None) -> None:
     """落 data_lake/macro_credit.parquet（DatetimeIndex，列含 shrzgm + M1M2_gap）。
 
+    P1 修（2026-08-12 W0 收尾）：改合并语义——读现有湖 + new 按索引合并（new 同期
+    覆盖、保留现有区间外历史），再 safe_overwrite 全量落盘。彻底治「窄窗口增量重采
+    触发 WriteGuardError 永久断更」：合并后行数单调≥现有，safe_overwrite 不误拒。
+
+    旧覆盖语义（to_parquet 整体覆盖）的物理缺陷：增量重采常见场景是只补近 N 天
+    （窄窗口），new 行数远小于现有湖；接入 write-side 守卫后，骤降即抛 WriteGuardError
+    拒写，宏观湖从此永久断更。合并语义把"窄窗口=覆盖全部"解耦——new 只负责其区间，
+    区间外历史由现有湖承接，行数单调≥现有，守卫不误拒、历史不丢。
+
+    前视红线（不变）：合并衔接处仅 ffill（用过去解释现在），绝无 bfill（不回填未来
+    月度值——否则把"未来才公布的月度数据"提前泄漏给历史日，构成前视偏差）。本函数
+    和 align_to_daily 一样守此红线。
+
     参数：
         start/end: 'YYYY-MM-DD' 同步区间。
         out: 自定义输出路径（默认 LAKE_CONFIG['lakes']['macro']）。
     """
+    # 局部 import：safe_overwrite 是 write-side 守卫的唯一入口，调用面收敛在此函数。
+    from data.integrity import safe_overwrite
+
     out = out or LAKE_CONFIG["lakes"]["macro"]
     df = fetch_macro_series(start, end)
     if df.empty:
         print("宏观数据为空，跳过")
         return
+    # 合并：读现有湖，new 同期覆盖、保留现有区间外历史。
+    if os.path.exists(out):
+        try:
+            existing = pd.read_parquet(out)
+            # concat 后按索引去重（保留 new = keep='last'）：new 同期值整段覆盖 existing。
+            # 索引语义为 date（工作日日频），date 重复即同一交易日——new 是更近的采集，
+            # 同期值以 new 为准（含上游重述/修订），区间外 existing 历史保留。
+            combined = pd.concat([existing, df])
+            combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+            # 合并衔接处可能产 NaN（existing 与 new 区间拼接缝隙，或列集合不完全重叠）
+            # → 仅 ffill 兜底：用过去最近一期已知值解释当下（与 align_to_daily 同口径）。
+            # ⚠️ 绝无 bfill：不回填未来月度值，前视红线不破。
+            for col in combined.columns:
+                combined[col] = combined[col].ffill()
+            df = combined
+        except Exception:
+            # 现有湖读失败（文件损坏 / 非预期 schema / 列漂移）→ 回退全量重采覆盖 + 告警，
+            # 不阻断本次同步：宁可丢历史段也不让宏观湖僵死（safe_overwrite 仍把住骤降底线）。
+            print(f"⚠ 读现有宏观湖失败，回退全量覆盖：{out}")
     os.makedirs(os.path.dirname(out), exist_ok=True)
+    # write-side 守卫：合并后行数单调≥现有（窄窗口也不掉），safe_overwrite 不误拒。
+    # ⚠️ safe_overwrite 只验不写（assert_safe_overwrite 语义：骤降抛 WriteGuardError，
+    # 通过则 return None）——必须紧跟 df.to_parquet(out) 真正落盘（与 sync_daily_incremental
+    # /repair_gaps 同范式：safe_overwrite 先验、to_parquet 后写）。
+    safe_overwrite(out, df)
     df.to_parquet(out)
     print(f"宏观湖写入：{out}，{len(df)} 行，列={list(df.columns)}")
 
