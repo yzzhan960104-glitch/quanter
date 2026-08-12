@@ -28,11 +28,14 @@ engine alerts 等）。逐符号归类如下：
     **W1-A/T2-Task4 进展**：无状态符号（_mode / _alert_critical / _state_store /
     _trading_days_between / _cancel_all_open_orders）已切断 _eng_mod 反查 → 顶部直接 import
     物理叶子（critical / state_store / compute.stop / io.breaker）。①段以下叙述保留历史；
-    现行反查仅余 get_gateway / _submit / _scan_expired_positions /
-    _close_expired_positions（Task 6/7 切断）。
+    现行反查仅余 get_gateway / _submit（Task 7 切断）。
     **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 _eng_mod 反查 → 顶部直接 import
     trading.account SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id
     失效 → Task 8-19 迁 monkeypatch account.resolve_account_id 或 setenv QMT_ACCOUNT_ID）。
+    **W1-A/T2-Task6 进展**：_scan_expired_positions / _close_expired_positions 切断 _eng_mod
+    反查 → 顶部直接 import phases.stop_loss 真身（同包无环 · patch engine._scan_expired_positions
+    失效 → Task 8-19 迁）；_pre_open_impl 同模块直调（pre_open wrapper 删 _eng_mod._pre_open_impl →
+    _pre_open_impl · monkeypatch engine._pre_open_impl 失效 → Task 8-19 迁台账测 patch 物理路径）。
     以下符号均在 pre_open 相关测试中经 ``patch("trading.engine._xxx")`` /
     ``monkeypatch.setattr(engine, "_xxx", ...)`` 注入 mock，且 engine 顶部 re-export 本模块
     会触发循环——故必须函数体内 lazy 引用，绝不能顶部 ``from trading.engine import _xxx``：
@@ -61,6 +64,8 @@ engine alerts 等）。逐符号归类如下：
       ``monkeypatch.setattr(engine, "_pre_open_impl", fake_impl)`` 跑 ``engine.pre_open`` 验台账
       skip/done/failed 语义——``pre_open`` 必须经 ``_eng_mod._pre_open_impl`` 调用才能命中该 patch
       （若直调本模块同名 local，patch engine._pre_open_impl 失效 → 台账语义测试全红）。
+      **W1-A/T2-Task6 已切同模块直调**（_eng_mod._pre_open_impl → _pre_open_impl · monkeypatch
+      engine._pre_open_impl 失效 → Task 8-19 迁）。
 
 ②顶部直接 import（不涉及 engine patch，无循环风险）：
     - ``clock`` / ``job_ledger`` / ``dynamic_whitelist``（``from trading import ...``）：clock 是
@@ -103,6 +108,14 @@ from trading.compute.stop import trading_days_between as _trading_days_between
 # W1-A/T2-Task4：_cancel_all_open_orders 从 _eng_mod 反查切断 → 顶部直接 import io.breaker 真身
 # （patch engine._cancel_all_open_orders 失效 → Task 8-19 迁 patch io.breaker.cancel_all_open_orders）。
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
+# W1-A/T2-Task6：_scan_expired_positions / _close_expired_positions 从 _eng_mod 反查切断 → 顶部
+# 直接 import phases.stop_loss 真身（同包 phases · stop_loss 模块级不反向 import 本文件 · 无环 ·
+# 别名保局部名 _scan/_close_expired_positions · patch engine._scan_expired_positions /
+# engine._close_expired_positions 失效 → Task 8-19 迁 monkeypatch stop_loss.scan/close_expired）。
+from trading.phases.stop_loss import (
+    scan_expired_positions as _scan_expired_positions,
+    close_expired_positions as _close_expired_positions,
+)
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.pre_open）：pre_open 原是 engine
 # 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -131,13 +144,15 @@ async def pre_open(date: str, ports: EnginePorts | None = None) -> dict:
     # fake_impl) 命中——test_pre_open_ledger_semantics 跑本包裹验台账 skipped/done/failed 语义，
     # 整体 mock _pre_open_impl 返不同 result 驱动台账分支判定；若直调本模块 local _pre_open_impl
     # 则 engine 模块属性 patch 失效 → 台账语义测试全红）+ 避循环 import（engine 顶部 re-export 本模块）。
-    import trading.engine as _eng_mod
+    # W1-A/T2-Task6：_pre_open_impl 同模块直调（_eng_mod._pre_open_impl → _pre_open_impl）——本模块
+    # 定义、无 import 需要；monkeypatch engine._pre_open_impl 失效 → Task 8-19 迁（改 monkeypatch
+    # pre_open._pre_open_impl 或重构台账测直接调 _pre_open_impl）。
     try:
         job_ledger.begin_run("pre_open", date, clock.now().isoformat())
     except Exception:
         logger.exception("job_ledger begin_run 失败（不阻断 pre_open）")
     try:
-        result = await _eng_mod._pre_open_impl(date, ports)
+        result = await _pre_open_impl(date, ports)
     except Exception:
         try:
             job_ledger.finish_run("pre_open", date, "failed", "未预期异常")
@@ -204,11 +219,11 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     # monkeypatch.setattr(engine, "_xxx", ...) 测试命中 + 避循环 import · 详见模块 docstring §①）。
     # call-time 解析：测试 patch 整体属性时拿 mock，patch 属性级（_state_store.xxx）时拿真模块对象。
     # clock / _trade_cfg / _CriticalHalt / dynamic_whitelist 顶部直接 import（不涉及 engine patch）。
+    # W1-A/T2-Task6：_scan_expired_positions / _close_expired_positions 已切顶部直接 import
+    # stop_loss 真身（本函数删别名赋值）；现行 _eng_mod 反查仅余 get_gateway / _submit（Task 7 切断）。
     import trading.engine as _eng_mod
     get_gateway = _eng_mod.get_gateway
     _submit = _eng_mod._submit
-    _scan_expired_positions = _eng_mod._scan_expired_positions
-    _close_expired_positions = _eng_mod._close_expired_positions
 
     # S3（Task 8 · C-2）：三段式前置 gate（经 EnginePorts.gate 调用实例方法 · T1 缝合点 #1）。
     # 物理意图：plan-confirmed → gateway-health → data-ready 三段全绿才放行下游（撤昨日单 /

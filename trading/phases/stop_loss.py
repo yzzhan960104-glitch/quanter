@@ -54,6 +54,8 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
       re-export）函数，测试 ``patch("trading.engine.get_gateway"/"_submit"/"place_take_profit")``
       （test_stop_loss_monitor_decide_exit._run_monitor / test_stop_loss_l1_halt）+
       ``monkeypatch.setattr(engine, "decide_exit"/"_submit")``（test_stop_loss_l1_halt 驱动 L1 分支）。
+      **W1-A/T2-Task6 进展**：place_take_profit 已切断 _eng_mod 反查 → 顶部直接 import phases.exit
+      真身（同包无环 · patch engine.place_take_profit 失效 → Task 8-19 迁）。
     - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，测试既
       ``patch("trading.engine._state_store")``（整体 MagicMock · test_stop_loss_l1_halt 三 Case 验
       has_order/insert_order L1 / test_engine_stoploss_inject）又 ``monkeypatch`` 属性级。走
@@ -85,7 +87,7 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
       (last_ts=0.0)`` 注入 ports 重置节流（原 ``monkeypatch.setattr("trading.engine._last_quote_
       blackout_alert_ts", 0.0)`` 已删，详见 test_stop_loss_monitor_decide_exit._make_ports_with_
       fresh_blackout）。本项不再属「engine 模块级符号反查」清单（仅历史注释保留）。
-      现行反查项仅余：``get_gateway`` / ``_submit`` / ``place_take_profit``（Task 6/7 切断）。
+      现行反查项仅余：``get_gateway`` / ``_submit``（Task 7 切断）。
       无状态符号（_state_store / _mode /
       _alert_critical / calendar / qmt_market_data / _trading_days_between / decide_exit）
       W1-A/T2-Task4 已切断，改顶部直接 import 物理叶子。
@@ -145,6 +147,10 @@ from trading.compute.stop import should_trigger_stop, trading_days_between as _t
 # W1-A/T2-Task4：decide_exit 从 _eng_mod 反查切断 → 同 execution 顶部直接 import（无新环 ·
 # monkeypatch(engine, "decide_exit") 失效 → Task 8-19 迁 patch execution.decide_exit）。
 from strategies.neckline.execution import ExitAction, ExitReason, decide_exit
+# W1-A/T2-Task6：place_take_profit 从 _eng_mod 反查切断 → 顶部直接 import phases.exit 真身
+# （同包 phases · exit 模块级不反向 import 本文件 · 无环 · patch engine.place_take_profit 失效 →
+# Task 8-19 迁 monkeypatch phases.exit.place_take_profit）。
+from trading.phases.exit import place_take_profit
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.stop_loss）：stop_loss_monitor 原是
 # engine 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -406,7 +412,7 @@ async def stop_loss_monitor(
                                 "【TP 漏挂兜底】%s decide_exit=TAKE_PROFIT 但 DB 无 TP1/TP2，盘中补挂",
                                 sym)
                             try:
-                                await _eng_mod.place_take_profit(sym, qty, price, "")
+                                await place_take_profit(sym, qty, price, "")
                             except Exception:
                                 logger.exception("TP 盘中补挂失败 symbol=%s（需人工补挂）", sym)
                         continue   # TP 交预挂，不走 fallback

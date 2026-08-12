@@ -33,6 +33,8 @@ T1 Task 3 缝合点 #2 设计（brief Step 2 · 临时耦合 engine · Task 9 �
 - 实例属性 ``self._gw`` → ``engine._gw``（网关实例引用 · 非模块级符号）；
   止盈挂单 T1-Task9 已收口——``place_take_profit`` 经 ``_eng_mod.place_take_profit`` 反查
   （engine re-export phases.exit），不再经 engine 实例引用（消除缝合点 #2 耦合）。
+  **W1-A/T2-Task6 已切**：place_take_profit 顶部直接 import phases.exit 真身（patch
+  engine.place_take_profit 失效 → Task 8-19 迁）。
 - engine 模块级符号（``_mode`` / ``_alert_critical`` / ``_resolve_account_id`` /
   ``_seq_for_real_oid`` / ``_order_state_to_db``）经函数内 lazy ``import trading.engine as _eng_mod``
   访问——规避循环 import（engine 顶部 re-export order_state）+ 保
@@ -41,6 +43,10 @@ T1 Task 3 缝合点 #2 设计（brief Step 2 · 临时耦合 engine · Task 9 �
   以下叙述保留历史（patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁）。
   **W1-A/T2-Task5 进展**：_resolve_account_id 已切断 → 顶部直接 import trading.account SSoT
   真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
+  **W1-A/T2-Task6 进展**：_seq_for_real_oid / _order_state_to_db 已切断 → 顶部直接 import
+  phases.post_close 真身（Task 1 已验 order_state→phases 无环 · patch engine._seq_for_real_oid /
+  engine._order_state_to_db 失效 → Task 8-19 迁）。order_state 现行 _eng_mod.X 反查归零，
+  残余 lazy ``import trading.engine as _eng_mod`` 待 Task 7 全量清扫删除。
   ``patch("trading.engine._alert_critical")`` / ``monkeypatch(engine, "_mode")`` 等测试命中
   （若 order_state 顶部 ``from trading.critical import _alert_critical`` 则拿到 critical 模块
    引用，patch engine._alert_critical 不命中，破坏 test_direction_unknown_* 等断言）。
@@ -65,6 +71,16 @@ from trading.critical import _CriticalHalt, _mode, _alert_critical
 # W1-A/T2-Task5：_resolve_account_id 从 _eng_mod 反查切断 → 顶部直接 import trading.account
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
 from trading.account import resolve_account_id as _resolve_account_id
+# W1-A/T2-Task6：place_take_profit / _seq_for_real_oid / _order_state_to_db 从 _eng_mod 反查切断
+# → 顶部直接 import phases.exit / phases.post_close 真身（Task 1 已验 order_state→phases 无环 ·
+# exit / post_close 模块级不反向 import 本文件 · 别名保局部名 _seq_for_real_oid/_order_state_to_db ·
+# patch engine.place_take_profit / engine._seq_for_real_oid / engine._order_state_to_db 失效 →
+# Task 8-19 迁 monkeypatch phases.exit/post_close 物理路径）。
+from trading.phases.exit import place_take_profit
+from trading.phases.post_close import (
+    seq_for_real_oid as _seq_for_real_oid,
+    order_state_to_db as _order_state_to_db,
+)
 
 # 日志 logger 名硬编码 ``trading.engine``（而非 ``__name__``=trading.order_state）：
 # 3 个 broker 回调函数原是 TradingEngine 实例方法，日志打到 trading.engine logger。
@@ -358,13 +374,10 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
     """
     # T1 Task 3：engine 模块级符号经 _eng_mod 引用（保 patch/monkeypatch 命中 + 避循环）。
     # _state_store / clock 顶部 import（不涉及 engine patch），_CriticalHalt 同上（异常类）。
+    # W1-A/T2-Task6：place_take_profit 已切顶部直接 import phases.exit 真身（本函数删别名赋值，
+    # patch engine.place_take_profit 失效 → Task 8-19 迁）。import trading.engine as _eng_mod
+    # 暂留（本函数内已无 _eng_mod.X 反查 · 待 Task 7 全量清扫删 lazy import）。
     import trading.engine as _eng_mod
-    # T1-Task9 收口缝合点 #2：place_take_profit 经 _eng_mod 反查（engine re-export
-    # phases.exit.place_take_profit），不再经 engine 实例引用——消除 order_state→engine
-    # 实例的 take_profit 耦合（单向依赖 order_state→phases.exit 经 engine re-export）。
-    # 保 ``patch("trading.engine.place_take_profit")`` 命中（local alias 绑定于函数入口，
-    # patch 先于调用 → alias 拿 mock；无 patch 拿 phases.exit.place_take_profit 真身）。
-    place_take_profit = _eng_mod.place_take_profit
 
     kind = update.get("kind")
     if kind == "async_response":
@@ -583,10 +596,11 @@ def order_direction(engine, order_id: str) -> Optional[str]:
     ``_seq_for_real_oid`` 经 ``_eng_mod`` 引用访问（保 ``patch("trading.engine._seq_for_real_oid")``
     命中 + 避循环 import）。逐行原样。
     """
-    # T1 Task 3：_seq_for_real_oid 是 engine 模块级辅助（Task 8 与 post_close 一起迁），
-    # 经 _eng_mod 引用访问。_state_store 顶部 import（不涉及 engine patch）。
+    # T1 Task 3：_seq_for_real_oid 是 engine 模块级辅助（Task 8 与 post_close 一起迁）。
+    # W1-A/T2-Task6：已切顶部直接 import post_close.seq_for_real_oid 真身（本函数删别名赋值，
+    # patch engine._seq_for_real_oid 失效 → Task 8-19 迁）。import trading.engine as _eng_mod
+    # 暂留（本函数内已无 _eng_mod.X 反查 · 待 Task 7 全量清扫删 lazy import）。_state_store 顶部 import。
     import trading.engine as _eng_mod
-    _seq_for_real_oid = _eng_mod._seq_for_real_oid
 
     # #1 修复：方向反查 DB 优先（state_store.order.side，pre_open 已落库），
     # 内存 gw._orders.order_type 仅兜底（_sync_orders_if_stale 走 query_orders 时才有 order_type）。
@@ -636,9 +650,10 @@ def advance_order_state_from_status(engine, update: Mapping[str, Any]) -> None:
     逐行原样。
     """
     # T1 Task 3：_seq_for_real_oid / _order_state_to_db 是 engine 模块级辅助（Task 8 迁）。
+    # W1-A/T2-Task6：已切顶部直接 import post_close 真身（本函数删别名赋值，
+    # patch engine._seq_for_real_oid / engine._order_state_to_db 失效 → Task 8-19 迁）。
+    # import trading.engine as _eng_mod 暂留（本函数内已无 _eng_mod.X 反查 · 待 Task 7 全量清扫）。
     import trading.engine as _eng_mod
-    _seq_for_real_oid = _eng_mod._seq_for_real_oid
-    _order_state_to_db = _eng_mod._order_state_to_db
 
     lookup = str(update.get("order_id", ""))
     if not lookup:
