@@ -45,6 +45,10 @@ DB / account_daily 收盘快照 / _post_close wrapper 读账本 / e2e probabilis
 归类如下（与 pre_open.py / stop_loss.py 同口径）：
 
 ①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
+    **W1-A/T2-Task4 进展**：无状态符号（_mode / _alert_critical / _state_store /
+    _cancel_all_open_orders）已切断 _eng_mod 反查 → 顶部直接 import 物理叶子（critical /
+    state_store / io.breaker）。①段以下叙述保留历史；现行反查仅余 get_gateway /
+    _resolve_account_id（Task 5/7 切断）。
     以下符号均在 post_close 相关测试中经 ``patch("trading.engine._xxx")`` /
     ``monkeypatch.setattr(engine, "_xxx", ...)`` / ``monkeypatch.setattr(engine, "xxx", ...)`` 注入
     mock，且 engine 顶部 re-export 本模块会触发循环——故必须函数体内 lazy 引用，绝不能顶部
@@ -63,13 +67,15 @@ DB / account_daily 收盘快照 / _post_close wrapper 读账本 / e2e probabilis
     - ``_cancel_all_open_orders``：engine 经 ``from trading.io.breaker import cancel_all_open_orders
       as _cancel_all_open_orders`` 引入，测试经 ``patch("trading.engine._cancel_all_open_orders")``
       驱动（e2e probabilistic_broker 熔断撤单 spy / test_cancel_all_account_id / test_l2 等）。
-      熔断触发时 post_close 调 ``_cancel_all_open_orders(gw)``——走 ``_eng_mod._cancel_all_open_orders``
-      保命中（直 import trading.io.breaker 真身则 patch engine 失效）。
+      熔断触发时 post_close 调 ``_cancel_all_open_orders(gw)``——**W1-A/T2-Task4 已切顶部直接
+      import io.breaker 真身**（原走 _eng_mod 反查保命中，现 patch engine._cancel_all_open_orders
+      失效 → Task 8-19 迁 patch io.breaker.cancel_all_open_orders）。
     - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，测试既
       ``patch("trading.engine._state_store")``（整体 MagicMock · test_post_close_circuit_breaker 系列
       等）又 ``monkeypatch`` 属性级 + 直接隔离 ``state_store._DEFAULT_DB``（共享模块对象）。
-      走 ``_eng_mod._state_store`` 在 call-time 解析：整体 patch 时拿 mock，无 patch 拿真模块对象 →
-      ``.get_start_equity`` / ``.snapshot_close_equity`` 等属性级 patch 同样命中。
+      **W1-A/T2-Task4 已切顶部直接 import state_store 真身**（原走 engine._state_store 在
+      call-time 解析，现整体 patch engine._state_store 失效，属性级 patch 仍命中共享模块对象 →
+      Task 8-19 迁整体 patch 路径）。
     - ``_resolve_account_id``：engine 模块级函数（account_id 解析）。test_post_close_snapshot_close_equity
       / test_post_close_inserts_closed_event / test_post_close_tp1_filled_event 用
       ``account_id = engine._resolve_account_id()`` 预置 state_store，post_close 内必须读同一
@@ -110,13 +116,22 @@ from typing import Any, Mapping, Optional
 
 # 窄依赖接口（Task 1 EnginePorts：whitelist_clear，纯 stdlib 依赖无循环）。
 from trading.ports import EnginePorts
-# 项目级单例（不涉及 engine patch · 共享模块对象属性 patch 命中）：
+# 项目级单例（共享模块对象属性 patch 命中）：
 # clock=单一时间源（C-6 V2 业务日期 key）/ dynamic_whitelist=ports=None 防御回退分支（pragma no cover）/
 # reconcile_job=持仓对账薄编排壳（属性级 patch 经共享模块对象命中）/ position_book=持仓账本（get_local_positions）。
+# W1-A/T2-Task4：state_store 从 _eng_mod 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
+# engine._state_store 失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock, dynamic_whitelist, reconcile_job
 from trading import position_book as _position_book
+from trading import state_store as _state_store
+# W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 顶部直接 import critical 真身
+# （critical 是 SSoT 基础设施域叶子 · patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁）。
+from trading.critical import _mode, _alert_critical
 # _check_daily_loss_limit（熔断 -3% 纯判定 functional core · compute 单源 · post_close 路径无 engine patch）。
 from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
+# W1-A/T2-Task4：_cancel_all_open_orders 从 _eng_mod 反查切断 → 顶部直接 import io.breaker 真身
+# （patch engine._cancel_all_open_orders 失效 → Task 8-19 迁 patch io.breaker.cancel_all_open_orders）。
+from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.post_close）：post_close 原是 engine
 # 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -175,10 +190,6 @@ async def post_close(
     # （不涉及 engine patch · 共享模块对象属性 patch 命中）。
     import trading.engine as _eng_mod
     get_gateway = _eng_mod.get_gateway
-    _mode = _eng_mod._mode
-    _alert_critical = _eng_mod._alert_critical
-    _cancel_all_open_orders = _eng_mod._cancel_all_open_orders
-    _state_store = _eng_mod._state_store
     _resolve_account_id = _eng_mod._resolve_account_id
 
     result: dict = {"date": date}

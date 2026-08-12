@@ -39,6 +39,10 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
 归类如下（与 pre_open.py / order_state.py 同口径）：
 
 ①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
+    **W1-A/T2-Task4 进展**：无状态符号（_state_store / _mode / _alert_critical / calendar /
+    qmt_market_data / _trading_days_between / decide_exit）已切断 _eng_mod 反查 → 顶部直接 import
+    物理叶子（见 ②段）。①段以下叙述保留历史（这些符号已迁走）；现行反查仅余 get_gateway /
+    _submit / place_take_profit / _resolve_account_id（Task 5/6/7 切断）。
     以下符号均在 stop_loss 相关测试中经 ``patch("trading.engine._xxx")`` /
     ``monkeypatch.setattr(engine, "_xxx", ...)`` / ``patch("trading.engine.xxx")`` 注入 mock，且
     engine 顶部 re-export 本模块会触发循环——故必须函数体内 lazy 引用，绝不能顶部
@@ -50,7 +54,7 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
     - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，测试既
       ``patch("trading.engine._state_store")``（整体 MagicMock · test_stop_loss_l1_halt 三 Case 验
       has_order/insert_order L1 / test_engine_stoploss_inject）又 ``monkeypatch`` 属性级。走
-      ``_eng_mod._state_store`` 在 call-time 解析：整体 patch 拿 mock，无 patch 拿真模块（autouse
+      ``_state_store`` 在 call-time 解析：整体 patch 拿 mock，无 patch 拿真模块（autouse
       fixture 隔离 _DEFAULT_DB）。
     - ``_mode`` / ``_alert_critical``：critical 定义、engine re-export，但测试 patch 的是
       ``trading.engine._mode`` / ``trading.engine._alert_critical``（test_stop_loss_monitor_decide_exit
@@ -63,12 +67,12 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
       ``patch("trading.engine.qmt_market_data")``（整体 MagicMock · test_stop_loss_monitor_decide_exit
       _run_monitor / test_engine_stoploss_inject）又 ``monkeypatch.setattr(engine.calendar, ...)`` /
       ``monkeypatch.setattr(engine.qmt_market_data, "get_quotes", ...)``（属性级 · test_stop_loss_l1_halt）。
-      走 ``_eng_mod.calendar`` / ``_eng_mod.qmt_market_data``：整体 patch 时拿 mock，属性级 patch 时
+      走 ``calendar`` / ``qmt_market_data``：整体 patch 时拿 mock，属性级 patch 时
       拿真模块对象 → ``.is_intraday_session`` / ``.get_quotes`` patch 同样命中。
     - ``_trading_days_between``：engine 模块级别名（``from trading.compute.stop import trading_days_between
       as _trading_days_between``），test_engine.py test_scan_expired_* 经
       ``monkeypatch.setattr(engine, "_trading_days_between", lambda s,e: N)`` 确定性驱动 scan_expired —
-      走 ``_eng_mod._trading_days_between`` 保命中（与 pre_open.py 同结论）。
+      走 ``_trading_days_between`` 保命中（与 pre_open.py 同结论）。
     - ``_last_quote_blackout_alert_ts`` / ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S``：**W1-A/T2 已收口**
       ——原 engine 模块级节流状态迁 ``trading.alerting.QuoteBlackoutThrottle`` dataclass，经
       ``ports.blackout`` 注入本函数（``ports.blackout.should_alert(now)`` / ``mark(now)`` 替代
@@ -76,9 +80,10 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
       (last_ts=0.0)`` 注入 ports 重置节流（原 ``monkeypatch.setattr("trading.engine._last_quote_
       blackout_alert_ts", 0.0)`` 已删，详见 test_stop_loss_monitor_decide_exit._make_ports_with_
       fresh_blackout）。本项不再属「engine 模块级符号反查」清单（仅历史注释保留）。
-      现行反查项仅余：``get_gateway`` / ``_submit`` / ``place_take_profit`` / ``decide_exit`` /
-      ``_state_store`` / ``_resolve_account_id`` / ``_trading_days_between`` / ``qmt_market_data`` /
-      ``calendar`` / ``_mode`` / ``_alert_critical``（Task 4-7 切断）。
+      现行反查项仅余：``get_gateway`` / ``_submit`` / ``place_take_profit`` /
+      ``_resolve_account_id``（Task 5/6/7 切断）。无状态符号（_state_store / _mode /
+      _alert_critical / calendar / qmt_market_data / _trading_days_between / decide_exit）
+      W1-A/T2-Task4 已切断，改顶部直接 import 物理叶子。
 
 ②顶部直接 import（不涉及 engine patch，无循环风险）：
     - ``clock``（``from trading import clock``）：单一时间源（测试经 ``monkeypatch clock.today/now``
@@ -107,19 +112,30 @@ import logging
 import time
 from typing import Any, Mapping, Optional
 
-# 项目级单例（不涉及 engine patch · 共享模块对象属性 patch 命中）：
+# 项目级单例（共享模块对象属性 patch 命中）：
 # clock=单一时间源（clock.now/today）/ position_book=持仓账本（get_entry_dates/_DEFAULT_DB）。
+# W1-A/T2-Task4：calendar / qmt_market_data / state_store 从 _eng_mod 反查切断 → 顶部直接 import
+# 物理叶子（底层无环 · 整体 patch engine.X 将失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock
+from trading import calendar
 from trading import position_book as _position_book
+from trading import qmt_market_data
+from trading import state_store as _state_store
 # _CriticalHalt（L1 致命停调度异常，按类身份 catch 不被 patch）。
-from trading.critical import _CriticalHalt
+# W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 顶部直接 import critical 真身
+# （critical 是 SSoT 基础设施域叶子，不反向 import 本文件 · patch engine._mode 失效 → Task 8-19 迁）。
+from trading.critical import _CriticalHalt, _mode, _alert_critical
 # W1-A/T2：EnginePorts 经 ports.blackout 注入 QuoteBlackoutThrottle（行情黑屏节流状态）。
 # 窄依赖接口纯 stdlib + alerting 依赖（无循环），与 pre_open.py 同口径顶层 import。
 from trading.ports import EnginePorts
 # should_trigger_stop（D12 fallback 纯判定 · compute 单源 · stop_loss 路径无 engine patch）。
-from trading.compute.stop import should_trigger_stop
+# W1-A/T2-Task4：_trading_days_between 从 _eng_mod 反查切断 → 同 compute.stop 顶部直接 import
+# （test_scan_expired_* 的 monkeypatch(engine, "_trading_days_between") 失效 → Task 8-19 迁）。
+from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between
 # ExitAction / ExitReason（执行单源枚举 · 按身份 is 比较 · 与 engine re-export 同源同类）。
-from strategies.neckline.execution import ExitAction, ExitReason
+# W1-A/T2-Task4：decide_exit 从 _eng_mod 反查切断 → 同 execution 顶部直接 import（无新环 ·
+# monkeypatch(engine, "decide_exit") 失效 → Task 8-19 迁 patch execution.decide_exit）。
+from strategies.neckline.execution import ExitAction, ExitReason, decide_exit
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.stop_loss）：stop_loss_monitor 原是
 # engine 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -198,7 +214,7 @@ async def stop_loss_monitor(
     import trading.engine as _eng_mod
     # ① 盘中时段判定（Task1）
     # C-6 V2：时点判定走 clock.now（单一时间源口子）。
-    if not _eng_mod.calendar.is_intraday_session(clock.now()):
+    if not calendar.is_intraday_session(clock.now()):
         return {"checked": 0, "reason": "非盘中时段（09:15-15:00 连续，D2 修订后），跳过止损监控"}
 
     # ② 取网关与持仓
@@ -218,7 +234,7 @@ async def stop_loss_monitor(
     def _stop_already_placed(sym: str) -> bool:
         """查 DB 是否已挂 STOP 委托（幂等检查）。失败升 L1（不知是否发过=可能重发=双倍卖）。"""
         try:
-            return _eng_mod._state_store.has_order(_aid, _today, sym, "STOP")
+            return _state_store.has_order(_aid, _today, sym, "STOP")
         except Exception as e:
             # C-4 U3b：幂等读失真——原回退 False（当作没挂）会直接走 _submit 重发卖单 = 双倍卖。
             # 升 L1（spec §3 DB 幂等读失败=L1）：停调度，CRITICAL 唤醒人工核对 DB 真相。
@@ -228,14 +244,14 @@ async def stop_loss_monitor(
     def _record_stop(sym: str, qty: float, price: float) -> None:
         """发止损单后落 DB order(STOP) + trade_event(STOP_TRIGGERED)。失败升 L1。"""
         try:
-            if _eng_mod._state_store.get_account(_aid) is None:
-                _eng_mod._state_store.upsert_account(_aid, broker="qmt")
-            trade_id = _eng_mod._state_store.build_trade_id(_aid, sym, _today)
+            if _state_store.get_account(_aid) is None:
+                _state_store.upsert_account(_aid, broker="qmt")
+            trade_id = _state_store.build_trade_id(_aid, sym, _today)
             oid = f"{_today}_{sym}_STOP_1"
-            _eng_mod._state_store.insert_order(
+            _state_store.insert_order(
                 oid, trade_id, _aid, _today, sym, "sell", "STOP",
                 float(qty), float(price), state="SUBMITTED")
-            _eng_mod._state_store.insert_trade_event(
+            _state_store.insert_trade_event(
                 _aid, trade_id, sym, "STOP_TRIGGERED",
                 order_id=oid, qty=float(qty), price=float(price))
         except Exception as e:
@@ -269,7 +285,7 @@ async def stop_loss_monitor(
         relevant_syms |= set(monitor_ctx.keys())
     if has_pending:
         relevant_syms |= set(pending_ctx.keys())
-    quotes = await _eng_mod.qmt_market_data.get_quotes(list(relevant_syms)) if relevant_syms else {}
+    quotes = await qmt_market_data.get_quotes(list(relevant_syms)) if relevant_syms else {}
 
     # R2 降级告警（live）：行情源整体失效（xtdata 黑屏）→ 止损链路裸奔，CRITICAL 知会。
     # Why 30min 节流：避免 IntervalTrigger 30s 巡检每轮推一条（M4 告警风暴红线）。
@@ -284,7 +300,7 @@ async def stop_loss_monitor(
     # ports=None 守卫：ports=None 等价 blackout 跳过——仅非生产裸调（生产 _stoploss 总传
     # self._ports，e2e orchestrator 显式传 eng._ports 保 blackout 语义完整）；不阻断主链路。
     # _alert_critical 仍经 _eng_mod（Task 4 才切断），本 Task 只迁 blackout 状态。
-    if (ports is not None and _eng_mod._mode() == "live" and relevant_syms):
+    if (ports is not None and _mode() == "live" and relevant_syms):
         _n_valid = sum(
             1 for q in quotes.values()
             if isinstance(q, dict)
@@ -296,7 +312,7 @@ async def stop_loss_monitor(
             _now_mono = time.monotonic()
             # fire_if_due：单一 Lock 内 check+mark 原子返回 True/False——杜绝并发双发（I-1）。
             if ports.blackout.fire_if_due(_now_mono):
-                _eng_mod._alert_critical(
+                _alert_critical(
                     f"stop_loss 行情源整体失效：{len(relevant_syms)} 个标的全无有效 "
                     f"last_price（xtdata 不可用？止损链路裸奔，请人工介入）")
 
@@ -340,7 +356,7 @@ async def stop_loss_monitor(
                 cfg = dict(ctx.get("cfg") or {})
                 # 兜底补 phase（_stoploss 已设，防御直接调 monitor_ctx 的测试/灰度场景）
                 state.setdefault("phase", "holding")
-                dec = _eng_mod.decide_exit(state, bar, cfg)
+                dec = decide_exit(state, bar, cfg)
             except Exception:
                 # D12 fallback 红线（resolution 2 · 盘中不裸奔）：decide_exit 抛任何异常
                 # （state 缺键 / compute_stop_price 除零 / bar NaN 等）→ 降级 should_trigger_stop，
@@ -372,8 +388,8 @@ async def stop_loss_monitor(
                         # （拖到止损/超时）。补挂走模块级 place_take_profit（差额幂等）。
                         _tp_ok = False
                         try:
-                            _tp_ok = (_eng_mod._state_store.has_order(_aid, _today, sym, "TP1")
-                                      or _eng_mod._state_store.has_order(_aid, _today, sym, "TP2"))
+                            _tp_ok = (_state_store.has_order(_aid, _today, sym, "TP1")
+                                      or _state_store.has_order(_aid, _today, sym, "TP2"))
                         except Exception:
                             _tp_ok = True  # DB 查失败保守视为已挂（防重复挂超卖）
                         if not _tp_ok:
@@ -409,7 +425,7 @@ async def stop_loss_monitor(
                             logger.warning(
                                 "【止损/超时触发】%s 卖出 %s 股 @%s（decide_exit %s/%s portion=%.2f mode=%s）",
                                 sym, sell_qty, price, dec.action.name, dec.reason.name,
-                                dec.portion, _eng_mod._mode())
+                                dec.portion, _mode())
                     continue   # decide_exit 已决策（CLOSE），不走 fallback
                 # HOLD → 跳过不发单（decide_exit 已判无需离场）
                 if dec.action is ExitAction.HOLD:
@@ -452,7 +468,7 @@ async def stop_loss_monitor(
                 _record_stop(sym, qty, price)
                 logger.warning(
                     "【止损触发】%s 卖出 %s 股 @%s（止损价 %s，fallback should_trigger_stop mode=%s）",
-                    sym, qty, price, sp, _eng_mod._mode())
+                    sym, qty, price, sp, _mode())
 
     # ── ⑤ pending 期 cancel_on 巡检（D11 · resolution 4 · 当前实盘缺这环）──
     # 物理意图：挂单等待期（pre_open 挂买单未成交），盘中 high≥cancel_on → 涨幅已兑现，
@@ -518,15 +534,15 @@ async def stop_loss_monitor(
     # C-4 U4：止损发卖失败聚合 L2 CRITICAL——漏止损真金损失，研究员须知情（但整批监控不停）。
     # Why 聚合非逐只：防多标的连板跌停时逐只告警风暴（spec R3）。Why 限 live：dry_run/测试
     # 的发卖失败非真金风险。与 pre_open 部分拒同范式：L2 不停调度，_halted 保持 False。
-    if n_submit_failed > 0 and _eng_mod._mode() == "live":
-        _eng_mod._alert_critical(
+    if n_submit_failed > 0 and _mode() == "live":
+        _alert_critical(
             f"stop_loss 部分卖出失败 submit_failed={n_submit_failed} checked={n_checked}"
             f"（查 gw 挡板/lock_down 日志，漏止损须人工补单）")
     logger.info("stop_loss_monitor 完成 checked=%d triggered=%d fallback=%d pending_cancelled=%d mode=%s",
-                n_checked, n_triggered, n_fallback, n_pending_cancelled, _eng_mod._mode())
+                n_checked, n_triggered, n_fallback, n_pending_cancelled, _mode())
     return {"checked": n_checked, "stop_triggered": n_triggered,
             "fallback_used": n_fallback, "pending_cancelled": n_pending_cancelled,
-            "mode": _eng_mod._mode()}
+            "mode": _mode()}
 
 
 # ============================================================================
@@ -574,7 +590,7 @@ def scan_expired_positions(today: str, max_holding: int) -> list[dict]:
     import trading.engine as _eng_mod
     expired: list[dict] = []
     for sym, entry_date in _position_book.get_entry_dates().items():
-        holding_days = _eng_mod._trading_days_between(entry_date, today)
+        holding_days = _trading_days_between(entry_date, today)
         # I-4：`>` 严格大于（第 max_holding+1 日才标超期）——兜底 monitor 漏掉的标的，
         # 不与 monitor is_last `>=`（第 max_holding 日市价强平）同日冲突（防卖空）。详见上方 docstring。
         if holding_days > max_holding:
@@ -622,7 +638,7 @@ async def close_expired_positions(gw: Any, expired: list[dict]) -> dict:
         return {"closed": 0, "reason": "查持仓异常"}
     # 批量取所有超期标的跌停价（对齐 stop_loss_monitor T3 批量模式，减 GIL/C++ 调用开销）
     try:
-        quotes = await _eng_mod.qmt_market_data.get_quotes([e["symbol"] for e in expired])
+        quotes = await qmt_market_data.get_quotes([e["symbol"] for e in expired])
     except Exception:
         quotes = {}
         logger.exception("平超期持仓取行情异常（按无价处理，逐只跳过）")
@@ -637,7 +653,7 @@ async def close_expired_positions(gw: Any, expired: list[dict]) -> dict:
             continue
         # #7：DB 幂等防重——已挂 EXPIRED_CLOSE（未终态）跳过，兜住“提交后、消费标记前崩溃”
         try:
-            if _eng_mod._state_store.has_order(_aid, today_close, sym, "EXPIRED_CLOSE"):
+            if _state_store.has_order(_aid, today_close, sym, "EXPIRED_CLOSE"):
                 logger.info("跳过已挂 EXPIRED_CLOSE symbol=%s（DB 幂等）", sym)
                 continue
         except Exception:
@@ -662,17 +678,17 @@ async def close_expired_positions(gw: Any, expired: list[dict]) -> dict:
         if result.get("state") not in ("REJECTED", "FAILED"):
             n_closed += 1
             logger.warning("【超期平仓】%s 卖出 %s 股 @%s（holding_days=%s max_holding=%s mode=%s）",
-                           sym, qty, price, e.get("holding_days"), e.get("max_holding"), _eng_mod._mode())
+                           sym, qty, price, e.get("holding_days"), e.get("max_holding"), _mode())
             # #7：落 EXPIRED_CLOSE 幂等行（同日同标的同 purpose UNIQUE），防崩溃后重复挂卖
             try:
-                if _eng_mod._state_store.get_account(_aid) is None:
-                    _eng_mod._state_store.upsert_account(_aid, broker="qmt")
-                _eng_mod._state_store.insert_order(
+                if _state_store.get_account(_aid) is None:
+                    _state_store.upsert_account(_aid, broker="qmt")
+                _state_store.insert_order(
                     f"{today_close}_{sym}_EXPIRED_CLOSE_1",
-                    _eng_mod._state_store.build_trade_id(_aid, sym, today_close), _aid, today_close, sym, "sell",
+                    _state_store.build_trade_id(_aid, sym, today_close), _aid, today_close, sym, "sell",
                     "EXPIRED_CLOSE", float(qty), float(price), state="SUBMITTED")
             except Exception:
                 logger.exception("insert_order(EXPIRED_CLOSE) 失败 symbol=%s（告警人工复核）", sym)
     # B1 后无文件消费：DB 幂等（EXPIRED_CLOSE UNIQUE）兜底 pre_open 重入防重。
-    logger.info("平超期持仓完成 closed=%d/%d mode=%s", n_closed, len(expired), _eng_mod._mode())
+    logger.info("平超期持仓完成 closed=%d/%d mode=%s", n_closed, len(expired), _mode())
     return {"closed": n_closed}

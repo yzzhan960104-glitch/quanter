@@ -34,6 +34,8 @@ place_take_profit 单元测（test_place_take_profit_two_legs 等 8 测直调本
 stop_loss 路径补挂）。逐符号归类如下（与 pre_open.py / stop_loss.py 同口径）：
 
 ①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
+    **W1-A/T2-Task4 进展**：_state_store 已切断 _eng_mod 反查 → 顶部直接 import。①段以下
+    叙述保留历史；现行反查仅余 _submit / _resolve_account_id（Task 5/6 切断）。
     - ``_submit``：engine 模块级函数（下单分流），测试 ``patch("trading.engine._submit")``
       （test_place_take_profit_two_legs / _skips_vetoed_symbol / _tp1_qty_round_to_lot /
       _portion_zero/full / _tp1_ge_tp2 / _no_tp1 / _truncates_fractional + stop_loss 路径）。
@@ -41,7 +43,8 @@ stop_loss 路径补挂）。逐符号归类如下（与 pre_open.py / stop_loss.
     - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，
       测试既 ``patch("trading.engine._state_store")``（整体 mock · test_stop_loss_l1_halt）又
       ``patch("trading.engine._state_store.has_order")`` / ``add_order_qty`` 等（属性级）。
-      走 ``_eng_mod._state_store``：整体 patch 拿 mock，属性级 patch 拿真模块对象。
+      **W1-A/T2-Task4 已切顶部直接 import state_store 真身**（原走 engine._state_store 反查，
+      现整体 patch engine._state_store 失效，属性级 patch 仍命中 → Task 8-19 迁）。
     - ``_resolve_account_id``：engine 模块级函数（account_id 解析），测试经 env var
       ``QMT_ACCOUNT_ID`` 驱动（monkeypatch.setenv）——走 ``_eng_mod._resolve_account_id()``
       在 call-time 解析（与 pre_open.py / order_state.py 同范式）。
@@ -62,10 +65,13 @@ from __future__ import annotations
 
 import logging
 
-# 项目级单例（不涉及 engine patch · 共享模块对象属性 patch 命中）：
+# 项目级单例（共享模块对象属性 patch 命中）：
 # clock=单一时间源（clock.today）/ trading_plan=计划加载（trading_plan.load_plan）。
+# W1-A/T2-Task4：state_store 从 _eng_mod 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
+# engine._state_store 失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock
 from trading import trading_plan
+from trading import state_store as _state_store
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.exit）：place_take_profit 原是
 # engine 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -89,7 +95,6 @@ async def place_take_profit(symbol: str, filled_qty: float, fill_price: float,
     # local alias 绑定于函数入口：测试 patch 先于调用 → alias 拿 mock；无 patch 拿真值。
     import trading.engine as _eng_mod
     _resolve_account_id = _eng_mod._resolve_account_id
-    _state_store = _eng_mod._state_store
     _submit = _eng_mod._submit
 
     today = clock.today()

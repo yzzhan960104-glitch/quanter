@@ -25,6 +25,11 @@
 engine alerts 等）。逐符号归类如下：
 
 ①经函数内 lazy ``import trading.engine as _eng_mod`` 反查（保 patch 命中 + 避循环 import）：
+    **W1-A/T2-Task4 进展**：无状态符号（_mode / _alert_critical / _state_store /
+    _trading_days_between / _cancel_all_open_orders）已切断 _eng_mod 反查 → 顶部直接 import
+    物理叶子（critical / state_store / compute.stop / io.breaker）。①段以下叙述保留历史；
+    现行反查仅余 _resolve_account_id / get_gateway / _submit / _scan_expired_positions /
+    _close_expired_positions（Task 5/6/7 切断）。
     以下符号均在 pre_open 相关测试中经 ``patch("trading.engine._xxx")`` /
     ``monkeypatch.setattr(engine, "_xxx", ...)`` 注入 mock，且 engine 顶部 re-export 本模块
     会触发循环——故必须函数体内 lazy 引用，绝不能顶部 ``from trading.engine import _xxx``：
@@ -44,8 +49,9 @@ engine alerts 等）。逐符号归类如下：
     - ``_state_store``：engine 经 ``from trading import state_store as _state_store`` 引入，测试既
       ``patch("trading.engine._state_store")``（整体 MagicMock · test_pre_open_l1_halt / test_l2 /
       test_cancel_all_account_id）又 ``patch("trading.engine._state_store.list_signals_with_meta_by_plan_date")``
-      （属性级 · test_pre_open_ledger）。走 ``_eng_mod._state_store`` 在 call-time 解析：整体 patch
-      时拿到 mock，属性级 patch 时拿到真模块对象 → ``.list_signals...`` patch 同样命中。
+      （属性级 · test_pre_open_ledger）。**W1-A/T2-Task4 已切顶部直接 import state_store 真身**
+      （原走 engine._state_store 在 call-time 解析，现整体 patch engine._state_store 失效，
+      属性级 patch 仍命中 → Task 8-19 迁整体 patch 路径）。
     - ``_pre_open_impl``（仅 ``pre_open`` wrapper 内调用）：test_pre_open_ledger_semantics 经
       ``monkeypatch.setattr(engine, "_pre_open_impl", fake_impl)`` 跑 ``engine.pre_open`` 验台账
       skip/done/failed 语义——``pre_open`` 必须经 ``_eng_mod._pre_open_impl`` 调用才能命中该 patch
@@ -73,12 +79,22 @@ import os
 
 # 窄依赖接口（Task 1 EnginePorts：gate + 动态白名单注入/清空，纯 stdlib 依赖无循环）。
 from trading.ports import EnginePorts
-# 项目级单例（不涉及 engine patch）：clock=单一时间源 / job_ledger=台账真相源 /
-# dynamic_whitelist=ports=None 防御回退分支（pragma no cover）。
+# 项目级单例：clock=单一时间源 / job_ledger=台账真相源 / dynamic_whitelist=ports=None 防御回退分支。
+# W1-A/T2-Task4：state_store 从 _eng_mod 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
+# engine._state_store 失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock, dynamic_whitelist, job_ledger
+from trading import state_store as _state_store
 # _CriticalHalt（L1 致命停调度异常，按类身份 catch 不被 patch）+ _trade_cfg（纯 env 参数读，
 # pre_open 路径无 patch engine._trade_cfg 测试）。critical 是 SSoT 基础设施域，不反向 import 本文件。
-from trading.critical import _CriticalHalt, _trade_cfg
+# W1-A/T2-Task4：_mode / _alert_critical 从 _eng_mod 反查切断 → 同 critical 顶部直接 import
+# （patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁 monkeypatch critical._mode 等）。
+from trading.critical import _CriticalHalt, _trade_cfg, _mode, _alert_critical
+# W1-A/T2-Task4：_trading_days_between 从 _eng_mod 反查切断 → 顶部直接 import compute.stop 真身
+# （monkeypatch(engine, "_trading_days_between") 失效 → Task 8-19 迁）。
+from trading.compute.stop import trading_days_between as _trading_days_between
+# W1-A/T2-Task4：_cancel_all_open_orders 从 _eng_mod 反查切断 → 顶部直接 import io.breaker 真身
+# （patch engine._cancel_all_open_orders 失效 → Task 8-19 迁 patch io.breaker.cancel_all_open_orders）。
+from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.pre_open）：pre_open 原是 engine
 # 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -181,16 +197,11 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     # call-time 解析：测试 patch 整体属性时拿 mock，patch 属性级（_state_store.xxx）时拿真模块对象。
     # clock / _trade_cfg / _CriticalHalt / dynamic_whitelist 顶部直接 import（不涉及 engine patch）。
     import trading.engine as _eng_mod
-    _mode = _eng_mod._mode
-    _alert_critical = _eng_mod._alert_critical
     _resolve_account_id = _eng_mod._resolve_account_id
     get_gateway = _eng_mod.get_gateway
     _submit = _eng_mod._submit
-    _cancel_all_open_orders = _eng_mod._cancel_all_open_orders
     _scan_expired_positions = _eng_mod._scan_expired_positions
     _close_expired_positions = _eng_mod._close_expired_positions
-    _trading_days_between = _eng_mod._trading_days_between
-    _state_store = _eng_mod._state_store
 
     # S3（Task 8 · C-2）：三段式前置 gate（经 EnginePorts.gate 调用实例方法 · T1 缝合点 #1）。
     # 物理意图：plan-confirmed → gateway-health → data-ready 三段全绿才放行下游（撤昨日单 /
