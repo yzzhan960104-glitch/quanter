@@ -139,6 +139,17 @@ async def test_reconnect_skips_if_already_reconnecting(monkeypatch, tmp_path):
 # ============================================================ T8：守护 job（_health_guard）
 # M1 自愈的最后一块：TradingEngine._health_guard（apscheduler interval 60s）。
 # 场景：启动 connect 失败 / 盘中断线 → 守护 job 周期探测 is_client_ready→connect 恢复 live。
+#
+# W1-A/T2-Task10 C3 判定（engine_vs_phases）：本组全部 patch **保 trading.engine.X 不迁**。
+# Why：_health_guard 是 TradingEngine 实例方法（engine.py:885），其内读 get_gateway()/
+# _mode()/_alert_critical() 均经 **engine 模块全局名** 解析（Python LEGB 模块作用域）：
+#   - get_gateway（engine.py:367 engine 自有模块级定义 · 非 phases 路径）
+#   - _mode / _alert_critical（engine.py:92-98 `from trading.critical import` re-export ·
+#     re-export 后仍是 engine 模块属性 · engine 内部调用点经模块全局名读）
+# 故 patch("trading.engine.get_gateway") / setattr(eng_mod, "_mode"/"_alert_critical")
+# 替换的是 engine 模块属性 → _health_guard 内经模块全局名读到 mock → 命中。
+# phases 路径（phases.pre_open/stop_loss/post_close）不经 _health_guard → 无需迁 phases。
+# 经验证：本组 25 个 health_guard engine 路径测试全绿（patch engine.X 命中），C3 决策成立。
 @pytest.mark.asyncio
 async def test_health_guard_noop_when_connected():
     """已连接时守护 job 直接返回（不捣乱活跃连接）。
@@ -494,6 +505,11 @@ def _make_engine_with_not_ready_gw(monkeypatch, *, diag_text="userdata 目录不
     gw.is_client_ready = MagicMock(return_value=False)
     gw._client_staleness_diag = MagicMock(return_value=diag_text)
     # Fix1 关键：_alert_critical 已加 live 守卫，必须 patch _mode 才能命中告警分支
+    # W1-A/T2-Task10 C3：setattr(eng_mod, "_mode"/"_alert_critical") **保 engine 不迁**——
+    # _health_guard 内 _mode()/_alert_critical() 经 engine 模块全局名读（engine.py:92-98
+    # from trading.critical import re-export · re-export 后是 engine 模块属性），patch engine
+    # 模块属性即命中；critical._mode/_alert_critical 是物理真身但 _health_guard 不经 critical
+    # 模块全局名读 → 迁 critical 反而 miss。与上方 health_guard 组 C3 决策一致。
     monkeypatch.setattr(eng_mod, "_mode", lambda: mode)
     fired = []
     monkeypatch.setattr(eng_mod, "_alert_critical", lambda msg: fired.append(msg))
