@@ -47,8 +47,7 @@
     "neckline",
     "tp2",
     "exit_date",
-    "exit_price",
-    "rr"
+    "exit_price"
   ],
   "n_signals": 15,
   "signals": [
@@ -61,8 +60,7 @@
       "neckline": 8.79,
       "tp2": 12.13,
       "exit_date": "2025-08-12",
-      "exit_price": 8.54,
-      "rr": null
+      "exit_price": 8.54
     },
     {
       "symbol": "300012.SZ",
@@ -73,8 +71,7 @@
       "neckline": 11.33,
       "tp2": 12.622,
       "exit_date": "2025-07-07",
-      "exit_price": 11.451,
-      "rr": null
+      "exit_price": 11.451
     },
     {
       "symbol": "300012.SZ",
@@ -85,8 +82,7 @@
       "neckline": 11.545,
       "tp2": 13.149,
       "exit_date": "2025-07-30",
-      "exit_price": 12.311,
-      "rr": null
+      "exit_price": 12.311
     },
     {
       "symbol": "300014.SZ",
@@ -97,8 +93,7 @@
       "neckline": 68.27,
       "tp2": 88.482,
       "exit_date": "2026-05-07",
-      "exit_price": 71.489,
-      "rr": null
+      "exit_price": 71.489
     },
     {
       "symbol": "300015.SZ",
@@ -109,8 +104,7 @@
       "neckline": 11.226,
       "tp2": 12.248,
       "exit_date": "2026-02-06",
-      "exit_price": 10.866,
-      "rr": null
+      "exit_price": 10.866
     },
     {
       "symbol": "300016.SZ",
@@ -121,8 +115,7 @@
       "neckline": 10.43,
       "tp2": 14.81,
       "exit_date": "2025-09-10",
-      "exit_price": 9.761,
-      "rr": null
+      "exit_price": 9.761
     },
     {
       "symbol": "300017.SZ",
@@ -133,8 +126,7 @@
       "neckline": 11.417,
       "tp2": 14.109,
       "exit_date": "2025-10-17",
-      "exit_price": 11.031,
-      "rr": null
+      "exit_price": 11.031
     },
     {
       "symbol": "300017.SZ",
@@ -145,8 +137,7 @@
       "neckline": 11.417,
       "tp2": 13.401,
       "exit_date": "2025-11-05",
-      "exit_price": 11.004,
-      "rr": null
+      "exit_price": 11.004
     },
     {
       "symbol": "300017.SZ",
@@ -157,8 +148,7 @@
       "neckline": 18.815,
       "tp2": 25.377,
       "exit_date": "2026-05-20",
-      "exit_price": 17.476,
-      "rr": null
+      "exit_price": 17.476
     },
     {
       "symbol": "300018.SZ",
@@ -169,8 +159,7 @@
       "neckline": 8.609,
       "tp2": 10.533,
       "exit_date": "2025-10-13",
-      "exit_price": 10.041,
-      "rr": null
+      "exit_price": 10.041
     },
     {
       "symbol": "300018.SZ",
@@ -181,8 +170,7 @@
       "neckline": 13.44,
       "tp2": 17.686,
       "exit_date": "2026-05-15",
-      "exit_price": 14.901,
-      "rr": null
+      "exit_price": 14.901
     },
     {
       "symbol": "300019.SZ",
@@ -193,8 +181,7 @@
       "neckline": 22.228,
       "tp2": 27.698,
       "exit_date": "2026-03-03",
-      "exit_price": 21.515,
-      "rr": null
+      "exit_price": 21.515
     },
     {
       "symbol": "300019.SZ",
@@ -205,8 +192,7 @@
       "neckline": 19.37,
       "tp2": 25.57,
       "exit_date": "2026-07-13",
-      "exit_price": 18.536,
-      "rr": null
+      "exit_price": 18.536
     },
     {
       "symbol": "300024.SZ",
@@ -217,8 +203,7 @@
       "neckline": 18.36,
       "tp2": 22.24,
       "exit_date": "2026-01-29",
-      "exit_price": 17.845,
-      "rr": null
+      "exit_price": 17.845
     },
     {
       "symbol": "300031.SZ",
@@ -229,8 +214,7 @@
       "neckline": 25.705,
       "tp2": 31.617,
       "exit_date": "2025-09-23",
-      "exit_price": 24.837,
-      "rr": null
+      "exit_price": 24.837
     }
   ]
 }

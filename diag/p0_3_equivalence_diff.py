@@ -11,7 +11,7 @@ CANONICAL 字段存成基线 JSON；P1 新实现跑同一 universe 后调 compar
   - P1 对拍前先校验 data_content_hash 一致，否则湖已变（增量/复权）→ 告警须重建基线。
 
 CANONICAL 字段（识别+出场结果的核心数值，剔 debug-only）：
-  signal_date / entry / exit_reason / avg_pnl_pct / neckline / tp2 / exit_date / exit_price / rr
+  signal_date / entry / exit_reason / avg_pnl_pct / neckline / tp2 / exit_date / exit_price
 """
 import json
 import sys
@@ -22,7 +22,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import pandas as pd  # noqa: E402
 from strategies.neckline.method_v0 import DEFAULTS  # noqa: E402
 from strategies.neckline.backtest import scan_symbol, EXEC_DEFAULTS  # noqa: E402
 from discovery.snapshot import load_universe, data_content_hash  # noqa: E402
@@ -31,8 +30,10 @@ LAKE = _ROOT / "data_lake" / "a_shares_daily.parquet"
 BASELINE_PATH = Path(__file__).resolve().parent / "p0_3_baseline.json"
 
 # P1 对拍的字段集（数值/枚举核心；剔 suppression 等 debug-only 元数据）
+# rr 不入列：rr 由 strategy.scan_at 另算，非 scan_symbol/simulate_exit 的 filled 输出，
+# 基线里恒为 null（s.get("rr") -> None），零区分力。
 CANONICAL = ["signal_date", "entry", "exit_reason", "avg_pnl_pct",
-             "neckline", "tp2", "exit_date", "exit_price", "rr"]
+             "neckline", "tp2", "exit_date", "exit_price"]
 
 # 抽样规模：N 只【有信号】的创板科创标的（够覆盖典型形态，又控制基线体积/跑时）
 SAMPLE_N = 10
@@ -89,26 +90,25 @@ def compare_signals(baseline: list, current: list) -> list:
 
 
 def _params_default():
-    """构造 21 维默认 params（DEFAULTS ∪ EXEC_DEFAULTS，evaluate 取 ID_KEYS/EXEC_KEYS 子集）。"""
+    """构造默认 params——DEFAULTS(11) ∪ EXEC_DEFAULTS(13) = 24 keys（evaluate 实取 ID_KEYS 11 + EXEC_KEYS 10 子集，commission/stamp/transfer 三个 cost rate 不进 evaluate）。"""
     return {**DEFAULTS, **EXEC_DEFAULTS}
 
 
 def _run_sampling(universe, params):
-    """对 universe 每标的跑 scan_symbol → 收集全部 filled 信号（带 symbol/signal_date）。"""
-    id_cfg = {**DEFAULTS, **{k: params[k] for k in params if k in DEFAULTS}}
-    exec_cfg = {**EXEC_DEFAULTS, **{k: params[k] for k in params if k in EXEC_DEFAULTS}}
-    all_filled = []
-    for sym, df in universe.items():
-        try:
-            filled, _n, _skip = scan_symbol(df, id_cfg["window"], exec=exec_cfg, id_cfg=id_cfg)
-            for r in filled:
-                r["symbol"] = sym
-            all_filled.extend(filled)
-        except Exception as e:
-            # 不静默吞——基线/P1 对拍侧任一 scan_symbol 抛错须可观测（防差异被掩盖）
-            warnings.warn(f"[P0-3] scan_symbol threw on {sym}: {e!r}")
-            continue
-    return all_filled
+    """对 universe 跑 scan_symbol 收集 filled 信号——委托生产 run_full_scan（生产强一致）。
+
+    Why 委托：P0-3 是 P1 向量化验收基建，对拍口径必须与 discovery 生产 evaluate 完全一致
+    （run_full_scan 用 ID_KEYS/EXEC_KEYS 具名 overlay 构 cfg），否则非默认 params 下 gate
+    量非所跑。旧实现自构 id_cfg/exec_cfg（{**DEFAULTS, **{k in DEFAULTS}}）与生产分叉——默认
+    params 下收敛（基线正确），但 P1 复用 compare() 跑非默认 params 时口径可能失真。
+    注意签名换序：本 wrapper 是 (universe, params)，run_full_scan 是 (params, universe)。
+    """
+    from discovery.objective import run_full_scan
+    try:
+        return run_full_scan(params, universe)
+    except Exception as e:
+        warnings.warn(f"[P0-3] run_full_scan threw: {e!r}")
+        return []
 
 
 def build_sampling_universe(lake_start=DEFAULT_LAKE_START, n=SAMPLE_N):
