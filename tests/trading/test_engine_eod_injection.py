@@ -457,3 +457,198 @@ def test_eod_cooldown_dedup_old_signal_kept(monkeypatch, tmp_db):
     # 10 日前 SIGNAL 超 cooldown=5 → 300001.SZ 保留
     syms = [s.symbol for s in captured["signals"]]
     assert "300001.SZ" in syms
+
+
+# ============================================================================
+# 6. Task 7（W0/D1 ② 告警通道）：filter_universe_by_continuity 过滤标的数
+#    ≥ _CONTINUITY_FILTER_ALERT_FLOOR → _alert_critical 推钉钉（残数据有声）。
+#    物理意图（spec §3.3.5 ②）：原 data/integrity.py:413 filter 仅 _log.warning，
+#    残数据标的被过滤无声无息——若 lake 大面积漏采（如停牌复牌段批量缺失），
+#    universe 静默收窄、信号锐减、研究员查盘后才察觉。本通道在 engine 调用方接
+#    _alert_critical（CRITICAL 钉钉），data 层零侵入（不 import infra.notifier）。
+#    节流：filter 在 exp 循环内，用 _continuity_alerted_this_eod 局部变量保每次 _eod
+#    至多告警一次（N 个 exp 都达阈值也不风暴）。
+# ============================================================================
+def test_eod_alerts_when_continuity_filter_drops_many(monkeypatch):
+    """② 告警通道：filter 过滤标的数 ≥ _CONTINUITY_FILTER_ALERT_FLOOR → _alert_critical 被调。
+
+    场景：universe=10 只，filter 返 3 只（过滤 7 ≥ 阈值 5）→ 告警，msg 含过滤数。
+    """
+    from experiment.models import ActiveExperiment
+
+    fake_exp = ActiveExperiment(
+        experiment_id="exp-filter-alert", strategy_name="neckline",
+        params={"window": 20}, weight=1.0,
+    )
+    monkeypatch.setattr(
+        "experiment.resolver.resolve_active", lambda db_path=None: [fake_exp]
+    )
+
+    class _MockStrategy:
+        def __init__(self, *a, **kw):
+            pass
+
+        def scan_live(self, symbol, df_upto, date):
+            return []  # 信号生成不在本测试范围
+
+    monkeypatch.setattr(
+        "strategies.registry.build_strategy",
+        lambda name, cfg_override=None, **kw: _MockStrategy(),
+    )
+
+    # 10 只标的全进 df_map（≥60 行均入）
+    universe = [f"{i:06d}.SZ" for i in range(10)]
+    monkeypatch.setattr(engine, "_load_universe", lambda lake: list(universe))
+    monkeypatch.setattr(engine, "_load_df_upto", lambda lake, s, d: pd.DataFrame(
+        {"open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0, "volume": 1000},
+        index=pd.date_range("2026-01-01", periods=80, freq="D"),
+    ))
+
+    # 关键：monkeypatch data.integrity.filter_universe_by_continuity 返 3 只
+    # （过滤 7 只 ≥ _CONTINUITY_FILTER_ALERT_FLOOR=5 → 触发告警）。
+    # Why patch data.integrity 而非 engine：_eod 内 `from data.integrity import
+    # filter_universe_by_continuity`（L1144）是**函数内 local import**，每次 _eod
+    # 执行时重新 bind 到 data.integrity 当前属性 → patch data.integrity 命中。
+    import data.integrity as _di
+    _clean_subset = list(universe[:3])
+    monkeypatch.setattr(
+        _di, "filter_universe_by_continuity",
+        lambda univ, df_map, window, susp, trade_days: list(_clean_subset),
+    )
+
+    # 捕获 _alert_critical（engine 模块级 import，patch engine._alert_critical 命中）
+    captured_alerts: list[str] = []
+    monkeypatch.setattr(
+        engine, "_alert_critical", lambda msg: captured_alerts.append(msg),
+    )
+
+    async def _fake_eod_plan(date, signals, atr_map, capital):
+        return {"date": date, "n_orders": 0, "mode": "dry_run"}
+
+    monkeypatch.setattr(engine, "eod_plan", _fake_eod_plan)
+
+    asyncio.run(engine.TradingEngine()._eod())
+
+    # 断言：_alert_critical 被调一次，msg 含过滤数 "7"
+    assert len(captured_alerts) == 1, f"应告警一次，实际 {captured_alerts}"
+    assert "7" in captured_alerts[0], f"告警文案应含过滤数 7，实际 {captured_alerts[0]}"
+
+
+def test_eod_continuity_alert_throttled_across_experiments(monkeypatch):
+    """② 告警节流：N 个 exp 都达阈值 → 只告警一次（防 N exp 风暴）。
+
+    场景：3 个 exp，每个 filter 都过滤 7 只（均达阈值）→ 局部节流变量使只告警 1 次。
+    物理意图：filter 在 exp 循环内（per-exp window 可能不同），若每个 exp 都告警，
+    N 个 exp 推 N 条钉钉 → 风暴。_continuity_alerted_this_eod 局部变量保 _eod 至多 1 次。
+    """
+    from experiment.models import ActiveExperiment
+
+    fake_exps = [
+        ActiveExperiment(experiment_id=f"exp-throttle-{i}", strategy_name="neckline",
+                         params={"window": 20}, weight=1.0)
+        for i in range(3)
+    ]
+    monkeypatch.setattr(
+        "experiment.resolver.resolve_active", lambda db_path=None: fake_exps
+    )
+
+    class _MockStrategy:
+        def __init__(self, *a, **kw):
+            pass
+
+        def scan_live(self, symbol, df_upto, date):
+            return []
+
+    monkeypatch.setattr(
+        "strategies.registry.build_strategy",
+        lambda name, cfg_override=None, **kw: _MockStrategy(),
+    )
+
+    universe = [f"{i:06d}.SZ" for i in range(10)]
+    monkeypatch.setattr(engine, "_load_universe", lambda lake: list(universe))
+    monkeypatch.setattr(engine, "_load_df_upto", lambda lake, s, d: pd.DataFrame(
+        {"open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0, "volume": 1000},
+        index=pd.date_range("2026-01-01", periods=80, freq="D"),
+    ))
+
+    import data.integrity as _di
+    monkeypatch.setattr(
+        _di, "filter_universe_by_continuity",
+        lambda univ, df_map, window, susp, trade_days: list(univ[:3]),
+    )
+
+    captured_alerts: list[str] = []
+    monkeypatch.setattr(
+        engine, "_alert_critical", lambda msg: captured_alerts.append(msg),
+    )
+
+    async def _fake_eod_plan(date, signals, atr_map, capital):
+        return {"date": date, "n_orders": 0, "mode": "dry_run"}
+
+    monkeypatch.setattr(engine, "eod_plan", _fake_eod_plan)
+
+    asyncio.run(engine.TradingEngine()._eod())
+
+    # 3 exp 都达阈值，但局部节流只让 _alert_critical 被调一次
+    assert len(captured_alerts) == 1, (
+        f"3 exp 节流后只应告警一次（防风暴），实际 {len(captured_alerts)} 次"
+    )
+
+
+def test_eod_no_continuity_alert_when_drop_below_floor(monkeypatch):
+    """② 阈值闸：过滤数 < _CONTINUITY_FILTER_ALERT_FLOOR → 不告警。
+
+    场景：universe=10，filter 返 8（过滤 2 < 阈值 5）→ 单标的偶发漏采只 warning，
+    不刷屏钉钉。
+    """
+    from experiment.models import ActiveExperiment
+
+    fake_exp = ActiveExperiment(
+        experiment_id="exp-no-alert", strategy_name="neckline",
+        params={"window": 20}, weight=1.0,
+    )
+    monkeypatch.setattr(
+        "experiment.resolver.resolve_active", lambda db_path=None: [fake_exp]
+    )
+
+    class _MockStrategy:
+        def __init__(self, *a, **kw):
+            pass
+
+        def scan_live(self, symbol, df_upto, date):
+            return []
+
+    monkeypatch.setattr(
+        "strategies.registry.build_strategy",
+        lambda name, cfg_override=None, **kw: _MockStrategy(),
+    )
+
+    universe = [f"{i:06d}.SZ" for i in range(10)]
+    monkeypatch.setattr(engine, "_load_universe", lambda lake: list(universe))
+    monkeypatch.setattr(engine, "_load_df_upto", lambda lake, s, d: pd.DataFrame(
+        {"open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0, "volume": 1000},
+        index=pd.date_range("2026-01-01", periods=80, freq="D"),
+    ))
+
+    import data.integrity as _di
+    # filter 返 8 只（过滤 2 只 < _CONTINUITY_FILTER_ALERT_FLOOR=5 → 不告警）
+    monkeypatch.setattr(
+        _di, "filter_universe_by_continuity",
+        lambda univ, df_map, window, susp, trade_days: list(univ[:8]),
+    )
+
+    captured_alerts: list[str] = []
+    monkeypatch.setattr(
+        engine, "_alert_critical", lambda msg: captured_alerts.append(msg),
+    )
+
+    async def _fake_eod_plan(date, signals, atr_map, capital):
+        return {"date": date, "n_orders": 0, "mode": "dry_run"}
+
+    monkeypatch.setattr(engine, "eod_plan", _fake_eod_plan)
+
+    asyncio.run(engine.TradingEngine()._eod())
+
+    assert captured_alerts == [], (
+        f"过滤数 < 阈值不应告警（偶发漏采只 warning），实际 {captured_alerts}"
+    )

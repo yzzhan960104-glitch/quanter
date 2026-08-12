@@ -304,6 +304,14 @@ POST_CLOSE_CRON_DEFAULT = "30 15 * * mon-fri" # 盘后对账/熔断/trailing
 _last_quote_blackout_alert_ts: float = 0.0
 _QUOTE_BLACKOUT_ALERT_INTERVAL_S = 30 * 60
 
+# ② 告警通道节流阈值（W0/D1 Task 7 · spec §3.3.5 ②）：
+# filter_universe_by_continuity 在 _eod exp 循环内被调（per-exp window 可能不同），
+# 被过滤标的数 ≥ 此阈值 → _alert_critical 推 CRITICAL 钉钉（残数据有声）。
+# Why 阈值而非零容忍：单标的偶发漏采（停牌复牌边界）由 data/integrity 内 _log.warning
+# 兜底即可，推钉钉只污染运营群致研究员麻木；阈值 ≥5 才告警确保只在 lake 大面积漏采
+# （universe 显著收窄、信号锐减）时触达操作员——这是真"残数据"风险，非偶发噪声。
+_CONTINUITY_FILTER_ALERT_FLOOR = 5
+
 
 # （T1-Task2）_mode / _trade_cfg 已迁 trading.critical.py（集群 A 基础设施），见文件顶部
 # re-export。下方原模块级定义已删；engine 内部 ``_mode()`` / ``_trade_cfg()`` 调用点经模块
@@ -1182,6 +1190,11 @@ class TradingEngine:
 
         signals: list = []
         atr_map: dict = {}
+        # ② 告警通道节流局部变量（W0/D1 Task 7 · spec §3.3.5 ②）：filter 在下方 exp 循环
+        # 内被调，若每个 exp 达阈值都告警 → N 个 exp 推 N 条钉钉（风暴）。此局部变量保
+        # 每次 _eod 至多告警一次。Why 局部变量非模块级：_eod 每天 19:00 一次天然不风暴，
+        # 模块级可变状态会加重 W1-A 收口负担（参考 _last_quote_blackout_alert_ts 已是负担）。
+        _continuity_alerted_this_eod = False
         # 逐实验 × 逐 symbol 扫信号；单 symbol scan_live 异常仅 warn 跳过，不炸整批
         for exp in experiments:
             strategy = build_strategy(exp.strategy_name, cfg_override=exp.params)
@@ -1190,6 +1203,18 @@ class TradingEngine:
             id_window = _resolve_id_window(strategy)
             clean_universe = filter_universe_by_continuity(
                 list(df_map.keys()), df_map, id_window, susp, trade_days)
+            # ② 告警通道（2026-08-12）：被过滤标的数 ≥ 阈值 → CRITICAL 钉钉（残数据有声）。
+            # Why 在 engine 调用方而非 data/integrity：data 层保持纯净（不 import infra.notifier），
+            # 告警统一走 _alert_critical（复用 infra.notifier 通道，与 _health_guard / pre_open
+            # gate 同链）。data/integrity.py 内 _log.warning 保留作为运维日志兜底（不删）。
+            # 节流：局部变量 _continuity_alerted_this_eod 保 _eod 至多告警一次（防 N exp 风暴）。
+            dropped = len(df_map) - len(clean_universe)
+            if dropped >= _CONTINUITY_FILTER_ALERT_FLOOR and not _continuity_alerted_this_eod:
+                _alert_critical(
+                    f"完整性 gate 过滤 {dropped}/{len(df_map)} 标的（窗口含未解释漏采），"
+                    f"universe 收窄——疑 lake 漏采，查 scan/repair 闭环"
+                )
+                _continuity_alerted_this_eod = True
             for sym in clean_universe:
                 df_upto = df_map[sym]   # df_upto 复用（不重复 _load_df_upto）
                 try:
