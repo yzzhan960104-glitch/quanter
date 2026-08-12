@@ -58,6 +58,19 @@ def test_select_keys_退役key配quota不崩():
     assert "stock_basic" in sel, "quota basic 有效 key 应保留"
 
 
+def test_select_keys_retired_with_quota_no_keyerror():
+    """P2 回归：退役 key + quota 组合不 KeyError（原崩溃路径 --keys daily --quota basic）。
+
+    物理意图：复现 select_keys 修复前的崩溃路径——daily 已退役不在 TUSHARE_DATASETS，
+    修复前 quota 过滤对 daily 取 TUSHARE_DATASETS[k] 直接 KeyError（sync_cli.py:73 注释）。
+    补强点：指定列表「全为退役 key」+ quota，结果应为空列表，且不崩——
+    既有 test_select_keys_退役key配quota不崩 用混合（退役+有效）输入，未覆盖此「全退役→空」边界。
+    """
+    from data.sync_cli import select_keys
+    sel = select_keys(all_keys=False, keys=["daily"], quota="basic")
+    assert sel == [], "退役 key 经 quota 过滤后为空，不崩"
+
+
 def test_run_单key失败不中断后续(monkeypatch):
     """fail-soft：某 key 抛异常，后续 key 仍跑，汇总 exit code=1。用真实注册表 key（run 访问 cfg）。"""
     calls = []
