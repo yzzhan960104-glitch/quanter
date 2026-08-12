@@ -307,7 +307,7 @@ POST_CLOSE_CRON_DEFAULT = "30 15 * * mon-fri" # 盘后对账/熔断/trailing
 
 # W1-A/T2（模块级可变状态收口红线）：原 R2 降级告警节流模块级可变状态已迁
 # ``trading.alerting.QuoteBlackoutThrottle`` dataclass，经 ``EnginePorts.blackout`` 注入
-# stop_loss_monitor（``ports.blackout.should_alert`` / ``ports.blackout.mark``）。原两行：
+# stop_loss_monitor（生产主路径走 ``ports.blackout.fire_if_due`` 原子方法）。原两行：
 #     _last_quote_blackout_alert_ts: float = 0.0
 #     _QUOTE_BLACKOUT_ALERT_INTERVAL_S = 30 * 60
 # 已删——依赖方向由隐式 engine 反查变为显式 ports 透传，节流语义逐字等价（30min 窗口 +
@@ -639,7 +639,7 @@ class TradingEngine:
             whitelist_clear=self._dynamic_whitelist.clear,  # set.clear 原地清空，对齐原 ``.clear()``
             # W1-A/T2：行情黑屏 30min 节流告警状态机（原模块级 _last_quote_blackout_alert_ts
             # + _QUOTE_BLACKOUT_ALERT_INTERVAL_S 收口）。stop_loss_monitor 经
-            # ports.blackout.should_alert/mark 读写；默认 last_ts=0.0 + interval=1800.0
+            # ports.blackout.fire_if_due 原子读写（单一 Lock 内 check+mark）；默认 last_ts=0.0 + interval=1800.0
             # 等价原模块级初值 + 常量（行为零变更）。显式构造留实例化点便于未来注入测试替身。
             blackout=QuoteBlackoutThrottle(),
         )

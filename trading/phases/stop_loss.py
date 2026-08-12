@@ -294,7 +294,7 @@ async def stop_loss_monitor(
     # 边界等价触发，逐字对齐原 ``_now_mono - _last >= _INTERVAL`` 语义。
     # ports=None 守卫：ports=None 等价 blackout 跳过——仅非生产裸调（生产 _stoploss 总传
     # self._ports，e2e orchestrator 显式传 eng._ports 保 blackout 语义完整）；不阻断主链路。
-    # _alert_critical 仍经 engine 反查（Task 4 才切断），本 Task 只迁 blackout 状态。
+    # 注：_alert_critical 已 Task 4 切断（顶部 import critical 真身），本 Task（Task 3）只迁 blackout 状态。
     if (ports is not None and _mode() == "live" and relevant_syms):
         _n_valid = sum(
             1 for q in quotes.values()

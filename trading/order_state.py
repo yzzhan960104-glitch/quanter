@@ -62,8 +62,8 @@ from trading.critical import _CriticalHalt, _mode, _alert_critical
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
 from trading.account import resolve_account_id as _resolve_account_id
 # W1-A/T2-Task6：place_take_profit / _seq_for_real_oid / _order_state_to_db 反查切断
-# → 直接 import phases.exit / phases.post_close 真身（非历史 engine 模块反查）。
-# W1-A/T2-Task10 修：改 **函数内 lazy import**（非顶部）。Why：顶部 import 触发跨包环——
+# → 改 **函数内 lazy import** phases.exit / phases.post_close 真身（防跨包环·详见下方注释）。
+# W1-A/T2-Task10 修：顶部 import 触发跨包环（故从顶部直接 import 回退为函数内 lazy）——
 # broker.base → trading.__init__ → order_state → phases.exit → gateway_service → broker.base
 # （broker.base 部分初始化, OrderResult 未定义 → ImportError）。Task 6 Step 3 只验了
 # `import trading.phases.X`（trading 先加载不触发环），未验 `import broker.qmt`（broker 先
