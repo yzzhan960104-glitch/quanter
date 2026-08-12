@@ -14,6 +14,40 @@ server lifespan 复用同一段初始化代码（构造(零 I/O) → bootstrap(I
 Mock 策略：patch ``trading.engine.get_gateway``（模块级函数）+ ``trading.position_book.init_db``
 + ``trading.state_store.init_store`` + ``trading.state_store._migrate_env_to_account``
 （bootstrap 内函数局部 import 这些子模块，故 patch 源模块路径）。
+
+W1-A/T2-Task17 patch 物理路径迁移（bootstrap engine 调用链归属判定）：
+    本文件 8 测全调 ``eng.bootstrap()``——TradingEngine 实例方法（engine.py 内
+    ``async def bootstrap``）。bootstrap 函数体内对 ``get_gateway`` / ``_alert_critical``
+    均作 **engine 模块全局名 bare global 读取**（``gw = get_gateway()`` / 单实例锁被占用
+    时调 ``_alert_critical(...)``）→ 经 engine ``__globals__`` 解析。按「符号被读取时的
+    ``__globals__`` 归属模块」判 → **全 9 patch 保 trading.engine.X 不迁，0 处迁移**：
+
+    - ``get_gateway`` ×8（C3 · 保 engine · L26/46/59/83/113/140/157/178）：bootstrap 内
+      ``gw = get_gateway()`` 读引擎模块全局名 → engine ``__globals__``。engine.py:367
+      自定义薄 wrapper（物理真身在 trading.gateway_service · Task 7 切断后 engine 顶部
+      ``from trading.gateway_service import get_gateway`` re-export）即物理命中点。
+      8 测覆盖主路径（客户端就绪 connect）/ 降级（gw=None）/ 未就绪跳过 connect /
+      未就绪带诊断 / live 持锁 / live 拒锁 / dry_run 跳锁 / live+QUANTER_TESTING 跳锁
+      全部经 engine.bootstrap → 保 engine.X 正确拦截。迁 phases 反 miss（phases 内
+      ``get_gateway`` 本地绑定不经 bootstrap 调用链）。与 Task 10（health_guard）/
+      Task 16（_stoploss）的 ``get_gateway`` 同构——engine 实例方法路径统一保 engine。
+    - ``_alert_critical`` ×1（C3 engine re-export · 保 engine · L141）：bootstrap 单实例
+      守护段在锁被占用时调 ``_alert_critical("检测到另一 TradingEngine 实例持有 QMT
+      session=... 锁...")`` 读引擎模块全局名 → engine ``__globals__``。engine.py:93
+      ``from trading.critical import _alert_critical`` re-export 整体绑定命中 patch
+      （test_bootstrap_live_refuses_when_lock_held 验 alert.assert_called_once）。
+      ``_alert_critical`` 物理真身在 trading.critical（T1-Task2 迁出），engine re-export
+      即测试物理命中点；phases 内 ``_alert_critical`` 本地绑定不经 bootstrap 调用链 →
+      不迁。（与 Task 10/13 _alert_critical 同构——bootstrap 路径统一保 engine。）
+
+    按 ``__globals__`` 归属：bootstrap 是 engine 实例方法（engine.py 定义），其
+    ``__globals__`` = ``trading.engine.__dict__``；``get_gateway`` / ``_alert_critical``
+    均 re-export 绑定于 engine namespace（``'get_gateway' in vars(engine)`` /
+    ``'_alert_critical' in vars(engine)`` 实证 True）→ patch trading.engine.X 即拦截
+    bootstrap 内 bare global 读取的物理真身。phases ``__globals__`` 全程不经 →
+    无需双口子 patch。
+
+    绿门：8 passed（baseline 8 绿 → 仍 8 绿，零行为变更，patch 字符串零修改）。
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
