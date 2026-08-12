@@ -240,8 +240,14 @@ def sync_macro(start: str, end: str, out: str | None = None) -> None:
                 combined[col] = combined[col].ffill()
             df = combined
         except Exception:
-            # 现有湖读失败（文件损坏 / 非预期 schema / 列漂移）→ 回退全量重采覆盖 + 告警，
-            # 不阻断本次同步：宁可丢历史段也不让宏观湖僵死（safe_overwrite 仍把住骤降底线）。
+            # 现有湖读失败（文件损坏 / 非预期 schema / 列漂移）→ df 保持 fetch 原值，走
+            # safe_overwrite 全量重采覆盖 + 告警。
+            # ⚠️ 措辞订正（review fix）：旧注「不阻断本次同步」「safe_overwrite 仍把住骤降
+            # 底线」失实。若湖为「文件存在但 pd.read_parquet 读不出」的损坏态，
+            # existing_row_count 返 None 且文件存在 → assert_safe_overwrite 按「基线不可读
+            # 拒写」抛 WriteGuardError（data/integrity.py:229-232），同步【确实阻断】——
+            # 这是守卫的正确行为（基线不可信宁拒不盲写，杜绝盲覆盖脏数据），需
+            # QUANTER_FORCE_WRITE=1 强旁路恢复。except 分支逻辑保持不变（只改注释措辞）。
             print(f"⚠ 读现有宏观湖失败，回退全量覆盖：{out}")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     # write-side 守卫：合并后行数单调≥现有（窄窗口也不掉），safe_overwrite 不误拒。

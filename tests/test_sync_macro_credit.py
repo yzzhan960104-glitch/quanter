@@ -123,3 +123,101 @@ def test_sync_macro_merges_narrow_window_keeps_history(tmp_path, monkeypatch):
     # new 同期值已更新（d50..d60 的 shrzgm = 1000+，旧 0..100 已被同期覆盖）。
     seg = got.loc[idx_old[50]:idx_old[60], "shrzgm"]
     assert (seg == pd.Series(range(1000, 1011), index=idx_old[50:61])).all()
+
+
+def test_sync_macro_complete_interval_merge_equals_overwrite(tmp_path, monkeypatch):
+    """完整区间输入下，合并结果与「直接用 new 覆盖」逐字一致（行为等价红线守护）。
+
+    Task 3 Self-Review 主张「完整区间输入下合并与旧覆盖逐字一致」——本测试补直接证据。
+    场景：existing 已有湖（N 行），new 为完整区间（⊇ existing 范围，相同列 + 同期值
+    更新或一致）。跑 sync_macro 合并后，结果应与「直接用 new 覆盖」（旧整体覆盖语义）
+    逐字一致。此为「完整区间下合并 == 旧覆盖」的红线守护——若合并实现误改（如保留
+    existing 区间外的历史行、误对同期值取 existing 而非 new、bfill 衔接处等），此测 RED。
+
+    Why 守护：合并语义是为治「窄窗口增量重采触发骤降守卫」引入的（见
+    sync_macro 文档串），但语义扩展必须保证「完整区间」这一旧覆盖的常见场景行为不变，
+    否则等于静默改了生产语义。逐字等价是最强证据——任何发散即回归。
+    """
+    from data.tools.sync_macro_credit import sync_macro
+
+    out = tmp_path / "macro.parquet"
+    # 现有湖：3 个工作日（2026-01-01..01-05），shrzgm + M1M2_gap 列（CreditRegime 不变量）。
+    idx_old = pd.bdate_range("2026-01-01", periods=3)  # 1-1, 1-2, 1-5
+    existing = pd.DataFrame(
+        {"shrzgm": [1, 2, 3], "M1M2_gap": [0.1, 0.2, 0.3]}, index=idx_old
+    )
+    existing.index.name = "date"
+    existing.to_parquet(out)
+
+    # new：完整区间 ⊇ existing 范围——5 个工作日（2025-12-31..2026-01-06）覆盖 existing
+    # 的 3 个工作日，相同列，同期值已被上游修订/更新（区别于 existing 旧值）。
+    idx_new = pd.bdate_range("2025-12-31", periods=5)  # 12-31, 1-1, 1-2, 1-5, 1-6
+    new_df = pd.DataFrame(
+        {"shrzgm": [10, 20, 30, 40, 50], "M1M2_gap": [1.1, 1.2, 1.3, 1.4, 1.5]},
+        index=idx_new,
+    )
+    new_df.index.name = "date"
+    monkeypatch.setattr(
+        "data.tools.sync_macro_credit.fetch_macro_series", lambda s, e: new_df
+    )
+    monkeypatch.setattr(
+        "data.tools.sync_macro_credit.LAKE_CONFIG", {"lakes": {"macro": str(out)}}
+    )
+
+    sync_macro("2025-12-31", "2026-01-06")  # fetch 已 mock，窗口参数不影响 new_df
+
+    got = pd.read_parquet(out)
+    # 期望：合并后与「直接用 new 覆盖」逐字一致——完整区间下 new 已覆盖 existing 全部
+    # 索引，combined 去重 keep='last' 后等于 new 本身，ffill 无 NaN 可填，结果 == new_df。
+    # check_freq=False：parquet 落盘不保留 DatetimeIndex.freq 元数据（got.freq 必为 None），
+    # 而 new_df 由 bdate_range 构造带 freq="B"——这是 IO 元数据差异，非语义差异，不参与比对。
+    pd.testing.assert_frame_equal(got, new_df, check_freq=False)
+
+
+def test_sync_macro_merge_seam_no_bfill_no_future_leak(tmp_path, monkeypatch):
+    """合并衔接处仅 ffill 无 bfill：未来值不泄漏到历史（前视红线守护）。
+
+    前视偏差（look-ahead bias）红线：社融/M1M2 是【月频】数据，合并衔接处若误用 bfill
+    回填，会把「未来才公布的月度值」提前泄漏给历史交易日——回测曲线完美但实盘直接崩盘。
+    本测试直接构造「未来已知 / 历史 NaN 缺口」场景验证不泄漏，是 Task 3 Self-Review
+    「仅 ffill 无 bfill」主张的直接测试证据（此前仅靠实现审查，无运行时守护）。
+
+    场景：existing 有较晚日期（"未来"）的已知值 100/200/300，new 区间较早期含已知 50.0
+    + 后续 NaN 缺口。合并 + ffill 后：
+      - 较早期 NaN 必须被「更早的 50.0 ffill」（用过去解释现在）；
+      - 绝不可被「较晚的 100.0 bfill」回填（未来值泄漏）。
+    若实现误改为 .bfill() 或 .ffill().bfill()，较早期会变成 100.0，此测 RED。
+    """
+    from data.tools.sync_macro_credit import sync_macro
+
+    out = tmp_path / "macro.parquet"
+    nan = float("nan")
+    # existing：较晚日期（2026-02-02..02-04，"未来"段）已知 shrzgm = 100/200/300。
+    idx_old = pd.bdate_range("2026-02-02", periods=3)  # 2-2, 2-3, 2-4
+    existing = pd.DataFrame({"shrzgm": [100.0, 200.0, 300.0]}, index=idx_old)
+    existing.index.name = "date"
+    existing.to_parquet(out)
+
+    # new：较早期区间（2026-01-01..01-05），首日已知 50.0，后两日 NaN（缺口）。
+    idx_new = pd.bdate_range("2026-01-01", periods=3)  # 1-1, 1-2, 1-5
+    new_df = pd.DataFrame({"shrzgm": [50.0, nan, nan]}, index=idx_new)
+    new_df.index.name = "date"
+    monkeypatch.setattr(
+        "data.tools.sync_macro_credit.fetch_macro_series", lambda s, e: new_df
+    )
+    monkeypatch.setattr(
+        "data.tools.sync_macro_credit.LAKE_CONFIG", {"lakes": {"macro": str(out)}}
+    )
+
+    sync_macro("2026-01-01", "2026-01-05")  # fetch 已 mock，窗口参数不影响 new_df
+
+    got = pd.read_parquet(out)
+    # 较早期（1-1..1-5）的 shrzgm 必须全 == 50.0（ffill 自 1-1 已知值，用过去解释现在）。
+    # 若实现误用 bfill，1-2/1-5 会被 2-2 的 100.0 回填 → 红线被破、断言失败。
+    early = got.loc[idx_new, "shrzgm"]
+    assert (early == 50.0).all(), (
+        f"前视红线被破：较早期 shrzgm 应被 50.0 ffill，却出现未来值 bfill 回填\n{early}"
+    )
+    # 同时验证未来段保持原值未被污染（合并不应反向影响 existing 已知值）。
+    late = got.loc[idx_old, "shrzgm"]
+    assert (late == pd.Series([100.0, 200.0, 300.0], index=idx_old)).all()
