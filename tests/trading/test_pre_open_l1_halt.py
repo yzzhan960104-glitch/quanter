@@ -28,6 +28,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from trading.engine import TradingEngine, _CriticalHalt
+# W1-A/T2-Task9：phases.pre_open 顶部 ``from…import`` 为本地绑定，patch/monkeypatch
+# 必须注入到 phases.pre_open 模块命名空间才命中（patch trading.engine.X 不再生效——
+# engine.pre_open 是 ``from trading.phases.pre_open import pre_open`` 别名，调用链全程
+# 在 phases.pre_open 本地解析）。trading_plan 例外：phases.pre_open 不引用它（C2c 走
+# DB-driven 路径 _state_store.list_signals_with_meta_by_plan_date），patch 是 no-op 死
+# 代码，迁 trading.trading_plan 物理真身模块（保 Task 19 删 re-export 后无 AttributeError）。
+import trading.phases.pre_open as _pre_open_mod
 
 
 # ----------------------------------------------------------------------------
@@ -55,7 +62,8 @@ def isolated_eng(monkeypatch, tmp_path):
     # gw=None（pre_open 内 696 行 warning 跳过撤昨日单 + 746 行跳过基线快照）。
     # dry_run 模式下 _submit 命中 dry_run 分支返 {"state":"DRY_RUN"} 不触达 gw——
     # 但本测试重点是 DB 失败，不让 _submit 真发单：每个 case 在 _submit 上加断言守卫。
-    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    # W1-A/T2-Task9：get_gateway 迁 phases.pre_open 本地绑定（line 107 import）。
+    monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: None)
 
     return eng
 
@@ -87,8 +95,8 @@ def _walk_to_submit_chain(eng):
 
     T1：接收 eng 实例（原经 engine_mod._ACTIVE_ENGINE 反查），在其上 monkeypatch
     ``_pre_open_gate`` 让 gate 绿——ports.gate 的 lambda 延迟解析会即时生效。
-    各 case 在调用方通过 patch("trading.engine._state_store") 注入具体 side_effect
-    （决定哪个 DB 调用抛异常）。
+    各 case 在调用方通过 patch("trading.phases.pre_open._state_store") 注入具体 side_effect
+    （决定哪个 DB 调用抛异常 · W1-A/T2-Task9 迁 phases.pre_open 本地绑定）。
     """
     # ① gate 绿（_pre_open_gate 是 async，需 AsyncMock 返 (True, "")）
     eng._pre_open_gate = AsyncMock(return_value=(True, ""))
@@ -107,13 +115,15 @@ def test_insert_order_failure_raises_critical_halt(isolated_eng, monkeypatch):
     _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
-    with patch("trading.engine.trading_plan") as tp, \
-         patch("trading.engine._cancel_all_open_orders",
+    # W1-A/T2-Task9：phases.pre_open 本地绑定迁路径（trading_plan 例外——迁物理真身）。
+    with patch("trading.trading_plan") as tp, \
+         patch("trading.phases.pre_open._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._scan_expired_positions", return_value=[]), \
-         patch("trading.engine._submit") as submit_mock:
+         patch("trading.phases.pre_open._scan_expired_positions", return_value=[]), \
+         patch("trading.phases.pre_open._submit") as submit_mock:
         tp.load_plan.return_value = plan
-        with patch("trading.engine._state_store") as ss:
+        # W1-A/T2-Task9：_state_store 迁 phases.pre_open 本地绑定（line 81 import as _state_store）。
+        with patch("trading.phases.pre_open._state_store") as ss:
             # C2c：list_signals 返绿信号 + build_trade_id mock + latest=CONFIRMED 通过确认闸
             ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
             ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
@@ -144,13 +154,15 @@ def test_idempotent_read_failure_raises_critical_halt(isolated_eng, monkeypatch)
     _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
-    with patch("trading.engine.trading_plan") as tp, \
-         patch("trading.engine._cancel_all_open_orders",
+    # W1-A/T2-Task9：phases.pre_open 本地绑定迁路径（trading_plan 例外——迁物理真身）。
+    with patch("trading.trading_plan") as tp, \
+         patch("trading.phases.pre_open._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._scan_expired_positions", return_value=[]), \
-         patch("trading.engine._submit") as submit_mock:
+         patch("trading.phases.pre_open._scan_expired_positions", return_value=[]), \
+         patch("trading.phases.pre_open._submit") as submit_mock:
         tp.load_plan.return_value = plan
-        with patch("trading.engine._state_store") as ss:
+        # W1-A/T2-Task9：_state_store 迁 phases.pre_open 本地绑定（line 81 import as _state_store）。
+        with patch("trading.phases.pre_open._state_store") as ss:
             ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
             ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             ss.get_account.return_value = MagicMock()
@@ -180,13 +192,15 @@ def test_submit_backfill_failure_raises_critical_halt(isolated_eng, monkeypatch)
     _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
-    with patch("trading.engine.trading_plan") as tp, \
-         patch("trading.engine._cancel_all_open_orders",
+    # W1-A/T2-Task9：phases.pre_open 本地绑定迁路径（trading_plan 例外——迁物理真身）。
+    with patch("trading.trading_plan") as tp, \
+         patch("trading.phases.pre_open._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._scan_expired_positions", return_value=[]), \
-         patch("trading.engine._submit") as submit_mock:
+         patch("trading.phases.pre_open._scan_expired_positions", return_value=[]), \
+         patch("trading.phases.pre_open._submit") as submit_mock:
         tp.load_plan.return_value = plan
-        with patch("trading.engine._state_store") as ss:
+        # W1-A/T2-Task9：_state_store 迁 phases.pre_open 本地绑定（line 81 import as _state_store）。
+        with patch("trading.phases.pre_open._state_store") as ss:
             ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
             ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             ss.get_account.return_value = MagicMock()
@@ -213,13 +227,15 @@ def test_account_row_failure_raises_critical_halt(isolated_eng, monkeypatch):
     _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
-    with patch("trading.engine.trading_plan") as tp, \
-         patch("trading.engine._cancel_all_open_orders",
+    # W1-A/T2-Task9：phases.pre_open 本地绑定迁路径（trading_plan 例外——迁物理真身）。
+    with patch("trading.trading_plan") as tp, \
+         patch("trading.phases.pre_open._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._scan_expired_positions", return_value=[]), \
-         patch("trading.engine._submit") as submit_mock:
+         patch("trading.phases.pre_open._scan_expired_positions", return_value=[]), \
+         patch("trading.phases.pre_open._submit") as submit_mock:
         tp.load_plan.return_value = plan
-        with patch("trading.engine._state_store") as ss:
+        # W1-A/T2-Task9：_state_store 迁 phases.pre_open 本地绑定（line 81 import as _state_store）。
+        with patch("trading.phases.pre_open._state_store") as ss:
             ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
             ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             # get_latest_action=CONFIRMED 通过确认闸 + 撤单 / 基线 / 过期持仓阶段后到 account 检查
@@ -249,13 +265,15 @@ def test_submit_runtime_error_stays_l2_not_halt(isolated_eng, monkeypatch):
     _walk_to_submit_chain(isolated_eng)
 
     plan = _green_plan()
-    with patch("trading.engine.trading_plan") as tp, \
-         patch("trading.engine._cancel_all_open_orders",
+    # W1-A/T2-Task9：phases.pre_open 本地绑定迁路径（trading_plan 例外——迁物理真身）。
+    with patch("trading.trading_plan") as tp, \
+         patch("trading.phases.pre_open._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._scan_expired_positions", return_value=[]), \
-         patch("trading.engine._submit") as submit_mock:
+         patch("trading.phases.pre_open._scan_expired_positions", return_value=[]), \
+         patch("trading.phases.pre_open._submit") as submit_mock:
         tp.load_plan.return_value = plan
-        with patch("trading.engine._state_store") as ss:
+        # W1-A/T2-Task9：_state_store 迁 phases.pre_open 本地绑定（line 81 import as _state_store）。
+        with patch("trading.phases.pre_open._state_store") as ss:
             ss.list_signals_with_meta_by_plan_date.return_value = _green_signals()
             ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             ss.get_account.return_value = MagicMock()
