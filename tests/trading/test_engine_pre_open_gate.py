@@ -220,6 +220,13 @@ def test_pre_open_skip_on_gate_failure(monkeypatch, tmp_path):
     会 fail），不把它列为「不应触达」守卫——因为它不是网关写操作。
     """
     from trading import engine
+    # W1-A/T2-Task11：engine.pre_open 是 ``from trading.phases.pre_open import pre_open``
+    # 别名（engine.py:179），调用链全程在 phases.pre_open 本地解析。_pre_open_impl 内
+    # get_gateway / _submit / _cancel_all_open_orders 经 phases.pre_open 顶部 ``from…import``
+    # 本地绑定读（pre_open.py:107/95）→ monkeypatch engine.X 不命中 → 迁 _pre_open_mod.X。
+    # 对比：load_plan / get_ready（C4 不迁）由 _pre_open_gate（engine.py:678 实例方法）经
+    # engine 模块全局名读 → patch trading.engine.load_plan 命中 → 保 engine（见下文 line 252）。
+    import trading.phases.pre_open as _pre_open_mod
 
     # 隔离 plan dir + state_store db（与 test_engine.py 同款隔离）
     monkeypatch.setenv("TRADE_PLAN_DIR", str(tmp_path / "plans"))
@@ -235,8 +242,10 @@ def test_pre_open_skip_on_gate_failure(monkeypatch, tmp_path):
     # self._pre_open_gate），pre_open 显式传 ports=eng._ports 让三段闸生效。
     eng = TradingEngine()
 
-    # get_gateway 返 None（惰性 singleton getter，只读无写副作用，允许调用）
-    monkeypatch.setattr(engine, "get_gateway", lambda: None)
+    # get_gateway 返 None（惰性 singleton getter，只读无写副作用，允许调用）。
+    # W1-A/T2-Task11：迁 phases.pre_open 本地绑定——_pre_open_impl:221 ``ports.gate(date,
+    # get_gateway())`` 经 phases 模块全局名读，patch engine.get_gateway 不命中调用链。
+    monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: None)
 
     # 守卫：_submit / _cancel_all_open_orders 绝不应被调（gate 拦截即早返）
     async def _no_submit(*a, **kw):
@@ -245,8 +254,12 @@ def test_pre_open_skip_on_gate_failure(monkeypatch, tmp_path):
     async def _no_cancel(gw):
         raise AssertionError("gate 未通过绝不应触达 _cancel_all_open_orders")
 
-    monkeypatch.setattr(engine, "_submit", _no_submit)
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_cancel)
+    # W1-A/T2-Task11：迁 phases.pre_open 本地绑定——_pre_open_impl 读 phases 模块全局名
+    # （_submit pre_open.py:107 import / _cancel_all_open_orders pre_open.py:95 import as
+    # 别名），patch engine._submit / engine._cancel_all_open_orders 不命中调用链
+    # （engine 侧虽 re-export 同名属性，但 phases 调用链不经 engine 模块全局名解析）。
+    monkeypatch.setattr(_pre_open_mod, "_submit", _no_submit)
+    monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders", _no_cancel)
 
     # load_plan 返 None → gate ① 段失败
     with patch("trading.engine.load_plan", return_value=None):
