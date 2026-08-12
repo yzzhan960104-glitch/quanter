@@ -34,16 +34,21 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
     断言: 聚合 CRITICAL 含 "被拒" 语义 + _halted 保持 False (L2 不停调度).
     """
     eng = TradingEngine()
-    with patch("trading.engine.get_gateway", return_value=None), \
-            patch("trading.engine._cancel_all_open_orders",
+    # W1-A/T2-Task14：pre_open 路径符号在 _pre_open_impl 函数体内读 phases.pre_open 顶部
+    # import 的本地绑定（Task 4/6/7 切断 engine 反查后 patch trading.engine.X 全失效）→
+    # 按「符号被读取时的 __globals__ 归属」迁物理路径 trading.phases.pre_open.X。
+    # trading_plan 保 engine：pre_open 路径用 _state_store.list_signals_with_meta_by_plan_date
+    # 读计划，根本不读 trading_plan（gate 被 monkeypatch 跳过）→ 死 patch 无副作用，保 engine 最安全。
+    with patch("trading.phases.pre_open.get_gateway", return_value=None), \
+            patch("trading.phases.pre_open._cancel_all_open_orders",
                   new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-            patch("trading.engine._scan_expired_positions", return_value=[]), \
-            patch("trading.engine._mode", return_value="live"), \
-            patch("trading.engine._alert_critical") as ac, \
-            patch("trading.engine._submit", new=AsyncMock(side_effect=[
+            patch("trading.phases.pre_open._scan_expired_positions", return_value=[]), \
+            patch("trading.phases.pre_open._mode", return_value="live"), \
+            patch("trading.phases.pre_open._alert_critical") as ac, \
+            patch("trading.phases.pre_open._submit", new=AsyncMock(side_effect=[
                 {"state": "SUBMITTED", "order_id": "seq1"},
                 RuntimeError("涨停拒单")])), \
-            patch("trading.engine._state_store") as ss, \
+            patch("trading.phases.pre_open._state_store") as ss, \
             patch("trading.engine.trading_plan") as tp:
         # C2c：pre_open 直读 DB list_signals_with_meta_by_plan_date
         ss.list_signals_with_meta_by_plan_date.return_value = [
@@ -98,20 +103,33 @@ async def test_stop_loss_partial_submit_fail_aggregates_critical_not_halt(monkey
                             "300215.SZ": {"last_price": 8.5, "high": 10.5, "low": 8.4}}))
 
     # 两只均 decide_exit CLOSE/STOP_LOSS portion=1.0 (全平 -> 触发卖出分支)
+    # ExitAction / ExitReason 是枚举单例（engine re-export 与 phases.stop_loss 顶部 import
+    # 同源同类 → eng_mod.ExitAction.CLOSE IS phases.stop_loss.ExitAction.CLOSE，is 比较成立）。
     fake_dec = MagicMock()
     fake_dec.action = eng_mod.ExitAction.CLOSE
     fake_dec.reason = eng_mod.ExitReason.STOP_LOSS
     fake_dec.portion = 1.0
-    monkeypatch.setattr(eng_mod, "decide_exit", lambda *a, **kw: fake_dec)
+    # W1-A/T2-Task14：decide_exit 迁 trading.phases.stop_loss.decide_exit——stop_loss_monitor
+    # 行 354 读 phases.stop_loss 顶部 from execution import decide_exit 本地绑定（Task 4 切断
+    # engine 反查后 monkeypatch.setattr(eng_mod, "decide_exit") 失效，真实 decide_exit 抛
+    # KeyError 'neckline' 触发 D12 降级 → stop_triggered=0）。改字符串路径形式 patch 模块属性。
+    monkeypatch.setattr("trading.phases.stop_loss.decide_exit", lambda *a, **kw: fake_dec)
 
     # 第 1 只 _submit 成功; 第 2 只 raise RuntimeError (业务拒单/挡板)
-    monkeypatch.setattr(eng_mod, "_submit", AsyncMock(side_effect=[
+    # W1-A/T2-Task14：_submit 迁 trading.phases.stop_loss._submit——主路径 CLOSE/STOP_LOSS
+    # 分支（stop_loss.py:408）与 fallback 分支（:452）均读 phases.stop_loss 顶部 from
+    # gateway_service import _submit 本地绑定（Task 7 切断后 monkeypatch eng_mod 失效）。
+    monkeypatch.setattr("trading.phases.stop_loss._submit", AsyncMock(side_effect=[
         {"state": "FILLED", "order_id": "seq1"},
         RuntimeError("gw lock_down 拒单")]))
 
-    with patch("trading.engine._mode", return_value="live"), \
-            patch("trading.engine._alert_critical") as ac, \
-            patch("trading.engine._state_store") as ss:
+    # W1-A/T2-Task14：_mode / _alert_critical / _state_store 迁 trading.phases.stop_loss.X
+    # ——stop_loss_monitor 函数体读 phases.stop_loss 顶部 import 本地绑定（Task 4 切断后
+    # patch trading.engine.X 失效）。_state_store 是整体 patch（替换 phases.stop_loss 本地
+    # 名 _state_store 为 MagicMock；与 Task13 属性级 patch state_store.xxx 命中共享对象区分）。
+    with patch("trading.phases.stop_loss._mode", return_value="live"), \
+            patch("trading.phases.stop_loss._alert_critical") as ac, \
+            patch("trading.phases.stop_loss._state_store") as ss:
         ss.has_order.return_value = False   # 幂等读通过 (无已挂 STOP)
         ss.get_account.return_value = MagicMock()
         from trading.engine import stop_loss_monitor
