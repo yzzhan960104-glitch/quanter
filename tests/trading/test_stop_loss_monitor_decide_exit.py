@@ -26,6 +26,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from trading.engine import TradingEngine, stop_loss_monitor, place_take_profit
+# W1-A/T2：blackout 节流状态从 engine 模块级 (_last_quote_blackout_alert_ts) 迁 ports.blackout
+# （QuoteBlackoutThrottle dataclass）——blackout 测试改经 ports 注入 + 重置节流。
+from trading.alerting import QuoteBlackoutThrottle
+from trading.ports import EnginePorts
 
 
 # ----------------------------------------------------------------------------
@@ -85,7 +89,7 @@ def _holding_ctx(*, stop=9.5, tp1=11.0, tp2=12.0, neckline=10.0, atr=0.5,
 
 
 def _run_monitor(monitor_ctx, positions, quotes, submitted=None, gw=None,
-                 pending_ctx=None):
+                 pending_ctx=None, ports=None):
     """跑 stop_loss_monitor 一次，patch 所有外部副作用。
 
     - positions: gw._fetch_broker_positions 返回（{sym: {volume, avg_price}}）
@@ -93,6 +97,8 @@ def _run_monitor(monitor_ctx, positions, quotes, submitted=None, gw=None,
     - submitted: 收集 _submit 调用（list，append OrderRequest）
     - gw: 可注入 mock gw（None 时造一个 AsyncMock _fetch_broker_positions）
     - pending_ctx: {sym: cancel_on} pending 期撤单上下文（D11）
+    - ports: W1-A/T2 注入的 EnginePorts（仅 blackout 测试需要传——含 QuoteBlackoutThrottle
+      节流状态）。None 时 stop_loss_monitor 内 ports 守卫跳过 blackout 告警分支。
     """
     if gw is None:
         gw = MagicMock()
@@ -113,7 +119,7 @@ def _run_monitor(monitor_ctx, positions, quotes, submitted=None, gw=None,
         cal.is_trading_day.return_value = True
         qmd.get_quotes = AsyncMock(return_value=quotes)
         return asyncio.run(stop_loss_monitor(
-            monitor_ctx=monitor_ctx, pending_ctx=pending_ctx))
+            monitor_ctx=monitor_ctx, pending_ctx=pending_ctx, ports=ports))
 
 
 # ============================================================================
@@ -393,42 +399,62 @@ def test_tp_missing_places_fallback(monkeypatch):
 
 
 # ============================================================================
-# R2 降级告警：行情源整体失效（xtdata 黑屏）→ live CRITICAL，30min 节流
+# R2 降级告警：行情源整体失效（xtata 黑屏）→ live CRITICAL，30min 节流
+# W1-A/T2：节流状态从 engine 模块级 _last_quote_blackout_alert_ts 迁 ports.blackout
+# （QuoteBlackoutThrottle dataclass）——经 ports 注入 + 重置节流（构造 QuoteBlackoutThrottle
+# (last_ts=0.0) 等价原 monkeypatch("trading.engine._last_quote_blackout_alert_ts", 0.0)）。
 # ============================================================================
+def _make_ports_with_fresh_blackout():
+    """造 EnginePorts 实例：blackout 重置 last_ts=0.0（首次必触发，对齐原模块级初值）。
+
+    gate/whitelist_* 用 no-op lambda 占位（blackout 测试不触达 pre_open 路径）。
+    """
+    return EnginePorts(
+        gate=lambda d, gw: (True, ""),
+        whitelist_add=lambda syms: None,
+        whitelist_clear=lambda: None,
+        blackout=QuoteBlackoutThrottle(last_ts=0.0, interval=1800.0),
+    )
+
+
 def test_quote_blackout_alerts_critical_in_live(monkeypatch):
     """live 模式全标的 last_price 缺失 → CRITICAL（止损链路裸奔必须叫醒人）。"""
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
-    monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)
+    ports = _make_ports_with_fresh_blackout()
     with patch("trading.engine._alert_critical") as alert:
-        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None})
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None}, ports=ports)
     alert.assert_called_once()
     assert "行情源整体失效" in alert.call_args.args[0]
 
 
 def test_quote_blackout_throttled_30min(monkeypatch):
-    """30min 节流：连续两轮黑屏只推一条 CRITICAL（防告警风暴）。"""
+    """30min 节流：连续两轮黑屏只推一条 CRITICAL（防告警风暴）。
+
+    W1-A/T2：两次 _run_monitor 共享同一 ports 实例 → 同一 QuoteBlackoutThrottle →
+    第一次 should_alert=True + mark(now1)，第二次 should_alert=False（now2-now1 < 1800）。
+    """
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
-    monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)
+    ports = _make_ports_with_fresh_blackout()
     with patch("trading.engine._alert_critical") as alert:
-        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None})
-        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None})
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None}, ports=ports)
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None}, ports=ports)
     alert.assert_called_once()
 
 
 def test_quote_blackout_no_alert_when_price_valid(monkeypatch):
     """任一标的有价 → 不告警（行情源正常）。"""
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
-    monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)
+    ports = _make_ports_with_fresh_blackout()
     quotes = {SYM: {"last_price": 10.0, "high": 10.2, "low": 9.8}}
     with patch("trading.engine._alert_critical") as alert:
-        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, quotes)
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, quotes, ports=ports)
     alert.assert_not_called()
 
 
 def test_quote_blackout_no_alert_in_dry_run(monkeypatch):
     """dry_run 无真金风险 → 不告警（防影子模式误报）。"""
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
-    monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)
+    ports = _make_ports_with_fresh_blackout()
     with patch("trading.engine._alert_critical") as alert:
-        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None})
+        _run_monitor({SYM: _holding_ctx()}, {SYM: {"volume": 100}}, {SYM: None}, ports=ports)
     alert.assert_not_called()

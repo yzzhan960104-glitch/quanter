@@ -78,7 +78,8 @@ from trading import (
 from trading.trading_plan import load_plan
 from trading.state_store import get_data_ready, get_ready
 from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
-from trading.ports import EnginePorts  # T1 缝合点 #1：phases 外迁函数的窄依赖接口（无循环：ports 仅依赖 stdlib）
+from trading.ports import EnginePorts  # T1 缝合点 #1：phases 外迁函数的窄依赖接口（无循环：ports 仅依赖 stdlib + alerting）
+from trading.alerting import QuoteBlackoutThrottle  # W1-A/T2：行情黑屏节流状态机（注入 ports.blackout，无循环：alerting 仅依赖 stdlib）
 # T1-Task2 集群 A re-export（trading.critical · L1 停调度 + 告警基础设施 · 最独立）。
 # 物理意图：_alert_critical / _CriticalHalt / _critical_guard / _mode / _trade_cfg 已迁
 # trading.critical.py（零下游交易耦合），此处 re-export 保「公共/半公开 API 不变形」红线：
@@ -300,9 +301,14 @@ POST_CLOSE_CRON_DEFAULT = "30 15 * * mon-fri" # 盘后对账/熔断/trailing
 # （catchup 补跑 / 单测）传 ``ports=self._ports``；未传 ports 时走 None 防御分支（跳过 gate /
 # 回退模块级 dynamic_whitelist），与原单例为 None 的防御分支行为逐行等价。
 
-# R2 降级告警节流：行情源整体失效（xtdata 黑屏）→ live CRITICAL（30min 至多一条）。
-_last_quote_blackout_alert_ts: float = 0.0
-_QUOTE_BLACKOUT_ALERT_INTERVAL_S = 30 * 60
+# W1-A/T2（模块级可变状态收口红线）：原 R2 降级告警节流模块级可变状态已迁
+# ``trading.alerting.QuoteBlackoutThrottle`` dataclass，经 ``EnginePorts.blackout`` 注入
+# stop_loss_monitor（``ports.blackout.should_alert`` / ``ports.blackout.mark``）。原两行：
+#     _last_quote_blackout_alert_ts: float = 0.0
+#     _QUOTE_BLACKOUT_ALERT_INTERVAL_S = 30 * 60
+# 已删——依赖方向由隐式 ``_eng_mod`` 反查变为显式 ports 透传，节流语义逐字等价（30min 窗口 +
+# last_ts=0.0 初值）。grep ``_last_quote_blackout_alert_ts`` / ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S``
+# 在 trading/ 下应 0 命中（新 home 在 trading/alerting.py 用 last_ts/interval 字段）。
 
 # ② 告警通道节流阈值（W0/D1 Task 7 · spec §3.3.5 ②）：
 # filter_universe_by_continuity 在 _eod exp 循环内被调（per-exp window 可能不同），
@@ -412,8 +418,10 @@ async def _submit(order) -> dict:
 # 交易日守卫 + monitor_ctx/pending_ctx/stop_prices 构造），调 stop_loss_monitor(...) 经 re-export
 # 命中 patch("trading.engine.stop_loss_monitor")。迁出函数内部经 lazy ``import trading.engine as
 # _eng_mod`` 反查 engine 模块级符号（保 patch 命中 + 避循环 import），详见 phases/stop_loss.py
-# 模块 docstring「模块级符号 patch 路径设计」。节流状态 _last_quote_blackout_alert_ts 留 engine
-# （R2 行情黑屏 30min 节流真相源 · 测试 monkeypatch trading.engine 命中）。
+# 模块 docstring「模块级符号 patch 路径设计」。
+# W1-A/T2：行情黑屏 30min 节流状态已从 engine 模块级 _last_quote_blackout_alert_ts 收口到
+# ``trading.alerting.QuoteBlackoutThrottle`` dataclass，经 ``self._ports.blackout`` 注入——
+# 不再属「engine 模块级符号反查」清单（详见 ports.py + alerting.py）。
 
 
 # ============================================================================
@@ -624,6 +632,11 @@ class TradingEngine:
             gate=lambda d, gw: self._pre_open_gate(d, gw),
             whitelist_add=self._dynamic_whitelist.update,   # set.update 原地并集，对齐原 ``|=``
             whitelist_clear=self._dynamic_whitelist.clear,  # set.clear 原地清空，对齐原 ``.clear()``
+            # W1-A/T2：行情黑屏 30min 节流告警状态机（原模块级 _last_quote_blackout_alert_ts
+            # + _QUOTE_BLACKOUT_ALERT_INTERVAL_S 收口）。stop_loss_monitor 经
+            # ports.blackout.should_alert/mark 读写；默认 last_ts=0.0 + interval=1800.0
+            # 等价原模块级初值 + 常量（行为零变更）。显式构造留实例化点便于未来注入测试替身。
+            blackout=QuoteBlackoutThrottle(),
         )
 
     # ---------------------------------------------------------------------
@@ -1530,10 +1543,14 @@ class TradingEngine:
                     pending_ctx[sym] = float(cancel_on)
 
         # 空时显式转 None：与 stop_loss_monitor 的「xxx is None or empty → no-op」契约对齐。
+        # W1-A/T2：传 ports=self._ports 注入行情黑屏节流状态机（QuoteBlackoutThrottle 经
+        # ports.blackout）。stop_loss_monitor 内 ports=None 守卫下跳过 blackout 告警分支，
+        # 生产路径总传 self._ports 不受影响。
         await stop_loss_monitor(
             stop_prices=stop_prices or None,
             monitor_ctx=monitor_ctx or None,
             pending_ctx=pending_ctx or None,
+            ports=self._ports,
         )
 
     @_critical_guard

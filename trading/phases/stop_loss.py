@@ -69,13 +69,16 @@ cancel_on / DB 幂等 L1 / 行情黑屏节流 / e2e probabilistic_broker / engin
       as _trading_days_between``），test_engine.py test_scan_expired_* 经
       ``monkeypatch.setattr(engine, "_trading_days_between", lambda s,e: N)`` 确定性驱动 scan_expired —
       走 ``_eng_mod._trading_days_between`` 保命中（与 pre_open.py 同结论）。
-    - ``_last_quote_blackout_alert_ts`` / ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S``：engine 模块级节流状态
-      （R2 行情黑屏 30min 至多一条 CRITICAL）。测试经
-      ``monkeypatch.setattr("trading.engine._last_quote_blackout_alert_ts", 0.0)`` 重置节流（4 测）。
-      ⚠️ 原 engine 内用 ``global _last_quote_blackout_alert_ts`` 读写——迁出后 ``global`` 会绑到
-      本模块（phases.stop_loss）命名空间，patch trading.engine 不命中。故【删 global】，改经
-      ``_eng_mod._last_quote_blackout_alert_ts`` 属性读写（read 比较节流 / write 更新时间戳），
-      单一真相源仍在 engine（state + interval 配对不动）。
+    - ``_last_quote_blackout_alert_ts`` / ``_QUOTE_BLACKOUT_ALERT_INTERVAL_S``：**W1-A/T2 已收口**
+      ——原 engine 模块级节流状态迁 ``trading.alerting.QuoteBlackoutThrottle`` dataclass，经
+      ``ports.blackout`` 注入本函数（``ports.blackout.should_alert(now)`` / ``mark(now)`` 替代
+      ``_eng_mod._last_quote_blackout_alert_ts`` 反查读写）。测试改经构造 ``QuoteBlackoutThrottle
+      (last_ts=0.0)`` 注入 ports 重置节流（原 ``monkeypatch.setattr("trading.engine._last_quote_
+      blackout_alert_ts", 0.0)`` 已删，详见 test_stop_loss_monitor_decide_exit._make_ports_with_
+      fresh_blackout）。本项不再属「engine 模块级符号反查」清单（仅历史注释保留）。
+      现行反查项仅余：``get_gateway`` / ``_submit`` / ``place_take_profit`` / ``decide_exit`` /
+      ``_state_store`` / ``_resolve_account_id`` / ``_trading_days_between`` / ``qmt_market_data`` /
+      ``calendar`` / ``_mode`` / ``_alert_critical``（Task 4-7 切断）。
 
 ②顶部直接 import（不涉及 engine patch，无循环风险）：
     - ``clock``（``from trading import clock``）：单一时间源（测试经 ``monkeypatch clock.today/now``
@@ -110,6 +113,9 @@ from trading import clock
 from trading import position_book as _position_book
 # _CriticalHalt（L1 致命停调度异常，按类身份 catch 不被 patch）。
 from trading.critical import _CriticalHalt
+# W1-A/T2：EnginePorts 经 ports.blackout 注入 QuoteBlackoutThrottle（行情黑屏节流状态）。
+# 窄依赖接口纯 stdlib + alerting 依赖（无循环），与 pre_open.py 同口径顶层 import。
+from trading.ports import EnginePorts
 # should_trigger_stop（D12 fallback 纯判定 · compute 单源 · stop_loss 路径无 engine patch）。
 from trading.compute.stop import should_trigger_stop
 # ExitAction / ExitReason（执行单源枚举 · 按身份 is 比较 · 与 engine re-export 同源同类）。
@@ -130,6 +136,7 @@ async def stop_loss_monitor(
     gw: Any = None,
     monitor_ctx: Optional[Mapping[str, Mapping[str, Any]]] = None,
     pending_ctx: Optional[Mapping[str, float]] = None,
+    ports: Optional["EnginePorts"] = None,
 ) -> dict:
     """盘中止损/超时巡检 + pending 期撤单（Task 9 · U6 实盘执行统一 · 最高风险）。
 
@@ -166,6 +173,12 @@ async def stop_loss_monitor(
                      decide_exit 契约（execution.py:131-201）+ simulate_exit cfg
                      （backtest.py:177-183）。None 时纯走 stop_prices 旧路径。
         pending_ctx: {symbol: cancel_on}（D11 pending 撤单）。None 时跳过 pending 巡检。
+        ports: W1-A/T2 注入的 EnginePorts 窄接口（仅消费 ``ports.blackout``——行情黑屏
+               30min 节流状态机）。生产路径 ``_stoploss`` wrapper 总传 ``self._ports``
+               （含 blackout），与原 engine 模块级 ``_last_quote_blackout_alert_ts`` 反查
+               语义等价（行为零变更）。None 时（测试裸调 / 未装配）跳过 blackout 告警分支
+               —— 防御性 None 守卫，不阻断监控主链路。blackout 仅本函数用，
+               ``scan_expired_positions`` / ``close_expired_positions`` 不加 ports 参数。
 
     Returns:
         盘中：{"checked":N, "stop_triggered":M, "fallback_used":K, "pending_cancelled":P,
@@ -177,9 +190,9 @@ async def stop_loss_monitor(
     # monkeypatch.setattr(engine, "xxx") 命中——test_stop_loss_monitor_decide_exit._run_monitor
     # 经 patch("trading.engine.calendar"/"qmt_market_data"/"_submit"/"get_gateway") 驱动主路径；
     # test_stop_loss_l1_halt 经 monkeypatch.setattr(engine, "decide_exit"/"_submit") 驱动 L1 分支；
-    # 行情黑屏 4 测经 patch("trading.engine._alert_critical") + monkeypatch
-    # ("trading.engine._last_quote_blackout_alert_ts") 验 R2 节流）+ 避循环 import（engine 顶部
-    # re-export 本模块）。详见本文件模块 docstring「模块级符号 patch 路径设计」。
+    # 行情黑屏 4 测经 patch("trading.engine._alert_critical") 验 _alert_critical 命中
+    # （W1-A/T2：节流状态已迁 ports.blackout，不再 monkeypatch engine 模块级））+ 避循环 import
+    # （engine 顶部 re-export 本模块）。详见本文件模块 docstring「模块级符号 patch 路径设计」。
     import trading.engine as _eng_mod
     # ① 盘中时段判定（Task1）
     # C-6 V2：时点判定走 clock.now（单一时间源口子）。
@@ -257,13 +270,17 @@ async def stop_loss_monitor(
     quotes = await _eng_mod.qmt_market_data.get_quotes(list(relevant_syms)) if relevant_syms else {}
 
     # R2 降级告警（live）：行情源整体失效（xtdata 黑屏）→ 止损链路裸奔，CRITICAL 知会。
-    # Why 30min 节流：避免 5min 巡检每轮推一条（M4 告警风暴红线）。
-    # T1-Task7：节流状态 _last_quote_blackout_alert_ts / 间隔常量 _QUOTE_BLACKOUT_ALERT_INTERVAL_S
-    # 均 engine 模块级（测试经 monkeypatch("trading.engine._last_quote_blackout_alert_ts", 0.0)
-    # 重置节流）。原 engine 内用 ``global _last_quote_blackout_alert_ts`` 读写——迁出后 global 会
-    # 绑本模块命名空间（patch trading.engine 不命中），故删 global 改经 _eng_mod 属性读写（read
-    # 比较节流 / write 更新时间戳），单一真相源仍 engine（state + interval 配对不动）。
-    if _eng_mod._mode() == "live" and relevant_syms:
+    # Why 30min 节流：避免 IntervalTrigger 30s 巡检每轮推一条（M4 告警风暴红线）。
+    # W1-A/T2（模块级可变状态收口）：原节流状态 _last_quote_blackout_alert_ts / 间隔常量
+    # _QUOTE_BLACKOUT_ALERT_INTERVAL_S 是 engine 模块级可变 global，经 _eng_mod 反查读写——
+    # 违反「模块级可变状态收口」红线。现收敛为 trading.alerting.QuoteBlackoutThrottle dataclass
+    # 实例，经 ports.blackout 注入（``should_alert(now)`` 判节流 / ``mark(now)`` 写时间戳）。
+    # 行为等价：30min 窗口（interval=1800.0）+ last_ts=0.0 初值 + ``now - last_ts >= interval``
+    # 边界等价触发，逐字对齐原 ``_now_mono - _last >= _INTERVAL`` 语义。
+    # ports=None 守卫：测试裸调 / 未装配 ports 时跳过 blackout 告警分支（不阻断主链路）；
+    # 生产路径 _stoploss 总传 self._ports（含 blackout），不受影响。_alert_critical 仍经
+    # _eng_mod（Task 4 才切断），本 Task 只迁 blackout 状态。
+    if (ports is not None and _eng_mod._mode() == "live" and relevant_syms):
         _n_valid = sum(
             1 for q in quotes.values()
             if isinstance(q, dict)
@@ -273,8 +290,8 @@ async def stop_loss_monitor(
         )
         if _n_valid == 0:
             _now_mono = time.monotonic()
-            if _now_mono - _eng_mod._last_quote_blackout_alert_ts >= _eng_mod._QUOTE_BLACKOUT_ALERT_INTERVAL_S:
-                _eng_mod._last_quote_blackout_alert_ts = _now_mono
+            if ports.blackout.should_alert(_now_mono):
+                ports.blackout.mark(_now_mono)
                 _eng_mod._alert_critical(
                     f"stop_loss 行情源整体失效：{len(relevant_syms)} 个标的全无有效 "
                     f"last_price（xtdata 不可用？止损链路裸奔，请人工介入）")
