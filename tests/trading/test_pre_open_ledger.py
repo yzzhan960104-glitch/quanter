@@ -20,7 +20,7 @@ async def test_pre_open_gate_skip_records_skipped():
         gate=AsyncMock(return_value=(False, "无计划")),
         whitelist_add=lambda syms: None,
         whitelist_clear=lambda: None)
-    with patch("trading.engine.get_gateway", return_value=None):
+    with patch("trading.phases.pre_open.get_gateway", return_value=None):
         result = await pre_open("2026-08-03", ports=fake_ports)
     assert result["skipped"] == "无计划"
     assert job_ledger.latest_status("pre_open", "2026-08-03") == "skipped"
@@ -37,7 +37,10 @@ async def test_pre_open_no_plan_records_skipped():
         gate=AsyncMock(return_value=(True, "")),
         whitelist_add=lambda syms: None,
         whitelist_clear=lambda: None)
-    with patch("trading.engine.get_gateway", return_value=None), \
+    # W1-A/T2-Task18 B 类（属性级·保 engine）：_state_store 是共享 ``trading.state_store``
+    # 模块对象（engine 与 phases.pre_open 顶部 ``from trading import state_store as`` 同指），
+    # 属性级 patch 改的是模块对象属性，两路径都命中 → 无需迁（区别于整体替换 patch）。
+    with patch("trading.phases.pre_open.get_gateway", return_value=None), \
          patch("trading.engine._state_store.list_signals_with_meta_by_plan_date",
                return_value=[]):
         result = await pre_open("2026-08-03", ports=fake_ports)
@@ -60,13 +63,20 @@ async def test_pre_open_success_records_done():
     _signals = [{"symbol": "300214.SZ",
                  "order": {"symbol": "300214.SZ", "qty": 100, "side": "buy", "price": 10.0},
                  "formed_at": None, "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5}]
-    with patch("trading.engine.get_gateway", return_value=None), \
-         patch("trading.engine._cancel_all_open_orders",
+    # W1-A/T2-Task18：pre_open 路径符号在 _pre_open_impl 函数体内读 phases.pre_open 顶部
+    # import 的本地绑定（Task 4/6/7 切断 engine 反查后 patch trading.engine.X 全失效）→
+    # 按「符号被读取时的 __globals__ 归属」迁物理路径 trading.phases.pre_open.X（Task 11/14 范式）。
+    # _state_store 整体替换须迁 phases.pre_open._state_store：phases.pre_open 顶部
+    # ``from trading import state_store as _state_store`` 为本地绑定，patch engine._state_store
+    # 只改 engine 模块属性、phases.pre_open._state_store 仍指真 state_store → signals 读空
+    # → submitted=0（本测 baseline fail 根因；整体替换不共享，区别于 test_no_plan 的属性级 patch）。
+    with patch("trading.phases.pre_open.get_gateway", return_value=None), \
+         patch("trading.phases.pre_open._cancel_all_open_orders",
                new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
-         patch("trading.engine._scan_expired_positions", return_value=[]), \
-         patch("trading.engine._submit",
+         patch("trading.phases.pre_open._scan_expired_positions", return_value=[]), \
+         patch("trading.phases.pre_open._submit",
                new=AsyncMock(return_value={"state": "SUBMITTED", "order_id": "seq1"})), \
-         patch("trading.engine._state_store") as ss:
+         patch("trading.phases.pre_open._state_store") as ss:
         ss.list_signals_with_meta_by_plan_date.return_value = _signals
         ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
         ss.get_account.return_value = AsyncMock()
@@ -88,7 +98,7 @@ async def test_pre_open_exception_records_failed_and_raises():
         gate=AsyncMock(side_effect=RuntimeError("DB 故障")),
         whitelist_add=lambda syms: None,
         whitelist_clear=lambda: None)
-    with patch("trading.engine.get_gateway", return_value=None):
+    with patch("trading.phases.pre_open.get_gateway", return_value=None):
         with pytest.raises(RuntimeError, match="DB 故障"):
             await pre_open("2026-08-03", ports=fake_ports)
     assert job_ledger.latest_status("pre_open", "2026-08-03") == "failed"
