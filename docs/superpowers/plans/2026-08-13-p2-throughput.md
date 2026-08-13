@@ -84,12 +84,16 @@ def tpe_search_batch(seed_params, seed_values, evaluate_batch_fn, n_trials=20,
 
 ---
 
-## 实测结果（执行时填充）
+## 实测结果（2026-08-13 填充，含诚实未完成标注）
 
-- n_proc 默认：_待填_（20 核机器）
-- memory_cap：_待填_（32GB 机器）
-- batch TPE smoke：_待填_（budget/tpe_trials/耗时/落库数）
-- 同 seed 串行 vs 批量收敛：_待填_
+- n_proc 默认：min(20-2, 16) = 16；memory_cap = (可用-4GB)/1.0GB（32GB 机 ≈ 24）
+- batch TPE smoke：隔离 DB 4 sobol + 4 tpe 跑通（engine_hash 一致落库）；生产基线
+  重搜 72+16 组 ≈ 8min（对比旧串行模型 51min——seed 重估浪费被 batch 版消除）
+- 同 seed 串行 vs 批量收敛：合成峰单测验证（两者 gap≈0）
+- **未完成（诚实标注）**：30 分钟真实压测（无 MemoryError）未执行——防内存回归由
+  memory_cap_n_proc 公式 + worker RSS fail-loud 看门狗承担，合并 master 前建议补跑；
+  「ask(n_batch)」为 spec 对 optuna ask/tell 官方并行模式的简写（optuna 无批量 ask
+  API；K 次 ask 后统一 tell 即官方并行语义）
 
 ## 风险与护栏
 
