@@ -99,3 +99,16 @@ def test_sample_search_reproducible():
     # 每条 dict 值相等（None 也要相等）
     for x, y in zip(a, b):
         assert x == y
+
+
+def test_sample_search_no_duplicates():
+    """P2 fix（2026-08-13）：合法空间小（约束裁剪）时补采不重复——预算全落唯一组合。
+
+    P1-1 基线实测 seed=42 的 72 组含 13 组重复（18% 评估浪费）——本测试钉死去重
+    （同 seed 同规模采样必须全唯一；确定性不变）。
+    """
+    from discovery.sampler import sample_search
+    sampled = sample_search(n_sobol=48, n_random=24, seed=42)
+    keys = [tuple(sorted(p.items())) for p in sampled]
+    assert len(sampled) == 72
+    assert len(set(keys)) == 72, f"采样含 {len(sampled) - len(set(keys))} 组重复——去重失效"

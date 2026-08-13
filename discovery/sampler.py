@@ -214,15 +214,34 @@ def sample_search(n_sobol, n_random, seed=0, n_attempts_factor=3):
     # 阶段二：random 补充
     rnd_unit = random_sample(dim, n_random, seed=seed + 1) if n_random > 0 else np.zeros((0, dim))
     rnd_params = _unit_vecs_to_params(rnd_unit)
-    # 合并 + 裁剪（filter_feasible 内部做 normalize + is_feasible）
-    batch = filter_feasible(sob_params + rnd_params)
+    # 合并 + 裁剪 + 去重（filter_feasible 内部做 normalize + is_feasible）。
+    # P2 fix（2026-08-13）：合法空间经约束裁剪（min_rr 死参/trailing 互锁/tp 顺序耦合）
+    # 远小于笛卡尔积，Sobol+random 混合与补采阶段会重复抽中同一组合——P1-1 基线实测
+    # seed=42 的 72 组含 13 组重复（18% 评估浪费：persist 去重吞掉但评估已白跑）。
+    # seen 唯一性跟踪把预算全部落到唯一组合上（确定性不变：同 seed 同序列）。
+    seen = set()
+    batch = []
+    for p in filter_feasible(sob_params + rnd_params):
+        k = _combo_key(p)
+        if k not in seen:
+            seen.add(k)
+            batch.append(p)
     # 不够则 random 继续补采（attempts 上限防死循环，约束极紧时安全退出）
     attempts = 0
     max_attempts = n_attempts_factor * 5
     extra_seed = seed + 100
     while len(batch) < target and attempts < max_attempts:
         more = random_sample(dim, target * 2, seed=extra_seed)
-        batch.extend(filter_feasible(_unit_vecs_to_params(more)))
+        for p in filter_feasible(_unit_vecs_to_params(more)):
+            k = _combo_key(p)
+            if k not in seen:
+                seen.add(k)
+                batch.append(p)
         extra_seed += 1
         attempts += 1
     return batch[:target]
+
+
+def _combo_key(params):
+    """params dict → 可 hash 唯一键（sample_search 去重用；None/数值 str 归一安全）。"""
+    return tuple(sorted((k, str(v)) for k, v in params.items()))
