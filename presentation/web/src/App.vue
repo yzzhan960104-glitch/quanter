@@ -44,6 +44,8 @@ interface NavItem {
 const researchNav: NavItem[] = [
   { to: '/caisen',     label: '蔡森筛选',   icon: TrendCharts },
   { to: '/lab',        label: '参数实验室', icon: DataAnalysis },
+  // P3（2026-08-13）：搜索实验室——参数发现敏感性分析/热力图（只读，spec §4）
+  { to: '/discovery',  label: '搜索实验室', icon: DataBoard },
   { to: '/dashboard',  label: '宏观驾驶舱', icon: DataBoard },
   { to: '/data',       label: '数据湖',     icon: Files },
 ]

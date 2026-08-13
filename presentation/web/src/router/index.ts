@@ -29,6 +29,8 @@ const DataLakeView = () => import('../views/DataLakeView.vue')
 const CockpitView = () => import('../views/CockpitView.vue')
 // 作业驾驶舱（Phase 2 · Task 12 收官）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
 const JobCockpitView = () => import('../views/JobCockpitView.vue')
+// 搜索实验室（P3 · 2026-08-13）：参数发现敏感性分析/热力图/进展（只读，spec §4）。
+const DiscoveryLabView = () => import('../views/DiscoveryLabView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -45,6 +47,8 @@ const router = createRouter({
     // 作业驾驶舱（Phase 2 · Task 12）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
     { path: '/jobs', name: 'jobs', component: JobCockpitView },
     { path: '/data', name: 'data', component: DataLakeView },
+    // 搜索实验室（P3）：敏感性分析/热力图（研究区段入口，只读）
+    { path: '/discovery', name: 'discovery', component: DiscoveryLabView },
   ],
 })
 

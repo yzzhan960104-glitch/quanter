@@ -51,6 +51,7 @@ from presentation.server.api.v1.data import router as data_router
 from presentation.server.api.v1.review import router as review_router
 # Phase C 研究提案路由（2026-08-03）：Agent 提案生成/验证/钉钉审批/发布桥。
 from presentation.server.api.v1.research import router as research_router
+from presentation.server.api.v1.discovery import router as discovery_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
 from infra.notifier import build_default_manager
 
@@ -659,6 +660,9 @@ app.include_router(data_router, prefix="/api/v1", dependencies=[Depends(require_
 # diagnose 触发外部 LLM 调用（成本/滥用面），路由级鉴权保护。
 app.include_router(review_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 app.include_router(research_router, prefix="/api/v1", dependencies=[Depends(require_write)])
+# P3 参数发现敏感性分析：纯只读端点（读 discovery DB + 纯函数），**不挂** require_write——
+# 分析结果不应被写权限误伤（spec §4.2）；research_router 的 proposal 写端点保持写鉴权。
+app.include_router(discovery_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 
 
