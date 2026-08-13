@@ -14,7 +14,6 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from research import proposals
-from research import discovery_bridge
 
 router = APIRouter(prefix="/research", tags=["研究提案"])
 
@@ -34,12 +33,6 @@ class ReviewRequest(BaseModel):
 def list_proposals(status: Optional[str] = None) -> Dict[str, Any]:
     """提案列表（created_at 降序；可按状态过滤）。"""
     return {"proposals": proposals.list_proposals(_db(), status=status)}
-
-
-@router.get("/discovery/status")
-def discovery_status() -> Dict[str, Any]:
-    """低功率 discovery 进展（trial/最新 run/k 进度/新冠军），供前端/手动查。"""
-    return discovery_bridge.load_discovery_status()
 
 
 @router.post("/proposals/generate")

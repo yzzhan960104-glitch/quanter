@@ -31,7 +31,9 @@ def _mk_db(tmp_path, rows):
 
 
 def test_sensitivity_structure_and_dead_param(tmp_path):
-    """敏感性端点：结构齐全 + 合成死参（min_rr 恒值）落 dead_params（spec §4.4 锚）。"""
+    """敏感性端点：结构齐全 + 合成恒值参数（min_rr 三档同 calmar）落 dead_params
+    （spec §4.4 锚——借 min_rr 历史死参设定构造零方差场景；P4 后 min_rr 为活参，
+     真实语料中不保证被标记）。"""
     import json
     rows = []
     for w, c in [(40, 1.0), (60, 2.0), (80, 3.0)]:

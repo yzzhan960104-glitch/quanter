@@ -198,27 +198,41 @@ def filter_universe_from_lake(lake_df, min_amt=1e5):
     return universe
 
 
-def load_universe_window(start, end, warmup_days=180):
-    """P5 分折 universe：标的池按【折末 30 日】流动性重算，数据自 start-warmup 起。
+def load_universe_window(start, sel_end, data_end=None, warmup_days=180):
+    """P5 分折 universe：标的池按【sel_end 折末 30 日】流动性重算，数据至 data_end。
 
     与 load_universe(start) 的关键差异（幸存者偏差防线，spec §6.1）：
-      - 流动性 tail(30) 取自 [start-warmup, end] 窗（折末口径）——历史折不用未来
-        流动性选股（load_universe 的 tail(30) 是「今天」口径，会把 2025 之后才
-        活跃的标的选进 2020 折 = 幸存者偏差）；
+      - **选股/数据双窗口**：流动性 tail(30) 取自 [start-warmup, sel_end]（信息截止 =
+        折末，历史折不用未来流动性选股——load_universe 的 tail(30) 是「今天」口径，
+        会把 2025 之后才活跃的标的选进 2020 折 = 幸存者偏差）；而返回的 df 延伸至
+        data_end（walk-forward 需评估折后 OOS 年——wf smoke 曾抓到「数据止于
+        sel_end → oos 段零信号」的 bug）；
       - 数据含 start-warmup 预热段（窗口 window≤80 + ATR 余量，颈线形态在折首
         也能正确成形）；信号日期由调用方 segment 过滤，预热段不产计入信号；
       - 退市标的：湖内保留挂牌期数据（P0-2 实测 38 只退市/休眠创板科创），折内
         挂牌且满足流动性则纳入，折后自然消失。
     """
     from datetime import timedelta
+    if data_end is None:
+        data_end = sel_end
     data_start = pd.Timestamp(start) - timedelta(days=warmup_days)
     try:
         lake = pd.read_parquet(
             LAKE_PATH,
-            filters=[("date", ">=", data_start), ("date", "<=", pd.Timestamp(end))],
+            filters=[("date", ">=", data_start), ("date", "<=", pd.Timestamp(data_end))],
         )
     except Exception:
         lake = pd.read_parquet(LAKE_PATH)   # filters 推送失败 → 全量读再筛（语义不变）
         lake = lake[(lake.index.get_level_values("date") >= data_start)
-                    & (lake.index.get_level_values("date") <= pd.Timestamp(end))]
-    return filter_universe_from_lake(lake)
+                    & (lake.index.get_level_values("date") <= pd.Timestamp(data_end))]
+    # 选股口径：sel_end 截断（流动性信息截止折末）；数据口径：全窗 df（含 OOS 年）。
+    sel_lake = lake[lake.index.get_level_values("date") <= pd.Timestamp(sel_end)]
+    sel_universe = filter_universe_from_lake(sel_lake)   # 标的集 = 折末流动性合格者
+    universe = {}
+    for s in sel_universe:
+        try:
+            universe[s] = lake.xs(s, level="symbol").sort_index()   # 数据延伸至 data_end
+        except Exception:
+            continue
+    return universe
+

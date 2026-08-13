@@ -18,7 +18,7 @@ vi.mock('@/api/discovery', () => ({
   })),
   getParams: vi.fn(async () => ({
     param_space: [{ key: 'window', layer: 'id', candidates: [40, 60, 80] }],
-    constraints: ['min_rr 为死参数'],
+    constraints: ['tp1_h_mult <= tp_h_mult'],
   })),
   getDiscoveryStatus: vi.fn(async () => ({
     n_trials: 0, latest_run: null, champion: null,

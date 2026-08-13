@@ -44,6 +44,18 @@ def _read_trials(db_path=None):
         return []
 
 
+@router.get("/status")
+def status():
+    """搜索进展 digest（trial 数/最新 run/新冠军）——原 research.py 端点迁移至此。
+
+    P3 code review 发现：原端点挂在 research_router（require_write）下，前端
+    DiscoveryLabView 只读视图调它会因缺写权限失败（spec §4.2「视图无权限问题」）。
+    本 router 不挂写鉴权，只读进展归位。数据源仍 research/discovery_bridge（同函数）。
+    """
+    from research import discovery_bridge
+    return discovery_bridge.load_discovery_status()
+
+
 @router.get("/sensitivity")
 def sensitivity():
     """21 维敏感性表：边际效应（每档均值+样本量）+ 主效应排名 + 死参数 + 覆盖盲区。

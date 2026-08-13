@@ -107,8 +107,8 @@ def test_evaluate_wf_per_fold_independent_universe(monkeypatch):
 
     loaded = []
 
-    def fake_load(start, end, warmup_days=180):
-        loaded.append((start, end))
+    def fake_load(start, sel_end, data_end=None, warmup_days=180):
+        loaded.append((start, sel_end, data_end))
         return {"300001.SZ": None}
 
     def fake_scan(params, universe):
@@ -128,8 +128,9 @@ def test_evaluate_wf_per_fold_independent_universe(monkeypatch):
     out = evaluate_wf({"window": 60}, wf)
     assert len(out) == 4
     assert [r["fold"] for r in out] == ["wf1_2020_21", "wf2_2022_23", "wf3_2024", "wf4_2025"]
-    # 每折 universe 独立重建（train.start/train.end 注入）
-    assert loaded[0] == (wf.folds[0][1].start, wf.folds[0][1].end)
+    # 每折 universe 独立重建（train.start 选股截止 / oos.end 数据截止注入）
+    t0, o0 = wf.folds[0][1], wf.folds[0][2]
+    assert loaded[0] == (t0.start, t0.end, o0.end)
     # 折内分段：train 段收 2020 信号（n=1）、oos 段收 2022 信号（n=1）
     assert out[0]["train"]["n"] == 1
     assert out[0]["oos"]["n"] == 1

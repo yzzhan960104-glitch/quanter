@@ -3,7 +3,8 @@
 
 物理定位（Why）：discovery 的 trial 语料（Sobol 均匀覆盖 = 天然 DOE 设计）是免费的
 敏感性数据源——对 21 维参数算「边际效应」（每档 inner 指标均值）与「主效应排序」
-（档间极差），可量化识别死参数（如 min_rr 已被实证为死参）与主导参数，为 P4 策略
+（档间极差），可量化识别死参数与主导参数（注意：min_rr 的「死参」旧结论已被 P4 推翻——R3 实际口径
+后为活参数，constraints 不再强制；本模块对「恒 2.0 无方差」类参数仍会正确标记），为 P4 策略
 本体改进提供数据驱动优先级，并进后台 DiscoveryLab 视图「直接看」。
 
 分层红线（spec §4.1）：本模块**零 DB 连接、零 presentation 依赖**——纯函数接收
@@ -84,8 +85,9 @@ def main_effect_ranking(marginals):
 def dead_param_flags(marginals, ranking, spread_quantile=0.1):
     """死参数候选：主效应极差 ≤ 全局极差的 spread_quantile 分位 → 低方差标记。
 
-    物理意图（spec §4.4 验收锚）：min_rr 已被实证为死参（结构恒 2.0，normalize 强制），
-    其档间极差应为 0 或接近 0 → 落入低分位 → 标记。阈值取「最大极差 × spread_quantile」
+    物理意图（spec §4.4 验收锚）：结构恒值参数（单档或档间零方差——如 normalize 固定的
+    互锁值）其档间极差为 0 → 落入低分位 → 标记。阈值取「最大极差 × spread_quantile」
+    （注：P4 起 min_rr 复活为活参数，若其有真实主效应则不再被标记——正确行为）
     （相对阈值，自动适配目标指标尺度）。返回 [key, ...]。
     """
     if not ranking:

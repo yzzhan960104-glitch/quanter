@@ -180,7 +180,11 @@ def evaluate_wf(params, wf_split, warmup_days=180):
     from discovery.snapshot import load_universe_window
     out = []
     for name, train, oos in wf_split.folds:
-        universe = load_universe_window(train.start, train.end, warmup_days=warmup_days)
+        # 选股截止 train.end（信息不泄漏），数据延伸至 oos.end（评估 OOS 年需要数据）——
+        # load_universe_window 内已做选股/数据双窗口分离（wf smoke 曾抓到数据止于
+        # sel_end → oos 段零信号的 bug）
+        universe = load_universe_window(train.start, train.end, data_end=oos.end,
+                                        warmup_days=warmup_days)
         all_filled = run_full_scan(params, universe)
         out.append({
             "fold": name,
