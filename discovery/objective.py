@@ -161,3 +161,36 @@ def evaluate_replay(params, universe, split, start=None, end=None,
         "n_total": out["inner"]["n_hits"] + (outer.get("n_hits", 0) if outer else 0),
         "report": _compact_report(inner_report) if inner_report is not None else {},
     }
+
+
+# ============================================================================
+# P5（2026-08-13 · spec §6.1）：walk-forward 交叉验证评估
+# ============================================================================
+def evaluate_wf(params, wf_split, warmup_days=180):
+    """P5 多折 walk-forward 评估：每折独立 universe（防幸存者偏差）→ 折内 train/oos 指标。
+
+    与 evaluate（二段 holdout）的差异：
+      - 每折用 load_universe_window(train.start, train.end) 独立重建标的池（折末 30 日
+        流动性口径），不复用「今天」标的池——历史折不用未来信息选股（spec §6.1）；
+      - 每折跑一次 run_full_scan（该折 universe），按 signal_date 分 train/oos 两段
+        （embargo 吸收边界持仓跨越，与 segment_metrics 同源）；
+      - 不落库、不参与选择——分析口径（cmd_wf 交叉验证一致性用）。
+    返回 list[dict]：每折 {fold, n_symbols, train, oos, n_total}。
+    """
+    from discovery.snapshot import load_universe_window
+    out = []
+    for name, train, oos in wf_split.folds:
+        # 选股截止 train.end（信息不泄漏），数据延伸至 oos.end（评估 OOS 年需要数据）——
+        # load_universe_window 内已做选股/数据双窗口分离（wf smoke 曾抓到数据止于
+        # sel_end → oos 段零信号的 bug）
+        universe = load_universe_window(train.start, train.end, data_end=oos.end,
+                                        warmup_days=warmup_days)
+        all_filled = run_full_scan(params, universe)
+        out.append({
+            "fold": name,
+            "n_symbols": len(universe),
+            "train": segment_metrics(all_filled, train, embargo_days=0),
+            "oos": segment_metrics(all_filled, oos, embargo_days=wf_split.embargo_days),
+            "n_total": len(all_filled),
+        })
+    return out

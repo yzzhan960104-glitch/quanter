@@ -115,3 +115,50 @@ def test_freeze_loads_real_universe():
     assert meta.universe_count == len(universe)
     assert len(meta.snapshot_hash) == 16
     assert "2025" in meta.date_range
+
+
+def test_filter_universe_from_lake_synthetic():
+    """P5 分折 universe 纯函数：合成湖（含退市标的 + 低流动性标的）→ 过滤口径正确。
+
+    幸存者偏差防线（spec §6.1）：流动性 tail(30) 取自传入窗（折末口径）——退市标的
+    只要在窗内挂牌且满足流动性就保留（折后自然消失），低流动性/非创板科创剔除。
+    """
+    import pandas as pd
+    from discovery.snapshot import filter_universe_from_lake
+
+    idx = pd.MultiIndex.from_product(
+        [pd.date_range("2020-01-01", periods=40, freq="B"),
+         ["300001.SZ", "300002.SZ", "600000.SH"]],
+        names=["date", "symbol"])
+    amount = pd.Series(100_000.0, index=idx)          # 创板 2 只 ≥1e5；主板 1 只同额
+    amount.loc[(slice(None), "300002.SZ")] = 10.0     # 300002 低流动性（<1e5）
+    lake = pd.DataFrame({"amount": amount, "close": 1.0})
+    lake["high"] = 1.0; lake["low"] = 1.0; lake["volume"] = 1.0
+
+    univ = filter_universe_from_lake(lake)
+    assert set(univ.keys()) == {"300001.SZ"}          # 300002 流动性不足；主板被 board 过滤
+    assert len(univ["300001.SZ"]) == 40
+
+
+def test_count_stale_symbols_offline_proxy():
+    """P6-D2：尾部陈旧标的计数（离线连续性代理）——早于全局最新日超阈值者计陈旧。"""
+    import pandas as pd
+    from discovery.snapshot import _count_stale_symbols
+
+    idx_new = pd.date_range("2026-07-01", "2026-08-07", freq="B")
+    idx_stale = pd.date_range("2026-07-01", "2026-07-10", freq="B")
+    cols = {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0, "volume": 1.0, "amount": 1e6}
+    univ = {
+        "300001.SZ": pd.DataFrame(cols, index=idx_new),
+        "300002.SZ": pd.DataFrame(cols, index=idx_stale),   # 尾部陈旧（早于最新日 28 天）
+        "300003.SZ": pd.DataFrame(cols, index=idx_new),
+    }
+    assert _count_stale_symbols(univ, stale_days=14) == 1
+
+
+def test_snapshot_hash_includes_stale_count():
+    """P6-D2：n_stale 入指纹——连续性状态变化 → hash 变（补采后收敛重置的触发源）。"""
+    from discovery.snapshot import snapshot_hash
+    h1 = snapshot_hash(1190, "2025-01-02~2026-08-07", "2025-01-01", n_stale=0)
+    h2 = snapshot_hash(1190, "2025-01-02~2026-08-07", "2025-01-01", n_stale=3)
+    assert h1 != h2

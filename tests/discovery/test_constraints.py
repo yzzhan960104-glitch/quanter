@@ -11,12 +11,16 @@ def test_param_keys_21_dims():
         assert k in PARAM_KEYS
 
 
-def test_normalize_min_rr_fixed():
-    """min_rr 是死参数（结构恒 2.0），normalize 后强制 2.0（spec §7.1 耦合2）。"""
+def test_normalize_min_rr_preserved():
+    """P4（2026-08-13）：min_rr 不再强制 2.0——R3 实际口径后是活参数，normalize 保留原值。
+
+    旧断言「结构恒 rr=2.0」是 R3 前几何 rr 口径的过时结论；P3 敏感性实测三档均值
+    5.16/10.24/7.76（非零主效应）→ 撤死参强制，按候选档正常搜索。
+    """
     from discovery.constraints import normalize_params
     p = normalize_params({"min_rr": 1.5, "window": 80})
-    assert p["min_rr"] == 2.0
-    assert p["window"] == 80   # 其它参数不动
+    assert p["min_rr"] == 1.5     # 保留原值（活参数）
+    assert p["window"] == 80
 
 
 def test_normalize_trailing_grace_zero_freezes_step_floor():
@@ -85,7 +89,7 @@ def test_filter_feasible_keeps_legal_drops_illegal():
     ]
     kept = filter_feasible(batch)
     assert len(kept) == 1
-    assert kept[0]["min_rr"] == 2.0          # normalize 已固定死参数
+    assert kept[0]["min_rr"] == 1.5          # P4：min_rr 活参数，保留原值（不强制 2.0）
     assert kept[0]["window"] == 80
     # 第3条 grace=0 本应被 normalize 救回 trailing，但 cancel<tp1 仍非法 → 被滤
 

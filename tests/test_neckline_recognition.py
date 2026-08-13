@@ -239,8 +239,9 @@ def test_scan_symbol_orchestration(monkeypatch):
     df = _ohlc(rows)
     signal_idx = 20
     # 识别单源（U2 · 2026-07-29 Task 3）：scan_symbol 改调 detect_signal（返 Signal|None），
-    # 不再直调 detect_neckline_method（返 res dict）。桩点相应迁移——本 case 聚焦测编排
-    # （预算 ATR → detect_signal → dedup → simulate → skip/filled 收集），识别层 mock 掉。
+    # 不再直调 detect_neckline_method（返 res dict）。P1（2026-08-13）入口再迁
+    # detect_signal_fast（fast path，同一识别内核）——桩点相应迁移，本 case 仍聚焦测编排
+    # （预算 ATR → 识别 → dedup → simulate → skip/filled 收集），识别层 mock 掉。
     from strategies.neckline.signal import Signal
     fake_sig = Signal(
         symbol=None,
@@ -250,13 +251,14 @@ def test_scan_symbol_orchestration(monkeypatch):
         entry_price=None,   # scan_symbol 走 simulate_exit 路径，entry 由 simulate 决定，不读此字段
     )
 
-    def fake_detect_signal(symbol, d, id_cfg, exec_cfg, date, atr_full=None):
-        # 仅在输入序列长度 == signal_idx+1（即 i=signal_idx 这一轮）返回 Signal
-        if len(d) == signal_idx + 1:
+    def fake_detect_signal_fast(symbol, arr, pos, id_cfg, exec_cfg, date, atr_arr,
+                                tops_mask=None, lows_mask=None, decay_weights=None):
+        # 仅在 pos == signal_idx（即 i=signal_idx 这一轮）返回 Signal
+        if pos == signal_idx:
             return fake_sig
         return None
 
-    monkeypatch.setattr(nb, "detect_signal", fake_detect_signal)
+    monkeypatch.setattr(nb, "detect_signal_fast", fake_detect_signal_fast)
     filled, n_signals, n_skip = scan_symbol(df, window=20)
 
     assert n_signals >= 1                  # 识别到 ≥1 个信号
@@ -299,8 +301,10 @@ def test_scan_symbol_matches_strategy(monkeypatch):
     df = _ohlc(rows)
     signal_idx = 20
     # 识别单源（U2 · 2026-07-29 Task 3）：scan_symbol 与 scan_at 都改调 detect_signal（返
-    # Signal|None），不再直调 detect_neckline_method。两侧桩点统一迁到 detect_signal，
-    # 双轨一致性契约不变（真实分叉仍在去重 + simulate + 收集链路）。
+    # Signal|None），不再直调 detect_neckline_method。P1（2026-08-13）：scan_symbol 入口
+    # 迁 detect_signal_fast（fast path，与 detect_signal 同一识别内核），scan_at 仍走
+    # detect_signal（df 路径）——两侧桩点按入口分别 patch，双轨一致性契约不变（真实分叉
+    # 仍在去重 + simulate + 收集链路）。
     from strategies.neckline.signal import Signal
     fake_sig = Signal(
         symbol="TEST",
@@ -309,13 +313,20 @@ def test_scan_symbol_matches_strategy(monkeypatch):
         neckline=100.0, bottom=90.0, atr=3.6,
     )
 
+    def fake_detect_signal_fast(symbol, arr, pos, id_cfg, exec_cfg, date, atr_arr,
+                                tops_mask=None, lows_mask=None, decay_weights=None):
+        if pos == signal_idx:
+            return fake_sig
+        return None
+
     def fake_detect_signal(symbol, d, id_cfg, exec_cfg, date, atr_full=None):
         if len(d) == signal_idx + 1:
             return fake_sig
         return None
 
-    # 两处 import 绑定都要 patch（scan_symbol 在 strategies.neckline.backtest，scan_at 在 strategies）
-    monkeypatch.setattr(nb, "detect_signal", fake_detect_signal)
+    # 两处入口都要 patch（scan_symbol 在 strategies.neckline.backtest 走 fast path，
+    # scan_at 在 strategies 走 detect_signal——识别内核同源、入口不同）
+    monkeypatch.setattr(nb, "detect_signal_fast", fake_detect_signal_fast)
     monkeypatch.setattr(nm, "detect_signal", fake_detect_signal)
 
     # ① 研究侧：scan_symbol 批量（param_iter 路径），id_cfg 参数化（P1-b 收敛后）

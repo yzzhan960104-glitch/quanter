@@ -90,3 +90,137 @@ def test_tpe_search_enqueues_snapped_seed_no_crash():
     obj = lambda p: p["trailing_step"]
     params, study = tpe_search([{"trailing_step": 0.0}], obj, n_trials=3, seed=42, param_space=space)
     assert len(params) == 4   # 1 seed(snapped) + 3 tpe，不 crash
+
+
+# ============================================================================
+# P2（2026-08-13 · spec §3）：tpe_search_batch 批量 ask/tell
+# ============================================================================
+def _peak_objective(params):
+    """合成峰形 objective：window 越接近 80 越好（峰在候选档 80），其余维无信息。
+
+    用于验证 TPE 收敛方向（不依赖真实数据湖），与 param_space 无耦合。
+    """
+    return float(abs(80 - params.get("window", 40)) <= 0) * 5.0 + \
+        max(0.0, 2.0 - abs(params.get("window", 40) - 80) / 20.0)
+
+
+def test_tpe_search_batch_finds_peak():
+    """批量 ask/tell 在合成峰形 objective 上收敛到峰邻域（TPE 学习生效）。"""
+    from discovery.search import tpe_search_batch
+    space = [("window", [40, 60, 80]), ("min_rr", [1.0, 1.5, 2.0])]
+    seeds = [{"window": 40, "min_rr": 2.0}, {"window": 60, "min_rr": 1.0}]
+    values = [0.0, 1.0]
+
+    def _eval(plist):
+        return [{"inner": {"calmar": _peak_objective(p)}} for p in plist]
+
+    new_pairs, study = tpe_search_batch(seeds, values, _eval, n_trials=24,
+                                        seed=7, param_space=space, batch_size=6)
+    assert len(new_pairs) == 24
+    # 峰 = window=80（calmar 5.0）；TPE 应找得到并成为 best
+    assert study.best_value >= 5.0 - 1e-9
+    assert any(p[0]["window"] == 80 for p in new_pairs)
+
+
+def test_tpe_search_batch_matches_serial_trend():
+    """同 seed 串行 vs 批量：收敛趋势一致（best_value 同量级逼近真峰，非逐位同）。
+
+    P2 验收项（spec §3）：批量模式改变采样顺序（K 个 ask 后统一 tell vs 逐 tell），
+    TPE 后验更新节奏不同 → 具体候选不同，但都应收敛到峰。二者 best 与真峰的差同量级。
+    """
+    from discovery.search import tpe_search_batch, tpe_search
+    space = [("window", [40, 60, 80]), ("min_rr", [1.0, 1.5, 2.0])]
+    seeds = [{"window": 40, "min_rr": 2.0}, {"window": 60, "min_rr": 1.0}]
+
+    _, study_serial = tpe_search(seeds, _peak_objective, n_trials=24, seed=7,
+                                 param_space=space)
+    _, study_batch = tpe_search_batch(seeds, [_peak_objective(p) for p in seeds],
+                                      lambda plist: [{"inner": {"calmar": _peak_objective(p)}}
+                                                     for p in plist],
+                                      n_trials=24, seed=7, param_space=space, batch_size=6)
+    peak = 5.0
+    serial_gap = peak - study_serial.best_value
+    batch_gap = peak - study_batch.best_value
+    assert serial_gap <= 1e-6 and batch_gap <= 1e-6, (
+        f"串行 gap={serial_gap} 批量 gap={batch_gap}——两者都应逼近峰（gap≈0）")
+
+
+def test_tpe_search_batch_failed_eval_marks_failed():
+    """评估失败组：new_pairs 含 (params, None) + study 该 trial FAILED 态（不毒化后验）。"""
+    from discovery.search import tpe_search_batch
+    space = [("window", [40, 60, 80]), ("min_rr", [1.0, 1.5, 2.0])]
+    seeds = [{"window": 40, "min_rr": 2.0}]
+
+    def _eval(plist):
+        # 全部失败：返回 None 组
+        return [None for _ in plist]
+
+    new_pairs, study = tpe_search_batch(seeds, [0.0], _eval, n_trials=4,
+                                        seed=3, param_space=space, batch_size=4)
+    assert len(new_pairs) == 4
+    assert all(res is None for _, res in new_pairs)
+    failed = [t for t in study.trials if t.state.name == "FAIL"]
+    assert len(failed) == 4
+
+
+def test_tpe_search_batch_normalizes_suggestions():
+    """P4（2026-08-13）：TPE 建议过 normalize+is_feasible——评估函数收到的 params
+    必满足耦合约束（trailing 互锁：grace=0 时 step/floor 归零；tp1≤tp_h 可行）。
+
+    用含耦合的 param_space：TPE 可能建议 grace=0 而 step≠0（categorical 独立采样）
+    ——断言 evaluate_batch_fn 收到的每组 params 已 normalize（且组数 = n_trials）。
+    """
+    from discovery.search import tpe_search_batch
+    space = [("trailing_grace", [0, 5]),
+             ("trailing_step", [0.05, 0.15]),
+             ("trailing_floor", [0.0, 0.5]),
+             ("tp1_h_mult", [0.5, 1.5]),
+             ("tp_h_mult", [1.5, 2.0])]
+    received = []
+
+    def _eval(plist):
+        received.extend(plist)
+        return [{"inner": {"calmar": 1.0}} for _ in plist]
+
+    new_pairs, _ = tpe_search_batch([{"trailing_grace": 5, "trailing_step": 0.1,
+                                      "trailing_floor": 0.5, "tp1_h_mult": 0.5,
+                                      "tp_h_mult": 2.0}],
+                                    [1.0], _eval, n_trials=16, seed=5,
+                                    param_space=space, batch_size=8)
+    assert len(new_pairs) == 16
+    for p in received:
+        if p["trailing_grace"] == 0:
+            assert p["trailing_step"] == 0.0 and p["trailing_floor"] == 0.0
+        assert p["tp1_h_mult"] <= p["tp_h_mult"]
+
+
+def test_tpe_search_batch_warm_start_params_populated():
+    """Critical C2 回归（2026-08-13 外部评审）：warm-start trial 必须 params 非空且与 seed 对齐。
+
+    旧实现 enqueue+ask 后不调 suggest_categorical → trial.params={}（optuna 4.9.0 实测）
+    → TPE 后验无 warm-start 数据，Sobol 先验全丢。本测试断言 study.trials[:n_seed]
+    的 params 与 seed 逐位对齐（snap 后口径），证明 warm-start 真生效。
+    """
+    from discovery.search import tpe_search_batch
+    from discovery.sampler import PARAM_SPACE
+    seeds = [
+        {"window": 80, "min_rr": 2.0, "min_touches": 2, "min_suppression": 0.6,
+         "local_extrema_window": 3, "min_bottoms": 2, "breakout_vol_mult": 1.5,
+         "max_h_atr": 4.0, "stop_atr_mult": 1.0, "tp_h_mult": 2.5, "decay_tau": None,
+         "max_holding": 15, "max_wait": 5, "cooldown": 5, "buy_limit_atr_mult": 1.0,
+         "tp1_h_mult": 1.0, "tp1_portion": 0.5, "cancel_thresh_mult": 1.0,
+         "trailing_grace": 0, "trailing_step": 0.0, "trailing_floor": 0.0},
+    ]
+
+    def _eval(plist):
+        return [{"inner": {"calmar": 1.0}} for _ in plist]
+
+    _new, study = tpe_search_batch(seeds, [2.0], _eval, n_trials=4, seed=11,
+                                   param_space=PARAM_SPACE, batch_size=4)
+    seed_trials = study.trials[:len(seeds)]
+    assert all(len(t.params) == len(PARAM_SPACE) for t in seed_trials), (
+        f"warm-start trial params 应为 21 维全量，实际 {[len(t.params) for t in seed_trials]}")
+    assert all(t.state.name == "COMPLETE" for t in seed_trials)
+    # params 与 seed 对齐（window/tp_h_mult 逐位；snap 只在越界时改动）
+    assert seed_trials[0].params["window"] == 80
+    assert seed_trials[0].params["tp_h_mult"] == 2.5

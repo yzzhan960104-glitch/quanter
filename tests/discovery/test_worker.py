@@ -32,16 +32,50 @@ def test_init_worker_not_lambda_not_nested():
     assert "<locals>" not in fn.__qualname__   # 嵌套函数会有 <locals>
 
 
-def test_default_n_proc_capped_at_4(monkeypatch):
-    """回归（2026-08-03 资源优化）：默认进程数上限 4。
+def test_default_n_proc_capped_at_16(monkeypatch):
+    """P2（2026-08-13 · spec §3）：默认进程数上限 16（旧 cap 4 放开）。
 
-    旧实现 cpu-2（20 核机 = 18 worker）→ 12~18 个 worker 各自全量加载数据湖
-    （~1.3GB/个）撑爆内存。cap 4 后 8h 夜跑预算仍覆盖 ~640 组。
+    旧 cap 4 是 720s/组时代的内存务实平衡；P1 向量化 + P0-4 RSS 实测（0.57GB/worker）
+    后内存不再是约束（32GB 机 ≈49 上限），cap 转向 CPU 核数（min(cpu-2, 16)）。
+    内存回归防线改由 memory_cap_n_proc + _init_worker RSS 看门狗承担。
     """
     from discovery import worker
     monkeypatch.delenv("DISCOVERY_N_PROC", raising=False)
     monkeypatch.setattr("os.cpu_count", lambda: 20)
-    assert worker._default_n_proc() == 4
+    assert worker._default_n_proc() == 16
+
+
+def test_default_n_proc_cpu_minus_2(monkeypatch):
+    """小核数机器：cpu-2（10 核 → 8），低于 16 上限时不封顶。"""
+    from discovery import worker
+    monkeypatch.delenv("DISCOVERY_N_PROC", raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 10)
+    assert worker._default_n_proc() == 8
+
+
+def test_memory_cap_n_proc_clamps(monkeypatch):
+    """P2：memory_cap_n_proc 按可用内存 ÷ 每 worker RSS 估计（留储备）自动降并发。
+
+    可用 12GB − 4GB 储备 = 8GB ÷ 2GB/worker（env 调大模拟膨胀）= 4 进程。
+    """
+    from discovery import worker
+    monkeypatch.setenv("DISCOVERY_WORKER_RSS_GB", "2.0")
+    monkeypatch.setenv("DISCOVERY_RSS_RESERVE_GB", "4.0")
+
+    class _VM:
+        available = 12 * 1024 ** 3
+    monkeypatch.setattr("psutil.virtual_memory", lambda: _VM())
+    assert worker.memory_cap_n_proc() == 4
+
+
+def test_memory_cap_n_proc_floor_one(monkeypatch):
+    """可用内存极低 → 至少 1 进程（不返 0）。psutil 不可用 → 降级返 CPU cap。"""
+    from discovery import worker
+    monkeypatch.setenv("DISCOVERY_WORKER_RSS_GB", "10.0")
+    class _VM:
+        available = 5 * 1024 ** 3
+    monkeypatch.setattr("psutil.virtual_memory", lambda: _VM())
+    assert worker.memory_cap_n_proc() == 1
 
 
 def test_default_n_proc_env_override(monkeypatch):
@@ -115,6 +149,28 @@ def test_eval_worker_swallows_exception(monkeypatch, champion_params, synth_sym_
 
 
 @pytest.mark.slow
+def test_eval_pool_reuses_workers(champion_params):
+    """P2：EvalPool 长驻池两次 eval 同结果（worker 复用，每 worker 只 freeze 一次）。
+
+    与 test_eval_batch_real_pool 互补：eval_batch 单发、EvalPool 长驻（TPE batch 多轮）。
+    真实 spawn 2 子进程，两次 eval 各评估同一组 params，断言结果结构一致（worker 复用
+    语义——第二次不重 freeze）。
+    """
+    from discovery.worker import EvalPool
+    pool = EvalPool(n_proc=2, lake_start="2025-01-01", embargo_days=5)
+    try:
+        r1 = pool.eval([champion_params])
+        r2 = pool.eval([champion_params])
+    finally:
+        pool.close()
+    assert len(r1) == len(r2) == 1
+    assert (r1[0] is None) == (r2[0] is None)
+    if r1[0] is not None:
+        _, res1 = r1[0]
+        _, res2 = r2[0]
+        assert res1["inner"]["n"] == res2["inner"]["n"]   # 同 params 两次评估同口径
+
+
 def test_eval_batch_real_pool(champion_params):
     """集成：真实 Pool 起 2 子进程跑 2 组（含冠军 + 邻域扰动），~6min。
     验证 ProcessPool 真起作用、子进程 freeze 复用、返回非 None。"""

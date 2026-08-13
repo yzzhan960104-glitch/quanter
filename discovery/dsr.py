@@ -97,3 +97,21 @@ def deflated_sharpe(sharpe, n_trials, n_obs, skew=0.0, kurt=3.0):
         return 0.0
     z = (sharpe - sr_max) * math.sqrt(max(n_obs - 1, 1)) / math.sqrt(var_factor)
     return _norm_cdf(z)
+
+
+def dsr_gated_ranking(candidates, dsr_min=0.8, fallback_to_calmar=True):
+    """P5 DSR 门控排序（spec §6.2）：calmar 排序 + DSR≥dsr_min 门槛共因子。
+
+    candidates: [(calmar, dsr, trial_id), ...]（调用方算好 DSR 注入——多重比较
+    校正依赖 n_trials/n_obs，逐候选口径由调用方保证）。
+    返回 (gated, fell_back)：gated = calmar 降序且 DSR 达标的候选；
+    门控空集 → fallback_to_calmar 时回退纯 calmar 排序（早期搜索 trial 数少 → DSR
+    天然低，不惩罚早期搜索——ADR13 诚实报告：fell_back=True 显式标注）。
+    """
+    ranked = sorted(candidates, key=lambda x: x[0], reverse=True)
+    gated = [c for c in ranked if c[1] >= dsr_min]
+    if gated:
+        return gated, False
+    if fallback_to_calmar:
+        return ranked, True
+    return [], False

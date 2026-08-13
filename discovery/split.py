@@ -44,3 +44,47 @@ def holdout_split(embargo_days=5):
         outer=Segment("outer_2026", date(2026, 1, 1), date(2026, 12, 31)),
         embargo_days=embargo_days,
     )
+
+
+# ============================================================================
+# P5（2026-08-13 · spec §6.1）：多折 walk-forward（数据可行性由 P0-2 实证：
+# 创板科创 2020=1065 → 2026=2017 只/年，各折 >> 200 阈值；湖深 2016-07 起）
+# ============================================================================
+@dataclass
+class WalkForwardSplit:
+    """P5 多折 walk-forward：4 训练折（各带次年为 OOS）+ 终局 2026 去偏。
+
+    折结构（经典锚定 walk-forward）：
+      wf1: train 2020-21 → oos 2022
+      wf2: train 2022-23 → oos 2024
+      wf3: train 2024    → oos 2025
+      wf4: train 2025    → oos 2026（= 现有二段 holdout 口径，交叉验证锚）
+    科创约束（P0-2）：688/689 2019-07 开板，2020-21 折 universe = 创板全量 +
+    科创（2020 起 ~211 只，占 ~20%）——evaluate_wf 的每折 universe 独立重建
+    （折末 30 日流动性），不复用 2025 标的池（幸存者偏差防线）。
+    """
+    folds: list   # [(name, train: Segment, oos: Segment), ...]
+    final_oos: Segment
+    embargo_days: int
+
+
+def walk_forward_split(embargo_days=5):
+    """P5 四折 walk-forward 切分（embargo 语义与 holdout_split 同源）。"""
+    return WalkForwardSplit(
+        folds=[
+            ("wf1_2020_21",
+             Segment("t_2020_21", date(2020, 1, 1), date(2021, 12, 31)),
+             Segment("o_2022", date(2022, 1, 1), date(2022, 12, 31))),
+            ("wf2_2022_23",
+             Segment("t_2022_23", date(2022, 1, 1), date(2023, 12, 31)),
+             Segment("o_2024", date(2024, 1, 1), date(2024, 12, 31))),
+            ("wf3_2024",
+             Segment("t_2024", date(2024, 1, 1), date(2024, 12, 31)),
+             Segment("o_2025", date(2025, 1, 1), date(2025, 12, 31))),
+            ("wf4_2025",
+             Segment("t_2025", date(2025, 1, 1), date(2025, 12, 31)),
+             Segment("o_2026", date(2026, 1, 1), date(2026, 12, 31))),
+        ],
+        final_oos=Segment("oos_2026", date(2026, 1, 1), date(2026, 12, 31)),
+        embargo_days=embargo_days,
+    )

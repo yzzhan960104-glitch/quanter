@@ -21,12 +21,18 @@ from discovery.store import (init_db, connect, write_trial, write_snapshot,
                              write_search_run, _now_iso)
 from discovery.snapshot import SnapshotMeta, freeze
 from discovery.split import HoldoutSplit
-from discovery.objective import evaluate, evaluate_replay
+from discovery.objective import evaluate_replay
 from discovery.judging import feasibility_gate
 from discovery.coverage import grid_coverage, coverage_gate
 from discovery.pareto import pareto_frontier
-from discovery.dsr import deflated_sharpe
-from discovery.search import tpe_search, expected_improvement
+from discovery.dsr import deflated_sharpe, dsr_gated_ranking
+from discovery.search import tpe_search_batch, expected_improvement
+
+
+# DSR 门槛共因子阈值（spec §6.2 · P5-I1）：deflated_sharpe ∈ [0,1] 概率口径，
+# 0.8 = 多重比较校正后仍有 ≥80% 置信度非零真实夏普。门控空集时回退纯 calmar
+#（见 run_search 排序段），排序恒非空（spec「先验证不空集」）。
+DSR_GATE_MIN = 0.8
 
 
 def _engine_hash():
@@ -67,15 +73,12 @@ class RunSummary:
     ei: float = 0.0                # 预期提升代理（判据②）
     frontier_size: int = 0         # Pareto 前沿大小
     dsr_top: float = 0.0           # top-1 DSR（L2 统计裁决）
+    dsr_gate_fell_back: bool = False   # P5（spec §6.2）：DSR 门控排序回退纯 calmar 标记
+                                       #（门控空集=早期搜索 trial 少 DSR 天然低，诚实报告）
     run_id: str = ""               # Plan 4：本次 run 的 search_run 行 id（daemon 跨夜状态键）
     top_replay_metrics: dict = field(default_factory=dict)  # P1-2（2026-08-03）：冠军
                                 # 的 replay 口径复评（backtest.replay 引擎，主回测同源）。
                                 # 搜索排序仍用 kelly/calmar，此字段供报告/告警对拍两口径。
-
-
-def _params_key(params):
-    """params dict → 可 hash 键（TPE _res_cache 用，避免双 evaluate）。"""
-    return tuple(sorted((k, str(v)) for k, v in params.items()))
 
 
 def _persist_trial(conn, params, snapshot_meta, split_tag, engine_hash, result, source, seed):
@@ -155,26 +158,46 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
             n_new += 1
             all_evaluated.append(params)
 
-    # === 阶段二：TPE 序贯精化（tpe_trials>0，主进程串行 evaluate） ===
+    # === 阶段二：TPE 批量并行精化（P2 · spec §3：optuna ask/tell 批量替代主进程串行 evaluate） ===
+    # 物理意图：旧版 TPE 主进程串行 evaluate（每采一组跑 ~35s，16 组 ≈ 9min）且 seed 经
+    # objective 重估（浪费一轮）。P2 改 tpe_search_batch：ask K → EvalPool 并行评估 →
+    # 统一 tell，seed 用阶段一新鲜 (params, res) 直接 tell 已知 calmar（不重估）。
+    # EvalPool 长驻整个 TPE 阶段（每 worker freeze 一次，避免每轮重 spawn+重 freeze）。
     tpe_study = None
     if tpe_trials > 0:
-        universe, _ = freeze(lake_start=lake_start)   # 主进程 freeze（TPE 串行 evaluate 用）
-        _res_cache = {}                                # params→res，避免落库时双 evaluate
-        def _obj(p):
-            res = evaluate(p, universe, split)
-            _res_cache[_params_key(p)] = res
-            return res["inner"].get("calmar", 0.0)
-        all_params, tpe_study = tpe_search(sampled, _obj, n_trials=tpe_trials, seed=seed)
-        # 落库 TPE 新 trial（sampled 之后的是 TPE 新采；缓存命中避免双跑）
-        with connect(db_path) as conn:
-            for p in all_params[len(sampled):]:
-                res = _res_cache.get(_params_key(p)) or evaluate(p, universe, split)
-                tid = _persist_trial(conn, p, snapshot_meta, split_tag,
-                                     engine_hash, res, "tpe", seed)
-                if tid is None:
-                    continue
-                n_new += 1
-                all_evaluated.append(p)
+        from discovery.worker import EvalPool
+        pool = EvalPool(n_proc=n_proc, lake_start=lake_start,
+                        embargo_days=split.embargo_days)
+        try:
+            # seed = 阶段一新鲜评估的 (params, res) 对——**必须滤 None**（Critical C1：
+            # eval_batch 对退化组（n_total==0/异常）返 None，落库循环只跳过不删除；
+            # 原样传给列表推导解包 `for p, _ in seed_pairs` 会 TypeError → daemon 夜跑
+            # 崩溃（外部评审实测确认）。dup 跳过组不在 results，不重估。
+            seed_pairs = [it for it in results if it is not None]
+            # 契约适配：EvalPool.eval 返回 [(params, res)|None]（与 eval_batch 同构），
+            # tpe_search_batch 的 evaluate_batch_fn 契约是 [res|None]——此处解包剥离 params
+            #（P2 smoke 曾在此抓到 tuple 直传的契约错位）。
+            def _eval_results(plist):
+                return [item[1] if item is not None else None for item in pool.eval(plist)]
+            new_pairs, tpe_study = tpe_search_batch(
+                [p for p, _ in seed_pairs],
+                [r["inner"].get("calmar", 0.0) for _, r in seed_pairs],
+                _eval_results,
+                n_trials=tpe_trials, seed=seed)
+            # 落库 TPE 新 trial（失败组 res=None 计 n_failed 不落库）
+            with connect(db_path) as conn:
+                for p, res in new_pairs:
+                    if res is None:
+                        n_failed += 1
+                        continue
+                    tid = _persist_trial(conn, p, snapshot_meta, split_tag,
+                                         engine_hash, res, "tpe", seed)
+                    if tid is None:
+                        continue
+                    n_new += 1
+                    all_evaluated.append(p)
+        finally:
+            pool.close()
 
     # === 收敛判据 + 覆盖度 + EI ===
     rho = grid_coverage(all_evaluated)
@@ -198,16 +221,25 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         except (TypeError, ValueError):
             continue
     frontier_idxs = pareto_frontier([m for m, _ in inner_metrics]) if inner_metrics else []
-    candidates = [(m.get("calmar", 0.0), t) for m, t in inner_metrics if feasibility_gate(m)]
+    # P5（spec §6.2 · 2026-08-13 外部评审 P5-I1）：DSR 从「标注」升级为「门槛共因子」
+    # ——calmar 排序 + DSR≥dsr_min 门控（多重比较校正不达标候选剔除，防多试误报
+    # 冠军）；门控空集回退纯 calmar 并置 dsr_gate_fell_back=True（早期搜索 trial 少
+    # DSR 天然低，不惩罚——ADR13 诚实报告，spec §6.2「先验证不空集」由 fallback 语义
+    # 保证：排序恒非空）。
+    dsr_gate_fell_back = False
+    dsr_cands = []
+    for m, t in inner_metrics:
+        if not feasibility_gate(m):
+            continue
+        d = deflated_sharpe(m.get("sharpe", 0.0),
+                            n_trials=len(trials_db), n_obs=m.get("n", 30))
+        dsr_cands.append((m.get("calmar", 0.0), d, t))
     top_calmar, top_tid, dsr_top = 0.0, "", 0.0
-    if candidates:
-        candidates.sort(reverse=True, key=lambda x: x[0])
-        top_calmar, top_t = candidates[0]
+    if dsr_cands:
+        gated, dsr_gate_fell_back = dsr_gated_ranking(
+            dsr_cands, dsr_min=DSR_GATE_MIN, fallback_to_calmar=True)
+        top_calmar, dsr_top, top_t = gated[0]
         top_tid = top_t["trial_id"]
-        top_m = json.loads(top_t["inner_metrics"]) if top_t["inner_metrics"] else {}
-        # DSR top-1：n_trials=本 snapshot trial 数（多重比较），n_obs=top 的交易笔数
-        dsr_top = deflated_sharpe(top_m.get("sharpe", 0.0),
-                                  n_trials=len(trials_db), n_obs=top_m.get("n", 30))
 
     # === P1-2：冠军 replay 口径复评（可选，daemon 生产默认开） ===
     # 物理意图：搜索排序用 kelly/calmar（risk_metrics 近似），与主回测/实盘
@@ -252,4 +284,5 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         status=status, convergence_reason=reason,
         rho=rho, ei=ei, frontier_size=len(frontier_idxs), dsr_top=dsr_top,
         run_id=run_id, top_replay_metrics=top_replay_metrics,
+        dsr_gate_fell_back=dsr_gate_fell_back,
     )

@@ -67,3 +67,23 @@ def test_norm_ppf_matches_scipy():
         # 绝对口径：Acklam 实测 max abs err 2.23e-9 × 2.2 余量 = 5e-9
         # 高位抄错（偏差 >>1e-8）100% 捕获；末位微扰（1e-10-）受算法噪声限制
         assert abs(_norm_ppf(p) - sp) < 5e-9, f"p={p} 绝对偏差超 5e-9（Acklam 精度内）"
+
+
+def test_dsr_gated_ranking_gate_and_fallback():
+    """P5 DSR 门控：达标集按 calmar 降序；全不达标 → 回退纯 calmar 并标注 fell_back。"""
+    from discovery.dsr import dsr_gated_ranking
+    cands = [
+        (5.0, 0.9, "a"),   # calmar 最高 + DSR 达标
+        (4.0, 0.95, "b"),  # 达标
+        (6.0, 0.5, "c"),   # calmar 最高但 DSR 不达标 → 门控剔除
+    ]
+    gated, fell = dsr_gated_ranking(cands, dsr_min=0.8)
+    assert not fell
+    assert [t for _, _, t in gated] == ["a", "b"]   # c 被 DSR 门控剔除
+    # 全不达标 → 回退纯 calmar（不惩罚早期搜索），fell_back 显式标注
+    gated2, fell2 = dsr_gated_ranking([(3.0, 0.3, "x"), (2.0, 0.2, "y")], dsr_min=0.8)
+    assert fell2
+    assert [t for _, _, t in gated2] == ["x", "y"]
+    # 不 fallback 模式 → 空集（调用方决定如何诚实报告）
+    gated3, fell3 = dsr_gated_ranking([(3.0, 0.3, "x")], dsr_min=0.8, fallback_to_calmar=False)
+    assert gated3 == [] and not fell3

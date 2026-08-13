@@ -33,6 +33,10 @@ class SnapshotMeta:
     data_hash: str = ""         # P1-3（2026-08-03）：universe 价格内容指纹（close 序列
                                 # sha256 聚合）。数据增量/复权重算历史 → 指纹变，供
                                 # daemon 审计"跨夜收敛因数据版本变化而重置"。
+    n_stale_symbols: int = 0    # P6-D2（2026-08-13）：尾部陈旧标的数（离线连续性代理）——
+                                # 最后 K 线早于湖全局最新日超 STALE_DAYS 的标的数；>0 时
+                                # freeze 告警数据可信度风险，且计入 snapshot_hash（补采后
+                                # 计数变化 → hash 变 → 跨夜收敛重置，spec §7 D6-2）。
 
 
 def is_target_board(sym):
@@ -41,15 +45,40 @@ def is_target_board(sym):
     return code.startswith(("300", "301", "688", "689"))
 
 
-def snapshot_hash(universe_count, date_range, lake_start, universe_def=DEFAULT_UNIVERSE_DEF):
-    """纯函数：快照指纹 sha256[:16]。同输入→同输出（可复现基石），不读文件故可快速单测。"""
+def snapshot_hash(universe_count, date_range, lake_start, universe_def=DEFAULT_UNIVERSE_DEF,
+                   n_stale=0):
+    """纯函数：快照指纹 sha256[:16]。同输入→同输出（可复现基石），不读文件故可快速单测。
+
+    P6-D2（2026-08-13）：n_stale（尾部陈旧标的数）入指纹——连续性状态变化（补采修复）
+    → hash 变 → 跨夜收敛显式重置（spec §7 D6-2；daemon data_changed 机制已存在）。
+    """
     sig = json.dumps({
         "universe_def": universe_def,
         "universe_count": int(universe_count),
         "date_range": str(date_range),
         "lake_start": str(lake_start),
+        "n_stale": int(n_stale),
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
+
+
+# 尾部陈旧判定阈值（自然日）：最后 K 线早于湖全局最新日超此天数 → 陈旧（离线连续性代理）。
+_STALE_DAYS = 14
+
+
+def _count_stale_symbols(universe, stale_days=_STALE_DAYS):
+    """尾部陈旧标的数（P6-D2 离线连续性代理）：最后 K 线早于湖全局最新日超 stale_days。
+
+    物理意图：discovery 的 universe 加载不触网（无法拿停牌区间做精确 find_gaps），
+    用「尾部陈旧」做连续性风险的离线代理——退市/长期停牌/漏采三种尾部缺数都会命中；
+    精确判定由 data.integrity.find_gaps（带 suspend/trade_cal）承担，本函数只做
+    搜索前的廉价告警 + 指纹联动（补采 → 计数变化 → snapshot_hash 变化 → 收敛重置）。
+    """
+    if not universe:
+        return 0
+    latest = max(df.index.max() for df in universe.values())
+    cutoff = pd.Timestamp(latest) - pd.Timedelta(days=stale_days)
+    return sum(1 for df in universe.values() if df.index.max() < cutoff)
 
 
 def data_content_hash(universe, lake_start="2025-01-01"):
@@ -112,6 +141,11 @@ def freeze(lake_start="2025-01-01"):
 
     universe 全量加载（start 至今），objective 再按 signal_date 切 inner/outer，
     而非此处切——保证 scan_symbol 有完整历史做 window/ATR 预热。
+
+    P6-D2（2026-08-13）：连续性状态入快照——n_stale_symbols（尾部陈旧标的数，离线
+    代理）计入 snapshot_hash 并告警。物理意图：discovery 在残缺数据上搜索会产出
+    误导性冠军（300214.SZ 教训）；补采修复 → n_stale 变化 → hash 变 → 跨夜收敛
+    显式重置（spec §7 D6-2）。
     """
     universe = load_universe(start=lake_start)
     dates = []
@@ -122,12 +156,83 @@ def freeze(lake_start="2025-01-01"):
         date_range = f"{pd.Timestamp(dmin).date()}~{pd.Timestamp(dmax).date()}"
     else:
         date_range = "empty"
+    n_stale = _count_stale_symbols(universe)
+    if n_stale > 0:
+        print(f"[freeze][WARN] universe 含 {n_stale} 只尾部陈旧标的（最后 K 线早于湖最新日"
+              f"超 {_STALE_DAYS} 天）——数据可信度风险，建议 repair_gaps 补采后再搜索",
+              flush=True)
     meta = SnapshotMeta(
-        snapshot_hash=snapshot_hash(len(universe), date_range, lake_start),
+        snapshot_hash=snapshot_hash(len(universe), date_range, lake_start,
+                                    n_stale=n_stale),
         universe_def=DEFAULT_UNIVERSE_DEF,
         universe_count=len(universe),
         date_range=date_range,
         lake_start=lake_start,
         data_hash=data_content_hash(universe, lake_start),
+        n_stale_symbols=n_stale,
     )
     return universe, meta
+
+
+# ============================================================================
+# P5（2026-08-13 · spec §6.1）：分折 universe（防幸存者偏差）
+# ============================================================================
+def filter_universe_from_lake(lake_df, min_amt=1e5):
+    """湖 DataFrame → 可交易 universe dict（纯函数，分折/全量共用）。
+
+    lake_df: 已按日期窗截好的湖（MultiIndex date/symbol，含 amount 列）。
+    流动性口径：近 30 日均成交额 ≥ min_amt（1e5 千元 = 1 亿元，对齐 param_iter）；
+    创板科创过滤（is_target_board 口径）。返回 {symbol: sym_df}（sort_index 后）。
+    """
+    from discovery.tools.param_iter import is_target_board
+    syms = lake_df.index.get_level_values("symbol").unique().tolist()
+    amt = lake_df.groupby("symbol")["amount"].apply(
+        lambda s: s.tail(30).mean() if len(s) > 0 else 0.0)
+    tradable = [s for s in syms if is_target_board(s) and amt.get(s, 0.0) >= min_amt]
+    universe = {}
+    for s in tradable:
+        try:
+            universe[s] = lake_df.xs(s, level="symbol").sort_index()
+        except Exception:
+            continue
+    return universe
+
+
+def load_universe_window(start, sel_end, data_end=None, warmup_days=180):
+    """P5 分折 universe：标的池按【sel_end 折末 30 日】流动性重算，数据至 data_end。
+
+    与 load_universe(start) 的关键差异（幸存者偏差防线，spec §6.1）：
+      - **选股/数据双窗口**：流动性 tail(30) 取自 [start-warmup, sel_end]（信息截止 =
+        折末，历史折不用未来流动性选股——load_universe 的 tail(30) 是「今天」口径，
+        会把 2025 之后才活跃的标的选进 2020 折 = 幸存者偏差）；而返回的 df 延伸至
+        data_end（walk-forward 需评估折后 OOS 年——wf smoke 曾抓到「数据止于
+        sel_end → oos 段零信号」的 bug）；
+      - 数据含 start-warmup 预热段（窗口 window≤80 + ATR 余量，颈线形态在折首
+        也能正确成形）；信号日期由调用方 segment 过滤，预热段不产计入信号；
+      - 退市标的：湖内保留挂牌期数据（P0-2 实测 38 只退市/休眠创板科创），折内
+        挂牌且满足流动性则纳入，折后自然消失。
+    """
+    from datetime import timedelta
+    if data_end is None:
+        data_end = sel_end
+    data_start = pd.Timestamp(start) - timedelta(days=warmup_days)
+    try:
+        lake = pd.read_parquet(
+            LAKE_PATH,
+            filters=[("date", ">=", data_start), ("date", "<=", pd.Timestamp(data_end))],
+        )
+    except Exception:
+        lake = pd.read_parquet(LAKE_PATH)   # filters 推送失败 → 全量读再筛（语义不变）
+        lake = lake[(lake.index.get_level_values("date") >= data_start)
+                    & (lake.index.get_level_values("date") <= pd.Timestamp(data_end))]
+    # 选股口径：sel_end 截断（流动性信息截止折末）；数据口径：全窗 df（含 OOS 年）。
+    sel_lake = lake[lake.index.get_level_values("date") <= pd.Timestamp(sel_end)]
+    sel_universe = filter_universe_from_lake(sel_lake)   # 标的集 = 折末流动性合格者
+    universe = {}
+    for s in sel_universe:
+        try:
+            universe[s] = lake.xs(s, level="symbol").sort_index()   # 数据延伸至 data_end
+        except Exception:
+            continue
+    return universe
+

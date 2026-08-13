@@ -139,14 +139,19 @@ def test_digest_includes_discovery_progress(monkeypatch):
 
 
 def test_api_discovery_status(monkeypatch, tmp_path):
-    """GET /research/discovery/status 返回进展 dict。"""
+    """GET /research/discovery/status 返回进展 dict。
+
+    P3（2026-08-13）：端点已迁 presentation/server/api/v1/discovery.py（只读 router，
+    不挂 require_write）——研究进展是只读数据，不应被写权限误伤（spec §4.2）。
+    """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from presentation.server.api.v1 import research as research_api
+    from presentation.server.api.v1 import discovery as discovery_api
+    from research import discovery_bridge
     db = _seed_trial_db(tmp_path)
-    monkeypatch.setattr(research_api.discovery_bridge, "_DISCOVERY_DB", db)
+    monkeypatch.setattr(discovery_bridge, "_DISCOVERY_DB", db)
     app = FastAPI()
-    app.include_router(research_api.router, prefix="/api/v1")
+    app.include_router(discovery_api.router, prefix="/api/v1")
     r = TestClient(app).get("/api/v1/research/discovery/status")
     assert r.status_code == 200
     assert r.json()["n_trials"] == 2

@@ -202,7 +202,11 @@ def _one_param(window=80):
 
 
 def _mock_search_deps(monkeypatch, runner, *, sampled, tpe_params=None, tpe_values=None):
-    """mock run_search 的外部依赖（sample_search/eval_batch/tpe_search/evaluate/freeze/_engine_hash）。"""
+    """mock run_search 的外部依赖（sample_search/eval_batch/tpe_search_batch/EvalPool/_engine_hash）。
+
+    P2（2026-08-13）：TPE seam 从 tpe_search（串行）迁 tpe_search_batch（ask/tell 批量）+
+    worker.EvalPool fake（长驻池语义：eval 返回 (params, _RES) 对齐、close 空操作）。
+    """
     monkeypatch.setattr(runner, "sample_search", lambda **kw: sampled)
     monkeypatch.setattr(runner, "eval_batch", lambda plist, **kw: [(p, _RES) for p in plist])
     monkeypatch.setattr(runner, "_engine_hash", lambda: "eng1")
@@ -212,9 +216,22 @@ def _mock_search_deps(monkeypatch, runner, *, sampled, tpe_params=None, tpe_valu
             def __init__(self, v): self.value = v
         class _FS:
             def __init__(self, vs): self.trials = [_FT(v) for v in vs]; self.best_value = max(vs) if vs else 0.0
-        monkeypatch.setattr(runner, "tpe_search",
-                            lambda sp, obj, n_trials, seed, **kw: (tpe_params, _FS(tpe_values or [])))
-        monkeypatch.setattr(runner, "evaluate", lambda p, u, s: _RES)
+        # fake 长驻池（runner 阶段二 `from discovery.worker import EvalPool` 引用的是
+        # worker 模块名——patch 物理路径 worker.EvalPool）
+        class _FakePool:
+            def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5):
+                pass
+            def eval(self, plist):
+                return [(p, _RES) for p in plist]
+            def close(self):
+                pass
+        import discovery.worker as _worker_mod
+        monkeypatch.setattr(_worker_mod, "EvalPool", _FakePool)
+        # tpe_search_batch 签名 (seed_params, seed_values, eval_fn, n_trials, seed, ...)
+        # → 返回 ([(params, res), ...], fake_study)
+        monkeypatch.setattr(runner, "tpe_search_batch",
+                            lambda sp, sv, ef, n_trials, seed, **kw:
+                            ([(p, _RES) for p in tpe_params], _FS(tpe_values or [])))
         monkeypatch.setattr(runner, "freeze", lambda lake_start="2025-01-01": ({}, _fake_meta()))
 
 
@@ -267,3 +284,41 @@ def test_run_search_dsr_and_frontier_marked(tmp_path, monkeypatch):
     assert 0.0 <= s.dsr_top <= 1.0
     assert s.frontier_size >= 1   # 至少 1 组 trial，自身即前沿
     assert s.rho >= 0.0
+
+
+def test_run_search_tpe_seeds_filter_none_results(tmp_path, monkeypatch):
+    """Critical C1 回归（2026-08-13 外部评审）：results 含 None 时 TPE 阶段不崩。
+
+    旧实现 seed_pairs = results 原样保留 None → `[p for p, _ in seed_pairs]` 解包
+    TypeError → daemon 夜跑整夜失败。本测试注入含 None 的 results（去 mock 双层掩盖：
+    eval_batch 返回 [None, (params, res)]），断言 run_search 正常完成且 n_failed 计数。
+    """
+    from discovery import runner
+    from discovery.store import init_db
+    db = str(tmp_path / "t.db"); init_db(db)
+    p_good = {"window": 80, "min_rr": 2.0}
+    monkeypatch.setattr(runner, "sample_search", lambda **kw: [p_good])
+    # 双层 mock 拆除：eval_batch 真实返回含 None（第一组退化、第二组成交）
+    monkeypatch.setattr(runner, "eval_batch",
+                        lambda plist, **kw: [None, (p_good, {
+                            "inner": {"ann": 0.5, "calmar": 3.5, "max_dd": 0.2, "n": 100},
+                            "outer": {"ann": 1.5, "calmar": 5.0, "max_dd": 0.3, "n": 80},
+                            "n_total": 180})])
+    monkeypatch.setattr(runner, "_engine_hash", lambda: "eng1")
+    # TPE batch 不 mock：走真 tpe_search_batch（evaluate 回调走 fake pool）
+    import discovery.worker as worker_mod
+    class _FakePool:
+        def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5):
+            pass
+        def eval(self, plist):
+            return [(p, {"inner": {"ann": 0.4, "calmar": 2.0, "max_dd": 0.3, "n": 50},
+                         "outer": {"ann": 0.0, "calmar": 0.0, "max_dd": 0.0, "n": 0},
+                         "n_total": 50}) for p in plist]
+        def close(self):
+            pass
+    monkeypatch.setattr(worker_mod, "EvalPool", _FakePool)
+    s = runner.run_search(_fake_meta(), _fake_split(), budget=2, n_sobol=2, n_random=0,
+                          seed=1, db_path=db, tpe_trials=2)
+    assert s.n_failed == 1          # 退化组计数
+    assert s.n_new_trials == 3      # 1 组成交 search + 2 组 TPE
+    assert s.top_inner_calmar == 3.5

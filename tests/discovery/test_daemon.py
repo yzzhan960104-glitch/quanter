@@ -267,3 +267,17 @@ def test_daemon_calls_auto_publish_with_champion_and_outer(tmp_path):
                            eval_outer_fn=lambda tid: {"ann": 0.12})
     assert calls == {"trial_id": "t1", "outer": {"ann": 0.12}}
     assert out["auto_published_experiment"] == "exp_auto"
+
+
+def test_integrity_gate_fail_closed():
+    """P5-I2 回归（2026-08-13 外部评审）：漏采>0 与扫描失败（None）都拒跑，0 放行。
+
+    fail-open 治理项（评审三、3）：降级方向必须保守——缺信息时收紧而非放开。
+    """
+    from discovery.daemon import integrity_gate
+    ok, reason = integrity_gate(0)
+    assert ok and "PASS" in reason
+    ok2, reason2 = integrity_gate(3)
+    assert not ok2 and "3" in reason2
+    ok3, reason3 = integrity_gate(None)
+    assert not ok3 and "fail-closed" in reason3
