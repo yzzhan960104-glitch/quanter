@@ -92,6 +92,6 @@ def params():
             "tp1_h_mult <= tp_h_mult（止盈1 不得比止盈2 远）",
             "cancel_thresh_mult >= tp1_h_mult 或 None=放飞（撤单不得比止盈1 早）",
             "trailing_grace=0 时 trailing_step/floor 互锁归零（trailing 不激活）",
-            "min_rr 为死参数（结构恒 2.0，normalize 强制，调它无意义）",
+            "min_rr 为活参数（R3 实际口径盈亏比；P4 起按候选档正常搜索）",
         ],
     }

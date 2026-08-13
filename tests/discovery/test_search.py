@@ -161,3 +161,34 @@ def test_tpe_search_batch_failed_eval_marks_failed():
     assert all(res is None for _, res in new_pairs)
     failed = [t for t in study.trials if t.state.name == "FAIL"]
     assert len(failed) == 4
+
+
+def test_tpe_search_batch_normalizes_suggestions():
+    """P4（2026-08-13）：TPE 建议过 normalize+is_feasible——评估函数收到的 params
+    必满足耦合约束（trailing 互锁：grace=0 时 step/floor 归零；tp1≤tp_h 可行）。
+
+    用含耦合的 param_space：TPE 可能建议 grace=0 而 step≠0（categorical 独立采样）
+    ——断言 evaluate_batch_fn 收到的每组 params 已 normalize（且组数 = n_trials）。
+    """
+    from discovery.search import tpe_search_batch
+    space = [("trailing_grace", [0, 5]),
+             ("trailing_step", [0.05, 0.15]),
+             ("trailing_floor", [0.0, 0.5]),
+             ("tp1_h_mult", [0.5, 1.5]),
+             ("tp_h_mult", [1.5, 2.0])]
+    received = []
+
+    def _eval(plist):
+        received.extend(plist)
+        return [{"inner": {"calmar": 1.0}} for _ in plist]
+
+    new_pairs, _ = tpe_search_batch([{"trailing_grace": 5, "trailing_step": 0.1,
+                                      "trailing_floor": 0.5, "tp1_h_mult": 0.5,
+                                      "tp_h_mult": 2.0}],
+                                    [1.0], _eval, n_trials=16, seed=5,
+                                    param_space=space, batch_size=8)
+    assert len(new_pairs) == 16
+    for p in received:
+        if p["trailing_grace"] == 0:
+            assert p["trailing_step"] == 0.0 and p["trailing_floor"] == 0.0
+        assert p["tp1_h_mult"] <= p["tp_h_mult"]

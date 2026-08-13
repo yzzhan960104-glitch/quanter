@@ -117,6 +117,11 @@ def tpe_search_batch(seed_params, seed_values, evaluate_batch_fn,
 
     new_pairs = []
     remaining = n_trials
+    # P4（2026-08-13）：TPE 建议须过 normalize + is_feasible（与 Sobol 采样同口径）——
+    # P3 敏感性发现旧版 TPE 绕过 normalize（min_rr 死参强制只作用于 Sobol，TPE 自由
+    # 1.0/1.5/2.0 → 搜索空间与评估空间不一致）。normalize 处理 trailing 互锁，is_feasible
+    # 裁 tp1≤tp_h/cancel≥tp1 耦合；不可行建议 tell FAIL 后重抽（保预算不浪费在废组合）。
+    from discovery.constraints import normalize_params, is_feasible
     while remaining > 0:
         k = min(batch_size, remaining)
         # ask 批量：并行模式官方用法。ask() 返回的 trial 须显式调 suggest_categorical
@@ -125,10 +130,24 @@ def tpe_search_batch(seed_params, seed_values, evaluate_batch_fn,
         trials = []
         plist = []
         for _ in range(k):
-            tr = study.ask()
-            params = {key: tr.suggest_categorical(key, cands) for key, cands in param_space}
+            tr = None
+            for _attempt in range(5):   # 重抽上限：可行性低的建议 tell FAIL 后重抽
+                tr = study.ask()
+                p = {key: tr.suggest_categorical(key, cands) for key, cands in param_space}
+                p = normalize_params(p)
+                if is_feasible(p):
+                    break
+                study.tell(tr, state=optuna.trial.TrialState.FAIL)
+                tr = None
+            if tr is None:
+                # 5 次全不可行（极端约束，正常不会发生）：接受最后一次 normalize 后的
+                # 组合直接评估（废组合评估代价低于死循环；worker 侧耦合6 n_total==0
+                # 兜底返 None 不落库）——勿复用已 tell FAIL 的 trial（optuna 会拒双 tell）
+                tr = study.ask()
+                p = {key: tr.suggest_categorical(key, cands) for key, cands in param_space}
+                p = normalize_params(p)
             trials.append(tr)
-            plist.append(params)
+            plist.append(p)
         results = evaluate_batch_fn(plist)
         for i, tr in enumerate(trials):
             res = results[i] if i < len(results) else None

@@ -73,7 +73,7 @@ def test_sample_search_all_feasible():
     assert len(batch) >= 10       # 至少裁剪后有若干合法
     for p in batch:
         assert is_feasible(p) is True
-        assert p["min_rr"] == 2.0              # normalize 过
+        assert p["min_rr"] in (1.0, 1.5, 2.0)   # P4：min_rr 活参数
         # trailing 一致性：grace=0 时 step/floor 必为 0
         if p["trailing_grace"] == 0:
             assert p["trailing_step"] == 0.0
