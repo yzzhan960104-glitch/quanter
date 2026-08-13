@@ -24,17 +24,19 @@ logger = logging.getLogger(__name__)
 def estimate_budget(budget_hours, n_proc=None):
     """时间预算（小时）→ 组数上限（算力账，spec §3.6）。
 
-    ~720s/组 × ProcessPool(n_proc) 并发。T7 slow E2E 实测：颈线法单组成本 ~12min
-    （1334 标的 freeze + evaluate），原 180s 偏乐观 4 倍（已用 T7 真值标定）。
-    偏高→次夜 trial_id 去重断点续跑接续（不无限跑）。n_proc 默认 CPU-2，保底线留给
-    schtasks/日志/OS，避免 daemon 把机器吃满影响其他任务（spec §8 拷问②资源边界）。
+    per_group_seconds × ProcessPool(n_proc) 并发。P2（2026-08-13）常数订正：
+    720s 是 P1 向量化前的旧锚（1334 标的时代，T7 实测）——P1 后同尺度实测 35.5s/组
+    （diag/p1_1_speed.py 段3，1190 标的），取 40s 留余量。若沿用 720s，夜预算会把
+    实际 12min 就跑完的量当成 4h 上限，白白放弃 ~20x 吞吐。偏高→次夜 trial_id 去重
+    断点续跑接续（不无限跑）。n_proc 默认与 worker._default_n_proc 同源，保底线留给
+    日志/OS，避免 daemon 把机器吃满影响其他任务（spec §8 拷问②资源边界）。
     """
-    # 2026-08-03：默认进程数与 worker._default_n_proc 同源（cap 4 + env 覆盖），
+    # 2026-08-03：默认进程数与 worker._default_n_proc 同源（cap + env 覆盖），
     # 避免此处再写一份 cpu-2 导致两处默认值漂移（daemon 实测 12 worker 全量
-    # 加载数据湖撑爆内存的根因之一）。
+    # 加载数据湖撑爆内存的根因之一）。P2 后该默认已是 cap 16 + 内存公式自动降并发。
     from discovery.worker import _default_n_proc
     n_proc = n_proc or _default_n_proc()
-    per_group_seconds = 720   # T7 slow E2E 实测单组~12min（原 180 偏乐观 4 倍）
+    per_group_seconds = 40   # P1 实测 35.5s/组（diag/p1_1_speed.py 段3），40 留余量
     return max(1, int(budget_hours * 3600 / per_group_seconds) * n_proc)
 
 

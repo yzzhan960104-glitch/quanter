@@ -202,7 +202,11 @@ def _one_param(window=80):
 
 
 def _mock_search_deps(monkeypatch, runner, *, sampled, tpe_params=None, tpe_values=None):
-    """mock run_search 的外部依赖（sample_search/eval_batch/tpe_search/evaluate/freeze/_engine_hash）。"""
+    """mock run_search 的外部依赖（sample_search/eval_batch/tpe_search_batch/EvalPool/_engine_hash）。
+
+    P2（2026-08-13）：TPE seam 从 tpe_search（串行）迁 tpe_search_batch（ask/tell 批量）+
+    worker.EvalPool fake（长驻池语义：eval 返回 (params, _RES) 对齐、close 空操作）。
+    """
     monkeypatch.setattr(runner, "sample_search", lambda **kw: sampled)
     monkeypatch.setattr(runner, "eval_batch", lambda plist, **kw: [(p, _RES) for p in plist])
     monkeypatch.setattr(runner, "_engine_hash", lambda: "eng1")
@@ -212,9 +216,22 @@ def _mock_search_deps(monkeypatch, runner, *, sampled, tpe_params=None, tpe_valu
             def __init__(self, v): self.value = v
         class _FS:
             def __init__(self, vs): self.trials = [_FT(v) for v in vs]; self.best_value = max(vs) if vs else 0.0
-        monkeypatch.setattr(runner, "tpe_search",
-                            lambda sp, obj, n_trials, seed, **kw: (tpe_params, _FS(tpe_values or [])))
-        monkeypatch.setattr(runner, "evaluate", lambda p, u, s: _RES)
+        # fake 长驻池（runner 阶段二 `from discovery.worker import EvalPool` 引用的是
+        # worker 模块名——patch 物理路径 worker.EvalPool）
+        class _FakePool:
+            def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5):
+                pass
+            def eval(self, plist):
+                return [(p, _RES) for p in plist]
+            def close(self):
+                pass
+        import discovery.worker as _worker_mod
+        monkeypatch.setattr(_worker_mod, "EvalPool", _FakePool)
+        # tpe_search_batch 签名 (seed_params, seed_values, eval_fn, n_trials, seed, ...)
+        # → 返回 ([(params, res), ...], fake_study)
+        monkeypatch.setattr(runner, "tpe_search_batch",
+                            lambda sp, sv, ef, n_trials, seed, **kw:
+                            ([(p, _RES) for p in tpe_params], _FS(tpe_values or [])))
         monkeypatch.setattr(runner, "freeze", lambda lake_start="2025-01-01": ({}, _fake_meta()))
 
 

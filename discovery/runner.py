@@ -21,12 +21,12 @@ from discovery.store import (init_db, connect, write_trial, write_snapshot,
                              write_search_run, _now_iso)
 from discovery.snapshot import SnapshotMeta, freeze
 from discovery.split import HoldoutSplit
-from discovery.objective import evaluate, evaluate_replay
+from discovery.objective import evaluate_replay
 from discovery.judging import feasibility_gate
 from discovery.coverage import grid_coverage, coverage_gate
 from discovery.pareto import pareto_frontier
 from discovery.dsr import deflated_sharpe
-from discovery.search import tpe_search, expected_improvement
+from discovery.search import tpe_search_batch, expected_improvement
 
 
 def _engine_hash():
@@ -71,11 +71,6 @@ class RunSummary:
     top_replay_metrics: dict = field(default_factory=dict)  # P1-2（2026-08-03）：冠军
                                 # 的 replay 口径复评（backtest.replay 引擎，主回测同源）。
                                 # 搜索排序仍用 kelly/calmar，此字段供报告/告警对拍两口径。
-
-
-def _params_key(params):
-    """params dict → 可 hash 键（TPE _res_cache 用，避免双 evaluate）。"""
-    return tuple(sorted((k, str(v)) for k, v in params.items()))
 
 
 def _persist_trial(conn, params, snapshot_meta, split_tag, engine_hash, result, source, seed):
@@ -155,26 +150,39 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
             n_new += 1
             all_evaluated.append(params)
 
-    # === 阶段二：TPE 序贯精化（tpe_trials>0，主进程串行 evaluate） ===
+    # === 阶段二：TPE 批量并行精化（P2 · spec §3：optuna ask/tell 批量替代主进程串行 evaluate） ===
+    # 物理意图：旧版 TPE 主进程串行 evaluate（每采一组跑 ~35s，16 组 ≈ 9min）且 seed 经
+    # objective 重估（浪费一轮）。P2 改 tpe_search_batch：ask K → EvalPool 并行评估 →
+    # 统一 tell，seed 用阶段一新鲜 (params, res) 直接 tell 已知 calmar（不重估）。
+    # EvalPool 长驻整个 TPE 阶段（每 worker freeze 一次，避免每轮重 spawn+重 freeze）。
     tpe_study = None
     if tpe_trials > 0:
-        universe, _ = freeze(lake_start=lake_start)   # 主进程 freeze（TPE 串行 evaluate 用）
-        _res_cache = {}                                # params→res，避免落库时双 evaluate
-        def _obj(p):
-            res = evaluate(p, universe, split)
-            _res_cache[_params_key(p)] = res
-            return res["inner"].get("calmar", 0.0)
-        all_params, tpe_study = tpe_search(sampled, _obj, n_trials=tpe_trials, seed=seed)
-        # 落库 TPE 新 trial（sampled 之后的是 TPE 新采；缓存命中避免双跑）
-        with connect(db_path) as conn:
-            for p in all_params[len(sampled):]:
-                res = _res_cache.get(_params_key(p)) or evaluate(p, universe, split)
-                tid = _persist_trial(conn, p, snapshot_meta, split_tag,
-                                     engine_hash, res, "tpe", seed)
-                if tid is None:
-                    continue
-                n_new += 1
-                all_evaluated.append(p)
+        from discovery.worker import EvalPool
+        pool = EvalPool(n_proc=n_proc, lake_start=lake_start,
+                        embargo_days=split.embargo_days)
+        try:
+            # seed = 阶段一新鲜评估的 (params, res) 对（results 已滤 None；dup 跳过组不在
+            # 其中，不重估——TPE warm start 用已知 inner calmar 直接 tell）
+            seed_pairs = results
+            new_pairs, tpe_study = tpe_search_batch(
+                [p for p, _ in seed_pairs],
+                [r["inner"].get("calmar", 0.0) for _, r in seed_pairs],
+                pool.eval,
+                n_trials=tpe_trials, seed=seed)
+            # 落库 TPE 新 trial（失败组 res=None 计 n_failed 不落库）
+            with connect(db_path) as conn:
+                for p, res in new_pairs:
+                    if res is None:
+                        n_failed += 1
+                        continue
+                    tid = _persist_trial(conn, p, snapshot_meta, split_tag,
+                                         engine_hash, res, "tpe", seed)
+                    if tid is None:
+                        continue
+                    n_new += 1
+                    all_evaluated.append(p)
+        finally:
+            pool.close()
 
     # === 收敛判据 + 覆盖度 + EI ===
     rho = grid_coverage(all_evaluated)
