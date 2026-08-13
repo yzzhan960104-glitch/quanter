@@ -1,6 +1,6 @@
 # 全栈护栏 CI（fast gate）。
 #
-# 物理意图：push/PR 时自动跑与本地同源的 scripts/run_checks.py——「本地过了 CI 也过」，
+# 物理意图：push/PR 时自动跑与本地同源的 ops/run_checks.py——「本地过了 CI 也过」，
 # 杜绝护栏只靠人脑记得手跑。4 项 gate：端口一致性 / 前后端契约 / 后端单测 / 前端类型检查。
 #
 # 边界（诚实）：E2E（Playwright，慢 + 需起前后端服务编排）不入首版 CI，本地按
@@ -40,7 +40,9 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          # Why presentation/web/：2026-07-25 前端目录由 web/ 迁至 presentation/web/（commit 2c49ee57），
+          # 旧路径 web/package-lock.json 在仓库已不存在，setup-node 的 cache 探测会直接失败。此为 N1 双错之一。
+          cache-dependency-path: presentation/web/package-lock.json
 
       - name: 装后端依赖（requirements.txt）
         run: |
@@ -48,7 +50,18 @@ jobs:
           pip install -r requirements.txt
 
       - name: 装前端依赖（npm ci，按 lock 精确安装）
-        run: npm ci --prefix web
+        # Why presentation/web：前端目录 2026-07-25 迁移后旧前缀 web/ 已不存在（N1 双错之一），
+        # npm ci 找不到 package.json 会立即失败，CI 在 gate 跑起来之前就断链。
+        run: npm ci --prefix presentation/web
 
-      - name: 全栈护栏（与本地 python scripts/run_checks.py 同源）
-        run: python scripts/run_checks.py
+      - name: 自检·run_checks 路径未漂移
+        # Why：2026-07-25 scripts/→ops/ 迁移后 ci.yml 曾长期指向 scripts/run_checks.py（已删），
+        # 导致 CI 静默断链（python 找不到脚本直接 exit 1）。此自检把「路径漂移」从静默失败升级为
+        # 显式中文报错——scripts/ 残留或 ops/ 缺失都立刻阻断 CI，防止再次出现「CI 绿但实际没跑」。
+        # 物理意图：用 test -f / test ! -f 两条 POSIX 原语做断言，无新依赖、跨 runner 通用。
+        run: |
+          test ! -f scripts/run_checks.py || { echo "ci.yml 应指向 ops/run_checks.py，scripts/ 仍残留"; exit 1; }
+          test -f ops/run_checks.py || { echo "ops/run_checks.py 不存在"; exit 1; }
+
+      - name: 全栈护栏（与本地 python ops/run_checks.py 同源）
+        run: python ops/run_checks.py
