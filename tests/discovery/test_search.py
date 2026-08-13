@@ -192,3 +192,35 @@ def test_tpe_search_batch_normalizes_suggestions():
         if p["trailing_grace"] == 0:
             assert p["trailing_step"] == 0.0 and p["trailing_floor"] == 0.0
         assert p["tp1_h_mult"] <= p["tp_h_mult"]
+
+
+def test_tpe_search_batch_warm_start_params_populated():
+    """Critical C2 回归（2026-08-13 外部评审）：warm-start trial 必须 params 非空且与 seed 对齐。
+
+    旧实现 enqueue+ask 后不调 suggest_categorical → trial.params={}（optuna 4.9.0 实测）
+    → TPE 后验无 warm-start 数据，Sobol 先验全丢。本测试断言 study.trials[:n_seed]
+    的 params 与 seed 逐位对齐（snap 后口径），证明 warm-start 真生效。
+    """
+    from discovery.search import tpe_search_batch
+    from discovery.sampler import PARAM_SPACE
+    seeds = [
+        {"window": 80, "min_rr": 2.0, "min_touches": 2, "min_suppression": 0.6,
+         "local_extrema_window": 3, "min_bottoms": 2, "breakout_vol_mult": 1.5,
+         "max_h_atr": 4.0, "stop_atr_mult": 1.0, "tp_h_mult": 2.5, "decay_tau": None,
+         "max_holding": 15, "max_wait": 5, "cooldown": 5, "buy_limit_atr_mult": 1.0,
+         "tp1_h_mult": 1.0, "tp1_portion": 0.5, "cancel_thresh_mult": 1.0,
+         "trailing_grace": 0, "trailing_step": 0.0, "trailing_floor": 0.0},
+    ]
+
+    def _eval(plist):
+        return [{"inner": {"calmar": 1.0}} for _ in plist]
+
+    _new, study = tpe_search_batch(seeds, [2.0], _eval, n_trials=4, seed=11,
+                                   param_space=PARAM_SPACE, batch_size=4)
+    seed_trials = study.trials[:len(seeds)]
+    assert all(len(t.params) == len(PARAM_SPACE) for t in seed_trials), (
+        f"warm-start trial params 应为 21 维全量，实际 {[len(t.params) for t in seed_trials]}")
+    assert all(t.state.name == "COMPLETE" for t in seed_trials)
+    # params 与 seed 对齐（window/tp_h_mult 逐位；snap 只在越界时改动）
+    assert seed_trials[0].params["window"] == 80
+    assert seed_trials[0].params["tp_h_mult"] == 2.5

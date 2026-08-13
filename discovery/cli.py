@@ -35,18 +35,20 @@ def _db_path():
 
 
 def _engine_hash():
-    """回测内核代码 hash（backtest.py+method_v0.py 内容 sha256[:12]）。
+    """回测内核代码 hash（**ENGINE_FILES 8 文件** 内容 sha256[:12]，与 runner 同源）。
 
     物理意图：内核改了老 trial 的指标就 stale 了——engine_hash 作内核指纹，与
-    snapshot_hash 双指纹共同标识"可复现试验"。内核（scan_symbol/risk_metrics）一动，
-    engine_hash 变，老 trial 自然与新跑不可比（spec §3.2 engine_hash）。
+    snapshot_hash 双指纹共同标识"可复现试验"（spec §3.2 engine_hash）。
+
+    2026-08-13 外部评审（engine_hash 三份实现不一致）：旧实现只 hash backtest+
+    method_v0 两文件，是 P1-3（2026-08-02 扩到 8 文件）漏改的陈旧口径——cmd_oos 用
+    本函数写 trial.engine_hash，与 runner 版（ENGINE_FILES 8 文件）必然不等，跨机
+    漂移校验误报 + 内核改动（如 objective.py）不触发 stale。收口：直接委托
+    discovery.runner._engine_hash（单源，test_engine_hash_matches_discovery_runner
+    守护 runner↔compute_unit.hashes 一致）。
     """
-    from strategies.neckline import backtest, method_v0
-    h = hashlib.sha256()
-    for f in (backtest.__file__, method_v0.__file__):
-        with open(f, "rb") as fh:
-            h.update(fh.read())
-    return h.hexdigest()[:12]
+    from discovery.runner import _engine_hash as _runner_engine_hash
+    return _runner_engine_hash()
 
 
 def cmd_oos(args):
@@ -211,7 +213,20 @@ def cmd_daemon(args):
     # 先装钉钉通道（读 .env）——必须在 run_daemon 调用前完成，否则告警静默丢失
     from infra.notifier import build_default_manager
     build_default_manager()
-    from discovery.daemon import run_daemon, estimate_budget
+    from discovery.daemon import run_daemon, estimate_budget, integrity_gate
+    # P5-I2 fail-closed：精确完整性闸（scan_integrity 带停牌区间判定，全市场 ~1.2s）——
+    # 漏采段 > 0 或扫描失败 → 拒跑（宁可空夜不可在残缺数据上毒跑搜索，300214.SZ 教训）
+    try:
+        from data.tools.scan_integrity import scan as _scan_integrity
+        _report = _scan_integrity(lake_dir="data_lake")
+        _ok, _reason = integrity_gate(_report.get("unjustified_gaps"))
+    except Exception as _exc:
+        _ok, _reason = integrity_gate(None)
+        print(f"[daemon] 完整性扫描异常：{_exc!r}", file=sys.stderr)
+    if not _ok:
+        print(f"[daemon][BLOCK] {_reason}", file=sys.stderr, flush=True)
+        sys.exit(3)
+    print(f"[daemon] {_reason}")
     universe, meta = freeze(args.lake_start)
     split = holdout_split(args.embargo)
     print(f"=== discovery daemon：跨夜守护（snapshot={meta.snapshot_hash}）===")

@@ -386,14 +386,18 @@ def test_detect_signal_fast_equals_detect_signal_sweep():
                   "decay_tau": rng.choice([None, 30]),
                   "local_extrema_window": int(rng.choice([3, 5]))}
         arr, atr_arr, tops_mask, lows_mask, decay = _fast_ctx(df, id_cfg)
-        pos = n - 1
-        date = df.index[pos]
-        df_T = df.iloc[:pos + 1]
-        base = detect_signal("TEST", df_T, id_cfg, dict(EXEC_DEFAULTS), date)
-        fast = detect_signal_fast("TEST", arr, pos, id_cfg, dict(EXEC_DEFAULTS), date, atr_arr,
-                                  tops_mask=tops_mask, lows_mask=lows_mask,
-                                  decay_weights=decay)
-        assert fast == base, (
+        # 多 pos 扫场（2026-08-13 外部评审 P1-I2 补实）：滚动扫描中每个 i 都是一次
+        # 边界裁剪——只测末窗口会让中间窗口的掩码裁剪语义裸奔
+        for pos in sorted({n - 1, n - 7, window + 7}):
+            if pos < window or pos >= n:
+                continue
+            date = df.index[pos]
+            df_T = df.iloc[:pos + 1]
+            base = detect_signal("TEST", df_T, id_cfg, dict(EXEC_DEFAULTS), date)
+            fast = detect_signal_fast("TEST", arr, pos, id_cfg, dict(EXEC_DEFAULTS), date,
+                                      atr_arr, tops_mask=tops_mask, lows_mask=lows_mask,
+                                      decay_weights=decay)
+            assert fast == base, (
             f"trial={trial} window={window} w_ext={id_cfg['local_extrema_window']} "
             f"tau={id_cfg['decay_tau']}\nbase={base}\nfast={fast}")
 

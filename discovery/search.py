@@ -109,10 +109,17 @@ def tpe_search_batch(seed_params, seed_values, evaluate_batch_fn,
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
-    # warm start：enqueue + ask 取固定 trial → tell 已知值（不重估）
+    # warm start：enqueue + ask 取固定 trial → tell 已知值（不重估）。
+    # Critical C2（2026-08-13 外部评审 + optuna 4.9.0 实测铁证）：ask/tell 模式下
+    # enqueue 只入队，trial.params 必须由 suggest_* 填充——跳过则 trial 是空壳
+    # COMPLETE（params={} dists=[]），TPE 拟合 l(x)/g(x) 时无 warm-start 数据，
+    # Sobol 先验全丢、TPE 退化为随机（n_startup_trials 默认 10 轮冷启）。串行版
+    # study.optimize 的 obj(trial) 内 suggest 自动填充，批量版必须显式补。
     for p, v in zip(seed_params, seed_values):
         study.enqueue_trial(_snap_to_candidates(p, param_space))
         t = study.ask()
+        for key, cands in param_space:          # 填充 params（enqueue 值经 snap 后回吐）
+            t.suggest_categorical(key, cands)
         study.tell(t, float(v))
 
     new_pairs = []

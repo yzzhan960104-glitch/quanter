@@ -40,6 +40,23 @@ def estimate_budget(budget_hours, n_proc=None):
     return max(1, int(budget_hours * 3600 / per_group_seconds) * n_proc)
 
 
+def integrity_gate(unjustified_gaps):
+    """P5-I2 fail-closed 完整性闸（2026-08-13 外部评审）：漏采段 > 0 时拒跑。
+
+    物理意图：freeze 的 n_stale 只是离线代理（print WARN 后仍放行）；精确判定用
+    data.tools.scan_integrity（带停牌区间 ground-truth，全市场 ~1.2s）。300214.SZ
+    教训：残缺数据产出误导性冠军——降级方向必须保守（缺信息时收紧而非放开，评审
+    fail-open 治理项）。扫描本身异常也拒跑（无信息 = 不放行，宁可空夜不可毒跑）。
+    返回 (ok, reason)。
+    """
+    if unjustified_gaps is None:
+        return False, "完整性扫描失败（无判定信息）——fail-closed 拒跑，排查 scan_integrity"
+    if unjustified_gaps > 0:
+        return False, (f"data 完整性扫描发现 {unjustified_gaps} 段漏采——拒跑"
+                       "（repair_gaps 补采后重试）")
+    return True, "完整性 PASS"
+
+
 def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=None,
                      lake_start="2025-01-01", tpe_trials=0, rho_threshold=0.8, K=3,
                      run_search_fn=None, notify_fn=None, eval_outer_fn=None,

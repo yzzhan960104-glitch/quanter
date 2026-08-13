@@ -25,8 +25,14 @@ from discovery.objective import evaluate_replay
 from discovery.judging import feasibility_gate
 from discovery.coverage import grid_coverage, coverage_gate
 from discovery.pareto import pareto_frontier
-from discovery.dsr import deflated_sharpe
+from discovery.dsr import deflated_sharpe, dsr_gated_ranking
 from discovery.search import tpe_search_batch, expected_improvement
+
+
+# DSR 门槛共因子阈值（spec §6.2 · P5-I1）：deflated_sharpe ∈ [0,1] 概率口径，
+# 0.8 = 多重比较校正后仍有 ≥80% 置信度非零真实夏普。门控空集时回退纯 calmar
+#（见 run_search 排序段），排序恒非空（spec「先验证不空集」）。
+DSR_GATE_MIN = 0.8
 
 
 def _engine_hash():
@@ -67,6 +73,8 @@ class RunSummary:
     ei: float = 0.0                # 预期提升代理（判据②）
     frontier_size: int = 0         # Pareto 前沿大小
     dsr_top: float = 0.0           # top-1 DSR（L2 统计裁决）
+    dsr_gate_fell_back: bool = False   # P5（spec §6.2）：DSR 门控排序回退纯 calmar 标记
+                                       #（门控空集=早期搜索 trial 少 DSR 天然低，诚实报告）
     run_id: str = ""               # Plan 4：本次 run 的 search_run 行 id（daemon 跨夜状态键）
     top_replay_metrics: dict = field(default_factory=dict)  # P1-2（2026-08-03）：冠军
                                 # 的 replay 口径复评（backtest.replay 引擎，主回测同源）。
@@ -161,9 +169,11 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         pool = EvalPool(n_proc=n_proc, lake_start=lake_start,
                         embargo_days=split.embargo_days)
         try:
-            # seed = 阶段一新鲜评估的 (params, res) 对（results 已滤 None；dup 跳过组不在
-            # 其中，不重估——TPE warm start 用已知 inner calmar 直接 tell）
-            seed_pairs = results
+            # seed = 阶段一新鲜评估的 (params, res) 对——**必须滤 None**（Critical C1：
+            # eval_batch 对退化组（n_total==0/异常）返 None，落库循环只跳过不删除；
+            # 原样传给列表推导解包 `for p, _ in seed_pairs` 会 TypeError → daemon 夜跑
+            # 崩溃（外部评审实测确认）。dup 跳过组不在 results，不重估。
+            seed_pairs = [it for it in results if it is not None]
             # 契约适配：EvalPool.eval 返回 [(params, res)|None]（与 eval_batch 同构），
             # tpe_search_batch 的 evaluate_batch_fn 契约是 [res|None]——此处解包剥离 params
             #（P2 smoke 曾在此抓到 tuple 直传的契约错位）。
@@ -211,16 +221,25 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         except (TypeError, ValueError):
             continue
     frontier_idxs = pareto_frontier([m for m, _ in inner_metrics]) if inner_metrics else []
-    candidates = [(m.get("calmar", 0.0), t) for m, t in inner_metrics if feasibility_gate(m)]
+    # P5（spec §6.2 · 2026-08-13 外部评审 P5-I1）：DSR 从「标注」升级为「门槛共因子」
+    # ——calmar 排序 + DSR≥dsr_min 门控（多重比较校正不达标候选剔除，防多试误报
+    # 冠军）；门控空集回退纯 calmar 并置 dsr_gate_fell_back=True（早期搜索 trial 少
+    # DSR 天然低，不惩罚——ADR13 诚实报告，spec §6.2「先验证不空集」由 fallback 语义
+    # 保证：排序恒非空）。
+    dsr_gate_fell_back = False
+    dsr_cands = []
+    for m, t in inner_metrics:
+        if not feasibility_gate(m):
+            continue
+        d = deflated_sharpe(m.get("sharpe", 0.0),
+                            n_trials=len(trials_db), n_obs=m.get("n", 30))
+        dsr_cands.append((m.get("calmar", 0.0), d, t))
     top_calmar, top_tid, dsr_top = 0.0, "", 0.0
-    if candidates:
-        candidates.sort(reverse=True, key=lambda x: x[0])
-        top_calmar, top_t = candidates[0]
+    if dsr_cands:
+        gated, dsr_gate_fell_back = dsr_gated_ranking(
+            dsr_cands, dsr_min=DSR_GATE_MIN, fallback_to_calmar=True)
+        top_calmar, dsr_top, top_t = gated[0]
         top_tid = top_t["trial_id"]
-        top_m = json.loads(top_t["inner_metrics"]) if top_t["inner_metrics"] else {}
-        # DSR top-1：n_trials=本 snapshot trial 数（多重比较），n_obs=top 的交易笔数
-        dsr_top = deflated_sharpe(top_m.get("sharpe", 0.0),
-                                  n_trials=len(trials_db), n_obs=top_m.get("n", 30))
 
     # === P1-2：冠军 replay 口径复评（可选，daemon 生产默认开） ===
     # 物理意图：搜索排序用 kelly/calmar（risk_metrics 近似），与主回测/实盘
@@ -265,4 +284,5 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         status=status, convergence_reason=reason,
         rho=rho, ei=ei, frontier_size=len(frontier_idxs), dsr_top=dsr_top,
         run_id=run_id, top_replay_metrics=top_replay_metrics,
+        dsr_gate_fell_back=dsr_gate_fell_back,
     )

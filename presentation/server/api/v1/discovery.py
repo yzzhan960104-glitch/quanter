@@ -13,9 +13,12 @@ discovery 包零 presentation 依赖不变）。
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 from fastapi import APIRouter
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/research/discovery", tags=["参数发现分析"])
 
@@ -41,6 +44,10 @@ def _read_trials(db_path=None):
             (snap["snapshot_hash"],)).fetchall()
         return [dict(r) for r in rows]
     except Exception:
+        # P3-I1（2026-08-13 外部评审）：降级必须有可观测——裸 except 静默吞异常会让
+        # DB schema 错位/锁/IO 错被当成「空语料」，运维无告警。对照 discovery_bridge
+        # 同款降级有 logger.warning。
+        logger.warning("读 discovery trial 失败（降级空语料）：%s", db, exc_info=True)
         return []
 
 

@@ -82,6 +82,29 @@ def test_empty_db_degrades(tmp_path):
     assert out["ranking"] == []
 
 
+def test_readonly_router_accessible_without_token(tmp_path):
+    """P3-I2 回归（2026-08-13 外部评审）：只读挂载红线自动化——TestClient 全栈起
+    FastAPI 挂 discovery_router（**不挂** require_write），无 token GET 必须 200。
+
+    旧测试函数直调绕过依赖注入，「不挂 require_write」仅靠 main.py 注释人工守护。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    _mk_db(tmp_path, [("{}", 1.0)])
+    import presentation.server.api.v1.discovery as mod
+    old = mod._DISCOVERY_DB
+    mod._DISCOVERY_DB = str(tmp_path / "d.db")
+    try:
+        app = FastAPI()
+        app.include_router(mod.router, prefix="/api/v1")   # 无 dependencies=[...] 参数
+        client = TestClient(app)
+        r = client.get("/api/v1/research/discovery/sensitivity")
+        assert r.status_code == 200
+        assert r.json()["n_trials"] == 1
+    finally:
+        mod._DISCOVERY_DB = old
+
+
 def _call(fn, db):
     """以 tmp DB 调用端点函数（monkeypatch 模块 DB 路径）。"""
     import presentation.server.api.v1.discovery as mod
