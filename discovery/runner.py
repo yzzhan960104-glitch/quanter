@@ -164,10 +164,15 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
             # seed = 阶段一新鲜评估的 (params, res) 对（results 已滤 None；dup 跳过组不在
             # 其中，不重估——TPE warm start 用已知 inner calmar 直接 tell）
             seed_pairs = results
+            # 契约适配：EvalPool.eval 返回 [(params, res)|None]（与 eval_batch 同构），
+            # tpe_search_batch 的 evaluate_batch_fn 契约是 [res|None]——此处解包剥离 params
+            #（P2 smoke 曾在此抓到 tuple 直传的契约错位）。
+            def _eval_results(plist):
+                return [item[1] if item is not None else None for item in pool.eval(plist)]
             new_pairs, tpe_study = tpe_search_batch(
                 [p for p, _ in seed_pairs],
                 [r["inner"].get("calmar", 0.0) for _, r in seed_pairs],
-                pool.eval,
+                _eval_results,
                 n_trials=tpe_trials, seed=seed)
             # 落库 TPE 新 trial（失败组 res=None 计 n_failed 不落库）
             with connect(db_path) as conn:
