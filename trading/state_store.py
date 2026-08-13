@@ -95,6 +95,115 @@ def _has_column(con, table: str, column: str) -> bool:
     return column in cols
 
 
+# ============================================================================
+# G5：schema 迁移备份式重建（导出 → DROP → CREATE → 回灌，治「连错库即清零」）
+# ============================================================================
+# 物理意图（2026-08-13 g-wave-p0-guards · Task G5 · spec 2026-08-13-audit-remediation-design:174）：
+#   原 init_store 的旧表迁移用 ``DROP TABLE`` 直接重建——SQLite 改 PK/类型/NOT NULL 约束
+#   确需重建，但 DROP 无条件丢数据。spec §7.1 docstring 标注「live-前-无-生产-成交/快照，
+#   丢影子数据可接受」——但这一假设在「连错库 / 历史回灌 / 影子库误判」场景下被破坏，
+#   成交/持仓真相源即清零。备份式迁移先 SELECT 导出 → DROP → CREATE → 回灌，保证数据不丢。
+#
+#   备份目录：默认 logs/（与 trading_state.db 同根，运行态可观测）；测试 monkeypatch 此
+#   常量到 tmp_path 隔离（防污染 logs/）。
+_MIGRATION_BACKUP_DIR = "logs"
+
+
+def _dump_migration_sidecar(table: str, rows: list[dict]) -> None:
+    """旧表行导出到 sidecar JSON（连错库即清零的兜底保险）。
+
+    物理意图：DROP 重建前的双保险——即使内存回灌失败/事务回滚，sidecar JSON 仍留档，
+    运维可从 JSON 完整恢复旧数据。文件名带时间戳防同表多次迁移覆盖（精确到秒）。
+    备份失败不阻断迁移（内存 rows 仍可回灌），仅 log warning 暴露——这是有意的容错：
+    迁移推进比备份完美更重要，sidecar 是双保险而非主路径。
+    """
+    try:
+        backup_dir = Path(_MIGRATION_BACKUP_DIR)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        ts = clock.now().strftime("%Y%m%dT%H%M%S")
+        backup_path = backup_dir / f"state_store_{table}_backup_{ts}.json"
+        backup_path.write_text(
+            json.dumps(rows, ensure_ascii=False, default=str), encoding="utf-8")
+        logger.info("state_store 迁移：%s 表 %d 行已备份到 %s", table, len(rows), backup_path)
+    except Exception:
+        # 备份失败不阻断迁移（内存 rows 仍可回灌），但 log warning 暴露
+        logger.warning("state_store 迁移：%s 表 sidecar 备份失败（内存回灌仍进行）",
+                       table, exc_info=True)
+
+
+def _migrate_with_backup(
+    con, table: str, new_ddl: str, *,
+    defaults: dict | None = None,
+    backfill: bool = True,
+) -> int:
+    """SQLite 表备份式重建（导出 → DROP → CREATE → 回灌，治「连错库即清零」）。
+
+    三段式安全重建（DROP 前必须先 SELECT 导出——这是与原 ``con.execute("DROP TABLE")``
+    的本质差异）：
+      ① SELECT * 旧表 → 内存缓存行 + 写 sidecar JSON（双保险，连错库可恢复）；
+      ② DROP TABLE + 执行 new_ddl（新 schema，CREATE 语义）；
+      ③ 回灌共享列（旧∩新列名）+ 新表独有列取 ``defaults`` 兜底；其余 NULL。
+         ``backfill=False`` 时跳过回灌（旧行语义无法融入新 schema，仅备份）。
+
+    Args:
+        con: sqlite3 连接（_connect 上下文，事务由其 commit/rollback）。
+        table: 表名（如 "fill" / "position"）。
+        new_ddl: 完整 CREATE TABLE 语句（DROP 后执行；含 IF NOT EXISTS 语义冗余但无害，
+                 因 DROP 已确保表不存在）。
+        defaults: 新表独有列的回灌默认值（如 ``{"account_id": "default"}``）。
+                  回灌时新表独有列若无默认，取 NULL；若该列 NOT NULL 则撞约束 → 该行跳过
+                  （保数据不丢即可，sidecar 已存可恢复）。
+        backfill: True 回灌共享列（旧行语义可融入新 schema）；False 仅备份不回灌
+                  （旧行无法融入，如 fill 表 traded_time NOT NULL 但旧行无此列）。
+
+    Returns:
+        回灌行数（backfill=False 时为 0；备份始终执行）。
+
+    红线（绝不静默丢数据）：
+        - 备份失败（磁盘满/权限）只 log warning 不抛——内存 rows 仍可回灌，迁移继续；
+        - 回灌撞约束（NOT NULL/UNIQUE/FK）跳过该行 + log warning，不阻断整批；
+        - DROP 前必须先 SELECT（导出），这是与原 ``con.execute("DROP TABLE")`` 的本质差异。
+    """
+    defaults = defaults or {}
+    # ① 导出旧行到内存 + sidecar JSON（DROP 前必须先读，DROP 后无源可读）
+    rows = [dict(r) for r in con.execute(f"SELECT * FROM {table}").fetchall()]
+    if rows:
+        _dump_migration_sidecar(table, rows)
+    # ② DROP + CREATE 新 schema
+    con.execute(f"DROP TABLE {table}")
+    con.execute(new_ddl)
+    if not rows or not backfill:
+        return 0
+    # ③ 回灌共享列（旧∩新列名）+ 新表独有列取 defaults 兜底
+    new_cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()]
+    old_cols = set(rows[0].keys())
+    col_list = ", ".join(f'"{c}"' for c in new_cols)
+    placeholders = ", ".join("?" * len(new_cols))
+    inserted = 0
+    for row in rows:
+        vals = []
+        for col in new_cols:
+            if col in old_cols:
+                vals.append(row[col])
+            elif col in defaults:
+                vals.append(defaults[col])
+            else:
+                vals.append(None)
+        try:
+            con.execute(
+                f'INSERT INTO {table}({col_list}) VALUES({placeholders})',
+                vals,
+            )
+            inserted += 1
+        except sqlite3.IntegrityError:
+            # 回灌撞约束（NOT NULL/UNIQUE/FK）跳过——旧行语义已损坏，备份已存可恢复
+            logger.warning("state_store 迁移：%s 表回灌撞约束跳过该行：%s", table, row)
+    if inserted:
+        logger.info("state_store 迁移：%s 表回灌 %d/%d 行（共享列 + defaults 兜底）",
+                    table, inserted, len(rows))
+    return inserted
+
+
 def init_store(db_path: str | None = None) -> None:
     """幂等建 6 张表 + schema 迁移（spec §2.2 DDL + §7.1 迁移）。
 
@@ -168,9 +277,30 @@ def init_store(db_path: str | None = None) -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_order_trade ON \"order\"(trade_id)")
         # ④ fill（成交流水 · append-only）——升级既有表（加 account_id 列）
         if _table_exists(con, "fill") and not _has_column(con, "fill", "traded_time"):
-            # 旧 fill 无 traded_time（position_book 早期 schema）→ DROP 重建
-            logger.info("state_store 迁移：旧 fill 表无 traded_time，DROP 重建（增量幂等）")
-            con.execute("DROP TABLE fill")
+            # 旧 fill 无 traded_time（position_book 早期 schema）→ 备份式重建
+            # G5 schema 迁移安全：原 DROP 直接丢数据（spec §7.1「live-前-无-数据」假设在
+            # 连错库/历史回灌场景下被破坏即清零成交真相源）；改 _migrate_with_backup 三段式
+            # （导出 → DROP → CREATE → 回灌）。
+            # backfill=False：新 fill 表 traded_time NOT NULL + UNIQUE(order_id, traded_time)
+            # 幂等键——旧 fill 行无 traded_time 列，回灌 NULL 撞 NOT NULL，或回灌哨兵值撞
+            # UNIQUE，技术上无法回灌。备份到 sidecar（连错库可恢复）+ 不回灌（新表 schema 干净）。
+            # spec §7.1 live-前-无-数据 假设下 fill 无生产数据，备份是双保险而非数据迁移。
+            logger.info("state_store 迁移：旧 fill 表无 traded_time，备份式重建（不回灌）")
+            _migrate_with_backup(
+                con, "fill",
+                """CREATE TABLE fill (
+                    fill_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id     TEXT NOT NULL,
+                    traded_time  TEXT NOT NULL,
+                    symbol       TEXT NOT NULL,
+                    direction    TEXT NOT NULL,
+                    qty          REAL NOT NULL,
+                    price        REAL NOT NULL,
+                    applied_at   TEXT NOT NULL,
+                    UNIQUE(order_id, traded_time)
+                )""",
+                backfill=False,
+            )
         con.execute("""
             CREATE TABLE IF NOT EXISTS fill (
                 fill_id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,8 +334,29 @@ def init_store(db_path: str | None = None) -> None:
             not _has_column(con, "position", "account_id")
             or not _has_column(con, "position", "avg_price")
         ):
-            logger.info("state_store 迁移：旧 position 表无 account_id/avg_price，DROP 重建（复合PK）")
-            con.execute("DROP TABLE position")
+            # G5 schema 迁移安全：原 DROP 直接丢持仓数据（敞口真相失真红线）；改备份式重建
+            # （导出 → DROP → CREATE → 回灌共享列）。回灌时 account_id 用 _DEFAULT_ACCOUNT_ID
+            # 兜底（NOT NULL 约束 + 单账户默认口径，spec §7.1 live-前-无-数据 假设兼容）。
+            # FK 引用 account(account_id)：回灌前先 INSERT OR IGNORE 默认 account 行，
+            # 防 FK RESTRICT 挡住回灌（account 表是 init_store 第一步建的，此处必已存在）。
+            logger.info("state_store 迁移：旧 position 表无 account_id/avg_price，备份式重建（回灌共享列）")
+            con.execute(
+                "INSERT OR IGNORE INTO account(account_id, broker, created_at) VALUES(?, 'unknown', ?)",
+                (_DEFAULT_ACCOUNT_ID, clock.now().isoformat()),
+            )
+            _migrate_with_backup(
+                con, "position",
+                """CREATE TABLE position (
+                    account_id  TEXT NOT NULL REFERENCES account(account_id) ON DELETE RESTRICT,
+                    symbol      TEXT NOT NULL,
+                    qty         REAL NOT NULL,
+                    avg_price   REAL,
+                    entry_date  TEXT,
+                    updated_at  TEXT NOT NULL,
+                    PRIMARY KEY (account_id, symbol)
+                )""",
+                defaults={"account_id": _DEFAULT_ACCOUNT_ID},
+            )
         con.execute("""
             CREATE TABLE IF NOT EXISTS position (
                 account_id  TEXT NOT NULL REFERENCES account(account_id) ON DELETE RESTRICT,

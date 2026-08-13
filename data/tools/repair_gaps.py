@@ -256,10 +256,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             new_lake = repair_gaps(gaps, lake_df, pro)
         delta = len(new_lake) - len(lake_df)
-        # 写入前历史行数守卫（T13-A）：repair 重写全湖（覆盖写），防御 dedup/recompute bug
-        # 致 new_lake 异常收缩被静默落盘。
+        # 写入前历史行数守卫 + 原子落盘（T13-A 守卫 + G5 原子写）：safe_overwrite 内部完成
+        # 「守卫 + tmp + fsync + os.replace」原子写入，调用方不再紧跟 to_parquet（防半截损坏）。
+        # repair 重写全湖（覆盖写），防御 dedup/recompute bug 致 new_lake 异常收缩被静默落盘。
         safe_overwrite(str(lake_path), new_lake)
-        new_lake.to_parquet(lake_path, engine="pyarrow")
         if auto_mode:
             record_repair_result(success=True, lake_dir=args.lake_dir)
         print(f"补采完成：a_shares_daily {len(lake_df)} → {len(new_lake)} 行（+{delta}）")

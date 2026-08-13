@@ -250,12 +250,10 @@ def sync_macro(start: str, end: str, out: str | None = None) -> None:
             # QUANTER_FORCE_WRITE=1 强旁路恢复。except 分支逻辑保持不变（只改注释措辞）。
             print(f"⚠ 读现有宏观湖失败，回退全量覆盖：{out}")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    # write-side 守卫：合并后行数单调≥现有（窄窗口也不掉），safe_overwrite 不误拒。
-    # ⚠️ safe_overwrite 只验不写（assert_safe_overwrite 语义：骤降抛 WriteGuardError，
-    # 通过则 return None）——必须紧跟 df.to_parquet(out) 真正落盘（与 sync_daily_incremental
-    # /repair_gaps 同范式：safe_overwrite 先验、to_parquet 后写）。
+    # write-side 守卫 + 原子落盘（T13-A 守卫 + G5 原子写）：safe_overwrite 内部完成
+    # 「守卫 + tmp + fsync + os.replace」原子写入，调用方不再紧跟 to_parquet（防半截损坏）。
+    # 合并后行数单调≥现有（窄窗口也不掉），safe_overwrite 守卫不误拒。
     safe_overwrite(out, df)
-    df.to_parquet(out)
     print(f"宏观湖写入：{out}，{len(df)} 行，列={list(df.columns)}")
 
 

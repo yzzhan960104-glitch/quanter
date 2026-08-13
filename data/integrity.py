@@ -238,16 +238,80 @@ def assert_safe_overwrite(lake_path: str, new_df: pd.DataFrame, *,
         raise WriteGuardError(f"{lake_path} {reason}")
 
 
+def _fsync_path(path: str) -> None:
+    """fsync 文件刷盘（原子写入最佳实践，防 OS page cache 断电丢数据）。
+
+    物理意图：``to_parquet`` 写完后数据可能仅落 OS page cache（未刷磁盘）——正常关机时
+    内核会刷盘，但断电/内核 panic 极端场景下 page cache 内半截数据会丢。``fsync`` 强制
+    把文件数据 + 元数据刷到磁盘存储层，确保 ``tmp`` 文件完整落盘后再 ``os.replace``——
+    达到「真原子」（rename 原子 + 内容也已持久化）。
+
+    容错：fsync 失败（权限/网络盘不支持/文件已被关）只 log warning 不抛——``os.replace``
+    仍执行。理由：fsync 失败属于「断电极端场景退化」，绝大多数情况 page cache 仍会被
+    内核异步刷盘，原子 rename 仍成立；抛错反而会让可用性退化（写入失败但实际数据已写完）。
+    """
+    try:
+        with open(path, "rb") as f:
+            os.fsync(f.fileno())
+    except OSError:
+        logger.warning("fsync 失败（文件系统不支持？正常关机仍会刷盘，原子 rename 仍成立）：%s",
+                       path, exc_info=True)
+
+
+def atomic_write_parquet(lake_path: str, new_df: pd.DataFrame) -> None:
+    """原子落盘 parquet（tmp + fsync + os.replace 同卷原子），不含行数守卫。
+
+    物理意图（G5 数据原子写）：把原子写入逻辑从 safe_overwrite 抽出为独立工具，供两类
+    调用方复用——
+      - ``safe_overwrite``：守卫 + 原子写（绝大多数湖写入口，需守卫防残片覆盖）；
+      - ``date_range`` 旁路守卫场景（tushare_sync._sync_single 窗口中间态写，行数本来就
+        比现有小，守卫会误拒；但仍需原子写防半截损坏）。
+    DRY 红线：原子写逻辑（tmp + fsync + os.replace + 异常清理）只此一处实现。
+
+    同卷保证：tmp = ``path + ".<pid>.tmp"`` 与 path 同目录（默认）→ 同卷 → ``os.replace``
+    原子（跨卷 rename 非原子，会先 copy 再 unlink，中途异常留半截）。PID 防御并发：多进程
+    并发写同 path 时 tmp 不撞（虽然本项目生产串行，PID 防御性）。
+
+    异常清理：to_parquet/fsync/replace 任一失败时清理 tmp（防遗留 .tmp 干扰下次写），
+    原文件不动——这是原子写的核心收益（异常不损原文件）。
+    """
+    tmp = f"{lake_path}.{os.getpid()}.tmp"
+    try:
+        new_df.to_parquet(tmp, engine="pyarrow")
+        _fsync_path(tmp)  # 刷盘（断电极端场景兜底，正常关机内核也会刷）
+        os.replace(tmp, lake_path)  # 同卷原子 rename（POSIX rename(2)/Win MoveFileEx 原子）
+    except Exception:
+        # 异常清理 tmp：防遗留 .tmp 干扰下次写（ls 见 .tmp 误判残留态）。
+        # 原文件未动——to_parquet/fsync/replace 失败时，target 完整保留旧内容（原子核心）。
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                logger.warning("atomic_write_parquet 清理 tmp 失败（残留不影响正确性）：%s",
+                               tmp, exc_info=True)
+        raise
+
+
 def safe_overwrite(lake_path: str, new_df: pd.DataFrame, *,
                    min_ratio: float = WRITE_GUARD_MIN_RATIO) -> None:
-    """assert_safe_overwrite 的生产包装：自动从 QUANTER_FORCE_WRITE 读 force 旁路口。
+    """写入前历史行数守卫 + 原子落盘（assert_safe_overwrite 守卫 + atomic_write_parquet 原子写）。
 
-    物理意图：湖写入口的落盘守卫统一调 safe_overwrite(path, df)，消除
-    `force=os.environ.get("QUANTER_FORCE_WRITE") == "1"` 在 4 处的逐字重复（review
-    Duplicated Code）。语义与 assert_safe_overwrite 一致，仅封装 env 读取 + 默认 min_ratio。
+    物理意图（G5 数据原子写 · 治半截损坏 parquet）：
+        原实现 safe_overwrite 只做行数守卫，落盘由调用方紧跟的 ``df.to_parquet(path)``
+        直写目标——写入中途 OOM/断电/磁盘满会留半截损坏 parquet，下次 ``read_parquet``
+        抛 EOFError 读不全，需全量回采（生产湖 1020 万行 × 5000 标的）才能恢复。本函数
+        把「守卫 + 原子写」收口为单一入口：守卫通过后调 atomic_write_parquet（tmp + fsync
+        + os.replace 同卷原子）。异常（守卫拒写 / 写入失败）时原文件不动。
+
+    签名向后兼容：原 safe_overwrite ``只验不写``、调用方紧跟 ``to_parquet``；现在 safe_overwrite
+    完成原子写入，所有 5 处调用方（tushare_sync / sync_macro_credit / sync_data_lake /
+    sync_daily_incremental / repair_gaps）已同步移除紧跟的 ``to_parquet``，落盘收口到此单点。
     """
+    # ① 守卫（骤降拒写，硬阻断语义不变；force=QUANTER_FORCE_WRITE=1 逃生口）
     assert_safe_overwrite(lake_path, new_df, min_ratio=min_ratio,
                           force=os.environ.get("QUANTER_FORCE_WRITE") == "1")
+    # ② 原子写入（tmp + fsync + os.replace，异常时清理 tmp、原文件不动）
+    atomic_write_parquet(lake_path, new_df)
 
 
 # ============================================================================

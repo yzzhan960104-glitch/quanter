@@ -253,10 +253,11 @@ def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = F
             combined = combined[combined.index.get_level_values("symbol") != sym]
             combined = pd.concat([combined, fixed])
         combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-    # 写入守卫（T13-A · 防御性）：append 日常 combined >= 现有放行，捕获 dedup/recompute
-    # bug 致 combined 异常收缩。force=QUANTER_FORCE_WRITE=1 为人为重采逃生口。
+    # 写入守卫 + 原子落盘（T13-A 防御性 + G5 原子写）：safe_overwrite 内部完成
+    # 「守卫 + tmp + fsync + os.replace」原子写入，调用方不再紧跟 to_parquet（防半截损坏）。
+    # append 日常 combined >= 现有放行，捕获 dedup/recompute bug 致 combined 异常收缩。
+    # force=QUANTER_FORCE_WRITE=1 为人为重采逃生口。
     safe_overwrite(LAKE, combined)
-    combined.to_parquet(LAKE, engine="pyarrow")
     new_d0 = str(pd.Timestamp(combined.index.get_level_values("date").max()).date())
     logger.info("完成：a_shares_daily %d 行，最新日 %s（新增 %d 行）",
                 len(combined), new_d0, len(new))

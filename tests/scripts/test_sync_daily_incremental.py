@@ -148,14 +148,15 @@ def test_sync_incremental_recomputes_qfq_and_appends():
     }
     pro = _build_pro(trade_days, raw_by_day, adj_by_day)
     written = {}
-    def fake_to_parquet(df, path, **kw):
+    # 守卫放行 stub（T13-A + G5）：safe_overwrite 升级为「守卫 + 原子写」单点后，
+    # 落盘 to_parquet 在 safe_overwrite 内部完成；本测聚焦前复权数学（combined 是 3 行
+    # 小数据 vs 生产湖 1020万，真实守卫会拒写 + 真实 to_parquet 写生产 LAKE 路径污染），
+    # 故 stub safe_overwrite 为「捕获 df 不真写」——拿到 combined 验证数学断言。
+    def fake_safe_overwrite(path, df, **k):
         written["df"] = df
-    # 守卫放行 stub（T13-A）：本测聚焦前复权数学，combined 是 3 行小数据 vs 生产湖 1020万，
-    # 接入 assert_safe_overwrite 后会被真实守卫拒写；stub 放行以聚焦原测试目标（数学断言）。
     with patch.object(mod.pd, "read_parquet", return_value=fake_lake), \
          patch.object(mod, "get_pro", return_value=pro), \
-         patch.object(mod.pd.DataFrame, "to_parquet", fake_to_parquet), \
-         patch.object(mod, "safe_overwrite", lambda *a, **k: None), \
+         patch.object(mod, "safe_overwrite", fake_safe_overwrite), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
         msg = mod.sync_daily_incremental()
@@ -198,13 +199,14 @@ def test_sync_detects_dividend_when_adj_changes():
     }
     pro = _build_pro(trade_days, raw_by_day, adj_by_day)
     written = {}
-    # 守卫放行 stub（T13-A）：本测聚焦除权检测，combined 是 2 行小数据 vs 生产湖 1020万，
-    # 接入 assert_safe_overwrite 后会被真实守卫拒写；stub 放行以聚焦原测试目标（除权 detect）。
+    # 守卫放行 stub（T13-A + G5）：safe_overwrite 升级为「守卫 + 原子写」单点，本测聚焦
+    # 除权 detect（combined 是 2 行小数据 vs 生产湖 1020万，真实守卫拒写 + 真实 to_parquet
+    # 写生产 LAKE 污染），stub safe_overwrite 为「捕获 df 不真写」——拿到 combined 验证除权。
+    def fake_safe_overwrite(path, df, **k):
+        written["df"] = df
     with patch.object(mod.pd, "read_parquet", return_value=fake_lake), \
          patch.object(mod, "get_pro", return_value=pro), \
-         patch.object(mod.pd.DataFrame, "to_parquet",
-                      lambda df, path, **kw: written.update(df=df)), \
-         patch.object(mod, "safe_overwrite", lambda *a, **k: None), \
+         patch.object(mod, "safe_overwrite", fake_safe_overwrite), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
         msg = mod.sync_daily_incremental()

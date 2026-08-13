@@ -234,9 +234,9 @@ def _build_multiindex(shard_dir: str, date_col: str, symbol_col: str, out: str,
             big["symbol"] = big["date"].dt.strftime("%Y%m%d")
     big = big.set_index(["date", "symbol"]).sort_index()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    # 写入前历史行数守卫（T13-A）：防 T12 式残片覆盖——新行数相对现有骤降则拒写。
+    # 写入前历史行数守卫 + 原子落盘（T13-A 守卫 + G5 原子写）：safe_overwrite 内部完成
+    # 「守卫 + tmp + fsync + os.replace」原子写入，调用方不再紧跟 to_parquet（防半截损坏）。
     safe_overwrite(out, big)
-    big.to_parquet(out, engine="pyarrow")
     logger.info("湖写入完成：%s，%d 行，%d 标的",
                 out, len(big), big.index.get_level_values("symbol").nunique())
 
@@ -530,12 +530,16 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
         if keep:
             df = df[keep]
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    # 写入前历史行数守卫（T13-A）：防全量覆盖残片。date_range 数据集（shibor 等）的
-    # _sync_single 覆盖写是「窗口中间态」（只含新窗口，由调用方 sync_incremental [6]
-    # merge 后的最终落盘守卫负责）；此处放行避免误伤窗口增量写致 shibor 每日断更。
-    if not (cfg or {}).get("date_range"):
+    # 写入前历史行数守卫 + 原子落盘（T13-A 守卫 + G5 原子写）：原子路径 tmp + fsync +
+    # os.replace 防半截损坏。date_range 数据集（shibor 等）的 _sync_single 覆盖写是
+    # 「窗口中间态」（只含新窗口，由调用方 sync_incremental [6] merge 后的最终落盘守卫负责），
+    # 此处旁路守卫避免误伤窗口增量写致 shibor 每日断更——但仍走 atomic_write_parquet 原子路径
+    # （守卫可旁路，原子写不可旁路——半截损坏风险与数据集类型无关）。
+    if (cfg or {}).get("date_range"):
+        from data.integrity import atomic_write_parquet
+        atomic_write_parquet(out, df)
+    else:
         safe_overwrite(out, df)
-    df.to_parquet(out, engine="pyarrow")
     logger.info("%s 写入：%s，%d 行", key, out, len(df))
 
 
