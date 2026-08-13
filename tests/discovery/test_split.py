@@ -35,3 +35,21 @@ def test_embargo_configurable():
     from discovery.split import holdout_split
     assert holdout_split(embargo_days=5).embargo_days == 5
     assert holdout_split(embargo_days=20).embargo_days == 20
+
+
+def test_walk_forward_split_structure():
+    """P5：4 折锚定结构（train→次年 oos）+ 终局 2026；wf4 = 二段 holdout 口径（交叉验证锚）。"""
+    from discovery.split import walk_forward_split
+    wf = walk_forward_split(embargo_days=5)
+    assert [name for name, _, _ in wf.folds] == \
+        ["wf1_2020_21", "wf2_2022_23", "wf3_2024", "wf4_2025"]
+    # 每折 oos 紧随 train 次年（经典锚定：train 段末 + 1 天 == oos 段始）
+    for _name, train, oos in wf.folds:
+        assert oos.start.year == train.end.year + 1
+        assert oos.end.year == oos.start.year
+    assert wf.final_oos.name == "oos_2026"
+    # wf4 与二段 holdout 同口径（train 2025 / oos 2026）——交叉验证一致性锚
+    t4, o4 = wf.folds[3][1], wf.folds[3][2]
+    assert (t4.start.year, t4.end.year) == (2025, 2025)
+    assert (o4.start.year, o4.end.year) == (2026, 2026)
+    assert wf.embargo_days == 5

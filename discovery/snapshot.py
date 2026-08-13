@@ -131,3 +131,53 @@ def freeze(lake_start="2025-01-01"):
         data_hash=data_content_hash(universe, lake_start),
     )
     return universe, meta
+
+
+# ============================================================================
+# P5（2026-08-13 · spec §6.1）：分折 universe（防幸存者偏差）
+# ============================================================================
+def filter_universe_from_lake(lake_df, min_amt=1e5):
+    """湖 DataFrame → 可交易 universe dict（纯函数，分折/全量共用）。
+
+    lake_df: 已按日期窗截好的湖（MultiIndex date/symbol，含 amount 列）。
+    流动性口径：近 30 日均成交额 ≥ min_amt（1e5 千元 = 1 亿元，对齐 param_iter）；
+    创板科创过滤（is_target_board 口径）。返回 {symbol: sym_df}（sort_index 后）。
+    """
+    from discovery.tools.param_iter import is_target_board
+    syms = lake_df.index.get_level_values("symbol").unique().tolist()
+    amt = lake_df.groupby("symbol")["amount"].apply(
+        lambda s: s.tail(30).mean() if len(s) > 0 else 0.0)
+    tradable = [s for s in syms if is_target_board(s) and amt.get(s, 0.0) >= min_amt]
+    universe = {}
+    for s in tradable:
+        try:
+            universe[s] = lake_df.xs(s, level="symbol").sort_index()
+        except Exception:
+            continue
+    return universe
+
+
+def load_universe_window(start, end, warmup_days=180):
+    """P5 分折 universe：标的池按【折末 30 日】流动性重算，数据自 start-warmup 起。
+
+    与 load_universe(start) 的关键差异（幸存者偏差防线，spec §6.1）：
+      - 流动性 tail(30) 取自 [start-warmup, end] 窗（折末口径）——历史折不用未来
+        流动性选股（load_universe 的 tail(30) 是「今天」口径，会把 2025 之后才
+        活跃的标的选进 2020 折 = 幸存者偏差）；
+      - 数据含 start-warmup 预热段（窗口 window≤80 + ATR 余量，颈线形态在折首
+        也能正确成形）；信号日期由调用方 segment 过滤，预热段不产计入信号；
+      - 退市标的：湖内保留挂牌期数据（P0-2 实测 38 只退市/休眠创板科创），折内
+        挂牌且满足流动性则纳入，折后自然消失。
+    """
+    from datetime import timedelta
+    data_start = pd.Timestamp(start) - timedelta(days=warmup_days)
+    try:
+        lake = pd.read_parquet(
+            LAKE_PATH,
+            filters=[("date", ">=", data_start), ("date", "<=", pd.Timestamp(end))],
+        )
+    except Exception:
+        lake = pd.read_parquet(LAKE_PATH)   # filters 推送失败 → 全量读再筛（语义不变）
+        lake = lake[(lake.index.get_level_values("date") >= data_start)
+                    & (lake.index.get_level_values("date") <= pd.Timestamp(end))]
+    return filter_universe_from_lake(lake)

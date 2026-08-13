@@ -98,3 +98,38 @@ def test_evaluate_champion_real(champion_params):
     assert res["inner"]["n"] > 0
     assert res["outer"]["n"] > 0
     assert res["outer"]["ann"] > 0   # 复现探查：2026 未塌
+
+
+def test_evaluate_wf_per_fold_independent_universe(monkeypatch):
+    """P5：evaluate_wf 每折独立 universe + 折内 train/oos 分段（mock run_full_scan）。"""
+    from discovery.objective import evaluate_wf
+    from discovery.split import walk_forward_split
+
+    loaded = []
+
+    def fake_load(start, end, warmup_days=180):
+        loaded.append((start, end))
+        return {"300001.SZ": None}
+
+    def fake_scan(params, universe):
+        # 每折返回 1 条 train 信号（date=折中点）+ 1 条 oos 信号（date=oos 中点）
+        from datetime import date
+        import pandas as pd
+        return [{"signal_date": date(2020, 6, 1), "avg_pnl_pct": 1.0},
+                {"signal_date": date(2022, 6, 1), "avg_pnl_pct": 2.0}]
+
+    import discovery.objective as obj
+    import discovery.snapshot as snap
+    # evaluate_wf 内部 lazy import load_universe_window → patch 物理路径（snapshot 模块）
+    monkeypatch.setattr(snap, "load_universe_window", fake_load)
+    monkeypatch.setattr(obj, "run_full_scan", fake_scan)
+
+    wf = walk_forward_split(embargo_days=5)
+    out = evaluate_wf({"window": 60}, wf)
+    assert len(out) == 4
+    assert [r["fold"] for r in out] == ["wf1_2020_21", "wf2_2022_23", "wf3_2024", "wf4_2025"]
+    # 每折 universe 独立重建（train.start/train.end 注入）
+    assert loaded[0] == (wf.folds[0][1].start, wf.folds[0][1].end)
+    # 折内分段：train 段收 2020 信号（n=1）、oos 段收 2022 信号（n=1）
+    assert out[0]["train"]["n"] == 1
+    assert out[0]["oos"]["n"] == 1

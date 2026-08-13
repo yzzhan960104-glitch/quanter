@@ -115,3 +115,26 @@ def test_freeze_loads_real_universe():
     assert meta.universe_count == len(universe)
     assert len(meta.snapshot_hash) == 16
     assert "2025" in meta.date_range
+
+
+def test_filter_universe_from_lake_synthetic():
+    """P5 分折 universe 纯函数：合成湖（含退市标的 + 低流动性标的）→ 过滤口径正确。
+
+    幸存者偏差防线（spec §6.1）：流动性 tail(30) 取自传入窗（折末口径）——退市标的
+    只要在窗内挂牌且满足流动性就保留（折后自然消失），低流动性/非创板科创剔除。
+    """
+    import pandas as pd
+    from discovery.snapshot import filter_universe_from_lake
+
+    idx = pd.MultiIndex.from_product(
+        [pd.date_range("2020-01-01", periods=40, freq="B"),
+         ["300001.SZ", "300002.SZ", "600000.SH"]],
+        names=["date", "symbol"])
+    amount = pd.Series(100_000.0, index=idx)          # 创板 2 只 ≥1e5；主板 1 只同额
+    amount.loc[(slice(None), "300002.SZ")] = 10.0     # 300002 低流动性（<1e5）
+    lake = pd.DataFrame({"amount": amount, "close": 1.0})
+    lake["high"] = 1.0; lake["low"] = 1.0; lake["volume"] = 1.0
+
+    univ = filter_universe_from_lake(lake)
+    assert set(univ.keys()) == {"300001.SZ"}          # 300002 流动性不足；主板被 board 过滤
+    assert len(univ["300001.SZ"]) == 40

@@ -129,6 +129,40 @@ def cmd_verify(args):
           f"（去偏幅度见 spec §1.4）")
 
 
+def cmd_wf(args):
+    """P5 walk-forward 交叉验证（分析工具：不落库、不参与选择，spec §6.1 验收）。
+
+    冠军参数（experiment.db ACTIVE，resolve_champion 同 cmd_oos）跑 4 折锚定
+    walk-forward：每折独立 universe（折末 30 日流动性，防幸存者偏差）→ 折内
+    train/oos 两段 calmar。交叉验证一致性：train calmar 跨折极差 + oos calmar
+    跨折极差（小 = 参数跨年份稳健）；wf4 与二段 holdout 同口径（2025→2026），
+    其 oos 与 `discovery oos` 的差异即 universe 幸存者偏差的量化。
+    """
+    champion = resolve_champion()
+    if champion is None:
+        print("[wf] 无 experiment.db ACTIVE 实验——wf 探查需要当前生效冠军参数。\n"
+              "  promote 一个实验：python -m experiment promote <id> --weight 0.1",
+              file=sys.stderr)
+        sys.exit(2)
+    params = dict(champion.params)
+    from discovery.split import walk_forward_split
+    from discovery.objective import evaluate_wf
+    wf = walk_forward_split(embargo_days=args.embargo)
+    print(f"=== discovery wf：四折 walk-forward 交叉验证（冠军 {champion.experiment_id}）===")
+    results = evaluate_wf(params, wf, warmup_days=args.warmup_days)
+    print(f"{'折':<12} {'标的数':>6} {'train calmar':>13} {'train n':>8} {'oos calmar':>11} {'oos n':>7}")
+    for r in results:
+        print(f"{r['fold']:<12} {r['n_symbols']:>6} {r['train']['calmar']:>13.2f} "
+              f"{r['train']['n']:>8} {r['oos']['calmar']:>11.2f} {r['oos']['n']:>7}")
+    train_calmars = [r["train"]["calmar"] for r in results]
+    oos_calmars = [r["oos"]["calmar"] for r in results]
+    print(f"\n一致性：train calmar 跨折极差 {max(train_calmars) - min(train_calmars):.2f}"
+          f"（均值 {sum(train_calmars)/len(train_calmars):.2f}）；"
+          f"oos calmar 跨折极差 {max(oos_calmars) - min(oos_calmars):.2f}")
+    print("注：wf4(2025→2026) 与 `discovery oos` 同口径；差异 = universe 幸存者偏差的量化。\n"
+          "    walk-forward 不落库不参与选择——一致性结论供人审（P4 协议输入）。")
+
+
 def cmd_run(args):
     """两阶段搜索跑批：Sobol 批量→TPE 序贯→落库→收敛自停（spec §5.1/§7.2，Plan 2+3）。
 
@@ -327,6 +361,11 @@ def main(argv=None):
     ap_c = sub.add_parser("champions", help="Pareto 前沿 + DSR 冠军报告（Plan 3）")
     ap_c.add_argument("--top-n", type=int, default=10, dest="top_n", help="报 top-N")
     ap_c.set_defaults(func=cmd_champions)
+    ap_wf = sub.add_parser("wf", help="四折 walk-forward 交叉验证（P5 分析工具）")
+    ap_wf.add_argument("--embargo", type=int, default=5, help="折间 embargo 天数")
+    ap_wf.add_argument("--warmup-days", type=int, default=180, dest="warmup_days",
+                       help="折首数据预热天数（window≤80 + ATR 余量）")
+    ap_wf.set_defaults(func=cmd_wf)
     ap_rp = sub.add_parser("report", help="run 历史简报（Plan 3）")
     ap_rp.set_defaults(func=cmd_report)
     # publish 子命令（Plan 4 Task 5）：daemon 收敛后冠军 → experiment DRAFT 桥
