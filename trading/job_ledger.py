@@ -55,10 +55,27 @@ def _db_path(path: Optional[str] = None) -> str:
 
 
 def _connect(path: Optional[str] = None) -> sqlite3.Connection:
-    """打开连接并保证表存在（幂等，零装配负担）。"""
+    """打开连接并保证表存在（幂等，零装配负担）。
+
+    DG-G6（2026-08-14 g-wave-p0-guards · 对齐 backtest/tasks_db.py:45 + discovery/store.py:59
+    正范式）：补齐 SQLite 并发协调三件套——
+      ① ``timeout=30``：sqlite3.connect 默认 5s，并发写场景（cron + 启动补跑 + API
+         查询）下秒抛 SQLITE_BUSY 中断台账写入。30s 给排队留足够余量；
+      ② ``PRAGMA journal_mode=WAL``：Write-Ahead Logging 让读不阻塞写、写不阻塞读，
+         rollback journal（默认 delete 模式）写时拿 EXCLUSIVE 锁，并发写直接 BUSY；
+      ③ ``PRAGMA busy_timeout=30000``：连接级锁等待 30s（与 timeout 参数语义同源——
+         Python sqlite3 ``timeout=X`` 内部就是设 busy_timeout=X*1000ms，显式 PRAGMA
+         钉死口径，防 timeout 参数被误改后失去兜底）。
+
+    物理意图：job_run 表是 cron 与启动补跑共用的「跨重启运行状态真相源」，二者并发
+    写同一 (job, date) 时，必须由 WAL + timeout 串行化排队（而非 BUSY 中断），否则
+    台账漏写会让幂等守卫误判「未跑」导致重复执行（spec §3.1 红线）。
+    """
     db = _db_path(path)
     Path(db).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db)
+    conn = sqlite3.connect(db, timeout=30)  # DG-G6：5s→30s 防并发 BUSY（对齐 tasks_db）
+    conn.execute("PRAGMA journal_mode=WAL")           # DG-G6：WAL 让读不阻塞写
+    conn.execute("PRAGMA busy_timeout=30000")         # DG-G6：锁等待 30s 兜底
     conn.execute(_SCHEMA)
     return conn
 
@@ -72,16 +89,35 @@ def init_db(path: Optional[str] = None) -> None:
 
 def begin_run(job_name: str, business_date: str, started_at: str,
               path: Optional[str] = None) -> None:
-    """标记 job 开始（INSERT OR REPLACE → running，重跑可覆盖旧终态）。"""
+    """标记 job 开始（INSERT OR REPLACE → running，重跑可覆盖旧终态）。
+
+    DG-G6（2026-08-14 g-wave-p0-guards · 对齐 tasks_db.claim_next_pending 范式）：
+    显式 ``BEGIN IMMEDIATE`` 包裹写操作——立即拿 RESERVED→EXCLUSIVE 写锁，让并发
+    begin_run 串行排队（vs DEFERRED 在首条 INSERT 时才升级锁，多连接并发下存在锁升级
+    deadlock 窗口）。配合 _connect 的 ``timeout=30`` + ``busy_timeout=30000``，并发
+    begin_run 排队 30s 内必拿到锁，不抛 SQLITE_BUSY。
+
+    幂等语义（红线，绝不破现有 test_begin_run_replaces_previous_status）：INSERT OR REPLACE
+    覆盖旧终态为 running——无论之前是 done/skipped/failed/running，begin_run 一律重置为
+    running + 清空 finished_at/message。这是「重跑覆盖」的物理意图（cron 与启动补跑都
+    调 begin_run 标记开始，谁先谁后无关，最终状态由执行流推进，不由 begin_run 顺序决定）。
+    """
     conn = _connect(path)
-    conn.execute(
-        "INSERT OR REPLACE INTO job_run "
-        "(job_name, business_date, status, started_at, finished_at, message) "
-        "VALUES (?, ?, 'running', ?, NULL, '')",
-        (job_name, business_date, started_at),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("BEGIN IMMEDIATE")  # 显式写锁，串行化并发 begin_run（DG-G6）
+        conn.execute(
+            "INSERT OR REPLACE INTO job_run "
+            "(job_name, business_date, status, started_at, finished_at, message) "
+            "VALUES (?, ?, 'running', ?, NULL, '')",
+            (job_name, business_date, started_at),
+        )
+        conn.commit()
+    except Exception:
+        # BEGIN IMMEDIATE 拿锁失败（timeout）或 INSERT 异常 → 回滚，防残留事务态污染后续连接
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def finish_run(job_name: str, business_date: str, status: str,

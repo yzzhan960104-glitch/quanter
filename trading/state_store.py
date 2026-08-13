@@ -58,7 +58,24 @@ _DEFAULT_ACCOUNT_ID = "default"
 
 @contextmanager
 def _connect(db_path: str):
-    """连接上下文：开 WAL + foreign_keys，提交/回滚自动。每次操作新建连接（SQLite 非线程安全）。
+    """连接上下文：开 WAL + foreign_keys + busy_timeout，提交/回滚自动。每次操作新建连接。
+
+    红线契约（DG-G6 钉死）：**仅事件循环线程可写**。
+        engine 的 insert_*/update_*/snapshot_* 等写路径全部在事件循环线程同步执行
+        （state_store 是同步 API，engine 用 run_in_threadpool 把读口 export_trades/
+        query_trades 扔到工作线程，但写口仍由事件循环直接调用）。WAL + busy_timeout
+        是为跨线程读不阻塞写、跨连接写串行化的兜底，**不是鼓励多线程并发写**——多线程
+        并发写同一 DB 仍会因 SQLite 单写者语义排队（不 BUSY 但串行）。如需工作线程写，
+        必须显式加应用层互斥（参考 discovery/store.py:50 _write_lock 范式）。
+
+    DG-G6（2026-08-14 g-wave-p0-guards · 对齐 backtest/tasks_db.py:45 + discovery/store.py:59
+    正范式）：补齐 SQLite 并发协调三件套——
+      ① ``timeout=30``：默认 5s→30s，跨线程读（export_trades/query_trades 已走
+         run_in_threadpool）与事件循环写并发时，读连接遇 RESERVED 锁会等 30s 而非秒抛 BUSY；
+      ② ``PRAGMA journal_mode=WAL``：Write-Ahead Logging 让读不阻塞写——跨线程读口
+         查询时事件循环仍可写，rollback journal 模式下读也会被 EXCLUSIVE 锁挡住；
+      ③ ``PRAGMA busy_timeout=30000``：连接级锁等待 30s（与 timeout 参数语义同源，
+         显式 PRAGMA 钉死口径，防 timeout 参数被误改后失去兜底）。
 
     Why foreign_keys=ON（spec §2.2 顶部 PRAGMA）：trade_event/order/fill/position/account_daily
     均外键引用 account(account_id)。开 FK 引用完整性，插孤儿行（引用不存在 account）直接 IntegrityError，
@@ -66,10 +83,11 @@ def _connect(db_path: str):
     复用 position_book._connect 范式（WAL + row_factory + 自动 commit/rollback）。
     """
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path, timeout=30)  # DG-G6：5s→30s 防跨线程读写并发 BUSY
     con.row_factory = sqlite3.Row
     try:
         con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout=30000")      # DG-G6：锁等待 30s 兜底
         con.execute("PRAGMA foreign_keys=ON")  # 引用完整性（spec §2.2）
         yield con
         con.commit()
