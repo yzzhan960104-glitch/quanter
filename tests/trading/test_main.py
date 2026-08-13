@@ -74,6 +74,12 @@ def test_run_server_live_no_reload(monkeypatch):
     captured = {}
     monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    # DG-G2 fail-closed 适配：live 模式启动闸（__main__.py:371）要求必配 QUANTER_API_TOKEN，
+    # 否则 sys.exit(1)（防 live 实例裸奔——起一个所有敏感请求都 401 的实例无意义）。
+    # 本测试锁的是「live → reload=False」契约，必须维持 live；故显式配测试 token 通过启动闸，
+    # 而非退回 dry_run（退回将使本测试失去验 live 行为的意义）。token 值任意——uvicorn.run 被
+    # mock，不起真 server，不触发 per-request 鉴权，仅满足启动期 env 门。
+    monkeypatch.setenv("QUANTER_API_TOKEN", "test-token-no-real-server")
     monkeypatch.setattr(main_mod, "_assert_single_instance", lambda port: None)
     main_mod.run_server()
     assert captured.get("reload") is False, "live 模式必须 reload=False（防子进程抢 session）"
@@ -146,6 +152,10 @@ def test_run_server_live_passes_require_live_gate(monkeypatch):
     captured = {}
     monkeypatch.setenv("QUANTER_REQUIRE_LIVE", "1")
     monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    # DG-G2 fail-closed 适配：与 test_run_server_live_no_reload 同因——live 启动闸要求
+    # QUANTER_API_TOKEN 已配。本测试锁的是「REQUIRE_LIVE=1 + live → 放行不误杀生产」，
+    # mode 必须维持 live，故显式配测试 token 过启动闸（token 值任意，uvicorn.run 被 mock）。
+    monkeypatch.setenv("QUANTER_API_TOKEN", "test-token-no-real-server")
     monkeypatch.setattr(main_mod, "_assert_single_instance", lambda port: None)
     monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
     main_mod.run_server()
