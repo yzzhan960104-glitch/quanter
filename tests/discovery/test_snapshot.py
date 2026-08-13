@@ -138,3 +138,27 @@ def test_filter_universe_from_lake_synthetic():
     univ = filter_universe_from_lake(lake)
     assert set(univ.keys()) == {"300001.SZ"}          # 300002 流动性不足；主板被 board 过滤
     assert len(univ["300001.SZ"]) == 40
+
+
+def test_count_stale_symbols_offline_proxy():
+    """P6-D2：尾部陈旧标的计数（离线连续性代理）——早于全局最新日超阈值者计陈旧。"""
+    import pandas as pd
+    from discovery.snapshot import _count_stale_symbols
+
+    idx_new = pd.date_range("2026-07-01", "2026-08-07", freq="B")
+    idx_stale = pd.date_range("2026-07-01", "2026-07-10", freq="B")
+    cols = {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0, "volume": 1.0, "amount": 1e6}
+    univ = {
+        "300001.SZ": pd.DataFrame(cols, index=idx_new),
+        "300002.SZ": pd.DataFrame(cols, index=idx_stale),   # 尾部陈旧（早于最新日 28 天）
+        "300003.SZ": pd.DataFrame(cols, index=idx_new),
+    }
+    assert _count_stale_symbols(univ, stale_days=14) == 1
+
+
+def test_snapshot_hash_includes_stale_count():
+    """P6-D2：n_stale 入指纹——连续性状态变化 → hash 变（补采后收敛重置的触发源）。"""
+    from discovery.snapshot import snapshot_hash
+    h1 = snapshot_hash(1190, "2025-01-02~2026-08-07", "2025-01-01", n_stale=0)
+    h2 = snapshot_hash(1190, "2025-01-02~2026-08-07", "2025-01-01", n_stale=3)
+    assert h1 != h2

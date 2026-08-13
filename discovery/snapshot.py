@@ -33,6 +33,10 @@ class SnapshotMeta:
     data_hash: str = ""         # P1-3（2026-08-03）：universe 价格内容指纹（close 序列
                                 # sha256 聚合）。数据增量/复权重算历史 → 指纹变，供
                                 # daemon 审计"跨夜收敛因数据版本变化而重置"。
+    n_stale_symbols: int = 0    # P6-D2（2026-08-13）：尾部陈旧标的数（离线连续性代理）——
+                                # 最后 K 线早于湖全局最新日超 STALE_DAYS 的标的数；>0 时
+                                # freeze 告警数据可信度风险，且计入 snapshot_hash（补采后
+                                # 计数变化 → hash 变 → 跨夜收敛重置，spec §7 D6-2）。
 
 
 def is_target_board(sym):
@@ -41,15 +45,40 @@ def is_target_board(sym):
     return code.startswith(("300", "301", "688", "689"))
 
 
-def snapshot_hash(universe_count, date_range, lake_start, universe_def=DEFAULT_UNIVERSE_DEF):
-    """纯函数：快照指纹 sha256[:16]。同输入→同输出（可复现基石），不读文件故可快速单测。"""
+def snapshot_hash(universe_count, date_range, lake_start, universe_def=DEFAULT_UNIVERSE_DEF,
+                   n_stale=0):
+    """纯函数：快照指纹 sha256[:16]。同输入→同输出（可复现基石），不读文件故可快速单测。
+
+    P6-D2（2026-08-13）：n_stale（尾部陈旧标的数）入指纹——连续性状态变化（补采修复）
+    → hash 变 → 跨夜收敛显式重置（spec §7 D6-2；daemon data_changed 机制已存在）。
+    """
     sig = json.dumps({
         "universe_def": universe_def,
         "universe_count": int(universe_count),
         "date_range": str(date_range),
         "lake_start": str(lake_start),
+        "n_stale": int(n_stale),
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
+
+
+# 尾部陈旧判定阈值（自然日）：最后 K 线早于湖全局最新日超此天数 → 陈旧（离线连续性代理）。
+_STALE_DAYS = 14
+
+
+def _count_stale_symbols(universe, stale_days=_STALE_DAYS):
+    """尾部陈旧标的数（P6-D2 离线连续性代理）：最后 K 线早于湖全局最新日超 stale_days。
+
+    物理意图：discovery 的 universe 加载不触网（无法拿停牌区间做精确 find_gaps），
+    用「尾部陈旧」做连续性风险的离线代理——退市/长期停牌/漏采三种尾部缺数都会命中；
+    精确判定由 data.integrity.find_gaps（带 suspend/trade_cal）承担，本函数只做
+    搜索前的廉价告警 + 指纹联动（补采 → 计数变化 → snapshot_hash 变化 → 收敛重置）。
+    """
+    if not universe:
+        return 0
+    latest = max(df.index.max() for df in universe.values())
+    cutoff = pd.Timestamp(latest) - pd.Timedelta(days=stale_days)
+    return sum(1 for df in universe.values() if df.index.max() < cutoff)
 
 
 def data_content_hash(universe, lake_start="2025-01-01"):
@@ -112,6 +141,11 @@ def freeze(lake_start="2025-01-01"):
 
     universe 全量加载（start 至今），objective 再按 signal_date 切 inner/outer，
     而非此处切——保证 scan_symbol 有完整历史做 window/ATR 预热。
+
+    P6-D2（2026-08-13）：连续性状态入快照——n_stale_symbols（尾部陈旧标的数，离线
+    代理）计入 snapshot_hash 并告警。物理意图：discovery 在残缺数据上搜索会产出
+    误导性冠军（300214.SZ 教训）；补采修复 → n_stale 变化 → hash 变 → 跨夜收敛
+    显式重置（spec §7 D6-2）。
     """
     universe = load_universe(start=lake_start)
     dates = []
@@ -122,13 +156,20 @@ def freeze(lake_start="2025-01-01"):
         date_range = f"{pd.Timestamp(dmin).date()}~{pd.Timestamp(dmax).date()}"
     else:
         date_range = "empty"
+    n_stale = _count_stale_symbols(universe)
+    if n_stale > 0:
+        print(f"[freeze][WARN] universe 含 {n_stale} 只尾部陈旧标的（最后 K 线早于湖最新日"
+              f"超 {_STALE_DAYS} 天）——数据可信度风险，建议 repair_gaps 补采后再搜索",
+              flush=True)
     meta = SnapshotMeta(
-        snapshot_hash=snapshot_hash(len(universe), date_range, lake_start),
+        snapshot_hash=snapshot_hash(len(universe), date_range, lake_start,
+                                    n_stale=n_stale),
         universe_def=DEFAULT_UNIVERSE_DEF,
         universe_count=len(universe),
         date_range=date_range,
         lake_start=lake_start,
         data_hash=data_content_hash(universe, lake_start),
+        n_stale_symbols=n_stale,
     )
     return universe, meta
 
