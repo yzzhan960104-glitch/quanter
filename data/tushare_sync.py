@@ -22,7 +22,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from config import TUSHARE_DATASETS, LAKE_CONFIG
-from data._tushare_compat import get_pro, source_name
+from data._tushare_compat import _call_with_timeout, get_pro, source_name
 from data.integrity import safe_overwrite
 from data.resilience import (
     tushare_breaker,
@@ -120,7 +120,12 @@ def _fetch_with_guard(api_name: str, *, quota_type: str = "basic", **kwargs) -> 
     last_exc: Exception | None = None
     for attempt in range(_BACKOFF_MAX_RETRIES + 1):  # 0..max_retries，首次不退避
         try:
-            df = getattr(pro, api_name)(**kwargs)
+            # _call_with_timeout 包裹：让 TCP 挂起在 _CALL_TIMEOUT 秒后抛 TimeoutError
+            # （Why：tushare pro_api 底层 requests 无 timeout，挂起不抛异常会旁路整个
+            # 韧性链——熔断/退避永远等不到异常触发。包裹后 TimeoutError 含"超时"关键词
+            # → _classify_exc 归 transient → 走退避重试链 → 退避耗尽 record_failure
+            # → 熔断最终 OPEN 停打。Task G4 · 韧性链复活。）
+            df = _call_with_timeout(getattr(pro, api_name), **kwargs)
         except Exception as e:
             kind = _classify_exc(e)
             # 持久态：积分/权限不足，重试必败，直接返空（不 record_failure，原逻辑）

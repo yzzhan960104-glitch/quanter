@@ -41,10 +41,19 @@ def fetch_trade_cal(year: int) -> list[str]:
         except Exception:
             pass
     try:
-        from data._tushare_compat import get_pro  # 统一凭证入口（与 sync_daily_incremental 同源）
+        from data._tushare_compat import _call_with_timeout, get_pro  # 统一凭证入口（与 sync_daily_incremental 同源）
         pro = get_pro()
-        df = pro.trade_cal(exchange="SSE", start_date=f"{year}0101", end_date=f"{year}1231",
-                           fields="cal_date,is_open")
+        # _call_with_timeout 包裹 trade_cal（Task G4）：tushare pro_api 底层 requests 无
+        # timeout，启动期 TCP 挂起会卡死整个启动流程（calendar 在盘前被调用判交易日）。
+        # 包裹后挂起在 30s 后抛 TimeoutError → 被下方 broad except 捕获 → weekday 兜底，
+        # 与"无 token / 网络失败"语义同口径（启动不卡死，仅识周末不识节假日）。
+        df = _call_with_timeout(
+            pro.trade_cal,
+            exchange="SSE",
+            start_date=f"{year}0101",
+            end_date=f"{year}1231",
+            fields="cal_date,is_open",
+        )
         days = df[df["is_open"] == 1]["cal_date"].tolist()
         days = [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in days]
         cache.parent.mkdir(parents=True, exist_ok=True)

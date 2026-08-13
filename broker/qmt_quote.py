@@ -16,10 +16,19 @@ xtdata 行情封装（延迟容错）。
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 from typing import Any, Mapping, Optional
 
 logger = logging.getLogger(__name__)
+
+# 独立线程池（Task G4 · 2026-08-13）：xtdata C++ 调用专用。
+# Why 不用默认 executor（loop.run_in_executor(None, ...)）：asyncio.run() 退出时会调
+# shutdown_default_executor() 等所有未完成 future → 一个挂起的 get_full_tick 会拖慢
+# 事件循环关闭 5s+。独立 executor 不被 asyncio.run 回收，挂起线程留在后台（Python 无法
+# 真 kill 线程），事件循环立即关闭——符合"主路径不等挂起"的韧性语义。
+_qmt_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="qmt-quote")
 
 try:
     from xtquant import xtdata  # type: ignore
@@ -36,6 +45,13 @@ except ImportError:  # pragma: no cover - 环境相关，非逻辑分支
 # 移动止损现价检查永远跳过。这里集中归一化：驼峰→下划线 + 补涨跌停（instrument_detail）。
 _LIMIT_PRICE_CACHE: dict[str, tuple[str, "float", "float"]] = {}
 # symbol -> (yyyymmdd, high_limit, low_limit)。涨跌停当日不变，按日缓存避免每 tick 重取。
+
+# xtdata C++ 调用超时阈值（Task G4 · 韧性链复活 · 2026-08-13）
+# Why 5s：xtdata.get_full_tick / get_instrument_detail 是本地 QMT 进程的 C++ 同步调用，
+# 正常 <100ms；5s 兜底覆盖 QMT 进程卡顿/柜台网络抖动。对端 TCP 挂起时 run_in_executor
+# 里的同步调用【不抛异常】（与 requests 同理），asyncio.wait_for 到点抛 asyncio.TimeoutError
+# → get_quotes 全 None 降级（与"行情缺失跳过"语义一致），不卡死 stop_loss_monitor 巡查循环。
+_QMT_CALL_TIMEOUT: float = 5.0
 
 
 def _fetch_limit_prices_sync(symbols: list[str]) -> dict[str, tuple["float | None", "float | None"]]:
@@ -145,12 +161,25 @@ async def get_quotes(
         # 两路同步 C++ 调用分别投同一线程池（run_in_executor 串行 await，不阻塞事件循环）：
         # ① get_full_tick 批量取 tick（原生 list 入参，N→1 次）；
         # ② _fetch_limit_prices_sync 取涨跌停（按日缓存，命中后 0 调用）。
-        raw = await loop.run_in_executor(
-            None, lambda: xtdata.get_full_tick(symbols)  # type: ignore[union-attr]
+        # asyncio.wait_for 超时兜底（Task G4）：xtdata 挂起时 run_in_executor 永不返回 →
+        # wait_for 到点抛 asyncio.TimeoutError → 落 except 全 None 降级（不卡巡查循环）。
+        raw = await asyncio.wait_for(
+            loop.run_in_executor(
+                _qmt_executor, lambda: xtdata.get_full_tick(symbols)  # type: ignore[union-attr]
+            ),
+            timeout=_QMT_CALL_TIMEOUT,
         )
-        limits = await loop.run_in_executor(
-            None, lambda: _fetch_limit_prices_sync(symbols)
+        limits = await asyncio.wait_for(
+            loop.run_in_executor(
+                _qmt_executor, lambda: _fetch_limit_prices_sync(symbols)
+            ),
+            timeout=_QMT_CALL_TIMEOUT,
         )
+    except asyncio.TimeoutError as exc:
+        # xtdata 挂起超时：全 None 降级（与"行情缺失跳过"同语义，不阻断 stop_loss/risk_shield）
+        logger.warning("xtdata 调用超时(>%ss) symbols=%s，全 None 降级：%s",
+                       _QMT_CALL_TIMEOUT, symbols, exc)
+        return {s: None for s in symbols}
     except Exception as exc:
         # 行情查询失败不阻断主路径：捕获记 warning，全 None 让调用方降级
         logger.warning("xtdata.get_full_tick/limit 批量异常 symbols=%s: %s", symbols, exc)

@@ -15,7 +15,72 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import os
+
+# ============================================================================
+# 外部 SDK 调用超时兜底（Task G4 · 韧性链复活 · 2026-08-13）
+# ============================================================================
+# 物理意图（Why 此层兜底存在）：tushare pro_api / fredapi 底层用 requests（默认无
+# timeout），当对端 TCP 挂起（半开连接 / GFW 注入 RST / 对端 hold 住不回 FIN）时，
+# requests.read() 阻塞在 socket.recv **不抛异常**——上层 CircuitBreaker / 退避重试
+# 永远等不到异常触发 → 韧性链被旁路（熔断不跳闸、record_failure 不计、退避不重试），
+# 同步主循环被一个挂起接口拖死。
+#
+# 解法：用独立线程池跑 SDK 调用，主线程 future.result(timeout) 到点抛 TimeoutError，
+# 让上层 except 能捕获 → record_failure → 熔断/退避链复活。对齐既有范式：
+#   - data/clients/akshare_client.py::_call_ak（_AK_TIMEOUT=30s，ThreadPoolExecutor）
+#   - data/clients/alpha_vantage_client.py（httpx.AsyncClient timeout=15.0）
+#
+# 阈值选 30s（Why）：tushare/FRED 正常调用 <5s；30s 兜底覆盖大数据集分页 + 网络抖动；
+# akshare 同量级已生产验证。env TUSHARE_CALL_TIMEOUT 可覆盖便于压测/测试调小不真等。
+# 命名沿用 brief 契约（虽然 helper 通用，但 tushare 是主消费者 + 向后兼容）。
+_CALL_TIMEOUT = float(os.getenv("TUSHARE_CALL_TIMEOUT", "30"))
+
+# 独立线程池（Why 不用 with ThreadPoolExecutor as ex：with 退出会 shutdown(wait=True)
+# 阻塞至挂起线程完成，反而把超时绕回成阻塞——违反"挂起可被打断"的初衷）。
+# 模块级单例 + max_workers=4：挂起线程随主线程放弃 future 留在池里继续跑（Python 无法
+# 真 kill 线程），但主线程已抛 TimeoutError 向上交差。4 worker 容纳偶发挂起不堵新调用。
+# 对齐 akshare _ak_executor 同范式（已生产验证）。
+_sdk_timeout_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="sdk-timeout")
+
+
+def _call_with_timeout(fn, *args, timeout=None, **kwargs):
+    """线程池包裹外部 SDK 调用 + 超时兜底，让 TCP 挂起可观测化（抛 TimeoutError）。
+
+    Why 本函数：tushare pro_api / fredapi 底层 requests 无 timeout，TCP 挂起时不抛异常
+    → 上层 CircuitBreaker/退避重试链被旁路（永远等不到异常）。本包裹在独立线程跑 fn，
+    主线程 future.result(timeout) 到点抛 TimeoutError → 上层 except 捕获 → record_failure
+    → 韧性链复活。
+
+    Args:
+        fn: 外部 SDK 调用（如 pro.daily / fred.get_series）。
+        *args, **kwargs: fn 的位置/关键字参数（透传）。
+        timeout: 显式覆盖 _CALL_TIMEOUT（per-call 自定义阈值，如 FRED/calendar 可传不同值）。
+
+    Returns:
+        fn 的返回值（透传）。
+
+    Raises:
+        TimeoutError: fn 在 timeout 秒内未完成（消息含 "timeout" + "超时" 双关键词，
+            确保 tushare_sync._classify_exc 的 "超时" 命中 + FRED except 的 "timeout" 命中）。
+        Exception: fn 自身抛出的任何异常原样透传（不被吞，不影响上层异常分类）。
+
+    固有限制（无法消除）：超时仅放弃【等待】，底层 fn 线程仍在跑（Python 无真 kill 线程），
+    挂起线程占用一个池槽位直至对端真断连。max_workers=4 容纳偶发挂起；持续挂起会耗尽
+    槽位导致 submit 阻塞——但此时同步主循环早已因 TimeoutError 走熔断 OPEN 停打，
+    不会继续投新任务（熔断层兜底）。
+    """
+    t = timeout if timeout is not None else _CALL_TIMEOUT
+    fut = _sdk_timeout_executor.submit(fn, *args, **kwargs)
+    try:
+        return fut.result(timeout=t)
+    except concurrent.futures.TimeoutError as e:
+        # 双关键词消息（"timeout" + "超时"）：让 _classify_exc（查"超时"）和 FRED except
+        # （查 "timeout"）都能命中 → 归基础设施异常走 record_failure / transient 退避。
+        raise TimeoutError(f"外部 SDK 调用超时 (timeout after {t}s)") from e
+
 
 # ============================================================================
 # T15 代码层防复发（2026-08-11 · 决策 C 补全）

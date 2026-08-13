@@ -610,11 +610,19 @@ class FredDataFetcher(DataFetcher):
         抽离动机：把"触达外部接口"的代码与"缓存/前视偏差处理/异常分类"解耦，
         便于熔断器在外层统一 try/except 包裹后做异常分类与 record_failure。
         本方法只负责调用 + 返回原始 Series，不做任何加工。
+
+        Task G4（2026-08-13 韧性链复活）：用 _call_with_timeout 包裹 get_series ——
+        fredapi 底层 requests 无 timeout，TCP 挂起时不抛异常会旁路 fetch_macro 的
+        except 分类（永远等不到异常）。包裹后挂起抛 TimeoutError（消息含 "timeout"
+        英文关键词）→ fetch_macro except 命中 "timeout" 分支 → record_failure + 空 DF
+        （基础设施异常口径）。
         """
-        return self._fred.get_series(
+        from data._tushare_compat import _call_with_timeout
+        return _call_with_timeout(
+            self._fred.get_series,
             series_id=indicator,
             observation_start=start,
-            observation_end=end
+            observation_end=end,
         )
 
     def fetch_factor_data(
