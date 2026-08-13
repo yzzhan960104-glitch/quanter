@@ -134,6 +134,7 @@ def _dump_migration_sidecar(table: str, rows: list[dict]) -> None:
 def _migrate_with_backup(
     con, table: str, new_ddl: str, *,
     defaults: dict | None = None,
+    column_copies: dict | None = None,
     backfill: bool = True,
 ) -> int:
     """SQLite 表备份式重建（导出 → DROP → CREATE → 回灌，治「连错库即清零」）。
@@ -142,19 +143,25 @@ def _migrate_with_backup(
     的本质差异）：
       ① SELECT * 旧表 → 内存缓存行 + 写 sidecar JSON（双保险，连错库可恢复）；
       ② DROP TABLE + 执行 new_ddl（新 schema，CREATE 语义）；
-      ③ 回灌共享列（旧∩新列名）+ 新表独有列取 ``defaults`` 兜底；其余 NULL。
-         ``backfill=False`` 时跳过回灌（旧行语义无法融入新 schema，仅备份）。
+      ③ 回灌共享列（旧∩新列名）+ 新表独有列按 ``column_copies`` 行级拷贝 / ``defaults``
+         兜底；其余 NULL。``backfill=False`` 时跳过回灌（旧行语义无法融入新 schema，仅备份）。
 
     Args:
         con: sqlite3 连接（_connect 上下文，事务由其 commit/rollback）。
         table: 表名（如 "fill" / "position"）。
         new_ddl: 完整 CREATE TABLE 语句（DROP 后执行；含 IF NOT EXISTS 语义冗余但无害，
                  因 DROP 已确保表不存在）。
-        defaults: 新表独有列的回灌默认值（如 ``{"account_id": "default"}``）。
-                  回灌时新表独有列若无默认，取 NULL；若该列 NOT NULL 则撞约束 → 该行跳过
-                  （保数据不丢即可，sidecar 已存可恢复）。
+        defaults: 新表独有列的回灌「静态」默认值（如 ``{"account_id": "default"}``）——
+                  全部行取同一个值。回灌时新表独有列若无默认，取 NULL；若该列 NOT NULL
+                  则撞约束 → 该行跳过（保数据不丢即可，sidecar 已存可恢复）。
+        column_copies: 新表独有列的「行级按列拷贝」映射（如
+                  ``{"traded_time": "applied_at"}``）——每行各自取映射源列的旧值，适合
+                  新列语义可由某旧列近似的场景。优先级：旧列直匹配 > column_copies >
+                  defaults > NULL。典型：fill 表迁移 traded_time NOT NULL 但旧表无此列，
+                  用 applied_at 作成交时间近似回灌（order_id 已 UNIQUE 保证
+                  (order_id, traded_time) 不撞）。
         backfill: True 回灌共享列（旧行语义可融入新 schema）；False 仅备份不回灌
-                  （旧行无法融入，如 fill 表 traded_time NOT NULL 但旧行无此列）。
+                  （旧行无法融入新 schema，仅留 sidecar）。
 
     Returns:
         回灌行数（backfill=False 时为 0；备份始终执行）。
@@ -165,6 +172,7 @@ def _migrate_with_backup(
         - DROP 前必须先 SELECT（导出），这是与原 ``con.execute("DROP TABLE")`` 的本质差异。
     """
     defaults = defaults or {}
+    column_copies = column_copies or {}
     # ① 导出旧行到内存 + sidecar JSON（DROP 前必须先读，DROP 后无源可读）
     rows = [dict(r) for r in con.execute(f"SELECT * FROM {table}").fetchall()]
     if rows:
@@ -185,6 +193,10 @@ def _migrate_with_backup(
         for col in new_cols:
             if col in old_cols:
                 vals.append(row[col])
+            elif col in column_copies and column_copies[col] in old_cols:
+                # 行级按列拷贝：新列取映射源列的旧值（如 traded_time ← applied_at，
+                # 每行各自的成交落库时刻作 traded_time 近似）
+                vals.append(row[column_copies[col]])
             elif col in defaults:
                 vals.append(defaults[col])
             else:
@@ -277,15 +289,23 @@ def init_store(db_path: str | None = None) -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_order_trade ON \"order\"(trade_id)")
         # ④ fill（成交流水 · append-only）——升级既有表（加 account_id 列）
         if _table_exists(con, "fill") and not _has_column(con, "fill", "traded_time"):
-            # 旧 fill 无 traded_time（position_book 早期 schema）→ 备份式重建
+            # 旧 fill 无 traded_time（position_book 早期 schema）→ 备份式重建 + 回灌
             # G5 schema 迁移安全：原 DROP 直接丢数据（spec §7.1「live-前-无-数据」假设在
             # 连错库/历史回灌场景下被破坏即清零成交真相源）；改 _migrate_with_backup 三段式
             # （导出 → DROP → CREATE → 回灌）。
-            # backfill=False：新 fill 表 traded_time NOT NULL + UNIQUE(order_id, traded_time)
-            # 幂等键——旧 fill 行无 traded_time 列，回灌 NULL 撞 NOT NULL，或回灌哨兵值撞
-            # UNIQUE，技术上无法回灌。备份到 sidecar（连错库可恢复）+ 不回灌（新表 schema 干净）。
-            # spec §7.1 live-前-无-数据 假设下 fill 无生产数据，备份是双保险而非数据迁移。
-            logger.info("state_store 迁移：旧 fill 表无 traded_time，备份式重建（不回灌）")
+            # 回灌（backfill 默认 True）+ column_copies={"traded_time": "applied_at"}：
+            #   旧 fill 表 schema（order_id TEXT NOT NULL, symbol, direction, qty, price,
+            #   applied_at, UNIQUE(order_id)——见 position_book 早期建表 + test_position_book.py
+            #   test_fill_schema_migration 历史范式）只缺 traded_time 一列。回灌时令
+            #   traded_time = applied_at 作成交时间近似（applied_at 是成交回报落库时刻，
+            #   与 traded_time 同语义近值，是最优近似）：
+            #     - traded_time NOT NULL：applied_at 旧值非空即满足；
+            #     - UNIQUE(order_id, traded_time)：旧表 order_id 已 UNIQUE ⇒ (order_id,
+            #       traded_time) 必然唯一 ⇒ 回灌永不撞约束（reviewer 实测 2/2 零冲突）。
+            #   fill 是成交真相源，应保 DB 而非仅 sidecar——回灌让旧成交流水在新表存活。
+            #   兜底退化：若极旧 fill 行缺 applied_at，traded_time 取 NULL → 撞 NOT NULL
+            #   → 该行跳过 + warning（sidecar 已备份，数据不丢）。
+            logger.info("state_store 迁移：旧 fill 表无 traded_time，备份式重建 + 回灌（traded_time=applied_at 近似）")
             _migrate_with_backup(
                 con, "fill",
                 """CREATE TABLE fill (
@@ -299,7 +319,7 @@ def init_store(db_path: str | None = None) -> None:
                     applied_at   TEXT NOT NULL,
                     UNIQUE(order_id, traded_time)
                 )""",
-                backfill=False,
+                column_copies={"traded_time": "applied_at"},
             )
         con.execute("""
             CREATE TABLE IF NOT EXISTS fill (

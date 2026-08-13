@@ -69,8 +69,7 @@ def test_atomic_overwrite_normal_replaces(tmp_path):
     pd.DataFrame({"a": range(100)}).to_parquet(target, engine="pyarrow")
 
     # 增长写（150 > 100，守卫放行）
-    new_df = pd.DataFrame({"a": range(150)}
-                          ) if False else pd.DataFrame({"a": range(150)})
+    new_df = pd.DataFrame({"a": range(150)})
     safe_overwrite(str(target), new_df)
 
     got = pd.read_parquet(target)
