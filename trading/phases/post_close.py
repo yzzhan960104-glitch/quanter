@@ -111,7 +111,10 @@ from trading import state_store as _state_store
 from trading.account import resolve_account_id as _resolve_account_id
 # W1-A/T2-Task4：_mode / _alert_critical 反查切断 → 顶部直接 import critical 真身
 # （critical 是 SSoT 基础设施域叶子 · patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁）。
-from trading.critical import _mode, _alert_critical
+# DG-G3（2026-08-13）：补 import _CriticalHalt——熔断段基线缺失时让 breaker raise 的
+# _CriticalHalt 在本段 except 中显式 re-raise（不被软降级 except Exception 吞掉，直传
+# _critical_guard 触发 _halt 停调度）。
+from trading.critical import _CriticalHalt, _mode, _alert_critical
 # _check_daily_loss_limit（熔断 -3% 纯判定 functional core · compute 单源 · post_close 路径无 engine patch）。
 from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
 # W1-A/T2-Task4：_cancel_all_open_orders 反查切断 → 顶部直接 import io.breaker 真身
@@ -258,7 +261,10 @@ async def post_close(
     # ③ 日内熔断三步（Task 10 · R-2 · 在 reconcile 之后）：
     # Why 在 reconcile 后：reconcile 查持仓 drift 是另一维度观测，与日内总资产 -3% 熔断
     # 互不依赖；放后面让熔断有最完整的 curr_equity（含盘后 reconcile 拉到的最新持仓估值）。
-    # 各步独立 try-except 软降级：单段异常不阻塞清白名单和后续 trailing/max_holding。
+    # 各段独立 try-except 软降级：单段异常不阻塞清白名单和后续 trailing/max_holding。
+    # **DG-G3（2026-08-13）异常传播例外**：本段 except 顺序 ``_CriticalHalt`` 优先 re-raise，
+    # 让 breaker fail-closed 抛的 _CriticalHalt 直传 engine._critical_guard → _halt 停调度
+    # （不被软降级 except Exception 吞掉变静默）。
     circuit_breaker_triggered = False
     breaker_skipped = False
     try:
@@ -287,69 +293,76 @@ async def post_close(
                 logger.warning(_msg)
                 if _mode() == "live":
                     _alert_critical(_msg + "（C-1 熔断基线为近似值，人工复盘知悉精度边界）")
-        if start_equity is None or start_equity <= 0:
-            # 无基线（pre_open + T-1 close 都缺）→ 跳过熔断 + WARN
-            # Why 显式跳过：check_daily_loss_limit(0, X) 虽返 False 但语义模糊，
-            # 显式 breaker_skipped=True 让观测层知道「未判定」而非「判定未触发」。
+        # DG-G3（2026-08-13）：基线链全失效（start + T-1 close 都缺）→ **不再 breaker_skipped**，
+        # 让 None 直传 breaker 触发 fail-closed（dry_run 返 True 停手 + CRITICAL / live raise
+        # _CriticalHalt 停调度）。原 breaker_skipped 路径只保留 curr_equity 缺失（无法判定，
+        # 与基线缺失语义不同——基线缺失是「该停手」，curr 缺失是「无法判定」）。
+        # 步骤 2：拉当前总资产（盘后总资产 = curr_equity）
+        curr_equity = None
+        if gw is not None and hasattr(gw, "query_asset"):
+            try:
+                asset = await gw.query_asset()
+                curr_equity = (asset or {}).get("total_asset")
+            except Exception:
+                logger.exception("post_close query_asset 异常（熔断路径降级跳过）")
+        if curr_equity is None or float(curr_equity) <= 0:
+            # curr 缺失 → 跳过熔断 + WARN（无法判定，与基线缺失 fail-closed 区分）
+            # Why 显式跳过：check_daily_loss_limit(X, 0) 同样语义模糊，显式 breaker_skipped=True
+            # 让观测层知道「未判定」而非「判定未触发」。
             breaker_skipped = True
             logger.warning(
-                "post_close 跳过日内熔断：无 start_equity 基线 date=%s"
-                "（pre_open query_asset 失败？次日人工补基线）", today_eq)
+                "post_close 跳过日内熔断：query_asset 返空 date=%s curr=None", today_eq)
         else:
-            # 步骤 2：拉当前总资产（盘后总资产 = curr_equity）
-            curr_equity = None
-            if gw is not None and hasattr(gw, "query_asset"):
-                try:
-                    asset = await gw.query_asset()
-                    curr_equity = (asset or {}).get("total_asset")
-                except Exception:
-                    logger.exception("post_close query_asset 异常（熔断路径降级跳过）")
-            if curr_equity is None or float(curr_equity) <= 0:
-                # curr 缺失同样跳过（不拿 0 触发）
-                breaker_skipped = True
-                logger.warning(
-                    "post_close 跳过日内熔断：query_asset 返空 date=%s curr=None", today_eq)
-            else:
-                # 步骤 3：判定 + 触发三步（cancel_all + emergency_halt + 告警）
-                triggered = _check_daily_loss_limit(
-                    float(start_equity), float(curr_equity))
-                if triggered:
-                    logger.critical(
-                        "【日内熔断】触发！date=%s start=%s curr=%s 回撤=%.2f%%"
-                        "（执行 cancel_all + emergency_halt）",
-                        today_eq, start_equity, curr_equity,
-                        (float(curr_equity) - float(start_equity)) / float(start_equity) * 100)
-                    # 撤所有未终态单（尽最大努力撤完，单笔失败不中断）
-                    if gw is not None:
-                        try:
-                            # M2（T3 fix I-1）：熔断撤单必须消费 unconfirmed 口径。
-                            # 熔断是实盘最致命路径（敞口已超阈值），撤单若有未确认
-                            # 终态的单，必须 critical 告警——既不与上方 :1248 的
-                            # 「触发」告警重复（那一条是宣告触发，此条是追加撤单质量
-                            # 口径），也绝不允许静默（与 pre_open:530 同口径双标）。
-                            _cb_res = await _cancel_all_open_orders(gw)
-                            if _cb_res["unconfirmed"] > 0:
-                                logger.critical(
-                                    "【日内熔断】撤单有 %s 笔未确认终态（发起 %s 笔）"
-                                    "——敞口可能残留，必须人工复核柜台真实持仓",
-                                    _cb_res["unconfirmed"], _cb_res["cancelled"],
-                                )
-                        except Exception:
-                            logger.exception("post_close 熔断撤单异常（继续 emergency_halt）")
-                    # 置网关 lock_down + ERROR 告警
+            # 步骤 3：判定 + 触发三步（cancel_all + emergency_halt + 告警）
+            # DG-G3：start_equity 可能 None（基线链全失效），不强转 float（防 TypeError），
+            # 直传 breaker → fail-closed 分支处理（live raise _CriticalHalt 由下方 except 捕获 re-raise）。
+            triggered = _check_daily_loss_limit(start_equity, float(curr_equity))
+            if triggered:
+                # start_equity 在 fail-closed 路径下可能 None，回撤展示需有基线才打百分号
+                _pct_str = (
+                    f"{(float(curr_equity) - float(start_equity)) / float(start_equity) * 100:.2f}%"
+                    if (start_equity and start_equity > 0) else "N/A(基线缺失 fail-closed 触发)")
+                logger.critical(
+                    "【日内熔断】触发！date=%s start=%s curr=%s 回撤=%s"
+                    "（执行 cancel_all + emergency_halt）",
+                    today_eq, start_equity, curr_equity, _pct_str)
+                # 撤所有未终态单（尽最大努力撤完，单笔失败不中断）
+                if gw is not None:
                     try:
-                        from trading.gateway_service import (
-                            emergency_halt as _emergency_halt,
-                        )
-                        _emergency_halt()
+                        # M2（T3 fix I-1）：熔断撤单必须消费 unconfirmed 口径。
+                        # 熔断是实盘最致命路径（敞口已超阈值），撤单若有未确认
+                        # 终态的单，必须 critical 告警——既不与上方 :1248 的
+                        # 「触发」告警重复（那一条是宣告触发，此条是追加撤单质量
+                        # 口径），也绝不允许静默（与 pre_open:530 同口径双标）。
+                        _cb_res = await _cancel_all_open_orders(gw)
+                        if _cb_res["unconfirmed"] > 0:
+                            logger.critical(
+                                "【日内熔断】撤单有 %s 笔未确认终态（发起 %s 笔）"
+                                "——敞口可能残留，必须人工复核柜台真实持仓",
+                                _cb_res["unconfirmed"], _cb_res["cancelled"],
+                            )
                     except Exception:
-                        logger.exception("post_close emergency_halt 异常（已尽力撤单）")
-                    circuit_breaker_triggered = True
-                else:
-                    logger.info(
-                        "post_close 日内熔断未触发 date=%s 回撤=%.2f%%（阈值 -3.0%%）",
-                        today_eq,
-                        (float(curr_equity) - float(start_equity)) / float(start_equity) * 100)
+                        logger.exception("post_close 熔断撤单异常（继续 emergency_halt）")
+                # 置网关 lock_down + ERROR 告警
+                try:
+                    from trading.gateway_service import (
+                        emergency_halt as _emergency_halt,
+                    )
+                    _emergency_halt()
+                except Exception:
+                    logger.exception("post_close emergency_halt 异常（已尽力撤单）")
+                circuit_breaker_triggered = True
+            else:
+                logger.info(
+                    "post_close 日内熔断未触发 date=%s 回撤=%.2f%%（阈值 -3.0%%）",
+                    today_eq,
+                    (float(curr_equity) - float(start_equity)) / float(start_equity) * 100)
+    except _CriticalHalt:
+        # DG-G3（2026-08-13）：breaker fail-closed 在 live 模式 raise _CriticalHalt 时，
+        # 必须 re-raise 让 engine._critical_guard 捕获 → _halt 停调度。原 ``except Exception``
+        # 会吞掉 _CriticalHalt（其继承 Exception）变静默软降级，违背 fail-closed 语义。
+        # 此 except 必须在 ``except Exception`` 之前（Python 异常匹配顺序）。
+        raise
     except Exception:
         logger.exception("post_close 日内熔断整体异常（不阻塞清白名单）")
 

@@ -326,12 +326,19 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     today_eq = date
 
     def _notify_baseline_missing(reason: str) -> None:
-        """C-1 熔断基线缺失统一告警（warning + live CRITICAL 钉钉）。
+        """C-1 熔断基线缺失统一告警（warning + live CRITICAL 钉钉）+ DG-G3 T-1 兜底回填。
 
         pre_open 抓基线失败的三种场景（query_asset 返空 / 抓取异常 / gw=None）共用本
         helper，防 C-1 告警文案漂移 + 确保三处都触发 live CRITICAL。物理意图：基线缺失
         = 日内 -3% 熔断将失效（穿仓风险），开盘前必须叫醒人工（post_close T-1 close
         兜底是第二道防线，但开盘前告警让用户可立即 trigger_pre_open_once 补精确基线）。
+
+        DG-G3（2026-08-13）T-1 兜底回填（红线「fail-closed + 基线兜底同 commit」）：
+            breaker fail-closed 后若 pre_open 不兜底，则 query_asset 失败的每个交易日
+            都会让 post_close → breaker fail-closed 停手 = **每天开盘误熔断中断业务**。
+            本 helper 在告警后追加：用 T-1 close 写 account_daily.start（隔夜无交易近似），
+            让 post_close 读到非 None 基线 → 熔断正常判定，fail-closed 仅在 T-1 close 也无时触发。
+            与 post_close 本地 T-1 兜底互补——这里写 DB 真相源（所有读口统一受益，SSoT）。
         """
         msg = f"pre_open 跳过熔断基线快照：{reason} date={today_eq}"
         logger.warning(msg)
@@ -339,6 +346,51 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
             _alert_critical(
                 msg + "（C-1 熔断基线缺失，post_close 将用 T-1 close 近似；"
                 "可手动 trigger_pre_open_once 补精确开盘基线）")
+        # DG-G3：精确抓失败后用 T-1 close 兜底回填 account_daily.start（防每天误熔断中断业务）
+        _backfill_start_from_t1_close(today_eq, reason)
+
+    def _backfill_start_from_t1_close(today_eq: str, miss_reason: str) -> None:
+        """DG-G3 兜底：精确基线抓取失败 → 用 T-1 close 写 account_daily.start 近似基线。
+
+        物理意图（DG-G3 红线 · spec audit-remediation §G3）：
+            隔夜无交易 T-1 收盘 ≈ T 开盘，T-1 close 是次精确的开盘基线近似。写回 DB
+            account_daily.start 后，post_close 与所有读口统一拿到非 None 近似基线，
+            熔断正常工作（不必触发 fail-closed 停手）。
+
+        边界（防御性深度）：
+            - T-1 close 也无（连续异常日 / 首个交易日 / 日历未就绪）→ **不写脏值**，
+              account_daily.start 保留 NULL，让 post_close → breaker fail-closed 处理
+              （绝不拿 0 写基线，防 post_close 读到 0 触发除零或语义模糊）；
+            - snapshot_start_equity 写入异常 → logger.exception（不阻塞挂单主路径，
+              与精确抓取的 except 同口径）。
+        """
+        try:
+            prev_close = _state_store.get_prev_close_equity(
+                _resolve_account_id(), today_eq)
+        except Exception:
+            logger.exception(
+                "pre_open T-1 close 兜底读取异常 date=%s（保留 account_daily.start NULL）",
+                today_eq)
+            return
+        # 类型防御：get_prev_close_equity 契约返 float|None，但 mock 环境（如本引擎其他单测
+        # 把 state_store 整体 monkeypatch 成 MagicMock）会返 MagicMock。fail-closed 语义下，
+        # 非数值视作「无效兜底」安全降级（保留 None 让 breaker fail-closed），绝不让类型
+        # 异常 TypeError 中断 pre_open 主路径。
+        if not isinstance(prev_close, (int, float)) or prev_close <= 0:
+            # T-1 close 也无 / 类型异常 = 基线链全失效 → 不写脏值，让 breaker fail-closed 处理
+            logger.warning(
+                "pre_open T-1 close 也无（基线链全失效）date=%s"
+                "（account_daily.start 保留 NULL，breaker 将 fail-closed 触发保护）", today_eq)
+            return
+        try:
+            _state_store.snapshot_start_equity(
+                _resolve_account_id(), today_eq, float(prev_close))
+            logger.info(
+                "pre_open T-1 close=%s 回填 account_daily.start date=%s"
+                "（精确基线抓取失败：%s）", prev_close, today_eq, miss_reason)
+        except Exception:
+            logger.exception(
+                "pre_open T-1 close 回填 account_daily.start 异常 date=%s", today_eq)
 
     if gw is not None:
         try:
@@ -354,7 +406,7 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
                 logger.info("pre_open 日内熔断基线已抓取 date=%s start_equity=%s",
                             today_eq, float(total))
             else:
-                # query_asset 返空（未连接/锁定/超时）→ 不写基线，post_close T-1 close 兜底
+                # query_asset 返空（未连接/锁定/超时）→ 告警 + DG-G3 T-1 close 兜底回填
                 _notify_baseline_missing("query_asset 返空（未连接/锁定/超时）")
         except Exception:
             # 抓基线异常（超时/锁定报错的真实落点）→ 记 traceback + 告警（spec 三处站点之一）

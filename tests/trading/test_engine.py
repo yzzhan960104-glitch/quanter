@@ -1366,20 +1366,25 @@ def test_post_close_circuit_breaker_skip_when_within_limit(monkeypatch):
     assert halt_calls == []
 
 
-def test_post_close_circuit_breaker_skip_when_no_baseline(monkeypatch):
-    """post_close：无基线（start=None，未快照）→ 跳过 + WARN，不熔断。
+def test_post_close_circuit_breaker_fail_closed_when_no_baseline(monkeypatch):
+    """post_close：基线链全失效（start + T-1 close 都缺）→ DG-G3 fail-closed 触发熔断。
 
-    物理意图（边界 · spec §5.2）：
-        pre_open 未抓到基线（query_asset 返空），post_close 无 start_equity。
-        绝不拿 0 触发熔断（check_daily_loss_limit(0, X) 虽返 False，但语义模糊），
-        显式跳过 + WARN 让研究员次日人工补基线。
+    物理意图（DG-G3 · 2026-08-13 · 边界收尾）：
+        原行为（fail-open）：pre_open 未抓基线 + T-1 close 也缺 → ``breaker_skipped=True``
+        + WARN 软降级跳过 → 日内 -3% 熔断静默失效（实盘敞口失控红线）。
+        新行为（fail-closed）：基线链全失效时不再 skipped，让 ``None`` 直传 breaker，
+        breaker 进入 fail-closed 分支（dry_run 返 True 触发 C-1 停手 + CRITICAL 告警）。
+        curr_equity 有值 + start 链全缺 = 本测场景 → circuit_breaker=True（不再是 breaker_skipped）。
+
+    Why 不断言 _CriticalHalt raise：本测默认 dry_run（autouse fixture），breaker 走 dry_run
+        分支（返 True 停手），live 分支由 test_breaker_fail_closed::test_live_*_raises_halt 覆盖。
     """
     from trading import position_book
 
     db_path = os.path.join(os.environ["TRADE_PLAN_DIR"], "..", "state.db")
     monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
     position_book.init_db()
-    # 不写基线（模拟 pre_open 未抓到）
+    # 不写基线（模拟 pre_open 未抓到 + T-1 close 也无）
 
     class _FakeGw:
         async def query_asset(self):
@@ -1389,16 +1394,20 @@ def test_post_close_circuit_breaker_skip_when_no_baseline(monkeypatch):
     fake_gw = _FakeGw()
 
     cancel_calls = []
-    async def _fake_cancel(gw):
+    async def _fake_cancel(gw, *a, **kw):
         cancel_calls.append(gw)
-        return 0
+        return {"cancelled": 0, "unconfirmed": 0}
     halt_calls = []
     def _fake_halt():
         halt_calls.append(True)
         return {"halted": True}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    monkeypatch.setattr("trading.phases.post_close._cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(
         "trading.gateway_service.emergency_halt", _fake_halt)
+    # DG-G3：拦截 breaker fail-closed 分支的副用（_alert_critical 不真发钉钉；_mode 走 fixture 默认 dry_run）
+    monkeypatch.setattr("trading.compute.breaker._alert_critical", lambda msg: None)
+    # _state_store.get_prev_close_equity 经 clock.pretrade_date 算 T-1，本测不种 T-1 close → 返 None
+    # → start_equity 保持 None → breaker fail-closed 触发
 
     from trading.compute.reconcile import ReconciliationResult
     fake_rec = ReconciliationResult(
@@ -1411,11 +1420,13 @@ def test_post_close_circuit_breaker_skip_when_no_baseline(monkeypatch):
     today = datetime.now().strftime("%Y-%m-%d")
     result = asyncio.run(engine.post_close(today, gw=fake_gw, local_positions={}))
 
-    # 无基线 → 跳过（breaker_skipped=True），不熔断
-    assert result.get("circuit_breaker") is False
-    assert result.get("breaker_skipped") is True
-    assert cancel_calls == []
-    assert halt_calls == []
+    # 基线链全失效 → fail-closed 触发熔断（不再 breaker_skipped）
+    assert result.get("circuit_breaker") is True, (
+        "基线链全失效应 fail-closed 触发熔断（DG-G3），不应静默跳过")
+    assert result.get("breaker_skipped") is not True, (
+        "基线缺失不再 breaker_skipped（fail-closed 触发，让 None 直传 breaker）")
+    assert len(cancel_calls) == 1
+    assert len(halt_calls) == 1
 
 
 # ============================================================================

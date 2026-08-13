@@ -49,10 +49,23 @@ def test_daily_loss_limit_boundary_equal():
     assert cb.check_daily_loss_limit(1_000_000, 970_000, limit=-0.03) is True
 
 
-def test_daily_loss_limit_invalid_start_equity():
-    """start_equity <= 0 返回 False（防除零；初始权益为 0 视作「无持仓基线」不熔断）。"""
-    assert cb.check_daily_loss_limit(0, 0, limit=-0.03) is False
-    assert cb.check_daily_loss_limit(-100, -200, limit=-0.03) is False
+def test_daily_loss_limit_invalid_start_equity(monkeypatch):
+    """基线缺失 fail-closed（DG-G3 · 2026-08-13）：start_equity<=0/None 不再 return False 放行。
+
+    物理意图（DG-G3 裁决）：原 ``return False`` fail-open 让 account_daily 漏采时
+    日内 -3% 熔断静默失效（实盘敞口失控红线）。改 fail-closed：
+        - dry_run（默认）：返 True（C-1 当日停手）+ CRITICAL 告警；
+        - live：raise _CriticalHalt（详见 test_breaker_fail_closed.py）。
+    本测覆盖 dry_run 默认路径（live halt 路径在新测覆盖）。breaker 在 fail-closed
+    分支内调 _alert_critical/_mode（monkeypatch 拦截避免真发钉钉 + 固定 dry_run）。
+    """
+    # dry_run 模式 + 拦截告警副用（避免真发钉钉 + 防 _mode 读 env 漂移）
+    monkeypatch.setattr("trading.compute.breaker._mode", lambda: "dry_run")
+    monkeypatch.setattr("trading.compute.breaker._alert_critical", lambda msg: None)
+    # start_equity<=0 / None / 负值 均触发 fail-closed（返 True 停手）
+    assert cb.check_daily_loss_limit(0, 0, limit=-0.03) is True
+    assert cb.check_daily_loss_limit(-100, -200, limit=-0.03) is True
+    assert cb.check_daily_loss_limit(None, 965_000, limit=-0.03) is True  # type: ignore[arg-type]
 
 
 def test_daily_loss_limit_env_default(monkeypatch):
