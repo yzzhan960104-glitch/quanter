@@ -2,14 +2,16 @@
 """API 鉴权依赖测试（B-1：HTTPBearer token + 可选 IP 白名单）。
 
 覆盖契约：
-  - QUANTER_API_TOKEN 未配置 → 开发态放行（但 WARNING，生产必须配置）；
+  - QUANTER_API_TOKEN 未配置 + dry_run → 开发态放行（WARNING，生产必须配置）；
+  - QUANTER_API_TOKEN 未配置 + live → **fail-closed 401**（DG-G2，见
+    ``tests/server/test_auth_fail_closed.py``，本文件不重复覆盖 live 分支）；
   - 配置后：缺 Bearer / 错 Bearer → 401；正确 Bearer → 200；
   - QUANTER_ALLOWED_IPS 配置时：来源 IP 不在白名单 → 403（纵深防御）。
 
-Why「未配置即放行」：避免破坏本地开发/CI（既有 API 测试不设 token）。生产部署
-必须显式配置 QUANTER_API_TOKEN，未配置会在每次请求打 WARNING 提醒。
+Why「dry_run 未配置即放行」：避免破坏本地开发/CI（既有 API 测试不设 token）。live
+模式（实盘）下未配置 token 会 fail-closed 拒所有受保护请求，且 trading/__main__.py
+启动闸会在 live + 无 token 时 FATAL 退出，根本起不来。
 """
-import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
@@ -28,7 +30,14 @@ def _app_with_protected_endpoint() -> FastAPI:
 
 
 def test_no_token_configured_allows_dev_mode(monkeypatch):
-    """token 未配置 → 开发态放行（不阻断本地/CI）。"""
+    """token 未配置 + dry_run → 开发态放行（不阻断本地/CI）。
+
+    Why 显式 setenv dry_run：DG-G2 后 require_write 的「无 token 放行」仅对 dry_run
+    成立（live 无 token fail-closed 拒）。显式钉死 dry_run 让契约自洽，不依赖
+    conftest 的 autouse env（防御未来 conftest 改动误伤）。live 分支由
+    ``tests/server/test_auth_fail_closed.py`` 覆盖。
+    """
+    monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
     monkeypatch.delenv("QUANTER_API_TOKEN", raising=False)
     client = TestClient(_app_with_protected_endpoint())
     assert client.post("/protected").status_code == 200

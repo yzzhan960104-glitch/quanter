@@ -362,13 +362,27 @@ def run_server() -> None:
             "生产链要求 AUTO_TRADE_MODE=live，当前=%s，拒绝启动（fail-closed）",
             os.getenv("AUTO_TRADE_MODE"))
         sys.exit(1)
+    # DG-G2：live 模式必须配 QUANTER_API_TOKEN——require_write/require_read_cookie 在
+    # live 无 token 时 fail-closed（拒所有受保护请求），起这种实例无意义（下单/熔断/SSE
+    # 全 401）。Why 启动闸而非运行期才发现：生产部署忘配 token 时，启动即 FATAL 退出，
+    # 运维一眼定位；否则进程起来但所有敏感请求 401，故障隐蔽（/health 不触发鉴权故看似存活）。
+    # 该闸覆盖**所有**启动入口（start_server.bat / run_trading_engine.bat / 手动 -m trading），
+    # 与 start_server.bat 的 bat 级预检互为兜底（bat 预检只能读 bat 进程 env，读不到 .env）。
+    if os.getenv("AUTO_TRADE_MODE") == "live" and not os.getenv("QUANTER_API_TOKEN"):
+        logger.critical(
+            "live 模式未配 QUANTER_API_TOKEN，鉴权 fail-closed 将拒所有受保护请求，拒绝启动（DG-G2）"
+        )
+        sys.exit(1)
     server_port = int(os.getenv("SERVER_PORT", "8000"))
     if not _in_testing():
         _assert_single_instance(server_port)
 
     uvicorn.run(
         "presentation.server.main:app",
-        host=os.getenv("SERVER_HOST", "0.0.0.0"),
+        # DG-G2：默认 host 127.0.0.1（仅本机回环），防默认监听 0.0.0.0 导致下单/熔断
+        # API 裸奔到局域网（同网段任意主机可直连 8000 触发真单）。外网/容器部署须显式
+        # 设 SERVER_HOST=0.0.0.0（运维主动知情，而非代码默认）。
+        host=os.getenv("SERVER_HOST", "127.0.0.1"),
         port=int(os.getenv("SERVER_PORT", "8000")),
         # 显式不传 reuse_port（spec §3.3 R6）：uvicorn 默认 SO_REUSEPORT=False，
         # 第二实例 bind 8000 即 WSAEADDRINUSE exit（端口单例防护）。

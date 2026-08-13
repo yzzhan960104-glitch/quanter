@@ -18,4 +18,11 @@ set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 REM A5（P1-2）：生产链 fail-closed——非 live 一律拒绝（防 dry_run 实例接管生产端口/日志）
 set QUANTER_REQUIRE_LIVE=1
+REM DG-G2：live 模式必须配 QUANTER_API_TOKEN——bat 级 best-effort 预检（仅当 AUTO_TRADE_MODE /
+REM QUANTER_API_TOKEN 通过系统 env 或 schtasks 注册注入 bat 进程时生效；.env 由 python 内
+REM load_dotenv 加载，bat 看不到——python 启动闸（trading/__main__.py）兜底覆盖所有入口）。
+if "%AUTO_TRADE_MODE%"=="live" if "%QUANTER_API_TOKEN%"=="" (
+    echo [FATAL] live 模式未配 QUANTER_API_TOKEN，鉴权将 fail-closed 拒所有请求。请配置后重试。
+    exit /b 1
+)
 ".venv310\Scripts\python.exe" -m trading

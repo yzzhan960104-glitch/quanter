@@ -9,7 +9,8 @@ FastAPI 应用入口
 4. 提供健康检查端点
 
 启动方式：
-    uvicorn presentation.server.main:app --reload --host 0.0.0.0 --port 8000
+    uvicorn presentation.server.main:app --reload --host 127.0.0.1 --port 8000
+    （DG-G2：默认 127.0.0.1 仅本机回环，外网/容器部署显式 SERVER_HOST=0.0.0.0）
 
 设计原则：
 - 应用入口仅做组装，不包含业务逻辑
@@ -26,9 +27,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from presentation.server.http.config import CORS_ORIGINS, LOG_CONFIG
 from presentation.server.http._responses import StrictJSONResponse
-# API 鉴权依赖（B-1）：挂在敏感 router（trading/caisen/data/review）上，
-# token 未配置=开发态放行（WARNING），生产须配 QUANTER_API_TOKEN。
-from presentation.server.http.auth import require_write
+# API 鉴权依赖（B-1）：挂在敏感 router（trading/training/data/review/ops）上，
+# DG-G2 fail-closed——live 模式无 token 硬拒（防默认裸奔），dry_run 放行（开发/CI）。
+from presentation.server.http.auth import require_read_cookie, require_write
 from presentation.server.api.v1.logs import (
     RingBufferLogHandler,
     log_stream_hub,
@@ -642,12 +643,17 @@ app.add_middleware(
 
 # ============ 挂载路由 ============
 # API 版本化前缀：/api/v1/
-app.include_router(logs_router, prefix="/api/v1")
+# DG-G2：logs_router 用 **cookie 鉴权**（require_read_cookie），而非 Bearer（require_write）。
+# Why：/logs/stream 是 SSE 长连接，前端 EventSource API 无法自定义请求头（不能加
+# Authorization: Bearer），Bearer 鉴权在此场景失效；走 cookie（quanter_ro=<token>）同源
+# 自动携带 + 不进 access log（query 参数会进 URL/access log 泄露）。DG-G2 裁决：cookie 优先。
+app.include_router(logs_router, prefix="/api/v1", dependencies=[Depends(require_read_cookie)])
 # 宏观/板块/因子只读端点：四端点全部只读内存湖，无网络/无写入，
 # 缺数据湖时端点内部短路返空结构（离线降级），不阻断 lifespan。
 app.include_router(macro_router, prefix="/api/v1")
 # 实盘交易路由（优雅降级真接 QMT；lifespan 不自动 connect，单例 lazy 构造）
-# 【B-1】路由级鉴权：下单/熔断/连接等敏感端点强制 require_write（token 未配置=开发放行）。
+# 【B-1/DG-G2】路由级鉴权：下单/熔断/连接等敏感端点强制 require_write——
+# live 模式无 token fail-closed 拒（401），dry_run 放行（开发/CI 不阻断）。
 app.include_router(trading_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 # AI 参数训练 loop（Spec 3 Task 7）：start/get/list/submit_review 四端点。
 # 训练提交/审核提交是写操作（落库 + 触发回测子进程），路由级鉴权保护；
@@ -670,13 +676,10 @@ app.include_router(ops_router, prefix="/api/v1", dependencies=[Depends(require_w
 @app.get("/health", summary="健康检查", tags=["系统"])
 async def health_check():
     """
-    健康检查端点
+    健康检查端点（DG-G2：最小信息面，防指纹）。
 
-    用于前端/运维确认后端服务存活。
-    返回服务状态和版本信息。
+    Why 仅返 {status:"ok"}：version 字段（2.0.0）暴露应用迭代进度、service 字段暴露
+    服务身份，均属可被外部探测的指纹信息。健康检查只需确认存活，最小信息面原则——
+    攻击者无法通过 /health 推断服务类型/版本/技术栈。前端/运维判定存活只看 status。
     """
-    return {
-        "status": "ok",
-        "service": "quanter-api",
-        "version": "2.0.0",
-    }
+    return {"status": "ok"}
