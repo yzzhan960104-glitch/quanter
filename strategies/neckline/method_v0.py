@@ -31,7 +31,12 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
+# P1（2026-08-13 · spec 2026-08-12-overall-optimization-design §2）：识别热路径向量化——
+# local_extrema_mask 用滑动窗视图一次算全序列局部极值掩码（替代逐日窗口 Python 循环），
+# numpy>=1.24 已锁（requirements.txt），零新增依赖。
+from numpy.lib.stride_tricks import sliding_window_view
 
 # Signal dataclass（Task 1 归位 strategies/neckline/signal.py）——detect_signal 装配
 # 完整 Signal 返回。同包子相对 import（Layer2 Task 1.5 收口口径）。
@@ -105,6 +110,44 @@ def local_maxima(values, w: int):
     return maxs
 
 
+def local_extrema_mask(values, w: int, kind: str = "min") -> np.ndarray:
+    """全序列局部极值布尔掩码（P1 向量化基元 · 与 local_minima/local_maxima 位置语义逐位一致）。
+
+    kind="min"：某点 <= 左右各 w 根（局部极小，对齐 local_minima）；kind="max"：>= 左右
+    各 w 根（局部极大，对齐 local_maxima / search_neckline 内联 tops 检测）。True 位 =
+    旧逐点循环会收集的位置——范围 [w, n-w)，即排除首尾各 w 根（旧 range(w, n-w) 语义）。
+
+    向量化：sliding_window_view 一次构出全部长度为 w 的滑动窗，逐位取窗 max/min 与
+    中心值比较。O(n) 内存 O(n×w) 计算，替代逐日窗口的 Python 级 O(n×w) 循环发射
+    （P0-1 cProfile 实测 numpy reduce 叶子 1.455s 是 top-1 热点，即此循环的叶子开销）。
+
+    NaN 语义：窗 max/min 用 numpy NaN 传播（与旧 values[i-w:i].min() 的 ndarray 口径
+    一致——生产路径 detect 传的恒是 .values ndarray，NaN 邻居 → 比较 False → 不成极值）。
+    短序列（n < 2w+1，旧 range 空循环）→ 全 False。
+
+    注：旧 local_minima/local_maxima 函数保留（单测/外部脚本的行为锚），本掩码是
+    fast path 的等价向量化版——两者一致性由 tests/test_p1_fast_path.py 直接对拍守护。
+    """
+    arr = values.values if hasattr(values, "values") else np.asarray(values)
+    n = len(arr)
+    mask = np.zeros(n, dtype=bool)
+    if n < 2 * w + 1:
+        return mask
+    sw = sliding_window_view(arr, w)          # sw[j] = arr[j:j+w]，j ∈ [0, n-w]
+    # 左窗 arr[i-w:i]（i ∈ [w, n-w)）→ sw[i-w]，j ∈ [0, n-2w)；右窗 arr[i+1:i+1+w]
+    # → sw[i+1]，j ∈ [w+1, n-w]。max 用 >= / min 用 <= 与旧版严格对齐（并列极值都算）。
+    if kind == "max":
+        left = sw[:n - 2 * w].max(axis=1)
+        right = sw[w + 1:n - w + 1].max(axis=1)
+        ok = (arr[w:n - w] >= left) & (arr[w:n - w] >= right)
+    else:
+        left = sw[:n - 2 * w].min(axis=1)
+        right = sw[w + 1:n - w + 1].min(axis=1)
+        ok = (arr[w:n - w] <= left) & (arr[w:n - w] <= right)
+    mask[w:n - w] = ok
+    return mask
+
+
 # ============================================================================
 # 颈线搜索：顶部高点聚集定位 + 压制时长验证
 # ============================================================================
@@ -133,105 +176,126 @@ def search_neckline(highs, closes, atr_val: float, min_touches: int, min_supp: f
 
     返回：(颈线价位 c, 压制时长 suppression)；无满足者返 (None, 0.0)。
     """
-    n = len(highs)
-    if n == 0:
+    # P1（2026-08-13）：旧版 inline tops 检测 + O(tops²) 双循环已下沉向量化内核
+    # _neckline_cluster（与旧实现逐位等价，tests/test_p1_fast_path.py 随机扫场对拍守护）。
+    # 本函数保留公开签名与语义契约（识别单源注释链），只做「掩码预计算 → 内核」薄包装。
+    high_arr = highs.values if hasattr(highs, "values") else np.asarray(highs)
+    close_arr = closes.values if hasattr(closes, "values") else np.asarray(closes)
+    if len(high_arr) == 0:
         return None, 0.0
+    tops_mask = local_extrema_mask(high_arr, top_window, kind="max")
+    return _neckline_cluster(high_arr, close_arr, atr_val, min_touches, min_supp,
+                             tops_mask, decay_tau)
 
-    # ① 定位：顶部高点的位置 + 值（需位置算 Δt，故内联 local_maxima 逻辑）
-    tops = []  # [(idx, value)]
-    for i in range(top_window, n - top_window):
-        left = highs[i - top_window:i]
-        right = highs[i + 1:i + top_window + 1]
-        if highs[i] >= left.max() and highs[i] >= right.max():
-            tops.append((i, float(highs[i])))
-    if len(tops) < min_touches:
-        return None, 0.0  # 顶部不够，连不成颈线
-    # 聚集选位：加权 score（近期主导）+ 等权 touches（聚集足够性阈值）
-    best_c, best_score = None, 0.0
-    for ci, c in tops:
-        touches_eq = 0
-        score = 0.0
-        for ti, t in tops:
-            if abs(t - c) <= atr_val:
-                touches_eq += 1
-                if decay_tau and decay_tau > 0:
-                    dt = (n - 1) - ti  # 距今（窗口末根 n-1 = 当日）天数
-                    score += math.exp(-dt / decay_tau)
-                else:
-                    score += 1.0
-        # 选位用加权 score（近期主导），但要求等权 touches ≥ min_touches（聚集足够）
-        if score > best_score and touches_eq >= min_touches:
-            best_c, best_score = float(c), score
-    if best_c is None:
-        return None, 0.0  # 无满足聚集足够性的价位
 
-    # ② 验证：压制时长（衰减加权，与聚集一致——近期 close 权重高，匹配近期颈线）
-    #    Why 衰减压制：衰减选近期颈线（如 0.750），但全窗口等权压制会把早期高点
-    #    （0.82>0.75 不算被压）算进分母拉低压制比例 → 近期颈线被误杀。衰减压制让
-    #    近期 close 主导（早期高点权重低），与近期颈线口径一致。
-    if decay_tau and decay_tau > 0:
-        weights = [math.exp(-((n - 1) - i) / decay_tau) for i in range(n)]
-        sup_num = sum(w for i, w in enumerate(weights) if closes[i] < best_c)
-        suppression = float(sup_num / sum(weights))
+def _neckline_cluster(highs_w, closes_w, atr_val, min_touches, min_supp,
+                      tops_mask, decay_tau, decay_weights=None):
+    """颈线聚集定位 + 压制验证的向量化内核（search_neckline 与 _detect_core_window 共用）。
+
+    P1（2026-08-13 · spec §2.1）：替代旧 search_neckline 的 O(tops²) Python 双循环——
+    tops×tops 外层差布尔矩阵 `D = |vals[:,None] - vals[None,:]| <= atr`，带内计数
+    touches = D.sum(axis=1)，加权 score = D @ w_t（等权 w_t=1；衰减 w_t=exp(-Δt/τ)，
+    Δt = 窗口末根(n-1) − 顶部窗口相对位置）。与旧实现逐位等价：
+
+      - 首最大语义：旧 `if score > best_score and touches_eq >= min_touches` 顺序迭代
+        严格更新 → 平局取位置靠前；向量化 `np.argmax(where(valid, scores, -inf))`
+        对无效候选置 -inf、argmax 取首个最大——两者一致。
+      - 压制时长：close<c* 的（衰减加权）比例 ≥ min_supp；等权退化为布尔计数/n。
+      - 入参 tops_mask 为窗口相对布尔掩码（local_extrema_mask 产物，含 [w, n-w) 边界
+        排除语义）；调用方（detect wrapper / scan_symbol fast loop）保证掩码与窗口对齐。
+
+    返回 (颈线价位 c_star, 压制 suppression)；无满足者返 (None, 0.0)。
+    """
+    n = len(highs_w)
+    tops_pos = np.flatnonzero(tops_mask)
+    if len(tops_pos) < min_touches:
+        return None, 0.0   # 顶部不够，连不成颈线
+    tops_vals = highs_w[tops_pos]
+    # 聚集布尔矩阵（对称）：带内 |t_i − t_j| <= atr
+    D = np.abs(tops_vals[:, None] - tops_vals[None, :]) <= atr_val
+    touches = D.sum(axis=1)
+    use_decay = bool(decay_tau and decay_tau > 0)
+    if use_decay:
+        if decay_weights is None:
+            # 衰减权重（窗口相对索引 i → exp(-((n-1)-i)/tau)，与旧 math.exp 逐位同口径）
+            decay_weights = np.exp(-(np.arange(n - 1, -1, -1)) / decay_tau)
+        w_t = decay_weights[tops_pos]
     else:
-        suppression = float((closes < best_c).sum() / n)
+        w_t = np.ones(len(tops_pos), dtype=np.float64)
+    scores = D @ w_t
+    valid = touches >= min_touches   # 等权 touches 是聚集足够性阈值（衰减不豁免）
+    if not valid.any():
+        return None, 0.0   # 无满足聚集足够性的价位
+    best = int(np.argmax(np.where(valid, scores, -np.inf)))   # 首个最大（对齐严格 > 更新）
+    c_star = float(tops_vals[best])
+
+    if use_decay:
+        weights = (decay_weights if decay_weights is not None
+                   else np.exp(-(np.arange(n - 1, -1, -1)) / decay_tau))
+        sup_num = float(weights[closes_w < c_star].sum())
+        suppression = float(sup_num / weights.sum())
+    else:
+        suppression = float((closes_w < c_star).sum() / n)
     if suppression < min_supp:
-        return None, 0.0  # 压制时长不足，颈线无效
-    return best_c, suppression
+        return None, 0.0   # 压制时长不足，颈线无效
+    return c_star, suppression
 
 
 # ============================================================================
 # 颈线法识别器主流程
 # ============================================================================
-def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=None):
-    """对单标的 OHLCV 时序执行颈线法识别，返回候选 dict 或 None。
+def _detect_core_window(highs_w, lows_w, closes_w, vols_w, index_w, atr_val, cfg,
+                        tops_mask_w=None, lows_mask_w=None, decay_weights=None):
+    """detect 全守卫的数组内核（P1 · spec §2.1）——窗口切片视图 + 窗口相对掩码。
 
-    atr_series: 可选预算 ATR 序列（回测滚动复用，避免每 T 重算 compute_atr）；
-                None 则内部现算。
+    与 detect_neckline_method 旧逐行逻辑逐位等价（三层守护：tests/test_p1_fast_path.py
+    内核对拍 + tests/test_neckline_recognition.py 7 守卫 + P0-3 冻结基线 compare()）。
+    入参均为「截至识别日的窗口」数组（长度 = cfg["window"]），掩码为窗口相对布尔掩码
+    （local_extrema_mask 产物，含 [w, n-w) 边界排除语义）；None 则现场算（单次调用
+    路径）。decay_weights 为 len=window 的衰减权重 exp(-((n-1)-i)/tau)，None 且
+    decay_tau>0 时现场算（滚动扫描预计算复用，省每 T 重算 exp）。
+
+    守卫顺序与旧版严格一致：ATR → 颈线（聚集+压制）→ 底部 → 突破 → 带量 → 深度 →
+    盈亏比。任一不过返 None。
     """
-    window = cfg["window"]
-    if len(df) < window:
-        return None
-
-    W = df.tail(window)
-
-    # ATR：外部传 atr_series（回测预算复用）则用末根；否则内部全序列算。
-    # 窗口对齐 cfg["window"]（颈线识别窗口），尺度统一——形态在 window 天形成，
-    # 衡量其波动尺度也应用 window 天，而非写死的 14 天短期 ATR。
-    if atr_series is not None:
-        atr_val = float(atr_series.iloc[-1])
-    else:
-        atr_val = float(compute_atr(df["high"], df["low"], df["close"], window=cfg["window"]).iloc[-1])
+    n = len(highs_w)
     if pd.isna(atr_val) or atr_val <= 0:
         return None
 
-    highs = W["high"].values
-    closes_w = W["close"].values
-    lows = W["low"]
+    if tops_mask_w is None:
+        tops_mask_w = local_extrema_mask(highs_w, 3, kind="max")
+    tau = cfg.get("decay_tau")
+    if tau and tau > 0 and decay_weights is None:
+        decay_weights = np.exp(-(np.arange(n - 1, -1, -1)) / tau)
 
     # —— 1. 颈线搜索（顶部聚集定位 + 压制时长验证，时间衰减加权）——
-    c_star, suppression = search_neckline(
-        highs, closes_w, atr_val, cfg["min_touches"], cfg["min_suppression"],
-        decay_tau=cfg.get("decay_tau"),
-    )
+    c_star, suppression = _neckline_cluster(
+        highs_w, closes_w, atr_val, cfg["min_touches"], cfg["min_suppression"],
+        tops_mask_w, tau, decay_weights)
     if c_star is None:
         return None  # 无有效颈线（顶部不足 或 压制时长不足）
 
     # —— 2. 底部（最低点 + 带内离散低点）——
-    min_price = float(lows.min())
-    local_lows = local_minima(lows.values, cfg["local_extrema_window"])
-    bottoms = [l for l in local_lows if min_price <= l <= min_price + atr_val]
+    # 旧版 pandas lows.min() 是 skipna；数组侧 np.nanmin 同语义（生产 OHLCV 无 NaN，
+    # 语义仍逐位对齐——等价陷阱清单第 3 条）。
+    min_price = float(np.nanmin(lows_w))
+    if lows_mask_w is None:
+        lows_mask_w = local_extrema_mask(lows_w, cfg["local_extrema_window"], kind="min")
+    lows_pos = np.flatnonzero(lows_mask_w)
+    lvals = lows_w[lows_pos]
+    lvals = lvals[(lvals >= min_price) & (lvals <= min_price + atr_val)]
     bottom_set = {round(min_price, 4)}
-    bottom_set.update(round(b, 4) for b in bottoms)
+    bottom_set.update(round(float(b), 4) for b in lvals)
     if len(bottom_set) < cfg["min_bottoms"]:
         return None  # 不足双底
 
     # —— 3. 突破（收盘越过颈线 + 带量）——
-    close_T = float(W["close"].iloc[-1])
+    close_T = float(closes_w[-1])
     if close_T <= c_star:
         return None  # 未突破颈线
-    vol_T = float(W["volume"].iloc[-1])
-    vol5 = float(W["volume"].tail(5).mean())
+    vol_T = float(vols_w[-1])
+    # 旧版 pandas tail(5).mean() 是 skipna；数组侧 np.nanmean 同语义
+    vol5 = float(np.nanmean(vols_w[-5:]))
     if vol5 > 0 and vol_T < cfg["breakout_vol_mult"] * vol5:
         return None  # 突破未带量
 
@@ -265,7 +329,7 @@ def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=No
         return None
 
     return {
-        "formed_at": W.index[-1],
+        "formed_at": index_w[-1],
         "neckline": round(c_star, 3),
         "suppression": round(suppression, 3),
         "bottom": round(min_price, 3),
@@ -280,6 +344,44 @@ def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=No
         "rr": round(rr, 3),                          # R3 实际口径盈亏比（替换旧几何 2H/H）
         "atr": round(atr_val, 3),
     }
+
+
+def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=None):
+    """对单标的 OHLCV 时序执行颈线法识别，返回候选 dict 或 None。
+
+    atr_series: 可选预算 ATR 序列（回测滚动复用，避免每 T 重算 compute_atr）；
+                None 则内部现算。
+
+    P1（2026-08-13）：7 守卫逻辑已下沉数组内核 _detect_core_window，本函数是公开签名的
+    薄包装（df 路径：实盘 scan_live / 回测 scan_at / 测试调用）——tail(window) 提取数组
+    → 现场算极值掩码 → 调内核。研究侧 scan_symbol 走 detect_signal_fast（同一内核，
+    全序列预计算掩码复用）——识别单源（内核一份，两侧共享）。
+    """
+    window = cfg["window"]
+    if len(df) < window:
+        return None
+
+    W = df.tail(window)
+
+    # ATR：外部传 atr_series（回测预算复用）则用末根；否则内部全序列算。
+    # 窗口对齐 cfg["window"]（颈线识别窗口），尺度统一——形态在 window 天形成，
+    # 衡量其波动尺度也应用 window 天，而非写死的 14 天短期 ATR。
+    if atr_series is not None:
+        atr_val = float(atr_series.iloc[-1])
+    else:
+        atr_val = float(compute_atr(df["high"], df["low"], df["close"], window=cfg["window"]).iloc[-1])
+    if pd.isna(atr_val) or atr_val <= 0:
+        return None
+
+    highs = W["high"].values
+    lows_w = W["low"].values
+    closes_w = W["close"].values
+    vols_w = W["volume"].values
+    # 极值掩码（现场算：单次调用路径；滚动扫描走 detect_signal_fast 全序列预计算复用）
+    tops_mask = local_extrema_mask(highs, 3, kind="max")
+    lows_mask = local_extrema_mask(lows_w, cfg["local_extrema_window"], kind="min")
+    return _detect_core_window(highs, lows_w, closes_w, vols_w, W.index, atr_val, cfg,
+                               tops_mask, lows_mask)
 
 
 # ============================================================================
@@ -340,6 +442,26 @@ def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date, atr_full=None):
     # 故 res["formed_at"] == df_upto.index[-1] == date（正常路径）。detect 内部已含
     # R2 窗口已突破判定（窗口内已突破形态返 None），detect_signal 直接透传 None。
     res = detect_neckline_method(df_upto, id_cfg, atr_series=atr_full)
+
+    # R1 cancel_on 守卫 + 当日突破过滤 + Signal 装配已下沉 _post_detect（P1 · spec §2.1）——
+    # 与 detect_signal_fast（研究侧数组路径）共用同一装配闭包，识别装配单源防分叉。
+    close_T = float(df_upto["close"].iloc[-1])
+    atr_last = atr_full.iloc[-1]
+    return _post_detect(symbol, res, exec_cfg, date, close_T, atr_last)
+
+
+def _post_detect(symbol, res, exec_cfg, date, close_T, atr_last):
+    """detect 之后的 R1 cancel_on 守卫 + 当日突破过滤 + Signal 装配（识别装配单源）。
+
+    P1（2026-08-13 · spec §2.1）：从 detect_signal 抽取的共用后半段——detect_signal
+    （df 路径：实盘 scan_live / 回测 scan_at）与 detect_signal_fast（数组路径：研究侧
+    scan_symbol）共用，防「研究侧 fast path 与实盘 df 路径装配分叉」。语义与原
+    detect_signal 后半段逐位一致：
+      - cancel_on 守卫（close 口径，D9）：close_T ≥ 颈线+cancel_thresh_mult×H → None
+      - 当日突破过滤：formed_at 与 date 归一短 ISO 比较（C1 类型对齐 fix）
+      - 装配：entry_price 回退 `(res.get("atr") or 0.0)`；atr 字段回退 `res.get("atr")`
+        ——两处回退口径不同（带 or 0.0 / 不带），勿合并。
+    """
     if res is None:
         return None
 
@@ -356,7 +478,6 @@ def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date, atr_full=None):
     if cancel_thresh is not None:
         H = res["neckline"] - res["bottom"]
         cancel_on = res["neckline"] + cancel_thresh * H
-        close_T = float(df_upto["close"].iloc[-1])
         if close_T >= cancel_on:
             return None  # 涨幅已兑现，不产回踩挂单信号（挡冲天突破）
 
@@ -377,6 +498,7 @@ def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date, atr_full=None):
     # buy_limit=c_star+buy_limit_atr_mult×atr）。mult=0 退化颈线（零回归）；
     # atr 缺失/NaN 回退 res["atr"]（与 scan_live:289-290 同口径）。
     # atr：用 atr_full 末值（对齐 date 当日，供二期引擎算止损=颈线−N×ATR 用）。
+    atr_ok = float(atr_last) if not pd.isna(atr_last) else None
     return Signal(
         symbol=symbol,
         signal_type="neckline",
@@ -385,12 +507,68 @@ def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date, atr_full=None):
         neckline=res.get("neckline"),
         bottom=res.get("bottom"),
         entry_price=(res.get("neckline") or 0.0) + exec_cfg.get("buy_limit_atr_mult", 1.0) * (
-            float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else (res.get("atr") or 0.0)),
-        atr=float(atr_full.iloc[-1]) if not pd.isna(atr_full.iloc[-1]) else res.get("atr"),
+            atr_ok if atr_ok is not None else (res.get("atr") or 0.0)),
+        atr=atr_ok if atr_ok is not None else res.get("atr"),
         # R3 实际口径盈亏比透传（detect 已算 (tp2-entry)/(entry-stop_price)，
         # 基于颈线-N×ATR 止损 / 颈线+N×H 止盈的真实风险报酬比），供研究员 T-1 晚人审。
         rr=res.get("rr"),
     )
+
+
+def detect_signal_fast(symbol, arr, pos, id_cfg, exec_cfg, date, atr_arr,
+                       tops_mask=None, lows_mask=None, decay_weights=None):
+    """fast path 识别（P1 · spec §2.1）：全序列数组 + 截至 pos 的窗口识别。
+
+    与 detect_signal(symbol, df.iloc[:pos+1], id_cfg, exec_cfg, date,
+                     atr_full=atr.iloc[:pos+1]) 逐位等价——研究侧 scan_symbol 逐日滚动
+    扫描改走本入口（预算好的 arr/极值掩码/ATR/衰减权重复用，窗口切片=零拷贝视图），
+    消除每 T 的 sym_df.iloc[:i+1] + atr_full.iloc[:i+1] O(n²) DataFrame 拷贝
+    （P0-1 实测识别路径占 scan_symbol cumtime ~80% 主导，本函数即对症改造）。
+
+    参数：
+        arr:  全序列数组上下文 {"high"/"low"/"close"/"volume": ndarray, "index": DatetimeIndex}
+        pos:  截至位置（含，识别日 = arr["index"][pos]）
+        atr_arr: 预算好的 ATR 全序列（compute_atr 产物 to_numpy()，窗口对齐 id_cfg["window"]）
+        tops_mask/lows_mask: 全序列极值掩码（local_extrema_mask 产物，调用方预计算复用；
+            窗口切片与「在窗口上现场算掩码」逐位一致——局部比较只用窗内邻居，P0 交接注记）
+        decay_weights: len=window 衰减权重（调用方预计算；None 时内核现场算）
+    其余参数语义同 detect_signal（date 归一 ISO 比较，cancel_on close 守卫共用 _post_detect）。
+    等价性由 tests/test_p1_fast_path.py（df 路径 == 数组路径）+ P0-3 冻结基线守护。
+    """
+    window = id_cfg["window"]
+    if pos + 1 < window:
+        return None   # 数据不足窗口（与 detect len(df)<window 守卫同口径）
+    atr_val = float(atr_arr[pos])
+    if pd.isna(atr_val) or atr_val <= 0:
+        return None   # ATR 无效（与 detect 的 atr 守卫同口径）
+    s = pos - window + 1
+    highs_w = arr["high"][s:pos + 1]
+    lows_w = arr["low"][s:pos + 1]
+    closes_w = arr["close"][s:pos + 1]
+    vols_w = arr["volume"][s:pos + 1]
+    index_w = arr["index"][s:pos + 1]
+    # 掩码边界裁剪（等价红线关键）：全序列掩码的 True 位含窗口首尾各 w 根的「边界区」
+    # ——这些位置的局部极值判定用了窗口外的邻居，与旧版 detect 的极值循环（range(w, n-w)
+    # 只取窗口相对 [w, n-w)）口径不同。正确裁剪 = 取窗口切片后**零化首尾边界区**（保持
+    # 窗口相对坐标不变；若用 [s+w:pos-w+1] 裁切片则 flatnonzero 产出的是切片相对位置，
+    # 与窗口相对坐标差 w 偏移——P0-3 冻结基线对拍曾抓出两种口径的分叉）。零化后与
+    # 「在窗口上现场算掩码」（df 路径 detect_neckline_method 的口径）逐位一致。
+    # .copy() 必加：基本切片是视图，写零会污染调用方预计算的全序列掩码。
+    tops_slice = None
+    if tops_mask is not None:
+        tops_slice = tops_mask[s:pos + 1].copy()
+        tops_slice[:3] = False            # 窗口相对 [0,3) 边界排除（top_window=3）
+        tops_slice[-3:] = False           # 窗口相对 [n-3, n) 边界排除
+    w_ext = id_cfg["local_extrema_window"]
+    lows_slice = None
+    if lows_mask is not None:
+        lows_slice = lows_mask[s:pos + 1].copy()
+        lows_slice[:w_ext] = False        # 窗口相对 [0, w_ext) 边界排除
+        lows_slice[-w_ext:] = False       # 窗口相对 [n-w_ext, n) 边界排除
+    res = _detect_core_window(highs_w, lows_w, closes_w, vols_w, index_w, atr_val, id_cfg,
+                              tops_slice, lows_slice, decay_weights)
+    close_T = float(closes_w[-1])
+    return _post_detect(symbol, res, exec_cfg, date, close_T, atr_val)
 
 
 # ============================================================================

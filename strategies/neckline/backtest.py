@@ -19,11 +19,16 @@ from __future__ import annotations
 import math
 import os   # main():511 os.makedirs("logs") 用（U5 Task 8 补——原顶部漏 import os 致潜伏 NameError）
 
+import numpy as np
 import pandas as pd
 
 # 本模块原在 scripts/（平级 from neckline_method_v0），Layer2 Task 1.5 收口进 strategies/neckline/
 # 子包后改相对 import（同包内 .method_v0）。
-from .method_v0 import DEFAULTS, compute_atr, detect_signal
+# P1（2026-08-13 · spec §2.1）：scan_symbol 识别循环改走 detect_signal_fast（全序列数组
+# fast path），detect_signal 仍保留 import（test_param_iter_kernel_same_source 断言
+# bk.detect_signal is method_v0.detect_signal 的同源 binding 契约不变）。
+from .method_v0 import (DEFAULTS, compute_atr, detect_signal, detect_signal_fast,
+                        local_extrema_mask)
 
 # Task 5 · U3 执行单源：持有期逐根离场判定改调 decide_exit（Task 4 建好的纯函数），
 # 让回测 simulate_exit 与实盘 stop_loss_monitor（Task 9）共用 decide_exit 单源。
@@ -448,6 +453,31 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
     # 给每个 sig_idx 复算 ATR 末值喂 simulate_exit（与 detect_signal 内部 compute_atr 同口径，
     # 两侧 rolling 到 sig_idx 等价）。
     atr_full = compute_atr(sym_df["high"], sym_df["low"], sym_df["close"], window=id_cfg["window"])
+
+    # —— P1 fast path（2026-08-13 · spec §2.1）：预计算全序列数组 + 极值掩码 ——
+    # 物理意图：旧循环每 T 调 detect_signal(sym_df.iloc[:i+1], atr_full.iloc[:i+1])——
+    # 每次 iloc 切片都新建 DataFrame/Series 拷贝（O(n²) 总拷贝量），P0-1 cProfile 实测
+    # 识别路径占 scan_symbol cumtime ~80% 主导（pandas 切片/拷贝叶子 + search_neckline
+    # O(tops²) 循环）。fast path 改为：一次性预计算 numpy 数组 + 极值掩码 + 衰减权重，
+    # 逐日只做零拷贝窗口视图切片（s:pos+1）——detect_signal_fast 与 detect_signal 逐位
+    # 等价（tests/test_p1_fast_path.py + P0-3 冻结基线 compare() 守护）。
+    # 掩码全序列预计算与「逐窗口现场算」逐位一致：局部比较只用 ±w 邻居，窗口内位置
+    # 的邻居恒在窗口内，窗口切片的掩码 == 窗口上重算的掩码（P0 交接注记等价论证）。
+    arr = {
+        "high": sym_df["high"].to_numpy(),
+        "low": sym_df["low"].to_numpy(),
+        "close": sym_df["close"].to_numpy(),
+        "volume": sym_df["volume"].to_numpy(),
+        "index": sym_df.index,
+    }
+    atr_arr = atr_full.to_numpy()
+    tops_mask = local_extrema_mask(arr["high"], 3, kind="max")   # 顶部聚集（硬编码 w=3，search_neckline 同源）
+    lows_mask = local_extrema_mask(arr["low"], id_cfg["local_extrema_window"], kind="min")
+    tau = id_cfg.get("decay_tau")
+    decay_weights = None
+    if tau and tau > 0:
+        decay_weights = np.exp(-(np.arange(id_cfg["window"])[::-1]) / tau)   # exp(-(n-1-i)/tau)
+
     signals = []
     for i in range(id_cfg["window"], len(sym_df)):
         # 识别统一（U2 · 2026-07-29 Task 3）：改调单一识别源 ``detect_signal``
@@ -461,11 +491,14 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
         # 路径与 scan_at 现在完全一致（都调 detect_signal），双轨一致性守护
         # test_scan_symbol_matches_strategy 仍守 simulate_exit/去重链路不分叉。
         #
-        # date 入参：sym_df.index[i]（每个候选 i 的自然日，DatetimeIndex label）。
         # P1-6：预算好的 atr_full 按候选日截断传入（与 detect_signal 自算逐位等价，
         # 由 test_detect_signal_precomputed_atr_equivalent 守卫），省每 i 全量重算。
-        sig = detect_signal(None, sym_df.iloc[: i + 1], id_cfg, exec, sym_df.index[i],
-                            atr_full=atr_full.iloc[: i + 1])
+        # P1（2026-08-13）：改调 detect_signal_fast——同一识别内核（_detect_core_window +
+        # _post_detect 与 detect_signal 完全共用），只是入口从 df 切片换成全序列数组+位置，
+        # 消除逐日 iloc 双切片。date 入参仍为 sym_df.index[i]（自然日，DatetimeIndex label）。
+        sig = detect_signal_fast(None, arr, i, id_cfg, exec, sym_df.index[i], atr_arr,
+                                 tops_mask=tops_mask, lows_mask=lows_mask,
+                                 decay_weights=decay_weights)
         if sig is not None:
             signals.append((i, sig))
     signals = dedup_signals(signals, cooldown=exec["cooldown"])
