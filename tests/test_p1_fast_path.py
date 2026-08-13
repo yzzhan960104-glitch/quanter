@@ -335,7 +335,8 @@ def _fast_ctx(df, id_cfg):
     tau = id_cfg.get("decay_tau")
     decay_weights = None
     if tau and tau > 0:
-        decay_weights = np.exp(-(np.arange(id_cfg["window"])[::-1]) / tau)
+        from strategies.neckline.method_v0 import decay_weights_of
+        decay_weights = decay_weights_of(id_cfg["window"], tau)
     return arr, atr_arr, tops_mask, lows_mask, decay_weights
 
 

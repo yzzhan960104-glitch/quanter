@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "captured_at_utc": "2026-07-22T17:44:57.452068+00:00",
+  "captured_at_utc": "2026-08-13T00:23:30.482429+00:00",
   "scan_symbol_source": "strategies/neckline/backtest.py::scan_symbol (Layer2 Task 1.5 收口：scripts/neckline_*.py → strategies/neckline/，per_symbol 数值逐位不变)",
   "symbols": [
     "300750.SZ",
@@ -8,7 +8,7 @@
     "301269.SZ"
   ],
   "defaults_hash": "5fde71ead4fa6fb90cee496b89988e1ce9f7b8239c1e1d42162a041abe2e6cd2",
-  "exec_defaults_hash": "fdcc88fabec87501b29c23bbd71b2a659c726be29f461b00e4a44542956be8a9",
+  "exec_defaults_hash": "1abf9fc7d290846bf48af4fa8e441841b1b05fed324220a39a85804e1b953d89",
   "defaults_snapshot": {
     "window": 60,
     "min_touches": 2,
@@ -32,30 +32,33 @@
     "cancel_thresh_mult": 1.0,
     "trailing_grace": 0,
     "trailing_step": 0.0,
-    "trailing_floor": 0.5
+    "trailing_floor": 0.5,
+    "commission_rate": 0.0003,
+    "stamp_rate": 0.0005,
+    "transfer_rate": 1e-05
   },
   "per_symbol": {
     "300750.SZ": {
-      "n_signals": 9,
+      "n_signals": 4,
       "n_filled": 3,
-      "n_skip": 6,
+      "n_skip": 1,
       "kelly": 0.5,
-      "curve": 1.010231906931,
-      "ann": 0.002353089128,
+      "curve": 1.009327176867,
+      "ann": 0.002145763952,
       "win_rate": 0.666666666667,
-      "avg_pnl_pct": 6.813333333333,
-      "total_pnl_pct": 20.44
+      "avg_pnl_pct": 6.216666666667,
+      "total_pnl_pct": 18.65
     },
     "688981.SH": {
-      "n_signals": 7,
+      "n_signals": 4,
       "n_filled": 4,
-      "n_skip": 3,
+      "n_skip": 0,
       "kelly": 0.0,
       "curve": 1.0,
       "ann": 0.0,
       "win_rate": 0.25,
-      "avg_pnl_pct": -2.635,
-      "total_pnl_pct": -10.54
+      "avg_pnl_pct": -2.8625,
+      "total_pnl_pct": -11.45
     },
     "301269.SZ": {
       "n_signals": 4,
@@ -65,8 +68,8 @@
       "curve": 1.0,
       "ann": 0.0,
       "win_rate": 0.0,
-      "avg_pnl_pct": -4.43,
-      "total_pnl_pct": -17.72
+      "avg_pnl_pct": -4.535,
+      "total_pnl_pct": -18.14
     }
   },
   "summary": {
@@ -76,8 +79,8 @@
     "kelly": 0.0,
     "curve": 1.0,
     "ann": 0.0,
-    "avg_pnl_pct": -0.710909090909,
-    "total_pnl_pct": -7.82
+    "avg_pnl_pct": -0.994545454545,
+    "total_pnl_pct": -10.94
   },
   "trades": [
     {
@@ -88,13 +91,13 @@
       "exit_reason": "tp2",
       "neckline": 40.754,
       "entry": 42.112,
-      "exit_price": 46.094,
+      "exit_price": 46.042,
       "tp1": 44.314,
       "tp2": 47.874,
       "risk_pct": 6.45,
-      "lot1_pnl_pct": 5.23,
-      "lot2_pnl_pct": 13.68,
-      "avg_pnl_pct": 9.46,
+      "lot1_pnl_pct": 5.11,
+      "lot2_pnl_pct": 13.56,
+      "avg_pnl_pct": 9.33,
       "holding_bars": 9
     },
     {
@@ -105,13 +108,13 @@
       "exit_reason": "timeout",
       "neckline": 110.922,
       "entry": 115.82,
-      "exit_price": 132.928,
+      "exit_price": 132.779,
       "tp1": 130.233,
       "tp2": 149.544,
       "risk_pct": 8.46,
-      "lot1_pnl_pct": 12.44,
-      "lot2_pnl_pct": 17.1,
-      "avg_pnl_pct": 14.77,
+      "lot1_pnl_pct": 12.32,
+      "lot2_pnl_pct": 16.97,
+      "avg_pnl_pct": 14.64,
       "holding_bars": 15
     },
     {
@@ -122,13 +125,13 @@
       "exit_reason": "stop_loss",
       "neckline": 215.593,
       "entry": 216.827,
-      "exit_price": 208.613,
+      "exit_price": 205.297,
       "tp1": 241.381,
       "tp2": 267.169,
       "risk_pct": 3.79,
-      "lot1_pnl_pct": -3.79,
-      "lot2_pnl_pct": -3.79,
-      "avg_pnl_pct": -3.79,
+      "lot1_pnl_pct": -5.32,
+      "lot2_pnl_pct": -5.32,
+      "avg_pnl_pct": -5.32,
       "holding_bars": 4
     },
     {
@@ -139,13 +142,13 @@
       "exit_reason": "stop_loss",
       "neckline": 56.28,
       "entry": 56.3,
-      "exit_price": 54.793,
+      "exit_price": 54.731,
       "tp1": 59.67,
       "tp2": 63.06,
       "risk_pct": 2.68,
-      "lot1_pnl_pct": -2.68,
-      "lot2_pnl_pct": -2.68,
-      "avg_pnl_pct": -2.68,
+      "lot1_pnl_pct": -2.79,
+      "lot2_pnl_pct": -2.79,
+      "avg_pnl_pct": -2.79,
       "holding_bars": 5
     },
     {
@@ -156,13 +159,13 @@
       "exit_reason": "timeout",
       "neckline": 56.98,
       "entry": 58.304,
-      "exit_price": 58.99,
+      "exit_price": 58.924,
       "tp1": 61.07,
       "tp2": 65.16,
       "risk_pct": 4.54,
-      "lot1_pnl_pct": 4.74,
-      "lot2_pnl_pct": -2.39,
-      "avg_pnl_pct": 1.18,
+      "lot1_pnl_pct": 4.63,
+      "lot2_pnl_pct": -2.5,
+      "avg_pnl_pct": 1.06,
       "holding_bars": 15
     },
     {
@@ -173,13 +176,13 @@
       "exit_reason": "stop_loss",
       "neckline": 55.43,
       "entry": 56.02,
-      "exit_price": 54.2,
+      "exit_price": 54.14,
       "tp1": 57.43,
       "tp2": 59.43,
       "risk_pct": 3.25,
-      "lot1_pnl_pct": -3.25,
-      "lot2_pnl_pct": -3.25,
-      "avg_pnl_pct": -3.25,
+      "lot1_pnl_pct": -3.36,
+      "lot2_pnl_pct": -3.36,
+      "avg_pnl_pct": -3.36,
       "holding_bars": 2
     },
     {
@@ -190,13 +193,13 @@
       "exit_reason": "stop_loss",
       "neckline": 125.99,
       "entry": 129.0,
-      "exit_price": 121.536,
+      "exit_price": 120.795,
       "tp1": 143.8,
       "tp2": 161.61,
       "risk_pct": 5.79,
-      "lot1_pnl_pct": -5.79,
-      "lot2_pnl_pct": -5.79,
-      "avg_pnl_pct": -5.79,
+      "lot1_pnl_pct": -6.36,
+      "lot2_pnl_pct": -6.36,
+      "avg_pnl_pct": -6.36,
       "holding_bars": 11
     },
     {
@@ -207,13 +210,13 @@
       "exit_reason": "stop_loss",
       "neckline": 99.811,
       "entry": 102.457,
-      "exit_price": 96.364,
+      "exit_price": 96.256,
       "tp1": 113.01,
       "tp2": 126.209,
       "risk_pct": 5.95,
-      "lot1_pnl_pct": -5.95,
-      "lot2_pnl_pct": -5.95,
-      "avg_pnl_pct": -5.95,
+      "lot1_pnl_pct": -6.05,
+      "lot2_pnl_pct": -6.05,
+      "avg_pnl_pct": -6.05,
       "holding_bars": 2
     },
     {
@@ -224,13 +227,13 @@
       "exit_reason": "stop_loss",
       "neckline": 84.996,
       "entry": 85.637,
-      "exit_price": 82.146,
+      "exit_price": 82.054,
       "tp1": 95.947,
       "tp2": 106.898,
       "risk_pct": 4.08,
-      "lot1_pnl_pct": -4.08,
-      "lot2_pnl_pct": -4.08,
-      "avg_pnl_pct": -4.08,
+      "lot1_pnl_pct": -4.18,
+      "lot2_pnl_pct": -4.18,
+      "avg_pnl_pct": -4.18,
       "holding_bars": 5
     },
     {
@@ -241,13 +244,13 @@
       "exit_reason": "timeout",
       "neckline": 120.542,
       "entry": 125.699,
-      "exit_price": 121.21,
+      "exit_price": 121.074,
       "tp1": 136.913,
       "tp2": 153.284,
       "risk_pct": 8.62,
-      "lot1_pnl_pct": -3.57,
-      "lot2_pnl_pct": -3.57,
-      "avg_pnl_pct": -3.57,
+      "lot1_pnl_pct": -3.68,
+      "lot2_pnl_pct": -3.68,
+      "avg_pnl_pct": -3.68,
       "holding_bars": 15
     },
     {
@@ -258,13 +261,13 @@
       "exit_reason": "timeout",
       "neckline": 120.542,
       "entry": 125.761,
-      "exit_price": 120.574,
+      "exit_price": 120.439,
       "tp1": 136.325,
       "tp2": 152.108,
       "risk_pct": 8.3,
-      "lot1_pnl_pct": -4.12,
-      "lot2_pnl_pct": -4.12,
-      "avg_pnl_pct": -4.12,
+      "lot1_pnl_pct": -4.23,
+      "lot2_pnl_pct": -4.23,
+      "avg_pnl_pct": -4.23,
       "holding_bars": 15
     }
   ]

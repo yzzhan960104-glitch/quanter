@@ -1,7 +1,7 @@
 ---
 title: quanter 策略与参数探索整体优化设计（P0-P6）
 date: 2026-08-12
-revision: v1（2026-08-12 落盘：基于 64 新提交复查，P6 重定位为验收+delta、湖深已实证、P3 可视化进后台）
+revision: v2（2026-08-13 code review 后修订：P1 §2 按实测订正——同尺度 4.7x、scan_at 范围收窄、golden 陈旧注记）
 status: draft（待用户审阅）
 author: session（peer reviewer / risk officer 姿态）
 scope: 颈线法策略本体 + discovery 参数探索架构整体优化（性能 / 方法论 / 可分析性 / 数据可信度四支柱）
@@ -64,20 +64,31 @@ related:
 
 ---
 
-## 2. P1 评估热路径向量化（性能 20-50x，行为等价红线）
+## 2. P1 评估热路径向量化（行为等价红线）
+
+> **v2 修订（2026-08-13 · code review 后，按实测订正）**：
+> ① 标题删「20-50x」——同尺度实测 per-symbol 149.8→29.7ms ≈ **4.7x**（全宇宙 35.5s ≤40s 门达标；
+> 原「720s」锚是 daemon 1334 标的+freeze 的旧时代口径，非同尺度对拍，保留仅为历史参照）；
+> ② §2.1「scan_at 改走 fast-path」**收窄为 scan_symbol only**——scan_at 的逐 T 切片由 replay
+> 引擎的 Protocol 契约（df.loc[:T]）主导，evaluate_replay/周度回测为单参数低频路径，非
+> discovery 搜索瓶颈（P0-1 只实测 scan_symbol）；scan_at 提速留 P2+ 或与 replay 引擎
+> 契约演进一并评估；
+> ③ §2.3 golden 门：golden 基线 2026-07-22 捕获，Task 12 成本键（commission/stamp/transfer）
+> 合法新增致 EXEC_DEFAULTS 哈希漂移（预先存在、P1 无关）——P1 等价性由 P0-3 冻结基线
+> compare() 证明，golden 重捕获已随 P1 收尾执行。
 
 ### 2.1 设计（公开签名不变）
 
 - **每 symbol 一次预计算**：numpy 数组（H/L/C/V）+ 局部极值掩码。
-  - tops 掩码：`search_neckline` 的 `top_window=3` **硬编码**（cfg 不可调）→ 固定 w=3 全序列掩码；
+  - tops 掩码：`search_neckline` 的 `top_window=3` **硬编码**（cfg 不可调，P1 收口为常量 `TOPS_WINDOW`）→ 固定 w=3 全序列掩码；
   - bottoms 掩码：`local_extrema_window` 参数（∈{3,5}）→ 按参数惰性缓存（每 eval 每 symbol 一次，微秒级）。
-- **窗口边界语义**：有效 tops 位置 = 窗口相对 [3, n-4]（`range(top_window, n-top_window)`），全序列掩码按窗口起点偏移。
+- **窗口边界语义**：有效 tops 位置 = 窗口相对 [3, n-4]（`range(top_window, n-top_window)`），全序列掩码取窗口切片后**零化首尾边界区**（保持窗口相对坐标，防切片坐标偏移）。
 - **聚集聚类向量化**：tops×tops 外层 diff ≤ ATR 布尔矩阵 → 计数/衰减加权 score；首最大语义（严格 `>` 更新）与 `np.argmax` 首最大一致。
-- **消除逐日切片**：`detect_signal` 增加 position 化 fast-path（全量数组 + 位置 i）；`scan_symbol`/`scan_at` 改走 fast-path（ATR 已预算，只需标量末值）。
+- **消除逐日切片**：`detect_signal` 增加 position 化 fast-path（全量数组 + 位置 i）；`scan_symbol` 改走 fast-path（ATR 已预算，只需标量末值）。`scan_at`（replay 引擎路径）本轮不动（见 v2 修订 ②）。
 - **等价性陷阱清单**（向量化必须逐一对齐）：
   - pandas Series `.min()/.mean()` **skipna**（`lows.min()`、`tail(5).mean()`）→ `np.nanmin`/`np.nanmean`；
   - numpy ndarray `.max()/.min()` **NaN 传播** → 局部极值比较天然一致，勿混用 pandas 方法；
-  - 衰减权重 `dt=(n-1)-ti` 是**窗口相对索引**；
+  - 衰减权重 `dt=(n-1)-ti` 是**窗口相对索引**（P1 收口为 `decay_weights_of` 单源）；
   - Python `round` 与 `np.round` 均银行家舍入 → 一致；
   - suppression decay 加权求和、cancel_on close 守卫语义不变。
 
@@ -88,8 +99,8 @@ ENGINE_FILES（compute_unit/hashes.py）含 `strategies/neckline/backtest.py` + 
 
 ### 2.3 验收门
 
-- 等价守卫全绿（tests/strategies + golden）+ 抽样 universe 新旧实现逐信号字段级 diff **零差异**；
-- 单组全宇宙评估实测 720s → ≤40s（记录实测值）；
+- 等价守卫全绿（tests/strategies + test_p1_fast_path + golden 注记见 v2 修订③）+ 抽样 universe 新旧实现逐信号字段级 diff **零差异**（P0-3 冻结基线 compare()）；
+- 单组全宇宙评估 ≤40s（实测 35.5s / 1190 标的 / lake_start=2025；同尺度 per-symbol 149.8→29.7ms ≈ 4.7x）；
 - 吞吐预估：4h/夜 × 3600s ÷ 25s × 12 进程 ≈ 6900 trial/夜（当前 ≈80，~80x）。
 
 ---

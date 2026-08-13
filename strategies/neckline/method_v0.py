@@ -64,6 +64,11 @@ DEFAULTS = {
                                       #    颈线漂移问题真实但纯时间衰减非正解，留作后续(量加权或其他)。
 }
 
+# 顶部聚集的局部极值窗口（search_neckline 的 top_window——颈线顶部聚集口径固定，cfg 不可调）。
+# P1 review-fix（2026-08-13）：向量化后该值散落 5 处（search_neckline 默认参 / 两处掩码
+# 预计算 / fast path 边界零化 / backtest 预计算），收口单源防魔数漂移（等价红线）。
+TOPS_WINDOW = 3
+
 
 # ============================================================================
 # 基元：ATR（自写避免依赖；原 caisen.patterns.zigzag_causal.compute_atr 同口径，
@@ -81,6 +86,15 @@ def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series,
         axis=1,
     ).max(axis=1)
     return tr.rolling(window, min_periods=1).mean()
+
+
+def decay_weights_of(n: int, tau: float) -> np.ndarray:
+    """len=n 衰减权重 exp(-((n-1)-i)/tau)（窗口相对 i 距窗口末根的天数，末根权重 1）。
+
+    P1 review-fix（2026-08-13）：颈线聚集选位与衰减压制共用该权重序列，此前同式两套
+    写法（np.arange(n)[::-1] 与 np.arange(n-1,-1,-1)）散落 3 处——收口单源防漂移。
+    """
+    return np.exp(-(np.arange(n - 1, -1, -1)) / tau)
 
 
 # ============================================================================
@@ -152,7 +166,7 @@ def local_extrema_mask(values, w: int, kind: str = "min") -> np.ndarray:
 # 颈线搜索：顶部高点聚集定位 + 压制时长验证
 # ============================================================================
 def search_neckline(highs, closes, atr_val: float, min_touches: int, min_supp: float,
-                    top_window: int = 3, decay_tau: float | None = None):
+                    top_window: int = TOPS_WINDOW, decay_tau: float | None = None):
     """颈线 = 【顶部高点聚集】的价位（时间衰减加权定位）+ 【压制时长】验证。
 
     两步，角色严格分离：
@@ -218,7 +232,7 @@ def _neckline_cluster(highs_w, closes_w, atr_val, min_touches, min_supp,
     if use_decay:
         if decay_weights is None:
             # 衰减权重（窗口相对索引 i → exp(-((n-1)-i)/tau)，与旧 math.exp 逐位同口径）
-            decay_weights = np.exp(-(np.arange(n - 1, -1, -1)) / decay_tau)
+            decay_weights = decay_weights_of(n, decay_tau)
         w_t = decay_weights[tops_pos]
     else:
         w_t = np.ones(len(tops_pos), dtype=np.float64)
@@ -231,7 +245,7 @@ def _neckline_cluster(highs_w, closes_w, atr_val, min_touches, min_supp,
 
     if use_decay:
         weights = (decay_weights if decay_weights is not None
-                   else np.exp(-(np.arange(n - 1, -1, -1)) / decay_tau))
+                   else decay_weights_of(n, decay_tau))
         sup_num = float(weights[closes_w < c_star].sum())
         suppression = float(sup_num / weights.sum())
     else:
@@ -263,10 +277,10 @@ def _detect_core_window(highs_w, lows_w, closes_w, vols_w, index_w, atr_val, cfg
         return None
 
     if tops_mask_w is None:
-        tops_mask_w = local_extrema_mask(highs_w, 3, kind="max")
+        tops_mask_w = local_extrema_mask(highs_w, TOPS_WINDOW, kind="max")
     tau = cfg.get("decay_tau")
     if tau and tau > 0 and decay_weights is None:
-        decay_weights = np.exp(-(np.arange(n - 1, -1, -1)) / tau)
+        decay_weights = decay_weights_of(n, tau)
 
     # —— 1. 颈线搜索（顶部聚集定位 + 压制时长验证，时间衰减加权）——
     c_star, suppression = _neckline_cluster(
@@ -378,7 +392,7 @@ def detect_neckline_method(df: pd.DataFrame, cfg: dict = DEFAULTS, atr_series=No
     closes_w = W["close"].values
     vols_w = W["volume"].values
     # 极值掩码（现场算：单次调用路径；滚动扫描走 detect_signal_fast 全序列预计算复用）
-    tops_mask = local_extrema_mask(highs, 3, kind="max")
+    tops_mask = local_extrema_mask(highs, TOPS_WINDOW, kind="max")
     lows_mask = local_extrema_mask(lows_w, cfg["local_extrema_window"], kind="min")
     return _detect_core_window(highs, lows_w, closes_w, vols_w, W.index, atr_val, cfg,
                                tops_mask, lows_mask)
@@ -442,6 +456,8 @@ def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date, atr_full=None):
     # 故 res["formed_at"] == df_upto.index[-1] == date（正常路径）。detect 内部已含
     # R2 窗口已突破判定（窗口内已突破形态返 None），detect_signal 直接透传 None。
     res = detect_neckline_method(df_upto, id_cfg, atr_series=atr_full)
+    if res is None:
+        return None   # 早退与旧版一致：df_upto 空/无效时不访问 close 列（防 IndexError）
 
     # R1 cancel_on 守卫 + 当日突破过滤 + Signal 装配已下沉 _post_detect（P1 · spec §2.1）——
     # 与 detect_signal_fast（研究侧数组路径）共用同一装配闭包，识别装配单源防分叉。
@@ -557,8 +573,8 @@ def detect_signal_fast(symbol, arr, pos, id_cfg, exec_cfg, date, atr_arr,
     tops_slice = None
     if tops_mask is not None:
         tops_slice = tops_mask[s:pos + 1].copy()
-        tops_slice[:3] = False            # 窗口相对 [0,3) 边界排除（top_window=3）
-        tops_slice[-3:] = False           # 窗口相对 [n-3, n) 边界排除
+        tops_slice[:TOPS_WINDOW] = False            # 窗口相对 [0,3) 边界排除
+        tops_slice[-TOPS_WINDOW:] = False           # 窗口相对 [n-3, n) 边界排除
     w_ext = id_cfg["local_extrema_window"]
     lows_slice = None
     if lows_mask is not None:

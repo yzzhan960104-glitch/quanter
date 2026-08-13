@@ -27,8 +27,8 @@ import pandas as pd
 # P1（2026-08-13 · spec §2.1）：scan_symbol 识别循环改走 detect_signal_fast（全序列数组
 # fast path），detect_signal 仍保留 import（test_param_iter_kernel_same_source 断言
 # bk.detect_signal is method_v0.detect_signal 的同源 binding 契约不变）。
-from .method_v0 import (DEFAULTS, compute_atr, detect_signal, detect_signal_fast,
-                        local_extrema_mask)
+from .method_v0 import (DEFAULTS, TOPS_WINDOW, compute_atr, decay_weights_of,
+                        detect_signal, detect_signal_fast, local_extrema_mask)
 
 # Task 5 · U3 执行单源：持有期逐根离场判定改调 decide_exit（Task 4 建好的纯函数），
 # 让回测 simulate_exit 与实盘 stop_loss_monitor（Task 9）共用 decide_exit 单源。
@@ -471,12 +471,12 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
         "index": sym_df.index,
     }
     atr_arr = atr_full.to_numpy()
-    tops_mask = local_extrema_mask(arr["high"], 3, kind="max")   # 顶部聚集（硬编码 w=3，search_neckline 同源）
+    tops_mask = local_extrema_mask(arr["high"], TOPS_WINDOW, kind="max")   # 顶部聚集（TOPS_WINDOW 单源，search_neckline 同源）
     lows_mask = local_extrema_mask(arr["low"], id_cfg["local_extrema_window"], kind="min")
     tau = id_cfg.get("decay_tau")
     decay_weights = None
     if tau and tau > 0:
-        decay_weights = np.exp(-(np.arange(id_cfg["window"])[::-1]) / tau)   # exp(-(n-1-i)/tau)
+        decay_weights = decay_weights_of(id_cfg["window"], tau)   # exp(-(n-1-i)/tau) 单源
 
     signals = []
     for i in range(id_cfg["window"], len(sym_df)):
