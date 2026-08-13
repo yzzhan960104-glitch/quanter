@@ -2,11 +2,14 @@
  * CockpitView 综合看板单测（Task 12 · 一期观测运营层前端收官）。
  *
  * 物理意图：验证综合看板编排正确——上排 StatusCard/AssetCard/DataHealthCard，中排
- * TradesTable/TerminalLogs，下排 ReplayCompare，6 个子组件全部被渲染到页面。
+ * TradesTable/TerminalLogs，5 个子组件全部被渲染到页面。
+ *
+ * 下排「回测对比」已随 caisen 退役移除（2026-08-13 · G8 契约清理）：原 ReplayCompare
+ * 调 /api/v1/caisen/replay/tasks 死端点全 404，撤占位避免死链。
  *
  * 策略（Why stub 子组件）：
  *   本测试只验证 CockpitView 的「编排」职责（哪些子组件挂在哪个栅格），不验证子组件内部
- *   行为（各自已有独立单测覆盖）。故用 shallow + stub 替换 6 个子组件为占位 div，
+ *   行为（各自已有独立单测覆盖）。故用 shallow + stub 替换 5 个子组件为占位 div，
  *   避免触发它们的 onMounted 真发 API 请求 / SSE 订阅，保持测试隔离与速度。
  *
  * Why polyfill：EP el-row/el-col 在 jsdom 下走响应式测量，不补 ResizeObserver/matchMedia 会抛。
@@ -52,14 +55,14 @@ beforeAll(() => {
   }
 })
 
-// 6 个子组件名（PascalCase），CockpitView 用默认名导入，stub 用组件名匹配。
+// 5 个子组件名（PascalCase），CockpitView 用默认名导入，stub 用组件名匹配。
+// 下排 ReplayCompare 已随 caisen 退役移除（G8），故从 6 减至 5。
 const CHILDREN = [
   'StatusCard',
   'AssetCard',
   'DataHealthCard',
   'TradesTable',
   'TerminalLogs',
-  'ReplayCompare',
 ]
 
 const stubs = CHILDREN.reduce((acc, name) => {
@@ -76,15 +79,15 @@ const mountView = () =>
   })
 
 describe('CockpitView.vue', () => {
-  it('渲染全部 6 个子组件（上 3 / 中 2 / 下 1 编排）', () => {
+  it('渲染全部 5 个子组件（上 3 / 中 2 编排）', () => {
     const w = mountView()
-    // 每个 stub 渲染为带 data-stub 属性的 div，验证全部 6 个都挂载到页面。
+    // 每个 stub 渲染为带 data-stub 属性的 div，验证全部 5 个都挂载到页面。
     for (const name of CHILDREN) {
       expect(w.find(`[data-stub="${name}"]`).exists()).toBe(true)
     }
   })
 
-  it('包含「综合看板」必需的三排结构（心跳/资金/数据健康/流水/日志/回测对比）', () => {
+  it('包含「综合看板」必需的两排结构（心跳/资金/数据健康/流水/日志）', () => {
     const w = mountView()
     const text = w.text()
     // 子组件 stub 文本里包含中文名（便于可读断言）。
@@ -93,6 +96,5 @@ describe('CockpitView.vue', () => {
     expect(text).toContain('DataHealthCard')
     expect(text).toContain('TradesTable')
     expect(text).toContain('TerminalLogs')
-    expect(text).toContain('ReplayCompare')
   })
 })

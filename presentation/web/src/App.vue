@@ -6,10 +6,12 @@
  *   1. 顶部导航条：在 4 个功能页间切换（图标 + 文字双标，按使用动线分组）
  *   2. <router-view/> 渲染当前路由对应的视图
  *
- * 导航信息架构（蔡森形态学流水线 Phase 3 Task 8 起；Phase 1 · 前端只读化 Task 6 撤 AI 复盘）：
- * - 左段「研究/配置」4 项：蔡森筛选（形态学流水线，研究第一入口）→ 参数实验室 →
- *   宏观驾驶舱 → 数据湖（按研究动线：形态学选股 → 调参 → 宏观面 → 数据资产）。
- *   Phase 3 建 CaisenScreenView 后首页改指 /caisen，蔡森筛选作为研究/配置首项。
+ * 导航信息架构（caisen 形态退役后 · G8 清理；Phase 1 · 前端只读化 Task 6 撤 AI 复盘）：
+ * - 左段「研究/配置」3 项：搜索实验室（参数发现敏感性分析，研究第一入口）→
+ *   宏观驾驶舱 → 数据湖（按研究动线：参数发现 → 宏观面 → 数据资产）。
+ *   caisen 退役（G8）：原「蔡森筛选」+「参数实验室」随 server/api/v1/caisen.py 整删
+ *   而移除（前端 caisen.ts 调的 6 个端点全 404，CaisenScreenView/ParamLabView 死视图）；
+ *   首页由 /caisen 改指 /discovery，研究动线第一入口由 discovery 参数发现敏感性承接。
  * - 右段「实盘」1 项：实盘中控。用 .nav-divider 细分隔线物理区隔——这是全站唯一会
  *   真实下单的高危入口，空间区隔降低误点风险（skill destructive-nav-separation）。
  * - 顶栏常驻「READ-ONLY 只读」红色徽标（Phase 1 · 前端只读化）：所有写操作走
@@ -24,8 +26,10 @@
 import { useRoute } from 'vue-router'
 import { computed, type Component } from 'vue'
 // 导航图标：EP 官方图标包，按需引入（非重型依赖，EP 生态标准配套）
-// Phase 1 · 前端只读化 Task 6：撤 MagicStick（AI 复盘导航项随 ReviewView 整删）
-import { TrendCharts, DataBoard, Files, Monitor, DataAnalysis, View, Operation } from '@element-plus/icons-vue'
+// Phase 1 · 前端只读化 Task 6：撤 MagicStick（AI 复盘导航项随 ReviewView 整删）。
+// G8 caisen 死视图清理：撤 TrendCharts（蔡森筛选）/ DataAnalysis（参数实验室）——
+//   对应导航项随 CaisenScreenView/ParamLabView 整删而移除，图标无消费者亦撤。
+import { DataBoard, Files, Monitor, View, Operation } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const activeName = computed(() => route.path)
@@ -37,14 +41,13 @@ interface NavItem {
   icon: Component
 }
 
-// 左段：研究/配置（蔡森形态学流水线 Phase 3 起：蔡森筛选作为研究第一入口，
-// 放 researchNav 首位；Spec 2 起参数实验室紧随其后——选股 → 调参的研究动线；
-// 宏观驾驶舱/数据湖依次承接）
-// Phase 1 · 前端只读化 Task 6：撤「AI 复盘」项（diagnose 为写操作，随 ReviewView 整删）
+// 左段：研究/配置（caisen 形态退役后 · G8 清理：搜索实验室作为研究第一入口，
+// 放 researchNav 首位；宏观驾驶舱/数据湖依次承接）。
+// Phase 1 · 前端只读化 Task 6：撤「AI 复盘」项（diagnose 为写操作，随 ReviewView 整删）。
+// G8（2026-08-13）：撤「蔡森筛选」+「参数实验室」（caisen.ts 调死端点，CaisenScreenView
+//   + ParamLabView 整删让 check_contracts gate② 绿；首页改指 /discovery）。
 const researchNav: NavItem[] = [
-  { to: '/caisen',     label: '蔡森筛选',   icon: TrendCharts },
-  { to: '/lab',        label: '参数实验室', icon: DataAnalysis },
-  // P3（2026-08-13）：搜索实验室——参数发现敏感性分析/热力图（只读，spec §4）
+  // 搜索实验室（P3）：参数发现敏感性分析/热力图（只读，spec §4，研究动线首屏）
   { to: '/discovery',  label: '搜索实验室', icon: DataBoard },
   { to: '/dashboard',  label: '宏观驾驶舱', icon: DataBoard },
   { to: '/data',       label: '数据湖',     icon: Files },

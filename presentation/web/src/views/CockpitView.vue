@@ -2,15 +2,20 @@
   CockpitView 综合看板（一期观测运营层 · Task 12 · 前端收官）。
 
   物理意图（CLAUDE.md 极简 + 第一性原理）：
-    把一期观测运营层的 6 块小部件按「上/中/下」三排聚合到同一屏，提供「俯瞰」视角：
+    把一期观测运营层的小部件按「上/中」两排聚合到同一屏，提供「俯瞰」视角：
     - 上排：StatusCard 心跳 / AssetCard 资金 / DataHealthCard 数据健康（3 个 ~30 行摘要卡，
       整体反映「网关连不连 / 账户有钱没钱 / 数据新不新」三项运营基本盘）。
     - 中排：TradesTable 流水 / TerminalLogs 日志（左实时成交、右实时日志，并排对照看
       「下单了 → 流水进了 → 日志记了」的链路一致性）。
-    - 下排：ReplayCompare 回测对比（横向占满，承载多选 + 对比表，需要更宽横向空间）。
+
+  下排「回测对比」已随 caisen 退役移除（2026-08-13 · G8 契约清理）：
+    原 ReplayCompare 组件经 caisen.ts 调 /api/v1/caisen/replay/tasks 端点，后端 router
+    随 caisen 形态整体退役已删（master 策略 = neckline），调用全 404。回测任务后端
+    replay_tasks_db 仍在（lifespan 装配 + training_loop 消费），但无 HTTP 端点暴露——
+    前端对比入口需待 training 域/独立 backtest 端点重建，此处先撤占位避免死链。
 
   Why 聚合而非新写：
-    Task 9/10/11 已分别落地 TradesTable/TerminalLogs/ReplayCompare，Task 12 又抽了 3 个
+    Task 9/10/11 已分别落地 TradesTable/TerminalLogs，Task 12 又抽了 3 个
     摘要小部件。综合看板只做编排，零业务逻辑，符合「拒绝过度抽象」——这页只是 container。
 
   Why el-row + el-col 而非 CSS grid：
@@ -35,11 +40,6 @@
       <el-col :span="12"><TradesTable /></el-col>
       <el-col :span="12"><TerminalLogs /></el-col>
     </el-row>
-
-    <!-- 下排：回测对比横向占满（多选 + 对比表需要更宽空间） -->
-    <el-row :gutter="12" style="margin-top: 12px;">
-      <el-col :span="24"><ReplayCompare /></el-col>
-    </el-row>
   </div>
 </template>
 
@@ -51,7 +51,6 @@ import DataHealthCard from '../components/cockpit/DataHealthCard.vue'
 // 一期观测运营层既有组件（Task 9/10/11）。
 import TradesTable from '../components/cockpit/TradesTable.vue'
 import TerminalLogs from '../components/cockpit/TerminalLogs.vue'
-import ReplayCompare from '../components/cockpit/ReplayCompare.vue'
 </script>
 
 <style scoped>
