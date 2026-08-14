@@ -93,15 +93,45 @@ def segment_metrics(all_filled, segment, embargo_days=0):
     return metrics_of(pairs)
 
 
+def yearly_metrics(all_filled, segment, min_trades=30):
+    """A2（DG-G4）：segment 内 all_filled 按信号自然年分块 → {年: calmar}。
+
+    Why 按年 min：整段 calmar 被单一大年淹没（2025 特化教训——wf 四折实证冠军
+    参数 2022 折外 -0.62 而整段 inner 44.87），按年分块让参数必须在【每一个】
+    年份站得住才得高分。
+    Why n<min_trades 记 0.0（不剔除）：剔除=逃考——信号稀疏年恰是参数在该年
+    不适配的证据，记 0 让它拖累 min（保守，不奖励缺席）。
+    无信号年份不入 dict（年份由实际信号决定，非日历枚举）。
+    """
+    from collections import defaultdict
+    by_year = defaultdict(list)
+    for r in all_filled:
+        d = pd.to_datetime(r["signal_date"])
+        if segment.covers(d):
+            by_year[d.year].append((r["avg_pnl_pct"], d))
+    out = {}
+    for y in sorted(by_year):
+        m = metrics_of(by_year[y])
+        out[y] = m["calmar"] if m["n"] >= min_trades else 0.0
+    return out
+
+
 def evaluate(params, universe, split):
     """评估给定 params 的 inner/outer 两段。
 
-    跑一次 run_full_scan（同 params 同 universe 的客观信号），分 inner(2025)/outer(2026)
-    两段。信息隔离：返回的 outer metrics 仅供报告，调用方不得用于冠军排序/选择（spec §6.2）。
+    跑一次 run_full_scan（同 params 同 universe 的客观信号），按 split 分段。
+    A2（DG-G4 · 2026-08-14）：inner dict 注入 yearly_calmar（各自然年 calmar，
+    n<30 年记 0）与 min_yearly_calmar（搜索排序新目标）——整段 calmar 等字段
+    保留（feasibility_gate 等既有消费者兼容，纯增量）。
+    信息隔离：返回的 outer metrics 仅供报告，调用方不得用于冠军排序/选择（spec §6.2）。
     """
     all_filled = run_full_scan(params, universe)
+    inner_m = segment_metrics(all_filled, split.inner, embargo_days=0)
+    yearly = yearly_metrics(all_filled, split.inner)
+    inner_m["yearly_calmar"] = yearly
+    inner_m["min_yearly_calmar"] = min(yearly.values()) if yearly else 0.0
     return {
-        "inner": segment_metrics(all_filled, split.inner, embargo_days=0),
+        "inner": inner_m,
         "outer": segment_metrics(all_filled, split.outer, embargo_days=split.embargo_days),
         "n_total": len(all_filled),
     }

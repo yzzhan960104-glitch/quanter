@@ -134,3 +134,96 @@ def test_evaluate_wf_per_fold_independent_universe(monkeypatch):
     # 折内分段：train 段收 2020 信号（n=1）、oos 段收 2022 信号（n=1）
     assert out[0]["train"]["n"] == 1
     assert out[0]["oos"]["n"] == 1
+
+
+# ============================================================================
+# A2（DG-G4 · 2026-08-14）：扩展切分 + inner 各年 min calmar（2025 特化教训）
+# ============================================================================
+def test_extended_split_spans():
+    """扩展切分：inner 2021-2024 四个自然年（含 2022 熊市考场）/ outer 2025-2026。"""
+    from discovery.split import extended_split
+    sp = extended_split()
+    assert sp.inner.start == date(2021, 1, 1) and sp.inner.end == date(2024, 12, 31)
+    assert sp.outer.start == date(2025, 1, 1) and sp.outer.end == date(2026, 12, 31)
+    assert sp.embargo_days == 5
+
+
+def test_holdout_split_untouched_by_extended():
+    """既有二段切分（45 caller 对照锚）不被扩展切分污染——oos/wf4 口径不动。"""
+    from discovery.split import holdout_split
+    old = holdout_split()
+    assert old.inner.start == date(2025, 1, 1) and old.outer.start == date(2026, 1, 1)
+
+
+def _filled_year(year, n, pnl):
+    """合成 n 笔 signal_date 全在 year 年、每笔 pnl 的 all_filled 条目（日期分散）。"""
+    return [{"avg_pnl_pct": pnl,
+             "signal_date": pd.Timestamp(date(year, 3, 1) if i % 2 else date(year, 9, 1))}
+            for i in range(n)]
+
+
+def _filled_year_mixed(year, pnls):
+    """合成混合盈亏年（wins+losses 均非空——纯全赢/全亏会触发 risk_metrics 的
+    空集退化分支返 ann=0，测不出年际差异；A2 测试用混合分布对齐真实形态）。"""
+    return [{"avg_pnl_pct": p,
+             "signal_date": pd.Timestamp(date(year, 3, 1) if i % 2 else date(year, 9, 1))}
+            for i, p in enumerate(pnls)]
+
+
+def test_yearly_metrics_min_takes_worst_year():
+    """两年一好一差 → min 恰取差年（好年不被整段淹没——A2 的全部物理意图）。"""
+    from discovery.split import Segment
+    from discovery.objective import yearly_metrics
+    seg = Segment("t", date(2021, 1, 1), date(2024, 12, 31))
+    good = _filled_year_mixed(2021, [6.0] * 40 + [-1.0] * 10)   # 80% 胜率高均盈
+    bad = _filled_year_mixed(2022, [1.0] * 10 + [-3.0] * 40)    # 20% 胜率深亏
+    ym = yearly_metrics(good + bad, seg)
+    assert 2021 in ym and 2022 in ym
+    assert ym[2022] < ym[2021]
+    assert min(ym.values()) == ym[2022]
+
+
+def test_yearly_metrics_sparse_year_scores_zero():
+    """n<min_trades 的年份记 0.0（保守：信号缺席=逃考失败，不剔除不奖励）。"""
+    from discovery.split import Segment
+    from discovery.objective import yearly_metrics
+    seg = Segment("t", date(2021, 1, 1), date(2024, 12, 31))
+    filled = _filled_year(2021, 50, 5.0) + _filled_year(2022, 10, 5.0)  # 2022 仅 10 笔
+    ym = yearly_metrics(filled, seg, min_trades=30)
+    assert ym[2022] == 0.0
+
+
+def test_yearly_metrics_excludes_out_of_segment():
+    """segment 外年份不计入（与 segment_metrics 同界语义，inner/outer 隔离）。"""
+    from discovery.split import Segment
+    from discovery.objective import yearly_metrics
+    seg = Segment("t", date(2021, 1, 1), date(2024, 12, 31))
+    filled = _filled_year(2021, 50, 5.0) + _filled_year(2025, 50, 5.0)  # 2025 属 outer
+    assert 2025 not in yearly_metrics(filled, seg)
+
+
+def test_evaluate_injects_yearly_fields(monkeypatch):
+    """evaluate 的 inner dict 注入 yearly_calmar + min_yearly_calmar（A2 排序新目标）。"""
+    from unittest.mock import patch
+    from discovery.split import extended_split
+    from discovery.objective import evaluate
+    # inner 两年信号 + outer 一年信号（2025 不进 inner yearly）+ 2023 无信号年不入 dict
+    filled = (_filled_year(2021, 40, 5.0) + _filled_year(2022, 40, -1.0)
+              + _filled_year(2025, 40, 8.0))
+    with patch("discovery.objective.run_full_scan", return_value=filled):
+        res = evaluate({}, {}, extended_split())
+    assert set(res["inner"]["yearly_calmar"]) == {2021, 2022}
+    assert res["inner"]["min_yearly_calmar"] == min(res["inner"]["yearly_calmar"].values())
+    # 整段字段保留（feasibility_gate 等既有消费者兼容——纯增量不破坏）
+    assert "calmar" in res["inner"] and "n" in res["inner"]
+
+
+def test_evaluate_empty_inner_min_is_zero(monkeypatch):
+    """inner 完全无信号 → yearly 空 dict，min_yearly_calmar 兜底 0.0（不抛）。"""
+    from unittest.mock import patch
+    from discovery.split import extended_split
+    from discovery.objective import evaluate
+    with patch("discovery.objective.run_full_scan", return_value=[]):
+        res = evaluate({}, {}, extended_split())
+    assert res["inner"]["yearly_calmar"] == {}
+    assert res["inner"]["min_yearly_calmar"] == 0.0
