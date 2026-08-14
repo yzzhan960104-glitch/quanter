@@ -133,6 +133,16 @@ async def pre_open(date: str, ports: EnginePorts | None = None) -> dict:
     # 历史 engine 反查为保 monkeypatch.setattr(engine, "_pre_open_impl", fake_impl) 命中
     # test_pre_open_ledger_semantics 台账语义；现同模块直调，monkeypatch engine._pre_open_impl
     # 失效 → Task 8-19 迁（改 monkeypatch pre_open._pre_open_impl 或重构台账测直接调 _pre_open_impl）。
+    #
+    # 并发硬化（G6 评审结论 · 2026-08-14）：cron 与 catchup 双入口共用本函数，但**刻意不加
+    # asyncio.Lock**——三层已闭环并发双挂单，Lock 属冗余且有害：
+    #   ① begin_run（G4 BEGIN IMMEDIATE 原子领取——谁先 claim 谁跑，catchup 另含 latest_status
+    #      预检跳过 running/done）；
+    #   ② DB UNIQUE(account,date,symbol,purpose) + has_order 滤活态；
+    #   ③ _pre_open_impl 内 insert_order 返 False→中止 _submit（竞争的第二入口撞 UNIQUE 即停，
+    #      绝不脱节下柜台——这是「本项真实收益」）。
+    # 且 has_order→insert_order 是同步段（无 await），单事件循环下不可交错；模块级 asyncio.Lock
+    # 反会破坏本仓库 asyncio.run(per-test) 跨循环模式。防未来引入 await/--workers>1 时再评估。
     try:
         job_ledger.begin_run("pre_open", date, clock.now().isoformat())
     except Exception:
@@ -318,7 +328,8 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     #
     # 边界（红线）：
     # - gw=None / query_asset 返 {}（未连接/锁定/超时）→ 跳过 + WARN，绝不拿 0/None
-    #   写基线（否则 post_close check_daily_loss_limit(0, curr) 返 False 反永不熔断）；
+    #   写基线（DG-G3 后基线缺失=post_close 走 T-1 兜底→仍无则 None 直传 breaker fail-closed
+    #   触发保护；拿 0 写会致 daily_pnl 除零+语义模糊——非旧 fail-open「永不熔断」）；
     # - query_asset 异常 → 跳过 + 告警（不阻塞挂单主路径）。
     # Why 在撤单后而非前：撤单不影响总资产（仅未成交单状态变化），先后顺序无关；
     # 放后面可与撤单共用同一个 gw 引用，且「撤完昨日 → 抓今日基线」语义更清晰。
@@ -506,12 +517,31 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
         # 升 L1（review 补强：单只层面 DB 写异常 > 单只计数，硬抛停调度，绝不带病挂下一只）。
         try:
             _order_id = f"{date}_{od['symbol']}_OPEN_1"
-            _state_store.insert_order(
+            # G6（spec audit-remediation §G6「本项真实收益」）：捕获 insert_order 返回值——
+            # False = UNIQUE 四元组 (account,date,symbol,OPEN) 已占位（多为 REJECTED 等死态残留，
+            # has_order 已滤活态放行至此）。绝不可忽略 False 继续 _submit：否则柜台下真单而 DB
+            # 无对应 OPEN 行 = 对账幽灵单（spec 点名「DB 幂等拦不住柜台」）。
+            # 语义副作用（知情）：死态占位 → 当日不再重挂（C-8 重试窗口内 submitted 仍 0）；spec
+            # 已权衡——拒单多因资金/涨跌停，同日重挂无意义，宁可停手不造 DB/柜台脱节的幽灵单。
+            _inserted = _state_store.insert_order(
                 _order_id, trade_id, account_id, date, od["symbol"], od["side"], "OPEN",
                 float(od["qty"]), float(od["price"]), state="PENDING")
         except Exception as e:
             raise _CriticalHalt(
                 f"pre_open insert_order(OPEN) 失败 symbol={od['symbol']}（DB 真相源失真）") from e
+        if not _inserted:
+            # G6：DB 幂等落库失败（slot 占位）→ 中止本只 _submit + 告警 + 计入拒单。
+            # 计入 n_rejected 让台账 status=failed（submitted=0/rejected>0）暴露异常，C-8 可感知。
+            # 同时顺带消除「REJECTED→SUBMITTED」非法迁移——不 _submit 即不回写 SUBMITTED。
+            logger.warning(
+                "pre_open 中止 _submit：insert_order 返 False（UNIQUE 占位/死态残留）"
+                " symbol=%s order_id=%s（DB 幂等拦柜台·G6）", od["symbol"], _order_id)
+            if _mode() == "live":
+                _alert_critical(
+                    f"pre_open 中止挂单 symbol={od['symbol']}（insert_order 返 False·UNIQUE "
+                    f"占位，防 DB/柜台脱节 G6）")
+            n_rejected += 1
+            continue
         try:
             result = await _submit(order_req)
         except Exception as exc:

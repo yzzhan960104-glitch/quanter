@@ -392,6 +392,47 @@ def test_pre_open_idempotent(monkeypatch, _state_db):
     assert submit_calls["n"] == 1  # 只挂一次（DB 幂等）
 
 
+def test_pre_open_aborts_submit_when_insert_order_returns_false(monkeypatch, _state_db):
+    """G6（spec audit-remediation §G6「本项真实收益」）：insert_order 返 False → 中止 _submit。
+
+    物理意图（防 DB/柜台脱节幽灵单）：has_order 滤死态放行后，insert_order 撞 UNIQUE 四元组
+    返 False = 该 (account,date,symbol,OPEN) slot 已占位（多为 REJECTED 等死态残留）。若忽略
+    False 继续 _submit，柜台下真单而 DB 无对应 OPEN 行 = 对账幽灵单（spec 点名「DB 幂等拦不住
+    柜台」）。正确行为：中止 _submit。
+
+    复现构造：预占同 order_id/四元组（先插 PENDING 再标 REJECTED）—— has_order 滤 REJECTED
+    死态 → 放行进挂单段；insert_order 撞同 order_id PK + UNIQUE → 返 False。当前实现忽略该返回
+    值 → _submit 仍被调（RED）；G6 修复后 → 不触达 _submit（GREEN）。
+    """
+    from trading import state_store
+    _confirmed_plan_one_order()  # 600000.SH @ 2099-01-02 已确认计划
+    # 预占 UNIQUE slot：同四元组 OPEN 委托先插 PENDING，再标 REJECTED（死态）。
+    # has_order 滤死态放行 → insert_order 撞冲突返 False（pre_open 现算 order_id = {date}_{symbol}_OPEN_1）
+    account_id = engine._resolve_account_id()
+    trade_id = state_store.build_trade_id(account_id, "600000.SH", "2099-01-02")
+    _oid = "2099-01-02_600000.SH_OPEN_1"
+    state_store.insert_order(
+        _oid, trade_id, account_id, "2099-01-02", "600000.SH", "buy", "OPEN",
+        100.0, 10.0, state="PENDING")
+    state_store.update_order_state(_oid, "REJECTED")
+
+    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: None)
+    submit_calls = {"n": 0}
+
+    async def _counting_submit(order, **kw):
+        submit_calls["n"] += 1
+        return {"order_id": "x", "state": "DRY_RUN", "message": "影子"}
+
+    monkeypatch.setattr("trading.phases.pre_open._submit", _counting_submit)
+
+    result = asyncio.run(engine.pre_open("2099-01-02"))
+
+    # G6 核心断言：insert_order False → 绝不触达柜台（_submit 0 次），submitted=0
+    assert submit_calls["n"] == 0, (
+        "insert_order 返 False 时不应 _submit（防 DB/柜台脱节幽灵单·G6）")
+    assert result["submitted"] == 0
+
+
 def test_pre_open_skips_vetoed(monkeypatch, _state_db):
     """trade_event 最新 action=VETOED → 跳过该标的（不挂单）。"""
     from trading import state_store
@@ -1182,9 +1223,10 @@ def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch, _state_db):
     """query_asset 返 {}（未连接）→ 跳过快照 + WARN（不拿 0 误触发熔断）。
 
     物理意图（边界 · spec §5.2）：
-        gw 未连接 / 锁定 / 超时 → query_asset 返 {}。绝不能拿 0 当基线，
-        否则 post_close check_daily_loss_limit(0, curr) 会因 start<=0 返 False
-        反而永不熔断，或拿 None 参与除法抛 TypeError。正确行为：跳过快照 + 告警。
+        gw 未连接 / 锁定 / 超时 → query_asset 返 {}。绝不能拿 0 当基线（致 daily_pnl
+        除零+语义模糊），或拿 None 参与除法抛 TypeError。DG-G3 后基线缺失由 post_close
+        走 T-1 兜底→仍无则 None 直传 breaker fail-closed 触发保护（非旧 fail-open「永不
+        熔断」）。正确行为：跳过快照 + 告警。
     """
     # C2c：DB 种已确认 SIGNAL
     _seed_signals_db("2099-01-02", [{
