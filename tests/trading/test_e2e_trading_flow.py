@@ -884,6 +884,9 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
 
     class _FakeEngineForPipeline:
         """pipeline_then_eod 的 engine 参数：只需 async _eod()（编排层低耦合契约）。"""
+        # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测另册）
+        async def _regime_gate(self):
+            return True, ""
         async def _eod(self):
             eod_called["n"] += 1
             # 模拟 eod_plan 产物：落计划 + 自动确认（模拟 AUTO_CONFIRM_PLAN）
@@ -938,7 +941,13 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
 
     # pre_open(PIPE_DATE)：gate ① 计划 confirmed ✓ / ② 网关 connected&ready ✓ /
     # ③ get_data_ready(PIPE_DATE, daily) 命中 ① 写的记录 ok=1 ✓ → 三段全绿放行挂单
-    result = asyncio.run(engine.pre_open(PIPE_DATE, ports=eng._ports))
+    # A1（08-14）：④ 段 regime 复核——本测试焦点是事件链收口，patch BULL 放行
+    # （regime 真值实弹见 test_regime.py 真湖验证；有意思的是不 patch 时闸走真湖
+    #  返回 BEAR「HS300 4666≤MA200；宽度 23%」正确拦截——A1 的意外现场演示）。
+    from trading.compute.regime import RegimeState as _RS2
+    with patch("trading.compute.regime.classify",
+               return_value=_RS2("BULL", "测试放行", PIPE_DATE)):
+        result = asyncio.run(engine.pre_open(PIPE_DATE, ports=eng._ports))
 
     # 事件链 ② 断言：三段全绿 → gate 放行 → submitted>=1（不被任何 gate 段早返 skip）
     assert "skipped" not in result, \
@@ -1004,5 +1013,9 @@ def test_pre_open_next_day_gate_hits_prev_day_data_ready(isolated, monkeypatch):
             _aid_pre, _tid_pre, sym, "SIGNAL",
             meta=_json.dumps(_meta_pre, ensure_ascii=False))
         state_store.insert_trade_event(_aid_pre, _tid_pre, sym, "CONFIRMED")
-    ok, reason = asyncio.run(eng._pre_open_gate(PREOPEN_T1, fake_gw))
+    # A1（08-14）：④ 段 regime 复核——patch BULL 放行（本测试焦点是 ③ 段 T/T+1 对齐）
+    from trading.compute.regime import RegimeState as _RS
+    with patch("trading.compute.regime.classify",
+               return_value=_RS("BULL", "测试放行", PREOPEN_T1)):
+        ok, reason = asyncio.run(eng._pre_open_gate(PREOPEN_T1, fake_gw))
     assert ok, f"T+1 pre_open gate 应放行（命中 T 日 data_ready），reason={reason}"

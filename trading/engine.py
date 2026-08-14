@@ -728,6 +728,34 @@ class TradingEngine:
             # get_ready 内部已 logger.warning 暴露具体哪源漂移（data_ready 内容/job_ledger 台账）；
             # gate reason 给简短中文供台账 skipped.message 记录。
             return False, f"数据未就绪（{_data_date}：内容校验或 pipeline 台账未绿，详见日志）"
+        # ④ 市场状态（A1 · DG-G4 · 2026-08-14）：eod 后隔夜可能转空，挂单前二次
+        # 复核（与 eod 前置同一 classify 单源 + 当日缓存，不重复读湖）。
+        rg_ok, rg_reason = await self._regime_gate()
+        if not rg_ok:
+            return False, rg_reason
+        return True, ""
+
+    async def _regime_gate(self) -> tuple[bool, str]:
+        """A1（DG-G4 · 2026-08-14）：市场状态闸——空头/未知环境停新单。
+
+        物理意图：颈线法冠军参数 2022 熊市折外 calmar=-0.62（wf 四折实证），
+        空头环境假突破多，正确动作是停手。BEAR/UNKNOWN（fail-closed，DG-G3
+        哲学：缺信息时收紧而非放开）→ 拒新单；BULL 放行。
+        **只断新单**：存量持仓的止损/止盈/stop_loss 巡检不经本闸（退出永远
+        允许——停手≠清仓，闸门不越权变相自动清仓）。
+        判定单源 trading.compute.regime.classify（当日缓存，读湖成本一日一次）。
+        """
+        from trading.compute import regime
+        try:
+            st = regime.classify()
+        except Exception:
+            # classify 自身已 fail-closed 返 UNKNOWN；此处兜底极端（import 级）异常
+            logger.exception("regime 判定异常（fail-closed 停手）")
+            return False, "regime 判定异常（fail-closed 停手）"
+        if st.state != "BULL":
+            reason = f"regime 停手（{st.state}：{st.reason}）"
+            logger.warning("A1 %s", reason)
+            return False, reason
         return True, ""
 
     def _plan_data_keys(self, plan: dict) -> set[str]:

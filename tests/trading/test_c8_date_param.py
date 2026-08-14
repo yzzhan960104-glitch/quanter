@@ -21,6 +21,9 @@ async def test_for_date_passes_explicit_dates_to_eod():
     from trading.orchestrate import pipeline as pl
     eng = MagicMock()
     eng._eod = AsyncMock()
+    # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
+    # test_engine_regime_gate.py / test_regime.py）
+    eng._regime_gate = AsyncMock(return_value=(True, ""))
     with patch.object(pl, "is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
@@ -44,6 +47,9 @@ async def test_default_path_calls_eod_without_args():
     from trading.orchestrate import pipeline as pl
     eng = MagicMock()
     eng._eod = AsyncMock()
+    # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
+    # test_engine_regime_gate.py / test_regime.py）
+    eng._regime_gate = AsyncMock(return_value=(True, ""))
     with patch.object(pl, "is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
@@ -64,6 +70,9 @@ async def test_run_eod_false_skips_eod_but_runs_brief():
     from trading.orchestrate import pipeline as pl
     eng = MagicMock()
     eng._eod = AsyncMock()
+    # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
+    # test_engine_regime_gate.py / test_regime.py）
+    eng._regime_gate = AsyncMock(return_value=(True, ""))
     with patch.object(pl, "is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
@@ -85,6 +94,9 @@ async def test_data_unready_records_failed():
     from trading.orchestrate import pipeline as pl
     eng = MagicMock()
     eng._eod = AsyncMock()
+    # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
+    # test_engine_regime_gate.py / test_regime.py）
+    eng._regime_gate = AsyncMock(return_value=(True, ""))
     with patch.object(pl, "is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \

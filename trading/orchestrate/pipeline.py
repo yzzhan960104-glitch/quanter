@@ -171,6 +171,24 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
             logger.exception("T13-B scan/repair 触发异常（不阻断 eod）")
         # 5. 全绿 → 跑 eod（C-8 V2：补跑传显式 data_day/plan_date；默认路径零变化）
         if run_eod:
+            # 4.5 A1 前置（DG-G4 · 2026-08-14）：空头/未知环境不产新计划（停手≠清仓，
+            # 存量持仓的退出链路不受影响）。与 _pre_open_gate ④ 段同一 _regime_gate
+            # 单源（当日缓存，不重复读湖）；BEAR/UNKNOWN 均 fail-closed 停产。
+            rg_ok, rg_reason = await engine._regime_gate()
+            if not rg_ok:
+                msg = f"eod 跳过：{rg_reason}"
+                logger.warning(msg)
+                _ledger_finish(today, "skipped", rg_reason)
+                try:
+                    from infra.notifier import (build_default_manager,
+                                                fire_and_forget, NotificationManager)
+                    build_default_manager()
+                    fire_and_forget(
+                        NotificationManager.get_default().notify_risk_event(msg, "WARN"))
+                except Exception:
+                    # 播报软降级（通知通道故障不能阻断「停手」这个主行为）
+                    logger.debug("regime 停手播报软降级", exc_info=True)
+                return  # 停产 T+1 计划；brief 播报跳过（eod 未跑，无盘后面板）
             if for_date is not None:
                 await engine._eod(data_day=today, plan_date=next_trading_day(today))
             else:
