@@ -1,4 +1,4 @@
-> 最近复核：2026-08-08 · 维护者：wayfinder-session ·
+> 最近复核：2026-08-14 · 维护者：glm-5.3-session ·
 > 权威归宿：**外部系统边界与集成入口**（单一归宿）。模块内部结构见 [#2](02-module-dependencies.md)。
 
 # #1 系统上下文（借 C4-L1 idiom）
@@ -23,13 +23,13 @@ flowchart LR
 
 | 外部系统 | 方向 | 入口符号（包） | 关键事实 / 风险 |
 |---|---|---|---|
-| **Tushare API** | 入（数据） | `data/tushare_sync.py` · `data/lake_reader.py` | 国内直连（[T15](../../plans/wayfinder/T15.md) 移除 ALL_PROXY 后验证）；**唯一数据源**（AKShare/JQData 已退役）；积分限频 |
-| **miniQMT + xtquant** | 出（订单/查询）/ 入（回报/行情） | `broker/qmt.py` `QmtExecutionGateway.connect/submit_order` | 共享内存队列、**同 sid 单进程独占、一次性连接、无内置心跳/重连**（[T4](../../plans/wayfinder/T4.md)）；模拟盘不扣 cash、拒涨停价买单、撤单主推延迟 1-2s（业务机制非连接 bug） |
-| **钉钉 webhook** | 出（播报） | `broadcast/` 多机器人（review / brief / discovery） | 三类推送；幂等由 `job_ledger` 守（[data-source-of-truth](../data-source-of-truth.md) 第 8 域） |
+| **Tushare API** | 入（数据·主源） | `data/tushare_sync.py` · `data/lake_reader.py` | 国内直连（[T15](../../plans/wayfinder/T15.md) 移除 ALL_PROXY 后验证）；**行情/日线主源**。08-14 订正：非「唯一数据源」——宏观社融/DR007 以 **akshare** fallback（`config/registry.py:39-46`），`data/clients/` 下 akshare / alpha_vantage / yfinance 客户端仍存活，G4 超时注入覆盖 tushare/FRED/xtdata 四类 SDK；积分限频 |
+| **miniQMT + xtquant** | 出（订单/查询）/ 入（回报/行情） | `broker/qmt.py` `QmtExecutionGateway.connect/submit_order` | 共享内存队列、**同 sid 单进程独占、一次性连接、无内置心跳/重连**（[T4](../../plans/wayfinder/T4.md)）；模拟盘不扣 cash、拒涨停价买单、撤单主推延迟 1-2s（业务机制非连接 bug）。**G8（2026-08-14）**：sid 轮换前置「客户端可服务」三件套探测（进程活着/活性新鲜/可服务），未就绪快速失败 |
+| **钉钉 webhook** | 出（播报） | `broadcast/` 多机器人（review / brief / discovery） | 三类推送；幂等由 `job_ledger` 守（[data-source-of-truth](../data-source-of-truth.md) 第 8 域）。**单通道风险**：fire-and-forget，失败仅剩日志（CR-7） |
 | **Windows Task Scheduler** | 入（触发） | `ops/`（`start_server.bat` ONSTART → uvicorn :8000；`data_pipeline` 定时 → sync） | schtasks 新进程读 User+Machine env 合成（[T15](../../plans/wayfinder/T15.md) 已清 ALL_PROXY） |
 | **GLM (z.ai) LLM** | 出（审核） | `infra/llm/glm.py` `GlmClient.call` | Anthropic Messages 兼容端点（`api.z.ai/api/anthropic/v1/messages`）；凭证 `GLM_API_KEY`；用于 plan 审核服务 |
-| **用户/运维（浏览器）** | 入（观测） | `presentation/server`（FastAPI :8000）+ `presentation/web`（Vue 只读） | 前端**只读**（[trading.ts](../../presentation/web/src/api/trading.ts) 无写函数）；写需求走 pre_open cron 或 `trading/tools/trigger_pre_open_once.py` |
-| **本地持久化**（系统边界，非外部） | 读/写 | `data_lake/*.parquet` · `logs/trading_state.db` · `logs/trading_job_run.db` · `experiment/experiments.db` | SSoT 真相源集，详见 [data-source-of-truth](../data-source-of-truth.md) 与 [#7](07-ssot-data-layer.md) |
+| **用户/运维（浏览器）** | 入（观测） | `presentation/server`（FastAPI :8000）+ `presentation/web`（Vue 只读） | 前端**只读**（[trading.ts](../../presentation/web/src/api/trading.ts) 无写函数）；写需求走 pre_open cron 或 `trading/tools/trigger_pre_open_once.py`。**鉴权（G2 · 2026-08-13 起 fail-closed）**：写路由 require_write Bearer；SSE 日志流 cookie 鉴权（`POST /api/v1/auth/read-cookie` 换取，**前端尚未接线**——CR-8）；live 模式无 `QUANTER_API_TOKEN` 拒起；默认 host 127.0.0.1 |
+| **本地持久化**（系统边界，非外部） | 读/写 | `data_lake/*.parquet` · `logs/trading_state.db` · `logs/trading_job_run.db` · `experiment/experiments.db` | SSoT 真相源集，详见 [data-source-of-truth](../data-source-of-truth.md) 与 [#7](07-ssot-data-layer.md)。G5 后湖文件写入原子化（tmp+fsync+replace） |
 
 ## 进出 quanter 的关键流（高层预览，详见 [#3](03-data-flow.md)）
 

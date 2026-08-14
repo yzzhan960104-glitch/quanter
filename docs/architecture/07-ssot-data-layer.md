@@ -78,7 +78,7 @@ classDiagram
 ## 防回归守卫（细节见 prose）
 
 - **静态护栏** `tests/test_ssot_static_guard.py`：BANNED pattern 精确正则（跳注释），CI 时炸。
-- **运维巡检** `scripts/audit_ssot.py`：5 项检查（fill↔position / account_daily 闭合 / trade_event 孤儿 / engine 进程数 ≤1 / BANNED 同口径），任一 FAIL exit 1。
+- **运维巡检** `scripts/audit_ssot.py`：**7 项检查**（08-14 订正，此前文档误写 5 项）：fill↔position / account_daily 闭合 / trade_event 孤儿 / engine 进程数 ≤1 / miniQMT 客户端 ==1 / 端口属主==pid / BANNED 同口径，任一 FAIL exit 1。**⚠️ 巡检自身无任何调度挂载（CR-7）**；fill↔position 存在单向盲区（只扫超卖方向，CR-5）。
 - **BANNED 模式**：读 `live_trades.csv` / `param_iter_state.json` 回退、写 `live_trades.csv` 等（已删，命中即 FAIL）。
 
 > 规则全文、Phase A/B 治理历史、遗留风险 → [`docs/data-source-of-truth.md`](../data-source-of-truth.md)。

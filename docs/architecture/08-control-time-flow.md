@@ -1,4 +1,4 @@
-> 最近复核：2026-08-08 · 维护者：wayfinder-session ·
+> 最近复核：2026-08-14 · 维护者：glm-5.3-session ·
 > 权威归宿：**job 时间窗 / 时钟语义**（单一归宿）。进程/调度结构见 [#4](04-process-topology.md)；时钟统一改造细节见 memory C6。
 
 # #8 控制 / 时间流
@@ -31,10 +31,10 @@ flowchart LR
 
 | job | 时段 | 读口径 | 写口径 | 关键不变量 |
 |---|---|---|---|---|
-| `eod` | T-1 盘后 | `today` | `trading_day = next_trading_day(today)` | 写次日 `account_daily.start` + `data_ready`（为 T 日 pre_open 备基线） |
-| `pre_open` | T `[09:22, 10:00)`（env 可调） | `plan_date = trading_day`（=T+1 写入值） | trade_event(SIGNAL)/plan | **窗口过只补数据 + CRITICAL**（不补挂单） |
-| `stop_loss` | T 盘中 | `today` | position.current_stop / trade_event | 盘中监控，L2 单只拒单 |
-| `post_close` | T 盘后（收盘后） | `today` | position + account_daily.close | 日终闭合（fill 累加↔position，account_daily start+close 非空） |
+| `eod` | T-1 盘后 | `today` | `trading_day = next_trading_day(today)` → data_ready | 写次日 `data_ready`（为 T 日 pre_open 备数据闸）。**08-14 订正：eod/pipeline 不写 account_daily**（`start` 唯一写入方在 pre_open） |
+| `pre_open` | T `[09:22, 10:00)`（env 可调） | `plan_date = trading_day`（=T+1 写入值） | trade_event(SIGNAL)/plan + **account_daily.start**（query_asset 精确抓取，失败 T-1 close 兜底——DG-G3） | **窗口过只补数据 + CRITICAL**（不补挂单） |
+| `stop_loss` | T 盘中 | `today` | position.current_stop / trade_event | 盘中监控，L2 单只拒单；**只做 per-position 止损，不做组合级权益判定**（CR-3） |
+| `post_close` | T 盘后（15:30 cron） | `today` | position + account_daily.close | 日终闭合（fill 累加↔position，account_daily start+close 非空）；**「日内 -3% 熔断」唯一判定点在此——盘后确认、次日生效（CR-3）** |
 | `brief` | T 盘后 | `today` | job_ledger brief_<bot> | 播报幂等（第 8 域） |
 | `data_pipeline`（schtasks） | 定时 daily | — | data_lake parquet | 独立进程（[T15](../../plans/wayfinder/T15.md) env 合成） |
 | `discovery`（schtasks） | 02:00 daily | — | experiments.db | DETACHED daemon |
@@ -53,5 +53,7 @@ flowchart LR
 
 ## 已知时间相关风险（详见 [#6](06-tech-debt.md)）
 
-- **`account_daily.start` 漏采**：非盘前启动 → start NULL → 熔断基线裸奔（pre_open 窗口内必须起来）。
+- **~~`account_daily.start` 漏采 → 熔断基线裸奔~~ ✅ 已治（DG-G3 · 2026-08-13）**：基线缺失判定层 fail-closed（live `_CriticalHalt` / dry 停手）+ pre_open 精确抓取 / T-1 close 兜底双路（`phases/pre_open.py:363-418`）。残留：10:00 后启动当日 start 无人写 → 走 T-1 兜底或 fail-closed 停手（不再裸奔）；**curr_equity 缺失方向仍静默跳过（CR-4）**。
+- **「日内熔断」的时间语义（CR-3）**：`check_daily_loss_limit` 唯一判定点 = 15:30 post_close，非盘中——盘中组合级 -3% 回撤零实时保护（stop_loss 30s 巡检只做 per-position 止损）。
 - **lifespan 补跑时序**：启动补跑读 `job_ledger` 判四态，窗口过不补挂单（C8）。
+- **P2-ts 时间戳三口径**：clock / state_store / tasks_db 的 tz 语义统一（Asia/Shanghai aware 分库迁移）未做（审计 spec P2-ts 待领取）。

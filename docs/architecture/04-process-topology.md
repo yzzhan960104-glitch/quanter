@@ -1,4 +1,4 @@
-> 最近复核：2026-08-08 · 维护者：wayfinder-session ·
+> 最近复核：2026-08-14 · 维护者：glm-5.3-session ·
 > 权威归宿：**进程模型 / 调度结构**（单一归宿）。外部触发源（schtasks）见 [#1](01-system-context.md)；job 时间窗/时钟语义见 [#8](08-control-time-flow.md)；连接态见 [T4](../../plans/wayfinder/T4.md)；挡板/熔断见 [guardrails.md](../guardrails.md)。
 
 # #4 进程 / 调度拓扑
@@ -40,6 +40,7 @@ flowchart TB
 
 - **唯一 engine 持有者 = uvicorn :8000**（`python -m trading` → `run_server`）。`__main__` 起 uvicorn 消除双进程抢 QMT session（[T4 真根因](../../plans/wayfinder/T4.md)：同 sid 单进程独占）。
 - **端口 8000 单例**，无文件锁；`reload=False`（live 期）。
+- **启动闸（G2 · 2026-08-13 起 fail-closed）**：live 模式缺 `QUANTER_API_TOKEN` → `sys.exit(1)` 拒起；默认 host 收敛 127.0.0.1。
 - `_gw_health_gate`（C5）：`_pre_open`/`_stoploss`/`_post_close` 三入口同口径锁态——gate 不过即 skip + CRITICAL（**不停调度**，C4 决议）。
 
 ## 外部调度入口（schtasks，C7 收编）
@@ -74,9 +75,11 @@ engine 经 APScheduler 调度的日内 jobs，统一走 `_pipeline_then_eod` 收
 
 > 时间窗精确语义（eod 用 `trading_day=next_trading_day(today)`、pre_open 窗口边界）归 [#8](08-control-time-flow.md)。
 
-## 已知韧性缺口（毕业自 T4，待 T9-T11）
+## 已知韧性缺口（毕业自 T4；08-14 复核刷新）
 
-- **T9**：`health_guard` 主动探针 watchdog（高优先）。
-- **T10**：嵌套父子进程探测（先实证）。
-- **T11**：连接韧性收尾（低）。
+- **T9**：`health_guard` 主动探针 watchdog —— ✅ 探针已落（`299ab2de`，W1-B 首项）。
+- **T10**：嵌套父子进程探测（先实证）—— 未完。
+- **T11**：连接韧性收尾（低）—— 未完。
+- **巡检调度缺失（CR-7）**：`scripts/audit_ssot.py` 7 项拓扑/一致性检查无任何 schtasks/CI 挂载——进程数==1、端口属主==pid 这类拓扑断言实际不在岗。
+- **补采回路停摆（CR-6）**：scan→repair 闭环熔断（连续 7 败），15701 段漏采未消化。
 - 见 [#6](06-tech-debt.md) 技术债视图与 [T4 Resolution](../../plans/wayfinder/T4.md)。

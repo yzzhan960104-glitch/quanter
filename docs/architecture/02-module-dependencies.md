@@ -1,9 +1,11 @@
-> 最近复核：2026-08-12 · 维护者：wayfinder-session ·
+> 最近复核：2026-08-14 · 维护者：glm-5.3-session ·
 > 权威归宿：**模块/包清单 + 包间依赖**（单一归宿）。债务判定见 [#6](06-tech-debt.md)；engine 内部见 [deep-dives/engine-current-state](deep-dives/engine-current-state.md)。
 
 # #2 模块边界 + 依赖图
 
-13 个顶层包的边界、规模、与**包间 import 依赖**。数据源：包间 Python `import`/`from` 扫描（2026-08-08 全量，文末脚本可复跑）。**边权 = 导入该包的文件数**（≥2 画入下图，=1 列文末次要边）。
+13 个顶层包的边界、规模、与**包间 import 依赖**。数据源：包间 Python `import`/`from` 扫描（**2026-08-14 全量复跑**，文末脚本可复跑）。**边权 = 导入该包的文件数**（≥2 画入下图，=1 列文末次要边）。
+
+> 2026-08-08→08-14 漂移注记：G 波加固推高 `trading→infra` 11→14、`trading→strategies` 5→7；M1 日历下沉使 `data→trading` 2→1；P0-P6 优化波使 discovery 2942→3645 行；caisen 删除使 presentation 3049→2483 行；新增次要边 `broker→ops:1`、`discovery→data:1`。`trading→presentation=0` 复核成立（W1-A 成果未回退）。
 
 ## 依赖图（按层分组）
 
@@ -14,36 +16,36 @@ flowchart TB
     config["config<br/>1007 · 9 文件<br/>env/settings"]
   end
   subgraph L1["L1 数据层"]
-    data["data<br/>6400 · 31 文件<br/>Tushare 采集 / lake"]
+    data["data<br/>7064 · 32 文件<br/>Tushare 采集 / lake"]
   end
   subgraph L2["L2 策略契约层"]
-    strategies["strategies<br/>2000 · 10 文件<br/>Strategy Protocol"]
+    strategies["strategies<br/>2227 · 10 文件<br/>Strategy Protocol"]
   end
   subgraph L3["L3 执行内核层"]
-    trading["trading<br/>12090 · 56 文件<br/>engine 编排（engine.py 1546 · T1 拆分后）"]
-    broker["broker<br/>2057 · 5 文件<br/>QMT 适配"]
+    trading["trading<br/>13814 · 60 文件<br/>engine 编排（engine.py 1546 · T1 拆分后）"]
+    broker["broker<br/>2213 · 5 文件<br/>QMT 适配"]
   end
   subgraph L4["L4 分析层"]
     backtest["backtest<br/>4134 · 26 文件"]
-    discovery["discovery<br/>2942 · 24 文件"]
-    experiment["experiment<br/>569 · 6 文件"]
+    discovery["discovery<br/>3645 · 25 文件"]
+    experiment["experiment<br/>497 · 6 文件"]
     compute_unit["compute_unit<br/>771 · 8 文件"]
   end
   subgraph L5["L5 接口与运维层"]
-    presentation["presentation<br/>3049 · 25 文件<br/>FastAPI + Vue 只读"]
-    broadcast["broadcast<br/>1607 · 9 文件"]
-    ops["ops<br/>1746 · 15 文件<br/>schtasks / 守护"]
+    presentation["presentation<br/>2483 · 25 文件<br/>FastAPI + Vue 只读"]
+    broadcast["broadcast<br/>1622 · 9 文件"]
+    ops["ops<br/>1751 · 15 文件<br/>schtasks / 守护"]
   end
 
   data -->|12| config
   data -->|6| infra
   backtest -->|7| strategies
-  discovery -->|5| strategies
-  trading -->|5| strategies
-  trading -->|11| infra
-  trading <-->|4 / 3| broker
-  trading <-->|3 / 2| data
-  trading -->|3| experiment
+  discovery -->|4| strategies
+  trading -->|7| strategies
+  trading -->|14| infra
+  trading <-->|5 / 3| broker
+  trading <-->|4 / 1| data
+  trading -->|4| experiment
   trading -->|2| ops
   presentation -->|4| trading
   backtest -->|2| data
@@ -55,8 +57,9 @@ flowchart TB
   compute_unit -->|2| infra
   presentation -->|3| config
   presentation -->|3| data
-  presentation -->|3| infra
+  presentation -->|2| infra
   presentation -->|2| backtest
+  presentation -->|2| discovery
   ops -->|3| infra
   ops -->|2| trading
   broadcast -->|2| data
@@ -67,13 +70,13 @@ flowchart TB
 ## 中枢分析
 
 **fan-in 最多（被依赖最重 → 基础设施）**：
-- `infra`（8 包入边：trading 11 / data 6 / presentation 3 / ops 3 / backtest 2 / discovery 2 / compute_unit 2 / broker 1）— **真·地基**：日志 / pyio / LLM 全员依赖。
+- `infra`（8 包入边：trading 14 / data 6 / ops 3 / presentation 2 / backtest 2 / discovery 2 / compute_unit 2 / broker 1）— **真·地基**：日志 / pyio / LLM 全员依赖（G 波加固使 trading 侧 11→14）。
 - `config`（data 12 / presentation 3 / backtest 1 / broadcast 1）— 配置中枢，**data 强耦合**（12 文件读 settings）。
-- `strategies`（backtest 7 / discovery 5 / trading 5）— 策略契约层（`Strategy` Protocol），三类执行主体共用。
+- `strategies`（trading 7 / backtest 7 / discovery 4）— 策略契约层（`Strategy` Protocol），三类执行主体共用。
 
 **fan-out 最多（依赖他人最重 → 编排中枢）**：
-- `trading`（出 7 边：infra / strategies / broker / data / experiment / ops / broadcast）— **编排核心**：全系统唯一负责「采集→信号→计划→订单→对账」完整闭环的包；体量最大（12090 行 / 56 文件）。engine.py 经 **T1 模块化拆分（2026-08-10 完成）**从 3437 行收缩至 1546 行（-55%），8 集群外迁为独立子模块，`_ACTIVE_ENGINE` 单例桥清零；**W1-A/T2（2026-08-12 完成）**切断 trading→presentation 反查（`trading_service` 下沉 `trading/gateway_service`），出边由 8 减至 7；内部结构见 [deep-dives/engine-current-state](deep-dives/engine-current-state.md)（已转为拆分前历史态）。
-- `presentation/server`（出 6 边）— 只读 API 聚合层，跨包读多。
+- `trading`（出 7 边：infra / strategies / broker / data / experiment / ops / broadcast）— **编排核心**：全系统唯一负责「采集→信号→计划→订单→对账」完整闭环的包；体量最大（13814 行 / 60 文件）。engine.py 经 **T1 模块化拆分（2026-08-10 完成）**从 3437 行收缩至 1546 行（-55%），8 集群外迁为独立子模块，`_ACTIVE_ENGINE` 单例桥清零；**W1-A/T2（2026-08-12 完成）**切断 trading→presentation 反查（`trading_service` 下沉 `trading/gateway_service`），出边由 8 减至 7；**G 波（2026-08-13/14）**在包内新增 compute/ 适配（breaker/risk/plan 单源化）与 io/breaker 撤单副作用，行数 +1700。内部结构见 [deep-dives/engine-current-state](deep-dives/engine-current-state.md)（已转为拆分前历史态）。
+- `presentation/server`（出 7 边）— 只读 API 聚合层，跨包读多。
 
 ### trading 内部依赖（T1 拆分后 · 2026-08-10 / W1-A/T2 反查切断 · 2026-08-12）
 
@@ -114,9 +117,9 @@ flowchart LR
 
 | 耦合对 | 边权 | 物理解释 | 拆分含义 |
 |---|---|---|---|
-| `trading ↔ broker` | 4 / 3 | engine 调 broker 下单；broker 回调 engine 写 trade_event / state_store | broker→trading 的回写是 **T2 适配层契约**的核心切点（[T2](../../plans/wayfinder/T2.md)） |
-| `trading ↔ data` | 3 / 2 | engine 读 data/lake；data 反查 trading（service 状态等） | 中等耦合；T1 engine 拆分（2026-08-10 完成）未触及包级读写方向，留 final review triage |
-| ~~`trading ↔ presentation`~~ → **✅ 单向（W1-A/T2 · 2026-08-12）** | ~~2 / 3~~ → **0 / 4** | server 起 engine；原 engine/phases/order_state/io.orders 反引 `presentation/.../trading_service`（领域层依赖表现层·分层违例） | **已切断**：`trading_service.py` 下沉 `trading/gateway_service.py`，trading→presentation 边权 2→0；presentation→trading 仍 4（单向被依赖合法）。`import` 扫描实证 0 命中 |
+| `trading ↔ broker` | 5 / 3 | engine 调 broker 下单；broker 回调 engine 写 trade_event / state_store | broker→trading 的回写是 **T2 适配层契约**的核心切点（[T2](../../plans/wayfinder/T2.md)） |
+| `trading ↔ data` | 4 / 1 | engine 读 data/lake；data 反查 trading（service 状态等，M1 后仅余 1 文件） | 中等耦合且持续收敛；M1（fetch_trade_cal 下沉 `data/calendar.py`）已切断函数级循环 |
+| ~~`trading ↔ presentation`~~ → **✅ 单向（W1-A/T2 · 2026-08-12）** | ~~2 / 3~~ → **0 / 4** | server 起 engine；原 engine/phases/order_state/io.orders 反引 `presentation/.../trading_service`（领域层依赖表现层·分层违例） | **已切断**：`trading_service.py` 下沉 `trading/gateway_service.py`，trading→presentation 边权 2→0；presentation→trading 仍 4（单向被依赖合法）。`import` 扫描实证 0 命中（08-14 复跑仍 0） |
 
 > 双向耦合不一定是债——但每个都是 T1（engine 拆分）必须显式处理的缝合点。**债务严重度判定归 [#6](06-tech-debt.md)**。
 
@@ -125,24 +128,24 @@ flowchart LR
 ```
 backtest→config:1 · backtest→trading:1 · broadcast→backtest:1 · broadcast→config:1
 broadcast→experiment:1 · broadcast→presentation:1 · broadcast→trading:1 · broker→infra:1
-data→strategies:1 · discovery→backtest:1 · discovery→compute_unit:1 · ops→backtest:1
-ops→presentation:1 · presentation→broadcast:1 · presentation→broker:1 · presentation→discovery:1
-presentation→ops:1 · trading→broadcast:1
+broker→ops:1 · data→strategies:1 · discovery→backtest:1 · discovery→compute_unit:1
+discovery→data:1 · ops→backtest:1 · ops→presentation:1 · presentation→broadcast:1
+presentation→broker:1 · presentation→ops:1 · trading→broadcast:1
 ```
 
-## 规模一览（行数 / .py 文件数）
+## 规模一览（行数 / .py 文件数 · 2026-08-14 扫描）
 
 | 包 | 行 | 文件 | 包 | 行 | 文件 |
 |---|---|---|---|---|---|
-| trading | 12090 | 56 | strategies | 2000 | 10 |
-| data | 6400 | 31 | broadcast | 1607 | 9 |
-| backtest | 4134 | 26 | ops | 1746 | 15 |
-| presentation | 3049 | 25 | config | 1007 | 9 |
-| discovery | 2942 | 24 | infra | 884 | 10 |
-| broker | 2057 | 5 | compute_unit | 771 | 8 |
-|  |  |  | experiment | 569 | 6 |
+| trading | 13814 | 60 | strategies | 2227 | 10 |
+| data | 7064 | 32 | broadcast | 1622 | 9 |
+| backtest | 4134 | 26 | ops | 1751 | 15 |
+| presentation | 2483 | 25 | config | 1001 | 9 |
+| discovery | 3645 | 25 | infra | 884 | 10 |
+| broker | 2213 | 5 | compute_unit | 771 | 8 |
+|  |  |  | experiment | 497 | 6 |
 
-**合计 ≈ 39.2k 行 · 234 .py 文件**（13 顶层包）。trading 增量（10620→12090 行 / 46→56 文件）= T1 拆分新增 8 子模块（critical / order_state / data_ctx / eod_plan / ports + phases/×4）的 re-export 兼容块 + 独立 docstring + EnginePorts 窄接口，是行为等价前提下的必要重复。
+**合计 ≈ 42.1k 行 · 240 .py 文件**（13 顶层包）。08-08→08-14 主要增量：trading 12090→13814（G 波加固：compute/ 单源化 + io/breaker + gateway_service 下沉吸收）、data 6400→7064、discovery 2942→3645（P0-P6 优化波）；presentation 3049→2483（服务端路由收敛；另 caisen 删除清掉前端 −1943 行 .ts/.vue，不计入本表 .py 口径）。
 
 ## 复跑扫描（新增 import 边时重跑核对·单一归宿保真）
 

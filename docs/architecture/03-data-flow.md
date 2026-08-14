@@ -1,4 +1,4 @@
-> 最近复核：2026-08-08 · 维护者：wayfinder-session ·
+> 最近复核：2026-08-14 · 维护者：glm-5.3-session ·
 > 权威归宿：**核心数据路径**（单一归宿）。外部边界见 [#1](01-system-context.md)；真相源规则见 [data-source-of-truth](../data-source-of-truth.md) 与 [#7](07-ssot-data-layer.md)；策略算法见 [neckline-method](../neckline-method.md)。
 
 # #3 核心数据流
@@ -24,9 +24,10 @@ sequenceDiagram
   participant BR as broadcast
 
   SCH->>EOD: 触发 eod（计算 next_trading_day）
-  EOD->>SS: account_daily.start_total_asset（次日 C-1 熔断基线）
   EOD->>SS: data_ready 校验（gate 阻断则跳过次日 pre_open）
+  Note over EOD,SS: 2026-08-14 订正：现行代码 eod/pipeline **不写** account_daily<br/>（全库唯一写入方 snapshot_start_equity 在 pre_open，见下）
   SCH->>PO: 次日 09:22 触发 pre_open
+  PO->>SS: account_daily.start_total_asset（query_asset 精确抓取；<br/>失败时 T-1 close 兜底回填——DG-G3）
   PO->>ENG: _health_guard gate 通过 → scan
   ENG->>STRAT: detect_signal(lake.loc[:T-1])  %% 严格无前视
   STRAT-->>ENG: list[Signal]（frozen dataclass）
@@ -81,8 +82,9 @@ flowchart LR
 | 数据就绪 | `state_store.data_ready` + `job_ledger` | **第 7 域** | `get_ready` 单口读；PK(date,dataset) |
 | 播报幂等 | `job_ledger` | **第 8 域** | brief_<bot> 行 begin/finish 成对，独立库 |
 
-## 关键风险点（详见 [#6](06-tech-debt.md)）
+## 关键风险点（详见 [#6](06-tech-debt.md) · 2026-08-14 复核后口径）
 
-- **start_total_asset 漏采**：模拟盘/非盘前启动 → start NULL → 当日 C-1 熔断基线裸奔（pre_open 窗口 `[09:22,10:00)` 内必须起来写 start snap）。
+- **~~start_total_asset 漏采 → 熔断基线裸奔~~ ✅ 已治（DG-G3 · `8d4ef714`）**：判定层 fail-closed（基线 None → live `_CriticalHalt` / dry 停手）+ pre_open T-1 close 兜底回填（`phases/pre_open.py:363-404`）。**残留（CR-4）**：curr_equity 缺失方向仍 fail-open 静默跳过；收盘快照失败会静默掏空次日 T-1 兜底。另注意 **熔断判定点 = 15:30 post_close（盘后）**，盘中组合级回撤无实时闸（CR-3）。
+- **湖历史缺口（CR-6）**：scan 发现 15701 段漏采（390 标的），补采回路熔断停摆（连续 7 败）+ 配额 50/轮——T13-B 闭环运行态停摆，回测语料可信度打折。
 - **撤单主推延迟**：QMT CANCELLED 主推延迟 1-2s，须轮询确认（非数据流 bug，业务机制）。
-- **第 6 域过渡态**：Phase C 删 save_plan/load_plan 前 JSON 仍是生产写入口（不违规）；完成后 JSON 降级为按需导出。
+- **第 6 域过渡态**：✅ Phase C 已全治理（2026-08-12）——`save_plan`/`confirm_plan` 已删，JSON 读侧 fallback 已关，本行保留作历史注记。
