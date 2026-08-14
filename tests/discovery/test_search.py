@@ -224,3 +224,36 @@ def test_tpe_search_batch_warm_start_params_populated():
     # params 与 seed 对齐（window/tp_h_mult 逐位；snap 只在越界时改动）
     assert seed_trials[0].params["window"] == 80
     assert seed_trials[0].params["tp_h_mult"] == 2.5
+
+
+# ============================================================================
+# A2（DG-G4 · 2026-08-14）：TPE 目标切各年 min calmar（兼容回退整段 calmar）
+# ============================================================================
+def test_tpe_batch_tells_min_yearly_when_present():
+    """A2：inner 含 min_yearly_calmar 时 TPE tell 它（非整段 calmar——防 2025 特化）。"""
+    from discovery.search import tpe_search_batch
+    param_space = [("w", [10, 20, 30])]
+
+    def fake_eval(plist):
+        # 整段 calmar=99.0（特化假象）但各年 min=1.5（真实水平）——tell 必须取 1.5
+        return [{"inner": {"calmar": 99.0, "min_yearly_calmar": 1.5, "outer": {}}}
+                for _ in plist]
+
+    _pairs, study = tpe_search_batch(
+        [{"w": 10}], [0.5], fake_eval, n_trials=2, seed=7, param_space=param_space, batch_size=2)
+    vals = [t.value for t in study.trials if t.value is not None]
+    assert all(v in (0.5, 1.5) for v in vals)   # 99.0 绝不出现
+
+
+def test_tpe_batch_falls_back_to_calmar_without_key():
+    """兼容回退：无 min_yearly_calmar 键的旧/合成 dict 落回 calmar（既有单测零改）。"""
+    from discovery.search import tpe_search_batch
+    param_space = [("w", [10, 20, 30])]
+
+    def fake_eval(plist):
+        return [{"inner": {"calmar": 3.0}, "outer": {}} for _ in plist]
+
+    _pairs, study = tpe_search_batch(
+        [{"w": 10}], [0.5], fake_eval, n_trials=1, seed=7, param_space=param_space, batch_size=1)
+    vals = [t.value for t in study.trials if t.value is not None]
+    assert 3.0 in vals

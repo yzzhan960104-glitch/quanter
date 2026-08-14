@@ -181,7 +181,10 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
                 return [item[1] if item is not None else None for item in pool.eval(plist)]
             new_pairs, tpe_study = tpe_search_batch(
                 [p for p, _ in seed_pairs],
-                [r["inner"].get("calmar", 0.0) for _, r in seed_pairs],
+                # A2（DG-G4）：warm start 值与 TPE tell 同口径——各年 min calmar
+                # （兼容回退整段 calmar，与 search.tpe_search_batch 的 tell 回退一致）。
+                [r["inner"].get("min_yearly_calmar", r["inner"].get("calmar", 0.0))
+                 for _, r in seed_pairs],
                 _eval_results,
                 n_trials=tpe_trials, seed=seed)
             # 落库 TPE 新 trial（失败组 res=None 计 n_failed 不落库）
@@ -233,7 +236,9 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
             continue
         d = deflated_sharpe(m.get("sharpe", 0.0),
                             n_trials=len(trials_db), n_obs=m.get("n", 30))
-        dsr_cands.append((m.get("calmar", 0.0), d, t))
+        # A2（DG-G4）：top 选择排序键同 TPE 目标——各年 min calmar（回退整段 calmar）。
+        # 不切此处会出现「TPE 朝 min 优化、champion 选择却按整段 calmar」的目标分裂。
+        dsr_cands.append((m.get("min_yearly_calmar", m.get("calmar", 0.0)), d, t))
     top_calmar, top_tid, dsr_top = 0.0, "", 0.0
     if dsr_cands:
         gated, dsr_gate_fell_back = dsr_gated_ranking(

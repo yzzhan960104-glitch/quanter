@@ -21,7 +21,7 @@ import os
 import sys
 
 from discovery.snapshot import freeze
-from discovery.split import holdout_split
+from discovery.split import holdout_split, extended_split
 from discovery.objective import evaluate
 from discovery.store import (init_db, connect, write_snapshot, write_trial,
                              trial_id_of, DEFAULT_DB_PATH)
@@ -176,7 +176,9 @@ def cmd_run(args):
     """
     from discovery.runner import run_search
     universe, meta = freeze(args.lake_start)
-    split = holdout_split(args.embargo)
+    # A2（2026-08-14）：搜索侧切扩展切分（inner 2021-2024 含熊市考场，排序目标
+    # min_yearly_calmar）；oos/verify 等 holdout_split caller 的对照口径不动。
+    split = extended_split(args.embargo)
     print(f"=== discovery run：两阶段搜索（snapshot={meta.snapshot_hash}）===")
     print(f"snapshot: {meta.universe_count} 只 | {meta.date_range} | hash {meta.snapshot_hash}")
     print(f"配置: budget={args.budget} sobol={args.n_sobol} random={args.n_random} "
@@ -228,7 +230,8 @@ def cmd_daemon(args):
         sys.exit(3)
     print(f"[daemon] {_reason}")
     universe, meta = freeze(args.lake_start)
-    split = holdout_split(args.embargo)
+    # A2（2026-08-14）：daemon 与 run 同口径 extended_split（新基线 min_yearly_calmar）。
+    split = extended_split(args.embargo)
     print(f"=== discovery daemon：跨夜守护（snapshot={meta.snapshot_hash}）===")
     print(f"配置: budget={args.budget}h(≈{estimate_budget(args.budget, args.n_proc)}组) "
           f"tpe={args.tpe_trials} proc={args.n_proc} K={args.k_rounds} rho={args.rho_threshold}")
@@ -366,7 +369,7 @@ def main(argv=None):
     ap_r.add_argument("--n-proc", type=int, default=None, dest="n_proc",
                      help="进程数（默认 min(核数-2,4)，DISCOVERY_N_PROC 可覆盖）")
     ap_r.add_argument("--seed", type=int, default=42, help="采样种子（可复现）")
-    ap_r.add_argument("--lake-start", type=str, default="2025-01-01", dest="lake_start",
+    ap_r.add_argument("--lake-start", type=str, default="2021-01-01", dest="lake_start",
                      help="universe 加载起始日")
     ap_r.add_argument("--tpe-trials", type=int, default=0, dest="tpe_trials",
                      help="TPE 序贯 trial 数（Plan 3，0=仅 Sobol）")
@@ -398,7 +401,7 @@ def main(argv=None):
     ap_d.add_argument("--embargo", type=int, default=5, help="inner→outer embargo 天数")
     ap_d.add_argument("--n-proc", type=int, default=None, dest="n_proc",
                      help="进程数（默认 min(核数-2,4)，DISCOVERY_N_PROC 可覆盖）")
-    ap_d.add_argument("--lake-start", type=str, default="2025-01-01", dest="lake_start",
+    ap_d.add_argument("--lake-start", type=str, default="2021-01-01", dest="lake_start",
                      help="universe 加载起始日")
     ap_d.add_argument("--tpe-trials", type=int, default=10, dest="tpe_trials",
                      help="TPE 序贯 trial 数（夜跑默认 10）")

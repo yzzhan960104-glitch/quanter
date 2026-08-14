@@ -162,7 +162,12 @@ def tpe_search_batch(seed_params, seed_values, evaluate_batch_fn,
                 study.tell(tr, state=optuna.trial.TrialState.FAIL)
                 new_pairs.append((plist[i], None))
             else:
-                study.tell(tr, float(res["inner"].get("calmar", 0.0)))
+                # A2（DG-G4 · 2026-08-14）：排序目标切各年 min calmar——整段 calmar 被
+                # single 大年淹没（2025 特化教训：wf 四折折外 0.00/-0.62/1.58/3.93 而
+                # 整段 inner 44.87）。兼容回退：无该键的旧/合成 dict 落回 calmar。
+                _inner = res["inner"]
+                study.tell(tr, float(_inner.get("min_yearly_calmar",
+                                                _inner.get("calmar", 0.0))))
                 new_pairs.append((plist[i], res))
         remaining -= k
     return new_pairs, study

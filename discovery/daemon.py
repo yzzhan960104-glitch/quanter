@@ -36,7 +36,9 @@ def estimate_budget(budget_hours, n_proc=None):
     # 加载数据湖撑爆内存的根因之一）。P2 后该默认已是 cap 16 + 内存公式自动降并发。
     from discovery.worker import _default_n_proc
     n_proc = n_proc or _default_n_proc()
-    per_group_seconds = 40   # P1 实测 35.5s/组（diag/p1_1_speed.py 段3），40 留余量
+    # A2（2026-08-14）：湖窗 2025+→2021+ 数据量 ×3，P1 后 35.5s/组 ×3 预估 ~105s，
+    # 取 110 留余量；diag/a2_mincalmar_probe.py 冒烟实测后校正。
+    per_group_seconds = 110
     return max(1, int(budget_hours * 3600 / per_group_seconds) * n_proc)
 
 
