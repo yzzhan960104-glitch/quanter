@@ -9,9 +9,11 @@ qmt_gateway.connect 捕获 `self._loop = get_running_loop()`，若跨 asyncio.ru
 旧 loop 已关闭，run_in_executor/call_soon_threadsafe 会抛 RuntimeError(loop closed)。
 """
 import asyncio
+import time
 import types
 
 import pytest
+from unittest.mock import AsyncMock
 
 # Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）。
 # patch 内部全局（_CONNECT_TIMEOUT/_ORDER_TIMEOUT/XtQuantTrader 等）须指真身模块，
@@ -111,6 +113,125 @@ def test_connect_timeout_raises(monkeypatch):
     gw = QmtExecutionGateway()
     with pytest.raises(ConnectionError):
         asyncio.run(gw.connect())
+
+
+# ============ L2 轮换客户端可服务闸（G8 · 2026-08-14）============
+def test_client_process_alive_states(monkeypatch):
+    """进程探测三态：在跑→True / 未起→False / 探测失败→None（保守放行原逻辑）。"""
+    import ops.process_topology as pt
+    monkeypatch.setattr(pt, "client_status", lambda: {"running": True, "pid": 1, "count": 1})
+    assert qmt_gateway._client_process_alive() is True
+    monkeypatch.setattr(pt, "client_status", lambda: {"running": False, "pid": None, "count": 0})
+    assert qmt_gateway._client_process_alive() is False
+    monkeypatch.setattr(pt, "client_status", lambda: {"running": None, "pid": None, "count": None})
+    assert qmt_gateway._client_process_alive() is None
+
+
+def test_client_activity_age_secs(tmp_path, monkeypatch):
+    """活跃文件 mtime 年龄：有新文件→年龄秒数；无活跃信号/目录缺失→None。"""
+    import os
+    monkeypatch.setattr("time.time", lambda: 1_000_000.0)
+    # 无任何活跃 patterns（连 quoter 目录都没有）→ None
+    assert qmt_gateway._client_activity_age_secs(str(tmp_path)) is None
+    quoter = tmp_path / "quoter"
+    quoter.mkdir()
+    # quoter/* 文件 mtime=now-10 → 年龄 10（注意顺序：先写文件再设旧 mtime——
+    # write_bytes 会刷新目录 mtime，pattern "quoter" 会匹配目录本身）
+    f = quoter / "tick.bin"
+    f.write_bytes(b"x")
+    os.utime(f, (999_990.0, 999_990.0))
+    os.utime(quoter, (999_990.0, 999_990.0))
+    age = qmt_gateway._client_activity_age_secs(str(tmp_path))
+    assert age is not None and abs(age - 10.0) < 1.0
+    # 目录缺失 → None
+    assert qmt_gateway._client_activity_age_secs(str(tmp_path / "nope")) is None
+
+
+def test_client_servable_states(monkeypatch, tmp_path):
+    """可服务三态：进程缺失→False；进程在但活跃文件陈旧→False；新鲜→True。"""
+    import os
+    import ops.process_topology as pt
+    # 进程未起 → False
+    monkeypatch.setattr(pt, "client_status", lambda: {"running": False, "pid": None, "count": 0})
+    assert qmt_gateway._client_servable(str(tmp_path)) is False
+    # 探测失败 → None（保守放行）
+    monkeypatch.setattr(pt, "client_status", lambda: {"running": None, "pid": None, "count": None})
+    assert qmt_gateway._client_servable(str(tmp_path)) is None
+    # 进程在跑 + 无活跃文件信号 → None（保守放行）
+    monkeypatch.setattr(pt, "client_status", lambda: {"running": True, "pid": 1, "count": 1})
+    assert qmt_gateway._client_servable(str(tmp_path)) is None
+    # 进程在跑 + 活跃文件陈旧（>300s）→ False
+    quoter = tmp_path / "quoter"
+    quoter.mkdir()
+    f = quoter / "tick.bin"
+    f.write_bytes(b"x")
+    old = time.time() - 600
+    os.utime(f, (old, old))
+    os.utime(quoter, (old, old))   # 目录 mtime 同步设旧（patterns 含 "quoter" 目录本身）
+    assert qmt_gateway._client_servable(str(tmp_path)) is False
+    # 进程在跑 + 活跃文件新鲜（<300s）→ True
+    fresh = time.time() - 10
+    os.utime(f, (fresh, fresh))
+    os.utime(quoter, (fresh, fresh))
+    assert qmt_gateway._client_servable(str(tmp_path)) is True
+
+
+def test_connect_skips_rotation_when_client_not_servable(monkeypatch):
+    """G8：connect -1 + 客户端不可服务 → 跳过 L2 轮换直进 L3（快速失败不再无效轮换）。
+
+    物理意图：客户端缺失/未登录时 -1 语义是「客户端未就绪」而非「sid 被占」，轮换
+    100 候选纯属无效功（每候选 30s 超时 + 75MB 队列文件爆盘，实测 ~50 分钟挂死 +
+    ≈2.7GB 磁盘）。跳过轮换后 connect 抛 ConnectionError 快速返回，恢复交给
+    health_guard 60s 轮询。
+    """
+    _setup_env(monkeypatch)
+    monkeypatch.setattr(FakeTrader, "connect_rc", -1)
+    monkeypatch.setattr(qmt_gateway, "_client_servable", lambda *a, **k: False)
+    # 轮换若被调用 → AssertionError 让测试响亮失败
+    monkeypatch.setattr(QmtExecutionGateway, "_try_rotate_session",
+                        AsyncMock(side_effect=AssertionError("客户端不可服务不应进入 L2 轮换")))
+
+    async def run():
+        gw = QmtExecutionGateway()
+        with pytest.raises(ConnectionError):
+            await gw.connect()
+        assert gw._lock_down is True
+
+    asyncio.run(run())
+
+
+def test_connect_rotates_when_client_servable(monkeypatch):
+    """客户端可服务 → L2 轮换照常执行（G8 不改可服务时的既有语义）。"""
+    _setup_env(monkeypatch)
+    monkeypatch.setattr(FakeTrader, "connect_rc", -1)
+    monkeypatch.setattr(qmt_gateway, "_client_servable", lambda *a, **k: True)
+    monkeypatch.setattr(QmtExecutionGateway, "_try_rotate_session",
+                        AsyncMock(return_value=0))
+
+    async def run():
+        gw = QmtExecutionGateway()
+        await gw.connect()          # 轮换成功（sub_rc=0）→ 整体连接成功
+        assert gw._connected is True
+        assert gw._lock_down is False
+
+    asyncio.run(run())
+
+
+def test_connect_rotation_exhausted_still_raises(monkeypatch):
+    """客户端可服务但轮换耗尽 → 维持原 L3 失败语义（ConnectionError + lock_down）。"""
+    _setup_env(monkeypatch)
+    monkeypatch.setattr(FakeTrader, "connect_rc", -1)
+    monkeypatch.setattr(qmt_gateway, "_client_servable", lambda *a, **k: True)
+    monkeypatch.setattr(QmtExecutionGateway, "_try_rotate_session",
+                        AsyncMock(return_value=None))
+
+    async def run():
+        gw = QmtExecutionGateway()
+        with pytest.raises(ConnectionError):
+            await gw.connect()
+        assert gw._lock_down is True
+
+    asyncio.run(run())
 
 
 def test_submit_order_timeout_returns_failed(monkeypatch):

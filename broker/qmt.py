@@ -281,6 +281,78 @@ def _cleanup_session_files(userdata_path: str, session_id: int) -> list[str]:
     return removed
 
 
+def _client_process_alive() -> bool | None:
+    """miniQMT 客户端进程存在性探测（委托 ops.process_topology.client_status，audit_ssot 同口径）。
+
+    返回 True=进程在跑 / False=进程未起 / None=探测失败（保守视为未知，调用方放行原逻辑）。
+
+    Why 进程级而非文件级：is_client_ready 按 08-04 事故教训只查目录（connect 返回码唯一
+    权威），但 L2 sid 轮换是重操作（100 候选 × 30s 超时 + 每候选建 down_queue 会话文件）
+    ——客户端进程不存在时 connect -1 的真实语义是「无客户端可连」而非「sid 被占」，
+    轮换 100 个 sid 纯属无效功（2026-08-14 实测：无客户端启动引擎 → 轮换静默推进
+    10 候选后中止，userdata 残留 down_queue_win_123501~123510）。轮换前用进程判据
+    短路，直进 L3 fail-closed，恢复交给 _health_guard 60s 轮询（客户端进程出现即重连）。
+    """
+    from ops.process_topology import client_status
+    return client_status()["running"]
+
+
+def _client_activity_age_secs(userdata_path: str) -> float | None:
+    """客户端活跃文件最新 mtime 年龄（秒）；无任何活跃信号 → None。
+
+    patterns 与 _client_staleness_diag 同源（quoter 行情刷新是登录/收数据的可靠存活
+    信号；miniqmtShm/up_queue 是启动时一次性生成不可靠）。抽函数供轮换闸复用。
+    """
+    import glob as _glob
+    if not userdata_path or not os.path.isdir(userdata_path):
+        return None
+    now = time.time()
+    newest = 0.0
+    for pat in ("miniqmtShm*Cache*", "up_queue_win_*", "quoter", "quoter/*"):
+        for f in _glob.glob(os.path.join(userdata_path, pat)):
+            try:
+                m = os.path.getmtime(f)
+                if m > newest:
+                    newest = m
+            except OSError:
+                continue
+    return None if newest == 0.0 else (now - newest)
+
+
+def _client_servable(userdata_path: str, staleness_sec: int = 300) -> bool | None:
+    """客户端「可服务」判据：进程在跑 ∧ 活跃文件新鲜 → True / False / None(未知)。
+
+    Why 比 _client_process_alive 强（2026-08-14 实测）：客户端进程存在但未登录
+    （quoter 缓存 6.7 天未刷新）时任意 sid connect 恒 -1——轮换 100 候选纯属无效功，
+    且每候选 start() 预分配 75MB down_queue 文件（实测 2 分钟 ≈2.7GB 磁盘）。轮换
+    前置闸用本判据：False → 跳过轮换直进 L3 fail-closed，恢复交给 _health_guard
+    （客户端登录后健康检查自动重连）。探测失败/无活跃信号 → None 保守放行原轮换。
+    """
+    running = _client_process_alive()
+    if running is False:
+        return False
+    if running is None:
+        return None
+    age = _client_activity_age_secs(userdata_path)
+    if age is None:
+        return None
+    return age <= staleness_sec
+
+
+def _drop_candidate_session_files(userdata_path: str, sid: int) -> None:
+    """L2 轮换失败候选的会话文件清理（G8：失败不留 down_queue 残留，防 userdata 污染）。
+
+    Why 仅失败路径调用：轮换成功时新 sid 的队列文件是真实会话上下文（连接在用），
+    绝不可删；失败候选的文件是死会话残留，下次 connect 前置清理只清 preferred，
+    轮换候选文件会永久累积（2026-08-14 实测 123501~123510 残留）。
+    """
+    try:
+        _cleanup_session_files(userdata_path, sid)
+    except Exception:
+        logger.debug("L2 轮换失败候选 sid=%s 会话文件清理失败（下轮轮换前置清理兜底）",
+                     sid, exc_info=True)
+
+
 def _used_session_ids(userdata_path: str) -> set[int]:
     """扫 down_queue_win_* / lock_*queue_win_* 提取在用 sid（L2 轮换的占用登记表）。
 
@@ -480,21 +552,12 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         #    目录 mtime 仅在内部文件增删时刷新（行情主推覆盖写已有文件不动目录 mtime），
         #    一天只变一次 → 客户端正常收行情时仍误报陈旧。加 "quoter/*" glob 到文件级，
         #    行情刷新文件 mtime 即更新，是 Windows 下唯一可靠的存活信号。
-        now = time.time()
-        patterns = ("miniqmtShm*Cache*", "up_queue_win_*", "quoter", "quoter/*")
-        newest = 0.0
-        for pat in patterns:
-            for f in _glob.glob(os.path.join(self._userdata_path, pat)):
-                try:
-                    m = os.path.getmtime(f)
-                    if m > newest:
-                        newest = m
-                except OSError:
-                    continue
-        if newest == 0.0:
+        # 扫描逻辑抽到 _client_activity_age_secs（轮换闸 _client_servable 复用同源判据）。
+        age = _client_activity_age_secs(self._userdata_path)
+        if age is None:
             # 目录非空但活跃 patterns 都没匹配（可能只有 down_queue 等引擎文件）
             return "无活跃文件（仅目录存在，客户端可能未登录）"
-        age_min = int((now - newest) / 60)
+        age_min = int(age / 60)
         # staleness_sec//60 把秒阈值换算成分钟阈值，与 mtime age_min 同口径比对
         return f"文件最新 mtime 陈旧 {age_min} 分钟" if age_min > staleness_sec // 60 else "正常（文件新鲜）"
 
@@ -555,6 +618,11 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             try:
                 rc2, sub2 = await self._run_bootstrap(candidate)
             except ConnectionError:
+                # G8：每候选 30s 超时——逐轮日志让轮换进度可观测（否则无声推进最坏
+                # ~50 分钟被误判「挂死」）；失败候选不留会话文件（防 userdata 污染累积）。
+                logger.warning("L2 轮换候选 sid=%s connect 超时（>%ss），换下一候选",
+                               candidate, _CONNECT_TIMEOUT)
+                _drop_candidate_session_files(self._userdata_path, candidate)
                 continue
             if rc2 == 0:
                 self._session_id = candidate
@@ -565,6 +633,8 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
                 return sub2
             _stop_trader_safely(self._trader)
             self._trader = None
+            logger.debug("L2 轮换候选 sid=%s connect 返 %s，换下一候选", candidate, rc2)
+            _drop_candidate_session_files(self._userdata_path, candidate)
         logger.warning("L2 sid 轮换耗尽（preferred=%s 前 5 候选=%s）→ L3 人工兜底",
                        preferred, candidates[:5])
         return None
@@ -646,9 +716,20 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # L2（spec §4.4 · 裁定 L1-L4）：-1 清理两轮后仍失败 → 自动轮换未占用 sid。
         # 单实例锁仍以 preferred 为键（引擎身份），轮换只改 trader 会话 sid。
         if connect_rc == -1:
-            _rot_sub = await self._try_rotate_session()
-            if _rot_sub is not None:
-                connect_rc, sub_rc = 0, _rot_sub
+            if _client_servable(self._userdata_path) is False:
+                # G8（2026-08-14 实测）：客户端不可服务（进程缺失 / 进程在但未登录，
+                # quoter 缓存数天未刷新）时 -1 的真实语义是「客户端未就绪」而非
+                # 「sid 被占」——轮换 100 候选纯属无效功（每候选 30s 超时 + start()
+                # 预分配 75MB down_queue 文件，实测 2 分钟 ≈2.7GB 磁盘 + 最长 ~50 分钟
+                # 「挂死」）。跳过轮换直进 L3 fail-closed，恢复交给 _health_guard 60s
+                # 轮询（客户端就绪后自动重连）。探测失败/无信号(None)保守放行原轮换。
+                logger.warning(
+                    "QMT 客户端不可服务（进程缺失或活跃文件陈旧）——跳过 L2 sid 轮换"
+                    "（-1=客户端未就绪而非被占），直进 L3；health_guard 将轮询恢复")
+            else:
+                _rot_sub = await self._try_rotate_session()
+                if _rot_sub is not None:
+                    connect_rc, sub_rc = 0, _rot_sub
 
         if connect_rc != 0:
             # connect 返回非 0 即连接失败（xttrader.md：返回 0 表示成功）
