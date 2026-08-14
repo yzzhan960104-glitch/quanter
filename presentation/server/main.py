@@ -22,14 +22,18 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from presentation.server.http.config import CORS_ORIGINS, LOG_CONFIG
 from presentation.server.http._responses import StrictJSONResponse
 # API 鉴权依赖（B-1）：挂在敏感 router（trading/training/data/review/ops）上，
 # DG-G2 fail-closed——live 模式无 token 硬拒（防默认裸奔），dry_run 放行（开发/CI）。
-from presentation.server.http.auth import require_read_cookie, require_write
+from presentation.server.http.auth import (
+    _configured_token,
+    require_read_cookie,
+    require_write,
+)
 from presentation.server.api.v1.logs import (
     RingBufferLogHandler,
     log_stream_hub,
@@ -670,6 +674,34 @@ app.include_router(research_router, prefix="/api/v1", dependencies=[Depends(requ
 # 分析结果不应被写权限误伤（spec §4.2）；research_router 的 proposal 写端点保持写鉴权。
 app.include_router(discovery_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1", dependencies=[Depends(require_write)])
+
+
+# ============ SSE 只读 cookie 换取端点（DG-G2 cookie「设置侧」） ============
+# 物理意图：/logs/stream 走 cookie 鉴权（require_read_cookie 读 quanter_ro），但 EventSource
+# 无法带 Authorization 头——前端无法直接用 Bearer 订阅 SSE。本端点是 cookie 的设置侧：前端先
+# 用 Bearer（fetch 可带 header）调本端点，服务端校验 token 后设 HttpOnly cookie
+# quanter_ro=<token>，后续 EventSource 同源请求自动携带。补齐评审 Spec 轴「SSE cookie 死端」。
+@app.post("/api/v1/auth/read-cookie", summary="换取 SSE 只读 cookie", tags=["鉴权"])
+def issue_read_cookie(response: Response, _=Depends(require_write)):
+    """凭 Bearer token 换取 SSE 只读 cookie（quanter_ro）。
+
+    鉴权复用 require_write（Bearer fail-closed）：项目仅单一 QUANTER_API_TOKEN，读/写同源；
+    cookie 仅是把同一 token 以 cookie 形态交给 EventSource（HttpOnly 防 JS 读取、path 限
+    /api/v1/logs 最小化暴露面）。live 无 token → require_write 直接 401，本函数体不执行。
+    """
+    tok = _configured_token()
+    ttl = int(os.getenv("QUANTER_RO_COOKIE_TTL", "3600"))
+    if not tok:
+        # dry_run 未配 token：require_read_cookie 同样放行，SSE 本就无鉴权，无需 cookie
+        return {"ok": True, "note": "dry_run 未配 token，SSE 无鉴权放行，无需 cookie"}
+    # Secure 仅 live（HTTPS）标——dry_run 走 localhost http，标 Secure 则浏览器不发该 cookie
+    response.set_cookie(
+        key="quanter_ro", value=tok, max_age=ttl,
+        httponly=True, samesite="lax",
+        secure=(os.getenv("AUTO_TRADE_MODE", "dry_run") == "live"),
+        path="/api/v1/logs",
+    )
+    return {"ok": True, "cookie": "quanter_ro", "ttl": ttl, "path": "/api/v1/logs"}
 
 
 # ============ 健康检查端点 ============
