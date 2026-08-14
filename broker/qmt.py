@@ -222,7 +222,11 @@ def _alert_account_status(gw, status_int: int, level: str) -> None:
         fire_and_forget(NotificationManager.get_default().notify_risk_event(
             f"QMT 账号状态异常 status={status_int} account={gw._account_id}，网关已锁定", level))
     except Exception:
-        pass
+        # G7 告警可观测：告警通道软降级（钉钉网络故障/get_default 异常）不阻断主路径，
+        # 但原 except:pass 零日志 → 「监控监控器」盲区（告警系统自己死掉无人知晓）。
+        # 加 debug（含 exc_info）让告警通道失效可观测（控制流不变，仍吞异常）。
+        logger.debug("告警通道软降级：账号状态告警发送失败 status=%s account=%s",
+                     status_int, getattr(gw, "_account_id", "?"), exc_info=True)
 
 
 def _stop_trader_safely(trader) -> None:
@@ -1349,7 +1353,9 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             fire_and_forget(NotificationManager.get_default().notify_risk_event(
                 f"QMT 断线，启动自动重连 account={self._account_id}", "WARN"))
         except Exception:
-            pass
+            # G7 告警可观测：断线告警通道软降级（控制流不变），加 debug 消盲区。
+            logger.debug("告警通道软降级：断线告警发送失败 account=%s",
+                         getattr(self, "_account_id", "?"), exc_info=True)
         # 在持久 loop 上调度重连任务（loop 关闭/为空时不调度，防 shutdown 期徒劳重连）
         if self._loop is not None and not self._loop.is_closed():
             self._loop.create_task(self._reconnect())
@@ -1384,7 +1390,8 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
                         fire_and_forget(NotificationManager.get_default().notify_risk_event(
                             f"QMT 断线后重连成功（第{i}次）", "INFO"))
                     except Exception:
-                        pass
+                        # G7 告警可观测：重连成功告警通道软降级（控制流不变），加 debug 消盲区。
+                        logger.debug("告警通道软降级：重连成功告警发送失败 第%s次", i, exc_info=True)
                     return
                 except Exception as exc:
                     logger.warning("QMT 重连失败（第 %s/%s）：%s", i, n, exc)
@@ -1392,13 +1399,16 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
                         fire_and_forget(NotificationManager.get_default().notify_risk_event(
                             f"QMT 重连失败第{i}次：{exc}", "WARN"))
                     except Exception:
-                        pass
+                        # G7 告警可观测：重连失败告警通道软降级（控制流不变），加 debug 消盲区。
+                        logger.debug("告警通道软降级：重连失败告警发送失败 第%s次", i, exc_info=True)
             logger.critical("QMT 重连耗尽（%s 次），网关保持锁态，请人工介入", n)
             try:
                 fire_and_forget(NotificationManager.get_default().notify_risk_event(
                     f"QMT 重连耗尽（{n}次），网关锁态，请人工介入！", "ERROR"))
             except Exception:
-                pass
+                # G7 告警可观测：重连耗尽告警通道软降级（控制流不变），加 debug 消盲区。
+                # 重连耗尽是致命态，告警通道此处失效会让运维完全失明——debug 仍留痕。
+                logger.debug("告警通道软降级：重连耗尽告警发送失败（%s次）", n, exc_info=True)
         finally:
             # M1：无论重连成功/失败/异常，释放互斥锁，允许下一次断线再触发重连。
             # 放 finally 保证异常路径（如 KeyboardInterrupt）不遗留死锁标志。

@@ -15,9 +15,15 @@ Windows spawn 兼容（spec §8 拷问② + Global Constraints，四条铁律）
    （否则 455MB parquet 每次 map 都序列化，爆掉）。
 4. _eval_worker 捕获单组异常返回 None——主进程 filter null（spec §8 单 trial 失败不影响 run）。
 """
+import logging
 import multiprocessing as mp
 import os
 import sys
+
+# G7 告警可观测：worker 进程的降级点（看门狗测量失败 / memory_cap psutil 异常 /
+# _eval_worker 评估异常）统一记日志，消「某 params 反复让 evaluate 崩溃被静默
+# filter null」盲区。
+logger = logging.getLogger(__name__)
 
 # 顶层 import（子进程重新 import 时执行，无副作用）。
 # 用 from-import 让 monkeypatch 可 patch worker.freeze/holdout_split/evaluate（测试注入合成数据）。
@@ -57,7 +63,9 @@ def _init_worker(lake_start="2025-01-01", embargo_days=5):
     except SystemExit:
         raise
     except Exception:
-        pass   # 看门狗自身异常（psutil 缺失等）降级：不阻断跑批
+        # G7 告警可观测：看门狗自身测量失败（psutil 缺失等）降级不阻断跑批，但原零日志
+        # → RSS fail-loud 防线静默失效（2026-08-03 MemoryError 复发防线之一）。加 warning。
+        logger.warning("_init_worker RSS 看门狗测量失败，降级跳过 fail-loud 检查", exc_info=True)
 
 
 def _eval_worker(params):
@@ -79,6 +87,10 @@ def _eval_worker(params):
             return None
         return (params, res)
     except Exception:
+        # G7 告警可观测：单 trial 评估异常返 None（spec §8 拷问②），主进程 filter null。
+        # 原零日志 → 某 params 反复让 evaluate 崩溃被静默过滤。加 warning（控制流不变）。
+        logger.warning("_eval_worker 评估异常返 None（主进程 filter null）params=%s", params,
+                       exc_info=True)
         return None
 
 
@@ -125,6 +137,10 @@ def memory_cap_n_proc():
         import psutil
         avail_gb = psutil.virtual_memory().available / (1024 ** 3)
     except Exception:
+        # G7 告警可观测：psutil 不可用时 memory_cap 降级返 CPU cap（只留 CPU 约束），
+        # 原零日志 → 内存自动降并发机制静默失效。加 warning（控制流不变，仍降级返回）。
+        logger.warning("memory_cap_n_proc psutil 不可用，降级返 CPU cap（内存自动降并发失效）",
+                       exc_info=True)
         return _N_PROC_CPU_CAP
     return max(1, int((avail_gb - reserve_gb) / rss_est_gb))
 

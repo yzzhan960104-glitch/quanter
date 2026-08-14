@@ -55,6 +55,22 @@ _DEFAULT_DB = "logs/trading_state.db"
 # engine 从 .env 迁移的真实 QMT_ACCOUNT_ID 会覆盖此默认（_migrate_env_to_account）。
 _DEFAULT_ACCOUNT_ID = "default"
 
+# ============================= G7 终态集单源（消三套集合漂移）=============================
+# 物理意图：has_order / get_order_placed_qty 的 NOT IN 与 get_pending_orders 的 IN 三处
+# SQL 子句历史上各写一份硬编码集合，漂移 bug：has_order 曾漏 PARTIAL_CANCELLED → 部分
+# 取消单被误判「已挂」→ 漏补挂（live 真金致命；get_order_placed_qty 的 docstring 自称
+# 「与 has_order 排除集同口径」却实际不一致）。现收口为两个单源常量，三处 SQL 同源引用。
+#
+# DB state 列约定（order_state_to_db 契约）：OrderState.PARTIAL_FILLED 在 DB 存短形式
+# "PARTIAL"，其余长形式（FILLED/CANCELLED/REJECTED/PARTIAL_CANCELLED/FAILED/SUBMITTED/PENDING）。
+# FILLED（成功终态）独立于活/死二分类——它不算死态（不可重挂，已成交），也不算活态
+# （不可撤单）；has_order/get_order_placed_qty 的 NOT IN dead 隐式把 FILLED 归「已挂」侧。
+_ACTIVE_ORDER_STATES = ("PENDING", "SUBMITTED", "PARTIAL")            # 活态（未终态，可撤/可推进）
+_DEAD_ORDER_STATES = ("REJECTED", "FAILED", "CANCELLED", "PARTIAL_CANCELLED")  # 死态（可重挂）
+# SQL IN 占位符（参数化防注入；由集合长度派生，单一计算点，三处共享）
+_ACTIVE_STATE_PLACEHOLDERS = ",".join("?" * len(_ACTIVE_ORDER_STATES))   # '?,?,?'
+_DEAD_STATE_PLACEHOLDERS = ",".join("?" * len(_DEAD_ORDER_STATES))       # '?,?,?,?'
+
 
 @contextmanager
 def _connect(db_path: str):
@@ -615,11 +631,22 @@ def update_order_state(order_id: str, state: str, *, broker_oid: str | None = No
     回填 broker_oid（seq→real 映射）；cancel_all_open_orders 回写 state=CANCELLED；成交回报回填
     filled_qty/filled_price/state=FILLED。幂等：多次回填同值是 no-op（UPDATE 不冲突）。
 
+    G7 FSM 写校验（软告警 · 2026-08-13 g-wave-p0-guards）：
+        写入前读 old_state，过 OrderStateMachine._is_valid_transition 校验。非法迁移告警
+        （logger.warning 含 old/new/order_id）+ **仍写入**（不拒写），幂等回推（old==new）
+        静默。Why 软告警而非硬拒：FSM 迁移表归 architecture/05 红线不可改（order_state.py
+        顶部注释明示），生产 pre_open 存在 PENDING→REJECTED 等表外业务跳变、现有测试存在
+        终态循环（test_has_order_filters_dead_states）——硬拒会破生产 + 测试；白名单方案需
+        改 FSM 表 → 越红线。软告警达成「消监控盲区」顶层目标（非法迁移不再静默），硬拒写
+        延后至 FSM 表重构 Task。详见 _fsm_check_on_write。
+
     按 order_id 主键更新（调用方持有内部 order_id 时用，如 pre_open submit 后回填）。
     柜台查询撤单路径持有 broker_oid（非主键）→ 用 cancel_order_by_broker_oid_db。
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
+        # G7 FSM 写校验（软告警）：非法迁移告警 + 仍写入（不拒写），幂等回推静默。
+        _fsm_check_on_write(con, order_id, state)
         # 动态拼 SET 子句：只更新提供的字段（None 不覆盖已有值，保留历史回填）
         sets = ["state = ?"]
         params: list = [state]
@@ -635,6 +662,66 @@ def update_order_state(order_id: str, state: str, *, broker_oid: str | None = No
             sets.append("filled_at = ?"); params.append(filled_at)
         params.append(order_id)
         con.execute(f"UPDATE \"order\" SET {', '.join(sets)} WHERE order_id=?", params)
+
+
+# DB state 列字符串 → OrderState 枚举映射（order_state_to_db 的逆）。
+# DB 约定：OrderState.PARTIAL_FILLED 存短形式 "PARTIAL"，其余长形式（见 order_state_to_db）。
+_DB_STATE_TO_ENUM = None  # lazy 构造（见 _fsm_check_on_write，避免模块级 import 循环）
+
+
+def _fsm_check_on_write(con, order_id: str, new_state: str) -> None:
+    """G7 FSM 写校验（软告警）：读 old_state，过 OrderStateMachine 校验，非法则告警。
+
+    物理意图（消「非法迁移静默落库」盲区）：
+        原 update_order_state 裸 UPDATE 不过 FSM，FILLED→PENDING 倒退等非法迁移静默落库，
+        状态机约束形同虚设。本 helper 在写入前读 old_state，过 _is_valid_transition，
+        非法则告警让人看见（消盲区）。
+
+    软告警契约（不拒写）：
+        - 非法迁移 → logger.warning（含 old/new/order_id）+ **仍写入**（控制流不变）。
+        - 幂等回推（old==new）→ 静默（合法 no-op，broker 重推同终态）。
+        - 行不存在 / 未知状态字符串 → 不校验（避免误报；行不存在是 insert 路径）。
+        - 校验自身异常 → debug log，不阻断写入（可观测降级，写路径不能因观测宕机）。
+
+    Why 软告警（不硬拒）见 update_order_state docstring。lazy import OrderStateMachine
+    防 state_store↔order_state 循环（order_state.py 顶部 import state_store）。
+    """
+    global _DB_STATE_TO_ENUM
+    try:
+        from trading.order_state import OrderStateMachine  # lazy 防 state_store↔order_state 循环
+        from trading.types.order_state import OrderState
+    except Exception:
+        return  # FSM 模块不可用（极端环境）→ 不校验，写入优先于观测
+
+    if _DB_STATE_TO_ENUM is None:
+        _DB_STATE_TO_ENUM = {
+            "PENDING": OrderState.PENDING, "SUBMITTED": OrderState.SUBMITTED,
+            "PARTIAL": OrderState.PARTIAL_FILLED,  # DB 短形式 → 枚举长形式
+            "FILLED": OrderState.FILLED, "CANCELLED": OrderState.CANCELLED,
+            "PARTIAL_CANCELLED": OrderState.PARTIAL_CANCELLED,
+            "REJECTED": OrderState.REJECTED, "FAILED": OrderState.FAILED,
+        }
+    try:
+        row = con.execute('SELECT state FROM "order" WHERE order_id=?', (order_id,)).fetchone()
+        if row is None:
+            return  # 行不存在（insert 路径/测试 fixture 直接插），不校验
+        old_state = row["state"]
+        if old_state == new_state:
+            return  # 幂等回推（合法 no-op），静默不告警（broker 重推同终态）
+        old_enum = _DB_STATE_TO_ENUM.get(old_state)
+        new_enum = _DB_STATE_TO_ENUM.get(new_state)
+        if old_enum is None or new_enum is None:
+            return  # 未知状态字符串（未来扩展/自定义），不校验避免误报
+        fsm = OrderStateMachine()
+        if not fsm._is_valid_transition(old_enum, new_enum):
+            # 软告警：非法迁移告警让人看见（消盲区），仍写入（不拒写，不破生产/测试）。
+            logger.warning(
+                "订单状态迁移偏离 FSM 表 order_id=%s %s→%s（软告警：仍写入；可能为 broker "
+                "异步回报边角跳变或业务回填，硬拒需 FSM 表重构 architecture/05 红线）",
+                order_id, old_state, new_state)
+    except Exception:
+        # 校验自身异常不阻断写入（可观测降级，不致写路径宕机）
+        logger.debug("FSM 写校验异常 order_id=%s state=%s", order_id, new_state, exc_info=True)
 
 
 def cancel_order_by_broker_oid_db(broker_oid: str, *, db_path: str | None = None) -> int:
@@ -695,11 +782,12 @@ def get_order_placed_qty(account_id: str, trade_date: str, symbol: str, purpose:
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
+        # G7 终态集单源：死态排除集引用 _DEAD_ORDER_STATES（与 has_order 同源），消漂移。
         row = con.execute(
             "SELECT COALESCE(SUM(qty), 0) AS total FROM \"order\" "
             "WHERE account_id=? AND trade_date=? AND symbol=? AND purpose=? "
-            "AND state NOT IN ('REJECTED','FAILED','CANCELLED','PARTIAL_CANCELLED')",
-            (account_id, trade_date, symbol, purpose)).fetchone()
+            "AND state NOT IN ({})".format(_DEAD_STATE_PLACEHOLDERS),
+            (account_id, trade_date, symbol, purpose, *_DEAD_ORDER_STATES)).fetchone()
     return float(row["total"]) if row else 0.0
 
 def get_order_by_broker_oid(broker_oid: str, *, db_path: str | None = None) -> dict | None:
@@ -1032,8 +1120,10 @@ def get_start_equity(account_id: str, date: str, *, db_path: str | None = None) 
 
     Returns:
         start_total_asset（float）或 None（pre_open 未写基线 / 查询异常）。
-        None 时调用方 post_close 显式 ``breaker_skipped=True`` 跳过熔断（绝不拿 0 触发，
-        防 check_daily_loss_limit(0, X) 返 False 反永不熔断）。
+        None 时调用方 post_close 走 T-1 close 兜底；兜底仍无则 None 直传 breaker 触发
+        fail-closed（DG-G3：dry 停手+CRITICAL / live raise _CriticalHalt；breaker_skipped
+        仅保留给 curr_equity 缺失的「无法判定」语义）。绝不拿 0 写基线——0 会致 daily_pnl
+        除零 + 语义模糊（基线缺失是「该停手」，非旧 fail-open 的「永不熔断」）。
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
@@ -1113,13 +1203,16 @@ def has_order(account_id: str, trade_date: str, symbol: str, purpose: str, *,
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
-        # C-1 final-review fix (I-2/?-1)：过滤非活态委托——REJECTED/FAILED/CANCELLED 不算
-        # 「已挂」，允许重挂。否则挂单被拒（资金不足/涨跌停挡板）后 has_order 恒 True →
-        # 当日永久漏挂（pre_open OPEN）+ stop_loss/TP 被拒后裸奔/永不补挂（live 真金致命）。
+        # C-1 final-review fix (I-2/?-1)：过滤死态委托——REJECTED/FAILED/CANCELLED/
+        # PARTIAL_CANCELLED 不算「已挂」，允许重挂。否则挂单被拒（资金不足/涨跌停挡板）后
+        # has_order 恒 True → 当日永久漏挂（pre_open OPEN）+ stop_loss/TP 被拒后裸奔/永不
+        # 补挂（live 真金致命）。
+        # G7 终态集单源：死态排除集引用 _DEAD_ORDER_STATES（与 get_order_placed_qty 同源），
+        # 修复历史漏 PARTIAL_CANCELLED 的漂移 bug。
         row = con.execute(
             "SELECT 1 FROM \"order\" WHERE account_id=? AND trade_date=? AND symbol=? AND purpose=?"
-            " AND state NOT IN ('REJECTED','FAILED','CANCELLED')",
-            (account_id, trade_date, symbol, purpose)
+            " AND state NOT IN ({})".format(_DEAD_STATE_PLACEHOLDERS),
+            (account_id, trade_date, symbol, purpose, *_DEAD_ORDER_STATES)
         ).fetchone()
     return row is not None
 
@@ -1145,8 +1238,8 @@ def get_active_trades(account_id: str, *, db_path: str | None = None) -> list[di
     return [dict(r) for r in rows]
 
 
-# order 未终态（撤单用：这些状态的委托还在柜台挂着，可撤）
-_PENDING_ORDER_STATES = frozenset({"PENDING", "SUBMITTED", "PARTIAL"})
+# 「未终态/活态」概念单一归宿 = _ACTIVE_ORDER_STATES（get_pending_orders / has_order /
+# get_order_placed_qty 三处同源）。G7 收口后不再保留 _PENDING_ORDER_STATES 别名（零消费者）。
 
 
 def get_pending_orders(account_id: str, *, db_path: str | None = None) -> list[dict]:
@@ -1156,9 +1249,11 @@ def get_pending_orders(account_id: str, *, db_path: str | None = None) -> list[d
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
+        # G7 终态集单源：活态集引用 _ACTIVE_ORDER_STATES（单一真相源），消硬编码漂移。
         rows = con.execute(
-            "SELECT * FROM \"order\" WHERE account_id=? AND state IN ('PENDING','SUBMITTED','PARTIAL')",
-            (account_id,)
+            "SELECT * FROM \"order\" WHERE account_id=? AND state IN ({})".format(
+                _ACTIVE_STATE_PLACEHOLDERS),
+            (account_id, *_ACTIVE_ORDER_STATES)
         ).fetchall()
     return [dict(r) for r in rows]
 

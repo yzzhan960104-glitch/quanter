@@ -14,9 +14,14 @@ inner=2025 / outer=2026 holdout（非 walk-forward，4 折推后续 plan）。
 """
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 
 import pandas as pd
+
+# G7 告警可观测：universe 冻结的降级点（parquet filters 回退 / xs 跳过）统一记日志，
+# 消「内存优化静默失效 / 某标的静默丢失」盲区。
+logger = logging.getLogger(__name__)
 
 LAKE_PATH = "data_lake/a_shares_daily.parquet"
 DEFAULT_UNIVERSE_DEF = "创板科创/2025截面/近30日均额≥1e5千元"
@@ -121,6 +126,9 @@ def load_universe(start="2025-01-01"):
         )
     except Exception:
         # filters 推送失败（异常湖/旧引擎）→ 回退全量读再筛（语义不变，仅内存优化）
+        # G7 告警可观测：内存优化静默失效（12 worker × 1.3GB 是内存峰值源）需可见。
+        logger.warning("load_universe parquet filters 推送失败，回退全量读（内存优化失效）",
+                       exc_info=True)
         lake = pd.read_parquet(LAKE_PATH)
     lake = lake[lake.index.get_level_values("date") >= pd.Timestamp(start)]
     syms = lake.index.get_level_values("symbol").unique().tolist()
@@ -132,6 +140,9 @@ def load_universe(start="2025-01-01"):
         try:
             universe[s] = lake.xs(s, level="symbol").sort_index()
         except Exception:
+            # G7 告警可观测：xs 失败（index 异常/重复键）跳过该标的，原零日志 → 标的
+            # 静默丢失无人知晓。加 warning 定位（控制流不变，仍 continue）。
+            logger.warning("load_universe 标的 xs 取片失败已跳过 symbol=%s", s, exc_info=True)
             continue
     return universe
 
@@ -194,6 +205,9 @@ def filter_universe_from_lake(lake_df, min_amt=1e5):
         try:
             universe[s] = lake_df.xs(s, level="symbol").sort_index()
         except Exception:
+            # G7 告警可观测：xs 失败跳过标的，原零日志 → 静默丢失。加 warning 定位。
+            logger.warning("filter_universe_from_lake 标的 xs 取片失败已跳过 symbol=%s", s,
+                           exc_info=True)
             continue
     return universe
 
@@ -222,6 +236,8 @@ def load_universe_window(start, sel_end, data_end=None, warmup_days=180):
             filters=[("date", ">=", data_start), ("date", "<=", pd.Timestamp(data_end))],
         )
     except Exception:
+        # G7 告警可观测：分折 universe 的 filters 回退也需可见（与 load_universe 同口径）。
+        logger.warning("load_universe_window parquet filters 推送失败，回退全量读", exc_info=True)
         lake = pd.read_parquet(LAKE_PATH)   # filters 推送失败 → 全量读再筛（语义不变）
         lake = lake[(lake.index.get_level_values("date") >= data_start)
                     & (lake.index.get_level_values("date") <= pd.Timestamp(data_end))]
@@ -233,6 +249,8 @@ def load_universe_window(start, sel_end, data_end=None, warmup_days=180):
         try:
             universe[s] = lake.xs(s, level="symbol").sort_index()   # 数据延伸至 data_end
         except Exception:
+            # G7 告警可观测：分折 xs 失败跳过标的，原零日志 → 静默丢失。加 warning 定位。
+            logger.warning("load_universe_window 标的 xs 取片失败已跳过 symbol=%s", s, exc_info=True)
             continue
     return universe
 

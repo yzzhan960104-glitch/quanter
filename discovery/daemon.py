@@ -154,12 +154,18 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
         try:
             outer = eval_outer_fn(summary.top_trial_id)
         except Exception:
+            # G7 告警可观测：冠军 outer 去偏失败（trial 不存在/数据缺失）软降级返 None，
+            # 原零日志 → outer 指标静默缺失，研究员以为跑成功实际无 OOS 指标。加 warning。
+            logger.warning("eval_outer 冠军 outer 去偏失败，软降级返 None trial=%s",
+                           summary.top_trial_id, exc_info=True)
             outer = None   # outer 软降级：数据缺失不阻断 daemon
     if notify_fn is not None:
         try:
             notify_fn(summary=summary, k=k, K=K, converged_cross=converged_cross, outer=outer)
         except Exception:
-            pass           # 告警软降级：钉钉失败不阻断 daemon
+            # G7 告警可观测：钉钉告警失败不阻断 daemon，但原零日志 → 告警通道静默死掉
+            # 无人知晓（「监控监控器」盲区典型：告警系统自己是单点故障源却无观测）。加 warning。
+            logger.warning("notify 告警通知失败，软降级跳过（不阻断 daemon）", exc_info=True)
 
     # 6. 自动 publish 桥（2026-08-03 · 与实验平台打通）：新冠军 outer 优于当前
     #    ACTIVE 才建 DRAFT；异常软降级（不阻断 daemon 主流程）。
@@ -168,6 +174,10 @@ def run_daemon_cycle(snapshot_meta, split, db_path, *, budget_hours=4, n_proc=No
         try:
             auto_exp_id = auto_publish_fn(summary.top_trial_id, outer)
         except Exception:
+            # G7 告警可观测：自动 publish 桥失败软降级，原零日志 → 新冠军静默未 publish
+            # 到实验平台，研究员漏接。加 warning。
+            logger.warning("auto_publish 自动 publish 桥失败，软降级返 None trial=%s",
+                           summary.top_trial_id, exc_info=True)
             auto_exp_id = None
 
     return {"early_exited": False, "run_id": summary.run_id, "summary": summary,

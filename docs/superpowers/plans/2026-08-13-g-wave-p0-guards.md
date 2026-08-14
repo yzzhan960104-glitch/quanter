@@ -654,6 +654,8 @@ state_store 写状态过 OrderStateMachine 校验，终态集引用 order_state 
 
 **4. 顺序依赖**：G1 必须最先（复活 CI 才有回归网）；G3 的 breaker fail-closed 与基线 T-1 兜底**必须同 commit**（否则退化每天熔断）；G2/G4/G5/G6/G7 互相独立可并行。
 
+**5. G7 迁移机制偏离 spec（已知情接受 · 2026-08-14 补记）**：基准 spec §G7 处方 `ALTER TABLE RENAME TO fill_legacy_<日期>`（可回滚、零数据丢失）；实施（`state_store.py:168-250 _migrate_with_backup`）采「导出旧行→DROP→CREATE 新 schema→共享列回灌 + column_copies 行级拷贝 + sidecar JSON 双保险」，撞约束跳过不阻断。**取舍**：数据安全（行守恒 + sidecar 可恢复，连错库不清零）但旧表无 legacy 名可一键回滚。fill 表首版曾 sidecar-only 不回灌，`5df74c03` 改回灌（traded_time←applied_at）。决策（用户 2026-08-14）：维持现状 + 本注记，**不重做 RENAME**——重写已测迁移有回归风险，live 前数据安全已满足，回滚通道非当前刚需。
+
 ## Execution Handoff
 
 Plan complete and saved to `docs/superpowers/plans/2026-08-13-g-wave-p0-guards.md`.

@@ -13,10 +13,16 @@ all_filled → 按 signal_date 分段。不硬切 df（scan_symbol 用 sym_df.il
 全部信号），但 outer 的 metrics 不反馈任何选择——由调用方（judging/cli）保证只用 inner
 排序、outer 只进报告。Plan 1 无搜索，"隔离"主要约束 outer 不进冠军排序。
 """
+import logging
+
 import pandas as pd
 
 from strategies.neckline.method_v0 import DEFAULTS
 from strategies.neckline.backtest import scan_symbol, risk_metrics, EXEC_DEFAULTS
+
+# G7 告警可观测：discovery 跑批的降级点统一记日志，消「监控监控器」盲区
+# （原 except:pass/continue 零日志 → 反复失败的标的/params 无人知晓）。
+logger = logging.getLogger(__name__)
 
 # 21 维参数分层键名（与 scripts/param_iter.PARAM_SPACE 同源；Plan 1 只需键名分层，不需候选值）
 ID_KEYS = ["window", "min_touches", "min_suppression", "local_extrema_window",
@@ -44,6 +50,10 @@ def run_full_scan(params, universe):
                 r["symbol"] = sym
             all_filled.extend(filled)
         except Exception:
+            # G7 告警可观测：单标的 scan 异常不炸整批（spec §8 单 trial 失败不影响 run），
+            # 但原零日志 continue → 反复失败的标的（数据残缺/内核崩溃）被静默吞掉，运维
+            # 无法定位「哪只标的在吞异常」。加 warning 定位标的（控制流不变，仍 continue）。
+            logger.warning("run_full_scan 标的 scan 异常已跳过 symbol=%s", sym, exc_info=True)
             continue
     return all_filled
 
