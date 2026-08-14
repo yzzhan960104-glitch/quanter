@@ -32,6 +32,13 @@ BREADTH_THRESHOLD = 0.5    # 宽度过半 = 市场多数标的在年线上方
 BREADTH_MIN_STOCKS = 500   # 宽度统计最小样本（防残缺湖误判「假宽度」）
 HS300 = "000300.SH"
 
+# 三态常量（评审 2026-08-15 Primitive Obsession：防 BULL/BEAR/UNKNOWN 魔符串
+# 散布拼写漂移。str 而非 Enum——保留序列化/f-string/JSON 兼容，值即契约；
+# 测试侧有意保留字面量断言作常量值金丝雀）。
+BULL = "BULL"
+BEAR = "BEAR"
+UNKNOWN = "UNKNOWN"
+
 _BREADTH_TAIL_DAYS = 260   # 宽度计算只取近 260 交易日（MA200 需 200 根 + 余量，
                            # 全历史 groupby rolling 纯浪费——A2 湖窗已 1030 万行）
 
@@ -57,7 +64,7 @@ def classify(index_df, daily_df, asof=None) -> RegimeState:
     try:
         st = _classify_sync(index_df, daily_df, asof)
     except Exception as exc:   # 对齐/计算任何异常 → UNKNOWN 不放行（fail-closed）
-        st = RegimeState("UNKNOWN", f"regime 判定异常（fail-closed）：{exc!r}", key)
+        st = RegimeState(UNKNOWN, f"regime 判定异常（fail-closed）：{exc!r}", key)
     return st
 
 
@@ -67,7 +74,7 @@ def _classify_sync(index_df, daily_df, asof) -> RegimeState:
     try:
         hs = index_df.xs(HS300, level="symbol").sort_index()
     except KeyError:
-        return RegimeState("UNKNOWN", f"指数湖无 {HS300}", str(asof or "?"))
+        return RegimeState(UNKNOWN, f"指数湖无 {HS300}", str(asof or "?"))
     if asof is not None:
         hs = hs[hs.index <= pandas.Timestamp(asof)]
     if len(hs) < MA_WINDOW + 1:
@@ -80,7 +87,7 @@ def _classify_sync(index_df, daily_df, asof) -> RegimeState:
     last_ma = float(ma.iloc[-1])
     import math
     if math.isnan(last_ma):
-        return RegimeState("UNKNOWN", "MA200 为 NaN", str(last_date.date()))
+        return RegimeState(UNKNOWN, "MA200 为 NaN", str(last_date.date()))
     price_ok = last_close > last_ma
 
     # ── ② 宽度腿：全市场【末位行】close>各自 MA200 占比（时点宽度）────────
@@ -121,4 +128,4 @@ def _classify_sync(index_df, daily_df, asof) -> RegimeState:
         why.append(f"HS300 {last_close:.0f}≤MA200 {last_ma:.0f}")
     if not breadth_ok:
         why.append(f"宽度 {breadth:.0%}≤{BREADTH_THRESHOLD:.0%}")
-    return RegimeState("BEAR", "；".join(why), str(last_date.date()))
+    return RegimeState(BEAR, "；".join(why), str(last_date.date()))

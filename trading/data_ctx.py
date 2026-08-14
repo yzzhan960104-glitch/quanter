@@ -291,3 +291,27 @@ def load_regime_frames():
 
 # 当日缓存槽：{ISO 日期: (index_df, daily_df)}——进程内、跨日自动失效（键换代）。
 _REGIME_FRAMES_CACHE: dict[str, tuple] = {}
+
+
+def regime_state_today():
+    """当日 regime 判定（观测面专用：读湖 + 判定双层当日缓存）。
+
+    物理意图：/trading/status 的 regime 态暴露（A1 spec §2.2.5）——前端 2s 轮询
+    零成本（当日判定缓存一日一算，「盘中新数据不改当日判定」本就是 A1 设计语义）。
+    与决策路径（engine._regime_gate 每次现算）分离：gate 不吃缓存保证测试可注入
+    与最新判定，观测面吃缓存保轮询廉价——两路径语义各归其位。
+    判定异常向上抛（调用方软降级 None，绝不让观测端点炸）。
+    """
+    import datetime as _dt
+
+    today = _dt.date.today().isoformat()
+    st = _REGIME_STATE_CACHE.get(today)
+    if st is None:
+        from trading.compute.regime import classify
+        st = classify(*load_regime_frames())
+        _REGIME_STATE_CACHE[today] = st
+    return st
+
+
+# 当日判定缓存槽：{ISO 日期: RegimeState}——观测面一日一算。
+_REGIME_STATE_CACHE: dict = {}

@@ -57,6 +57,25 @@ def _ledger_finish(today: str, status: str, message: str = "") -> None:
         logger.exception("job_ledger finish_run 失败（不阻断主流程）")
 
 
+def _notify_risk(msg: str, level: str, *, soft: bool = False) -> None:
+    """风险事件播报单源（评审 2026-08-15 去重：数据未就绪 / regime 停手两处共用）。
+
+    soft=True 走 debug 软降级（「停手」这类主行为已生效，播报失败仅留痕——
+    与 CRITICAL 级「告警本身是主行为」的 exception 语义区分）。
+    """
+    try:
+        from infra.notifier import (build_default_manager, fire_and_forget,
+                                    NotificationManager)
+        build_default_manager()
+        fire_and_forget(
+            NotificationManager.get_default().notify_risk_event(msg, level))
+    except Exception:
+        if soft:
+            logger.debug("播报软降级", exc_info=True)
+        else:
+            logger.exception("告警发送失败")
+
+
 async def pipeline_then_eod(engine, *, for_date: str | None = None,
                             run_eod: bool = True) -> None:
     """C-2 事件链：采集 → 等完成 → 按策略声明校验数据 → eod → brief。
@@ -138,15 +157,7 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
             msg = f"数据未就绪：{[r.message for r in results.values() if not r.ok]}，eod 跳过"
             logger.warning(msg)
             _ledger_finish(today, "failed", msg)
-            try:
-                from infra.notifier import (build_default_manager, fire_and_forget,
-                                            NotificationManager)
-                build_default_manager()
-                fire_and_forget(
-                    NotificationManager.get_default().notify_risk_event(msg, "CRITICAL")
-                )
-            except Exception:
-                logger.exception("CRITICAL 告警发送失败")
+            _notify_risk(msg, "CRITICAL")
             return  # 不跑 eod，不产废信号
         # 3.5 T13-B #1：连续性 scan（freshness 全绿后，eod 前）—— 历史缺口检测（与 freshness
         # 实时性互补）。scan FAIL **不阻断 eod**（历史缺口与当日交易无关，blueprint §2.3），
@@ -179,15 +190,8 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
                 msg = f"eod 跳过：{rg_reason}"
                 logger.warning(msg)
                 _ledger_finish(today, "skipped", rg_reason)
-                try:
-                    from infra.notifier import (build_default_manager,
-                                                fire_and_forget, NotificationManager)
-                    build_default_manager()
-                    fire_and_forget(
-                        NotificationManager.get_default().notify_risk_event(msg, "WARN"))
-                except Exception:
-                    # 播报软降级（通知通道故障不能阻断「停手」这个主行为）
-                    logger.debug("regime 停手播报软降级", exc_info=True)
+                # soft=True：播报软降级（通知通道故障不能阻断「停手」这个主行为）
+                _notify_risk(msg, "WARN", soft=True)
                 return  # 停产 T+1 计划；brief 播报跳过（eod 未跑，无盘后面板）
             if for_date is not None:
                 await engine._eod(data_day=today, plan_date=next_trading_day(today))

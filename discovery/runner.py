@@ -239,11 +239,13 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
         # A2（DG-G4）：top 选择排序键同 TPE 目标——各年 min calmar（回退整段 calmar）。
         # 不切此处会出现「TPE 朝 min 优化、champion 选择却按整段 calmar」的目标分裂。
         dsr_cands.append((m.get("min_yearly_calmar", m.get("calmar", 0.0)), d, t))
-    top_calmar, top_tid, dsr_top = 0.0, "", 0.0
+    # 评审（2026-08-15）：排序键已切 min_yearly_calmar，变量名随语义改 top_score
+    # （RunSummary.top_inner_calmar 字段名保留——公开契约，值语义=当前排序目标）。
+    top_score, top_tid, dsr_top = 0.0, "", 0.0
     if dsr_cands:
         gated, dsr_gate_fell_back = dsr_gated_ranking(
             dsr_cands, dsr_min=DSR_GATE_MIN, fallback_to_calmar=True)
-        top_calmar, dsr_top, top_t = gated[0]
+        top_score, dsr_top, top_t = gated[0]
         top_tid = top_t["trial_id"]
 
     # === P1-2：冠军 replay 口径复评（可选，daemon 生产默认开） ===
@@ -284,7 +286,7 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
     return RunSummary(
         n_sampled=n_sampled, n_evaluated=len(to_eval), n_new_trials=n_new,
         n_skipped_dup=n_skipped, n_failed=n_failed,
-        top_inner_calmar=top_calmar, top_trial_id=top_tid,
+        top_inner_calmar=top_score, top_trial_id=top_tid,
         db_path=db_path, snapshot_hash=snapshot_meta.snapshot_hash,
         status=status, convergence_reason=reason,
         rho=rho, ei=ei, frontier_size=len(frontier_idxs), dsr_top=dsr_top,

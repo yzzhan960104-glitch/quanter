@@ -74,6 +74,15 @@ def metrics_of(pairs):
                 calmar=calmar, curve=curve)
 
 
+def _iter_pairs(all_filled, segment):
+    """all_filled → (pnl, date) 生成器（segment 过滤单源——评审 2026-08-15 去重：
+    segment_metrics 与 yearly_metrics 共用 to_datetime+covers 形状，防双份漂移）。"""
+    for r in all_filled:
+        d = pd.to_datetime(r["signal_date"])
+        if segment.covers(d):
+            yield r["avg_pnl_pct"], d
+
+
 def segment_metrics(all_filled, segment, embargo_days=0):
     """从 all_filled 按 signal_date 过滤到 segment（embargo 偏移）→ metrics dict。
 
@@ -83,13 +92,8 @@ def segment_metrics(all_filled, segment, embargo_days=0):
     """
     from datetime import timedelta
     embargo_cutoff = segment.start + timedelta(days=embargo_days)
-    pairs = []
-    for r in all_filled:
-        d = pd.to_datetime(r["signal_date"])
-        if embargo_days > 0 and d.date() < embargo_cutoff:
-            continue
-        if segment.covers(d):
-            pairs.append((r["avg_pnl_pct"], d))
+    pairs = [(pnl, d) for pnl, d in _iter_pairs(all_filled, segment)
+             if not (embargo_days > 0 and d.date() < embargo_cutoff)]
     return metrics_of(pairs)
 
 
@@ -105,10 +109,8 @@ def yearly_metrics(all_filled, segment, min_trades=30):
     """
     from collections import defaultdict
     by_year = defaultdict(list)
-    for r in all_filled:
-        d = pd.to_datetime(r["signal_date"])
-        if segment.covers(d):
-            by_year[d.year].append((r["avg_pnl_pct"], d))
+    for pnl, d in _iter_pairs(all_filled, segment):
+        by_year[d.year].append((pnl, d))
     out = {}
     for y in sorted(by_year):
         m = metrics_of(by_year[y])

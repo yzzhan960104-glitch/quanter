@@ -45,8 +45,10 @@ related:
 2. **inner_metrics 新增 `yearly_calmar: {year: float}`**（evaluate 内按自然年分块算
    calmar；某年 n<30 笔 → 该年 calmar 记 0.0——保守：不奖励信号稀疏年，逃不过差年）。
    既有字段（ann/calmar/...）保留为整段值，兼容 feasibility_gate 等既有消费者。
-3. **排序目标改 `min(yearly_calmar.values())`**（新增 `score_key="min_yearly_calmar"`，
-   默认启用；旧行为可经参数回退）。落点：run_search/排序消费 inner score 处单点切换，
+3. **排序目标改 `min(yearly_calmar.values())`**。落点：run_search/排序消费 inner score 处单点切换，
+   **实施裁定（2026-08-15 评审后）**：原设想的 `score_key` 参数开关未实现——回退经
+   「键缺失回退 calmar」实现（`get(min_yearly_calmar, get(calmar))`），且 evaluate 恒
+   注入该键使回退在生产不可达；加显式开关即造死代码（YAGNI），记偏差不补参数。
    TPE 目标函数同源（信息隔离红线不动：outer 仍只进报告）。
 4. **per-eval 成本预算**：窗口 2025+→2021+ 数据量 ×3，P1 后 35.5s/组 → 预估 ~110s/组；
    P2 后 4h 夜 × 12 worker ≈ 1500+ 组/夜（对比旧串行 80 组），可接受。diag 冒烟实测后

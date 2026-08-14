@@ -133,3 +133,28 @@ def test_constants_are_dg_g4_pinned():
     assert MA_WINDOW == 200
     assert BREADTH_THRESHOLD == 0.5
     assert BREADTH_MIN_STOCKS == 500
+
+
+# ============================================================================
+# 阈值边界（A1 spec §2.3 验收门 · 评审 2026-08-15 补齐）——恰等 → BEAR（严格 >）
+# ============================================================================
+def test_boundary_price_exactly_ma200_is_bear():
+    """HS300 末位 close 恰等 MA200（flat 序列）→ 严格大于不成立 → BEAR。
+
+    锁定实现语义 `last_close > last_ma`（regime.py price_ok）：恰等=未站上年线，
+    保守停手——不因浮点边界放行。
+    """
+    idx = _index_df([100.0] * 260)          # 恒平：close=100, MA200=100 恰等
+    daily = _daily_df(600, 0.8)             # 宽度腿过
+    st = classify(index_df=idx, daily_df=daily)
+    assert st.state == "BEAR"
+    assert "MA200" in st.reason
+
+
+def test_boundary_breadth_exactly_half_is_bear():
+    """宽度恰 0.5（300/600 above）→ 严格大于不成立 → BEAR（宽度过半才确认）。"""
+    idx = _index_df(list(range(100, 360)))  # 指数腿过
+    daily = _daily_df(600, 0.5)             # exactly 50%
+    st = classify(index_df=idx, daily_df=daily)
+    assert st.state == "BEAR"
+    assert "宽度" in st.reason

@@ -103,15 +103,34 @@ def get_status() -> dict:
     （断线瞬间 _connected 可能未被 on_disconnected 翻转，但 _lock_down 已率先置位）。
     """
     gw = get_gateway()
+    regime = _regime_field()
     if gw is None:
-        return {"connected": False, "locked": False, "mode": "unavailable"}
+        return {"connected": False, "locked": False, "mode": "unavailable",
+                "regime": regime}
     locked = bool(getattr(gw, "is_locked", False))
     connected = bool(getattr(gw, "_connected", False))
     if locked:
-        return {"connected": connected, "locked": True, "mode": "vetoed_by_risk"}
+        return {"connected": connected, "locked": True, "mode": "vetoed_by_risk",
+                "regime": regime}
     if connected:
-        return {"connected": True, "locked": False, "mode": "live"}
-    return {"connected": False, "locked": False, "mode": "disconnected"}
+        return {"connected": True, "locked": False, "mode": "live", "regime": regime}
+    return {"connected": False, "locked": False, "mode": "disconnected",
+            "regime": regime}
+
+
+def _regime_field() -> dict | None:
+    """A1 spec §2.2.5：status 暴露当前 regime 态（观测面，当日缓存零轮询成本）。
+
+    Why dict 而非 RegimeState 直出：API 边界序列化（dataclass 不入响应契约）；
+    判定异常返 None（观测端点绝不让 regime 读湖故障炸掉网关心跳——软降级）。
+    """
+    try:
+        from trading.data_ctx import regime_state_today
+        st = regime_state_today()
+        return {"state": st.state, "reason": st.reason, "asof": st.asof}
+    except Exception:
+        logger.exception("regime 观测字段软降级（不影响网关四态）")
+        return None
 
 
 async def get_positions() -> list:

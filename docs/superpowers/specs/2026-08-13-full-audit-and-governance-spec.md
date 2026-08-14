@@ -75,6 +75,17 @@ related:
 
 ---
 
+### G8　L2 轮换前置「客户端可服务」闸（2026-08-14 spec 外实测新增，补记立项）
+
+- **来源**：非本审计产出——当日 connect -1 排障实测发现 L2 sid 轮换在客户端未登录时
+  纯属无效功（每候选 30s 超时 + 75MB down_queue 文件，2 分钟 ≈2.7GB 磁盘 + ~50 分钟
+  「挂死」）。实现 `2e74cb9d`（探测三件套 `_client_servable` + 失败候选会话文件清理）。
+- **与 L2 计划的关系**：新增前置行为，未破坏计划约束（有界轮换 / L3 fail-closed /
+  锁键 preferred / .env 不动均保持）。语义裁定见 `broker/qmt.py::_client_servable`
+  docstring「非交易时段语义」段——隔夜/周末 quoter 无刷新判 False =「非交易时段
+  不轮换」，保守收紧与 fail-closed 哲学同源，恢复交 health_guard。
+- **教训**：实盘排障中的新发现应即时补 spec 立项（本条为补记范式）。
+
 ## §2 保护链波 G1-G7（本周动工 · 分支 `fix/p0-guards`）
 
 > 物理隔离于 `opt/p1-vectorization`。每工单：基准(file:line @ HEAD 47561049) + 治疗 + 验证 + 对抗推演。

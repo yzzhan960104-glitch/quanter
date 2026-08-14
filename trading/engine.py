@@ -676,9 +676,9 @@ class TradingEngine:
         return True, ""
 
     async def _pre_open_gate(self, date: str, gw) -> tuple[bool, str]:
-        """S3：pre_open 三段式前置 gate。全绿返 ``(True, "")``，任一未绿即返。
+        """S3：pre_open 四段式前置 gate（A1 增 ④ regime）。全绿返 ``(True, "")``，任一未绿即返。
 
-        物理意图（spec S3 · 三段式前置 gate，最便宜先做）：
+        物理意图（spec S3 前置 gate 最便宜先做 + A1 ④ 段 · 2026-08-14）：
             模块级 ``pre_open(date)`` 入口最先调用本方法，**任一未绿即早返**，绝不触达
             网关写操作（撤昨日单 / 抓熔断基线 / 挂新单）。顺序「先便宜后贵」：
 
@@ -747,15 +747,17 @@ class TradingEngine:
         守卫要求零 I/O）；读湖与当日缓存在 trading.data_ctx.load_regime_frames
         （eod 前置与本 ④ 段共享一次读湖，455MB 主湖一日一读）。
         """
-        from trading.compute import regime
         try:
+            from trading.compute import regime
+            from trading.compute.regime import BULL
             from trading.data_ctx import load_regime_frames
             st = regime.classify(*load_regime_frames())
         except Exception:
-            # classify 自身已 fail-closed 返 UNKNOWN；此处兜底极端（import 级）异常
+            # classify 自身已 fail-closed 返 UNKNOWN；此处兜底极端（含 import 级，
+            # 如循环依赖）异常——import 留 try 内让该注释成立（评审 2026-08-15）
             logger.exception("regime 判定异常（fail-closed 停手）")
             return False, "regime 判定异常（fail-closed 停手）"
-        if st.state != "BULL":
+        if st.state != BULL:
             reason = f"regime 停手（{st.state}：{st.reason}）"
             logger.warning("A1 %s", reason)
             return False, reason

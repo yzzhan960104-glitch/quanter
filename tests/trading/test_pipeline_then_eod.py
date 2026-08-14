@@ -95,7 +95,7 @@ async def test_multi_experiment_keys_union(monkeypatch):
          patch("trading.orchestrate.pipeline.check_freshness", side_effect=fake_cf):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
-        eng = MagicMock(); eng._eod = AsyncMock(); eng._regime_gate = AsyncMock(return_value=(True, ""))
+        eng = MagicMock(); eng._eod = AsyncMock()
         # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
         # test_engine_regime_gate.py / test_regime.py）
         eng._regime_gate = AsyncMock(return_value=(True, ""))

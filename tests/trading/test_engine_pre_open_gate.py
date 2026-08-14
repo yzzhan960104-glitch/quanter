@@ -134,7 +134,7 @@ def test_data_ok_zero_blocks(eng):
 # 全绿放行
 # ============================================================================
 def test_all_green_passes(eng):
-    """三段全绿（plan confirmed + gw connected & ready + get_ready=True）→ gate (True, "")。"""
+    """①②③④ 全绿（plan confirmed + gw ready + get_ready + regime BULL）→ gate (True, "")。"""
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True

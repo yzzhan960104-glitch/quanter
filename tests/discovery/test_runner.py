@@ -322,3 +322,25 @@ def test_run_search_tpe_seeds_filter_none_results(tmp_path, monkeypatch):
     assert s.n_failed == 1          # 退化组计数
     assert s.n_new_trials == 3      # 1 组成交 search + 2 组 TPE
     assert s.top_inner_calmar == 3.5
+
+
+def test_run_search_top_ranked_by_min_yearly_calmar(tmp_path, monkeypatch):
+    """A2 排序键锁定（spec 计划 Task2 遗留 · 评审 2026-08-15 补齐）：
+    DSR 门控排序取 min_yearly_calmar（非整段 calmar）——RunSummary.top_inner_calmar
+    须等于各年 min 值，防「TPE 朝 min 优化、top 选择按整段 calmar」目标分裂回退。"""
+    from discovery import runner
+    from discovery.store import init_db
+    db = str(tmp_path / "t.db"); init_db(db)
+    # 整段 calmar=2.0（特化假象）但各年 min=0.5（真实水平）——top 必须取 0.5
+    res = {"inner": {"ann": 0.5, "calmar": 2.0, "min_yearly_calmar": 0.5,
+                     "max_dd": 0.2, "n": 100, "sharpe": 1.5},
+           "outer": {}, "n_total": 100}
+    monkeypatch.setattr(runner, "sample_search", lambda **kw: [_one_param()])
+    monkeypatch.setattr(runner, "eval_batch", lambda plist, **kw: [(p, res) for p in plist])
+    monkeypatch.setattr(runner, "_engine_hash", lambda: "eng1")
+    monkeypatch.setattr(runner, "freeze", lambda lake_start="2021-01-01": ({}, _fake_meta()))
+    s = runner.run_search(_fake_meta(), _fake_split(), budget=1, n_sobol=1, n_random=0,
+                          seed=1, db_path=db)
+    assert s.top_inner_calmar == 0.5, (
+        f"top 排序键须为 min_yearly_calmar=0.5，实际 {s.top_inner_calmar}"
+        "（若为 2.0 说明排序键回退整段 calmar——目标分裂）")

@@ -327,6 +327,12 @@ def _client_servable(userdata_path: str, staleness_sec: int = 300) -> bool | Non
     且每候选 start() 预分配 75MB down_queue 文件（实测 2 分钟 ≈2.7GB 磁盘）。轮换
     前置闸用本判据：False → 跳过轮换直进 L3 fail-closed，恢复交给 _health_guard
     （客户端登录后健康检查自动重连）。探测失败/无活跃信号 → None 保守放行原轮换。
+
+    非交易时段语义（评审 2026-08-15 质询，裁定为设计意图而非误伤）：隔夜/周末
+    quoter 无刷新，已登录的健康客户端本判据也返 False——即「非交易时段不轮换」。
+    这与 L2 自愈不冲突：非交易时段 connect -1 的主因是柜台不可连（轮换本就无效功），
+    sid 真被占的场景等交易时段 quoter 刷新后 health_guard 走轮换自愈。保守收紧
+    （宁可晚一轮轮换，不烧磁盘不做无效功）与 G 波 fail-closed 哲学同源。
     """
     running = _client_process_alive()
     if running is False:
@@ -716,7 +722,13 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
         # L2（spec §4.4 · 裁定 L1-L4）：-1 清理两轮后仍失败 → 自动轮换未占用 sid。
         # 单实例锁仍以 preferred 为键（引擎身份），轮换只改 trader 会话 sid。
         if connect_rc == -1:
-            if _client_servable(self._userdata_path) is False:
+            # run_in_executor 投递（模块契约：协程内绝不直调同步阻塞调用）——
+            # _client_servable 链路 client_status 是 subprocess.run(powershell,
+            # timeout=8)（进程启动常耗 0.5-2s），直调会卡事件循环拖垮行情/心跳协程
+            # （评审 2026-08-15 抓出的唯一破例，与本模块 _run_bootstrap 同纪律）。
+            _servable = await self._loop.run_in_executor(
+                None, _client_servable, self._userdata_path)
+            if _servable is False:
                 # G8（2026-08-14 实测）：客户端不可服务（进程缺失 / 进程在但未登录，
                 # quoter 缓存数天未刷新）时 -1 的真实语义是「客户端未就绪」而非
                 # 「sid 被占」——轮换 100 候选纯属无效功（每候选 30s 超时 + start()

@@ -13,11 +13,39 @@ import pytest
 
 
 def test_status_unavailable_when_no_gateway(monkeypatch):
-    """无网关单例（缺 QMT 凭证）→ mode='unavailable'。"""
+    """无网关单例（缺 QMT 凭证）→ mode='unavailable'（含 A1 regime 观测字段）。"""
     from trading import gateway_service as trading_service
     monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
+    # A1（08-15）：regime 观测字段桩 None——单元测试不读真湖（455MB）
+    monkeypatch.setattr(trading_service, "_regime_field", lambda: None)
     s = trading_service.get_status()
-    assert s == {"connected": False, "locked": False, "mode": "unavailable"}
+    assert s == {"connected": False, "locked": False, "mode": "unavailable",
+                 "regime": None}
+
+
+def test_status_exposes_regime_field(monkeypatch):
+    """A1 spec §2.2.5：/trading/status 暴露当前 regime 态（观测面，当日缓存）。"""
+    from trading import gateway_service as trading_service
+    gw = type("G", (), {"_connected": True, "is_locked": False})()
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: gw)
+    monkeypatch.setattr(trading_service, "_regime_field",
+                        lambda: {"state": "BEAR", "reason": "HS300≤MA200", "asof": "2026-08-14"})
+    s = trading_service.get_status()
+    assert s["mode"] == "live" and s["regime"]["state"] == "BEAR"
+
+
+def test_status_regime_field_soft_degrades(monkeypatch):
+    """regime 观测读湖异常 → 软降级 None（网关四态不受影响——观测端点不炸）。"""
+    from trading import gateway_service as trading_service
+    import trading.data_ctx as _dctx
+    monkeypatch.setattr(trading_service, "get_gateway", lambda: None)
+
+    def _boom():
+        raise RuntimeError("湖损坏")
+    # 经真 _regime_field 路径：装配层 regime_state_today 抛异常 → 捕获返 None
+    monkeypatch.setattr(_dctx, "regime_state_today", _boom)
+    s = trading_service.get_status()
+    assert s["regime"] is None and s["mode"] == "unavailable"
 
 
 def test_status_disconnected_when_gateway_not_connected(monkeypatch):
