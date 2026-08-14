@@ -100,7 +100,12 @@ def _classify_sync(index_df, daily_df, asof) -> RegimeState:
     price_ok = last_close > last_ma
 
     # ── ② 宽度腿：全市场【末位行】close>各自 MA200 占比（时点宽度）────────
+    # 回放语义修正（2026-08-14 回放抓 bug）：先按 asof 截日期轴、再取尾 260 日——
+    # 原顺序「全湖最新 260 日再 asof 过滤」在历史回放时窗口被滤空（宽度恒 0 样本，
+    # 2022 的 BEAR 全靠指数腿碰巧撑、2024 下半年恒 UNKNOWN）。
     dates = daily_df.index.get_level_values("date").unique().sort_values()
+    if asof is not None:
+        dates = dates[dates <= pd.Timestamp(asof)]
     tail_dates = dates[-_BREADTH_TAIL_DAYS:]
     tail = daily_df.loc[tail_dates[0]:] if len(dates) > _BREADTH_TAIL_DAYS else daily_df
     if asof is not None:
