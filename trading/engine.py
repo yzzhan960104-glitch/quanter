@@ -743,11 +743,14 @@ class TradingEngine:
         哲学：缺信息时收紧而非放开）→ 拒新单；BULL 放行。
         **只断新单**：存量持仓的止损/止盈/stop_loss 巡检不经本闸（退出永远
         允许——停手≠清仓，闸门不越权变相自动清仓）。
-        判定单源 trading.compute.regime.classify（当日缓存，读湖成本一日一次）。
+        判定单源 trading.compute.regime.classify（纯计算，df 注入——compute 纯度
+        守卫要求零 I/O）；读湖与当日缓存在 trading.data_ctx.load_regime_frames
+        （eod 前置与本 ④ 段共享一次读湖，455MB 主湖一日一读）。
         """
         from trading.compute import regime
         try:
-            st = regime.classify()
+            from trading.data_ctx import load_regime_frames
+            st = regime.classify(*load_regime_frames())
         except Exception:
             # classify 自身已 fail-closed 返 UNKNOWN；此处兜底极端（import 级）异常
             logger.exception("regime 判定异常（fail-closed 停手）")

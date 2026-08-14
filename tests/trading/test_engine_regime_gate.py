@@ -20,6 +20,14 @@ def _rs(state, reason="测试", asof="2026-08-14"):
     return RegimeState(state=state, reason=reason, asof=asof)
 
 
+@pytest.fixture(autouse=True)
+def _fake_lake(monkeypatch):
+    """装配层桩：_regime_gate 经 data_ctx.load_regime_frames 读湖（455MB）——
+    gate 测试焦点是三态语义，桩掉读湖（classify 本身在各测试内 patch）。"""
+    monkeypatch.setattr("trading.data_ctx.load_regime_frames",
+                        lambda: (None, None))
+
+
 @pytest.fixture
 def eng():
     """零 I/O 构造（__init__ 只装配 scheduler，不 connect 不起 cron）。"""

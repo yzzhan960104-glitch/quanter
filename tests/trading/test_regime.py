@@ -41,11 +41,11 @@ def _daily_df(n_symbols, above_frac, n_days=220):
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    """每测试清当日缓存（classify 的进程内 _CACHE 会跨测试串结果）。"""
-    from trading.compute import regime
-    regime._CACHE.clear()
+    """每测试清 data_ctx 当日缓存（读湖装配的进程内缓存会跨测试串结果）。"""
+    import trading.data_ctx as dctx
+    dctx._REGIME_FRAMES_CACHE.clear()
     yield
-    regime._CACHE.clear()
+    dctx._REGIME_FRAMES_CACHE.clear()
 
 
 def test_bull_when_price_above_ma200_and_breadth_confirms():
@@ -91,24 +91,41 @@ def test_unknown_when_breadth_sample_too_small_and_price_ok():
 
 def test_reason_is_human_readable_with_numbers():
     """reason 人读中文含具体数字（播报/日志定位用）。"""
-    from trading.compute import regime
     st = classify(index_df=_index_df(list(range(360, 100, -1))),
                   daily_df=_daily_df(600, 0.8))
     assert isinstance(st.reason, str) and "MA200" in st.reason
-    # 同测试内两次 classify 的缓存键同为 "latest"——第二次调用前清缓存防劫持
-    regime._CACHE.clear()
+    # classify 纯化后无进程内缓存——同测试两次调用天然独立（IO 缓存在 data_ctx 层）
     st2 = classify(index_df=_index_df(list(range(100, 360))),
                    daily_df=_daily_df(600, 0.3))
     assert "宽度" in st2.reason
 
 
-def test_same_day_cached_without_df():
-    """当日缓存：同基准日第二次调用免注入命中缓存（不重读 455MB 湖）。"""
-    idx = _index_df(list(range(100, 360)))
-    daily = _daily_df(600, 0.8)
-    s1 = classify(index_df=idx, daily_df=daily)
-    s2 = classify()                                 # 无注入 → 必须走缓存（否则读湖）
-    assert s1.asof == s2.asof and s1.state == s2.state
+def test_classify_is_pure_no_default_lake_read():
+    """纯度契约：classify 无默认读湖分支（df 必传——IO 归 data_ctx 装配层，
+    tests/test_compute_purity 守卫 compute 零外部 I/O 的语义对齐）。"""
+    import inspect
+    sig = inspect.signature(classify)
+    assert sig.parameters["index_df"].default is inspect.Parameter.empty
+    assert sig.parameters["daily_df"].default is inspect.Parameter.empty
+
+
+def test_data_ctx_regime_frames_cached_per_day(monkeypatch):
+    """data_ctx.load_regime_frames 当日缓存：第二次调用不再读湖（读计数=1）。"""
+    import trading.data_ctx as dctx
+    calls = {"n": 0}
+
+    def fake_read(path, *a, **k):
+        calls["n"] += 1
+        if "index_daily" in str(path):
+            return _index_df(list(range(100, 360)))
+        return _daily_df(600, 0.8)
+
+    monkeypatch.setattr("pandas.read_parquet", fake_read, raising=False)
+    dctx._REGIME_FRAMES_CACHE.clear()
+    f1 = dctx.load_regime_frames()
+    f2 = dctx.load_regime_frames()
+    assert calls["n"] == 2          # 两湖各读一次
+    assert f1 is f2                 # 第二次命中缓存（同对象）
 
 
 def test_constants_are_dg_g4_pinned():

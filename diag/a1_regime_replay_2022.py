@@ -11,9 +11,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import pandas as pd
-from trading.compute.regime import classify, _load_lake
+from trading.compute.regime import classify
+from trading.data_ctx import load_regime_frames
 
-idx, daily = _load_lake()
+idx, daily = load_regime_frames()
 rows = []
 for mstart in pd.date_range("2022-01-01", "2024-12-01", freq="MS"):
     asof = (mstart + pd.offsets.MonthEnd(0)).strftime("%Y-%m-%d")
