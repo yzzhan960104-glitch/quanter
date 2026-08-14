@@ -251,7 +251,10 @@ def _fsync_path(path: str) -> None:
     内核异步刷盘，原子 rename 仍成立；抛错反而会让可用性退化（写入失败但实际数据已写完）。
     """
     try:
-        with open(path, "rb") as f:
+        # Windows 平台正确性：FlushFileBuffers 需写权限，"rb" 只读句柄在 Windows 上 fsync
+        # 大概率恒失败→落 except 静默降级（即 docstring 声明的容错）。改 "r+b"（读写、不截断），
+        # 让原子写的 fsync 在目标平台真生效——「断电不丢」承诺不再因只读句柄静默退化。
+        with open(path, "r+b") as f:
             os.fsync(f.fileno())
     except OSError:
         logger.warning("fsync 失败（文件系统不支持？正常关机仍会刷盘，原子 rename 仍成立）：%s",
