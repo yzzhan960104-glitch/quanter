@@ -95,7 +95,9 @@ def test_pre_open_cancel_passes_account_id(isolated_eng, monkeypatch):
             ss.get_latest_action.return_value = "CONFIRMED"
             ss.get_account.return_value = AsyncMock()
             ss.has_order.return_value = False
-            ss.insert_order.return_value = None
+            # G6 语义（2026-08-14）：返 True 让挂单段完整走通（None 触发 G6 中止分支，
+            # 虽不影响本测的撤单段断言，但保持 mock 与真实语义一致防未来漂移）。
+            ss.insert_order.return_value = True
             ss.update_order_state.return_value = None
             asyncio.run(engine.pre_open("2026-07-31", ports=isolated_eng._ports))
 

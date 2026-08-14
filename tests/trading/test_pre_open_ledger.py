@@ -82,7 +82,10 @@ async def test_pre_open_success_records_done():
         ss.get_account.return_value = AsyncMock()
         ss.get_latest_action.return_value = "CONFIRMED"
         ss.has_order.return_value = False
-        ss.insert_order.return_value = None
+        # G6 语义（2026-08-14）：pre_open 消费 insert_order 返回值——False/None=UNIQUE
+        # 占位中止 _submit（防 DB/柜台脱节幽灵单）。本测构造「落库成功 + _submit 成功」
+        # 走完主流程，mock 须返 True（旧 None 在 G6 下误判占位→submitted=0 假失败）。
+        ss.insert_order.return_value = True
         ss.update_order_state.return_value = None
         ss.insert_trade_event.return_value = None
         result = await pre_open("2026-08-03", ports=fake_ports)

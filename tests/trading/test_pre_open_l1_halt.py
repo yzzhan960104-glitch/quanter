@@ -206,8 +206,10 @@ def test_submit_backfill_failure_raises_critical_halt(isolated_eng, monkeypatch)
             ss.get_account.return_value = MagicMock()
             ss.get_latest_action.return_value = "CONFIRMED"
             ss.has_order.return_value = False
-            # insert_order(OPEN) 通过（这是 case (a) 的职责，不在这测）
-            ss.insert_order.return_value = None
+            # insert_order(OPEN) 通过（这是 case (a) 的职责，不在这测）。
+            # G6 语义（2026-08-14）：pre_open 消费 insert_order 返回值——False/None=UNIQUE
+            # 占位中止 _submit。本 case 构造「落库成功→_submit 成功→回填失败」，须显式 True。
+            ss.insert_order.return_value = True
             # _submit 返成功（DRY_RUN）→ 走回填 SUBMITTED 分支
             submit_mock.return_value = {"state": "DRY_RUN", "order_id": "seq_1"}
             # update_order_state(SUBMITTED) 抛异常 → raise _CriticalHalt
@@ -279,7 +281,9 @@ def test_submit_runtime_error_stays_l2_not_halt(isolated_eng, monkeypatch):
             ss.get_account.return_value = MagicMock()
             ss.get_latest_action.return_value = "CONFIRMED"
             ss.has_order.return_value = False
-            ss.insert_order.return_value = None
+            # G6 语义（2026-08-14）：须返 True 让流程真触达 _submit（None 会走 G6 中止分支
+            # 跳过 _submit → RuntimeError 路径根本不执行 → 本测退化成假绿）。
+            ss.insert_order.return_value = True
             # _submit 业务拒单（L2 路径，应被外层 try 吞掉，不抛 _CriticalHalt）
             submit_mock.side_effect = RuntimeError("涨停价挡板拒单")
             # 回填 REJECTED 的写也不抛（不影响本断言）

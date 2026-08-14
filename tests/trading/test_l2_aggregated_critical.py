@@ -62,7 +62,10 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
         ss.get_account.return_value = MagicMock()
         ss.get_latest_action.return_value = "CONFIRMED"  # 确认闸 + per-symbol veto 通过
         ss.has_order.return_value = False
-        ss.insert_order.return_value = None
+        # G6 语义（2026-08-14）：pre_open 现在消费 insert_order 返回值——False/None=UNIQUE
+        # 占位中止 _submit（防 DB/柜台脱节幽灵单）。本测试构造「落库成功、柜台业务拒单」，
+        # 故 mock 必须返 True（旧 None 在 G6 下会被误判占位→两只全中止→submitted=0 假失败）。
+        ss.insert_order.return_value = True
         ss.update_order_state.return_value = None
         monkeypatch.setattr(eng, "_pre_open_gate", AsyncMock(return_value=(True, "")))
         from trading.engine import pre_open

@@ -20,6 +20,7 @@ fast gate 清单（秒~分钟级，push 必跑）：
     - 任一 gate 失败 → 总 exit 1（CI 阻断）；逐项中文报告便于定位。
     - stdout reconfigure utf-8：防 Windows GBK 终端崩中文/符号（E2E 曾因此 UnicodeEncodeError）。
 """
+import os
 import subprocess
 import sys
 
@@ -45,7 +46,11 @@ def _run_one(name: str, cmd, shell: bool) -> int:
     """跑单个 gate，实时透传子进程输出，返回其 exit code。"""
     display = cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd)
     print(f"\n{'=' * 64}\n▶ {name}\n  $ {display}\n{'=' * 64}", flush=True)
-    rc = subprocess.run(cmd, shell=shell).returncode
+    # 防 Windows GBK 子进程崩中文（2026-08-14 实证：父进程 reconfigure utf-8 不下传，
+    # gate ③ pytest 在 GBK 管道下对中文/符号输出触发 UnicodeEncodeError 级联 3000+
+    # errors）。统一注入 PYTHONUTF8=1 与父进程同口径；Linux/CI 无副作用。
+    env = {**os.environ, "PYTHONUTF8": "1"}
+    rc = subprocess.run(cmd, shell=shell, env=env).returncode
     tag = "PASS" if rc == 0 else f"FAIL (exit {rc})"
     print(f"\n  → {name}: {tag}", flush=True)
     return rc
