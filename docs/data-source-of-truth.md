@@ -22,8 +22,8 @@
    - 运维巡检：`scripts/audit_ssot.py`——**已挂 Windows 计划任务 `QuanterAudit`，每日 16:05
      自动跑（CR-7 · 2026-08-15 起）**：post_close 后核当日账；经 `ops/run_audit.bat`
      落盘 `logs/audit_schtask.log`，errs 传 exit 1 供任务计划程序「上次运行结果」外显。
-     挂载/管理入口：`ops/manage_ops_schtasks.py`（`QuanterAudit` 在 RETIRED/LEGACY
-     清退红线名单内，禁止误清）。
+     挂载/管理入口：`ops/manage_ops_schtasks.py`（`QuanterAudit` 受『绝不加入
+     RETIRED/LEGACY 清退名单』红线保护（见 register_audit docstring），禁止误清）。
    - BANNED pattern 同口径（精确正则，跳注释），命中即 FAIL。
 
 ---

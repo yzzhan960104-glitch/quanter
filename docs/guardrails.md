@@ -47,8 +47,8 @@ npm --prefix presentation/web run test      # 前端组件/单测（vitest：tra
 > **路径红线（2026-07-25 教训）**：前端目录是 `presentation/web/`（旧 `web/` 已迁走），
 > 任何文档/脚本沿用旧前缀都会静默断链——CI 已加「路径未漂移」自检 step 兜底（见第五节）。
 
-契约护栏的纯函数也有单测：`tests/test_check_contracts.py`（17 项，截至 2026-08-15）、
-`tests/test_check_ports.py`（合计 26 项）。
+契约护栏的纯函数也有单测：`tests/test_check_contracts.py`（17 项）+
+`tests/test_check_ports.py`（9 项），两文件合计 26 项（截至 2026-08-15 collect 实测）。
 
 ---
 
