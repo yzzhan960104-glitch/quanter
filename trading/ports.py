@@ -24,6 +24,13 @@
     ``PortfolioBreakerThrottle`` dataclass 实例，经 ``EnginePorts.breaker_throttle``
     注入 stop_loss_monitor（依赖方向与 blackout 完全同构）。
 
+    W2-H2 追加（回调体 Ports 化 · master design §5.2）：order_state 的 broker 订单回调
+    三分支（handle_order_update 等）原以 engine 实例为依赖载体（副作用依赖隐式散在
+    函数体）。本波把回调体的**副作用依赖**收敛入 Ports：``state_store``（fill/position/
+    trade_event 落账唯一通道）+ ``gateway``（原 ``engine._gw`` 网关反查口）。其余 phases
+    的 state_store 仍走模块级 import（窄接口红线不放大——本字段只服务回调体，default
+    装配真模块对象，生产行为零变更）。
+
     四个依赖逐一对齐原 ``_ACTIVE_ENGINE`` / 模块级路径的语义（行为零变更）：
         gate            ← TradingEngine._pre_open_gate（盘前三段闸，返 (ok, reason)）
         whitelist_add   ← self._dynamic_whitelist.update（set 原地并集，对齐原 ``|=``）
@@ -33,9 +40,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Any, Awaitable, Callable, Iterable
 
 from trading.alerting import PortfolioBreakerThrottle, QuoteBlackoutThrottle
+# W2-H2：state_store 模块对象默认源。default_factory 绑「模块对象本身」而非其函数属性
+# ——回调体 ``ports.state_store.<attr>`` **调用时**才读模块属性，故
+# ``patch("trading.state_store.insert_fill")`` 改模块属性后经 ports 通道仍拿 mock
+# （monkeypatch 语义与 order_state 原顶部 ``from trading import state_store`` 完全等价，
+# W1-B gateway lazy 顶部化同款范式）。无环：state_store 顶部仅依赖 trading.clock（叶子），
+# 不反查 ports / engine / order_state。
+from trading import state_store as _default_state_store
 
 
 @dataclass
@@ -65,11 +80,27 @@ class EnginePorts:
             状态生命周期绑定 engine 实例（每 TradingEngine 一份），非模块级单例。
             ⚠️ dataclass 规则：有默认字段必须在无默认字段之后——blackout/breaker_throttle
             放末尾合规。
+        state_store: 回调体（order_state broker 订单三分支）的落账副作用唯一通道
+            （W2-H2 · 2026-08-15）。**模块对象风格**：default_factory 绑
+            ``trading.state_store`` 模块对象本身，order_state 经 ``ports.state_store.<attr>``
+            调用时属性访问——``patch("trading.state_store.insert_fill")`` 仍命中（08-04
+            幂等红线的全部测试 patch 语义零变更）。生产 engine 构造不传该字段（自动装
+            真模块）；契约测试传 fake（SimpleNamespace + 记录列表）验证依赖方向。
+        gateway: 网关句柄（原回调体 ``engine._gw`` 反查口 · W2-H2）。运行时装配依赖：
+            ``__init__`` 构造 ports 时 ``self._gw`` 尚为 None（bootstrap 装配网关后才
+            赋值），且 e2e orchestrator / 单测存在直改 ``eng._gw`` 的既有模式——故由
+            engine 侧薄 wrapper **调用时快照对齐**（``self._ports.gateway = self._gw``），
+            兼容全部赋值路径。T13（W2-H1 broker 分层）将收敛此过渡锚点。默认 None 与
+            dry_run 影子模式 gw=None 兜底语义一致（order_direction 对 None 网关返 None）。
     """
 
     gate: Callable[[str, Any], Awaitable[tuple[bool, str]]]
     whitelist_add: Callable[[Iterable[str]], None]
     whitelist_clear: Callable[[], None]
-    # ⚠️ blackout/breaker_throttle 放最后（gate/whitelist_* 无默认值，有默认字段必须在无默认之后）。
+    # ⚠️ 有默认字段必须在无默认字段之后（gate/whitelist_* 无默认值）。
     blackout: QuoteBlackoutThrottle = field(default_factory=QuoteBlackoutThrottle)
     breaker_throttle: PortfolioBreakerThrottle = field(default_factory=PortfolioBreakerThrottle)
+    # W2-H2（回调体 Ports 化）：lambda 防「模块对象当 default_factory 被 call」——模块不可
+    # 调用，须零参 lambda 返回模块对象。
+    state_store: ModuleType = field(default_factory=lambda: _default_state_store)
+    gateway: Any = None

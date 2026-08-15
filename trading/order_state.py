@@ -25,10 +25,11 @@ Layer2 follow-up #4c 定型（spec §3.5 · OrderState 纯枚举单源）：
 ============================================================================
 T1 Task 3 缝合点 #2 设计（brief Step 2 · 临时耦合 engine · Task 9 收口）
 ============================================================================
-3 个 broker 回调函数迁出后改为**接收 engine 实例引用**的 free function：
-    ``async def handle_order_update(engine, update)``
-    ``def order_direction(engine, order_id)``
-    ``def advance_order_state_from_status(engine, update)``
+3 个 broker 回调函数迁出后改为 free function（T1 Task 3 接收 engine 引用 →
+W2-H2 收窄为 ``ports`` 引用——副作用依赖显式注入）：
+    ``async def handle_order_update(ports, update)``
+    ``def order_direction(ports, order_id)``
+    ``def advance_order_state_from_status(ports, update)``
 内部访问点逐行原样（幂等红线零容忍）：
 - 实例属性 ``self._gw`` → ``engine._gw``（网关实例引用 · 非模块级符号）；
   止盈挂单 T1-Task9 已收口——``place_take_profit`` 顶部直接 import phases.exit 真身（W1-A/T2-Task6
@@ -40,7 +41,12 @@ T1 Task 3 缝合点 #2 设计（brief Step 2 · 临时耦合 engine · Task 9 �
   因 order_state 不再经 engine 模块属性解析而失效，Task 8-19 迁 patch 至物理真身模块路径
   （monkeypatch critical._alert_critical / critical._mode / account.resolve_account_id /
   post_close._seq_for_real_oid / post_close._order_state_to_db）。order_state 现行 engine 反查归零。
-- 项目级单例（``state_store`` / ``clock``）顶部直接 import（不涉及 engine patch，无循环）。
+- 项目级单例（``clock``）顶部直接 import（不涉及 engine patch，无循环）。
+  W2-H2（回调体 Ports 化 · master design §5.2）：``state_store`` 副作用依赖改经
+  ``ports.state_store`` 属性访问注入（EnginePorts default_factory 绑真模块对象——
+  ``patch("trading.state_store.insert_fill")`` 调用时属性读仍命中，语义与顶部直接
+  import 等价）；``engine._gw`` 网关反查口改 ``ports.gateway``（engine 薄 wrapper
+  调用时快照对齐）。三分支业务逻辑逐行保形（幂等红线零容忍）。
 
 幂等红线（fill 表 UNIQUE(order_id, traded_time) + _fill_inserted 守卫，08-04「1 笔成交记
 24 次」事故根因修复）：``handle_order_update`` 的 trade 分支 ``insert_fill`` /
@@ -51,7 +57,12 @@ import logging
 from typing import Any, Dict, Mapping, Optional, Callable
 from datetime import datetime
 
-from trading import clock, state_store as _state_store
+from trading import clock
+# W2-H2（回调体 Ports 化）：state_store 副作用依赖不再顶部 import——改经 ``ports.state_store``
+# 属性访问注入（EnginePorts default_factory 绑 ``trading.state_store`` 模块对象，调用时
+# 读模块属性 → ``patch("trading.state_store.insert_fill")`` 仍命中，与顶部 import 的
+# patch 语义完全等价）。Why：回调体副作用依赖显式化（engine 实例不再是依赖载体），
+# fake ports（SimpleNamespace + 记录列表）可注入验证依赖方向（test_order_state_ports）。
 # W1-B（Task 10）：gateway lazy 顶部化·模块对象风格——record_position_attribution 经
 # ``gateway_service.<attr>`` 属性访问（调用时读模块属性），patch(
 # "trading.gateway_service.record_position_attribution") 命中语义与原函数内 lazy import
@@ -325,10 +336,12 @@ class OrderStateMachine:
 # broker 订单回调三分支 + 状态推进（T1 Task 3 · 集群 I · 缝合点 #2）
 # 原 TradingEngine 实例方法 _handle_order_update / _order_direction /
 # _advance_order_state_from_status 迁此为 free function（接收 engine 引用）。
-# 逐行原样搬移（幂等红线零容忍，状态机语义归 architecture/05 红线不变形）。
+# W2-H2（2026-08-15）：依赖载体由 engine 实例改 ``ports``（EnginePorts）——副作用依赖
+# state_store 落账经 ``ports.state_store`` 属性访问、网关反查经 ``ports.gateway``，
+# engine 薄 wrapper 调用时快照对齐 gateway。业务逻辑逐行保形（幂等红线零容忍）。
 # ============================================================================
 
-async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
+async def handle_order_update(ports, update: Mapping[str, Any]) -> None:
     """成交回报 handler（由 Task 11 的 ``_on_order_update`` 经 ``create_task`` 调度，
     主线程事件循环执行）。
 
@@ -369,12 +382,17 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
     re-export 反查），不再经 engine 实例引用（消除缝合点 #2 的 take_profit 耦合）；
     engine 模块级符号 ``_mode`` / ``_alert_critical`` / ``_resolve_account_id`` 顶部直接
     import 物理真身（W1-A/T2-Task4/5 切断历史 engine re-export 反查）。逐行原样，幂等红线零容忍。
+
+    W2-H2（回调体 Ports 化）：依赖载体 engine 实例 → ``ports``（EnginePorts）。副作用
+    依赖 ``_state_store`` → ``ports.state_store``（模块对象属性访问，patch 语义零变更）；
+    网关反查口 ``engine._gw`` → ``ports.gateway``（engine 薄 wrapper 调用时快照对齐）。
+    三分支业务逻辑（幂等判定/落账顺序/通知时机）逐行保形。
     """
     # T1 Task 3 → W1-A/T2 收口：engine 模块级符号经 engine 反查的设计已全量退役（_mode /
     # _alert_critical / _resolve_account_id / place_take_profit / _seq_for_real_oid /
     # _order_state_to_db 全切顶部直接 import 物理真身 · patch engine._xxx 失效 → Task 8-19 迁
-    # patch 物理路径）。_state_store / clock 顶部 import（不涉及 engine patch），
-    # _CriticalHalt 同上（异常类）。
+    # patch 物理路径）。clock 顶部 import / _CriticalHalt 同上（异常类）；state_store 经
+    # ``ports.state_store`` 注入（W2-H2，default 装真模块对象——行为等价顶部 import）。
 
     kind = update.get("kind")
     if kind == "async_response":
@@ -385,7 +403,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
         real = str(update.get("order_id", ""))
         if seq_str and real and real != seq_str:
             try:
-                n = _state_store.update_order_state_by_broker_oid(
+                n = ports.state_store.update_order_state_by_broker_oid(
                     seq_str, new_broker_oid=real)
                 if n == 0:
                     logger.warning(
@@ -400,7 +418,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
     if kind == "order":
         # #5 第二刀：柜台委托状态推送（含累计 traded_volume）→ 推进 DB order state。
         # 中间态（SUBMITTED）更新为同值 no-op；终态/部分态精确落库。
-        advance_order_state_from_status(engine, update)
+        advance_order_state_from_status(ports, update)
         return
     if kind != "trade":
         return  # 仅处理成交回报（order/order_error 由风控层负责，不在本 handler 范围）
@@ -413,7 +431,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
         return
 
     # 判定方向（BUY/SELL/None）——账本写入与挂止盈决策都依赖
-    direction = order_direction(engine, order_id)
+    direction = order_direction(ports, order_id)
     if direction is None:
         # #1：方向未知 = 审计黑洞（不挂止盈 + 不落账），必须叫醒人工对账，禁止静默。
         # Fix1（用户两轴 review · 告警模式闸）：dry_run 模式理论上无真实成交回报
@@ -427,7 +445,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
     # C-6 V2：TP1 幂等 key（trade_date 口径）与账本 account/trade_id 同源计算一次。
     today_tp = clock.today()
     _account_id = _resolve_account_id()
-    _trade_id = _state_store.build_trade_id(_account_id, symbol, today_tp)
+    _trade_id = ports.state_store.build_trade_id(_account_id, symbol, today_tp)
 
     # spec §A1：direction=None 旁路补 trade_event(DIRECTION_UNKNOWN) 审计（Fix 3b，
     # 用户 final review 抓出）。原旁路只有 _alert_critical（仅 live 模式推钉钉），
@@ -439,9 +457,9 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
         try:
             # 确保 account 行存在（trade_event FK 引用 account，与下方 BUY/SELL
             # 分支同范式——dry_run 影子期可能未预置 default 账户，缺失则 FK 失败）
-            if _state_store.get_account(_account_id) is None:
-                _state_store.upsert_account(_account_id, broker="qmt")
-            _state_store.insert_trade_event(
+            if ports.state_store.get_account(_account_id) is None:
+                ports.state_store.upsert_account(_account_id, broker="qmt")
+            ports.state_store.insert_trade_event(
                 _account_id, _trade_id, symbol, "DIRECTION_UNKNOWN",
                 order_id=order_id, qty=float(qty) if qty else None,
                 price=float(price) if price else None,
@@ -465,19 +483,19 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
     if direction in ("BUY", "SELL"):
         try:
             # 确保 account 行存在（fill/trade_event FK 引用 account）
-            if _state_store.get_account(_account_id) is None:
-                _state_store.upsert_account(_account_id, broker="qmt")
+            if ports.state_store.get_account(_account_id) is None:
+                ports.state_store.upsert_account(_account_id, broker="qmt")
             traded_time = str(update.get("traded_time", ""))
-            _fill_inserted = _state_store.insert_fill(
+            _fill_inserted = ports.state_store.insert_fill(
                 order_id, _account_id, traded_time, symbol, direction,
                 float(qty), float(price), strategy="neckline")
             if _fill_inserted:
                 # insert_fill 首次入账才更新 position（避免重推重复累加）
-                _state_store.apply_fill_to_position(
+                ports.state_store.apply_fill_to_position(
                     _account_id, symbol, direction, float(qty), float(price), traded_time)
                 # FILLED 事件（W3.1：与真相源同判定点——首次 fill 才记 FILLED，
                 # 重放不再追加事件行，保证事件流与 fill 表 1:1 对齐）
-                _state_store.insert_trade_event(
+                ports.state_store.insert_trade_event(
                     _account_id, _trade_id, symbol, "FILLED",
                     order_id=order_id, qty=float(qty), price=float(price))
                 # SSoT Phase B · B2b：BUY 成交写持仓归因（接线 engine 成交路径）。
@@ -522,7 +540,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
     # （fill 重放时 TP 可能因 has_order 已 True 而跳过，但两套幂等各管各的真相源）。
     _tp_already = False
     try:
-        _tp_already = _state_store.has_order(_account_id, today_tp, symbol, "TP1")
+        _tp_already = ports.state_store.has_order(_account_id, today_tp, symbol, "TP1")
     except Exception:
         logger.exception("查 DB has_order(TP1) 失败 symbol=%s（保守跳过，防重复挂）", symbol)
         _tp_already = True  # DB 查询失败保守视为已挂（宁可漏挂人工补，不超卖）
@@ -561,7 +579,7 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
             logger.exception("成交通知发送失败 symbol=%s", symbol)
 
 
-def order_direction(engine, order_id: str) -> Optional[str]:
+def order_direction(ports, order_id: str) -> Optional[str]:
     """从 ``gw._orders`` 查订单方向（BUY/SELL）。
 
     物理意图：
@@ -576,8 +594,8 @@ def order_direction(engine, order_id: str) -> Optional[str]:
         - 其它/缺失 → 返 None（保守，不误挂止盈）
 
     Args:
-        engine: TradingEngine 实例（T1 Task 3 缝合点 #2：原 self，迁此为 engine 引用，
-            访问 ``engine._gw`` 拿 gw._orders 字典）。
+        ports: EnginePorts（W2-H2 回调体 Ports 化：原 engine 引用收窄为 ports——
+            经 ``ports.gateway`` 拿 gw._orders 字典、``ports.state_store`` 查 DB side）。
         order_id: 成交回报里的订单 ID（str；gw._orders 的 key 在 broker/qmt.py 内
                   既可能是 seq 也可能是 real order_id，本处按 str(update["order_id"]) 查）。
 
@@ -591,13 +609,14 @@ def order_direction(engine, order_id: str) -> Optional[str]:
         xtconstant 同值），保证单测可跑。生产环境（miniQMT 通道）xtquant 必装，
         兜底分支不会触达。
 
-    T1 Task 3 缝合点 #2：``self._gw`` → ``engine._gw``；engine 模块级辅助
-    ``_seq_for_real_oid`` 顶部直接 import post_close 真身（W1-A/T2-Task6 切断历史 engine
-    re-export 反查 · patch engine._seq_for_real_oid 失效 → Task 8-19 迁）。逐行原样。
+    T1 Task 3 缝合点 #2：``self._gw`` → ``engine._gw``；W2-H2 再收窄 ``engine._gw`` →
+    ``ports.gateway``（engine 薄 wrapper 调用时快照对齐，T13 broker 分层前的过渡锚点）；
+    engine 模块级辅助 ``_seq_for_real_oid`` 顶部直接 import post_close 真身（W1-A/T2-Task6
+    切断历史 engine re-export 反查 · patch engine._seq_for_real_oid 失效 → Task 8-19 迁）。逐行原样。
     """
     # T1 Task 3 → W1-A/T2-Task6 收口：_seq_for_real_oid 已切顶部直接 import post_close 真身
     # （本函数删别名赋值，patch engine._seq_for_real_oid 失效 → Task 8-19 迁 monkeypatch
-    # post_close.seq_for_real_oid）。_state_store 顶部 import。
+    # post_close.seq_for_real_oid）。state_store 经 ports.state_store 注入（W2-H2）。
 
     # #1 修复：方向反查 DB 优先（state_store.order.side，pre_open 已落库），
     # 内存 gw._orders.order_type 仅兜底（_sync_orders_if_stale 走 query_orders 时才有 order_type）。
@@ -606,11 +625,11 @@ def order_direction(engine, order_id: str) -> Optional[str]:
     # W1-A/T2-Task10：函数内 lazy import 防跨包环（见文件顶部注释 · plan line 116 预授权）
     from trading.phases.post_close import seq_for_real_oid as _seq_for_real_oid
     try:
-        _row = _state_store.get_order_by_broker_oid(order_id)
+        _row = ports.state_store.get_order_by_broker_oid(order_id)
         if _row is None:
-            _seq = _seq_for_real_oid(engine._gw, order_id)
+            _seq = _seq_for_real_oid(ports.gateway, order_id)
             if _seq is not None:
-                _row = _state_store.get_order_by_broker_oid(str(_seq))
+                _row = ports.state_store.get_order_by_broker_oid(str(_seq))
     except Exception:
         logger.exception("get_order_by_broker_oid 失败 order_id=%s（回退内存）", order_id)
     if _row is not None:
@@ -620,7 +639,7 @@ def order_direction(engine, order_id: str) -> Optional[str]:
         if side == "sell":
             return "SELL"
         # DB 有行但 side 异常 → 继续走内存兜底，不轻易返 None
-    orders = getattr(engine._gw, "_orders", {}) if engine._gw else {}
+    orders = getattr(ports.gateway, "_orders", {}) if ports.gateway else {}
     rec = orders.get(order_id, {})
     try:
         from xtquant import xtconstant  # 与 broker/qmt.py:61 同源导入路径
@@ -636,17 +655,18 @@ def order_direction(engine, order_id: str) -> Optional[str]:
     return None
 
 
-def advance_order_state_from_status(engine, update: Mapping[str, Any]) -> None:
+def advance_order_state_from_status(ports, update: Mapping[str, Any]) -> None:
     """kind=order：按柜台状态推进 DB order.state/filled_*（#5 第二刀）。
 
     Why 用 order 事件而非 trade 事件：order_status 55/56 区分 PARTIAL/FILLED，
     traded_volume 是累计成交（trade 是本笔增量），状态推进必须用累计量。
     竞态（async_response 晚到）：按 real 查 miss 时经 _seq_to_real 反查 seq 再匹配。
 
-    T1 Task 3 缝合点 #2：``self._gw`` → ``engine._gw``；engine 模块级辅助
-    ``_seq_for_real_oid`` / ``_order_state_to_db`` 顶部直接 import post_close 真身（W1-A/T2-Task6
-    切断历史 engine re-export 反查 · 保 ``patch("trading.engine._seq_for_real_oid")`` 历史命中
-    已失效 → Task 8-19 迁）。逐行原样。
+    T1 Task 3 缝合点 #2：``self._gw`` → ``engine._gw``；W2-H2 再收窄 ``engine._gw`` →
+    ``ports.gateway``（回调体 Ports 化，engine 薄 wrapper 调用时快照对齐）；engine 模块级
+    辅助 ``_seq_for_real_oid`` / ``_order_state_to_db`` 顶部直接 import post_close 真身
+    （W1-A/T2-Task6 切断历史 engine re-export 反查 · 保 ``patch("trading.engine._seq_for_real_oid")``
+    历史命中已失效 → Task 8-19 迁）。逐行原样。
     """
     # T1 Task 3 → W1-A/T2-Task6 收口：_seq_for_real_oid / _order_state_to_db 已切顶部直接
     # import post_close 真身（本函数删别名赋值，patch engine._seq_for_real_oid /
@@ -662,11 +682,11 @@ def advance_order_state_from_status(engine, update: Mapping[str, Any]) -> None:
     )
     row = None
     try:
-        row = _state_store.get_order_by_broker_oid(lookup)
+        row = ports.state_store.get_order_by_broker_oid(lookup)
         if row is None:
-            seq = _seq_for_real_oid(engine._gw, lookup)
+            seq = _seq_for_real_oid(ports.gateway, lookup)
             if seq is not None:
-                row = _state_store.get_order_by_broker_oid(str(seq))
+                row = ports.state_store.get_order_by_broker_oid(str(seq))
     except Exception:
         logger.exception("get_order_by_broker_oid 失败 lookup=%s", lookup)
         return
@@ -682,7 +702,7 @@ def advance_order_state_from_status(engine, update: Mapping[str, Any]) -> None:
     # 「为什么没成交」）。
     status_msg = str(update.get("status_msg") or update.get("order_remark") or "")
     try:
-        n = _state_store.update_order_state_by_broker_oid(
+        n = ports.state_store.update_order_state_by_broker_oid(
             row["broker_oid"] or lookup,
             state=new_state,
             filled_qty=float(traded_volume) if traded_volume is not None else None,

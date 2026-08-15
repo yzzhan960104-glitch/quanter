@@ -1399,18 +1399,25 @@ class TradingEngine:
     # _advance_order_state_from_status 已迁 trading.order_state.py（集群 I），此处留
     # 薄 wrapper 保 ``eng._handle_order_update`` 等既有调用路径（bootstrap
     # set_order_update_callback 绑实例；止盈 patch 点 W1-B 起在 trading.phases.exit）。
-    # 逐行原样委托，零行为变更（幂等红线零容忍）。
+    # W2-H2（回调体 Ports 化）：委托时传 ``self._ports``（副作用依赖 state_store 显式
+    # 注入）；gateway 调用时快照对齐——ports 在 __init__ 构造时 self._gw 尚为 None
+    # （bootstrap :612 装配网关后才赋值），且 e2e orchestrator / 单测存在直改
+    # ``eng._gw`` 的既有模式，故每次回调从 self._gw 快照同步（事件循环单线程无竞态，
+    # 兼容全部赋值路径）。逐行原样委托，零行为变更（幂等红线零容忍）。
     async def _handle_order_update(self, update: Mapping[str, Any]) -> None:
         """薄 wrapper：委托 trading.order_state.handle_order_update（T1 Task 3 迁出）。"""
-        return await handle_order_update(self, update)
+        self._ports.gateway = self._gw  # W2-H2：网关快照对齐（见上方注释块）
+        return await handle_order_update(self._ports, update)
 
     def _order_direction(self, order_id: str) -> Optional[str]:
         """薄 wrapper：委托 trading.order_state.order_direction（T1 Task 3 迁出）。"""
-        return order_direction(self, order_id)
+        self._ports.gateway = self._gw  # W2-H2：网关快照对齐（见 _handle_order_update 注释）
+        return order_direction(self._ports, order_id)
 
     def _advance_order_state_from_status(self, update: Mapping[str, Any]) -> None:
         """薄 wrapper：委托 trading.order_state.advance_order_state_from_status（T1 Task 3 迁出）。"""
-        advance_order_state_from_status(self, update)
+        self._ports.gateway = self._gw  # W2-H2：网关快照对齐（见 _handle_order_update 注释）
+        advance_order_state_from_status(self._ports, update)
 
     @_critical_guard
     async def _pipeline_then_eod(self) -> None:
