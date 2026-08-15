@@ -16,6 +16,9 @@
       的同时保持连接复用；继续时无需重连开销。
     - onUnmounted close()：组件销毁必须显式关闭 SSE，否则浏览器会一直持有
       连接与回调引用，组件实例无法 GC（路由切换频繁时是真实内存泄漏点）。
+    - SSE 前先 POST /api/v1/auth/read-cookie（N5 · Low ⑨）：EventSource 不能带
+      Authorization 头，须先经 axios（可带 header）换取 HttpOnly cookie quanter_ro，
+      同源 EventSource 自动携带；失败吞错直连（dry_run/离线容错，见 onMounted 注释）。
 -->
 <template>
   <el-card shadow="never">
@@ -33,6 +36,11 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+// N5（CR-8 残留 Low ⑨）：SSE 订阅前先用可带 header 的 fetch 通道（axios）换只读 cookie。
+// 物理意图：EventSource API 无法自定义请求头（不能带 Authorization: Bearer），live 配
+// token 时 /logs/stream 的 require_read_cookie 会 401——必须先 POST /api/v1/auth/read-cookie
+// 让服务端 set-cookie（HttpOnly quanter_ro），EventSource 同源请求自动携带。
+import { apiClient } from '@/api/client'
 
 // 环缓冲上限：防内存膨胀。日志爆发期（回放/批量任务）超过此值则丢弃最旧行。
 const MAX = 500
@@ -55,7 +63,17 @@ function levelClass(l: string) {
   return ''
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // 先换只读 cookie 再订阅 SSE（N5：live 配 token 静默 401 的修复半截）。
+  // Why try/catch 吞错照常直连：dry_run/未配 token 时端点 200 无 cookie 也无需 cookie
+  //（require_read_cookie 放行）；后端不在（本地纯前端开发）或 token 失配 401 时，
+  // SSE 直连仍按服务端裁决（401 由浏览器 EventSource 静默重试，面板空但不炸组件）。
+  // 换 cookie 失败绝不阻断日志面板的渲染主线。
+  try {
+    await apiClient.post('/api/v1/auth/read-cookie')
+  } catch {
+    // 吞错直连：cookie 换取是「尽力而为」的前置增强，非面板可用性前提。
+  }
   // 订阅 SSE：服务端 text/event-stream，每条 `data: <line>\n\n` 触发一次 message。
   _es = new EventSource('/api/v1/logs/stream')
   _es.addEventListener('message', (e: MessageEvent) => {

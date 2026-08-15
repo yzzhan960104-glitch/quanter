@@ -1,21 +1,26 @@
 /**
  * TerminalLogs 实时日志组件单测（Task 10 · 严格 TDD）。
  *
- * 物理意图：验证组件 onMounted → new EventSource('/api/v1/logs/stream') 订阅
- * SSE → message 事件回调把 e.data 追加到 lines → 模板按 ERROR/WARN 着色
- * → onUnmounted close() 整条链路在 jsdom 下能跑通。
+ * 物理意图：验证组件 onMounted → POST /api/v1/auth/read-cookie 换只读 cookie
+ * → new EventSource('/api/v1/logs/stream') 订阅 SSE → message 事件回调把
+ * e.data 追加到 lines → 模板按 ERROR/WARN 着色 → onUnmounted close() 整条
+ * 链路在 jsdom 下能跑通。
  *
  * Why mock EventSource：jsdom 不实现 EventSource，组件 setup 同步 new EventSource
  * 会抛 ReferenceError；用一个最小 mock 捕获 addEventListener 的回调，测试侧
  * 手动派发 message 事件即可驱动组件状态机。
  *
+ * Why mock @/api/client（N5 · Low ⑨）：onMounted 先经 axios POST 换 cookie——
+ * 真实 axios 在 jsdom 下发网络请求（404/超时噪声且拖慢）；组件只依赖「post 的
+ * promise 落定」这一时序，不消费响应体，最小 mock post 即可（discovery.spec 同款）。
+ *
  * Why vi.hoisted：vi.mock/globalThis 赋值的工厂被提升到顶部，普通顶层 const 在
  * 其内部引用会触发 TDZ（Cannot access before initialization）。这里 MockES 不
  * 涉及 vi.mock 工厂闭包，但沿用 TradesTable.spec.ts 的装配骨架统一风格。
  *
- * Why flushPromises：组件 onMounted 是同步的（new EventSource 即时返回），
- * 但 vue/test-utils mount 后需 flush 一次微任务让 setup/onMounted 钩子完整
- * 跑完，再断言 _es 已建立。
+ * Why flushPromises：onMounted 前半段 await apiClient.post（异步）——mount 返回
+ * 时 post 已发出但 EventSource 尚未建立，flush 一次微任务让 await 落定、钩子
+ * 跑完，再断言 _es 已建立（时序契约由 read-cookie 先行用例单独钉死）。
  *
  * Why 顶部 polyfill：EP el-card/el-button 在 jsdom 下依赖 ResizeObserver/
  * matchMedia 做响应式测量，不补会在 mount 时抛 TypeError（与 TradesTable 同根）。
@@ -24,6 +29,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import TerminalLogs from '../TerminalLogs.vue'
+
+// ---- apiClient 最小 mock（N5 · Low ⑨）：只 mock 组件消费的 post 通道 ----
+// 默认 resolve（dry_run 无 token 的 200 形态）；失败容错用例用 mockRejectedValueOnce
+// 逐次覆写。组件不读响应体，只吃「promise 落定」时序。
+vi.mock('@/api/client', () => ({
+  apiClient: { post: vi.fn().mockResolvedValue({ ok: true }) },
+}))
 
 // ---- jsdom 缺失 API 的最小 polyfill（满足 EP 不抛，不模拟真实行为）----
 class MockObserver {
@@ -81,6 +93,33 @@ describe('TerminalLogs.vue', () => {
   })
   afterEach(() => {
     vi.clearAllMocks()
+  })
+
+  it('SSE 订阅前先 POST /api/v1/auth/read-cookie（live cookie 换取时序）', async () => {
+    // N5 · Low ⑨：EventSource 无法带 Authorization 头——必须先经 axios 换 HttpOnly
+    // cookie，SSE 同源自动携带。时序红线：post 未落定前不得建 EventSource（否则 live
+    // 配 token 时首个 SSE 请求裸奔 401）。
+    const { apiClient } = await import('@/api/client')
+    const w = mountLogs()
+    // mount 同步段：post 已发出、await 未落定 → EventSource 必然尚未建立。
+    expect(apiClient.post).toHaveBeenCalledWith('/api/v1/auth/read-cookie')
+    expect(MockES.last).toBeNull()
+    await flushPromises()
+    expect(MockES.last).toBeTruthy()
+    expect(MockES.last!.url).toBe('/api/v1/logs/stream')
+    w.unmount()
+  })
+
+  it('read-cookie 失败吞错照常直连（dry_run/离线容错）', async () => {
+    // 换 cookie 是「尽力而为」的前置增强而非面板可用性前提：后端不在/token 失配时
+    // post reject，组件不得抛错、不得阻断 SSE 建立（直连交服务端裁决）。
+    const { apiClient } = await import('@/api/client')
+    vi.mocked(apiClient.post).mockRejectedValueOnce(new Error('offline'))
+    const w = mountLogs()
+    await flushPromises()
+    expect(MockES.last).toBeTruthy()
+    expect(MockES.last!.url).toBe('/api/v1/logs/stream')
+    w.unmount()
   })
 
   it('订阅 SSE 并追加日志行（brief Step 1 主路径）', async () => {

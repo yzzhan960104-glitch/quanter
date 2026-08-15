@@ -57,8 +57,20 @@ LEGACY_TASKS = [
 
 
 def _schtasks(args: list[str]) -> int:
-    """封装 schtasks 子进程调用。capture_output 避免乱码打屏，text=True 直接拿 str。"""
-    return subprocess.run(["schtasks"] + args, capture_output=True, text=True).returncode
+    """封装 schtasks 子进程调用。capture_output 避免乱码打屏，text=True 直接拿 str。
+
+    Why 显式 encoding="utf-8" + errors="replace"（Low ⑪ · 2026-08-16）：text=True 不带
+    encoding 时子进程输出按 locale 编码解码——本项目全链强制 PYTHONUTF8=1，Python 的
+    locale 编码随之变 UTF-8，而中文 Windows 的 schtasks 输出的是 GBK（cp936）字节：
+    GBK 字节流按 UTF-8 strict 解码在 communicate 的 reader 线程里抛 UnicodeDecodeError，
+    注册动作实际已成功但进程以解码异常收场（stdout 丢失，运维看到的是炸栈不是结果）。
+    显式 utf-8 + replace：本函数只消费 returncode，stdout 本就丢弃，乱码占位无害；
+    解码永不抛是硬契约（清退/注册链路的幂等语义不能被输出编码打断）。
+    """
+    return subprocess.run(
+        ["schtasks"] + args, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    ).returncode
 
 
 def register() -> None:

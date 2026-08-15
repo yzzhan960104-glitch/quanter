@@ -196,3 +196,28 @@ def test_main_register_audit_flag():
         rc = main(["--register-audit"])
     assert rc == 0
     ra.assert_called_once()
+
+
+# ============ Low ⑪（N5 · 2026-08-16）：_schtasks 子进程解码容错 ============
+
+
+def test_schtasks_passes_utf8_replace_decode_kwargs():
+    """_schtasks 显式 encoding=utf-8 / errors=replace（GBK 输出不炸 reader 线程）。
+
+    物理意图：全链 PYTHONUTF8=1 下 text=True 缺省按 UTF-8 strict 解码，而中文
+    Windows 的 schtasks 输出 GBK 字节——GBK 字节流过 UTF-8 strict 解码在
+    communicate 的 reader 线程抛 UnicodeDecodeError，注册已成功却以炸栈收场
+    （stdout 丢失）。本测试锁定两个解码 kwarg 必须显式在位（缺省回归即红）。
+    """
+    import ops.manage_ops_schtasks as mos
+
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+
+    with patch("ops.manage_ops_schtasks.subprocess.run",
+               side_effect=lambda *a, **kw: captured.update(kw) or _Proc()):
+        mos._schtasks(["/Query", "/TN", "AnyTask"])
+    assert captured.get("encoding") == "utf-8", "必须显式 utf-8 解码（locale 漂移防线）"
+    assert captured.get("errors") == "replace", "必须 replace 容错（解码永不抛是硬契约）"
