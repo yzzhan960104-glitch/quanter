@@ -610,7 +610,8 @@ def order_direction(ports, order_id: str) -> Optional[str]:
         兜底分支不会触达。
 
     T1 Task 3 缝合点 #2：``self._gw`` → ``engine._gw``；W2-H2 再收窄 ``engine._gw`` →
-    ``ports.gateway``（engine 薄 wrapper 调用时快照对齐，T13 broker 分层前的过渡锚点）；
+    ``ports.gateway``（engine 薄 wrapper 调用时快照对齐；T13 broker 分层裁定保留——
+    回调体查网关实例态 _orders/_seq_to_real，模块分层替代不了实例锚点）；
     engine 模块级辅助 ``_seq_for_real_oid`` 顶部直接 import post_close 真身（W1-A/T2-Task6
     切断历史 engine re-export 反查 · patch engine._seq_for_real_oid 失效 → Task 8-19 迁）。逐行原样。
     """

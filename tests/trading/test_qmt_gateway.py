@@ -3,11 +3,11 @@
 import asyncio
 import pytest
 
-# Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）。
+# Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）；W2-H1 再分四文件。
 # patch 内部全局（_alert_account_status/_XTQUANT_AVAILABLE/XtQuantTrader/xtconstant/
-# _QMT_* 字面量等）须指真身模块，trading.qmt_gateway 垫片的 re-export 副本与真身
-# 非同一对象，patch 垫片无效。
-from broker import qmt as qmt_gateway
+# _QMT_* 字面量等）须指真身模块——现真身 = 契约根 broker.qmt_connection（broker.qmt
+# 只是组装+re-export 垫片，patch 垫片无效）。
+from broker import qmt_connection as qmt_gateway
 from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 from broker.qmt import QmtExecutionGateway
 

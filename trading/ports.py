@@ -90,7 +90,10 @@ class EnginePorts:
             ``__init__`` 构造 ports 时 ``self._gw`` 尚为 None（bootstrap 装配网关后才
             赋值），且 e2e orchestrator / 单测存在直改 ``eng._gw`` 的既有模式——故由
             engine 侧薄 wrapper **调用时快照对齐**（``self._ports.gateway = self._gw``），
-            兼容全部赋值路径。T13（W2-H1 broker 分层）将收敛此过渡锚点。默认 None 与
+            兼容全部赋值路径。T13（W2-H1 broker 分层）裁定：**保留**——回调体
+            （order_state）经它查网关【实例态】``_orders`` / ``_seq_to_real``，T13 只做
+            模块级分层（类/常量拆文件），实例世界不变，模块 import 无法替代实例锚点；
+            BrokerProtocol（trading.broker_ports）亦刻意不含这两个私有态。默认 None 与
             dry_run 影子模式 gw=None 兜底语义一致（order_direction 对 None 网关返 None）。
     """
 

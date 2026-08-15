@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from broker import qmt as qmt_mod
+# W2-H1：patch 内部全局（_write_runtime_session 等）须指真身模块——契约根
+# broker.qmt_connection（broker.qmt 只是组装+re-export 垫片，patch 垫片无效）。
+from broker import qmt_connection as qmt_mod
 from broker.qmt import (
     QmtExecutionGateway,
     _candidate_session_ids,

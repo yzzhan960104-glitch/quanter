@@ -404,8 +404,10 @@ class TradingEngine:
 
         # T1（缝合点 #1）：构造 EnginePorts 窄接口，替代原模块级活跃引擎单例桥。
         # 物理意图：phases 外迁（T6-T8）后模块级 pre_open/post_close 无法再反查 engine 实例，
-        # 经本 ports 显式注入「实例特有」依赖（gate + 动态白名单注入/清空）。state_store /
-        # lake / gateway 仍走模块级 import，不进 Ports（窄接口红线 + 不越界 T6）。
+        # 经本 ports 显式注入「实例特有」依赖（gate + 动态白名单注入/清空）。
+        # W2 订正（T1 期口径已过时）：state_store/gateway 自 W2-H2 起已入 Ports——但仅服务
+        # order_state 回调体（fill/trade_event 落账 + gw._orders/_seq_to_real 实例态反查）；
+        # lake 仍走模块级 import，不进 Ports（窄接口红线不放大）。
         # ⚠️ 必须在 _dynamic_whitelist 初始化（上方 set()）之后构造——whitelist_add/clear 绑定它。
         # gate 用延迟 lambda：调用时才解析 self._pre_open_gate，支持测试期 monkeypatch 实例
         # 方法（eng._pre_open_gate = AsyncMock(...)）与未来子类 override；生产路径 eng 永不

@@ -15,10 +15,11 @@ import types
 import pytest
 from unittest.mock import AsyncMock
 
-# Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）。
-# patch 内部全局（_CONNECT_TIMEOUT/_ORDER_TIMEOUT/XtQuantTrader 等）须指真身模块，
-# trading.qmt_gateway 垫片的 re-export 副本与真身非同一对象，patch 垫片无效。
-from broker import qmt as qmt_gateway
+# Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）；W2-H1 再分四文件。
+# patch 内部全局（_CONNECT_TIMEOUT/XtQuantTrader/_client_servable 等）须指真身模块
+# ——现真身 = 契约根 broker.qmt_connection（broker.qmt 只是组装+re-export 垫片，
+# patch 垫片无效）。例外：_ORDER_TIMEOUT 的 submit/cancel 读取方在 broker.qmt_business。
+from broker import qmt_connection as qmt_gateway
 from broker.qmt import QmtExecutionGateway, _map_qmt_status, _assert_status_contract
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
@@ -238,7 +239,10 @@ def test_submit_order_timeout_returns_failed(monkeypatch):
     """#9：order_stock_async 阻塞 → wait_for 超时返 FAILED（不抛、不卡事件循环）。"""
     import time
     _setup_env(monkeypatch)
-    monkeypatch.setattr(qmt_gateway, "_ORDER_TIMEOUT", 0.05)
+    # W2-H1：submit_order 真身在 broker.qmt_business（_ORDER_TIMEOUT 从契约根
+    # from-import 的读取方副本），patch 须指读取方模块。
+    from broker import qmt_business
+    monkeypatch.setattr(qmt_business, "_ORDER_TIMEOUT", 0.05)
 
     def _slow_order(self, *args):
         time.sleep(0.5)
