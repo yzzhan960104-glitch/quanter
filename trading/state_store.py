@@ -1055,7 +1055,11 @@ def _entry_date_from_traded_time(traded_time: str | None) -> str | None:
     ts = str(traded_time).strip()
     # 态③：≥14 位纯数字（YYYYMMDDHHMMSS）→ 前 8 位重组 YYYY-MM-DD。
     # 阈值钉 14 而非 8：防把 8 位日期/其它短数字串误判（短串走 None → 兜底，行为不变）。
-    if ts.isdigit() and len(ts) >= 14:
+    # isascii() 前置（N5）：str.isdigit() 对全角数字（"２０２６…"）与 Unicode 数字
+    # 变体也返 True——不设此闸会截出「２０２６-０７-０２」这类全角脏日期落
+    # entry_date（下游 holding_days 字符串比较全错位且肉眼难辨）。非 ASCII 数字
+    # 不是任何调用点的合法入参形态，落 None → 兜底写入日语义。
+    if ts.isascii() and ts.isdigit() and len(ts) >= 14:
         return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
     # 态①②：含 "-" 且长 ≥10 → 日期段在前，取前 10 位（YYYY-MM-DD）。
     # 轻量形状校验（4/7 位是 "-" 且三段数字就位）：防 "abc-2026-07-02" 类垃圾串截出脏日期。

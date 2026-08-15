@@ -252,6 +252,15 @@ def test_entry_date_from_traded_time_four_states():
     assert f("") is None
     assert f(None) is None
     assert f("garbage") is None
+    # 8 位日期不属四态（N5 补钉）：长度 <14 的数字串走 None → 兜底写入日，
+    # 不得截前 8 位重组（防止把半截数字串当日期）。
+    assert f("20260728") is None
+    # 形状校验钉死（N5 补钉）：垃圾头 + 合法日期尾巴的混种串不得被「取前 10 位」
+    # 截出脏日期——"abc-2026-07-02" 的 head[4] 非 "-"，形状闸必须拦下返 None。
+    assert f("abc-2026-07-02") is None
+    # 全角数字（N5 isascii 守卫）：isdigit() 对全角也返 True——不设 isascii 前置
+    # 会截出「２０２６-０７-０２」全角脏日期（下游字符串比较全错位且肉眼难辨）。
+    assert f("２０２６０７０２０９２５００") is None
 
 
 def test_entry_date_falls_back_to_today_on_pure_time(db, monkeypatch):

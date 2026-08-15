@@ -533,9 +533,11 @@ def test_classify_probes_only_midpoint(tmp_path, monkeypatch):
     """
     from data.tools import repair_gaps as rg
 
-    gap = GapRange("000921.SZ", "2024-09-02", "2024-09-06",
-                   ("2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05",
-                    "2024-09-06"), suspend_justified=False)
+    # N5 · D④ 守卫后语义：市场级全零的标记只在盲区年代（<2005）成立——用例迁 2001
+    # （2024 现代交易日市场全零会被守卫判源侧故障不标记，另见守卫专测）。
+    gap = GapRange("000921.SZ", "2001-06-18", "2001-06-22",
+                   ("2001-06-18", "2001-06-19", "2001-06-20", "2001-06-21",
+                    "2001-06-22"), suspend_justified=False)
     fetched = []
 
     def _fake(pro, api, tdc):
@@ -547,8 +549,8 @@ def test_classify_probes_only_midpoint(tmp_path, monkeypatch):
 
     stats = rg.classify_gaps([gap], object(), lake_dir=str(tmp_path))
 
-    # 5 日子段中点 = 09-04（index len//2）：恰好一对拉取，首尾/其余日零调用
-    assert fetched == [("daily", "20240904"), ("adj_factor", "20240904")], \
+    # 5 日子段中点 = 06-20（index len//2）：恰好一对拉取，首尾/其余日零调用
+    assert fetched == [("daily", "20010620"), ("adj_factor", "20010620")], \
         "只拉中点 1 日 ×（daily+adj）一对，不得全段拉取"
     assert stats["marked"] == 1
 
@@ -561,8 +563,9 @@ def test_classify_zero_midpoint_marks_probe_zero_day(tmp_path, monkeypatch):
     """
     from data.tools import repair_gaps as rg
 
-    gap = GapRange("000921.SZ", "2024-09-03", "2024-09-05",
-                   ("2024-09-03", "2024-09-04", "2024-09-05"), suspend_justified=False)
+    # N5 · D④：市场级全零（盲区形态）标记用例迁 2001——现代交易日全零走守卫专测。
+    gap = GapRange("000921.SZ", "2001-06-18", "2001-06-20",
+                   ("2001-06-18", "2001-06-19", "2001-06-20"), suspend_justified=False)
     monkeypatch.setattr(rg, "_fetch_paged", lambda *a, **k: pd.DataFrame())
     monkeypatch.setattr(rg, "REPAIR_DAY_SLEEP", 0.0)
 
@@ -570,7 +573,7 @@ def test_classify_zero_midpoint_marks_probe_zero_day(tmp_path, monkeypatch):
 
     side = json.loads((tmp_path / ".repair_unfillable.json").read_text(encoding="utf-8"))
     e = side["entries"][0]
-    assert (e["symbol"], e["start"], e["end"]) == ("000921.SZ", "2024-09-03", "2024-09-05")
+    assert (e["symbol"], e["start"], e["end"]) == ("000921.SZ", "2001-06-18", "2001-06-20")
     assert e["reason"] == "probe_zero_day", "采样推定 reason（与实证 reason 分级）"
     assert e["count"] == 1, "count=1：只实证中点 1 日"
     assert stats["marked"] == 1 and stats["nonzero"] == 0
@@ -650,12 +653,13 @@ def test_classify_shares_fetch_for_same_midpoint_day(tmp_path, monkeypatch):
     """
     from data.tools import repair_gaps as rg
 
-    g1 = GapRange("000921.SZ", "2024-09-02", "2024-09-06",
-                  ("2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05",
-                   "2024-09-06"), suspend_justified=False)
-    g2 = GapRange("000670.SZ", "2024-09-02", "2024-09-06",
-                  ("2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05",
-                   "2024-09-06"), suspend_justified=False)
+    # N5 · D④：全零市场响应的标记用例迁 2001 盲区年代（现代交易日全零=守卫故障态）。
+    g1 = GapRange("000921.SZ", "2001-06-18", "2001-06-22",
+                  ("2001-06-18", "2001-06-19", "2001-06-20", "2001-06-21",
+                   "2001-06-22"), suspend_justified=False)
+    g2 = GapRange("000670.SZ", "2001-06-18", "2001-06-22",
+                  ("2001-06-18", "2001-06-19", "2001-06-20", "2001-06-21",
+                   "2001-06-22"), suspend_justified=False)
     fetched = []
 
     def _fake(pro, api, tdc):
@@ -667,8 +671,8 @@ def test_classify_shares_fetch_for_same_midpoint_day(tmp_path, monkeypatch):
 
     stats = rg.classify_gaps([g1, g2], object(), lake_dir=str(tmp_path))
 
-    assert fetched == [("daily", "20240904"), ("adj_factor", "20240904")], \
-        "两子段共享中点日 09-04 → 只拉一对"
+    assert fetched == [("daily", "20010620"), ("adj_factor", "20010620")], \
+        "两子段共享中点日 06-20 → 只拉一对"
     assert stats["marked"] == 2, "两个子段各自入标（共享一次探针实证）"
     assert stats["probed_days"] == 1
 
@@ -738,3 +742,162 @@ def test_classify_cli_wiring_and_mutex(tmp_path, monkeypatch, capsys):
     assert stats_calls == [str(tmp_path)], "lake_dir 必须透传（sidecar 锚点）"
     out = capsys.readouterr().out
     assert "probe_zero_day" in out and "标记 1" in out, "stdout 摘要必须带标记数"
+
+
+# ============================================================================
+# N5 · D 批加固（2026-08-16）：sidecar 原子写 + 并发合并 + reason 定向清除
+# + classify 中断非零退出 + 现代交易日市场全零守卫
+# ============================================================================
+# 物理意图：T1b 实弹后暴露的四个加固点——① classify 长跑（1h）期间 repair --auto
+# 并发写 sidecar，直接覆盖写会抹掉并发方铁证条目（并发窗口）；② probe_zero_day
+# 是采样推定，误标时需要「只清推定不动铁证」的定向逃生口；③ classify 中断返 0
+# 会让 schtasks「上次运行结果」显示成功（半途被当完成）；④ 现代交易日（≥2005）
+# 全市场零行只可能是源侧故障，无守卫会把当日全部待探标的批量误标（标记后双侧
+# 跳过，误标段从此不再补采）。
+
+
+def test_classify_final_save_merges_concurrent_entries(tmp_path, monkeypatch):
+    """N5 D①：classify 落盘 re-load 合并——长跑期间并发落的铁证条目不被覆盖抹掉。
+
+    场景：classify 探 000921.SZ 盲区中点（2001）期间，repair --auto 并发往 sidecar
+    落了两条铁证（含同段不同 reason——验证四元组键的分级共存语义）。旧实现把启动
+    时 load 的内存快照直接覆盖写回，并发条目静默消失（下轮 scan 重新进队烧配额）。
+    """
+    from data.tools import repair_gaps as rg
+
+    gap = GapRange("000921.SZ", "2001-06-18", "2001-06-20",
+                   ("2001-06-18", "2001-06-19", "2001-06-20"), suspend_justified=False)
+    # 并发方（repair --auto）落的铁证：另一标的全段实证 + 同段不同 reason（分级共存）
+    concurrent = [
+        {"symbol": "600000.SH", "start": "2024-09-04", "end": "2024-09-05",
+         "reason": "symbol_absent", "count": 2, "marked_at": "2026-08-16T00:00:00"},
+        {"symbol": "000921.SZ", "start": "2001-06-18", "end": "2001-06-20",
+         "reason": "market_empty", "count": 3, "marked_at": "2026-08-16T00:00:00"},
+    ]
+
+    def _fake(pro, api, tdc):
+        # 模拟并发窗口：classify 拉取期间（cov 过滤之后）另一进程写 sidecar
+        rg.save_unfillable_entries(str(tmp_path), list(concurrent))
+        return pd.DataFrame()  # 盲区年代（2001）中点全零 → 正常标记 probe_zero_day
+
+    monkeypatch.setattr(rg, "_fetch_paged", _fake)
+    monkeypatch.setattr(rg, "REPAIR_DAY_SLEEP", 0.0)
+
+    stats = rg.classify_gaps([gap], object(), lake_dir=str(tmp_path))
+    assert stats["marked"] == 1
+
+    side = json.loads((tmp_path / ".repair_unfillable.json").read_text(encoding="utf-8"))
+    keys = {(e["symbol"], e["reason"]) for e in side["entries"]}
+    # 并发铁证必须存活（覆盖写会抹掉）
+    assert ("600000.SH", "symbol_absent") in keys, "并发铁证条目不得被 classify 内存快照覆盖"
+    # 同段不同 reason 分级共存（四元组键含 reason，不互相顶掉）
+    assert ("000921.SZ", "market_empty") in keys and ("000921.SZ", "probe_zero_day") in keys, \
+        "同段实证/推定两级标记共存（键含 reason）"
+
+
+def test_clear_unfillable_reason_scoped(tmp_path):
+    """N5 D②：clear_unfillable(reason=) 定向清除——只删匹配 reason，铁证不动。
+
+    三个分支：有匹配→重写保留余量；无匹配→零副作用（文件不动）；清完→删文件
+    （不留空壳——空 sidecar 与无 sidecar 语义等同）。
+    """
+    from data.tools import repair_gaps as rg
+
+    side = tmp_path / ".repair_unfillable.json"
+    side.write_text(json.dumps({"entries": [
+        {"symbol": "A.SZ", "start": "2001-06-18", "end": "2001-06-20",
+         "reason": "probe_zero_day", "count": 1, "marked_at": "t1"},
+        {"symbol": "B.SZ", "start": "2024-09-04", "end": "2024-09-05",
+         "reason": "symbol_absent", "count": 2, "marked_at": "t2"},
+        {"symbol": "C.SZ", "start": "2000-01-04", "end": "2000-01-05",
+         "reason": "market_empty", "count": 2, "marked_at": "t3"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+
+    # ① 只清 probe_zero_day：推定标记删，两条铁证原样保留
+    assert rg.clear_unfillable(str(tmp_path), reason="probe_zero_day") is True
+    left = json.loads(side.read_text(encoding="utf-8"))["entries"]
+    assert {e["symbol"] for e in left} == {"B.SZ", "C.SZ"}, "铁证标记不得连坐清除"
+
+    # ② 无匹配 reason：零副作用（不重写文件，marked_at 时间戳不动）
+    assert rg.clear_unfillable(str(tmp_path), reason="nonexistent") is False
+    assert len(json.loads(side.read_text(encoding="utf-8"))["entries"]) == 2
+
+    # ③ 逐 reason 清空 → 文件删除（不留空壳）
+    assert rg.clear_unfillable(str(tmp_path), reason="symbol_absent") is True
+    assert rg.clear_unfillable(str(tmp_path), reason="market_empty") is True
+    assert not side.exists()
+
+
+def test_repair_main_clear_unfillable_reason(tmp_path, capsys):
+    """N5 D② CLI：--clear-unfillable --reason probe_zero_day → 推定清、铁证留。"""
+    from data.tools import repair_gaps as rg
+
+    side = tmp_path / ".repair_unfillable.json"
+    side.write_text(json.dumps({"entries": [
+        {"symbol": "A.SZ", "start": "2001-06-18", "end": "2001-06-20",
+         "reason": "probe_zero_day", "count": 1, "marked_at": "t1"},
+        {"symbol": "A.SZ", "start": "2001-06-18", "end": "2001-06-20",
+         "reason": "probe_zero_day", "count": 1, "marked_at": "t1b"},
+        {"symbol": "B.SZ", "start": "2024-09-04", "end": "2024-09-05",
+         "reason": "symbol_absent", "count": 2, "marked_at": "t2"},
+    ]}, ensure_ascii=False), encoding="utf-8")
+
+    rc = rg.main(["--clear-unfillable", "--reason", "probe_zero_day",
+                  "--lake-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "probe_zero_day" in out and "保留 1" in out, "stdout 摘要带清除数与保留数"
+    left = json.loads(side.read_text(encoding="utf-8"))["entries"]
+    assert len(left) == 1 and left[0]["reason"] == "symbol_absent", "铁证留、推定清"
+
+    # --reason 单独出现（无 --clear-unfillable）→ fail-fast（防「以为清了实则跑补采」）
+    with pytest.raises(SystemExit):
+        rg.main(["--reason", "probe_zero_day", "--lake-dir", str(tmp_path)])
+
+
+def test_classify_cli_interrupted_returns_nonzero(tmp_path, monkeypatch, capsys):
+    """N5 D③：classify 中断（已 checkpoint）→ main 返非零——半途≠完成。
+
+    中断源四类：限频/异常/超时/市场全零守卫。返 0 会让 schtasks「上次运行结果」
+    显示成功，半途而废的收敛被误当完成（daemon fail-closed 闸打不开的排查被掩盖）。
+    """
+    from data.tools import repair_gaps as rg
+
+    monkeypatch.setattr("data.tools.scan_integrity.scan", lambda *a, **k: {"gaps": []})
+    monkeypatch.setattr("data._tushare_compat.get_pro", lambda: object())
+    monkeypatch.setattr(rg, "classify_gaps", lambda gaps, pro, *, lake_dir: {
+        "units": 0, "marked": 0, "nonzero": 0, "probed_days": 0,
+        "interrupted": True, "sidecar_entries": 0})
+    rc = rg.main(["--classify", "--lake-dir", str(tmp_path)])
+    assert rc == 1, "中断必须非零退出（重跑续收，已收标记经 checkpoint 不丢）"
+    assert "中断" in capsys.readouterr().out
+
+
+def test_classify_modern_day_market_all_zero_is_fault(tmp_path, monkeypatch, caplog):
+    """N5 D④：现代交易日（≥2005）中点市场级全零 → 源侧故障判定：零标记 + warning + 中断。
+
+    物理意图：2005 起全市场应数千行——该年代全零只能是 Tushare 单日故障性返空，
+    绝非全部标的集体缺席。无守卫会把当日组内全部待探标的批量误标 probe_zero_day
+    （sidecar 标记后 scan/repair 双侧跳过，误标段从此不再补采）。
+    """
+    import logging
+
+    from data.tools import repair_gaps as rg
+
+    gap = GapRange("000921.SZ", "2024-09-03", "2024-09-05",
+                   ("2024-09-03", "2024-09-04", "2024-09-05"), suspend_justified=False)
+
+    def _fake(pro, api, tdc):
+        return pd.DataFrame()  # 两接口全零（故障性返空形态）
+
+    monkeypatch.setattr(rg, "_fetch_paged", _fake)
+    monkeypatch.setattr(rg, "REPAIR_DAY_SLEEP", 0.0)
+
+    with caplog.at_level(logging.WARNING):
+        stats = rg.classify_gaps([gap], object(), lake_dir=str(tmp_path))
+
+    assert stats["marked"] == 0, "故障日不得批量误标"
+    assert stats["interrupted"] is True, "守卫按中断处理（main 转非零退出供人盯）"
+    assert stats["probed_days"] == 0, "故障日不计有效探针"
+    assert not (tmp_path / ".repair_unfillable.json").exists(), "零标记不落 sidecar"
+    assert "市场级全零" in caplog.text, "warning 必须留痕（人工排查锚点）"

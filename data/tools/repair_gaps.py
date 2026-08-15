@@ -156,18 +156,75 @@ def load_unfillable_entries(lake_dir: str = "data_lake") -> list[dict]:
 
 
 def save_unfillable_entries(lake_dir: str, entries: list[dict]) -> None:
-    """写 unfillable sidecar（覆盖写；条目量级=段数，无并发写场景）。"""
-    _unfillable_path(lake_dir).write_text(
-        json.dumps({"entries": entries}, ensure_ascii=False, indent=1), encoding="utf-8")
+    """写 unfillable sidecar（tmp + fsync + os.replace 原子落盘，G5 纪律）。
 
-
-def clear_unfillable(lake_dir: str = "data_lake") -> bool:
-    """清除 unfillable sidecar（--clear-unfillable 入口）。返回是否存在过。"""
+    Why 原子写（N5 · D 批加固）：并发写场景**真实存在**——classify 长跑（1h 量级）的
+    周期 checkpoint 与 repair --auto 的 ``_mark_unfillable``、scan 的读取方在同一
+    sidecar 上交汇（早期「无并发写场景」表述已过时，订正）。非原子 write_text 的
+    半截态会被并发读者（load_unfillable_entries）读成损坏 JSON → fail-open 全部
+    重试（已收标记白丢）；tmp + fsync + replace 保证读者只见「旧完整态 / 新完整态」，
+    永不见半截态。崩溃窗口同理：写一半被硬杀只留 tmp 尾巴，正文件完好（tmp 残留
+    无消费者，无害）。
+    """
     p = _unfillable_path(lake_dir)
-    if p.exists():
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"entries": entries}, ensure_ascii=False, indent=1))
+        f.flush()
+        os.fsync(f.fileno())  # 刷盘后再 replace：防断电下「空文件已换名」的半截态
+    os.replace(tmp, p)
+
+
+def _merge_save_unfillable(lake_dir: str, local_entries: list[dict]) -> None:
+    """落盘前 re-load 磁盘最新态 + 按 (symbol, start, end, reason) 四元组合并。
+
+    物理意图（N5 · D 批加固，T1b 评审 Important——并发写窗口收口）：classify 全程
+    在启动时 load 一次 entries、长跑期间内存态与磁盘态渐行渐远；若直接把内存态
+    覆盖写回，期间 repair --auto 并发落盘的铁证条目（symbol_absent/market_empty）
+    会被**静默抹掉**（下轮 scan 重新进队烧配额，标记白丢）。落盘前 re-load 磁盘 +
+    键合并让两侧条目并集共存：
+    - 键含 reason：同段不同分级（probe_zero_day 采样推定 vs symbol_absent 全段
+      实证）语义不同级，不得互相覆盖；
+    - 冲突时本 run 新条目胜出（marked_at 更新，重复标记幂等收敛到最新时间戳）。
+    """
+    disk = load_unfillable_entries(lake_dir)
+    merged: dict[tuple, dict] = {}
+    for e in disk:
+        merged[(e.get("symbol"), e.get("start"), e.get("end"), e.get("reason"))] = e
+    for e in local_entries:
+        merged[(e.get("symbol"), e.get("start"), e.get("end"), e.get("reason"))] = e
+    save_unfillable_entries(lake_dir, list(merged.values()))
+
+
+def clear_unfillable(lake_dir: str = "data_lake", *, reason: str | None = None) -> bool:
+    """清除 unfillable sidecar（--clear-unfillable 入口，可配 --reason 定向清除）。
+
+    Args:
+        reason: 定向清除过滤——只删该 reason 的条目（典型：只清 probe_zero_day
+            采样推定的误标，**不动** symbol_absent/market_empty 全段铁证）；
+            None = 整体删除（旧行为，一键重置逃生口）。
+    Returns:
+        是否发生了清除：整体模式 = 文件存在即删；定向模式 = 至少删掉 1 条匹配项
+        （无匹配/文件缺失零副作用返 False，不动文件）。
+    """
+    p = _unfillable_path(lake_dir)
+    if not p.exists():
+        return False
+    if reason is None:
         p.unlink()
         return True
-    return False
+    # 定向清除：fail-open 读（损坏返 []）→ 无匹配 → 不动文件。Why 不顺手整体删：
+    # 文件损坏时按 reason 过滤无法安全进行，保守留置交人工核（整体逃生口仍可
+    # 用不带 --reason 的 --clear-unfillable 显式触发，不静默扩大删除面）。
+    entries = load_unfillable_entries(lake_dir)
+    kept = [e for e in entries if e.get("reason") != reason]
+    if len(kept) == len(entries):
+        return False  # 无匹配：零副作用（不重写文件，保 marked_at 时间戳不动）
+    if kept:
+        save_unfillable_entries(lake_dir, kept)
+    else:
+        p.unlink()  # 清完即删整文件（不留空壳——空 sidecar 与无 sidecar 语义等同）
+    return True
 
 
 def unfillable_coverage(entries: list[dict]) -> dict[str, tuple[tuple[str, str], ...]]:
@@ -344,7 +401,9 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
                             "marked_at": datetime.now().isoformat(timespec="seconds")})
             added += 1
         if added:
-            save_unfillable_entries(lake_dir, entries)
+            # N5 · D 批加固：落盘前 re-load + 合并（与 classify checkpoint 同窗口——
+            # repair 与 classify 并发跑时互不抹条目）。
+            _merge_save_unfillable(lake_dir, entries)
             logger.warning("unfillable 标记 %d 子段（源零行实证，下轮 scan/repair 跳过；"
                            "--clear-unfillable 可重置）", added)
 
@@ -415,6 +474,12 @@ PROBE_ZERO_DAY = "probe_zero_day"  # sidecar reason 字面（scan 分流判据�
 # classify 总超时：1.4 万子段量级全跑约 1h，REPAIR_TIMEOUT 的 30min 默认会拦腰
 # 截断——探针模式单独放宽（env 可调，中断已 checkpoint 可续收）
 REPAIR_CLASSIFY_TIMEOUT = int(os.getenv("REPAIR_CLASSIFY_TIMEOUT_SECONDS", "14400"))
+# N5 · D 批加固（现代交易日防批量误标守卫）：盲区年代上限。2000-2004 是 Tushare
+# daily 的已知盲区（全市场零行=真无数据）；2005 起现代交易日全市场应数千行——
+# 该年代中点日「市场级全零」只可能是源侧故障（单日故障性返空/参数异常），绝非
+# 全部标的集体停牌。若无守卫，一个故障空响应会把当日组内**全部**待探标的批量
+# 误标 probe_zero_day（sidecar 一旦标记双侧跳过，误标段从此不再补采）。
+_MODERN_MARKET_FLOOR = "2005-01-01"
 
 
 def classify_gaps(gaps: list[GapRange], pro, *, lake_dir: str) -> dict:
@@ -445,7 +510,9 @@ def classify_gaps(gaps: list[GapRange], pro, *, lake_dir: str) -> dict:
         {units, marked, nonzero, probed_days, interrupted, sidecar_entries}——
         units=过滤 sidecar 后待探子段数；marked=probe_zero_day 新标数；nonzero=
         中点有行留给 --auto 的子段数；probed_days=实探唯一交易日数；
-        interrupted=是否被限频/异常/超时截断（已 checkpoint，重跑续收）。
+        interrupted=是否被限频/异常/超时截断（已 checkpoint，重跑续收）；N5 起含
+        现代交易日市场级全零守卫触发（源侧故障判定，该日零标记即停，见
+        _MODERN_MARKET_FLOOR 注释）。
     """
     unjustified = [g for g in gaps if not g.suspend_justified]
     units: list[tuple[str, tuple[str, ...]]] = []
@@ -509,6 +576,19 @@ def classify_gaps(gaps: list[GapRange], pro, *, lake_dir: str) -> dict:
                            _di + 1, len(days_sorted), day, exc, marked, exc_info=True)
             interrupted = True
             break
+        # N5 · D 批加固守卫：中点日属现代交易日（≥2005）且市场级全零（该日全部
+        # 标的零行）→ 视为源侧故障而非真缺席：本日**不标记任何条目** + warning
+        # 留痕 + 按 interrupted 处理（checkpoint 已收标记不受影响，重跑续收）。
+        # Why break 而非 continue：故障性返空通常持续（限频降级/权限失效），继续
+        # 探后续日只会烧配额产垃圾 warning；停跑 + 非零退出码（main 消费
+        # interrupted）让人工介入排查后再续。
+        if d.empty and day >= _MODERN_MARKET_FLOOR:
+            logger.warning(
+                "classify 中点日 %s 市场级全零（现代交易日应数千行）——判定为源侧"
+                "故障而非全部标的缺席：本日 0 标记，已收标记 %d 条 checkpoint 保住，"
+                "请核 Tushare daily 可用性后重跑续收", day, marked)
+            interrupted = True
+            break
         probed_days += 1
         # 当日标的集（组处理完即弃——全市场响应数千行，跨日驻留会吃满内存）
         daily_syms = (set(d["ts_code"]) if not d.empty and "ts_code" in d.columns
@@ -532,13 +612,15 @@ def classify_gaps(gaps: list[GapRange], pro, *, lake_dir: str) -> dict:
                             "reason": PROBE_ZERO_DAY, "count": 1,
                             "marked_at": datetime.now().isoformat(timespec="seconds")})
             marked += 1
-            # 周期 checkpoint（每 200 条）：长跑（1h 量级）被硬杀也不丢已收标记
+            # 周期 checkpoint（每 200 条）：长跑（1h 量级）被硬杀也不丢已收标记。
+            # N5 · D 批加固：落盘前 re-load + 四元组合并——长跑期间 repair --auto
+            # 并发落的铁证条目不得被本进程的内存快照覆盖抹掉（T1b Important）。
             if marked % 200 == 0:
-                save_unfillable_entries(lake_dir, entries)
+                _merge_save_unfillable(lake_dir, entries)
     # 无新增标记不写 sidecar（零副作用：非零探针轮不得凭空创建/重写标记文件；
-    # 中断路径的周期 checkpoint 已保住已收标记，此处兜底落盘）
+    # 中断路径的周期 checkpoint 已保住已收标记，此处兜底落盘——同样走合并）
     if marked:
-        save_unfillable_entries(lake_dir, entries)
+        _merge_save_unfillable(lake_dir, entries)
     logger.warning("classify 完成：标记 probe_zero_day %d 子段（非零留 --auto %d，"
                    "实探 %d 日）——probe_zero_day=采样推定（中点零行），与 "
                    "symbol_absent=全段实证不同级；--clear-unfillable 可重置",
@@ -576,15 +658,35 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="只列待补段，不写湖")
     ap.add_argument("--clear-unfillable", action="store_true",
                     help="清除 unfillable sidecar 后退出（误标逃生口，不需 --auto/--report）")
+    ap.add_argument("--reason", default=None,
+                    help="--clear-unfillable 的定向过滤：只清该 reason 的条目（如 "
+                         "probe_zero_day 采样推定），铁证标记（symbol_absent/"
+                         "market_empty）保留不动")
     args = ap.parse_args(argv)
 
-    # N1 --clear-unfillable：独立入口（人工核实源确有数据后重置标记，防误标永久化）
+    # N1 --clear-unfillable：独立入口（人工核实源确有数据后重置标记，防误标永久化）。
+    # N5 加 --reason：分类分级后的定向逃生口——误推定（probe_zero_day）可单独重置，
+    # 不连坐清掉 --auto 攒下的全段铁证（铁证重攒要再烧一轮全范围拉取配额）。
     if args.clear_unfillable:
-        if clear_unfillable(args.lake_dir):
-            print(f"unfillable sidecar 已清除：{_unfillable_path(args.lake_dir)}")
+        if args.reason is None:
+            if clear_unfillable(args.lake_dir):
+                print(f"unfillable sidecar 已整体清除：{_unfillable_path(args.lake_dir)}")
+            else:
+                print("无 unfillable sidecar（无需清除）")
+            return 0
+        removed = sum(1 for e in load_unfillable_entries(args.lake_dir)
+                      if e.get("reason") == args.reason)
+        if clear_unfillable(args.lake_dir, reason=args.reason):
+            kept = len(load_unfillable_entries(args.lake_dir))
+            print(f"已定向清除 reason={args.reason} 条目 {removed} 条"
+                  f"（保留 {kept} 条铁证/实证标记）：{_unfillable_path(args.lake_dir)}")
         else:
-            print("无 unfillable sidecar（无需清除）")
+            print(f"无 reason={args.reason} 条目（未改动 sidecar）")
         return 0
+    if args.reason is not None:
+        # 显式拒配：--reason 只服务 --clear-unfillable 的定向清除——静默忽略会让
+        # 「以为清了 probe 实际跑了补采」的操作事故无感知（fail-fast 优于静默）。
+        ap.error("--reason 仅与 --clear-unfillable 搭配（定向清除过滤）")
 
     # N1b --classify：探针分类独立入口（只写 sidecar 不写湖——排在读 lake parquet
     # 之前，10M 行白载是纯浪费）。与 --auto/--report 互斥：补采与分类是不同回路，
@@ -613,7 +715,11 @@ def main(argv: list[str] | None = None) -> int:
               f"{stats['marked']}（probe_zero_day 采样推定，可逆），非零留 --auto "
               f"{stats['nonzero']}，实探 {stats['probed_days']} 日，sidecar 共 "
               f"{stats['sidecar_entries']} 条")
-        return 0
+        # N5 · D 批加固：中断（限频/异常/超时/现代交易日市场全零守卫）→ 非零退出。
+        # Why：中断=本轮没探完，0 会让 schtasks/脚本「上次运行结果」显示成功——
+        # 半途而废的收敛被误当完成，daemon fail-closed 闸（unjustified>0 拒跑）
+        # 打不开的根因排查被掩盖。已收标记经 checkpoint 不丢，重跑续收。
+        return 1 if stats["interrupted"] else 0
 
     if not args.report and not args.auto:
         ap.error("需指定 --report <扫描报告> 或 --auto（内部 scan）")
