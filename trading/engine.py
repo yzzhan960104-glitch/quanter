@@ -131,6 +131,7 @@ from trading.phases.pre_open import pre_open
 # wrapper 调用点不变）。scan/close_expired_positions 及旧 `_` 名不在此：engine 内零引用，
 # 消费者（pre_open 超期平仓 / tests）已直 import phases.stop_loss。
 from trading.phases.stop_loss import stop_loss_monitor
+from trading.stop_loss_context import StopLossContext
 # 集群 G（trading.phases.post_close · 盘后对账 + 日内熔断 · T1-Task8 迁出）：engine cron
 # wrapper（_post_close）转调用真身。seq_for_real_oid/order_state_to_db 及旧 `_` 名不在
 # 此：engine 内零引用，消费者（order_state）已直 import phases.post_close。
@@ -1356,14 +1357,14 @@ class TradingEngine:
                 if cancel_on is not None:
                     pending_ctx[sym] = float(cancel_on)
 
-        # 空时显式转 None：与 stop_loss_monitor 的「xxx is None or empty → no-op」契约对齐。
+        # M2 StopLossContext 收口（2026-08-15）：三 map 装箱单参传递——「空 dict → None」
+        # 归一移至 monitor 解包处（语义等价，见 stop_loss_monitor 体内 M2 注释）。
         # W1-A/T2：传 ports=self._ports 注入行情黑屏节流状态机（QuoteBlackoutThrottle 经
         # ports.blackout）。stop_loss_monitor 内 ports=None 守卫下跳过 blackout 告警分支，
         # 生产路径总传 self._ports 不受影响。
         await stop_loss_monitor(
-            stop_prices=stop_prices or None,
-            monitor_ctx=monitor_ctx or None,
-            pending_ctx=pending_ctx or None,
+            StopLossContext(stop_prices=stop_prices, monitor_ctx=monitor_ctx,
+                            pending_ctx=pending_ctx),
             ports=self._ports,
         )
 

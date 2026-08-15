@@ -23,6 +23,7 @@
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 from trading.engine import TradingEngine
+from trading.stop_loss_context import StopLossContext  # M2：单参收三 map
 
 
 @pytest.mark.asyncio
@@ -138,11 +139,11 @@ async def test_stop_loss_partial_submit_fail_aggregates_critical_not_halt(monkey
         ss.has_order.return_value = False   # 幂等读通过 (无已挂 STOP)
         ss.get_account.return_value = MagicMock()
         from trading.phases.stop_loss import stop_loss_monitor  # W1-B：迁物理真身
-        result = await stop_loss_monitor(
-            stop_prices=None, gw=gw,
-            monitor_ctx={
+        result = await stop_loss_monitor(  # M2：三 map 装箱单参（2026-08-15）
+            StopLossContext(monitor_ctx={
                 "300214.SZ": {"state": {"stop": 9.0}, "cfg": {}},
-                "300215.SZ": {"state": {"stop": 9.0}, "cfg": {}}})
+                "300215.SZ": {"state": {"stop": 9.0}, "cfg": {}}}),
+            gw=gw)
 
     assert result["stop_triggered"] == 1   # 第 1 只发卖成; 第 2 只失败不计
     # 聚合 CRITICAL 含 "卖出失败" 语义, _halted 保持 False (L2 不停调度)

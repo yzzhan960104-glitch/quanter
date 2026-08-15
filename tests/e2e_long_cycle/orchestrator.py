@@ -25,8 +25,9 @@ dispatch 到对应真身 + 组件：
     - V3 MinBarFeeder.set_context(syms, t_date, up_to) + patch_get_quotes()：set_context
       覆盖当前上下文（syms + t_date + up_to），patch_get_quotes patch trading.qmt_market_data.
       get_quotes 返 feed 结果（_stoploss 内 `quotes = await get_quotes(syms)` 命中）。
-    - engine.stop_loss_monitor(stop_prices, *, gw, monitor_ctx, pending_ctx)：主路径走
-      monitor_ctx（decide_exit 契约），stop_prices 仅 D12 fallback 兜底。
+    - engine.stop_loss_monitor(context, *, gw, ports)：主路径走 context.monitor_ctx
+      （decide_exit 契约），context.stop_prices 仅 D12 fallback 兜底（M2 起三 map 装箱
+      StopLossContext 单参传递，2026-08-15）。
     - V6 snapshot_collector.snapshot(t_date)：读 state_store 6 表 + plan/review 当日落点。
 
 I-1 fix（V7 review Important）：_build_ctx 的 monitor_ctx state 必须补全 decide_exit
@@ -166,6 +167,7 @@ def build_job_runner(
         # ============================================================
         if phase == "stoploss":
             from trading.phases.stop_loss import stop_loss_monitor  # W1-B：迁物理真身
+            from trading.stop_loss_context import StopLossContext  # M2：单参收三 map
             from trading import trading_plan
 
             # 读当前持仓：从 broker 内存读（simulate_fetch_positions，与 stop_loss_monitor 真身
@@ -208,16 +210,19 @@ def build_job_runner(
             # stop_loss_monitor 会 await get_quotes，行情 patch 必须在内层先就位）。
             with min_bar_feeder.patch_get_quotes(), broker.attach(t_plus_1, now_time) as gw:
                 eng._gw = gw  # _order_direction 内存兜底（_handle_order_update 方向反查）
+                # M2（2026-08-15）：三 map 装箱 StopLossContext 单参传递（与生产
+                # engine._stoploss 同款收口）；gw/ports 仍独立 kwarg。
                 result = asyncio.run(stop_loss_monitor(
-                    # stop_prices：D12 fallback 兜底（decide_exit 异常时退回 should_trigger_stop
-                    # 用此比价）。从 monitor_ctx.state.stop 提取；None 安全（fallback 跳过该 sym）。
-                    stop_prices={
-                        s: (monitor_ctx.get(s, {}).get("state") or {}).get("stop")
-                        for s in syms
-                    },
+                    StopLossContext(
+                        # stop_prices：D12 fallback 兜底（decide_exit 异常时退回 should_trigger_stop
+                        # 用此比价）。从 monitor_ctx.state.stop 提取；None 安全（fallback 跳过该 sym）。
+                        stop_prices={
+                            s: (monitor_ctx.get(s, {}).get("state") or {}).get("stop")
+                            for s in syms
+                        },
+                        monitor_ctx=monitor_ctx,
+                        pending_ctx=pending_ctx),
                     gw=None,  # 让真身走 patched get_gateway（broker.attach 注入）
-                    monitor_ctx=monitor_ctx,
-                    pending_ctx=pending_ctx,
                     # M-1 fix：显式传 eng._ports——保 e2e blackout 节流语义完整（不传则
                     # ports=None 守卫跳过 blackout 分支，e2e 长周期回测的行情黑屏 30min
                     # 节流行为将不参与验证；eng._ports 由 TradingEngine 构造时装配默认

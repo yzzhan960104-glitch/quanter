@@ -17,7 +17,9 @@
     ``TradingEngine._stoploss`` 实例 wrapper（IntervalTrigger 绑定 + ``@_critical_guard`` + 网关健康
     闸 + 交易日守卫 + 从 DB SIGNAL.meta 构造 monitor_ctx/pending_ctx/stop_prices）**留 engine**
     （spec §2 深剖：wrapper 形态是解耦伏笔 · job_ledger + critical_guard 留 engine），内部改调
-    ``await stop_loss_monitor(...)``（经 engine re-export 命中 ``patch("trading.engine.stop_loss_monitor")``）。
+    ``await stop_loss_monitor(...)``（经 engine 顶部 import 绑定命中 ``patch("trading.engine.
+    stop_loss_monitor")``——engine 调用点读模块全局名，W1-B 删 re-export 垫层后此 patch 面
+    不变；M2 起调用面为 StopLossContext 单参）。
 
 迁出纪律（strangler 红线①）：
     海龟移动止损算法（grace/step/floor + expire 平仓逻辑）与 decide_exit 分发链路【逐行原样】，
@@ -150,6 +152,7 @@ from trading.gateway_service import get_gateway, _submit, emergency_halt
 from trading.compute.breaker import check_daily_loss_limit
 from trading.io.breaker import cancel_all_open_orders
 from trading.alerting import PortfolioBreakerThrottle
+from trading.stop_loss_context import StopLossContext
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.stop_loss）：stop_loss_monitor 原是
 # engine 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -161,11 +164,9 @@ logger = logging.getLogger("trading.engine")
 # 触发点 3：stop_loss_monitor —— 盘中：止损/超时巡检 + pending 期撤单（每 30s）
 # ============================================================================
 async def stop_loss_monitor(
-    stop_prices: Optional[Mapping[str, float]] = None,
+    context: Optional[StopLossContext] = None,
     *,
     gw: Any = None,
-    monitor_ctx: Optional[Mapping[str, Mapping[str, Any]]] = None,
-    pending_ctx: Optional[Mapping[str, float]] = None,
     ports: Optional["EnginePorts"] = None,
 ) -> dict:
     """盘中止损/超时巡检 + pending 期撤单（Task 9 · U6 实盘执行统一 · 最高风险）。
@@ -195,14 +196,19 @@ async def stop_loss_monitor(
     live 前必须另接行情源**（live 前必修 follow-up，切勿在无 xtdata 行情源环境切 live）。
 
     Args:
-        stop_prices: {symbol: stop_price}（D12 fallback 来源 + 向后兼容旧契约）。主路径
-                     monitor_ctx 注入后此参数仅作 decide_exit 异常时的兜底比价基准；
-                     monitor_ctx 为 None 时退回纯 should_trigger_stop 旧路径（向后兼容）。
-        gw:          网关实例（测试注入）；None 时内部 get_gateway()。
-        monitor_ctx: {symbol: {"state": dict, "cfg": dict}}（主路径）。state/cfg 字段对齐
-                     decide_exit 契约（execution.py:131-201）+ simulate_exit cfg
-                     （backtest.py:177-183）。None 时纯走 stop_prices 旧路径。
-        pending_ctx: {symbol: cancel_on}（D11 pending 撤单）。None 时跳过 pending 巡检。
+        context: StopLossContext 三 map 上下文（tech-debt M2 收口 · 2026-08-15）——
+                 原 stop_prices/monitor_ctx/pending_ctx 三散参装箱为单参（派生同源
+                 语义见 trading/stop_loss_context.py 模块 docstring）：
+                 - ``context.stop_prices``：{symbol: stop_price}（D12 fallback 来源 +
+                   向后兼容旧契约）。主路径注入后仅作 decide_exit 异常时的兜底比价
+                   基准；monitor_ctx 空时退回纯 should_trigger_stop 旧路径。
+                 - ``context.monitor_ctx``：{symbol: {"state": dict, "cfg": dict}}（主
+                   路径）。state/cfg 字段对齐 decide_exit 契约（execution.py:131-201）+
+                   simulate_exit cfg（backtest.py:177-183）。
+                 - ``context.pending_ctx``：{symbol: cancel_on}（D11 pending 撤单）。
+                 空 dict 与 None 等价（解包处归一，走「均空 no-op」既定分支）；
+                 None（不传）= 三路全关。
+        gw:      网关实例（测试注入）；None 时内部 get_gateway()。
         ports: W1-A/T2 注入的 EnginePorts 窄接口（消费 ``ports.blackout``——行情黑屏
                30min 节流状态机，生产主路径走 ``ports.blackout.fire_if_due(now)`` 原子方法：
                单一 Lock 内 check+mark，杜绝 catchup 重叠 / daemon 并发双发告警；及
@@ -220,6 +226,15 @@ async def stop_loss_monitor(
         非盘中：{"checked":0, "reason":"非盘中时段..."}
         无 gw：{"checked":0, "reason":"...网关..."}
     """
+    # M2 StopLossContext 收口（2026-08-15）：签名单参收三 map，此处解包回三个同名局部——
+    # 体内全部消费点（has_main_path/has_fallback/has_pending、relevant_syms 并集、fallback
+    # sp 取值、pending 巡检迭代）读的仍是原局部变量，函数体零改动（spec M2 行为等价红线）。
+    # 「空 dict → None」归一：延续 engine 旧调用点 ``stop_prices or None`` 契约，空配置
+    # 统一走下方「均空 → no-op」既定分支（两种空值形态在本函数各判据 ``is not None and
+    # len>0`` / ``(pending_ctx or {})`` 下行为恒等，见 test_stop_loss_context.py 锚测）。
+    stop_prices = (context.stop_prices or None) if context is not None else None
+    monitor_ctx = (context.monitor_ctx or None) if context is not None else None
+    pending_ctx = (context.pending_ctx or None) if context is not None else None
     # T1-Task7 → W1-A/T2 收口：engine 模块级符号经 engine 反查的设计已全量退役，所有符号
     # 改顶部直接 import 物理真身（gateway_service.get_gateway/_submit / critical / state_store /
     # compute.stop / execution / phases.exit）。patch engine.xxx 失效 → Task 8-19 迁 patch 物理路径
@@ -712,9 +727,10 @@ async def _check_portfolio_loss_limit(gw: Any, throttle: PortfolioBreakerThrottl
 # 物理意图：原 post_close 写盘 + pre_open 读盘是双写镜像（CSV 形态），文件覆盖写有
 # 竞态/崩溃丢失风险；holding_days 已可由 position_book.entry_date 任意时刻现算 →
 # 收口到 pre_open 单点，删文件函数全消除。
-# T1-Task7：原 ``_scan_expired_positions`` 去 `_` 前缀 → ``scan_expired_positions``（engine
-# re-export 双名保 ``patch("trading.engine._scan_expired_positions")`` + pre_open 历史 engine 反查
-# _scan_expired_positions`` 命中）。逻辑逐字原样。
+# T1-Task7：原 ``_scan_expired_positions`` 去 `_` 前缀 → ``scan_expired_positions``。逻辑逐字
+# 原样。（W1-B 订正 2026-08-15：原注「engine re-export 双名保 patch("trading.engine.
+# _scan_expired_positions")」——engine re-export 垫层已删且 engine 内零引用，消费方
+# pre_open / tests 已直 import 本模块物理真身，旧 patch 路径不存在。）
 
 
 def scan_expired_positions(today: str, max_holding: int) -> list[dict]:

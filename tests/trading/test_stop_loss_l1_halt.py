@@ -34,6 +34,7 @@ import pytest
 
 from trading.critical import _CriticalHalt  # W1-B：迁物理真身（engine re-export 已删）
 from trading.phases.stop_loss import stop_loss_monitor  # W1-B：迁物理真身
+from trading.stop_loss_context import StopLossContext  # M2：单参收三 map
 from strategies.neckline.execution import ExitAction, ExitReason  # W1-B：迁物理真身
 
 
@@ -78,9 +79,11 @@ def test_fetch_positions_failure_raises_critical_halt(isolated_stoploss):
     gw._fetch_broker_positions.side_effect = RuntimeError("柜台断线")
 
     with pytest.raises(_CriticalHalt, match="查持仓"):
-        asyncio.run(stop_loss_monitor(
-            stop_prices={"300214.SZ": 9.0}, gw=gw,
-            monitor_ctx={"300214.SZ": {"state": {"stop": 9.0}, "cfg": {}}}))
+        asyncio.run(stop_loss_monitor(  # M2：三 map 装箱单参（2026-08-15）
+            StopLossContext(
+                stop_prices={"300214.SZ": 9.0},
+                monitor_ctx={"300214.SZ": {"state": {"stop": 9.0}, "cfg": {}}}),
+            gw=gw))
 
 
 # ============================================================================
@@ -124,9 +127,11 @@ def test_stop_already_placed_read_failure_raises_critical_halt(isolated_stoploss
         ss.has_order.side_effect = RuntimeError("db disk full")
 
         with pytest.raises(_CriticalHalt, match="has_order"):
-            asyncio.run(stop_loss_monitor(
-                stop_prices=None, gw=gw,
-                monitor_ctx={"300214.SZ": {"state": {"stop": 9.0}, "cfg": {}}}))
+            asyncio.run(stop_loss_monitor(  # M2：三 map 装箱单参（2026-08-15）
+                StopLossContext(
+                    stop_prices=None,
+                    monitor_ctx={"300214.SZ": {"state": {"stop": 9.0}, "cfg": {}}}),
+                gw=gw))
 
 
 # ============================================================================
@@ -169,9 +174,11 @@ def test_record_stop_write_failure_raises_critical_halt(isolated_stoploss, monke
         ss.insert_order.side_effect = RuntimeError("sqlite locked")
 
         with pytest.raises(_CriticalHalt, match="record_stop"):
-            asyncio.run(stop_loss_monitor(
-                stop_prices=None, gw=gw,
-                monitor_ctx={"300214.SZ": {"state": {"stop": 9.0}, "cfg": {}}}))
+            asyncio.run(stop_loss_monitor(  # M2：三 map 装箱单参（2026-08-15）
+                StopLossContext(
+                    stop_prices=None,
+                    monitor_ctx={"300214.SZ": {"state": {"stop": 9.0}, "cfg": {}}}),
+                gw=gw))
 
 
 # ============================================================================
@@ -211,9 +218,11 @@ def test_decide_exit_exception_stays_l2_fallback_not_halt(isolated_stoploss, mon
         ss.has_order.return_value = False
 
         # 不应 raise _CriticalHalt（应正常返回，checked=1, fallback_used=1）
-        result = asyncio.run(stop_loss_monitor(
-            stop_prices={"300214.SZ": 9.0}, gw=gw,
-            monitor_ctx={"300214.SZ": {"state": {"stop": 9.0}, "cfg": {}}}))
+        result = asyncio.run(stop_loss_monitor(  # M2：三 map 装箱单参（2026-08-15）
+            StopLossContext(
+                stop_prices={"300214.SZ": 9.0},
+                monitor_ctx={"300214.SZ": {"state": {"stop": 9.0}, "cfg": {}}}),
+            gw=gw))
 
     assert result["checked"] == 1
     assert result["fallback_used"] == 1

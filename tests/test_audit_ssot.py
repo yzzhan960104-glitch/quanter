@@ -90,10 +90,15 @@ def test_engine_process_count_fails_when_two(monkeypatch):
 
 
 def test_engine_processes_parses_powershell_json(monkeypatch):
-    """_engine_processes 解析 PowerShell JSON，只留 -m trading / uvicorn main。"""
+    """_engine_processes 解析 PowerShell JSON，只留 -m trading / uvicorn main。
+
+    T10（2026-08-15）：查询改取全进程表（Name 过滤移 Python 侧），mock 须带 Name。
+    """
     monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
-        '[{"ProcessId": 11, "ExecutablePath": "x", "CommandLine": "python -m trading"},'
-        '{"ProcessId": 22, "ExecutablePath": "x", "CommandLine": "python -c print(1)"}]'))
+        '[{"Name": "python.exe", "ProcessId": 11, "ExecutablePath": "x",'
+        ' "CommandLine": "python -m trading"},'
+        '{"Name": "python.exe", "ProcessId": 22, "ExecutablePath": "x",'
+        ' "CommandLine": "python -c print(1)"}]'))
     procs = a._engine_processes()
     assert [p["pid"] for p in procs] == [11]
 
@@ -101,10 +106,27 @@ def test_engine_processes_parses_powershell_json(monkeypatch):
 def test_engine_processes_dedupes_venv_parent_child(monkeypatch):
     """venv 启动器+base 子进程都匹配 -m trading → 只留树根（引擎数=1 不误报）。"""
     monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
-        '[{"ProcessId": 11, "ParentProcessId": 0, "ExecutablePath": "x",'
+        '[{"Name": "python.exe", "ProcessId": 11, "ParentProcessId": 0, "ExecutablePath": "x",'
         ' "CommandLine": "E:\\\\quanter\\\\.venv310\\\\Scripts\\\\python.exe -m trading"},'
-        '{"ProcessId": 12, "ParentProcessId": 11, "ExecutablePath": "x",'
+        '{"Name": "python.exe", "ProcessId": 12, "ParentProcessId": 11, "ExecutablePath": "x",'
         ' "CommandLine": "C:\\\\Python310\\\\python.exe -m trading"}]'))
+    procs = a._engine_processes()
+    assert [p["pid"] for p in procs] == [11]
+
+
+def test_engine_processes_drops_grandchild_through_spawn_worker(monkeypatch):
+    """T10 递归祖先链：经 spawn worker（cmdline 不匹配）挂的 -m trading 孙辈被清。
+
+    2026-08-15 快照实证形态：root(11) → spawn worker(13, 不匹配) → 孙辈(14, 匹配)。
+    旧「直接父 ∈ 引擎集合」一级判据漏掉 14（其父 13 不在集合）→ 误计 2 引擎。
+    """
+    monkeypatch.setattr(pt.subprocess, "run", lambda *args, **kw: _FakeProc(
+        '[{"Name": "python.exe", "ProcessId": 11, "ParentProcessId": 0, "ExecutablePath": "x",'
+        ' "CommandLine": "E:\\\\quanter\\\\.venv310\\\\Scripts\\\\python.exe -m trading"},'
+        '{"Name": "python.exe", "ProcessId": 13, "ParentProcessId": 11, "ExecutablePath": "x",'
+        ' "CommandLine": "python -c from multiprocessing.spawn import spawn_main"},'
+        '{"Name": "python.exe", "ProcessId": 14, "ParentProcessId": 13, "ExecutablePath": "x",'
+        ' "CommandLine": "python -m trading"}]'))
     procs = a._engine_processes()
     assert [p["pid"] for p in procs] == [11]
 

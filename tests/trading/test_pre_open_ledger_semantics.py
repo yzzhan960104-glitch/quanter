@@ -72,7 +72,6 @@ async def test_pre_open_gate_reason_marks_skipped(monkeypatch, tmp_path):
 async def test_catchup_retries_failed_pre_open(monkeypatch, tmp_path):
     """A2: 台账 failed 在 C-8 窗口内必须重试（只有 running/done 才跳过）。"""
     from trading import catchup, job_ledger
-    import trading.engine as engine_mod
 
     monkeypatch.setenv("TRADING_JOB_LEDGER_DB", str(tmp_path / "job.db"))
     job_ledger.init_db()

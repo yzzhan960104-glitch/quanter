@@ -79,22 +79,57 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _drop_engine_descendants(
+    matched: list[dict], ppid_of: dict[int, int]
+) -> list[dict]:
+    """递归祖先链去重：matched 中任一祖先是引擎 pid 的进程全部丢弃，只留进程树根。
+
+    为什么不能只看直接父（T10 实证 2026-08-15 进程快照）：引擎树中间可能夹
+    「cmdline 不含 -m trading 的中间进程」——multiprocessing spawn worker 的
+    cmdline 是 spawn_main、.bat 经 cmd.exe 包装——其再拉起的 -m trading 子进程
+    直接父不在匹配集合内，一级 ppid 判据漏网（audit 误计多引擎 / stop 树杀漏孙辈）。
+    ppid_of 须传**全进程表** pid→ppid 映射（含非 python 中间进程），沿祖先链逐级
+    回溯，命中任一引擎 pid 即判后代。seen 集 防 PID 复用造成的祖先环（回溯不死循环）。
+    """
+    engine_pids = {p["pid"] for p in matched}
+
+    def _has_engine_ancestor(pid: int) -> bool:
+        seen: set[int] = set()
+        cur = ppid_of.get(pid)
+        while cur and cur not in seen:
+            if cur in engine_pids:
+                return True
+            seen.add(cur)
+            cur = ppid_of.get(cur)
+        return False
+
+    return [p for p in matched if not _has_engine_ancestor(p["pid"])]
+
+
 def engine_processes() -> list[dict]:
     """列项目引擎 python 进程根（cmdline 含 -m trading / presentation.server.main:app）。
 
     优先 PowerShell Get-CimInstance（短超时）；失败降级 Get-Process exe 路径匹配
     已移除——08-06 实测会误把 connect bot/数据同步等所有 venv python 都算成引擎
     （stop 会误杀）。降级改为「端口属主 + pid 文件属主」两个引擎锚点，绝不扩大匹配。
-    去重：Windows venv 启动器会拉起 base 解释器子进程（cmdline 都含 -m trading），
-    同一引擎会匹配出 2 个 pid——按 ParentProcessId 过滤，只保留进程树根（launcher），
-    stop() 用 taskkill /T 树杀时根+子一起清，audit 计数也回到「引擎数=1」。
+    去重（T10 实证升级 · 2026-08-15 快照）：Windows venv 启动器会拉起 base 解释器
+    子进程（cmdline 都含 -m trading），且 base 解释器还会经 multiprocessing spawn
+    worker（cmdline 不含 -m trading）挂孙辈——旧「直接父 ∈ 引擎集合」一级判据对
+    「经非匹配中间进程挂下来的孙辈」漏网。现取全进程表 pid→ppid 映射做**递归祖先
+    链去重**（_drop_engine_descendants），全树只留根：stop() 用 taskkill /T 树杀时
+    根+子+孙一起清，audit 计数也回到「引擎数=1」；两条独立树（真·双起抢 sid）则
+    都保留——探测不掩盖双起事实。
     """
-    out: list[dict] = []
+    matched: list[dict] = []
+    ppid_of: dict[int, int] = {}
     try:
+        # Why 取全表（不再 Where-Object 过滤 python）：祖先链回溯要经过非 python 中间
+        # 进程（spawn worker 也是 python 但 cmdline 不匹配；cmd.exe/.bat 包装则非 python），
+        # 只取 python 子集会在中间进程处断链。Name/CommandLine 过滤移到 Python 侧做。
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python' } | "
-             "Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | "
+             "Get-CimInstance Win32_Process | "
+             "Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine | "
              "ConvertTo-Json -Compress"],
             capture_output=True, text=True, errors="replace", timeout=8)
         raw = json.loads(r.stdout) if r.stdout.strip() else []
@@ -104,21 +139,28 @@ def engine_processes() -> list[dict]:
         if isinstance(raw, dict):
             raw = [raw]
         for item in raw:
+            try:
+                pid = int(item["ProcessId"])
+                ppid = int(item.get("ParentProcessId") or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            ppid_of[pid] = ppid  # 全表 pid→ppid（祖先链回溯的图，含非 python 进程）
+            name = item.get("Name") or ""
             cmd = item.get("CommandLine") or ""
+            # 与旧 PowerShell 侧 Where-Object Name -match '^python' 同口径（防 bat/ps
+            # 命令行里恰含 -m trading 的非 python 进程误入匹配集）。
+            if not name.lower().startswith("python"):
+                continue
             if "-m trading" in cmd or "presentation.server.main:app" in cmd:
-                out.append({"pid": int(item["ProcessId"]),
-                            "ppid": int(item.get("ParentProcessId") or 0),
-                            "exe": item.get("ExecutablePath"), "cmdline": cmd})
+                matched.append({"pid": pid, "ppid": ppid,
+                                "exe": item.get("ExecutablePath"), "cmdline": cmd})
     except Exception:
         # 降级：PowerShell/CIM 不可用时，用「端口属主 + pid 文件属主」两个引擎锚点——
         # 宁可漏报（返回空）也不把 bot/数据同步误判成引擎（stop 误杀风险高于漏报）。
         # 只保留存活锚点：陈旧 pid 文件（进程已死）不算引擎，否则 start 误判「已在运行」。
         anchors = {x for x in (port_holder_pid(), pid_file_owner()) if x and _pid_alive(x)}
         return [{"pid": p, "ppid": 0, "exe": None, "cmdline": None} for p in anchors]
-    # 去重：子进程的 ppid 落在引擎集合内 → 只留树根（launcher）。
-    pids = {p["pid"] for p in out}
-    out = [p for p in out if p.get("ppid") not in pids]
-    return out
+    return _drop_engine_descendants(matched, ppid_of)
 
 
 def client_status() -> dict:

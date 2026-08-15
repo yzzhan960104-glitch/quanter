@@ -33,6 +33,7 @@ import pytest
 
 # 被 Io C：monitor 真身（不经 engine re-export，patch 目标与调用方一致）
 from trading.phases.stop_loss import stop_loss_monitor
+from trading.stop_loss_context import StopLossContext  # M2：单参收三 map
 from trading.alerting import PortfolioBreakerThrottle
 from trading.ports import EnginePorts
 
@@ -99,8 +100,9 @@ def _run(gw, ports, *, quotes=None):
         qmd.get_quotes = AsyncMock(return_value=(
             quotes if quotes is not None
             else {SYM: {"last_price": 10.0, "high": 10.2, "low": 9.8}}))
-        return asyncio.run(stop_loss_monitor(
-            pending_ctx={SYM: 99.0}, ports=ports))
+        return asyncio.run(stop_loss_monitor(  # M2：三 map 装箱单参（2026-08-15）
+            StopLossContext(pending_ctx={SYM: 99.0}),
+            ports=ports))
 
 
 def _patch_cr3_actions(monkeypatch, *, start_equity: float | None):
@@ -226,8 +228,9 @@ def test_dry_run_gw_none_full_noop(monkeypatch):
          patch("trading.phases.stop_loss.qmt_market_data") as qmd:
         cal.is_intraday_session.return_value = True
         qmd.get_quotes = AsyncMock(return_value={})
-        result = asyncio.run(stop_loss_monitor(
-            pending_ctx={SYM: 99.0}, ports=ports))
+        result = asyncio.run(stop_loss_monitor(  # M2：三 map 装箱单参（2026-08-15）
+            StopLossContext(pending_ctx={SYM: 99.0}),
+            ports=ports))
     assert result["checked"] == 0
     assert "网关" in result.get("reason", "")
     # 评估点从未触达：节流状态零污染（should_check 未被调，last_check_ts 仍初值）

@@ -22,6 +22,7 @@ from trading import engine, trading_plan
 # W1-B（Task 10）：engine re-export 垫层已删——集群符号 patch/import 全迁物理真身
 # （qmt_market_data/reconcile_job 走共享模块属性、_scan_expired_positions 走 phases 真身）。
 from trading.phases.stop_loss import scan_expired_positions
+from trading.stop_loss_context import StopLossContext
 
 
 # ----------------------------------------------------------------------------
@@ -629,7 +630,7 @@ def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
 
     # 止损价 map：A=9.5（跌破 9.0）/ B=19.0（未跌破 21.0）/ C=9.0（但现价 None 无法判）
     result = asyncio.run(
-        engine.stop_loss_monitor(stop_prices={"A.SH": 9.5, "B.SH": 19.0, "C.SH": 9.0})
+        engine.stop_loss_monitor(StopLossContext(stop_prices={"A.SH": 9.5, "B.SH": 19.0, "C.SH": 9.0}))
     )
     assert result["mode"] == "dry_run"
     assert result["stop_triggered"] == 1           # 只 A 触发
@@ -667,7 +668,7 @@ def test_stop_loss_monitor_nan_price_skipped(monkeypatch):
     monkeypatch.setattr("trading.phases.stop_loss._submit", _no_submit)
 
     result = asyncio.run(
-        engine.stop_loss_monitor(stop_prices={"X.SH": 10.0})
+        engine.stop_loss_monitor(StopLossContext(stop_prices={"X.SH": 10.0}))
     )
     assert submitted["n"] == 0     # NaN 不发盲单
     assert result["checked"] == 0  # NaN 不计入 checked
@@ -686,7 +687,7 @@ def test_stop_loss_monitor_no_gateway_logs_and_skips(monkeypatch):
 
     monkeypatch.setattr("trading.phases.stop_loss._submit", _no_submit)
 
-    result = asyncio.run(engine.stop_loss_monitor(stop_prices={"A.SH": 9.5}))
+    result = asyncio.run(engine.stop_loss_monitor(StopLossContext(stop_prices={"A.SH": 9.5})))
     assert submitted["n"] == 0
     assert result["checked"] == 0
     assert "网关" in result.get("reason", "") or result.get("stop_triggered", -1) == 0
@@ -734,7 +735,7 @@ def test_stop_loss_idempotent(monkeypatch, tmp_path):
 
     monkeypatch.setattr("trading.phases.stop_loss._submit", _counting_submit)
 
-    asyncio.run(engine.stop_loss_monitor(stop_prices={"A.SH": 9.5}))
+    asyncio.run(engine.stop_loss_monitor(StopLossContext(stop_prices={"A.SH": 9.5})))
     assert submit_calls["n"] == 0  # 已有 STOP 委托 → 跳过（DB 幂等）
 
 
@@ -830,7 +831,7 @@ def test_stoploss_monitors_after_ordered(monkeypatch, tmp_path):
     monkeypatch.setattr("trading.phases.stop_loss._submit", _submit_dry)
 
     # stop_loss_monitor 从 trade_event SIGNAL.meta 读 stop_price + 确认闸过滤
-    asyncio.run(engine.stop_loss_monitor(stop_prices={sym: 9.5}))
+    asyncio.run(engine.stop_loss_monitor(StopLossContext(stop_prices={sym: 9.5})))
     # 核心断言：ORDERED 后止损仍监控 → 跌破触发 _submit（若确认闸失效 submitted=0）
     assert submitted["n"] == 1, "ORDERED 后 _stoploss 静默失效（P1 regression）"
 
@@ -1664,7 +1665,10 @@ def test_pre_open_skip_expired_signal(monkeypatch, _state_db):
     monkeypatch.setattr(engine, "get_gateway", lambda: object())
     # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（pre_open 路径）。
     monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 10)
+    # T10 顺手清：本行原 setattr(engine, ...) 是 W1-B 未迁完的死 patch（下方兄弟用例已迁
+    # phases.pre_open，此处漏迁；测试此前靠真实交易日历的巨大多日间隔侥幸通过，非 mock
+    # 决定性）——迁消费方物理路径，恢复「mock 决定性返 10」的本意。
+    monkeypatch.setattr("trading.phases.pre_open._trading_days_between", lambda s, e: 10)
 
     submitted = []
     async def _fake_submit(order, **kw):
@@ -1950,7 +1954,11 @@ def test_scan_expired_positions_empty_when_all_within(monkeypatch):
     from trading import position_book
     monkeypatch.setattr(position_book, "get_entry_dates",
                         lambda **kw: {"A.SH": "2099-01-15"})
-    monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 5)
+    # W1-B 评审遗留（T10 顺手清）：scan_expired_positions 消费方在 trading.phases.stop_loss
+    # （顶部 import trading_days_between as _trading_days_between 本地绑定），patch engine
+    # 属性不命中（monkeypatch 静默改了个没人读的名字，用例假绿）——迁物理路径，与上方
+    # test_scan_expired_boundary_holding_days 同款。
+    monkeypatch.setattr("trading.phases.stop_loss._trading_days_between", lambda s, e: 5)
 
     assert scan_expired_positions("2099-01-21", 15) == []
 

@@ -34,11 +34,13 @@ W1-A/T2-Task16 patch 物理路径迁移（_stoploss inject 调用链归属判定
       不迁。（与 Task 13 C3「_state_store.list_signals... ×1 共享属性」不同：此处是
       整体替换 patch（无 .attr 路径），但因读取点（_stoploss 函数体）属 engine 方法，
       仍判保 engine。）
-    - ``stop_loss_monitor`` ×3（C4 engine wrapper · 不迁 · L47/76/101）：engine.py:204-205
-      顶部 ``from trading.phases.stop_loss import stop_loss_monitor`` re-export；
-      _stoploss:1554 ``await stop_loss_monitor(...)`` 经 engine 模块全局名解析命中本
-      re-export → patch trading.engine.stop_loss_monitor 正确拦截（断言 stop_prices 注入
-      参数 / 非交易日不调）。迁 phases 反 miss（phases 本地绑定不经 _stoploss 调用点）。
+    - ``stop_loss_monitor`` ×3（C4 engine wrapper · 不迁 · L47/76/101）：engine 顶部
+      ``from trading.phases.stop_loss import stop_loss_monitor`` import 绑定（W1-B 后即
+      唯一 patch 面）；_stoploss ``await stop_loss_monitor(StopLossContext(...), ports=...)``
+      经 engine 模块全局名解析命中本绑定 → patch trading.engine.stop_loss_monitor 正确
+      拦截。M2（2026-08-15）起调用面为 StopLossContext 单参——断言 stop_prices 注入改从
+      ``call_args.args[0].stop_prices`` 解箱（非 kwargs）；非交易日不调不变。迁 phases 反
+      miss（phases 本地绑定不经 _stoploss 调用点）。
     - ``calendar.is_trading_day`` ×2（B 共享属性 · 不迁 · L74/100）：calendar 是共享模块
       对象（engine.calendar IS trading.calendar IS phases.calendar，sys.modules 同一对象），
       patch 属性路径改模块对象属性 → 全局命中（_stoploss:1443 经 engine 模块名读同对象）。
@@ -60,13 +62,14 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from trading.engine import TradingEngine
+from trading.stop_loss_context import StopLossContext  # M2：单参收三 map
 
 
 def test_stoploss_injects_stop_prices_from_plan():
     """有活跃 confirmed 计划 → _stoploss 把 symbol→stop_price 注入 monitor。
 
-    断言：``stop_loss_monitor(stop_prices={"300001.SZ": 9.5})`` 被精确调用，
-    而非 None（现状 bug）。
+    断言：``stop_loss_monitor(StopLossContext(stop_prices={"300001.SZ": 9.5}, ...))``
+    被精确调用，而非 None（现状 bug；M2 起单参解箱断言）。
 
     C2c：_stoploss 直读 DB list_signals_with_meta_by_plan_date（不再 load_plan），
     每个 SIGNAL 须 latest=CONFIRMED 才塞 stop_prices（确认闸 per-trade）。
@@ -95,8 +98,10 @@ def test_stoploss_injects_stop_prices_from_plan():
             ss.get_latest_action.return_value = "CONFIRMED"
             asyncio.run(eng._stoploss())
     # 断言 stop_prices 被注入（非 None）：symbol→stop_price 精确映射
-    _, kwargs = mon.call_args
-    assert kwargs.get("stop_prices") == {"300001.SZ": 9.5}
+    # M2（2026-08-15）：三 map 装箱 StopLossContext 单参传递——从 call_args.args[0] 解箱。
+    ctx_arg = mon.call_args.args[0]
+    assert isinstance(ctx_arg, StopLossContext)
+    assert ctx_arg.stop_prices == {"300001.SZ": 9.5}
 
 
 def test_stoploss_no_plan_injects_none():
@@ -119,8 +124,9 @@ def test_stoploss_no_plan_injects_none():
         with patch("trading.engine._state_store") as ss:
             ss.list_signals_with_meta_by_plan_date.return_value = []
             asyncio.run(eng._stoploss())
-    _, kwargs = mon.call_args
-    assert kwargs.get("stop_prices") in (None, {})
+    # M2（2026-08-15）：单参 StopLossContext 解箱断言（kwargs 只剩 ports 注入）
+    assert set(mon.call_args.kwargs) == {"ports"}
+    assert mon.call_args.args[0].stop_prices in (None, {})
 
 
 def test_stoploss_skips_non_trading_day():

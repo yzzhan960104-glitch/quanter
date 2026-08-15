@@ -27,6 +27,7 @@ import pytest
 
 from trading.engine import TradingEngine
 from trading.phases.stop_loss import stop_loss_monitor  # W1-B：迁物理真身
+from trading.stop_loss_context import StopLossContext  # M2：单参收三 map
 from trading.phases.exit import place_take_profit  # W1-B：迁物理真身
 # W1-A/T2：blackout 节流状态从 engine 模块级 (_last_quote_blackout_alert_ts) 迁 ports.blackout
 # （QuoteBlackoutThrottle dataclass）——blackout 测试改经 ports 注入 + 重置节流。
@@ -126,8 +127,10 @@ def _run_monitor(monitor_ctx, positions, quotes, submitted=None, gw=None,
         cal.is_intraday_session.return_value = True
         cal.is_trading_day.return_value = True
         qmd.get_quotes = AsyncMock(return_value=quotes)
+        # M2（2026-08-15）：三 map 装箱单参传递（gw/ports 仍独立 kwarg）。
         return asyncio.run(stop_loss_monitor(
-            monitor_ctx=monitor_ctx, pending_ctx=pending_ctx, ports=ports))
+            StopLossContext(monitor_ctx=monitor_ctx, pending_ctx=pending_ctx),
+            ports=ports))
 
 
 # ============================================================================

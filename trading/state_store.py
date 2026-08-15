@@ -1393,6 +1393,24 @@ def is_trade_confirmed(trade_id: str, *, db_path: str | None = None) -> bool:
     return get_latest_action(trade_id, db_path=db_path) not in (None, "SIGNAL", "VETOED")
 
 
+def is_vetoed(trade_id: str, *, db_path: str | None = None) -> bool:
+    """某 trade_id 是否被人审否决（VETOED 终局，语义单点 · tech-debt M2）。
+
+    物理意图：eod_plan 自动确认闸（auto_confirmed 分支）原散落
+    ``get_latest_action(trade_id) != "VETOED"`` 字面量——多一个消费方就多一处漂移面
+    （某处改了终局集合另一处漏改 → veto 保护失效/误伤）。与 is_trade_confirmed 同款
+    收口为单点判断。
+
+    None 安全：无任何事件（get_latest_action 返 None）= 未否决 → False，
+    与旧字面量 ``None != "VETOED"`` → True（不拦 CONFIRMED 落盘）语义一致。
+
+    Returns:
+        True  = latest action == "VETOED"（人审否决终局，veto 保护生效）
+        False = 其余一切（None / SIGNAL / CONFIRMED / ORDERED / ...）
+    """
+    return get_latest_action(trade_id, db_path=db_path) == "VETOED"
+
+
 def count_signals_by_plan_date(plan_date: str, *, db_path: str | None = None) -> int:
     """读某计划日（T+1）的 SIGNAL 数（即当日选股/扫描出多少标的）。
 

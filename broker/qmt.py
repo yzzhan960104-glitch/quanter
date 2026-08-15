@@ -707,6 +707,19 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             if connect_rc == 0:
                 break                        # 连接成功
 
+            # T11（2026-08-15）：connect **每次**返 -1 都留痕 status_msg（Notes 兑现：
+            # memory 688160 拒因黑盒教训——rc=-1 柜台无文本回报，不留痕则下方 L1 清理
+            # 重试 / L2 sid 轮换 / L3 fail-closed 整条兜底链只见结果不见过程，事后无法
+            # 归因「-1 发生在第几轮、当时 sid 是谁」）。status 经 _map_qmt_status 归一
+            # （-1 不属任何委托状态码，走默认分支 SUBMITTED——此处仅作「非 0 未归类码」
+            # 的统一口径标记，真实拒因语义看 msg）；msg 记 attempt 轮次 + -1 物理含义。
+            # ⚠️ 只加观测，不改重试次数/顺序（G8 刚重构，周一实战前零行为变更）。
+            if connect_rc == -1:
+                logger.warning(
+                    "connect -1 sid=%s status=%s msg=%s",
+                    sid, _map_qmt_status(connect_rc).name,
+                    f"attempt={attempt}/2：死进程残留会话/sid 被占（柜台无文本回报）")
+
             # 连接失败：立即停掉本次实例释放 sid（防止同进程下次重试自锁）
             _stop_trader_safely(self._trader)
             self._trader = None

@@ -135,7 +135,9 @@ async def test_e2e_pre_open_halt_then_stoploss_skipped(monkeypatch, tmp_path):
     # ④ 哨兵：记录 stop_loss_monitor 是否被触达（_halted 后应 False）
     stoploss_called = {"v": False}
 
-    async def _spy_stop_loss_monitor(**kw):
+    async def _spy_stop_loss_monitor(*args, **kw):
+        # M2（2026-08-15）：engine 经 StopLossContext 单参调用——spy 须收 positional
+        # （旧 **kw-only 形态在被触达时会 TypeError 掩盖真实断言失败）。
         stoploss_called["v"] = True
         return {"checked": 0}
 

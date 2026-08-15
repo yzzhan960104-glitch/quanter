@@ -322,6 +322,30 @@ def test_get_latest_action(db):
     _seed_for_queries(db)
     assert state_store.get_latest_action("ACC1_600000.SH_2026-07-30") == "CONFIRMED"
 
+
+def test_is_vetoed_single_point(db):
+    """M2 is_vetoed 单点：vetoed→True；CONFIRMED（未否决）→False；无事件（None）→False。
+
+    物理意图：eod_plan 自动确认闸（auto_confirmed 分支）原散落 ``!= "VETOED"`` 字面量，
+    收口为本单点后须钉死三种边界——尤其 None 安全（无任何事件 = 未否决 = 可写 CONFIRMED，
+    与旧字面量 ``None != "VETOED"`` → True 语义一致，不改 eod_plan 行为）。
+    """
+    # FK 前置：trade_event.account_id 引用 account 表（缺行时 insert_trade_event 吞
+    # IntegrityError 返 False，事件静默不落盘 → 测不出真语义）。
+    state_store.upsert_account("ACC1", broker="qmt")
+    tid_vetoed = "ACC1_600000.SH_2026-07-30"
+    state_store.insert_trade_event("ACC1", tid_vetoed, "600000.SH", "SIGNAL")
+    state_store.insert_trade_event("ACC1", tid_vetoed, "600000.SH", "VETOED")
+    assert state_store.is_vetoed(tid_vetoed) is True
+
+    tid_ok = "ACC1_600001.SH_2026-07-30"
+    state_store.insert_trade_event("ACC1", tid_ok, "600001.SH", "SIGNAL")
+    state_store.insert_trade_event("ACC1", tid_ok, "600001.SH", "CONFIRMED")
+    assert state_store.is_vetoed(tid_ok) is False
+
+    # None 安全：完全不存在的 trade_id（get_latest_action 返 None）
+    assert state_store.is_vetoed("ACC1_999999.SH_2026-07-30") is False
+
 # ============================================================================
 # SSoT Phase A · Task A1：fill 表加 strategy 列（新断点-4，保 digest 过滤口径）
 # ============================================================================

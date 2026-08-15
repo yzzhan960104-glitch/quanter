@@ -212,8 +212,9 @@ async def compute(date: str, signals: list, atr_map: dict, capital: float) -> di
             _state_store.insert_trade_event(
                 account_id, trade_id, sym, "SIGNAL",
                 meta=json.dumps(meta_obj, ensure_ascii=False))
-            # CONFIRMED 仅在 auto_confirmed 且未被 veto 时写（veto 保护：最新 action=VETOED 不覆盖）
-            if auto_confirmed and _state_store.get_latest_action(trade_id) != "VETOED":
+            # CONFIRMED 仅在 auto_confirmed 且未被 veto 时写（veto 保护：最新 action=VETOED 不覆盖；
+            # M2 收口：is_vetoed 单点封装 None 安全的 ==VETOED 判断，字面量不再散落）
+            if auto_confirmed and not _state_store.is_vetoed(trade_id):
                 _state_store.insert_trade_event(account_id, trade_id, sym, "CONFIRMED")
     except Exception:
         # DB 写失败不阻断 eod_plan 主流程（C3：DB 是真相源，但失败软降级不抛，下次 eod 补写）
