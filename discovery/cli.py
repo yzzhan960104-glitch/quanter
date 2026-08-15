@@ -35,7 +35,7 @@ def _db_path():
 
 
 def _engine_hash():
-    """回测内核代码 hash（**ENGINE_FILES 8 文件** 内容 sha256[:12]，与 runner 同源）。
+    """回测内核代码 hash（**ENGINE_FILES 9 文件** 内容 sha256[:12]，与 runner 同源）。
 
     物理意图：内核改了老 trial 的指标就 stale 了——engine_hash 作内核指纹，与
     snapshot_hash 双指纹共同标识"可复现试验"（spec §3.2 engine_hash）。

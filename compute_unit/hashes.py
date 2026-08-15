@@ -47,6 +47,13 @@ def _file_sha256(path) -> str:
 
 ENGINE_FILES = (
     "strategies/neckline/backtest.py",
+    # T18（2026-08-15 · T7 强制遗留收口）：price_levels.py 现承载回测内核的价位数学
+    # （compute_price_levels/PRICE_LEVEL_DEFAULTS），是 backtest.simulate_exit 的传递依赖
+    # （backtest.py:42 `from .price_levels import ...`）。不在清单 = 指纹盲区：未来改价位
+    # 公式（止损基准/tp 倍数口径）engine_hash 不变，老 trial 不标 stale，跨机 discovery
+    # 静默误判可比——回测⇄实盘等价性头号资产的守门人自己漏了门。加入即 hash 变化属
+    # 预期重估（backtest.py 内容 P1 后早变过，基线本就该刷新）。
+    "strategies/neckline/price_levels.py",
     "strategies/neckline/method_v0.py",
     "strategies/neckline/strategy.py",
     "strategies/neckline/execution.py",

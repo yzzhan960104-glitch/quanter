@@ -63,7 +63,7 @@ tracker: local-markdown
 - [多账户资金/持仓/订单隔离与路由](T3.md) — grilling · **可领取**（Phase 3 主脊柱末段；前置 T2 keystone + W2 broker 分层/Ports 化/actual_sid 单源已就位；验证护栏见 [ADR-09](../../docs/architecture/09-t7-validation-strategy.md)，依赖边界见 [ADR-10](../../docs/architecture/10-t8-dependency-policy.md)）
 
 > 阻塞链：主脊柱 T0.1→T1→T2 已全通（T0 closed 08-08 / T0.1 closed 08-10 / T1 done 08-10 / T2 done 08-12），**T3 为最后一环**；横向 T9→T11 已闭合（08-12/08-15）；横切 T7/T8 已闭（ADR-09/10）。
-> 待登记（非工单形态，2026-08-15 波次报告移交 T17 落 06-tech-debt）：scan 停牌真值缺口（suspend_d 全历史回补纳入 justified 判定）。
+> 已登记（T17 · 2026-08-15 落 06-tech-debt 新债务区【High】）：scan 停牌真值缺口（suspend_d 不覆盖历史长停牌 → 16371 段误判 unjustified、补采配额永占；需另寻真值源 + repair 侧 unfillable 标记）。
 
 ## Not yet specified
 
