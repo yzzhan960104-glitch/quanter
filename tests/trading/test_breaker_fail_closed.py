@@ -156,6 +156,26 @@ class _AssetGwStub:
         return self._asset
 
 
+class _SeqAssetGwStub:
+    """按调用序返值网关桩：post_close 内 query_asset 被调两次（熔断段 :314 先、快照段
+    :450 后）——首调返 ``first``（熔断段给足有效 curr 不 halt，流程才能走到快照段）、
+    次调起返 ``later``（快照段注入「query 成功但 total=None」的无效值路径）。
+
+    Why 不复用单值 ``_AssetGwStub``：恒返 {} 的单值桩会让熔断段先走 CR-4 fail-closed
+    （live raise _CriticalHalt），根本测不到快照段无效值分支——快照无效值是「query
+    成功而值无效」的独立残留路径，需与熔断段 curr 方向解耦注入。
+    """
+
+    def __init__(self, first, later):
+        self._first = first
+        self._later = later
+        self._calls = 0
+
+    async def query_asset(self):
+        self._calls += 1
+        return self._first if self._calls == 1 else self._later
+
+
 class _FakeStateStore:
     """post_close 全链路 state_store 桩（隔离 logs/trading_state.db 真库）。
 
@@ -314,3 +334,24 @@ def test_snapshot_close_failure_live_alerts(monkeypatch):
     assert len(alert_calls) == 1, "live 快照失败必须推一次 CRITICAL（防静默掏空次日基线）"
     assert "收盘快照" in alert_calls[0]
     assert store.close_snapshots == [], "异常注入生效：快照确未落库（fail 有声的观测前提）"
+
+
+def test_snapshot_invalid_total_live_alerts(monkeypatch):
+    """live + query_asset 返 {}（query 成功非异常）→ 推 CRITICAL 且 post_close 正常返回。
+
+    物理意图（CR-4 残留 · 收盘快照无效值有声）：快照段旧代码只覆盖「query 抛异常」
+    有声，「query 成功而 total_asset=None/≤0」既无日志也无告警静默跳过——同样掏空
+    次日 T-1 兜底基线（close 是 get_prev_close_equity 的唯一写入方，「返空≠真空值」）。
+    修复后对齐 except 分支口径：live 推 CRITICAL 但不 raise（快照段不阻断其余闭合段）。
+    """
+    store = _FakeStateStore(start_equity=1_000_000.0)
+    alert_calls = _patch_post_close_env(monkeypatch, mode="live", state_store=store)
+    # 调用序注入：熔断段首调给有效资产（1_000_000 vs 基线 1_000_000，0% 回撤不触发不
+    # halt），快照段次调返 {}（query 成功但 total 缺失——非异常路径）
+    gw = _SeqAssetGwStub(first={"total_asset": 1_000_000.0}, later={})
+    result = asyncio.run(_post_close("2026-08-15", gw=gw, local_positions=None))
+    # 不 raise：快照无效值与快照异常同口径（有声不阻断闭合段），正常返回结果 dict
+    assert result["date"] == "2026-08-15"
+    assert len(alert_calls) == 1, "live 快照无效值必须推一次 CRITICAL（防静默掏空次日基线）"
+    assert "快照无效值" in alert_calls[0]
+    assert store.close_snapshots == [], "total 无效：快照确未落库（有声告警的观测前提）"

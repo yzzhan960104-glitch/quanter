@@ -455,6 +455,21 @@ async def post_close(
                     close_cash=(asset or {}).get("cash"),
                     close_market_value=(asset or {}).get("market_value"))
                 logger.info("post_close account_daily 收盘快照 date=%s close=%s", _today_eq, total)
+            else:
+                # CR-4 残留（收盘快照无效值有声）：query 成功但 total=None/≤0——旧路径此处
+                # 无日志无告警静默跳过，与 except 分支同掏空次日 T-1 兜底基线（close 是
+                # get_prev_close_equity 读 account_daily.close 的唯一写入方，「返空≠真空值」）。
+                # 口径与 except 分支一致：不 raise（不阻断其余闭合段）+ live 推 CRITICAL、
+                # dry_run 不推（避免噪音）。_today_eq 在 else 分支必已绑定（此处必在赋值
+                # 之后），直接用而非像 except 分支那样现取 clock.today() 防 NameError。
+                _snap_invalid = (f"post_close account_daily 收盘快照无效值 date={_today_eq} "
+                                 f"total={total!r}（total=None/≤0 同掏空次日 T-1 兜底基线，"
+                                 "人工核查 query_asset 返回）")
+                logger.warning(_snap_invalid)
+                if _mode() == "live":
+                    # live 推钉钉叫醒人工（dry_run 不推避免噪音——与 except 分支同口径；
+                    # _alert_critical fire_and_forget，告警失败不阻塞本段收尾）。
+                    _alert_critical(_snap_invalid)
         except Exception:
             # CR-4（收盘快照失败有声）：快照失败不 raise（不阻断 post_close 其余闭合段
             # ——trade_event 已落、清白名单仍要走完），但 live 必须推 CRITICAL：
