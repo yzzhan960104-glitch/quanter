@@ -361,6 +361,23 @@ def test_insert_fill_strategy_optional_default_null(tmp_db):
     assert row["strategy"] is None  # 缺省 NULL
 
 
+def test_insert_fill_rejects_non_canonical_direction(tmp_db):
+    """CR-5：insert_fill 入口校验 direction 仅 BUY/SELL（脏值 ValueError 快速失败）。
+
+    物理意图：fill.direction 即将有 DB 层 CHECK（CR-5 schema 收口）——若无入口
+    校验，脏 direction（如小写 'buy'）会撞 DB CHECK 走 IntegrityError→返 False
+    分支，被调用方误当「重复成交」静默吞掉（审计断链）；入口先显式 ValueError
+    （与 apply_fill_to_position 同款先例），让脏值在写入侧立刻暴露而非静默降级。
+    """
+    from trading import state_store
+    with pytest.raises(ValueError):
+        state_store.insert_fill("O9", "ACC_TEST", "20260805101009", "600000.SH",
+                                "buy", 100, 10.0)  # 小写脏值
+    with pytest.raises(ValueError):
+        state_store.insert_fill("O10", "ACC_TEST", "20260805101010", "600000.SH",
+                                "TRADE", 100, 10.0)  # 非 BUY/SELL
+
+
 def test_init_store_strategy_column_migration_idempotent(tmp_db):
     """init_store 多次跑 strategy 列迁移不报错（幂等，ALTER TABLE IF NOT EXISTS 语义）。
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -127,6 +128,30 @@ def _has_column(con, table: str, column: str) -> bool:
         return False
     cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
     return column in cols
+
+
+# CR-5：fill.direction 的 CHECK 约束形态（迁移幂等判定用，与本文件两处 fill DDL 的
+# CHECK 子句同源）。re.IGNORECASE 容忍 DDL 文本空白/大小写重排（ALTER 追加列会重写
+# sqlite_master 存的建表文本），只认「direction IN ('BUY','SELL')」这一语义。
+_FILL_DIRECTION_CHECK_RE = re.compile(
+    r"CHECK\s*\(\s*direction\s+IN\s*\(\s*'BUY'\s*,\s*'SELL'\s*\)\s*\)", re.IGNORECASE)
+
+
+def _fill_direction_check_present(con) -> bool:
+    """fill.direction 列是否已有 BUY/SELL CHECK（只读 sqlite_master DDL 文本检测）。
+
+    Why 不用 PRAGMA table_info：它不返回 CHECK 约束；Why 不试探 INSERT：那要写库
+    （live 引擎运行中生产库只允许只读判定）。读 sqlite_master.sql 文本 + 正则是
+    只读、幂等、零副作用的检测点。
+    """
+    if not _table_exists(con, "fill") or not _has_column(con, "fill", "direction"):
+        return False
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='fill'"
+    ).fetchone()
+    if row is None or not row[0]:
+        return False
+    return _FILL_DIRECTION_CHECK_RE.search(row[0]) is not None
 
 
 # ============================================================================
@@ -347,7 +372,7 @@ def init_store(db_path: str | None = None) -> None:
                     order_id     TEXT NOT NULL,
                     traded_time  TEXT NOT NULL,
                     symbol       TEXT NOT NULL,
-                    direction    TEXT NOT NULL,
+                    direction    TEXT NOT NULL CHECK(direction IN ('BUY','SELL')),
                     qty          REAL NOT NULL,
                     price        REAL NOT NULL,
                     applied_at   TEXT NOT NULL,
@@ -361,7 +386,7 @@ def init_store(db_path: str | None = None) -> None:
                 order_id     TEXT NOT NULL,
                 traded_time  TEXT NOT NULL,
                 symbol       TEXT NOT NULL,
-                direction    TEXT NOT NULL,
+                direction    TEXT NOT NULL CHECK(direction IN ('BUY','SELL')),
                 qty          REAL NOT NULL,
                 price        REAL NOT NULL,
                 applied_at   TEXT NOT NULL,
@@ -382,6 +407,39 @@ def init_store(db_path: str | None = None) -> None:
         if not _has_column(con, "fill", "strategy"):
             con.execute("ALTER TABLE fill ADD COLUMN strategy TEXT")
             logger.info("state_store 迁移：fill 表加 strategy 列（A1 断点-4 真相源字段）")
+        # CR-5（2026-08-15 tech-debt）：fill.direction CHECK 约束迁移——「防超卖＞防漏挂」
+        # 盲区的 schema 层收口。Why：direction 脏值（如小写 'buy'）会让 audit 的
+        # ``direction == "BUY"`` 净额符号判定失真（小写被当 -qty 记成卖出）→ 漏挂向
+        # 静默 PASS；应用层校验（apply_fill_to_position/insert_fill）只是约定，DB 无
+        # CHECK 则旁路写入（运维脚本/迁移回灌）无兜底。SQLite 给既有列加 CHECK 必须
+        # 重建表 → 复用 G5 _migrate_with_backup（导出→DROP→CREATE→回灌，撞约束跳行
+        # + sidecar 兜底）。幂等触发条件：现表 direction 列无 CHECK（只读 sqlite_master
+        # DDL 文本检测，见 _fill_direction_check_present）。
+        # 迁移目标 DDL 特意带上 account_id/strategy（当前生产形态的 ALTER 追加列）：
+        # 共享列回灌保住既有归因数据（digest/归因消费口真相源字段），回灌后上方两个
+        # _has_column ALTER 守卫自然跳过，表形态与生产一致。历史脏 direction 行会在
+        # 回灌时撞 CHECK 跳行 + warning（设计行为：脏值不进新表，sidecar 留档人工订正）。
+        # 迁移前置实证（2026-08-15 只读 mode=ro）：生产 logs/trading_state.db fill 表
+        # 4 行 direction 全部 'BUY'（大写）→ 迁移 4/4 回灌零跳行。
+        if (_table_exists(con, "fill") and _has_column(con, "fill", "direction")
+                and not _fill_direction_check_present(con)):
+            logger.info("state_store 迁移：fill.direction 无 CHECK 约束，备份式重建 + 回灌（CR-5）")
+            _migrate_with_backup(
+                con, "fill",
+                """CREATE TABLE fill (
+                    fill_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id     TEXT NOT NULL,
+                    traded_time  TEXT NOT NULL,
+                    symbol       TEXT NOT NULL,
+                    direction    TEXT NOT NULL CHECK(direction IN ('BUY','SELL')),
+                    qty          REAL NOT NULL,
+                    price        REAL NOT NULL,
+                    applied_at   TEXT NOT NULL,
+                    account_id   TEXT REFERENCES account(account_id),
+                    strategy     TEXT,
+                    UNIQUE(order_id, traded_time)
+                )""",
+            )
         con.execute("CREATE INDEX IF NOT EXISTS idx_fill_symbol ON fill(symbol)")
         # ⑤ position（当前持仓 · fill 累加汇总，可变）——升级为复合 PK
         if _table_exists(con, "position") and (
@@ -851,6 +909,11 @@ def insert_fill(order_id: str, account_id: str, traded_time: str, symbol: str,
 
     Returns: True=首次写入；False=重复 (order_id, traded_time) 跳过。
     """
+    # CR-5：direction 入口校验（先于 DB CHECK——脏值若只靠 DB CHECK 拦，会走下方
+    # IntegrityError→返 False 分支，被调用方误当「重复成交」静默吞掉（审计断链）；
+    # 入口 ValueError 快速失败，与 apply_fill_to_position 同款先例）。
+    if direction not in ("BUY", "SELL"):
+        raise ValueError(f"insert_fill direction 仅 BUY/SELL，收到 {direction}")
     db_path = db_path or _DEFAULT_DB
     now = clock.now().isoformat()
     with _connect(db_path) as con:

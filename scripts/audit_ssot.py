@@ -85,6 +85,21 @@ BANNED_PATTERNS = [
 ]
 _BANNED_COMPILED = [re.compile(p) for p in BANNED_PATTERNS]
 
+# CR-5：SIGNAL 后「合法后续 action」单源集合（孤儿判定的 NOT-IN 口径，防误报）。
+# 物理意图：原集合 ('CONFIRMED','VETOED','OPEN','FILLED','CLOSED') 与生产实写口径
+# 脱节——pre_open/gateway_service 实写 ORDERED（gateway_service.py:670）、pre_open
+# 实写 SUBMITTED 推进、post_close 实写 TP1_FILLED/TP2_FILLED、stop_loss 实写
+# STOP_TRIGGERED；而 'OPEN' 从未作为 trade_event action 写入（是 order.purpose 值）。
+# 集合漏实写 action ⇒ 每个已推进未平仓的 trade 被误报孤儿，告警噪音淹没真断链
+# （审计旁路失效）。SQL IN 子句与告警文案同源引用本常量，杜绝两处口径漂移。
+_SIGNAL_FOLLOWUP_ACTIONS = (
+    "CONFIRMED", "VETOED", "ORDERED", "SUBMITTED",
+    "TP1_FILLED", "TP2_FILLED", "STOP_TRIGGERED",
+    "FILLED", "CLOSED",
+)
+# 参数化占位符（与 _SIGNAL_FOLLOWUP_ACTIONS 同源派生，防注入）
+_FOLLOWUP_PLACEHOLDERS = ",".join("?" * len(_SIGNAL_FOLLOWUP_ACTIONS))
+
 
 def check_fill_position(db: Path):
     """fill 流水 ↔ position 持仓一致性校验。
@@ -112,6 +127,13 @@ def check_fill_position(db: Path):
             mismatches.append(
                 f"{r['symbol']}: fill累加={expected} vs position.qty={r['qty']}"
             )
+    # CR-5：漏挂方向（fill 净额≠0 而 position 缺行/为 0）——旧扫描集只扫 position≠0，
+    # 真实持仓漏记（→止损/止盈漏挂、敞口裸奔）方向符号根本不进循环，静默 PASS。
+    for sym, net in fills.items():
+        if abs(net) > 1e-6:
+            row = con.execute("SELECT qty FROM position WHERE symbol=?", (sym,)).fetchone()
+            if row is None or abs(row["qty"]) <= 1e-6:
+                mismatches.append(f"{sym}: fill净额={net} 但 position 缺行/为0（漏挂向）")
     con.close()
     return ("fill↔position 不一致 " + "; ".join(mismatches)) if mismatches else None
 
@@ -142,28 +164,32 @@ def check_trade_event_chain(db: Path):
     """trade_event 生命周期链完整性：孤儿 SIGNAL（>7 日无后续）告警。
 
     物理意图：SIGNAL 是计划源（Phase C 升格 meta 为真相源），后续应有
-    CONFIRMED/VETOED/OPEN/FILLED/CLOSED 之一标记链路推进。<7 日合法未确认
+    _SIGNAL_FOLLOWUP_ACTIONS（CONFIRMED/VETOED/ORDERED/SUBMITTED/TP1_FILLED/
+    TP2_FILLED/STOP_TRIGGERED/FILLED/CLOSED）之一标记链路推进。<7 日合法未确认
     （研究员可能延后处理）；>7 日无后续 = 链路断（信号丢失 / 漏 confirm）。
+    CR-5 订正：集合按生产实写口径补 ORDERED/SUBMITTED/TP1_FILLED/TP2_FILLED/
+    STOP_TRIGGERED、删从未写入的 OPEN——只炸真断链，不拿已推进链凑数。
     """
     if not db.exists():
         return f"DB 不存在: {db}"
     con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
-    # NOT EXISTS 子查询：该 trade_id 无任何后续状态行
+    # NOT EXISTS 子查询：该 trade_id 无任何后续状态行（合法后续集单源引用，参数化）
     # datetime('now','-7 days') 走 SQLite 原生时间算术（UTC；timestamp 是 ISO8601 本地）
     orphans = con.execute(
         "SELECT trade_id, symbol, timestamp FROM trade_event e1 "
         "WHERE e1.action='SIGNAL' "
         "AND NOT EXISTS (SELECT 1 FROM trade_event e2 "
         "                WHERE e2.trade_id=e1.trade_id "
-        "                AND e2.action IN ('CONFIRMED','VETOED','OPEN','FILLED','CLOSED')) "
-        "AND e1.timestamp < datetime('now','-7 days')"
+        f"                AND e2.action IN ({_FOLLOWUP_PLACEHOLDERS})) "
+        "AND e1.timestamp < datetime('now','-7 days')",
+        _SIGNAL_FOLLOWUP_ACTIONS,
     ).fetchall()
     con.close()
     if not orphans:
         return None
     items = [f"{r['symbol']}@{r['timestamp'][:10]}" for r in orphans]
-    return f"孤儿 SIGNAL（>7 日无后续 CONFIRMED/VETOED/OPEN/FILLED/CLOSED）: {items}"
+    return f"孤儿 SIGNAL（>7 日无后续 {'/'.join(_SIGNAL_FOLLOWUP_ACTIONS)}）: {items}"
 
 
 def check_engine_process_count():

@@ -180,3 +180,131 @@ def test_fill_migration_backfills_traded_time_from_applied_at(tmp_path, monkeypa
     assert by_oid["o1"][4] == 100.0 and by_oid["o1"][5] == 10.0
     assert by_oid["o2"][2] == "000001.SZ" and by_oid["o2"][3] == "SELL"
     assert by_oid["o2"][4] == 200.0 and by_oid["o2"][5] == 15.0
+
+
+# ============================================================================
+# CR-5（2026-08-15 tech-debt-full-wave）：fill.direction CHECK 约束迁移
+# ============================================================================
+# 物理意图：「防超卖＞防漏挂」三层同向盲区的 schema 层收口——direction 脏值
+# （如小写 'buy'）会让 audit 的 ``direction == "BUY"`` 判定失真（小写被当 -qty
+# 记成卖出）→ 净额符号错 → 漏挂向静默 PASS。DB 层 CHECK 让旁路写入（运维脚本/
+# 迁移回灌）也有兜底。SQLite 给既有列加 CHECK 必须重建表 → 复用 G5 备份式迁移。
+# 迁移前置实证（2026-08-15 只读 mode=ro）：生产 logs/trading_state.db fill 表
+# 4 行 direction 全部 'BUY'（大写）→ 迁移 4/4 回灌零跳行。
+
+def _recreate_fill_without_check(db_path: str) -> None:
+    """把 fill 表替换为「当前生产形态」（direction 无 CHECK，account_id/strategy 齐）。
+
+    生产 logs/trading_state.db 的 fill 表由旧版 init_store 建（基座 CREATE 无 CHECK
+    + ALTER 追加 account_id/strategy——2026-08-15 只读实证 DDL 无 CHECK）。CR-5 后
+    init_store 建的新库天然带 CHECK，故测试须手工复刻「升级前旧库」形态，才能让
+    后续 init_store 真正触发 CHECK 迁移分支。
+    """
+    con = sqlite3.connect(db_path)
+    con.execute("DROP TABLE fill")
+    con.execute("""CREATE TABLE fill (
+        fill_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id     TEXT NOT NULL,
+        traded_time  TEXT NOT NULL,
+        symbol       TEXT NOT NULL,
+        direction    TEXT NOT NULL,
+        qty          REAL NOT NULL,
+        price        REAL NOT NULL,
+        applied_at   TEXT NOT NULL,
+        account_id   TEXT REFERENCES account(account_id),
+        strategy     TEXT,
+        UNIQUE(order_id, traded_time)
+    )""")
+    con.commit()
+    con.close()
+
+
+def test_fill_direction_check_migration_skips_dirty_rows(tmp_path, monkeypatch):
+    """CR-5：现形态 fill 表（direction 无 CHECK）含小写脏值 → init_store 迁移：
+    ① 脏行撞 CHECK 跳入 sidecar（不进新表）；② 干净行回灌且 account_id/strategy
+    归因数据保留；③ 新表 direction 列有 CHECK（脏值 INSERT 直接 IntegrityError）。
+
+    RED 依据：当前 init_store 无 CHECK 迁移——脏行 'buy' 原样留在表里（断言 ②
+    剩余行集 FAIL），新表插脏值不报错（断言 ③ FAIL）。
+    """
+    db_path = str(tmp_path / "state.db")
+    backup_dir = tmp_path / "backup"
+    # 隔离 _DEFAULT_DB（红线：绝不让任何未显式传 db_path 的调用落到生产库）
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    monkeypatch.setattr(state_store, "_MIGRATION_BACKUP_DIR", str(backup_dir))
+    # 先 init 建全部表 + 满足 FK 的 account 行，再把 fill 表复刻为「升级前旧形态」
+    state_store.init_store(db_path)
+    state_store.upsert_account("ACC1", broker="qmt", db_path=db_path)
+    _recreate_fill_without_check(db_path)
+    con = sqlite3.connect(db_path)
+    # 一行干净（BUY 大写，带 account_id/strategy 归因）+ 一行脏（buy 小写——
+    # 历史写入侧无校验时代的脏值形态）
+    con.execute(
+        "INSERT INTO fill(order_id, traded_time, symbol, direction, qty, price,"
+        " applied_at, account_id, strategy) VALUES('o1', '2026-01-01T09:30:00',"
+        " '600000.SH', 'BUY', 100.0, 10.0, 't1', 'ACC1', 'neckline')")
+    con.execute(
+        "INSERT INTO fill(order_id, traded_time, symbol, direction, qty, price,"
+        " applied_at, account_id, strategy) VALUES('o2', '2026-01-02T09:30:00',"
+        " '000001.SZ', 'buy', 200.0, 15.0, 't2', 'ACC1', NULL)")
+    con.commit()
+    con.close()
+    # 第二次 init：升级后引擎重启形态——检测 direction 无 CHECK → 备份式重建
+    state_store.init_store(db_path)
+
+    # ① sidecar 备份 2 行（DROP 前导出，脏行也留档可人工订正）
+    backups = list(backup_dir.glob("state_store_fill_backup_*.json"))
+    assert backups, "CHECK 迁移应先备份到 sidecar JSON"
+    data = json.loads(backups[0].read_text(encoding="utf-8"))
+    assert {row["order_id"] for row in data} == {"o1", "o2"}
+
+    # ② 新表只剩干净行；脏行 'buy' 撞 CHECK 被跳过（跳行数据在 sidecar）
+    with sqlite3.connect(db_path) as con:
+        rows = con.execute(
+            "SELECT order_id, direction, account_id, strategy FROM fill"
+        ).fetchall()
+        # ③ 新表 CHECK 生效：脏 direction 直接 INSERT 必须 IntegrityError
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(
+                "INSERT INTO fill(order_id, traded_time, symbol, direction, qty,"
+                " price, applied_at) VALUES('o3', 't3', 'X', 'buy', 1, 1, 't')")
+
+    assert {r[0] for r in rows} == {"o1"}, \
+        f"脏行 o2('buy') 应被 CHECK 跳入 sidecar，实际剩余: {[tuple(r) for r in rows]}"
+    clean = rows[0]
+    # 干净行回灌后 account_id/strategy 归因数据保留（迁移不得丢既有归因列）
+    assert clean[1] == "BUY"
+    assert clean[2] == "ACC1" and clean[3] == "neckline", \
+        "回灌必须保住 account_id/strategy（digest/归因消费口的真相源字段）"
+
+
+def test_fill_direction_check_migration_idempotent(tmp_path, monkeypatch):
+    """CR-5 迁移幂等：CHECK 已存在时再跑 init_store 不重复重建（无新 sidecar、行不变）。
+
+    Why：engine 启动期多入口重复调 init_store（boot/lifespan/补跑），迁移判定
+    「现表 direction 无 CHECK」必须幂等——否则每次启动都 DROP 重建一遍 fill 表
+    （fill_id 重排 + sidecar 刷屏 + 回灌风险叠加）。
+    """
+    db_path = str(tmp_path / "state.db")
+    backup_dir = tmp_path / "backup"
+    # 隔离 _DEFAULT_DB（红线：绝不让任何未显式传 db_path 的调用落到生产库）
+    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
+    monkeypatch.setattr(state_store, "_MIGRATION_BACKUP_DIR", str(backup_dir))
+    state_store.init_store(db_path)
+    state_store.upsert_account("ACC1", broker="qmt", db_path=db_path)
+    _recreate_fill_without_check(db_path)
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "INSERT INTO fill(order_id, traded_time, symbol, direction, qty, price,"
+        " applied_at, account_id) VALUES('o1', 't1', '600000.SH', 'BUY', 100.0,"
+        " 10.0, 't1', 'ACC1')")
+    con.commit()
+    con.close()
+    state_store.init_store(db_path)   # 第一次迁移（无 CHECK → 重建）
+    state_store.init_store(db_path)   # 第二次（有 CHECK → 必须跳过）
+
+    backups = list(backup_dir.glob("state_store_fill_backup_*.json"))
+    assert len(backups) == 1, f"幂等失败：CHECK 在表上不应再触发迁移 sidecar，实际 {len(backups)} 个"
+    with sqlite3.connect(db_path) as con:
+        n = con.execute("SELECT COUNT(*) FROM fill").fetchone()[0]
+    assert n == 1, "重复 init_store 不得丢/复制 fill 行"
