@@ -1,4 +1,4 @@
-> 最近复核：2026-08-15（清偿后记）· 维护者：debt-full-wave session ·
+> 最近复核：2026-08-16（新债清偿补记）· 维护者：new-debt-wave session ·
 > 证据基线：HEAD `2e74cb9d`（master，领先 origin 1 commit）。三路并行审计（前端契约 / 风控链路 / 治理波次）+ 复跑 [#2](../02-module-dependencies.md) 依赖扫描 + 逐项 git 考古。
 > 性质：**带日期的快照评估**（非活文档）——批判结论有时效，下次大波次合并后应重估或在文头标注过期。
 > 权威归宿：本文是「架构健康度批判评估」叙事的单一归宿；债务条目登记与严重度判定归 [#6](../06-tech-debt.md)（本文 CR-\* 与 #6 新增条目一一映射）；波次工单全景与状态归 [roadmap](../roadmap.md)。本文不重抄规则，只链。
@@ -20,6 +20,7 @@
 | CR-9 | ✅ T16（`e6100a79`）8 工单回填 + MAP frontier 重写（余 T3）+ sdd G7/G8 补账 | 状态同步机制化靠波次收尾 checklist（本 T17 即三件套） |
 | CR-10 | ✅ T5（`6f70faa6`）ci-heartbeat 元守卫 + 周一 schedule 心跳 | 基线依赖 master 首次成功 run（T18 push 后建立） |
 | CR-11 | ✅ T5（`6f70faa6`+`bc69d546`）guardrails / data-source-of-truth / .env.example 刷新 | 测试数漂移约定「改体量时顺手更新截至标注」 |
+| 新债（08-15/16 登记，#6 NEW 组） | ✅ **debt/new-debt-0816**（N1-N6 · 2026-08-16）：High 停牌真值 N1 `87e4132d` + N1b `fa4e9c86`（日级判定+共识启发式+unfillable sidecar+探针分类，unjustified 16,371→0）；Medium entry_date N2 `076aa44b` / 死种子 N3 `fc752a75`；测试卫生 pytest spawn N4 `e2e5c957`；Low 批 N5 三笔（`a550c4f2`/`d4c8a754`/`379b90cd`）。**根因叙事勘误：CR-6 行登记的 000029.SZ 铁证不成立**（scan_pre_t1 实证 `suspend_justified=True`，从未进 unjustified 集；真根因=2019-2022 suspend_d 稀疏 + 段级 all() 放大 + 920xxx.BJ daily 不载） | 13,535 段推定不可补（真补需换数据源）；02:00 daemon 首跑待观察；N 波 minors 留档 #6 Low 表 |
 
 **对总评三错位的清偿面**：错位 2（策略数学零单源）——CR-2/T7 已收口；错位 3（风控命名语义）——CR-3/T8 + CR-4/T2 已收口；错位 1（基础设施与策略证据倒挂）**未变**——A 波仍未动工，仍是最高优先空洞（[roadmap](../roadmap.md) 里程碑重申）。**本文批判性结论的有效性**：§3 各 CR 章节保留为历史快照（根因/证据链仍有档案价值），但处置状态以本后记与 #6 终态为准。
 
