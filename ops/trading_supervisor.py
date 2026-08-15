@@ -110,19 +110,24 @@ def _git_rev() -> str | None:
 
 
 def _read_runtime_session() -> int | None:
-    """runtime SSoT 实际 sid（B2 L2 轮换落地后由 broker 写入 logs/engine_session.json）。"""
+    """M2 单 SSoT 读口：实际 sid 唯一真相源 = DB ``account.session_id``。
+
+    Why 改读 DB（2026-08-15 M2 收口）：旧读法吃 ``logs/engine_session.json``——该文件
+    只在 L2 轮换时写、非轮换连接不刷新，且与消费端无事务保证，双源漂移不可观测；
+    「读 json 兜底读旧键 session_id」的死键兼容随本读口整体退役（双源判断即双源
+    漂移）。json 降级为 broker 轮换时的运行态快照（非真相源，仅供人眼）。
+    Why db_path 锚定 ROOT：state_store._DEFAULT_DB 是 CWD 相对路径，supervisor 可能
+    从任意目录调用；``ROOT / 绝对路径`` 的 pathlib 语义=直接取绝对路径，两种默认
+    值形态都安全（单一来源仍是 state_store._DEFAULT_DB，不在本文件复制路径知识）。
+    读失败（无库/无账户行）→ None（诚实空，不猜值不回退 json 死源）。
+    """
     try:
-        p = ROOT / "logs" / "engine_session.json"
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            # code-review 修复：broker 写键为 actual/preferred/rotated_at；
-            # 旧版误读 session_id → actual_sid 恒 None（L2 观测死字段）。
-            # 兼容回退 session_id：早期文件若存在旧键也能读出。
-            raw = data.get("actual", data.get("session_id"))
-            return int(raw) if raw is not None else None
+        from trading import state_store
+        from trading.account import resolve_account_id
+        db = str(ROOT / state_store._DEFAULT_DB)
+        return state_store.get_session_id(resolve_account_id(), db_path=db)
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _runtime_started_at() -> str | None:

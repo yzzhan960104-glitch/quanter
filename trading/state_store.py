@@ -577,6 +577,51 @@ def get_account(account_id: str, *, db_path: str | None = None) -> dict | None:
     return dict(row) if row else None
 
 
+# ============================= M2：actual_sid 单 SSoT 读/写口 =============================
+# 物理意图（tech-debt master design「actual_sid 单 SSoT」· 2026-08-15）：实际 sid 的
+# 唯一真相源 = DB ``account.session_id``；``logs/engine_session.json`` 降级为运行态快照
+# （broker 轮换时顺手写，供人眼看，消费端一律不走它）。两个写口保 DB 新鲜：
+#   ① engine bootstrap L3 回写（trading/engine.py `_bootstrap`）；
+#   ② L2 轮换成功点（broker/qmt_connection._write_runtime_session）。
+# 读口（本函数）是 supervisor / ops 端点取 actual_sid 的唯一通道——单口收编消
+# 「读 JSON 与写 JSON 双源漂移不可观测」的旧病（json 只在轮换时写、非轮换连接不刷新）。
+def get_session_id(account_id: str, *, db_path: str | None = None) -> int | None:
+    """M2 单 SSoT 读口：账户实际 sid（DB account.session_id 真相源）。
+
+    诚实语义：账户行不存在 / session_id 列 NULL → None（观测端显示空，不猜值）。
+    健壮性：DB 文件不存在时直接返 None 且**不创建空库文件**——本函数是只读探测
+    （supervisor 在未 init 的环境/异 CWD 下也会调），sqlite3.connect 默认会顺手
+    建空文件，必须前置 is_file 守卫防「探测留垃圾库」。
+    """
+    db_path = db_path or _DEFAULT_DB
+    if not Path(db_path).is_file():
+        return None
+    with _connect(db_path) as con:
+        row = con.execute(
+            "SELECT session_id FROM account WHERE account_id=?", (account_id,)
+        ).fetchone()
+    if row is None or row["session_id"] is None:
+        return None
+    return int(row["session_id"])
+
+
+def set_session_id(account_id: str, session_id: int, *, db_path: str | None = None) -> int:
+    """M2 单 SSoT 写口：列级精准 UPDATE account.session_id（返受影响行数）。
+
+    Why 不复用 upsert_account：UPSERT 的 ON CONFLICT 是**全列** UPDATE——只传
+    session_id 时其余列落到默认值（mode→'dry_run'、userdata_path→NULL），等于把
+    bootstrap 期刚从 .env 迁好的配置整行抹掉。M2 写口只动 session_id 一列。
+    行不存在时 no-op 返 0（账户行由 _migrate_env_to_account / upsert_account 负责
+    造，sid 写口不静默造行——防测试/旁路把幽灵账户写进真相源）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        cur = con.execute(
+            "UPDATE account SET session_id=? WHERE account_id=?",
+            (int(session_id), account_id))
+        return cur.rowcount
+
+
 def _migrate_env_to_account(db_path: str | None = None) -> str | None:
     """从 .env 读 QMT_* 配置 → upsert_account（spec §7.2）。
 

@@ -503,8 +503,9 @@ def test_connect_rotates_sid_after_two_minus_one(monkeypatch):
     """L2：首选 sid -1 两轮 → 自动轮换未占用 sid 重连成功（自愈，不抛错）。"""
     instances = _install_reconnect_fake(monkeypatch, [-1, -1, 0])
     written = {}
+    # T14（M2 单 SSoT）：writer 签名加 account_id（轮换点直写 DB 真相源），哑桩同签名
     monkeypatch.setattr(qmt_gateway, "_write_runtime_session",
-                        lambda p, a: written.update(preferred=p, actual=a))
+                        lambda p, a, account_id=None: written.update(preferred=p, actual=a))
     gw = QmtExecutionGateway()
     preferred = gw._session_id
     asyncio.run(gw.connect())

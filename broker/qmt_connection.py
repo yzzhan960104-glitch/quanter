@@ -399,25 +399,47 @@ def _candidate_session_ids(preferred: int, used: set[int], limit: int = 100) -> 
     return [preferred + i for i in range(1, limit + 1) if (preferred + i) not in used]
 
 
-def _write_runtime_session(preferred: int, actual: int) -> None:
-    """实际 sid runtime SSoT：logs/engine_session.json（supervisor/ops 端点读 actual_sid）。
+def _write_runtime_session(preferred: int, actual: int,
+                           account_id: str | None = None) -> None:
+    """L2 轮换落地：写 M2 真相源（DB account.session_id）+ 运行态快照（json）。
+
+    M2 降级语义（2026-08-15 tech-debt · actual_sid 单 SSoT）：实际 sid 的唯一真相源是
+    DB ``account.session_id``；``logs/engine_session.json`` 只是运行态快照（非真相源，
+    仅供人眼 cat——消费端 supervisor/ops 一律经 ``state_store.get_session_id`` 读 DB）。
+    Why 轮换点直写 DB（补 B2 计划欠账）：旧实现只在 json 写轮换结果、DB 靠 engine
+    bootstrap L3 回写——盘中轮换后 DB 滞后到下次重启才对齐，supervisor 改读 DB 即
+    观测失真；本函数两写口同点落，读口永远新鲜。
 
     Why 不动 .env（spec §4.4）：preferred 是引擎身份/锁键/观测锚点，轮换只记录实际
     值——.env 仍是人工期望值，两个值同时在观测端点展示，漂移可见但不阻断。
+    Why DB 写失败不阻断：连接本身已成功，观测缺值不是交易红线（与 json 同语义）。
+    Why state_store 函数内 lazy import：broker 是执行叶子包，顶部 import trading
+    state_store 会在「broker 首加载序」重新织入 import 环（T14 刚断的病）；调用点
+    一定在全模块加载完成后（轮换只发生在运行期），lazy 零环风险。
     """
     import json as _json
     from datetime import datetime as _dt
     from pathlib import Path as _Path
+    # ① json 运行态快照（降级：非真相源，note 字段自述防误用）
     try:
         p = _Path(__file__).resolve().parent.parent / "logs" / "engine_session.json"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
             _json.dumps({"preferred": preferred, "actual": actual,
-                         "rotated_at": _dt.now().isoformat(timespec="seconds")},
+                         "rotated_at": _dt.now().isoformat(timespec="seconds"),
+                         "note": "运行态快照·非真相源（真相源=state_store.account.session_id）"},
                         ensure_ascii=False),
             encoding="utf-8")
     except Exception:
-        logger.warning("L2 runtime SSoT 写入失败（不阻断连接）", exc_info=True)
+        logger.warning("L2 runtime 快照写入失败（不阻断连接）", exc_info=True)
+    # ② M2 真相源：DB account.session_id（列级精准 UPDATE，不抹 mode/userdata_path）
+    if account_id:
+        try:
+            from trading import state_store as _ss
+            _ss.set_session_id(account_id, int(actual))
+        except Exception:
+            logger.warning("M2 DB 真相源写入失败（不阻断连接，bootstrap L3 兜底）",
+                           exc_info=True)
 
 
 class QmtConnectionBase(BaseExecutionGateway, _CallbackBase):  # type: ignore[misc]
@@ -636,8 +658,8 @@ class QmtConnectionBase(BaseExecutionGateway, _CallbackBase):  # type: ignore[mi
 
         物理意图（spec §4.4 · 裁定 L1-L4）：connect -1 = 该 sid 被占/残留，清理两轮
         后仍失败 → 从 preferred 起有界找未占用 sid（上限 100）自动重连，成功把实际
-        sid 写入 runtime SSoT（engine_session.json），.env preferred 不变。轮换耗尽
-        返 None，由 connect 走既有 L3 失败路径（fail-closed + 告警文案）。
+        sid 写入 M2 真相源（DB account.session_id）+ json 运行态快照，.env preferred
+        不变。轮换耗尽返 None，由 connect 走既有 L3 失败路径（fail-closed + 告警文案）。
         """
         preferred = self._session_id
         used = _used_session_ids(self._userdata_path)
@@ -662,7 +684,9 @@ class QmtConnectionBase(BaseExecutionGateway, _CallbackBase):  # type: ignore[mi
                 continue
             if rc2 == 0:
                 self._session_id = candidate
-                _write_runtime_session(preferred, candidate)
+                # M2：account_id 必须透传——轮换点直写 DB 真相源（见 writer docstring）
+                _write_runtime_session(preferred, candidate,
+                                       account_id=self._account_id)
                 logger.warning(
                     "L2 sid 自动轮换 preferred=%s → actual=%s（connect -1 自愈）",
                     preferred, candidate)

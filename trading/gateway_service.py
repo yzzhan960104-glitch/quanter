@@ -30,10 +30,18 @@ import io
 import logging
 import os
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from infra.notifier import NotificationManager, fire_and_forget
-from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 broker.base 真身
+if TYPE_CHECKING:
+    # T14 断环（2026-08-15 · broker-first 加载序）：顶部 ``from broker.base import
+    # OrderResult`` 会让 ``import broker.qmt``（进程首个 broker/trading 导入）触发
+    # broker/__init__ → broker.base → trading/__init__ → order_state → 本模块 →
+    # broker.base（半初始化，OrderResult 未定义）→ ImportError（T13 披露 pre-existing
+    # 潜伏环，tests/test_import_order.py 子进程哨钉死）。OrderResult 在本模块仅作
+    # submit 处局部变量注解（``from __future__ import annotations`` 下运行时零求值）
+    # → TYPE_CHECKING 化零运行时代价，monkeypatch 语义不受影响（无任何运行时引用点）。
+    from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 broker.base 真身
 from trading import qmt_market_data
 # W1-B（Task 10 · lazy 顶部化·模块对象风格）：state_store/clock/job_ledger 原散落 8 处
 # 函数内 lazy import 收口到顶部。Why 模块对象风格安全：调用点经 ``state_store.foo()`` /

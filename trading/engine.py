@@ -643,14 +643,16 @@ class TradingEngine:
         position_book.init_db()
         state_store.init_store()
         state_store._migrate_env_to_account()
-        # L3（spec §4.4 · 裁定 L3）：L2 轮换后把实际 sid 回写 account 行（观测对照源）。
-        # Why 不阻断：DB 回写失败只是观测缺值，连接本身已成功（端点仍可读
-        # engine_session.json）。
+        # L3（spec §4.4 · 裁定 L3 · M2 单 SSoT）：启动期把实际 sid 回写 account 行——
+        # DB account.session_id 是 actual_sid 唯一真相源（supervisor/ops 经
+        # state_store.get_session_id 读）。Why set_session_id 而非 upsert_account：
+        # UPSERT 全列 UPDATE 会把上方 _migrate_env_to_account 刚落库的 mode/userdata_path
+        # 重置回默认（旧实现的隐性 clobber）；列级 UPDATE 只动 session_id。
+        # Why 不阻断：DB 回写失败只是观测缺值，连接本身已成功（json 快照仍在）。
         _actual_sid = getattr(self._gw, "_session_id", None)
         if _actual_sid is not None:
             try:
-                _state_store.upsert_account(_resolve_account_id(), broker="qmt",
-                                            session_id=int(_actual_sid))
+                _state_store.set_session_id(_resolve_account_id(), int(_actual_sid))
             except Exception:
                 logger.exception("L3 回写 account.session_id 失败（不阻断）")
         # SSoT Phase C · C1：启动归因重建（弥补 B2 重启丢失窗口）。
