@@ -125,6 +125,41 @@ ubuntu runner 装 Python 3.10 + Node 20 → `pip install -r requirements.txt` �
 代价是漏挂方向曾长期无观测——CR-5（2026-08-15）已补 `audit_ssot.check_fill_position` 反向扫描
 （fill 净额≠0 而 position 缺行/为 0 即告警），漏挂从「静默」变「有声 + 人工补挂兜底」。
 
+### emergency_halt 后的实际状态与人工解锁 SOP（CR-3 语义边界 · 2026-08-15 终审对齐）
+
+`emergency_halt()`（gateway_service）触发后的**真实系统态**（不是直觉上的「只拒新单」）：
+
+1. **发单全拒**：`set_risk_halt(True)` 置 `_risk_halted=True + _lock_down=True`，
+   `submit_order` 见 `is_blocked`（risk_halted ∨ lock_down）即拒——pre_open 补挂、
+   止损/止盈单全部进不来，幂等（重复调用不再重复处理）。
+2. **止损监控被健康闸跳过（残余持仓无止损覆盖）**：emergency_halt 同时置
+   `_connected=False`，engine `_gw_health_gate` 每轮对 `_stoploss` 返
+   「网关未连接」skip。CR-3 注释里的「保监控存活」实为：**APScheduler 调度器存活 +
+   `_health_guard` 在岗可人工解锁**；监控体（巡检/止损/撤单）本身在 lock_down 期间
+   **不跑**——残余持仓的止损保护中断，直到人工解锁。
+3. **自愈被粘滞锁阻断（有意设计）**：`_health_guard` 见 `_risk_halted=True` 只告警
+   不重连（风控熔断不得自动解除，防「熔断→自愈→再熔断」循环放血）；网络断线
+   （`_risk_halted=False`）才走 60s 自愈重连。
+
+**人工解锁路径**（唯一解锁口，无 API 端点——`POST /api/v1/trading/emergency_halt`
+只置锁不解锁）：
+
+```
+# 引擎进程内（如 REPL/运维脚本持 gw 引用）：
+gw = get_gateway()
+gw.clear_risk_halt()      # 仅清 _risk_halted；_lock_down/_connected 交给重连恢复
+# 之后 _health_guard 下轮（60s 内）自动重连 → connect 成功清 _lock_down、置
+# _connected=True → 健康闸过 → _stoploss 监控恢复巡检。
+```
+
+**解锁前操作员须知**：
+- 先查熔断原因再解锁——`logs/alerts.log`（CR-7 本地通道必有痕）与 `trading.engine`
+  logger 的 CRITICAL（CR-3 触发/基线缺失/评估失明三分支文案各异），勿盲解；
+- 核对柜台真实持仓与未终态单（CR-3 触发分支已尽力撤单，但 `unconfirmed>0` 时敞口
+  可能残留），评估「监控被跳过期间」的无止损覆盖敞口是否须先人工平仓；
+- 解锁即恢复自动发单权限——确认熔断根因（如基线缺失已补采、行情已恢复）已消除，
+  否则下一轮巡检可能再次触发（5min 节流评估）。
+
 ---
 
 ## 七、开发流程建议

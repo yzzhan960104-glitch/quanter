@@ -567,7 +567,10 @@ async def stop_loss_monitor(
     # get_start_equity 基线读口 + 同 check_daily_loss_limit 纯判定）搬进 30s 巡检，
     # 5min 节流（30s×10 轮才评一次：query_asset 是柜台 C++ 查询，防打柜台 + 防告警刷屏）。
     # 触发走 emergency_halt 粘滞锁（拒新单）而非 raise _CriticalHalt——停调度会连带
-    # 杀死止损监控自身（盘中绝对不可接受：熔断后持仓仍需监控存活撤残留单/盯持仓）；
+    # 杀死止损监控自身（I-2 语义订正 2026-08-15：emergency_halt 置 _connected=False
+    # 后 engine._gw_health_gate 每轮 skip _stoploss——「保监控存活」实为调度器存活 +
+    # health_guard 在岗可人工解锁；lock_down 期间监控体被健康闸跳过、残余持仓无止损
+    # 覆盖须人工接管，SOP 见 docs/guardrails.md §六）；
     # 评估失败（query_asset 断线返 {}）只观测不动作（断线场景 :271 查持仓失败已有
     # L1 兜底）。ports=None 守卫与 blackout 同口径：仅非生产裸调，不阻断监控主链路。
     if ports is not None and ports.breaker_throttle.should_check(time.monotonic()):
@@ -610,10 +613,14 @@ async def _check_portfolio_loss_limit(gw: Any, throttle: PortfolioBreakerThrottl
         ② 评估失败（query_asset 断线/锁定返 {} 或异常）：miss_streak 原子自增，≥3 才推
            CRITICAL（评估 5min 节流 ⇒ 至多 5min 一条不刷屏）；不停调度不 halt——断线
            场景 monitor 查持仓失败已有 L1 兜底，这里只补「熔断在岗性」观测。
-        ③ 基线缺失（start=None/≤0，判定交 breaker fail-closed SSoT）：live 时 breaker
-           raise _CriticalHalt → **catch 转换形态**为 emergency_halt + CRITICAL（对齐
-           DG-G3「不选仅告警不动作」，但保监控存活）；dry_run 时 breaker 返 True（C-1
-           停手语义）+ 自身已告警 → 本层只 warning（影子态无真金敞口，不中断）。
+        ③ 基线缺失（start=None/≤0，判定交 breaker fail-closed SSoT）：**先走 T-1 close
+           兜底**（I-1 · 2026-08-15 终审，照抄 post_close 同款先例）——首轮评估与 pre_open
+           基线写入存在竞态（评估从首个 monitor tick 起即可发生，写入方在三段 gate 之后），
+           读 get_prev_close_equity（T-1 close）作近似基线 + WARN；兜底后仍有基线才进
+           fail-closed：live 时 breaker raise _CriticalHalt → **catch 转换形态**为
+           emergency_halt + CRITICAL（对齐 DG-G3「不选仅告警不动作」，但保调度器存活）；
+           dry_run 时 breaker 返 True（C-1 停手语义）+ 自身已告警 → 本层只 warning
+           （影子态无真金敞口，不中断）。
         评估成功且未触发 → miss_streak 清零（断线计数不跨恢复期累积）。
 
     Args:
@@ -634,6 +641,29 @@ async def _check_portfolio_loss_limit(gw: Any, throttle: PortfolioBreakerThrottl
     except Exception:
         logger.exception("CR-3 读熔断基线异常（按基线缺失 fail-closed 处理）")
         start = None
+
+    # ①' T-1 close 兜底（I-1 · 2026-08-15 终审修复 · 照抄 post_close.py 同款先例）：
+    #    竞态根因：CR-3 首轮评估从首个 monitor tick（开盘后任意 30s 轮，5min 节流首轮
+    #    必评）起即可发生，而当日基线的唯一盘中写入方 pre_open 在三段 gate（计划确认/
+    #    网关健康/数据就绪）**之后**才写 snapshot_start_equity——确认迟到/gate 延迟时
+    #    start 仍 None。旧态此竞态直接落「基线缺失 → emergency_halt 粘滞锁」，之后
+    #    pre_open 补挂的单全被 lock_down 拒（一次首轮假阳性 = 当日全停，周一实盘风险）。
+    #    兜底物理假设（与 post_close 完全一致）：隔夜无交易，T-1 收盘权益 ≈ T 开盘基线，
+    #    读 account_daily T-1 行 close_total_asset 作 start 近似，熔断仍能工作（不裸奔）。
+    #    仅两级（当日 start + T-1 close）都失效才走原 fail-closed 分支（DG-G3 红线不动）。
+    #    读异常同按兜底缺失处理（get_prev_close_equity 内部对日历异常已自返 None）。
+    if start is None or start <= 0:
+        try:
+            prev_close = _state_store.get_prev_close_equity(_aid, _today)
+        except Exception:
+            logger.exception("CR-3 读 T-1 close 兜底基线异常（按基线缺失 fail-closed 处理）")
+            prev_close = None
+        if prev_close is not None and prev_close > 0:
+            start = prev_close
+            logger.warning(
+                "CR-3 用 T-1 close=%s 作盘中熔断 start 基线近似 date=%s"
+                "（pre_open 当日 start 未写入——首轮评估与基线写入竞态的兜底）",
+                prev_close, _today)
 
     # ② 读当前权益：query_asset 断线/锁定/超时一律返 {}（broker/qmt.py 同口径防脏读）；
     #    非 dict 返回值（防御 mock/异常网关）与 total_asset 缺失/NaN/≤0 同按「取不到」。
@@ -667,7 +697,9 @@ async def _check_portfolio_loss_limit(gw: Any, throttle: PortfolioBreakerThrottl
     except _CriticalHalt:
         # ── 分支③基线缺失（live）：breaker 抛 L1 停调度——catch 转换形态，绝不逸出。
         #    对齐 DG-G3「不选仅告警不动作」，但把「停调度」转换成「粘滞锁拒新单」：
-        #    监控自身存活继续巡检（熔断后持仓仍需止损监控兜底），新单被 lock_down 全拒。
+        #    调度器存活 + health_guard 在岗可人工解锁；lock_down 置 _connected=False 后
+        #    监控体被健康闸跳过（残余持仓无止损覆盖，人工接管，SOP 见 guardrails §六），
+        #    新单被 lock_down 全拒。
         logger.critical(
             "【CR-3 盘中熔断】基线缺失（start=%s date=%s）→ emergency_halt 拒新单"
             "（不停调度，保止损监控存活；人工核对 pre_open 基线抓取）", start, _today)

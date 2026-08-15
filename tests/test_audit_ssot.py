@@ -324,3 +324,72 @@ def test_orphan_signal_without_followup_still_flagged(tmp_path):
     db = _audit_db(tmp_path, events=[("t1", "600000.SH", "SIGNAL", "2020-01-01T09:30:00")])
     msg = a.check_trade_event_chain(db)
     assert msg is not None and "孤儿 SIGNAL" in msg
+
+
+# ===== I-3（2026-08-15 终审）：account_daily 闭合检查窗口语义 =====
+
+def _audit_db_account_daily(tmp_path, rows, name="ad"):
+    """造仅含 account_daily 的假库：rows = [(date, start, close)]（None 表示 NULL）。
+
+    Why 手工假库（与 _audit_db 同哲学）：audit 只读 date/start/close 三列，手工建库
+    可精确控制「窗口外老 NULL / 窗口内新 NULL」两类形态，不引 FK/account 依赖。
+    列名与生产 state_store DDL（account_daily）逐字对齐。
+    """
+    db = tmp_path / f"{name}.db"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE account_daily (
+        account_id          TEXT NOT NULL,
+        date                TEXT NOT NULL,
+        start_total_asset   REAL,
+        start_cash          REAL,
+        close_total_asset   REAL,
+        close_cash          REAL,
+        close_market_value  REAL,
+        daily_pnl           REAL,
+        daily_pnl_pct       REAL,
+        start_snap_at       TEXT,
+        close_snap_at       TEXT,
+        PRIMARY KEY(account_id, date))""")
+    for d, s, c in rows:
+        con.execute(
+            "INSERT INTO account_daily(account_id, date, start_total_asset, close_total_asset)"
+            " VALUES('ACC1', ?, ?, ?)", (d, s, c))
+    con.commit()
+    con.close()
+    return db
+
+
+def test_account_daily_old_null_outside_window_passes(tmp_path, monkeypatch):
+    """I-3 窗口语义：窗口外老 NULL 行（历史 dry_run 存量）不再永久红。
+
+    物理意图：引擎早期 dry_run 日的 NULL 行（接入 query_asset/基线抓取前的存量）在
+    「全表任一 NULL 即炸」旧口径下永久红底——审计要抓「当下基线链是否闭合」，不是
+    给历史陪葬；持续红把真告警淹没成狼来了（失败推送通道一开就是每轮轰炸）。
+    cutoff 钉死 2026-06-01（隔离真实日历/时钟，防用例随日期漂移变 time bomb）：
+    1 月的 10 行老 NULL 出窗 → PASS（近端 8 月行全闭合）。
+    """
+    monkeypatch.setattr(a, "_account_daily_cutoff", lambda n: "2026-06-01")
+    rows = [(f"2026-01-{d:02d}", None, None) for d in range(1, 11)]       # 窗口外老 NULL
+    rows += [(f"2026-08-{d:02d}", 100.0, 100.5) for d in range(11, 15)]   # 近 4 行闭合
+    db = _audit_db_account_daily(tmp_path, rows)
+    assert a.check_account_daily_closed(db, window_days=5) is None
+
+
+def test_account_daily_null_inside_window_still_fails(tmp_path, monkeypatch):
+    """I-3 窗口内 NULL 仍 FAIL（窗口订正不得把近端真断链放跑——含 T 日未闭合行）。"""
+    monkeypatch.setattr(a, "_account_daily_cutoff", lambda n: "2026-06-01")
+    rows = [(f"2026-08-{d:02d}", 100.0, 100.5) for d in range(11, 15)]
+    rows.append(("2026-08-15", None, 101.0))   # 最新行 start NULL（窗口内，当日未闭合）
+    db = _audit_db_account_daily(tmp_path, rows)
+    msg = a.check_account_daily_closed(db, window_days=5)
+    assert msg is not None and "2026-08-15" in msg and "近 5 交易日窗口内" in msg
+
+
+def test_audit_window_days_env_default_and_override(monkeypatch):
+    """I-3 窗口 env 口径：默认 30；AUDIT_ACCOUNT_WINDOW_DAYS 覆盖；非法值回落 30。"""
+    monkeypatch.delenv("AUDIT_ACCOUNT_WINDOW_DAYS", raising=False)
+    assert a._audit_window_days() == 30
+    monkeypatch.setenv("AUDIT_ACCOUNT_WINDOW_DAYS", "365")
+    assert a._audit_window_days() == 365
+    monkeypatch.setenv("AUDIT_ACCOUNT_WINDOW_DAYS", "0")
+    assert a._audit_window_days() == 30   # <1 非法 → fail-safe 回默认（不静默关检查）

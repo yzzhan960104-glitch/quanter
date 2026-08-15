@@ -172,9 +172,11 @@ def test_replay_skips_mirrors_via_ports(monkeypatch, tmp_path):
     assert "insert_fill" in names, "重放仍应触达真相源判定（返 False 即重放语义）"
     assert "apply_fill_to_position" not in names, "重放不得重复累加 position（08-04 红线）"
     assert "insert_trade_event" not in names, "重放不得追加 FILLED 事件（事件流与 fill 表 1:1）"
-    notify_mgr.notify_trade_event.assert_not_called(), "重放不得重复推钉钉（轰炸根因）"
+    # 终审 Minor：原两行是「调用, "msg"」元组表达式（非断言，消息永不生效）——补 assert
+    # 关键字；assert_not_* 返 None，is None 恒真，真实判定在 mock 方法内部（失败即抛）。
+    assert notify_mgr.notify_trade_event.assert_not_called() is None, "重放不得重复推钉钉（轰炸根因）"
     import trading.phases.exit as _exit
-    _exit.place_take_profit.assert_not_awaited(), "TP 已挂（has_order=True）不得重挂（超卖红线）"
+    assert _exit.place_take_profit.assert_not_awaited() is None, "TP 已挂（has_order=True）不得重挂（超卖红线）"
 
 
 def test_async_response_branch_writes_via_ports(monkeypatch, tmp_path):

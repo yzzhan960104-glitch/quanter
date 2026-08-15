@@ -105,12 +105,16 @@ def _run(gw, ports, *, quotes=None):
             ports=ports))
 
 
-def _patch_cr3_actions(monkeypatch, *, start_equity: float | None):
+def _patch_cr3_actions(monkeypatch, *, start_equity: float | None,
+                       prev_close_equity: float | None = None):
     """CR-3 副作用全拦截：emergency_halt / cancel_all / 双层 _alert_critical / 基线读口。
 
     返回 (halted_mock, cancelled_mock, alerts)。双层告警：phases.stop_loss._alert_critical
     （三分支动作告警）+ trading.compute.breaker._alert_critical（breaker fail-closed
     副用，基线缺失路径自身会推一条——一并拦截防真发钉钉 + 防断言串扰）。
+    I-1（2026-08-15 终审）：补 prev_close_equity 注入——T-1 close 兜底读口
+    （get_prev_close_equity）默认钉 None（既有用例「两级全缺」语义不变 + 免触真实
+    日历/DB），新用例传值构造「T-1 close 在」的兜底态。
     """
     from trading import state_store
     # 账号口径钉死（隔离 .env QMT_ACCOUNT_ID 漂移；基线读口与 post_close.py:282 同口）
@@ -118,6 +122,8 @@ def _patch_cr3_actions(monkeypatch, *, start_equity: float | None):
                         lambda: "CR3TEST")
     monkeypatch.setattr(state_store, "get_start_equity",
                         lambda aid, d, **kw: start_equity)
+    monkeypatch.setattr(state_store, "get_prev_close_equity",
+                        lambda aid, d, **kw: prev_close_equity)
     halted = MagicMock()
     monkeypatch.setattr("trading.phases.stop_loss.emergency_halt", halted)
     cancelled = AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})
@@ -238,3 +244,58 @@ def test_dry_run_gw_none_full_noop(monkeypatch):
     halted.assert_not_called()
     cancelled.assert_not_called()
     assert alerts == []
+
+
+# ============================================================================
+# 测试 ⑥（I-1 · 2026-08-15 终审）：start=None 但 T-1 close 在 → 近似基线评估不 halt
+# ============================================================================
+def test_baseline_missing_falls_back_to_t1_close_no_halt(monkeypatch):
+    """I-1 竞态兜底：start 未写 + T-1 close 在 → 用近似基线正常评估，不落基线缺失 halt。
+
+    物理意图（周一实盘风险根因）：CR-3 首轮评估从首个 monitor tick 起即可发生，而当日
+    基线唯一盘中写入方 pre_open 在三段 gate 之后才写——确认迟到/gate 延迟时 start 仍
+    None。旧态直接「基线缺失 → emergency_halt 粘滞锁」→ 之后 pre_open 补挂的单全被
+    lock_down 拒（一次首轮假阳性 = 当日全停）。T-1 close（隔夜无交易 ≈ T 开盘，
+    post_close.py 同款物理假设）兜底后：评估走真实回撤判定。
+    反证锚：若兜底未生效（旧行为），live 会 halt + 推「基线缺失」CRITICAL——下方
+    两断言（不 halt / 零告警）恰好同时取反；第二段再让 curr 跌破 -3%，证明近似
+    基线真参与判定（走「触发」三分支而非「基线缺失」分支）。
+    """
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    halted, cancelled, alerts = _patch_cr3_actions(
+        monkeypatch, start_equity=None, prev_close_equity=1_000_000.0)
+    # 段一：对近似基线 -1%（未穿 -3%）→ 评估成功不触发、不走基线缺失分支
+    gw = _make_gw(asset={"total_asset": 990_000.0})
+    result = _run(gw, _make_ports())
+    halted.assert_not_called()                       # 未触发 + 未走基线缺失分支
+    cancelled.assert_not_called()
+    assert alerts == []                              # 零告警（含无「基线缺失」）
+    assert result["checked"] == 0                    # monitor 正常返回
+    # 段二：同 T-1 基线下 curr 跌到 -5% → 走「触发」三分支（告警含「回撤」非「基线缺失」）
+    gw2 = _make_gw(asset={"total_asset": 950_000.0})
+    _run(gw2, _make_ports())                         # 新 ports=新节流，首轮必评
+    halted.assert_called_once()
+    cancelled.assert_called_once_with(gw2)
+    assert len(alerts) == 1 and "回撤" in alerts[0]
+
+
+# ============================================================================
+# 测试 ⑦（I-1 · 2026-08-15 终审）：两级基线全缺 → 原 fail-closed 分支不变
+# ============================================================================
+def test_baseline_and_t1_both_missing_keeps_fail_closed(monkeypatch):
+    """start + T-1 close 两级全缺 → live 仍 fail-closed（emergency_halt + CRITICAL）。
+
+    物理意图：兜底只救「可近似」的竞态场景，两级全失效（冷启动首日 T-1 无 close +
+    pre_open 未写）必须维持 DG-G3 fail-closed——live 转 emergency_halt 拒新单 +
+    CRITICAL 人工介入，绝不静默放行。与测试 ④ 同形锚定：兜底引入零回归（区别在
+    ④ 经真实 get_prev_close_equity 路径返 None，⑦ 显式钉 None——两级口径双保险）。
+    """
+    monkeypatch.setenv("AUTO_TRADE_MODE", "live")
+    halted, cancelled, alerts = _patch_cr3_actions(
+        monkeypatch, start_equity=None, prev_close_equity=None)
+    gw = _make_gw(asset={"total_asset": 950_000.0})
+    result = _run(gw, _make_ports())                 # 不抛 _CriticalHalt（转换形态）
+    halted.assert_called_once()
+    cancelled.assert_not_called()                    # 基线缺失分支不撤单（三分支互斥）
+    assert len(alerts) == 1 and "基线缺失" in alerts[0]
+    assert result["checked"] == 0                    # monitor 存活正常返回

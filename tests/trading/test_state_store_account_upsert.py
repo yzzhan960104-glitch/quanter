@@ -82,3 +82,15 @@ def test_set_session_id_updates_only_session_column(tmp_path):
     assert acc["userdata_path"] == "E:\qmt_userdata"
     # 账户行不存在 → no-op（rowcount 0），不静默造行（行由 _migrate_env_to_account 负责）
     assert state_store.set_session_id("ghost", 1, db_path=db) == 0
+
+
+def test_set_session_id_no_create_when_db_missing(tmp_path):
+    """终审 Minor（2026-08-16）：DB 文件不存在 → 返 0 且不得顺手创建空库文件。
+
+    与 get_session_id 同款 is_file 守卫（M2 读口先例）：写口本就要求账户行已存在，
+    库文件都不存在时 UPDATE 必然匹配 0 行——此时 sqlite3.connect 默认建空库只会
+    留下「探测垃圾库」（未 init/异 CWD 环境下 broker 轮换或旁路调用的副作用）。
+    """
+    db = tmp_path / "no_such_dir" / "state.db"
+    assert state_store.set_session_id("acc-m2", 123462, db_path=str(db)) == 0
+    assert not (tmp_path / "no_such_dir").exists()   # 目录连同空库都不落盘

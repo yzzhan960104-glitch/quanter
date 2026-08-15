@@ -22,6 +22,7 @@ BANNED pattern 边界（B6 决策 / C3 收尾）：
     CONFIRMED) 唯一真相源）。tests/_legacy_plan_io.py 测试专用 legacy shim 例外（PROD_DIRS
     不扫 tests/，不会误命中）。
 """
+import os
 import platform
 import re
 import subprocess
@@ -166,26 +167,84 @@ def check_fill_position(db: Path):
     return ("fill↔position 不一致 " + "; ".join(mismatches)) if mismatches else None
 
 
-def check_account_daily_closed(db: Path):
-    """account_daily 每交易日 start+close 非空（熔断基线闭合）。
+def _audit_window_days() -> int:
+    """I-3（2026-08-15 终审）：account_daily 闭合检查窗口天数（env 可调，默认 30）。
+
+    Why env 可调：窗口是「审计噪音 vs 覆盖纵深」的运维权衡——默认 30 交易日（约 6 周）
+    覆盖熔断 T-1 兜底基线链的可达纵深；排查历史闭合问题时可临时调大回看全表
+    （如 AUDIT_ACCOUNT_WINDOW_DAYS=365），排查完调回。非法值（非数字/<1）一律回落
+    默认 30（fail-safe：宁可窗口大一点也不静默关掉检查）。
+    """
+    raw = os.getenv("AUDIT_ACCOUNT_WINDOW_DAYS", "")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 30
+    return n if n >= 1 else 30
+
+
+def _account_daily_cutoff(n: int) -> str | None:
+    """I-3：算「近 n 个交易日」的日期下界（YYYY-MM-DD，含当日）。日历不可得返 None。
+
+    锚定语义：窗口相对**今天**（时间治愈）而非相对「表内最近行」——引擎休跑两月时，
+    表内最近行仍是两个月前，按行锚定则老 NULL 永远挤不出窗口；按今日锚定，30 个
+    交易日一过老行自然出窗（「历史 dry_run 日的 NULL 不再永久红」的本意）。
+    日历源：data.calendar.fetch_trade_cal（engine 日常维护的 logs/trade_cal_<year>.json
+    缓存，本仓常年在位；缓存缺失时自带 weekday 兜底——识周末不识节假日，对窗口
+    边界最多差几个自然日，不构成漏检方向）。跨年取当年+上一年并集（年初回看 N 日
+    需跨到 12 月）。Why lazy import：保持巡检主体（DB/进程/正则三项）对 data 层零
+    依赖，日历彻底不可用时由调用方退「全表检查」fail-closed（窗口未知的审计绝不
+    静默缩小检查范围）。
+    """
+    try:
+        from datetime import datetime
+        from data.calendar import fetch_trade_cal
+        today = datetime.now().strftime("%Y-%m-%d")
+        year = int(today[:4])
+        days = sorted(set(fetch_trade_cal(year)) | set(fetch_trade_cal(year - 1)))
+        past = [d for d in days if d <= today]
+        if not past:
+            return None
+        return past[-n] if len(past) >= n else past[0]
+    except Exception:
+        return None
+
+
+def check_account_daily_closed(db: Path, window_days: int | None = None):
+    """account_daily 近 N 个交易日 start+close 非空（熔断基线闭合）。
 
     物理意图：account_daily 是熔断基线真相源（C-1 熔断读口断链修复后的唯一口径）。
     熔断判定需 start_total_asset（日内 -3% 基线）+ close_total_asset（日终校验）。
     任一为 NULL = 当日熔断裸奔 / 日终未闭合 = SSoT 完整性破坏。
+
+    窗口语义（I-3 · 2026-08-15 终审）：只检「以今日回溯 N 个交易日」内的行（env
+    AUDIT_ACCOUNT_WINDOW_DAYS，默认 30；window_days 显式传参供测试注入）。
+    Why 窗口：审计要抓的是「当下熔断基线链是否闭合」，不是给历史陪葬——引擎早期
+    dry_run 日的 NULL 行（接入 query_asset/基线抓取前的存量）在「全表任一 NULL 即
+    炸」口径下**永久红底**，持续红反而把真告警淹没成狼来了（失败推送通道一开就是
+    每轮轰炸）。窗口外老 NULL 不再 FAIL；窗口内 NULL（含 T 日最新行——当日未闭合
+    必须当天炸）仍 FAIL。日历不可得（cutoff=None）→ 退回全表检查（fail-closed：
+    窗口未知的审计不静默缩小范围）。
     """
     if not db.exists():
         return f"DB 不存在: {db}"
+    n = window_days if window_days is not None else _audit_window_days()
+    cutoff = _account_daily_cutoff(n)
     con = _connect_ro(db)
-    # 任一为 NULL 即炸（OR 而非 AND —— 闭合要求两端都落）
+    # 主查询保持「任一为 NULL 即炸」（OR 而非 AND —— 闭合要求两端都落）；
+    # cutoff None 时参数用空串下界（YYYY-MM-DD 字典序恒 ≤ 任意日期 → 等价全表）。
     rows = con.execute(
         "SELECT account_id, date FROM account_daily "
-        "WHERE start_total_asset IS NULL OR close_total_asset IS NULL"
+        "WHERE (start_total_asset IS NULL OR close_total_asset IS NULL) "
+        "AND date >= ?",
+        (cutoff or "",),
     ).fetchall()
     con.close()
     if not rows:
         return None
     missing = [f"{r[1]}/{r[0]}" for r in rows]  # date/account_id
-    return f"account_daily 缺 start/close（熔断基线未闭合）: {missing}"
+    scope = f"近 {n} 交易日窗口内 cutoff={cutoff}" if cutoff else "全表（日历不可得 fallback）"
+    return f"account_daily 缺 start/close（熔断基线未闭合，{scope}）: {missing}"
 
 
 def check_trade_event_chain(db: Path):
@@ -321,6 +380,35 @@ def check_guard_ripgrep():
     return ("SSoT 护栏命中 BANNED 代码引用（注释不计）:\n" + "\n".join(hits)) if hits else None
 
 
+def _notify_failure(errs: list) -> None:
+    """I-3（2026-08-15 终审）：巡检失败推送——钉钉 + 本地 alerts.log 双通道留痕。
+
+    Why 推送：巡检常由 schtasks/cron 无人值守调起（输出重定向进 logs/audit_schtask.log），
+    失败只打 stdout = 持续红底无人知晓。经 infra.notifier 既有入口投递（CR-7 双通道：
+    LocalFileChannel 无条件装配——钉钉挂了 logs/alerts.log 也有痕，事后可审计
+    「告警到底发过没有」）。
+    Why fire_and_forget + 自吞：推送只是增益，巡检主语义是「错误行打 stdout +
+    exit(1)」——notifier import 失败/装配异常绝不阻断 exit 语义（daemon 线程投递
+    也不阻塞退出）。正文截断 1500 字：BANNED 命中列表可达数百行，全量以 stdout 为准。
+    Why 用 build_default_manager 而非裸 get_default：单例初始零通道，不装配则
+    LocalFileChannel（无条件通道）也不存在 → 推送静默跳过连本地痕都没有。
+    Why 退出前 1.5s 宽限：fire_and_forget 在 daemon 线程跑 asyncio.run，主线程
+    sys.exit 后解释器终期化会直接砍 daemon 线程——不宽限则连本地 append 都可能
+    没落盘（网络通道 10s 超时方向本就是尽最大努力，本地痕是保底）。
+    """
+    try:
+        import time
+        from infra.notifier import build_default_manager, fire_and_forget
+        msg = f"SSoT 巡检失败 {len(errs)} 项：" + "；".join(errs)
+        if len(msg) > 1500:
+            msg = msg[:1500] + "…（截断，全量见巡检 stdout / logs/audit_schtask.log）"
+        fire_and_forget(
+            build_default_manager().notify_risk_event(msg, "ERROR"))
+        time.sleep(1.5)
+    except Exception:
+        print("（巡检失败推送未发出：notifier 装配/投递异常——错误详情以上方 stdout 为准）")
+
+
 def main():
     """跑所有 check，errs 非空 sys.exit(1) 否则 print 全绿 + sys.exit(0)。"""
     db = DB_PATH
@@ -356,6 +444,9 @@ def main():
         print("\n=== 不一致（%d 项）===" % len(errs))
         for e in errs:
             print(" -", e)
+        # I-3（2026-08-15 终审）：失败推送（钉钉 + 本地 alerts.log 双通道 fire-and-forget，
+        # 自吞不阻断 exit(1) 语义）——无人值守调度下「持续红底」必须变成有声。
+        _notify_failure(errs)
         sys.exit(1)
     print("\naudit_ssot: 全绿（DB 一致 + 引擎单例 + 护栏零回归）")
     sys.exit(0)

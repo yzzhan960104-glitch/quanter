@@ -613,8 +613,15 @@ def set_session_id(account_id: str, session_id: int, *, db_path: str | None = No
     bootstrap 期刚从 .env 迁好的配置整行抹掉。M2 写口只动 session_id 一列。
     行不存在时 no-op 返 0（账户行由 _migrate_env_to_account / upsert_account 负责
     造，sid 写口不静默造行——防测试/旁路把幽灵账户写进真相源）。
+    健壮性（终审 Minor · 2026-08-16）：DB 文件不存在时前置 is_file 守卫直接返 0
+    且**不创建空库文件**——与 get_session_id 同款守卫。写口本就要求「账户行已存在」
+    （UPDATE 匹配 0 行返 0），库文件都不存在时账户行必然不存在，绝不能让
+    sqlite3.connect 顺手建空垃圾库（broker 轮换/测试在未 init 或异 CWD 环境下
+    调用时的「探测留垃圾库」同源坑）。
     """
     db_path = db_path or _DEFAULT_DB
+    if not Path(db_path).is_file():
+        return 0
     with _connect(db_path) as con:
         cur = con.execute(
             "UPDATE account SET session_id=? WHERE account_id=?",
