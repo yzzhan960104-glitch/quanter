@@ -398,6 +398,156 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
     return _tag_partial(combined) if partial else combined
 
 
+# ============================================================================
+# N1b 探针分类（2026-08-16）：--classify 中点采样标记（可逆、不写湖）
+# ============================================================================
+# 物理意图：T1 全量 --auto 严格标记需 13.8h（每 unjustified 子段全范围拉取），
+# 13,767 子段收敛不动 → daemon fail-closed 闸（unjustified>0 拒跑）打不开。
+# 探针降本：每子段只探「中点 1 个交易日」（daily+adj_factor 两接口），两接口完整
+# 拉取后该标的行缺席 → 采样推定「源无该标的该日行情」（停牌残留/盲区年代的
+# 采样版），记 sidecar reason=probe_zero_day（count=1——只实证了 1 日）；该标的
+# 中点有行 → 不标（源有数据，留给正规 --auto 全段补采）。
+#
+# 语义分级（诚实呈现）：probe_zero_day=采样推定（中点零行），与 symbol_absent=
+# 全段实证不同级；scan 报告分列 unfillable_confirmed/probed 计数。
+# --clear-unfillable 可逆：误推定可整体重置（与实证标记共用逃生口）。
+PROBE_ZERO_DAY = "probe_zero_day"  # sidecar reason 字面（scan 分流判据，勿改）
+# classify 总超时：1.4 万子段量级全跑约 1h，REPAIR_TIMEOUT 的 30min 默认会拦腰
+# 截断——探针模式单独放宽（env 可调，中断已 checkpoint 可续收）
+REPAIR_CLASSIFY_TIMEOUT = int(os.getenv("REPAIR_CLASSIFY_TIMEOUT_SECONDS", "14400"))
+
+
+def classify_gaps(gaps: list[GapRange], pro, *, lake_dir: str) -> dict:
+    """N1b --classify 内核：unjustified 子段中点采样分类（只读源 + 写 sidecar，不写湖）。
+
+    判定语义（Why symbol 级、且只认 daily）：探针拉的是按 trade_date 的全市场响应，
+    但「零行」结论落在【该标的】——中点日市场可以很健康（数千行），唯独该标的
+    在 daily 缺席（停牌残留形态）。在场证据只认 daily 行情行；adj_factor 停牌日
+    也连续发布（实证见循环内注释），不能作在场证据。
+
+    与 repair_gaps 的语义差异（Why 两套回路）：
+    - repair（--auto）：全范围拉取，标记 reason 严格只认「两接口完整拉取且零行」
+      的全段实证（market_empty/symbol_absent），count=段日数——慢但铁证；
+    - classify（本函数）：每子段只探中点 1 日，标的缺席 → probe_zero_day 推定，
+      count=1（只实证 1 日）——快但推定级，scan 报告单列不与实证混计。
+    压根不接收 lake_df：物理上无写湖路径（探针只改变 sidecar，不动 parquet）。
+
+    配额经济学：按 trade_date 拉的是全市场，同一中点交易日被多个子段共享时
+    重复拉取是白耗——先按中点日分组，一日一拉、组内逐标的判定。实弹耗时按
+    「唯一中点日数」而非「子段数」计；内存只驻留当日标的集（组处理完即弃）。
+
+    Args:
+        gaps: list[GapRange]（与 repair 同源；仅 suspend_justified=False 子段被探）。
+        pro: Tushare pro 接口（daily/adj_factor，按 trade_date 分页）。
+        lake_dir: unfillable sidecar 读写锚点（必传——classify 的唯一产出就是 sidecar）。
+
+    Returns:
+        {units, marked, nonzero, probed_days, interrupted, sidecar_entries}——
+        units=过滤 sidecar 后待探子段数；marked=probe_zero_day 新标数；nonzero=
+        中点有行留给 --auto 的子段数；probed_days=实探唯一交易日数；
+        interrupted=是否被限频/异常/超时截断（已 checkpoint，重跑续收）。
+    """
+    unjustified = [g for g in gaps if not g.suspend_justified]
+    units: list[tuple[str, tuple[str, ...]]] = []
+    for g in unjustified:
+        for run in unjustified_subsegments(g):
+            units.append((g.symbol, run))
+
+    # sidecar 已标记日不再探（与 repair 跳过同源）——也是「中断重跑续收」的机制
+    # 基础：已标段被 cov 过滤，重跑只探剩余段，已收标记不白费。
+    cov = unfillable_coverage(load_unfillable_entries(lake_dir))
+    if cov:
+        def _c(sym: str, day: str) -> bool:
+            return any(s <= day <= e for s, e in cov.get(sym, ()))
+        units = [(sym, tuple(d for d in run if not _c(sym, d)))
+                 for sym, run in units]
+        units = [u for u in units if u[1]]
+
+    # 中点分组：{日: [(symbol, run), ...]}——一日一拉，组内逐标的判定存在性
+    by_day: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+    for sym, run in units:
+        # 中点 = run[len//2]（奇数段正中，偶数段偏新一日——偏向近期证据）
+        by_day.setdefault(run[len(run) // 2], []).append((sym, run))
+    # 日粒度 recency-first：新中点日先探（与 repair 配额同哲学——影响实盘识别的
+    # 段先定性，中断时新段已收；盲区年代日殿后，天然最后探）
+    days_sorted = sorted(by_day, reverse=True)
+
+    entries = load_unfillable_entries(lake_dir)
+    existing = {(e.get("symbol"), e.get("start"), e.get("end")) for e in entries}
+    marked = nonzero = probed_days = done = 0
+    interrupted = False
+    _total = len(units)
+    _deadline = time.monotonic() + REPAIR_CLASSIFY_TIMEOUT
+    for _di, day in enumerate(days_sorted):
+        # 进度上报（复用 --auto 治「10min 无输出」的哲学）：每 100 中点日一报
+        if len(days_sorted) > 20 and _di > 0 and _di % 100 == 0:
+            logger.info("classify 进度：%d/%d 中点日（子段 %d/%d，零行标记 %d，"
+                        "非零留 --auto %d）",
+                        _di, len(days_sorted), done, _total, marked, nonzero)
+        # 总超时：截断前 sidecar 已在周期 checkpoint 落盘（见 marked 分支），重跑续收
+        if time.monotonic() > _deadline:
+            logger.warning("classify 总超时（%ds）：已探 %d/%d 中点日（标记 %d），"
+                           "sidecar 已 checkpoint，重跑续收",
+                           REPAIR_CLASSIFY_TIMEOUT, _di, len(days_sorted), marked)
+            interrupted = True
+            break
+        # 限频降速（复用 REPAIR_DAY_SLEEP）：相邻中点日间隔 sleep 给服务端 500/min
+        # 计数窗口留余量；首日不睡——尽早暴露接口可用性（与 repair 同哲学）
+        if _di > 0 and REPAIR_DAY_SLEEP > 0:
+            time.sleep(REPAIR_DAY_SLEEP)
+        tdc = day.replace("-", "")
+        try:
+            d = _fetch_paged(pro, "daily", tdc)
+            a = _fetch_paged(pro, "adj_factor", tdc)
+        except Exception as exc:
+            # 中断不废已收标记（与 --auto 部分落盘同哲学）：checkpoint 后停止，
+            # 重跑经 cov 跳过已标段续收。不进熔断计数——classify 是人工诊断
+            # 回路，写 record_repair_result 会污染 --auto 补采回路的连续失败
+            # 信号（3 次中断开 6h 熔断的语义只对 pipeline 自动补采成立）。
+            logger.warning("classify 第 %d/%d 中点日（%s）拉取异常：%s —— "
+                           "checkpoint %d 条标记后停止，重跑续收",
+                           _di + 1, len(days_sorted), day, exc, marked, exc_info=True)
+            interrupted = True
+            break
+        probed_days += 1
+        # 当日标的集（组处理完即弃——全市场响应数千行，跨日驻留会吃满内存）
+        daily_syms = (set(d["ts_code"]) if not d.empty and "ts_code" in d.columns
+                      else set())
+        for sym, run in by_day[day]:
+            done += 1
+            # 在场判定只认 daily（行情真值源）。Why 不看 adj_factor：实证（2026-08-16，
+            # 688646.SH/300246.SZ/000838.SZ 三例 --auto 铁证 symbol_absent 日）——
+            # adj_factor 对停牌股也连续发布（因子序列停牌日不中断），拿它当在场
+            # 证据会把全部停牌残留判「非零」，探针一颗标不了。adj 的拉取仍保留：
+            # 与 T1「两接口完整拉取」的 attempt 资格同口径（防单接口故障误判零行）。
+            if sym in daily_syms:
+                nonzero += 1
+                continue
+            key = (sym, run[0], run[-1])
+            if key in existing:
+                continue
+            existing.add(key)
+            # count=1 诚实口径：只实证中点 1 日（symbol_absent 的 count=段日数）
+            entries.append({"symbol": sym, "start": run[0], "end": run[-1],
+                            "reason": PROBE_ZERO_DAY, "count": 1,
+                            "marked_at": datetime.now().isoformat(timespec="seconds")})
+            marked += 1
+            # 周期 checkpoint（每 200 条）：长跑（1h 量级）被硬杀也不丢已收标记
+            if marked % 200 == 0:
+                save_unfillable_entries(lake_dir, entries)
+    # 无新增标记不写 sidecar（零副作用：非零探针轮不得凭空创建/重写标记文件；
+    # 中断路径的周期 checkpoint 已保住已收标记，此处兜底落盘）
+    if marked:
+        save_unfillable_entries(lake_dir, entries)
+    logger.warning("classify 完成：标记 probe_zero_day %d 子段（非零留 --auto %d，"
+                   "实探 %d 日）——probe_zero_day=采样推定（中点零行），与 "
+                   "symbol_absent=全段实证不同级；--clear-unfillable 可重置",
+                   marked, nonzero, probed_days)
+    return {"units": _total, "marked": marked, "nonzero": nonzero,
+            "probed_days": probed_days, "interrupted": interrupted,
+            "sidecar_entries": len(entries)}
+
+
 def _load_gaps_from_report(path: str) -> list[GapRange]:
     """从 scan_integrity 报告 JSON 加载 GapRange 列表（含 N1 日级/启发式新字段，
     旧报告缺字段时经 GapRange.__post_init__ 兜底为旧段级语义）。"""
@@ -416,6 +566,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="数据完整性补采（规则 3）")
     ap.add_argument("--report", default=None, help="scan_integrity 报告 JSON 路径")
     ap.add_argument("--auto", action="store_true", help="内部先 scan 再补（免手传报告）")
+    ap.add_argument("--classify", action="store_true",
+                    help="探针分类：每 unjustified 子段只拉中点 1 日，双零行记 "
+                         "probe_zero_day 可逆标记（不写湖；与 --auto/--report 互斥）")
     ap.add_argument("--symbol", default=None, help="仅补该标的（配合 --auto）")
     ap.add_argument("--since", default=None)
     ap.add_argument("--end", default=None)
@@ -431,6 +584,35 @@ def main(argv: list[str] | None = None) -> int:
             print(f"unfillable sidecar 已清除：{_unfillable_path(args.lake_dir)}")
         else:
             print("无 unfillable sidecar（无需清除）")
+        return 0
+
+    # N1b --classify：探针分类独立入口（只写 sidecar 不写湖——排在读 lake parquet
+    # 之前，10M 行白载是纯浪费）。与 --auto/--report 互斥：补采与分类是不同回路，
+    # 混跑会让「全段实证」与「中点推定」两类标记的产生路径不可区分。
+    if args.classify:
+        if args.auto or args.report:
+            ap.error("--classify 与 --auto/--report 互斥（探针分类 vs 补采，不同回路）")
+        # 复用 --auto 的熔断快闸：补采回路刚被限频打进 6h 冷却时，探针也停——
+        # 两个回路共享同一 token 配额，冷却期硬探只会加重服务端计数
+        _open, _reason = is_repair_breaker_open(args.lake_dir)
+        if _open:
+            print(f"探针分类跳过（{_reason}）")
+            return 0
+        from data.tools.scan_integrity import scan
+        report = scan(args.lake_dir, symbol=args.symbol, since=args.since, end=args.end)
+        gaps = [GapRange(symbol=g["symbol"], start=g["start"], end=g["end"],
+                         missing_dates=tuple(g["missing_dates"]),
+                         suspend_justified=g["suspend_justified"],
+                         unjustified_days=tuple(g.get("unjustified_days") or ()),
+                         suspend_suspected=bool(g.get("suspend_suspected", False)))
+                for g in report["gaps"]]
+        from data._tushare_compat import get_pro
+        stats = classify_gaps(gaps, get_pro(), lake_dir=args.lake_dir)
+        _tag = "（中断，sidecar 已 checkpoint，重跑续收）" if stats["interrupted"] else ""
+        print(f"探针分类完成{_tag}：待探 {stats['units']} 子段 → 零行标记 "
+              f"{stats['marked']}（probe_zero_day 采样推定，可逆），非零留 --auto "
+              f"{stats['nonzero']}，实探 {stats['probed_days']} 日，sidecar 共 "
+              f"{stats['sidecar_entries']} 条")
         return 0
 
     if not args.report and not args.auto:

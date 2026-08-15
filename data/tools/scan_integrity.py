@@ -53,6 +53,12 @@ def scan(
     同 key 自动对齐）；③ suspend_suspected_segments 单列计数（启发式推定停牌，
     与 suspend_d 铁证区分，可审计）。
 
+    N1b 探针分类（2026-08-16）升级：sidecar 出现第二类 reason（probe_zero_day=
+    中点采样推定）。两类 reason 从 unjustified 扣减的效力相同（daemon fail-closed
+    闸同等放行——推定错杀的代价是漏补一段，可用 --clear-unfillable 重置），但报告
+    分开计数 unfillable_confirmed_segments（market_empty/symbol_absent 全段实证）/
+    unfillable_probed_segments（probe_zero_day 采样推定）——诚实呈现证据等级。
+
     Args:
         lake_dir: 数据湖目录（默认 data_lake；测试注入 tmp_path）。
         symbol: 仅扫描该标的（None=全市场）。
@@ -61,6 +67,7 @@ def scan(
     Returns:
         {scan_range, total_symbols, total_gaps, unjustified_gaps, unjustified_symbols,
          suspend_suspected_segments, unfillable_skipped_segments,
+         unfillable_confirmed_segments, unfillable_probed_segments,
          gaps: [GapRange as dict]}。
     """
     lake = Path(lake_dir)
@@ -104,18 +111,39 @@ def scan(
     # 惰性 import：sidecar 归 repair_gaps 所有（写入侧在那里），此处只读；放函数内
     # 防任何未来的模块级循环 import。
     from data.tools.repair_gaps import unfillable_coverage, load_unfillable_entries
-    cov = unfillable_coverage(load_unfillable_entries(lake_dir))
+    entries = load_unfillable_entries(lake_dir)
+    cov = unfillable_coverage(entries)
+    # N1b reason 分流结构：{symbol: ((start, end, is_probe), ...)}——覆盖扣减不分
+    # reason（两类标记对 unjustified 的效力相同），仅报告计数时分流
+    cov_reason: dict[str, list[tuple[str, str, bool]]] = {}
+    for e in entries:
+        cov_reason.setdefault(e.get("symbol", ""), []).append(
+            (e.get("start", ""), e.get("end", ""),
+             e.get("reason") == "probe_zero_day"))
 
     def _covered(sym: str, day: str) -> bool:
         return any(s <= day <= e for s, e in cov.get(sym, ()))
 
     suspected = [g for g in gaps if g.suspend_suspected]
     unfillable_skipped = 0
+    unfillable_confirmed = 0
+    unfillable_probed = 0
     unjustified_subseg_count = 0
     unjustified_syms: set[str] = set()
     for g in gaps:
         if g.suspend_justified:
             continue
+        # N1b run 级分流计数：遍历该段全部真缺子段（未扣 sidecar 的原始拆分），
+        # 整体被标记覆盖的子段按覆盖条目 reason 归类——任一实证条目（market_empty/
+        # symbol_absent）即归 confirmed（实证证据强于推定，混标从强归类）
+        for run in _count_runs(g, set(g.unjustified_days)):
+            if all(_covered(g.symbol, d) for d in run):
+                _probes = [is_probe for s, e, is_probe in cov_reason.get(g.symbol, ())
+                           if any(s <= d <= e for d in run)]
+                if _probes and all(_probes):
+                    unfillable_probed += 1
+                else:
+                    unfillable_confirmed += 1
         # 日级真缺日 → sidecar 排除 → 剩余日按连续性拆子段（repair 原子单位）
         eff_days = [d for d in g.unjustified_days if not _covered(g.symbol, d)]
         if not eff_days:
@@ -133,6 +161,9 @@ def scan(
         "unjustified_symbols": sorted(unjustified_syms),
         "suspend_suspected_segments": len(suspected),
         "unfillable_skipped_segments": unfillable_skipped,
+        # N1b 分开计数（诚实呈现证据等级）：实证=全段拉取铁证 vs 推定=中点采样
+        "unfillable_confirmed_segments": unfillable_confirmed,
+        "unfillable_probed_segments": unfillable_probed,
         "gaps": [_gap_to_dict(g) for g in gaps],
     }
 
@@ -185,6 +216,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"长洞市场共识推定停牌 {report['suspend_suspected_segments']} 段；"
           f"unfillable 已标记跳过 {report['unfillable_skipped_segments']} 段"
           f"（--clear-unfillable 可重置）")
+    # N1b 证据分级：实证（全段拉取铁证）vs 推定（--classify 中点采样）分列——
+    # 推定标记占比高时提示先抽查再信任，防采样偏差被当铁证消费
+    print(f"unfillable 细分：实证 {report['unfillable_confirmed_segments']} 子段"
+          f"（market_empty/symbol_absent），推定 {report['unfillable_probed_segments']}"
+          f" 子段（probe_zero_day 中点采样）")
     unj_syms = report["unjustified_symbols"]
     if unj_syms:
         print(f"漏采标的 {len(unj_syms)} 只，top {args.top}：{unj_syms[:args.top]}")

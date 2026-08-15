@@ -132,3 +132,41 @@ def test_scan_excludes_unfillable_marked_days(tmp_path, monkeypatch):
     assert report["unjustified_gaps"] == 0, "标记日不算漏采"
     assert report["unjustified_symbols"] == []
     assert report["unfillable_skipped_segments"] == 1
+
+
+def test_scan_splits_unfillable_confirmed_vs_probed(tmp_path, monkeypatch):
+    """N1b：实证（market_empty/symbol_absent）与推定（probe_zero_day）分开计数。
+
+    两类 reason 都从 unjustified 扣减（daemon fail-closed 闸同等放行），但报告
+    单列 unfillable_confirmed_segments / unfillable_probed_segments——诚实呈现
+    「全段实证」vs「中点采样推定」的证据等级差异，可审计可回溯。
+    """
+    import json
+    from data.tools import scan_integrity
+    monkeypatch.setattr("data.integrity._fetch_year_trade_cal", lambda y: (
+        ["2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06"] if y == 2024 else []
+    ))
+    # 两标的各缺 09-03~09-05
+    _write_mock_daily(tmp_path, [
+        ("2024-09-02", "000921.SZ"), ("2024-09-06", "000921.SZ"),
+        ("2024-09-02", "000670.SZ"), ("2024-09-06", "000670.SZ"),
+    ])
+    # sidecar：000921.SZ 为 --auto 全段实证（market_empty）；000670.SZ 为 --classify
+    # 中点采样推定（probe_zero_day）
+    (tmp_path / ".repair_unfillable.json").write_text(json.dumps(
+        {"entries": [
+            {"symbol": "000921.SZ", "start": "2024-09-03", "end": "2024-09-05",
+             "reason": "market_empty", "count": 3},
+            {"symbol": "000670.SZ", "start": "2024-09-03", "end": "2024-09-05",
+             "reason": "probe_zero_day", "count": 1},
+        ]},
+        ensure_ascii=False), encoding="utf-8")
+
+    report = scan_integrity.scan(lake_dir=str(tmp_path))
+
+    # 两类 reason 同等从 unjustified 扣减（闸放行），但分开计数（证据分级）
+    assert report["unjustified_gaps"] == 0, "推定与实证都扣减 unjustified"
+    assert report["unjustified_symbols"] == []
+    assert report["unfillable_confirmed_segments"] == 1, "market_empty/symbol_absent = 实证"
+    assert report["unfillable_probed_segments"] == 1, "probe_zero_day = 采样推定"
+    assert report["unfillable_skipped_segments"] == 2, "旧总口径保留（gap 级全跳过数）"
