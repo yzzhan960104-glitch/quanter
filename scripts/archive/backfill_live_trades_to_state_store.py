@@ -80,23 +80,9 @@ def backfill(csv_path: str, *, apply: bool = False, db_path: str | None = None,
                 float(r["shares"]), float(r["price"]), traded_time, db_path=db_path)
         else:
             skipped += 1
-    if applied:
-        # 建仓日锁定为最早成交日：apply_fill_to_position 无 entry_date 入参，会用
-        # clock.today()（回填日）——对历史持仓会把 holding_days 算成 0，必须按最早
-        # CSV_BACKFILL 成交日回填（YYYYMMDD，与 traded_time 前缀同口径）。
-        import sqlite3 as _sqlite3
-        con = _sqlite3.connect(db_path or state_store._DEFAULT_DB)
-        try:
-            con.execute(
-                "UPDATE position SET entry_date = ("
-                " SELECT MIN(substr(fill.traded_time, 1, 8)) FROM fill"
-                " WHERE fill.symbol = position.symbol AND fill.direction = 'BUY'"
-                " AND fill.order_id LIKE 'CSV_BACKFILL_%'"
-                ") WHERE account_id = ? AND entry_date = ?",
-                (account_id, state_store.clock.today()))
-            con.commit()
-        finally:
-            con.close()
+    # 建仓日 SQL 事后订正 hack 已删（新债清偿 N-T2 · 2026-08-16）：产品侧
+    # apply_fill_to_position 已改为从 traded_time 解析成交日锁定 entry_date（解析失败
+    # 回退写入日），本脚本按 CSV 时间序回填时首 BUY 自然锁最早成交日——订正使命完成。
     return {"candidates": len(fills), "applied": applied, "skipped": skipped}
 
 

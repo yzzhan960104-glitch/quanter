@@ -1036,6 +1036,38 @@ def query_fills(start: str, end: str, *, symbol: str | None = None,
 
 # ============================= T4：position / account_daily 读写 =============================
 
+def _entry_date_from_traded_time(traded_time: str | None) -> str | None:
+    """从容错四态 traded_time 解析成交日（YYYY-MM-DD）；解析失败返 None（调用方回退）。
+
+    物理意图（新债清偿 N-T2 · 2026-08-16）：apply_fill_to_position 的 entry_date 原取
+    clock.today()（写入日），盘后/跨午夜补写成交回报时建仓日会漂一天——holding_days
+    （超期平仓基准 pretrade_date）与持仓周期归因全链消费此字段，必须锁**成交日**。
+    18 个调用点实存四态（2026-08-16 勘探实证），按形态容错解析：
+        ① ISO T 分隔   "2026-07-02T10:00:00"（engine 成交回报）
+        ② 空格分隔     "2026-07-02 09:25:00"（e2e / gateway 成交回报）
+        ③ 14 位数字    "20260702092500"（fill 表 traded_time 契约口径，backfill 落库）
+        ④ 纯时间       "15:00:00"（单测传参）→ 无日期信息，返 None
+    解析失败一律返 None 而非抛错：纯时间/8 位日期等非四态是合法入参，由调用方回退
+    clock.today() 兜底（写入日语义与历史行为一致）——容错不得打断成交落账（红线）。
+    """
+    if not traded_time:
+        return None
+    ts = str(traded_time).strip()
+    # 态③：≥14 位纯数字（YYYYMMDDHHMMSS）→ 前 8 位重组 YYYY-MM-DD。
+    # 阈值钉 14 而非 8：防把 8 位日期/其它短数字串误判（短串走 None → 兜底，行为不变）。
+    if ts.isdigit() and len(ts) >= 14:
+        return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
+    # 态①②：含 "-" 且长 ≥10 → 日期段在前，取前 10 位（YYYY-MM-DD）。
+    # 轻量形状校验（4/7 位是 "-" 且三段数字就位）：防 "abc-2026-07-02" 类垃圾串截出脏日期。
+    if "-" in ts and len(ts) >= 10:
+        head = ts[:10]
+        if head[4] == "-" and head[7] == "-" \
+                and head[:4].isdigit() and head[5:7].isdigit() and head[8:10].isdigit():
+            return head
+    # 态④及其它（空串/None/垃圾串/8 位日期）：解析失败信号
+    return None
+
+
 def apply_fill_to_position(account_id: str, symbol: str, direction: str, qty: float,
                            price: float, traded_time: str, *,
                            db_path: str | None = None) -> None:
@@ -1043,9 +1075,10 @@ def apply_fill_to_position(account_id: str, symbol: str, direction: str, qty: fl
 
     物理意图：fill 是 append-only 流水，position 是它的累加汇总（可变）。本函数在 insert_fill
     成功后调用，把本笔增量累加到 position。BUY 加权 avg_price；SELL 不动 avg（A 股口径）；
-    entry_date 首次 BUY 锁定；归零（qty=0）删除行（对账并集不被 0 干扰）。
-    与 position_book.apply_fill 的区别：本函数不写 fill 流水（由 insert_fill 单独负责，职责分离），
-    仅更新 position 汇总行。traded_time 参数保留（未来按成交时间排序重算 avg 的扩展点）。
+    entry_date 首次 BUY 锁定为 traded_time 的成交日（解析失败回退写入日 clock.today，
+    N-T2 前一律取写入日——跨午夜盘后补写会漂一天）；归零（qty=0）删除行（对账并集
+    不被 0 干扰）。与 position_book.apply_fill 的区别：本函数不写 fill 流水（由
+    insert_fill 单独负责，职责分离），仅更新 position 汇总行。
     """
     if direction not in ("BUY", "SELL"):
         raise ValueError(f"apply_fill_to_position direction 仅 BUY/SELL，收到 {direction}")
@@ -1068,7 +1101,11 @@ def apply_fill_to_position(account_id: str, symbol: str, direction: str, qty: fl
                 new_avg = (old_qty * old_avg + float(qty) * float(price)) / new_qty
             else:
                 new_avg = float(price)
-            new_entry = old_entry if old_entry is not None else today  # 建仓日锁定
+            # 建仓日锁定：优先取 traded_time 解析出的**成交日**——盘后跨午夜补写回报时
+            # clock.today()（写入日）会比真实成交日晚一天，holding_days/持仓归因全链被
+            # 污染；解析失败（纯时间等非四态）回退 today，保历史行为与既有单测口径。
+            new_entry = old_entry if old_entry is not None else (
+                _entry_date_from_traded_time(traded_time) or today)
         else:
             new_avg = old_avg
             new_entry = old_entry

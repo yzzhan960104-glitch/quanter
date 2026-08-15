@@ -207,6 +207,70 @@ def test_apply_fill_to_position_zero_clears(db):
     assert state_store.get_position("ACC1", "600000.SH") is None
 
 
+# ============================================================================
+# 新债清偿 N-T2（2026-08-16）：entry_date 取成交日（traded_time 解析）而非写入日
+# ============================================================================
+def test_entry_date_cross_midnight_takes_traded_day(db, monkeypatch):
+    """跨午夜盘后写入：traded_time=昨日 23:59 → entry_date=昨日（成交日，非写入日）。
+
+    物理意图（tech-debt #6 2026-08-15 Medium）：盘后落账（如 00:05 补写 T-1 日
+    23:59 的成交回报）时，entry_date 若取 clock.today()（写入日）会让建仓日漂一天
+    ——holding_days（超期平仓基准 pretrade_date 消费 entry_date）与持仓周期归因
+    全链被污染。冻结 clock 至 2026-07-03 00:05（跨午夜盘后写入时点），成交回报
+    traded_time="2026-07-02 23:59:00"（空格分隔态）→ entry_date 必须锁成交日
+    2026-07-02（修复前会错锁写入日 2026-07-03 → 本测试红）。
+    """
+    from datetime import datetime
+
+    from trading import clock
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 7, 3, 0, 5))
+    state_store.upsert_account("ACC1", broker="qmt")  # FK：position.account_id 引用 account
+    state_store.apply_fill_to_position("ACC1", "600000.SH", "BUY", 100, 10.0,
+                                       "2026-07-02 23:59:00")
+    pos = state_store.get_position("ACC1", "600000.SH")
+    assert pos["entry_date"] == "2026-07-02", (
+        f"建仓日应锁成交日 2026-07-02，实取 {pos['entry_date']}（跨午夜漂移复发）")
+
+
+def test_entry_date_from_traded_time_four_states():
+    """_entry_date_from_traded_time 四态解析：ISO T / 空格分隔 / 14 位数字 / 纯时间→None。
+
+    18 个调用点实存四态（2026-08-16 勘探实证）。解析失败必须返 None 而非抛错——
+    纯时间态（单测传参 "15:00:00"）是合法入参，由调用方回退 clock.today() 兜底
+    （回退口径见 test_entry_date_falls_back_to_today_on_pure_time）。
+    """
+    f = state_store._entry_date_from_traded_time
+    # 态① ISO T 分隔（engine 成交回报路径）
+    assert f("2026-07-02T10:00:00") == "2026-07-02"
+    # 态② 空格分隔（e2e / gateway 成交回报路径）
+    assert f("2026-07-02 09:25:00") == "2026-07-02"
+    # 态③ 14 位数字 YYYYMMDDHHMMSS（fill 表 traded_time 契约口径，backfill 落库格式）
+    assert f("20260702092500") == "2026-07-02"
+    # 态④ 纯时间（单测传参）→ None（解析失败信号，非异常）
+    assert f("15:00:00") is None
+    # 边界防御：空串 / None / 垃圾串 → None——容错解析不得抛错打断成交落账（红线）
+    assert f("") is None
+    assert f(None) is None
+    assert f("garbage") is None
+
+
+def test_entry_date_falls_back_to_today_on_pure_time(db, monkeypatch):
+    """纯时间态回退保护：解析失败 → entry_date=clock.today()（旧行为兼容）。
+
+    Why：tests/trading/test_e2e_trading_flow.py:797 传 "15:00:00" 纯时间（8 位日期
+    "20260728" 同理不属四态）——回退保证既有单测口径不破：解析失败不抛错、不写
+    脏值，落写入日兜底（与修复前行为完全一致）。
+    """
+    from datetime import datetime
+
+    from trading import clock
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 7, 3, 0, 5))
+    state_store.upsert_account("ACC1", broker="qmt")  # FK：position.account_id 引用 account
+    state_store.apply_fill_to_position("ACC1", "600001.SH", "BUY", 100, 10.0, "15:00:00")
+    pos = state_store.get_position("ACC1", "600001.SH")
+    assert pos["entry_date"] == "2026-07-03"  # clock.today() 兜底（冻结口径下的写入日）
+
+
 def test_snapshot_start_equity_idempotent(db):
     """INSERT OR REPLACE 同日覆盖（pre_open 崩溃重入安全）。"""
     state_store.upsert_account("ACC1", broker="qmt")
