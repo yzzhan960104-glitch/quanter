@@ -4,6 +4,9 @@
 """
 import pandas as pd
 from strategies.neckline.method_v0 import compute_atr
+# CR-2（2026-08-15）：诊断副本的硬编码价位公式（颈线±1ATR / +1H / +2H）改调
+# price_levels 单源——诊断脚本与回测/实盘共用同一数学，防「诊断口径漂移误导归因」。
+from strategies.neckline.price_levels import PRICE_LEVEL_DEFAULTS, compute_price_levels
 
 lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 t = pd.read_csv("logs/neckline_fullscan_trades.csv")
@@ -49,8 +52,11 @@ def replay(sym, sig_date_str):
     c_star, supp = best_c, (W["close"] < best_c).mean()
     min_price = float(W["low"].min())
     H = c_star - min_price
-    buy_limit, stop = c_star + atr_val, c_star - atr_val
-    tp1, tp2 = c_star + H, c_star + 2 * H
+    # CR-2：原硬编码 c_star±atr_val / c_star+H / c_star+2H 即默认档 (1,1,1,2,·)，
+    # 改调单源（**默认常量展开），数值与原式逐位一致。
+    lv = compute_price_levels(c_star=c_star, high=H, atr=atr_val, **PRICE_LEVEL_DEFAULTS)
+    buy_limit, stop = lv.buy_limit, lv.stop
+    tp1, tp2 = lv.tp1, lv.tp2
     buy_idx = None
     for i in range(sig_idx + 1, min(sig_idx + 6, len(df))):
         if df["low"].iloc[i] <= buy_limit:

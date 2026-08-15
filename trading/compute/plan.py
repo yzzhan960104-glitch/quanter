@@ -31,6 +31,11 @@ from dataclasses import dataclass
 
 from trading.compute.types import OrderRequest
 from strategies.neckline.signal import Signal
+# CR-2（2026-08-15 · 审计 spec A5+C1）：入场价位三件套改调 strategies/neckline/price_levels
+# 单源（真身在 strategies 层——分层铁律 2 禁 strategies→trading，trading→strategies 是
+# 既有合法方向，与 import Signal 同型）。回测 simulate_exit 与本函数共用同一价位数学，
+# 等价性由 tests/trading/test_price_levels_golden.py 用迁移前快照逐位钉死。
+from strategies.neckline.price_levels import PRICE_LEVEL_DEFAULTS, compute_price_levels
 
 
 @dataclass
@@ -95,8 +100,12 @@ def build_orders_from_signals(
     Why 跳过而非抛错：自动交易引擎在盘后批处理多只标的时，单只缺 ATR/数据异常
     不应中断整批；此处静默跳过，由上层日志记录后人工补救。
     """
-    stop_mult = stop_cfg.get("stop_atr_mult", 2.0)
-    tp_mult = stop_cfg.get("tp_h_mult", 2.0)
+    # C1（2026-08-15 · 审计 spec C1）：stop_atr_mult 兜底从 2.0 幽灵默认收敛到
+    # PRICE_LEVEL_DEFAULTS=1.0（对齐 EXEC_DEFAULTS/method_v0.DEFAULTS/critical.py env 缺省）。
+    # 迁移性核查：生产唯一调用方 eod_plan.compute 恒显式传键（_trade_cfg env 缺省已 1.0），
+    # 2.0 仅测试可触达、从未在生产生效——本收敛不改变任何生产数值，只消灭漂移源。
+    stop_mult = stop_cfg.get("stop_atr_mult", PRICE_LEVEL_DEFAULTS["stop_atr_mult"])
+    tp_mult = stop_cfg.get("tp_h_mult", PRICE_LEVEL_DEFAULTS["tp_h_mult"])
     # 分级止盈参数（Task 7 · P0-3 对齐）：tp1_h_mult×H 锁利位 + tp1_portion 分配比例。
     # Why 显式 .get + None 兜底：老 stop_cfg（Task 7 前）不传这两键，None 让下游
     # _place_take_profit 检测 falsy 退回 tp2 单笔全平，零回归。
@@ -135,20 +144,31 @@ def build_orders_from_signals(
             continue
         # H = 颈线到底部的高度，作为风险报酬比的标尺
         h = float(neckline) - float(bottom)
+        # CR-2：止损/止盈/tp1/撤单阈值四价位改调 price_levels 单源（原内联公式已删，
+        # 与回测 simulate_exit 共用同一数学；golden 钉死逐位等价）。
+        # Why tp1<tp2：tp1_h_mult < tp_h_mult（EXEC_DEFAULTS 1.0 vs 2.0）保证 tp1 先于
+        # tp2 成交，在 tp1 锁定部分浮利后剩余博 tp2 形态目标位。
+        # buy_limit_atr_mult：实盘挂单价由 Signal.entry_price 承载（scan_live 下=颈线），
+        # 此处按默认一并算出但【不消费】——保持三口同参调用形状，防未来分叉；
+        # tp1/cancel 缺参（None）语义单源透传（下游退回 tp2 全平 / 不撤单，零回归）。
+        levels = compute_price_levels(
+            c_star=float(neckline), high=h, atr=float(atr),
+            stop_atr_mult=stop_mult,
+            buy_limit_atr_mult=stop_cfg.get(
+                "buy_limit_atr_mult", PRICE_LEVEL_DEFAULTS["buy_limit_atr_mult"]),
+            tp1_h_mult=tp1_mult, tp_h_mult=tp_mult,
+            cancel_thresh_mult=cancel_thresh_mult,
+        )
         # 止损 = 颈线 - stop_mult × ATR（ATR 口径，过滤窄幅噪音）
-        stop_price = float(neckline) - stop_mult * float(atr)
+        stop_price = levels.stop
         # 止盈 tp2 = 颈线 + tp_mult × H（形态学对称目标位）
-        take_profit = float(neckline) + tp_mult * h
+        take_profit = levels.tp2
         # 分级止盈 tp1 = 颈线 + tp1_h_mult × H（Task 7 · P0-3）：
-        # Why tp1<tp2：tp1_h_mult < tp_h_mult（EXEC_DEFAULTS 1.0 vs 2.0）保证 tp1 先于 tp2
-        # 成交，在 tp1 锁定部分浮利后剩余博 tp2 形态目标位；simulate_exit 同口径计算。
         # tp1_mult 缺省（None）→ tp1=None，下游 _place_take_profit 退回 tp2 单笔全平（零回归）。
-        tp1_price = (float(neckline) + tp1_mult * h) if tp1_mult is not None else None
-        # pending 期撤单阈值（Task 9 · D11 · 对齐 simulate_exit:128-129）：
-        # cancel_on = 颈线 + cancel_thresh_mult×H。cancel_thresh_mult 缺省（None）→ cancel_on=None
+        tp1_price = levels.tp1
+        # pending 期撤单阈值（Task 9 · D11）：cancel_thresh_mult 缺省（None）→ cancel_on=None
         # （下游 _stoploss pending_ctx 检测 falsy 不塞，不撤单放飞，向后兼容）。
-        cancel_on_price = ((float(neckline) + cancel_thresh_mult * h)
-                           if cancel_thresh_mult is not None else None)
+        cancel_on_price = levels.cancel_on
         out.append(PlannedOrder(
             order=OrderRequest(symbol=sym, qty=float(qty), side="buy", price=float(entry)),
             stop_price=stop_price, take_profit=take_profit, neckline=float(neckline),

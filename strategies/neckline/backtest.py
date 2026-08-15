@@ -35,6 +35,12 @@ from .method_v0 import (DEFAULTS, TOPS_WINDOW, compute_atr, decay_weights_of,
 # decide_exit 内部调 compute_stop_price 算 trailing，本模块不再内联算 trailing（消除数学双份）。
 from .execution import decide_exit, ExitAction, ExitReason
 
+# CR-2（2026-08-15 · 审计 spec A5+C1）：入场价位三件套（挂单价/止损/tp1/tp2/撤单阈值）
+# 改调同包 price_levels 单源——回测与实盘（trading/compute/plan.py）共用同一价位数学，
+# 等价性由 tests/trading/test_price_levels_golden.py 用迁移前快照逐位钉死。
+# 参数仍从 id_cfg（识别层）/exec（执行层）两口读（结构不动），缺参回落 PRICE_LEVEL_DEFAULTS。
+from .price_levels import PRICE_LEVEL_DEFAULTS, compute_price_levels
+
 
 # 持有期参数（用户规则，可调）—— 保留为向后兼容常量
 MAX_HOLDING = 15           # 成交后超时持仓周期（交易日）
@@ -145,14 +151,27 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     H = c_star - bottom
     if H <= 0:
         return None
-    buy_limit = c_star + exec["buy_limit_atr_mult"] * atr_val   # 挂单价（颈线+N×ATR）
-    base_stop = c_star - id_cfg["stop_atr_mult"] * atr_val      # 止损基准（颈线−N×ATR，固定；
-    # risk_pct 用此基准预告初始风险；持有期 trailing 动态调整见 loop）
-    tp1 = c_star + exec["tp1_h_mult"] * H                         # 第一止盈（颈线+N×H）
-    tp2 = c_star + id_cfg["tp_h_mult"] * H                      # 第二止盈（颈线+N×H，识别层参数）
-    # 撤单阈值（None=不撤单放飞所有信号；否则等待期 high≥此价即撤单防追高）
-    cancel_on = (c_star + exec["cancel_thresh_mult"] * H
-                 if exec.get("cancel_thresh_mult") is not None else None)
+    # CR-2：入场价位三件套改调 price_levels 单源（原内联公式已删，防回测/实盘数学分叉）。
+    # 参数映射红线（与原内联取参完全同源）：stop_atr_mult/tp_h_mult ← id_cfg（识别层），
+    # buy_limit_atr_mult/tp1_h_mult/cancel_thresh_mult ← exec（执行层）；缺参一律回落
+    # PRICE_LEVEL_DEFAULTS（C1：旧式 [] 严格取键缺即 KeyError，.get 兜底只在原崩溃
+    # 路径上生效，任何非崩溃路径数值逐位不变——golden 钉死）。
+    levels = compute_price_levels(
+        c_star=c_star, high=H, atr=atr_val,
+        stop_atr_mult=id_cfg.get("stop_atr_mult", PRICE_LEVEL_DEFAULTS["stop_atr_mult"]),
+        buy_limit_atr_mult=exec.get("buy_limit_atr_mult",
+                                    PRICE_LEVEL_DEFAULTS["buy_limit_atr_mult"]),
+        tp1_h_mult=exec.get("tp1_h_mult", PRICE_LEVEL_DEFAULTS["tp1_h_mult"]),
+        tp_h_mult=id_cfg.get("tp_h_mult", PRICE_LEVEL_DEFAULTS["tp_h_mult"]),
+        # cancel_thresh_mult=None 是合法配置（不撤单放飞），不走数值兜底
+        cancel_thresh_mult=exec.get("cancel_thresh_mult"),
+    )
+    buy_limit = levels.buy_limit   # 挂单价（颈线+N×ATR；exec 恒有值故非 None）
+    # 止损基准（颈线−N×ATR，固定；risk_pct 用此基准预告初始风险；持有期 trailing 动态调整见 loop）
+    base_stop = levels.stop
+    tp1 = levels.tp1               # 第一止盈（颈线+N×H）
+    tp2 = levels.tp2               # 第二止盈（颈线+N×H，识别层参数）
+    cancel_on = levels.cancel_on   # 撤单阈值（None=不撤单放飞所有信号；否则等待期 high≥此价即撤单防追高）
 
     # ① 等回踩成交（用户逻辑修正：等待期 high≥tp1 → 涨幅已兑现，回踩是退潮，撤单）
     wait_end = min(signal_idx + max_wait, len(sym_df) - 1)

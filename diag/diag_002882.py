@@ -4,6 +4,8 @@
 """
 import pandas as pd
 from strategies.neckline.method_v0 import compute_atr, local_minima, DEFAULTS
+# CR-2（2026-08-15）：诊断副本硬编码价位公式改调 price_levels 单源（与回测/实盘同数学）。
+from strategies.neckline.price_levels import PRICE_LEVEL_DEFAULTS, compute_price_levels
 
 lake = pd.read_parquet("data_lake/a_shares_daily.parquet")
 df = lake.xs("002882.SZ", level="symbol").sort_index()
@@ -56,11 +58,10 @@ print(f"谷底 min: {min_price:.2f}  →  H = 颈线−底 = {H:.2f}  →  H/ATR
 close_T = float(W["close"].iloc[-1])
 print(f"\n突破日 {sig_date.date()}: close = {close_T:.2f}  >  颈线 {c_star:.2f}  ✓")
 
-# 交易要素
-buy_limit = c_star + atr_val
-stop = c_star - atr_val
-tp1 = c_star + H
-tp2 = c_star + 2 * H
+# 交易要素（CR-2：原硬编码 c_star±atr_val / +H / +2H 即默认档 (1,1,1,2,·)，
+# 改调单源（**默认常量展开），数值与原式逐位一致）
+lv = compute_price_levels(c_star=c_star, high=H, atr=atr_val, **PRICE_LEVEL_DEFAULTS)
+buy_limit, stop, tp1, tp2 = lv.buy_limit, lv.stop, lv.tp1, lv.tp2
 print(f"\n========== 交易要素 ==========")
 print(f"  颈线 c*        : {c_star:.2f}")
 print(f"  ATR            : {atr_val:.2f}")
