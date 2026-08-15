@@ -83,7 +83,8 @@ async def test_catchup_retries_failed_pre_open(monkeypatch, tmp_path):
     async def fake_pre_open(date, ports=None):
         ran.append(date)
 
-    monkeypatch.setattr(engine_mod, "pre_open", fake_pre_open)
+    # W1-B（Task 10）：catchup 改 lazy import phases.pre_open 物理真身，patch 同迁。
+    monkeypatch.setattr("trading.phases.pre_open.pre_open", fake_pre_open)
     monkeypatch.setattr(catchup.calendar, "is_trading_day", lambda date: True)
     monkeypatch.setattr(catchup.clock, "now", lambda: datetime(2026, 8, 5, 9, 30))
     monkeypatch.setattr(catchup.clock, "today", lambda: "2026-08-05")

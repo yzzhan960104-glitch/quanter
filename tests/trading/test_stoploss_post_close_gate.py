@@ -65,7 +65,7 @@ def test_stoploss_gw_locked_skips_and_alerts():
          patch("trading.engine._mode", return_value="live"), \
          patch("trading.engine.calendar.is_trading_day", return_value=True), \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon, \
-         patch("trading.engine.trading_plan.load_plan") as lp:
+         patch("trading.trading_plan.load_plan") as lp:  # W1-B：迁共享模块
         asyncio.run(eng._stoploss())   # 不抛 _CriticalHalt（gate skip 不停调度）
     ac.assert_called_once()       # CRITICAL 告警推送
     mon.assert_not_called()       # 业务未触达
@@ -85,7 +85,7 @@ def test_stoploss_gw_green_proceeds_to_monitor():
     with patch("trading.engine.get_gateway", return_value=gw), \
          patch("trading.engine._alert_critical") as ac, \
          patch("trading.engine.calendar.is_trading_day", return_value=True), \
-         patch("trading.engine.trading_plan.load_plan", return_value=None), \
+         patch("trading.trading_plan.load_plan", return_value=None), \
          patch("trading.engine._state_store.list_signals_with_meta_by_plan_date",
                return_value=[]) as _ss_sig, \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon:

@@ -44,7 +44,7 @@ async def test_pipeline_catchup_runs_full_chain_in_window(monkeypatch):
     monkeypatch.setattr(cal, "next_trading_day", lambda d: "2026-08-03")
     monkeypatch.setattr(cal, "is_trading_day", lambda d: True)
     with patch("trading.orchestrate.pipeline.pipeline_then_eod", new=AsyncMock()) as pl, \
-         patch("trading.engine.pre_open", new=AsyncMock()) as po:
+         patch("trading.phases.pre_open.pre_open", new=AsyncMock()) as po:  # W1-B：迁物理真身
         from trading.catchup import run_startup_catchup
         result = await run_startup_catchup(MagicMock())
     assert result["pipeline"] is True
@@ -64,7 +64,7 @@ async def test_pipeline_catchup_run_eod_false_after_window(monkeypatch):
     monkeypatch.setattr(cal, "next_trading_day", lambda d: "2026-08-03")
     monkeypatch.setattr(cal, "is_trading_day", lambda d: True)
     with patch("trading.orchestrate.pipeline.pipeline_then_eod", new=AsyncMock()) as pl, \
-         patch("trading.engine.pre_open", new=AsyncMock()) as po, \
+         patch("trading.phases.pre_open.pre_open", new=AsyncMock()) as po, \
          patch("trading.catchup._alert_critical") as alert:
         from trading.catchup import run_startup_catchup
         result = await run_startup_catchup(MagicMock())
@@ -99,7 +99,7 @@ async def test_weekend_catchup_produces_monday_plan(monkeypatch):
     monkeypatch.setattr(cal, "next_trading_day", lambda d: "2026-08-03")
     monkeypatch.setattr(cal, "is_trading_day", lambda d: False)
     with patch("trading.orchestrate.pipeline.pipeline_then_eod", new=AsyncMock()) as pl, \
-         patch("trading.engine.pre_open", new=AsyncMock()) as po:
+         patch("trading.phases.pre_open.pre_open", new=AsyncMock()) as po:  # W1-B：迁物理真身
         from trading.catchup import run_startup_catchup
         result = await run_startup_catchup(MagicMock())
     assert pl.await_args.kwargs == {"for_date": "2026-07-31", "run_eod": True}
@@ -128,7 +128,7 @@ async def test_brief_catchup_when_ledger_missing(monkeypatch, tmp_path):
     job_ledger.finish_run("pipeline", "2026-07-31", "done")
     # brief_<bot> 台账全部缺失（latest_status 返 None）→ 判定需补播
     with patch("ops.brief_all.run_brief_all", new=AsyncMock()) as rba, \
-         patch("trading.engine.pre_open", new=AsyncMock()) as po:
+         patch("trading.phases.pre_open.pre_open", new=AsyncMock()) as po:  # W1-B：迁物理真身
         from trading.catchup import run_startup_catchup
         result = await run_startup_catchup(MagicMock())
     assert result["brief"] is True
@@ -192,7 +192,7 @@ async def test_pre_open_skipped_before_window(monkeypatch):
     monkeypatch.setattr(cal, "next_trading_day", lambda d: "2026-08-03")
     monkeypatch.setattr(cal, "is_trading_day", lambda d: True)
     with patch("trading.orchestrate.pipeline.pipeline_then_eod", new=AsyncMock()) as pl, \
-         patch("trading.engine.pre_open", new=AsyncMock()) as po, \
+         patch("trading.phases.pre_open.pre_open", new=AsyncMock()) as po, \
          patch("trading.catchup._alert_critical") as alert:
         from trading.catchup import run_startup_catchup
         result = await run_startup_catchup(MagicMock())

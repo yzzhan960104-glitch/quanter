@@ -80,10 +80,9 @@ def test_pre_open_cancel_passes_account_id(isolated_eng, monkeypatch):
     # 【顶部 import 本地绑定】（phases.pre_open.__globals__）。patch trading.engine.X 不命中
     # 函数体符号解析 → _cancel_all_open_orders 真身跑（spy 不触发 · account_id 断言失效）+
     # _resolve_account_id 真身返默认账户（非 ACC_QMT_001）。5 patch 全迁 trading.phases.pre_open.X
-    # （Task 9-18 __globals__ 范式）。trading_plan 留 engine：phases.pre_open 不 import 它
-    # （pre_open 直读 _state_store.list_signals · 该 patch 为防御性历史遗留 · 本路径不读）。
-    with patch("trading.engine.trading_plan") as tp, \
-         patch("trading.phases.pre_open.get_gateway", return_value=AsyncMock(**{"query_asset.return_value": {}})), \
+    # W1-B（Task 10）：原 patch(trading.engine.trading_plan) 为防御性历史遗留
+    # （无断言消费 · phases 不读它），engine 属性删除后随之移除。
+    with patch("trading.phases.pre_open.get_gateway", return_value=AsyncMock(**{"query_asset.return_value": {}})), \
          patch("trading.phases.pre_open._cancel_all_open_orders", new=_spy_cancel), \
          patch("trading.phases.pre_open._resolve_account_id", return_value="ACC_QMT_001"), \
          patch("trading.phases.pre_open._scan_expired_positions", return_value=[]):

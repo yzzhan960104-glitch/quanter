@@ -87,7 +87,8 @@ def _smoke() -> int:
     tp.push_brief = _fake_push  # type: ignore[assignment]
 
     # ② 触发 eod_plan（空信号 → 空 orders）
-    from trading.engine import eod_plan
+    # W1-B（Task 10）：直 import 物理真身 trading.eod_plan.compute（engine re-export 垫层已删）。
+    from trading.eod_plan import compute as eod_plan
 
     today = clock.today()
     print(f"[smoke] 触发 eod_plan(date={today}, signals=[], atr_map={{}}, capital=1e6)")

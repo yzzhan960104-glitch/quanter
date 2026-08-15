@@ -52,6 +52,12 @@ from typing import Any, Dict, Mapping, Optional, Callable
 from datetime import datetime
 
 from trading import clock, state_store as _state_store
+# W1-B（Task 10）：gateway lazy 顶部化·模块对象风格——record_position_attribution 经
+# ``gateway_service.<attr>`` 属性访问（调用时读模块属性），patch(
+# "trading.gateway_service.record_position_attribution") 命中语义与原函数内 lazy import
+# 完全等价。无循环依赖：gateway_service 顶层零 order_state 反查（broker.base 只进
+# trading.compute.types / trading.types 包）。
+from trading import gateway_service
 from trading.types.order_state import OrderState
 # _CriticalHalt 异常类（L1 致命停调度信号）：critical 定义、engine re-export 同一对象。
 # 不被 patch（异常类型识别），顶部直接 import 安全（无循环：critical 不反向 import 本文件）。
@@ -486,9 +492,8 @@ async def handle_order_update(engine, update: Mapping[str, Any]) -> None:
                 # 失败可补偿——与上方 fill/position 异常升 L1 不同，归因异常软降级）。
                 if direction == "BUY":
                     try:
-                        from trading.gateway_service import \
-                            record_position_attribution
-                        record_position_attribution(
+                        # W1-B：顶部模块对象访问（原 lazy import 已顶部化，patch 语义等价）。
+                        gateway_service.record_position_attribution(
                             symbol, "neckline", f"成交建仓@{traded_time}")
                     except Exception:
                         logger.exception(

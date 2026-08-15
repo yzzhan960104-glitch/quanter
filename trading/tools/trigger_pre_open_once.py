@@ -75,7 +75,11 @@ logging.basicConfig(
 
 
 async def _run() -> int:
-    from trading.engine import TradingEngine, pre_open, get_gateway
+    # W1-B（Task 10）：pre_open 直 import 物理真身 phases.pre_open（engine re-export 垫层
+    # 已删）；TradingEngine/get_gateway 是 engine 自有符号，仍从 trading.engine 取。
+    # 保函数内 lazy：工具脚本冷启动只拉所需链，不顶层装配引擎。
+    from trading.engine import TradingEngine, get_gateway
+    from trading.phases.pre_open import pre_open
 
     today = clock.today()
     mode = os.getenv("AUTO_TRADE_MODE", "dry_run")

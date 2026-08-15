@@ -135,7 +135,10 @@ async def _catchup_pre_open(ports=None) -> tuple[bool, str]:
             （``run_startup_catchup(engine)`` / ``engine._health_guard``）传 ``engine._ports``，
             让补跑 pre_open 与 cron 路径一样经三段闸（行为等价原 ``_ACTIVE_ENGINE`` 全局置位）。
     """
-    from trading.engine import pre_open
+    # W1-B（Task 10）：直 import 物理真身 phases.pre_open（engine re-export 垫层已删）。
+    # 保函数内 lazy：catchup 被引擎补跑/health_guard 高频调，顶层拉 phases 链非必要；
+    # 调用时经 phases.pre_open 模块属性解析，patch("trading.phases.pre_open.pre_open") 命中。
+    from trading.phases.pre_open import pre_open
     now = clock.now()
     today = clock.today()
     if not calendar.is_trading_day(today):

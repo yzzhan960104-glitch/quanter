@@ -35,6 +35,13 @@ from typing import Optional
 from infra.notifier import NotificationManager, fire_and_forget
 from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 broker.base 真身
 from trading import qmt_market_data
+# W1-B（Task 10 · lazy 顶部化·模块对象风格）：state_store/clock/job_ledger 原散落 8 处
+# 函数内 lazy import 收口到顶部。Why 模块对象风格安全：调用点经 ``state_store.foo()`` /
+# ``job_ledger.foo()`` 属性访问，调用时读模块属性 → ``patch("trading.state_store.X")`` /
+# ``monkeypatch.setattr(job_ledger, "X", ...)`` 一定命中（from-import 函数本体的经典坑
+# 仅在 ``from X import f`` 把 f 绑进本地时发生；绑定模块对象无此问题）。三模块均为
+# stdlib/sqlite 叶子（无 gateway_service 反查），顶部化无循环依赖。
+from trading import clock, job_ledger, state_store
 from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 from trading.compute.risk import check_order  # Layer2 阶段6：直指 functional core 真身（risk_shield 垫片已删）
 # W1-A/T2-Task7：_mode 从 critical 顶部直 import（critical 是零下游耦合叶子模块 · 无环），
@@ -235,7 +242,6 @@ def _read_position_attribution(symbol: str) -> dict:
     不阻断持仓查询主路径——持仓 qty/avg_price 是真相，归因是衍生审计字段）。
     """
     try:
-        from trading import state_store
         row = state_store.get_position(_resolve_account_id(), symbol)
         if row is None:
             return {}  # 持仓行不存在（broker 有持仓但 DB 无行——对账漂移场景，归因自然空）
@@ -254,7 +260,6 @@ def record_position_attribution(symbol: str, strategy: str, rationale: str = "")
     持仓行须已由 apply_fill_to_position 建立（BUY 成交必先建行），UPDATE 命中 1 行；
     SELL 平仓 apply_fill_to_position 归零删行，归因随行消失（不调 clear——断点-3 Resolution）。
     """
-    from trading import state_store
     state_store.upsert_position_attribution(_resolve_account_id(), symbol, strategy, rationale)
 
 
@@ -265,7 +270,6 @@ def clear_position_attribution(symbol: str) -> None:
     position 行，归因随行消失。本函数保留供显式清除场景（人审纠错擦除但持仓留）+
     测试断言 upsert/clear 往返幂等。
     """
-    from trading import state_store
     state_store.clear_position_attribution(_resolve_account_id(), symbol)
 
 
@@ -290,7 +294,6 @@ def aggregate_fills_by_symbol(start: str, end: str) -> dict[str, float]:
     返回 shape {symbol: net_float}（不变，post_close 归因契约）：
         BUY 为正、SELL 为负，按 symbol 累加。
     """
-    from trading import state_store
     try:
         rows = state_store.query_fills(start, end)
     except Exception:
@@ -334,7 +337,6 @@ def export_trades(start: str, end: str) -> str:
     返回 shape：CSV 字符串（_EXPORT_COLUMNS 表头 + 0..N 数据行），前端下载契约红线。
     无日志/空 DB → 仅返回表头（诚实空导出，非 404；前端照常下载）。
     """
-    from trading import state_store
     try:
         rows = state_store.query_fills(start, end)
     except Exception:
@@ -409,7 +411,6 @@ def query_trades(
     limit = max(1, min(int(limit), 1000))
     offset = max(0, int(offset))
 
-    from trading import state_store
     try:
         rows = state_store.query_fills(start, end, symbol=symbol, direction=direction)
     except Exception:
@@ -580,7 +581,7 @@ def _write_submit_trade_event(
       post_close 聚合只认 fill，submit 行不计入净持仓（与原 CSV kind 口径一致）
     - direction：真单路径补 BUY/SELL（dry_run/BLOCKED 无 direction，由 action 间接表达）
     """
-    from trading import state_store, clock  # lazy import：避免 server 启动期 import 副作用
+    # W1-B（Task 10）：state_store/clock 已顶部 import（模块对象风格，patch 语义等价）。
     aid = _resolve_account_id()
     # date 统一带横线（YYYY-MM-DD，与 clock.today()/next_trading_day 返回一致）—— Fix1 rework：
     # 原传 ``.replace('-', '')``（无横线 20260805）与 engine（带横线 2026-08-05）不同 trade_id，
@@ -789,16 +790,15 @@ def get_jobs(date: str, engine, catchup_task) -> dict:
     - warning：仅台账读失败时出现（job 台账是操作元数据，绝不阻断观测主路径——
       即便 SQLite 被锁/文件损坏，前端驾驶舱仍要看见 catchup 状态，避免盲区）
 
-    Why `from trading import job_ledger` 写在函数体内而非模块顶：测试需 monkeypatch
-    job_ledger.snapshot_for_date，函数体内 import 在调用时取最新引用——让 patch
-    一定能命中（若在模块顶 import，monkeypatch 改的是 trading.job_ledger 上的属性，
-    本模块的本地引用会"漏过"patch，这是 Python import 语义的经典坑）。
+    W1-B（Task 10）注记：job_ledger 已顶部 import（模块对象风格）。原「函数体内 import
+    防 patch 漏过」的担忧只对 ``from X import f``（绑定函数本体）成立——本模块绑定的是
+    **模块对象**、调用点 ``job_ledger.snapshot_for_date`` 属性访问，monkeypatch 改
+    trading.job_ledger 属性时调用时可见，patch 命中语义与函数体内 import 完全等价。
 
     engine 参数当前未用：预留未来读 engine 内嵌可观测态（如当前持仓/挂单数），
     router 从 app.state 传入；本期 get_jobs 保持纯聚合层，不引入对 engine 内部结构的
     耦合。本函数无状态，全部信息来自入参与 job_ledger。
     """
-    from trading import job_ledger
     out: dict = {"date": date, "jobs": [],
                  "catchup": {"state": "not_started", "result": None}}
     try:

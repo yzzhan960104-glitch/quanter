@@ -126,7 +126,9 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
         # 函数内 import 规避循环依赖（engine.py 顶层 import 本编排层时会反向引用）。
         if rc != 0:
             _ledger_finish(today, "failed", f"采集子进程失败 rc={rc}")
-            from trading.engine import _CriticalHalt
+            # W1-B（Task 10）：_CriticalHalt 直 import 物理真身 trading.critical（engine
+            # re-export 垫层已删）。保函数内 lazy 规避循环依赖（本编排层被 engine 引用）。
+            from trading.critical import _CriticalHalt
             raise _CriticalHalt(f"采集子进程失败 rc={rc}（T 日增量未落湖，拒产 T+1 计划）")
         # 2. 装配本次在线实验策略 → 收集依赖 key 并集（D3）
         keys: set[str] = set()

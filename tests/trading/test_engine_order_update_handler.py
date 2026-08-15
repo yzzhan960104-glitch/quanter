@@ -21,8 +21,8 @@ TDD 约定（与 Task 7/8/9 一致）：
 
 W1-A/T2-Task12 patch 物理路径迁移（handle_order_update 调用链归属判定）：
     本文件测 ``eng._handle_order_update``（engine 薄 wrapper → 委托 order_state.
-    handle_order_update 函数体）+ 直接调 ``engine.place_take_profit``（phases.exit
-    re-export 别名，函数体 ``__globals__`` 属 phases.exit）。调用链全程不经 engine
+    handle_order_update 函数体）+ 直接调 ``place_take_profit``（W1-B 起顶部直
+    import phases.exit 物理真身，函数体 ``__globals__`` 属 phases.exit）。调用链全程不经 engine
     模块全局名解析符号 → patch trading.engine.X 失效，迁物理路径（按「符号被读取时的
     ``__globals__`` 归属模块」判）：
 
@@ -37,7 +37,7 @@ W1-A/T2-Task12 patch 物理路径迁移（handle_order_update 调用链归属判
       ``trading.order_state._mode`` / ``trading.order_state._alert_critical``
      （Task4 切断 engine 反查后 patch engine / setattr engine 模块属性失效）。
     - ``trading_plan.load_plan`` ×12（B 共享属性·不迁）：trading_plan 是共享模块对象，
-      patch ``trading.engine.trading_plan.load_plan`` 改模块对象属性 → phases.exit /
+      patch ``trading.trading_plan.load_plan`` 改模块对象属性 → phases.exit /
       order_state ``import trading_plan`` 同对象命中，保 engine 路径。
 
     绿门：28 passed（baseline 12 fail/16 pass → 全绿，修 Task4-7 遗留 patch 失效）。
@@ -52,6 +52,8 @@ import pytest
 from trading import position_book
 from trading import engine
 from trading.engine import TradingEngine
+# W1-B（Task 10）：place_take_profit 迁物理真身 phases.exit（engine re-export 垫层已删）。
+from trading.phases.exit import place_take_profit
 
 
 @pytest.fixture
@@ -175,7 +177,7 @@ def test_buy_fill_places_take_profit_once_idempotent(db):
     # W1-A/T2-Task12：_submit 迁 trading.phases.exit._submit——handle_order_update →
     # lazy import phases.exit.place_take_profit → 函数体读 phases.exit 本地 _submit
     # （exit.py 顶部 ``from trading.gateway_service import _submit``），patch engine 不命中。
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("infra.notifier.NotificationManager"), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(eng._handle_order_update(update))  # 首次成交回报 → 挂 TP1
@@ -279,7 +281,7 @@ def test_tp_idempotent_via_db(state_db, monkeypatch):
         tp_calls["n"] += 1
     fake_mgr = MagicMock()
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    with patch("trading.engine.trading_plan.load_plan", return_value=_plan_with_tp()), \
+    with patch("trading.trading_plan.load_plan", return_value=_plan_with_tp()), \
          patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         with patch("trading.phases.exit.place_take_profit", new=_counting_tp):
@@ -301,9 +303,9 @@ def test_tp_inserts_two_orders(state_db):
     # plan 用 qty=1000 + portion=0.5 → tp1=500/tp2=500（两腿都非零）
     plan = _plan_with_tp()
     plan["orders"][0]["order"]["qty"] = 1000
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED", "order_id": "s1"})):
-        asyncio.run(engine.place_take_profit("300001.SZ", 1000, 10.5, order_id="123"))
+        asyncio.run(place_take_profit("300001.SZ", 1000, 10.5, order_id="123"))
     account_id = engine._resolve_account_id()
     today = _today_str()
     # TP1 + TP2 两笔 order 落库（trade_date=今日，与 _place_take_profit 口径一致）
@@ -340,9 +342,9 @@ def test_place_take_profit_two_legs(db):
             "tp1_portion": 0.5,         # 50% 在 tp1 锁利
         }],
     }
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(engine.place_take_profit("300001.SZ", 1000, 10.5, order_id="ord-1"))
+        asyncio.run(place_take_profit("300001.SZ", 1000, 10.5, order_id="ord-1"))
     # _submit 必被调两次（两张限价卖单）
     assert submit_mock.call_count == 2
     legs = [call.args[0] for call in submit_mock.call_args_list]
@@ -385,9 +387,9 @@ def test_place_take_profit_skips_vetoed_symbol(db, monkeypatch):
     state_store.insert_trade_event(_aid, _tid, "300009.SZ", "VETOED")
 
     eng = engine.TradingEngine()
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(engine.place_take_profit("300009.SZ", 1000, 10.5, order_id="ord-veto"))
+        asyncio.run(place_take_profit("300009.SZ", 1000, 10.5, order_id="ord-veto"))
     # vetoed 标的 _submit 不应被调
     assert submit_mock.call_count == 0
 
@@ -409,9 +411,9 @@ def test_place_take_profit_tp1_qty_round_to_lot(db):
             "tp1": 11.5, "tp1_portion": 0.5,
         }],
     }
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(engine.place_take_profit("300002.SZ", 430, 10.5, order_id="ord-2"))
+        asyncio.run(place_take_profit("300002.SZ", 430, 10.5, order_id="ord-2"))
     legs = [call.args[0] for call in submit_mock.call_args_list]
     tp1_leg = next(leg for leg in legs if leg.price == 11.5)
     tp2_leg = next(leg for leg in legs if leg.price == 13.0)
@@ -431,9 +433,9 @@ def test_place_take_profit_portion_zero_only_tp2(db):
             "tp1": 11.5, "tp1_portion": 0.0,   # portion=0 → 全量 tp2
         }],
     }
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(engine.place_take_profit("300003.SZ", 1000, 10.5, order_id="ord-3"))
+        asyncio.run(place_take_profit("300003.SZ", 1000, 10.5, order_id="ord-3"))
     # 只调一次（tp2 全量）
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
@@ -452,9 +454,9 @@ def test_place_take_profit_portion_full_only_tp1(db):
             "tp1": 11.5, "tp1_portion": 1.0,    # portion=1 → 全量 tp1
         }],
     }
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(engine.place_take_profit("300004.SZ", 1000, 10.5, order_id="ord-4"))
+        asyncio.run(place_take_profit("300004.SZ", 1000, 10.5, order_id="ord-4"))
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
     assert leg.price == 11.5 and leg.qty == 1000
@@ -481,9 +483,9 @@ def test_place_take_profit_tp1_ge_tp2_falls_back_to_tp2_only(db):
             "tp1_portion": 0.5,
         }],
     }
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(engine.place_take_profit("300005.SZ", 1000, 10.5, order_id="ord-5"))
+        asyncio.run(place_take_profit("300005.SZ", 1000, 10.5, order_id="ord-5"))
     # tp1 ≥ tp2 时 sanity 只挂 tp2
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
@@ -503,9 +505,9 @@ def test_place_take_profit_no_tp1_in_plan_falls_back_to_tp2_only(db):
             # 无 tp1 / tp1_portion（老 plan）
         }],
     }
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
-        asyncio.run(engine.place_take_profit("300006.SZ", 1000, 10.5, order_id="ord-6"))
+        asyncio.run(place_take_profit("300006.SZ", 1000, 10.5, order_id="ord-6"))
     submit_mock.assert_called_once()
     leg = submit_mock.call_args.args[0]
     assert leg.price == 13.0 and leg.qty == 1000
@@ -552,9 +554,9 @@ def test_place_take_profit_truncates_fractional_qty_to_int(db):
     eng._gw = gw
     # patch 真身路径（同既有 test_buy_fill_places_take_profit_once_idempotent）：
     #   - ``_submit`` patch 成 AsyncMock 拦截真实下单（拿到 OrderRequest 检查 qty）；
-    #   - ``trading.engine.trading_plan.load_plan`` 返含 take_profit 的计划；
+    #   - ``trading.trading_plan.load_plan`` 返含 take_profit 的计划（W1-B 迁共享模块路径）；
     #   - record_live_trade / NotificationManager patch 掉日志与通知副作用。
-    with patch("trading.engine.trading_plan.load_plan", return_value=plan), \
+    with patch("trading.trading_plan.load_plan", return_value=plan), \
          patch("infra.notifier.NotificationManager"), \
          patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED"})) as submit_mock:
         asyncio.run(eng._handle_order_update(update))
@@ -780,7 +782,7 @@ def test_e2e_real_callback_chain_fills_and_places_tp(db, monkeypatch):
     state_store.insert_order(oid, f"{aid}_600000.SH_2026-08-01", aid, "2026-08-01",
                              "600000.SH", "buy", "OPEN", 100, 10.0,
                              broker_oid=str(seq), state="SUBMITTED")
-    monkeypatch.setattr("trading.engine.trading_plan.load_plan",
+    monkeypatch.setattr("trading.trading_plan.load_plan",
                         lambda d: {"orders": [{"order": {"symbol": "600000.SH"},
                                                "take_profit": 11.0, "tp1": 10.8,
                                                "tp1_portion": 0.0}]})

@@ -57,6 +57,10 @@ import logging
 import os
 
 from trading import calendar, clock, state_store as _state_store, trading_plan
+# W1-B（Task 10）：gateway lazy 顶部化·模块对象风格——调用点经 ``gateway_service.<attr>``
+# 属性访问（调用时读模块属性），patch("trading.gateway_service.get_positions") 命中语义
+# 与原函数内 lazy import 完全等价；from-import 本地绑定反而会冻结 patch（禁用）。
+from trading import gateway_service
 # build_orders_from_signals：颈线法信号 → PlannedOrder 纯函数（functional core，trading.compute.plan）。
 from trading.compute.plan import build_orders_from_signals
 # _trade_cfg / _mode：交易参数 + 模式纯 env 读函数（critical 是 SSoT，T1-Task2 已从 engine 迁出）。
@@ -222,8 +226,8 @@ async def compute(date: str, signals: list, atr_map: dict, capital: float) -> di
     # 网关未连/异常 → None，push 内部退回 position_book 本地账本（软降级，不阻断推送）。
     broker_positions = None
     try:
-        from trading.gateway_service import get_positions as _get_positions
-        broker_positions = await _get_positions()
+        # W1-B：顶部模块对象访问（原函数内 lazy import 已顶部化，patch 语义等价）。
+        broker_positions = await gateway_service.get_positions()
     except Exception:
         logger.warning("eod_plan 拉 QMT 持仓失败，交易计划持仓段退回本地账本")
     trading_plan.push_plan_to_dingtalk(

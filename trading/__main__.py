@@ -114,15 +114,18 @@ from trading import clock
 # ``_alert_critical`` 别名：测试 monkeypatch 用（钉钉通道软降级 try/except 已兜底，
 # 测试再 mock 一层避免触发真实网络/通道装配副作用）。
 def _alert_critical(msg: str) -> None:
-    """W1.4 启动探测告警通道（thin wrapper，转发 engine._alert_critical）。
+    """W1.4 启动探测告警通道（thin wrapper，转发 trading.critical._alert_critical）。
 
-    Why 单独包一层而非直接 ``from trading.engine import _alert_critical`` 顶层 import：
-    engine 顶层 import 会拉起 apscheduler 重链（破坏 __main__ 模块加载性能 + 测试隔离），
-    故延迟到函数体内 import；同时本别名让测试可 ``monkeypatch.setattr(__main__,
-    "_alert_critical", fake)`` 单一断口 mock（避免 patch engine 内部符号）。
+    Why 单独包一层而非直接顶层 import：``trading.engine`` 顶层 import 会拉起 apscheduler
+    重链（破坏 __main__ 模块加载性能 + 测试隔离），故延迟到函数体内 import 物理真身
+    ``trading.critical``（W1-B · Task 10 起不再经 engine re-export 转发）；同时本别名让
+    测试可 ``monkeypatch.setattr(__main__, "_alert_critical", fake)`` 单一断口 mock
+    （避免 patch critical 内部符号）。
     """
     try:
-        from trading.engine import _alert_critical as _engine_alert
+        # W1-B（Task 10）：改 lazy import 物理真身 trading.critical（engine re-export 垫层
+        # 已删）。lazy 保留：避免 __main__ 模块加载期拉起 engine 的 apscheduler 重链。
+        from trading.critical import _alert_critical as _engine_alert
         _engine_alert(msg)
     except Exception:
         # 软降级：启动期通道未装/网络异常不阻断 sys.exit 决策（exit 是硬约束，告警是辅助）。

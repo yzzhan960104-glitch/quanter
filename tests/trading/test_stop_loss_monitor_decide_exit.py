@@ -25,7 +25,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from trading.engine import TradingEngine, stop_loss_monitor, place_take_profit
+from trading.engine import TradingEngine
+from trading.phases.stop_loss import stop_loss_monitor  # W1-B：迁物理真身
+from trading.phases.exit import place_take_profit  # W1-B：迁物理真身
 # W1-A/T2：blackout 节流状态从 engine 模块级 (_last_quote_blackout_alert_ts) 迁 ports.blackout
 # （QuoteBlackoutThrottle dataclass）——blackout 测试改经 ports 注入 + 重置节流。
 from trading.alerting import QuoteBlackoutThrottle

@@ -205,8 +205,9 @@ def test_step3_trade_next_day(isolated, monkeypatch):
     fake_gw._connected = True
     fake_gw.is_locked = False
     monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
-    # _cancel_all_open_orders patch 真身（engine 模块别名导入）—— 防真撤昨日单触达 mock gw
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", AsyncMock(return_value=0))
+    # W1-B（Task 10）：engine re-export 垫层已删——迁消费方模块（pre_open 本地绑定），
+    # 防真撤昨日单触达 mock gw（原 patch engine 属性是死 patch，迁后真正生效保测试意图）。
+    monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders", AsyncMock(return_value=0))
 
     submitted = {"n": 0}
     async def _dry_submit(order, *, confirm=True):
@@ -233,7 +234,7 @@ def test_step3_trade_next_day(isolated, monkeypatch):
     # + _place_take_profit（避免再走 _submit 挂止盈——已 patch _submit 但走限频复杂度，禁掉更稳）
     # A4 删 record_live_trade，原 CSV 日志 patch 行随之删（审计平移 trade_event 表）
     with patch("infra.notifier.NotificationManager"), \
-         patch("trading.engine.place_take_profit", new=AsyncMock()):
+         patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
         asyncio.run(eng._handle_order_update(update))
     # 账本写入：BUY 100 股 300001.SZ（gap4 第四连写入实证）
     assert position_book.get_local_positions() == {"300001.SZ": 100.0}
@@ -273,7 +274,7 @@ def test_step4_review_report(isolated, monkeypatch):
     async def _fake_run_rec(gw, local, tolerance=0.0):
         return fake_rec
     monkeypatch.setattr(_post_close_mod, "get_gateway", lambda: fake_gw)
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_run_rec)  # W1-B：迁共享模块
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
 
     # 直调模块级 post_close 拿业务返回（drift 字段）
@@ -324,7 +325,7 @@ def test_e2e_full_flow_symbol_propagates(isolated, monkeypatch):
         "traded_volume": 100, "traded_price": 10.5, "state": "FILLED",
     }
     with patch("infra.notifier.NotificationManager"), \
-         patch("trading.engine.place_take_profit", new=AsyncMock()):
+         patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
         asyncio.run(eng._handle_order_update(update))
 
     # symbol 贯穿：position 表
@@ -497,8 +498,8 @@ def test_e2e_lockdown_recover_full_cycle(isolated, monkeypatch, captured_alerts_
     # 切断后两口子分离——必须同 patch 两处，否则阶段②守护 job 取 gw=None 直接 no-op。
     monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
-    monkeypatch.setattr(engine, "_cancel_all_open_orders",
-                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
+    monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders",
+                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))  # W1-B：迁消费方模块
 
     # 阶段①：gw 锁死 → _submit 全 raise（live 挡板拒单契约）→ pre_open submitted=0 + CRITICAL
     submit_calls_phase1 = {"n": 0}
@@ -701,8 +702,8 @@ def test_e2e_sanity_date_alignment_loads_right_plan(isolated, monkeypatch):
     fake_gw._lock_down = False
     fake_gw.query_asset = AsyncMock(return_value={})
     monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
-    monkeypatch.setattr(engine, "_cancel_all_open_orders",
-                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
+    monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders",
+                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))  # W1-B：迁消费方模块
     submitted = {"n": 0}
 
     async def _dry_submit(order, *, confirm=True):
@@ -755,8 +756,8 @@ def test_e2e_full_chain_db_consistency(isolated, monkeypatch):
     fake_gw._lock_down = False
     fake_gw.query_asset = AsyncMock(return_value={"total_asset": 1_000_000.0, "cash": 500_000.0})
     monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
-    monkeypatch.setattr(engine, "_cancel_all_open_orders",
-                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
+    monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders",
+                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))  # W1-B：迁消费方模块
     async def _dry_submit(order, *, confirm=True):
         return {"order_id": "seq1", "state": "DRY_RUN", "message": "影子"}
     monkeypatch.setattr(_pre_open_mod, "_submit", _dry_submit)
@@ -929,8 +930,8 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
     fake_gw.is_client_ready = lambda *a, **kw: True  # gate ② 段客户端就绪
     fake_gw.query_asset = AsyncMock(return_value={})  # 熔断基线兜底（返空跳过 snapshot）
     monkeypatch.setattr(_pre_open_mod, "get_gateway", lambda: fake_gw)
-    monkeypatch.setattr(engine, "_cancel_all_open_orders",
-                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
+    monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders",
+                        AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))  # W1-B：迁消费方模块
 
     submitted = {"n": 0}
 

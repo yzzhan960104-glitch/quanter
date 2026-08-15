@@ -86,7 +86,7 @@ def test_post_close_csv_dirty_rows_do_not_rewrite_position(monkeypatch, _isolate
             return {"total_asset": 1_000_000.0}
         async def _fetch_broker_positions(self, *, tradable_only=True):
             return {"600000.SH": {"volume": 100.0}}
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _make_fake_rec(is_ok=True))
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _make_fake_rec(is_ok=True))  # W1-B：迁共享模块
 
     # ④ 跑 post_close
     asyncio.run(engine.post_close(today, gw=_FakeGw(),
@@ -219,7 +219,7 @@ def test_post_close_csv_attribution_only_no_qty_rewrite(monkeypatch, _isolated_b
             return {"total_asset": 1_000_000.0}
         async def _fetch_broker_positions(self, *, tradable_only=True):
             return {}
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _make_fake_rec(is_ok=True))
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _make_fake_rec(is_ok=True))  # W1-B：迁共享模块
 
     asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
 

@@ -32,7 +32,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from trading.engine import stop_loss_monitor, _CriticalHalt
+from trading.critical import _CriticalHalt  # W1-B：迁物理真身（engine re-export 已删）
+from trading.phases.stop_loss import stop_loss_monitor  # W1-B：迁物理真身
+from strategies.neckline.execution import ExitAction, ExitReason  # W1-B：迁物理真身
 
 
 # ----------------------------------------------------------------------------
@@ -97,14 +99,14 @@ def test_stop_already_placed_read_failure_raises_critical_halt(isolated_stoploss
     gw = AsyncMock()
     gw._fetch_broker_positions.return_value = {
         "300214.SZ": {"volume": 100, "avg_price": 10.0}}
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes",
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes",  # W1-B：迁共享模块
                         AsyncMock(return_value={"300214.SZ": {
                             "last_price": 8.5, "high": 10.5, "low": 8.4}}))
 
     # decide_exit 返 CLOSE/STOP_LOSS（仓位命中止损）
     fake_dec = MagicMock()
-    fake_dec.action = engine.ExitAction.CLOSE
-    fake_dec.reason = engine.ExitReason.STOP_LOSS
+    fake_dec.action = ExitAction.CLOSE
+    fake_dec.reason = ExitReason.STOP_LOSS
     fake_dec.portion = 1.0
     # W1-A/T2-Task19：stop_loss_monitor 函数体已迁 trading.phases.stop_loss，其内部
     # decide_exit/_submit/_state_store 经【顶部 import 本地绑定】（phases.stop_loss 模块
@@ -143,13 +145,13 @@ def test_record_stop_write_failure_raises_critical_halt(isolated_stoploss, monke
     gw = AsyncMock()
     gw._fetch_broker_positions.return_value = {
         "300214.SZ": {"volume": 100, "avg_price": 10.0}}
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes",
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes",  # W1-B：迁共享模块
                         AsyncMock(return_value={"300214.SZ": {
                             "last_price": 8.5, "high": 10.5, "low": 8.4}}))
 
     fake_dec = MagicMock()
-    fake_dec.action = engine.ExitAction.CLOSE
-    fake_dec.reason = engine.ExitReason.STOP_LOSS
+    fake_dec.action = ExitAction.CLOSE
+    fake_dec.reason = ExitReason.STOP_LOSS
     fake_dec.portion = 1.0
     # decide_exit/_submit/_state_store 全迁 trading.phases.stop_loss.X（同 case (b) 注 ·
     # __globals__ 归属 · Task 15/19 范式）。
@@ -188,7 +190,7 @@ def test_decide_exit_exception_stays_l2_fallback_not_halt(isolated_stoploss, mon
     gw._fetch_broker_positions.return_value = {
         "300214.SZ": {"volume": 100, "avg_price": 10.0}}
     # 现价未跌破 stop（fallback should_trigger_stop 返 False → 不发单，正常返回）
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes",
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes",  # W1-B：迁共享模块
                         AsyncMock(return_value={"300214.SZ": {
                             "last_price": 9.6, "high": 10.5, "low": 9.5}}))
 

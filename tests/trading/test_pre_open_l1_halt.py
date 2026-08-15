@@ -27,7 +27,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from trading.engine import TradingEngine, _CriticalHalt
+from trading.critical import _CriticalHalt  # W1-B：迁物理真身
+from trading.engine import TradingEngine
 # W1-A/T2-Task9：phases.pre_open 顶部 ``from…import`` 为本地绑定，patch/monkeypatch
 # 必须注入到 phases.pre_open 模块命名空间才命中（patch trading.engine.X 不再生效——
 # engine.pre_open 是 ``from trading.phases.pre_open import pre_open`` 别名，调用链全程

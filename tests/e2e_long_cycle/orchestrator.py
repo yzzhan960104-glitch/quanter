@@ -165,7 +165,7 @@ def build_job_runner(
         # ③ stoploss：T+1 盘中 MinBarFeeder 注入行情 + stop_loss_monitor 真身判定
         # ============================================================
         if phase == "stoploss":
-            from trading.engine import stop_loss_monitor
+            from trading.phases.stop_loss import stop_loss_monitor  # W1-B：迁物理真身
             from trading import trading_plan
 
             # 读当前持仓：从 broker 内存读（simulate_fetch_positions，与 stop_loss_monitor 真身
@@ -299,7 +299,7 @@ def _build_ctx(plan: dict | None, positions: dict,
     # holding_days 的 end 日期：显式传入优先（job_runner 已 freeze 到 t_plus_1），否则 clock.today。
     _today = today_iso if today_iso else _clock.today()
     # max_holding 从 _trade_cfg() 取（与实盘 _stoploss engine.py:2543 同源，env 可调）。
-    from trading.engine import _trade_cfg
+    from trading.critical import _trade_cfg  # W1-B：迁物理真身（与实盘 _stoploss 同源 cfg）
     max_holding = _trade_cfg().get("max_holding", 15)
 
     monitor_ctx: dict[str, dict] = {}
@@ -388,7 +388,7 @@ def _cfg_from_plan(o: dict) -> dict:
     用 cfg.get("trailing_*") 有默认值（不 KeyError），但补全让 E2E 与实盘 cfg 完全同源
     （trailing 真演进而非退化为固定止损），验主路径才有意义。
     """
-    from trading.engine import _trade_cfg
+    from trading.critical import _trade_cfg  # W1-B：迁物理真身（与实盘 _stoploss 同源 cfg）
     cfg = _trade_cfg()  # 真身默认（env 可调，与实盘同源）
     return {
         "stop_atr_mult": cfg["stop_atr_mult"],

@@ -12,8 +12,9 @@
 
     ``TradingEngine._place_take_profit`` 实例方法（薄 wrapper · 原 L1582）**已删**——成交回报
     链路（order_state.handle_order_update）+ 盘中 TP 漏挂兜底（stop_loss_monitor）均直接调模块级
-    ``place_take_profit``（经 engine re-export 命中 ``patch("trading.engine.place_take_profit")``），
-    不再经 engine 实例引用（Task 9 收口缝合点 #2：消除 order_state→engine 实例的 take_profit 耦合）。
+    ``place_take_profit``（W1-B 起 patch 点即 ``trading.phases.exit.place_take_profit``——
+    engine re-export 垫层已删），不再经 engine 实例引用（Task 9 收口缝合点 #2：消除
+    order_state→engine 实例的 take_profit 耦合）。
 
 迁出纪律（strangler 红线①）：
     止盈挂单算法（load_plan 读价/量 → 差额补挂 → _submit 限价卖 + _record_tp 落 DB）【逐行原样】，
@@ -28,10 +29,11 @@
 模块级符号依赖设计（W1-A/T2 收口后 · 保行为等价 + 测试全绿）
 ================================================================================
 止盈挂单路径是成交回报链路（order_state）+ 盘中 TP 漏挂兜底（stop_loss）的关键交汇点。
-测试 patch ``trading.engine._submit`` / ``trading.engine.trading_plan.load_plan`` 驱动
+测试 patch ``trading.phases.exit._submit`` / ``trading.trading_plan.load_plan`` 驱动
 place_take_profit 单元测（test_place_take_profit_two_legs 等 8 测直调本函数），以及
-``trading.engine.place_take_profit`` 整体 mock（test_tp_fallback_preserves_positions 经
-stop_loss 路径补挂）。逐符号归类如下（与 pre_open.py / stop_loss.py 同口径）：
+``trading.phases.exit.place_take_profit`` 整体 mock（test_tp_fallback_preserves_positions
+经 stop_loss 路径补挂）。逐符号归类如下（与 pre_open.py / stop_loss.py 同口径；
+W1-B · Task 10 起 patch 路径已迁物理真身，历史 engine 路径删）：
 
 W1-A/T2 反查切断收口语义：原 phases 经函数内 lazy ``import trading.engine as`` 反查 engine
 模块级符号的设计**已全量退役**——所有符号改为顶部直接 import 物理真身模块。``patch(

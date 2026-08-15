@@ -19,6 +19,9 @@ from datetime import datetime
 import pytest
 
 from trading import engine, trading_plan
+# W1-B（Task 10）：engine re-export 垫层已删——集群符号 patch/import 全迁物理真身
+# （qmt_market_data/reconcile_job 走共享模块属性、_scan_expired_positions 走 phases 真身）。
+from trading.phases.stop_loss import scan_expired_positions
 
 
 # ----------------------------------------------------------------------------
@@ -518,7 +521,8 @@ def test_pre_open_skip_cancel_when_no_gateway(monkeypatch, _state_db):
         cancelled["n"] += 1
         return 0
 
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（pre_open 路径）。
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(engine, "get_gateway", lambda: None)  # 网关未装配
 
     result = asyncio.run(engine.pre_open("2099-01-02"))  # 不应抛
@@ -612,7 +616,7 @@ def test_stop_loss_monitor_dry_run_no_real_sell(monkeypatch):
         return {s: quote_map.get(s) for s in symbols}
 
     # monkeypatch 引擎里 import 的 qmt_market_data.get_quotes 引用（T3 批量后的现价入口）
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_get_quotes)
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes", _fake_get_quotes)  # W1-B：迁共享模块物理路径
 
     submitted = []
 
@@ -652,7 +656,7 @@ def test_stop_loss_monitor_nan_price_skipped(monkeypatch):
         # last_price 为 NaN（脏数据）：price != price 判定为 NaN，应跳过
         return {s: {"last_price": float("nan")} for s in symbols}
 
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _nan_quotes)
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes", _nan_quotes)  # W1-B：迁共享模块物理路径
 
     submitted = {"n": 0}
 
@@ -720,7 +724,7 @@ def test_stop_loss_idempotent(monkeypatch, tmp_path):
     async def _fake_get_quotes(symbols):
         return {"A.SH": {"last_price": 9.0}}  # 跌破 9.5
 
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_get_quotes)
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes", _fake_get_quotes)  # W1-B：迁共享模块物理路径
 
     submit_calls = {"n": 0}
 
@@ -815,7 +819,7 @@ def test_stoploss_monitors_after_ordered(monkeypatch, tmp_path):
     async def _fake_get_quotes(symbols):
         return {sym: {"last_price": 9.0}}  # 跌破 9.5
 
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_get_quotes)
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes", _fake_get_quotes)  # W1-B：迁共享模块物理路径
 
     submitted = {"n": 0}
 
@@ -952,7 +956,7 @@ def test_post_close_runs_reconcile(monkeypatch):
     async def _fake_run_rec(gw, local, tolerance=0.0):
         return fake_rec
 
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_run_rec)  # W1-B：迁共享模块物理路径
 
     result = asyncio.run(
         engine.post_close("2099-01-02", gw=_FakeGw(),
@@ -1198,7 +1202,7 @@ def test_daily_pnl_closes_after_pre_open_and_post_close(monkeypatch, _state_db):
     from trading.compute.reconcile import ReconciliationResult
     async def _fake_rec(gw, local, tolerance=0.0):
         return ReconciliationResult([], [], [], [], 0.0, True)
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_rec)  # W1-B：迁共享模块物理路径
     asyncio.run(engine.post_close(fixed_date, gw=_FakeGwClose(), local_positions={}))
 
     # 验证 account_daily 同 date 有 start+close+daily_pnl（闭合）
@@ -1238,7 +1242,8 @@ def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch, _state_db):
         async def query_asset(self):
             return {}  # 未连接/锁定/异常 → 空 dict
     monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（pre_open 路径）。
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
     monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
 
     asyncio.run(engine.pre_open("2099-01-02"))
@@ -1302,7 +1307,7 @@ def test_post_close_circuit_breaker_triggers(monkeypatch):
         max_abs_drift=0.0, is_ok=True)
     async def _fake_run_rec(gw, local, tolerance=0.0):
         return fake_rec
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_run_rec)  # W1-B：迁共享模块物理路径
 
     result = asyncio.run(engine.post_close(
         today, gw=fake_gw, local_positions={}))
@@ -1354,7 +1359,7 @@ def test_post_close_circuit_breaker_warns_unconfirmed(monkeypatch, caplog):
         max_abs_drift=0.0, is_ok=True)
     async def _fake_run_rec(gw, local, tolerance=0.0):
         return fake_rec
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_run_rec)  # W1-B：迁共享模块物理路径
 
     with caplog.at_level(logging.CRITICAL, logger="trading.engine"):
         result = asyncio.run(engine.post_close(
@@ -1389,7 +1394,8 @@ def test_post_close_circuit_breaker_skip_when_within_limit(monkeypatch):
     def _fake_halt():
         halt_calls.append(True)
         return {"halted": True}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _fake_cancel)
+    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（post_close 熔断撤单）。
+    monkeypatch.setattr("trading.phases.post_close._cancel_all_open_orders", _fake_cancel)
     monkeypatch.setattr(
         "trading.gateway_service.emergency_halt", _fake_halt)
 
@@ -1399,7 +1405,7 @@ def test_post_close_circuit_breaker_skip_when_within_limit(monkeypatch):
         max_abs_drift=0.0, is_ok=True)
     async def _fake_run_rec(gw, local, tolerance=0.0):
         return fake_rec
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_run_rec)  # W1-B：迁共享模块物理路径
 
     result = asyncio.run(engine.post_close(today, gw=fake_gw, local_positions={}))
 
@@ -1457,7 +1463,7 @@ def test_post_close_circuit_breaker_fail_closed_when_no_baseline(monkeypatch):
         max_abs_drift=0.0, is_ok=True)
     async def _fake_run_rec(gw, local, tolerance=0.0):
         return fake_rec
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_run_rec)  # W1-B：迁共享模块物理路径
 
     today = datetime.now().strftime("%Y-%m-%d")
     result = asyncio.run(engine.post_close(today, gw=fake_gw, local_positions={}))
@@ -1594,7 +1600,7 @@ def test_post_close_uses_prev_close_when_start_missing(monkeypatch, _state_db):
         matched=[], drifted=[], only_local=[], only_broker=[], max_abs_drift=0.0, is_ok=True)
     async def _fake_run_rec(gw, local, tolerance=0.0):
         return fake_rec
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_run_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_run_rec)  # W1-B：迁共享模块物理路径
 
     result = asyncio.run(engine.post_close(today, gw=fake_gw, local_positions={}))
 
@@ -1656,7 +1662,8 @@ def test_pre_open_skip_expired_signal(monkeypatch, _state_db):
 
     # monkeypatch _trading_days_between 返 10（> max_wait=5）→ 该单应被跳过
     monkeypatch.setattr(engine, "get_gateway", lambda: object())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（pre_open 路径）。
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
     monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 10)
 
     submitted = []
@@ -1842,7 +1849,7 @@ def test_handle_order_update_writes_book(monkeypatch, tmp_path):
 
     with patch("infra.notifier.NotificationManager") as NM1:
         NM1.get_default.return_value = fake_mgr
-        with patch("trading.engine.place_take_profit", new=AsyncMock()), \
+        with patch("trading.phases.exit.place_take_profit", new=AsyncMock()), \
              patch.object(state_store, "insert_fill", return_value=True) as if_buy:
             asyncio.run(eng._handle_order_update(update))
     if_buy.assert_called_once()
@@ -1856,7 +1863,7 @@ def test_handle_order_update_writes_book(monkeypatch, tmp_path):
 
     with patch("infra.notifier.NotificationManager") as NM2:
         NM2.get_default.return_value = fake_mgr
-        with patch("trading.engine.place_take_profit", new=AsyncMock()), \
+        with patch("trading.phases.exit.place_take_profit", new=AsyncMock()), \
              patch.object(state_store, "insert_fill", return_value=True) as if_none:
             asyncio.run(eng._handle_order_update(update))
     if_none.assert_not_called()  # 方向 None 守门拦截，账本不写（防误记买当卖/卖当买）
@@ -1871,7 +1878,8 @@ def test_handle_order_update_book_failure_raises_l1(monkeypatch, tmp_path):
     import pytest
     from unittest.mock import MagicMock, AsyncMock, patch
     from trading import state_store
-    from trading.engine import TradingEngine, _CriticalHalt
+    from trading.engine import TradingEngine
+    from trading.critical import _CriticalHalt  # W1-B：迁物理真身（engine re-export 已删）
 
     db_path = str(tmp_path / "state.db")
     monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
@@ -1900,7 +1908,7 @@ def test_handle_order_update_book_failure_raises_l1(monkeypatch, tmp_path):
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
         with patch.object(state_store, "insert_fill", side_effect=RuntimeError("db locked")), \
-             patch("trading.engine.place_take_profit", new=_tp):
+             patch("trading.phases.exit.place_take_profit", new=_tp):
             with pytest.raises(_CriticalHalt):
                 asyncio.run(eng._handle_order_update(update))
     assert tp_called == [], "账本失败升 L1，止盈不应再执行"
@@ -1928,7 +1936,7 @@ def test_scan_expired_positions_marks_over_holding(monkeypatch):
     monkeypatch.setattr("trading.phases.stop_loss._trading_days_between",
                         lambda s, e: 20 if s == "2099-01-01" else 5)
 
-    expired = engine._scan_expired_positions("2099-01-21", 15)
+    expired = scan_expired_positions("2099-01-21", 15)
 
     assert len(expired) == 1
     assert expired[0]["symbol"] == "A.SH"
@@ -1944,7 +1952,7 @@ def test_scan_expired_positions_empty_when_all_within(monkeypatch):
                         lambda **kw: {"A.SH": "2099-01-15"})
     monkeypatch.setattr(engine, "_trading_days_between", lambda s, e: 5)
 
-    assert engine._scan_expired_positions("2099-01-21", 15) == []
+    assert scan_expired_positions("2099-01-21", 15) == []
 
 
 def test_scan_expired_boundary_holding_days(monkeypatch):
@@ -1982,7 +1990,7 @@ def test_scan_expired_boundary_holding_days(monkeypatch):
     monkeypatch.setattr(
         "trading.phases.stop_loss._trading_days_between",
         lambda s, e: 15 if s == "2099-01-01" else 15)
-    expired_at_boundary = engine._scan_expired_positions(asof, 15)
+    expired_at_boundary = scan_expired_positions(asof, 15)
     assert expired_at_boundary == [], (
         "holding_days == max_holding 不应标超期（I-4：`>` 严格大于，第 max_holding 日仍给足"
         "机会；若标了说明误用 `>=`）")
@@ -1991,7 +1999,7 @@ def test_scan_expired_boundary_holding_days(monkeypatch):
     monkeypatch.setattr(
         "trading.phases.stop_loss._trading_days_between",
         lambda s, e: 16 if s == "2099-01-01" else 16)
-    expired_over = engine._scan_expired_positions(asof, 15)
+    expired_over = scan_expired_positions(asof, 15)
     assert len(expired_over) == 2, (
         "holding_days > max_holding 应标超期（16 > 15）")
     symbols = {e["symbol"] for e in expired_over}
@@ -2029,8 +2037,9 @@ def test_post_close_no_longer_scans_max_holding(monkeypatch):
     from trading.compute.reconcile import ReconciliationResult
     async def _fake_rec(gw, local, tolerance=0.0):
         return ReconciliationResult([], [], [], [], 0.0, True)
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_rec)  # W1-B：迁共享模块物理路径
+    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（post_close 路径）。
+    monkeypatch.setattr("trading.phases.post_close._cancel_all_open_orders", _no_op_cancel)
 
     result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
 
@@ -2077,7 +2086,7 @@ def test_pre_open_closes_expired_positions(monkeypatch, _state_db):
     monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
     async def _fake_quotes(syms):
         return {sym: {"last_price": 9.0, "low_limit": 8.5} for sym in syms}
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_quotes)
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes", _fake_quotes)  # W1-B：迁共享模块物理路径
     submitted = []
     async def _fake_submit(order, **kw):
         submitted.append((order.symbol, order.side, order.qty, order.price))
@@ -2125,11 +2134,12 @@ def test_pre_open_close_expired_skip_when_no_price(monkeypatch, _state_db):
         async def _fetch_broker_positions(self):
             return {"300001.SZ": {"volume": 200, "avg_price": 10.0}}
     monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（pre_open 路径）。
+    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
     # quote 空 dict（无 low_limit/last_price）
     async def _fake_quotes(syms):
         return {sym: {} for sym in syms}
-    monkeypatch.setattr(engine.qmt_market_data, "get_quotes", _fake_quotes)
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes", _fake_quotes)  # W1-B：迁共享模块物理路径
     submitted = []
     async def _fake_submit(order, **kw):
         submitted.append((order.symbol, order.side))
@@ -2182,11 +2192,12 @@ def test_post_close_query_trades_reconcile_drift(monkeypatch):
             return {"total_asset": 1_000_000.0}
         async def _fetch_broker_positions(self):
             return {}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（post_close 路径）。
+    monkeypatch.setattr("trading.phases.post_close._cancel_all_open_orders", _no_op_cancel)
     from trading.compute.reconcile import ReconciliationResult
     async def _fake_rec(gw, local, tolerance=0.0):
         return ReconciliationResult([], [], [], [], 0.0, True)
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_rec)  # W1-B：迁共享模块物理路径
 
     result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
 
@@ -2219,10 +2230,11 @@ def test_post_close_query_trades_no_drift_is_noop(monkeypatch):
             return {"total_asset": 1_000_000.0}
         async def _fetch_broker_positions(self):
             return {}
-    monkeypatch.setattr(engine, "_cancel_all_open_orders", _no_op_cancel)
+    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（post_close 路径）。
+    monkeypatch.setattr("trading.phases.post_close._cancel_all_open_orders", _no_op_cancel)
     async def _fake_rec(gw, local, tolerance=0.0):
         return ReconciliationResult([], [], [], [], 0.0, True)
-    monkeypatch.setattr(engine.reconcile_job, "run_reconcile", _fake_rec)
+    monkeypatch.setattr("trading.reconcile_job.run_reconcile", _fake_rec)  # W1-B：迁共享模块物理路径
 
     result = asyncio.run(engine.post_close(today, gw=_FakeGw(), local_positions={}))
 
@@ -2273,7 +2285,7 @@ def test_partial_fill_tp_diff_no_oversell_no_gap(monkeypatch, tmp_path):
     """3 笔部分成交（300 股）：TP 差额补挂，总量=目标量，不超卖、无覆盖缺口（#4）。"""
     import asyncio
     from trading import state_store
-    from trading.engine import place_take_profit
+    from trading.phases.exit import place_take_profit  # W1-B：迁物理真身
 
     monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
     state_store.init_store()
@@ -2283,7 +2295,7 @@ def test_partial_fill_tp_diff_no_oversell_no_gap(monkeypatch, tmp_path):
     state_store.upsert_account(aid, broker="qmt")
     state_store.insert_order(f"{today}_{sym}_OPEN_7", f"{aid}_{sym}_{today}", aid, today, sym,
                              "buy", "OPEN", 300, 10.0, broker_oid="987654", state="SUBMITTED")
-    monkeypatch.setattr("trading.engine.trading_plan.load_plan",
+    monkeypatch.setattr("trading.trading_plan.load_plan",
                         lambda d: {"orders": [{"order": {"symbol": sym},
                                                "take_profit": 12.0, "tp1": 11.0,
                                                "tp1_portion": 0.5}]})
@@ -2293,8 +2305,9 @@ def test_partial_fill_tp_diff_no_oversell_no_gap(monkeypatch, tmp_path):
         return {"order_id": f"seq{len(submit_calls)}", "state": "SUBMITTED"}
     # W1-A/T2-Task19：place_take_profit 函数体迁 trading.phases.exit，_submit 经顶部 import
     # 本地绑定（phases.exit.__globals__）→ 迁 trading.phases.exit._submit（Task 15 范式）。
-    # trading_plan.load_plan 是共享对象属性（engine.trading_plan IS phases.exit.trading_plan）
-    # → patch trading.engine.trading_plan.load_plan 天然全局命中，无需迁。
+    # trading_plan.load_plan 是共享模块对象属性（phases.exit import 的 trading_plan 与
+    # trading.trading_plan 同对象）→ patch trading.trading_plan.load_plan 天然全局命中
+    # （W1-B · Task 10 起 engine 不再持有 trading_plan 转发属性，路径直指共享模块）。
     monkeypatch.setattr("trading.phases.exit._submit", _fake_submit)
     # 分 3 笔成交：累计 100/200/300
     for filled in (100, 200, 300):
@@ -2315,7 +2328,7 @@ def test_tp_single_leg_portion_zero_incremental(monkeypatch, tmp_path):
     """tp1_portion=0 退化单腿 TP2：分 3 笔补挂合计 300，不重复。"""
     import asyncio
     from trading import state_store
-    from trading.engine import place_take_profit
+    from trading.phases.exit import place_take_profit  # W1-B：迁物理真身
 
     monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
     state_store.init_store()
@@ -2325,7 +2338,7 @@ def test_tp_single_leg_portion_zero_incremental(monkeypatch, tmp_path):
     state_store.upsert_account(aid, broker="qmt")
     state_store.insert_order(f"{today}_{sym}_OPEN_7", f"{aid}_{sym}_{today}", aid, today, sym,
                              "buy", "OPEN", 300, 10.0, broker_oid="987654", state="SUBMITTED")
-    monkeypatch.setattr("trading.engine.trading_plan.load_plan",
+    monkeypatch.setattr("trading.trading_plan.load_plan",
                         lambda d: {"orders": [{"order": {"symbol": sym},
                                                "take_profit": 12.0, "tp1": None,
                                                "tp1_portion": 0.0}]})
@@ -2347,7 +2360,7 @@ def test_close_expired_positions_skips_already_placed(monkeypatch, tmp_path):
     import asyncio
     from unittest.mock import AsyncMock
     from trading import state_store
-    from trading.engine import _close_expired_positions
+    from trading.phases.stop_loss import close_expired_positions as _close_expired_positions  # W1-B：迁物理真身（旧 `_` 名 as 别名保调用点不变）
 
     monkeypatch.setattr(state_store, "_DEFAULT_DB", str(tmp_path / "state.db"))
     state_store.init_store()
@@ -2360,7 +2373,7 @@ def test_close_expired_positions_skips_already_placed(monkeypatch, tmp_path):
                              state="SUBMITTED")
     gw = AsyncMock()
     gw._fetch_broker_positions = AsyncMock(return_value={sym: {"volume": 100, "avg_price": 10.0}})
-    monkeypatch.setattr("trading.engine.qmt_market_data.get_quotes",
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes",
                         AsyncMock(return_value={sym: {"low_limit": 9.5, "last_price": 9.8}}))
     submit_calls = []
     async def _fake_submit(order, **kw):
@@ -2412,7 +2425,7 @@ def test_buy_fill_records_attribution(tmp_db, monkeypatch):
     fake_mgr.notify_trade_event = AsyncMock(return_value=[])
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
-        with patch("trading.engine.place_take_profit", new=AsyncMock()):
+        with patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
             asyncio.run(eng._handle_order_update(update))
 
     # 断言：position 行已建 + 归因已落（strategy/entry_rationale）
@@ -2455,7 +2468,7 @@ def test_buy_fill_attribution_failure_does_not_block(tmp_db, monkeypatch):
         raise RuntimeError("归因 DB 写失败模拟")
     with patch("infra.notifier.NotificationManager") as NM:
         NM.get_default.return_value = fake_mgr
-        with patch("trading.engine.place_take_profit", new=AsyncMock()), \
+        with patch("trading.phases.exit.place_take_profit", new=AsyncMock()), \
              patch("trading.gateway_service.record_position_attribution",
                    side_effect=_boom):
             # 不应抛异常（归因失败软降级，成交主路径继续）

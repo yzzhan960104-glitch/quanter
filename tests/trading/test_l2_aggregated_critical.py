@@ -37,8 +37,9 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
     # W1-A/T2-Task14：pre_open 路径符号在 _pre_open_impl 函数体内读 phases.pre_open 顶部
     # import 的本地绑定（Task 4/6/7 切断 engine 反查后 patch trading.engine.X 全失效）→
     # 按「符号被读取时的 __globals__ 归属」迁物理路径 trading.phases.pre_open.X。
-    # trading_plan 保 engine：pre_open 路径用 _state_store.list_signals_with_meta_by_plan_date
-    # 读计划，根本不读 trading_plan（gate 被 monkeypatch 跳过）→ 死 patch 无副作用，保 engine 最安全。
+    # W1-B（Task 10）：原 patch("trading.engine.trading_plan") 是死防御 patch（pre_open
+    # 路径走 _state_store.list_signals_with_meta_by_plan_date，不读 trading_plan），engine
+    # 属性删除后随之移除（无断言消费，行为零变）。
     with patch("trading.phases.pre_open.get_gateway", return_value=None), \
             patch("trading.phases.pre_open._cancel_all_open_orders",
                   new=AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
@@ -48,8 +49,7 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
             patch("trading.phases.pre_open._submit", new=AsyncMock(side_effect=[
                 {"state": "SUBMITTED", "order_id": "seq1"},
                 RuntimeError("涨停拒单")])), \
-            patch("trading.phases.pre_open._state_store") as ss, \
-            patch("trading.engine.trading_plan") as tp:
+            patch("trading.phases.pre_open._state_store") as ss:
         # C2c：pre_open 直读 DB list_signals_with_meta_by_plan_date
         ss.list_signals_with_meta_by_plan_date.return_value = [
             {"symbol": "300214.SZ",
@@ -68,7 +68,7 @@ async def test_pre_open_partial_reject_aggregates_critical_not_halt(monkeypatch)
         ss.insert_order.return_value = True
         ss.update_order_state.return_value = None
         monkeypatch.setattr(eng, "_pre_open_gate", AsyncMock(return_value=(True, "")))
-        from trading.engine import pre_open
+        from trading.phases.pre_open import pre_open  # W1-B：迁物理真身
         result = await pre_open("2026-07-31", ports=eng._ports)
     assert result["submitted"] == 1   # 第 1 只挂成 / 第 2 只业务拒单 (部分拒触发 L2 聚合)
     # 聚合 CRITICAL 含 "被拒" 语义, _halted 保持 False (L2 不停调度)
@@ -100,17 +100,19 @@ async def test_stop_loss_partial_submit_fail_aggregates_critical_not_halt(monkey
     gw._fetch_broker_positions.return_value = {
         "300214.SZ": {"volume": 100, "avg_price": 10.0},
         "300215.SZ": {"volume": 100, "avg_price": 10.0}}
-    monkeypatch.setattr(eng_mod.qmt_market_data, "get_quotes",
+    monkeypatch.setattr("trading.qmt_market_data.get_quotes",  # W1-B：迁共享模块
                         AsyncMock(return_value={
                             "300214.SZ": {"last_price": 8.5, "high": 10.5, "low": 8.4},
                             "300215.SZ": {"last_price": 8.5, "high": 10.5, "low": 8.4}}))
 
     # 两只均 decide_exit CLOSE/STOP_LOSS portion=1.0 (全平 -> 触发卖出分支)
-    # ExitAction / ExitReason 是枚举单例（engine re-export 与 phases.stop_loss 顶部 import
-    # 同源同类 → eng_mod.ExitAction.CLOSE IS phases.stop_loss.ExitAction.CLOSE，is 比较成立）。
+    # ExitAction / ExitReason 是枚举单例（phases.stop_loss 顶部 import 与本测 import
+    # 同源同类 → ExitAction.CLOSE IS phases.stop_loss.ExitAction.CLOSE，is 比较成立；
+    # W1-B 起不经 engine re-export，直取 strategies.neckline.execution）。
     fake_dec = MagicMock()
-    fake_dec.action = eng_mod.ExitAction.CLOSE
-    fake_dec.reason = eng_mod.ExitReason.STOP_LOSS
+    from strategies.neckline.execution import ExitAction, ExitReason  # W1-B：迁物理真身
+    fake_dec.action = ExitAction.CLOSE
+    fake_dec.reason = ExitReason.STOP_LOSS
     fake_dec.portion = 1.0
     # W1-A/T2-Task14：decide_exit 迁 trading.phases.stop_loss.decide_exit——stop_loss_monitor
     # 行 354 读 phases.stop_loss 顶部 from execution import decide_exit 本地绑定（Task 4 切断
@@ -135,7 +137,7 @@ async def test_stop_loss_partial_submit_fail_aggregates_critical_not_halt(monkey
             patch("trading.phases.stop_loss._state_store") as ss:
         ss.has_order.return_value = False   # 幂等读通过 (无已挂 STOP)
         ss.get_account.return_value = MagicMock()
-        from trading.engine import stop_loss_monitor
+        from trading.phases.stop_loss import stop_loss_monitor  # W1-B：迁物理真身
         result = await stop_loss_monitor(
             stop_prices=None, gw=gw,
             monitor_ctx={

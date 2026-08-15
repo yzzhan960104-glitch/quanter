@@ -16,12 +16,13 @@ T1 拆分红线（缝合点设计 · spec 集群 A 「最独立」判定依据�
     ``_critical_guard`` 捕获 _CriticalHalt 后调 ``self._halt(...)``（鸭子类型，engine wrapper
     实装），critical 与 engine 无 import 级耦合（避免循环依赖）。
 
-公共 API 兼容（spec 公共 API 不变形红线）：
-    engine.py 顶部 ``from trading.critical import (...)`` re-export 全部符号——既保
-    ``from trading.engine import _CriticalHalt`` 等既有 import 路径不断，又保
-    ``patch("trading.engine._alert_critical")`` / ``patch("trading.engine._mode", ...)`` 等
-    monkeypatch 命中（engine 内部调用点经模块全局名解析，re-export 后仍是 engine 模块属性；
-    _halt 薄 wrapper 透传 ``alert=_alert_critical`` 同理）。
+公共 API 兼容（spec 公共 API 不变形红线 · W1-B 后现状）：
+    engine.py 顶部 ``from trading.critical import (...)`` 直 import 其**自用**符号
+    （_alert_critical/_critical_guard/_mode/_trade_cfg，绑定名不变 → ``patch(
+    "trading.engine._mode"/"_alert_critical")`` 等仍命中 engine 调用点）；W1-B（Task 10）
+    起不再为他人转发——``from trading.engine import _CriticalHalt`` 等历史路径已全量迁
+    ``from trading.critical import ...`` 物理真身（orchestrate/phases/tests），engine 的
+    re-export 垫层删除（详见 task-10-audit）。
 """
 from __future__ import annotations
 

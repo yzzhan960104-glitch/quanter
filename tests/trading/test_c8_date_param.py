@@ -114,7 +114,7 @@ async def test_data_unready_records_failed():
 @pytest.mark.asyncio
 async def test_collect_failure_records_failed_and_raises(monkeypatch):
     """采集子进程 rc!=0 → 台账 failed 后抛 _CriticalHalt（cron 路径 L1 停调度语义不变）。"""
-    from trading.engine import _CriticalHalt
+    from trading.critical import _CriticalHalt  # W1-B：迁物理真身
     from trading.orchestrate import pipeline as pl
 
     class _FakeProc:

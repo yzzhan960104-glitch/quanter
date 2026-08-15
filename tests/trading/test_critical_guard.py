@@ -8,7 +8,8 @@
 """
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
-from trading.engine import TradingEngine, _CriticalHalt, _critical_guard as _apply_guard
+from trading.critical import _CriticalHalt, _critical_guard as _apply_guard  # W1-B：迁物理真身
+from trading.engine import TradingEngine
 
 
 @pytest.mark.asyncio

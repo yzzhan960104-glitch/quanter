@@ -54,230 +54,100 @@ W1 隔离机制（取代旧的进程隔离硬约束）：
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import time
 from dataclasses import replace as _dc_replace
-from datetime import datetime
 from typing import Any, Mapping, Optional
 
-from trading import (
-    calendar,
-    dynamic_whitelist,
-    job_ledger,
-    qmt_market_data,
-    reconcile_job,
-    trading_plan,
-)
-# Task 8（C-2 S3 pre_open 三段式 gate）：显式 re-export 让 patch 目标稳定。
-# 物理意图：``pre_open`` 模块级函数与 ``TradingEngine._pre_open_gate`` 都直接调
-# ``load_plan`` / ``get_data_ready``，独立 import 让测试可 ``patch("trading.engine.load_plan")``
-# / ``patch("trading.engine.get_data_ready")`` 命中（trading_plan.get_data_ready 等其它
-# 调用方仍走各自的命名空间引用，互不污染）。
+# ============================================================================
+# W1-B 销账（tech-debt 0815 · Task 10）：T1 拆分期的 re-export 兼容块已删。
+# 物理意图：T1 把 critical/data_ctx/eod_plan/phases/order_state 集群拆出本模块后，曾在
+# 此处维持 ~40 个 ``from trading.X import Y`` re-export 别名 + 旧 `_` 名双导出垫层（保
+# ``from trading.engine import X`` / ``patch("trading.engine.X")`` 公共入口不变形）。W1-A
+# 已把全部消费者（phases/order_state/orchestrate/catchup/tools/tests）迁物理真身，本块
+# 收敛为【engine 自用】的直 import——engine 不再是任何集群符号的转发中枢。
+# 行为零变更红线：自用绑定名与删前逐一同名（_mode/_alert_critical/_load_* 旧名/…），
+# ``patch("trading.engine.<自用名>")`` 命中语义不变；仅删除「engine 内零引用、纯为他
+# 人转发」的符号（_CriticalHalt/place_take_profit/_cancel_all_open_orders/decide_exit/
+# build_orders_from_signals/reconcile_job/qmt_market_data/trading_plan 等）——其消费者
+# 已直 import 物理真身，对应 patch 点同步迁至物理模块（详见 task-10-audit）。
+# ============================================================================
+# 网关服务（W1-B lazy 顶部化 · 模块对象风格）：get_gateway/_submit/get_positions 调用点
+# 经 ``gateway_service.<attr>`` 属性访问——**禁 from-import 本地绑定**（``patch(
+# "trading.gateway_service.X")`` 改的是模块属性，from 绑定在 import 期冻结不跟随），
+# 模块对象风格保 monkeypatch 命中（与 _state_store/job_ledger 同范式）。无循环依赖：
+# gateway_service 顶层零 engine 反查（broker.base 仅进 compute.types/types 包）。
+from trading import calendar, clock, gateway_service
+from trading import position_book as _position_book
+from trading import state_store as _state_store
+# Task 8（C-2 S3 pre_open 三段式 gate）：load_plan/get_ready 独立 import 让
+# ``patch("trading.engine.load_plan")`` / ``patch("trading.engine.get_ready")`` 命中
+# （_pre_open_gate ①③ 段经 engine 模块全局名解析；其它调用方走各自命名空间，互不污染）。
 from trading.trading_plan import load_plan
-from trading.state_store import get_data_ready, get_ready
-from trading.io.breaker import cancel_all_open_orders as _cancel_all_open_orders
+from trading.state_store import get_ready
 from trading.ports import EnginePorts  # T1 缝合点 #1：phases 外迁函数的窄依赖接口（无循环：ports 仅依赖 stdlib + alerting）
 from trading.alerting import QuoteBlackoutThrottle  # W1-A/T2：行情黑屏节流状态机（注入 ports.blackout，无循环：alerting 仅依赖 stdlib）
-# T1-Task2 集群 A re-export（trading.critical · L1 停调度 + 告警基础设施 · 最独立）。
-# 物理意图：_alert_critical / _CriticalHalt / _critical_guard / _mode / _trade_cfg 已迁
-# trading.critical.py（零下游交易耦合），此处 re-export 保「公共/半公开 API 不变形」红线：
-#   - 既有 ``from trading.engine import _CriticalHalt, _critical_guard`` 等路径不断；
-#   - ``patch("trading.engine._alert_critical")`` / ``patch("trading.engine._mode", ...)`` 等
-#     monkeypatch 命中（engine 内部调用点经模块全局名解析，re-export 后仍是 engine 模块属性；
-#     _halt 薄 wrapper 透传 alert=_alert_critical 同理命中既有断言）。
-# halt / guard_skip_rounds 为内部别名（驱动下方 _halt / _guard_skip_rounds 薄实例 wrapper，
-# 「critical 留纯函数 + engine 留薄 wrapper」避免 critical → engine 耦合）。
-from trading.critical import (  # noqa: F401  公共 API 兼容（cluster A re-export）
-    _alert_critical,
-    _CriticalHalt,
-    _critical_guard,
-    _mode,
-    _trade_cfg,
-)
+# 集群 A（trading.critical · L1 停调度 + 告警基础设施）：engine 自用直 import（W1-B 删
+# re-export 垫层，绑定名不变 → patch("trading.engine._mode"/"_alert_critical"/
+# "_critical_guard"/"_trade_cfg") 命中语义不变）。halt/guard_skip_rounds 别名驱动下方
+# _halt/_guard_skip_rounds 薄实例 wrapper（「critical 留纯函数 + engine 留薄 wrapper」，
+# 避免 critical → engine 耦合）。_CriticalHalt 不在此：engine 内零引用，raise/except 方
+# （orchestrate.pipeline / phases / tests）均已直 import trading.critical。
+from trading.critical import _alert_critical, _critical_guard, _mode, _trade_cfg
 from trading.critical import halt as _halt_logic, guard_skip_rounds as _gskip_fn
-# T1-Task3 集群 I re-export（trading.order_state · broker 订单回调三分支 + 状态推进 · 缝合点 #2）。
-# 物理意图：handle_order_update / order_direction / advance_order_state_from_status 已迁
-# trading.order_state.py（与 OrderStateMachine 同住，spec §5.1 design L120 共存设计），此处
-# re-export 保「公共/半公开 API 不变形」红线；engine 类内留薄 wrapper（``eng._handle_order_update``
-# 等）保 bootstrap ``set_order_update_callback(self._handle_order_update)`` 绑定 +
-# ``patch("trading.engine.place_take_profit")`` 命中（T1-Task9 收口后）。order_state 内部已 W1-A/T2
-# 全量切顶部直接 import 物理真身（``_mode``/``_alert_critical``/``_resolve_account_id``/
-# ``_seq_for_real_oid``/``_order_state_to_db`` 不再经 engine re-export 反查）；engine 侧 re-export
-# 保 ``patch("trading.engine.xxx")`` 兼容（Task 8-19 迁 patch 物理路径后可删）。
-from trading.order_state import (  # noqa: F401
+# 集群 I（trading.order_state · broker 订单回调三分支 + 状态推进 · T1-Task3 迁出）：
+# 下方三个薄实例 wrapper（_handle_order_update/_order_direction/
+# _advance_order_state_from_status）委托用（bootstrap set_order_update_callback 绑实例）。
+from trading.order_state import (
+    advance_order_state_from_status,
     handle_order_update,
     order_direction,
-    advance_order_state_from_status,
 )
-# T1-Task4 集群 B re-export（trading.data_ctx · lake 数据加载 helper · 最独立的只读反查集群）。
-# 物理意图：load_universe / load_df_upto / load_recent_plan_symbols / resolve_cooldown_days /
-# load_integrity_ctx / resolve_id_window / plan_data_keys 已迁 trading.data_ctx.py（零下游
-# 交易耦合，仅消费 lake DataFrame + 模块级 state_store/data.integrity），此处 re-export 保
-# 「公共/半公开 API 不变形」红线：
-#   - 既有 ``from trading.engine import _load_universe`` 等路径不断（新名 + 旧 `_` 名双导出）；
-#   - ``patch("trading.engine._load_universe")`` / ``patch("trading.engine._resolve_id_window")``
-#     等 monkeypatch 命中：engine 内部 ``_eod`` 调用点**保留旧 `_` 名**（经模块全局名解析，
-#     re-export 的旧名别名仍是 engine 模块属性，patch 即替换该属性 → 内部调用命中 mock）；
-#   - ``engine._load_df_upto(...)`` / ``engine._load_recent_plan_symbols(...)`` 直调测试命中
-#     （访问模块全局旧名别名 → 真身 data_ctx.load_df_upto/load_recent_plan_symbols）。
-# ``_plan_data_keys`` 原 engine 实例方法（不读 self，仅 plan 参数 + 模块级 resolver）→ 逻辑迁
-# data_ctx.plan_data_keys free function；engine 类留薄实例 wrapper ``_plan_data_keys(self, plan)``
-# 调之，保 ``patch("trading.engine.TradingEngine._plan_data_keys")`` + ``eng._plan_data_keys(plan)``
-# 测试命中。新名 ``plan_data_keys`` 亦经此处 re-export（data_ctx 公开 API 入口）。
-from trading.data_ctx import (  # noqa: F401  公共 API 兼容（cluster B re-export · 新名）
-    load_universe,
-    load_df_upto,
-    load_recent_plan_symbols,
-    resolve_cooldown_days,
-    load_integrity_ctx,
-    resolve_id_window,
+# 集群 B（trading.data_ctx · lake 数据加载 helper · T1-Task4 迁出）：_eod 调用点沿用
+# 旧 `_` 名——W1-B 由「新名 import + 旧名赋值别名」双导出收敛为 as 别名直绑，绑定名
+# 不变 → ``patch("trading.engine._load_*"/"_resolve_*")`` 命中语义不变。plan_data_keys
+# 供 TradingEngine._plan_data_keys 薄实例 wrapper 调用（保类方法 patch 点）。
+from trading.data_ctx import (
+    load_df_upto as _load_df_upto,
+    load_integrity_ctx as _load_integrity_ctx,
+    load_recent_plan_symbols as _load_recent_plan_symbols,
+    load_universe as _load_universe,
     plan_data_keys,
+    resolve_cooldown_days as _resolve_cooldown_days,
+    resolve_id_window as _resolve_id_window,
 )
-# 旧 `_` 名兼容别名（engine 内部 _eod 调用点保留旧名 → patch("trading.engine._load_*") 命中）。
-_load_universe = load_universe
-_load_df_upto = load_df_upto
-_load_recent_plan_symbols = load_recent_plan_symbols
-_resolve_cooldown_days = resolve_cooldown_days
-_load_integrity_ctx = load_integrity_ctx
-_resolve_id_window = resolve_id_window
-# Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，直指真身 trading.compute.plan
-from trading.compute.plan import build_orders_from_signals
-# T1-Task5 集群 D re-export（trading.eod_plan · 盘后计划生成 · 颈线法信号→计划参数+trade_event）。
-# 物理意图：eod_plan（compute）+ sanity_check_date_alignment 已迁 trading.eod_plan.py
-# （compute 是 ~157 行模块级核心；sanity_check_date_alignment 原 _sanity_check_date_alignment
-# 类方法不读 self → free function），此处 re-export 保「公共/半公开 API 不变形」红线：
-#   - ``_eod`` wrapper 内 ``await eod_plan(...)`` 经 engine 模块全局名解析命中本 re-export 别名
-#     （wrapper 留 engine · 深剖 §2.D：wrapper 形态是解耦伏笔）；
-#   - 外部 ``from trading.engine import eod_plan``（scripts/archive/smoke_trading_engine.py）不断；
-#   - ``monkeypatch.setattr(engine, "eod_plan", _fake)`` / ``engine.eod_plan(...)`` 直调测试命中
-#     （test_engine.py / test_e2e_trading_flow.py / test_c8_date_param / test_e2e_eod_to_plan 等，
-#     经 engine 模块属性访问 → 本 re-export 别名 = eod_plan.compute 真身）。
-# 命名 compute（非 eod_plan）：避免「模块名 eod_plan = 函数名 eod_plan」歧义；engine 经
-# ``compute as eod_plan`` re-export 旧名兼容。compute 不调 _load_*（signals 传入参数）→
-# 无 Task 4 那种 patch("trading.engine._load_*") 命中风险（详见 eod_plan.py 模块 docstring）。
-# TradingEngine._sanity_check_date_alignment 类内留薄实例 wrapper 调 free function，保
-# ``eng._sanity_check_date_alignment()`` 测试 + ``self._sanity_check_date_alignment()``（start）命中。
-from trading.eod_plan import compute as eod_plan, sanity_check_date_alignment  # noqa: F401
-# T1-Task6 集群 E re-export（trading.phases.pre_open · 盘前挂单 · 撤昨日单 + 确认闸 + 逐单挂单）。
-# 物理意图：pre_open（C-8 V3 台账包裹）+ _pre_open_impl（~330 行盘前主逻辑）已迁
-# trading/phases/pre_open.py（新建 trading/phases/ 包的首个阶段模块），此处 re-export 保
-# 「公共/半公开 API 不变形」红线：
-#   - ``_pre_open`` wrapper 内 ``await pre_open(today, ports=self._ports)`` 经 engine 模块全局名
-#     解析命中本 re-export 别名（wrapper 留 engine · APScheduler 绑定 + @_critical_guard）；
-#   - 外部 ``from trading.engine import pre_open``（trading.catchup._catchup_pre_open · L138）不断；
-#   - ``monkeypatch.setattr(engine, "pre_open"/"_pre_open_impl", _fake)`` /
-#     ``patch("trading.engine.pre_open")`` 命中（test_pre_open_ledger* / test_e2e / test_l2 /
-#     test_cancel_all_account_id 等 · 经 engine 模块属性访问）。
-# pre_open/_pre_open_impl 内部已 W1-A/T2 全量切顶部直接 import 物理真身（gateway_service._submit/
-# get_gateway / state_store / critical / compute.stop / io.breaker / account / phases.stop_loss），
-# 不再经 engine re-export 反查。engine 侧 re-export 保 ``patch("trading.engine._xxx")`` /
-# ``monkeypatch.setattr(engine, "_xxx")`` 兼容（Task 8-19 迁 patch 物理路径后可删）。
-# 详见 trading/phases/pre_open.py 模块 docstring「模块级符号依赖设计」。逻辑零改动（盘前
-# 挂单时序逐行原样 · DB 幂等 + L1/L2 错误分级不变）。
-from trading.phases.pre_open import pre_open, _pre_open_impl  # noqa: F401
-# T1-Task7 集群 F re-export（trading.phases.stop_loss · 盘中止损/超时巡检 + 超期平仓 · 最高风险）。
-# 物理意图：stop_loss_monitor（~370 行 · 含内嵌 _stop_already_placed/_record_stop 闭包）+
-# scan_expired_positions（原 _scan_expired_positions）+ close_expired_positions（原
-# _close_expired_positions）已迁 trading/phases/stop_loss.py（盘中风控核心 · 海龟 grace/step/floor
-# + expire 平仓逐行原样），此处 re-export 保「公共/半公开 API 不变形」红线：
-#   - ``_stoploss`` wrapper 内 ``await stop_loss_monitor(...)`` 经 engine 模块全局名解析命中本
-#     re-export 别名（wrapper 留 engine · IntervalTrigger + @_critical_guard + 网关健康闸 +
-#     交易日守卫 + monitor_ctx/pending_ctx/stop_prices 构造）；
-#   - 外部 ``from trading.engine import stop_loss_monitor``（tests/e2e_long_cycle/orchestrator ·
-#     probabilistic_broker 真身巡检）不断；
-#   - ``patch("trading.engine.stop_loss_monitor")`` / ``monkeypatch.setattr(engine, "stop_loss_monitor")``
-#     命中（test_engine_stoploss_inject / test_stoploss_post_close_gate / test_critical_guard 经
-#     engine 模块属性访问 · wrapper 调用点命中 mock 哨兵）。
-# stop_loss_monitor / scan_expired_positions / close_expired_positions 内部已 W1-A/T2 全量切顶部
-# 直接 import 物理真身（gateway_service.get_gateway/_submit / state_store / critical / account /
-# compute.stop / execution / phases.exit），不再经 engine re-export 反查；行情黑屏节流状态迁
-# ``trading.alerting.QuoteBlackoutThrottle`` 经 ports.blackout 注入（W1-A/T2 收口）。engine 侧
-# re-export 保 ``patch("trading.engine._xxx")`` / ``monkeypatch.setattr(engine, "_xxx")`` 兼容
-# （Task 8-19 迁 patch 物理路径后可删）。详见 trading/phases/stop_loss.py 模块 docstring
-# 「模块级符号依赖设计」。逻辑零改动（海龟止损算法 + decide_exit 分发 + D12 fallback + D11
-# pending cancel_on + DB 幂等 + L1/L2 分级不变）。
-# 旧 `_` 名兼容别名（engine 内 _stoploss 注释 + pre_open 历史 engine 反查 ``_scan_expired_positions``/
-# ``_close_expired_positions`` 已切直接 import + test_engine ``engine._scan_expired_positions(...)`` +
-# ``patch("trading.engine._scan_expired_positions")`` 命中）。
-from trading.phases.stop_loss import (  # noqa: F401
-    stop_loss_monitor,
-    scan_expired_positions,
-    close_expired_positions,
-)
-_scan_expired_positions = scan_expired_positions
-_close_expired_positions = close_expired_positions
-# T1-Task8 集群 G re-export（trading.phases.post_close · 盘后对账 + 日内熔断 + 清白名单）。
-# 物理意图：post_close（~290 行盘后编排主入口 · ① reconcile broker 权威 → ② aggregate_fills 归因
-# 展示 → ③ 日内 -3% 熔断三步 → ⑥ trade_event(CLOSED/TP_FILLED) + account_daily 收盘快照 + 清
-# 动态白名单）+ seq_for_real_oid（原 _seq_for_real_oid · real→seq 反查）+ order_state_to_db（原
-# _order_state_to_db · OrderState→order.state 列映射）已迁 trading/phases/post_close.py（盘后收口
-# 核心 · 熔断基线 get_start_equity + 持仓快照 + TP 对账逐行原样），此处 re-export 保
-# 「公共/半公开 API 不变形」红线：
-#   - ``_post_close`` wrapper 内 ``await post_close(today, local_positions=..., ports=self._ports)``
-#     经 engine 模块全局名解析命中本 re-export 别名（wrapper 留 engine · CronTrigger + @_critical_guard
-#     + 网关健康闸 + 交易日守卫 + 读 position_book 注入 local_positions）；
-#   - 外部 ``from trading.engine import post_close``（trading.orchestrate / tests/e2e_long_cycle/
-#     signal_scanner · 直调 engine.post_close(date, gw, local_positions)）不断；
-#   - ``monkeypatch.setattr(engine, "post_close", _fake)`` / ``patch("trading.engine.post_close")``
-#     命中（test_post_close_reads_position_book / test_post_close_empty_book_passes_empty_dict /
-#     test_stoploss_post_close_gate · 经 engine 模块属性访问 · wrapper 调用点命中 mock 哨兵）。
-# post_close 内部已 W1-A/T2 全量切顶部直接 import 物理真身（gateway_service.get_gateway /
-# critical / io.breaker / state_store / account），不再经 engine re-export 反查。engine 侧 re-export
-# 保 ``patch("trading.engine._xxx")`` / ``monkeypatch.setattr(engine, "_xxx"/"xxx")`` 兼容（Task 8-19
-# 迁 patch 物理路径后可删）。详见 trading/phases/post_close.py 模块 docstring「模块级符号依赖设计」。
-# 逻辑零改动（盘后对账 + 熔断基线 get_start_equity + 持仓快照 + TP_FILLED 对账 + 清白名单逐行原样 ·
-# DB 读写口不变）。
-# 旧 `_` 名兼容别名（engine 内 order_state.py 历史 engine 反查 ``_seq_for_real_oid`` /
-# ``_order_state_to_db`` 已切直接 import + ``patch("trading.engine._seq_for_real_oid")`` 命中）。
-from trading.phases.post_close import (  # noqa: F401
-    post_close,
-    seq_for_real_oid,
-    order_state_to_db,
-)
-_seq_for_real_oid = seq_for_real_oid
-_order_state_to_db = order_state_to_db
-# T1-Task9 集群 H re-export（trading.phases.exit · 挂限价止盈卖单 · #4 差额补挂防超卖）。
-# trading/phases/exit.py（phases 包的止盈阶段模块），此处 re-export 保「公共/半公开 API 不变形」
-# 红线：
-#   - ``place_take_profit`` 经 engine re-export 命中：order_state.handle_order_update trade 分支
-#     + stop_loss_monitor 盘中 TP 漏挂兜底已 W1-A/T2-Task6 改顶部直接 import phases.exit 真身
-#     （历史 engine 反查已切断 · engine 侧 re-export 别名 = phases.exit.place_take_profit 真身
-#     仅保 ``patch("trading.engine.place_take_profit")`` 兼容）；
-#   - ``patch("trading.engine.place_take_profit")`` / ``from trading.engine import place_take_profit``
-#     旧调用/patch 目标不变（re-export 别名 = engine 模块属性，patch 替换该属性即被调用方命中）；
-#   - 原 TradingEngine._place_take_profit 实例 wrapper 已删（薄 wrapper · 仅转发模块级），成交回报
-#     链路改为直接调模块级 place_take_profit（收口缝合点 #2：消除 order_state→engine 实例的
-#     take_profit 耦合，单向依赖 order_state→phases.exit 经 engine re-export）。
-from trading.phases.exit import place_take_profit  # noqa: F401  公共 API 兼容（cluster H re-export）
-# ⚠️ compute_stop_price 不再 engine 内导入（SSoT review P2 · 删 _evolve_trailing_stops 后
-#   该 import 成孤儿，CLAUDE.md 无死代码）；trailing 收紧作独立 live P0 task 重实现时若需在
-#   engine 内消费，再 from trading.compute.stop import compute_stop_price 即可。
-from trading.compute.stop import should_trigger_stop, trading_days_between as _trading_days_between
-# Task 9（U6 实盘执行统一）：decide_exit 执行单源纯函数（Task 4 · simulate_exit 已切，实盘 stop_loss_monitor 切）
-# strangler 等价红线：decide_exit 已证等价 simulate_exit（Task 5 golden 守护），实盘切用后
-# 止损判定行为等价 should_trigger_stop（price≤stop → CLOSE/STOP_LOSS）；D12 fallback 保底。
-from strategies.neckline.execution import decide_exit, ExitAction, ExitReason
-# Task 10（R-2 日内熔断）：check_daily_loss_limit 纯判定 functional core
-from trading.compute.breaker import check_daily_loss_limit as _check_daily_loss_limit
-# Task 10（R-2）：position_book 持仓账本（apply_fill/持仓读口）。
-# 注（B5 收口）：daily_equity reader/writer（snapshot_start_equity/get_start_equity）
-# 已删——熔断基线唯一读口 = _state_store.snapshot/get_start_equity(account_daily)。
-from trading import position_book as _position_book
-# state-store-redesign：统一交易状态库（6 表，trade_event/order/fill/position/account_daily）。
-# 是 position_book 的超集（真相源）。engine 落 SIGNAL/CONFIRMED 事件、写 order/fill 幂等、读
-# stop_price/has_order 走 DB（替代 plan JSON 单一依赖 + _tp_placed 内存）。
-from trading import state_store as _state_store
-# C-6 V2：单一时间源口子（替代散落 18 处 datetime.now）。三函数分工：
+# 集群 D（trading.eod_plan · 盘后计划生成 · T1-Task5 迁出）：compute 真身以 ``eod_plan``
+# 旧名绑定（_eod wrapper 调用点 + ``patch("trading.engine.eod_plan")`` 命中不变；命名
+# compute 避免「模块名 = 函数名」歧义）。sanity_check_date_alignment 供启动口径自检薄
+# wrapper（_sanity_check_date_alignment）调用。
+from trading.eod_plan import compute as eod_plan, sanity_check_date_alignment
+# 集群 E（trading.phases.pre_open · 盘前挂单 · T1-Task6 迁出）：engine cron wrapper
+# （_pre_open）转调用真身（``patch("trading.engine.pre_open")`` 命中 wrapper 调用点不变）。
+# _pre_open_impl 不在此：engine 内零引用，消费者（catchup 补跑语义测试等）已直 import
+# phases.pre_open。
+from trading.phases.pre_open import pre_open
+# 集群 F（trading.phases.stop_loss · 盘中止损/超时巡检 · T1-Task7 迁出）：engine cron
+# wrapper（_stoploss）转调用真身（``patch("trading.engine.stop_loss_monitor")`` 命中
+# wrapper 调用点不变）。scan/close_expired_positions 及旧 `_` 名不在此：engine 内零引用，
+# 消费者（pre_open 超期平仓 / tests）已直 import phases.stop_loss。
+from trading.phases.stop_loss import stop_loss_monitor
+# 集群 G（trading.phases.post_close · 盘后对账 + 日内熔断 · T1-Task8 迁出）：engine cron
+# wrapper（_post_close）转调用真身。seq_for_real_oid/order_state_to_db 及旧 `_` 名不在
+# 此：engine 内零引用，消费者（order_state）已直 import phases.post_close。
+from trading.phases.post_close import post_close
+# holding_days 交易日口径（_stoploss 构造 monitor_ctx 用）。should_trigger_stop/decide_exit/
+# ExitAction/ExitReason、place_take_profit、check_daily_loss_limit、cancel_all_open_orders、
+# build_orders_from_signals 等止损/止盈/熔断/撤单/建单真身的消费者在 phases/compute/
+# order_state/eod_plan（W1-A/T2 已切直 import），engine 零内部引用不再转发（清单见
+# task-10-audit）。
+from trading.compute.stop import trading_days_between as _trading_days_between
+# C-6 V2：单一时间源口子（clock 已并入上方 ``from trading import`` 行）。三函数分工：
 #   clock.today()       = 业务日期 key（load_plan/is_trading_day/熔断基线 date）
 #   clock.trading_day() = eod 落盘 key（=next_trading_day(today)，eod 专用，禁混用）
 #   clock.now()         = 事件时间戳（submitted_at/written_at/is_intraday_session 时点）
 # 触发点入口缓存（_eod/_pre_open/_stoploss/_post_close 入口算一次）防同轮跨午夜漂移。
-from trading import clock
-# Task 9（M4 静默漏单消灭）：致命事件钉钉 CRITICAL 告警（复用 infra.notifier，
-# broker/qmt.py _reconnect 已在用同一套）。lazy import 避免顶层 import 副作用扩散到
-# 仅用纯函数的测试场景——_alert_critical 内部 import 保持引用局部化。
+# _alert_critical 定义在 trading.critical（上方直 import，防 patch 断链说明见其模块）；
+# 本模块仅保 logger 供自用。
 logger = logging.getLogger(__name__)
 
 
@@ -323,30 +193,6 @@ POST_CLOSE_CRON_DEFAULT = "30 15 * * mon-fri" # 盘后对账/熔断/trailing
 _CONTINUITY_FILTER_ALERT_FLOOR = 5
 
 
-# （T1-Task2）_mode / _trade_cfg 已迁 trading.critical.py（集群 A 基础设施），见文件顶部
-# re-export。下方原模块级定义已删；engine 内部 ``_mode()`` / ``_trade_cfg()`` 调用点经模块
-# 全局名解析，re-export 后仍是 engine 模块属性（``patch("trading.engine._mode", ...)`` 命中）。
-
-
-# （T1-Task4）集群 B lake 数据加载 helper 已迁 trading.data_ctx.py（见文件顶部 re-export）：
-#   load_universe / load_df_upto / load_recent_plan_symbols / resolve_cooldown_days /
-#   load_integrity_ctx / resolve_id_window / plan_data_keys。
-# 物理意图：这 7 个符号是 engine 内最独立的只读反查集群（零下游交易耦合，仅消费 lake
-#   DataFrame + 模块级 state_store / data.integrity）。下方原模块级定义已删，行为逐行等价
-#   （函数体原样移入 data_ctx，仅 logger 名从 trading.engine → trading.data_ctx）。
-# 公共/半公开 API 兼容红线（保既有调用与 patch 命中）：
-#   - 旧 `_` 名经 re-export 别名保留（``_load_universe = load_universe`` 等），engine 内部
-#     ``_eod`` 调用点（``_load_universe(lake)`` / ``_load_df_upto(...)`` /
-#     ``_load_integrity_ctx(...)`` / ``_resolve_id_window(...)`` / ``_resolve_cooldown_days(...)``
-#     / ``_load_recent_plan_symbols(...)``）**保留旧名**，经模块全局名解析命中
-#     ``patch("trading.engine._load_*", ...)`` monkeypatch（test_c8_date_param /
-#     test_engine_eod_injection / test_e2e_eod_to_plan 均验）；
-#   - ``_plan_data_keys`` 逻辑迁 free function ``data_ctx.plan_data_keys(plan)``，engine 类
-#     保留薄实例 wrapper（见下方 ``def _plan_data_keys(self, plan)``）调用之，保
-#     ``patch("trading.engine.TradingEngine._plan_data_keys")`` + ``eng._plan_data_keys(plan)``
-#     测试命中（test_engine_pre_open_gate 均验）。
-
-
 def _resolve_account_id() -> str:
     """解析当前账户 ID（canonical 委托 trading.account.resolve_account_id）。
 
@@ -365,14 +211,18 @@ def _resolve_account_id() -> str:
 
 
 def get_gateway():
-    """惰性取交易网关单例（透传 gateway_service.get_gateway）。
+    """取交易网关单例（透传 gateway_service.get_gateway · W1-B lazy 顶部化）。
 
     Why 透传不重造：网关单例的装配（QMT 唯一，无凭证→None）与懒构造策略已在
     gateway_service.get_gateway 固化，本引擎薄编排不重复，避免双单例漂移。
     本函数独立出来便于测试 monkeypatch（engine.get_gateway）隔离真实网关副作用。
+
+    W1-B 注记：原函数体内 lazy import 改顶部 ``from trading import gateway_service`` +
+    调用点属性访问（模块对象风格）——from-import 本地绑定会在 import 期冻结，patch(
+    "trading.gateway_service.get_gateway") 不跟随；属性访问在调用时读模块属性，patch
+    语义与 lazy import 完全等价（gateway_service 顶层零 engine 反查，无循环依赖）。
     """
-    from trading.gateway_service import get_gateway as _svc_get_gw
-    return _svc_get_gw()
+    return gateway_service.get_gateway()
 
 
 async def _submit(order) -> dict:
@@ -388,83 +238,9 @@ async def _submit(order) -> dict:
 
     A-2（2026-08-06 裁定 D3）：confirm 由计划确认闸承担（pre_open 必须 confirmed=True），
     白名单挡板已删（前端同步放开）；此处不再拼 whitelist/confirm，直接透传 dry_run。
+    （W1-B：lazy import 已顶部化，模块对象属性访问保 patch——见 get_gateway 注记。）
     """
-    from trading.gateway_service import submit_order as svc_submit
-    return await svc_submit(order, dry_run=(_mode() == "dry_run"))
-
-
-# ============================================================================
-# 触发点 1：eod_plan —— T 日盘后扫信号、落计划、推钉钉（不真下单）
-# ============================================================================
-# （T1-Task5）eod_plan 已迁 trading.eod_plan.py（集群 D · compute），顶部 re-export
-# ``from trading.eod_plan import compute as eod_plan`` 保旧调用兼容。逻辑零改动（trade_event
-# SIGNAL/CONFIRMED 落 DB + plan 序列化逐行原样），详见 trading/eod_plan.py 模块 docstring。
-
-
-# ============================================================================
-# 触发点 2：pre_open —— T 日开盘前：撤昨日单 + 检查确认闸 + 挂当日买单
-# ============================================================================
-# （T1-Task6）pre_open / _pre_open_impl 已迁 trading.phases.pre_open.py（集群 E · 盘前挂单），
-# 顶部 re-export ``from trading.phases.pre_open import pre_open, _pre_open_impl`` 保旧调用兼容。
-# 逻辑零改动（确认闸→撤昨日→熔断基线→平超期→注入白名单→逐单挂单；DB 幂等 + L1/L2 错误分级
-# 不变），详见 trading/phases/pre_open.py 模块 docstring（模块级符号 patch 路径设计）。
-# TradingEngine._pre_open wrapper（APScheduler 绑定）留 engine 调 pre_open(self._ports, today)。
-
-
-# ============================================================================
-# 触发点 3 / Task 8 超期平仓 —— 盘中止损/超时巡检 + 超期平仓（集群 F · 最高风险）
-# ============================================================================
-# T1-Task7：stop_loss_monitor（~370 行 · 含 _stop_already_placed/_record_stop 闭包）+
-# _scan_expired_positions + _close_expired_positions 已迁 trading/phases/stop_loss.py
-# （逐字搬移 · 海龟 grace/step/floor + expire 平仓 + decide_exit 分发逐行原样 · 零逻辑改动）。
-# 顶部 re-export：``from trading.phases.stop_loss import stop_loss_monitor, scan_expired_positions,
-# close_expired_positions`` + 旧 `_` 名别名（_scan_expired_positions/_close_expired_positions）。
-# TradingEngine._stoploss wrapper 留 engine（IntervalTrigger + @_critical_guard + 网关健康闸 +
-# 交易日守卫 + monitor_ctx/pending_ctx/stop_prices 构造），调 stop_loss_monitor(...) 经 re-export
-# 命中 patch("trading.engine.stop_loss_monitor")。迁出函数内部已 W1-A/T2 全量切顶部直接 import
-# 物理真身（不再经 engine re-export 反查），详见 phases/stop_loss.py 模块 docstring
-# 「模块级符号依赖设计」。
-# W1-A/T2：行情黑屏 30min 节流状态已从 engine 模块级 _last_quote_blackout_alert_ts 收口到
-# ``trading.alerting.QuoteBlackoutThrottle`` dataclass，经 ``self._ports.blackout`` 注入——
-# 不再属「engine 模块级符号反查」清单（详见 ports.py + alerting.py）。
-
-
-# ============================================================================
-# trailing 盘后演进（Task 9·R-3）已删除（SSoT review P2 · 死计算）
-# ============================================================================
-# Why 删除（CLAUDE.md 无死代码）：
-#   原 ``_evolve_trailing_stops`` 在 post_close ④ 段按 holding_days 重算 plan orders 的
-#   stop_price。C3 删了 save_plan 写回路径 + C2c 把 ``_stoploss`` 改读 DB SIGNAL.meta
-#   （初始 stop_price）——演进值不再有消费方（写盘是孤儿，可观测字段 ``trailing_evolved``
-#   反而误导「演进 N 单」）。整个 trailing 收紧链路实际停摆。
-# 决策（本分支 SSoT B/C scope 外）：
-#   彻底删函数 + post_close 调用 + result["trailing_evolved"] 字段 + 全部测试断言。
-# Follow-up（独立 live P0 task，非本分支）：
-#   trailing 收紧作为 memory「live 前 P0 4 项」（部分成交精度/熔断/trailing/EMT）之一独立
-#   重实现——post_close 写 ``position.current_stop``（DB 真相源）+ ``_stoploss`` 改读最新
-#   （而非读 SIGNAL.meta 初始 stop_price）。spec §5.3 红线（盘中不调整 stop / 盘后演进一步/日）
-#   不变；演进算法仍由 ``compute_stop_price`` + holding_days 驱动，仅落盘真相源从 JSON 改 DB。
-#   参 memory：plan-backtest-live-alignment trailing / neckline-algorithm-gaps R3。
-
-
-# ============================================================================
-# 触发点 4：post_close —— 盘后对账 + 日内熔断 + 清白名单（集群 G · T1-Task8 已外迁）
-# ============================================================================
-# T1-Task8：post_close（~290 行）+ seq_for_real_oid（原 _seq_for_real_oid）+ order_state_to_db
-# （原 _order_state_to_db）已迁 trading/phases/post_close.py（盘后收口核心 · 熔断基线
-# get_start_equity + 持仓快照 + TP_FILLED 对账 + 清白名单逐行原样）。本模块经顶部 re-export
-# （``from trading.phases.post_close import post_close, seq_for_real_oid, order_state_to_db`` +
-# 旧 `_` 名别名）保 ``patch("trading.engine.post_close"/"_seq_for_real_oid"/"_order_state_to_db")``
-# 命中（order_state.py 历史 engine 反查已 W1-A/T2-Task6 切直接 import）。
-# 详见 trading/phases/post_close.py 模块 docstring「模块级符号依赖设计」。
-
-
-# （T1-Task9）集群 H · place_take_profit（含内嵌闭包 _placed/_record_tp）已迁
-# trading/phases/exit.py（止盈挂单 · #4 差额补挂防超卖 · load_plan 读 tp1/tp2 →
-# 两腿/单腿分流 → _submit 限价卖 + _record_tp 落 DB UPSERT）。本模块经顶部 re-export
-# （``from trading.phases.exit import place_take_profit``）保 ``patch("trading.engine.place_take_profit")``
-# 命中（order_state/stop_loss 历史 engine 反查已 W1-A/T2-Task6 切顶部直接 import）。详见
-# trading/phases/exit.py 模块 docstring「模块级符号依赖设计」。
+    return await gateway_service.submit_order(order, dry_run=(_mode() == "dry_run"))
 
 
 # ============================================================================
@@ -1338,10 +1114,10 @@ class TradingEngine:
             已落盘的计划。播报是「锦上添花」而非「关键路径」，与 fire_and_forget 同语义。
         """
         try:
-            # 局部 import：gateway_service（W1-A/T2 已下沉 trading 包）虽不再拉起 presentation
-            # server 子系统，但仍引入 infra.notifier/broker.base；与 _eod 内 experiment/strategies
-            # 局部 import 同口径，保持引擎薄编排。顶层 import 提升见 Task 4/7。
-            from trading.gateway_service import get_positions
+            # W1-B lazy 顶部化：gateway_service 已顶部 import（模块对象风格，见文件顶部注记），
+            # get_positions 经属性访问调用时解析——patch("trading.gateway_service.get_positions")
+            # 命中语义与原函数内 lazy import 完全等价。notifier 是纯第三方通道装配，留函数内
+            # 局部 import 保持「引擎薄编排」（与 _eod 内 experiment/strategies 同口径）。
             from infra.notifier import NotificationManager, fire_and_forget
 
             gw = get_gateway()
@@ -1355,7 +1131,7 @@ class TradingEngine:
                     asset = {}
             total = float(asset.get("total_asset", 0.0) or 0.0)
 
-            positions = await get_positions()
+            positions = await gateway_service.get_positions()
 
             # 汇总浮盈 + 持仓成本总额（账户浮亏率分母）：仅累加 pnl 非 None 的仓位
             # （盲价仓位跳过，避免 None + 数值 TypeError）。total_cost = Σ(avg×qty) 用于算
@@ -1621,7 +1397,7 @@ class TradingEngine:
     # T1 Task 3 缝合点 #2：_handle_order_update / _order_direction /
     # _advance_order_state_from_status 已迁 trading.order_state.py（集群 I），此处留
     # 薄 wrapper 保 ``eng._handle_order_update`` 等既有调用路径（bootstrap
-    # set_order_update_callback 绑实例 + 止盈经 patch("trading.engine.place_take_profit") 命中）。
+    # set_order_update_callback 绑实例；止盈 patch 点 W1-B 起在 trading.phases.exit）。
     # 逐行原样委托，零行为变更（幂等红线零容忍）。
     async def _handle_order_update(self, update: Mapping[str, Any]) -> None:
         """薄 wrapper：委托 trading.order_state.handle_order_update（T1 Task 3 迁出）。"""

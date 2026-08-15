@@ -22,6 +22,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from trading import engine
+# W1-B（Task 10）：engine re-export 垫层已删，_cancel_all_open_orders 迁消费方模块
+# （本文件 pre_open 路径消费者是 phases.pre_open 本地绑定）。
+import trading.phases.pre_open as _pre_open_mod
 
 
 # ============================================================================
@@ -157,7 +160,7 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
     # 路径干净、不依赖异常吞咽，断言聚焦真正的「漏挂」告警点。
     fake_gw.query_asset = AsyncMock(return_value={})
     monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
-    monkeypatch.setattr(engine, "_cancel_all_open_orders",
+    monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
     monkeypatch.setattr(engine, "_submit", AsyncMock(side_effect=RuntimeError("网关锁死")))
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
@@ -210,7 +213,7 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
 
     fake_gw = MagicMock()
     monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
-    monkeypatch.setattr(engine, "_cancel_all_open_orders",
+    monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
     # dry_run 下 _submit 返 DRY_RUN 不 raise——构造返 REJECTED 模拟「未挂成功」
     monkeypatch.setattr(engine, "_submit",

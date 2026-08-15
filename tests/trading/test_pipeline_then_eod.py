@@ -107,7 +107,7 @@ async def test_multi_experiment_keys_union(monkeypatch):
 async def test_pipeline_collect_failure_raises_critical_halt(monkeypatch):
     """采集子进程 rc!=0 → raise _CriticalHalt（T+1 计划失真，停调度）。"""
     import asyncio
-    from trading.engine import _CriticalHalt
+    from trading.critical import _CriticalHalt  # W1-B：迁物理真身
     from trading.orchestrate import pipeline as pl
 
     class _FakeProc:

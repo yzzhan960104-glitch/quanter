@@ -40,14 +40,14 @@ stop_loss_monitor 四缠拆解（spec §3.5 最大债 · 本层核心交付）�
 """
 from __future__ import annotations
 
-# 编排层门面：re-export 四触发点 + TradingEngine（真身在 trading/engine.py）。
-from trading.engine import (  # noqa: F401
-    eod_plan,
-    pre_open,
-    stop_loss_monitor,
-    post_close,
-    TradingEngine,
-)
+# 编排层门面：四触发点物理真身 + TradingEngine（W1-B · Task 10：原经 trading.engine
+# re-export 的四触发点改直 import phases/eod_plan 真身——engine re-export 垫层已删；
+# TradingEngine 仍指 trading.engine（其物理 home 就是 engine））。
+from trading.eod_plan import compute as eod_plan  # noqa: F401  门面（compute 真身，旧名 eod_plan 兼容）
+from trading.phases.pre_open import pre_open  # noqa: F401  门面
+from trading.phases.stop_loss import stop_loss_monitor  # noqa: F401  门面
+from trading.phases.post_close import post_close  # noqa: F401  门面
+from trading.engine import TradingEngine  # noqa: F401  门面（类真身 home = trading.engine）
 
 __all__ = [
     "eod_plan",

@@ -104,6 +104,10 @@ from trading.ports import EnginePorts
 # W1-A/T2-Task4：state_store 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
 # engine._state_store 失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock, dynamic_whitelist, reconcile_job
+# W1-B（Task 10）：gateway lazy 顶部化·模块对象风格——aggregate_fills_by_symbol /
+# emergency_halt 经 ``gateway_service.<attr>`` 属性访问（调用时读模块属性），
+# patch("trading.gateway_service.X") 命中语义与原函数内 lazy import 完全等价。
+from trading import gateway_service
 from trading import position_book as _position_book
 from trading import state_store as _state_store
 # W1-A/T2-Task5：_resolve_account_id 反查切断 → 顶部直接 import trading.account
@@ -239,8 +243,8 @@ async def post_close(
     # gw=None（dry_run）跳过（无真实成交可归因，避免读 CSV 老数据产生误导日志）。
     if gw is not None:
         try:
-            from trading.gateway_service import \
-                aggregate_fills_by_symbol as _svc_agg_fills
+            # W1-B：顶部模块对象访问（原 lazy import 已顶部化，patch 语义等价）。
+            _svc_agg_fills = gateway_service.aggregate_fills_by_symbol
             # C-6 V2：业务日期 key（当日成交流水口径）走 clock.today。
             today_eq = clock.today()
             net = _svc_agg_fills(today_eq, today_eq)
@@ -357,10 +361,8 @@ async def post_close(
                         logger.exception("post_close 熔断撤单异常（继续 emergency_halt）")
                 # 置网关 lock_down + ERROR 告警
                 try:
-                    from trading.gateway_service import (
-                        emergency_halt as _emergency_halt,
-                    )
-                    _emergency_halt()
+                    # W1-B：顶部模块对象访问（原 lazy import 已顶部化，patch 语义等价）。
+                    gateway_service.emergency_halt()
                 except Exception:
                     logger.exception("post_close emergency_halt 异常（已尽力撤单）")
                 circuit_breaker_triggered = True

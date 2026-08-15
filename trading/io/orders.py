@@ -23,6 +23,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+# W1-B（Task 10）：gateway lazy 顶部化·模块对象风格——submit_order 经
+# ``gateway_service.<attr>`` 属性访问（调用时读模块属性），patch(
+# "trading.gateway_service.submit_order") 命中语义与原函数内 lazy import 完全等价。
+from trading import gateway_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,5 +45,5 @@ async def submit_order(order: Any, *, dry_run: bool, confirm: bool = True) -> di
     异常：
         非 dry_run 挡板命中 → raise RuntimeError（透传，由调用方 try-except）。
     """
-    from trading.gateway_service import submit_order as svc_submit
-    return await svc_submit(order, dry_run=dry_run, confirm=confirm)
+    # W1-B：顶部模块对象访问（原函数内 lazy import 已顶部化，patch 语义等价）。
+    return await gateway_service.submit_order(order, dry_run=dry_run, confirm=confirm)

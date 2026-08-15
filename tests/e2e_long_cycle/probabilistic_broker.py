@@ -389,8 +389,6 @@ class ProbabilisticBroker:
         # _cancel_all_open_orders 仅 pre_open/post_close 读（stop_loss/exit 不 import）。
         with patch("trading.engine.get_gateway", lambda: gw), \
              patch("trading.engine._submit", _submit_mock), \
-             patch("trading.engine._cancel_all_open_orders",
-                   AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0})), \
              patch("trading.phases.pre_open.get_gateway", lambda: gw), \
              patch("trading.phases.pre_open._submit", _submit_mock), \
              patch("trading.phases.pre_open._cancel_all_open_orders",

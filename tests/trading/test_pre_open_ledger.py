@@ -14,7 +14,7 @@ from trading.ports import EnginePorts  # T1：构造 fake ports 驱动 pre_open 
 @pytest.mark.asyncio
 async def test_pre_open_gate_skip_records_skipped():
     """gate 未过（无计划等）→ 台账 skipped（不算完成，补跑可重试）。"""
-    from trading.engine import pre_open
+    from trading.phases.pre_open import pre_open  # W1-B：迁物理真身
     # T1：原 patch _ACTIVE_ENGINE → 改构造 fake EnginePorts 注入 gate 行为。
     fake_ports = EnginePorts(
         gate=AsyncMock(return_value=(False, "无计划")),
@@ -32,7 +32,7 @@ async def test_pre_open_no_plan_records_skipped():
 
     C2c：pre_open 直读 DB list_signals_with_meta_by_plan_date；返空 = 无计划 = skipped。
     """
-    from trading.engine import pre_open
+    from trading.phases.pre_open import pre_open  # W1-B：迁物理真身
     fake_ports = EnginePorts(
         gate=AsyncMock(return_value=(True, "")),
         whitelist_add=lambda syms: None,
@@ -55,7 +55,7 @@ async def test_pre_open_success_records_done():
     C2c：pre_open 直读 DB；空 signals 会返「无计划」skipped，故需种一只 SIGNAL
     让主流程走完（confirmed + has_order=False + insert_order 通过 + _submit 成功）。
     """
-    from trading.engine import pre_open
+    from trading.phases.pre_open import pre_open  # W1-B：迁物理真身
     fake_ports = EnginePorts(
         gate=AsyncMock(return_value=(True, "")),
         whitelist_add=lambda syms: None,
@@ -96,7 +96,7 @@ async def test_pre_open_success_records_done():
 @pytest.mark.asyncio
 async def test_pre_open_exception_records_failed_and_raises():
     """未预期异常 → 台账 failed 后上抛（cron 路径由 _critical_guard 按 C-4 L1 停调度）。"""
-    from trading.engine import pre_open
+    from trading.phases.pre_open import pre_open  # W1-B：迁物理真身
     fake_ports = EnginePorts(
         gate=AsyncMock(side_effect=RuntimeError("DB 故障")),
         whitelist_add=lambda syms: None,
