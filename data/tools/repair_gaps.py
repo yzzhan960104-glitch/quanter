@@ -51,6 +51,24 @@ MAX_REPAIR_SEGMENTS = int(os.getenv("REPAIR_MAX_SEGMENTS", "50"))           # �
 REPAIR_FAILURE_THRESHOLD = int(os.getenv("REPAIR_FAILURE_THRESHOLD", "3"))  # 连续 3 次失败熔断
 REPAIR_RECOVERY_HOURS = float(os.getenv("REPAIR_RECOVERY_HOURS", "6"))      # 熔断 6h
 
+# CR-6 限频降速：相邻漏采日之间的强制间隔（秒）。实锤根因（repair_auto.log 25 连败）：
+# Tushare 服务端 500/min 计数窗口与客户端令牌桶错位——令牌桶允许「合规」瞬时突发，
+# 服务端却按自己的滚动窗口掐表 → 客户端自认未超限、服务端已判频率超限。日间隔 sleep
+# 把按日分组的分页请求在时间轴上摊开，给服务端计数窗口留恢复余量（降速换通过率）。
+REPAIR_DAY_SLEEP = float(os.getenv("REPAIR_DAY_SLEEP", "1.5"))
+
+
+def _tag_partial(df: pd.DataFrame) -> pd.DataFrame:
+    """在返回 df 的 attrs 上打 partial 标记（CR-6：拉取被异常中断，已拉部分待落盘）。
+
+    Why attrs 而非改返回签名：repair_gaps 的返回值已被 main / 既有单测 / 外部 mock 按
+    「单 df」消费，改成 tuple 会破坏全部调用方；attrs 是 pandas 官方的元数据随行通道，
+    main 紧随 repair_gaps 读取（中间无其他 pandas 运算，不存在 attrs 丢失面）。
+    早退分支会连带在调用方传入的 lake_df 上打标（attrs 仅元数据，不改数据体，无害）。
+    """
+    df.attrs["partial"] = True
+    return df
+
 
 def _repair_breaker_path(lake_dir: str = "data_lake") -> Path:
     """熔断 sidecar 路径（与 freshness baseline 同目录，运行时状态不入库）。"""
@@ -111,6 +129,9 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
 
     Returns:
         合并后的 lake df（dedup keep last，新覆盖旧）。无补采则原样返回。
+        CR-6：拉取被异常中断（频率超限/网络断）时不再 raise，已拉日照常 merge 返回，
+        并在返回 df 的 attrs 打 ``partial=True`` 标记（部分补采 > 完全不补；230/350
+        白拉教训——单日异常 raise 会丢弃全部已拉数据）。
 
     关键正确性：
     - 仅补 gap 涉及的 (symbol, date)：_fetch_paged 按日拉全市场，筛 gap_symbols + missing
@@ -130,6 +151,7 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
 
     # 按日分页拉 raw daily + adj_factor（复用 sync_daily_incremental._fetch_paged）
     raw_frames, adj_frames = [], []
+    partial = False  # CR-6：拉取被异常中断，但已拉日仍要走 merge 落盘（部分补采 > 完全不补）
     _total_days = len(missing)
     _deadline = time.monotonic() + REPAIR_TIMEOUT  # T13-B #4：总超时边界
     for _i, td in enumerate(missing):
@@ -142,16 +164,35 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
             logger.warning("repair_gaps 总超时（%ds）：已拉 %d/%d 日，部分补采落盘",
                            REPAIR_TIMEOUT, _i, _total_days)
             break
+        # CR-6 限频降速：日间隔 sleep 给 Tushare 服务端 500/min 计数窗口留余量
+        # （首日不睡：不延迟第一个请求，尽早暴露接口可用性）。sleep 计入总超时预算。
+        if _i > 0 and REPAIR_DAY_SLEEP > 0:
+            time.sleep(REPAIR_DAY_SLEEP)
         tdc = td.replace("-", "")
-        d = _fetch_paged(pro, "daily", tdc)
-        if not d.empty:
-            raw_frames.append(d)
-        a = _fetch_paged(pro, "adj_factor", tdc)
-        if not a.empty:
-            adj_frames.append(a)
+        # CR-6 部分落盘（与上方超时 break 分支同语义）：单日拉取异常（频率超限/网络断/
+        # 代理失败）不再直接 raise——旧实现把已拉的 230/350 日全部丢弃白拉（repair_auto.log
+        # 实锤 25 连败熔断循环根因：一次限频 = 一轮全废）。部分补采 > 完全不补：
+        # warning 留痕 + break 停止拉新日，已拉日继续走下方 merge 落盘路径；
+        # partial 标记透传 main → 记熔断失败计数（连续 3 次中断才熔断退避，非单次雪崩）。
+        try:
+            d = _fetch_paged(pro, "daily", tdc)
+            if not d.empty:
+                raw_frames.append(d)
+            a = _fetch_paged(pro, "adj_factor", tdc)
+            if not a.empty:
+                adj_frames.append(a)
+        except Exception as exc:
+            partial = True
+            logger.warning(
+                "repair_gaps 第 %d/%d 日（%s）拉取异常：%s —— 停止拉新日，"
+                "已拉 %d 日走部分补采落盘（部分补采 > 完全不补；单日 raise 会丢弃全部已拉数据）",
+                _i + 1, _total_days, td, exc, _i,
+            )
+            break
     if not raw_frames:
         logger.warning("补采日 %s 全部返空（Tushare 异常/权限/或实际无数据），无新增", missing[:5])
-        return lake_df
+        # 第 1 日即被打断：无数据可落，但 partial 仍要透传（main 记失败计数，连续 3 次熔断）
+        return _tag_partial(lake_df) if partial else lake_df
 
     raw = pd.concat(raw_frames, ignore_index=True)
     adj = pd.concat(adj_frames, ignore_index=True)
@@ -182,14 +223,15 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
 
     if new.empty:
         logger.warning("补采段筛 symbol/date 后为空（gap 标的该日 Tushare 无数据？）")
-        return lake_df
+        return _tag_partial(lake_df) if partial else lake_df
 
     # merge dedup keep last（新覆盖旧；与 sync_daily_incremental:132-133 同模式）
     combined = pd.concat([lake_df, new])
     combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-    logger.info("补采 %d 行（%d 标的 × %d 漏采日）",
-                len(new), len(gap_symbols), len(missing))
-    return combined
+    logger.info("补采 %d 行（%d 标的 × %d 漏采日%s）",
+                len(new), len(gap_symbols), len(missing),
+                "，partial 部分落盘" if partial else "")
+    return _tag_partial(combined) if partial else combined
 
 
 def _load_gaps_from_report(path: str) -> list[GapRange]:
@@ -255,14 +297,21 @@ def main(argv: list[str] | None = None) -> int:
             new_lake = repair_gaps(gaps, lake_df, pro, max_segments=MAX_REPAIR_SEGMENTS)
         else:
             new_lake = repair_gaps(gaps, lake_df, pro)
+        # CR-6：读 partial 标记（拉取被限频/异常中断，但已拉部分已 merge 完待落盘）。
+        # 标记用 ASCII「partial」——log 经 GBK/UTF8 多道转码仍可 grep（pipeline 侧可识别）。
+        partial = bool(new_lake.attrs.get("partial", False))
         delta = len(new_lake) - len(lake_df)
         # 写入前历史行数守卫 + 原子落盘（T13-A 守卫 + G5 原子写）：safe_overwrite 内部完成
         # 「守卫 + tmp + fsync + os.replace」原子写入，调用方不再紧跟 to_parquet（防半截损坏）。
         # repair 重写全湖（覆盖写），防御 dedup/recompute bug 致 new_lake 异常收缩被静默落盘。
         safe_overwrite(str(lake_path), new_lake)
         if auto_mode:
-            record_repair_result(success=True, lake_dir=args.lake_dir)
-        print(f"补采完成：a_shares_daily {len(lake_df)} → {len(new_lake)} 行（+{delta}）")
+            # CR-6 熔断计数方向：部分补采 = 数据已落盘不丢，但「本轮被限频打断」是失败信号
+            # ——记失败计数（连续 3 次中断 → 熔断 6h 退避，给服务端限频窗口恢复余量）。
+            # 与旧「单次中断即整轮 raise 雪崩」的区别：中断不废已拉数据，熔断只看连续性。
+            record_repair_result(success=not partial, lake_dir=args.lake_dir)
+        _tag = "（partial，拉取中断部分落盘）" if partial else ""
+        print(f"补采完成{_tag}：a_shares_daily {len(lake_df)} → {len(new_lake)} 行（+{delta}）")
         return 0
     except Exception:
         # 自动模式记熔断失败计数（连续 K 次熔断）；人工模式仅抛

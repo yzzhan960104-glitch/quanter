@@ -203,3 +203,75 @@ def test_repair_gaps_max_segments_quota(monkeypatch):
     # max_segments=3 截断（_fetch_paged 返空 → 无补采返原样；不抛即截断逻辑执行）
     result = rg.repair_gaps(gaps, lake_df, object(), max_segments=3)
     assert len(result) == len(lake_df)
+
+
+# ============ CR-6：单日拉取异常 → 部分落盘（补采回路复活）===========
+# 物理意图（repair_auto.log 实锤 25 连败熔断循环根因）：Tushare 服务端 500/min 计数
+# 窗口与客户端令牌桶错位 → `_fetch_paged` 抛 Exception("频率超限") → 旧实现直接 raise，
+# 已拉的 230/350 日全部丢弃白拉，且 main 记熔断失败 → 连续失败 → 熔断 6h → 回路停摆。
+# 修复语义（与 :134-144 超时分支同构）：异常 break 出拉新日循环 + 已拉日继续 merge 落盘
+# （部分补采 > 完全不补），partial 标记透传 main 记熔断失败计数（限频中断连续 3 次
+# 才熔断退避，而非单次中断即雪崩）。
+
+
+def test_partial_persist_on_fetch_error(tmp_path, monkeypatch, capsys):
+    """CR-6：第 N 日 _fetch_paged 抛「频率超限」→ 已拉 1..N-1 日仍 merge 落盘、
+    熔断计数 +1、进程不 raise（exit 0 带 partial 计数）。
+
+    场景：gap 缺 09-03/09-04/09-05 三日，第 3 日（09-05）daily 拉取抛频率超限 →
+    09-03/09-04（已拉）必须落湖，09-05 不在；--auto 模式记 sidecar fail_count=1
+    （连续 3 次才熔断，本次仅计数不熔断）；main 返回 0 且 stdout 带 partial 标记。
+    """
+    from data.tools import repair_gaps as rg
+
+    # 湖：09-02 与 09-06 在，中间 09-03~09-05 缺（一个 unjustified gap 三日）
+    lake_path = tmp_path / "a_shares_daily.parquet"
+    _mk_lake([("2024-09-02", "000001.SZ"), ("2024-09-06", "000001.SZ")]).to_parquet(lake_path)
+
+    # mock --auto 内部 scan（局部 import，patch 源模块属性；同 get_pro 手法）
+    monkeypatch.setattr(
+        "data.tools.scan_integrity.scan",
+        lambda *a, **k: {"gaps": [{"symbol": "000001.SZ", "start": "2024-09-03",
+                                   "end": "2024-09-05",
+                                   "missing_dates": ["2024-09-03", "2024-09-04", "2024-09-05"],
+                                   "suspend_justified": False}]},
+    )
+    # mock get_pro（pro 本体不被真调——_fetch_paged 也被 mock）
+    monkeypatch.setattr("data._tushare_compat.get_pro", lambda: object())
+    # 日间隔降速默认 1.5s——测试置 0 免 3s 空转（降速逻辑由 env 默认值保证，不在此验证）
+    monkeypatch.setattr(rg, "REPAIR_DAY_SLEEP", 0.0)
+
+    def _fake_fetch_paged(pro, api, tdc):
+        """前 2 日返真数据；第 3 日（20240905）daily 抛 Tushare 服务端限频原文。"""
+        if tdc == "20240905" and api == "daily":
+            raise Exception("抱歉，您访问接口(daily)频率超限(500次/分钟)")
+        if api == "daily":
+            return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": tdc,
+                                  "open": 10.0, "high": 11.0, "low": 9.0,
+                                  "close": 10.5, "vol": 1000}])
+        return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": tdc,
+                              "adj_factor": 1.0}])
+
+    monkeypatch.setattr(rg, "_fetch_paged", _fake_fetch_paged)
+
+    # 旧实现：Exception 从 _fetch_paged 一路 raise 出 main（230/350 白拉教训）→ 此处红
+    rc = rg.main(["--auto", "--lake-dir", str(tmp_path)])
+
+    # ① 进程不 raise，exit 0，stdout 带 partial 标记与净增计数
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "partial" in out, "stdout 必须带 partial 标记（供 pipeline log 识别部分落盘）"
+    assert "+2" in out
+
+    # ② 已拉 1..N-1 日（09-03/09-04）merge 落盘；被打断日（09-05）不在；原有日不丢
+    df = pd.read_parquet(lake_path)
+    dates = df.xs("000001.SZ", level="symbol").index.strftime("%Y-%m-%d").tolist()
+    assert "2024-09-03" in dates and "2024-09-04" in dates, "已拉日必须部分落盘"
+    assert "2024-09-05" not in dates, "被打断日无数据，不应出现"
+    assert "2024-09-02" in dates and "2024-09-06" in dates
+    assert len(df) == 4
+
+    # ③ 熔断计数 +1（限频中断记失败：连续 3 次才开熔断；本次 1 次不熔断）
+    breaker = json.loads((tmp_path / ".repair_breaker.json").read_text(encoding="utf-8"))
+    assert breaker["fail_count"] == 1
+    assert breaker.get("open_until", 0) == 0
