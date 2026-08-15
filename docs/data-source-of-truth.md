@@ -90,7 +90,7 @@ BANNED pattern 命中即 FAIL：
 - `check_fill_position`：fill 流水 ↔ position 持仓一致（BUY+ / SELL- 累加 = position.qty，容差 1e-6；
   CR-5 起含**漏挂方向反向扫描**——fill 净额≠0 而 position 缺行/为 0 即告警）
 - `check_account_daily_closed`：每交易日 start+close 非空（熔断基线闭合）
-- `check_trade_event_chain`：孤儿 SIGNAL（>7 日无后续 CONFIRMED/VETOED/OPEN/FILLED/CLOSED）告警
+- `check_trade_event_chain`：孤儿 SIGNAL（>7 日无后续合法 action 即告警；合法集 = CONFIRMED/VETOED/ORDERED/SUBMITTED/TP1_FILLED/TP2_FILLED/STOP_TRIGGERED/FILLED/CLOSED + 下单审计四态 DRY_RUN/BLOCKED/REJECTED/DIRECTION_UNKNOWN，T17 补全；OPEN 从未实写已删）
 - `check_engine_process_count`：引擎进程数 ≤1（C-5 单例，PowerShell Get-CimInstance / pgrep 跨平台）
 - `check_client_process`（A6 新增）：miniQMT 客户端进程数 == 1（0=未起，>1=多实例，探测失败亦有声）
 - `check_port_owner_consistency`（A6 新增）：端口属主 == pid 文件 PID（不一致=旧链/非法链，与 supervisor 三合同口径）

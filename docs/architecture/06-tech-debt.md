@@ -1,12 +1,12 @@
-> 最近复核：2026-08-14 · 维护者：glm-5.3-session ·
+> 最近复核：2026-08-15 · 维护者：debt-full-wave session ·
 > 权威归宿：**技术债 / 痛点 / god module 判定**（单一归宿）。模块结构（不判债）见 [#2](02-module-dependencies.md)；本视图是 #2 的「债务切片」——只画债-bearing 项 + 严重度，不重复依赖边。
-> 2026-08-14 批判性复核完成一次全量对账（销账 3 项 / 入账 11 项 CR-\*），逐条证据与根因分析见 [deep-dives/2026-08-14-critical-review.md](deep-dives/2026-08-14-critical-review.md)。
+> **波次记录**：`debt/full-wave-0815`（T1-T18 · 2026-08-15）——对 2026-08-14 批判性复核（[deep-dives](deep-dives/2026-08-14-critical-review.md)）登记的 CR-1..11 全量清偿 + W1-B/W2/TD/SS/CN 遗留收口；本文件即该波次销账终态对账单。清偿后记见 [deep-dives 文头「2026-08-15 清偿后记」](deep-dives/2026-08-14-critical-review.md)。
 
 # #6 技术债 / 已知缺口分布
 
 路线图即技术债热力图。严重度四级（Critical / High / Medium / Low），每项链对应 wayfinder 工单（→ 治理归宿）。
 
-## 债务热力图
+## 债务热力图（2026-08-15 销账终态）
 
 ```mermaid
 flowchart LR
@@ -17,54 +17,35 @@ flowchart LR
     L["Low"]:::low
   end
 
-  E["✅ engine.py god module<br/>T1 完成 (2026-08-10)<br/>3437→1546 行 · 8 集群外迁<br/>_ACTIVE_ENGINE 单例桥清零"]:::done
-  T2I["✅ trading 内 _eng_mod 反查切断<br/>+ trading_service 下沉<br/>W1-A/T2 完成 (2026-08-12)<br/>phases/order_state 直 import 物理叶子<br/>engine re-export 块保留（内部依赖·defer W1-B）<br/>360 patch 迁物理路径（tests/trading + e2e_long_cycle）"]:::done
-  DI["data 完整性<br/>✅ T13-A/B 代码路径全治理<br/>⚠️ 运行态尾巴：15701 段漏采<br/>补采回路熔断停摆(连续7败)<br/>配额 50/轮 消化不动"]:::crit
-  DVP["CR-1 discovery 死页面<br/>discovery.ts 四函数双层解包<br/>首页 /discovery 永远空态<br/>HTTP 200 + 空 catch + vi.mock<br/>契约 gate 只比 URL 不比形状"]:::crit
-  PL["CR-2 入场价位双份实现<br/>backtest.py:149 ⇄ plan.py:141<br/>stop/tp1/tp2 各算一遍<br/>参数通道异构(id_cfg/exec vs stop_cfg)<br/>策略数学零 SSoT 守卫"]:::crit
-  AS["✅ account_daily.start 漏采<br/>G3/DG-G3 治理(8d4ef714)<br/>fail-closed + T-1 兜底<br/>⚠️ 残留 CR-4：curr_equity 方向<br/>仍 fail-open 静默跳过"]:::done
+  subgraph DONE["✅ 2026-08-15 全量销账（debt/full-wave-0815）"]
+    E["✅ engine.py god module<br/>T1 (08-10) 3437→1546<br/>+ W1-B re-export 删除 T10<br/>现 1481 行 · 零中转站"]:::done
+    AS["✅ 风控链 fail-closed 全收口<br/>G3 基线 8d4ef714<br/>CR-4 curr 缺失 7296e3f3<br/>CR-3 盘中前移 0072e1a1"]:::done
+    PL["✅ CR-2 价位单源<br/>strategies/neckline/price_levels.py<br/>fbbeb82a · golden 钉死"]:::done
+    DVP["✅ CR-1 discovery 死页<br/>5d999375 · 形状守卫入 gate②"]:::done
+    Q["✅ broker 四文件分层<br/>W2-H1 e3d5df0<br/>qmt.py 1692→132 + BrokerProtocol"]:::done
+    TB["✅ 回调体 Ports 化<br/>W2-H2 7be0419f<br/>order_state 副作用显式注入"]:::done
+    OSS["✅ CR-5 漏挂观测三件套<br/>6d434ce4 (+T17 集合补全)<br/>反向扫描+孤儿口径+fill CHECK"]:::done
+    OBS["✅ CR-7 巡检调度+双通道<br/>42e3bd96<br/>QuanterAudit DAILY 16:05"]:::done
+    TD["✅ TD data→trading 边清零<br/>T9 ddb9c9a9<br/>#2 复跑 = 0"]:::done
+    SS["✅ T6 SSoT 四决策定稿<br/>fill CHECK/is_vetoed/actual_sid<br/>StopLossContext 全落"]:::done
+    CN["✅ 连接韧性 T9/T10/T11<br/>探针 299ab2de + 嵌套去重 710d9c30<br/>connect 留痕 + 韧性收尾 bf55c6ae"]:::done
+    GOV["✅ CR-9 工单回填<br/>e6100a79 · 8 工单闭 + MAP 重写<br/>frontier 仅余 T3"]:::done
+    CIG["✅ CR-10 CI 心跳元守卫<br/>6f70faa6<br/>ci-heartbeat.yml + 周一 schedule"]:::done
+    DD["✅ CR-11 文档漂移<br/>guardrails/data-source-of-truth<br/>6f70faa6 + bc69d546 刷新"]:::done
+    DOC["✅ 过时文档丙删<br/>早已执行（Phase 0 收尾）"]:::done
+  end
 
-  Q["broker/qmt.py 1540 行<br/>业务层堆补丁<br/>连接层不需重构"]:::high
-  TB["双向耦合 trading↔broker<br/>4/3 边·回调写 DB<br/>T2 适配层缝合点"]:::high
-  BKT["CR-3 「日内熔断」实为盘后闸<br/>check_daily_loss_limit 唯一调用点<br/>= 15:30 post_close<br/>盘中组合级回撤零保护"]:::high
-  OSS["CR-5 防超卖＞防漏挂三层同向<br/>TP 查失败视为已挂<br/>巡检只扫 position≠0 方向<br/>fill.direction 无 CHECK"]:::high
-  PC["Phase C plan ✅ 全治理(2026-08-12)<br/>save_plan 已删+C2d 下沉<br/>JSON 读侧 fallback 已关"]:::done
+  subgraph NEW["🔶 2026-08-15 新登记（本轮发现）"]
+    SUS["🆕【High】scan 停牌真值缺口<br/>16371 段含长停牌真缺<br/>000029.SZ 恒大重组 1514 天洞<br/>误判 unjustified · 配额永占"]:::high
+    EDT["🆕【Medium】entry_date 取写入日<br/>clock.today() 而非成交日<br/>跨午夜盘后漂一天（T15）"]:::med
+    SEED["🆕【Medium】save_plan_legacy 死种子<br/>DG-5 后 JSON 对 load_plan 不可见<br/>同类测试潜在红（T15）"]:::med
+    LC["🆕【Low】波次遗留清理清单<br/>T13-C 未竟维度 / 三拷贝常量<br/>engine._submit 零调用者等"]:::low
+  end
 
-  TD["双向耦合 trading↔data (实跑 4/1)"]:::med
-  TP["✅ trading→presentation 反查已切断<br/>W1-A/T2 (2026-08-12)<br/>trading_service→gateway_service 下沉<br/>trading→presentation 边权 2→0"]:::done
-  SS["state_store SSoT 演进半成品"]:::med
-  CN["连接韧性：health_guard 无主动探针<br/>嵌套父子未探测"]:::med
-  OBS["CR-7 audit_ssot 无任何调度挂载<br/>7 项检查(文档误写5)实际不在岗<br/>告警单通道押 fire-and-forget 钉钉"]:::med
-  SSE["CR-8 SSE cookie 前端死端<br/>live 配 token 日志面板将静默 401<br/>+ sector/flow 恒空 + 孤儿路由 11+"]:::med
-  GOV["CR-9 工单状态失同步<br/>T2/T13 open vs 实际已合并<br/>MAP frontier 陈旧 · G8 撞号 · G7 报告缺"]:::med
-  CIG["CR-10 CI 曾静默死亡 19 天(07-25→08-13)<br/>路径已修(f445fe71)但<br/>「CI 最近必须跑过」无元守卫"]:::med
+  DI["⚠️ data 完整性运行态<br/>回路机械性已复活（T6 CR-6）<br/>350/350 零中断 · 熔断复位<br/>但补成 0 段——真值缺口吃配额"]:::crit
 
-  FV["✅ 前端 caisen 死视图已删<br/>cf41d973 (08-13) −1943 行<br/>gate② 绿；定级 Low 系低估<br/>(历史影响 3 动线含首页)"]:::done
-  DOC["过时文档<br/>data_pool.md / caisen-summary"]:::low
-  DC["死代码/死参（P3 follow-ups）"]:::low
-  DD["CR-11 文档漂移族<br/>Tushare「唯一数据源」不准<br/>(akshare/FRED fallback 活着)<br/>eod 不写 account_daily(文档仍写)"]:::low
-
-  E -.->|T1 完成| T1D["✅ T1 done (2026-08-10)"]
-  T2I -.->|W1-A/T2 完成| T2ID["✅ W1-A/T2 done (2026-08-12)"]
-  TP -.->|下沉生效| T2ID
-  DI --> T13["→ T13 治本 + 补采回路复活(E盘重验)"]
-  AS -.->|DG-G3 治理| G3D["✅ 8d4ef714 done (08-13)<br/>残留 curr_equity 方向→OSS"]
-  DVP --> CRV["→ 一行修复 + 形状契约入 gate"]
-  PL --> A5["→ 审计 spec A5/C1 价位单源"]
-  BKT --> A4["→ spec A4 半承认 / 语义改写或评估点前移"]
-  OSS --> FIX["→ 对齐 DG-G3 fail-closed + 巡检补反方向"]
-  Q --> T2["→ T2 适配层"]
-  TB --> T2
-  PC --> T6C["→ T6 / Phase C"]
-  SS --> T6["→ T6"]
-  CN --> T9["→ T9/T10/T11"]
-  OBS --> SCH["→ schtasks/CI 挂载 + 双通道告警"]
-  SSE --> WEB["→ 前端接 read-cookie + 死端点下线"]
-  GOV --> SYNC["→ 波次收尾三件套(刷#2/#6/回填工单)"]
-  CIG --> META["→ CI run 元守卫(如 stale-check)"]
-  FV -.->|cf41d973 删| FVD["✅ done (08-13)"]
-  DOC --> DEL["→ T0 丙删（本工单）"]
-  DD --> DOCS["→ 随波次收尾批量订正"]
+  DI -.->|真值层| SUS
+  SUS --> NEWTK["→ 新工单：suspend ground-truth<br/>全历史回补/等效真值源"]
 
   classDef crit fill:#f88,stroke:#c00,color:#400
   classDef high fill:#fc8,stroke:#a60,color:#420
@@ -73,54 +54,78 @@ flowchart LR
   classDef done fill:#cfc,stroke:#090,color:#030
 ```
 
-## 债务清单（按严重度）
+## 债务清单（按严重度 · 销账终态）
 
 ### Critical（阻塞 live / 阻塞演进主脊柱）
 
 | 项 | 物理事实 | 治理归宿 |
 |---|---|---|
-| ✅ **engine.py god module —— T1 完成（2026-08-10）** | **已治理**：3437→1546 行（-55%），10 集群外迁 8 个（A critical / B data_ctx / D eod_plan / E-F-G-H phases×4 / I order_state），`_ACTIVE_ENGINE` 单例桥代码清零（仅注释/docstring 引用历史），engine 仅留调度/装配/gate/job wrapper + re-export 兼容块。终验：trading 515 单测 + e2e 长周期 26 测全绿（行为等价）。历史态内部结构 → [deep-dives/engine-current-state](deep-dives/engine-current-state.md) | ✅ [T1 done](../../plans/wayfinder/T1.md) |
-| **data 完整性 gate 缺陷** | 生产 gate 只校验实时性不校验历史连续性；`scan_integrity`/`repair_gaps` 孤立 CLI 无调度；历史缺口被动跳过永不发现（[T5](../../plans/wayfinder/T5.md)）。**L1 写入守卫 + daily 双轨收口 + freshness 行数骤降已治理（T13-A · 2026-08-11，已合并 master）；L2 scan gate + L3 自动补采已治理（T13-B · 2026-08-11 合并 `31304e9f`）：scan gate 接 `pipeline_then_eod:155` + 每周全扫 `engine.sched` cron + scan→repair 异步闭环（配额 50/熔断 sidecar/限频 `_fetch_paged`/超时 1800s）；降级 scan FAIL 不阻断 eod（blueprint §2.3，DG-7 用户确认不推翻）**。**✅ D1 T13-B W0 收尾全治理（2026-08-12）**：① **P1 shibor/macro 窗口写误伤 → 已治**（`sync_macro_credit` 改合并语义 `concat 去重 keep last`，窄窗口断更不再误伤历史区间，commit `5e7bf620`）② **filter_universe 过滤告警 → 已治**（`engine` 调用方接 `_alert_critical`，data 层零侵入「残数据有声」，commit `95bb9c7d`）③ **3 处裸写 → 已治**（`sync_macro_credit.py:212` + `sync_data_lake.py:158/181` 全部接 `safe_overwrite` write-side 守卫，commit `c4c88a87`/`5e7bf620`）④ **L1 覆盖面 deferred 全收口**（与 ③ 同一笔）⑤ **P2 select_keys 退役 key 回归 + P3 `_unavailable` 漏过滤守卫测试 → 已补**（commit `0095c413`/`f071dcaa`，防再生）。**⚠️ 运行态尾巴（2026-08-14 复核新增，CR-6）**：代码路径全治 ≠ 数据全治——`logs/repair_auto.log` 实录 scan 发现 **15701 段漏采（390 标的）**，补采受 `MAX_REPAIR_SEGMENTS=50`（`repair_gaps.py:50`）配额截断，且 repair 熔断已开（连续 7 败、6h 恢复）——**闭环停摆，缺口未消化**；E 盘迁移后需重估 daemon。漏采段不补则回测语料可信度打折（P6 指纹会记录问题但不修数据） | [T13](../../plans/wayfinder/T13.md) + 补采回路复活（E 盘重验） |
-| **【CR-1】discovery 研究首页死页面** | `presentation/web/src/api/discovery.ts:65,72,79,84` 四函数对已剥壳响应二次解构 `const { data } = ...`（client.ts:62 拦截器已返 payload）→ `undefined`；`DiscoveryLabView` 空 `catch {}` 吞 TypeError → **/discovery（caisen 退役后研究动线第一入口）HTTP 200 永远空态**。三重盲区：契约 gate 只比 URL 不比形状 / `vi.mock` mock 掉集成点 / 200 不触发错误 Toast。证据链与根因 → [critical-review §CR-1](deep-dives/2026-08-14-critical-review.md) | 一行修复 + 「响应形状契约」纳入 gate（openapi↔TS 运行时校验或最小 e2e 冒烟） |
-| **【CR-2】入场价位三件套双份实现** | `strategies/neckline/backtest.py:149-151`（`c_star − id_cfg["stop_atr_mult"]·ATR` / `c_star + exec["tp1_h_mult"]·H`）⇄ `trading/compute/plan.py:141-146`（`neckline + tp_mult·h` / `tp1_mult·h`）各算一遍，参数通道异构（`id_cfg`/`exec` vs `stop_cfg`）。回测-实盘等价性是自称的头号不可迁移资产，但入场价位数学**零单源保护**——改公式漏改 = 回测结论静默失效。`decide_exit` 离场已单源，入场价位从未收口（`grep compute_price_levels` 零命中） | 审计 spec **A5 价位单源 + C1 配置六层默认值 SSoT**（已识别未动工）→ [critical-review §CR-2](deep-dives/2026-08-14-critical-review.md) |
-| ~~**account_daily.start 漏采**~~ → **✅ 已治理（DG-G3 · 2026-08-13）** | `8d4ef714`：判定层 fail-closed（基线 None/≤0 → live `raise _CriticalHalt` 停调度 / dry_run 停手，`trading/compute/breaker.py:74-90`）+ pre_open T-1 close 兜底回填（`phases/pre_open.py:363-404`）+ `tests/trading/test_breaker_fail_closed.py` 钉死。修复前 fail-open 事实可复现（`git show 8d4ef714^`：`start_equity <= 0: return False`）。**⚠️ 残留缺口（→ CR-4 High 新立）**：curr_equity 缺失方向仍 fail-open | ~~live P0 运维~~ → ✅ [G3 done](../../docs/superpowers/specs/2026-08-13-audit-remediation-design.md) |
+| ✅ **engine.py god module —— T1 + W1-B 全收口** | T1（2026-08-10）：3437→1546 行，8 集群外迁，`_ACTIVE_ENGINE` 单例桥清零。**W1-B/T10（`e2a6153f` · 2026-08-15）**：engine re-export 兼容块整体删除（1693→1469 行）+ gateway lazy 顶部化（模块对象风格）；7 处外部引用迁物理真身、~120 测试触点迁移；现 engine.py **1481 行**，纯调度/装配/gate/job wrapper，**零符号中转站**（grep `^from trading.` 仅 15 行自用直 import）。行为等价：T10 全量 1908+2 存量红（基线同款）、T15 L4 双跑零 diff | ✅ done（[T1](../../plans/wayfinder/T1.md) + W1-B） |
+| ⚠️ **data 完整性（运行态尾巴——代码路径全治，数据侧余真值缺口）** | 代码侧全治理：T13-A/B + D1（08-11/12）写入守卫/scan gate/异步补采；**CR-6/T6（`4b636756`+`3abea439` · 2026-08-15）回路复活**——单日异常部分落盘（不再整轮丢弃白拉）+ daily/adj 原子入列（防 NaN 落湖）+ `REPAIR_DAY_SLEEP` 限频降速；**实弹 350/350 日零中断、熔断 sidecar 复位、湖 byte-identical 零漂移**。⚠️ 残留：补成 0 段——配额被长停牌真缺占据（→ 下条【High】新债）。15701 段（复核口径）含真停牌洞 | ⚠️ 真值缺口 → 新工单（见 High 新登记） |
+| ✅ **【CR-1】discovery 研究首页死页面** | `5d999375`（T1 · 2026-08-15）：`discovery.ts` 四函数剥壳语义直返 + **形状契约静态守卫 `check_no_double_unwrap` 入 gate②**（单行正则、读不到 fail-closed）；vitest 13 文件 33 测全绿 + vue-tsc 0 错；顺手修 predev 死路径（`scripts/ops/check_ports.py`→`ops/`）。守卫局限（多行解构不命中）已知成文 | ✅ done（T1） |
+| ✅ **【CR-2】入场价位三件套双份实现** | `fbbeb82a`（T7 · 2026-08-15）：单源真身 `strategies/neckline/price_levels.py`（`PriceLevels` + `compute_price_levels` + `PRICE_LEVEL_DEFAULTS`）——brief 原址 trading/compute/ 违分层铁律（strategies 禁 import trading），改址仓内先例同向（ExitAction 同款）。backtest.py/plan.py/两 diag 副本全收编；C1 兜底 2.0→1.0（实证 2.0 幽灵默认从未生产生效，零行为变化）；11 golden 测试钉死 + backtest/plan 行为级等价。残留：`method_v0.py:328/337` 识别层 rr 门控副本（语义不同，未收编——见 Low 清单）| ✅ done（T7） |
+| ✅ **account_daily.start 漏采 → 全链 fail-closed** | G3 `8d4ef714`（08-13）：基线缺失 live `raise _CriticalHalt` 停调度 + pre_open T-1 兜底回填。**CR-4/T2（`7296e3f3`）补对称缺口**：curr_equity 缺失/异常 live 推 CRITICAL + `_CriticalHalt`（原 fail-open 静默 skip）+ 收盘快照失败 live 有声（掏空次日基线链的静默面收口）。测试 `test_breaker_fail_closed.py` 9 测钉死（live halt ×3 + dry skip ×2 + 快照告警）| ✅ done（G3 + T2） |
 
 ### High（演进主脊柱缝合点）
 
 | 项 | 物理事实 | 治理归宿 |
 |---|---|---|
-| **broker/qmt.py 业务层堆补丁（1540 行）** | 连接层不需重构（[T4](../../plans/wayfinder/T4.md) 裁定）；债在业务层（串通挂撤/拒涨停/撤单延迟的处理逻辑） | [T2](../../plans/wayfinder/T2.md) |
-| **双向耦合 trading↔broker（4/3）** | engine 调 broker 下单，broker 回调 engine 写 trade_event/state_store —— T2 适配层契约核心切点 | [T2](../../plans/wayfinder/T2.md) |
-| **【CR-3】「日内熔断」实为盘后闸** | `check_daily_loss_limit` 全库唯一生产调用点 = 15:30 post_close（`post_close.py:319`，cron `engine.py:300`）——**收盘后**。盘中 30s stop_loss 只做 per-position，组合级 -3% 回撤盘中任何时刻不触发任何动作；实际语义「盘后确认 → 次日停手」。A 股单日振幅可击穿 3%，盘中时效保护为零 | spec A4 已半承认；改名诚实化 或 评估点前移进 stop_loss 巡检（权衡 query_asset 限频）→ [critical-review §CR-3](deep-dives/2026-08-14-critical-review.md) |
-| **【CR-4】curr_equity 缺失静默跳过熔断（G3 对称缺口）** | `post_close.py:308-314`：query_asset 返 None/异常 → `breaker_skipped=True` + 仅 `logger.warning`，**live 无 CRITICAL 无 halt**——恰是断线/网关锁死（熔断最该在岗）的场景；与同函数 reconcile 段 live CRITICAL（:218-222）双标。关联：收盘快照失败（六段软降级 :431-445）静默掏空次日 T-1 兜底 → 「连续两日异常才 fail-closed」悬崖 | 对齐 DG-G3「不选仅告警不动作」：curr_equity 缺失 live 推 CRITICAL + `_CriticalHalt`（本次新发现）→ [critical-review §CR-4](deep-dives/2026-08-14-critical-review.md) |
-| **【CR-5】「防超卖 > 防漏挂」三层同向盲区** | ① 交易层：DB 查失败视为「TP 已挂」（`stop_loss.py:388-389` `_tp_ok=True`、`order_state.py:521-523`），卖出失败只 L2 计数不重试；② 巡检层：`audit_ssot.py:109` 对账扫描集 `WHERE qty != 0`——幻影持仓（超卖向）告警，**fill 净额≠0 而 position 缺行（漏挂向）符号不进循环静默 PASS**；③ schema 层：`fill.direction` 无 CHECK（`state_store.py:364`），非 `'BUY'` 一律按 −qty。风险取向可以是选择，但必须被表述被观测——现只是三处注释的一致巧合 | 巡检补反方向扫描 + `fill.direction` CHECK + 取向显式写进 [guardrails](../../docs/guardrails.md) → [critical-review §CR-5](deep-dives/2026-08-14-critical-review.md) |
-| ~~**Phase C plan 未升格**~~ → **✅ Phase C 全治理（2026-08-12）** | `save_plan`/`confirm_plan` **已删**（`trading_plan.py:132-137`）+ `audit_ssot.py:79-84` BANNED 守卫；生产写入已切 DB（`eod_plan.py:202-229` 写 SIGNAL/CONFIRMED）；`load_plan` DB 优先。**✅ H3 Phase C W0 收尾全治理（2026-08-12）**：① **C2d plan 归因下沉 → 已治**（`experiment/cli.py report` 退化守 layer 铁律，归因下沉至 `trading/plan_report.py:report_plan_attribution(since)`，commit `123b95cc`）② **JSON 读侧 fallback 窗口关闭 → 已治**（`load_plan` 关 JSON fallback，对齐 DG-5 生产只信 trade_event 表，commit `11616220`）③ `_resolve_account_id` 四处复制 → `trading/account.py`（**已闭合 commit `7fbb68b8`**，本计划前已完成）| [T6](../../plans/wayfinder/T6.md) / Phase C |
+| 🆕 **【2026-08-15 新登记】scan 停牌真值缺口（T6 实弹暴露 · T16 素材）** | `scan_integrity` 报 16371 段 unjustified（418 标的），但其中含**长停牌真缺**：本地 `suspend_d.parquet` ground-truth 不覆盖历史长停牌区间 → `suspend_justified=False` 误判 → 每轮 50 段补采配额被「永不可补」的段占据 → 补成 0 段、记 success、下轮重试同 50 段 → **永不净收敛**。铁证：`000029.SZ`（深深房A）湖内洞 2016-09-14~2020-11-06（1514 天）与其恒大重组停牌四年公开事实完全吻合；首批 50 段 36 标的洞高度集中于 2016-2018 A 股停牌潮年代（000006.SZ 177 天洞等）。注意 Tushare `suspend_d` **不覆盖历史长停牌**，需另寻真值源（全历史回补或「该日全市场有数据而此标的无」启发式）+ repair 侧 unfillable 标记防死占 | **→ 新工单（data 完整性线）**（素材：task-6/16-report） |
+| ✅ **broker/qmt.py 业务层堆补丁 —— W2-H1 四文件分层** | `e3195df0`（T13 · 2026-08-15）：`qmt.py` 1692→**132 行**（类组装 + 显式列名 re-export），拆 `qmt_connection.py` 1025（契约根/常量/12 辅助/8 回调/连接）、`qmt_io.py` 334（6 IO 方法）、`qmt_business.py` 479（15 业务方法）；新增 `trading/broker_ports.py` **`BrokerProtocol`**（runtime_checkable 最小契约面 + Mock 负面钉子）。**AST 级 53/53 函数体逐字一致**（逻辑只搬）；常量值零漂移（logger 名锁定 `broker.qmt`）；全量 1933 passed 基线同款 | ✅ done（W2-H1 · T13） |
+| ✅ **双向耦合 trading↔broker —— W2-H2 回调 Ports 化** | `7be0419f`（T12 · 2026-08-15）：`handle_order_update(engine,...)` → `handle_order_update(ports,...)`，16 处 `_state_store` 副作用 + 3 处 `engine._gw` 经 `EnginePorts.state_store/gateway` 显式注入；engine 侧薄 wrapper 调用时快照。08-04 幂等红线载体逐行保形。#2 复跑边权 6/6（四文件分层后记账面变化，见 #2 漂移注记）。T13 裁定 `ports.gateway` 保留（回调体查**实例态** `_orders/_seq_to_real`，模块分层替代不了实例锚点） | ✅ done（W2-H2 · T12） |
+| ✅ **【CR-3】「日内熔断」实为盘后闸** | `0072e1a1`（T8 · 2026-08-15）：评估点前移——`PortfolioBreakerThrottle`（5min 节流，经 ports 注入）挂进 stop_loss 30s 巡检（⑤撤单后）；三分支：触发→先撤后 `emergency_halt`（**不停调度保监控存活**）/评估失败 streak≥3 才告警/基线缺失→breaker fail-closed SSoT（live 转 emergency_halt 不停调度）。post_close 盘后闸仍完整在岗兜底。5 新测 + tests/trading 615 全绿。⚠️ 语义边界（已入 guardrails §六）：lock_down 后 `_gw_health_gate` 每轮 skip monitor（既有引擎行为）——「保监控存活」实为调度器存活 + health_guard 在岗可人工解锁；盘中无 T-1 兜底→盘后启动首轮假阳性 halt（follow-up 见 Low 清单） | ✅ done（T8 · 语义边界成文） |
+| ✅ **【CR-5】「防超卖 > 防漏挂」三层同向盲区** | `6d434ce4`（T3 · 2026-08-15）三件套：① audit 反向扫描（fill 净额≠0 而 position 缺行/为 0 → 漏挂向告警）；② 孤儿口径单源常量（删从未写入的 OPEN，补生产实写集）；③ `fill.direction` CHECK（DDL 两处 + G5 备份回灌迁移带 account_id/strategy 保数据 + `insert_fill` 入口 ValueError 先于 DB CHECK 防误吞）。**T17 补全（T3 遗留）**：孤儿集合再补 DRY_RUN/BLOCKED/REJECTED/DIRECTION_UNKNOWN 四个下单审计实写 action + :91 注释订正（SUBMITTED 实写 order 表）+ 巡检连接 `mode=ro`。风险取向已显式写进 [guardrails §六](../guardrails.md)（T5） | ✅ done（T3 + T17 补全） |
+| ✅ **【CR-4】curr_equity 缺失静默跳过** | 见 Critical 表末行（`7296e3f3` · T2）——原 High 条目随对称收口升级销账 | ✅ done（T2） |
 
 ### Medium（横向治理）
 
-| 项 | 治理归宿 |
-|---|---|
-| 双向耦合 trading↔data (**2026-08-14 复跑实为 4/1**，M1 后 data→trading 余 1 文件) —— T1 engine 拆分时理顺。**data.integrity→trading.calendar 真函数级循环已切断（M1 · 2026-08-12，`fetch_trade_cal` 下沉 `data/calendar.py`，data 层零 trading 静态依赖）**。**✅ trading→presentation 反查已切断（W1-A/T2 · 2026-08-12）**：原 trading→presentation 的 8 处 lazy import 全指 `presentation/server/services/trading_service.py`（领域层反依赖表现层·位置错配），下沉为 `trading/gateway_service.py` 后 trading→presentation 边权 **2→0**（presentation→trading 仍 4 文件，单向被依赖合法）。trading 内 `_eng_mod` 反查同批切断（phases/order_state 改顶部直 import 物理叶子）| [T1](../../plans/wayfinder/T1.md) / ✅ W1-A/T2 |
-| state_store SSoT 演进半成品（Phase B+C 收口后剩余） | [T6](../../plans/wayfinder/T6.md) |
-| 连接韧性：health_guard 无主动探针 watchdog / 嵌套父子进程未探测（**T9 探针已落 `299ab2de`，T10/T11 未完——W1-B 半程**） | [T9](../../plans/wayfinder/T9.md) / [T10](../../plans/wayfinder/T10.md) / [T11](../../plans/wayfinder/T11.md) |
-| **【CR-7】audit_ssot 巡检无人调度 + 告警单通道**：7 项检查（#7 与 data-source-of-truth 误写 5 项）无 schtasks/CI/run_checks 任何挂载——巡检层 fail-open；告警全押 fire-and-forget 钉钉（`critical.py:58-65` 全吞、`infra/notifier.py:245-250`）。对照：数据域 discovery daemon 漏采>0 已拒跑（`discovery/daemon.py:44-55`）——**数据域已 fail-closed、交易域巡检没有，标准不一**。另孤儿 SIGNAL 检查 action 集合口径漂移（含从未写的 `OPEN`、漏 `ORDERED/TP*_FILLED/STOP_TRIGGERED`） | 挂调度（schtasks 或 CI cron）+ 巡检口径订正 + 双通道告警 → [critical-review §CR-7](deep-dives/2026-08-14-critical-review.md) |
-| **【CR-8】前端观测面断链族**：① `POST /api/v1/auth/read-cookie`（G2 新增）全前端无调用方，`TerminalLogs.vue:60` 直接 EventSource——**live 配 token 日志面板将静默 401**；② `/macro/sector/flow` 数据源退役 sectors 恒空（`macro.py:46-48` 自述待前端确认下线）；③ 孤儿路由：training×5 + research proposals×5 + `/ops/processes` + `/review/diagnose` 有后端无 facade | 前端接 read-cookie + 死端点双向确认下线 + training.ts facade 补或不补显式决策 → [critical-review §CR-8](deep-dives/2026-08-14-critical-review.md) |
-| **【CR-9】三套工单体系状态失同步（元治理）**：wayfinder **T2 仍标 open 但 W1-A 已合并**（reflog fast-forward 实锤）、**T13 仍标 open 但 A/B 均已合并**、MAP.md frontier 仍列 T0.1 阻塞 T1（T1 done 两周）；G8 编号撞车（sdd 删 caisen vs master sid 闸）、G7 task 报告缺失、progress 止于 G6；M4/W0-tail plan 08-14 补落盘 checkbox 全空（plan-as-written ≠ plan-as-executed） | 波次收尾 checklist 固化三件套：刷 #2 / 刷 #6 / 回填工单状态 → [critical-review §CR-9](deep-dives/2026-08-14-critical-review.md) |
-| **【CR-10】CI 曾静默死亡 19 天且无元守卫**：契约 gate 07-12 诞生（`d4870d07`）→ 07-25 目录迁移打断 CI（`2c49ee57`）→ 08-13 G1 复活（`f445fe71` + 防漂移自检）。期间 T13/W1-A/M4 全量绿均本地口径，**caisen 404 存活整月——设计来抓这类断链的 gate 从未在 CI 开火**。CI 死亡是静默失败，无任何机制报告「CI 已 N 天未跑」；`docs/guardrails.md` 仍写 533 测试（现 ~1821）且无 DG-G3 痕迹 | CI stale 元守卫（如 scheduled workflow 断言最近 run）+ guardrails.md 刷新 → [critical-review §CR-10](deep-dives/2026-08-14-critical-review.md) |
-| **【测试卫生】✅ 已治理（M4 · 2026-08-12）**：真污染源 = 测试**裸写 breaker 内部状态**（`_state`/`_failure_count`）无 finally 还原（非「替换模块属性」，原排查方向落空）。治理：① `CircuitBreaker`/`RateLimiter` 加 `reset()` ② 根 conftest 加 autouse `_reset_resilience_singletons`（每用例前 reset 全部单例，治本）③ 清 4 处裸写（删冗余入口 reset + 刻意 OPEN 改 monkeypatch）④ 删 `_DEFAULT_DB_OVERRIDE` 死代码。全量 1687 绿，canary `test_resilience_singletons_start_clean` 守门 | ✅ [M4 done](../../docs/superpowers/plans/2026-08-11-m4-test-hygiene.md) |
+| 项 | 物理事实 | 治理归宿 |
+|---|---|---|
+| ✅ **双向耦合 trading↔data（TD）—— 边清零** | `ddb9c9a9`（T9 · 2026-08-15）：检查点入口本质是 ops 编排件 → `data/tools/run_data_check.py` 迁 `ops/`（9 文件 +117/−71，bat/tests/docs 引用全量更新，schtasks 元数据实证无需改）；`expected_latest_trade_day` 下沉 `data/calendar.py` + trading 侧 re-export 兼容。**#2 复跑 `data→trading = 0`**（基线 1）——依赖图最后一条 data→trading 反向边清零 | ✅ done（T9） |
+| ✅ **state_store SSoT 演进（SS）—— 四决策定稿** | [T6 工单 closed](../../plans/wayfinder/T6.md)（T16 · 2026-08-15）：① plan→SQLite 不重启（DG-5 划线）② 多策略/多账户隔离=W3 划线 ③ 表扩展=Phase A/B/C 已治 + fill.direction CHECK（T3）④ 读写键对齐=`is_vetoed` 单点（T11 `710d9c30`）+ **actual_sid DB 单源**（M2/T14 `ccaad5c9`：`get_session_id/set_session_id` 列级写口，修 L3 upsert clobber + B2 轮换双写欠账）+ `StopLossContext`（T11） | ✅ done（T6/T11/T14/T16） |
+| ✅ **连接韧性（CN）—— T9/T10/T11 全闭** | T9 探针 `299ab2de`（`probe_account_status` 线程池+超时 + health_guard 集成）；**T10 实证关闭**（`710d9c30`）：实测发现真嵌套为 venv launcher 单树形态（1456→11548→spawn worker）→ 补 `_drop_engine_descendants` 递归祖先链去重（孙辈经非匹配中间进程挂下不漏杀）+ 7 用例；**T11** connect rc=-1 每轮 `logger.warning` 留痕（观测补齐零行为变更，G8 重试形态保持）。T10/T11 工单 Resolution 均已闭合 | ✅ done（bf55c6ae 收尾） |
+| ✅ **【CR-7】audit_ssot 巡检无人调度 + 告警单通道** | `42e3bd96`（T4 · 2026-08-15）：① `LocalFileChannel` 本地第二通道（append `logs/alerts.log`、永不抛、无条件装配、`__file__` 锚定项目根）② `register_audit()` schtasks **QuanterAudit DAILY 16:05**（已注册实证 Ready；16:05=post_close 后避开 17:00 管道）③ `ops/run_audit.bat`（T17 补 `if not exist logs mkdir logs` 守卫）。清退红线测试锁定（误入 RETIRED/LEGACY 会删成静默裸奔）。smoke 暴露 2 项存量 FAIL（account_daily 闭合 11 条 + 端口无 pid 文件）→ 属实存量，T16 已清 ACC debris / 端口项属运维侧旧链 | ✅ done（T4） |
+| ✅ **【CR-8】前端观测面断链族** | T16 `e6100a79` + T17 收官：② `/macro/sector/flow` **已删**（sector 湖 2026-07-27 退役恒空；端点收缩 `/macro/pool` + 前端板块图块删 + 404 防复活钉；顺手修 pool 形状错位 `string[]`→`{symbol}[]`）；③ 孤儿路由显式处置——**training×5 保留**（隐藏消费方 `infra/tools/dingtalk_review_bridge.py` 常驻桥消费 `/training/review`）、**research proposals×5 保留**（同桥 `/research/proposals/review`，:13 注释失准已由 T17 订正）、`/ops/processes` 保留（B2-3 内部观测端点）、`/review/diagnose` 保留（CLI 写面，人工 curl 直调）；① `POST /auth/read-cookie` 前端接入（TerminalLogs SSE 配 token）**未做**——G2 修了后端半截，前端半截悬空，live 配 token 时日志面板将静默 401，**唯一 CR-8 残留**（登记 Low 清单待领） | ✅ done + 1 残留（T16/T17） |
+| ✅ **【CR-9】三套工单体系状态失同步** | `e6100a79`（T16 · 2026-08-15）：wayfinder 8 工单回填（T0.1/T2/T13/T9/T6/T7/T8 闭 + T10/T11 核对已闭）；MAP.md frontier 重写——**剩余 frontier = T3 唯一余项**（W2 主体已落阻塞解除）；Decisions 回填 8 条；sdd G7 补账（progress 条目 + 事后补记报告，复跑 21 绿）+ G8 撞号消歧注。波次收尾三件套（刷 #2/#6/回填工单）即本 T17 | ✅ done（T16/T17） |
+| ✅ **【CR-10】CI 曾静默死亡 19 天且无元守卫** | `6f70faa6`（T5 · 2026-08-15）：新建 `.github/workflows/ci-heartbeat.yml`（每日 schedule 断言最近 run ≤7 天，独立 concurrency + 最小权限）+ ci.yml 加周一 schedule 心跳。平台边界成文（GitHub 60 天无活动自动停 schedule）；心跳基线依赖 master 首次成功 run（T18 push 后建立） | ✅ done（T5 · 基线待 T18） |
+| ✅ **【测试卫生】（M4 · 08-12）+ silently orphaned patch 审计（T17）** | M4 已治理（resilience 单例 reset + autouse fixture + canary）。**T17 审计（本波次）**：临时脚本扫 tests/ 全部 `patch("trading.engine.X")`/`setattr(engine,"X")`——活代码命中 27 符号（字符串 16 + 对象 11）**全部仍是 engine 模块属性，孤儿 = 0**；仅 3 处正则命中位于历史迁移叙述注释内（`_last_quote_blackout_alert_ts`/`trading_plan`/`decide_exit`，均为 W1-A/W1-B 迁移记录，如实保留）。test_pre_open_ledger_semantics 死 import 复核零残留（T11 已清）。审计报告贴波次 commit body | ✅ done（M4 + T17 审计） |
 
 ### Low（清理类）
 
-| 项 | 治理归宿 |
-|---|---|
-| ~~前端 caisen 死视图~~ → **✅ 已删（2026-08-13）**：`cf41d973` 整删 14 文件 −1943 行（api/view/spec/组件/路由），gate② 契约对齐绿。**复盘**：定级 Low 系低估（历史影响首页/实验室/回测对比 3 动线），且 404 形态存活约一月才清——根因是 CI 死亡期契约 gate 未开火（→ CR-10）；**删除当天接棒首页即患 CR-1（200+undefined 形态，更隐蔽）** | ✅ done |
-| 过时文档 `data_pool.md` / `caisen-methodology-summary.md` | **本工单 T0 丙删** |
-| **【CR-11】文档漂移族**：#1「Tushare 唯一数据源」不准（宏观社融/DR007 akshare fallback、FRED/yfinance 客户端仍活，`config/registry.py:39-46`）；#7 与 data-source-of-truth 巡检「5 项」实为 7 项；#3 时序图与 #8 时间表仍写「eod 写 account_daily.start」——现行代码 eod/pipeline **不写** account_daily，start 唯一写入方在 pre_open（精确抓取 + T-1 兜底）；`docs/guardrails.md` 533 测试数过期（2026-08-14 已订正 #1/#3/#7/#8，guardrails/data-source-of-truth 待刷） | 随波次收尾批量订正（→ CR-9 三件套） |
-| 死代码 / 死参数（P3 follow-ups：消息重复 / pro 死参等） | 各源工单 follow-up |
-| **【测试流程】风控闸变更未同步测试**：T1 删 confirm/allow_live 闸时 `test_submit_order_no_confirm` 未同步删（2026-08-11 已删）+ 时间依赖测试 `test_low_power_discovery`（已 mock 时间窗口修）。过时测试积累成「既有红」掩盖真回归（曾阻塞 T13-A 合并判断）。范畴已排查仅此一例（`_allow_live` 无其它遗留） | CI 全量绿门 + 行为变更时 grep 测试同步 |
-| **【测试卫生 follow-up】silently orphaned patch**：W1-A/T2 patch 迁移按「仅迁 fail 相关」红线执行（Task 19 M3），多测因 negative assertion（`assert X not in` / `assert n==0`）或 `gw=None` 早返路径，旧 `setattr(engine,...)` / `patch("trading.engine.X")` 失效仍偶然通过——这些「silently orphaned」patch 未动（保绿·避免扩面）。非阻塞：行为已等价（L4 双跑实证），仅测试与代码耦合漂移；后续可专项审计迁物理路径或加 `pytest --no-header` 断言强化 | W1-A/T2 follow-up（非阻塞） |
+| 项 | 物理事实 | 治理归宿 |
+|---|---|---|
+| 🆕 **【Medium 严重度 · 2026-08-15】entry_date 取写入日而非成交日** | `apply_fill_to_position` 的 entry_date 取 `clock.today()`（`state_store.py:1047/1064`）而非成交日 traded_time——「跨午夜盘后写入」边界会让建仓日漂一天。T15 测试侧冻结规避（clock freeze 2026-07-02），产品侧是否改解析 traded_time 属**独立议题未动**（超测试修复授权）。holding_days/持仓周期归因消费此字段 | 待领（独立议题） |
+| 🆕 **【Medium 严重度 · 2026-08-15】save_plan_legacy JSON 死种子** | DG-5（`11616220`）后生产 `load_plan` 只读 DB trade_event(SIGNAL).meta——`save_plan_legacy`（tests/_legacy_plan_io.py shim）写的 JSON 种子对 `load_plan` 恒不可见。T15 已修 probabilistic_broker 两例（DB 种子同构 C2c）；**其它仍用它的历史测试若断言经 `load_plan` 读回将同类红**（本波次 L3 范围内无此类，属潜在项） | 待领（测试卫生） |
+| 🆕 **波次遗留清理清单（debt/full-wave-0815 ledger 转录）** | ① **T13-C 未竟维度**：D5/D6/D7/D9 未按原编号整体落地（部分语义散落 T13-A/增量脚本，T13 工单已诚实注记不虚销）——建议与停牌真值工单同批；② `engine._submit` 零内部调用者（W1-B 后遗留）；③ `_ORDER_TIMEOUT` 一全局三拷贝（qmt_connection/io/business from-import 副本，运行期调超时踩三处）；④ seeding 同构第三份拷贝宜抽共享 helper（T15）；⑤ `_is_trading_day` 与 `trading.calendar.is_trading_day` 一行镜像双份（T9 刻意、注释互引）；⑥ `method_v0.py:328/337` 识别层 rr 门控价位副本（语义不同未收编，T7 记录）；⑦ `strategies/neckline/price_levels.py` 不在 `compute_unit/hashes.py` ENGINE_FILES（指纹未罩住新真身，T18 决策）；⑧ T7/T8 ADR「待用户终签」手续债（决策内容已被两波次实跑约束）；⑨ CR-8 残留：TerminalLogs SSE 接 read-cookie（live 配 token 静默 401）；⑩ 盘中熔断同享 T-1 兜底（T8 follow-up，防盘后启动首轮假阳性 halt）；⑪ `manage_ops_schtasks._schtasks` 在 PYTHONUTF8=1 下 GBK 解码炸 reader 线程（注册成功但 stdout 丢）；⑫ 仓库孤儿 stash `!!GitHub_Desktop<master>` 择日人工清点（T12 事故记录）；⑬ DC 死代码线索（消息重复/pro 死参）**线索穷尽未复现**（T17 grep：消息重复仅 notifier 幂等守卫与 broadcast 去重设计；「死参」命中全为 min_rr P4 复活史述；vitest.config/.env.example 注释 T1/T5 已修） | 各源工单 follow-up |
+| ✅ **过时文档 data_pool.md / caisen-methodology-summary.md** | 丙删早已执行（Phase 0 收尾，CR-9 复核确认） | ✅ done |
+| ✅ **【CR-11】文档漂移族** | `6f70faa6`+`bc69d546`（T5 · 2026-08-15）：guardrails.md 刷新（测试数 1892 截至标注 + 路径全订正 + §四 E2E 重写 + 新增 §六 fail-closed 语义与**风险取向显式声明**）；data-source-of-truth.md 刷新（7 项巡检实况 + QuanterAudit 调度 + Phase C 语义订正，评审修复清退红线方向写反）；`.env.example` 路径订正。#1/#3/#7/#8 已于 08-14 订正 | ✅ done（T5） |
+| ✅ **【测试流程】风控闸变更未同步测试** | 已收口（T1 期清 + 时间依赖测试 mock；T15 存量红真因钉死=save_plan_legacy 死种子而非日期敏感——诊断偏了一层的实证）。**全量红 = 0**（T15 后 1943 passed + 0 failed） | ✅ done（T15） |
+
+## 销账对照速查（波次 T1-T17 → CR/遗留项）
+
+| CR/遗留 | 处置 | 落地 commit |
+|---|---|---|
+| CR-1 discovery 死页 | ✅ 直返化 + 形状守卫入 gate② | `5d999375`（T1） |
+| CR-2 价位双份 | ✅ price_levels.py 单源 + golden | `fbbeb82a`（T7） |
+| CR-3 盘后闸 | ✅ 评估点前移 5min 节流 | `0072e1a1`（T8） |
+| CR-4 curr_equity fail-open | ✅ live fail-closed + 快照有声 | `7296e3f3`（T2） |
+| CR-5 防超卖>防漏挂 | ✅ 反向扫描+口径+CHECK（+T17 集合补全/ro 连接） | `6d434ce4`（T3）+ 本 T17 |
+| CR-6 补采回路 | ✅ 部分落盘+原子入列+限频（实弹 350/350） | `4b636756`+`3abea439`（T6） |
+| CR-7 巡检无调度/单通道 | ✅ QuanterAudit 16:05 + LocalFileChannel | `42e3bd96`（T4） |
+| CR-8 观测面断链 | ✅ sector 删+孤儿路由显式处置（残留 read-cookie 前端接入登记） | `e6100a79`（T16）+ T17 注释订正 |
+| CR-9 工单失同步 | ✅ 8 工单回填 + MAP 重写 | `e6100a79`（T16） |
+| CR-10 CI 无元守卫 | ✅ ci-heartbeat + 周一 schedule | `6f70faa6`（T5） |
+| CR-11 文档漂移 | ✅ guardrails/data-source-of-truth/.env.example | `6f70faa6`+`bc69d546`（T5） |
+| TD data→trading | ✅ 边清零（#2 复跑 = 0） | `ddb9c9a9`（T9） |
+| W1-B re-export | ✅ 块删除 + gateway 顶部化 | `e2a6153f`（T10） |
+| CN T9/T10/T11 | ✅ 探针 + 嵌套去重 + connect 留痕 | `299ab2de` / `710d9c30` / `bf55c6ae` |
+| Q/TB（W2-H1/H2） | ✅ broker 四文件 + 回调 Ports | `e3195df0` / `7be0419f`（T13/T12） |
+| M2 读写键 | ✅ actual_sid 单源 + is_vetoed + StopLossContext | `ccaad5c9`（T14）/ `710d9c30`（T11） |
+| SS（T6 工单） | ✅ 四决策定稿 + 落地 | T16 回填 + T3/T11/T14 |
+| 测试存量红 | ✅ 真因钉死（死种子），全量红=0 | `a4e5cc40`（T15） |
+| 波次门 L3/L4/perf | ✅ 26 绿 / 双跑零 diff / +1.9%≪10% | T15（无独立 commit，报告实录） |
 
 ## 非痛点（明确不在债内 — MAP Out of scope）
 
 - `broadcast` / `config` / `discovery` / `experiment` / `ops` / `compute_unit`：非痛点模块，仅当三维扩展（[T3](../../plans/wayfinder/T3.md)）要求时由适配层工单驱动改造。
-- 颈线法策略算法本身（缺口在 [neckline-algorithm-gaps] memory 独立跟踪，非架构债）。**边界澄清**：CR-2 是「同一算法的两份实现」的工程 SSoT 债，属架构债；算法有效性问题（regime/期望/Kelly）属 A 波。
+- 颈线法策略算法本身（缺口在 [neckline-algorithm-gaps] memory 独立跟踪，非架构债）。**边界澄清**：CR-2 已收口「同一算法两份实现」的工程 SSoT 债；算法有效性问题（regime/期望/Kelly）属 A 波——**仍是当前最高优先空洞**（[roadmap 里程碑](roadmap.md)）。

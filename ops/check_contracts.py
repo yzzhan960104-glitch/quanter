@@ -145,6 +145,11 @@ def main(backend_spec: dict, ts_files: Iterable[Path]) -> int:
         )
         return 2
 
+    # T17（T1 ①遗留）：物化 list——ts_files 在 main 内被消费两遍（URL 对账循环 +
+    # check_no_double_unwrap），调用方若传生成器，第二遍遍历为空 → 形状守卫静默
+    # 永远 0 命中（守卫失效而非误报，最隐蔽）。一行物化把双消费变成安全语义。
+    ts_files = list(ts_files)
+
     # 合并所有 api/*.ts 的前端调用（多 facade 场景，前端 6 个文件合并比对）
     frontend: Set[Tuple[str, str]] = set()
     missing_files = []

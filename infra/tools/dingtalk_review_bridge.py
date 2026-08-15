@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""dws dev connect 的 agent-cmd 桥：钉钉@消息(统一应用) → HTTP /training/review 或 /research/review。
+"""dws dev connect 的 agent-cmd 桥：钉钉@消息(统一应用) → HTTP /training/review 或 /research/proposals/review。
 
 根因（2026-07-16 实测确认）：审查应用 dingbabujxcelmssmdpn 是「统一应用」，老
 dingtalk-stream SDK 的 ChatbotHandler 收不到@（代际不匹配；stream 连得上但@不推）。
@@ -10,7 +10,9 @@ dingtalk-stream SDK 的 ChatbotHandler 收不到@（代际不匹配；stream 连
 作为回复推回钉钉。stdout 强制 UTF-8（避免 Windows GBK 控制台把中文@内容/回复写乱）。
 
 Phase C（2026-08-03）：@文本含提案 id（p_xxxxxxxx）或「提案」关键词 → 路由到
-POST /api/v1/research/review（研究提案审批）；否则走 training/review（训练 loop 审核）。
+POST /api/v1/research/proposals/review（研究提案审批；T16 复核：实际端点即此，
+:41-42 RESEARCH_REVIEW_URL 默认值为准，旧注释「/research/review」系简写失准）；
+否则走 training/review（训练 loop 审核）。
 
 配合（常驻）：
     dws dev connect --unified-app-id e2695383-6fe9-4617-9439-2a8538af3107 \

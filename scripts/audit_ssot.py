@@ -87,18 +87,40 @@ _BANNED_COMPILED = [re.compile(p) for p in BANNED_PATTERNS]
 
 # CR-5：SIGNAL 后「合法后续 action」单源集合（孤儿判定的 NOT-IN 口径，防误报）。
 # 物理意图：原集合 ('CONFIRMED','VETOED','OPEN','FILLED','CLOSED') 与生产实写口径
-# 脱节——pre_open/gateway_service 实写 ORDERED（gateway_service.py:670）、pre_open
-# 实写 SUBMITTED 推进、post_close 实写 TP1_FILLED/TP2_FILLED、stop_loss 实写
-# STOP_TRIGGERED；而 'OPEN' 从未作为 trade_event action 写入（是 order.purpose 值）。
+# 脱节——pre_open/gateway_service 实写 ORDERED（gateway_service.py:670）、
+# post_close 实写 TP1_FILLED/TP2_FILLED、stop_loss 实写 STOP_TRIGGERED；而 'OPEN'
+# 从未作为 trade_event action 写入（是 order.purpose 值）。
 # 集合漏实写 action ⇒ 每个已推进未平仓的 trade 被误报孤儿，告警噪音淹没真断链
 # （审计旁路失效）。SQL IN 子句与告警文案同源引用本常量，杜绝两处口径漂移。
+#
+# T17 补全（T3 遗留）：下单审计四态也是 SIGNAL 的合法后续——gateway_service 实写
+# DRY_RUN（:655 模拟下单审计）/ BLOCKED（:659 挡板拒单）/ REJECTED（:679 柜台拒单），
+# order_state 实写 DIRECTION_UNKNOWN（:463 direction 缺失审计旁路）。SIGNAL 后走了
+# 任一下单尝试（含被拒）即非孤儿——漏掉会把「被挡板/柜台拒单的信号」误报断链。
+# SUBMITTED 订正（T17）：SUBMITTED 实写的是 **order 表**（update_order_state 推进
+# order.state，pre_open.py:565-568），非 trade_event action——保留在集合内属防御性
+# 超集（若未来任何路径把它写进 trade_event 也不误报），不构成误判源。
 _SIGNAL_FOLLOWUP_ACTIONS = (
     "CONFIRMED", "VETOED", "ORDERED", "SUBMITTED",
     "TP1_FILLED", "TP2_FILLED", "STOP_TRIGGERED",
     "FILLED", "CLOSED",
+    "DRY_RUN", "BLOCKED", "REJECTED", "DIRECTION_UNKNOWN",
 )
 # 参数化占位符（与 _SIGNAL_FOLLOWUP_ACTIONS 同源派生，防注入）
 _FOLLOWUP_PLACEHOLDERS = ",".join("?" * len(_SIGNAL_FOLLOWUP_ACTIONS))
+
+
+def _connect_ro(db: Path):
+    """巡检只读连接（T3 ③ / T17 落地）：mode=ro URI 打开。
+
+    物理意图：审计读口绝不持生产库写句柄——默认 sqlite3.connect 拿到的是读写
+    句柄，巡检脚本里的笔误（如 UPDATE/写错表名）会直接落到生产库；mode=ro 让
+    SQLite 在协议层拒绝任何写（误写直接抛 SyntaxError/OperationalError 而非
+    静默成功），同时避免与 live 引擎的写事务产生意外的锁竞争。
+    WAL 兼容性：live 引擎在跑时 -shm 在位可读；引擎干净退出后 wal/shm 已
+    checkpoint 删除，纯文件只读同样成立。as_posix() 统一 Windows 反斜杠。
+    """
+    return sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
 
 
 def check_fill_position(db: Path):
@@ -113,7 +135,7 @@ def check_fill_position(db: Path):
     """
     if not db.exists():
         return f"DB 不存在: {db}"
-    con = sqlite3.connect(db)
+    con = _connect_ro(db)
     con.row_factory = sqlite3.Row
     # 显式累加（清晰平铺，避免 SUM(CASE...) 在空表/无方向字段时返回 NULL 的陷阱）
     fills = {}
@@ -147,7 +169,7 @@ def check_account_daily_closed(db: Path):
     """
     if not db.exists():
         return f"DB 不存在: {db}"
-    con = sqlite3.connect(db)
+    con = _connect_ro(db)
     # 任一为 NULL 即炸（OR 而非 AND —— 闭合要求两端都落）
     rows = con.execute(
         "SELECT account_id, date FROM account_daily "
@@ -165,14 +187,16 @@ def check_trade_event_chain(db: Path):
 
     物理意图：SIGNAL 是计划源（Phase C 升格 meta 为真相源），后续应有
     _SIGNAL_FOLLOWUP_ACTIONS（CONFIRMED/VETOED/ORDERED/SUBMITTED/TP1_FILLED/
-    TP2_FILLED/STOP_TRIGGERED/FILLED/CLOSED）之一标记链路推进。<7 日合法未确认
-    （研究员可能延后处理）；>7 日无后续 = 链路断（信号丢失 / 漏 confirm）。
+    TP2_FILLED/STOP_TRIGGERED/FILLED/CLOSED/DRY_RUN/BLOCKED/REJECTED/
+    DIRECTION_UNKNOWN）之一标记链路推进（T17：下单审计四态 DRY_RUN/BLOCKED/
+    REJECTED/DIRECTION_UNKNOWN 同为合法后续——信号走到「尝试下单但被拒」不是断链）。
+    <7 日合法未确认（研究员可能延后处理）；>7 日无后续 = 链路断（信号丢失 / 漏 confirm）。
     CR-5 订正：集合按生产实写口径补 ORDERED/SUBMITTED/TP1_FILLED/TP2_FILLED/
     STOP_TRIGGERED、删从未写入的 OPEN——只炸真断链，不拿已推进链凑数。
     """
     if not db.exists():
         return f"DB 不存在: {db}"
-    con = sqlite3.connect(db)
+    con = _connect_ro(db)
     con.row_factory = sqlite3.Row
     # NOT EXISTS 子查询：该 trade_id 无任何后续状态行（合法后续集单源引用，参数化）
     # datetime('now','-7 days') 走 SQLite 原生时间算术（UTC；timestamp 是 ISO8601 本地）

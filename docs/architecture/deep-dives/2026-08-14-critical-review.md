@@ -1,7 +1,27 @@
-> 最近复核：2026-08-14 · 维护者：glm-5.3-session ·
+> 最近复核：2026-08-15（清偿后记）· 维护者：debt-full-wave session ·
 > 证据基线：HEAD `2e74cb9d`（master，领先 origin 1 commit）。三路并行审计（前端契约 / 风控链路 / 治理波次）+ 复跑 [#2](../02-module-dependencies.md) 依赖扫描 + 逐项 git 考古。
 > 性质：**带日期的快照评估**（非活文档）——批判结论有时效，下次大波次合并后应重估或在文头标注过期。
 > 权威归宿：本文是「架构健康度批判评估」叙事的单一归宿；债务条目登记与严重度判定归 [#6](../06-tech-debt.md)（本文 CR-\* 与 #6 新增条目一一映射）；波次工单全景与状态归 [roadmap](../roadmap.md)。本文不重抄规则，只链。
+
+# 2026-08-15 清偿后记（debt/full-wave-0815 波次）
+
+**本复核登记的 CR-1..11 已由技术债全量清偿波次（分支 `debt/full-wave-0815`，T1-T18，2026-08-15）逐条处置。** 终态对账单（含新债登记）见 [#6](../06-tech-debt.md) 销账对照速查；波次逐 task 证据在 `.superpowers/sdd/2026-08-15-tech-debt-full-wave/`。一行处置表：
+
+| CR | 处置 | 残留 |
+|---|---|---|
+| CR-1 | ✅ T1（`5d999375`）discovery.ts 直返化 + 形状契约守卫入 gate② | 守卫单行正则局限（成文） |
+| CR-2 | ✅ T7（`fbbeb82a`）`strategies/neckline/price_levels.py` 单源 + golden 钉死 | method_v0 rr 门控副本（语义不同，Low 清单） |
+| CR-3 | ✅ T8（`0072e1a1`）盘中 5min 节流评估点前移，emergency_halt 不停调度 | 盘中无 T-1 兜底（follow-up）；lock_down 后 monitor skip 语义已入 guardrails |
+| CR-4 | ✅ T2（`7296e3f3`）curr_equity 缺失 live fail-closed + 收盘快照失败有声 | live 停调度=行为变更（运维知悉，guardrails §六） |
+| CR-5 | ✅ T3（`6d434ce4`）反向扫描 + 孤儿口径 + fill.direction CHECK；T17 补集合四 action + mode=ro | 取向本身显式入 guardrails（选择保留） |
+| CR-6 | ✅ T6（`4b636756`+`3abea439`）部分落盘 + 原子入列 + 限频，实弹 350/350 零中断 | **→ 新债【High】停牌真值缺口**（16371 段含真缺永占配额） |
+| CR-7 | ✅ T4（`42e3bd96`）QuanterAudit DAILY 16:05 + LocalFileChannel 双通道 | 心跳/调度依赖运行态持续观测 |
+| CR-8 | ✅ T16（`e6100a79`）sector 删 + 孤儿路由显式处置（training/research=桥消费保留，ops/processes=内部观测，review/diagnose=CLI 写面） | TerminalLogs SSE 接 read-cookie 未做（Low 清单） |
+| CR-9 | ✅ T16（`e6100a79`）8 工单回填 + MAP frontier 重写（余 T3）+ sdd G7/G8 补账 | 状态同步机制化靠波次收尾 checklist（本 T17 即三件套） |
+| CR-10 | ✅ T5（`6f70faa6`）ci-heartbeat 元守卫 + 周一 schedule 心跳 | 基线依赖 master 首次成功 run（T18 push 后建立） |
+| CR-11 | ✅ T5（`6f70faa6`+`bc69d546`）guardrails / data-source-of-truth / .env.example 刷新 | 测试数漂移约定「改体量时顺手更新截至标注」 |
+
+**对总评三错位的清偿面**：错位 2（策略数学零单源）——CR-2/T7 已收口；错位 3（风控命名语义）——CR-3/T8 + CR-4/T2 已收口；错位 1（基础设施与策略证据倒挂）**未变**——A 波仍未动工，仍是最高优先空洞（[roadmap](../roadmap.md) 里程碑重申）。**本文批判性结论的有效性**：§3 各 CR 章节保留为历史快照（根因/证据链仍有档案价值），但处置状态以本后记与 #6 终态为准。
 
 # 2026-08-14 架构批判性复核
 

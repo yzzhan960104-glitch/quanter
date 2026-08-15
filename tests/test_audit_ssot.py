@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 import scripts.audit_ssot as a
 import ops.process_topology as pt
 
@@ -277,12 +279,44 @@ def test_orphan_signal_with_partial_fill_followups_not_flagged(tmp_path):
     覆盖集合：旧集合只认 CONFIRMED/VETOED/OPEN/FILLED/CLOSED，漏掉盘中推进事件
     （pre_open "SUBMITTED"、post_close "TP1_FILLED/TP2_FILLED"、stop_loss
     "STOP_TRIGGERED"）——SIGNAL→TP1_FILLED 的已成交链会被误判孤儿。
+    T17（2026-08-15）：补下单审计四态 DRY_RUN/BLOCKED/REJECTED/DIRECTION_UNKNOWN
+    ——gateway_service/order_state 实写（模拟下单/挡板拒/柜台拒/direction 缺失审计），
+    信号走到「尝试下单但被拒」不是断链，漏掉会误报孤儿（T3 遗留补全）。
     """
-    for follow in ("SUBMITTED", "TP1_FILLED", "TP2_FILLED", "STOP_TRIGGERED"):
+    for follow in ("SUBMITTED", "TP1_FILLED", "TP2_FILLED", "STOP_TRIGGERED",
+                   "DRY_RUN", "BLOCKED", "REJECTED", "DIRECTION_UNKNOWN"):
         db = _audit_db(tmp_path, name=f"audit_{follow}", events=[
             ("t1", "600000.SH", "SIGNAL", "2020-01-01T09:30:00"),
             ("t1", "600000.SH", follow, "2020-01-01T09:31:00")])
         assert a.check_trade_event_chain(db) is None, f"后续 {follow} 不应误报孤儿"
+
+
+def test_audit_db_connection_is_read_only(tmp_path):
+    """T3 ③/T17：巡检连接 mode=ro——对库的写操作必须被 SQLite 协议层拒绝。
+
+    物理意图：审计是读侧消费者，绝不能持生产库写句柄（脚本笔误的 UPDATE/写错表
+    会直接落生产库）。mode=ro URI 下任何写尝试直接抛 OperationalError（只读数据库），
+    而非静默成功——fail-closed 于「巡检自身不成为污染源」。
+    """
+    db = _audit_db(tmp_path, fills=[("o1", "600000.SH", "BUY", 100)],
+                   positions=[("600000.SH", 100.0)])
+    con = a._connect_ro(db)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM fill").fetchone()[0] == 1
+        try:
+            con.execute("DELETE FROM fill")
+        except sqlite3.OperationalError as e:
+            assert "readonly" in str(e).lower() or "只读" in str(e)
+        else:
+            pytest.fail("mode=ro 连接竟然允许 DELETE——只读护栏失效")
+    finally:
+        con.close()
+    # 连接关闭后数据仍在（证明 DELETE 未生效而非静默提交）
+    con2 = sqlite3.connect(db)
+    try:
+        assert con2.execute("SELECT COUNT(*) FROM fill").fetchone()[0] == 1
+    finally:
+        con2.close()
 
 
 def test_orphan_signal_without_followup_still_flagged(tmp_path):

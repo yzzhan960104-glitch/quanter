@@ -204,3 +204,19 @@ def test_main_direct_return_no_unwrap_violation(tmp_path, capsys):
     """)
     assert check_contracts.main(spec, [ts]) == 0
     assert capsys.readouterr().err == ""
+
+
+def test_main_accepts_generator_ts_files(tmp_path, capsys):
+    # T17（T1 ①遗留）：main 对 ts_files 是双消费（URL 对账循环 + 形状守卫扫描），
+    # 传生成器时第二遍为空 → 二次解构守卫静默失效（永远 0 命中，最隐蔽的守卫失效）。
+    # 物化 list() 后，生成器入参与列表入参行为一致：违规照样被抓。
+    spec = _spec(("/api/v1/research/discovery/sensitivity", ["GET"]))
+    ts = _write_ts(tmp_path, "discovery.ts", """
+    export async function getSensitivity() {
+      const { data } = await apiClient.get('/api/v1/research/discovery/sensitivity')
+      return data
+    }
+    """)
+    rc = check_contracts.main(spec, iter([ts]))  # 生成器形态（一次性迭代器）
+    assert rc == 1
+    assert "二次解构" in capsys.readouterr().err

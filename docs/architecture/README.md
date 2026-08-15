@@ -1,6 +1,7 @@
-> 最近复核：2026-08-14 · 维护者：glm-5.3-session ·
+> 最近复核：2026-08-15 · 维护者：debt-full-wave session ·
 > 权威归宿：本文件是架构文档集的**索引 + 单一归宿映射表**（[T0](../../plans/wayfinder/T0.md) 决策）。
 > 图约定：Mermaid（[T0 Decisions](../../plans/wayfinder/T0.md) (b)）。**活文档**——随代码演进，改动时改文件头「最近复核」。
+> 波次记录：`debt/full-wave-0815`（T1-T18 · 2026-08-15）CR-1..11 全量清偿 + W1-B/W2/TD/SS/CN 收口——#2/#6/roadmap/批判性复核后记四件同步刷新（波次收尾三件套兑现）。
 
 # quanter 架构全景（Phase 0 地基）
 
@@ -22,7 +23,7 @@
 | 7 | SSoT 数据层 | [07-ssot-data-layer.md](07-ssot-data-layer.md) | `classDiagram`（α 补集） | 数据模型图 |
 | 8 | 控制/时间流 | [08-control-time-flow.md](08-control-time-flow.md) | `flowchart`（job 切片） | 时间窗/时钟语义 |
 | — | engine 深剖 | [deep-dives/engine-current-state.md](deep-dives/engine-current-state.md) ✅ | 多图 | engine 内部结构（T1 拆分前历史态快照） |
-| — | **架构批判性复核** | [deep-dives/2026-08-14-critical-review.md](deep-dives/2026-08-14-critical-review.md) ✅ | 表格+证据链 | **架构健康度批判评估**（带日期快照） |
+| — | **架构批判性复核** | [deep-dives/2026-08-14-critical-review.md](deep-dives/2026-08-14-critical-review.md) ✅ | 表格+证据链 | **架构健康度批判评估**（带日期快照；文头含 **2026-08-15 清偿后记**——CR-1..11 一行处置表） |
 | — | 演进路线图 | [roadmap.md](roadmap.md) | — | 目标态 / Phase / 波次编排 |
 
 ## 单一归宿映射表（[T0 乙原则](../../plans/wayfinder/T0.md)——每事实只在一处权威定义，他处引用不重抄）
@@ -45,13 +46,13 @@
 ## 分层模型（自包间 import 扫描涌现，详见 #2）
 
 ```
-L0 基础     : infra(884) · config(1001)         ← 最多被依赖（infra 8 包入边 = 真地基）
-L1 数据     : data(7064)                        ← 依赖 config + infra
-L2 策略契约 : strategies(2227)                  ← Strategy Protocol，backtest/discovery/trading 共用
-L3 执行内核 : trading(13814) · broker(2213)     ← trading 最大 fan-out 中枢；engine.py 已 T1 拆分（深剖见 deep-dives）
-L4 分析     : backtest(4134) · discovery(3645) · experiment(497) · compute_unit(771)
-L5 接口运维 : presentation(2483) · broadcast(1622) · ops(1751)
-合计 ≈ 42.1k 行 · 240 .py 文件（2026-08-14 扫描；较 08-08 净增 = T1/W1-A 拆分 + G 波加固 + P0-P6 优化波 − caisen 删除）
+L0 基础     : infra(963) · config(1001)         ← 最多被依赖（infra 8 包入边 = 真地基）
+L1 数据     : data(6994)                        ← 依赖 config + infra；零 trading 反向边（T9 后）
+L2 策略契约 : strategies(2359)                  ← Strategy Protocol + price_levels 单源（T7）
+L3 执行内核 : trading(14572) · broker(2516)     ← trading 最大 fan-out 中枢；engine.py 1481 行（T1+W1-B）；broker 四文件分层（W2-H1）
+L4 分析     : backtest(4135) · discovery(3720) · experiment(497) · compute_unit(771)
+L5 接口运维 : presentation(2474) · broadcast(1622) · ops(2087)
+合计 ≈ 43.7k 行 · 247 .py 文件（2026-08-15 扫描；较 08-14 净增 = debt/full-wave-0815：W1-B re-export 删除 + W2 broker 分层 + CR 族清偿）
 ```
 
 ## 维护协议
