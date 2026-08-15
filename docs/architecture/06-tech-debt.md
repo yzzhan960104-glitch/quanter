@@ -22,7 +22,7 @@ flowchart LR
     AS["✅ 风控链 fail-closed 全收口<br/>G3 基线 8d4ef714<br/>CR-4 curr 缺失 7296e3f3<br/>CR-3 盘中前移 0072e1a1"]:::done
     PL["✅ CR-2 价位单源<br/>strategies/neckline/price_levels.py<br/>fbbeb82a · golden 钉死"]:::done
     DVP["✅ CR-1 discovery 死页<br/>5d999375 · 形状守卫入 gate②"]:::done
-    Q["✅ broker 四文件分层<br/>W2-H1 e3d5df0<br/>qmt.py 1692→132 + BrokerProtocol"]:::done
+    Q["✅ broker 四文件分层<br/>W2-H1 e3195df0<br/>qmt.py 1692→132 + BrokerProtocol"]:::done
     TB["✅ 回调体 Ports 化<br/>W2-H2 7be0419f<br/>order_state 副作用显式注入"]:::done
     OSS["✅ CR-5 漏挂观测三件套<br/>6d434ce4 (+T17 集合补全)<br/>反向扫描+孤儿口径+fill CHECK"]:::done
     OBS["✅ CR-7 巡检调度+双通道<br/>42e3bd96<br/>QuanterAudit DAILY 16:05"]:::done

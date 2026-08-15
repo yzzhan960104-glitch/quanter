@@ -19,7 +19,7 @@
 ### Phase 2 — 可插拔适配层（[T2](../../plans/wayfinder/T2.md) · **主体完成 2026-08-15**）
 - **W1-A keystone ✅ 已合并（2026-08-12，`96d55418` fast-forward，origin 已含）**：`_eng_mod` 反查 19 符号全量退役、`trading_service` 下沉 `trading/gateway_service.py`（trading→presentation 边权 2→0）、~360 测试 patch 迁物理路径
 - **W1-B ✅ done（2026-08-15，debt/full-wave-0815 T10/T11）**：T9 探针（`299ab2de`）+ T10 嵌套父子实证关闭（递归祖先链去重）+ T11 connect 留痕 + **engine re-export 块删除**（`e2a6153f`，engine.py 现 1481 行零中转站）
-- **W2 ✅ done（2026-08-15，T12/T13/T14）**：H1 broker 四文件分层 + `BrokerProtocol`（`e3d5df0`，AST 53/53 逐字一致）；H2 回调体 Ports 化（`7be0419f`，order_state 副作用显式注入）；M2 actual_sid DB 单源（`ccaad5c9`）+ is_vetoed/StopLossContext（T11）。**波次门：L3 26 绿 / L4 双跑零 diff / perf +1.9%≪10%**（T15）
+- **W2 ✅ done（2026-08-15，T12/T13/T14）**：H1 broker 四文件分层 + `BrokerProtocol`（`e3195df0`，AST 53/53 逐字一致）；H2 回调体 Ports 化（`7be0419f`，order_state 副作用显式注入）；M2 actual_sid DB 单源（`ccaad5c9`）+ is_vetoed/StopLossContext（T11）。**波次门：L3 26 绿 / L4 双跑零 diff / perf +1.9%≪10%**（T15）
 - 契约核心切点：trading↔broker 回调写 DB——已收口（[#2](02-module-dependencies.md) 双向耦合表现状）
 - 诚实注记：T2 工单「完整三维适配层」目标未全竟（余 W3 多策略 schema），主体 H1/H2/M2 已落——工单已标 done + 注记（T16 回填）
 

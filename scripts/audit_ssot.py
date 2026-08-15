@@ -100,6 +100,9 @@ _BANNED_COMPILED = [re.compile(p) for p in BANNED_PATTERNS]
 # SUBMITTED 订正（T17）：SUBMITTED 实写的是 **order 表**（update_order_state 推进
 # order.state，pre_open.py:565-568），非 trade_event action——保留在集合内属防御性
 # 超集（若未来任何路径把它写进 trade_event 也不误报），不构成误判源。
+# 实况补注（T17 评审）：该超集并非纯防御——生产 trade_event 现存一条 2026-08-05
+# 遗留 SUBMITTED 行（event_id=35，default_510300.SH_20260805），把 SUBMITTED 移出
+# 集合会把这条生产链误报成孤儿 SIGNAL。
 _SIGNAL_FOLLOWUP_ACTIONS = (
     "CONFIRMED", "VETOED", "ORDERED", "SUBMITTED",
     "TP1_FILLED", "TP2_FILLED", "STOP_TRIGGERED",
@@ -119,6 +122,9 @@ def _connect_ro(db: Path):
     静默成功），同时避免与 live 引擎的写事务产生意外的锁竞争。
     WAL 兼容性：live 引擎在跑时 -shm 在位可读；引擎干净退出后 wal/shm 已
     checkpoint 删除，纯文件只读同样成立。as_posix() 统一 Windows 反斜杠。
+    边角（T17 评审补注）：引擎崩溃留下 -wal 而 -shm 缺失时，mode=ro 打开直接抛
+    OperationalError（读 WAL 须先写 -shm，ro 句柄无权）——脚本以 traceback 退出，
+    仍有声失败而非静默吞掉；恢复手段 = 让引擎重启一次完成 WAL 恢复。
     """
     return sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
 
