@@ -104,32 +104,6 @@ def test_inject_fills_writes_fill_and_position_via_engine(isolated_state, monkey
     assert n >= 1, "BUY 成交应落 fill 表"
 
 
-def _seed_plan_truth(date_iso: str, orders: list[dict]) -> None:
-    """落 DB 真相源计划种子：trade_event(SIGNAL, meta=计划参数) + CONFIRMED（C2c 口径）。
-
-    Why 不再只用 save_plan_legacy（存量红根因 · T15 钉死）：DG-5（2026-08-12，11616220）
-    后 ``load_plan`` 关闭 JSON 读侧 fallback，只读 trade_event 表——JSON 镜像写盘对
-    ``_tp_purpose`` 的 ``load_plan`` 恒不可见（返 None）→ SELL@tp1 被误判为市价卖单
-    立即 FILLED，resting 限价语义整体失效。本 helper 与生产 eod_plan / smoke
-    ``_fake_run_eod_phase`` 同构：先 SIGNAL 再 CONFIRMED，保 latest_action=CONFIRMED
-    （确认闸通过），meta 携带 tp1/take_profit（_tp_purpose 限价单判定输入）。
-    """
-    import json
-
-    from trading import engine as engine_mod, state_store
-
-    aid = engine_mod._resolve_account_id()
-    if state_store.get_account(aid) is None:
-        state_store.upsert_account(aid, broker="qmt")
-    for o in orders:
-        sym = o["order"]["symbol"]
-        tid = state_store.build_trade_id(aid, sym, date_iso)
-        meta_obj = {**o, "plan_date": date_iso, "strategy_name": "neckline", "rationale": ""}
-        state_store.insert_trade_event(
-            aid, tid, sym, "SIGNAL", meta=json.dumps(meta_obj, ensure_ascii=False))
-        state_store.insert_trade_event(aid, tid, sym, "CONFIRMED")
-
-
 def _freeze_trade_day(monkeypatch, y: int = 2026, m: int = 7, d: int = 2, h: int = 10):
     """钉死测试内日期语义：clock.now freeze 到显式固定交易日时点（T15 存量红钉死）。
 
@@ -152,9 +126,12 @@ def test_resting_tp_stays_submitted_when_high_below_price(isolated_state, monkey
 
     from tests.e2e_long_cycle.min_bar_feeder import MinBarFeeder
     from tests.e2e_long_cycle.probabilistic_broker import ProbabilisticBroker
+    from tests._plan_seed import seed_plan
 
     _freeze_trade_day(monkeypatch)  # 日期语义钉死：entry_date/时间戳锚定 2026-07-02
-    _seed_plan_truth("2026-07-02", [{
+    # N3 共享种子：DB SIGNAL(meta 含 tp1/take_profit) + CONFIRMED（原 _seed_plan_truth
+    # 手写段收口；json_mirror=False——本套件无读 plan_*.json 的断言）。
+    seed_plan("2026-07-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "BUY", "price": 10.0},
         "stop_price": 9.5, "take_profit": 11.0, "tp1": 10.5, "tp1_portion": 50,
     }])
@@ -190,9 +167,12 @@ def test_resting_tp_fills_when_high_reaches_price(isolated_state, monkeypatch):
     from trading import engine as engine_mod, state_store
     from tests.e2e_long_cycle.min_bar_feeder import MinBarFeeder
     from tests.e2e_long_cycle.probabilistic_broker import ProbabilisticBroker
+    from tests._plan_seed import seed_plan
 
     _freeze_trade_day(monkeypatch)  # 日期语义钉死：entry_date/时间戳锚定 2026-07-02
-    _seed_plan_truth("2026-07-02", [{
+    # N3 共享种子：DB SIGNAL(meta 含 tp1/take_profit) + CONFIRMED（原 _seed_plan_truth
+    # 手写段收口；json_mirror=False——本套件无读 plan_*.json 的断言）。
+    seed_plan("2026-07-02", [{
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "BUY", "price": 10.0},
         "stop_price": 9.5, "take_profit": 11.0, "tp1": 10.5, "tp1_portion": 50,
     }])

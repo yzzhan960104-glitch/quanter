@@ -81,26 +81,16 @@ def test_orchestrator_smoke(isolated_state, monkeypatch, tmp_path):
         C2c：pre_open/_stoploss 直读 DB trade_event(SIGNAL).meta，故 fake eod 除 JSON 外
         必须落 SIGNAL+CONFIRMED DB 行（与生产 eod_plan 同构）。先 SIGNAL 再 CONFIRMED
         保证 latest_action=CONFIRMED（确认闸通过）。
+        N3 收口：DB 双写 + JSON 镜像改调共享 ``tests/_plan_seed.seed_plan``（原手写段
+        与 _seed_plan_truth/table_snapshot 三处同构，meta 形状逐字保形）。
         """
-        from trading import engine, state_store
-        from tests._legacy_plan_io import save_plan_legacy
-        import json as _json
+        from trading import engine
+        from tests._plan_seed import seed_plan
         t_plus_1 = engine.calendar.next_trading_day(t_date.isoformat())
-        save_plan_legacy(t_plus_1, fake_orders, confirmed=True)  # C3：legacy shim
-        # C2c：落 DB SIGNAL+CONFIRMED（pre_open/_stoploss C2c 真相源）
-        _aid = engine._resolve_account_id()
-        if state_store.get_account(_aid) is None:
-            state_store.upsert_account(_aid, broker="qmt")
-        for o in fake_orders:
-            sym = o["order"]["symbol"]
-            tid = state_store.build_trade_id(_aid, sym, t_plus_1)
-            meta_obj = {**o, "plan_date": t_plus_1, "strategy_name": "neckline",
-                        "rationale": ""}
-            state_store.insert_trade_event(
-                _aid, tid, sym, "SIGNAL",
-                meta=_json.dumps(meta_obj, ensure_ascii=False))
-            state_store.insert_trade_event(_aid, tid, sym, "CONFIRMED")
-        return {"date": t_plus_1, "n_orders": len(fake_orders), "mode": "dry_run",
+        # json_mirror=True：保留 legacy JSON 展示镜像（confirmed=True），供直接读
+        # plan_*.json 的老断言路径；对 load_plan 恒不可见（DB 才是有效种子）。
+        n = seed_plan(t_plus_1, fake_orders, confirmed=True, json_mirror=True)
+        return {"date": t_plus_1, "n_orders": n, "mode": "dry_run",
                 "auto_confirmed": True}
 
     from tests.e2e_long_cycle import signal_scanner
