@@ -7,4 +7,4 @@ cd /d E:\quanter
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 call .venv310\Scripts\activate.bat
-python -m data.tools.run_data_check t2
+python -m ops.run_data_check t2

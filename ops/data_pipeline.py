@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-os.chdir(ROOT)  # 锁项目根（子任务用相对路径 data/tools/...）
+os.chdir(ROOT)  # 锁项目根（子任务用相对路径 data/tools/... 与 -m 模块路径 ops.run_data_check）
 # 2026-08-05 事故修复：本脚本以 `python ops/data_pipeline.py` 方式执行时 sys.path[0]=ops/，
 # 仓库根不在 path → `from infra.pyio import force_utf8_stdout` ModuleNotFoundError → rc=1 →
 # pipeline fail-closed 拒产 T+1 计划（08-05 计划缺失根因）。与 trigger_eod_once 同范式锚根。
@@ -36,10 +36,12 @@ if str(ROOT) not in sys.path:
 PY = sys.executable  # .bat 用 .venv310 跑本脚本，子任务复用同一解释器
 
 # (步骤名, 命令) —— 串行顺序即物理时序
+# T9（2026-08-15）：run_data_check 已自 data/tools 迁 ops/（data→trading 边清零），
+# 模块路径 data.tools.run_data_check → ops.run_data_check（同包内邻居，逻辑零改动）。
 STEPS = [
-    ("① T1 检查（T-1 完整性）",   [PY, "-m", "data.tools.run_data_check", "t1"]),
+    ("① T1 检查（T-1 完整性）",   [PY, "-m", "ops.run_data_check", "t1"]),
     ("② 日频采集（T 日 daily）",  [PY, "data/tools/sync_daily_incremental.py"]),
-    ("③ T2 检查（T 完整性·熔断）", [PY, "-m", "data.tools.run_data_check", "t2"]),
+    ("③ T2 检查（T 完整性·熔断）", [PY, "-m", "ops.run_data_check", "t2"]),
 ]
 
 

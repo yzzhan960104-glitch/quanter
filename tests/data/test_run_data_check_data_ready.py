@@ -16,12 +16,12 @@ def test_t2_writes_data_ready_on_pass(monkeypatch, tmp_path):
     monkeypatch.setattr(state_store, "_DEFAULT_DB", db)
     state_store.init_store()
     # run_check("t2") 成功后应落 data_ready
-    with patch("data.tools.run_data_check.check_freshness") as cf, \
-         patch("data.tools.run_data_check.expected_latest_trade_day", return_value="2026-07-30"):
+    with patch("ops.run_data_check.check_freshness") as cf, \
+         patch("ops.run_data_check.expected_latest_trade_day", return_value="2026-07-30"):
         from data.freshness import FreshnessResult
         cf.return_value = FreshnessResult(key="daily", ok=True, latest_date="2026-07-30",
                                           expected_date="2026-07-30", message="PASS")
-        from data.tools.run_data_check import run_check
+        from ops.run_data_check import run_check
         run_check("t2", keys=("daily",), deadline_hour=23)  # deadline 远在未来避免 sleep
     got = state_store.get_data_ready("2026-07-30", "daily", db_path=db)
     assert got is not None
@@ -32,14 +32,14 @@ def test_t2_writes_data_ready_on_melt(monkeypatch, tmp_path):
     db = str(tmp_path / "t.db")
     monkeypatch.setattr(state_store, "_DEFAULT_DB", db)
     state_store.init_store()
-    with patch("data.tools.run_data_check.check_freshness") as cf, \
-         patch("data.tools.run_data_check.expected_latest_trade_day", return_value="2026-07-30"), \
-         patch("data.tools.run_data_check._now", return_value="23:30"), \
-         patch("data.tools.run_data_check._resync_key", return_value=(False, "fail")):
+    with patch("ops.run_data_check.check_freshness") as cf, \
+         patch("ops.run_data_check.expected_latest_trade_day", return_value="2026-07-30"), \
+         patch("ops.run_data_check._now", return_value="23:30"), \
+         patch("ops.run_data_check._resync_key", return_value=(False, "fail")):
         from data.freshness import FreshnessResult
         cf.return_value = FreshnessResult(key="daily", ok=False, latest_date=None,
                                           expected_date="2026-07-30", message="缺")
-        from data.tools.run_data_check import run_check
+        from ops.run_data_check import run_check
         run_check("t2", keys=("daily",), deadline_hour=20)
     got = state_store.get_data_ready("2026-07-30", "daily", db_path=db)
     assert got is not None

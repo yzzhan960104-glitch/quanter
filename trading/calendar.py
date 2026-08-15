@@ -1,22 +1,27 @@
 # -*- coding: utf-8 -*-
-"""A 股交易日历会话语义（交易日判定 + 盘中时段 + 期望最新交易日）。
+"""A 股交易日历会话语义（交易日判定 + 盘中时段）。
 
 Why 与 data/calendar.py 分离（M1 循环切断 · 2026-08-12）：
   trade_cal 数据拉取 + 缓存已下沉到 data/calendar.py（断 data.integrity→trading.calendar
   真函数级循环）。本模块保留会话语义——依赖 data.calendar.fetch_trade_cal 取交易日列表，
   属 trading→data 的正常单向依赖。
 
+T9 下沉（data→trading 边清零 · 2026-08-15）：expected_latest_trade_day（数据实时性检查
+的期望锚点，纯交易日历域函数）亦下沉 data/calendar.py。本模块 re-export 保兼容。
+
 兼容 re-export：``trading.calendar.fetch_trade_cal`` 名字保留（外部调用方如 compute/stop.py、
-test_stop_loss 的 patch 目标仍指向 trading.calendar.fetch_trade_cal）——指向 data.calendar
-的同一函数对象，行为等价。
+test_stop_loss 的 patch 目标仍指向 trading.calendar.fetch_trade_cal）；``trading.calendar.
+expected_latest_trade_day`` 名字保留（engine.py:724 lazy import、orchestrate/pipeline.py、
+broadcast/__main__.py 既有消费者零改动）——均指向 data.calendar 的同一函数对象，行为等价。
 """
 from __future__ import annotations
 
 from datetime import datetime, time
 
-# 兼容 re-export：fetch_trade_cal 物理实现已下沉到 data/calendar.py（M1 循环切断）。
-# 保留 trading.calendar.fetch_trade_cal 名字空间绑定，外部调用方与 patch 目标不改。
-from data.calendar import fetch_trade_cal  # noqa: F401
+# 兼容 re-export：fetch_trade_cal / expected_latest_trade_day 物理实现均已下沉到
+# data/calendar.py（M1 循环切断 + T9 data→trading 边清零）。保留 trading.calendar
+# 名字空间绑定，外部调用方与 patch 目标不改。
+from data.calendar import expected_latest_trade_day, fetch_trade_cal  # noqa: F401
 
 
 def is_trading_day(date_str: str) -> bool:
@@ -87,26 +92,5 @@ def is_intraday_session(now: datetime) -> bool:
     return time(9, 15) <= t <= time(15, 0)
 
 
-# 物理意图：数据实时性检查的期望锚点——盘后查 T 数据是否落湖，盘前查 T-1 是否齐全。
-# 决策口径：now >= 15:00 且今天是交易日 → 期望今天（收盘数据清算后应落湖）；
-#           否则 → 回溯最近一个交易日（最多 10 自然日，覆盖长假）。
-def expected_latest_trade_day(now: datetime) -> str:
-    """期望最新交易日（数据湖应含此日完整数据）。
-
-    Args:
-        now: 当前时刻。
-
-    Returns:
-        YYYY-MM-DD。盘后交易日→今天；否则→上一个交易日；全非交易日兜底 today。
-    """
-    from datetime import timedelta
-    today = now.strftime("%Y-%m-%d")
-    # 盘后（15:00 之后）且今天交易日 → 期望今天
-    if now.time() >= time(15, 0) and is_trading_day(today):
-        return today
-    # 否则回溯找上一个交易日（最多 10 自然日，覆盖长假 + 周末）
-    for i in range(1, 11):
-        prev = (now - timedelta(days=i)).strftime("%Y-%m-%d")
-        if is_trading_day(prev):
-            return prev
-    return today  # 兜底：窗口内无交易日（极端长假），返 today 让检查自然 FAIL 告警
+# expected_latest_trade_day 已下沉 data/calendar.py（T9 · 2026-08-15），本模块顶部
+# re-export（见文件头 import）；实现与物理意图注释随迁至 data.calendar。
