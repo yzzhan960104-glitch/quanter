@@ -4,7 +4,7 @@
  * 当前路由（6 条，2026-08-13 · G8 caisen 死视图清理后）：
  * - /           → 重定向 /discovery（搜索实验室：参数发现敏感性分析/热力图，研究第一入口）
  * - /discovery  → DiscoveryLabView（搜索实验室：敏感性仪表板/热力图/搜索进展，spec §4.3 只读）
- * - /dashboard  → DashboardView（宏观·板块驾驶舱）
+ * - /dashboard  → DashboardView（活跃股池驾驶舱：2026-08-15 CR-8 删板块图块后单块布局）
  * - /live       → LiveCockpitView（实盘交易中控：QMT 连接 + 下单 + 订单/资产）
  * - /data       → DataLakeView（数据湖资产白盒反射）
  * - /cockpit    → CockpitView（综合看板：聚合流水/日志/心跳/资金/数据健康）

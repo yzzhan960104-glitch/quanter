@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
-"""板块只读端点（server/api/v1/macro.py）契约测试。
+"""活跃股池只读端点（server/api/v1/macro.py）契约测试。
 
 设计意图（为什么要有这套测试）：
-    /macro/sector/flow 是前端驾驶舱「板块轮动」的【唯一后端供给】：
-      - /macro/sector/flow：板块资金流排名 + 活跃股池（板块轮动监控）
+    /macro/pool 是前端驾驶舱「活跃股池」的【唯一后端供给】：
+      - /macro/pool：活跃股池（daily 内存湖前 50 只）
 
-    原宏观 CTA 端点 /macro/regime 与 /macro/credit（CreditRegime 信贷状态机）
-    已于 2026-07 随 CreditRegime 整体下线删除；/macro/factors/{symbol}（单标的
-    ATR 微观定权）于 T7 架构治理批 2 删除（前端零调用方，颈线法自带 compute_atr
-    不依赖 factors）。本测试随之移除对应用例，仅保留板块端点的离线降级契约。
+    下线史（本测试随之收缩，防复活）：
+      原宏观 CTA 端点 /macro/regime 与 /macro/credit（CreditRegime 信贷状态机）
+      已于 2026-07 随 CreditRegime 整体下线删除；/macro/factors/{symbol}（单标的
+      ATR 微观定权）于 T7 架构治理批 2 删除（前端零调用方）；/macro/sector/flow
+      （板块资金流 + 活跃股池复合端点）于 2026-08-15 CR-8 处置删除——sector 湖
+      2026-07-27 退役后 sectors 字段结构性恒空，端点收缩为纯活跃股池 /macro/pool。
 
     本测试锁死两条契约：
-      1) /macro/sector/flow 在无 sector 湖时返回 {sectors:[], pool:[]} 空结构不抛；
-      2) /macro/sector/flow 活跃股池走内存湖 reader.symbols()（零 IO，不重读 daily）。
+      1) /macro/pool 在无 daily 湖时返回 {pool: []} 空结构不抛；
+      2) /macro/pool 活跃股池走内存湖 reader.symbols()（零 IO，不重读 daily）。
 
     Why TestClient 复用 presentation.server.main:app 单例：DataLakeReader 单例 monkeypatch
     重置 _instance 与 _lakes，模拟「湖未载入」的离线场景以验证降级契约。
@@ -36,44 +38,55 @@ def client():
 
 
 # --------------------------------------------------------------
-# 契约 1：/macro/sector/flow 无 sector 湖 → 返空 {sectors:[], pool:[]} 不抛
+# 契约 0：旧路径 /macro/sector/flow 已删（CR-8 · 2026-08-15）——防复活钉
 # --------------------------------------------------------------
 
-def test_macro_sector_flow_empty_when_no_lake(client, monkeypatch):
-    """无 sector/daily parquet → /macro/sector/flow 返 {sectors:[], pool:[]} 不抛。
+def test_macro_sector_flow_route_removed(client):
+    """/macro/sector/flow 不再注册（CR-8 下线）——请求应 404 而非 200。
 
-    离线降级红线：板块资金流缺失时前端容错渲染空表。
-    端点直读 parquet（sector 是快照表非时序，不走 DataLakeReader），故 mock 路径不存在。
+    Why 钉死：sector 湖 2026-07-27 退役后该端点 sectors 恒空，属「结构性恒空死端」；
+    若有人复活旧路由（复制历史代码），本用例让契约 gate 之外多一层行为层防线。
     """
-    from config import LAKE_CONFIG
-    monkeypatch.setitem(LAKE_CONFIG["lakes"], "sector", "/nonexistent/sector.parquet")
-    monkeypatch.setitem(LAKE_CONFIG["lakes"], "daily", "/nonexistent/daily.parquet")
-
     resp = client.get("/api/v1/macro/sector/flow")
+    assert resp.status_code == 404
+
+
+# --------------------------------------------------------------
+# 契约 1：/macro/pool 无 daily 湖 → 返空 {pool: []} 不抛
+# --------------------------------------------------------------
+
+def test_macro_pool_empty_when_no_lake(client, monkeypatch):
+    """无 daily parquet → /macro/pool 返 {pool: []} 不抛。
+
+    离线降级红线：daily 湖缺失时前端容错渲染空表（watermark 兜底），端点不得抛 5xx。
+    """
+    from data.lake_reader import DataLakeReader
+    # mock reader.symbols 返空列表，模拟「daily 湖未载入」的离线场景
+    fake_reader = type("R", (), {
+        "symbols": lambda self, lake=None: [],
+    })()
+    monkeypatch.setattr(DataLakeReader, "get_instance", lambda: fake_reader)
+
+    resp = client.get("/api/v1/macro/pool")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["sectors"] == []
     assert body["pool"] == []
 
 
-def test_macro_sector_flow_pool_from_reader_symbols(client, monkeypatch):
+def test_macro_pool_from_reader_symbols(client, monkeypatch):
     """#5：活跃股池走内存湖 reader.symbols()，不重读 408MB daily parquet。
 
     物理意图：原实现每请求 read_parquet(daily) 仅取 symbol 列表，是 dashboard 性能黑洞；
     改走 reader.symbols()（内存湖 index）零 IO。mock reader.symbols 返固定列表验证接线，
-    且 sector parquet 不存在时 sectors=[] 而 pool 来自 reader.symbols（证明不再依赖 daily parquet）。
+    并验证 pool 元素形态为 {symbol: 代码} 记录（前端表格 code 列依赖此形状）。
     """
     from data.lake_reader import DataLakeReader
-    from config import LAKE_CONFIG
     fake_reader = type("R", (), {
         "symbols": lambda self, lake=None: ["000001.SZ", "600000.SH", "510300.SH"],
     })()
     monkeypatch.setattr(DataLakeReader, "get_instance", lambda: fake_reader)
-    monkeypatch.setitem(LAKE_CONFIG["lakes"], "sector", "/nonexistent/sector.parquet")
 
-    resp = client.get("/api/v1/macro/sector/flow")
+    resp = client.get("/api/v1/macro/pool")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["sectors"] == []
     assert [p["symbol"] for p in body["pool"]] == ["000001.SZ", "600000.SH", "510300.SH"]
-

@@ -28,7 +28,8 @@ import { logger } from './utils/logger'
 
 // 全局强制暗黑终端模式：在 <html> 上挂 .dark 类，触发 EP dark css-vars
 document.documentElement.classList.add('dark')
-// 注册 ECharts 暗色主题（DashboardView 等图表组件用 theme="terminal-dark"）
+// 注册 ECharts 暗色主题（DiscoveryLab/LiveCockpit 等图表组件用 theme="terminal-dark"；
+// DashboardView 的板块图块已随 CR-8 删除，本视图不再用 ECharts）
 initTerminalDarkTheme()
 
 const app = createApp(App)
