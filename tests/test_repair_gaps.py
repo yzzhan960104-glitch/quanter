@@ -275,3 +275,76 @@ def test_partial_persist_on_fetch_error(tmp_path, monkeypatch, capsys):
     breaker = json.loads((tmp_path / ".repair_breaker.json").read_text(encoding="utf-8"))
     assert breaker["fail_count"] == 1
     assert breaker.get("open_until", 0) == 0
+
+
+# ============ T6 评审 #1：daily/adj 原子入列（被打断日零 NaN 落湖）===========
+# 物理意图（P1-A 红线同案）：旧实现 daily fetch 成功即 append、adj_factor 随后抛限频
+# → break → 该日 daily 已入列而 adj 永缺 → merge how="left" 后 adj_factor=NaN →
+# 前复权价格全 NaN 落湖，且 scan 按 index 在场判定「已补」永不复查（sync_daily_
+# incremental 的 adj NaN 守卫先例明文此污染）。修复语义：d/a 两个 fetch 都成功后才
+# 一起 append——被打断日本身不应出现（brief 字面「已拉 1..N-1 日落盘」）。
+
+
+def test_partial_persist_on_adj_error_atomic_day(tmp_path, monkeypatch, capsys):
+    """T6 评审 #1：第 N 日 adj_factor 抛限频（该日 daily 已成功）→ 该日整体不入湖。
+
+    场景：gap 缺 09-03/09-04/09-05 三日，第 3 日（09-05）daily 拉取成功、adj_factor
+    抛频率超限。旧实现 09-05 的 daily 已 append → 该日以 adj_factor=NaN → 前复权
+    价格全 NaN 落湖（+3 行）；修复后 daily/adj 原子入列 → 09-05 零贡献（+2 行），
+    已拉 09-03/09-04 照常部分落盘，partial/熔断计数语义不变。
+    """
+    from data.tools import repair_gaps as rg
+
+    # 湖：09-02 与 09-06 在，中间 09-03~09-05 缺（一个 unjustified gap 三日）
+    lake_path = tmp_path / "a_shares_daily.parquet"
+    _mk_lake([("2024-09-02", "000001.SZ"), ("2024-09-06", "000001.SZ")]).to_parquet(lake_path)
+
+    # mock --auto 内部 scan（局部 import，patch 源模块属性；同 get_pro 手法）
+    monkeypatch.setattr(
+        "data.tools.scan_integrity.scan",
+        lambda *a, **k: {"gaps": [{"symbol": "000001.SZ", "start": "2024-09-03",
+                                   "end": "2024-09-05",
+                                   "missing_dates": ["2024-09-03", "2024-09-04", "2024-09-05"],
+                                   "suspend_justified": False}]},
+    )
+    # mock get_pro（pro 本体不被真调——_fetch_paged 也被 mock）
+    monkeypatch.setattr("data._tushare_compat.get_pro", lambda: object())
+    # 日间隔降速默认 1.5s——测试置 0 免 3s 空转（降速逻辑由 env 默认值保证，不在此验证）
+    monkeypatch.setattr(rg, "REPAIR_DAY_SLEEP", 0.0)
+
+    def _fake_fetch_paged(pro, api, tdc):
+        """daily 全部成功；第 3 日（20240905）adj_factor 抛服务端限频原文。"""
+        if tdc == "20240905" and api == "adj_factor":
+            raise Exception("抱歉，您访问接口(adj_factor)频率超限(500次/分钟)")
+        if api == "daily":
+            return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": tdc,
+                                  "open": 10.0, "high": 11.0, "low": 9.0,
+                                  "close": 10.5, "vol": 1000}])
+        return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": tdc,
+                              "adj_factor": 1.0}])
+
+    monkeypatch.setattr(rg, "_fetch_paged", _fake_fetch_paged)
+
+    # 旧实现：09-05 的 daily 已入列而 adj 永缺 → adj_factor=NaN → 前复权价格全 NaN
+    # 落湖（+3 行，P1-A 红线）→ 此处红
+    rc = rg.main(["--auto", "--lake-dir", str(tmp_path)])
+
+    # ① 进程不 raise，exit 0，stdout 带 partial 标记；净增 +2（不含被打断日）
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "partial" in out, "stdout 必须带 partial 标记（供 pipeline log 识别部分落盘）"
+    assert "+2" in out
+
+    # ② 已拉 1..N-1 日（09-03/09-04）merge 落盘；被打断日（09-05）零贡献不在湖——
+    #    旧实现该日以 adj_factor=NaN 落湖（前复权价格全 NaN 污染），此处必须不在
+    dates = (pd.read_parquet(lake_path).xs("000001.SZ", level="symbol").index
+             .strftime("%Y-%m-%d").tolist())
+    assert "2024-09-03" in dates and "2024-09-04" in dates, "已拉日必须部分落盘"
+    assert "2024-09-05" not in dates, "被打断日不得以 adj_factor=NaN 形式落湖（原子入列）"
+    assert "2024-09-02" in dates and "2024-09-06" in dates
+    assert len(pd.read_parquet(lake_path)) == 4
+
+    # ③ 熔断计数 +1（adj 中断与 daily 中断同语义：记失败，连续 3 次才开熔断）
+    breaker = json.loads((tmp_path / ".repair_breaker.json").read_text(encoding="utf-8"))
+    assert breaker["fail_count"] == 1
+    assert breaker.get("open_until", 0) == 0

@@ -160,6 +160,8 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
             logger.info("repair_gaps 进度：%d/%d 日已拉（raw %d adj %d 帧）",
                         _i, _total_days, len(raw_frames), len(adj_frames))
         # 总超时（T13-B #4）：超时停止拉新段，已拉部分继续 merge 落盘（部分补采 > 完全不补）
+        # 观测盲点（T6 评审 #3 注明，保持 T13-B 既有语义不改）：超时不置 partial →
+        # main 记 success=True，超时打断不进熔断失败计数（与限频中断分支计数方向不同）。
         if time.monotonic() > _deadline:
             logger.warning("repair_gaps 总超时（%ds）：已拉 %d/%d 日，部分补采落盘",
                            REPAIR_TIMEOUT, _i, _total_days)
@@ -176,17 +178,25 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
         # partial 标记透传 main → 记熔断失败计数（连续 3 次中断才熔断退避，非单次雪崩）。
         try:
             d = _fetch_paged(pro, "daily", tdc)
+            a = _fetch_paged(pro, "adj_factor", tdc)
+            # T6 评审 #1（daily/adj 原子入列）：两个 fetch 都成功后才一起 append。
+            # Why 不逐个 append：daily 成功即入列、adj 随后抛限频 → 该日 daily 在列
+            # 而 adj 永缺 → merge how="left" 后 adj_factor=NaN → 前复权价格全 NaN
+            # 落湖（P1-A 红线，sync_daily_incremental 的 adj NaN 守卫同案先例），且
+            # scan 按 index 在场判「已补」永不复查。被打断日零贡献——宁缺勿 NaN。
             if not d.empty:
                 raw_frames.append(d)
-            a = _fetch_paged(pro, "adj_factor", tdc)
             if not a.empty:
                 adj_frames.append(a)
         except Exception as exc:
             partial = True
+            # exc_info=True（T6 评审 #2）：非限频类 bug（网络栈/解析 KeyError 等）若只
+            # 落 str(exc) 会丢栈——限频原文可肉眼辨、bug 不可辨，必须留全栈供排查。
             logger.warning(
                 "repair_gaps 第 %d/%d 日（%s）拉取异常：%s —— 停止拉新日，"
                 "已拉 %d 日走部分补采落盘（部分补采 > 完全不补；单日 raise 会丢弃全部已拉数据）",
                 _i + 1, _total_days, td, exc, _i,
+                exc_info=True,
             )
             break
     if not raw_frames:
