@@ -182,6 +182,12 @@ def _reset_resilience_singletons():
         resilience.akshare_breaker,
     ):
         _singleton.reset()
+    # CR-3（2026-08-15）盘中组合级熔断节流（trading.alerting.PortfolioBreakerThrottle）
+    # **刻意不入本清单**：它与 data.resilience 单例不同，按 W1-A「模块级可变状态收口」
+    # 红线经 EnginePorts.breaker_throttle 注入（与 QuoteBlackoutThrottle 同范式）——
+    # 无模块级单例可 reset，每用例自建 ports/engine 即自新（last_check_ts/miss_streak
+    # 生命周期绑定 engine 实例）。若未来引入模块级默认实例，须即刻加入上方清单
+    # （reset() 已就绪）；测试内复用同一实例做多轮 streak 场景时显式调 .reset()。
     yield
 
 

@@ -71,6 +71,13 @@ W1-A/T2 反查切断收口语义：原 phases 经函数内 lazy ``import trading
       ``ports.blackout`` 注入本函数（``ports.blackout.fire_if_due(now)`` 原子方法替代原
       engine 反查读写）。测试改经构造 ``QuoteBlackoutThrottle(last_ts=0.0)`` 注入 ports 重置节流
       （详见 test_stop_loss_monitor_decide_exit._make_ports_with_fresh_blackout）。
+    - CR-3（2026-08-15）盘中组合级熔断三分支：``check_daily_loss_limit``（compute.breaker 纯
+      判定 + 基线缺失 fail-closed）/ ``emergency_halt``（gateway_service 粘滞锁）/
+      ``cancel_all_open_orders``（io.breaker 撤单）顶部直 import 物理真身；节流/失败计数状态
+      ``PortfolioBreakerThrottle`` 经 ``ports.breaker_throttle`` 注入（与 blackout 同范式）。
+      接入点在 monitor ⑤ pending 撤单后、⑥ 聚合告警前（``_check_portfolio_loss_limit``），
+      测试 patch 目标 = ``trading.phases.stop_loss.{emergency_halt, cancel_all_open_orders,
+      _alert_critical}`` + ``trading.compute.breaker._alert_critical``（breaker 副用）。
     - ``clock``（``from trading import clock``）：单一时间源（测试经 ``monkeypatch clock.today/now``
       在共享模块对象上 patch → 命中；无 ``patch("trading.engine.clock")`` 整体 mock 驱动 stop_loss）。
     - ``position_book``（``from trading import position_book as _position_book``）：持仓账本（测试经
@@ -131,7 +138,18 @@ from trading.phases.exit import place_take_profit
 # W1-A/T2-Task7：get_gateway / _submit 反查切断 → 顶部直接 import gateway_service 真身（原 engine
 # re-export 反查 · gateway_service 不反向 import 本文件 · 无环 · patch engine.get_gateway /
 # engine._submit 失效 → Task 8-19 迁 monkeypatch trading.phases.stop_loss.get_gateway / _submit）。
-from trading.gateway_service import get_gateway, _submit
+# CR-3（2026-08-15）：emergency_halt 同源补入（熔断粘滞锁：置 lock_down 拒新单，**非**停调度）。
+from trading.gateway_service import get_gateway, _submit, emergency_halt
+# CR-3（2026-08-15）：盘中组合级熔断三分支的判定核 + 撤单动作 + 节流状态机，全部顶部
+# 直 import 物理真身（W1-A 红线：禁 lazy engine 反查）：
+#   - check_daily_loss_limit（compute.breaker 纯判定 + 基线缺失 fail-closed 副用）；
+#   - cancel_all_open_orders（io.breaker 撤未终态单副作用壳，post_close 熔断同款）；
+#   - PortfolioBreakerThrottle（alerting 节流状态机 dataclass，仅类型标注用——运行态
+#     经 ports.breaker_throttle 注入，本模块不自建实例）。
+# 三者均为底层叶子（breaker→critical / io.breaker→types / alerting→stdlib），无环。
+from trading.compute.breaker import check_daily_loss_limit
+from trading.io.breaker import cancel_all_open_orders
+from trading.alerting import PortfolioBreakerThrottle
 
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.stop_loss）：stop_loss_monitor 原是
 # engine 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
@@ -185,14 +203,16 @@ async def stop_loss_monitor(
                      decide_exit 契约（execution.py:131-201）+ simulate_exit cfg
                      （backtest.py:177-183）。None 时纯走 stop_prices 旧路径。
         pending_ctx: {symbol: cancel_on}（D11 pending 撤单）。None 时跳过 pending 巡检。
-        ports: W1-A/T2 注入的 EnginePorts 窄接口（仅消费 ``ports.blackout``——行情黑屏
+        ports: W1-A/T2 注入的 EnginePorts 窄接口（消费 ``ports.blackout``——行情黑屏
                30min 节流状态机，生产主路径走 ``ports.blackout.fire_if_due(now)`` 原子方法：
-               单一 Lock 内 check+mark，杜绝 catchup 重叠 / daemon 并发双发告警）。生产路径
-               ``_stoploss`` wrapper 总传 ``self._ports``（含 blackout），与原 engine 模块级
-               ``_last_quote_blackout_alert_ts`` 反查语义等价（行为零变更）。None 时（测试
-               裸调 / 未装配）等价 blackout 跳过——仅非生产裸调（生产 _stoploss 总传
-               self._ports），不阻断监控主链路。blackout 仅本函数用，``scan_expired_positions``
-               / ``close_expired_positions`` 不加 ports 参数。
+               单一 Lock 内 check+mark，杜绝 catchup 重叠 / daemon 并发双发告警；及
+               ``ports.breaker_throttle``——CR-3 盘中组合级熔断 5min 评估节流 + 连续
+               评估失败计数状态机，走 ``should_check(now)`` 原子占坑）。生产路径
+               ``_stoploss`` wrapper 总传 ``self._ports``（含 blackout + breaker_throttle），
+               与原 engine 模块级 ``_last_quote_blackout_alert_ts`` 反查语义等价（行为
+               零变更）。None 时（测试裸调 / 未装配）等价两节流均跳过——仅非生产裸调
+               （生产 _stoploss 总传 self._ports），不阻断监控主链路。两状态机仅本函数
+               用，``scan_expired_positions`` / ``close_expired_positions`` 不加 ports 参数。
 
     Returns:
         盘中：{"checked":N, "stop_triggered":M, "fallback_used":K, "pending_cancelled":P,
@@ -526,6 +546,24 @@ async def stop_loss_monitor(
                     logger.warning("pending 撤单失败 symbol=%s order_id=%s 原因=%s",
                                    sym, oid, exc)
 
+    # ── CR-3（2026-08-15）：盘中组合级 -3% 熔断评估点前移（⑤ pending 撤单后、⑥ 聚合告警前）──
+    # 物理意图：旧态「日内 -3% 熔断」唯一判定点在 15:30 post_close（盘后闸）——盘中穿线
+    # 后敞口要裸奔至收盘才停手（最长 ~4 小时无保护）。本评估点把同一判定（同
+    # get_start_equity 基线读口 + 同 check_daily_loss_limit 纯判定）搬进 30s 巡检，
+    # 5min 节流（30s×10 轮才评一次：query_asset 是柜台 C++ 查询，防打柜台 + 防告警刷屏）。
+    # 触发走 emergency_halt 粘滞锁（拒新单）而非 raise _CriticalHalt——停调度会连带
+    # 杀死止损监控自身（盘中绝对不可接受：熔断后持仓仍需监控存活撤残留单/盯持仓）；
+    # 评估失败（query_asset 断线返 {}）只观测不动作（断线场景 :271 查持仓失败已有
+    # L1 兜底）。ports=None 守卫与 blackout 同口径：仅非生产裸调，不阻断监控主链路。
+    if ports is not None and ports.breaker_throttle.should_check(time.monotonic()):
+        try:
+            await _check_portfolio_loss_limit(gw, ports.breaker_throttle)
+        except Exception:
+            # 兜底（对齐 post_close 熔断段「整体异常不阻塞」范式）：评估路径任何意外
+            # 异常（含未来改动引入的 bug）绝不反噬止损巡检主链路——评估点失败最多
+            # 退化为「退回盘后闸」，监控本体死亡才是盘中不可接受态。
+            logger.exception("CR-3 盘中熔断评估异常（不影响止损巡检主链路）")
+
     # C-4 U4：止损发卖失败聚合 L2 CRITICAL——漏止损真金损失，研究员须知情（但整批监控不停）。
     # Why 聚合非逐只：防多标的连板跌停时逐只告警风暴（spec R3）。Why 限 live：dry_run/测试
     # 的发卖失败非真金风险。与 pre_open 部分拒同范式：L2 不停调度，_halted 保持 False。
@@ -538,6 +576,132 @@ async def stop_loss_monitor(
     return {"checked": n_checked, "stop_triggered": n_triggered,
             "fallback_used": n_fallback, "pending_cancelled": n_pending_cancelled,
             "mode": _mode()}
+
+
+# ============================================================================
+# CR-3（2026-08-15）：盘中组合级日内 -3% 熔断评估（评估点前移 · 三分支设计锁定）
+# ============================================================================
+async def _check_portfolio_loss_limit(gw: Any, throttle: PortfolioBreakerThrottle) -> None:
+    """盘中组合级「日内 -3%」熔断评估（stop_loss_monitor ⑤后接入点唯一调用 · 5min 节流内）。
+
+    物理定位（tech-debt CR-3 · 与 post_close.py:282 熔断段同基线读口 + 同判定核）：
+        把「日内权益回撤 ≤ -3% 即当日停手」的判定从 15:30 盘后闸前移进盘中 30s 巡检，
+        穿线即时收口（撤未终态单 + 粘滞锁拒新单），不再裸奔至收盘。
+
+    三分支（设计锁定 · 全部「不 raise _CriticalHalt」——停调度会杀死止损监控自身）：
+        ① 触发（有基线且真实回撤 ≤ 阈值）：cancel_all_open_orders + emergency_halt +
+           CRITICAL。先撤后 halt（对齐 post_close 顺序：halt 置 lock_down 后柜台查询
+           走锁定态返空，先撤才能真撤到）。
+        ② 评估失败（query_asset 断线/锁定返 {} 或异常）：miss_streak 原子自增，≥3 才推
+           CRITICAL（评估 5min 节流 ⇒ 至多 5min 一条不刷屏）；不停调度不 halt——断线
+           场景 monitor 查持仓失败已有 L1 兜底，这里只补「熔断在岗性」观测。
+        ③ 基线缺失（start=None/≤0，判定交 breaker fail-closed SSoT）：live 时 breaker
+           raise _CriticalHalt → **catch 转换形态**为 emergency_halt + CRITICAL（对齐
+           DG-G3「不选仅告警不动作」，但保监控存活）；dry_run 时 breaker 返 True（C-1
+           停手语义）+ 自身已告警 → 本层只 warning（影子态无真金敞口，不中断）。
+        评估成功且未触发 → miss_streak 清零（断线计数不跨恢复期累积）。
+
+    Args:
+        gw: 网关实例（monitor 已保证非 None——②段守卫早返；query_asset 断线/锁定
+            一律返 {} 是 broker 层契约，防脏读陈旧快照）。
+        throttle: ports.breaker_throttle 注入的节流/计数状态机（should_check 已由
+            调用方判定通过并占坑，本函数只消费 record_miss/record_success）。
+    """
+    _aid = _resolve_account_id()
+    # C-6 V2：业务日期 key（熔断基线与 post_close 同口径）走 clock.today。
+    _today = clock.today()
+
+    # ① 读当日开盘基线（与 post_close.py:282 同读口：account_daily.start_total_asset，
+    #    pre_open 的 snapshot_start_equity 写入方）。读异常按基线缺失 fail-closed 处理
+    #    （绝不当 0 也不静默跳过——基线失明正是 breaker fail-closed 分支要接管的态）。
+    try:
+        start = _state_store.get_start_equity(_aid, _today)
+    except Exception:
+        logger.exception("CR-3 读熔断基线异常（按基线缺失 fail-closed 处理）")
+        start = None
+
+    # ② 读当前权益：query_asset 断线/锁定/超时一律返 {}（broker/qmt.py 同口径防脏读）；
+    #    非 dict 返回值（防御 mock/异常网关）与 total_asset 缺失/NaN/≤0 同按「取不到」。
+    curr: Optional[float] = None
+    try:
+        asset = await gw.query_asset()
+        if isinstance(asset, dict):
+            _raw = asset.get("total_asset")
+            # 数值三重防御：类型（int/float，排除 MagicMock/str）+ NaN（_raw==_raw）+ 正数
+            if isinstance(_raw, (int, float)) and _raw == _raw and _raw > 0:
+                curr = float(_raw)
+    except Exception:
+        logger.warning("CR-3 query_asset 异常（按 curr 缺失计 miss_streak）", exc_info=True)
+
+    # ── 分支②评估失败：只观测不动作（不停调度不 halt），连续 ≥3 轮才升级 CRITICAL ──
+    if curr is None:
+        _streak = throttle.record_miss()
+        logger.warning("CR-3 盘中熔断评估失败：query_asset 无有效权益 miss_streak=%d"
+                       "（post_close 盘后闸仍在兜底）", _streak)
+        if _streak >= 3:
+            # 告警频次 = 评估频次（5min 节流）⇒ 至多 5min 一条，不刷屏；单次抖动
+            # （streak 1/2）静默，持续失明 15min 才叫醒人工。
+            _alert_critical(
+                f"盘中熔断评估连续 {_streak} 轮取不到权益（query_asset 断线/锁定），"
+                f"组合级 -3% 熔断盘中失明（post_close 盘后闸仍在），人工查网关")
+        return
+
+    # ── 判定交 breaker SSoT（有基线纯判定 / 基线缺失 fail-closed 副用收口在判定层）──
+    try:
+        tripped = check_daily_loss_limit(start, curr)
+    except _CriticalHalt:
+        # ── 分支③基线缺失（live）：breaker 抛 L1 停调度——catch 转换形态，绝不逸出。
+        #    对齐 DG-G3「不选仅告警不动作」，但把「停调度」转换成「粘滞锁拒新单」：
+        #    监控自身存活继续巡检（熔断后持仓仍需止损监控兜底），新单被 lock_down 全拒。
+        logger.critical(
+            "【CR-3 盘中熔断】基线缺失（start=%s date=%s）→ emergency_halt 拒新单"
+            "（不停调度，保止损监控存活；人工核对 pre_open 基线抓取）", start, _today)
+        try:
+            emergency_halt()
+        except Exception:
+            logger.exception("CR-3 emergency_halt 异常（基线缺失路径，已 CRITICAL 知会人工）")
+        _alert_critical(
+            f"盘中熔断：当日基线缺失（account_daily.start 未写入，date={_today}），"
+            f"已 emergency_halt 拒新单（不停调度，人工核对 pre_open 基线抓取）")
+        return
+
+    # ── 分支③基线缺失（dry_run）：breaker 返 True（C-1 停手语义）+ 自身已推 CRITICAL
+    #    （breaker fail-closed 副用）。本层只 warning 不动作——影子观测态无真金敞口，
+    #    halt 会把影子评估链路一起锁死（与 breaker「dry 不抛 halt 进程」裁决同口径）。
+    if start is None or start <= 0:
+        logger.warning("CR-3 盘中熔断基线缺失（dry_run 影子态，跳过评估不动作）"
+                       "date=%s curr=%s（breaker 已推 CRITICAL 告警）", _today, curr)
+        return
+
+    # ── 分支①触发（真实回撤 ≤ -3%）：三件套 = 撤未终态单 + emergency_halt + CRITICAL ──
+    if tripped:
+        _pct = (curr - float(start)) / float(start) * 100
+        logger.critical(
+            "【CR-3 盘中熔断】触发！date=%s start=%s curr=%s 回撤=%.2f%%"
+            "（评估点前移：执行撤单 + emergency_halt，不停调度）", _today, start, curr, _pct)
+        try:
+            # 先撤后 halt（对齐 post_close 顺序）：halt 置 lock_down 后柜台查询走锁定
+            # 态返空，先撤才能真撤到；单笔失败不中断（io.breaker 尽最大努力撤完）。
+            _cb = await cancel_all_open_orders(gw)
+            if _cb.get("unconfirmed", 0) > 0:
+                logger.critical(
+                    "【CR-3 盘中熔断】撤单 %s 笔未确认终态（发起 %s 笔）——敞口可能残留，"
+                    "人工复核柜台真实持仓", _cb.get("unconfirmed"), _cb.get("cancelled"))
+        except Exception:
+            logger.exception("CR-3 熔断撤单异常（继续 emergency_halt）")
+        try:
+            emergency_halt()
+        except Exception:
+            logger.exception("CR-3 emergency_halt 异常（已尽力撤单）")
+        _alert_critical(
+            f"盘中组合级熔断触发：日内回撤 {_pct:.2f}%（start={start} curr={curr}），"
+            f"已撤未终态单 + emergency_halt 拒新单（人工接管）")
+        return
+
+    # ── 评估成功且未触发：miss_streak 清零（网关自愈后断线计数从 0 重数）──
+    throttle.record_success()
+    logger.info("CR-3 盘中熔断评估未触发：date=%s start=%s curr=%s 回撤=%.2f%%",
+                _today, start, curr, (curr - float(start)) / float(start) * 100)
 
 
 # ============================================================================

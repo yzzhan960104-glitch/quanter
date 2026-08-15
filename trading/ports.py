@@ -19,6 +19,11 @@
     依赖方向：engine 构造 ``QuoteBlackoutThrottle()`` 装入 ports.blackout → stop_loss 经
     ``ports.blackout.fire_if_due`` 原子读写——与 gate/whitelist 同口径（显式参数透传）。
 
+    CR-3 追加（盘中组合级熔断评估节流 · 2026-08-15）：5min 评估节流 + 连续评估失败
+    计数（miss_streak）同属跨轮巡检可变运行态，同红线同范式收敛为
+    ``PortfolioBreakerThrottle`` dataclass 实例，经 ``EnginePorts.breaker_throttle``
+    注入 stop_loss_monitor（依赖方向与 blackout 完全同构）。
+
     四个依赖逐一对齐原 ``_ACTIVE_ENGINE`` / 模块级路径的语义（行为零变更）：
         gate            ← TradingEngine._pre_open_gate（盘前三段闸，返 (ok, reason)）
         whitelist_add   ← self._dynamic_whitelist.update（set 原地并集，对齐原 ``|=``）
@@ -30,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
 
-from trading.alerting import QuoteBlackoutThrottle
+from trading.alerting import PortfolioBreakerThrottle, QuoteBlackoutThrottle
 
 
 @dataclass
@@ -52,11 +57,19 @@ class EnginePorts:
             失效时推 CRITICAL，30min 节流防风暴）。默认 ``field(default_factory=...)`` 让
             未传 blackout 的旧调用方（测试裸调 / scan_expired / close_expired）自动装配
             默认实例，无破坏（blackout 默认 last_ts=0.0 + interval=1800.0 等价原模块初值）。
-            ⚠️ dataclass 规则：有默认字段必须在无默认字段之后——blackout 放末尾合规。
+        breaker_throttle: 盘中组合级熔断 5min 评估节流 + 连续评估失败计数状态机
+            （CR-3 · 2026-08-15「评估点前移」，与 blackout 同范式同注入方向）。仅
+            ``stop_loss_monitor`` 消费（⑤ pending 撤单后 5min 节流评估「日内 -3% 组合
+            熔断」，miss_streak ≥3 升级观测）。default_factory 保既有构造（engine
+            :636 与全部测试构造 EnginePorts(...) 不传此字段也自动装配新实例）——
+            状态生命周期绑定 engine 实例（每 TradingEngine 一份），非模块级单例。
+            ⚠️ dataclass 规则：有默认字段必须在无默认字段之后——blackout/breaker_throttle
+            放末尾合规。
     """
 
     gate: Callable[[str, Any], Awaitable[tuple[bool, str]]]
     whitelist_add: Callable[[Iterable[str]], None]
     whitelist_clear: Callable[[], None]
-    # ⚠️ blackout 放最后（gate/whitelist_* 无默认值，有默认字段必须在无默认之后）。
+    # ⚠️ blackout/breaker_throttle 放最后（gate/whitelist_* 无默认值，有默认字段必须在无默认之后）。
     blackout: QuoteBlackoutThrottle = field(default_factory=QuoteBlackoutThrottle)
+    breaker_throttle: PortfolioBreakerThrottle = field(default_factory=PortfolioBreakerThrottle)

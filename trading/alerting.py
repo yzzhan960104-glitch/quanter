@@ -13,6 +13,11 @@
     + 经 EnginePorts 注入（依赖方向：engine 持实例 → ports.blackout → stop_loss_monitor）。
     本模块定义该 dataclass：``QuoteBlackoutThrottle``。
 
+CR-3 追加（tech-debt-full-wave · 2026-08-15）：「盘中组合级 -3% 熔断评估点前移」的
+节流/计数运行态同属此类可变状态（5min 评估节流 + 连续评估失败计数），按同一红线
+同范式收敛为 ``PortfolioBreakerThrottle`` dataclass，经 ``EnginePorts.breaker_throttle``
+注入 stop_loss_monitor（依赖方向与 blackout 完全同构）。
+
 设计契约（行为等价 · 与原 engine 模块级实现逐字对齐）：
     - ``should_alert(now)`` ⟺ ``now - last_ts >= interval``（原 ``_now_mono - _last_ts >= _INTERVAL``）
       首次 ``last_ts=0.0`` → ``now >= interval`` 即 True（与原模块级初值 0.0 + 首轮触发等价）。
@@ -140,3 +145,103 @@ class QuoteBlackoutThrottle:
                 self.last_ts = now
                 return True
             return False
+
+
+@dataclass
+class PortfolioBreakerThrottle:
+    """盘中组合级熔断 5min 评估节流 + 连续评估失败计数状态机（CR-3 · 2026-08-15）。
+
+    物理意图（tech-debt CR-3「评估点前移」· 三分支设计的公共基础设施）：
+        「日内 -3% 组合熔断」原唯一判定点在 15:30 post_close（盘后闸）——盘中穿线后
+        敞口要裸奔至收盘才停手。CR-3 把同一判定（同 ``get_start_equity`` 基线读口 +
+        同 ``check_daily_loss_limit`` 纯判定）前移进 stop_loss_monitor 的 30s 巡检。
+        但 ``query_asset`` 是柜台同步 C++ 查询（投线程池 + 超时兜底），每 30s 评估
+        一轮既打柜台又会在触发/失明场景刷屏。本状态机承载两职：
+        - ``should_check``：5min 评估节流（同窗内至多评估一次，单一 Lock 内
+          check+mark 原子——与 ``QuoteBlackoutThrottle.fire_if_due`` 同范式）；
+        - ``miss_streak``：连续评估失败（query_asset 断线返 {}/异常）计数，≥3 才推
+          CRITICAL——单次抖动不叫醒人工，持续失明（3×5min=15min）才升级观测。
+
+    Why 经 EnginePorts 注入而非模块级 global（W1-A「模块级可变状态收口」红线）：
+        节流/计数是跨轮巡检的可变运行态，模块级 global 会被 engine/测试/多实例互相
+        污染；dataclass 实例 + ``ports.breaker_throttle`` 显式透传让状态生命周期绑定
+        engine 实例（每 TradingEngine 一份，30s 巡检共享同一份 → 节流窗口与失败
+        计数才跨轮连续）。与 ``QuoteBlackoutThrottle``（ports.blackout）完全同构。
+
+    线程安全（``threading.Lock``，与本模块 QuoteBlackoutThrottle / trading.critical
+    同范式）：``should_check`` 在单一 Lock 内 check+mark 原子返回——IntervalTrigger
+    catchup 重叠 / fire_and_forget daemon 并发下至多一条线程拿到 True；record_miss /
+    record_success / reset 亦各自单次加锁，无重入需求故用 ``Lock`` 非 ``RLock``。
+
+    Attributes:
+        last_check_ts: 上次评估时间戳（``time.monotonic()`` 域，单调时钟避开系统时钟
+            漂移）。默认 ``0.0`` = 从未评估，首轮 ``now - 0 >= interval`` 必触发。
+        interval: 评估节流窗口（秒），默认 ``300.0``（= 5min，CR-3 设计锁定值：
+            30s 巡检 × 10 轮评一次——柜台查询频率与告警频次的平衡点）。
+        miss_streak: 连续评估失败计数（成功评估且未触发即清零；≥3 推 CRITICAL）。
+    """
+
+    last_check_ts: float = 0.0
+    interval: float = 300.0   # 5min（CR-3 设计锁定）
+    miss_streak: int = 0
+
+    # ---------------------------------------------------------------------------
+    # __post_init__ 在 dataclass 字段赋值后建立 Lock（threading.Lock 不可 pickle /
+    # 不可默认工厂共享，必须实例化时新建——与 QuoteBlackoutThrottle 同款）。
+    # ---------------------------------------------------------------------------
+    def __post_init__(self) -> None:
+        # 互斥锁：节流判定 + 失败计数全部单次加锁收口，杜绝并发双评估/双计数。
+        self._lock = threading.Lock()
+
+    def should_check(self, now: float) -> bool:
+        """原子「评估窗口判定 + 占坑」（check+mark 单一 Lock 内，**生产主路径**）。
+
+        ``now - last_check_ts >= interval`` 即到窗：本调用原子更新 last_check_ts 并返
+        True（占住本轮评估权），窗内返 False（不动 last_check_ts）。check-then-act
+        跨步收进互斥区，并发下至多一条线程拿到 True——与 QuoteBlackoutThrottle.
+        fire_if_due 同范式（I-1 fix 的原子化理由同源）。
+
+        Args:
+            now: 当前单调时钟时间戳（``time.monotonic()``，调用方传入）。
+
+        Returns:
+            True=到窗应评估（已原子占坑）；False=5min 窗内（本轮跳过）。
+        """
+        with self._lock:
+            if (now - self.last_check_ts) >= self.interval:
+                self.last_check_ts = now
+                return True
+            return False
+
+    def record_miss(self) -> int:
+        """记一次评估失败（curr 取不到），原子自增并返新计数。
+
+        Why 返回新计数（而非裸 void）：调用方判 ``>= 3`` 需读自增后的值，「自增+读」
+        收进同一互斥区才是真原子（分开则并发下两轮 miss 可同读 2 → 双双不告警漏升线）。
+
+        Returns:
+            自增后的 miss_streak（调用方据此判 ≥3 推 CRITICAL）。
+        """
+        with self._lock:
+            self.miss_streak += 1
+            return self.miss_streak
+
+    def record_success(self) -> None:
+        """评估成功且未触发 → miss_streak 清零。
+
+        物理意图：断线计数不跨恢复期累积——网关自愈后首轮成功评估即归零，后续再断线
+        从 0 重新数（≥3 升线语义恒为「连续失明 15min」而非「当日累计失明」）。
+        """
+        with self._lock:
+            self.miss_streak = 0
+
+    def reset(self) -> None:
+        """全量归零（last_check_ts + miss_streak）——复位口（测试隔离/运维重置用）。
+
+        与 QuoteBlackoutThrottle 的差异：本类无 mark/should_alert 分解方法（消费方
+        只走 should_check 原子路径，无旧调用方兼容包袱）；reset 供测试显式归零复用
+        同一实例的场景（M4 式 conftest autouse 的复位语义同源）。
+        """
+        with self._lock:
+            self.last_check_ts = 0.0
+            self.miss_streak = 0
