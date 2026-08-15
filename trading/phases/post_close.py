@@ -157,7 +157,10 @@ async def post_close(
         {"date":..., "drift":bool, "circuit_breaker":bool, "breaker_skipped"?:bool}
         - drift=True：对账有偏差（run_reconcile 已告警）
         - circuit_breaker=True：日内 -3% 熔断已触发（cancel_all + emergency_halt 已执行）
-        - breaker_skipped=True：无基线跳过熔断（start_equity 未抓到，不拿 0 误触发）
+        - breaker_skipped=True：当前权益缺失跳过熔断（query_asset 无有效 curr_equity，
+          无法判定日内 -3%）——CR-4 后仅 dry_run 出现此标记（live 同场景 raise
+          _CriticalHalt 停调度，异常直传不返此字段）；基线缺失方向 DG-G3 已改
+          fail-closed（dry 停手/live halt），不再走 skipped。
 
     编排顺序（plan 红线 · spec §6 数据流）：
         ① reconcile（持仓对账）→ ② query_trades 兜底（Task 11 follow-up）
@@ -171,7 +174,9 @@ async def post_close(
         2) gw.query_asset → curr_equity（盘后总资产）
         3) check_daily_loss_limit(start, curr) → True 即 cancel_all_open_orders +
            emergency_halt + ERROR 告警
-        缺基线（start=None）→ 跳过 + WARN（不拿 0 触发，防 check(0,X) 永远 False 反永不熔断）。
+        缺基线（start=None）→ DG-G3 fail-closed（dry 返 True 停手 / live raise halt）；
+        缺 curr_equity → CR-4 对称收口（live 同 fail-closed 停调度 + CRITICAL；
+        dry_run 保留 breaker_skipped 标记，无真实资金敞口不抛 halt）。
     """
     # T1-Task8 → W1-A/T2 收口：engine 模块级符号经 engine 反查的设计已全量退役，所有符号
     # 改顶部直接 import 物理真身（gateway_service.get_gateway / state_store / critical /
@@ -295,8 +300,9 @@ async def post_close(
                     _alert_critical(_msg + "（C-1 熔断基线为近似值，人工复盘知悉精度边界）")
         # DG-G3（2026-08-13）：基线链全失效（start + T-1 close 都缺）→ **不再 breaker_skipped**，
         # 让 None 直传 breaker 触发 fail-closed（dry_run 返 True 停手 + CRITICAL / live raise
-        # _CriticalHalt 停调度）。原 breaker_skipped 路径只保留 curr_equity 缺失（无法判定，
-        # 与基线缺失语义不同——基线缺失是「该停手」，curr 缺失是「无法判定」）。
+        # _CriticalHalt 停调度）。原 breaker_skipped 路径只保留 curr_equity 缺失——CR-4
+        # （2026-08-15）起 live 方向同收 fail-closed，仅 dry_run 保留 skipped 标记
+        # （与基线缺失方向对称收口，语义见下方分支）。
         # 步骤 2：拉当前总资产（盘后总资产 = curr_equity）
         curr_equity = None
         if gw is not None and hasattr(gw, "query_asset"):
@@ -304,14 +310,20 @@ async def post_close(
                 asset = await gw.query_asset()
                 curr_equity = (asset or {}).get("total_asset")
             except Exception:
-                logger.exception("post_close query_asset 异常（熔断路径降级跳过）")
+                # CR-4：查询异常与返空同语义——curr_equity 保持 None 落入下方 fail-closed
+                # 判定（live 停调度 / dry skipped），不再「降级跳过」式静默放行。
+                logger.exception("post_close query_asset 异常（curr=None 落入下方 fail-closed 判定）")
         if curr_equity is None or float(curr_equity) <= 0:
-            # curr 缺失 → 跳过熔断 + WARN（无法判定，与基线缺失 fail-closed 区分）
-            # Why 显式跳过：check_daily_loss_limit(X, 0) 同样语义模糊，显式 breaker_skipped=True
-            # 让观测层知道「未判定」而非「判定未触发」。
+            # CR-4（DG-G3 对称收口）：当前权益缺失=熔断最该在岗的断线场景，
+            # live 必须保守停调度并推 CRITICAL；dry_run 保留 skipped 语义（无真实资金敞口）。
             breaker_skipped = True
-            logger.warning(
-                "post_close 跳过日内熔断：query_asset 返空 date=%s curr=None", today_eq)
+            msg = (f"post_close 熔断评估失效：query_asset 无有效当前权益 date={today_eq} "
+                   f"curr={curr_equity}（断线/锁定/查询失败）——按 fail-closed 停调度")
+            logger.critical(msg)
+            if _mode() == "live":
+                _alert_critical(msg)
+                raise _CriticalHalt(msg)
+            logger.warning("dry_run 跳过日内熔断：curr=None（无真实资金敞口，保守停手当日）")
         else:
             # 步骤 3：判定 + 触发三步（cancel_all + emergency_halt + 告警）
             # DG-G3：start_equity 可能 None（基线链全失效），不强转 float（防 TypeError），
@@ -442,7 +454,20 @@ async def post_close(
                     close_market_value=(asset or {}).get("market_value"))
                 logger.info("post_close account_daily 收盘快照 date=%s close=%s", _today_eq, total)
         except Exception:
-            logger.exception("post_close snapshot_close_equity 失败（不阻断主流程）")
+            # CR-4（收盘快照失败有声）：快照失败不 raise（不阻断 post_close 其余闭合段
+            # ——trade_event 已落、清白名单仍要走完），但 live 必须推 CRITICAL：
+            # close_total_asset 是次日熔断 T-1 兜底基线（get_prev_close_equity 读
+            # account_daily.close）的唯一写入方，静默失败 = 掏空次日基线链 → 次日
+            # pre_open 再漏抓时熔断在最该在岗时又缺勤（与 curr fail-open 同源风险）。
+            # date 用 clock.today() 现取而非 _today_eq：异常可能发生在 :435 赋值之前
+            # （_resolve_account_id 抛），except 内引用未绑定名会 NameError 盖掉真因。
+            _snap_msg = (f"post_close account_daily 收盘快照失败 date={clock.today()}"
+                         "（close_total_asset 未落库将掏空次日 T-1 兜底基线，人工补采）")
+            logger.exception(_snap_msg)
+            if _mode() == "live":
+                # live 推钉钉叫醒人工（dry_run 不推避免噪音——与 :218 对账异常同口径；
+                # _alert_critical fire_and_forget，告警失败不阻塞本段收尾）。
+                _alert_critical(_snap_msg)
 
     # 清动态白名单（Task5 → C-2 W1 改实例属性 · T1 经 ports.whitelist_clear）：保证下一交易日从干净状态开始。
     # 改造后清 engine 实例 self._dynamic_whitelist（经 EnginePorts 显式清空，
