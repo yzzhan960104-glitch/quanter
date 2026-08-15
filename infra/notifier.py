@@ -5,7 +5,9 @@ infra/notifier.py
 
 异步单例多通道预警通知管理器。
 
-通道解耦：NotificationChannel 抽象 → TelegramChannel / WeComChannel 具体实现。
+通道解耦：NotificationChannel 抽象 → TelegramChannel / WeComChannel / DingTalkChannel
+网络通道 + LocalFileChannel 本地兜底通道（CR-7 双通道：网络通道 env 门控装配，
+本地通道无条件装配——钉钉挂了 logs/alerts.log 仍有痕）。
 NotificationManager 两类对外通知共享同一并发广播内核 _broadcast（asyncio.gather，
 单通道异常软降级，避免一个 IM 故障导致整条链失效）：
   - notify_risk_event(msg, level)：风控告警，⚠️/❌/🚨 前缀（语义=风险需介入）；
@@ -31,6 +33,8 @@ import threading
 import time          # 钉钉加签：毫秒级时间戳
 import urllib.parse  # 钉钉加签：base64 串 → URL 安全的 urlencode
 from abc import ABC, abstractmethod
+from datetime import datetime  # LocalFileChannel：告警落痕的 ISO 秒级时间戳
+from pathlib import Path      # LocalFileChannel：logs/alerts.log 路径定位
 from typing import Awaitable, Literal
 
 import httpx
@@ -92,6 +96,73 @@ class WeComChannel(NotificationChannel):
             self._url,
             {"msgtype": "text", "text": {"content": text}},
         )
+
+
+# CR-7 告警双通道：本地文件通道的缺省落痕路径（项目根/logs/alerts.log）。
+# Why 用 __file__ 定位而非 cwd：fire_and_forget 的 daemon 线程与 schtasks 调起
+# 的进程 cwd 不确定（schtasks 默认 System32），按源码文件定位才能保证无论从
+# 哪个目录调起，告警都落到同一份审计日志。
+DEFAULT_ALERTS_LOG = Path(__file__).resolve().parents[1] / "logs" / "alerts.log"
+
+
+class LocalFileChannel(NotificationChannel):
+    """本地文件告警通道（CR-7 第二通道）：append 写 logs/alerts.log。
+
+    Why 必须存在：此前告警全押 fire-and-forget 钉钉单通道——网络抖动/加签失效/
+    IP 白名单/频控任一故障即静默丢失且**无任何本地痕迹**，事后无法审计「告警到底
+    发过没有」。本通道无条件装配（零 env 门控）：钉钉挂了本地仍有痕。
+
+    红线（与网络通道语义相反）：send **永不抛**——本地写盘失败（磁盘满/权限/
+    路径被占位）仅 logger.error 自吞。Why：_broadcast 用 gather 并发全通道，
+    本地通道抛异常虽不会拖垮其它通道（return_exceptions=True），但会让调用方
+    拿到的结果列表混入本地通道的假失败噪音；且本地通道的意义就是「最不可能
+    失败的兜底」，它自己不该成为告警链上的新故障源。
+
+    格式：`{ISO 秒级时间戳} | {级别} | {正文}` 每告警一行（append 不覆盖），
+    级别从 "{emoji} [LEVEL] 正文" 徽标解析（与钉钉 _render_markdown 同款拆法），
+    便于运维直接 `grep CRITICAL logs/alerts.log` 过滤红线告警。
+    """
+
+    def __init__(self, log_path: "str | os.PathLike | None" = None) -> None:
+        # None → 项目根缺省路径；显式传参供测试 tmp_path 隔离（测试绝不写真实文件）。
+        # 构造期不触盘（不 makedirs 不 open）：装配发生在进程启动早期，此时就建
+        # 目录会把「装配」变成有副作用动作；落痕推迟到首次 send。
+        self._log_path = Path(log_path) if log_path is not None else DEFAULT_ALERTS_LOG
+
+    @staticmethod
+    def _parse_level(text: str) -> tuple[str, str]:
+        """从 "{emoji} [LEVEL] 正文" 解析 (级别, 正文)；无徽标裸文本降级 ("-", 全文)。
+
+        Why 复用 partition("] ") 拆法（与钉钉 _render_markdown 一致）：Manager 拼接
+        格式固定为 "{级别前缀} {msg}"，徽标必含 "] "；直调 send 的裸文本（无级别）
+        不强行猜级别，落 "-" 保持行格式对齐（每行列数稳定才好 awk/列切）。
+        """
+        if "] " in text:
+            head, _, body = text.partition("] ")
+            if "[" in head:
+                level = head.rsplit("[", 1)[1].strip(" ]")
+                return level, body.strip()
+        return "-", text.strip()
+
+    async def send(self, text: str) -> None:
+        """append 一行「时间戳 | 级别 | 正文」；任何异常自吞仅记日志，永不向外抛。
+
+        Why async 里做同步小文件 IO 可接受：单行 append（微秒级本地盘操作），
+        相比网络通道 10s 超时可忽略；为它单开线程池反而引入调度复杂度。
+        encoding="utf-8" 显式声明：Windows 缺省 GBK 会把 emoji/中文告警写花。
+        """
+        try:
+            level, body = self._parse_level(text)
+            line = f"{datetime.now().isoformat(timespec='seconds')} | {level} | {body}\n"
+            # makedirs + append：目录不存在（首次告警/新环境）自动建；多进程/多线程
+            # 同时 append 同一文件由 OS 追加语义保证行级不交错（单次 write < 4KB）。
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            # 自吞红线：本地兜底通道自身故障只记 logger，不向 _broadcast 抛
+            #（否则兜底通道变成新告警源，违背「最不可能失败的通道」定位）。
+            logger.exception("LocalFileChannel 本地落痕失败 path=%s", self._log_path)
 
 
 class NotificationManager:
@@ -225,6 +296,12 @@ def build_default_manager() -> NotificationManager:
     dt_secret = os.getenv("DINGTALK_SECRET", "")
     if dt_webhook and dt_secret:
         mgr.add_channel(DingTalkChannel(dt_webhook, dt_secret))
+    # CR-7 告警双通道：本地文件通道**无条件**装配（不受任何 env 门控）。
+    # Why 无条件：网络通道（钉钉/TG/企微）全灭时（凭证失效/断网/IP 白名单），
+    # 告警仍须在 logs/alerts.log 留痕，否则「告警是否发过」事后无法审计。
+    # 放在 _configured 置 True 之前、幂等守卫之内：重复调用被顶部短路挡住，
+    # 无条件通道不会被重复 append（不破坏既有幂等语义）。
+    mgr.add_channel(LocalFileChannel())
     # 装配完成标记，使后续调用幂等。
     mgr._configured = True
     return mgr

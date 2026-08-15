@@ -153,3 +153,46 @@ def test_retired_tasks_contains_daily_brief():
     """
     from ops.manage_ops_schtasks import RETIRED_TASKS
     assert "QuanterDailyBrief" in RETIRED_TASKS
+
+
+# ============ CR-7：QuanterAudit 每日巡检 schtasks ============
+# Why 调度挂载：audit_ssot 7 项巡检此前无任何调度入口（巡检层 fail-open——漏采/
+# 敞口偏差/护栏回归无人盯）。挂 DAILY 16:05（post_close 15:30 收盘后，当日数据
+# 已落湖即可核账）由退出码驱动：errs→exit 1 供任务计划程序「上次运行结果」非零可见。
+
+
+def test_register_audit_creates_daily_task():
+    """CR-7: register_audit = /SC DAILY /MO 1 /ST 16:05 → ops/run_audit.bat（幂等 /F）。"""
+    from ops.manage_ops_schtasks import register_audit
+    cmds: list[list[str]] = []
+    with patch("ops.manage_ops_schtasks._schtasks",
+               side_effect=lambda a: cmds.append(a) or 0):
+        register_audit()
+    create_cmds = [c for c in cmds if "/Create" in c]
+    assert len(create_cmds) == 1, f"期望恰好 1 条 /Create，实际 {create_cmds}"
+    cmd = create_cmds[0]
+    assert "/SC" in cmd and "DAILY" in cmd          # 每日一跑（非 MINUTE 轮询）
+    assert "/MO" in cmd and "1" in cmd              # 间隔 1 天
+    assert "/ST" in cmd and "16:05" in cmd          # post_close 15:30 之后
+    assert "/TN" in cmd and "QuanterAudit" in cmd
+    # /TR 必须指向 bat（bat 内固定 cd /d E:\quanter + PYTHONUTF8 + 日志重定向）
+    tr = cmd[cmd.index("/TR") + 1]
+    assert "run_audit.bat" in tr
+    assert "/F" in cmd                              # 幂等：重复注册强制覆盖
+
+
+def test_register_audit_not_in_cleanup_lists():
+    """CR-7 红线：QuanterAudit 是活跃任务，绝不可进 RETIRED/LEGACY 清退清单——
+    register()/unregister() 兜底清退迭代这两份名单，误列入会把巡检调度删成静默裸奔。"""
+    from ops.manage_ops_schtasks import RETIRED_TASKS, LEGACY_TASKS
+    assert "QuanterAudit" not in RETIRED_TASKS
+    assert "QuanterAudit" not in LEGACY_TASKS
+
+
+def test_main_register_audit_flag():
+    """main(--register-audit) → 派发 register_audit()（独立 flag，不混入 --register 清退语义）。"""
+    from ops.manage_ops_schtasks import register_audit
+    with patch("ops.manage_ops_schtasks.register_audit") as ra:
+        rc = main(["--register-audit"])
+    assert rc == 0
+    ra.assert_called_once()

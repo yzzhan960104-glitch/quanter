@@ -294,3 +294,58 @@ def test_dingtalk_render_plain_text_has_no_level_badge():
     assert "裸文本消息" in text
     # 仅品牌脚注一处引用块，无级别徽标行
     assert text.count("> ") == 1
+
+
+# ============ CR-7 告警双通道：LocalFileChannel 本地落痕 ============
+# Why 双通道：此前告警全押 fire-and-forget 钉钉单通道（网络抖动/加签失效/IP 白名单/
+# 频控任一故障 = 告警静默丢失且无任何本地痕迹）。本地文件第二通道无条件装配后，
+# 钉钉挂了 logs/alerts.log 仍有痕，事后可审计「告警到底发过没有」。
+
+
+def test_local_file_channel_appends(tmp_path):
+    """CR-7: send → logs/alerts.log 追加「时间戳 | 级别 | 正文」一行（tmp_path 隔离，
+    绝不写真实 logs/alerts.log）。"""
+    from infra.notifier import LocalFileChannel
+    log = tmp_path / "alerts.log"
+    ch = LocalFileChannel(log_path=log)
+    asyncio.run(ch.send("🚨 [CRITICAL] Tushare 熔断"))
+    content = log.read_text(encoding="utf-8")
+    line = content.strip()
+    # 时间戳（ISO 秒级）：可按时间排序/过滤
+    import re
+    assert re.search(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", line)
+    # 级别徽标被解析成独立字段（grep CRITICAL 可直接过滤）
+    assert "CRITICAL" in line
+    # 正文逐字保留
+    assert "Tushare 熔断" in line
+    # 二次 send 追加（append 语义，不覆盖历史告警）
+    asyncio.run(ch.send("⚠️ [WARN] 敞口偏差"))
+    assert "敞口偏差" in log.read_text(encoding="utf-8")
+
+
+def test_local_file_channel_never_raises(tmp_path):
+    """CR-7 红线：本地通道自身永不抛——路径不可写（父目录被同名文件占位）时
+    send 必须自吞异常仅记日志，否则会拖垮 _broadcast 的其它通道语义。"""
+    from infra.notifier import LocalFileChannel
+    blocker = tmp_path / "occupied"   # 占位文件：makedirs("occupied/...") 必炸
+    blocker.write_text("x", encoding="utf-8")
+    ch = LocalFileChannel(log_path=blocker / "alerts.log")
+    # 不抛 = 本地通道故障不向外传播（软降级到 logger.error）
+    asyncio.run(ch.send("🚨 [CRITICAL] 这条应自吞不抛"))
+
+
+def test_default_manager_includes_local_file(monkeypatch):
+    """CR-7: build_default_manager **无条件**装配 LocalFileChannel——
+    零凭证（钉钉/TG/企微全空）时本地通道仍在，且幂等不重复堆积。"""
+    from infra.notifier import LocalFileChannel
+    # 抹掉全部网络通道凭证，模拟「钉钉挂了/未配置」的最劣环境
+    for var in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+                "WECOM_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    mgr = NotificationManager.get_default()
+    mgr.clear_channels()
+    build_default_manager()
+    locals_ = [c for c in mgr._channels if isinstance(c, LocalFileChannel)]
+    assert len(locals_) == 1, "零凭证环境本地文件通道仍必须装配（无条件，不设 env 门控）"
+    build_default_manager()  # 二次装配幂等：无条件通道不得破坏 _configured 短路
+    assert len([c for c in mgr._channels if isinstance(c, LocalFileChannel)]) == 1

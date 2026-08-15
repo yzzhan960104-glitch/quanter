@@ -182,6 +182,34 @@ def register_guard() -> None:
               f"/TR \"{tr}\" /F")
 
 
+def register_audit() -> None:
+    """CR-7：注册 QuanterAudit（每日 16:05 跑 ops/run_audit.bat → scripts/audit_ssot.py）。
+
+    物理意图（tech-debt CR-7）：audit_ssot 的 7 项 SSOT 巡检（fill↔position 对账/
+    引擎单例/护栏回归等）此前**无任何调度入口**——巡检层 fail-open，漏采/敞口偏差/
+    护栏回归无人盯。挂 DAILY schtasks 后每天自动核账一次。
+
+    Why 16:05：post_close 15:30 收盘流程走完、当日成交/持仓已落库，此时核账对的是
+    完整当日数据；又避开 17:00 起的数据管道/brief 时序（见 discovery/schtasks.py
+    的时序避让说明），错峰 5 分钟。
+
+    Why 退出码可消费：audit_ssot errs→exit 1 / 全绿 exit 0，任务计划程序
+    「上次运行结果」直接反映巡检红绿，运维一眼可见（不需要翻 stdout 日志）。
+
+    ⚠️ 红线：QuanterAudit 是**活跃**任务，绝不加入 RETIRED_TASKS/LEGACY_TASKS
+    清退清单（register()/unregister() 兜底迭代这两份名单，误列入会删成静默裸奔）。
+    """
+    tr = f'"{ROOT / "ops" / "run_audit.bat"}"'
+    rc = _schtasks(["/Create", "/SC", "DAILY", "/MO", "1", "/ST", "16:05",
+                    "/TN", "QuanterAudit", "/TR", tr, "/F"])
+    print(f"{'OK' if rc == 0 else 'FAIL(权限/语法)'} QuanterAudit @ 每日16:05 → "
+          f"ops/run_audit.bat（audit_ssot 巡检，errs→exit1）")
+    if rc != 0:
+        print("[!] 手动注册：\n"
+              f"   schtasks /Create /SC DAILY /MO 1 /ST 16:05 /TN QuanterAudit "
+              f"/TR \"{tr}\" /F")
+
+
 def unregister_discovery() -> None:
     """C-7 V4：退 discovery ``QuanterDiscoveryDaemon`` schtasks（收编 lifespan 后防双触发）。
 
@@ -232,6 +260,8 @@ def main(argv=None) -> int:
                    help="C-7：注册 QuanterServer ONSTART（开机 session 0 后台起 python -m trading）")
     g.add_argument("--register-guard", action="store_true",
                    help="B2-4：注册 QuanterMiniQmtGuard（每 5 分钟客户端看门狗）")
+    g.add_argument("--register-audit", action="store_true",
+                   help="CR-7：注册 QuanterAudit（每日 16:05 跑 audit_ssot 巡检，errs→exit1）")
     g.add_argument("--unregister", action="store_true")
     g.add_argument("--unregister-pipeline-brief", action="store_true",
                    help="清退已收编进 uvicorn 的 DataPipeline/Brief（幂等，Task 9）")
@@ -247,6 +277,8 @@ def main(argv=None) -> int:
         register_server(user=args.user)
     elif args.register_guard:
         register_guard()
+    elif args.register_audit:
+        register_audit()
     elif args.unregister:
         unregister()
     elif args.unregister_pipeline_brief:
