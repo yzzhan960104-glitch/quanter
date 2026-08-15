@@ -170,3 +170,37 @@ def test_main_aggregates_multiple_ts_files(tmp_path):
     a = _write_ts(tmp_path, "caisen.ts", "apiClient.get('/api/v1/caisen/plans')\n")
     b = _write_ts(tmp_path, "macro.ts", "apiClient.get('/api/v1/macro/regime')\n")
     assert check_contracts.main(spec, [a, b]) == 0
+
+
+# ============ check_no_double_unwrap：CR-1 形状契约守卫（二次解构死页）============
+# 根因（CR-1）：client.ts 响应拦截器 `(response) => response.data` 已剥掉 axios 包壳，
+# apiClient.get 运行时直接 resolve 业务 payload；facade 再写 `const { data } = await
+# apiClient.get(...)` 是对已剥壳结果二次解构 → data === undefined → 视图静默空态
+# （HTTP 200 死页）。URL 对账只能保证端点存在，管不住「响应形状」这层——故加静态守卫。
+
+def test_main_double_unwrap_returns_one(tmp_path, capsys):
+    # 违规 ts：对已剥壳 apiClient 二次解构 → main exit 1，中文报文件:行号定位
+    spec = _spec(("/api/v1/research/discovery/sensitivity", ["GET"]))
+    ts = _write_ts(tmp_path, "discovery.ts", """
+    export async function getSensitivity() {
+      const { data } = await apiClient.get('/api/v1/research/discovery/sensitivity')
+      return data
+    }
+    """)
+    rc = check_contracts.main(spec, [ts])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "二次解构" in err
+    assert "discovery.ts" in err  # 报文件名（必要时带行号）便于定位
+
+
+def test_main_direct_return_no_unwrap_violation(tmp_path, capsys):
+    # 正常直返 ts（trading.ts 姿势）：return apiClient.get(...) → 守卫 0 命中，静默放行
+    spec = _spec(("/api/v1/research/discovery/sensitivity", ["GET"]))
+    ts = _write_ts(tmp_path, "discovery.ts", """
+    export function getSensitivity() {
+      return apiClient.get('/api/v1/research/discovery/sensitivity')
+    }
+    """)
+    assert check_contracts.main(spec, [ts]) == 0
+    assert capsys.readouterr().err == ""

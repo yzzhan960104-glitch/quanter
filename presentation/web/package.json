@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "python ../scripts/ops/check_ports.py",
+    "predev": "python ../../ops/check_ports.py",
     "dev": "vite",
     "build": "vue-tsc && vite build",
     "typecheck": "vue-tsc --noEmit",

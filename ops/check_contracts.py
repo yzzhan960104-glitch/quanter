@@ -7,15 +7,25 @@ FastAPI 的权威 /openapi.json（后端真相源）与前端 api/*.ts 的 apiCl
 调用做静态比对，前端调用了后端不存在的端点即 sys.exit(1) 阻断，与 check_ports.py 同为
 「源码静态比对护栏 + 单测」家族（check_ports 比端口，本脚本比契约）。
 
+第二道守卫 check_no_double_unwrap（CR-1 形状契约，2026-08-15 技术债波次）：URL 对账只保证
+「端点存在」，管不住「响应形状」——曾发生 facade 写 `const { data } = await apiClient.get(...)`
+对 client.ts 已剥壳拦截器产物二次解构，data === undefined，discovery 页静默空态成 HTTP 200
+死页（CR-1）。故对 api/*.ts 加静态正则守卫，命中即与契约漂移同档 exit 1 阻断。
+
 设计（反黑盒 / 极简，与 check_ports.py 同哲学）：
-- 纯函数 parse_openapi_endpoints / parse_ts_calls / _norm_path + main(backend_spec, ts_files)，
-  CLI 仅薄封装，单测喂假 openapi dict + tmp_path 造假 ts，不依赖 subprocess；
+- 纯函数 parse_openapi_endpoints / parse_ts_calls / _norm_path / check_no_double_unwrap
+  + main(backend_spec, ts_files)，CLI 仅薄封装，单测喂假 openapi dict + tmp_path 造假 ts，
+  不依赖 subprocess；
 - 刻意不在单测路径 import presentation.server.main（拉 fastapi/uvicorn/celery 重依赖）；CLI 入口
   才进程内 import presentation.server.main:app 取权威 openapi，故挂在后端 CI / make verify-contracts，
   不挂前端 predev（前端开发机可能无后端依赖，与 check_ports.py 前端轻量诉求互补）。
 
 参数归一红线：前端 TS 写 /plans/${planId}（模板字符串），后端 openapi 写 /plans/{plan_id}，
 两者参数名不同但语义同一占位 → _norm_path 统一为 /plans/{} 再比对，避免参数名差异误报漂移。
+
+守卫扫描范围红线：check_no_double_unwrap 只吃 main/CLI 传入的 presentation/web/src/api/*.ts
+（DEFAULT_API_DIR.glob("*.ts")），绝不扫组件/视图目录——组件层对本地对象解构 { data } 是
+合法写法，扩面必误伤。
 """
 import re
 import sys
@@ -32,6 +42,13 @@ DEFAULT_API_DIR = PROJECT_ROOT / "presentation" / "web" / "src" / "api"
 _TS_CALL_RE = re.compile(
     r"apiClient\.(get|post|put|patch|delete)\(\s*['\"`]([^'\"`]+)['\"`]"
 )
+
+# 二次解构死页模式（CR-1）：`const { data } = await apiClient.<method>(...)`。
+# 根因：client.ts 响应拦截器 `(response) => response.data` 已剥掉 axios 包壳，
+# apiClient.get 运行时直接 resolve 业务 payload 本身——再解构 { data } 得 undefined，
+# 视图层静默空态（HTTP 200 死页），无任何报错可循，只能静态正则前置拦截。
+# `\s*` 兼容 `{ data }`/`{data}` 等空格写法；方法名不限定（get/post 均可能中招）。
+_DOUBLE_UNWRAP_RE = re.compile(r"const\s*\{\s*data\s*\}\s*=\s*await\s+apiClient\.")
 
 # openapi 规范：paths.<path> 下的 HTTP method 键用小写；非 method 键（parameters/summary 等）须排除。
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
@@ -60,6 +77,38 @@ def parse_ts_calls(text: str) -> Set[Tuple[str, str]]:
     return calls
 
 
+def check_no_double_unwrap(ts_paths: Iterable[Path]) -> list[str]:
+    """CR-1 形状契约守卫：扫 api/*.ts，揪出对已剥壳 apiClient 的二次解构。
+
+    Why 存在：client.ts 响应拦截器已 `(response) => response.data` 剥壳，apiClient.get
+    运行时直接 resolve 业务 payload；facade 若再写 `const { data } = await apiClient.get(...)`
+    则 data === undefined，页面静默空态成 HTTP 200 死页（CR-1 discovery 实案）。URL 对账
+    只能保证端点存在，管不住响应形状——本守卫补上这一层，命中即 main exit 1 阻断。
+
+    扫描范围红线：只应吃 presentation/web/src/api/*.ts（main/CLI 的 DEFAULT_API_DIR glob），
+    不扫组件目录——组件层对本地对象解构 { data } 是合法写法，扩面必误伤。
+
+    Args:
+        ts_paths: 待扫 ts 文件路径集（与 URL 对账同一批文件，main 已确保可读）。
+
+    Returns:
+        违规描述列表（"文件名:行号: 源码行"），空列表 = 干净放行；读取失败也入列
+        （读不到文件无法证清白，宁可误阻断不可静默放过——fail-closed）。
+    """
+    violations: list = []
+    for f in ts_paths:
+        try:
+            text = Path(f).read_text(encoding="utf-8")
+        except OSError as e:
+            violations.append(f"{Path(f).name}（读取失败：{e}）")
+            continue
+        # 逐行扫而非全文 finditer：违规项带行号，报错直达病灶，省去二次定位
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if _DOUBLE_UNWRAP_RE.search(line):
+                violations.append(f"{Path(f).name}:{lineno}: {line.strip()}")
+    return violations
+
+
 def parse_openapi_endpoints(spec: dict) -> Set[Tuple[str, str]]:
     """从 openapi dict 提取 (METHOD_UPPER, path_norm) 端点集。
 
@@ -78,12 +127,13 @@ def parse_openapi_endpoints(spec: dict) -> Set[Tuple[str, str]]:
 
 
 def main(backend_spec: dict, ts_files: Iterable[Path]) -> int:
-    """比对后端 openapi 端点集与前端 ts 调用集，返回 exit code。
+    """比对后端 openapi 端点集与前端 ts 调用集，并扫二次解构死页模式，返回 exit code。
 
     真相源：backend_spec（openapi dict，CLI 入口进程内取自 presentation.server.main:app.openapi()）。
     返回码：
-      0 —— 前端所有调用都在后端端点集内（一致，静默放行）
-      1 —— 漂移：存在「前端调用但后端无」的端点，stderr 中文逐条列出
+      0 —— 前端所有调用都在后端端点集内，且无二次解构违规（一致，静默放行）
+      1 —— 漂移（前端调用但后端无的端点）或二次解构（CR-1 死页模式）任一命中，
+            stderr 中文逐条列出（两类同轮全量报告）
       2 —— 解析失败：openapi 无 paths（后端异常）/ ts 文件读不到（与漂移区分，便于定位）
     """
     backend = parse_openapi_endpoints(backend_spec)
@@ -107,7 +157,10 @@ def main(backend_spec: dict, ts_files: Iterable[Path]) -> int:
         print(f"[契约护栏] 无法读取前端 api 文件：{missing_files}", file=sys.stderr)
         return 2
 
+    # 两道守卫并列：① URL/method 对账（契约漂移）② 响应形状对账（二次解构死页）。
+    # 同轮全量报告再统一判 exit——避免「修一处、再跑一轮才见下一处」的挤牙膏式定位。
     drift = frontend - backend
+    unwrap_violations = check_no_double_unwrap(ts_files)
     if drift:
         # 漂移：前端调用了后端 openapi 不存在的端点，逐条列出便于定位
         lines = "\n".join(f"    {m} {p}" for m, p in sorted(drift))
@@ -118,6 +171,19 @@ def main(backend_spec: dict, ts_files: Iterable[Path]) -> int:
             f"使端点路径与方法对齐（注意路径参数名差异不影响，护栏已归一比对）。",
             file=sys.stderr,
         )
+    if unwrap_violations:
+        # 二次解构（CR-1 形状契约）：client.ts 拦截器已剥壳，二次解构必得 undefined 死页
+        lines = "\n".join(f"    {v}" for v in unwrap_violations)
+        print(
+            f"[契约护栏] 发现 {len(unwrap_violations)} 处对已剥壳 apiClient 的二次解构（CR-1 死页根因）：\n"
+            f"{lines}\n"
+            f"  根因：client.ts 响应拦截器 `(response) => response.data` 已剥掉 axios 包壳，"
+            f"apiClient.get 运行时直接 resolve 业务 payload，再 `const {{ data }} = ...` 解构得 undefined，"
+            f"页面静默空态（HTTP 200 死页）。\n"
+            f"  修复：参照 trading.ts 直返姿势 `return apiClient.get('<url>')` + 显式返回类型，去掉解构。",
+            file=sys.stderr,
+        )
+    if drift or unwrap_violations:
         return 1
 
     return 0

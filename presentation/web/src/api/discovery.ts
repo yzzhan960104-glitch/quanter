@@ -61,26 +61,35 @@ export interface DiscoveryStatus {
   champion: Record<string, unknown> | null
 }
 
-export async function getSensitivity(): Promise<SensitivityResponse> {
-  const { data } = await apiClient.get<SensitivityResponse>('/api/v1/research/discovery/sensitivity')
-  return data
+/* ============ 请求函数（直返姿势 · CR-1 修复）============
+ *
+ * Why 直返而不解构：client.ts 响应拦截器 `(response) => response.data` 已剥掉
+ * axios 包壳，apiClient.get 运行时直接 resolve 业务 payload 本身。旧写法在 await
+ * 之后对结果解构出 data 再返回——这是对已剥壳 payload 的二次解构，data 恒为
+ * undefined，视图层静默渲染空态，形成 HTTP 200 的「死页」（CR-1；ops/check_contracts.py
+ * 的 check_no_double_unwrap 守卫已静态拦截此姿势回潮）。
+ *
+ * Why 不写 `<T>` 泛型也能过 vue-tsc：axios 的 get 签名 get<T, R = AxiosResponse<T>>
+ * 中 R 支持从函数显式返回类型（Promise<XXXResponse>）上下文反推——故直返 +
+ * 显式返回类型即得正确类型（与 trading.ts getStatus/getPositions 同款姿势）。
+ */
+
+/** GET /research/discovery/sensitivity：敏感性仪表板（边际效应 + 主效应排名） */
+export function getSensitivity(): Promise<SensitivityResponse> {
+  return apiClient.get('/api/v1/research/discovery/sensitivity')
 }
 
-export async function getHeatmap(
-  x: string, y: string, metric = 'calmar',
-): Promise<HeatmapResponse> {
-  const { data } = await apiClient.get<HeatmapResponse>('/api/v1/research/discovery/heatmap', {
-    params: { x, y, metric },
-  })
-  return data
+/** GET /research/discovery/heatmap：两维热力图（metric 缺省 calmar） */
+export function getHeatmap(x: string, y: string, metric = 'calmar'): Promise<HeatmapResponse> {
+  return apiClient.get('/api/v1/research/discovery/heatmap', { params: { x, y, metric } })
 }
 
-export async function getParams(): Promise<ParamsResponse> {
-  const { data } = await apiClient.get<ParamsResponse>('/api/v1/research/discovery/params')
-  return data
+/** GET /research/discovery/params：参数空间三件套（PARAM_SPACE + 约束） */
+export function getParams(): Promise<ParamsResponse> {
+  return apiClient.get('/api/v1/research/discovery/params')
 }
 
-export async function getDiscoveryStatus(): Promise<DiscoveryStatus> {
-  const { data } = await apiClient.get<DiscoveryStatus>('/api/v1/research/discovery/status')
-  return data
+/** GET /research/discovery/status：搜索进展 digest（试验数 / 最新 run / 冠军） */
+export function getDiscoveryStatus(): Promise<DiscoveryStatus> {
+  return apiClient.get('/api/v1/research/discovery/status')
 }
