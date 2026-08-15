@@ -1,0 +1,45 @@
+# ============================================================================
+# CI 心跳元守卫（CR-10 · 2026-08-15）——守卫守卫者的元层。
+#
+# 物理意图（Why）：CI 死亡 = 静默失败。2026-07-25 ci.yml 路径双错后保护链断了
+# 19 天无人知晓（08-13 才发现），期间 push/PR gate 从未真正执行——「绿」只是
+# 没跑，不是通过。本元守卫把「ci.yml 已 N 天没成功跑过」从无人知晓变成
+# workflow 红 + GitHub 邮件通知：每日查一次 ci.yml 最近一次成功 run 的距今天数，
+# 超过 7 天阈值即 fail（7 天 = 周一 schedule 心跳的宽限期上限：正常心跳每周一轮，
+# 连续两轮缺席必 >7 天）。
+#
+# 边界（诚实）：GitHub 对 60 天无任何 commit 活动的 repo 会自动停用 schedule
+# trigger——本守卫自身也依赖 schedule，60 天休眠后它和 ci.yml 一起静默。
+# 这是平台边界不是设计遗漏；长期停摆前应先归档/冻结分支并在 README 注明。
+#
+# 设计要点：concurrency 组独立为 ci-heartbeat（不带 ref 后缀）且不 cancel——
+# 防被同 ref 的 push run（组 ci-${{ github.ref }}）误取消；permissions 只授
+# actions: read（查 runs 列表的最小权限，不写不评）。
+# ============================================================================
+name: CI 心跳元守卫
+on:
+  schedule:
+    - cron: "23 2 * * *"   # 每日 UTC 02:23
+  workflow_dispatch: {}
+permissions:
+  actions: read
+concurrency:
+  group: ci-heartbeat
+  cancel-in-progress: false
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 断言 ci.yml 最近成功 run 距今 <= 7 天
+        run: |
+          set -euo pipefail
+          latest=$(curl -sf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/yzzhan960104-glitch/quanter/actions/workflows/ci.yml/runs?branch=master&status=success&per_page=1" \
+            | jq -r '.workflow_runs[0].created_at')
+          if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+            echo "ci.yml 无任何成功 run——保护链死亡"; exit 1; fi
+          age_days=$(( ( $(date +%s) - $(date -d "$latest" +%s) ) / 86400 ))
+          echo "最近成功 run: $latest（${age_days} 天前）"
+          [ "$age_days" -le 7 ]

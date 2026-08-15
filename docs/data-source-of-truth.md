@@ -1,6 +1,8 @@
 # 数据单一真相源清单（Data Source of Truth）
 
-> 适用版本：SSoT Phase A + Phase B 收口后（2026-08-05）。
+> 适用版本：SSoT Phase A + Phase B 收口（2026-08-05）+ Phase C 完成（trade_event(SIGNAL).meta
+> 升格真相源、save_plan 删除）+ 巡检调度实况。**本文数字/实况截至 2026-08-15（CR-11 刷新）**，
+> 会随治理推进漂移，以 `scripts/audit_ssot.py` 当日实现为准。
 > 依据：`docs/superpowers/specs/2026-08-05-ssot-final-hardening-design.md` §3.1。
 > 目的：消灭「同一逻辑数据存在多份来源、读写各指各的」历史债务；为引擎/服务/
 > 播报/复盘/巡检提供**唯一读入口**，为新代码提供**唯一写入口**。
@@ -17,7 +19,11 @@
 4. **遗留文件统一归档到 `logs/archive/`**（只移动不删除，可恢复）。
 5. **写入口被静态护栏 + 巡检双保险守卫**：
    - 静态护栏：`tests/test_ssot_static_guard.py`（CI / pytest 时炸）
-   - 运维巡检：`scripts/audit_ssot.py`（调度 / 手动跑时炸）
+   - 运维巡检：`scripts/audit_ssot.py`——**已挂 Windows 计划任务 `QuanterAudit`，每日 16:05
+     自动跑（CR-7 · 2026-08-15 起）**：post_close 后核当日账；经 `ops/run_audit.bat`
+     落盘 `logs/audit_schtask.log`，errs 传 exit 1 供任务计划程序「上次运行结果」外显。
+     挂载/管理入口：`ops/manage_ops_schtasks.py`（`QuanterAudit` 在 RETIRED/LEGACY
+     清退红线名单内，禁止误清）。
    - BANNED pattern 同口径（精确正则，跳注释），命中即 FAIL。
 
 ---
@@ -31,16 +37,17 @@
 | 3 | **持仓** | `state_store.position`（含归因列 `strategy` + `entry_rationale`，Phase B2） | 券商 QMT 真实持仓（对账 reconcile 用，by design 外部参照，非内部真相源） |
 | 4 | **交易生命周期** | `state_store.trade_event`（`UNIQUE(account_id, trade_id, action)` 幂等；动作枚举 SIGNAL / CONFIRMED / VETOED / BLOCKED / ORDERED / SUBMITTED / REJECTED / DRY_RUN / FILLED / CLOSED 等） | — |
 | 5 | **日权益/熔断基线** | `state_store.account_daily`（PRIMARY KEY (account_id, date)；start_total_asset 是 C-1 熔断 -3% 读口基线，close_total_asset 是日终闭合校验） | `daily_equity` 表已退役（Phase B5，死表清理） |
-| 6 | **交易计划** | `state_store.trade_event(SIGNAL).meta`（Phase C 升格为真相源；当前 Phase B 阶段 `logs/trading_plans/plan_<date>.json` 仍是生产写入口，**Phase C 将删除 save_plan/load_plan，切 DB 优先**） | `plan_<date>.json` 当前仍由 `trading_plan.save_plan` 落盘（过渡期镜像）；Phase C 后改为按需导出 |
+| 6 | **交易计划** | `state_store.trade_event(SIGNAL).meta`（**Phase C 已完成升格**：`save_plan/load_plan` 已删并进 BANNED，DB 是唯一生产写入口） | `plan_<date>.json` 仅为按需导出/审计归档产物，可由 trade_event(SIGNAL) 重建，**不再是写入口** |
 | 7 | **数据就绪** | `state_store.data_ready` + `job_ledger`（`get_ready` 单口读，PRIMARY KEY (date, dataset)） | — |
 | 8 | **播报幂等** | `job_ledger`（`logs/trading_job_run.db`，brief_<bot> 行 begin/finish 成对，独立库不与 trading_state 混） | — |
 | 9 | **参数迭代/实验** | `experiment/experiments.db`（ACTIVE 表，Phase B3 收口） | — |
 
-> 注 1：第 6 域当前处于过渡态。`logs/trading_plans/plan_<date>.json`（`trading_plan.save_plan`）
-> 在 Phase C 删除前仍是生产写入口，**不构成违规双源**。`trade_event(SIGNAL)` 已双写
-> （`UNIQUE(account_id,trade_id,action)` 幂等），Phase C 升格为真相源后 JSON 降级为按需导出。
-> 注 2：`save_plan` 不在 `scripts/audit_ssot.py` BANNED 集合内 —— Phase C 才删，
-> 当前命中不算回归。Phase C 完成后应将 `save_plan`/`load_plan` 加入 BANNED。
+> 注 1（CR-11 · 2026-08-15 订正，Phase C 完成语义）：第 6 域过渡态**已收口**——
+> `save_plan`/`load_plan` 已随 Phase C（C3）删除，`logs/trading_plans/plan_<date>.json`
+> 降级为按需导出/审计归档产物，任何代码再写它即违规双源。
+> 注 2：`save_plan` 调用/定义/模块属性访问**已在 `scripts/audit_ssot.py` BANNED 集合内**
+> （如 `\bsave_plan\s*\(`、`\bdef\s+save_plan\b`、`trading_plan\.save_plan\b`），命中即 FAIL——
+> 巡检与静态护栏双守卫，防 JSON 落盘路径复活。
 
 ---
 
@@ -77,16 +84,21 @@ BANNED pattern 命中即 FAIL：
 （如「原 record_live_trade CSV 审计块已删除」），注释里只出现【名字】无括号/等号/import/
 引号/csv 字面，不构成代码引用，pattern 不命中。
 
-### 运维巡检（调度/手动跑时炸）
+### 运维巡检（已挂调度，每日自动跑）
 
-`scripts/audit_ssot.py`：跑 5 项检查，任一 FAIL 退出码 1：
-- `check_fill_position`：fill 流水 ↔ position 持仓一致（BUY+ / SELL- 累加 = position.qty，容差 1e-6）
+`scripts/audit_ssot.py`：跑 **7 项检查**（A6 起 5→7，CR-11 · 2026-08-15 订正），任一 FAIL 退出码 1：
+- `check_fill_position`：fill 流水 ↔ position 持仓一致（BUY+ / SELL- 累加 = position.qty，容差 1e-6；
+  CR-5 起含**漏挂方向反向扫描**——fill 净额≠0 而 position 缺行/为 0 即告警）
 - `check_account_daily_closed`：每交易日 start+close 非空（熔断基线闭合）
 - `check_trade_event_chain`：孤儿 SIGNAL（>7 日无后续 CONFIRMED/VETOED/OPEN/FILLED/CLOSED）告警
-- `check_engine_process_count`：引擎进程数 ≤1（C-5 单例，wmic/pgrep 跨平台）
-- `check_guard_ripgrep`：复用 A5 BANNED（同口径 pattern，运维侧镜像）
+- `check_engine_process_count`：引擎进程数 ≤1（C-5 单例，PowerShell Get-CimInstance / pgrep 跨平台）
+- `check_client_process`（A6 新增）：miniQMT 客户端进程数 == 1（0=未起，>1=多实例，探测失败亦有声）
+- `check_port_owner_consistency`（A6 新增）：端口属主 == pid 文件 PID（不一致=旧链/非法链，与 supervisor 三合同口径）
+- `check_guard_ripgrep`：复用 A5 BANNED（同口径 pattern，运维侧镜像，含 save_plan 系列）
 
-退出码语义：0=全绿，1=有不一致。可挂 schtasks / cron 定期跑。
+退出码语义：0=全绿，1=有不一致。**调度实况：已挂 schtasks `QuanterAudit` 每日 16:05
+（CR-7 · 2026-08-15 起，post_close 后核当日账）**，日志落 `logs/audit_schtask.log`；
+也可手动 `python scripts/audit_ssot.py` 或 cron 定期跑。
 
 ---
 
@@ -119,13 +131,14 @@ BANNED pattern 命中即 FAIL：
 
 ## 遗留风险与下一步
 
-- **第 6 域过渡**：Phase C 升格 `trade_event(SIGNAL).meta` 为真相源 + 删 `save_plan/load_plan`。
-  过渡期内 JSON 仍是生产写入口，不违规。Phase C 完成后应将 `save_plan/load_plan` 加入
-  BANNED pattern。
+- ~~**第 6 域过渡**~~ **已收口（Phase C 完成）**：`trade_event(SIGNAL).meta` 是交易计划唯一
+  真相源，`save_plan/load_plan` 已删且进 BANNED pattern（命中即 FAIL）。
 - **account_daily start_total_asset 漏采**：模拟盘 / 非盘前启动场景下 start 可能 NULL
-  （`audit_ssot.check_account_daily_closed` 会告警）。生产 live 前需保证 pre_open 窗口
-  `[09:22, 10:00)` 内 engine 起来并写了 start snap_at；否则当日熔断基线裸奔。
+  （`audit_ssot.check_account_daily_closed` 会告警；DG-G3 起 T-1 close 兜底回填 +
+  熔断缺基线 fail-closed）。生产 live 前需保证 pre_open 窗口 `[09:22, 10:00)` 内 engine
+  起来并写了 start snap_at；否则当日熔断走 fail-closed 停调度（不再裸奔）。
 - **第 12 域 symbol→名称映射**：双源同源（Tushare），`data_lake/stock_basic.parquet`
   （落盘）与 `data/symbol_names`（实时拉取）内容可能漂移；建议统一以 parquet 为 SSoT。
-- **前端 caisen 死视图**：`presentation/web/src/api/caisen.ts` 的 `listPlans/listReplayTasks`
-  指向已下线后端路由，是死代码（首页 `/caisen` 空态）。不阻塞 SSoT，但待后续清理。
+- ~~**前端 caisen 死视图**~~ **已清理（CR-11 · 2026-08-15 核实）**：
+  `presentation/web/src/api/caisen.ts` 及 `/caisen` 死视图已随 caisen 前端整体退役删除，
+  不再存在 SSoT 层面的悬挂引用。
