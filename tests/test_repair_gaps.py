@@ -159,8 +159,9 @@ def test_repair_gaps_main_refuses_shrink(tmp_path, monkeypatch):
     # Why patch 源模块属性：局部 import 绑定的是 data._tushare_compat.get_pro，patch
     # rg.get_pro 拦不住（与 tushare_sync.get_pro 双绑定的 get_pro fixture 同理）。
     monkeypatch.setattr("data._tushare_compat.get_pro", lambda: object())
-    # mock repair_gaps 返回异常收缩的湖（模拟 dedup/recompute bug 致 5000→100）
-    monkeypatch.setattr(rg, "repair_gaps", lambda gaps, lake_df, pro: _big_lake(100))
+    # mock repair_gaps 返回异常收缩的湖（模拟 dedup/recompute bug 致 5000→100）；
+    # **kw 吸收 N1 新增的 lake_dir 关键字（sidecar 锚点，与本用例守卫语义无关）
+    monkeypatch.setattr(rg, "repair_gaps", lambda gaps, lake_df, pro, **kw: _big_lake(100))
 
     with pytest.raises(WriteGuardError):
         rg.main(["--report", str(report_path), "--lake-dir", str(tmp_path)])
@@ -348,3 +349,167 @@ def test_partial_persist_on_adj_error_atomic_day(tmp_path, monkeypatch, capsys):
     breaker = json.loads((tmp_path / ".repair_breaker.json").read_text(encoding="utf-8"))
     assert breaker["fail_count"] == 1
     assert breaker.get("open_until", 0) == 0
+
+
+# ============================================================================
+# N1 停牌真值（2026-08-16）：日级补采 + unfillable sidecar + recency-first 配额
+# ============================================================================
+# 物理意图（勘探实证）：unjustified 16,371 段配额 [:50]（近于 symbol 序）被
+# 2000-2004 盲区段永占（Tushare daily 无该年代数据，拉取恒空）——配额死循环。
+# 修复三件：① 日级判定后只拉真缺日；② 「源全段零行」记 unfillable sidecar，
+# 下轮 scan/repair 双侧跳过；③ 配额改 recency-first（最新段优先，天然跳过最旧
+# 盲区年代，不硬编码年份）。
+
+
+def test_repair_marks_unfillable_market_empty(tmp_path, monkeypatch):
+    """盲区年代形态：源对补采日全市场返零行 → 段记 unfillable sidecar，湖不动。
+
+    2000-2004 段的 Tushare daily 恒空——旧实现只 warning，下轮 scan 重新进队
+    永占配额。修复：记 sidecar（symbol/range/reason/count），下轮跳过。
+    """
+    from data.tools import repair_gaps as rg
+
+    lake = _mk_lake([("2024-09-02", "000921.SZ"), ("2024-09-06", "000921.SZ")])
+    gap = GapRange("000921.SZ", "2024-09-03", "2024-09-05",
+                   ("2024-09-03", "2024-09-04", "2024-09-05"), suspend_justified=False)
+    # _fetch_paged 恒返空（盲区年代：全市场无该日数据）
+    monkeypatch.setattr(rg, "_fetch_paged", lambda *a, **k: pd.DataFrame())
+    # 日间隔降速置 0 免 3s 空转（降速逻辑由 env 默认值保证，不在此验证）
+    monkeypatch.setattr(rg, "REPAIR_DAY_SLEEP", 0.0)
+
+    new_lake = rg.repair_gaps([gap], lake, object(), lake_dir=str(tmp_path))
+
+    assert len(new_lake) == len(lake), "无可补行，湖不动"
+    side = json.loads((tmp_path / ".repair_unfillable.json").read_text(encoding="utf-8"))
+    e = side["entries"][0]
+    assert (e["symbol"], e["start"], e["end"]) == ("000921.SZ", "2024-09-03", "2024-09-05")
+    assert e["reason"] == "market_empty", "全市场零行 → 盲区年代 reason"
+    assert e["count"] == 3, "count = 该段不可补交易日数"
+
+
+def test_repair_marks_unfillable_symbol_absent(tmp_path, monkeypatch):
+    """真停牌残留形态：市场该日有行、唯独该标的无行 → reason=symbol_absent。
+
+    suspend_d 没记到的停牌（2019 后稀疏化）：市场健康而该股缺席 = 源侧也无数据，
+    不可补——与盲区年代同记 sidecar，但 reason 区分（排查时辨方向）。
+    """
+    from data.tools import repair_gaps as rg
+
+    lake = _mk_lake([("2024-09-02", "000921.SZ"), ("2024-09-06", "000921.SZ")])
+    gap = GapRange("000921.SZ", "2024-09-04", "2024-09-04",
+                   ("2024-09-04",), suspend_justified=False)
+
+    def _fake(pro, api, tdc):
+        # 市场健康（600000.SH 有行），唯独 000921.SZ 缺席
+        if api == "daily":
+            return pd.DataFrame([{"ts_code": "600000.SH", "trade_date": tdc,
+                                  "open": 1.0, "high": 1.0, "low": 1.0,
+                                  "close": 1.0, "vol": 100}])
+        return pd.DataFrame([{"ts_code": "600000.SH", "trade_date": tdc, "adj_factor": 1.0}])
+
+    monkeypatch.setattr(rg, "_fetch_paged", _fake)
+    new_lake = rg.repair_gaps([gap], lake, object(), lake_dir=str(tmp_path))
+
+    assert len(new_lake) == len(lake), "该标的零行，湖不动"
+    side = json.loads((tmp_path / ".repair_unfillable.json").read_text(encoding="utf-8"))
+    e = side["entries"][0]
+    assert e["symbol"] == "000921.SZ"
+    assert e["reason"] == "symbol_absent", "市场有数据而该标的缺席 → 停牌残留 reason"
+
+
+def test_repair_skips_marked_unfillable(tmp_path, monkeypatch):
+    """sidecar 已标记段：repair 不再发起任何拉取（配额死循环根治）。"""
+    from data.tools import repair_gaps as rg
+
+    lake = _mk_lake([("2024-09-02", "000921.SZ"), ("2024-09-06", "000921.SZ")])
+    gap = GapRange("000921.SZ", "2024-09-03", "2024-09-05",
+                   ("2024-09-03", "2024-09-04", "2024-09-05"), suspend_justified=False)
+    # 预写 sidecar：该段已标记不可补
+    (tmp_path / ".repair_unfillable.json").write_text(json.dumps(
+        {"entries": [{"symbol": "000921.SZ", "start": "2024-09-03",
+                      "end": "2024-09-05", "reason": "market_empty", "count": 3}]},
+        ensure_ascii=False), encoding="utf-8")
+
+    calls = []
+
+    def _fail_fetch(*a, **k):
+        calls.append(a)  # 若被调用即失败（标记段不应再拉）
+        raise AssertionError("已标记 unfillable 的段不应再发起拉取")
+
+    monkeypatch.setattr(rg, "_fetch_paged", _fail_fetch)
+    new_lake = rg.repair_gaps([gap], lake, object(), lake_dir=str(tmp_path))
+    assert calls == [], "标记段零拉取"
+    assert len(new_lake) == len(lake), "湖不动"
+
+
+def test_repair_fetches_only_unjustified_days(tmp_path, monkeypatch):
+    """日级补采：混合段（3 缺日中 2 日有 S）→ 只拉真缺的 1 日（真缺一日补一日）。
+
+    旧实现拉整段 missing_dates——被 suspend_d 解释的日拉了恒空，白耗配额与限频
+    预算（REPAIR_DAY_SLEEP 按日摊开，每省一日省 1.5s+2 次请求）。
+    """
+    from data.tools import repair_gaps as rg
+
+    lake = _mk_lake([("2024-09-02", "000670.SZ"), ("2024-09-06", "000670.SZ")])
+    # 混合段：09-03/09-04 已由 suspend_d 解释，仅 09-05 真缺
+    gap = GapRange("000670.SZ", "2024-09-03", "2024-09-05",
+                   ("2024-09-03", "2024-09-04", "2024-09-05"), suspend_justified=False,
+                   unjustified_days=("2024-09-05",))
+    fetched = []
+
+    def _fake(pro, api, tdc):
+        fetched.append(tdc)
+        if api == "daily":
+            return pd.DataFrame([{"ts_code": "000670.SZ", "trade_date": tdc,
+                                  "open": 10.0, "high": 11.0, "low": 9.0,
+                                  "close": 10.5, "vol": 1000}])
+        return pd.DataFrame([{"ts_code": "000670.SZ", "trade_date": tdc, "adj_factor": 1.0}])
+
+    monkeypatch.setattr(rg, "_fetch_paged", _fake)
+    new_lake = rg.repair_gaps([gap], lake, object(), lake_dir=str(tmp_path))
+
+    # 每日 daily + adj_factor 成对拉取 → tdc 恰好出现 2 次且只有真缺日
+    assert fetched == ["20240905", "20240905"], "只拉真缺日 09-05（daily+adj 一对）"
+    dates = new_lake.xs("000670.SZ", level="symbol").index.strftime("%Y-%m-%d").tolist()
+    assert "2024-09-05" in dates, "真缺日被补上"
+
+
+def test_repair_recency_first_quota(monkeypatch):
+    """配额 recency-first：两段 unjustified（旧段在前）max_segments=1 → 新段优先。
+
+    旧 [:50] 取 symbol 序——2000-2004 盲区段（最旧）永占配额，真缺的新段
+    （影响实盘识别的近期数据）饿死。盲区=最旧，recency-first 天然跳过，
+    不硬编码年代界线。
+    """
+    from data.tools import repair_gaps as rg
+
+    old_gap = GapRange("000921.SZ", "2001-06-18", "2001-06-18",
+                       ("2001-06-18",), suspend_justified=False)
+    new_gap = GapRange("300214.SZ", "2026-07-14", "2026-07-21",
+                       ("2026-07-14", "2026-07-21"), suspend_justified=False)
+    fetched = []
+
+    def _fake(pro, api, tdc):
+        fetched.append(tdc)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(rg, "_fetch_paged", _fake)
+    monkeypatch.setattr(rg, "REPAIR_DAY_SLEEP", 0.0)
+    lake_df = _mk_lake([("2024-09-02", "000001.SZ")])
+    rg.repair_gaps([old_gap, new_gap], lake_df, object(),
+                   max_segments=1, lake_dir=None)
+    # 只拉 2026 新段（recency-first）；2001 盲区段被配额淘汰
+    assert set(fetched) == {"20260714", "20260721"}, "只有 2026 新段被拉（recency-first）"
+
+
+def test_repair_main_clear_unfillable(tmp_path, capsys):
+    """--clear-unfillable 入口：清除 sidecar（防误标永久化的逃生口）。"""
+    from data.tools import repair_gaps as rg
+
+    sidecar = tmp_path / ".repair_unfillable.json"
+    sidecar.write_text('{"entries": []}', encoding="utf-8")
+    rc = rg.main(["--clear-unfillable", "--lake-dir", str(tmp_path)])
+    assert rc == 0
+    assert not sidecar.exists(), "sidecar 应被删除"
+    out = capsys.readouterr().out
+    assert "清除" in out or "clear" in out.lower()

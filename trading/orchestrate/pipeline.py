@@ -164,12 +164,15 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
         # 3.5 T13-B #1：连续性 scan（freshness 全绿后，eod 前）—— 历史缺口检测（与 freshness
         # 实时性互补）。scan FAIL **不阻断 eod**（历史缺口与当日交易无关，blueprint §2.3），
         # 仅触发异步 repair 子进程（fire-and-forget；配额/熔断在 repair_gaps --auto 内）。
+        # N1 语义对齐（2026-08-16）：unjustified_gaps 已升级为「日级判定 + 长洞市场共识
+        # + unfillable sidecar 排除后真需补的子段计数」——旧段级 all() 误报（16,371 段）
+        # 收敛到真缺子段，本闸触发频率随之对齐真值（消费 key 不变）。
         try:
             from data.tools.scan_integrity import scan as _scan_integrity
             _scan_report = _scan_integrity(lake_dir=str(ROOT / "data_lake"))
             _n_gaps = _scan_report.get("unjustified_gaps", 0)
             if _n_gaps > 0:
-                logger.warning("T13-B scan 发现 %d 段漏采（%d 标的），触发异步补采",
+                logger.warning("T13-B scan 发现 %d 个待补子段（%d 标的，日级判定后），触发异步补采",
                                _n_gaps, len(_scan_report.get("unjustified_symbols", [])))
                 import subprocess as _sp
                 _log_dir = ROOT / "logs"

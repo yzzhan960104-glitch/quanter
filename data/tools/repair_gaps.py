@@ -26,13 +26,14 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pandas as pd
 
-from data.integrity import GapRange, safe_overwrite
+from data.integrity import GapRange, safe_overwrite, unjustified_subsegments
 # 复用 sync_daily_incremental 的 _fetch_paged（按日分页）——同源同口径，避免重复实现
 from data.tools.sync_daily_incremental import _fetch_paged
 
@@ -117,15 +118,92 @@ def record_repair_result(success: bool, lake_dir: str = "data_lake", *, now: flo
     bp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
+# ============ N1 停牌真值（2026-08-16）：unfillable sidecar ============
+# 物理意图（勘探实证的配额死循环）：unjustified 段配额 [:50] 被「源恒返零行」的段
+# 永占——① 2000-2004 盲区年代（Tushare daily 无该年代数据）；② suspend_d 没记到
+# 的真停牌残留（2019 后稀疏化）。旧实现拉空只 warning，下轮 scan 重新进队 →
+# 每轮配额全烧在永不可能补成的段上，真缺段饿死。
+# 修复：拉取实证「源零行」的子段记 sidecar（symbol/range/reason/count），下轮
+# scan/repair 双侧跳过；--clear-unfillable 逃生口防误标永久化（如 Tushare 单日
+# 故障性返空被误标——人工核实源确有数据后清除重试）。
+# 风险权衡：误标 → 该段暂不补（可逆：clear 后重试）；漏标 → 每轮空拉浪费配额
+# （不可接受：这正是要治的死循环）。标记只认「当日两接口拉取完成且该标的零行」
+# ——限频/超时被打断的日不记 attempted，不参与标记（无法区分故障与无数据）。
+
+
+def _unfillable_path(lake_dir: str = "data_lake") -> Path:
+    """unfillable sidecar 路径（与 breaker 同目录，运行时状态不入库不入 git）。"""
+    return Path(lake_dir) / ".repair_unfillable.json"
+
+
+def load_unfillable_entries(lake_dir: str = "data_lake") -> list[dict]:
+    """读 unfillable sidecar 条目；缺失/损坏 → []。
+
+    fail-open 理由：sidecar 是「跳过优化」不是正确性必需——读不出来退化为旧行为
+    （全段重试），最坏浪费一轮配额，不丢数据。损坏只 warning 留痕（与 breaker 同口径）。
+    """
+    p = _unfillable_path(lake_dir)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        entries = data.get("entries", [])
+        return entries if isinstance(entries, list) else []
+    except Exception:
+        logger.warning("unfillable sidecar 读失败，视为无标记（fail-open 全段重试）",
+                       exc_info=True)
+        return []
+
+
+def save_unfillable_entries(lake_dir: str, entries: list[dict]) -> None:
+    """写 unfillable sidecar（覆盖写；条目量级=段数，无并发写场景）。"""
+    _unfillable_path(lake_dir).write_text(
+        json.dumps({"entries": entries}, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def clear_unfillable(lake_dir: str = "data_lake") -> bool:
+    """清除 unfillable sidecar（--clear-unfillable 入口）。返回是否存在过。"""
+    p = _unfillable_path(lake_dir)
+    if p.exists():
+        p.unlink()
+        return True
+    return False
+
+
+def unfillable_coverage(entries: list[dict]) -> dict[str, tuple[tuple[str, str], ...]]:
+    """sidecar 条目 → {symbol: ((start, end), ...)} 区间分组（双侧跳过的查询结构）。
+
+    Why 按 symbol 分组 + 区间包含判定（而非展开成日集）：不依赖交易日历即可判定
+    「某日是否已标记」——sidecar 的 start/end 本就是交易日，闭区间包含即覆盖；
+    分组后单标的条目通常个位数（16k 段/418 标的 ≈ 1.5 条/标的），查询近 O(1)。
+    """
+    by_sym: dict[str, list[tuple[str, str]]] = {}
+    for e in entries:
+        by_sym.setdefault(e.get("symbol", ""), []).append(
+            (e.get("start", ""), e.get("end", "")))
+    return {s: tuple(v) for s, v in by_sym.items()}
+
+
 def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
-                max_segments: int | None = None) -> pd.DataFrame:
+                max_segments: int | None = None,
+                lake_dir: str | None = None) -> pd.DataFrame:
     """补采 unjustified gaps 的漏采日，返回 merged lake df（不写盘，调用方负责落盘）。
+
+    N1 停牌真值（2026-08-16）升级——修复单元从「段」改为「日级子段」：
+    - 只拉 gap.unjustified_days（suspend_d 已解释的日不再白拉——省配额与限频预算）；
+    - 配额 recency-first（最新子段优先）：旧 [:50] 近 symbol 序被最旧的盲区年代段
+      永占（拉空只 warning 下轮重进队 = 配额死循环）；盲区=最旧，按新→旧天然绕开，
+      且近期真缺段正是影响实盘识别的数据，本就该优先；
+    - lake_dir 提供时启用 unfillable sidecar：双侧跳过已标记段 + 拉取实证「源零行」
+      的新段记标记（见上方 sidecar 区注释）。
 
     Args:
         gaps: list[GapRange]（仅 suspend_justified=False 被补；停牌合法跳空跳过）。
         lake_df: 原 daily 湖（MultiIndex(date, symbol)）。
         pro: Tushare pro 接口（需有 daily/adj_factor 方法，按 trade_date 分页）。
         max_segments: 配额上限（T13-B #2，自动补采防过载）；None=不限（CLI 人工补采）。
+        lake_dir: 数据湖目录——unfillable sidecar 读写锚点；None=不启用 sidecar
+                  （既有单测/纯函数调用兼容）。
 
     Returns:
         合并后的 lake df（dedup keep last，新覆盖旧）。无补采则原样返回。
@@ -141,17 +219,48 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
     unjustified = [g for g in gaps if not g.suspend_justified]
     if not unjustified:
         return lake_df
-    # 配额截断（T13-B #2）：自动补采单次最多 max_segments 段（防过载）；None=不限（CLI 人工）
-    if max_segments is not None and len(unjustified) > max_segments:
-        logger.warning("repair_gaps 配额截断：%d → %d 段（剩余下次补采）",
-                       len(unjustified), max_segments)
-        unjustified = unjustified[:max_segments]
-    missing = sorted({d for g in unjustified for d in g.missing_dates})
-    gap_symbols = {g.symbol for g in unjustified}
+    # N1 子段展开：每个 gap 的 unjustified_days 按段内连续性拆 run——两个被解释日
+    # 隔开的真缺日在物理上是两处独立漏采，配额/标记/拉取都以子段为原子单位
+    # （旧构造的 GapRange 经 __post_init__ 已隐含 unjustified_days=全段，语义等价旧版）
+    units: list[tuple[str, tuple[str, ...]]] = []
+    for g in unjustified:
+        for run in unjustified_subsegments(g):
+            units.append((g.symbol, run))
+
+    # N1 unfillable sidecar 跳过：已实证「源零行」的日不再进队（配额死循环根治）
+    if lake_dir is not None:
+        cov = unfillable_coverage(load_unfillable_entries(lake_dir))
+        if cov:
+            def _cov(sym: str, day: str) -> bool:
+                return any(s <= day <= e for s, e in cov.get(sym, ()))
+            _filtered = [(sym, tuple(d for d in run if not _cov(sym, d)))
+                         for sym, run in units]
+            _kept = [u for u in _filtered if u[1]]
+            _fully_skipped = sum(1 for u in _filtered if not u[1])
+            if _fully_skipped:
+                logger.info("unfillable sidecar 跳过 %d 个已标记子段（%d 选中 → %d 保留，"
+                            "部分缩减段继续补剩余日）", _fully_skipped, len(units), len(_kept))
+            units = _kept
+    if not units:
+        return lake_df
+
+    # N1 recency-first 配额：按子段末日新→旧排序再截断（盲区年代=最旧天然殿后）
+    units.sort(key=lambda u: u[1][-1], reverse=True)
+    if max_segments is not None and len(units) > max_segments:
+        logger.warning("repair_gaps 配额截断：%d → %d 子段（recency-first，剩余下次补采）",
+                       len(units), max_segments)
+        units = units[:max_segments]
+    missing = sorted({d for _, run in units for d in run})
+    gap_symbols = {sym for sym, _ in units}
 
     # 按日分页拉 raw daily + adj_factor（复用 sync_daily_incremental._fetch_paged）
     raw_frames, adj_frames = [], []
     partial = False  # CR-6：拉取被异常中断，但已拉日仍要走 merge 落盘（部分补采 > 完全不补）
+    # N1 unfillable 实证记录：attempted=完成两接口拉取的日（标记资格——限频/超时打断
+    # 的日无法区分「故障」与「无数据」不参与标记）；market_rows=每日源全市场行数
+    # （全零=盲区年代 vs 有行而个股缺席=停牌残留，reason 双向定位）
+    attempted_days: set[str] = set()
+    market_rows: dict[str, int] = {}
     _total_days = len(missing)
     _deadline = time.monotonic() + REPAIR_TIMEOUT  # T13-B #4：总超时边界
     for _i, td in enumerate(missing):
@@ -179,6 +288,10 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
         try:
             d = _fetch_paged(pro, "daily", tdc)
             a = _fetch_paged(pro, "adj_factor", tdc)
+            # N1：两接口都完成才记 attempted（daily 成功 adj 抛异常的日不算——拉取
+            # 中断日无法区分「源无数据」与「故障」，标记必须建立在完整实证上）
+            attempted_days.add(td)
+            market_rows[td] = len(d)
             # T6 评审 #1（daily/adj 原子入列）：两个 fetch 都成功后才一起 append。
             # Why 不逐个 append：daily 成功即入列、adj 随后抛限频 → 该日 daily 在列
             # 而 adj 永缺 → merge how="left" 后 adj_factor=NaN → 前复权价格全 NaN
@@ -199,8 +312,46 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
                 exc_info=True,
             )
             break
+
+    def _mark_unfillable(new_pairs: set[tuple[str, str]]) -> None:
+        """N1：入选子段「已尝试日全零行」→ 记 unfillable sidecar（配额死循环根治）。
+
+        new_pairs = 本次实际落湖的 (date_str, symbol) 集——子段任一日有行即视为可补
+        不标（剩余日下轮 scan 缩段重试，源侧有数据只是当日未覆盖到）。
+        """
+        if lake_dir is None or not units:
+            return
+        entries = load_unfillable_entries(lake_dir)
+        existing = {(e.get("symbol"), e.get("start"), e.get("end")) for e in entries}
+        added = 0
+        for sym, run in units:
+            att = [d for d in run if d in attempted_days]
+            if not att:
+                continue  # 未完成拉取的子段（超时/限频截断）：无实证，不标
+            if any((d, sym) in new_pairs for d in att):
+                continue  # 有行落湖 → 可补，不标
+            # reason 双向定位：市场全零行=盲区年代（源无该日数据）；市场有行而该标的
+            # 缺席=停牌残留（suspend_d 漏记）。混段归 market_empty（从严：疑盲区即盲区）
+            reason = ("market_empty" if all(market_rows.get(d, 0) == 0 for d in att)
+                      else "symbol_absent")
+            key = (sym, att[0], att[-1])
+            if key in existing:
+                continue
+            existing.add(key)
+            # count = 该段不可补交易日数（marked_at 供人工审计标记时效）
+            entries.append({"symbol": sym, "start": att[0], "end": att[-1],
+                            "reason": reason, "count": len(att),
+                            "marked_at": datetime.now().isoformat(timespec="seconds")})
+            added += 1
+        if added:
+            save_unfillable_entries(lake_dir, entries)
+            logger.warning("unfillable 标记 %d 子段（源零行实证，下轮 scan/repair 跳过；"
+                           "--clear-unfillable 可重置）", added)
+
     if not raw_frames:
-        logger.warning("补采日 %s 全部返空（Tushare 异常/权限/或实际无数据），无新增", missing[:5])
+        logger.warning("补采日 %s 全部返空（Tushare 异常/权限/盲区年代/停牌残留），无新增",
+                       missing[:5])
+        _mark_unfillable(set())  # 全零行实证：入选子段全部记不可补
         # 第 1 日即被打断：无数据可落，但 partial 仍要透传（main 记失败计数，连续 3 次熔断）
         return _tag_partial(lake_df) if partial else lake_df
 
@@ -233,6 +384,7 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
 
     if new.empty:
         logger.warning("补采段筛 symbol/date 后为空（gap 标的该日 Tushare 无数据？）")
+        _mark_unfillable(set())  # 市场有行而入选标的全缺席：停牌残留实证
         return _tag_partial(lake_df) if partial else lake_df
 
     # merge dedup keep last（新覆盖旧；与 sync_daily_incremental:132-133 同模式）
@@ -241,15 +393,20 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
     logger.info("补采 %d 行（%d 标的 × %d 漏采日%s）",
                 len(new), len(gap_symbols), len(missing),
                 "，partial 部分落盘" if partial else "")
+    _mark_unfillable({(pd.Timestamp(d).strftime("%Y-%m-%d"), s)
+                      for d, s in new.index})
     return _tag_partial(combined) if partial else combined
 
 
 def _load_gaps_from_report(path: str) -> list[GapRange]:
-    """从 scan_integrity 报告 JSON 加载 GapRange 列表。"""
+    """从 scan_integrity 报告 JSON 加载 GapRange 列表（含 N1 日级/启发式新字段，
+    旧报告缺字段时经 GapRange.__post_init__ 兜底为旧段级语义）。"""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return [GapRange(symbol=g["symbol"], start=g["start"], end=g["end"],
                      missing_dates=tuple(g["missing_dates"]),
-                     suspend_justified=g["suspend_justified"])
+                     suspend_justified=g["suspend_justified"],
+                     unjustified_days=tuple(g.get("unjustified_days") or ()),
+                     suspend_suspected=bool(g.get("suspend_suspected", False)))
             for g in data["gaps"]]
 
 
@@ -264,7 +421,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--end", default=None)
     ap.add_argument("--lake-dir", default="data_lake")
     ap.add_argument("--dry-run", action="store_true", help="只列待补段，不写湖")
+    ap.add_argument("--clear-unfillable", action="store_true",
+                    help="清除 unfillable sidecar 后退出（误标逃生口，不需 --auto/--report）")
     args = ap.parse_args(argv)
+
+    # N1 --clear-unfillable：独立入口（人工核实源确有数据后重置标记，防误标永久化）
+    if args.clear_unfillable:
+        if clear_unfillable(args.lake_dir):
+            print(f"unfillable sidecar 已清除：{_unfillable_path(args.lake_dir)}")
+        else:
+            print("无 unfillable sidecar（无需清除）")
+        return 0
 
     if not args.report and not args.auto:
         ap.error("需指定 --report <扫描报告> 或 --auto（内部 scan）")
@@ -280,16 +447,22 @@ def main(argv: list[str] | None = None) -> int:
         report = scan(args.lake_dir, symbol=args.symbol, since=args.since, end=args.end)
         gaps = [GapRange(symbol=g["symbol"], start=g["start"], end=g["end"],
                          missing_dates=tuple(g["missing_dates"]),
-                         suspend_justified=g["suspend_justified"])
+                         suspend_justified=g["suspend_justified"],
+                         unjustified_days=tuple(g.get("unjustified_days") or ()),
+                         suspend_suspected=bool(g.get("suspend_suspected", False)))
                 for g in report["gaps"]]
 
     unjustified = [g for g in gaps if not g.suspend_justified]
-    print(f"待补采：{len(unjustified)} 段漏采（{len({g.symbol for g in unjustified})} 标的）")
+    _n_subsegs = sum(len(unjustified_subsegments(g)) for g in unjustified)
+    print(f"待补采：{len(unjustified)} 段（{len({g.symbol for g in unjustified})} 标的，"
+          f"日级拆分 {_n_subsegs} 子段，recency-first 配额 {MAX_REPAIR_SEGMENTS}）")
     if args.dry_run:
-        for g in unjustified[:20]:
-            print(f"  {g.symbol}  {g.start} ~ {g.end}  ({len(g.missing_dates)} 日)")
+        # 按末日新→旧展示（与 repair 选择序一致：最新真缺段优先进入配额）
+        for g in sorted(unjustified, key=lambda g: g.end, reverse=True)[:20]:
+            print(f"  {g.symbol}  {g.start} ~ {g.end}  "
+                  f"（缺 {len(g.missing_dates)} 日，真缺 {len(g.unjustified_days)} 日）")
         if len(unjustified) > 20:
-            print(f"  ...（共 {len(unjustified)} 段，--dry-run 仅显示前 20）")
+            print(f"  ...（共 {len(unjustified)} 段，--dry-run 仅显示最新前 20）")
         return 0
 
     # T13-B #2：--auto 自动模式（pipeline 子进程触发）用配额 + 熔断；--report 人工模式不限。
@@ -302,11 +475,14 @@ def main(argv: list[str] | None = None) -> int:
     from data._tushare_compat import get_pro
     pro = get_pro()
     try:
-        # auto 模式传配额；--report 人工模式不传（保原签名，兼容外部 mock）
+        # auto 模式传配额；--report 人工模式不传（保原签名，兼容外部 mock）。
+        # lake_dir 双模式都传：unfillable sidecar 跳过/标记对人工补采同样生效
+        # （人工补采更不该把时间烧在已实证不可补的段上）。
         if auto_mode:
-            new_lake = repair_gaps(gaps, lake_df, pro, max_segments=MAX_REPAIR_SEGMENTS)
+            new_lake = repair_gaps(gaps, lake_df, pro, max_segments=MAX_REPAIR_SEGMENTS,
+                                   lake_dir=args.lake_dir)
         else:
-            new_lake = repair_gaps(gaps, lake_df, pro)
+            new_lake = repair_gaps(gaps, lake_df, pro, lake_dir=args.lake_dir)
         # CR-6：读 partial 标记（拉取被限频/异常中断，但已拉部分已 merge 完待落盘）。
         # 标记用 ASCII「partial」——log 经 GBK/UTF8 多道转码仍可 grep（pipeline 侧可识别）。
         partial = bool(new_lake.attrs.get("partial", False))

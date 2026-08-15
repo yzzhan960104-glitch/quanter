@@ -48,6 +48,13 @@ TRADE_DAYS = {
     "2024-09-09", "2024-09-10", "2024-09-11",
 }
 
+# 长窗交易日集（连续 3 周 15 日）：市场共识启发式用例需 ≥10 日的长洞段
+TRADE_DAYS_LONG = {
+    "2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06",
+    "2024-09-09", "2024-09-10", "2024-09-11", "2024-09-12", "2024-09-13",
+    "2024-09-16", "2024-09-17", "2024-09-18", "2024-09-19", "2024-09-20",
+}
+
 
 # ============================================================================
 # load_suspend_intervals：S/R 事件 → 停牌交易日集合
@@ -209,6 +216,176 @@ def test_find_gaps_suspend_period_justified():
     assert len(gaps) == 1
     assert set(gaps[0].missing_dates) == {"2024-09-03", "2024-09-04"}
     assert gaps[0].suspend_justified is True
+
+
+# ============================================================================
+# 日级判定 + 长洞市场共识启发式（N1 停牌真值 · 2026-08-16）
+# ============================================================================
+# 物理意图（段级 all() 的放大效应，2026-08-16 实跑勘定）：
+#   旧实现 `justified = all(d in susp for d in seg)`——段内任一日缺 S 事件 → 整段
+#   误判漏采。而 suspend_d 2019 年后对长停牌只记零星 S（000670.SZ 589 天洞仅
+#   11 行 S），导致 16,371 段 unjustified 误报。修复两级：
+#   1. 日级判定：段拆「justified 日集 / unjustified 日集」，repair 只补真缺日；
+#   2. 长洞市场共识启发式（≥10 交易日 + 湖在场数健康 + 段前后有数据）：
+#      判 suspend_suspected=True（justified-with-flag）。
+
+
+def test_find_gaps_day_level_splits_mixed_segment():
+    """日级判定：段内 3 缺日中 2 日有 S 事件 → 只剩 1 日算 unjustified_days。
+
+    旧段级 all() 会把整段（含 2 个已由 suspend_d 解释的日）全判漏采——
+    000670.SZ 589 天洞仅 11 行 S 的形态下，578 个无记录日拖累 11 个有记录日。
+    """
+    from data.integrity import find_gaps
+    df = _make_daily_df([
+        ("2024-09-02", "000670.SZ"),
+        ("2024-09-06", "000670.SZ"),  # 缺 09-03/09-04/09-05；前两日有 S、第三日无记录
+        ("2024-09-09", "000670.SZ"),
+    ])
+    susp = {"000670.SZ": {"2024-09-03", "2024-09-04"}}
+    gaps = find_gaps(df, TRADE_DAYS, suspend_intervals=susp)
+    assert len(gaps) == 1
+    g = gaps[0]
+    assert g.suspend_justified is False, "段内仍有 1 日无解释 → 整段非全停牌"
+    assert set(g.missing_dates) == {"2024-09-03", "2024-09-04", "2024-09-05"}
+    assert g.unjustified_days == ("2024-09-05",), "只有无 S 记录的日进入 unjustified_days"
+    assert g.suspend_suspected is False
+
+
+def test_find_gaps_long_hole_market_consensus_suspected():
+    """长洞启发式：≥10 日洞 + 段内每日湖在场数 ≥ 窗口中位数×0.8 → 停牌推定。
+
+    000670.SZ 实证形态：589 天洞窗内每日湖在场 3,662-4,684 标的、零日低于中位数
+    80%——市场一直健康而唯独该标的无数据，物理上只能是停牌（Tushare suspend_d
+    2019 后长停牌稀疏化漏记）。判 suspend_suspected=True（合法跳空，不触发补采）。
+    """
+    from data.integrity import find_gaps
+    days = sorted(TRADE_DAYS_LONG)
+    hole = days[2:14]  # 12 个连续交易日洞（≥10 门槛）
+    df = _make_daily_df([(d, "000670.SZ") for d in [days[0], days[1], days[14]]])
+    presence = {d: 4000 for d in hole}  # 市场每日在场数健康且稳定
+    gaps = find_gaps(df, TRADE_DAYS_LONG, suspend_intervals={},
+                     market_presence=presence)
+    assert len(gaps) == 1
+    g = gaps[0]
+    assert g.suspend_justified is True, "市场共识推定停牌 → 合法跳空"
+    assert g.suspend_suspected is True, "须带 flag（与 suspend_d 铁证区分，scan 单列计数）"
+    assert g.unjustified_days == ()
+
+
+def test_find_gaps_short_segment_stays_strict_even_with_healthy_market():
+    """短段（<10 日）不走启发式，维持严格 suspend_d 判定。
+
+    风险权衡：2017-2018 suspend_d 密集覆盖期（2018 年 42,976 行 S），短洞真漏采
+    概率高——误把真缺判停牌 = 数据永缺（repair 永不补），误放真缺 = repair 多拉
+    一轮空（下轮 unfillable 标记收敛）。不对称代价下短段从严。
+    """
+    from data.integrity import find_gaps
+    days = sorted(TRADE_DAYS_LONG)
+    hole = days[2:7]  # 5 日短洞
+    df = _make_daily_df([(d, "000001.SZ") for d in [days[0], days[1], days[7]]])
+    presence = {d: 4000 for d in hole}
+    gaps = find_gaps(df, TRADE_DAYS_LONG, suspend_intervals={},
+                     market_presence=presence)
+    assert len(gaps) == 1
+    assert gaps[0].suspend_justified is False
+    assert gaps[0].suspend_suspected is False
+    assert gaps[0].unjustified_days == tuple(hole)
+
+
+def test_find_gaps_heuristic_rejects_lake_outage_day():
+    """启发式反例：段内某日湖在场数骤低（< 中位数×0.8）→ 不推定停牌。
+
+    该日湖自身残缺（全市场漏采/同步事故），个股缺失可能是被湖故障连坐——
+    此时推定停牌会把真缺日永久合法化，方向错误。
+    """
+    from data.integrity import find_gaps
+    days = sorted(TRADE_DAYS_LONG)
+    hole = days[2:14]
+    df = _make_daily_df([(d, "000670.SZ") for d in [days[0], days[1], days[14]]])
+    presence = {d: 4000 for d in hole}
+    presence[hole[5]] = 100  # 该日湖在场数崩到 100（< 4000×0.8=3200）
+    gaps = find_gaps(df, TRADE_DAYS_LONG, suspend_intervals={},
+                     market_presence=presence)
+    assert gaps[0].suspend_justified is False
+    assert gaps[0].suspend_suspected is False
+
+
+def test_find_gaps_heuristic_rejects_thin_market_era():
+    """启发式反例：湖在场数中位数低于分母下限（2017 前仅 ~20 标的）→ 不可用。
+
+    2017 前湖只有 ~20 个先锋标的在场——「市场共识」分母残缺，20 vs 16 的波动
+    无统计意义，任何结论都是噪声。启发式只对 2017+（中位数 ≥2,908）有效。
+    """
+    from data.integrity import find_gaps
+    days = sorted(TRADE_DAYS_LONG)
+    hole = days[2:14]
+    df = _make_daily_df([(d, "000670.SZ") for d in [days[0], days[1], days[14]]])
+    presence = {d: 20 for d in hole}  # 2017 前形态：每日仅 ~20 标的在场面
+    gaps = find_gaps(df, TRADE_DAYS_LONG, suspend_intervals={},
+                     market_presence=presence)
+    assert gaps[0].suspend_justified is False
+    assert gaps[0].suspend_suspected is False
+
+
+def test_find_gaps_heuristic_off_without_market_presence():
+    """market_presence 未喂入（默认 None）→ 启发式关闭，退回严格 suspend_d 判定。
+
+    兼容红线：既有调用方（sync_daily_incremental._backscan_recent 近窗回扫）不传
+    在场计数，行为必须与旧版一致——启发式是 scan 全市场路径的可选增强，不是
+    破坏性默认。
+    """
+    from data.integrity import find_gaps
+    days = sorted(TRADE_DAYS_LONG)
+    df = _make_daily_df([(d, "000670.SZ") for d in [days[0], days[1], days[14]]])
+    gaps = find_gaps(df, TRADE_DAYS_LONG, suspend_intervals={})  # 不传 market_presence
+    assert gaps[0].suspend_justified is False
+    assert gaps[0].suspend_suspected is False
+
+
+def test_heuristic_requires_data_before_and_after():
+    """启发式前置：标的段前后均有数据（洞夹在真实行情之间）才推定停牌。
+
+    退市末段/上市初段形态下，「之后无数据」可能是永久退市而非停牌——不适用
+    市场共识推定（find_gaps 的 [amin,amax] 边界结构上保证此条件，本用例直测
+    内核定防未来重构破坏）。
+    """
+    from data.integrity import _is_suspend_suspected
+    seg = sorted(TRADE_DAYS_LONG)[2:14]
+    pres = {d: 4000 for d in seg}
+    assert _is_suspend_suspected(seg, pres, has_data_before=True, has_data_after=True)
+    assert not _is_suspend_suspected(seg, pres, has_data_before=False, has_data_after=True)
+    assert not _is_suspend_suspected(seg, pres, has_data_before=True, has_data_after=False)
+
+
+def test_gaprange_legacy_construction_defaults_unjustified_days():
+    """旧构造兼容：只传 5 字段的 GapRange（旧报告 JSON/旧测试）不破。
+
+    suspend_justified=False 的段隐含 unjustified_days = 全部 missing_dates
+    （与旧段级 all() 语义等价——repair 仍按整段补，不空转）；justified 段为空。
+    """
+    from data.integrity import GapRange
+    g = GapRange("000001.SZ", "2024-09-04", "2024-09-05",
+                 ("2024-09-04", "2024-09-05"), suspend_justified=False)
+    assert g.unjustified_days == ("2024-09-04", "2024-09-05")
+    assert g.suspend_suspected is False
+    j = GapRange("000413.SZ", "2024-09-03", "2024-09-04",
+                 ("2024-09-03", "2024-09-04"), suspend_justified=True)
+    assert j.unjustified_days == ()
+    assert j.suspend_suspected is False
+
+
+def test_unjustified_subsegments_splits_consecutive_runs():
+    """子段拆分：unjustified_days 按段内连续性拆 run——repair 以子段为单位。
+
+    段内 8 日，unjustified 为 {d0,d1,d4}（d2/d3/d5.. 被 suspend_d 解释）→
+    两个子段 (d0,d1) 与 (d4)：中间隔着被解释日，物理上是两处独立漏采。
+    """
+    from data.integrity import GapRange, unjustified_subsegments
+    seg = tuple(sorted(TRADE_DAYS)[:8])
+    g = GapRange("000001.SZ", seg[0], seg[-1], seg, suspend_justified=False,
+                 unjustified_days=(seg[0], seg[1], seg[4]))
+    assert unjustified_subsegments(g) == [(seg[0], seg[1]), (seg[4],)]
 
 
 # ============================================================================

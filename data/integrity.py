@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import statistics
 from dataclasses import dataclass
 from typing import Set
 
@@ -36,12 +37,29 @@ class GapRange:
     """一段缺口（规则 1 扫描输出 / 规则 3 补采输入）。
 
     suspend_justified=True 表示整段是停牌（合法跳空，无需补采）；False 表示漏采（需补）。
+
+    N1 停牌真值（2026-08-16）日级化升级——旧段级 ``all(d in susp)`` 的放大效应：
+    段内任一日缺 S 事件 → 整段误判漏采（000670.SZ 589 天洞仅 11 行 S → 578 个
+    无记录日拖累整段）。新字段把「该补哪些日」精确到日：
+    - unjustified_days：日级判定后真需补采的交易日（suspend_d 解释 + 长洞市场
+      共识启发式排除后的剩余）；repair 以此为单位（真缺一日补一日）。
+    - suspend_suspected：整段由市场共识启发式判停牌（非 suspend_d 铁证）——
+      justified-with-flag，scan 报告单列计数，与铁证停牌区分（可审计可追溯）。
     """
     symbol: str
     start: str                            # 缺口起 YYYY-MM-DD
     end: str                              # 缺口止 YYYY-MM-DD
     missing_dates: tuple[str, ...]        # 该段缺失的交易日（不可变，可哈希）
     suspend_justified: bool
+    unjustified_days: tuple[str, ...] = ()   # 真需补的日（缺省见 __post_init__ 兼容填充）
+    suspend_suspected: bool = False          # 市场共识推定停牌（长洞启发式命中）
+
+    def __post_init__(self):
+        # 旧构造兼容：旧报告 JSON / 既有调用方只传 5 字段——suspend_justified=False
+        # 的段在旧段级语义下「全段皆漏」，隐含 unjustified_days = 全部 missing_dates
+        # （等价旧行为，repair 不空转）；justified 段恒空。frozen 需绕 __setattr__ 写。
+        if self.unjustified_days == () and self.suspend_justified is False:
+            object.__setattr__(self, "unjustified_days", tuple(self.missing_dates))
 
 
 @dataclass(frozen=True)
@@ -321,9 +339,85 @@ def safe_overwrite(lake_path: str, new_df: pd.DataFrame, *,
 # 规则 1：全市场连续性扫描
 # ============================================================================
 
+# ============================================================================
+# N1 长洞市场共识启发式（2026-08-16 勘定根因的修复侧）
+# ============================================================================
+# 物理意图：suspend_d 2019 年后对长停牌只记零星 S（000670.SZ 589 天洞仅 11 行、
+# 000792.SZ 311 天 13 行、000995.SZ 399 天 8 行）——停牌 ground-truth 本身残缺，
+# 严格按 suspend_d 判会把大量真停牌长洞误报为漏采（实跑 16,371 段 unjustified 的
+# 主因）。市场共识是独立于 suspend_d 的第二真值源：洞窗内每日湖在场数健康
+# （≥ 窗口中位数 × 0.8，即湖自身无全市场残缺日）而唯独该标的缺席 + 标的段前后
+# 均有行情 → 物理上唯一自洽的解释是停牌（000670.SZ 洞窗实证：每日在场
+# 3,662-4,684 标的，零日低于中位数 80%）。
+#
+# 风险权衡（两方向误判代价不对称，参数从严的原因）：
+# - 误放真缺（把漏采判停牌）→ 数据永缺：repair 永不补、scan 永不报——不可逆。
+# - 误补停牌（把停牌判漏采）→ repair 拉空一轮：浪费配额/限频预算，下轮 unfillable
+#   sidecar 标记后收敛——可逆、可观测。
+# 故三重前置全部满足才推定：段长 ≥10 交易日（短段 suspend_d 2017-2018 密集覆盖
+# 期真短漏概率高，从严）+ 每日在场数 ≥ 中位数×0.8（湖故障日不背书）+ 标的段前后
+# 均有数据（退市末段/上市初段不适用）。
+#
+# 2017 前边界：湖仅 ~20 标的在场面（逐年中位数 ≤24 vs 2017+ ≥2,908）——「市场
+# 共识」分母残缺，20 vs 16 的波动无统计意义。用在场数下限（而非硬编码年份）闸：
+# 中位数 < 下限 → 启发式不适用，退回严格 suspend_d 判定（宁从严）。
+SUSPEND_SUSPECT_MIN_DAYS = 10            # 推定停牌的最小段长（交易日）
+SUSPEND_SUSPECT_PRESENCE_RATIO = 0.8     # 每日在场数 ≥ 窗口中位数 × 该比的下限
+SUSPEND_SUSPECT_MIN_MARKET_PRESENCE = 1000  # 窗口中位数在场数下限（2017 前分母残缺闸）
+
+
+def _is_suspend_suspected(
+    seg: list[str], market_presence: dict[str, int], *,
+    has_data_before: bool, has_data_after: bool,
+) -> bool:
+    """长洞市场共识启发式内核：三重前置全满足才推定停牌（纯函数，可直测）。
+
+    Args:
+        seg: 连续缺失交易日段（find_gaps 的一个 gap 段，时间序）。
+        market_presence: {YYYY-MM-DD: 湖该日在场标的数}（scan 从湖日级计数喂入；
+                    缺日的在场数按 0 计——湖连在场计数都没有的日不可为其背书）。
+        has_data_before/has_data_after: 标的在该段前/后是否均有行情（洞须夹在
+                    真实行情之间；find_gaps 的 [amin,amax] 边界结构上保证为 True，
+                    此处显式校验防未来重构破坏边界语义）。
+    """
+    if len(seg) < SUSPEND_SUSPECT_MIN_DAYS:
+        return False
+    if not (has_data_before and has_data_after):
+        return False
+    counts = [market_presence.get(d, 0) for d in seg]
+    median = statistics.median(counts)
+    # 2017 前分母残缺闸：窗口中位数不足下限 → 市场共识无统计意义，不推定
+    if median < SUSPEND_SUSPECT_MIN_MARKET_PRESENCE:
+        return False
+    # 每日健康闸：任一日湖在场数 < 中位数×0.8 → 该日湖自身可疑，不能为个股缺席背书
+    return all(c >= median * SUSPEND_SUSPECT_PRESENCE_RATIO for c in counts)
+
+
+def unjustified_subsegments(gap: GapRange) -> list[tuple[str, ...]]:
+    """GapRange 的 unjustified_days 按段内连续性拆子段（repair 的原子单位）。
+
+    以 missing_dates（段日序骨架）遍历：连续的 unjustified 日合并为一个子段，
+    中间隔着被解释日（suspend_d/启发式）即断开——物理上是两处独立漏采，
+    recency-first 配额与 unfillable 标记都以子段为粒度。
+    """
+    keep = set(gap.unjustified_days)
+    runs: list[tuple[str, ...]] = []
+    cur: list[str] = []
+    for d in gap.missing_dates:
+        if d in keep:
+            cur.append(d)
+        elif cur:
+            runs.append(tuple(cur))
+            cur = []
+    if cur:
+        runs.append(tuple(cur))
+    return runs
+
+
 def find_gaps(
     df_lake: pd.DataFrame, trade_days_set: Set[str],
     suspend_intervals: dict[str, Set[str]],
+    market_presence: dict[str, int] | None = None,
 ) -> list[GapRange]:
     """全市场连续性扫描：找出每个标的在 [首日, 末日] 区间内「应有却缺失」的交易日段。
 
@@ -332,14 +426,22 @@ def find_gaps(
                     沿 trade_days 顺序遍历，连续的 missing（非 actual）合并成一段
     区间边界用 [actual_min, actual_max]：标的上市前/退市后的日期不要求（避免误报）。
 
+    N1 日级判定（2026-08-16）：段内不再段级 all() 一刀切——每日独立判定
+    「suspend_d 解释与否」，输出 unjustified_days（真需补日集）；长洞（≥10 日）
+    另走市场共识启发式（market_presence 喂入时）判 suspend_suspected。
+
     Args:
         df_lake: daily 湖（MultiIndex(date, symbol) + OHLCV 列）。
         trade_days_set: 全期交易日集合（fetch_trade_days 输出）。
         suspend_intervals: load_suspend_intervals 输出（{symbol: 停牌日集合}）。
+        market_presence: {YYYY-MM-DD: 湖该日在场标的数}——长洞市场共识启发式的
+                    分母（scan 全市场路径从湖自身计数喂入，~1.5s/10.3M 行）；
+                    None=不启用启发式（既有调用方 _backscan_recent 兼容，行为同旧版）。
 
     Returns:
-        list[GapRange]：每个 GapRange 是一段连续缺口；整段全停牌 → suspend_justified=True
-        （合法跳空），否则 False（含漏采，需补）。
+        list[GapRange]：每个 GapRange 是一段连续缺口；suspend_justified=True 表示
+        全段合法跳空（suspend_d 铁证或启发式推定，后者带 suspend_suspected=True），
+        False 表示含真缺日（unjustified_days 列出，repair 以子段为单位补）。
     """
     gaps: list[GapRange] = []
     # groupby(sort=False) 不额外排序（lake 已 sort_index），groupby 键即唯一 symbol。
@@ -355,24 +457,48 @@ def find_gaps(
         for d in expected_sorted:
             if d in actual:
                 if seg:  # 遇到 actual → 连续 missing 段结束
-                    gaps.append(_build_gap_range(sym, seg, suspend_intervals))
+                    gaps.append(_build_gap_range(sym, seg, suspend_intervals,
+                                                 market_presence, amin, amax))
                     seg = []
             else:
                 seg.append(d)
         if seg:  # 末尾缺口段
-            gaps.append(_build_gap_range(sym, seg, suspend_intervals))
+            gaps.append(_build_gap_range(sym, seg, suspend_intervals,
+                                         market_presence, amin, amax))
     return gaps
 
 
 def _build_gap_range(
-    symbol: str, seg: list[str], suspend_intervals: dict[str, Set[str]]
+    symbol: str, seg: list[str], suspend_intervals: dict[str, Set[str]],
+    market_presence: dict[str, int] | None = None,
+    amin: str | None = None, amax: str | None = None,
 ) -> GapRange:
-    """把连续 missing 段组装成 GapRange，整段全停牌则 suspend_justified=True。"""
+    """把连续 missing 段组装成 GapRange（N1 日级判定 + 长洞市场共识启发式）。
+
+    判定序：① 日级 suspend_d 解释 → unjustified 日集；② 非空且喂了在场计数 →
+    长洞启发式可整体推定停牌（suspend_suspected=True，unjustified 清空）；
+    ③ 输出 suspend_justified = unjustified 日集是否为空。
+    """
     susp = suspend_intervals.get(symbol, set())
-    justified = all(d in susp for d in seg)
+    # ① 日级判定：段内逐日问 suspend_d（替代旧段级 all()——零星 S 不再拖累整段）
+    unjustified = [d for d in seg if d not in susp]
+    suspend_suspected = False
+    if unjustified and market_presence is not None:
+        # ② 长洞市场共识启发式：前置见 _is_suspend_suspected 注释（两方向风险权衡）
+        # has_data_before/after：段严格夹在标的 amin/amax 行情之间（结构上恒真，
+        # ISO 日期串比较；显式校验防 [amin,amax] 边界语义被未来重构破坏）
+        if _is_suspend_suspected(
+                seg, market_presence,
+                has_data_before=(amin is not None and seg[0] > amin),
+                has_data_after=(amax is not None and seg[-1] < amax)):
+            unjustified = []
+            suspend_suspected = True
     return GapRange(
         symbol=symbol, start=seg[0], end=seg[-1],
-        missing_dates=tuple(seg), suspend_justified=justified,
+        missing_dates=tuple(seg),
+        suspend_justified=(not unjustified),
+        unjustified_days=tuple(unjustified),
+        suspend_suspected=suspend_suspected,
     )
 
 

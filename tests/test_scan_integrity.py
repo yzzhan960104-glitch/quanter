@@ -63,3 +63,72 @@ def test_scan_symbol_filter(tmp_path, monkeypatch):
     report = scan_integrity.scan(lake_dir=str(tmp_path), symbol="000001.SZ")
     syms_in_report = {g["symbol"] for g in report["gaps"]}
     assert syms_in_report == {"000001.SZ"}
+
+
+# ============================================================================
+# N1 停牌真值（2026-08-16）：在场计数喂入（长洞市场共识）+ unfillable sidecar 排除
+# ============================================================================
+
+# 长窗交易日（连续 3 周 15 日）：启发式需 ≥10 日长洞
+_LONG_DAYS = [
+    "2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06",
+    "2024-09-09", "2024-09-10", "2024-09-11", "2024-09-12", "2024-09-13",
+    "2024-09-16", "2024-09-17", "2024-09-18", "2024-09-19", "2024-09-20",
+]
+
+
+def test_scan_suspects_long_hole_with_healthy_market(tmp_path, monkeypatch):
+    """端到端：12 日洞 + 市场每日在场 → suspend_suspected_segments=1、unjustified=0。
+
+    scan 从湖自身算日级在场计数喂 find_gaps（不新增数据源）——000670.SZ 实证
+    形态的接线验证：市场健康而唯独该标的无数据 → 停牌推定，单列计数不混入
+    unjustified（pipeline/daemon 消费侧语义不变）。
+    """
+    from data.tools import scan_integrity
+    monkeypatch.setattr("data.integrity._fetch_year_trade_cal",
+                        lambda y: _LONG_DAYS if y == 2024 else [])
+    # 分母下限降到 5（生产默认 1000 对应 2017+ 全市场；单测市场只造 5 标的）
+    monkeypatch.setattr("data.integrity.SUSPEND_SUSPECT_MIN_MARKET_PRESENCE", 5)
+    hole = _LONG_DAYS[2:14]  # 12 个连续交易日洞
+    rows = [(d, "000670.SZ") for d in [_LONG_DAYS[0], _LONG_DAYS[1], _LONG_DAYS[14]]]
+    # 市场标的：15 日全在场（每日在场数 5，中位数 5 ≥ 下限 5，恒 ≥ 5×0.8）
+    rows += [(d, f"60000{i}.SH") for i in range(5) for d in _LONG_DAYS]
+    _write_mock_daily(tmp_path, rows)
+    # 不写 suspend_d.parquet → 洞完全无 S 记录（启发式是唯一解释源）
+
+    report = scan_integrity.scan(lake_dir=str(tmp_path))
+
+    assert report["suspend_suspected_segments"] == 1
+    assert report["unjustified_gaps"] == 0
+    assert report["unjustified_symbols"] == []
+    g = [g for g in report["gaps"] if g["symbol"] == "000670.SZ"][0]
+    assert g["suspend_justified"] is True
+    assert g["suspend_suspected"] is True
+    assert g["unjustified_days"] == []
+
+
+def test_scan_excludes_unfillable_marked_days(tmp_path, monkeypatch):
+    """unfillable sidecar：已标记不可补的日不计入 unjustified（scan/repair 同源）。
+
+    repair 拉过「源零行」的段记 sidecar 后，scan 不再把它算漏采——否则
+    pipeline 每夜照旧 spawn repair、daemon fail-closed 闸永久拒跑。
+    """
+    import json
+    from data.tools import scan_integrity
+    monkeypatch.setattr("data.integrity._fetch_year_trade_cal", lambda y: (
+        ["2024-09-02", "2024-09-03", "2024-09-04", "2024-09-05", "2024-09-06"] if y == 2024 else []
+    ))
+    _write_mock_daily(tmp_path, [
+        ("2024-09-02", "000921.SZ"), ("2024-09-06", "000921.SZ"),  # 缺 09-03,04,05
+    ])
+    # 预写 sidecar：09-03~09-05 已标记不可补（盲区年代/停牌残留）
+    (tmp_path / ".repair_unfillable.json").write_text(json.dumps(
+        {"entries": [{"symbol": "000921.SZ", "start": "2024-09-03",
+                      "end": "2024-09-05", "reason": "market_empty", "count": 3}]},
+        ensure_ascii=False), encoding="utf-8")
+
+    report = scan_integrity.scan(lake_dir=str(tmp_path))
+
+    assert report["unjustified_gaps"] == 0, "标记日不算漏采"
+    assert report["unjustified_symbols"] == []
+    assert report["unfillable_skipped_segments"] == 1
