@@ -140,7 +140,6 @@ def _map_qmt_status(status: int) -> OrderState:
         # #9：51（已报待撤）不再归 CANCELLED——撤单指令刚受理未到终态，
         # 归 SUBMITTED 等主推/query_orders 推进到真撤（54），避免 unconfirmed 漏报。
         return OrderState.CANCELLED
-        return OrderState.CANCELLED
     if status in (_QMT_ORDER_PART_CANCEL, _QMT_ORDER_PARTSUCC_CANCEL):
         return OrderState.PARTIAL_CANCELLED
     # 48/49/50/255 等未到终态的中间态统一视为「已提交」，等待后续回报推进
@@ -707,17 +706,18 @@ class QmtExecutionGateway(BaseExecutionGateway, _CallbackBase):  # type: ignore[
             if connect_rc == 0:
                 break                        # 连接成功
 
-            # T11（2026-08-15）：connect **每次**返 -1 都留痕 status_msg（Notes 兑现：
+            # T11（2026-08-15）：connect **每次**返 -1 都留痕（Notes 兑现：
             # memory 688160 拒因黑盒教训——rc=-1 柜台无文本回报，不留痕则下方 L1 清理
             # 重试 / L2 sid 轮换 / L3 fail-closed 整条兜底链只见结果不见过程，事后无法
-            # 归因「-1 发生在第几轮、当时 sid 是谁」）。status 经 _map_qmt_status 归一
-            # （-1 不属任何委托状态码，走默认分支 SUBMITTED——此处仅作「非 0 未归类码」
-            # 的统一口径标记，真实拒因语义看 msg）；msg 记 attempt 轮次 + -1 物理含义。
+            # 归因「-1 发生在第几轮、当时 sid 是谁」）。rc 直接打字面量：-1 不是委托
+            # 状态码，硬塞 _map_qmt_status 只会落默认分支打成误导性的 status=SUBMITTED
+            # （rc 与 OrderState 是两套语义，混叠比缺字段更危险）；msg 记 attempt 轮次
+            # + -1 物理含义。
             # ⚠️ 只加观测，不改重试次数/顺序（G8 刚重构，周一实战前零行为变更）。
             if connect_rc == -1:
                 logger.warning(
-                    "connect -1 sid=%s status=%s msg=%s",
-                    sid, _map_qmt_status(connect_rc).name,
+                    "connect -1 sid=%s rc=%s msg=%s",
+                    sid, connect_rc,
                     f"attempt={attempt}/2：死进程残留会话/sid 被占（柜台无文本回报）")
 
             # 连接失败：立即停掉本次实例释放 sid（防止同进程下次重试自锁）

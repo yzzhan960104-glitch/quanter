@@ -808,7 +808,8 @@ def test_stoploss_monitors_after_ordered(monkeypatch, tmp_path):
     eng = engine.TradingEngine() if hasattr(engine, "TradingEngine") else None
     # engine 模块级函数风格（_stoploss 在 AsyncEngine 内）：若 API 不便直接调，
     # 退化为「确认闸逻辑」单点断言——is_trade_confirmed(trade_id)=True 已覆盖核心修复。
-    # 这里补一层端到端：用 stop_loss_monitor(stop_prices=...) 走完整路径，跌破应触发。
+    # 这里补一层端到端：M2 起调用面为 stop_loss_monitor(StopLossContext(stop_prices=...))
+    # 单参装箱（三 map 上下文容器）——走完整路径，跌破应触发。
     monkeypatch.setattr(engine.calendar, "is_intraday_session", lambda now: True)
 
     class _FakeGw:
