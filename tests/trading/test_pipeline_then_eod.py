@@ -58,11 +58,15 @@ async def test_data_ready_runs_eod(monkeypatch):
     from trading.orchestrate.pipeline import pipeline_then_eod
     from data.freshness import FreshnessResult
     today = datetime.now().strftime("%Y-%m-%d")
+    # N4（08-16）测试卫生：3.5 段连续性 scan 打断——不真读 10M 行生产湖（单次
+    # ~74s）更不真 spawn 补采子进程烧 Tushare 配额（本测焦点是编排顺序，
+    # scan→repair 行为由 test_scan_fail_triggers_repair_but_eod_runs 专测）
     with patch("trading.orchestrate.pipeline.is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch("trading.orchestrate.pipeline.resolve_active", return_value=[]), \
          patch("trading.orchestrate.pipeline.check_freshness",
-               return_value=FreshnessResult("daily", True, today, today, "PASS")):
+               return_value=FreshnessResult("daily", True, today, today, "PASS")), \
+         patch("trading.orchestrate.pipeline._scan_and_spawn_repair", return_value=0):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
         eng = MagicMock()
@@ -88,11 +92,14 @@ async def test_multi_experiment_keys_union(monkeypatch):
     def fake_cf(k, exp):
         checked_keys.append(k)
         return FreshnessResult(k, True, today, today, "ok")
+    # N4（08-16）测试卫生：同 test_data_ready_runs_eod——掐断 3.5 段真读湖+真
+    # spawn 补采（本测焦点是 required_data_keys 并集，不是 scan 行为）
     with patch("trading.orchestrate.pipeline.is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch("trading.orchestrate.pipeline.resolve_active", return_value=exps), \
          patch("trading.orchestrate.pipeline.build_strategy", side_effect=[strat_a, strat_b]), \
-         patch("trading.orchestrate.pipeline.check_freshness", side_effect=fake_cf):
+         patch("trading.orchestrate.pipeline.check_freshness", side_effect=fake_cf), \
+         patch("trading.orchestrate.pipeline._scan_and_spawn_repair", return_value=0):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
         eng = MagicMock(); eng._eod = AsyncMock()
@@ -149,6 +156,10 @@ async def test_scan_fail_triggers_repair_but_eod_runs(monkeypatch):
     monkeypatch.setattr(pl, "check_freshness",
                         lambda k, exp: FreshnessResult(k, True, today, today, "ok"))
     # scan 返 unjustified>0（FAIL，触发 repair）
+    # N4 注：本测【不走】新锚 patch("..._scan_and_spawn_repair")——它专测 3.5 段
+    # 「scan FAIL → Popen repair 触发」的行为本身，必须让 _scan_and_spawn_repair
+    # 真身跑、只 patch 其内部依赖（scan 源模块属性 + subprocess.Popen，均靠函数内
+    # lazy import 在调用时解析命中）；其余 6 个编排用例才整锚掐断（测试卫生）。
     monkeypatch.setattr("data.tools.scan_integrity.scan", lambda **kw: {
         "unjustified_gaps": 3, "unjustified_symbols": ["000001.SZ"],
         "total_symbols": 1, "total_gaps": 3, "gaps": [], "scan_range": [today, today]})

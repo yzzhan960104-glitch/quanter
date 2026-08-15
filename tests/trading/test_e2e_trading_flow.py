@@ -903,10 +903,15 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
         await pipeline_mod.pipeline_then_eod(_FakeEngineForPipeline())
     # patch 掉子进程（不真起 ops/data_pipeline.py）+ freshness（不读真实 parquet）
     # + resolve_active 返空让 keys 回退默认 {daily}（聚焦事件链编排而非策略装配）
+    # + N4（08-16）测试卫生：3.5 段连续性 scan 一并掐断——不真读 10M 行生产湖
+    #   （单次 ~74s）更不真 spawn 补采子进程烧 Tushare 配额（scan→repair 行为由
+    #   test_pipeline_then_eod.py::test_scan_fail_triggers_repair_but_eod_runs 专测；
+    #   本测焦点是 data_ready 落库→gate 放行的事件链契约）
     with patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch("trading.orchestrate.pipeline.resolve_active", return_value=[]), \
          patch("trading.orchestrate.pipeline.check_freshness",
                return_value=FreshnessResult("daily", True, PIPE_DATE, PIPE_DATE, "PASS")), \
+         patch("trading.orchestrate.pipeline._scan_and_spawn_repair", return_value=0), \
          patch("ops.brief_all.run_brief_all", new=AsyncMock(return_value=0)):
         proc = AsyncMock(); proc.wait.return_value = 0  # rc=0 采集成功
         cse.return_value = proc

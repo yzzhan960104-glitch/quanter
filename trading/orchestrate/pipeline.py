@@ -76,6 +76,54 @@ def _notify_risk(msg: str, level: str, *, soft: bool = False) -> None:
             logger.exception("告警发送失败")
 
 
+def _scan_and_spawn_repair(lake_dir: str) -> int:
+    """T13-B #1：连续性 scan（freshness 全绿后，eod 前）+ 异步补采子进程 spawn。
+
+    Why 抽成模块级函数（N4 · 2026-08-16）：原逻辑内联在 pipeline_then_eod 的 3.5 段，
+    ``from data.tools.scan_integrity import scan`` 与 ``import subprocess`` 都是函数内
+    import——测试没有干净的 patch 锚，只能打在源模块属性上（脆且易漏）。后果已实弹
+    发生过：pytest 真实读 10M 行生产湖（单次 ~74s）+ unjustified>0 时真 spawn 生产
+    repair 子进程**烧 Tushare 配额**、竞态挤爆限频（T1b 实弹事故）。抽到模块级后，
+    测试一锚 ``patch("trading.orchestrate.pipeline._scan_and_spawn_repair")`` 即掐断
+    真读湖+真 spawn 两条侧信道；生产语义逐字保形（只搬位置，不改任何逻辑）。
+
+    scan FAIL **不阻断 eod**（历史缺口与当日交易无关，blueprint §2.3），仅触发异步
+    repair（fire-and-forget；配额/熔断在 repair_gaps --auto 内）。
+    N1 语义对齐（2026-08-16）：unjustified_gaps 已升级为「日级判定 + 长洞市场共识
+    + unfillable sidecar 排除后真需补的子段计数」——旧段级 all() 误报（16,371 段）
+    收敛到真缺子段，本闸触发频率随之对齐真值（消费 key 不变）。
+
+    Args:
+        lake_dir: 数据湖目录（生产=ROOT/data_lake；抽参纯粹为可测性，行为与
+            原内联 ``str(ROOT / "data_lake")`` 完全一致）。
+
+    Returns:
+        unjustified_gaps 计数（当前调用方不消费返回值——fire-and-forget 语义下
+        仅日志留痕；返回它供未来闸门/观测接线）。scan/repair 任何异常吞掉返 0，
+        绝不阻断 eod 主链（与原 try/except 保形）。
+    """
+    try:
+        from data.tools.scan_integrity import scan as _scan_integrity
+        _scan_report = _scan_integrity(lake_dir=lake_dir)
+        _n_gaps = _scan_report.get("unjustified_gaps", 0)
+        if _n_gaps > 0:
+            logger.warning("T13-B scan 发现 %d 个待补子段（%d 标的，日级判定后），触发异步补采",
+                           _n_gaps, len(_scan_report.get("unjustified_symbols", [])))
+            import subprocess as _sp
+            _log_dir = ROOT / "logs"
+            _log_dir.mkdir(parents=True, exist_ok=True)
+            _log_fh = (_log_dir / "repair_auto.log").open("ab")
+            _sp.Popen([sys.executable, "-m", "data.tools.repair_gaps", "--auto",
+                       "--lake-dir", lake_dir],
+                      cwd=str(ROOT), stdout=_log_fh, stderr=_sp.STDOUT,
+                      stdin=_sp.DEVNULL, close_fds=True)
+            # _log_fh 由子进程继承，退出后 OS 回收（与 _run_discovery_subprocess 同模式）
+        return _n_gaps
+    except Exception:
+        logger.exception("T13-B scan/repair 触发异常（不阻断 eod）")
+        return 0
+
+
 async def pipeline_then_eod(engine, *, for_date: str | None = None,
                             run_eod: bool = True) -> None:
     """C-2 事件链：采集 → 等完成 → 按策略声明校验数据 → eod → brief。
@@ -161,30 +209,10 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
             _ledger_finish(today, "failed", msg)
             _notify_risk(msg, "CRITICAL")
             return  # 不跑 eod，不产废信号
-        # 3.5 T13-B #1：连续性 scan（freshness 全绿后，eod 前）—— 历史缺口检测（与 freshness
-        # 实时性互补）。scan FAIL **不阻断 eod**（历史缺口与当日交易无关，blueprint §2.3），
-        # 仅触发异步 repair 子进程（fire-and-forget；配额/熔断在 repair_gaps --auto 内）。
-        # N1 语义对齐（2026-08-16）：unjustified_gaps 已升级为「日级判定 + 长洞市场共识
-        # + unfillable sidecar 排除后真需补的子段计数」——旧段级 all() 误报（16,371 段）
-        # 收敛到真缺子段，本闸触发频率随之对齐真值（消费 key 不变）。
-        try:
-            from data.tools.scan_integrity import scan as _scan_integrity
-            _scan_report = _scan_integrity(lake_dir=str(ROOT / "data_lake"))
-            _n_gaps = _scan_report.get("unjustified_gaps", 0)
-            if _n_gaps > 0:
-                logger.warning("T13-B scan 发现 %d 个待补子段（%d 标的，日级判定后），触发异步补采",
-                               _n_gaps, len(_scan_report.get("unjustified_symbols", [])))
-                import subprocess as _sp
-                _log_dir = ROOT / "logs"
-                _log_dir.mkdir(parents=True, exist_ok=True)
-                _log_fh = (_log_dir / "repair_auto.log").open("ab")
-                _sp.Popen([sys.executable, "-m", "data.tools.repair_gaps", "--auto",
-                           "--lake-dir", str(ROOT / "data_lake")],
-                          cwd=str(ROOT), stdout=_log_fh, stderr=_sp.STDOUT,
-                          stdin=_sp.DEVNULL, close_fds=True)
-                # _log_fh 由子进程继承，退出后 OS 回收（与 _run_discovery_subprocess 同模式）
-        except Exception:
-            logger.exception("T13-B scan/repair 触发异常（不阻断 eod）")
+        # 3.5 T13-B #1：连续性 scan + 异步补采（详见 _scan_and_spawn_repair docstring）。
+        # N4（2026-08-16）：scan+Popen 块抽出为模块级 _scan_and_spawn_repair——抽出为
+        # 测试 patch 锚（pytest 曾真实 spawn 生产补采烧 Tushare 配额），生产语义逐字保形。
+        _scan_and_spawn_repair(lake_dir=str(ROOT / "data_lake"))
         # 5. 全绿 → 跑 eod（C-8 V2：补跑传显式 data_day/plan_date；默认路径零变化）
         if run_eod:
             # 4.5 A1 前置（DG-G4 · 2026-08-14）：空头/未知环境不产新计划（停手≠清仓，

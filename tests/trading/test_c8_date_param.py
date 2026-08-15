@@ -24,6 +24,8 @@ async def test_for_date_passes_explicit_dates_to_eod():
     # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
     # test_engine_regime_gate.py / test_regime.py）
     eng._regime_gate = AsyncMock(return_value=(True, ""))
+    # N4（08-16）测试卫生：掐断 3.5 段真读 10M 行生产湖 + 真 spawn 补采子进程
+    # （烧 Tushare 配额；本测焦点是 for_date 日期参数化，不是 scan 行为）
     with patch.object(pl, "is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
@@ -32,6 +34,7 @@ async def test_for_date_passes_explicit_dates_to_eod():
                       return_value=FreshnessResult("daily", True, "2026-07-31",
                                                    "2026-07-31", "PASS")), \
          patch.object(pl, "upsert_data_ready") as udr, \
+         patch.object(pl, "_scan_and_spawn_repair", return_value=0), \
          patch("ops.brief_all.run_brief_all", new=AsyncMock()):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
@@ -50,12 +53,15 @@ async def test_default_path_calls_eod_without_args():
     # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
     # test_engine_regime_gate.py / test_regime.py）
     eng._regime_gate = AsyncMock(return_value=(True, ""))
+    # N4（08-16）测试卫生：掐断 3.5 段真读湖+真 spawn 补采（本测焦点是默认路径
+    # for_date=None 行为零变化，不是 scan 行为）
     with patch.object(pl, "is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
          patch.object(pl, "check_freshness",
                       return_value=FreshnessResult("daily", True, "2026-08-03",
                                                    "2026-08-03", "PASS")), \
+         patch.object(pl, "_scan_and_spawn_repair", return_value=0), \
          patch("ops.brief_all.run_brief_all", new=AsyncMock()):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
@@ -73,12 +79,15 @@ async def test_run_eod_false_skips_eod_but_runs_brief():
     # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
     # test_engine_regime_gate.py / test_regime.py）
     eng._regime_gate = AsyncMock(return_value=(True, ""))
+    # N4（08-16）测试卫生：掐断 3.5 段真读湖+真 spawn 补采（本测焦点是 run_eod=False
+    # 只补数据不产计划，不是 scan 行为）
     with patch.object(pl, "is_trading_day", return_value=True), \
          patch("trading.orchestrate.pipeline.asyncio.create_subprocess_exec") as cse, \
          patch.object(pl, "resolve_active", return_value=[]), \
          patch.object(pl, "check_freshness",
                       return_value=FreshnessResult("daily", True, "2026-07-31",
                                                    "2026-07-31", "PASS")), \
+         patch.object(pl, "_scan_and_spawn_repair", return_value=0), \
          patch("ops.brief_all.run_brief_all", new=AsyncMock()) as rba:
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
