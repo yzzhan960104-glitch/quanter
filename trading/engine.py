@@ -34,7 +34,8 @@ W1 隔离机制（取代旧的进程隔离硬约束）：
   等 phases 函数改经 ``EnginePorts`` 窄接口显式接收 engine 实例特有依赖（盘前三段闸 gate
   + ``_dynamic_whitelist`` 注入/清空），由 engine cron wrapper / catchup 补跑注入
   ``self._ports``——依赖方向由隐式全局反查变为显式参数透传（为 T6-T8 phases 外迁铺路）。
-  ``_submit`` 不读实例白名单（A-2 已删 whitelist 挡板，直透 dry_run），故 ports 不承载它。
+  ``_submit``（现居 gateway_service，N5 后 engine 零副本）不读实例白名单（A-2 已删
+  whitelist 挡板，直透 dry_run），故 ports 不承载它。
 - server 路径的 ``submit_order`` **不传** ``whitelist``（默认 None），走旧路径
   ``_whitelist() = get_effective_whitelist()``（``_dynamic_whitelist`` 恒空 = 纯 env）
   ——server 行为与改造前完全一致（向后兼容红线）。
@@ -47,7 +48,7 @@ W1 隔离机制（取代旧的进程隔离硬约束）：
 ============================================================================
 影子模式（AUTO_TRADE_MODE=dry_run，默认）红线
 ============================================================================
-- pre_open / stop_loss_monitor 走 ``_submit`` → gateway_service.submit_order 的
+- pre_open / stop_loss_monitor 走 ``gateway_service._submit`` → submit_order 的
   ``dry_run=(_mode()=="dry_run")`` 分流，命中即返 ``{"state":"DRY_RUN"}`` 不真下单。
 - 未跑满 TRADE_SHADOW_MIN_DAYS（≥5）禁切 live 的告警由 ``trading/__main__.py``
   启动期处理（Task 10），本引擎内 ``_mode()`` 仅忠实读 env，不重复告警逻辑。
@@ -72,7 +73,7 @@ from typing import Any, Mapping, Optional
 # build_orders_from_signals/reconcile_job/qmt_market_data/trading_plan 等）——其消费者
 # 已直 import 物理真身，对应 patch 点同步迁至物理模块（详见 task-10-audit）。
 # ============================================================================
-# 网关服务（W1-B lazy 顶部化 · 模块对象风格）：get_gateway/_submit/get_positions 调用点
+# 网关服务（W1-B lazy 顶部化 · 模块对象风格）：get_gateway/get_positions 调用点
 # 经 ``gateway_service.<attr>`` 属性访问——**禁 from-import 本地绑定**（``patch(
 # "trading.gateway_service.X")`` 改的是模块属性，from 绑定在 import 期冻结不跟随），
 # 模块对象风格保 monkeypatch 命中（与 _state_store/job_ledger 同范式）。无循环依赖：
@@ -226,22 +227,14 @@ def get_gateway():
     return gateway_service.get_gateway()
 
 
-async def _submit(order) -> dict:
-    """下单分流（dry_run 据 _mode；A-2 后无 confirm/whitelist 参数）。
-
-    透传 gateway_service.submit_order，其契约：
-    - dry_run 命中 → 返 {"order_id":"", "state":"DRY_RUN", "message":<reason>}（不真下单）
-    - 真单成功   → 返 {"order_id":<seq>, "state":<OrderState.name 字符串>, "message":...}
-    - 挡板命中（非 dry_run）→ **raise RuntimeError**（调用方必须 try-except 兜底）
-
-    Why dry_run 用 _mode() 而非参数注入：pre_open/stop_loss 都是「影子即整批不真单」
-    语义，_mode 是进程级开关，逐单传参反而引入「单只切 live」的误操作面。
-
-    A-2（2026-08-06 裁定 D3）：confirm 由计划确认闸承担（pre_open 必须 confirmed=True），
-    白名单挡板已删（前端同步放开）；此处不再拼 whitelist/confirm，直接透传 dry_run。
-    （W1-B：lazy import 已顶部化，模块对象属性访问保 patch——见 get_gateway 注记。）
-    """
-    return await gateway_service.submit_order(order, dry_run=(_mode() == "dry_run"))
+# ============================================================================
+# N5（debt/new-debt-0816 · Low ②）：模块级 ``_submit`` wrapper 已删除。
+# W1-A/T2-Task7 把 phases 的下单入口下沉到 ``trading.gateway_service._submit`` 后，
+# 本模块这份副本零生产调用者（phases 顶部 ``from trading.gateway_service import _submit``
+# 直取真身，不反向经 engine）——留档只养出「patch("trading.engine._submit") 静默孤儿」
+# 一类假锚（test_engine 超期平仓用例与 e2e probabilistic_broker 均曾 patch 此死名）。
+# 测试拦截点已迁：phases 调用方模块（trading.phases.pre_open/stop_loss/exit 的 _submit）。
+# ============================================================================
 
 
 # ============================================================================

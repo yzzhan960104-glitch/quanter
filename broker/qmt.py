@@ -23,9 +23,10 @@ QmtExecutionGateway 组装面 + 兼容 re-export 垫片（W2-H1 · broker 四文
    ``from broker import qmt as qmt_gateway`` 的属性读取均经本面。
 
 ⚠️ patch 纪律（T1 既定）：monkeypatch 内部全局（XtQuantTrader/_CONNECT_TIMEOUT/
-_cleanup_session_files 等）须指「读取方真身模块」（分-layer 后多为 broker.qmt_connection，
-_ORDER_TIMEOUT 的 submit/cancel 读取方为 broker.qmt_business）——本垫片的 re-export
-副本与真身非同一对象，patch 垫片无效。
+_cleanup_session_files 等）须指「读取方真身模块」（分-layer 后多为 broker.qmt_connection）。
+_ORDER_TIMEOUT 单源收口（N5 · Low ③）：qmt_io/qmt_business 均改调用点
+``qmt_connection._ORDER_TIMEOUT`` 模块属性访问，patch 统一指契约根——本垫片的
+re-export 副本与真身非同一对象，patch 垫片无效。
 
 底层 API 事实来源：skills/miniqmt/references/xttrader.md（迅投官方），本模块不
 臆造任何 xtquant / xtconstant 字段（CLAUDE.md 事实审查红线）。

@@ -17,9 +17,12 @@ QmtExecutionGateway 业务层 mixin（W2-H1 · broker 四文件分层 · 逻辑�
   QmtConnectionBase.__init__）——与分层前同一实例世界，mixin 间零新通信机制。
 - 共享常量从 broker.qmt_connection（契约根）from-import：不可变值拷贝语义。
   xtconstant 例外说明：submit_order 读 xtconstant.STOCK_BUY/SELL 拿的是本模块
-  import 时绑定的契约根副本（conftest 假件先于本模块装载注入，绑定即假件）；
-  单测若需 patch 超时常量（_ORDER_TIMEOUT）须指本模块（T1 范式：patch 须指
-  读取方真身模块，契约根/垫片的副本不生效）。
+  import 时绑定的契约根副本（conftest 假件先于本模块装载注入，绑定即假件）。
+  **_ORDER_TIMEOUT 例外（N5 · Low ③ 单源收口）**：超时常量改
+  ``qmt_connection._ORDER_TIMEOUT`` 调用点模块属性访问——单测 patch 超时统一指
+  契约根 ``patch("broker.qmt_connection._ORDER_TIMEOUT")``（一处生效全部读取方，
+  io/business/契约根自身），不再各自维护 from-import 副本（原三拷贝运行期调
+  超时要踩三处）。
 
 分层红线（spec §5.1）：逻辑只搬位置 + 接缝注释，零行为改动；方法体逐字保留。
 """
@@ -32,8 +35,10 @@ import time
 from typing import Any, Mapping, Optional
 
 from broker.base import OrderResult
+# N5（Low ③）：_ORDER_TIMEOUT 从 from-import 列表移除，改 ``qmt_connection.
+# _ORDER_TIMEOUT`` 调用点模块属性访问——契约根单源，patch 一处生效三读取方。
+from broker import qmt_connection
 from broker.qmt_connection import (
-    _ORDER_TIMEOUT,
     _ORDERS_GC_KEEP_SECONDS,
     _ORDERS_GC_THRESHOLD,
     _RECONNECT_BACKOFFS,
@@ -204,12 +209,12 @@ class QmtBusinessMixin:
         try:
             # #9：wait_for 兜底防 order_stock_async 永久阻塞事件循环（超时返 FAILED）。
             seq = await asyncio.wait_for(
-                self._loop.run_in_executor(None, _do_order), timeout=_ORDER_TIMEOUT)
+                self._loop.run_in_executor(None, _do_order), timeout=qmt_connection._ORDER_TIMEOUT)
         except Exception as exc:
             # C++ 调用异常/超时（如会话失效）：记 FAILED 而非冒泡，让上层状态机兜底
             logger.exception("QMT order_stock_async 异常/超时 symbol=%s", order.symbol)
             return OrderResult(order_id=order.order_id or "", state=OrderState.FAILED,
-                               message=f"下单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
+                               message=f"下单异常/超时(>{qmt_connection._ORDER_TIMEOUT}s)：{exc}")
 
         if seq is None or seq < 0:
             # seq == -1：柜台拒单（资金不足/涨跌停/参数非法等），具体原因由 on_order_error 推送
@@ -251,11 +256,11 @@ class QmtBusinessMixin:
         try:
             # #9：wait_for 兜底防 cancel_order_stock 永久阻塞事件循环（超时返 FAILED）。
             rc = await asyncio.wait_for(
-                self._loop.run_in_executor(None, _do_cancel), timeout=_ORDER_TIMEOUT)
+                self._loop.run_in_executor(None, _do_cancel), timeout=qmt_connection._ORDER_TIMEOUT)
         except Exception as exc:
             logger.exception("QMT cancel_order_stock 异常/超时 order_id=%s", order_id)
             return OrderResult(order_id=order_id, state=OrderState.FAILED,
-                               message=f"撤单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
+                               message=f"撤单异常/超时(>{qmt_connection._ORDER_TIMEOUT}s)：{exc}")
 
         if rc == 0:
             # rc==0 仅表「撤单指令已成功发出」，非订单终态——柜台可能因订单已成交 /
@@ -293,11 +298,11 @@ class QmtBusinessMixin:
 
         try:
             rc = await asyncio.wait_for(
-                self._loop.run_in_executor(None, _do_cancel), timeout=_ORDER_TIMEOUT)
+                self._loop.run_in_executor(None, _do_cancel), timeout=qmt_connection._ORDER_TIMEOUT)
         except Exception as exc:
             logger.exception("QMT cancel_order_by_broker_oid 异常/超时 broker_oid=%s", broker_oid)
             return OrderResult(order_id=str(broker_oid), state=OrderState.FAILED,
-                               message=f"撤单异常/超时(>{_ORDER_TIMEOUT}s)：{exc}")
+                               message=f"撤单异常/超时(>{qmt_connection._ORDER_TIMEOUT}s)：{exc}")
 
         if rc == 0:
             return OrderResult(order_id=str(broker_oid), state=OrderState.CANCELLED,

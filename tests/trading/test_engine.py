@@ -5,7 +5,8 @@
 - 绝不真起 APScheduler（plan 红线）——只测 4 个 async 触发函数 + TradingEngine
   的 cron 注册（实例化即装配 4 job，不 start）；
 - 绝不真发钉钉 / 真下单：monkeypatch ``trading_plan.push_plan_to_dingtalk``
-  （网络副作用）+ ``engine._submit``（真单副作用）；
+  （网络副作用）+ ``_submit``（真单副作用；N5 后 engine 副本已删，绊线指
+  ``trading.gateway_service._submit`` 真身 / ``trading.phases.<消费方>._submit``）；
 - stop_loss qty 不得硬编码（live 安全红线）：monkeypatch gw._fetch_broker_positions
   返回真实持仓 dict，断言卖出 qty 源自该 dict 而非魔法数 100。
 """
@@ -54,7 +55,9 @@ def test_eod_plan_dry_run_no_real_order(monkeypatch):
     async def _no_submit(order, **kw):
         raise AssertionError("影子模式 eod_plan 绝不应调 _submit（计划阶段本就不下单）")
 
-    monkeypatch.setattr(engine, "_submit", _no_submit)
+    # N5（Low ②）：engine._submit 副本已删——绊线迁真身 gateway_service._submit
+    # （eod_plan 计划阶段本就不下单；patch 真身兜「任何 submit 路径被误触」的防真单意图）。
+    monkeypatch.setattr("trading.gateway_service._submit", _no_submit)
 
     # 防真发钉钉（scope #5）：monkeypatch trading_plan.push_plan_to_dingtalk
     pushed = {"n": 0}
@@ -84,7 +87,8 @@ def test_eod_plan_produces_nested_orders(monkeypatch):
     """scope #1：eod_plan 生产的 orders 必须是嵌套结构（与 Task8 push 一致）。"""
     from strategies.neckline.signal import Signal
 
-    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    # N5（Low ②）：engine._submit 副本已删——eod_plan 防真单绊线迁真身。
+    monkeypatch.setattr("trading.gateway_service._submit", _no_op_submit)
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
 
     # Layer2 阶段1：signals 改为 list[Signal]（frozen dataclass）
@@ -148,7 +152,8 @@ def test_eod_plan_inserts_signal_event(monkeypatch, _state_db):
     """
     import sqlite3
     from trading import state_store
-    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    # N5（Low ②）：engine._submit 副本已删——eod_plan 防真单绊线迁真身。
+    monkeypatch.setattr("trading.gateway_service._submit", _no_op_submit)
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
                                 atr_map={"600000.SH": 0.2}, capital=1_000_000))
@@ -167,7 +172,8 @@ def test_eod_plan_inserts_signal_event(monkeypatch, _state_db):
 def test_eod_plan_auto_confirm_event(monkeypatch, _state_db):
     """AUTO_CONFIRM_PLAN=true → trade_event 有 CONFIRMED 行。"""
     from trading import state_store
-    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    # N5（Low ②）：engine._submit 副本已删——eod_plan 防真单绊线迁真身。
+    monkeypatch.setattr("trading.gateway_service._submit", _no_op_submit)
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     monkeypatch.setenv("AUTO_CONFIRM_PLAN", "true")
     asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
@@ -181,7 +187,8 @@ def test_eod_plan_signal_idempotent(monkeypatch, _state_db):
     """重跑 eod_plan → SIGNAL 已存在 → 跳过（UNIQUE 幂等，不重复记）。"""
     import sqlite3
     from trading import state_store
-    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    # N5（Low ②）：engine._submit 副本已删——eod_plan 防真单绊线迁真身。
+    monkeypatch.setattr("trading.gateway_service._submit", _no_op_submit)
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
                                 atr_map={"600000.SH": 0.2}, capital=1_000_000))
@@ -198,7 +205,8 @@ def test_eod_plan_signal_idempotent(monkeypatch, _state_db):
 def test_eod_plan_veto_protection(monkeypatch, _state_db):
     """trade_event VETOED 后重跑 eod_plan → 不重写为 CONFIRMED（veto 保护）。"""
     from trading import state_store
-    monkeypatch.setattr(engine, "_submit", _no_op_submit)
+    # N5（Low ②）：engine._submit 副本已删——eod_plan 防真单绊线迁真身。
+    monkeypatch.setattr("trading.gateway_service._submit", _no_op_submit)
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     monkeypatch.setenv("AUTO_CONFIRM_PLAN", "true")
     asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
@@ -452,7 +460,8 @@ def test_pre_open_skips_vetoed(monkeypatch, _state_db):
     async def _counting_submit(order, **kw):
         submit_calls["n"] += 1
         return {"order_id": "x", "state": "DRY_RUN", "message": "影子"}
-    monkeypatch.setattr(engine, "_submit", _counting_submit)
+    # N5（Low ②）：engine._submit 副本已删——pre_open 消费方真身 patch。
+    monkeypatch.setattr("trading.phases.pre_open._submit", _counting_submit)
     asyncio.run(engine.pre_open("2099-01-02"))
     assert submit_calls["n"] == 0  # vetoed 不挂单
     assert state_store.has_order(account_id, "2099-01-02", "600000.SH", "OPEN") is False
@@ -574,7 +583,8 @@ def test_stop_loss_monitor_off_session_no_op(monkeypatch):
         submitted["n"] += 1
         return {"state": "DRY_RUN"}
 
-    monkeypatch.setattr(engine, "_submit", _no_submit)
+    # N5（Low ②）：engine._submit 副本已删——stop_loss 消费方真身 patch。
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _no_submit)
 
     result = asyncio.run(engine.stop_loss_monitor())
     assert "非盘中" in result["reason"]
@@ -1246,7 +1256,7 @@ def test_pre_open_snapshot_skip_when_query_asset_empty(monkeypatch, _state_db):
     monkeypatch.setattr(engine, "get_gateway", lambda: _FakeGw())
     # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（pre_open 路径）。
     monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr(engine, "_submit", _no_op_submit_should_not_be_called_unused)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _no_op_submit_should_not_be_called_unused)
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
@@ -1675,7 +1685,7 @@ def test_pre_open_skip_expired_signal(monkeypatch, _state_db):
     async def _fake_submit(order, **kw):
         submitted.append(order.symbol)
         return {"state": "SUBMITTED"}
-    monkeypatch.setattr(engine, "_submit", _fake_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
 
     result = asyncio.run(engine.pre_open("2099-01-02"))
     assert submitted == [], "超期信号（formed_at 距今 > max_wait）应被跳过不挂"
@@ -2153,7 +2163,7 @@ def test_pre_open_close_expired_skip_when_no_price(monkeypatch, _state_db):
     async def _fake_submit(order, **kw):
         submitted.append((order.symbol, order.side))
         return {"state": "SUBMITTED"}
-    monkeypatch.setattr(engine, "_submit", _fake_submit)
+    monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
 
     asyncio.run(engine.pre_open("2099-01-02"))
 
@@ -2388,7 +2398,10 @@ def test_close_expired_positions_skips_already_placed(monkeypatch, tmp_path):
     async def _fake_submit(order, **kw):
         submit_calls.append(order.symbol)
         return {"order_id": "x", "state": "SUBMITTED"}
-    monkeypatch.setattr("trading.engine._submit", _fake_submit)
+    # N5（Low ②）：engine._submit 副本已删（零生产调用者）——close_expired_positions
+    # 真身在 trading.phases.stop_loss，其 _submit 为模块顶部 from-import 本地绑定，
+    # patch 须指调用方模块（patch engine 死名是静默孤儿锚）。
+    monkeypatch.setattr("trading.phases.stop_loss._submit", _fake_submit)
     monkeypatch.setenv("QMT_ACCOUNT_ID", aid)  # _resolve_account_id 与幂等行同账户
     res = asyncio.run(_close_expired_positions(gw, [{"symbol": sym, "entry_date": "2026-06-15",
                                                      "holding_days": 20, "max_holding": 15}]))

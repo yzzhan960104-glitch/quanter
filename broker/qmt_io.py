@@ -13,8 +13,11 @@ QmtExecutionGateway IO 层 mixin（W2-H1 · broker 四文件分层 · 逻辑只�
   is_blocked 等，初始化在 QmtConnectionBase.__init__，锁风控状态机在
   QmtBusinessMixin）——与分层前同一实例世界，mixin 间零新通信机制。
 - 共享常量从 broker.qmt_connection（契约根）from-import：不可变值拷贝语义，
-  读取方单一（本层仅 _ORDER_TIMEOUT/_map_qmt_status）；单测若需 patch 超时须指
-  本模块（T1 范式：patch 须指读取方真身模块，垫片/契约根的副本不生效）。
+  读取方单一（本层仅 _map_qmt_status）。**_ORDER_TIMEOUT 例外（N5 · Low ③ 单源
+  收口）**：超时常量改 ``qmt_connection._ORDER_TIMEOUT`` 调用点模块属性访问——
+  from-import 副本在 import 期冻结，patch 契约根不跟随；属性访问让
+  ``patch("broker.qmt_connection._ORDER_TIMEOUT")`` 一处生效三读取方（io/business/
+  契约根自身），运行期调超时不再踩多处副本。
 
 分层红线（spec §5.1）：逻辑只搬位置 + 接缝注释，零行为改动；方法体逐字保留。
 """
@@ -24,7 +27,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Mapping, Optional
 
-from broker.qmt_connection import _ORDER_TIMEOUT, _map_qmt_status
+# N5（Low ③）：_ORDER_TIMEOUT 改「模块对象 + 调用点属性访问」——契约根单源可 patch；
+# _map_qmt_status 仍是函数 from-import（非 patch 热点，值拷贝语义无漂移面）。
+from broker import qmt_connection
+from broker.qmt_connection import _map_qmt_status
 from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 # ⚠️ 日志名锁定 "broker.qmt"（不用默认 __name__）：分层前全部日志经 broker.qmt 一个
@@ -149,11 +155,11 @@ class QmtIoMixin:
             asset = await asyncio.wait_for(
                 self._loop.run_in_executor(
                     None, lambda: self._trader.query_stock_asset(self._account)),
-                timeout=_ORDER_TIMEOUT,
+                timeout=qmt_connection._ORDER_TIMEOUT,
             )
         except Exception as exc:
             # 超时/异常不抛——让 circuit_breaker 跳过当日损失检查（跳过≠熔断）
-            logger.exception("QMT query_stock_asset 异常/超时(>%ss)：%s", _ORDER_TIMEOUT, exc)
+            logger.exception("QMT query_stock_asset 异常/超时(>%ss)：%s", qmt_connection._ORDER_TIMEOUT, exc)
             return {}
         if asset is None:
             # xttrader.md：查询失败/无资产均返 None，统一返 {} 让调用方按缺失降级
@@ -267,11 +273,11 @@ class QmtIoMixin:
                 self._loop.run_in_executor(
                     None, lambda: self._trader.query_stock_orders(
                         self._account, cancelable_only)),
-                timeout=_ORDER_TIMEOUT,
+                timeout=qmt_connection._ORDER_TIMEOUT,
             )
         except Exception as exc:
             # 超时/异常不抛——让上层（T5/对账）按 [] 降级
-            logger.exception("QMT query_stock_orders 异常/超时(>%ss)：%s", _ORDER_TIMEOUT, exc)
+            logger.exception("QMT query_stock_orders 异常/超时(>%ss)：%s", qmt_connection._ORDER_TIMEOUT, exc)
             return []
         if not orders:
             # None 或空列表统一返 []（None 即查询失败/当日无委托，二者不可区分）
@@ -317,10 +323,10 @@ class QmtIoMixin:
             trades = await asyncio.wait_for(
                 self._loop.run_in_executor(
                     None, lambda: self._trader.query_stock_trades(self._account)),
-                timeout=_ORDER_TIMEOUT,
+                timeout=qmt_connection._ORDER_TIMEOUT,
             )
         except Exception as exc:
-            logger.exception("QMT query_stock_trades 异常/超时(>%ss)：%s", _ORDER_TIMEOUT, exc)
+            logger.exception("QMT query_stock_trades 异常/超时(>%ss)：%s", qmt_connection._ORDER_TIMEOUT, exc)
             return []
         if not trades:
             return []

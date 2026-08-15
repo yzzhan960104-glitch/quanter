@@ -124,7 +124,7 @@ broker/
 └── mock.py              90 行  概率成交 broker（L3 e2e 载体）
 ```
 
-> 分层红线：AST 级 53/53 函数体逐字一致（逻辑只搬）；`BrokerProtocol`（trading/broker_ports.py，runtime_checkable 最小契约）钉住六方法 + 回调钩子；logger 名锁定 `broker.qmt`（测试/运维口径零变化）。`_ORDER_TIMEOUT` 跨层 from-import 三拷贝见 [#6 Low 清单](06-tech-debt.md)。
+> 分层红线：AST 级 53/53 函数体逐字一致（逻辑只搬）；`BrokerProtocol`（trading/broker_ports.py，runtime_checkable 最小契约）钉住六方法 + 回调钩子；logger 名锁定 `broker.qmt`（测试/运维口径零变化）。`_ORDER_TIMEOUT` 跨层 from-import 三拷贝已收口（N5 · Low ③：qmt_io/qmt_business 改 `qmt_connection._ORDER_TIMEOUT` 调用点模块属性访问，patch 统一指契约根，见 [#6 Low 清单](06-tech-debt.md)）。
 
 ## 双向耦合（重构缝合点现状）
 

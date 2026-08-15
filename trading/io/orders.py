@@ -37,7 +37,7 @@ async def submit_order(order: Any, *, dry_run: bool, confirm: bool = True) -> di
     参数：
         order:    OrderRequest（trading.compute.types，由调用方构造）。
         dry_run:  影子模式标志（True=不真下单，返 DRY_RUN）。
-        confirm:  二次确认开关（默认 True，引擎自动批量通道见 engine._submit 注释）。
+        confirm:  二次确认开关（默认 True，引擎自动批量通道见 gateway_service._submit 注释）。
 
     返回：
         gateway_service.submit_order 原样透传（{order_id, state, message}）。

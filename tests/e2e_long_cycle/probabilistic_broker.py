@@ -387,8 +387,9 @@ class ProbabilisticBroker:
         # engine.X 保 patch：_health_guard（engine.py 实例方法）读 engine 模块全局 ``get_gateway``
         # （engine.py:367 自有定义），与 phases 本地引用两口子分离（Task 7 fix 同款双口子）。
         # _cancel_all_open_orders 仅 pre_open/post_close 读（stop_loss/exit 不 import）。
+        # N5（Low ②）：patch("trading.engine._submit") 已删——engine 副本零生产调用者
+        # （phases 全部 from gateway_service 直取真身），patch 死名是静默孤儿锚。
         with patch("trading.engine.get_gateway", lambda: gw), \
-             patch("trading.engine._submit", _submit_mock), \
              patch("trading.phases.pre_open.get_gateway", lambda: gw), \
              patch("trading.phases.pre_open._submit", _submit_mock), \
              patch("trading.phases.pre_open._cancel_all_open_orders",

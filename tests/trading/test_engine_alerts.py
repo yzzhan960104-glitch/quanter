@@ -162,7 +162,9 @@ def test_pre_open_zero_submit_live_alerts_critical(_isolate_trade_env, monkeypat
     monkeypatch.setattr(engine, "get_gateway", lambda: fake_gw)
     monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
-    monkeypatch.setattr(engine, "_submit", AsyncMock(side_effect=RuntimeError("网关锁死")))
+    # N5（Low ②）：engine._submit 副本已删——pre_open 消费方模块本地绑定，patch 须指真身。
+    monkeypatch.setattr(_pre_open_mod, "_submit",
+                        AsyncMock(side_effect=RuntimeError("网关锁死")))
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
 
     result = asyncio.run(engine.pre_open("2026-07-28"))
@@ -216,7 +218,7 @@ def test_pre_open_zero_submit_dry_run_no_alert(_isolate_trade_env, monkeypatch, 
     monkeypatch.setattr(_pre_open_mod, "_cancel_all_open_orders",
                         AsyncMock(return_value={"cancelled": 0, "unconfirmed": 0}))
     # dry_run 下 _submit 返 DRY_RUN 不 raise——构造返 REJECTED 模拟「未挂成功」
-    monkeypatch.setattr(engine, "_submit",
+    monkeypatch.setattr(_pre_open_mod, "_submit",
                         AsyncMock(return_value={"state": "REJECTED", "message": "挡板"}))
     monkeypatch.setattr(engine.calendar, "is_trading_day", lambda d: True)
 
