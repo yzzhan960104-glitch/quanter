@@ -41,6 +41,7 @@
 | | **C1** | 配置六层默认值 SSoT（stop_atr_mult/trailing/tp1_portion） | ◐ 主体已收（T7 `PRICE_LEVEL_DEFAULTS` 单源 + stop_atr_mult 2.0→1.0 收敛）；trailing/tp1_portion 六层全收敛未做 |
 | | **P2-ts** | 时间戳三口径统一（Asia/Shanghai aware） | ✗ 未做 |
 | 策略优化（08-12 spec） | **P0-P6** | P1 向量化 35.5s / P2 TPE batch / P3 敏感性后台 / P4 min_rr 复活 / P5 walk-forward / P6 数据指纹 | ✅ 已合并（`cc4629b7`，08-13）；P4 语义候选未启动（ADR 诚实标注） |
+| 优化循环（08-16 开战） | **R0→** | 长周期调参循环：A3/A4 可信度验证 + autopromote 七门 + 自动环；R0 实证 **口径裂缝**（scan+18.4% vs replay-23.9% 符号反转）→ G7 fail-closed | ✅ R0 done（08-16，`optimize/long-loop-0816`）；R1=搜索目标切 replay 口径（见 `docs/research/ROUND_LOG.md`） |
 | 技术债清偿（08-15） | **debt/full-wave-0815** | 08-14 批判性复核 CR-1..11 全量清偿 + W1-B/W2/TD/SS/CN 收口 + 架构视图收官 | ✅ done（08-15，`5d999375`..T17；T18 终验合并推送收口）；遗留 → [#6 新债登记](06-tech-debt.md)（停牌真值缺口 High 等） |
 | data 完整性 | [T13](../../plans/wayfinder/T13.md) | 生产 gate + 自动补采 + 写入守卫 | ✅ 代码路径全治 + **补采回路复活（CR-6/T6：实弹 350/350 零中断、熔断复位）**；⚠️ 新尾巴：**scan 停牌真值缺口**（16371 段含长停牌真缺，配额被永不可补段占据——[#6 High 新债](06-tech-debt.md)，待新工单） |
 | state_store SSoT | [T6](../../plans/wayfinder/T6.md) | SSoT 演进收口 | ✅ done（08-15 闭单：四决策定稿——fill CHECK T3 / is_vetoed T11 / actual_sid 单源 T14 / StopLossContext T11） |
