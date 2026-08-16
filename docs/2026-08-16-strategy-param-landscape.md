@@ -98,18 +98,19 @@ ACTIVE 实值（25c602）：window=80, min_touches=2, min_suppression=0.6, local
 - **指纹**：engine_hash=`53090190e55f`（ENGINE_FILES 9 文件）、snapshot_hash（universe 冻结）、data_hash（除权重算防线）；discovery_trials.db 516 trial / 当前快照 3fdcbbcb 仅 3 trial（新起点）。
 - **AI 回路已知缺口（10 条中关键 3 条）**：①分析输入无逐笔归因 ②verify 不自动触发 ③建议→提案断链——阶段 3 沉淀对象。
 
-## 五、风险清单
+## 五、风险清单（R0 收官刷新 2026-08-16）
 
 | 风险 | 现状 | 处置 |
 |---|---|---|
-| **A3 成交真实性未验证** | 滑点 5bps 默认存在但无敏感性实证；跳空/跌停封死未建模（stop_gap/same_day_both 已计数可量化） | 本次 T1.1 |
-| **A4 Kelly 薄边缘** | audit 标定"4% Kelly 薄边缘"；DG-G5 定稿分数 Kelly 0.25× 未落地（当前固定 pos_cap=0.05） | 本次 T1.2/T1.3 |
+| **口径裂缝（R0 实锤，当前最高）** | scan 口径 outer +18.4%/+53.4% vs replay 组合口径 **-23.9%/-44.5%（符号反转）**——kelly_metrics 假设信号独立可下注，replay max_positions=6 才是实盘 | R1 主攻：搜索目标切 replay 口径（协议 §三军规） |
+| **A3 成交真实性** | 已实证：摩擦斜率温和（10bps 侵蚀 0.6-1.7pp）；stop_gap 7%；主问题是组合约束非交易成本 | ✅ R0-A3 报告落盘，G7 常量定稿 False |
+| **A4 Kelly 薄边缘** | 已实证：正 kelly 年 4/6 贴线、wf OOS 无翻负两折归零；分数 Kelly 0.25× 已落地（默认 fixed 影子观察） | ✅ R0-A4 报告 + ADR-14 |
 | 实盘 env 分叉 | 5 项价位参数与 ACTIVE 档不一致（上表） | 登记，后续收口工单 |
-| DRAFT 无处置路径 | 状态机缺 DRAFT→ARCHIVED；08-04 曾手工 SQL discard | 本次 T2.2 |
-| auto_publish UNIQUE 冲突 | 08-16 06:08 崩溃一次（`discovery_bridge.py:151`） | 本次 C4 |
-| universe 陈旧标的 | 4 只尾部 K 线早于湖最新日 >14 天（freeze 警告） | 本次 C5 |
-| 提案悬置 | p_553e383d PENDING 10 天未 verify | 本次 C3 |
-| 多口径不一致 | discovery（kelly/calmar）≠ ReplayReport ≠ 实盘；verify 已用 evaluate_replay 对齐方向 | 循环协议内声明口径 |
+| ~~DRAFT 无处置路径~~ | ✅ T2.2 落地 discard；池已清空（4 条处置留审计痕） | 完成 |
+| ~~auto_publish UNIQUE 冲突~~ | ✅ C4 双层幂等修复 | 完成 |
+| ~~universe 陈旧标的~~ | ✅ C5 核实=真实停牌/退市（unfillable 停牌真值），警告是正确信号 | 完成 |
+| ~~提案悬置~~ | ✅ C3：挖出并修复 `_judge` dd 符号反转 bug；p_553e383d 重裁决 APPROVED → 3e383d 为 R1 种子 | 完成 |
+| 多口径不一致 | discovery（kelly/calmar）≠ ReplayReport ≠ 实盘 | 放行判据已锁 replay 口径（ADR-15 §口径声明）；搜索侧 R1 切换 |
 
 ## 六、循环入口
 
