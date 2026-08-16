@@ -18,17 +18,22 @@ def _ver(**kw):
 
 
 def test_legal_transitions():
-    """合法迁移：DRAFT→ACTIVE、ACTIVE→ARCHIVED、ARCHIVED→ACTIVE。"""
+    """合法迁移：DRAFT→ACTIVE、DRAFT→ARCHIVED(discard)、ACTIVE→ARCHIVED、ARCHIVED→ACTIVE。"""
     assert validate_transition(ExperimentStatus.DRAFT, ExperimentStatus.ACTIVE) is True
+    assert validate_transition(ExperimentStatus.DRAFT, ExperimentStatus.ARCHIVED) is True   # T2.2 discard
     assert validate_transition(ExperimentStatus.ACTIVE, ExperimentStatus.ARCHIVED) is True
     assert validate_transition(ExperimentStatus.ARCHIVED, ExperimentStatus.ACTIVE) is True
 
 
 def test_illegal_transitions():
-    """非法迁移一律拒绝（ARCHIVED→DRAFT、已 ACTIVE 再 promote 等）。"""
+    """非法迁移一律拒绝（ARCHIVED→DRAFT、已 ACTIVE 再 promote 等）。
+
+    注：DRAFT→ARCHIVED 已于 T2.2（2026-08-16）成为合法 discard 迁移，移出非法清单——
+    ACTIVE→ARCHIVED 与 DRAFT→ARCHIVED 的语义区分由 store.discard 显式 DRAFT 校验保证。
+    """
     assert validate_transition(ExperimentStatus.ARCHIVED, ExperimentStatus.DRAFT) is False
     assert validate_transition(ExperimentStatus.ACTIVE, ExperimentStatus.ACTIVE) is False
-    assert validate_transition(ExperimentStatus.DRAFT, ExperimentStatus.ARCHIVED) is False
+    assert validate_transition(ExperimentStatus.DRAFT, ExperimentStatus.DRAFT) is False
 
 
 def test_weight_sum_within_limit():

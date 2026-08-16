@@ -163,6 +163,30 @@ def archive(db_path: str, experiment_id: str, operator: str, now: str) -> None:
     _transition(db_path, experiment_id, ExperimentStatus.ARCHIVED, operator, now, "archive")
 
 
+def discard(db_path: str, experiment_id: str, operator: str, now: str) -> None:
+    """discard: DRAFT→ARCHIVED（T2.2 · 2026-08-16）。DRAFT 池的处置出口。
+
+    Why 显式校验 DRAFT 而非直接走 _transition：validate_transition 对 (ACTIVE, ARCHIVED)
+    也放行（archive 迁移），discard 直接复用会让 ACTIVE 借 discard 入口下线、绕开
+    archive 的语义与审计区分——与 promote 显式拒绝 ARCHIVED 同款防线（C1 教训）。
+    DRAFT weight 恒 0，无资金守恒校验需求。
+    """
+    with _connect(db_path) as con:
+        row = con.execute("SELECT * FROM experiment_version WHERE experiment_id=?",
+                          (experiment_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"实验版本不存在: {experiment_id}")
+        old_status = ExperimentStatus(row["status"])
+        if old_status != ExperimentStatus.DRAFT:
+            raise ValueError(f"discard 仅 DRAFT→ARCHIVED（当前 {old_status}；"
+                             f"ACTIVE 下线请用 archive）")
+        con.execute(
+            "UPDATE experiment_version SET status=?, archived_at=? WHERE experiment_id=?",
+            (ExperimentStatus.ARCHIVED.value, now, experiment_id))
+        _write_audit(con, action="discard", experiment_id=experiment_id, operator=operator,
+                     now=now, changed_fields={"status": [old_status.value, "ARCHIVED"]})
+
+
 def rollback(db_path: str, experiment_id: str, operator: str, now: str) -> None:
     """rollback: ARCHIVED→ACTIVE（恢复上线）。权重沿用归档前值，若冲突由调用方先调权重。"""
     _transition(db_path, experiment_id, ExperimentStatus.ACTIVE, operator, now, "rollback")

@@ -74,8 +74,13 @@ class AuditLog:
 # 状态机与权重校验（纯函数，store.py 写入前调）
 # ============================================================================
 # 合法迁移表（design §3.3 状态机）。set-weight 不改 status，不在此表。
+# discard（DRAFT→ARCHIVED，2026-08-16 T2.2 补全）：DRAFT 池需要处置出口——autopromote
+# 门槛判定不过的候选、过期提案 DRAFT 须可出清，否则积压污染候选选择。此前 08-04 只能
+# 手工 SQL 补 discard（audit_id=6），本迁移落地后走正规代码路径。语义边界：discard 仅
+# DRAFT（store.discard 显式校验），ACTIVE 下线走 archive（含资金语义），不可互借。
 _LEGAL_TRANSITIONS = {
     (ExperimentStatus.DRAFT, ExperimentStatus.ACTIVE): "promote",
+    (ExperimentStatus.DRAFT, ExperimentStatus.ARCHIVED): "discard",
     (ExperimentStatus.ACTIVE, ExperimentStatus.ARCHIVED): "archive",
     (ExperimentStatus.ARCHIVED, ExperimentStatus.ACTIVE): "rollback",
 }

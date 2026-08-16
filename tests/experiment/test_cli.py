@@ -61,3 +61,23 @@ def test_cli_promote_rejects_overflow(db, capsys):
     assert rc != 0
     err = capsys.readouterr().err
     assert "权重" in err
+
+
+def test_cli_discard_draft(db):
+    """T2.2：CLI discard 子命令——DRAFT 出清后不再出现在 DRAFT 池。"""
+    cli.main(["create", "--strategy", "neckline", "--params", '{}',
+              "--experiment-id", "e1", "--created-at", "t"])
+    rc = cli.main(["discard", "e1", "--note", "autopromote G2 未过"])
+    assert rc == 0
+    assert store.list_versions(db, status=ExperimentStatus.DRAFT) == []
+    assert store.list_versions(db, status=ExperimentStatus.ARCHIVED)[0].experiment_id == "e1"
+
+
+def test_cli_discard_rejects_active(db, capsys):
+    """T2.2：CLI discard 对 ACTIVE 报错非零退出（防借 discard 绕 archive 语义）。"""
+    cli.main(["create", "--strategy", "neckline", "--params", '{}',
+              "--experiment-id", "e1", "--created-at", "t"])
+    cli.main(["promote", "e1", "--weight", "0.5"])
+    rc = cli.main(["discard", "e1"])
+    assert rc != 0
+    assert "仅 DRAFT" in capsys.readouterr().err

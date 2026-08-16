@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 
 from experiment.models import ExperimentVersion, ExperimentStatus
-from experiment.store import _DEFAULT_DB, archive as _archive, create_version, list_versions, promote as _promote, rollback as _rollback, set_weight
+from experiment.store import _DEFAULT_DB, archive as _archive, create_version, discard as _discard, list_versions, promote as _promote, rollback as _rollback, set_weight
 
 _OPERATOR = "cli"
 
@@ -45,6 +45,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("archive", help="ACTIVE→ARCHIVED")
     sp.add_argument("experiment_id")
+
+    sp = sub.add_parser("discard", help="DRAFT→ARCHIVED（DRAFT 池处置出口，仅 DRAFT）")
+    sp.add_argument("experiment_id")
+    sp.add_argument("--note", default="", help="处置原因（写审计，如「autopromote G2 未过」）")
+
+    # autopromote（T2.3 · ADR-15）：七门量化门槛自动 promote。默认 dry-run（只评估+播报，
+    # 零写库）；--exec 才写库且受 env AUTO_PROMOTE_ENABLED 总开关管辖（fail-closed）。
+    sp = sub.add_parser("autopromote", help="七门量化门槛自动 promote（默认 dry-run）")
+    sp.add_argument("experiment_id")
+    sp.add_argument("--confirm", action="store_true",
+                    help="灰度第二步：候选 weight→1.0 + 基线 archive（跳过评估）")
+    sp.add_argument("--weight", type=float, default=None, help="灰度第一步新权重（默认 0.3）")
+    sp.add_argument("--exec", dest="execute", action="store_true",
+                    help="实际写库（默认 dry-run 只评估播报）")
+    sp.add_argument("--baseline", default=None, help="基线 experiment_id（默认当前 ACTIVE 冠军）")
+    sp.add_argument("--latest", action="store_true",
+                    help="自动选取最新 DRAFT（T3.4 日报 cron 用；无 DRAFT 时静默退出 0）")
 
     sp = sub.add_parser("rollback", help="ARCHIVED→ACTIVE")
     sp.add_argument("experiment_id")
@@ -80,6 +97,26 @@ def main(argv: list = None) -> int:
         elif args.cmd == "archive":
             _archive(db, args.experiment_id, operator=_OPERATOR, now=_now())
             print(f"archived {args.experiment_id}")
+        elif args.cmd == "discard":
+            _discard(db, args.experiment_id, operator=_OPERATOR, now=_now())
+            print(f"discarded {args.experiment_id}")
+        elif args.cmd == "autopromote":
+            # lazy import（仿 discovery/cli.py _auto_publish 范式）：experiment 是叶子层，
+            # 顶层 import research.autopromote 会成环（research→experiment）。
+            from research.autopromote import run as _autopromote_run
+            target = args.experiment_id
+            if args.latest:
+                drafts = [v for v in list_versions(db)
+                          if v.status == ExperimentStatus.DRAFT]
+                if not drafts:
+                    print("无 DRAFT——日报跳过")
+                    return 0
+                target = drafts[-1].experiment_id   # created_at 序的最末=最新
+            res = _autopromote_run(target,
+                                   phase="confirm" if args.confirm else "initial",
+                                   dry_run=not args.execute,
+                                   weight=args.weight, baseline_id=args.baseline)
+            print(json.dumps(res, ensure_ascii=False, default=str, indent=1))
         elif args.cmd == "rollback":
             _rollback(db, args.experiment_id, operator=_OPERATOR, now=_now())
             print(f"rollback {args.experiment_id} → ACTIVE")

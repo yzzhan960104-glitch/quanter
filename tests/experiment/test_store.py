@@ -125,3 +125,32 @@ def test_params_immutable_after_promote(db):
     # 再次 create 同 experiment_id 应拒（主键冲突）
     with pytest.raises(ValueError):
         store.create_version(db, _make("e1", params={"window": 99}), operator="cli")
+
+
+def test_discard_draft_writes_audit(db):
+    """T2.2：discard DRAFT→ARCHIVED + 审计 action=discard（DRAFT 池处置出口）。"""
+    store.create_version(db, _make("e1", weight=0.0), operator="cli")
+    store.discard(db, "e1", operator="cli", now="t")
+    rows = store.list_versions(db, status=ExperimentStatus.ARCHIVED)
+    assert len(rows) == 1 and rows[0].experiment_id == "e1"
+    audit = store.list_audit(db, "e1")
+    dc = [a for a in audit if a.action == "discard"][0]
+    assert dc.changed_fields["status"] == ["DRAFT", "ARCHIVED"]
+
+
+def test_discard_rejects_active(db):
+    """T2.2 红线：ACTIVE 不可 discard——防借 discard 入口绕开 archive 语义（promote C1 同款防线）。"""
+    store.create_version(db, _make("e1", weight=0.0), operator="cli")
+    store.promote(db, "e1", weight=0.5, operator="cli", now="t")
+    with pytest.raises(ValueError, match="仅 DRAFT"):
+        store.discard(db, "e1", operator="cli", now="t2")
+    # 状态未被破坏：仍是 ACTIVE
+    assert store.list_versions(db, status=ExperimentStatus.ACTIVE)[0].experiment_id == "e1"
+
+
+def test_discard_rejects_archived(db):
+    """T2.2：ARCHIVED 不可再 discard（幂等出清也不允许，防审计噪音）。"""
+    store.create_version(db, _make("e1", weight=0.0), operator="cli")
+    store.discard(db, "e1", operator="cli", now="t")
+    with pytest.raises(ValueError):
+        store.discard(db, "e1", operator="cli", now="t2")
