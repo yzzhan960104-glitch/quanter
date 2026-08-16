@@ -234,4 +234,48 @@ def _trade_cfg() -> dict:
         # strategies/neckline/backtest.py MAX_HOLDING=15。post_close 扫超期 → 次日 pre_open
         # 跌停价平仓释放资金（对齐回测「成交后 max_holding 日未达止盈收盘卖剩余」语义）。
         "max_holding": int(os.getenv("TRADE_MAX_HOLDING", "15")),
+        # ── A4 分数 Kelly 仓位（2026-08-16 · audit DG-G5 定稿落地）──
+        # sizing_mode：fixed=固定 pos_cap（默认，零行为变化）；kelly=单笔仓位上限收紧为
+        #   min(kelly_hat×kelly_fraction, pos_cap)——单向安全：任何合法 hat/fraction 组合下
+        #   有效仓位 ≤ pos_cap，切 kelly 只会减仓不会加仓（弱信号年自动降杠杆，A4 实证
+        #   2022/2023 kelly 塌 0 → 仓位退化到最小，正是审计要的防御性）。
+        # kelly_fraction：DG-G5 定稿起步 0.25；上限 0.5 需样本外验证——超限 fail-closed
+        #   拒起（配置错误宁可停单，不静默钳到 0.5 伪装合法）。
+        # kelly_hat：kelly 估计值（0~0.5）。来源=autopromote/验证管线算出写实验 note，
+        #   人工贴 env（critical 保持 env-only SSoT，不引入引擎读 DB 耦合）。A4 实证
+        #   分年 hat 区间 0.000~0.296（CV 0.92 极不稳）→ hat 取保守分位（下三分位≈0）。
+        "sizing_mode": _sizing_mode(),
+        "kelly_fraction": _kelly_fraction(),
+        "kelly_hat": _kelly_hat(),
     }
+
+
+def _sizing_mode() -> str:
+    """仓位模式读取 + 非法值 fail-closed（拼写错如 'kely' 宁可停单不可静默降级）。"""
+    mode = os.getenv("TRADE_SIZING_MODE", "fixed")
+    if mode not in ("fixed", "kelly"):
+        raise ValueError(
+            f"TRADE_SIZING_MODE={mode!r} 非法（fixed|kelly）——配置错误 fail-closed 拒起")
+    return mode
+
+
+def _kelly_fraction() -> float:
+    """分数 Kelly 比例读取 + 上限 0.5 fail-closed（DG-G5：超限需样本外验证，不可盲设）。"""
+    frac = float(os.getenv("TRADE_KELLY_FRACTION", "0.25"))
+    if not (0.0 < frac <= 0.5):
+        raise ValueError(
+            f"TRADE_KELLY_FRACTION={frac} 越界（合法 (0, 0.5]；DG-G5 上限 0.5× "
+            f"需样本外验证）——fail-closed 拒起")
+    return frac
+
+
+def _kelly_hat() -> float:
+    """kelly 估计值读取 + 值域钳制（[0, 0.5]，kelly_metrics 同域；越界属配置笔误，
+    钳到边界并留 CRITICAL 日志——hat 是估计量不是风控红线，钳制+告警即可（与
+    fraction 的拒起语义区分：fraction 是风控决策值，hat 是统计量）。"""
+    hat = float(os.getenv("TRADE_KELLY_HAT", "0.0"))
+    if hat < 0.0 or hat > 0.5:
+        logging.getLogger("trading.critical").critical(
+            "TRADE_KELLY_HAT=%s 越界 [0,0.5]，已钳到边界（检查 env 笔误）", hat)
+        hat = min(max(hat, 0.0), 0.5)
+    return hat

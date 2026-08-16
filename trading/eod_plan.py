@@ -108,11 +108,28 @@ async def compute(date: str, signals: list, atr_map: dict, capital: float) -> di
         [{"order":{symbol,qty,side,price}, "stop_price":..., "take_profit":...}, ...]
     """
     cfg = _trade_cfg()
+    # ── A4 分数 Kelly 仓位（2026-08-16 · DG-G5）：kelly 模式收紧单笔上限 ──
+    # 单向安全论证：pos_cap_eff = min(hat×fraction, pos_cap) ≤ pos_cap 恒成立——切
+    # kelly 只会减仓不会加仓；默认 fixed 完全绕过本块（零行为变化，部署即无感）。
+    # 影子日志：fixed 模式且 hat>0 时打印对照行（不改变任何数值），供 ≥5 交易日观察
+    # （对齐 TRADE_SHADOW_MIN_DAYS 基线节奏）后再切 TRADE_SIZING_MODE=kelly。
+    # 复合语义：budget = capital × pos_cap_eff × experiment_weight（plan.py:96 既有
+    # 复合）——kelly 收紧策略层基础仓，weight 仍按实验归因分流，两层正交。
+    pos_cap_eff = cfg["pos_cap"]
+    if cfg["sizing_mode"] == "kelly":
+        pos_cap_eff = min(cfg["kelly_hat"] * cfg["kelly_fraction"], cfg["pos_cap"])
+        logger.info("[sizing-kelly] pos_cap %.4f → %.4f（hat=%.3f frac=%.2f）",
+                    cfg["pos_cap"], pos_cap_eff, cfg["kelly_hat"], cfg["kelly_fraction"])
+    elif cfg["kelly_hat"] > 0:
+        kelly_cap = min(cfg["kelly_hat"] * cfg["kelly_fraction"], cfg["pos_cap"])
+        logger.info("[sizing-shadow] fixed 口径 pos_cap=%.4f | 若切 kelly 将为 %.4f"
+                    "（hat=%.3f frac=%.2f）——影子观察中，未生效",
+                    cfg["pos_cap"], kelly_cap, cfg["kelly_hat"], cfg["kelly_fraction"])
     # 信号 → PlannedOrder（仓位整手 + 止损/止盈价）；缺数据跳过不抛
     orders = build_orders_from_signals(
         signals,
         capital=capital,
-        pos_cap=cfg["pos_cap"],
+        pos_cap=pos_cap_eff,
         atr_map=atr_map,
         stop_cfg={
             "stop_atr_mult": cfg["stop_atr_mult"], "tp_h_mult": cfg["tp_h_mult"],
