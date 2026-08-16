@@ -13,6 +13,13 @@ deflated_sharpe/freeze/resolve_champion），单测不跑真回测（真跑 30-4
 """
 import pytest
 
+# 测试污染防线（R1 实弹教训）：本文件 _mock_evaluations 会 patch objective.evaluate，
+# 而 autopromote.evaluate_gates 内 lazy import neighborhood 时（若 neighborhood 尚未
+# 加载）其模块级 from-import 会把 fake 冻结成永久绑定，污染同进程后续邻域测试。
+# 顶部预热 import 让绑定发生在任何 patch 之前。
+import discovery.neighborhood  # noqa: F401
+import discovery.objective  # noqa: F401
+
 from research import autopromote
 
 

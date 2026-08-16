@@ -16,6 +16,12 @@ def test_init_worker_is_toplevel_picklable():
     assert pickle.loads(blob) is worker._init_worker
 
 
+def monkeypatch_env_scan(monkeypatch):
+    """R1-1（2026-08-16）：这些用例 patch worker.evaluate（scan 口径桩）——显式钉
+    DISCOVERY_OBJECTIVE=scan 让桩命中；默认口径已切 portfolio（走真组合后处理）。"""
+    monkeypatch.setenv("DISCOVERY_OBJECTIVE", "scan")
+
+
 def test_eval_worker_is_toplevel_picklable():
     """_eval_worker 顶层定义 → 可 pickle。"""
     from discovery import worker
@@ -97,6 +103,7 @@ def test_default_n_proc_min_one(monkeypatch):
 
 
 def test_eval_worker_uses_state(monkeypatch, champion_params, synth_sym_df):
+    monkeypatch_env_scan(monkeypatch)
     """_eval_worker 在 _init_worker 设好 state 后调，返回 (params, evaluate 结果)。
 
     monkeypatch freeze 注入合成 universe（避免读 parquet）；_init_worker 设 _WORKER_STATE；
@@ -127,6 +134,7 @@ def test_eval_worker_uses_state(monkeypatch, champion_params, synth_sym_df):
 
 
 def test_eval_worker_swallows_exception(monkeypatch, champion_params, synth_sym_df):
+    monkeypatch_env_scan(monkeypatch)
     """_eval_worker 单组异常 → 返回 None（spec §8 单 trial 失败不影响 run）。"""
     from discovery import worker
     from discovery.split import HoldoutSplit, Segment
@@ -149,7 +157,8 @@ def test_eval_worker_swallows_exception(monkeypatch, champion_params, synth_sym_
 
 
 @pytest.mark.slow
-def test_eval_pool_reuses_workers(champion_params):
+def test_eval_pool_reuses_workers(champion_params, monkeypatch):
+    monkeypatch_env_scan(monkeypatch)
     """P2：EvalPool 长驻池两次 eval 同结果（worker 复用，每 worker 只 freeze 一次）。
 
     与 test_eval_batch_real_pool 互补：eval_batch 单发、EvalPool 长驻（TPE batch 多轮）。
@@ -171,7 +180,8 @@ def test_eval_pool_reuses_workers(champion_params):
         assert res1["inner"]["n"] == res2["inner"]["n"]   # 同 params 两次评估同口径
 
 
-def test_eval_batch_real_pool(champion_params):
+def test_eval_batch_real_pool(champion_params, monkeypatch):
+    monkeypatch_env_scan(monkeypatch)
     """集成：真实 Pool 起 2 子进程跑 2 组（含冠军 + 邻域扰动），~6min。
     验证 ProcessPool 真起作用、子进程 freeze 复用、返回非 None。"""
     from discovery.worker import eval_batch
@@ -188,6 +198,7 @@ def test_eval_batch_real_pool(champion_params):
 
 
 def test_eval_worker_coupling6_empty_trades_returns_none(monkeypatch, champion_params, synth_sym_df):
+    monkeypatch_env_scan(monkeypatch)
     """耦合6 runtime 裁剪（design 决策6）：evaluate 返回 n_total==0（挂单区间全空退化）→ None。
 
     spec §7.1 耦合6 buy_limit<cancel×H/ATR 依赖 runtime H/ATR（每标的每信号点不同），

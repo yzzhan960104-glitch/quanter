@@ -206,6 +206,113 @@ def evaluate_replay(params, universe, split, start=None, end=None,
 
 
 # ============================================================================
+# R1-1（2026-08-16）：组合约束口径评估——搜索目标与实盘口径裂缝的修复
+# ============================================================================
+def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
+                      position_model=None) -> dict:
+    """run_full_scan 的 filled → 组合约束口径指标（build_equity_curve 单源后处理）。
+
+    R0 实证（口径裂缝）：scan 口径（evaluate/metrics_of 假设信号独立可下注）与 replay
+    组合口径（max_positions=6/资金约束）对同一参数 outer ann 符号反转（+18.4% vs
+    -23.9%）。本函数把 replay 引擎的净值算法（backtest.models.build_equity_curve 单源）
+    直接后处理在 scan 产物上——共享昂贵步（run_full_scan），只加 O(n log n) 组合模拟，
+    让搜索能以实盘口径目标驱动（快 60-100 倍于跑 replay 引擎）。
+
+    与 replay 引擎的已知边界差异（标定脚本 diag/r1_portfolio_calibration.py 量化）：
+      - 分段按 signal_date（scan 口径惯例）；replay 按引擎逐日回放窗口；
+      - 段末未平仓持仓不截断（replay 引擎同款——exit_date 可越出段末）；
+      - 完整性 gate（_apply_continuity_filter）不在本路径——universe 由 freeze 已筛。
+    """
+    from datetime import timedelta
+    from backtest.models import PositionModel, build_equity_curve
+
+    pm = position_model or PositionModel()   # 默认 pos_cap=0.05/max_positions=6/slip 5bps=实盘同源
+    embargo_cutoff = segment.start + timedelta(days=embargo_days)
+    trades = []
+    for r in filled:
+        # 日期守卫：缺 signal_date 的记录（合成数据/异常产物）跳过——pd.to_datetime(None)
+        # 返 None 会穿透下游 risk_metrics 的 max-min（实弹 TypeError 教训）。
+        if r.get("signal_date") is None:
+            continue
+        d = pd.to_datetime(r["signal_date"])
+        if d is None or pd.isna(d) or not segment.covers(d):
+            continue
+        if embargo_days > 0 and d.date() < embargo_cutoff:
+            continue
+        trades.append({"symbol": r.get("symbol"),
+                       "signal_date": d,                  # 保留（sharpe extras 消费）
+                       "entry_date": r.get("buy_date"),   # scan 产物成交日键名（replay 侧叫 entry_date）
+                       "exit_date": r.get("exit_date"),
+                       "avg_pnl_pct": r["avg_pnl_pct"], "rr": 0.0})
+    curve = build_equity_curve(trades, pm)
+    # n_trading_days：段内交易日数（镜像 replay.py:222-227——各 symbol 同区间取一计数）
+    n_days = int(((universe_dates >= pd.Timestamp(segment.start)) &
+                  (universe_dates <= pd.Timestamp(segment.end))).sum())
+    equity_end = curve[-1]["equity"] if curve else 1.0
+    ann = equity_end ** (252.0 / n_days) - 1.0 if (n_days > 0 and equity_end > 0) else 0.0
+    # 净值曲线峰谷最大回撤（负值口径，同 ReplayReport.max_drawdown）
+    peak, max_dd = 1.0, 0.0
+    for pt in curve:
+        peak = max(peak, pt["equity"])
+        if pt["equity"] - peak < max_dd:
+            max_dd = pt["equity"] - peak
+    n_taken = len(curve)                       # 并发/资金约束后真正进净值的笔数
+    wins = sum(1 for pt in curve if pt["pnl_pct"] > 0)
+    if max_dd > 1e-9:
+        calmar = ann / abs(max_dd)
+    else:
+        calmar = float("inf") if ann > 0 else 0.0
+    out = {"n": len(trades), "n_taken": n_taken,
+           "win_rate": wins / n_taken if n_taken else 0.0,
+           "ann": ann, "max_dd": -abs(max_dd), "calmar": calmar,
+           "equity_end": equity_end, "n_days": n_days}
+    # 信号口径补充键（sharpe/kelly）：DSR 门控（runner）与 trial 展示消费 sharpe——组合
+    # 模拟本身不产 sharpe，用段内信号序列的 metrics_of 补（选择统计量 min_yearly_calmar
+    # 仍是组合口径；DSR 的多重比较修正由 n_trials 主导，sharpe 用信号口径代理可接受，
+    # 此处显式注释声明混口径边界）。metrics_of 的 n/ann/max_dd/calmar 被组合值覆盖。
+    sig = metrics_of([(float(t["avg_pnl_pct"]), t["signal_date"]) for t in trades])
+    out["sharpe"] = sig["sharpe"]
+    out["kelly"] = sig["kelly"]
+    return out
+
+
+def evaluate_portfolio(params, universe, split, position_model=None) -> dict:
+    """R1-1 组合口径评估：run_full_scan 一次 → inner/outer 分段 + 分年组合指标。
+
+    返回形状与 evaluate() 对齐（inner 含 yearly_calmar/min_yearly_calmar），下游
+    feasibility_gate / 排序可无缝消费。信息隔离语义同 evaluate：outer 只进报告。
+    yearly 口径：按信号自然年构造 Segment 复用 portfolio_metrics（A2 的 min_yearly_calmar
+    在组合口径下的同款「每一年都站得住」判别——n<30 年记 0.0 逃考惩罚同源）。
+    """
+    from discovery.split import Segment
+    all_filled = run_full_scan(params, universe)
+    universe_dates = next(iter(universe.values())).index   # 交易日历（同区间取一）
+    inner_m = portfolio_metrics(all_filled, split.inner, universe_dates,
+                                position_model=position_model)
+    by_year = {}
+    for r in all_filled:
+        d = pd.to_datetime(r["signal_date"])
+        if split.inner.covers(d):
+            by_year.setdefault(d.year, []).append(r)
+    yearly = {}
+    for y in sorted(by_year):
+        seg_y = Segment(f"y{y}", pd.Timestamp(f"{y}-01-01").date(),
+                        pd.Timestamp(f"{y}-12-31").date())
+        m = portfolio_metrics(by_year[y], seg_y, universe_dates,
+                              position_model=position_model)
+        yearly[y] = m["calmar"] if m["n"] >= 30 else 0.0
+    inner_m["yearly_calmar"] = yearly
+    inner_m["min_yearly_calmar"] = min(yearly.values()) if yearly else 0.0
+    return {
+        "inner": inner_m,
+        "outer": portfolio_metrics(all_filled, split.outer, universe_dates,
+                                   embargo_days=split.embargo_days,
+                                   position_model=position_model),
+        "n_total": len(all_filled),
+    }
+
+
+# ============================================================================
 # P5（2026-08-13 · spec §6.1）：walk-forward 交叉验证评估
 # ============================================================================
 def evaluate_wf(params, wf_split, warmup_days=180):

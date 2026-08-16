@@ -29,7 +29,27 @@ logger = logging.getLogger(__name__)
 # 用 from-import 让 monkeypatch 可 patch worker.freeze/holdout_split/evaluate（测试注入合成数据）。
 from discovery.snapshot import freeze
 from discovery.split import holdout_split
-from discovery.objective import evaluate
+from discovery.objective import evaluate, evaluate_portfolio
+
+
+def _objective_fn():
+    """R1-1（2026-08-16）：搜索目标口径选择（env DISCOVERY_OBJECTIVE）。
+
+    R0 实证口径裂缝（scan +18.4% vs replay -23.9% 符号反转）后，搜索目标默认切
+    **portfolio**（evaluate_portfolio：run_full_scan 产物 + build_equity_curve 组合约束
+    后处理——max_positions=6/资金/滑点与实盘 PositionModel 同源；标定见
+    diag/r1_portfolio_calibration.py）。legacy "scan" 保留为对照/回滚口（kelly_metrics
+    信号独立假设）。两口径产物键兼容（feasibility_gate/排序/DSR 均可消费）。
+
+    Why env 而非硬切：engine_hash 已随 objective.py 变更重置 trial 可比性；口径本身
+    留 env 口让「对照实验/紧急回滚」零代码（A/B 同夜可切）。env 逐 trial 读取——
+    同一 run 中途翻转属操作错误，trial 落库不带口径标记的局限由 metrics 键形状差异
+    （portfolio 有 n_taken/equity_end）可事后甄别。
+    """
+    import os
+    if os.getenv("DISCOVERY_OBJECTIVE", "portfolio").lower() == "scan":
+        return evaluate
+    return evaluate_portfolio
 
 # 子进程模块全局：initializer 一次 freeze 后填充，_eval_worker 读取复用。
 # 主进程也 import 本模块（读 _WORKER_STATE.ready=False 占位），但主进程不调 _eval_worker。
@@ -81,7 +101,7 @@ def _eval_worker(params):
     if not _WORKER_STATE["ready"]:
         return None
     try:
-        res = evaluate(params, _WORKER_STATE["universe"], _WORKER_STATE["split"])
+        res = _objective_fn()(params, _WORKER_STATE["universe"], _WORKER_STATE["split"])
         # 耦合6 runtime 裁剪：n_total==0 = 挂单区间全空退化（spec §7.1 耦合6 代理）
         if res.get("n_total", 0) == 0:
             return None

@@ -227,3 +227,121 @@ def test_evaluate_empty_inner_min_is_zero(monkeypatch):
         res = evaluate({}, {}, extended_split())
     assert res["inner"]["yearly_calmar"] == {}
     assert res["inner"]["min_yearly_calmar"] == 0.0
+
+
+# ============================================================================
+# R1-1（2026-08-16）：组合约束口径评估——portfolio_metrics / evaluate_portfolio
+# ============================================================================
+from unittest.mock import patch
+
+from discovery.objective import portfolio_metrics, evaluate_portfolio
+
+
+def _mk_trade(sym, signal, entry, exit_, pnl):
+    """合成 filled 记录（scan_symbol 产物键名：signal_date/buy_date/exit_date）。"""
+    return {"symbol": sym, "signal_date": signal, "buy_date": entry,
+            "exit_date": exit_, "avg_pnl_pct": pnl, "rr": 0.0}
+
+
+@pytest.fixture
+def seg_2025():
+    from discovery.split import Segment
+    return Segment("inner_2025", date(2025, 1, 1), date(2025, 12, 31))
+
+
+@pytest.fixture
+def dates_2025():
+    return pd.date_range("2025-01-01", "2025-12-31", freq="B")
+
+
+def test_portfolio_metrics_basic_math(seg_2025, dates_2025):
+    """顺序三笔（+10%/-5%/+8%）→ equity=1+0.05×(逐笔扣双边5bps滑点)；win/dd/n 齐。"""
+    trades = [
+        _mk_trade("A", "2025-02-03", "2025-02-04", "2025-02-14", 10.0),
+        _mk_trade("B", "2025-03-03", "2025-03-04", "2025-03-14", -5.0),
+        _mk_trade("C", "2025-04-03", "2025-04-04", "2025-04-14", 8.0),
+    ]
+    m = portfolio_metrics(trades, seg_2025, dates_2025)
+    slip = 5.0 * 2 / 10_000 * 100           # 双边 5bps×2=10bps=0.1%/笔（pnl_pct 折减）
+    expect_equity = 1 + 0.05 * ((10.0 - slip) + (-5.0 - slip) + (8.0 - slip)) / 100
+    assert m["n"] == 3 and m["n_taken"] == 3
+    assert m["equity_end"] == pytest.approx(expect_equity, abs=1e-9)
+    assert m["win_rate"] == pytest.approx(2 / 3)
+    assert m["max_dd"] < 0                    # 第二笔亏损造成谷值（负值口径）
+    assert m["ann"] > 0                       # 净值>1 → 正年化
+    assert m["n_days"] == len(dates_2025)     # 交易日计数镜像 replay 口径
+
+
+def test_portfolio_metrics_max_positions_cap(seg_2025, dates_2025):
+    """7 笔全并发 → 默认 max_positions=6 只接 6 笔（n_taken=6，n=7）——口径裂缝的机理钉死。"""
+    trades = [_mk_trade(f"S{i}", "2025-02-03", "2025-02-04", "2025-03-14", 5.0)
+              for i in range(7)]
+    m = portfolio_metrics(trades, seg_2025, dates_2025)
+    assert m["n"] == 7 and m["n_taken"] == 6
+
+
+def test_portfolio_metrics_embargo_excludes_boundary(seg_2025, dates_2025):
+    """embargo=5：段起点+2 天的信号被跳过（吸收跨段持仓，segment_metrics 同源语义）。"""
+    trades = [_mk_trade("A", "2025-01-02", "2025-01-03", "2025-01-13", 5.0),
+              _mk_trade("B", "2025-02-03", "2025-02-04", "2025-02-14", 5.0)]
+    m = portfolio_metrics(trades, seg_2025, dates_2025, embargo_days=5)
+    assert m["n"] == 1                        # 只有 2 月那笔入段
+
+
+def test_portfolio_metrics_slippage_zero_option(seg_2025, dates_2025):
+    """零滑点模型注入：equity 不折减（研究对照口径）。"""
+    from backtest.models import PositionModel
+    trades = [_mk_trade("A", "2025-02-03", "2025-02-04", "2025-02-14", 10.0)]
+    m = portfolio_metrics(trades, seg_2025, dates_2025,
+                          position_model=PositionModel(slippage_bps=0.0))
+    assert m["equity_end"] == pytest.approx(1.005)
+
+
+def test_evaluate_portfolio_segments_and_yearly(monkeypatch, dates_2025):
+    """接线：run_full_scan 桩 → inner/outer 分段隔离 + yearly_calmar/min 注入。"""
+    filled = [
+        _mk_trade("A", "2025-03-03", "2025-03-04", "2025-03-14", 10.0),
+        _mk_trade("B", "2025-06-03", "2025-06-04", "2025-06-14", -4.0),
+        _mk_trade("C", "2025-09-03", "2025-09-04", "2025-09-14", 12.0),
+        _mk_trade("D", "2026-02-03", "2026-02-04", "2026-02-14", 6.0),
+    ]
+    fake_universe = {"S": pd.DataFrame(index=dates_2025)}
+    monkeypatch.setattr("discovery.objective.run_full_scan", lambda *a, **kw: filled)
+    from discovery.split import holdout_split
+    res = evaluate_portfolio({}, fake_universe, holdout_split())
+    assert res["n_total"] == 4
+    assert res["inner"]["n"] == 3 and res["outer"]["n"] == 1   # 信息隔离分段
+    assert 2025 in res["inner"]["yearly_calmar"]
+    assert "min_yearly_calmar" in res["inner"]
+    # 单年 3 笔 < 30 → 逃考惩罚记 0（yearly_metrics 同款保守口径）
+    assert res["inner"]["yearly_calmar"][2025] == 0.0
+
+
+def test_worker_objective_env_switch(monkeypatch):
+    """R1-1：DISCOVERY_OBJECTIVE env 切搜索口径——默认 portfolio，scan 回滚口。"""
+    from discovery import worker
+    from discovery.objective import evaluate, evaluate_portfolio
+    assert worker._objective_fn() is evaluate_portfolio          # 默认（R1 起新口径）
+    monkeypatch.setenv("DISCOVERY_OBJECTIVE", "scan")
+    assert worker._objective_fn() is evaluate                     # legacy 对照口
+    monkeypatch.setenv("DISCOVERY_OBJECTIVE", "PORTFOLIO")
+    assert worker._objective_fn() is evaluate_portfolio           # 大小写不敏感
+
+
+def test_portfolio_metrics_feasibility_compatible(seg_2025, dates_2025):
+    """下游契约：portfolio 指标过 feasibility_gate（max_dd≤0.4 ∧ n≥30）与 DSR 键。"""
+    from discovery.judging import feasibility_gate
+    trades = [_mk_trade(f"S{i}", f"2025-{m:02d}-03", f"2025-{m:02d}-04",
+                        f"2025-{m:02d}-18", 4.0)
+              for i, m in enumerate(range(1, 13), start=1)
+              for _ in range(2)] +              [_mk_trade(f"U{i}", f"2025-{m:02d}-20", f"2025-{m:02d}-21",
+                        f"2025-{m:02d}-27", 4.0)
+              for i, m in enumerate(range(1, 7), start=1)]
+    trades += [_mk_trade(f"T{i}", f"2025-{i + 6:02d}-03", f"2025-{i + 6:02d}-04",
+                        f"2025-{i + 6:02d}-18", -3.0)
+               for i in range(0, 6)]
+    m = portfolio_metrics(trades, seg_2025, dates_2025)
+    assert m["n"] == len(trades) >= 30
+    assert m["max_dd"] <= 0.4                       # 负值口径过闸（与正值同义）
+    assert feasibility_gate(m) is True
+    assert "sharpe" in m and "kelly" in m           # DSR 门控/展示消费的补充键
