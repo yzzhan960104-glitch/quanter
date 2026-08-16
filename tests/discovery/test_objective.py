@@ -270,6 +270,8 @@ def test_portfolio_metrics_basic_math(seg_2025, dates_2025):
     assert m["max_dd"] < 0                    # 第二笔亏损造成谷值（负值口径）
     assert m["ann"] > 0                       # 净值>1 → 正年化
     assert m["n_days"] == len(dates_2025)     # 交易日计数镜像 replay 口径
+    # 负值 dd 口径回归（冒烟实弹）：calmar=ann/|dd| 有限值，不得因 dd 为负误走 inf 分支
+    assert m["calmar"] == pytest.approx(m["ann"] / abs(m["max_dd"]), rel=1e-9)
 
 
 def test_portfolio_metrics_max_positions_cap(seg_2025, dates_2025):

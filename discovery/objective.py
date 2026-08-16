@@ -258,7 +258,7 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
             max_dd = pt["equity"] - peak
     n_taken = len(curve)                       # 并发/资金约束后真正进净值的笔数
     wins = sum(1 for pt in curve if pt["pnl_pct"] > 0)
-    if max_dd > 1e-9:
+    if abs(max_dd) > 1e-9:
         calmar = ann / abs(max_dd)
     else:
         calmar = float("inf") if ann > 0 else 0.0
