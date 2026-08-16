@@ -157,7 +157,36 @@ def _run_research_digest_push() -> None:
     _log_dir.mkdir(parents=True, exist_ok=True)
     _log_fh = (_log_dir / "research_digest.log").open("a", encoding="utf-8")
     _subprocess.Popen(
-        [str(_venv_py), "-m", "research.digest", "--push", "--proposals"],
+        # T3.2（2026-08-16）：加 --verify-proposals——提案生成后自动 A 档验证 →
+        # APPROVED 自动 publish DRAFT（weight=0，promote 仍走 autopromote 七门/人审）。
+        [str(_venv_py), "-m", "research.digest", "--push", "--proposals",
+         "--verify-proposals"],
+        cwd=str(_root),
+        stdout=_log_fh,
+        stderr=_subprocess.STDOUT,
+        stdin=_subprocess.DEVNULL,
+        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
+        close_fds=True,
+    )
+
+
+def _run_autopromote_daily_brief() -> None:
+    """autopromote 门槛日报 cron job：DETACHED 子进程对最新 DRAFT 跑七门 dry-run。
+
+    T3.4（2026-08-16）：digest 推送 5 分钟后（18:35）触发。子进程范式与
+    _run_research_digest_push 同款——evaluate_gates 是 30-45 分钟的回测评估
+    （2×evaluate_replay + wf 四折 + 邻域×6），绝不能进 uvicorn 进程。dry-run
+    零写库：日报只让门槛读数每日可见；夜间真放行由 AUTO_PROMOTE_ENABLED
+    总开关 + G7 fail-closed 双闸把守。日志 logs/autopromote_brief.log。
+    """
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    _venv_py = _root / ".venv310" / "Scripts" / "python.exe"
+    _log_dir = _root / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_fh = (_log_dir / "autopromote_brief.log").open("a", encoding="utf-8")
+    _subprocess.Popen(
+        [str(_venv_py), "-m", "experiment", "autopromote", "--latest"],
         cwd=str(_root),
         stdout=_log_fh,
         stderr=_subprocess.STDOUT,
@@ -518,6 +547,26 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception(
             "lifespan 装 research digest cron 异常（已忽略）")
+
+    # T3.4（2026-08-16）：autopromote dry-run 门槛日报 cron——digest 推送 5 分钟后，
+    # 对当日最新 DRAFT 跑七门 dry-run（只评估+播报，零写库；夜间真放行由
+    # AUTO_PROMOTE_ENABLED 总开关另行控制）。日报让「门槛读数」每日可见，人审红线
+    # 保留在开关与 G7 fail-closed 上。软降级同上。
+    try:
+        _eng_ap = getattr(app.state, "trading_engine", None)
+        if _eng_ap is not None:
+            from apscheduler.triggers.cron import CronTrigger
+            _eng_ap.sched.add_job(
+                _run_autopromote_daily_brief,
+                CronTrigger.from_crontab("35 18 * * mon-fri"),
+                id="autopromote_daily_brief",
+                replace_existing=True,
+            )
+            logging.getLogger(__name__).info(
+                "autopromote 日报 cron 18:35 已注册到 engine.sched")
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan 装 autopromote 日报 cron 异常（已忽略）")
 
     # C-7 V3：discovery 启动补跑（offline 容错，收编自洽必需）。
     # 物理意图（spec §3.3）：offline 跨昨晚 02:00 → 启动补跑（DETACHED subprocess，

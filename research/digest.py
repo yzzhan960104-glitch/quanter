@@ -115,7 +115,8 @@ def _drift_status(live: dict, exp: dict) -> str:
 
 def build_digest(digest_date, live: dict, expectation: dict | None,
                  data_hash: str = "", active_experiment: str = "",
-                 discovery_status: dict | None = None) -> str:
+                 discovery_status: dict | None = None,
+                 analysis_md: str = "") -> str:
     """组装研究摘要 Markdown（纯函数，零 IO）。
 
     参数：
@@ -128,6 +129,8 @@ def build_digest(digest_date, live: dict, expectation: dict | None,
         active_experiment: 当前 ACTIVE 实验 id（播报/审计同源）。
         discovery_status: discovery 进展 dict（load_discovery_status 产物）；
             None → 探索段渲染「—」。
+        analysis_md: T3.1 逐笔归因 markdown（round_analysis.render_analysis_md 产物）；
+            空串跳过（无 SUCCESS 回测任务时降级）。
     """
     status = _drift_status(live, expectation or {}) if expectation else "无回测期望"
     exp_block = "—"
@@ -173,6 +176,10 @@ def build_digest(digest_date, live: dict, expectation: dict | None,
         "## 参数探索（discovery 低功率）",
         _discovery_block(discovery_status),
     ]
+    # T3.1 逐笔归因段（可选）：插在漂移对比之后——分析输入加厚的落点（AI 回路缺口①：
+    # 此前 digest/训练环只有 6 字段摘要，无「亏在哪种出场/哪个月」的归因面）
+    if analysis_md:
+        lines.insert(lines.index("## 数据与实验状态"), analysis_md.rstrip() + "\n")
     return "\n".join(lines)
 
 
@@ -392,6 +399,10 @@ def main(argv=None) -> str:
                     help="生成后推钉钉（cron 周期同步用）")
     ap.add_argument("--proposals", action="store_true",
                     help="生成 0-2 条研究提案并追加到摘要（Phase C Agent 交互）")
+    ap.add_argument("--verify-proposals", action="store_true",
+                    help="T3.2：提案生成后自动 verify（A 档）→ APPROVED 自动 publish DRAFT。"
+                         "先推 digest 再验（verify 是 2 次 evaluate_replay 分钟级，不阻塞播报），"
+                         "验证结论以追加消息二次播报")
     ap.add_argument("--out", default="docs/research_digest.md", help="输出路径")
     args = ap.parse_args(argv)
 
@@ -408,8 +419,19 @@ def main(argv=None) -> str:
             active_exp = active_list[0].experiment_id
     except Exception:
         pass
+    # T3.1：归因段（最近 SUCCESS 回测的逐笔 trades；与期望段同任务选择逻辑防口径分裂）
+    analysis_md = ""
+    try:
+        from research.round_analysis import analyze_trades, load_recent_trades, render_analysis_md
+        trades = load_recent_trades()
+        if trades:
+            analysis_md = render_analysis_md(analyze_trades(trades))
+    except Exception:
+        logger.exception("逐笔归因段生成失败（降级跳过）")
     md = build_digest(str(date.today()), live, expectation, active_experiment=active_exp,
-                      discovery_status=discovery_bridge.load_discovery_status())
+                      discovery_status=discovery_bridge.load_discovery_status(),
+                      analysis_md=analysis_md)
+    pid = None   # 当轮生成的提案 id（--verify-proposals 消费；未生成时 None 跳过验证）
     if args.proposals:
         pid = proposals.generate_proposal(
             proposals._DEFAULT_DB, md, proposals.list_proposals(proposals._DEFAULT_DB))
@@ -423,6 +445,33 @@ def main(argv=None) -> str:
                 f"- 回复「通过 {pid}」或「否决 {pid}」")
     if args.push:
         push_digest(md)
+    # T3.2 auto-verify 链（2026-08-16）：digest 先推（播报不被 verify 的分钟级评估阻塞），
+    # 之后对当轮生成的提案自动跑 A 档验证 → APPROVED 自动 publish DRAFT（weight=0，
+    # promote 仍走 autopromote 七门/人审，红线不破）→ 结论追加播报。REJECTED 的理由
+    # 经 T3.3 学习回路进下轮 generate_proposal 的 prompt（闭环）。
+    if args.verify_proposals and pid:
+        try:
+            ok = proposals.verify_proposal(proposals._DEFAULT_DB, pid)
+            p = proposals.get_proposal(proposals._DEFAULT_DB, pid)
+            try:
+                reason = json.loads(p.get("verification_json") or "{}").get("reason", "")
+            except Exception:
+                reason = ""
+            follow = (f"## 提案自动验证 {pid}\n"
+                      f"结论：**{p['status']}**——{reason or '—'}")
+            if ok:
+                try:
+                    exp_id = proposals.publish_proposal(proposals._DEFAULT_DB, pid)
+                    follow += (f"\n已 publish → experiment DRAFT `{exp_id}`（weight=0，"
+                               f"promote 走 autopromote 七门）")
+                except Exception:
+                    logger.exception("提案 publish 失败（APPROVED 状态保留，人工处置）")
+            if args.push:
+                push_digest(follow)
+            print(follow)
+        except Exception:
+            # 验证失败不阻断 digest 主流程（提案留在 PENDING/VERIFYING，人工可重推）
+            logger.exception("提案自动验证失败（不阻断 digest）")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(md, encoding="utf-8")
