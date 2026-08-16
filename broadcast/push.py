@@ -14,8 +14,40 @@ import logging
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# npm 全局安装时 dws 真身相对垫片的固定位置（npm 布局约定）：
+# <npm_prefix>\dws.CMD（垫片）+ <npm_prefix>\node_modules\dingtalk-workspace-cli\bin\dws.js（真身）
+_DWS_PACKAGE_SUBPATH = ("node_modules", "dingtalk-workspace-cli", "bin", "dws.js")
+
+
+def _resolve_dws_cmd(markdown: str) -> list[str]:
+    """解析 dws 启动命令：Windows npm .cmd 垫片 → 直调 [node, dws.js]。
+
+    根因（2026-08-16 实证）：dws 经 npm 全局安装为 .CMD 批处理垫片，垫片尾部
+    ``"%_prog%" "...dws.js" %*`` 由 cmd.exe 展开——**批处理把参数中的换行当命令
+    分隔符**，多行 markdown 经垫片后 node 只收到第一行（rc=0、stderr 空，静默
+    截断），钉钉群收到正文仅一行标题 → 用户看到「消息内容是空的」。
+
+    修复：垫片路径以 .cmd/.bat 结尾且真身 js + node.exe 均可解析时，绕过垫片
+    直调 node——CreateProcess 按 UTF-16 原样传参，多行正文一字不差。
+    回退：非 npm 布局（js/node 缺失）退回垫片路径（保留原报错语义）；若正文
+    含换行则 WARNING 留观测痕迹（观测层纪律：截断风险不静默）。
+    """
+    dws_bin = shutil.which("dws") or "dws"
+    if dws_bin.lower().endswith((".cmd", ".bat")):
+        js = Path(dws_bin).parent.joinpath(*_DWS_PACKAGE_SUBPATH)
+        node_bin = shutil.which("node")
+        if js.is_file() and node_bin:
+            return [node_bin, str(js)]
+        if "\n" in markdown:
+            logger.warning(
+                "dws 走 .cmd 垫片且真身不可解析，多行正文可能被批处理截断（dws_bin=%s js=%s）",
+                dws_bin, js,
+            )
+    return [dws_bin]
 
 
 def push_brief(
@@ -48,9 +80,9 @@ def push_brief(
     # PATHEXT（只匹配 dws.exe），直接 Popen "dws" 会 FileNotFoundError [WinError 2]
     # （同源根因见 connect_manager.build_cmd 注释）。用 shutil.which 解析绝对路径
     # （含 .CMD 扩展名），失败回退 "dws" 保留原报错语义。
-    dws_bin = shutil.which("dws") or "dws"
-    cmd = [
-        dws_bin, "chat", "message", "send-by-bot",
+    # 多行 --text 的垫片截断防护见 _resolve_dws_cmd docstring（2026-08-16 实证）。
+    cmd = _resolve_dws_cmd(markdown) + [
+        "chat", "message", "send-by-bot",
         "--robot-code", robot_code,
         "--group", group_id,
         "--title", title,
