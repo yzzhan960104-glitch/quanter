@@ -60,11 +60,13 @@ G7_REQUIRED_KELLY_RATIO = 4 / 6
 
 # ── G7 首轮循环结论常量（R0-A3/R0-A4 报告定稿后回填；None=未定稿 → 拒跑，fail-closed）──
 # R0-A3：滑点敏感性——冠军候选 outer ann@10bps ≥ ann@0bps×50% 且 @20bps>0 → True。
-# 2026-08-16 实证（已定稿）：ACTIVE/DRAFT 两参数集 replay 口径 outer 0bps 即负
-# （-23.9%/-44.5%）→ 无边缘可言，判 False。R1 找到 replay 口径正边缘候选后重跑
-# diag/a3_fill_realism_probe.py 翻绿方可改 True（修订走 ADR-15 修订记录）——
-# 详见 docs/research/2026-08-16-a3-fill-realism.md
-A3_SURVIVES_10BPS: bool | None = False
+# R0（08-16 晨）：ACTIVE/DRAFT 两参数集 replay 口径 outer 0bps 即负 → False。
+# R1 修订（08-16 晚 · ADR-15 修订记录）：质量方向两候选实证翻绿——
+#   touch3 盈亏平衡 48.6bps / 10bps 存活率 79%；3e383d 51.0bps / 89%（50bps 仍 +2.6%）
+#   （diag/a3_fill_realism_probe.py --experiments 两验体，logs/a3_r1_touch3.out）。
+#   ACTIVE 基线仍薄边缘（0bps 即负）——本常量语义是「存在过滑点存活的候选方向」，
+#   非全参数集背书。验体：neckline_r1_touch3_20260816 / neckline_prop_20260816_3e383d。
+A3_SURVIVES_10BPS: bool | None = True
 # R0-A4：Kelly 收敛——正 kelly 年占比（n≥30 年，逃考惩罚口径）。
 # 2026-08-16 实测 0.667（4/6，2022/2023 塌零；wf OOS 无翻负）——
 # 详见 docs/research/2026-08-16-a4-kelly-convergence.md

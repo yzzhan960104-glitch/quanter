@@ -29,3 +29,28 @@
   1. **搜索目标口径切换**：inner 快筛从 scan 切到 replay 口径（或轻量 replay 代理 + 抽样 universe 平衡成本）——循环协议 §三军规的落地。
   2. 以 3e383d 为工作基线，沿「信号质量优先」方向（min_rr/max_h_atr 收紧邻域）受控探索。
   3. 重跑 A3 探针验证新候选 → G7 常量按 ADR-15 修订流程更新。
+
+---
+
+## R1 · 2026-08-16 晚 · 口径修复轮（搜索目标切换 + 质量网格 + G7 翻绿）
+
+- **假设**：R0 口径裂缝是根因——搜索目标切组合口径后，「少而精」质量方向应在组合口径下兑现正边缘并过滑点存活。
+- **指纹**：engine_hash `53090190e55f → f457eeaf1946`（objective.py 入 ENGINE_FILES，机制内重置）；snapshot `3fdcbbcb2e3160e1`（universe 1193）。
+- **R1-1 搜索目标切组合口径** ✅：
+  - `evaluate_portfolio`（discovery/objective.py）：run_full_scan 产物 → `build_equity_curve` 组合约束后处理（max_positions=6/资金/滑点=实盘 PositionModel 同源）+ 分年 min_yearly_calmar + sharpe 补充键；`worker._objective_fn` env 切换（`DISCOVERY_OBJECTIVE`，默认 portfolio，scan 为对照口）。
+  - **标定背书**（diag/r1_portfolio_calibration.py）：三参数集六段全符号一致；3e383d 段逐位吻合（inner +1.81%/outer +5.50%）；25c602 的 716 笔仅 174 入净值（组合约束吃掉 76%）而 3e383d 85 笔入 75——**信号越泛滥口径折损越大，裂缝机理再添一证**。提速 ~1.7x。
+  - 端到端冒烟（`discovery run` 单 trial）抓出 calmar 负值 dd 误走 inf 分支的真 bug 并修复；daemon 今夜起以组合口径搜索（新 trial 时代）。
+  - **附带治理修复**：提案 publish 物化全参数（3e383d 存量 2 键 partial 是 scan 侧 KeyError 地雷，audit `r1-repair` 物化为 21 键）；autopromote 测试污染修复（patch 窗口 lazy-import 冻结 fake 的实弹教训）。
+- **R1-2 质量网格**（diag/r1_quality_grid.py，14 格 replay 口径@5bps，inner 选择/outer 报告）：
+  - **inner 冠军 `touch3`**（min_touches 2→3）：inner +3.7% (n=73) / outer +2.3% dd -1.7% → DRAFT `neckline_r1_touch3_20260816`。
+  - **min_rr 在 1.2-1.8 档完全非 binding**（同 mh 档逐位相同——实际 rr 分布远高于档位，P4 复活的参数再度半死）；**质量方向实质由 max_h_atr 单维驱动**（2.0 全灭 n=9 / 2.5 精选 / 3.0 泛滥 279 笔弱）；vol2.0/supp0.7 把 outer 打负——过严质量闸反噬。
+  - win60 与 base 逐位一致（无操作格=内部一致性检查 ✓）。
+- **R1-3 A3 探针翻绿** ✅（--experiments 两验体）：
+  - **touch3：盈亏平衡 48.6bps，10bps 存活率 79% → 可存活**；**3e383d：51.0bps，89%，50bps 仍 +2.6% → 可存活**；ACTIVE 仍薄边缘（0bps 即负）。
+  - **G7 `A3_SURVIVES_10BPS` False→True**（ADR-15 修订记录：常量语义=「存在过滑点存活的候选方向」，非全参数集背书）。
+- **七门实弹（touch3 dry-run，G7 翻绿前跑）**：G3 ✓（dd 1.7% vs 基线 18.5%）/ G4 ✓（wf oos calmar 全 ≥0：0.0/3.72/0.54/0.0）/ G5 ✓（邻域均值 0.96 ≥ base×0.5）/ G6 ✓（DSR 0.9999）；**G1 ✗（inner n=73<100）**；**G2 ✗（calmar 代理 1.375<1.5——outer dd 1.7% 太浅使比值吃亏，绝对改善已过 ann≥0）**；kelly_hat=0.0（分年下三分位，2022/2023 塌零拉低——保守方向特性）。
+- **结论**：口径修复轮三件事全部达成；R1 不 promote（G1 拦截，诚实态）。**留用户决策点：G1=100 与质量方向的结构性矛盾**——质量收紧天然减 n（touch3 73 / 3e383d 85 均 <100），保持门槛则质量候选永远差一步；降门槛有「为特定候选调闸」之嫌（ADR-15 自己的警告）。建议：保持 G1=100，R2 网格向「n≥100 的质量组合」探索（touch3×window80 / max_h_atr 2.7-2.8 细分档），凑足样本量再过闸。
+- **下一步（R2）**：
+  1. 质量网格扩展：touch3 邻域 × window/流动性维度，目标 inner n≥100 且 ann 不塌。
+  2. 观察首夜组合口径 daemon 搜索产出（trial 形状/前沿质量 vs scan 时代）。
+  3. auto_publish 桥的 note 口径对齐（ACTIVE note 仍是 scan 口径 18.4%，组合口径 trial 与之比较会保守停滞——已知边界，待组合口径冠军出现时随 promote 换 note）。
