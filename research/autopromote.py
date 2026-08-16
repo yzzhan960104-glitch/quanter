@@ -55,11 +55,17 @@ G3_DD_WORSE_LIMIT = 0.02      # outer |dd| 劣化 ≤2pp
 G6_DSR_MIN = 0.8              # 与 discovery.runner.DSR_GATE_MIN 同值（共因子语义）
 G7_REQUIRED_KELLY_RATIO = 4 / 6
 
-# ── G7 首轮循环结论常量（A3/A4 报告定稿后回填；None=未定稿 → 拒跑，fail-closed）──
-# R0-A3：滑点敏感性——冠军候选 outer ann@10bps ≥ ann@0bps×50% 且 @20bps>0 → True
-A3_SURVIVES_10BPS: bool | None = None
-# R0-A4：Kelly 收敛——正 kelly 年占比（n≥30 年，逃考惩罚口径）。2026-08-16 实测 0.667
-A4_POS_KELLY_RATIO: float | None = None
+# ── G7 首轮循环结论常量（R0-A3/R0-A4 报告定稿后回填；None=未定稿 → 拒跑，fail-closed）──
+# R0-A3：滑点敏感性——冠军候选 outer ann@10bps ≥ ann@0bps×50% 且 @20bps>0 → True。
+# 2026-08-16 实证（已定稿）：ACTIVE/DRAFT 两参数集 replay 口径 outer 0bps 即负
+# （-23.9%/-44.5%）→ 无边缘可言，判 False。R1 找到 replay 口径正边缘候选后重跑
+# diag/a3_fill_realism_probe.py 翻绿方可改 True（修订走 ADR-15 修订记录）——
+# 详见 docs/research/2026-08-16-a3-fill-realism.md
+A3_SURVIVES_10BPS: bool | None = False
+# R0-A4：Kelly 收敛——正 kelly 年占比（n≥30 年，逃考惩罚口径）。
+# 2026-08-16 实测 0.667（4/6，2022/2023 塌零；wf OOS 无翻负）——
+# 详见 docs/research/2026-08-16-a4-kelly-convergence.md
+A4_POS_KELLY_RATIO: float | None = 0.667
 
 _OPERATOR = "autopromote:gate-v1"
 # 灰度第一步的权重切分（旧 0.7 / 新 0.3；confirm 后 1.0/归档）
