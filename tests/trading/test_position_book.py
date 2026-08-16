@@ -123,6 +123,34 @@ def test_apply_fill_entry_date_locked(db):
     assert "300001.SZ" in position_book.get_entry_dates()
 
 
+def test_get_entry_dates_normalizes_legacy_8digit(db, monkeypatch):
+    """I-1 读侧归一：position 表 8 位紧凑 entry_date → get_entry_dates 出库即横杠格式。
+
+    物理意图（终审 I-1 · 2026-08-16）：生产 position 表两行 8 位存量（600519.SH=
+    20260727、300654.SZ=20260729，已删 backfill hack 写入）让 stop_loss 扫超期链的
+    trading_days_between strptime("%Y-%m-%d") 抛 ValueError → except 返 0 →
+    holding_days=0 → max_holding 超时平仓失明。本函数是该链唯一数据源，出库归一
+    后 strptime 必须成功且 holding_days > 0（对照：8 位原文直接喂 = 0 = 失明形态）。
+    """
+    import sqlite3 as _s3
+    # 直接落 8 位脏存量（模拟 backfill hack 落库形态——绕过 apply_fill 写入口）
+    with _s3.connect(db) as con:
+        con.execute(
+            "INSERT INTO position(account_id, symbol, qty, avg_price, entry_date, updated_at)"
+            " VALUES('default', '600519.SH', 100, 1291.09, '20260727', '2026-08-05T00:43:30')")
+    dates = position_book.get_entry_dates()
+    assert dates["600519.SH"] == "2026-07-27", "8 位紧凑存量必须归一为横杠格式"
+
+    # 消费链实证（hermetic：patch 交易日历，避免触网）
+    from trading import calendar as _cal
+    from trading.compute.stop import trading_days_between
+    _weekdays = [f"2026-07-{d:02d}" for d in range(27, 32)] + [
+        f"2026-08-{d:02d}" for d in (3, 4, 5, 6, 7, 10, 11, 12, 13, 14)]
+    monkeypatch.setattr(_cal, "fetch_trade_cal", lambda year: _weekdays)
+    assert trading_days_between(dates["600519.SH"], "2026-08-14") == 14
+    assert trading_days_between("20260727", "2026-08-14") == 0, "8 位原文直接进消费链 = 失明"
+
+
 def test_fill_schema_migration(db):
     """老 fill 表（UNIQUE(order_id)，无 traded_time）→ init_db 迁移重建为新结构。
 

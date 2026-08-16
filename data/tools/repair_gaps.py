@@ -7,6 +7,10 @@ Tushare daily + adj_factor → 前复权 → merge 回 a_shares_daily 湖（dedu
 复用 sync_daily_incremental 的 _fetch_paged（按日分页 limit=500 绕过 ConnectionReset）+
 前复权（price_qfq = raw × adj / latest）+ concat dedup（keep last）。
 
+I-2 覆写收口（2026-08-16 终审）：merge 只顶「(symbol, date) 真实缺席对」（units 展开
+即得）——跨符号 missing 日并集带进来的已有湖行不再被重建行顶掉；OUT_COLS 补 amount
+（与 sync_daily_incremental 同口径，防重建行落 NaN 抹湖内原值）。
+
 前复权基准：本次用「缺口段窗口最新 adj」（与 sync_daily_incremental 同口径），不重算
 除权标的全历史 qfq 基准（memory `sync_daily_incremental:11-13` 标注的 follow-up）。
 
@@ -41,7 +45,12 @@ logger = logging.getLogger(__name__)
 
 LAKE = "data_lake/a_shares_daily.parquet"
 PRICE_COLS = ["open", "high", "low", "close"]
-OUT_COLS = ["open", "high", "low", "close", "volume"]
+# I-2（2026-08-16 终审）：补 amount——与 sync_daily_incremental.OUT_COLS 同口径。旧表
+# 漏 amount 导致补采重建行不带 amount 列 → concat 并集后该列落 NaN、dedup keep=last
+# 又让 NaN 顶掉湖内原值（实证已抹 1,177 格 amount，2022-2026 跨 39 标的）。Tushare
+# daily 响应本有 amount（千元单位）；严格列名选取——源响应一旦缺列立即 KeyError 早爆，
+# 不静默落 NaN（宁 loud 勿盲写，与 T6 评审「宁缺勿 NaN」同哲学）。
+OUT_COLS = ["open", "high", "low", "close", "volume", "amount"]
 # repair 总超时（T13-B #4）：超时停止拉新段，已拉部分继续 merge 落盘（部分补采 > 完全不补）。
 # 治 --auto 10min 无输出：有进度 log + 有超时边界，不再「卡住不知在干嘛」。
 REPAIR_TIMEOUT = int(os.getenv("REPAIR_TIMEOUT_SECONDS", "1800"))  # 30min 默认（覆盖全市场多日补采）
@@ -269,9 +278,11 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
         白拉教训——单日异常 raise 会丢弃全部已拉数据）。
 
     关键正确性：
-    - 仅补 gap 涉及的 (symbol, date)：_fetch_paged 按日拉全市场，筛 gap_symbols + missing
-      dates，避免把补采日其他 symbol 数据误并入（重复或污染）。
-    - dedup keep last：补采日与 lake 已有日重叠时，新数据覆盖旧（边界日不重复）。
+    - 仅补 gap 涉及的 (symbol, date) 真实缺席对（I-2）：_fetch_paged 按日拉全市场，
+      帧内凡「该 symbol 该日在湖内本就有行」的（跨符号 missing 日并集带进来的）一律
+      出局——已有行不得被重建行顶掉；dedup keep last 只作用于真缺席对的边界重叠日。
+    - dedup keep last：真缺席对与 lake 已有日重叠时（scan 报告与湖态短暂不一致），
+      新数据覆盖旧（边界日不重复，qfq 重定基语义见 OUT_COLS/前复权段注释）。
     """
     unjustified = [g for g in gaps if not g.suspend_justified]
     if not unjustified:
@@ -433,13 +444,27 @@ def repair_gaps(gaps: list[GapRange], lake_df: pd.DataFrame, pro, *,
         if col in merged.columns:
             merged[col] = merged[col] * merged["adj_factor"] / merged["latest_adj"]
 
-    # 组装新行 → MultiIndex(date, symbol)，筛 gap 涉及的 symbol + date
+    # I-2 跨符号覆写收口（2026-08-16 终审）：筛键从「missing 日并集 ∩ gap_symbols」
+    # 两维独立过滤，收窄为 (date, symbol) **真实缺席对集**。
+    # 旧机制缺陷：missing 是全部选中子段的跨符号日**并集**——_fetch_paged 按日拉的是
+    # 全市场帧，帧里天然含 (gap_symbol, 别的符号缺日) 的行（该标的该日在湖内本就有
+    # 值）；两维独立过滤拦不住这类行，dedup keep=last 又让重建行顶掉湖内原行 → 已有
+    # 行 OHLC 被「缺口段窗口 adj」重定基 + amount 列缺失落 NaN（git 键级 diff 实证
+    # e8041041 波次：抹 1,177 格 amount（39 标的）+ 473 行 OHLC 真重定基（NaN-aware
+    # 逐格实差口径；裸 != 比较会把双 NaN 格误计入，勿用）。
+    # 修复语义（两侧边界）：
+    # - 真缺席格（scan 判 unjustified 的 (symbol, day)，units 展开即得）：照旧整行重建
+    #   ——qfq 前复权重定基语义保留（raw × adj / 窗口最新 adj 全列重算，含 amount）；
+    # - 湖内已有行（不在缺席对集）：重建行直接出局，一行一列都不动（OHLC/amount/
+    #   volume 原值保真）——跨符号并集不再是覆写的合法来源。
+    absent_pairs = pd.MultiIndex.from_tuples(
+        [(pd.Timestamp(d), sym) for sym, run in units for d in run],
+        names=["date", "symbol"])
     new = merged[["trade_date", "symbol"] + OUT_COLS].copy().rename(
         columns={"trade_date": "date"})
     new["date"] = pd.to_datetime(new["date"])
     new = new.set_index(["date", "symbol"]).sort_index()
-    new = new[new.index.get_level_values("symbol").isin(gap_symbols)]
-    new = new[new.index.get_level_values("date").isin([pd.Timestamp(d) for d in missing])]
+    new = new[new.index.isin(absent_pairs)]
 
     if new.empty:
         logger.warning("补采段筛 symbol/date 后为空（gap 标的该日 Tushare 无数据？）")

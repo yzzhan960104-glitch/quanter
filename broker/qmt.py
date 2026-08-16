@@ -24,9 +24,10 @@ QmtExecutionGateway 组装面 + 兼容 re-export 垫片（W2-H1 · broker 四文
 
 ⚠️ patch 纪律（T1 既定）：monkeypatch 内部全局（XtQuantTrader/_CONNECT_TIMEOUT/
 _cleanup_session_files 等）须指「读取方真身模块」（分-layer 后多为 broker.qmt_connection）。
-_ORDER_TIMEOUT 单源收口（N5 · Low ③）：qmt_io/qmt_business 均改调用点
-``qmt_connection._ORDER_TIMEOUT`` 模块属性访问，patch 统一指契约根——本垫片的
-re-export 副本与真身非同一对象，patch 垫片无效。
+_ORDER_TIMEOUT 单源收口（N5 · Low ③，终审 Minor ② 收尾）：qmt_io/qmt_business 均改
+调用点 ``qmt_connection._ORDER_TIMEOUT`` 模块属性访问，patch 统一指契约根——本垫片
+原 re-export 副本与真身非同一对象（patch 垫片无效）且运行时零读取方，已从下方
+re-export 表删除（防「两份冻结副本」复活）。
 
 底层 API 事实来源：skills/miniqmt/references/xttrader.md（迅投官方），本模块不
 臆造任何 xtquant / xtconstant 字段（CLAUDE.md 事实审查红线）。
@@ -52,10 +53,12 @@ from broker.qmt_connection import (  # noqa: F401
     _CallbackBase,
 )
 # --- 契约根（broker.qmt_connection）：常量（超时/退避/GC）+ 回调签名 -------------
+# 注：_ORDER_TIMEOUT 不在本表（N5 单源收口 + 终审 Minor ② 删冻结副本）——读取方
+# （qmt_io/qmt_business）一律 ``qmt_connection._ORDER_TIMEOUT`` 模块属性访问，
+# re-export 冻结副本零运行时读取方，留着只会诱使 patch 打到无效副本上。
 from broker.qmt_connection import (  # noqa: F401
     _RECONNECT_BACKOFFS,
     _CONNECT_TIMEOUT,
-    _ORDER_TIMEOUT,
     _ORDERS_GC_THRESHOLD,
     _ORDERS_GC_KEEP_SECONDS,
     OrderUpdateCallback,

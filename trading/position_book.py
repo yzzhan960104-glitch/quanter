@@ -27,6 +27,9 @@ from datetime import datetime
 from pathlib import Path
 
 from trading import clock
+# I-1 读侧归一 helper 单源（state_store 与本模块共用同一 position 表——归一逻辑不得
+# 两处各写一份；state_store 无反向依赖本模块，无循环 import）
+from trading.state_store import normalize_entry_date
 
 logger = logging.getLogger(__name__)
 
@@ -252,12 +255,17 @@ def get_entry_dates(*, db_path: str | None = None) -> dict[str, str]:
 
     供 max_holding（P0-4）/ trailing（R-3）的 holding_days 计算。entry_date None（老数据/
     迁移残留）不返回。
+    I-1 读侧防御（2026-08-16 终审）：entry_date 出库时经 normalize_entry_date 归一
+    （8 位紧凑存量 → 横杠格式）——本函数是 stop_loss 扫超期 / engine._stoploss 移动
+    止损的 holding_days 数据源，trading_days_between 的 strptime("%Y-%m-%d") 对
+    8 位格式抛 ValueError → except 返 0 → max_holding 超时平仓链失明（生产曾有两行
+    8 位存量：600519.SH/300654.SZ，backfill hack 写入，已 SQL 迁移 + 本层双保险）。
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
         rows = con.execute(
             "SELECT symbol, entry_date FROM position WHERE qty != 0 AND entry_date IS NOT NULL"
         ).fetchall()
-    return {r["symbol"]: r["entry_date"] for r in rows}
+    return {r["symbol"]: normalize_entry_date(r["entry_date"]) for r in rows}
 
 

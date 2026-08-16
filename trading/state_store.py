@@ -1053,13 +1053,19 @@ def _entry_date_from_traded_time(traded_time: str | None) -> str | None:
     if not traded_time:
         return None
     ts = str(traded_time).strip()
+    # isascii() 全函数一次性闸（终审 Minor ① · 2026-08-16，I-1 同源防御）：
+    # str.isdigit() 对全角数字（"２０２６…"）与 Unicode 数字变体也返 True——旧实现
+    # 只在态③前设此闸，态①②的形状校验（head[:4].isdigit() 等）会把「２０２６-07-02」
+    # 这类**全角数字 + ASCII 连字符**的混种串当合法日期截出，脏 entry_date 落库后
+    # 下游 strptime("%Y-%m-%d")/字符串比较全错位且肉眼难辨。提到函数顶部一次性闸死：
+    # 非 ASCII 数字不是任何调用点的合法入参形态，一律返 None → 兜底写入日语义
+    # （与态④同回退路径，容错不得打断成交落账红线不变）。
+    if not ts.isascii():
+        return None
     # 态③：≥14 位纯数字（YYYYMMDDHHMMSS）→ 前 8 位重组 YYYY-MM-DD。
-    # 阈值钉 14 而非 8：防把 8 位日期/其它短数字串误判（短串走 None → 兜底，行为不变）。
-    # isascii() 前置（N5）：str.isdigit() 对全角数字（"２０２６…"）与 Unicode 数字
-    # 变体也返 True——不设此闸会截出「２０２６-０７-０２」这类全角脏日期落
-    # entry_date（下游 holding_days 字符串比较全错位且肉眼难辨）。非 ASCII 数字
-    # 不是任何调用点的合法入参形态，落 None → 兜底写入日语义。
-    if ts.isascii() and ts.isdigit() and len(ts) >= 14:
+    # 阈值钉 14 而非 8：防把 8 位日期/其它短数字串误判（短串走 None → 兜底，行为不变）；
+    # 全角数字已被上方 isascii 全闸拦下，此处 isdigit 只可能命中 ASCII 数字。
+    if ts.isdigit() and len(ts) >= 14:
         return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
     # 态①②：含 "-" 且长 ≥10 → 日期段在前，取前 10 位（YYYY-MM-DD）。
     # 轻量形状校验（4/7 位是 "-" 且三段数字就位）：防 "abc-2026-07-02" 类垃圾串截出脏日期。
@@ -1070,6 +1076,32 @@ def _entry_date_from_traded_time(traded_time: str | None) -> str | None:
             return head
     # 态④及其它（空串/None/垃圾串/8 位日期）：解析失败信号
     return None
+
+
+def normalize_entry_date(entry_date: str | None) -> str | None:
+    """读侧归一：8 位紧凑日期（YYYYMMDD）→ YYYY-MM-DD；其余原样透传（None 保 None）。
+
+    物理意图（终审 I-1 · 2026-08-16）：生产 position 表曾有两行存量 entry_date 为
+    8 位紧凑格式（600519.SH=20260727、300654.SZ=20260729，系已删 backfill hack 写入）
+    ——新代码统一写 YYYY-MM-DD，而消费链 trading.compute.stop.trading_days_between
+    的 strptime("%Y-%m-%d") 对 8 位抛 ValueError → except 返 0 → holding_days=0 →
+    max_holding 超时平仓链对这两笔实盘持仓失明（已 ~13-15 交易日，max_holding=15，
+    越晚归一越多裸奔一天）。存量已一次性 SQL 迁移归一（见 final-review-fix.md）；
+    本函数是**读侧防御**：get_position / position_book.get_entry_dates 两个 DB 读口
+    出库时归一，防未来任何写入侧再混入 8 位格式（写入侧闸是
+    _entry_date_from_traded_time 四态解析，本层只兜「脏数据已落库」的出口）。
+
+    Why 只认「8 位 ASCII 纯数字且月/日段合法」：防把任意 8 位数字串（误入列的
+    订单号/数量等）重组出伪日期；横杠格式/垃圾串原样返回，交给消费链自行暴露
+    （读侧归一不做静默纠错，只做已证实发生过的一类格式转换）。
+    """
+    if not isinstance(entry_date, str):
+        return entry_date
+    s = entry_date.strip()
+    if (len(s) == 8 and "-" not in s and s.isascii() and s.isdigit()
+            and 1 <= int(s[4:6]) <= 12 and 1 <= int(s[6:8]) <= 31):
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return entry_date
 
 
 def apply_fill_to_position(account_id: str, symbol: str, direction: str, qty: float,
@@ -1126,6 +1158,8 @@ def get_position(account_id: str, symbol: str, *, db_path: str | None = None) ->
     """读单标的当前持仓 {qty, avg_price, entry_date, strategy, entry_rationale}。不存在返 None。
 
     B2 后追加 strategy/entry_rationale（持仓归因，与 qty/avg_price 同行）。
+    I-1 读侧防御：entry_date 出库时经 normalize_entry_date 归一（8 位紧凑存量 →
+    横杠格式）——gateway_service / post_close 的盈亏播报等消费面不再见脏格式。
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
@@ -1134,7 +1168,11 @@ def get_position(account_id: str, symbol: str, *, db_path: str | None = None) ->
             " FROM position WHERE account_id=? AND symbol=?",
             (account_id, symbol)
         ).fetchone()
-    return dict(row) if row else None
+    if row is None:
+        return None
+    d = dict(row)
+    d["entry_date"] = normalize_entry_date(d.get("entry_date"))
+    return d
 
 
 def upsert_position_attribution(account_id: str, symbol: str, strategy: str,

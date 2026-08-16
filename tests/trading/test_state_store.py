@@ -261,6 +261,68 @@ def test_entry_date_from_traded_time_four_states():
     # 全角数字（N5 isascii 守卫）：isdigit() 对全角也返 True——不设 isascii 前置
     # 会截出「２０２６-０７-０２」全角脏日期（下游字符串比较全错位且肉眼难辨）。
     assert f("２０２６０７０２０９２５００") is None
+    # 终审 Minor ①（2026-08-16）：isascii 提到函数顶部一次性闸——态①②原本没设此闸，
+    # 「全角数字 + ASCII 连字符」混种串（"２０２６-07-02"）会被形状校验当合法日期截出
+    # （head[:4].isdigit() 对全角也 True）。全闸后四态任一形态的全角变体一律 None。
+    assert f("２０２６-07-02") is None, "全角数字+连字符混种不得被态①②截出脏日期"
+    assert f("２０２６-０７-０２ 09:25:00") is None, "空格分隔态的全角变体同拦"
+
+
+def test_normalize_entry_date_read_side_guard():
+    """normalize_entry_date 单元：8 位紧凑 → 横杠；横杠/None/垃圾串/越界月日原样透传。
+
+    物理意图（终审 I-1 · 2026-08-16）：生产 position 表两行 8 位存量（backfill hack
+    写入）让 trading_days_between 的 strptime 抛 ValueError → except 返 0 → max_holding
+    平仓链失明。归一只认「8 位 ASCII 纯数字 + 月/日合法」，防把误入列的 8 位数字串
+    （订单号/数量）重组出伪日期；其余格式原样交消费链暴露，读侧不做静默纠错扩权。
+    """
+    f = state_store.normalize_entry_date
+    # I-1 实锤两行的原文 → 归一为横杠
+    assert f("20260727") == "2026-07-27"
+    assert f("20260729") == "2026-07-29"
+    # 新代码统一格式 / None / 空串 → 原样
+    assert f("2026-07-27") == "2026-07-27"
+    assert f(None) is None
+    assert f("") == ""
+    # 越界月/日：不重组（伪日期防线）
+    assert f("20261301") == "20261301"
+    assert f("20260732") == "20260732"
+    # 全角 8 位：isascii 闸内拦（isascii+isdigit 双闸），原样透传
+    assert f("２０２６０７２７") == "２０２６０７２７"
+    # 非 8 位数字串（订单号等误入形态）原样
+    assert f("1234567890") == "1234567890"
+
+
+def test_get_position_normalizes_legacy_8digit_entry_date(db, monkeypatch):
+    """I-1 读侧防御：position 表 8 位存量 → get_position 出库即横杠，消费链 strptime 复活。
+
+    场景复刻：直接 INSERT 8 位 entry_date（模拟已删 backfill hack 的落库形态，绕过
+    apply_fill_to_position 写入口），get_position 必须归一返回；拿归一结果喂
+    trading_days_between（stop.py strptime 消费口）→ holding_days 正确
+    （8 位原文直接喂 = 0 = 超时平仓链失明，即 I-1 的实盘事故形态）。
+    """
+    state_store.upsert_account("ACC1", broker="qmt")
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "INSERT INTO position(account_id, symbol, qty, avg_price, entry_date, updated_at)"
+            " VALUES('ACC1', '600519.SH', 100, 1291.09, '20260727', '2026-08-05T00:43:30')")
+    pos = state_store.get_position("ACC1", "600519.SH")
+    assert pos["entry_date"] == "2026-07-27", "8 位紧凑存量必须出库归一为横杠格式"
+
+    # 消费链实证（hermetic：patch trading.calendar.fetch_trade_cal 为固定工作日历，
+    # 避免测试触网拉 Tushare trade_cal）。07-27（周一）建仓，(07-27, 08-14] 工作日 = 14。
+    from trading import calendar as _cal
+    from trading.compute.stop import trading_days_between
+    _weekdays = [
+        "2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31",
+        "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07",
+        "2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14",
+    ]
+    monkeypatch.setattr(_cal, "fetch_trade_cal", lambda year: _weekdays)
+    # 8 位原文（未归一）→ strptime 失败被吞 → 0（失明形态——修复前生产行为）
+    assert trading_days_between("20260727", "2026-08-14") == 0
+    # 归一后 → strptime 成功 → holding_days = (07-27, 08-14] 工作日数 = 14
+    assert trading_days_between(pos["entry_date"], "2026-08-14") == 14
 
 
 def test_entry_date_falls_back_to_today_on_pure_time(db, monkeypatch):

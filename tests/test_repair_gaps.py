@@ -62,9 +62,11 @@ def test_repair_gaps_fills_missing_segment():
     pro = _FakePro(
         daily_data={
             "20240904": [{"ts_code": "000001.SZ", "trade_date": "20240904",
-                          "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.5, "vol": 1000}],
+                          "open": 10.0, "high": 11.0, "low": 9.0, "close": 10.5,
+                          "vol": 1000, "amount": 10500.0}],
             "20240905": [{"ts_code": "000001.SZ", "trade_date": "20240905",
-                          "open": 10.5, "high": 11.0, "low": 10.0, "close": 11.0, "vol": 1100}],
+                          "open": 10.5, "high": 11.0, "low": 10.0, "close": 11.0,
+                          "vol": 1100, "amount": 12100.0}],
         },
         adj_data={
             "20240904": [{"ts_code": "000001.SZ", "trade_date": "20240904", "adj_factor": 1.0}],
@@ -92,7 +94,8 @@ def test_repair_gaps_dedup_keep_new_on_overlap():
                    ("2024-09-03",), suspend_justified=False)
     pro = _FakePro(
         daily_data={"20240903": [{"ts_code": "000001.SZ", "trade_date": "20240903",
-                                   "open": 99.0, "high": 99.0, "low": 99.0, "close": 99.0, "vol": 9999}]},
+                                   "open": 99.0, "high": 99.0, "low": 99.0, "close": 99.0,
+                                   "vol": 9999, "amount": 989901.0}]},
         adj_data={"20240903": [{"ts_code": "000001.SZ", "trade_date": "20240903", "adj_factor": 1.0}]},
     )
 
@@ -249,7 +252,7 @@ def test_partial_persist_on_fetch_error(tmp_path, monkeypatch, capsys):
         if api == "daily":
             return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": tdc,
                                   "open": 10.0, "high": 11.0, "low": 9.0,
-                                  "close": 10.5, "vol": 1000}])
+                                  "close": 10.5, "vol": 1000, "amount": 10500.0}])
         return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": tdc,
                               "adj_factor": 1.0}])
 
@@ -320,7 +323,7 @@ def test_partial_persist_on_adj_error_atomic_day(tmp_path, monkeypatch, capsys):
         if api == "daily":
             return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": tdc,
                                   "open": 10.0, "high": 11.0, "low": 9.0,
-                                  "close": 10.5, "vol": 1000}])
+                                  "close": 10.5, "vol": 1000, "amount": 10500.0}])
         return pd.DataFrame([{"ts_code": "000001.SZ", "trade_date": tdc,
                               "adj_factor": 1.0}])
 
@@ -404,7 +407,7 @@ def test_repair_marks_unfillable_symbol_absent(tmp_path, monkeypatch):
         if api == "daily":
             return pd.DataFrame([{"ts_code": "600000.SH", "trade_date": tdc,
                                   "open": 1.0, "high": 1.0, "low": 1.0,
-                                  "close": 1.0, "vol": 100}])
+                                  "close": 1.0, "vol": 100, "amount": 100.0}])
         return pd.DataFrame([{"ts_code": "600000.SH", "trade_date": tdc, "adj_factor": 1.0}])
 
     monkeypatch.setattr(rg, "_fetch_paged", _fake)
@@ -462,7 +465,7 @@ def test_repair_fetches_only_unjustified_days(tmp_path, monkeypatch):
         if api == "daily":
             return pd.DataFrame([{"ts_code": "000670.SZ", "trade_date": tdc,
                                   "open": 10.0, "high": 11.0, "low": 9.0,
-                                  "close": 10.5, "vol": 1000}])
+                                  "close": 10.5, "vol": 1000, "amount": 10500.0}])
         return pd.DataFrame([{"ts_code": "000670.SZ", "trade_date": tdc, "adj_factor": 1.0}])
 
     monkeypatch.setattr(rg, "_fetch_paged", _fake)
@@ -901,3 +904,139 @@ def test_classify_modern_day_market_all_zero_is_fault(tmp_path, monkeypatch, cap
     assert stats["probed_days"] == 0, "故障日不计有效探针"
     assert not (tmp_path / ".repair_unfillable.json").exists(), "零标记不落 sidecar"
     assert "市场级全零" in caplog.text, "warning 必须留痕（人工排查锚点）"
+
+
+# ============================================================================
+# I-2 跨符号覆写收口（2026-08-16 终审）：(symbol, date) 真实缺席对过滤 + amount 回归
+# ============================================================================
+# 物理意图（e8041041 波次实锤）：旧实现的筛键是「missing 日并集 ∩ gap_symbols」两维
+# 独立过滤——missing 是全部选中子段的跨符号日并集，_fetch_paged 按日拉全市场帧又天然
+# 含 (gap_symbol, 别的符号缺日) 的行（该标的该日在湖内本就有值），dedup keep=last 让
+# 重建行顶掉湖内原行：① OUT_COLS 漏 amount → 重建行该列 NaN 落湖（已抹 1,177 格
+# amount）；② OHLC 被「缺口段窗口 adj」重定基（2,661 行）。修复：筛键收窄为
+# units 展开的 (date, symbol) 真实缺席对 + OUT_COLS 补 amount。
+
+
+def test_repair_no_cross_symbol_overwrite():
+    """I-2 ①：跨符号场景——A 缺 0701、B 缺 0702，repair 后 A 的 0702 / B 的 0701
+    （湖内已有行）OHLC/amount/volume 必须原样，只有 A 的 0701 / B 的 0702 被补。
+
+    旧实现：全市场帧含 (A,0702)/(B,0701) 行，两维独立过滤拦不住 → 重建行顶掉已有
+    行 → 已有行 amount=NaN（OUT_COLS 旧无 amount）+ OHLC 重定基 → 本测试红。
+    """
+    from data.tools.repair_gaps import repair_gaps
+
+    # 湖：A 有 0630/0702，B 有 0701/0703——A 缺 0701、B 缺 0702（跨符号不同缺日）
+    lake = _mk_lake([("2024-06-30", "000001.SZ"), ("2024-07-02", "000001.SZ"),
+                     ("2024-07-01", "600000.SH"), ("2024-07-03", "600000.SH")])
+    # 打上「原值指纹」：湖内已有行的 amount 用可辨识值（_mk_lake 默认无 amount 列，
+    # 手工补一列模拟生产湖结构——amount 是 I-2 抹除的直接受害列）
+    lake["amount"] = [111.0, 222.0, 333.0, 444.0]  # 依次对应上面 4 行
+
+    gaps = [
+        GapRange("000001.SZ", "2024-07-01", "2024-07-01",
+                 ("2024-07-01",), suspend_justified=False),
+        GapRange("600000.SH", "2024-07-02", "2024-07-02",
+                 ("2024-07-02",), suspend_justified=False),
+    ]
+    # 全市场帧：两日都返 A、B 双行（真实形态——按日拉的就是全市场，帧里天然带
+    # 「非本符号缺日」的行，这正是旧覆写机制的入口）
+    pro = _FakePro(
+        daily_data={
+            "20240701": [
+                {"ts_code": "000001.SZ", "trade_date": "20240701",
+                 "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+                 "vol": 100, "amount": 1000.0},
+                {"ts_code": "600000.SH", "trade_date": "20240701",
+                 "open": 88.0, "high": 88.0, "low": 88.0, "close": 88.0,
+                 "vol": 880, "amount": 8888.0},
+            ],
+            "20240702": [
+                {"ts_code": "000001.SZ", "trade_date": "20240702",
+                 "open": 11.0, "high": 11.0, "low": 11.0, "close": 11.0,
+                 "vol": 110, "amount": 1100.0},
+                {"ts_code": "600000.SH", "trade_date": "20240702",
+                 "open": 99.0, "high": 99.0, "low": 99.0, "close": 99.0,
+                 "vol": 990, "amount": 9999.0},
+            ],
+        },
+        adj_data={
+            "20240701": [{"ts_code": s, "trade_date": "20240701", "adj_factor": 1.0}
+                         for s in ("000001.SZ", "600000.SH")],
+            "20240702": [{"ts_code": s, "trade_date": "20240702", "adj_factor": 1.0}
+                         for s in ("000001.SZ", "600000.SH")],
+        },
+    )
+
+    new_lake = repair_gaps(gaps, lake, pro)
+
+    # ① 真缺席格被补：A 的 0701、B 的 0702（含 amount——OUT_COLS 补齐的回归）
+    a = new_lake.xs("000001.SZ", level="symbol").sort_index()
+    b = new_lake.xs("600000.SH", level="symbol").sort_index()
+    assert "2024-07-01" in a.index.strftime("%Y-%m-%d"), "A 的真缺日 0701 必须被补"
+    assert a.loc["2024-07-01", "amount"] == 1000.0, "补采行必须带 amount（I-2 回归）"
+    assert "2024-07-02" in b.index.strftime("%Y-%m-%d"), "B 的真缺日 0702 必须被补"
+    assert b.loc["2024-07-02", "amount"] == 9999.0
+
+    # ② 跨符号已有行原样保真（旧实现这里被重建行顶掉：amount=NaN + OHLC 重定基）
+    # _mk_lake 指纹：4 行 close 依次 0/1/2/3——A 的 0702=1.0、B 的 0701=2.0
+    assert a.loc["2024-07-02", "close"] == 1.0, "A 的 0702（湖内已有）OHLC 原值不动"
+    assert a.loc["2024-07-02", "amount"] == 222.0, "A 的 0702 amount 不得被顶掉（1,177 格事故形态）"
+    assert b.loc["2024-07-01", "close"] == 2.0, "B 的 0701（湖内已有）OHLC 原值不动"
+    assert b.loc["2024-07-01", "amount"] == 333.0, "B 的 0701 amount 不得被顶掉"
+    # 原有日不丢 + 总行数 = 原 4 + 补 2
+    assert "2024-06-30" in a.index.strftime("%Y-%m-%d")
+    assert "2024-07-03" in b.index.strftime("%Y-%m-%d")
+    assert len(new_lake) == 6
+
+
+def test_repair_rebases_qfq_on_genuinely_missing_days():
+    """I-2 ②：复权列重定基语义保留——真缺日整行按 raw × adj / 窗口最新 adj 重算。
+
+    收口只防「跨符号并集顶掉已有行」，不伤合法重建：真缺席对的 qfq 全列重算（含
+    amount 透传）必须照旧。窗口最新 adj=1.5（0702 的因子），0701 的 adj=1.0 →
+    0701 前复权价 = raw × 1.0 / 1.5。
+    """
+    from data.tools.repair_gaps import repair_gaps
+
+    lake = _mk_lake([("2024-06-30", "000001.SZ")])
+    gaps = [GapRange("000001.SZ", "2024-07-01", "2024-07-02",
+                     ("2024-07-01", "2024-07-02"), suspend_justified=False)]
+    pro = _FakePro(
+        daily_data={
+            "20240701": [{"ts_code": "000001.SZ", "trade_date": "20240701",
+                          "open": 30.0, "high": 30.0, "low": 30.0, "close": 30.0,
+                          "vol": 300, "amount": 9000.0}],
+            "20240702": [{"ts_code": "000001.SZ", "trade_date": "20240702",
+                          "open": 15.0, "high": 15.0, "low": 15.0, "close": 15.0,
+                          "vol": 150, "amount": 4500.0}],
+        },
+        adj_data={
+            "20240701": [{"ts_code": "000001.SZ", "trade_date": "20240701", "adj_factor": 1.0}],
+            "20240702": [{"ts_code": "000001.SZ", "trade_date": "20240702", "adj_factor": 1.5}],
+        },
+    )
+
+    new_lake = repair_gaps(gaps, lake, pro)
+    a = new_lake.xs("000001.SZ", level="symbol").sort_index()
+    # 0701：raw 30.0 × adj 1.0 / latest 1.5 = 20.0（重定基到窗口最新因子基准）
+    assert a.loc["2024-07-01", "close"] == pytest.approx(20.0)
+    assert a.loc["2024-07-01", "open"] == pytest.approx(20.0)
+    # 0702：raw 15.0 × adj 1.5 / latest 1.5 = 15.0（基准日本身）
+    assert a.loc["2024-07-02", "close"] == pytest.approx(15.0)
+    # amount 是成交量额非价格，不做前复权缩放——原值透传
+    assert a.loc["2024-07-01", "amount"] == 9000.0
+    assert a.loc["2024-07-02", "amount"] == 4500.0
+
+
+def test_repair_out_cols_contains_amount():
+    """I-2 ③：OUT_COLS 含 amount——与 sync_daily_incremental.OUT_COLS 同口径对齐。
+
+    契约钉死防回归：漏 amount 会让重建行该列缺失 → concat 落 NaN 顶掉湖内原值
+    （e8041041 波次抹 1,177 格 amount 的直接根因）。
+    """
+    from data.tools import repair_gaps as rg
+    from data.tools.sync_daily_incremental import OUT_COLS as SYNC_OUT_COLS
+
+    assert "amount" in rg.OUT_COLS, "repair OUT_COLS 必须含 amount（I-2 根因修复）"
+    assert rg.OUT_COLS == SYNC_OUT_COLS, "与 sync_daily_incremental 出列口径保持一致"
