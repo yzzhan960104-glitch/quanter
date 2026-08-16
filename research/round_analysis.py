@@ -86,7 +86,7 @@ def render_analysis_md(analysis: dict) -> str:
     return "\n".join(lines)
 
 
-def load_recent_trades(db_path: str | None = None, params_source: str = "ACTIVE") -> list[dict]:
+def load_recent_trades(db_path: str | None = None) -> list[dict]:
     """读最近一条 SUCCESS 回测任务的逐笔 trades（与 digest.load_backtest_expectation
     同款 ACTIVE 优先选择逻辑——期望段与归因段必须来自同一任务，否则口径分裂）。
 
@@ -109,7 +109,7 @@ def load_recent_trades(db_path: str | None = None, params_source: str = "ACTIVE"
                 continue
             if fallback is None:
                 fallback = t
-            if active and params_source == "ACTIVE":
+            if active:
                 cfg = t.get("cfg_override") or {}
                 if isinstance(cfg, str):
                     try:

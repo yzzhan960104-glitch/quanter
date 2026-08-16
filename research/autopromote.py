@@ -52,6 +52,9 @@ G2_ANN_ABS_FLOOR = 0.0        # outer ann 绝对不亏（R0 实证：基线 repl
 G2_CALMAR_RATIO = 1.2         # calmar 代理（ann/|dd|）相对改善 ×1.2
 G2_CALMAR_ABS_FLOOR = 1.5     # calmar 代理绝对下限
 G3_DD_WORSE_LIMIT = 0.02      # outer |dd| 劣化 ≤2pp
+# ⚠️ 与 proposals.OUTER_DD_WORSE_LIMIT=0.05 刻意分级（review 注记 2026-08-16）：那是
+# 提案准入闸（A 档 MVP，进 DRAFT 池），本处是实盘放行闸（动真钱，更严一档半）。
+# 两闸语义不同故不共享常量；若调整任一阈值须同 PR 复核另一处并记 ADR-15 修订。
 G6_DSR_MIN = 0.8              # 与 discovery.runner.DSR_GATE_MIN 同值（共因子语义）
 G7_REQUIRED_KELLY_RATIO = 4 / 6
 
@@ -155,8 +158,10 @@ def evaluate_gates(experiment_id: str, baseline_id: str | None = None,
         "pass": ci["n_hits"] >= G1_MIN_INNER_N and co["n_hits"] >= G1_MIN_OUTER_N}
     base_ann, cand_ann = bo["annualized_return"], co["annualized_return"]
     base_dd, cand_dd = abs(bo["max_drawdown"] or 0.0), abs(co["max_drawdown"] or 0.0)
-    base_ratio = base_ann / base_dd if base_dd > 1e-9 else (99.0 if base_ann > 0 else 0.0)
-    cand_ratio = cand_ann / cand_dd if cand_dd > 1e-9 else (99.0 if cand_ann > 0 else 0.0)
+    # 无回撤哨兵：dd≈0 且 ann>0 → ratio 视为「极大」（远超任何有限阈值）；ann≤0 → 0
+    _NO_DD_SENTINEL = 99.0
+    base_ratio = base_ann / base_dd if base_dd > 1e-9 else (_NO_DD_SENTINEL if base_ann > 0 else 0.0)
+    cand_ratio = cand_ann / cand_dd if cand_dd > 1e-9 else (_NO_DD_SENTINEL if cand_ann > 0 else 0.0)
     gates["G2_outer改善"] = {
         "base_outer_ann": base_ann, "cand_outer_ann": cand_ann,
         "ann_need": max(base_ann + G2_ANN_IMPROVE, G2_ANN_ABS_FLOOR),
@@ -190,11 +195,48 @@ def evaluate_gates(experiment_id: str, baseline_id: str | None = None,
         "a4_pos_kelly_ratio": A4_POS_KELLY_RATIO,
         "pass": bool(A3_SURVIVES_10BPS) and A4_POS_KELLY_RATIO >= G7_REQUIRED_KELLY_RATIO}
 
-    # kelly_hat（ADR-14 播报物）：inner scan kelly 的保守采用值=本组直接估计
-    kelly_hat = round(float(inner_eval["kelly"]), 4)
+    # kelly_hat（ADR-14 播报物）：**保守分位（下三分位）**而非点估计——review 修复
+    # （2026-08-16）：ADR-14 Decision 3 明文「hat 取保守分位（下三分位），弱年退化到
+    # 最小仓位是特性」，原实现用 inner 整段点估计违背该条款（A4 实证 CV 0.92，点估计
+    # 会把 2024/2025 好年杠杆错配给弱年）。分年 kelly 复用 A4 口径：全历史（lake_start
+    # 2021 起）按信号自然年分块，n≥30 年可信；不足三年时退化为分年最小（同保守向）。
+    kelly_hat = _conservative_kelly_hat(cand.params, universe)
+
     all_pass = all(g["pass"] for k, g in gates.items() if k != "_meta")
     return {"experiment_id": experiment_id, "baseline_id": base_id,
             "gates": gates, "all_pass": all_pass, "kelly_hat": kelly_hat}
+
+
+def _conservative_kelly_hat(params: dict, universe) -> float:
+    """分年 kelly → 下三分位（ADR-14 保守分位；与 diag/a4_kelly_convergence.py 同口径）。
+
+    Why 全历史而非 inner 段：A4 的分年 kelly 覆盖 2021-2026（inner 只有 2025 单年，
+    按年分块会退化成点估计失去分位意义）。Why 下三分位而非 min：单年 kelly=0
+    （2022/2023 形状）会让 hat 直接归零、kelly 模式退化到永不开仓——下三分位在
+    「保守」与「不完全自废」之间取折中，与 A4 报告「可上但 hat 取保守分位」一致。
+    年份不足 3（无三分位可言）→ 分年最小。无任何可信年 → 0.0（最保守）。
+    """
+    from collections import defaultdict
+    import pandas as pd
+    from discovery.objective import run_full_scan
+    from strategies.neckline.backtest import kelly_metrics
+
+    all_filled = run_full_scan(params, universe)
+    by_year = defaultdict(list)
+    for r in all_filled:
+        d = pd.to_datetime(r["signal_date"])
+        by_year[d.year].append((r["avg_pnl_pct"], d))
+    year_kellys = []
+    for y in sorted(by_year):
+        pnls = [p for p, _ in by_year[y]]
+        if len(pnls) >= 30:                     # 可信年下限（A4/yearly_metrics 同口径）
+            k, _, _ = kelly_metrics(pnls, [d for _, d in by_year[y]])
+            year_kellys.append(float(k))
+    if len(year_kellys) >= 3:
+        return round(sorted(year_kellys)[(len(year_kellys) - 1) // 3], 4)
+    if year_kellys:
+        return round(min(year_kellys), 4)
+    return 0.0
 
 
 def render_report(res: dict) -> str:
@@ -290,7 +332,13 @@ def run(experiment_id: str, *, phase: str = "initial", dry_run: bool = True,
         set_weight(db, base_id, new_weight=round(1.0 - new_w, 4),
                    operator=_OPERATOR, now=now)
     promote(db, experiment_id, weight=new_w, operator=_OPERATOR, now=now)
-    # 门槛读数随审计留痕（note 附加——promote 自身审计行已含 status/weight 变更）
+    # ADR-14「kelly_hat 写实验 note」（review 修复）：版本表 note 不可变（创建快照），
+    # 追加走 append_note 审计行——保守分位 hat + 对应 .env 行入库可溯源。
+    from experiment.store import append_note
+    append_note(db, experiment_id,
+                note=f"kelly_hat(下三分位)={res['kelly_hat']}；"
+                     f"贴 env：TRADE_KELLY_HAT={res['kelly_hat']}",
+                operator=_OPERATOR, now=now)
     logger.info("[autopromote] 灰度第一步完成 %s → %.2f（门槛读数见播报/ROUND_LOG）",
                 experiment_id, new_w)
     return {"action": "initial(promoted)", **res}

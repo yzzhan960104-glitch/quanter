@@ -163,13 +163,34 @@ def archive(db_path: str, experiment_id: str, operator: str, now: str) -> None:
     _transition(db_path, experiment_id, ExperimentStatus.ARCHIVED, operator, now, "archive")
 
 
-def discard(db_path: str, experiment_id: str, operator: str, now: str) -> None:
+def append_note(db_path: str, experiment_id: str, note: str, operator: str,
+                now: str) -> None:
+    """追加一条 note 审计行（不改版本表任何字段，纯留痕）。
+
+    用途（review 修复 2026-08-16 · ADR-14「kelly_hat 写实验 note」的落地载体）：
+    autopromote 灰度后把保守分位 kelly_hat + 对应 .env 行写入审计——版本表 note 列
+    是创建时快照不可变（immutable-after-create 语义），追加型信息走审计行才符合
+    append-only 纪律。不校验状态（任何状态都可留痕）。
+    """
+    with _connect(db_path) as con:
+        row = con.execute("SELECT 1 FROM experiment_version WHERE experiment_id=?",
+                          (experiment_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"实验版本不存在: {experiment_id}")
+        _write_audit(con, action="note", experiment_id=experiment_id, operator=operator,
+                     now=now, changed_fields={"note": note})
+
+
+def discard(db_path: str, experiment_id: str, operator: str, now: str,
+            note: str = "") -> None:
     """discard: DRAFT→ARCHIVED（T2.2 · 2026-08-16）。DRAFT 池的处置出口。
 
     Why 显式校验 DRAFT 而非直接走 _transition：validate_transition 对 (ACTIVE, ARCHIVED)
     也放行（archive 迁移），discard 直接复用会让 ACTIVE 借 discard 入口下线、绕开
     archive 的语义与审计区分——与 promote 显式拒绝 ARCHIVED 同款防线（C1 教训）。
     DRAFT weight 恒 0，无资金守恒校验需求。
+    note（review 修复 2026-08-16）：处置原因写审计行——DRAFT 出清无理由留痕等于
+    丢了「为什么杀它」的证据链（T2.4 的 4 条处置各有理由，必须可溯源）。
     """
     with _connect(db_path) as con:
         row = con.execute("SELECT * FROM experiment_version WHERE experiment_id=?",
@@ -184,7 +205,8 @@ def discard(db_path: str, experiment_id: str, operator: str, now: str) -> None:
             "UPDATE experiment_version SET status=?, archived_at=? WHERE experiment_id=?",
             (ExperimentStatus.ARCHIVED.value, now, experiment_id))
         _write_audit(con, action="discard", experiment_id=experiment_id, operator=operator,
-                     now=now, changed_fields={"status": [old_status.value, "ARCHIVED"]})
+                     now=now, changed_fields={"status": [old_status.value, "ARCHIVED"],
+                                              "reason": note or "(未注明)"})
 
 
 def rollback(db_path: str, experiment_id: str, operator: str, now: str) -> None:

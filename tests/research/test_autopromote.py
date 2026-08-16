@@ -69,12 +69,24 @@ def _mock_evaluations(monkeypatch, *, mutate=None):
     def _fake_evaluate(params, universe, split):
         return {"inner": {"sharpe": 2.0, "n": 300, "kelly": 0.21}}
 
+    def _fake_run_full_scan(params, universe):
+        # 分年 kelly 桩（_conservative_kelly_hat 消费）：4 个可信年 → [0.0, 0.25, 0.5, 0.5]
+        # 注意全胜年 kelly_metrics 退化为 0（无亏损 b 无定义，backtest.py:391 守卫），
+        # 故高 kelly 年用混合分布构造：20胜(+3%)/10亏(-1%) → b=3,p=2/3 → 0.556→封顶 0.5。
+        trades = []
+        for y, pnls in ((2021, [-1.0] * 30), (2022, [+2.0] * 15 + [-1.0] * 15),
+                        (2023, [+3.0] * 20 + [-1.0] * 10), (2024, [+3.0] * 20 + [-1.0] * 10)):
+            trades += [{"avg_pnl_pct": p, "signal_date": f"{y}-06-{i % 28 + 1:02d}"}
+                       for i, p in enumerate(pnls)]
+        return trades
+
     # evaluate_gates 内部函数体 lazy import 真名 → patch 源模块生效（autopromote 模块
     # 顶层无这些属性，patch autopromote.evaluate_replay 会 AttributeError）
     import discovery.objective as _obj
     monkeypatch.setattr(_obj, "evaluate_replay", _fake_evaluate_replay)
     monkeypatch.setattr(_obj, "evaluate_wf", _fake_evaluate_wf)
     monkeypatch.setattr(_obj, "evaluate", _fake_evaluate)
+    monkeypatch.setattr(_obj, "run_full_scan", _fake_run_full_scan)
     import discovery.neighborhood as _nb
     monkeypatch.setattr(_nb, "neighborhood_stability", _fake_nb)
     import discovery.dsr as _dsr
@@ -110,7 +122,8 @@ def test_all_gates_green(db, monkeypatch):
     _mock_evaluations(monkeypatch)
     res = autopromote.evaluate_gates("cand_draft", db_path=db)
     assert res["all_pass"] is True
-    assert res["kelly_hat"] == 0.21
+    # review 修复：kelly_hat=分年下三分位（0.25），非 inner 点估计 0.21（ADR-14）
+    assert res["kelly_hat"] == 0.25
     for k, g in res["gates"].items():
         if k != "_meta":
             assert g["pass"] is True, k

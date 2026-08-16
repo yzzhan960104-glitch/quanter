@@ -245,16 +245,17 @@ def test_create_experiment_draft_idempotent_same_source(tmp_path, monkeypatch):
     assert len(same) == 1
 
 
-def test_create_experiment_draft_tail6_collision_idempotent(tmp_path, monkeypatch):
-    """C4 窄口径守卫②：不同 source 但尾 6 位相同 + 同日 → experiment_id 撞车也不抛。
-
-    语义级守卫①（source 匹配）拦不住这种撞车，靠 except ValueError 后按
-    experiment_id 复查兜底——存在即返回同 id，库内仍只有一版。
+def test_create_experiment_draft_tail6_collision_creates_second_version(tmp_path, monkeypatch):
+    """C4 窄口径守卫②（review 修复 2026-08-16）：不同 source 但尾 6 位相同 + 同日撞 id
+    → 自动加序号后缀建第二版，**不再静默返回第一个 id**——原实现会把第二提案
+    mark_published 到别人的 experiment_id 上，params 从未入库，证据链错配。
     """
     from experiment import store as estore
     exp_db = str(tmp_path / "exp.db")
     monkeypatch.setattr(estore, "_DEFAULT_DB", exp_db)
     id1 = proposals._create_experiment_draft({"min_rr": 2.0}, "disc_aaaa12")
     id2 = proposals._create_experiment_draft({"min_rr": 1.5}, "prop_aaaa12")  # 尾6位同为 aaaa12
-    assert id1 == id2
-    assert len(estore.list_versions(exp_db)) == 1
+    assert id1 != id2 and id2.endswith("-2")
+    versions = estore.list_versions(exp_db)
+    assert len(versions) == 2
+    assert {v.params["min_rr"] for v in versions} == {2.0, 1.5}   # 两提案参数各自入库

@@ -37,7 +37,9 @@ MIN_HITS = 30            # inner 最少成交笔数（样本不足直接否决�
 WIN_RATE_IMPROVE = 0.02  # inner 胜率提升 ≥2pp
 AVG_RR_IMPROVE = 0.05    # inner 均 rr 提升 ≥0.05
 ANN_IMPROVE = 0.01       # inner 年化提升 ≥1pp
-OUTER_DD_WORSE_LIMIT = 0.05  # outer 回撤劣化 ≤5pp
+OUTER_DD_WORSE_LIMIT = 0.05  # outer 回撤劣化 ≤5pp（提案准入闸；实盘放行闸
+                              # autopromote.G3_DD_WORSE_LIMIT=0.02 更严——两闸刻意分级，
+                              # 调整任一处须同 PR 复核另一处）
 OUTER_ANN_FLOOR = -0.30      # outer 年化下限（OOS 不能崩）
 
 # 状态机（合法迁移表）
@@ -419,13 +421,25 @@ def _create_experiment_draft(params: dict, source: str) -> str:
     try:
         create_version(_EXP_DB, version, operator="research:proposal")
     except ValueError:
-        # ② 窄口径兜底：不同 source 但 尾6位+同日 撞出同一 experiment_id → 复查后幂等返回
-        clash = [v for v in list_versions(_EXP_DB) if v.experiment_id == experiment_id]
-        if clash:
-            logger.info("_create_experiment_draft 幂等跳过（experiment_id 撞车）: %s",
-                        experiment_id)
-            return experiment_id
-        raise   # 真异常（如 version 序列冲突等）不吞，保 fail-fast
+        # ② 窄口径兜底（review 修复 2026-08-16）：不同 source 但 尾6位+同日 撞出同一
+        # experiment_id。原实现静默返回第一个 id——第二个提案的 params 从未入库却被
+        # mark_published 记上别人的 id，证据链错配。正解：撞车即换序号后缀重建
+        # （_2/_3…），两条提案各自有独立版本可溯源；仍失败（真异常）才 re-raise。
+        clash = [v for v in list_versions(_EXP_DB)
+                 if v.experiment_id == experiment_id
+                 and v.source != src_tag]
+        if not clash:
+            raise   # 非撞车型冲突（version 序列等真异常）不吞，保 fail-fast
+        for suffix in range(2, 100):
+            retry_id = f"{experiment_id}-{suffix}"
+            if any(v.experiment_id == retry_id
+                   for v in list_versions(_EXP_DB)):
+                continue
+            version.experiment_id = retry_id
+            logger.info("_create_experiment_draft 尾6位撞车，改用后缀 id: %s", retry_id)
+            create_version(_EXP_DB, version, operator="research:proposal")
+            return retry_id
+        raise ValueError(f"experiment_id 撞车且后缀耗尽: {experiment_id}")
     return experiment_id
 
 

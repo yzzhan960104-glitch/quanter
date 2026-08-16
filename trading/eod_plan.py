@@ -115,13 +115,13 @@ async def compute(date: str, signals: list, atr_map: dict, capital: float) -> di
     # （对齐 TRADE_SHADOW_MIN_DAYS 基线节奏）后再切 TRADE_SIZING_MODE=kelly。
     # 复合语义：budget = capital × pos_cap_eff × experiment_weight（plan.py:96 既有
     # 复合）——kelly 收紧策略层基础仓，weight 仍按实验归因分流，两层正交。
+    kelly_cap = min(cfg["kelly_hat"] * cfg["kelly_fraction"], cfg["pos_cap"])
     pos_cap_eff = cfg["pos_cap"]
     if cfg["sizing_mode"] == "kelly":
-        pos_cap_eff = min(cfg["kelly_hat"] * cfg["kelly_fraction"], cfg["pos_cap"])
+        pos_cap_eff = kelly_cap
         logger.info("[sizing-kelly] pos_cap %.4f → %.4f（hat=%.3f frac=%.2f）",
                     cfg["pos_cap"], pos_cap_eff, cfg["kelly_hat"], cfg["kelly_fraction"])
     elif cfg["kelly_hat"] > 0:
-        kelly_cap = min(cfg["kelly_hat"] * cfg["kelly_fraction"], cfg["pos_cap"])
         logger.info("[sizing-shadow] fixed 口径 pos_cap=%.4f | 若切 kelly 将为 %.4f"
                     "（hat=%.3f frac=%.2f）——影子观察中，未生效",
                     cfg["pos_cap"], kelly_cap, cfg["kelly_hat"], cfg["kelly_fraction"])

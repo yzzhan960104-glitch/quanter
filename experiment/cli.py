@@ -52,8 +52,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # autopromote（T2.3 · ADR-15）：七门量化门槛自动 promote。默认 dry-run（只评估+播报，
     # 零写库）；--exec 才写库且受 env AUTO_PROMOTE_ENABLED 总开关管辖（fail-closed）。
+    # experiment_id 可选（review 修复：T3.4 日报 cron 只传 --latest 不带 id，原必填位置
+    # 参数会让 argparse exit 2、--latest 分支不可达——cron 从未跑通过）。
     sp = sub.add_parser("autopromote", help="七门量化门槛自动 promote（默认 dry-run）")
-    sp.add_argument("experiment_id")
+    sp.add_argument("experiment_id", nargs="?", default=None,
+                    help="候选 experiment_id（--latest 时可省略）")
     sp.add_argument("--confirm", action="store_true",
                     help="灰度第二步：候选 weight→1.0 + 基线 archive（跳过评估）")
     sp.add_argument("--weight", type=float, default=None, help="灰度第一步新权重（默认 0.3）")
@@ -98,7 +101,8 @@ def main(argv: list = None) -> int:
             _archive(db, args.experiment_id, operator=_OPERATOR, now=_now())
             print(f"archived {args.experiment_id}")
         elif args.cmd == "discard":
-            _discard(db, args.experiment_id, operator=_OPERATOR, now=_now())
+            _discard(db, args.experiment_id, operator=_OPERATOR, now=_now(),
+                     note=args.note)   # review 修复：--note 落审计（原死参数）
             print(f"discarded {args.experiment_id}")
         elif args.cmd == "autopromote":
             # lazy import（仿 discovery/cli.py _auto_publish 范式）：experiment 是叶子层，
@@ -112,6 +116,11 @@ def main(argv: list = None) -> int:
                     print("无 DRAFT——日报跳过")
                     return 0
                 target = drafts[-1].experiment_id   # created_at 序的最末=最新
+            elif target is None:
+                # review 修复：既无 id 又无 --latest → 显式报错（argparse 层已不拦，
+                # 此处 fail-fast 给人看清楚用法，而非 KeyError 埋雷）
+                print("错误: 需要 experiment_id 或 --latest", file=sys.stderr)
+                return 1
             res = _autopromote_run(target,
                                    phase="confirm" if args.confirm else "initial",
                                    dry_run=not args.execute,

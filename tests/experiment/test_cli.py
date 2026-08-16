@@ -63,14 +63,37 @@ def test_cli_promote_rejects_overflow(db, capsys):
     assert "权重" in err
 
 
-def test_cli_discard_draft(db):
-    """T2.2：CLI discard 子命令——DRAFT 出清后不再出现在 DRAFT 池。"""
+def test_cli_discard_draft_writes_audit_note(db):
+    """T2.2+review 修复：discard --note 落审计行（原死参数，审计只记 status）。"""
     cli.main(["create", "--strategy", "neckline", "--params", '{}',
               "--experiment-id", "e1", "--created-at", "t"])
     rc = cli.main(["discard", "e1", "--note", "autopromote G2 未过"])
     assert rc == 0
     assert store.list_versions(db, status=ExperimentStatus.DRAFT) == []
     assert store.list_versions(db, status=ExperimentStatus.ARCHIVED)[0].experiment_id == "e1"
+    dc = [a for a in store.list_audit(db, "e1") if a.action == "discard"][0]
+    assert dc.changed_fields.get("reason") == "autopromote G2 未过"
+
+
+def test_cli_autopromote_latest_without_positional_id(db, monkeypatch, capsys):
+    """review 修复回归（T3.4 cron 必崩）：autopromote --latest 不带位置参数可解析——
+    原实现 experiment_id 必填，cron 只传 --latest 会 argparse exit 2，日报从未跑通。"""
+    cli.main(["create", "--strategy", "neckline", "--params", '{}',
+              "--experiment-id", "d1", "--created-at", "t"])   # 造一条 DRAFT 供 --latest 选中
+    from research import autopromote as _ap
+    monkeypatch.setattr(_ap, "run",
+                        lambda target, **kw: {"action": "stub", "target": target})
+    rc = cli.main(["autopromote", "--latest"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "stub" in out
+
+
+def test_cli_autopromote_requires_id_or_latest(db, capsys):
+    """无 id 无 --latest → 显式报错非零退出（fail-fast 给人看清用法）。"""
+    rc = cli.main(["autopromote"])
+    assert rc == 1
+    assert "experiment_id" in capsys.readouterr().err
 
 
 def test_cli_discard_rejects_active(db, capsys):

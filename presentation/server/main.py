@@ -141,6 +141,27 @@ def _run_discovery_subprocess(low_power: bool | None = None) -> None:
     )
 
 
+def _spawn_venv_subprocess(args: list, log_name: str) -> None:
+    """DETACHED 子进程装配公共件（review 提取 2026-08-16）：venv python + 独立进程组 +
+    日志重定向。cron 拉起的长任务（digest 推送/autopromote 日报评估）一律走此口，
+    防 root/venv/log 三件套在多个 cron 装配函数间复制漂移。"""
+    from pathlib import Path
+    _root = Path(__file__).resolve().parents[2]
+    _venv_py = _root / ".venv310" / "Scripts" / "python.exe"
+    _log_dir = _root / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_fh = (_log_dir / log_name).open("a", encoding="utf-8")
+    _subprocess.Popen(
+        [str(_venv_py), *args],
+        cwd=str(_root),
+        stdout=_log_fh,
+        stderr=_subprocess.STDOUT,
+        stdin=_subprocess.DEVNULL,
+        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
+        close_fds=True,
+    )
+
+
 def _run_research_digest_push() -> None:
     """research digest 周期推送 cron job：DETACHED 子进程跑 ``research.digest --push``。
 
@@ -150,24 +171,11 @@ def _run_research_digest_push() -> None:
       (2) 与 discovery cron 同范式（DETACHED 独立进程组，server 重启不杀推送）；
       (3) 日志重定向 logs/research_digest.log（append），推送失败可溯源。
     """
-    from pathlib import Path
-    _root = Path(__file__).resolve().parents[2]
-    _venv_py = _root / ".venv310" / "Scripts" / "python.exe"
-    _log_dir = _root / "logs"
-    _log_dir.mkdir(parents=True, exist_ok=True)
-    _log_fh = (_log_dir / "research_digest.log").open("a", encoding="utf-8")
-    _subprocess.Popen(
-        # T3.2（2026-08-16）：加 --verify-proposals——提案生成后自动 A 档验证 →
-        # APPROVED 自动 publish DRAFT（weight=0，promote 仍走 autopromote 七门/人审）。
-        [str(_venv_py), "-m", "research.digest", "--push", "--proposals",
-         "--verify-proposals"],
-        cwd=str(_root),
-        stdout=_log_fh,
-        stderr=_subprocess.STDOUT,
-        stdin=_subprocess.DEVNULL,
-        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
-        close_fds=True,
-    )
+    # T3.2（2026-08-16）：加 --verify-proposals——提案生成后自动 A 档验证 →
+    # APPROVED 自动 publish DRAFT（weight=0，promote 仍走 autopromote 七门/人审）。
+    _spawn_venv_subprocess(["-m", "research.digest", "--push", "--proposals",
+                            "--verify-proposals"],
+                           log_name="research_digest.log")
 
 
 def _run_autopromote_daily_brief() -> None:
@@ -179,21 +187,8 @@ def _run_autopromote_daily_brief() -> None:
     零写库：日报只让门槛读数每日可见；夜间真放行由 AUTO_PROMOTE_ENABLED
     总开关 + G7 fail-closed 双闸把守。日志 logs/autopromote_brief.log。
     """
-    from pathlib import Path
-    _root = Path(__file__).resolve().parents[2]
-    _venv_py = _root / ".venv310" / "Scripts" / "python.exe"
-    _log_dir = _root / "logs"
-    _log_dir.mkdir(parents=True, exist_ok=True)
-    _log_fh = (_log_dir / "autopromote_brief.log").open("a", encoding="utf-8")
-    _subprocess.Popen(
-        [str(_venv_py), "-m", "experiment", "autopromote", "--latest"],
-        cwd=str(_root),
-        stdout=_log_fh,
-        stderr=_subprocess.STDOUT,
-        stdin=_subprocess.DEVNULL,
-        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
-        close_fds=True,
-    )
+    _spawn_venv_subprocess(["-m", "experiment", "autopromote", "--latest"],
+                           log_name="autopromote_brief.log")
 
 
 def _discovery_missed_last_run() -> bool:

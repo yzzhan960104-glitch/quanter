@@ -21,6 +21,7 @@
 4. **审计**：operator=`autopromote:gate-v1`，门槛读数随播报/ROUND_LOG 留痕。
 5. **播报**：钉钉逐门绿红 + kelly_hat env 行（衔接 ADR-14）+ 回滚 SOP。
 6. **回滚**：`set-weight 旧 1.0 && archive 新` 两命令；极端用 `experiment rollback`。
+7. **override 口**（review 注记）：CLI `--weight/--baseline` 为人工紧急干预保留，可偏离 0.3/冠军默认——资金守恒校验 + 总开关 + dry-run 默认三重兜底；使用须在 ROUND_LOG 记理由。
 
 ## 口径声明（R0 实证驱动的关键设计）
 
@@ -43,4 +44,4 @@ G2/G3 用 **replay 引擎口径**（PositionModel 组合约束=实盘同源）�
 
 - 正面：DRAFT 池有可自动化处置路径（过闸灰度/不过 discard），循环闭环不再依赖人盯。
 - 负面/代价：门槛数值本身成为新的过拟合面（调门槛放行候选=变相人审漏洞）——靠季度人审 + ADR 修订记录对冲；评估成本 30-45min/候选。
-- 后续：R0-A3 报告定稿后回填 `A3_SURVIVES_10BPS`；R0-A4 已有 `A4_POS_KELLY_RATIO=0.667` 实测值待回填。
+- 后续：G7 常量已随 R0 报告定稿回填（`A3_SURVIVES_10BPS=False`、`A4_POS_KELLY_RATIO=0.667`，见 `research/autopromote.py` 常量注释）——R1 找到 replay 口径正边缘候选后按修订流程更新。
