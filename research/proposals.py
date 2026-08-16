@@ -49,6 +49,10 @@ _LEGAL = {
     ("APPROVED", "PUBLISHED"),
     ("PENDING", "APPROVED"),    # 人审直接放行（B/C 档人工评估后）
     ("PENDING", "REJECTED"),
+    # 重裁决口（2026-08-16 C3）：dd 符号 bug 修复后，被误拒的提案（如 p_553e383d）
+    # 需要重新 verify——REJECTED 不再是终态。重跑会覆写 verification_json，
+    # note 留痕（COALESCE 追加），审计链不断。
+    ("REJECTED", "VERIFYING"),
 }
 
 _SCHEMA = """
@@ -187,7 +191,14 @@ def _judge(baseline: dict | None, proposal: dict) -> tuple[bool, str]:
     ])
     if not improved:
         return False, "inner 无改善（胜率/均rr/年化均未达门槛）"
-    dd_worse = (outer_p.get("max_drawdown", 0) or 0) - (outer_b.get("max_drawdown", 0) or 0)
+    # 回撤符号归一（C3 实弹 bug · 2026-08-16）：ReplayReport.max_drawdown 是负值口径
+    # （如 -0.212），discovery metrics_of 是正值口径——直接相减在负值约定下语义完全反转：
+    # 提案 outer dd -1.4% vs 基线 -21.2% 的大幅改善被算成"劣化 +19.8%"而误拒（p_553e383d
+    # 实弹）；反向地，真劣化（-0.10 vs -0.08）算出负数反而放行。统一取幅度再比，两种
+    # 口径都正确。
+    dd_p = abs(outer_p.get("max_drawdown", 0) or 0)
+    dd_b = abs(outer_b.get("max_drawdown", 0) or 0)
+    dd_worse = dd_p - dd_b
     if dd_worse > OUTER_DD_WORSE_LIMIT:
         return False, f"outer 回撤劣化 {dd_worse:.1%} 超限（>{OUTER_DD_WORSE_LIMIT:.0%}）"
     if outer_p.get("annualized_return", 0) < OUTER_ANN_FLOOR:
@@ -257,7 +268,22 @@ def generate_proposal(db_path: str, digest_md: str, history: list[dict],
         return None
     from strategies.neckline.schema import NecklineConfig
     fields = ", ".join(NecklineConfig.model_fields.keys())
-    history_str = json.dumps(history[-5:], ensure_ascii=False, default=str)
+    # T3.3 学习回路（2026-08-16）：历史渲染显式带出 REJECTED 的否决理由——此前只 dump
+    # 原始行（状态在、理由不在），LLM 学不到「这形状的参数已经死过一次」，同一形状反复
+    # 试错。verification_json 的 reason（A 档自动验证结论）+ note（人审理由）双源兜底。
+    hist_lines = []
+    for h in history[-5:]:
+        try:
+            ver = json.loads((h.get("verification_json") if isinstance(h, dict) else None) or "{}")
+        except Exception:
+            ver = {}
+        reason = ver.get("reason") or (h.get("note") if isinstance(h, dict) else "") or ""
+        params_short = str((h.get("params_json") if isinstance(h, dict) else "") or "")[:120]
+        pid_h = (h.get("proposal_id") if isinstance(h, dict) else "?") or "?"
+        status_h = (h.get("status") if isinstance(h, dict) else "?") or "?"
+        hist_lines.append(f"- [{status_h}] {pid_h}: {params_short}"
+                          + (f" → 失败/否决理由：{reason}" if reason else ""))
+    history_str = "\n".join(hist_lines) or "（无）"
     prompt = f"""你是量化策略研究员。基于今日研究摘要与近期实验历史，生成一条**可执行的**
 参数探索提案（A 档：只改参数，无需改代码）。必须严格输出 JSON，不要任何解释。
 
@@ -358,22 +384,48 @@ def _create_experiment_draft(params: dict, source: str) -> str:
 
     独立函数便于测试 patch；与 discovery.publish 的建桥逻辑同源（DRAFT 不自动
     promote——过拟合参数若直冲 ACTIVE 会绕开人审，红线在 test 钉死）。
+
+    幂等守卫（C4 · 2026-08-16 实弹教训）：experiment_id = neckline_prop_{today}_{source[-6:]}
+    同日同 source（daemon 跨夜两轮 auto_publish / 桥+人双入口）必撞 UNIQUE——08-16 06:08
+    第二轮 daemon 因 IntegrityError 整轮 crash，丢当晚后续动作。两层防线：
+      ① 前置查同 source 已存在 → 直接返回既有 id（语义级幂等，跨日也拦）；
+      ② 兜底捕 create_version 的 ValueError → 按 experiment_id 复查（拦"不同 source
+        但尾 6 位撞车"的窄口径），存在即返回，仍不存在才 re-raise（真异常不吞）。
     """
     from datetime import datetime as _dt
     from experiment.models import ExperimentStatus, ExperimentVersion
     from experiment.store import (_DEFAULT_DB as _EXP_DB, create_version,
                                   init_db as _init_exp, list_versions)
-    _init_exp()
+    # 显式传 _EXP_DB：init_db 的默认参数在 def 时绑定（monkeypatch 模块属性不生效），
+    # 不传参会让"初始化的库"与"读写的库"在测试注入路径下分叉（生产两者同路径无感）。
+    _init_exp(_EXP_DB)
     today = _dt.now().strftime("%Y%m%d")
-    existing = [v.version for v in list_versions(_EXP_DB) if v.strategy_name == "neckline"]
+    src_tag = f"research_proposal:{source}"
+    all_versions = list_versions(_EXP_DB)
+    # ① 语义级幂等：同 source 的版本已存在（无论哪天建）→ 重复 publish 无新信息，返回既有 id
+    for v in all_versions:
+        if v.source == src_tag:
+            logger.info("_create_experiment_draft 幂等跳过（同 source 已存在）: %s",
+                        v.experiment_id)
+            return v.experiment_id
+    existing = [v.version for v in all_versions if v.strategy_name == "neckline"]
     experiment_id = f"neckline_prop_{today}_{source[-6:]}"
     version = ExperimentVersion(
         experiment_id=experiment_id, strategy_name="neckline", params=params,
         weight=0.0, status=ExperimentStatus.DRAFT,
         version=max(existing) + 1 if existing else 1,
-        source=f"research_proposal:{source}", note="Phase C 提案自动验证通过",
+        source=src_tag, note="Phase C 提案自动验证通过",
         created_at=_dt.now().isoformat(timespec="seconds"))
-    create_version(_EXP_DB, version, operator="research:proposal")
+    try:
+        create_version(_EXP_DB, version, operator="research:proposal")
+    except ValueError:
+        # ② 窄口径兜底：不同 source 但 尾6位+同日 撞出同一 experiment_id → 复查后幂等返回
+        clash = [v for v in list_versions(_EXP_DB) if v.experiment_id == experiment_id]
+        if clash:
+            logger.info("_create_experiment_draft 幂等跳过（experiment_id 撞车）: %s",
+                        experiment_id)
+            return experiment_id
+        raise   # 真异常（如 version 序列冲突等）不吞，保 fail-fast
     return experiment_id
 
 

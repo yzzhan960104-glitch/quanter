@@ -121,6 +121,54 @@ def test_verify_rejects_when_inner_worse(tmp_path, monkeypatch):
     assert json.loads(p["verification_json"])["verdict"] == "rejected"
 
 
+def test_judge_dd_sign_convention_regression():
+    """C3 实弹回归（2026-08-16）：负值 dd 口径下改善不得误判为劣化。
+
+    真实案例 p_553e383d：提案 outer dd -1.4% vs 基线 -21.2%——旧代码
+    dd_worse=(-0.014)-(-0.212)=+19.8% 触发误拒；真劣化（-0.10 vs -0.08）反而算出
+    负数放行。abs 幅度归一后两种符号口径语义都正确。
+    """
+    # ① C3 实弹数字：大幅改善 → 必须放行（不被 dd 闸拦截）
+    baseline = {"inner": {"n_hits": 518, "win_rate": 0.446, "avg_rr": 0.737,
+                          "annualized_return": 0.05},
+                "outer": {"max_drawdown": -0.212, "annualized_return": -0.293}}
+    prop = {"inner": {"n_hits": 67, "win_rate": 0.567, "avg_rr": 0.274,
+                      "annualized_return": 0.052},
+            "outer": {"max_drawdown": -0.014, "annualized_return": 0.055}}
+    ok, reason = proposals._judge(baseline, prop)
+    assert ok is True, reason   # inner 胜率 +12pp 改善 + outer dd 大幅改善 → APPROVED
+
+    # ② 真劣化 8pp（-0.10 → -0.18，幅度 0.10→0.18）→ 必须被 dd 闸拒绝（旧代码放行）
+    baseline2 = {"inner": {"n_hits": 200, "win_rate": 0.40, "avg_rr": 1.2,
+                           "annualized_return": 0.15},
+                 "outer": {"max_drawdown": -0.10, "annualized_return": 0.08}}
+    prop2 = {"inner": {"n_hits": 180, "win_rate": 0.45, "avg_rr": 1.5,
+                       "annualized_return": 0.22},
+             "outer": {"max_drawdown": -0.18, "annualized_return": 0.06}}
+    ok2, reason2 = proposals._judge(baseline2, prop2)
+    assert ok2 is False and "回撤" in reason2
+
+    # ③ 正值口径（discovery metrics_of）同样正确：0.12 → 0.13 仅 1pp，不拒
+    baseline3 = {"inner": {"n_hits": 200, "win_rate": 0.40, "avg_rr": 1.2,
+                           "annualized_return": 0.15},
+                 "outer": {"max_drawdown": 0.12, "annualized_return": 0.08}}
+    prop3 = {"inner": {"n_hits": 180, "win_rate": 0.45, "avg_rr": 1.5,
+                       "annualized_return": 0.22},
+             "outer": {"max_drawdown": 0.13, "annualized_return": 0.06}}
+    ok3, _ = proposals._judge(baseline3, prop3)
+    assert ok3 is True
+
+
+def test_rejected_proposal_can_be_reverified(tmp_path, monkeypatch):
+    """重裁决口（C3）：REJECTED → VERIFYING 合法——dd bug 修复后误拒提案可重跑。"""
+    db = str(tmp_path / "p.db")
+    pid = _mk_proposal(db)
+    proposals.mark_verifying(db, pid)
+    proposals.mark_rejected(db, pid)
+    proposals.mark_verifying(db, pid)     # 旧状态机此处抛 ValueError
+    assert proposals.get_proposal(db, pid)["status"] == "VERIFYING"
+
+
 def test_generate_proposal_uses_llm_and_schema_guard(tmp_path, monkeypatch):
     """LLM 生成提案：合法 JSON + 值域护栏；GLM 不可用 → None（不落库）。"""
     db = str(tmp_path / "p.db")
@@ -178,3 +226,35 @@ def test_publish_creates_experiment_draft(tmp_path, monkeypatch):
     assert exp_id == "neckline_disc_abc"
     assert proposals.get_proposal(db, pid)["status"] == "PUBLISHED"
     assert created[0][0] == _proposal_params()
+
+
+def test_create_experiment_draft_idempotent_same_source(tmp_path, monkeypatch):
+    """C4 回归（2026-08-16 06:08 实弹）：同 source 重复建 DRAFT 撞 UNIQUE → daemon 整轮 crash。
+
+    期望：第二次调用幂等返回既有 experiment_id（语义级守卫①），库里同 source 仅一版。
+    """
+    from experiment import store as estore
+    exp_db = str(tmp_path / "exp.db")
+    monkeypatch.setattr(estore, "_DEFAULT_DB", exp_db)   # 惰性 import 于函数体内，patch 模块属性即生效
+    params = {"min_rr": 2.0}
+    id1 = proposals._create_experiment_draft(params, "trial_aaaa12")
+    id2 = proposals._create_experiment_draft(params, "trial_aaaa12")   # daemon 第二轮同冠军
+    assert id1 == id2
+    same = [v for v in estore.list_versions(exp_db)
+            if v.source == "research_proposal:trial_aaaa12"]
+    assert len(same) == 1
+
+
+def test_create_experiment_draft_tail6_collision_idempotent(tmp_path, monkeypatch):
+    """C4 窄口径守卫②：不同 source 但尾 6 位相同 + 同日 → experiment_id 撞车也不抛。
+
+    语义级守卫①（source 匹配）拦不住这种撞车，靠 except ValueError 后按
+    experiment_id 复查兜底——存在即返回同 id，库内仍只有一版。
+    """
+    from experiment import store as estore
+    exp_db = str(tmp_path / "exp.db")
+    monkeypatch.setattr(estore, "_DEFAULT_DB", exp_db)
+    id1 = proposals._create_experiment_draft({"min_rr": 2.0}, "disc_aaaa12")
+    id2 = proposals._create_experiment_draft({"min_rr": 1.5}, "prop_aaaa12")  # 尾6位同为 aaaa12
+    assert id1 == id2
+    assert len(estore.list_versions(exp_db)) == 1
