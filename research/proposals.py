@@ -412,6 +412,14 @@ def _create_experiment_draft(params: dict, source: str) -> str:
             return v.experiment_id
     existing = [v.version for v in all_versions if v.strategy_name == "neckline"]
     experiment_id = f"neckline_prop_{today}_{source[-6:]}"
+    # R1（2026-08-16 标定实弹教训）：params 物化——提案 params 常是 partial diff（如
+    # 3e383d 仅 {min_rr, max_h_atr} 2 键）。策略侧 merge 合法（NecklineMethodStrategy
+    # 以 DEFAULTS 为基座），但 discovery scan 侧（run_full_scan 的 ID_KEYS/EXEC_KEYS
+    # 直接索引）与 autopromote G4/G5/G6 路径要求全 21 键——partial 入库即地雷。
+    # 物化= NecklineConfig 默认填充（与策略 merge 同基座，语义零变化），失败抛（值域
+    # 非法的 partial 在此拦下，不该有 partial 能过 _validate_params 却过不了全量构造）。
+    from strategies.neckline.schema import NecklineConfig
+    params = NecklineConfig(**params).model_dump()
     version = ExperimentVersion(
         experiment_id=experiment_id, strategy_name="neckline", params=params,
         weight=0.0, status=ExperimentStatus.DRAFT,

@@ -225,7 +225,24 @@ def test_publish_creates_experiment_draft(tmp_path, monkeypatch):
     exp_id = proposals.publish_proposal(db, pid)
     assert exp_id == "neckline_disc_abc"
     assert proposals.get_proposal(db, pid)["status"] == "PUBLISHED"
+    # 本用例 mock 了 _create_experiment_draft——断言透传的提案原参（物化语义在
+    # test_create_experiment_draft_materializes_partial_params 单独覆盖）
     assert created[0][0] == _proposal_params()
+
+
+def test_create_experiment_draft_materializes_partial_params(tmp_path, monkeypatch):
+    """R1（2026-08-16 标定实弹）：partial 提案物化为全量 21 键——scan 侧
+    run_full_scan（ID_KEYS 直接索引）与 autopromote G4/G5/G6 路径要求全量，
+    partial 入库即 KeyError 地雷（3e383d 2键实弹教训）。"""
+    from experiment import store as estore
+    exp_db = str(tmp_path / "exp.db")
+    monkeypatch.setattr(estore, "_DEFAULT_DB", exp_db)
+    out_id = proposals._create_experiment_draft({"min_rr": 1.5}, "disc_partia1")
+    v = [v for v in estore.list_versions(exp_db)
+         if v.experiment_id == out_id][0]
+    assert len(v.params) == 21
+    assert v.params["min_rr"] == 1.5
+    assert v.params["window"] == 60            # NecklineConfig 默认基座（策略 merge 同源）
 
 
 def test_create_experiment_draft_idempotent_same_source(tmp_path, monkeypatch):

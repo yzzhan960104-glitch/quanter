@@ -22,7 +22,7 @@
 用法（后台跑，预计 1-1.5h）：
     PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe -u diag/a3_fill_realism_probe.py
 """
-import sys, os, time, json, sqlite3
+import sys, os, time, json, sqlite3, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
@@ -31,7 +31,14 @@ from discovery.snapshot import freeze
 from discovery.split import holdout_split
 from discovery.objective import evaluate_replay
 
-# ── 参数集：ACTIVE 基线 + 今晨 daemon 自动 publish 的最强 DRAFT（同一证据链）──
+# ── 参数集：默认 ACTIVE；R1 起 --experiments 指定候选（逗号分隔 experiment_id）──
+# R1-3（2026-08-16）：G7 翻绿的验体从「当任 ACTIVE」改为「当前候选」，支持
+# autopromote 冠军候选的滑点存活复验。
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--experiments", default="",
+                 help="逗号分隔 experiment_id 列表（默认仅 ACTIVE 基线）")
+_ARGS, _ = _ap.parse_known_args()
+
 conn = sqlite3.connect("experiment/experiments.db")
 conn.row_factory = sqlite3.Row
 PARAM_SETS = {}
@@ -39,11 +46,12 @@ row = conn.execute(
     "SELECT experiment_id, params FROM experiment_version WHERE status='ACTIVE' "
     "ORDER BY weight DESC LIMIT 1").fetchone()
 PARAM_SETS["ACTIVE_" + row["experiment_id"].split("_")[-1]] = json.loads(row["params"])
-row = conn.execute(
-    "SELECT experiment_id, params FROM experiment_version "
-    "WHERE experiment_id='neckline_prop_20260816_47d350'").fetchone()
-if row is not None:
-    PARAM_SETS["DRAFT_47d350"] = json.loads(row["params"])
+for eid in filter(None, _ARGS.experiments.split(",")):
+    r2 = conn.execute(
+        "SELECT experiment_id, params FROM experiment_version WHERE experiment_id=?",
+        (eid.strip(),)).fetchone()
+    if r2 is not None:
+        PARAM_SETS[eid.split("_")[-1]] = json.loads(r2["params"])
 
 SLIPPAGES = [0.0, 5.0, 10.0, 20.0, 50.0]   # bps（双边口径：每边扣 s，逐笔共 s×2）
 
