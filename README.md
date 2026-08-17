@@ -151,7 +151,7 @@ python -m ops.manage_ops_schtasks --register-server
 7. 三路日志装配（本地文件 + 前端 SSE 流 + 控制台）；
 8. **TradingEngine 装配**：banner → `TradingEngine()` → `bootstrap()`（网关 connect + 成交回报回调注册 + position_book/state_store 建表迁移）→ `check_shadow_gate()`（影子期不足则不 start scheduler，server 照常起）→ `eng.start()`；
 9. **broadcast connect 5 bot** 起常驻（cli/trading_q/data_q/strategy_q/review）；
-10. **discovery cron 02:00** 注册进 engine.sched（DETACHED subprocess 跑 daemon）；
+10. **discovery cron 每小时+5 分（24h 低功率模式）** 注册进 engine.sched（DETACHED subprocess 跑 daemon）；
 11. **discovery 启动补跑**：检测跨过昨晚 02:00 → 异步补跑（轮次/seed 幂等去重）；
 12. **C-8 全 job 启动补跑**：`asyncio.create_task(run_startup_catchup(engine))`（见 4.4）。
 
@@ -162,11 +162,11 @@ TradingEngine 装配 APScheduler（`max_instances=1` + `misfire_grace_time=300` 
 | 触发点 | 时间 | 职责 |
 |---|---|---|
 | pipeline_then_eod | 18:00 周一-五（`ENGINE_PIPELINE_CRON`） | 盘后事件链：采集子进程→等完成→按策略声明校验数据→落 data_ready→`_eod` 扫 T 日信号产 T+1 计划→brief 三播报 |
-| pre_open | 09:22 周一-五（`ENGINE_PRE_OPEN_CRON`） | 三段 gate（计划确认→网关健康→数据就绪）→撤昨日未成交单→抓日内熔断基线→注入动态白名单→逐单挂单 |
+| pre_open | 09:22 周一-五（`ENGINE_PRE_OPEN_CRON`） | 四段 gate（计划确认→网关健康→数据就绪→**regime** A1）→撤昨日未成交单→超期平仓现算→抓日内熔断基线→注入动态白名单→逐单挂单 |
 | stop_loss | 每 30s（`ENGINE_STOPLOSS_INTERVAL_SECONDS`） | 盘中巡检：持仓 `decide_exit` 止损/止盈补挂/超时平仓 + pending 期 cancel_on 撤单（非盘中时段自动 no-op） |
 | post_close | 15:30 周一-五（`ENGINE_POST_CLOSE_CRON`） | 持仓对账→成交流水兜底纠正→日内 -3% 熔断→trailing 止损推进→超期平仓→清动态白名单 |
 | _health_guard | 每 60s | 网关健康自愈：断线探测→退避重连（`_guard_skip_rounds` 防刷柜台） |
-| discovery_daemon | 02:00（lifespan 注册） | 参数发现 daemon 跨夜搜索（DETACHED 子进程，收敛/轮次幂等） |
+| discovery_daemon | 每小时 :05（lifespan 注册，24h 低功率模式） | 参数发现 daemon 搜索（DETACHED 子进程，收敛/轮次幂等） |
 
 典型交易日时序：
 
