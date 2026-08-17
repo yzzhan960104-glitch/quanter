@@ -1863,6 +1863,58 @@ _RISK_BLOCK_KEY = "block_new_orders"
 _RISK_POSITION_KEY = "max_total_position"
 
 
+def list_active_holding_signals(account_id: str, symbols: list[str] | set[str],
+                                *, db_path: str | None = None) -> list[dict]:
+    """按 symbols 反查各自**最新**一条 SIGNAL 行 meta（活跃持仓的源信号 · 2026-08-17）。
+
+    物理意图（存量止损裸奔修复）：cooldown=8 期内 eod 不重产同标的信号 → 持仓成交
+    次日起不在「今日 plan_date」的 SIGNAL 集里 → ``_stoploss`` 的 monitor_ctx 缺该
+    symbol → monitor「无止损价」跳过 → 盘中个股止损裸奔。本函数给 _stoploss 提供
+    「按当前真实持仓反查入场源 SIGNAL」的读口，state/cfg 用入场时快照（参数定终身，
+    对齐回测 simulate_exit 静态 cfg 语义）。
+
+    取数口径：每 symbol 取 event_id **最大**的 SIGNAL 行（最新计划口径——8 日 cooldown
+    后 eod 重产新信号时，新价位覆盖旧的，与「今日 SIGNAL 优先」合并语义一致；调用方
+    先用今日 SIGNAL 填充、本函数只补漏）。meta 解析失败/None 跳过（同
+    list_signals_with_meta_by_plan_date 保守口径）。
+
+    Args:
+        account_id: 账户（trade_event.account_id 同口径）。
+        symbols:    待反查的标的集合（调用方应为当前真实持仓且今日 SIGNAL 未覆盖者）。
+    Returns:
+        ``list[dict]``，每项 ``{symbol, trade_id, **meta}``；无命中返 []。
+    """
+    syms = [s for s in symbols if s]
+    if not syms:
+        return []
+    db_path = db_path or _DEFAULT_DB
+    ph = ",".join("?" * len(syms))
+    with _connect(db_path) as con:
+        rows = con.execute(
+            "SELECT symbol, trade_id, meta FROM trade_event "
+            f"WHERE action='SIGNAL' AND account_id=? AND symbol IN ({ph}) "
+            "ORDER BY event_id DESC",
+            (account_id, *syms)).fetchall()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:   # DESC：首见即该 symbol 最新一条
+        if r["symbol"] in seen:
+            continue
+        seen.add(r["symbol"])
+        if r["meta"] is None:
+            continue
+        try:
+            meta = json.loads(r["meta"])
+        except (TypeError, ValueError):
+            logger.warning("list_active_holding_signals meta JSON 解析失败 symbol=%s",
+                           r["symbol"])
+            continue
+        if not isinstance(meta, dict):
+            continue
+        out.append({"symbol": r["symbol"], "trade_id": r["trade_id"], **meta})
+    return out
+
+
 def read_risk_control(db_path: str | None = None) -> dict:
     """raw 读双值（无默认填充、无 fail-closed——供 REST 观测面展示存储真值）。
 

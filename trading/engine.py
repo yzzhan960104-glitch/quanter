@@ -1238,89 +1238,142 @@ class TradingEngine:
         # event_id > CONFIRMED，latest=ORDERED）→ 止损监控静默失效（live 红线）。
         # 改用 is_trade_confirmed 单点（CONFIRMED + ORDERED/FILLED/CLOSED/TP_FILLED 视作
         # 已确认，与 trading_plan.load_plan:95 语义对齐）。
-        if signals:
-            _aid_sl = _resolve_account_id()
-            # 过滤已确认 SIGNAL（per-trade confirmed gate · is_trade_confirmed 单点）
-            confirmed_signals = []
-            for sig in signals:
-                _tid_sl = _state_store.build_trade_id(_aid_sl, sig["symbol"], today)
-                if _state_store.is_trade_confirmed(_tid_sl):
-                    confirmed_signals.append(sig)
-            # entry_dates / avg_prices 来自 position_book（持仓账本，holding_days + entry 基准）
-            try:
-                entry_dates = _position_book.get_entry_dates()
-            except Exception:
-                # 账本读失败软降级 → holding_days 全 0（等同 base_stop，不崩）
-                logger.warning("_stoploss 读 entry_dates 失败（holding_days 降级 0）", exc_info=True)
-                entry_dates = {}
-            cfg_trade = _trade_cfg()
-            # decide_exit 静态 cfg（整个持有期不变 · resolution 7）：键对齐 simulate_exit cfg
-            # （backtest.py:177-183）+ decide_exit 契约（execution.py:155-161）。
-            decide_cfg = {
-                "stop_atr_mult": cfg_trade["stop_atr_mult"],
-                "trailing_grace": cfg_trade.get("grace", 0) or 0,
-                "trailing_step": cfg_trade.get("step", 0.0) or 0.0,
-                "trailing_floor": cfg_trade.get("floor"),
-                "tp1_portion": cfg_trade.get("tp1_portion", 0.5),
-                "max_holding": cfg_trade.get("max_holding", 15),
-            }
-            max_holding = decide_cfg["max_holding"]
-            for o in confirmed_signals:
-                sym = (o.get("order") or {}).get("symbol") or o.get("symbol")
-                sp = o.get("stop_price")
-                # 双重防御：symbol 缺失或 stop_price 非数（NaN/None）一律跳过——
-                # stop_prices 的每一项都必须是「能拿来比价」的合法 (sym, price) 对。
-                if not sym:
-                    continue
-                if sp is not None:
-                    stop_prices[sym] = sp
+        _aid_sl = _resolve_account_id()
+        # 过滤已确认 SIGNAL（per-trade confirmed gate · is_trade_confirmed 单点）
+        confirmed_signals = []
+        for sig in signals:
+            _tid_sl = _state_store.build_trade_id(_aid_sl, sig["symbol"], today)
+            if _state_store.is_trade_confirmed(_tid_sl):
+                confirmed_signals.append(sig)
+        # entry_dates / avg_prices 来自 position_book（持仓账本，holding_days + entry 基准）
+        try:
+            entry_dates = _position_book.get_entry_dates()
+        except Exception:
+            # 账本读失败软降级 → holding_days 全 0（等同 base_stop，不崩）
+            logger.warning("_stoploss 读 entry_dates 失败（holding_days 降级 0）", exc_info=True)
+            entry_dates = {}
+        cfg_trade = _trade_cfg()
+        # decide_exit 静态 cfg 基线（env 源 · 整个持有期不变 · resolution 7）：键对齐
+        # simulate_exit cfg（backtest.py:177-183）+ decide_exit 契约（execution.py:155-161）。
+        # 2026-08-17 单源收敛：此为 **缺 exec_params 键时的 fallback 基线**——新 SIGNAL
+        # meta 带 exec_params（实验口径定终身），_decide_cfg_for 逐单覆盖。
+        _base_decide_cfg = {
+            "stop_atr_mult": cfg_trade["stop_atr_mult"],
+            "trailing_grace": cfg_trade.get("grace", 0) or 0,
+            "trailing_step": cfg_trade.get("step", 0.0) or 0.0,
+            "trailing_floor": cfg_trade.get("floor"),
+            "tp1_portion": cfg_trade.get("tp1_portion", 0.5),
+            "max_holding": cfg_trade.get("max_holding", 15),
+        }
 
-                # ── 构造 monitor_ctx[sym]（主路径 decide_exit · resolution 3）──
-                # state 字段对齐 decide_exit 契约（execution.py:142-153）：
-                #   phase=holding（实盘 monitor 是 holding 期巡检）；entry/stop/tp1/tp2/neckline/
-                #   atr from plan orders；holding_days from position_book.entry_date；is_last =
-                #   (holding_days >= max_holding)（resolution 6：超期即当末根，不判浮盈 threshold）；
-                #   lot1_open/lot2_open 默认 True（实盘单仓，_place_take_profit 限价单成交翻 lot，
-                #   monitor 不维护 lot 翻转——对齐 simulate_exit 的单根无状态语义）。
-                neckline = o.get("neckline")
-                atr = o.get("atr")
-                tp1 = o.get("tp1")
-                tp2 = o.get("take_profit")
-                # 缺 neckline/atr/tp2 的 order（老 plan 无这些字段）→ 无法构造 decide_exit
-                # state（compute_stop_price 要 neckline+atr，holding 期 tp2 必填）→ 只塞
-                # stop_prices 走 fallback，不塞 monitor_ctx（保守，不拿脏 state 喂 decide_exit）。
-                if (neckline is not None and atr is not None and tp2 is not None
-                        and tp1 is not None):
-                    entry_date = entry_dates.get(sym)
-                    # holding_days 交易日口径（trading_days_between，与 _scan_expired_positions 同源）；
-                    # entry_date 缺失（未成交 / 老数据）→ holding_days=0（等同 base_stop，向后兼容）。
-                    holding_days = _trading_days_between(entry_date, today) if entry_date else 0
-                    # I-4：is_last 用 `>=`（第 max_holding 日即当末根 → decide_exit TIMEOUT
-                    # 市价优先强平），对齐回测 simulate_exit is_last 语义。与 _scan_expired_positions
-                    # 的 `>`（第 max_holding+1 日跌停价兜底）错位一日——monitor 先市价平，
-                    # post_close 次日兜底仅处理 monitor 漏掉的标的（防同日双卖卖空）。
-                    is_last = holding_days >= max_holding
-                    monitor_ctx[sym] = {
-                        "state": {
-                            "phase": "holding",
-                            "entry": None,     # 实盘 entry 不入 state（decide_exit holding 分支不读 entry，
-                                               # pnl 在 simulate_exit 算；monitor 只决策发不发单）
-                            "stop": float(sp) if sp is not None else None,  # D12 fallback 观测用
-                            "tp1": float(tp1), "tp2": float(tp2),
-                            "neckline": float(neckline), "atr": float(atr),
-                            "holding_days": holding_days, "is_last": is_last,
-                            "lot1_open": True, "lot2_open": True,
-                        },
-                        "cfg": dict(decide_cfg),
-                    }
+        def _decide_cfg_for(o: dict) -> dict:
+            """per-signal decide_cfg：SIGNAL.meta.exec_params（实验快照）> env 基线。
 
-                # ── 构造 pending_ctx[sym]（D11 pending 期撤单 · resolution 4）──
-                # cancel_on = 颈线 + cancel_thresh_mult×H（build_orders 落盘，对齐 simulate_exit:128）。
-                # plan orders 里 cancel_on 字段（Task 9 新增落盘，见 _eod order_dicts）；
-                # 老 plan 无此字段 → 不塞 pending_ctx（None=不撤单放飞，向后兼容）。
+            消灭双源分叉：巡检侧曾全量用 env（trailing 5/0.1/0.5 vs 实验 0、
+            max_holding 15 vs 20、tp1_portion 0.5 vs 0.3）。老 SIGNAL（无 exec_params
+            键）零变化走 env 基线（向后兼容）。
+            """
+            ep = o.get("exec_params")
+            if isinstance(ep, dict):
+                return {
+                    "stop_atr_mult": ep.get("stop_atr_mult", _base_decide_cfg["stop_atr_mult"]),
+                    "trailing_grace": ep.get("trailing_grace", _base_decide_cfg["trailing_grace"]),
+                    "trailing_step": ep.get("trailing_step", _base_decide_cfg["trailing_step"]),
+                    "trailing_floor": ep.get("trailing_floor", _base_decide_cfg["trailing_floor"]),
+                    "tp1_portion": ep.get("tp1_portion", _base_decide_cfg["tp1_portion"]),
+                    "max_holding": int(ep.get("max_holding", _base_decide_cfg["max_holding"])),
+                }
+            return dict(_base_decide_cfg)
+
+        def _inject_signal_meta(o: dict, *, with_pending: bool = True) -> None:
+            """SIGNAL meta → 三 map（stop_prices/monitor_ctx/pending_ctx）装配单源。
+
+            今日计划路径与持仓反查路径共用（防两处构造漂移）。with_pending=False
+            用于持仓反查：cancel_on 是入场时的挂单撤单阈值，今日并无该 pending 单，
+            塞进 pending_ctx 语义错位（虽然 monitor 查不到可撤单也匹配不上，仍不塞）。
+            """
+            sym = (o.get("order") or {}).get("symbol") or o.get("symbol")
+            sp = o.get("stop_price")
+            # 双重防御：symbol 缺失或 stop_price 非数（NaN/None）一律跳过——
+            # stop_prices 的每一项都必须是「能拿来比价」的合法 (sym, price) 对。
+            if not sym:
+                return
+            if sp is not None:
+                stop_prices[sym] = sp
+            cfg = _decide_cfg_for(o)
+            max_holding = cfg["max_holding"]
+            neckline = o.get("neckline")
+            atr = o.get("atr")
+            tp1 = o.get("tp1")
+            tp2 = o.get("take_profit")
+            # 缺 neckline/atr/tp2 的 order（老 plan 无这些字段）→ 无法构造 decide_exit
+            # state（compute_stop_price 要 neckline+atr，holding 期 tp2 必填）→ 只塞
+            # stop_prices 走 fallback，不塞 monitor_ctx（保守，不拿脏 state 喂 decide_exit）。
+            if (neckline is not None and atr is not None and tp2 is not None
+                    and tp1 is not None):
+                entry_date = entry_dates.get(sym)
+                # holding_days 交易日口径（trading_days_between，与 _scan_expired_positions 同源）；
+                # entry_date 缺失（未成交 / 老数据）→ holding_days=0（等同 base_stop，向后兼容）。
+                holding_days = _trading_days_between(entry_date, today) if entry_date else 0
+                # I-4：is_last 用 `>=`（第 max_holding 日即当末根 → decide_exit TIMEOUT
+                # 市价优先强平），对齐回测 simulate_exit is_last 语义。与 _scan_expired_positions
+                # 的 `>`（第 max_holding+1 日跌停价兜底）错位一日——monitor 先市价平，
+                # post_close 次日兜底仅处理 monitor 漏掉的标的（防同日双卖卖空）。
+                is_last = holding_days >= max_holding
+                monitor_ctx[sym] = {
+                    "state": {
+                        "phase": "holding",
+                        "entry": None,     # 实盘 entry 不入 state（decide_exit holding 分支不读 entry，
+                                           # pnl 在 simulate_exit 算；monitor 只决策发不发单）
+                        "stop": float(sp) if sp is not None else None,  # D12 fallback 观测用
+                        "tp1": float(tp1), "tp2": float(tp2),
+                        "neckline": float(neckline), "atr": float(atr),
+                        "holding_days": holding_days, "is_last": is_last,
+                        "lot1_open": True, "lot2_open": True,
+                    },
+                    "cfg": cfg,
+                }
+            # ── 构造 pending_ctx[sym]（D11 pending 期撤单 · resolution 4）──
+            # cancel_on = 颈线 + cancel_thresh_mult×H（build_orders 落盘，对齐 simulate_exit:128）。
+            # plan orders 里 cancel_on 字段（Task 9 新增落盘，见 _eod order_dicts）；
+            # 老 plan 无此字段 → 不塞 pending_ctx（None=不撤单放飞，向后兼容）。
+            if with_pending:
                 cancel_on = o.get("cancel_on")
                 if cancel_on is not None:
                     pending_ctx[sym] = float(cancel_on)
+
+        for o in confirmed_signals:
+            _inject_signal_meta(o)
+
+        # ── 持仓反查（存量止损裸奔修复 · 2026-08-17）──
+        # 物理根因：cooldown=8 期内 eod 不重产同标的信号 → 持仓成交次日起不在今日
+        # SIGNAL 集里 → monitor_ctx 缺该 symbol → monitor「无止损价」continue → 盘中
+        # 个股止损/超时强平对存量持仓完全不生效（只剩预挂 TP 单 + 组合熔断 + pre_open
+        # 超期兜底）。补：按当前真实持仓反查各自最新 SIGNAL meta（exec_params 定终身，
+        # 今日 SIGNAL 已覆盖的 sym 不重查不覆盖）。
+        try:
+            _pos_raw_sl = (await gw.query_positions()
+                           if (gw is not None and hasattr(gw, "query_positions")) else {})
+        except Exception:
+            # 反查失败不炸本轮（今日计划路径不受影响）——裸奔风险由下一轮 30s 重试收敛；
+            # 持续失败由 gw 健康闸/行情黑屏告警兜底。
+            logger.exception("_stoploss 持仓反查 query_positions 失败（本轮仅今日计划覆盖）")
+            _pos_raw_sl = {}
+        _missing_syms: set[str] = set()
+        for _hsym, _hpos in (_pos_raw_sl or {}).items():
+            _hvol = _hpos.get("volume") if isinstance(_hpos, dict) else _hpos
+            if (not _hsym) or not _hvol or _hvol <= 0:
+                continue
+            if _hsym in monitor_ctx or _hsym in stop_prices:
+                continue   # 今日 SIGNAL 已覆盖（新计划优先）
+            _missing_syms.add(_hsym)
+        if _missing_syms:
+            _before = set(monitor_ctx)
+            for sig in _state_store.list_active_holding_signals(
+                    _aid_sl, sorted(_missing_syms)):
+                _inject_signal_meta(sig, with_pending=False)
+            logger.info("_stoploss 持仓反查注入 %d 个存量持仓的止损监控（候选 %d）",
+                        len(set(monitor_ctx) - _before), len(_missing_syms))
 
         # M2 StopLossContext 收口（2026-08-15）：三 map 装箱单参传递——「空 dict → None」
         # 归一移至 monitor 解包处（语义等价，见 stop_loss_monitor 体内 M2 注释）。
