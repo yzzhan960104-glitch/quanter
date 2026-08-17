@@ -613,7 +613,13 @@ async def submit_order(order: OrderRequest, *, dry_run: bool) -> dict:
     if gw is None:
         raise RuntimeError("交易网关未装配（unavailable）")
 
-    # 1. 风控挡板（A-2 三闸短路：connection / dry_run / session）
+    # 1. 风控挡板（A-2 三闸 + ADR-16 master_switch：connection / dry_run / 人工开关 / session）
+    # resolve_risk_control 自身 fail-closed（DB 异常→block=True）。类型守卫防调用方
+    # mock 环境的脏形态（整体 MagicMock state_store 时下标返 MagicMock）误拒单。
+    from trading.state_store import resolve_risk_control
+    _rc = resolve_risk_control()
+    _block = (_rc.get("block") if isinstance(_rc, dict)
+              and isinstance(_rc.get("block"), bool) else False)
     decision = check_order(
         order,
         dry_run=dry_run,
@@ -621,6 +627,7 @@ async def submit_order(order: OrderRequest, *, dry_run: bool) -> dict:
         is_locked=bool(getattr(gw, "is_locked", False)),
         connected=bool(getattr(gw, "_connected", False)),
         in_session=_in_a_share_session(),
+        block_new_orders=_block,
     )
 
     # 2. 命中处理：落 trade_event 审计事件 + 返回/抛错

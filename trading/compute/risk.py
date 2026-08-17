@@ -55,8 +55,9 @@ def check_order(
     is_locked: bool,
     connected: bool,
     in_session: bool = True,
+    block_new_orders: bool = False,
 ) -> RiskDecision:
-    """A-2 短路校验（2026-08-06 裁定 D1-D3/D5 后仅剩 3 道闸）。
+    """A-2 短路校验（2026-08-06 裁定 D1-D3/D5 后 3 道闸 + ADR-16 人工开关关）。
 
     被删闸（决策记录 Annotation 1 + 裁定）：
       allow_live / confirm / whitelist / lot / max_amount / max_shares / high_low_limit
@@ -65,7 +66,9 @@ def check_order(
     保留闸（链路正确性原语，D1/D2）：
       1 connection  断线/未连接          — 状态机边界，最高优先（D1）
       2 dry_run     请求级模拟           — is_dry_run=True，非错误
-      3 session     A 股交易时段（enforce_session=True 时生效；上午起点 09:15，A1 已修）
+      3 master_switch 人工增量拦截       — ADR-16：block_new_orders=True 拒一切真买单
+                    （只拦 side="buy"；卖出=止损/止盈/超期退出，永不拦；dry_run 模拟不受限）
+      4 session     A 股交易时段（enforce_session=True 时生效；上午起点 09:15，A1 已修）
     """
     # 闸1：断线/连接（最高优先——断线时其他校验无意义）
     if is_locked or not connected:
@@ -75,7 +78,13 @@ def check_order(
     if dry_run:
         return RiskDecision(True, "dry_run 模拟（前端请求不真下单）", "dry_run", is_dry_run=True)
 
-    # 闸3：A 股交易时段（enforce_session=True 时生效；D2 保留，09:15 起点 A1 已修）
+    # 闸3：人工增量拦截开关（ADR-16 · 2026-08-17）——只拦买单，卖出（退出）永不拦。
+    # Why 在 dry_run 之后：模拟请求不产生真增量，放行保链路可测试；
+    # Why 只判 side=="buy"：开关语义是「拦截增量下单」，止损/止盈/超期平仓是存量退出。
+    if block_new_orders and order.side == "buy":
+        return RiskDecision(True, "人工风控开关：拦截增量买入（卖出/退出不拦）", "master_switch")
+
+    # 闸4：A 股交易时段（enforce_session=True 时生效；D2 保留，09:15 起点 A1 已修）
     if enforce_session and not in_session:
         return RiskDecision(True, "非 A 股交易时段", "session")
 

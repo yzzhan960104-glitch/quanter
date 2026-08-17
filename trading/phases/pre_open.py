@@ -456,6 +456,61 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     else:  # pragma: no cover - 防御性回退：未注入 ports（未装配 engine 的裸调，理论仅测试）
         dynamic_whitelist.inject_dynamic_whitelist(symbols)
 
+    # ③.5 ADR-16 人工风控双值（2026-08-17，regime 指标闸移除后的增量拦截接管面）：
+    #   block_new_orders=1 → 撤昨日单/超期平仓/熔断基线等存量管理已照常执行（上方），
+    #     仅挂新买单整体跳过（skip payload + WARN 播报）；
+    #   max_total_position<1.0 → 逐单额度检查「持仓市值 + 本轮已挂 + 本单 ≤ 比例×总权益」，
+    #     超限单跳过（n_pos_capped 计入返回 payload）。默认 1.0 = 不限制（零行为变化）。
+    # resolve 自身 fail-closed：DB 读异常 → block=True 全拦（宁错拦人工拨回，不裸奔）。
+    # 类型守卫：非 {block:bool, max_pos:num} 形态（如测试环境整体 MagicMock state_store
+    # 时下标返 MagicMock）→ 按默认不拦处理——真 fail-closed 已在 resolve 内部完成，
+    # 此处只防调用方注入的脏形态误触发拦截分支。
+    _rc_any = _state_store.resolve_risk_control()
+    _rc = (_rc_any if isinstance(_rc_any, dict)
+           and isinstance(_rc_any.get("block"), bool)
+           and isinstance(_rc_any.get("max_pos"), (int, float))
+           and not isinstance(_rc_any.get("max_pos"), bool)
+           else {"block": False, "max_pos": 1.0, "degraded": True})
+    if _rc["block"]:
+        _msg = (f"pre_open 人工风控拦截：block_new_orders=1（ADR-16），"
+                f"{len(signals)} 单全部跳过挂单（撤昨日单/超期平仓/熔断基线已照常执行）"
+                + ("；⚠ risk_control 读取异常 fail-closed，请查 DB" if _rc["degraded"] else ""))
+        logger.warning(_msg)
+        try:  # WARN 播报软降级（人工开关是已知状态非事故，不占 CRITICAL 通道）
+            from infra.notifier import NotificationManager, fire_and_forget
+            fire_and_forget(
+                NotificationManager.get_default().notify_risk_event(_msg, "WARN"))
+        except Exception:
+            logger.debug("人工风控拦截播报软降级", exc_info=True)
+        return {"submitted": 0, "mode": _mode(),
+                "skipped": "人工风控开关：拦截增量下单（存量管理已执行）"}
+
+    # 总仓位额度（仅 max_pos<1.0 时启用）：quota = 比例×总权益 − 持仓市值，本轮挂单逐单扣减。
+    # Why fail-closed：设置了上限但权益/市值查不到（断线/返空）→ 全跳过——「不知道占多少」
+    # 时宁可多拦（人工可 trigger_pre_open_once 补挂），不可盲放。
+    _pos_quota: float | None = None   # None = 不限制（max_pos=1.0 默认，零行为变化）
+    if _rc["max_pos"] < 1.0:
+        _asset_rc: dict = {}
+        if gw is not None:
+            try:
+                _asset_rc = await gw.query_asset() or {}
+            except Exception:
+                logger.exception("pre_open 总仓位检查 query_asset 异常（fail-closed 全跳过）")
+                _asset_rc = {}
+        _total_rc = _asset_rc.get("total_asset")
+        _mv_rc = _asset_rc.get("market_value")
+        if _total_rc is None or float(_total_rc) <= 0 or _mv_rc is None:
+            _msg = (f"pre_open 总仓位上限 {_rc['max_pos']:.0%} 生效但权益查询失败"
+                    f"（total_asset={_total_rc} market_value={_mv_rc}），fail-closed 跳过全部新单")
+            logger.warning(_msg)
+            if _mode() == "live":
+                _alert_critical(_msg)
+            return {"submitted": 0, "rejected": 0, "total": len(signals),
+                    "mode": _mode(), "pos_check_failed": True}
+        _pos_quota = float(_total_rc) * _rc["max_pos"] - float(_mv_rc)
+        logger.info("pre_open 总仓位额度：%.0f%%×%.2f−%.2f = %.2f（本轮逐单扣减）",
+                    _rc["max_pos"], float(_total_rc), float(_mv_rc), _pos_quota)
+
     # ④ 逐单挂单 + raise 兜底（scope #7）
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
     # plan Task 6（P0-2 max_wait 窗口）：pre_open 按 formed_at+max_wait 过滤超期信号。
@@ -468,6 +523,7 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     n_submitted = 0
     n_expired = 0
     n_rejected = 0   # C-4 U4：单只业务拒单计数（L2 聚合 CRITICAL 用，防告警风暴）
+    n_pos_capped = 0  # ADR-16：总仓位额度超限跳过计数（聚合播报，防逐单刷屏）
     account_id = _resolve_account_id()
     # 确保 account 行存在（insert_order/trade_event FK 引用）
     # C-4 U3a：account 行是 insert_order/trade_event 的 FK 源——get_account/upsert_account
@@ -508,6 +564,17 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
             # （spec §3 state_store 关键读失败 = L1）。宁可停整批不盲挂。
             raise _CriticalHalt(
                 f"pre_open DB 幂等读失败 symbol={od['symbol']}（敞口未明，拒继续挂）") from e
+        # ADR-16 总仓位额度检查（在 DB 幂等读之后、insert_order 之前——被跳过的单不留
+        # DB 痕迹，人工提额后 trigger_pre_open_once 补挂即可重走本检查）：
+        # 本单金额 > 剩余额度 → 跳过（只拦增量，不撤已挂单）。
+        if _pos_quota is not None:
+            _order_amt = float(od["qty"]) * float(od["price"])
+            if _order_amt > _pos_quota:
+                n_pos_capped += 1
+                logger.warning(
+                    "pre_open 总仓位额度跳过 symbol=%s 金额=%.2f > 剩余 %.2f（上限 %.0f%%）",
+                    od["symbol"], _order_amt, _pos_quota, _rc["max_pos"])
+                continue
         order_req = OrderRequest(
             symbol=od["symbol"], qty=od["qty"], side=od["side"], price=od["price"],
         )
@@ -559,6 +626,9 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
         # state 是 OrderState.name 字符串；REJECTED/FAILED 视为未挂成功
         if result.get("state") not in ("REJECTED", "FAILED"):
             n_submitted += 1
+            # ADR-16：挂单成功才扣减总仓位额度（拒单/失败单的额度在下轮重挂时仍可用）
+            if _pos_quota is not None:
+                _pos_quota -= float(od["qty"]) * float(od["price"])
             # T8：挂单成功 → 回填 order.state=SUBMITTED + broker_oid（seq）+ trade_event(ORDERED)
             try:
                 broker_oid = str(result.get("order_id") or "")
@@ -603,6 +673,17 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
         _alert_critical(
             f"pre_open 漏挂 submitted=0/{len(signals)} date={date}"
             f"（网关锁死? 网关拒绝所有单? 人工核查 gw 状态与挡板日志）")
+    # ADR-16：总仓位超限聚合播报（WARN——是人工设限的预期行为，非事故）
+    if n_pos_capped > 0:
+        _msg = (f"pre_open 总仓位上限 {_rc['max_pos']:.0%}：{n_pos_capped}/{len(signals)} 单"
+                f"超限跳过，submitted={n_submitted}（提额可 trigger_pre_open_once 补挂）")
+        logger.warning(_msg)
+        try:
+            from infra.notifier import NotificationManager, fire_and_forget
+            fire_and_forget(
+                NotificationManager.get_default().notify_risk_event(_msg, "WARN"))
+        except Exception:
+            logger.debug("总仓位超限播报软降级", exc_info=True)
     # A2：返回 submitted/rejected/total 供台账判定（submitted=0 且有单 → failed，不再 done 掩盖）。
     return {"submitted": n_submitted, "rejected": n_rejected,
-            "total": len(signals), "mode": _mode()}
+            "total": len(signals), "mode": _mode(), "pos_capped": n_pos_capped}
