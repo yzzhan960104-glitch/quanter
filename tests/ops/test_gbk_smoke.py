@@ -32,10 +32,10 @@ def test_emoji_print_survives_gbk_pipe():
 
 
 def test_emoji_stderr_survives_gbk_pipe():
-    """cp936 管道下 stderr emoji print 不崩(P2-A 回归:compute_unit ❌ 路径)。
+    """cp936 管道下 stderr emoji print 不崩(P2-A 回归,出身:已退役 compute_unit 的 ❌ 路径)。
 
-    物理意图:compute_unit/__main__.py 在环境漂移/跑批异常时往 stderr 打
-    `❌ 环境漂移:...`,失败路径正是最需要输出的场景。原 force_utf8_stdout
+    物理意图:已退役的 compute_unit CLI(2026-08-18,ADR-17)在环境漂移/跑批异常时往
+    stderr 打 `❌ 环境漂移:...`,失败路径正是最需要输出的场景。原 force_utf8_stdout
     只 reconfigure stdout,stderr 在 GBK 管道下 ❌ 仍崩——失败诊断信息丢失。
     P2-A 扩展后 stderr 同被治理。
     """

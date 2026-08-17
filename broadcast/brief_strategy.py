@@ -69,7 +69,8 @@ def build_strategy_brief(date, *, scan_count, param_iter_state, recent_runs,
         param_block = f"- 参数迭代最优年化：{best_s}（第 {iter_s} 轮）"
 
     # 近期回测：最多列 5 条防刷屏；run_id 截前 8 位；胜率/年化走 _pct 容错。
-    # 回撤口径（2026-08-02 对齐 compute_unit/summary.py）：replay_runs 的
+    # 回撤口径（2026-08-02 与已退役的 compute_unit/summary.py 对齐后固定，见 ADR-17）：
+    # replay_runs 的
     # max_drawdown 是**累计 rr 峰谷（风险倍数）**，不是净值百分比——旧实现把它
     # 当百分比渲染（如单笔亏损 rr=-1 → 显示「回撤 0.0%」，既漏算又错单位）。
     # n_hits=0 的回测无交易样本，胜率/回撤/年化全是 0.0 无意义 → 显式「无成交」。

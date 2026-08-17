@@ -2,8 +2,10 @@
 """L1 评估函数（spec §6.2，Plan 1 简化：inner/outer 二段，无 walk-forward）。
 
 v2（P0-2 · 2026-08-02）：新增 evaluate_replay——用 backtest.replay 引擎（与 Win 主回测
-同源）评估同一 params，产出 ReplayReport 口径指标（胜率/均rr/回撤/年化），供 compute_unit
-replay 模式与"基于最新策略回测"使用；老 evaluate 保持 kelly/calmar 搜索口径不动。
+同源）评估同一 params，产出 ReplayReport 口径指标（胜率/均rr/回撤/年化），供"基于
+最新策略回测"复评使用（runner 冠军复评/proposals/autopromote；出生动因之一的
+compute_unit replay 模式已于 2026-08-18 退役，见 ADR-17）；老 evaluate 保持
+kelly/calmar 搜索口径不动。
 
 核心范式（探查脚本 probe_champion_oos.py 验证过）：全历史跑 scan_symbol 一次 → 收集
 all_filled → 按 signal_date 分段。不硬切 df（scan_symbol 用 sym_df.iloc[:i+1] 截至信号
@@ -140,7 +142,8 @@ def evaluate(params, universe, split):
 
 
 def report_metrics(report) -> dict:
-    """ReplayReport → 指标 dict（compute_unit result 用，无 trades 轻量）。"""
+    """ReplayReport → 指标 dict（replay 口径轻量导出，无 trades；供 runner 冠军
+    复评 top_replay_metrics 等）。"""
     return {
         "n_hits": report.n_hits,
         "win_rate": report.win_rate,

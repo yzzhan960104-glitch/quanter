@@ -57,7 +57,7 @@ def extended_split(embargo_days=5):
     inner calmar 44.87 全靠选择段（2025）撑起，「2025 特化」坐实。扩到 2021 起
     让 2022 单边熊 + 2023 震荡 + 2024 结构牛都成为考场，min 才有牙齿。
 
-    Why 不改 holdout_split 默认：45 个 caller（compute_unit/publish/proposals/cli）
+    Why 不改 holdout_split 默认：众多 caller（publish/proposals/cli/oos/wf4）
     依赖 2025/2026 口径作对照锚（含 oos/wf4 交叉验证）；扩展切分仅搜索侧
     （cmd_run/cmd_daemon）启用，_split_tag 自然产 'holdout_2021_2025' 区分新旧。
 
