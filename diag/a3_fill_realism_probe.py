@@ -100,8 +100,8 @@ except Exception:
 # ── 判定：盈亏平衡滑点（ann 线性过零插值）+ 10bps 存活率 ──
 print("\n=== A3 判定 ===", flush=True)
 try:
-    from compute_unit.hashes import _engine_hash
-    print(f"engine_hash={_engine_hash()}", flush=True)
+    from discovery.fingerprint import engine_hash
+    print(f"engine_hash={engine_hash()}", flush=True)
 except Exception:
     pass
 

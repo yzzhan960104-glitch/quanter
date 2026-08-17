@@ -115,8 +115,8 @@ print(f"    → oos kelly 符号一致={sign_consistent} "
 # ── ③ 分数 Kelly 仓位对照（DG-G5：0.25× 起步，上限 0.5× 需样本外验证）──
 print("=== A4 判定 ===", flush=True)
 try:
-    from compute_unit.hashes import _engine_hash
-    print(f"engine_hash={_engine_hash()}", flush=True)
+    from discovery.fingerprint import engine_hash
+    print(f"engine_hash={engine_hash()}", flush=True)
 except Exception:
     pass
 for label, s in out["summary"].items():
