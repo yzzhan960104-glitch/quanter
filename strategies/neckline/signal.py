@@ -113,6 +113,15 @@ class Signal:
     experiment_weight: float = 1.0
     """资金权重（灰度分流；1.0=满仓口径，向后兼容老 signal_runner 调用）。"""
 
+    # ---- 执行参数快照（参数单源收敛 · 2026-08-17）----
+    exec_params: dict | None = None
+    """产信号时的实验执行键全集（stop_atr_mult/tp_h_mult/tp1_h_mult/tp1_portion/
+    max_wait/cancel_thresh_mult/max_holding/trailing 三件），由 detect_signal 从
+    id_cfg+exec_cfg 抄录。物理意图：执行参数随信号**定终身**（对齐回测 simulate_exit
+    静态 cfg 语义）——eod 装配价位、SIGNAL.meta 快照、_stoploss decide_cfg 逐单读此，
+    消灭「计划侧实验参数 / 巡检侧 env 缺省」双源分叉。None=老链路（测试/构造直调），
+    消费方 fallback env/内置缺省。frozen 契约：dict 引用不得原地 mutate。"""
+
 
 def signal_to_dict(sig: Signal) -> dict:
     """Signal → dict（兼容老消费方 / JSON 落盘）。

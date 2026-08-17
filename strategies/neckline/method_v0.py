@@ -463,10 +463,10 @@ def detect_signal(symbol, df_upto, id_cfg, exec_cfg, date, atr_full=None):
     # 与 detect_signal_fast（研究侧数组路径）共用同一装配闭包，识别装配单源防分叉。
     close_T = float(df_upto["close"].iloc[-1])
     atr_last = atr_full.iloc[-1]
-    return _post_detect(symbol, res, exec_cfg, date, close_T, atr_last)
+    return _post_detect(symbol, res, id_cfg, exec_cfg, date, close_T, atr_last)
 
 
-def _post_detect(symbol, res, exec_cfg, date, close_T, atr_last):
+def _post_detect(symbol, res, id_cfg, exec_cfg, date, close_T, atr_last):
     """detect 之后的 R1 cancel_on 守卫 + 当日突破过滤 + Signal 装配（识别装配单源）。
 
     P1（2026-08-13 · spec §2.1）：从 detect_signal 抽取的共用后半段——detect_signal
@@ -528,6 +528,22 @@ def _post_detect(symbol, res, exec_cfg, date, close_T, atr_last):
         # R3 实际口径盈亏比透传（detect 已算 (tp2-entry)/(entry-stop_price)，
         # 基于颈线-N×ATR 止损 / 颈线+N×H 止盈的真实风险报酬比），供研究员 T-1 晚人审。
         rr=res.get("rr"),
+        # 执行参数快照（参数单源收敛 · 2026-08-17）：跨 id_cfg（stop/tp 乘数）+
+        # exec_cfg（执行键）抄录解析值。exec_cfg 本身 = {**EXEC_DEFAULTS, **实验覆盖}，
+        # 故此处即「实验口径（有覆盖时）或回测默认（无覆盖时）」，消费链
+        # （eod 装配 → SIGNAL.meta → _stoploss decide_cfg）据此定终身，env 只兜底。
+        exec_params={
+            "stop_atr_mult": id_cfg.get("stop_atr_mult"),
+            "tp_h_mult": id_cfg.get("tp_h_mult"),
+            "tp1_h_mult": exec_cfg.get("tp1_h_mult"),
+            "tp1_portion": exec_cfg.get("tp1_portion"),
+            "max_wait": exec_cfg.get("max_wait"),
+            "cancel_thresh_mult": exec_cfg.get("cancel_thresh_mult"),
+            "max_holding": exec_cfg.get("max_holding"),
+            "trailing_grace": exec_cfg.get("trailing_grace", 0),
+            "trailing_step": exec_cfg.get("trailing_step", 0.0),
+            "trailing_floor": exec_cfg.get("trailing_floor"),
+        },
     )
 
 
@@ -584,7 +600,7 @@ def detect_signal_fast(symbol, arr, pos, id_cfg, exec_cfg, date, atr_arr,
     res = _detect_core_window(highs_w, lows_w, closes_w, vols_w, index_w, atr_val, id_cfg,
                               tops_slice, lows_slice, decay_weights)
     close_T = float(closes_w[-1])
-    return _post_detect(symbol, res, exec_cfg, date, close_T, atr_val)
+    return _post_detect(symbol, res, id_cfg, exec_cfg, date, close_T, atr_val)
 
 
 # ============================================================================

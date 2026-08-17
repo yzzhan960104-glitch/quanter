@@ -76,6 +76,10 @@ class PlannedOrder:
     # （颈线法专属，过滤「猛突破后回踩」陷阱）。None=不撤单放飞（cancel_thresh_mult 未配）。
     # 实盘 stop_loss_monitor pending_ctx 读此字段盘中撤买单（simulate_exit:130 skip_target_met）。
     cancel_on: float | None = None
+    # 执行参数快照（单源收敛 · 2026-08-17）：Signal.exec_params 透传（实验执行键全集）。
+    # eod_plan 落 SIGNAL.meta 时带出（巡检 decide_cfg / 超期 max_holding 消费）；
+    # None=老链路（无实验源信号），消费方 fallback env/_trade_cfg（向后兼容）。
+    exec_params: dict | None = None
 
 
 def build_orders_from_signals(
@@ -100,27 +104,39 @@ def build_orders_from_signals(
     Why 跳过而非抛错：自动交易引擎在盘后批处理多只标的时，单只缺 ATR/数据异常
     不应中断整批；此处静默跳过，由上层日志记录后人工补救。
     """
-    # C1（2026-08-15 · 审计 spec C1）：stop_atr_mult 兜底从 2.0 幽灵默认收敛到
-    # PRICE_LEVEL_DEFAULTS=1.0（对齐 EXEC_DEFAULTS/method_v0.DEFAULTS/critical.py env 缺省）。
-    # 迁移性核查：生产唯一调用方 eod_plan.compute 恒显式传键（_trade_cfg env 缺省已 1.0），
-    # 2.0 仅测试可触达、从未在生产生效——本收敛不改变任何生产数值，只消灭漂移源。
-    stop_mult = stop_cfg.get("stop_atr_mult", PRICE_LEVEL_DEFAULTS["stop_atr_mult"])
-    tp_mult = stop_cfg.get("tp_h_mult", PRICE_LEVEL_DEFAULTS["tp_h_mult"])
-    # 分级止盈参数（Task 7 · P0-3 对齐）：tp1_h_mult×H 锁利位 + tp1_portion 分配比例。
-    # Why 显式 .get + None 兜底：老 stop_cfg（Task 7 前）不传这两键，None 让下游
-    # _place_take_profit 检测 falsy 退回 tp2 单笔全平，零回归。
-    tp1_mult = stop_cfg.get("tp1_h_mult")
-    tp1_portion = float(stop_cfg.get("tp1_portion", 0.0) or 0.0)
-    # pending 期撤单阈值倍数（Task 9 · D11）：cancel_thresh_mult×H，None=不撤单放飞。
-    # Why 显式 .get：老 stop_cfg（Task 9 前）不传此键，None 让下游 _stoploss pending_ctx
-    # 检测 falsy 不塞（不撤单），零回归（向后兼容）。
-    cancel_thresh_mult = stop_cfg.get("cancel_thresh_mult")
+    # 参数解析（2026-08-17 单源收敛）：**优先逐信号 exec_params 快照（实验口径）**，
+    # stop_cfg（eod 传 _trade_cfg env）降为缺键兜底——修复双源分叉（计划侧价位/比例
+    # 曾按 env 缺省算：tp_h_mult 2.0 vs 实验 2.5、tp1_portion 0.5 vs 0.3、max_wait 5
+    # vs 8、cancel_thresh_mult 1.0 vs 2.0）。优先级链（spec §4.6 原设计）：
+    #   信号 exec_params（实验参数定终身） > stop_cfg（env 兜底） > 内置缺省。
+    # 老信号（exec_params=None，测试构造/历史重放）零变化走 stop_cfg（向后兼容）。
+    def _pick(ep: dict, key: str, default):
+        v = ep.get(key)
+        return v if v is not None else default
+
+    # env/内置缺省基线（C1：stop_atr_mult 兜底从 2.0 幽灵默认收敛到 PRICE_LEVEL_DEFAULTS）
+    base_stop_mult = stop_cfg.get("stop_atr_mult", PRICE_LEVEL_DEFAULTS["stop_atr_mult"])
+    base_tp_mult = stop_cfg.get("tp_h_mult", PRICE_LEVEL_DEFAULTS["tp_h_mult"])
+    base_tp1_mult = stop_cfg.get("tp1_h_mult")
+    base_tp1_portion = float(stop_cfg.get("tp1_portion", 0.0) or 0.0)
+    base_cancel_mult = stop_cfg.get("cancel_thresh_mult")
+    base_max_wait = int(stop_cfg.get("max_wait", 5))
     out: list[PlannedOrder] = []
     for s in signals:
         sym = s.symbol
         entry = s.entry_price
         neckline = s.neckline
         bottom = s.bottom
+        # 逐信号执行参数（单源收敛核心）：exec_params 是 detect_signal 抄录的实验解析值
+        ep: dict = s.exec_params if isinstance(s.exec_params, dict) else {}
+        stop_mult = _pick(ep, "stop_atr_mult", base_stop_mult)
+        tp_mult = _pick(ep, "tp_h_mult", base_tp_mult)
+        # 分级止盈（Task 7）：tp1_h_mult/tp1_portion——None 让下游退回 tp2 全平（零回归）
+        tp1_mult = _pick(ep, "tp1_h_mult", base_tp1_mult)
+        tp1_portion = float(_pick(ep, "tp1_portion", base_tp1_portion) or 0.0)
+        # pending 期撤单阈值倍数（Task 9 · D11）：None=不撤单放飞（零回归）
+        cancel_thresh_mult = _pick(ep, "cancel_thresh_mult", base_cancel_mult)
+        max_wait_sig = int(_pick(ep, "max_wait", base_max_wait))
         # ATR 取值（C2 · final-fix）：优先用 signal 自身 atr，fallback atr_map。
         # Why 优先 signal atr：_eod 内 ``atr_map[sym] = s.atr`` 多实验同标的灰度时
         # 被最后写入的实验覆盖 → 共享 atr_map 已无法按实验区分 ATR。Signal 已
@@ -173,10 +189,10 @@ def build_orders_from_signals(
             order=OrderRequest(symbol=sym, qty=float(qty), side="buy", price=float(entry)),
             stop_price=stop_price, take_profit=take_profit, neckline=float(neckline),
             # 地基字段（live-readiness Task 2）：atr 供 trailing 演进 / formed_at 供 pre_open
-            # max_wait 窗口判定 / max_wait 从 stop_cfg 读（默认 5 对齐 NecklineConfig）
+            # max_wait 窗口判定 / max_wait 逐信号实验口径（单源收敛后）
             atr=float(atr),
             formed_at=str(s.formed_at) if s.formed_at is not None else "",
-            max_wait=int(stop_cfg.get("max_wait", 5)),
+            max_wait=max_wait_sig,
             # 归因透传：experiment_id Signal 默认 ""（老链路），experiment_weight 已在 budget 落地
             experiment_id=s.experiment_id,
             experiment_weight=weight,
@@ -186,5 +202,7 @@ def build_orders_from_signals(
             tp1=tp1_price, tp1_portion=tp1_portion,
             # Task 9：cancel_on（None → 下游 pending_ctx 不塞，不撤单放飞，向后兼容）
             cancel_on=cancel_on_price,
+            # 单源收敛：执行参数快照随单透传（meta 落盘 + 巡检 decide_cfg 消费）
+            exec_params=dict(ep) if ep else None,
         ))
     return out
