@@ -222,7 +222,7 @@ def test_brief_next_day_plan_unconfirmed_flagged():
 
 
 def test_brief_next_day_plan_none_degrades_honestly():
-    """无明日计划（eod 未产/regime 停手/读库失败）→ 诚实降级文案，不抛不造假。"""
+    """无明日计划（eod 未产/读库失败）→ 诚实降级文案，不抛不造假。"""
     r = build_trading_brief(
         "2026-08-14", trades=[], asset=None, positions=[],
         status={"connected": True, "locked": False, "mode": "live"},

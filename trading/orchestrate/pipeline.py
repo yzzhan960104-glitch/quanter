@@ -58,7 +58,7 @@ def _ledger_finish(today: str, status: str, message: str = "") -> None:
 
 
 def _notify_risk(msg: str, level: str, *, soft: bool = False) -> None:
-    """风险事件播报单源（评审 2026-08-15 去重：数据未就绪 / regime 停手两处共用）。
+    """风险事件播报单源（评审 2026-08-15 去重：数据未就绪等播报点共用）。
 
     soft=True 走 debug 软降级（「停手」这类主行为已生效，播报失败仅留痕——
     与 CRITICAL 级「告警本身是主行为」的 exception 语义区分）。
@@ -213,19 +213,10 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
         # N4（2026-08-16）：scan+Popen 块抽出为模块级 _scan_and_spawn_repair——抽出为
         # 测试 patch 锚（pytest 曾真实 spawn 生产补采烧 Tushare 配额），生产语义逐字保形。
         _scan_and_spawn_repair(lake_dir=str(ROOT / "data_lake"))
-        # 5. 全绿 → 跑 eod（C-8 V2：补跑传显式 data_day/plan_date；默认路径零变化）
+        # 5. 全绿 → 跑 eod（C-8 V2：补跑传显式 data_day/plan_date；默认路径零变化）。
+        # 原 4.5 A1 regime 前置段已按 ADR-16 移除（2026-08-17）——择时判断权归人工，
+        # eod 照常产 T+1 计划，增量拦截在 pre_open 挂单侧由 risk_control 双值执行。
         if run_eod:
-            # 4.5 A1 前置（DG-G4 · 2026-08-14）：空头/未知环境不产新计划（停手≠清仓，
-            # 存量持仓的退出链路不受影响）。与 _pre_open_gate ④ 段同一 _regime_gate
-            # 单源（当日缓存，不重复读湖）；BEAR/UNKNOWN 均 fail-closed 停产。
-            rg_ok, rg_reason = await engine._regime_gate()
-            if not rg_ok:
-                msg = f"eod 跳过：{rg_reason}"
-                logger.warning(msg)
-                _ledger_finish(today, "skipped", rg_reason)
-                # soft=True：播报软降级（通知通道故障不能阻断「停手」这个主行为）
-                _notify_risk(msg, "WARN", soft=True)
-                return  # 停产 T+1 计划；brief 播报跳过（eod 未跑，无盘后面板）
             if for_date is not None:
                 await engine._eod(data_day=today, plan_date=next_trading_day(today))
             else:

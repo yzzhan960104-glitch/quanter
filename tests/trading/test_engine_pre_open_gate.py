@@ -24,7 +24,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trading.engine import TradingEngine
-from trading.compute.regime import RegimeState
 
 
 @pytest.fixture
@@ -134,7 +133,7 @@ def test_data_ok_zero_blocks(eng):
 # 全绿放行
 # ============================================================================
 def test_all_green_passes(eng):
-    """①②③④ 全绿（plan confirmed + gw ready + get_ready + regime BULL）→ gate (True, "")。"""
+    """①②③ 全绿（plan confirmed + gw ready + get_ready）→ gate (True, "")。"""
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
@@ -142,8 +141,7 @@ def test_all_green_passes(eng):
                return_value={"confirmed": True, "orders": []}), \
          patch("trading.engine.TradingEngine._plan_data_keys",
                return_value={"daily"}), \
-         patch("trading.engine.get_ready", return_value=True),          patch("trading.compute.regime.classify",
-               return_value=RegimeState("BULL", "测试放行", "2026-07-30")):
+         patch("trading.engine.get_ready", return_value=True):
         ok, reason = asyncio.run(eng._pre_open_gate("2026-07-30", gw))
     assert ok is True
     assert reason == ""
@@ -162,8 +160,7 @@ def test_all_green_multi_dataset_passes(eng):
                return_value={"confirmed": True, "orders": []}), \
          patch("trading.engine.TradingEngine._plan_data_keys",
                return_value={"daily", "moneyflow"}), \
-         patch("trading.engine.get_ready", return_value=True),          patch("trading.compute.regime.classify",
-               return_value=RegimeState("BULL", "测试放行", "2026-07-30")):
+         patch("trading.engine.get_ready", return_value=True):
         ok, reason = asyncio.run(eng._pre_open_gate("2026-07-30", gw))
     assert ok is True
     assert reason == ""

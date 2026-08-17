@@ -46,9 +46,6 @@ async def test_data_not_ready_no_eod(monkeypatch):
         cse.return_value = proc
         eng = MagicMock()
         eng._eod = AsyncMock()
-        # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
-        # test_engine_regime_gate.py / test_regime.py）
-        eng._regime_gate = AsyncMock(return_value=(True, ""))
         await pipeline_then_eod(eng)
         eng._eod.assert_not_awaited()  # 数据未就绪不跑 eod
 
@@ -71,9 +68,6 @@ async def test_data_ready_runs_eod(monkeypatch):
         cse.return_value = proc
         eng = MagicMock()
         eng._eod = AsyncMock()
-        # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
-        # test_engine_regime_gate.py / test_regime.py）
-        eng._regime_gate = AsyncMock(return_value=(True, ""))
         await pipeline_then_eod(eng)
         eng._eod.assert_awaited_once()
 
@@ -103,9 +97,6 @@ async def test_multi_experiment_keys_union(monkeypatch):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
         eng = MagicMock(); eng._eod = AsyncMock()
-        # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
-        # test_engine_regime_gate.py / test_regime.py）
-        eng._regime_gate = AsyncMock(return_value=(True, ""))
         await pipeline_then_eod(eng)
         assert set(checked_keys) == {"daily", "moneyflow"}
 
@@ -173,9 +164,6 @@ async def test_scan_fail_triggers_repair_but_eod_runs(monkeypatch):
 
     eng = MagicMock()
     eng._eod = AsyncMock()
-    # A1（08-14）：事件链 eod 前置 regime gate——fake 放行（regime 语义单测在
-    # test_engine_regime_gate.py / test_regime.py）
-    eng._regime_gate = AsyncMock(return_value=(True, ""))
     await pl.pipeline_then_eod(eng)
 
     # scan FAIL → subprocess repair 触发

@@ -153,7 +153,7 @@ def build_trading_brief(
         summary += f" / 拦截 {len(blocked)} 笔"
 
     # —— 明日（T+1）交易计划段（2026-08-17 补）——
-    # 三态：None/空单 → 诚实降级（eod 未产 / regime 停手 / 读库失败）；
+    # 三态：None/空单 → 诚实降级（eod 未产 / 读库失败）；
     # confirmed=False → 显式「待确认」（pre_open 不放行）；True → 「已确认」。
     # 明细最多列 20 条防刷屏（超量追加余量计数行）。
     if next_plan and next_plan.get("orders"):
@@ -182,7 +182,7 @@ def build_trading_brief(
         plan_section = [
             "",
             "**明日（T+1）交易计划**",
-            "- 明日无新计划（eod 未产 / regime 停手 / 读库失败）",
+            "- 明日无新计划（eod 未产 / 读库失败）",
         ]
 
     sections = [

@@ -448,9 +448,10 @@ class TradingEngine:
         return True, ""
 
     async def _pre_open_gate(self, date: str, gw) -> tuple[bool, str]:
-        """S3：pre_open 四段式前置 gate（A1 增 ④ regime）。全绿返 ``(True, "")``，任一未绿即返。
+        """S3：pre_open 三段式前置 gate。全绿返 ``(True, "")``，任一未绿即返。
 
-        物理意图（spec S3 前置 gate 最便宜先做 + A1 ④ 段 · 2026-08-14）：
+        物理意图（spec S3 前置 gate 最便宜先做；原 ④ regime 段已按 ADR-16 移除——
+        择时判断权归人工，增量拦截由 risk_control 双值接管 · 2026-08-17）：
             模块级 ``pre_open(date)`` 入口最先调用本方法，**任一未绿即早返**，绝不触达
             网关写操作（撤昨日单 / 抓熔断基线 / 挂新单）。顺序「先便宜后贵」：
 
@@ -500,39 +501,6 @@ class TradingEngine:
             # get_ready 内部已 logger.warning 暴露具体哪源漂移（data_ready 内容/job_ledger 台账）；
             # gate reason 给简短中文供台账 skipped.message 记录。
             return False, f"数据未就绪（{_data_date}：内容校验或 pipeline 台账未绿，详见日志）"
-        # ④ 市场状态（A1 · DG-G4 · 2026-08-14）：eod 后隔夜可能转空，挂单前二次
-        # 复核（与 eod 前置同一 classify 单源 + 当日缓存，不重复读湖）。
-        rg_ok, rg_reason = await self._regime_gate()
-        if not rg_ok:
-            return False, rg_reason
-        return True, ""
-
-    async def _regime_gate(self) -> tuple[bool, str]:
-        """A1（DG-G4 · 2026-08-14）：市场状态闸——空头/未知环境停新单。
-
-        物理意图：颈线法冠军参数 2022 熊市折外 calmar=-0.62（wf 四折实证），
-        空头环境假突破多，正确动作是停手。BEAR/UNKNOWN（fail-closed，DG-G3
-        哲学：缺信息时收紧而非放开）→ 拒新单；BULL 放行。
-        **只断新单**：存量持仓的止损/止盈/stop_loss 巡检不经本闸（退出永远
-        允许——停手≠清仓，闸门不越权变相自动清仓）。
-        判定单源 trading.compute.regime.classify（纯计算，df 注入——compute 纯度
-        守卫要求零 I/O）；读湖与当日缓存在 trading.data_ctx.load_regime_frames
-        （eod 前置与本 ④ 段共享一次读湖，455MB 主湖一日一读）。
-        """
-        try:
-            from trading.compute import regime
-            from trading.compute.regime import BULL
-            from trading.data_ctx import load_regime_frames
-            st = regime.classify(*load_regime_frames())
-        except Exception:
-            # classify 自身已 fail-closed 返 UNKNOWN；此处兜底极端（含 import 级，
-            # 如循环依赖）异常——import 留 try 内让该注释成立（评审 2026-08-15）
-            logger.exception("regime 判定异常（fail-closed 停手）")
-            return False, "regime 判定异常（fail-closed 停手）"
-        if st.state != BULL:
-            reason = f"regime 停手（{st.state}：{st.reason}）"
-            logger.warning("A1 %s", reason)
-            return False, reason
         return True, ""
 
     def _plan_data_keys(self, plan: dict) -> set[str]:
