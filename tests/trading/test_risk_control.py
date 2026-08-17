@@ -73,8 +73,13 @@ def test_write_no_keys_rejected(risk_db):
 
 
 def test_resolve_fail_closed_on_db_error(tmp_path):
-    """DB 打不开（路径是目录等）→ fail-closed 全拦 + degraded。"""
-    bad = str(tmp_path / "no_such_dir" / "x" / "state.db")
+    """DB 无法打开（路径是目录——建表自愈也救不了）→ fail-closed 全拦 + degraded。
+
+    注：普通「文件不存在」路径已被 _ensure_risk_control_table 自愈（首访建库建表，
+    resolve 返缺省不拦）——只有真 IO 级失败（目录当文件/权限/损坏）才触发本分支。
+    """
+    bad = str(tmp_path / "as_dir")   # 目录当 DB 文件 → sqlite3.OperationalError
+    (tmp_path / "as_dir").mkdir()
     r = state_store.resolve_risk_control(db_path=bad)
     assert r == {"block": True, "max_pos": 0.0, "degraded": True}
 

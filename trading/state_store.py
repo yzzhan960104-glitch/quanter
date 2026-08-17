@@ -1915,6 +1915,23 @@ def list_active_holding_signals(account_id: str, symbols: list[str] | set[str],
     return out
 
 
+def _ensure_risk_control_table(con) -> None:
+    """risk_control 表幂等建（CLI/REST 首访自愈）。
+
+    init_store 在引擎启动时建表，但生产旧库在引擎重启前没有该表——CLI
+    （python -m trading.risk_ctrl）与 REST PUT 首访会直接撞 no such table。
+    kv 表无外键无迁移，读写前 IF NOT EXISTS 幂等补建是最低成本自愈（与
+    init_store 内 DDL 同文，双保险不冲突）。
+    """
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS risk_control (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+
 def read_risk_control(db_path: str | None = None) -> dict:
     """raw 读双值（无默认填充、无 fail-closed——供 REST 观测面展示存储真值）。
 
@@ -1923,6 +1940,7 @@ def read_risk_control(db_path: str | None = None) -> dict:
     """
     db_path = db_path or _DEFAULT_DB
     with _connect(db_path) as con:
+        _ensure_risk_control_table(con)
         rows = con.execute(
             f"SELECT key, value FROM risk_control "
             f"WHERE key IN (?, ?)", (_RISK_BLOCK_KEY, _RISK_POSITION_KEY)
@@ -1991,6 +2009,7 @@ def write_risk_control(block_new_orders: bool | None = None,
     if not writes:
         raise ValueError("至少传一个键（block_new_orders / max_total_position）——空写拒收")
     with _connect(db_path) as con:
+        _ensure_risk_control_table(con)
         for key, value in writes:
             con.execute(
                 "INSERT INTO risk_control(key, value, updated_at) VALUES(?, ?, ?) "
