@@ -54,6 +54,10 @@ A1 regime 闸（HS300 MA200 + 市场宽度双腿确认）的落地动因：颈�
    本身默认 dry-run + 七门门槛 + 钉钉播报（ADR-15）；人工 `experiment promote` 补一条上线
    WARN 播报（通知不拦截，接管影子期闸的知情价值）。
 
+**拨回语义（操作指引，review 补）**：`block 1→0` 后**无周期性自动补挂**——当日被拦的计划
+不会自动重挂，需 `trigger_pre_open_once` 手动补挂（C-8 窗口 [09:22,10:00) 内）或等次日
+pre_open；已挂未成交单不受开关影响（撤单仍走每日撤旧单流程）。
+
 **落地**：删 `check_shadow_gate`/`_days_since_activation`/resolve_active 顶层绑定
 （trading/__main__.py）+ lifespan 条件分支（presentation/server/main.py，engine 无条件
 start）+ `TRADE_SHADOW_MIN_DAYS` env + 4 个测试文件清理；历史包袱注记：07-28 曾因影子期

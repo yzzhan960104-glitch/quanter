@@ -235,7 +235,7 @@ cd F:/quanter
 ```dotenv
 # 默认 dry_run（缺省即 dry_run，宁可漏挂也不在未观测足够天数时盲发真单）
 AUTO_TRADE_MODE=dry_run
-TRADE_SHADOW_MIN_DAYS=5           # 影子最小观测天数（硬闸，切 live 前必须跑满）
+# [2026-08-17 ADR-16 修订1] TRADE_SHADOW_MIN_DAYS 已移除（影子期闸拆除，上线缓冲改人工 risk_ctrl block）
 TRADE_PLAN_DIR=logs/trading_plans # 计划落盘目录（cwd 相对路径，依赖 bat 的 cd /d 锁根）
 TRADE_CAPITAL=1000000             # 仓位 cap 基准（pos_cap 计算用）
 # 四 cron 时点（缺省值对齐 A 股交易日历，Task4 已配）
@@ -328,7 +328,7 @@ schtasks /Delete /TN "QuanterTradingEngine" /F
    - Terminal tab 模式：Ctrl-C 老进程 → 重跑 `scripts/run_trading_engine.bat`
    - PM2：`pm2 restart trading-engine`
    - schtasks：`schtasks /Run /TN "QuanterTradingEngine"`
-3. 启动期验证：日志必须出现 WARNING `⚠️ LIVE 模式：将真实下单！确保影子模式已跑满 TRADE_SHADOW_MIN_DAYS(=5) 天...`（`__main__.py` 启动闸）——若未出现说明 `AUTO_TRADE_MODE` 没读到，停进程排查。
+3. 启动期验证：日志出现 `=== 自动交易引擎启动（AUTO_TRADE_MODE=live` banner（`__main__.py`）——若仍显示 dry_run 说明 env 没读到，停进程排查。（原「影子期 WARNING」检查项已随 ADR-16 修订 1 移除——该 WARNING 已删，未见≠异常，勿据此停机。）
 4. 首个交易日观察 `pre_open` 日志：`state` 应出现 `FILLED` / `PARTIALLY_FILLED` / `REJECTED`（真实触达网关），不再是 `DRY_RUN`。
 
 > 切 live 后若需回退影子：改 `.env` `AUTO_TRADE_MODE=dry_run` 重启即可（同一进程同一份代码，dry_run/live 仅 env 开关切换，无代码分叉）。

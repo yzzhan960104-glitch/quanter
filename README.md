@@ -117,7 +117,7 @@ quanter/
 
 ### 3.3 参数治理链路
 
-`discovery daemon`（跨夜搜索收敛）→ `publish` 产出 experiment **DRAFT** → 人审 promote → **ACTIVE + weight** → `resolve_active()` 实时发放给 `_eod`（scan_live 装配）→ 信号带 `experiment_id` 归因 → `pre_open` 计划确认（人审闸）后才挂单。切换 live 有 ≥5 天（`TRADE_SHADOW_MIN_DAYS`）影子期硬闸（`check_shadow_gate`，fail-closed）。
+`discovery daemon`（跨夜搜索收敛）→ `publish` 产出 experiment **DRAFT** → 人审 promote → **ACTIVE + weight** → `resolve_active()` 实时发放给 `_eod`（scan_live 装配）→ 信号带 `experiment_id` 归因 + `exec_params` 执行参数快照（定终身）→ `pre_open` 计划确认（人审闸）后才挂单。原 ≥5 天影子期硬闸已按 ADR-16 修订 1 移除（2026-08-17）——上线缓冲由人工 `risk_ctrl block` 开关接管，promote 时钉钉 WARN 播报。
 
 策略方法论权威参考：[`docs/neckline-method.md`](docs/neckline-method.md)（颈线法完整技术文档）；[`docs/caisen-methodology-summary.md`](docs/caisen-methodology-summary.md)（历史方法论沉淀）。
 
@@ -149,7 +149,7 @@ python -m ops.manage_ops_schtasks --register-server
 5. 加载 symbol→企业名映射；
 6. 后台线程扫 stale/missing 数据集并触发补同步；
 7. 三路日志装配（本地文件 + 前端 SSE 流 + 控制台）；
-8. **TradingEngine 装配**：banner → `TradingEngine()` → `bootstrap()`（网关 connect + 成交回报回调注册 + position_book/state_store 建表迁移）→ `check_shadow_gate()`（影子期不足则不 start scheduler，server 照常起）→ `eng.start()`；
+8. **TradingEngine 装配**：banner → `TradingEngine()` → `bootstrap()`（网关 connect + 成交回报回调注册 + position_book/state_store 建表迁移）→ `eng.start()`（原影子期闸已移除 ADR-16 修订 1，engine 无条件启动）；
 9. **broadcast connect 5 bot** 起常驻（cli/trading_q/data_q/strategy_q/review）；
 10. **discovery cron 每小时+5 分（24h 低功率模式）** 注册进 engine.sched（DETACHED subprocess 跑 daemon）；
 11. **discovery 启动补跑**：检测跨过昨晚 02:00 → 异步补跑（轮次/seed 幂等去重）；
@@ -295,8 +295,8 @@ QMT_ORDER_MAX_SHARES=100
 QMT_SYMBOL_WHITELIST=510300.SH,511010.SH,510500.SH,159915.SZ
 
 # 自动交易引擎（二期）
-AUTO_TRADE_MODE=dry_run        # dry_run=影子只记账；live=真单（需影子期硬闸）
-TRADE_SHADOW_MIN_DAYS=5
+AUTO_TRADE_MODE=dry_run        # dry_run=影子只记账；live=真单
+# （TRADE_SHADOW_MIN_DAYS 已移除 ADR-16 修订1）
 ENGINE_PIPELINE_CRON=0 18 * * 1-5
 ENGINE_PRE_OPEN_CRON=22 9 * * 1-5
 ENGINE_STOPLOSS_INTERVAL_SECONDS=30

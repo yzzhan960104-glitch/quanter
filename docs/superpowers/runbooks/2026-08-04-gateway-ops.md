@@ -92,7 +92,7 @@ W1.4 探测命中只 `sys.exit(1)` + CRITICAL 告警，**绝不自动 taskkill**
 
 | 变量 | 红线值 | 事故机值 | 说明 |
 |------|--------|----------|------|
-| `TRADE_SHADOW_MIN_DAYS` | `5` | `1`（事故机） | 影子期硬闸下限，低于 5 天拒切 LIVE（`check_shadow_gate`） |
+| ~~`TRADE_SHADOW_MIN_DAYS`~~ | — | — | 已移除（ADR-16 修订 1 · 2026-08-17，影子期闸拆除） |
 | `AUTO_TRADE_MODE` | `dry_run`/`live` | — | 确认是否真要全自动 live（W2 已修人审 veto 双写 DB） |
 | `AUTO_CONFIRM_PLAN` | `true`/`false` | — | 与 `AUTO_TRADE_MODE` 同口径，全自动 live 需两者一致 |
 | `QMT_SESSION_ID` | 与 miniQMT 客户端一致 | 事故机 session 漂移（123456 vs 123458） | 见 `log_startup_banner` 启动时固化进日志 |
@@ -104,8 +104,8 @@ REM 1. 编辑 .env（F:\quanter\.env）
 notepad F:\quanter\.env
 
 REM 2. 校正红线值
-REM    TRADE_SHADOW_MIN_DAYS=5
-REM    AUTO_TRADE_MODE=live（仅当人审 veto 已就位 + 影子期 ≥5 天）
+REM    （TRADE_SHADOW_MIN_DAYS 已移除 ADR-16 修订1）
+REM    AUTO_TRADE_MODE=live（仅当人审 veto 已就位；换仓缓冲用 risk_ctrl block）
 REM    AUTO_CONFIRM_PLAN=true（与 AUTO_TRADE_MODE 同步）
 
 REM 3. 重启 engine 让 load_dotenv(override=True) 生效
@@ -119,7 +119,7 @@ REM    日志关键字：「=== 启动 banner === session=... account=... userda
 
 切 LIVE 前**必须**确认以下刹车就位（任一缺失禁止切 live）：
 - W2 veto/confirm DB 双写已生效（`veto_plan.veto` 写 DB，`_pre_open_impl` 查 VETOED 跳过）；
-- `check_shadow_gate` 返 True（所有 ACTIVE 实验影子期 ≥ `TRADE_SHADOW_MIN_DAYS`）；
+- （影子期闸已移除 ADR-16 修订 1，无此检查项；换仓缓冲确认 `risk_ctrl` 显示 block=off 再放行增量）；
 - 对账连续无 drift（W3.4 post_close broker 权威对账，本 SOP 不覆盖，见 W3 follow-up）。
 
 ---
@@ -234,7 +234,7 @@ schtasks /Run /TN QuanterServer
 | `端口 8000 已被既有引擎实例占用` CRITICAL | 双引擎并存 | §1 清理 |
 | `gw.connect()` 返 -1 | session 被占（嵌套子进程） | §1 清理 + §5 启动顺序 |
 | `拒切 LIVE：experiment 状态查询失败` | resolve_active 抛异常 | 查 experiment DB 连通性 |
-| `拒切 LIVE：N 实验影子期不足` | TRADE_SHADOW_MIN_DAYS < 5 或实验未满期 | §2 回正 + 等影子期 |
+| ~~`拒切 LIVE：N 实验影子期不足`~~ | 闸已移除（ADR-16 修订 1），该告警不再出现 | — |
 | 启动 banner session 与 .env 不一致 | session 漂移 | §2 回正 + 重启 |
 | CSV 对账 drift | 测试脏行未清 | §3 清理（先人工核对持仓） |
 

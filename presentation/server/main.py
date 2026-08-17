@@ -424,7 +424,7 @@ async def lifespan(app: FastAPI):
         from trading.engine import TradingEngine
         from trading.__main__ import log_startup_banner
         # C-5 V2：装配 engine 前打启动 banner（session/account/mode/口径版本）。
-        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcase]] 根因——原 qmt-connect-1 教训）：生产链
+        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链
         # schtasks ONSTART→python -m trading→uvicorn→lifespan 之前无 banner，session 漂移无日志可
         # 对比。banner 先于 bootstrap（含网关 connect）输出，便于排查 .env 漂移。
         log_startup_banner()
