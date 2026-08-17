@@ -26,8 +26,16 @@ def build_trading_brief(
     asset: dict | None,
     positions: list[dict] | None,
     status: dict | None,
+    next_plan: dict | None = None,
 ) -> BriefResult:
-    """生成交易每日播报 Markdown。数据由 __main__ 取数注入，本函数零 IO 副作用。"""
+    """生成交易每日播报 Markdown。数据由 __main__ 取数注入，本函数零 IO 副作用。
+
+    next_plan（2026-08-17 补）：明日（T+1）交易计划，load_plan 契约
+    ``{date, confirmed, orders}``（None=无计划/读库失败）。物理意图：用户核心诉求
+    是「推送明日的交易计划」，旧模板只有当日回顾五段、计划数据在 DB 却不进播报
+    ——补前瞻段让研究员盘后一眼看到明日挂单清单与确认态。渲染三态对齐持仓段
+    纪律：None/空单诚实降级，confirmed=False 显式标注待确认，不冒充已确认。
+    """
     trades = trades or []
     # positions=None 语义：取数失败/网关未连（持仓未知），不与「空仓」混用。
     # 空 list [] 才是 broker 权威空仓。这里不把 None 折叠成 []，留给三态渲染分支判定。
@@ -144,6 +152,39 @@ def build_trading_brief(
     if blocked:
         summary += f" / 拦截 {len(blocked)} 笔"
 
+    # —— 明日（T+1）交易计划段（2026-08-17 补）——
+    # 三态：None/空单 → 诚实降级（eod 未产 / regime 停手 / 读库失败）；
+    # confirmed=False → 显式「待确认」（pre_open 不放行）；True → 「已确认」。
+    # 明细最多列 20 条防刷屏（超量追加余量计数行）。
+    if next_plan and next_plan.get("orders"):
+        plan_date = next_plan.get("date", "?")
+        n_orders = len(next_plan["orders"])
+        conf_note = "已确认（人审/AUTO_CONFIRM 过闸）" if next_plan.get("confirmed") \
+            else "待确认（pre_open 将不放行）"
+        plan_lines = []
+        for o in next_plan["orders"][:20]:
+            od = o.get("order") or {}
+            sym = od.get("symbol") or o.get("symbol") or "?"
+            qty = _fmt_num(od.get("qty"))
+            px = _fmt_num(od.get("price"))
+            stop = _fmt_num(o.get("stop_price"))
+            tp = _fmt_num(o.get("take_profit"))
+            plan_lines.append(f"- {sym} 买 {qty}股 @ {px}（止损 {stop} / 止盈 {tp}）")
+        if n_orders > 20:
+            plan_lines.append(f"- … 等共 {n_orders} 单")
+        plan_block = "\n".join(plan_lines)
+        plan_section = [
+            "",
+            f"**明日（T+1）交易计划** · {plan_date} · {n_orders} 单 · {conf_note}",
+            plan_block,
+        ]
+    else:
+        plan_section = [
+            "",
+            "**明日（T+1）交易计划**",
+            "- 明日无新计划（eod 未产 / regime 停手 / 读库失败）",
+        ]
+
     sections = [
         f"### 🤖 交易机器人 · 每日跟踪\n> {date}（{weekday}）收盘{gw_note}\n",
         summary,
@@ -166,6 +207,8 @@ def build_trading_brief(
         "**止盈止损触发**",
         "- （第二期自动交易引擎上线后填充，当前模拟盘无自动止损动作）",
     ]
+    # 计划段放末尾：回顾在前、前瞻收尾（与播报「每日跟踪」定位一致）
+    sections += plan_section
     md = _clean_markdown("\n".join(sections))
     return BriefResult(date=date, markdown=md)
 

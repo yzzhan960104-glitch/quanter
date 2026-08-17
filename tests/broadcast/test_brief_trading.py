@@ -177,3 +177,64 @@ def test_trading_brief_positions_three_states_detail():
     assert "510300.SH" in md and "100" in md
     assert "持仓未知" not in md
     assert "当前无持仓" not in md
+
+
+# ===========================================================================
+# 明日（T+1）交易计划段（2026-08-17 补）：用户核心诉求「推送明日的交易计划」
+# 在旧模板中从未落地——brief 只有当日回顾五段，计划数据在 DB 却不进播报。
+# 新增 next_plan 注入参数（load_plan 契约：{date, confirmed, orders} / None）。
+# ===========================================================================
+
+def _plan_order(sym: str, qty: int, px: float, stop: float, tp: float) -> dict:
+    """构造 load_plan.orders 元素（meta shape：{symbol, order{...}, stop_price, ...}）。"""
+    return {"symbol": sym,
+            "order": {"symbol": sym, "qty": float(qty), "side": "buy", "price": px},
+            "stop_price": stop, "take_profit": tp, "neckline": px - 0.5, "atr": 0.4}
+
+
+def test_brief_next_day_plan_renders_orders_and_confirm_state():
+    """有明日计划 → 渲染计划段：日期、标的、量、挂单价、止损/止盈、确认态。"""
+    r = build_trading_brief(
+        "2026-08-14", trades=[], asset=None, positions=[],
+        status={"connected": True, "locked": False, "mode": "live"},
+        next_plan={"date": "2026-08-17", "confirmed": True,
+                   "orders": [_plan_order("300017.SZ", 3000, 16.56, 15.04, 24.29),
+                              _plan_order("688111.SH", 100, 260.08, 243.29, 365.75)]},
+    )
+    md = r.markdown
+    assert "2026-08-17" in md                    # 计划日（T+1）可见
+    assert "300017.SZ" in md and "688111.SH" in md
+    assert "16.56" in md and "260.08" in md      # 挂单价
+    assert "15.04" in md and "24.29" in md       # 止损/止盈
+    assert "已确认" in md                          # 整体确认态
+
+
+def test_brief_next_day_plan_unconfirmed_flagged():
+    """计划存在但未过确认闸 → 显式标注待确认（pre_open 不放行），不冒充已确认。"""
+    r = build_trading_brief(
+        "2026-08-14", trades=[], asset=None, positions=[],
+        status={"connected": True, "locked": False, "mode": "live"},
+        next_plan={"date": "2026-08-17", "confirmed": False,
+                   "orders": [_plan_order("300017.SZ", 3000, 16.56, 15.04, 24.29)]},
+    )
+    assert "待确认" in r.markdown
+    assert "已确认" not in r.markdown
+
+
+def test_brief_next_day_plan_none_degrades_honestly():
+    """无明日计划（eod 未产/regime 停手/读库失败）→ 诚实降级文案，不抛不造假。"""
+    r = build_trading_brief(
+        "2026-08-14", trades=[], asset=None, positions=[],
+        status={"connected": True, "locked": False, "mode": "live"},
+        next_plan=None,
+    )
+    assert "明日无新计划" in r.markdown
+
+
+def test_brief_next_day_plan_default_omittable():
+    """旧调用方不传 next_plan（向后兼容）→ 计划段降级文案而非 TypeError。"""
+    r = build_trading_brief(
+        "2026-08-14", trades=[], asset=None, positions=[],
+        status={"connected": True, "locked": False, "mode": "live"},
+    )
+    assert "明日无新计划" in r.markdown

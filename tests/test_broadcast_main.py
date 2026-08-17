@@ -18,9 +18,10 @@ def _stub_trading(monkeypatch, date="2026-07-15"):
     """桩：reader/date/取数/brief 渲染，让 main 主流程不依赖真实 IO。"""
     monkeypatch.setattr(bm, "_load_reader", lambda: "fake_reader")
     monkeypatch.setattr(bm, "_latest_trade_date", lambda r: date)
-    # mock trading 取数四件套（避免 import trading_service 重链路 + 真实网关）
+    # mock trading 取数五件套（避免 import trading_service 重链路 + 真实网关；
+    # 2026-08-17 增 next_plan 第五件——明日计划 DB 读口一并桩掉）
     monkeypatch.setattr(bm, "_fetch_trading_snapshot",
-                        lambda d: ([], None, None, {"mode": "live"}))
+                        lambda d: ([], None, None, {"mode": "live"}, None))
     # mock brief 渲染（主流程测幂等/push/last，不应依赖 brief 真渲染）
     monkeypatch.setattr(
         bm, "build_trading_brief",
@@ -276,9 +277,15 @@ def test_fetch_trading_snapshot_reads_server_api(monkeypatch):
     }
     monkeypatch.setattr(bm, "_server_json", lambda path, timeout=5.0: fake[path])
     monkeypatch.setattr(bm, "_local_positions_fallback", lambda: None)
+    # 明日计划读口桩死（防测试依赖生产 logs/trading_state.db 的真实计划行）
+    monkeypatch.setattr("trading.trading_plan.load_plan",
+                        lambda d: {"date": d, "confirmed": True, "orders": []})
+    import trading.calendar as _cal
+    monkeypatch.setattr(_cal, "next_trading_day", lambda d: "2026-08-04")
 
-    trades, asset, positions, status = bm._fetch_trading_snapshot("2026-08-03")
+    trades, asset, positions, status, next_plan = bm._fetch_trading_snapshot("2026-08-03")
     assert status["mode"] == "live"
+    assert next_plan["date"] == "2026-08-04"
     assert asset["total_asset"] == 1002237.74
     assert positions[0]["symbol"] == "600519.SH"
     assert positions[1]["qty"] == 12900.0
@@ -291,8 +298,12 @@ def test_fetch_trading_snapshot_degrades_when_api_down(monkeypatch):
     monkeypatch.setattr(bm, "_server_json", _boom)
     monkeypatch.setattr(bm, "_local_positions_fallback",
                         lambda: [{"symbol": "300654.SZ", "qty": 12900.0}])
+    monkeypatch.setattr("trading.trading_plan.load_plan", lambda d: None)
+    import trading.calendar as _cal
+    monkeypatch.setattr(_cal, "next_trading_day", lambda d: "2026-08-04")
 
-    _, asset, positions, status = bm._fetch_trading_snapshot("2026-08-03")
+    _, asset, positions, status, next_plan = bm._fetch_trading_snapshot("2026-08-03")
     assert asset is None
+    assert next_plan is None
     assert positions == [{"symbol": "300654.SZ", "qty": 12900.0}]
     assert status == {}

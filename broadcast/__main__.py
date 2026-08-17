@@ -125,8 +125,8 @@ def _latest_trade_date(reader: DataLakeReader) -> str | None:
 # Brief 构造器路由（trading/data/strategy 注入式取数 + 纯函数渲染）
 # ===========================================================================
 
-def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, dict]:
-    """取交易机器人当日快照四件套：(trades, asset, positions, status)。
+def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, dict, dict | None]:
+    """取交易机器人当日快照五件套：(trades, asset, positions, status, next_plan)。
 
     Why 集中取数 + 兜底降级：
     - 网关未连接/取数失败：asset 传 None、positions 传 None，brief 自动降级文案，绝不抛
@@ -136,6 +136,9 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
       （独立进程从未 connect → 恒 disconnected 降级；且同 sid 双进程会互斥抢 session），
       改为读运行中 server 的 API（网关所有权唯一归 server/engine）。server 不在/超时
       → 走既有降级文案（观测层绝不阻断播报）。
+    - **2026-08-17 补 next_plan**：明日（T+1）计划直读 DB 真相源（load_plan——
+      trade_event SIGNAL/CONFIRMED 行），不读 server API（计划与网关无关，DB 是
+      唯一真相源）。读库/日历失败 → None 降级，不阻断播报。
     """
     # 同步取数：trades 走 query_trades（读 state_store.fill 表，DB-only 真相源）。
     # 历史口径演进：T7 前 query_trades 全表扫 CSV（与 server 同源单文件）；T7 切 fill 表 DB
@@ -175,7 +178,17 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
         logger.warning("取 positions 失败，trading brief 持仓段退回本地账本", exc_info=True)
         positions = _local_positions_fallback()
 
-    return trades, asset, positions, status
+    # 明日（T+1）计划：DB 真相源（与网关无关）。播报日 D → 计划日 = next_trading_day(D)
+    # ——与 _eod 落盘口径一致（eod=next_trading_day，pre_open=today）。失败 → None 降级。
+    next_plan = None
+    try:
+        from trading.calendar import next_trading_day
+        from trading.trading_plan import load_plan
+        next_plan = load_plan(next_trading_day(date))
+    except Exception:
+        logger.warning("读明日（T+1）计划失败，trading brief 计划段降级", exc_info=True)
+
+    return trades, asset, positions, status, next_plan
 
 
 def _server_json(path: str, timeout: float = 5.0):
@@ -530,9 +543,10 @@ def _build_brief(bot: str, date: str, reader: DataLakeReader):
     """
     if bot == "trading":
         # 交易机器人：取数注入 → 纯函数渲染。取数失败任一项均降级，不阻断播报。
-        trades, asset, positions, status = _fetch_trading_snapshot(date)
+        trades, asset, positions, status, next_plan = _fetch_trading_snapshot(date)
         return build_trading_brief(
             date, trades=trades, asset=asset, positions=positions, status=status,
+            next_plan=next_plan,
         )
     if bot == "data":
         # 数据机器人：取 datasets 快照 → 纯函数渲染健康度文案。取数失败降级为空列表。
