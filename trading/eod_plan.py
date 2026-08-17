@@ -111,8 +111,9 @@ async def compute(date: str, signals: list, atr_map: dict, capital: float) -> di
     # ── A4 分数 Kelly 仓位（2026-08-16 · DG-G5）：kelly 模式收紧单笔上限 ──
     # 单向安全论证：pos_cap_eff = min(hat×fraction, pos_cap) ≤ pos_cap 恒成立——切
     # kelly 只会减仓不会加仓；默认 fixed 完全绕过本块（零行为变化，部署即无感）。
-    # 影子日志：fixed 模式且 hat>0 时打印对照行（不改变任何数值），供 ≥5 交易日观察
-    # （对齐 TRADE_SHADOW_MIN_DAYS 基线节奏）后再切 TRADE_SIZING_MODE=kelly。
+    # 影子日志：fixed 模式且 hat>0 时打印对照行（不改变任何数值），供人工观察数日
+    # 后再切 TRADE_SIZING_MODE=kelly（原「对齐 TRADE_SHADOW_MIN_DAYS 节奏」引用已随
+    # 影子期闸移除而过时 · ADR-16 修订 2026-08-17）。
     # 复合语义：budget = capital × pos_cap_eff × experiment_weight（plan.py:96 既有
     # 复合）——kelly 收紧策略层基础仓，weight 仍按实验归因分流，两层正交。
     kelly_cap = min(cfg["kelly_hat"] * cfg["kelly_fraction"], cfg["pos_cap"])

@@ -422,24 +422,19 @@ async def lifespan(app: FastAPI):
     # 仅自动 cron 编排缺席。与上面 replay_scheduler / training_orchestrator 同源软降级范式。
     try:
         from trading.engine import TradingEngine
-        from trading.__main__ import check_shadow_gate, log_startup_banner
+        from trading.__main__ import log_startup_banner
         # C-5 V2：装配 engine 前打启动 banner（session/account/mode/口径版本）。
-        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链 schtasks ONSTART→python -m trading→uvicorn
-        # →lifespan 之前无 banner，session 漂移（进程内 123456 vs .env 123458）无日志可
+        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcase]] 根因——原 qmt-connect-1 教训）：生产链
+        # schtasks ONSTART→python -m trading→uvicorn→lifespan 之前无 banner，session 漂移无日志可
         # 对比。banner 先于 bootstrap（含网关 connect）输出，便于排查 .env 漂移。
         log_startup_banner()
         eng = TradingEngine()
         await eng.bootstrap()
-        if check_shadow_gate():
-            eng.start()
-            app.state.trading_engine = eng
-            logging.getLogger(__name__).info("TradingEngine 已装配并启动")
-        else:
-            # 影子期不足（live 模式下 < TRADE_SHADOW_MIN_DAYS）：不 start scheduler，
-            # 但保留实例供运维查看 / 手动 vet 戏（API 继续运行，engine 自动编排缺席）。
-            app.state.trading_engine = eng
-            logging.getLogger(__name__).warning(
-                "TradingEngine 装配但 scheduler 未启动（影子期不足，API 继续运行）")
+        # 影子期闸已按 ADR-16 修订移除（2026-08-17）——engine 启动不再被自动冻结；
+        # 新参数上实盘的缓冲由人工 risk_ctrl block 开关接管（只拦增量、存量退出照常）。
+        eng.start()
+        app.state.trading_engine = eng
+        logging.getLogger(__name__).info("TradingEngine 已装配并启动")
     except Exception:
         logging.getLogger(__name__).exception("TradingEngine 装配异常（已忽略）")
 

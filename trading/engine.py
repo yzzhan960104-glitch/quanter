@@ -50,8 +50,8 @@ W1 隔离机制（取代旧的进程隔离硬约束）：
 ============================================================================
 - pre_open / stop_loss_monitor 走 ``gateway_service._submit`` → submit_order 的
   ``dry_run=(_mode()=="dry_run")`` 分流，命中即返 ``{"state":"DRY_RUN"}`` 不真下单。
-- 未跑满 TRADE_SHADOW_MIN_DAYS（≥5）禁切 live 的告警由 ``trading/__main__.py``
-  启动期处理（Task 10），本引擎内 ``_mode()`` 仅忠实读 env，不重复告警逻辑。
+- （原 TRADE_SHADOW_MIN_DAYS 影子期闸已按 ADR-16 修订移除 · 2026-08-17——
+  本引擎内 ``_mode()`` 忠实读 env，上线缓冲由人工 risk_ctrl block 开关接管。）
 """
 from __future__ import annotations
 

@@ -94,6 +94,18 @@ def main(argv: list = None) -> int:
         elif args.cmd == "promote":
             _promote(db, args.experiment_id, weight=args.weight, operator=_OPERATOR, now=_now())
             print(f"promoted {args.experiment_id} weight={args.weight}")
+            # ADR-16 修订（2026-08-17）：影子期闸移除后新实验上线只播报不拦截——
+            # 同步 asyncio.run（CLI 短命进程，fire_and_forget 的 daemon 线程来不及发）；
+            # 播报失败不阻断 promote 返回码（通知是尽力而为的知情通道）。
+            try:
+                import asyncio as _aio
+                from infra.notifier import NotificationManager
+                _aio.run(NotificationManager.get_default().notify_risk_event(
+                    f"实验上线：{args.experiment_id} → ACTIVE（weight={args.weight}）——"
+                    f"影子期闸已移除（ADR-16 修订），新参数即刻生效；"
+                    f"如需缓冲请 risk_ctrl block on", "WARN"))
+            except Exception:
+                print("（上线播报发送失败，promote 本身已成功）")
         elif args.cmd == "set-weight":
             set_weight(db, args.experiment_id, new_weight=args.weight, operator=_OPERATOR, now=_now())
             print(f"set-weight {args.experiment_id} → {args.weight}")

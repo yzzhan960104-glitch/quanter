@@ -63,8 +63,8 @@ discovery daemon（每小时+5 低功率搜索收敛）
 ```
 
 - 当前 ACTIVE：`neckline_disc_20260725_25c602`（discovery 冠军，2026-07-27 激活）。
-- 切 live 有 **≥5 天影子期硬闸**（`TRADE_SHADOW_MIN_DAYS=5`，`check_shadow_gate` fail-closed——
-  影子期不足则 engine 不 start scheduler，server 照常起）。
+- （原 ≥5 天影子期硬闸已按 ADR-16 修订 1 移除 · 2026-08-17——新实验上线改为
+  promote 时 WARN 播报（不拦截），上线缓冲由人工 `risk_ctrl block` 开关接管。）
 
 ### 2.3 策略可信度边界（治理背景，诚实声明）
 
@@ -206,7 +206,6 @@ gate 失败：live 推 CRITICAL 钉钉；台账 skipped（补跑窗口 [09:22, 1
 | L0 人工 | **增量拦截开关** | `block_new_orders=1`（人工拨） | pre_open 全拒挂（存量管理照常）+ check_order 拒一切真买单 | `state_store.resolve_risk_control`、pre_open ③.5、compute/risk.py master_switch |
 | L0 人工 | **总仓位上限** | `max_total_position<1.0`（人工拨） | pre_open 逐单额度超限跳过；权益查不到 fail-closed 全跳 | 同上（pre_open 逐单扣减） |
 | L1 计划 | 确认闸 | SIGNAL 无 CONFIRMED / VETOED | pre_open 不放行 | `load_plan` + `is_trade_confirmed` |
-| L1 计划 | 影子期闸 | 切 live < 5 天 | 不 start scheduler | `check_shadow_gate` |
 | L2 前置 | pre_open 三段 | ①计划②网关③数据任一未绿 | 早返不触网关 + live CRITICAL | `engine._pre_open_gate` |
 | L3 单笔 | session 闸 | 非 A 股时段（enforce_session 时） | 拒单 | `compute/risk.py:check_order` |
 | L3 单笔 | dry_run 闸 | 请求级模拟 | 不真下单 | 同上 |
@@ -338,7 +337,6 @@ Tushare(主) / AKShare / JQData(辅)
 | `QMT_ALLOW_LIVE_TRADE` | true | risk.py 环境总闸 | 生效 |
 | `TRADE_POS_CAP` | 0.05 | critical.py 单笔仓位 | 生效 |
 | `CIRCUIT_DAILY_LOSS_LIMIT` | -0.03 | breaker.py 组合熔断 | 生效 |
-| `TRADE_SHADOW_MIN_DAYS` | 5 | 影子期硬闸 | 生效 |
 | `TRADE_MAX_TOTAL_EXPOSURE` | 0.80 | — | **遗留无消费**（总仓位已由 risk_control 接管） |
 | `QMT_ORDER_MAX_AMOUNT` | 200000 | — | **遗留无消费**（A-2 删挡板） |
 | `QMT_ORDER_MAX_SHARES` | 10000 | — | **遗留无消费**（同上） |

@@ -52,14 +52,13 @@ def _mock_lifespan_dependencies():
     stack.enter_context(patch("backtest.optimize.training_dingtalk.ReviewBotConfig.from_env", return_value=None))
     stack.enter_context(patch("data.symbol_names.load_all"))
     stack.enter_context(patch("presentation.server.services.data_service.sweep_stale_on_startup", return_value=[]))
-    # TradingEngine（check_shadow_gate + engine 实例 mock）
+    # TradingEngine mock（影子期闸已移除 ADR-16 修订 · 2026-08-17）
     # bootstrap 是 async（lifespan 内 ``await eng.bootstrap()``），用 AsyncMock；
-    # sched.running=False 影子期不足 → lifespan 不调 eng.start，shutdown 段据此跳过 eng.shutdown
+    # sched.running=False → shutdown 段据此跳过 eng.shutdown
     eng = MagicMock()
     eng.sched.running = False
     eng.bootstrap = AsyncMock()
     stack.enter_context(patch("trading.engine.TradingEngine", return_value=eng))
-    stack.enter_context(patch("trading.__main__.check_shadow_gate", return_value=False))  # 影子期不足不 start
     stack.enter_context(patch("trading.__main__.log_startup_banner"))
     return stack, start_mock, stop_mock, eng
 
@@ -402,7 +401,6 @@ async def test_lifespan_creates_catchup_task_when_engine_started():
     app = FastAPI()
     stack, _start, _stop, eng = _mock_lifespan_dependencies()
     eng.sched.running = True                              # engine 已 start
-    stack.enter_context(patch("trading.__main__.check_shadow_gate", return_value=True))
     catchup = stack.enter_context(
         patch("trading.catchup.run_startup_catchup", new=AsyncMock()))
     with stack:
