@@ -1,6 +1,7 @@
 # 交易系统全景：策略 · 流程 · 风控
 
-> **时效标注**：本文截至 **2026-08-17**（live 引擎实跑核对版）。所有会漂的内容（cron、参数
+> **时效标注**：本文截至 **2026-08-17**（ADR-16 风控重构批次：regime 指标闸移除 +
+> 人工风控双值 + 执行参数单源收敛 + 存量止损覆盖修复）。所有会漂的内容（cron、参数
 > 生效值、遗留债状态）均以代码与 `.env` 当日实测为准；数字过期不构成文档失效，但改代码时
 > 须同步刷新对应小节。
 >
@@ -20,10 +21,10 @@
 （时点均为北京时间，交易日口径）
 ─────────────────────────────────────────────────────────────────────────
 每小时 :05   discovery daemon（24h 低功率模式，DETACHED 子进程，轮次幂等）
-09:22        pre_open —— 四段 gate → 撤昨日单 → 熔断基线 → 逐单挂今日计划
+09:22        pre_open —— 三段 gate → 撤昨日单 → 熔断基线 → 人工风控双值 → 逐单挂今日计划
 09:15-15:00  stop_loss 每 30s —— 持仓 decide_exit 巡检 + pending 撤单 + 组合熔断评估(5min节流)
 15:30        post_close —— 对账 → 归因 → 日内熔断 → trade_event 补写 → 清白名单
-18:00        pipeline_then_eod —— 采集→校验→data_ready→regime 前置→eod 扫信号→brief 播报
+18:00        pipeline_then_eod —— 采集→校验→data_ready→eod 扫信号→brief 播报
 每周六 02:00 weekly_scan —— 全市场完整性周扫（只告警不自动补）
 随时         health_guard 每 60s —— 网关断线探测与退避重连（风控熔断态除外）
 ─────────────────────────────────────────────────────────────────────────
@@ -55,7 +56,9 @@ discovery cron + 启动补跑，全部在 lifespan 内装配。端口 8000 天�
 discovery daemon（每小时+5 低功率搜索收敛）
   → publish 产 experiment DRAFT → 人审 promote → ACTIVE(weight=1.0)
   → resolve_active() 实时发放 (strategy_name, params, weight)
-  → _eod scan_live 装配 → 信号带 experiment_id 归因
+  → _eod scan_live 装配 → 信号带 experiment_id 归因 + **exec_params 快照**
+    （detect_signal 抄录实验执行键，参数随信号定终身——2026-08-17 单源收敛）
+  → eod 装配价位（exec_params > env > 内置缺省）→ SIGNAL.meta 落库（含乘数快照）
   → pre_open 计划确认闸 → 挂单
 ```
 
@@ -68,7 +71,8 @@ discovery daemon（每小时+5 低功率搜索收敛）
 颈线法可信度评审结论（`docs/architecture/` 评审系列 + 记忆沉淀）：**regime 过拟合风险 + 熊市
 负期望实证（2022 折外 calmar=-0.62）+ 4% Kelly 薄边缘 + 回测理想化**——单独裸奔不建议上实盘。
 落地对策：
-- **A1 已落**：regime 环境闸（§5.1）——BEAR/UNKNOWN 全面停新单；
+- **A1 已移除**（ADR-16 · 2026-08-17）：regime 指标闸退役——系统所有者裁决「择时不是
+  几个单纯指标可以判读」，环境判断权归人工（人工风控双值见 §5.1）；
 - **A2 已落**：`min_yearly_calmar` 裁判门槛（discovery 搜索目标）；
 - **A3/A4 未动工**：盈亏比真实口径复核、执行成本压力测试——**当前最高优先空洞**。
 
@@ -105,28 +109,32 @@ SIGNAL ──→ CONFIRMED ──→ ORDERED ──→ FILLED ──→ TP1_FILL
 2. **校验**：按策略声明的数据集逐项检查 → 全绿落 `data_ready(T)`；任一未绿 → eod 跳过 +
    CRITICAL；
 3. **连续性 scan + 异步补采**（T13-B：`_scan_and_spawn_repair`，缺段后台补不阻塞）；
-4. **A1 regime 前置闸**（pipeline.py:218-228）：BEAR/UNKNOWN → **eod 停产 T+1 计划**（台账
-   skipped + WARN 播报），brief 一并跳过——**只断新单，存量退出照常**；
-5. **eod**（`engine._eod`）：完整性 gate（`data/integrity.filter_universe_by_continuity`，300214
+   （原 4. A1 regime 前置闸已按 ADR-16 移除——eod 照常产计划，增量拦截移至 pre_open
+   人工风控双值，2026-08-17）；
+4. **eod**（`engine._eod`）：完整性 gate（`data/integrity.filter_universe_by_continuity`，300214
    漏采教训）→ `resolve_active()` 装配策略 → 全市场扫描 → 产 SIGNAL/CONFIRMED（plan_date =
-   next_trading_day）→ 风控参数（`trading/critical.py:_trade_cfg`，pos_cap 单笔 5% 算 qty）；
-6. **brief 三播报**（`ops/brief_all.py` 子进程串行 trading/strategy/data；trading brief 含
+   next_trading_day）→ 风控参数（pos_cap 单笔 5% 算 qty + **exec_params 快照进 meta**）；
+5. **brief 三播报**（`ops/brief_all.py` 子进程串行 trading/strategy/data；trading brief 含
    「明日（T+1）交易计划」段，2026-08-17 补）。
 
 ### 4.2 pre_open · 09:22 周一-五（`ENGINE_PRE_OPEN_CRON`）
 
 `trading/phases/pre_open.py`，顺序执行：
 
-1. **四段 gate**（`engine._pre_open_gate`，先便宜后贵，任一未绿即早返不触网关）：
+1. **三段 gate**（`engine._pre_open_gate`，先便宜后贵，任一未绿即早返不触网关）：
    - ① 计划确认：`load_plan(today)` 无计划 / `confirmed=False` → skip；
    - ② 网关健康：gw 为 None / `_connected=False` / miniQMT 客户端未就绪 → skip；
    - ③ 数据就绪（W5 单口）：`get_ready(T)` = data_ready 内容校验 AND pipeline 台账 done；
-   - ④ **regime**（A1）：eod 后隔夜可能转空，挂单前二次复核（同一 classify 单源+当日缓存）。
+   （原 ④ regime 段已按 ADR-16 移除，2026-08-17）
 2. **撤昨日未成交单**（防残留敞口）；
 3. **超期平仓现算**（SSoT Phase B：`scan_expired_positions`（holding_days > max_holding）+
    `close_expired_positions`（跌停价挂卖）——从 post_close 迁入，盘前清超期）；
 4. **抓日内熔断基线**（开盘权益快照 → account_daily.start_total_asset）；
-5. **注入动态白名单** + 逐单挂限价买单。
+5. **人工风控双值闸**（ADR-16，接管原 regime 位）：`block_new_orders=1` → 全部拒挂
+   （skip + WARN 播报，存量管理已执行）；`max_total_position<1.0` → 逐单额度检查
+   「持仓市值+本轮已挂+本单 ≤ 比例×总权益」超限跳过（pos_capped 计数）；权益查不到
+   fail-closed 全跳；
+6. **注入动态白名单** + 逐单挂限价买单。
 
 gate 失败：live 推 CRITICAL 钉钉；台账 skipped（补跑窗口 [09:22, 10:00) 内可重试）。
 
@@ -140,6 +148,11 @@ gate 失败：live 推 CRITICAL 钉钉；台账 skipped（补跑窗口 [09:22, 1
 - ④ holding 期巡检：每持仓构造 state+bar → **`decide_exit` 执行单源**（主路径）→ 按 action
   分发（挂止损/差额补挂止盈/超时平仓）；DB 查失败时「已挂判定」保守视为已挂（§5.7）；
   fallback 路径 `should_trigger_stop`（D12 兜底）；
+- ④b **持仓反查**（2026-08-17 裸奔修复）：cooldown=8 期内存量持仓不在今日 SIGNAL →
+  `state_store.list_active_holding_signals` 反查入场源 SIGNAL meta 注入 monitor_ctx
+  （今日 SIGNAL 优先不覆盖）；**decide_cfg per-signal**：SIGNAL.meta.exec_params（实验
+  参数定终身）> `_trade_cfg()` env 基线（老数据兜底）——修复前存量持仓 D1+ 盘中个股
+  止损完全不生效（只剩 TP 预挂单/组合熔断/超期兜底）；
 - ⑤ pending 期 cancel_on 巡检：high ≥ 撤单阈值 → 撤未成交买单（防追高）；
 - **CR-3 组合级熔断评估**（⑤后、聚合告警前，5min 节流 `PortfolioBreakerThrottle`）：
   - 基线 = `account_daily.start_total_asset`（缺失 → T-1 close 兜底，I-1）；
@@ -190,10 +203,11 @@ gate 失败：live 推 CRITICAL 钉钉；台账 skipped（补跑窗口 [09:22, 1
 
 | 层 | 闸门 | 触发条件 | 动作 | 代码 |
 |---|---|---|---|---|
-| L0 环境 | **regime 闸** | HS300 ≤ MA200 或 宽度 ≤50%（任一） | eod 停产 + pre_open 拒挂（只断新单） | `trading/compute/regime.py`、pipeline.py:218、engine `_pre_open_gate`④ |
+| L0 人工 | **增量拦截开关** | `block_new_orders=1`（人工拨） | pre_open 全拒挂（存量管理照常）+ check_order 拒一切真买单 | `state_store.resolve_risk_control`、pre_open ③.5、compute/risk.py master_switch |
+| L0 人工 | **总仓位上限** | `max_total_position<1.0`（人工拨） | pre_open 逐单额度超限跳过；权益查不到 fail-closed 全跳 | 同上（pre_open 逐单扣减） |
 | L1 计划 | 确认闸 | SIGNAL 无 CONFIRMED / VETOED | pre_open 不放行 | `load_plan` + `is_trade_confirmed` |
 | L1 计划 | 影子期闸 | 切 live < 5 天 | 不 start scheduler | `check_shadow_gate` |
-| L2 前置 | pre_open 四段 | ①计划②网关③数据④regime 任一未绿 | 早返不触网关 + live CRITICAL | `engine._pre_open_gate` |
+| L2 前置 | pre_open 三段 | ①计划②网关③数据任一未绿 | 早返不触网关 + live CRITICAL | `engine._pre_open_gate` |
 | L3 单笔 | session 闸 | 非 A 股时段（enforce_session 时） | 拒单 | `compute/risk.py:check_order` |
 | L3 单笔 | dry_run 闸 | 请求级模拟 | 不真下单 | 同上 |
 | L3 计划侧 | 仓位上限 | 单笔 pos_cap=5% | eod 算 qty 时约束 | `trading/critical.py:_trade_cfg` |
@@ -205,26 +219,29 @@ gate 失败：live 推 CRITICAL 钉钉；台账 skipped（补跑窗口 [09:22, 1
 | L5 设施 | 环境总闸 | QMT_ALLOW_LIVE_TRADE=false | 拒真单强制模拟 | `compute/risk.py` |
 | L5 设施 | 单例锁 | 端口 8000 + QMT session 锁 | 第二实例退出 | `_assert_single_instance` |
 
-### 5.1 L0 环境层：regime 闸（A1 · DG-G4）
+### 5.1 L0 人工层：risk_control 双值（ADR-16 · 2026-08-17）
 
-三态判定，**双腿确认、非对称收紧**（`trading/compute/regime.py`）：
+**regime 指标闸（HS300 MA200 + 市场宽度）已整体移除**——所有者裁决「择时不是几个单纯
+指标可以判读，只通过人工来判断」。历史：A1/DG-G4 落地（2026-08-14），2026-08-17 09:22
+首次实弹拦截 15 单全拒后于同日退役（ADR-16）。环境判断的残余防护 = 人审 veto（终局）+
+组合 -3% 熔断 + 个股止损 + 影子期闸 + 单笔 pos_cap。
 
-```
-BULL    = HS300 收盘 > MA200  ∧  宽度 > 0.5         → 允许新单
-BEAR    = 任一不满足                             → 停手（断新单，存量退出照常）
-UNKNOWN = 数据缺失（指数<201根 / 宽度样本<500只 / 异常）→ 视同 BEAR（fail-closed）
-```
+人工风控面收缩为两个值（`logs/trading_state.db` kv 表 `risk_control`，**运行时可改无需重启**）：
 
-- 宽度 = 全市场**末位有效 K 线** close > 各自 MA200 的占比（时点宽度，防权重股假多头）；
-- 阈值（MA200/0.5/500 只）为固定经验值，**红线绝不进 TPE**（防搜索过拟合 regime 本身），改值
-  须走 ADR；
-- 双拦截点：**eod 前置**（pipeline.py:218 停产计划）+ **pre_open ④**（挂单前二次复核，eod 后
-  隔夜可能转空）；当日缓存，盘中不重判（环境闸非交易信号）；
-- 实弹记录：2026-08-17 09:22 首次实弹拦截（HS300 4666≤4702；宽度 23%≤50%，15 单全拒）。
+| 键 | 默认 | 语义 | 消费点 |
+|---|---|---|---|
+| `block_new_orders` | 0（不拦） | 1 = 拦一切增量买入（自动挂单 + 手动下单；卖出/退出**永不拦**） | pre_open ③.5 全拒挂 + check_order master_switch 关 |
+| `max_total_position` | 1.0（不限） | 总仓位上限：持仓市值 + 本轮已挂 + 本单 ≤ 比例 × 总权益 | pre_open 逐单额度（挂成功才扣减） |
+
+- 修改通道：`PUT /api/v1/trading/risk/control`（require_write 鉴权）或
+  `python -m trading.risk_ctrl [block on|off | position 0.8]`；
+- fail-closed：DB 读异常 → 视同全拦（宁错拦人工拨回，不裸奔）；设了仓位上限但权益查
+  不到 → 全跳过（pos_check_failed）；值域非法（position∉[0,1]）→ 422 拒写不静默钳制；
+- dry_run 模拟请求不受开关限制（不产生真增量，闸序在 master_switch 前）。
 
 ### 5.2–5.3 计划层与执行前置
 
-见 §三（确认状态机）与 §4.2（四段 gate）。要点：gate 顺序「先便宜后贵」（DB 读 < 探测 <
+见 §三（确认状态机）与 §4.2（三段 gate）。要点：gate 顺序「先便宜后贵」（DB 读 < 探测 <
 查询），任一未绿**绝不触达网关写操作**。
 
 ### 5.4 L3 单笔层（A-2 裁定后的实际存留）
@@ -239,7 +256,14 @@ UNKNOWN = 数据缺失（指数<201根 / 宽度样本<500只 / 异常）→ 视�
 `QMT_ORDER_MAX_SHARES=10000` **现为遗留无消费方**（grep 全库无读取），勿误信仍在挡。
 
 仓位约束在**计划生成侧**：`TRADE_POS_CAP=0.05`（单笔 = capital×5% 算 qty）。
-⚠️ `TRADE_MAX_TOTAL_EXPOSURE=0.80` 同为**遗留无消费方**（总敞口上限当前无代码执行）。
+总仓位上限已由 `risk_control.max_total_position` 接管（ADR-16，见 §5.1）——原
+`TRADE_MAX_TOTAL_EXPOSURE=0.80` env 键仍为无消费方遗留（注释已标）。
+
+**执行参数单源（2026-08-17 收敛）**：优先级链 = 信号 `exec_params` 快照（实验口径，
+detect_signal 抄录 + SIGNAL.meta 定终身）> env（`_trade_cfg` 兜底）> 内置缺省。修复
+实测四处分叉：TP2 2.0H↔2.5H、tp1_portion 0.5↔0.3、max_wait 5↔8、cancel_on 1.0H↔2.0H
+（301584.SZ 案例）；巡检侧 trailing 5/0.1/0.5（env）→ 实验全 0 = 固定止损（回归回测
+口径）；超期平仓 per-symbol max_holding（新持仓实验值 20 / 老数据 env 15 过渡）。
 
 ### 5.5 L4 组合层：日内 -3% 熔断
 
@@ -315,10 +339,10 @@ Tushare(主) / AKShare / JQData(辅)
 | `TRADE_POS_CAP` | 0.05 | critical.py 单笔仓位 | 生效 |
 | `CIRCUIT_DAILY_LOSS_LIMIT` | -0.03 | breaker.py 组合熔断 | 生效 |
 | `TRADE_SHADOW_MIN_DAYS` | 5 | 影子期硬闸 | 生效 |
-| `TRADE_MAX_TOTAL_EXPOSURE` | 0.80 | — | **遗留无消费** |
+| `TRADE_MAX_TOTAL_EXPOSURE` | 0.80 | — | **遗留无消费**（总仓位已由 risk_control 接管） |
 | `QMT_ORDER_MAX_AMOUNT` | 200000 | — | **遗留无消费**（A-2 删挡板） |
 | `QMT_ORDER_MAX_SHARES` | 10000 | — | **遗留无消费**（同上） |
-| `TRADE_STOP_ATR_MULT` 等 `TRADE_*` | 缺省 | critical.py（缺省对齐回测 DEFAULTS） | 生效（env 可覆盖） |
+| `TRADE_STOP_ATR_MULT` 等 `TRADE_*` | 缺省 | critical.py（**缺省兜底基线**，单源收敛后仅老 SIGNAL/缺键时生效） | 兜底层 |
 
 ### 8.2 调度类
 
@@ -341,13 +365,15 @@ Tushare(主) / AKShare / JQData(辅)
 ## 九、已知边界与技术债（如实清单）
 
 1. **trailing 收紧链路停摆**：`_evolve_trailing_stops` 已删（SSoT review P2 死计算，无消费
-   方）。当前 ACTIVE 参数 trailing 三件全 0 = 固定止损，**无实际影响**；但 env 三件套与
-   `compute_stop_price` 保留，重实现列为独立 live P0 task。
+   方）。ACTIVE 参数 trailing 三件全 0 = 固定止损。⚠️ 2026-08-17 双轴核查曾发现 env 三件
+   （5/0.1/0.5）经 decide_cfg 在实盘巡检侧实际生效（与回测口径分叉）——单源收敛后新信号
+   按实验值定终身（全 0），env 三件降为老 SIGNAL 兜底基线；重实现列为独立 live P0 task。
 2. **account_daily 基线链未闭**：08-10 起每日 `start_total_asset` NULL（08-17 仍复现，当日行
    缺失）。T-1 close 兜底已消假阳性 halt（I-1），但「正基线链」未修——runbook ② 持续核查项。
 3. **A3/A4 空洞**：盈亏比真实口径复核、执行成本压力测试——策略可信度最高优先待办。
-4. **遗留 env 三件**：`TRADE_MAX_TOTAL_EXPOSURE` / `QMT_ORDER_MAX_AMOUNT` /
-   `QMT_ORDER_MAX_SHARES` / `ENGINE_EOD_PLAN_CRON` 无消费方（§八）——待清理或恢复消费。
+4. **遗留 env 三件**：`QMT_ORDER_MAX_AMOUNT` / `QMT_ORDER_MAX_SHARES` /
+   `ENGINE_EOD_PLAN_CRON` 无消费方（§八）——待清理；`TRADE_MAX_TOTAL_EXPOSURE` 语义已由
+   risk_control.max_total_position 接管（ADR-16）。
 5. **dws 登录态 30 天周期**：下次 ~09-15 到期，brief 推送 returncode=5 先查 auth。
 6. **600519 阈值语义待用户确认**：holding=15 恰在 max_holding 阈值（`>` 判定推迟一日平仓）。
 
@@ -357,11 +383,11 @@ Tushare(主) / AKShare / JQData(辅)
 
 | 域 | 文件 | 职责 |
 |---|---|---|
-| 引擎 | `trading/engine.py` | TradingEngine 装配 + job 注册 + `_eod` + `_pre_open_gate` 四段 |
+| 引擎 | `trading/engine.py` | TradingEngine 装配 + job 注册 + `_eod` + `_pre_open_gate` 三段 |
 | 执行 | `trading/phases/{pre_open,stop_loss,post_close}.py` | 三阶段执行体 |
-| 编排 | `trading/orchestrate/pipeline.py` | 18:00 事件链（含 regime 前置） |
+| 编排 | `trading/orchestrate/pipeline.py` | 18:00 事件链 |
 | 补跑 | `trading/catchup.py` + `trading/job_ledger.py` | C-8 三腿 + 台账 |
-| 风控 | `trading/compute/{risk,breaker,regime,stop}.py` | 单笔挡板/组合熔断/环境闸/止损价（纯函数） |
+| 风控 | `trading/compute/{risk,breaker,stop}.py` + `trading/risk_ctrl.py` | 单笔挡板/组合熔断/止损价（纯函数）+ 人工双值 CLI |
 | 网关 | `trading/gateway_service.py` + `broker/qmt_*.py` | 网关单例/emergency_halt/下单 |
 | 状态 | `trading/state_store.py` + `trading_plan.py` | 6 表真相源 + 计划读取（trade_event） |
 | 策略 | `strategies/neckline/{method_v0,execution,price_levels}.py` | 识别/离场单源/价位单源 |
