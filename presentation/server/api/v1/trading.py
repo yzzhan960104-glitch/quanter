@@ -202,3 +202,46 @@ async def jobs_endpoint(
     engine = getattr(request.app.state, "trading_engine", None)
     catchup_task = getattr(request.app.state, "catchup_task", None)
     return get_jobs(date or clock.today(), engine, catchup_task)
+
+
+# ============================================================================
+# ADR-16：人工风控双值（regime 指标闸移除后的增量拦截接管面）
+# ============================================================================
+class RiskControlBody(BaseModel):
+    """风控双值写体。只传要改的键（另一键保持不动）。"""
+
+    block_new_orders: bool | None = None      # True=拦一切新买单（卖出/退出不拦）
+    max_total_position: float | None = None   # 总仓位上限（0.0~1.0）
+
+
+@router.get("/risk/control", summary="人工风控双值（拦截开关/总仓位比例）")
+async def risk_control_get() -> dict:
+    """读消费口径（block/max_pos/degraded）+ 存储真值（raw）。
+
+    Why 同步直调：单次 sqlite SELECT 快操作，与 status() 同纪律。
+    Why 用 resolve 而非裸 read：观测面与消费面同口径（fail-closed 语义下观测即决策）。
+    """
+    from trading.state_store import read_risk_control, resolve_risk_control
+    resolved = resolve_risk_control()
+    try:
+        raw = read_risk_control()
+    except Exception:  # 观测端点不炸：resolve 已给 fail-closed 值，raw 降级空
+        raw = {}
+    return {**resolved, "raw": raw}
+
+
+@router.put("/risk/control", summary="设置人工风控双值（运行时生效，无需重启）")
+async def risk_control_put(body: RiskControlBody) -> dict:
+    """写双值（UPSERT 幂等）。值域非法 → 422 拒写（不静默钳制，ADR-16 语义）。
+
+    生效点：pre_open 挂单前 gate + check_order 请求级挡板 + pre_open 总仓位逐单检查
+    ——下一轮判定即读新值，无缓存。
+    """
+    from trading.state_store import write_risk_control
+    try:
+        return await run_in_threadpool(
+            write_risk_control,
+            block_new_orders=body.block_new_orders,
+            max_total_position=body.max_total_position)
+    except ValueError as e:
+        raise HTTPException(422, str(e))

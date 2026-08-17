@@ -534,6 +534,16 @@ def init_store(db_path: str | None = None) -> None:
                 PRIMARY KEY (date, dataset)
             )
         """)
+        # ⑧ risk_control（人工风控双值 · ADR-16 · 2026-08-17）——运行时可改 kv，无外键：
+        # 建表前旧库 init_store 幂等补建；空表 = 缺键，resolve_risk_control 走缺省
+        # （block=0 / max_pos=1.0，零行为变化起步）。
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS risk_control (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
 
 
 # ============================= T2：account 表 CRUD + .env 迁移 =============================
@@ -1840,3 +1850,100 @@ def get_ready(date: str, datasets: list[str] | None = None,
         return False
 
     return True
+
+
+# ============================= ADR-16：risk_control 人工风控双值 =============================
+# 物理（ADR-16 · 2026-08-17）：regime 指标闸移除后，增量下单拦截权归人工双值——
+#   block_new_orders  '0'（默认，不拦）| '1'（拦一切新买单；卖出/存量退出永不拦）
+#   max_total_position 0.0~1.0（默认 1.0=不限制；「持仓市值+当日已挂买单+本单 ≤ 比例×权益」）
+# 存储取 DB kv 而非 env：开关生命周期是「盘前/盘中临时收紧」，env 改动需重启进程
+# （单例锁 + QMT session 重连成本），一次 sqlite 写即可运行时生效。
+
+_RISK_BLOCK_KEY = "block_new_orders"
+_RISK_POSITION_KEY = "max_total_position"
+
+
+def read_risk_control(db_path: str | None = None) -> dict:
+    """raw 读双值（无默认填充、无 fail-closed——供 REST 观测面展示存储真值）。
+
+    返回：``{"block_new_orders": "0"|"1"|None, "max_total_position": str|None}``。
+    None = 表中无该键（未设置过）。DB 异常向上抛（观测面调用方软降级）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        rows = con.execute(
+            f"SELECT key, value FROM risk_control "
+            f"WHERE key IN (?, ?)", (_RISK_BLOCK_KEY, _RISK_POSITION_KEY)
+        ).fetchall()
+    raw = {r["key"]: r["value"] for r in rows}
+    return {
+        "block_new_orders": raw.get(_RISK_BLOCK_KEY),
+        "max_total_position": raw.get(_RISK_POSITION_KEY),
+    }
+
+
+def resolve_risk_control(db_path: str | None = None) -> dict:
+    """消费口径（fail-closed）：双值解析为执行形态，供 pre_open gate / check_order 注入。
+
+    - 缺键（未设置）：默认 block=False / max_pos=1.0（ADR-16 零行为变化起步）；
+    - 值解析失败（写坏）：视同缺键默认 + degraded 标记 + warning（观测可辨）；
+    - **DB 读取异常：fail-closed 全拦**——block=True / max_pos=0.0 / degraded=True
+      （宁可错拦人工拨回，不可读不到就放行——DG-G3 哲学同源）。
+
+    返回：``{"block": bool, "max_pos": float, "degraded": bool}``。
+    """
+    try:
+        raw = read_risk_control(db_path)
+    except Exception:
+        logger.exception("risk_control 读取异常，fail-closed 全拦（人工拨回请查 DB）")
+        return {"block": True, "max_pos": 0.0, "degraded": True}
+    degraded = False
+    block = False
+    if raw["block_new_orders"] is not None:
+        if raw["block_new_orders"] in ("0", "1"):
+            block = raw["block_new_orders"] == "1"
+        else:
+            degraded = True
+            logger.warning("risk_control block_new_orders=%r 非法（合法 0|1），按默认不拦",
+                           raw["block_new_orders"])
+    max_pos = 1.0
+    if raw["max_total_position"] is not None:
+        try:
+            max_pos = float(raw["max_total_position"])
+        except (TypeError, ValueError):
+            degraded = True
+            logger.warning("risk_control max_total_position=%r 非数字，按默认 1.0",
+                           raw["max_total_position"])
+    return {"block": block, "max_pos": max_pos, "degraded": degraded}
+
+
+def write_risk_control(block_new_orders: bool | None = None,
+                       max_total_position: float | None = None,
+                       db_path: str | None = None) -> dict:
+    """写双值（UPSERT 幂等，仅传的键写）。值域校验 fail-closed：非法抛 ValueError 拒写。
+
+    Why 拒写而非钳制：双值是人工风控意志（同 TRADE_KELLY_FRACTION 拒起语义）——
+    设错必须显式失败，静默钳到边界会让「我以为设了 0.6」实为 1.0 的假象。
+    返回写后 resolve 口径（调用方直接拿到生效值，免二次读）。
+    """
+    if max_total_position is not None and not (0.0 <= float(max_total_position) <= 1.0):
+        raise ValueError(
+            f"max_total_position={max_total_position} 越界（合法 [0.0, 1.0]）——拒写")
+    db_path = db_path or _DEFAULT_DB
+    now = clock.now().isoformat()
+    writes: list[tuple[str, str]] = []
+    if block_new_orders is not None:
+        writes.append((_RISK_BLOCK_KEY, "1" if block_new_orders else "0"))
+    if max_total_position is not None:
+        writes.append((_RISK_POSITION_KEY, f"{float(max_total_position):.4f}"))
+    if not writes:
+        raise ValueError("至少传一个键（block_new_orders / max_total_position）——空写拒收")
+    with _connect(db_path) as con:
+        for key, value in writes:
+            con.execute(
+                "INSERT INTO risk_control(key, value, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
+                (key, value, now))
+    return resolve_risk_control(db_path)
+
