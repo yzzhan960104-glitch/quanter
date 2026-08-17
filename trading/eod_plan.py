@@ -189,6 +189,10 @@ async def compute(date: str, signals: list, atr_map: dict, capital: float) -> di
             # 供 push_plan_to_dingtalk md 渲染「盈亏比N.N」+ trading_plan JSON 落盘存档。
             # Why 落盘：研究员复盘时可按 rr 排序找出弱信号历史，迭代 min_rr 守卫阈值。
             "rr": round(o.rr, 2),
+            # 执行参数乘数快照（单源收敛 · 2026-08-17）：实验执行键全集随 SIGNAL.meta
+            # 定终身——_stoploss decide_cfg（止损/止盈/超时/trailing）与 pre_open 超期
+            # max_holding 逐单读此，env 只兜老数据缺键。None=老链路（消费方 fallback）。
+            "exec_params": dict(o.exec_params) if o.exec_params else None,
         }
         for o in orders
     ]
