@@ -32,6 +32,14 @@ from ops import trading_supervisor
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 校验前 load .env（2026-08-17 修复）：supervisor 三合一的 sid 口径 = 显式 >
+    # env QMT_SESSION_ID > default——不 load 时 sid 落 default，探测 default.lock
+    # （历史残留、空闲）而非引擎真持有的 <sid>.lock → 「端口被监听但锁未持有」
+    # 误报拒启（08-17 实弹：123459 链被 default 误报拦重启）。与引擎进程
+    # python -m trading 顶部 load_dotenv(override=True) 同口径。
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
     p = argparse.ArgumentParser(description="Quanter 引擎原子重启（唯一入口）")
     p.add_argument("action", choices=["restart", "status"])
     p.add_argument("--yes", action="store_true",

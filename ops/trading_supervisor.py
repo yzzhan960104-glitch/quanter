@@ -211,6 +211,17 @@ def stop(port: int = DEFAULT_PORT, yes: bool = False) -> int:
     if not yes:
         print("dry-run：加 --yes 才执行 taskkill /F /T")
         return 0
+    # 08-17 修复：树成员全集（根 + 全部子进程）——引擎 pid/lock 文件由**工作子进程**
+    # 写（uvicorn 父进程只孵化），下方清理判定用树根比对会漏（31116≠21292 → pid
+    # 残留 → start() 前置三合一判「pid 文件存在但端口无监听」拒启，08-17 实弹卡停机态）。
+    import psutil as _ps
+    _tree_pids: set = set(pids)
+    for p in procs:
+        try:
+            _proc = _ps.Process(p["pid"])
+            _tree_pids |= {c.pid for c in _proc.children(recursive=True)}
+        except (_ps.NoSuchProcess, _ps.AccessDenied):
+            pass
     for pid in pids:
         # taskkill 在本机对巨型引擎树会 OOM（08-06 实测）→ 先试 taskkill，rc≠0 降级
         # Stop-Process -Force（单进程；子进程由引擎父退出自然收编/孤儿由下次巡检清理）。
@@ -233,7 +244,7 @@ def stop(port: int = DEFAULT_PORT, yes: bool = False) -> int:
         # 并让 start() 误判「引擎已在运行」。锁由 OS 自动释放，无需清 .lock。
         if port_holder_pid(port) is None:
             _pf = pid_file_owner()
-            if _pf == pid:
+            if _pf in _tree_pids:
                 from trading.single_instance import _pid_path
                 try:
                     _pid_path(_session_id()).unlink(missing_ok=True)
