@@ -94,16 +94,23 @@ def main(argv: list = None) -> int:
         elif args.cmd == "promote":
             _promote(db, args.experiment_id, weight=args.weight, operator=_OPERATOR, now=_now())
             print(f"promoted {args.experiment_id} weight={args.weight}")
-            # ADR-16 修订（2026-08-17）：影子期闸移除后新实验上线只播报不拦截——
-            # 同步 asyncio.run（CLI 短命进程，fire_and_forget 的 daemon 线程来不及发）；
-            # 播报失败不阻断 promote 返回码（通知是尽力而为的知情通道）。
+            # ADR-16 修订（2026-08-17）：影子期闸移除后新实验上线只播报不拦截。
+            # Review 修复：必须先 build_default_manager() 装配——CLI 独立进程的
+            # get_default() 是裸单例（零通道），不装配时 notify 静默空转且 except 不
+            # 触发（表面完全正常）。同步 asyncio.run（CLI 短命进程，fire_and_forget
+            # 的 daemon 线程来不及发）；通道非空断言 + 播报失败均不阻断 promote 返回码。
             try:
                 import asyncio as _aio
-                from infra.notifier import NotificationManager
-                _aio.run(NotificationManager.get_default().notify_risk_event(
-                    f"实验上线：{args.experiment_id} → ACTIVE（weight={args.weight}）——"
-                    f"影子期闸已移除（ADR-16 修订），新参数即刻生效；"
-                    f"如需缓冲请 risk_ctrl block on", "WARN"))
+                from infra.notifier import NotificationManager, build_default_manager
+                build_default_manager()   # 幂等装配（读 .env 钉钉配置建通道）
+                _mgr = NotificationManager.get_default()
+                if not _mgr._channels:
+                    print("（⚠ 上线播报未发：钉钉通道未装配（查 .env DINGTALK_* 配置）——promote 已成功）")
+                else:
+                    _aio.run(_mgr.notify_risk_event(
+                        f"实验上线：{args.experiment_id} → ACTIVE（weight={args.weight}）——"
+                        f"影子期闸已移除（ADR-16 修订），新参数即刻生效；"
+                        f"如需缓冲请 risk_ctrl block on", "WARN"))
             except Exception:
                 print("（上线播报发送失败，promote 本身已成功）")
         elif args.cmd == "set-weight":

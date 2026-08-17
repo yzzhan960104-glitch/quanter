@@ -1351,13 +1351,18 @@ class TradingEngine:
         # 个股止损/超时强平对存量持仓完全不生效（只剩预挂 TP 单 + 组合熔断 + pre_open
         # 超期兜底）。补：按当前真实持仓反查各自最新 SIGNAL meta（exec_params 定终身，
         # 今日 SIGNAL 已覆盖的 sym 不重查不覆盖）。
+        # C-1 修复（review 2026-08-17 晚）：网关持仓查询的真实方法面是
+        # ``_fetch_broker_positions``（broker/base.py:99 抽象契约；原误写 query_positions
+        # ——全库不存在该方法，生产 hasattr 恒 False 致本段静默空转）。返回
+        # {sym: {volume,...}}（tradable_only 默认滤 T+1 冻结仓，与 monitor 的「只动
+        # 可卖仓」同口径）；未连接/锁定时 raise → 下方 except 兜底。
         try:
-            _pos_raw_sl = (await gw.query_positions()
-                           if (gw is not None and hasattr(gw, "query_positions")) else {})
+            _pos_raw_sl = (await gw._fetch_broker_positions()
+                           if (gw is not None and hasattr(gw, "_fetch_broker_positions")) else {})
         except Exception:
             # 反查失败不炸本轮（今日计划路径不受影响）——裸奔风险由下一轮 30s 重试收敛；
             # 持续失败由 gw 健康闸/行情黑屏告警兜底。
-            logger.exception("_stoploss 持仓反查 query_positions 失败（本轮仅今日计划覆盖）")
+            logger.exception("_stoploss 持仓反查 _fetch_broker_positions 失败（本轮仅今日计划覆盖）")
             _pos_raw_sl = {}
         _missing_syms: set[str] = set()
         for _hsym, _hpos in (_pos_raw_sl or {}).items():
@@ -1372,8 +1377,17 @@ class TradingEngine:
             for sig in _state_store.list_active_holding_signals(
                     _aid_sl, sorted(_missing_syms)):
                 _inject_signal_meta(sig, with_pending=False)
-            logger.info("_stoploss 持仓反查注入 %d 个存量持仓的止损监控（候选 %d）",
-                        len(set(monitor_ctx) - _before), len(_missing_syms))
+            _n_injected = len(set(monitor_ctx) - _before)
+            # M-4（review）：有候选持仓却一个都没注入（SIGNAL 缺失/meta 不全）→ 升 WARN
+            # 让「反查没接上」可观测，杜绝静默空转复发。
+            if _n_injected == 0:
+                logger.warning(
+                    "_stoploss 持仓反查 0 注入（候选 %d 个持仓无可用 SIGNAL meta——"
+                    "老数据缺 neckline/atr/tp 字段或 meta 损坏），这些持仓本日无 "
+                    "decide_exit 主路径覆盖", len(_missing_syms))
+            else:
+                logger.info("_stoploss 持仓反查注入 %d 个存量持仓的止损监控（候选 %d）",
+                            _n_injected, len(_missing_syms))
 
         # M2 StopLossContext 收口（2026-08-15）：三 map 装箱单参传递——「空 dict → None」
         # 归一移至 monitor 解包处（语义等价，见 stop_loss_monitor 体内 M2 注释）。

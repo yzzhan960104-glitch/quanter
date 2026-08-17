@@ -111,8 +111,11 @@ def build_orders_from_signals(
     #   信号 exec_params（实验参数定终身） > stop_cfg（env 兜底） > 内置缺省。
     # 老信号（exec_params=None，测试构造/历史重放）零变化走 stop_cfg（向后兼容）。
     def _pick(ep: dict, key: str, default):
-        v = ep.get(key)
-        return v if v is not None else default
+        # Review 修复（I-3）：键存在性判断而非 None 判断——实验显式配 None（如
+        # cancel_thresh_mult=None=不撤单放飞，backtest.py:64 合法语义）必须原样保留；
+        # `v if v is not None else default` 会把它静默 fallback 成 env 值（计划侧
+        # 「放飞」vs 巡检侧 ep.get(key, base)「撤单」的分叉——正是本批要消灭的 bug 型）。
+        return ep[key] if key in ep else default
 
     # env/内置缺省基线（C1：stop_atr_mult 兜底从 2.0 幽灵默认收敛到 PRICE_LEVEL_DEFAULTS）
     base_stop_mult = stop_cfg.get("stop_atr_mult", PRICE_LEVEL_DEFAULTS["stop_atr_mult"])

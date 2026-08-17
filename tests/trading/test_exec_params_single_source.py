@@ -82,6 +82,19 @@ def test_partial_exec_params_fills_from_env():
     assert po.max_wait == 5                                   # env 兜底
 
 
+def test_explicit_none_preserved_not_fallback():
+    """review I-3：实验显式配 None（cancel_thresh_mult=None=不撤单放飞）原样保留。
+
+    原 ``v if v is not None else default`` 会静默 fallback 成 env 1.0——计划侧「放飞」
+    vs 巡检侧「撤单」的分叉，正是单源收敛要消灭的 bug 型。
+    """
+    po = _build(_sig({"cancel_thresh_mult": None}))
+    assert po.cancel_on is None          # 放飞语义（不撤单），非 env 1.0H 阈值
+    # 键完全缺省仍走 env 兜底（两语义并存不矛盾）
+    po2 = _build(_sig({}))
+    assert po2.cancel_on == pytest.approx(NECK + 1.0 * H)
+
+
 def test_signal_to_dict_carries_exec_params():
     """序列化（meta 落盘链）带 exec_params。"""
     d = signal_to_dict(_sig(EXP_PARAMS))

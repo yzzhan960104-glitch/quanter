@@ -1462,6 +1462,30 @@ def get_pending_orders(account_id: str, *, db_path: str | None = None) -> list[d
     return [dict(r) for r in rows]
 
 
+def get_open_buy_amount(account_id: str, *, db_path: str | None = None) -> float:
+    """未终态**买入**委托占额合计（总仓位额度扣减基数 · ADR-16）。
+
+    物理意图（review I-2 修复）：pre_open 总仓位额度原只扣「已成交市值 + 本轮已挂」，
+    当日更早挂出的未成交买单（max_wait 窗口内持续有效）与 trigger_pre_open_once 补挂
+    路径均不计入 → 名义敞口可击穿 max_total_position。本函数把未终态 buy 委托的
+    **剩余未成交部分**（qty−filled_qty）×price 计入额度基数（成交部分已体现在
+    market_value，不重复计）。卖出委托不减额度（退出方向不占增量额度）。
+    """
+    db_path = db_path or _DEFAULT_DB
+    with _connect(db_path) as con:
+        rows = con.execute(
+            "SELECT qty, price, filled_qty FROM \"order\" "
+            "WHERE account_id=? AND side='buy' AND state IN ({})".format(
+                _ACTIVE_STATE_PLACEHOLDERS),
+            (account_id, *_ACTIVE_ORDER_STATES)
+        ).fetchall()
+    total = 0.0
+    for r in rows:
+        remaining = float(r["qty"]) - float(r["filled_qty"] or 0.0)
+        total += max(remaining, 0.0) * float(r["price"])
+    return total
+
+
 def get_trade_plan(trade_id: str, *, db_path: str | None = None) -> dict | None:
     """从 trade_event SIGNAL 行的 meta 读计划参数（stop_price/tp1/take_profit/atr 等）。
 
@@ -1874,9 +1898,11 @@ def list_active_holding_signals(account_id: str, symbols: list[str] | set[str],
     对齐回测 simulate_exit 静态 cfg 语义）。
 
     取数口径：每 symbol 取 event_id **最大**的 SIGNAL 行（最新计划口径——8 日 cooldown
-    后 eod 重产新信号时，新价位覆盖旧的，与「今日 SIGNAL 优先」合并语义一致；调用方
-    先用今日 SIGNAL 填充、本函数只补漏）。meta 解析失败/None 跳过（同
-    list_signals_with_meta_by_plan_date 保守口径）。
+    后 eod 重产新信号时，监控价位随之漂到新形态，**非入场口径定终身**（与「今日 SIGNAL
+    优先」合并语义一致；调用方先用今日 SIGNAL 填充、本函数只补漏）。已知边界（review
+    M-3，接受现状）：不校验该 SIGNAL 的确认态——新 SIGNAL 被人审 VETO 后其价位仍可能
+    接管老仓位监控（VETO 语义是拦新单非清存量；价位来自同一形态几何，方向性无偏）。
+    meta 解析失败/None 跳过（同 list_signals_with_meta_by_plan_date 保守口径）。
 
     Args:
         account_id: 账户（trade_event.account_id 同口径）。
@@ -1973,16 +1999,21 @@ def resolve_risk_control(db_path: str | None = None) -> dict:
         if raw["block_new_orders"] in ("0", "1"):
             block = raw["block_new_orders"] == "1"
         else:
+            # Review 修复（I-4 · CR-4 同型）：值损坏视同拦截（fail-closed）——人工想拦
+            # 却写错格式时，最坏组合是系统静默放行。宁可误拦人工拨回。
             degraded = True
-            logger.warning("risk_control block_new_orders=%r 非法（合法 0|1），按默认不拦",
+            block = True
+            logger.warning("risk_control block_new_orders=%r 非法（合法 0|1），视同拦截",
                            raw["block_new_orders"])
     max_pos = 1.0
     if raw["max_total_position"] is not None:
         try:
             max_pos = float(raw["max_total_position"])
         except (TypeError, ValueError):
+            # 同 I-4：值损坏收紧到 0.0（全跳），不沿用宽松默认 1.0（放开方向）。
             degraded = True
-            logger.warning("risk_control max_total_position=%r 非数字，按默认 1.0",
+            max_pos = 0.0
+            logger.warning("risk_control max_total_position=%r 非数字，视同 0（全跳）",
                            raw["max_total_position"])
     return {"block": block, "max_pos": max_pos, "degraded": degraded}
 

@@ -8,7 +8,7 @@
     decide_exit 主路径实际只覆盖成交当日。
 
 修复契约：
-    1. 按当前真实持仓（gw.query_positions volume>0）反查最新 SIGNAL meta 注入三 map
+    1. 按当前真实持仓（gw._fetch_broker_positions volume>0）反查最新 SIGNAL meta 注入三 map
        （今日 SIGNAL 已覆盖的 sym 不重查不覆盖——新计划优先）；
     2. 持仓反查不塞 pending_ctx（cancel_on 是入场时挂单阈值，今日无该 pending 单）；
     3. decide_cfg per-signal：SIGNAL.meta.exec_params（实验口径定终身）> env 基线；
@@ -55,7 +55,7 @@ def _run_stoploss(monkeypatch, tmp_path, *, signals, positions, holding_meta):
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
-    gw.query_positions = AsyncMock(return_value=positions)
+    gw._fetch_broker_positions = AsyncMock(return_value=positions)
 
     with patch("trading.engine.get_gateway", return_value=gw), \
          patch("trading.engine.calendar") as cal, \
@@ -133,7 +133,7 @@ def test_stoploss_today_signal_takes_priority_over_backfill(monkeypatch, tmp_pat
     gw = MagicMock()
     gw._connected = True
     gw.is_client_ready.return_value = True
-    gw.query_positions = AsyncMock(return_value={HOLDING_SYM: {"volume": 100}})
+    gw._fetch_broker_positions = AsyncMock(return_value={HOLDING_SYM: {"volume": 100}})
     with patch("trading.engine.get_gateway", return_value=gw), \
          patch("trading.engine.calendar") as cal, \
          patch("trading.engine.stop_loss_monitor", new=AsyncMock()) as mon, \

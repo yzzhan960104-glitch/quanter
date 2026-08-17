@@ -91,8 +91,9 @@ def test_resolve_degrades_on_corrupt_value(risk_db):
                     ("block_new_orders", "yes", "2026-08-17T00:00:00"))
         con.execute("INSERT INTO risk_control(key, value, updated_at) VALUES(?, ?, ?)",
                     ("max_total_position", "abc", "2026-08-17T00:00:00"))
+    # review I-4：值损坏 fail-closed——block 视同拦截、max_pos 视同 0（非旧默认放开）
     r = state_store.resolve_risk_control()
-    assert r["block"] is False and r["max_pos"] == 1.0 and r["degraded"] is True
+    assert r["block"] is True and r["max_pos"] == 0.0 and r["degraded"] is True
 
 
 def test_cli_block_and_position(risk_db, capsys):
@@ -205,6 +206,7 @@ def _run_pre_open(eng, signals, gw=None):
         submit_mock.return_value = {"state": "SUBMITTED", "order_id": "1"}
         with patch("trading.phases.pre_open._state_store") as ss:
             ss.resolve_risk_control = state_store.resolve_risk_control  # 透传真身
+            ss.get_open_buy_amount = state_store.get_open_buy_amount    # 同上（额度基数走隔离真 DB）
             ss.list_signals_with_meta_by_plan_date.return_value = signals
             ss.build_trade_id.side_effect = lambda aid, sym, d: f"{aid}_{sym}_{d}"
             ss.get_account.return_value = {"account_id": "ACC"}
@@ -248,3 +250,33 @@ def test_pre_open_position_cap_skips_over_quota(pre_open_env):
     result2, submit2 = _run_pre_open(pre_open_env, _green_signals(), gw=gw)
     assert result2["submitted"] == 1 and result2.get("pos_capped") == 0
     submit2.assert_called_once()
+
+
+def test_pre_open_position_cap_counts_open_buy_orders(pre_open_env):
+    """review I-2：额度基数计入未终态买入委托——已有挂单占额时新单被跳过。
+
+    0.9×100000−49900=40100 名义额度，但 order 表有 39500 未终态买单占额
+    → 剩余 600 < 本单 1000 → 跳过（原实现只扣市值会放行 = 名义敞口击穿上限）。
+    """
+    import sqlite3
+    from trading.account import resolve_account_id
+    # 隔离库插 account + 未终态 buy 委托（直接 SQL，绕过 FSM 最小构造）。
+    # account_id 用 _resolve_account_id 真身口径（pre_open 额度查询走它，不对齐则查不到）
+    _aid = resolve_account_id()
+    db = state_store._DEFAULT_DB
+    with sqlite3.connect(db) as con:
+        con.execute("INSERT OR IGNORE INTO account(account_id, broker, created_at) "
+                    "VALUES(?, 'qmt', '2026-08-17')", (_aid,))
+        con.execute(
+            'INSERT INTO "order"(order_id, trade_id, account_id, trade_date, symbol, '
+            'side, purpose, qty, price, state) VALUES(?,?,?,?,?,?,?,?,?,?)',
+            ("o1", "t1", _aid, "2026-07-31", "600000.SH", "buy", "OPEN",
+             4000.0, 10.0, "SUBMITTED"))  # 4000×10 = 40000 占额
+    state_store.write_risk_control(max_total_position=0.9)
+    gw = MagicMock()
+    gw.query_asset = AsyncMock(return_value={
+        "total_asset": 100000.0, "cash": 50000.0, "market_value": 49900.0})
+    result, submit_mock = _run_pre_open(pre_open_env, _green_signals(), gw=gw)
+    # 40100 − open_buy(≈40000) ≈ 100 < 1000 → 跳过
+    assert result["submitted"] == 0 and result.get("pos_capped") == 1
+    submit_mock.assert_not_called()

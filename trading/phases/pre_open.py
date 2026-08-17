@@ -78,6 +78,7 @@ from trading.ports import EnginePorts
 # W1-A/T2-Task4：state_store 反查切断 → 顶部直接 import（底层叶子无环 · 整体 patch
 # engine._state_store 失效 → Task 8-19 迁 patch 物理路径）。
 from trading import clock, dynamic_whitelist, job_ledger
+from trading import position_book as _position_book   # review 修复：⑧ per-symbol max_holding 反查曾引用未导入名（每轮 NameError 退 env）
 from trading import state_store as _state_store
 # W1-A/T2-Task5：_resolve_account_id 反查切断 → 顶部直接 import trading.account
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
@@ -516,17 +517,29 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
                 _asset_rc = {}
         _total_rc = _asset_rc.get("total_asset")
         _mv_rc = _asset_rc.get("market_value")
-        if _total_rc is None or float(_total_rc) <= 0 or _mv_rc is None:
-            _msg = (f"pre_open 总仓位上限 {_rc['max_pos']:.0%} 生效但权益查询失败"
-                    f"（total_asset={_total_rc} market_value={_mv_rc}），fail-closed 跳过全部新单")
+        # Review 修复（I-2）：额度基数计入未终态买入委托的剩余占额（当日更早挂单/
+        # 补挂路径不再击穿上限）；DB 读异常与权益失败同口径 fail-closed（CR-4 同型）。
+        try:
+            _open_buy = _state_store.get_open_buy_amount(_resolve_account_id())
+        except Exception:
+            logger.exception("pre_open 总仓位检查 get_open_buy_amount 异常（fail-closed 全跳过）")
+            _open_buy = None
+        if (_total_rc is None or float(_total_rc) <= 0 or _mv_rc is None
+                or _open_buy is None):
+            _msg = (f"pre_open 总仓位上限 {_rc['max_pos']:.0%} 生效但权益/委托查询失败"
+                    f"（total_asset={_total_rc} market_value={_mv_rc} open_buy={_open_buy}），"
+                    f"fail-closed 跳过全部新单")
             logger.warning(_msg)
             if _mode() == "live":
                 _alert_critical(_msg)
+            # Review 修复（I-1）：必须带 skipped 键——wrapper 五分支据它记台账 skipped
+            # （C-8 窗口内可重试）；无键会落 else→done，瞬时故障被永久关闭重试。
             return {"submitted": 0, "rejected": 0, "total": len(signals),
-                    "mode": _mode(), "pos_check_failed": True}
-        _pos_quota = float(_total_rc) * _rc["max_pos"] - float(_mv_rc)
-        logger.info("pre_open 总仓位额度：%.0f%%×%.2f−%.2f = %.2f（本轮逐单扣减）",
-                    _rc["max_pos"], float(_total_rc), float(_mv_rc), _pos_quota)
+                    "mode": _mode(), "pos_check_failed": True,
+                    "skipped": "总仓位检查权益/委托查询失败（fail-closed 全跳过）"}
+        _pos_quota = float(_total_rc) * _rc["max_pos"] - float(_mv_rc) - _open_buy
+        logger.info("pre_open 总仓位额度：%.0f%%×%.2f−%.2f−%.2f = %.2f（已扣未终态买单，本轮逐单扣减）",
+                    _rc["max_pos"], float(_total_rc), float(_mv_rc), _open_buy, _pos_quota)
 
     # ④ 逐单挂单 + raise 兜底（scope #7）
     from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
