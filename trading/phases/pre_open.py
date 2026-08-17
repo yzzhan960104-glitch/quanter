@@ -440,7 +440,24 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     # 文件覆盖写 + 跨日传递有竞态/崩溃丢失风险，且 holding_days 计算已可通过 position_book
     # 任意时刻现算（无状态，幂等）→ 删文件函数全收口到 pre_open 单点。
     _asof = clock.pretrade_date(clock.today())  # 基准日=上一交易日（断点-2，零漂移）
-    _expired = _scan_expired_positions(_asof, _trade_cfg()["max_holding"])
+    # ⑧ per-symbol max_holding（单源收敛 · 2026-08-17）：新持仓按入场 SIGNAL.meta.
+    # exec_params（实验值定终身，如 20）；老持仓（无快照）走 env 缺省（15）自然过渡。
+    # 反查失败（DB/账本异常）→ 整体退 int 全局口径（现行为，绝不因反查失败不扫超期）。
+    _mh_env = int(_trade_cfg()["max_holding"])
+    _mh = _mh_env
+    try:
+        _entry_syms = list(_position_book.get_entry_dates().keys())
+        if _entry_syms:
+            _mh_map = {s: _mh_env for s in _entry_syms}   # env 缺省打底
+            for _m in _state_store.list_active_holding_signals(
+                    _resolve_account_id(), _entry_syms):
+                _ep = _m.get("exec_params")
+                if isinstance(_ep, dict) and isinstance(_ep.get("max_holding"), (int, float)):
+                    _mh_map[_m["symbol"]] = int(_ep["max_holding"])
+            _mh = _mh_map
+    except Exception:
+        logger.exception("pre_open per-symbol max_holding 反查失败，退 env 全局口径 %d", _mh_env)
+    _expired = _scan_expired_positions(_asof, _mh)
     if _expired:
         await _close_expired_positions(gw, _expired)
 

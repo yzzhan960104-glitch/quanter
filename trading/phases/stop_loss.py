@@ -765,8 +765,13 @@ async def _check_portfolio_loss_limit(gw: Any, throttle: PortfolioBreakerThrottl
 # pre_open / tests 已直 import 本模块物理真身，旧 patch 路径不存在。）
 
 
-def scan_expired_positions(today: str, max_holding: int) -> list[dict]:
+def scan_expired_positions(today: str, max_holding: "int | dict[str, int]") -> list[dict]:
     """扫超期持仓（holding_days > max_holding 的 {symbol→entry_date}）。
+
+    max_holding 形态（2026-08-17 单源收敛 · per-symbol）：int=全局口径（历史行为零变化）；
+    dict[str,int]=per-symbol——新持仓按入场 SIGNAL.meta.exec_params（实验值定终身，
+    如 20），老持仓由**调用方**补 env 缺省进 map；dict 缺键的 symbol 保守跳过不标
+    （无参数不盲平，兜底延后一日无害）。
 
     物理意图（plan Task 8 · 对齐回测 MAX_HOLDING 超时平仓）：
         回测里成交后 max_holding 日未达任一止盈即收盘卖剩余；实盘对齐——pre_open 现算
@@ -796,13 +801,19 @@ def scan_expired_positions(today: str, max_holding: int) -> list[dict]:
     # import（测试 monkeypatch position_book.get_entry_dates 属性级 patch · 共享模块对象命中）。
     expired: list[dict] = []
     for sym, entry_date in _position_book.get_entry_dates().items():
+        if isinstance(max_holding, dict):
+            mh = max_holding.get(sym)
+            if mh is None:
+                continue   # per-symbol map 缺键：保守不标（见 docstring）
+        else:
+            mh = max_holding
         holding_days = _trading_days_between(entry_date, today)
         # I-4：`>` 严格大于（第 max_holding+1 日才标超期）——兜底 monitor 漏掉的标的，
         # 不与 monitor is_last `>=`（第 max_holding 日市价强平）同日冲突（防卖空）。详见上方 docstring。
-        if holding_days > max_holding:
+        if holding_days > mh:
             expired.append({
                 "symbol": sym, "entry_date": entry_date,
-                "holding_days": holding_days, "max_holding": max_holding,
+                "holding_days": holding_days, "max_holding": mh,
             })
     return expired
 

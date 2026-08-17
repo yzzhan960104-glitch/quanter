@@ -154,8 +154,33 @@ def test_stoploss_today_signal_takes_priority_over_backfill(monkeypatch, tmp_pat
 
 
 # ============================================================================
+# ⑧ scan_expired_positions per-symbol max_holding（新 20 / 老 15 过渡）
+# ============================================================================
+def test_scan_expired_per_symbol_dict(monkeypatch):
+    """dict 口径：新持仓（20）窗口内不标、老持仓（15）按 15 标、缺键跳过。"""
+    from trading.phases import stop_loss as _sl
+    monkeypatch.setattr(_sl._position_book, "get_entry_dates",
+                        lambda: {"NEW.SH": "2099-01-01", "OLD.SH": "2099-01-01",
+                                 "NOCFG.SH": "2099-01-01"})
+    # holding_days 桩确定性返 16（test_engine.py 边界用例同款范式，避开交易日历漂移）
+    monkeypatch.setattr(_sl, "_trading_days_between", lambda s, e: 16)
+    expired = _sl.scan_expired_positions(
+        "2099-01-21", {"NEW.SH": 20, "OLD.SH": 15})
+    syms = [e["symbol"] for e in expired]
+    assert syms == ["OLD.SH"]                       # 16>15 标，16<=20 窗口内
+    assert expired[0]["max_holding"] == 15          # per-symbol 值透传（播报/日志用）
+    # 缺键（NOCFG.SH）保守跳过——即使超任何口径也不标
+    expired2 = _sl.scan_expired_positions("2099-01-21", {"NEW.SH": 20})
+    assert expired2 == []
+    # int 口径（历史行为）零变化
+    expired3 = _sl.scan_expired_positions("2099-01-21", 15)
+    assert set(e["symbol"] for e in expired3) == {"NEW.SH", "OLD.SH", "NOCFG.SH"}
+
+
+# ============================================================================
 # state_store.list_active_holding_signals 单测（真 DB）
 # ============================================================================
+
 def test_list_active_holding_signals_picks_latest(tmp_path, monkeypatch):
     """同 symbol 多条 SIGNAL → 取 event_id 最大（最新计划口径）。"""
     import sqlite3
