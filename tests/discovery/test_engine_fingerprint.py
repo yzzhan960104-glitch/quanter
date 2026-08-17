@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""engine_hash 指纹单源守护（P1-3 覆盖守卫 + 单源委托守护 + 退役搬迁等价）。
+"""engine_hash 指纹单源守护（P1-3 覆盖守卫 + 单源委托守护）。
 
 出身：2026-08-18 compute_unit 退役（ADR-17）时自 tests/compute_unit/test_hashes.py
 迁入——内核覆盖守卫原样保留；双实现一致性断言转型为单源委托守护（防未来再内联
-出漂移副本，2026-08-13 三份实现不一致事故的防线）。
+出漂移副本，2026-08-13 三份实现不一致事故的防线）。退役搬迁等价断言（旧
+compute_unit.hashes ↔ fingerprint 输出恒等，G1 门 ce16cc4ee4de 留证）已完成使命，
+随 T2 删包移除。
 """
 from discovery import fingerprint
 
@@ -35,11 +37,3 @@ def test_runner_and_cli_delegate_to_fingerprint():
     from discovery.cli import _engine_hash as cli_hash
     assert runner_hash() == fingerprint.engine_hash()
     assert cli_hash() == fingerprint.engine_hash()
-
-
-def test_migration_equivalence_compute_unit_hashes():
-    """退役搬迁等价断言（仅 T1→T2 过渡期存在，T2 删包时随包移除）：
-    discovery.fingerprint 与 compute_unit.hashes 输出逐字节相等——老 trial 可比性
-    不受退役影响（退役 spec G1 门，留证值 ce16cc4ee4de）。"""
-    from compute_unit.hashes import _engine_hash as legacy
-    assert legacy() == fingerprint.engine_hash()
