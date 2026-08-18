@@ -751,6 +751,28 @@ def test_order_event_rejected_alerts_in_live(db, monkeypatch):
         msg = alert.call_args[0][0]
         assert "300381.SZ" in msg and "证券交易未初始化" in msg
 
+    # 风暴熔断（2026-08-18）：5 连拒自动拨 block——一次风暴只拨一次
+    import trading.order_state as _os
+    _os._reject_storm_ts.clear()
+    _os._reject_storm_last_fire = 0.0
+    with patch("trading.order_state._mode", return_value="live"),          patch("trading.state_store.write_risk_control") as wr,          patch("trading.order_state._alert_critical"):
+        for i in range(5):
+            _os._note_reject_for_storm()
+        assert wr.call_count == 1 and wr.call_args.kwargs["block_new_orders"] is True
+        # 冷却期内再积一波：不重拨不重告警（block 已拨幂等）
+        for i in range(5):
+            _os._note_reject_for_storm()
+        assert wr.call_count == 1
+    _os._reject_storm_ts.clear()
+    _os._reject_storm_last_fire = 0.0
+
+    # 低于阈值不拨
+    with patch("trading.state_store.write_risk_control") as wr2:
+        for i in range(4):
+            _os._note_reject_for_storm()
+        wr2.assert_not_called()
+    _os._reject_storm_ts.clear()
+
     # dry_run：不告警
     state_store.update_order_state(oid, "SUBMITTED")
     with patch("trading.order_state._mode", return_value="dry_run"),          patch("trading.order_state._alert_critical") as alert2:

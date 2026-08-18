@@ -75,6 +75,21 @@ from trading.types.order_state import OrderState
 # W1-A/T2-Task4：_mode / _alert_critical 反查切断 → 同 critical 顶部直接 import
 # （patch engine._mode / engine._alert_critical 失效 → Task 8-19 迁 monkeypatch critical._mode 等）。
 from trading.critical import _CriticalHalt, _mode, _alert_critical
+
+# ── 拒单风暴自动熔断（2026-08-18 · 11 单全拒实弹）────────────────────────────
+# 物理：柜台异步 REJECTED 是唯一知情点（见 advance_order_state_from_status 内告警注释）；
+# 短窗多单连拒 = 柜台/会话级故障（如"证券交易未初始化"），继续挂单只会产出更多
+# 废单。达到阈值自动拨 risk_control.block_new_orders=1（ADR-16 单向安全：只拦
+# 增量买入，卖出/退出永不拦），人工排查后 `risk_ctrl block off` 解除。
+# 进程内单调钟滑动窗（重启复位可接受——风暴本身在进程存活期内）。
+from collections import deque as _deque
+import time as _time
+
+_REJECT_STORM_WINDOW_S = 60.0     # 滑动窗口
+_REJECT_STORM_THRESHOLD = 5       # 窗口内拒单数阈值（11 单全拒场景 100ms 内达峰）
+_reject_storm_cooldown_s = 60.0   # 触发后冷却（同窗口内不重拨不重告警）
+_reject_storm_ts: "deque[float]" = _deque()
+_reject_storm_last_fire: float = 0.0
 # W1-A/T2-Task5：_resolve_account_id 反查切断 → 顶部直接 import trading.account
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
 from trading.account import resolve_account_id as _resolve_account_id
@@ -579,6 +594,35 @@ async def handle_order_update(ports, update: Mapping[str, Any]) -> None:
             logger.exception("成交通知发送失败 symbol=%s", symbol)
 
 
+
+def _note_reject_for_storm() -> None:
+    """拒单计数入滑动窗；达阈值自动拨 block_new_orders=1（一次风暴只拨一次）。
+
+    Why write 失败不抛：本函数在回报回调链上，熔断动作失败不应炸回调（告警兜底）。
+    Why 触发后清空窗口：防同风暴后续拒单每单重拨+重告警（block 幂等但告警会刷屏）。
+    """
+    now = _time.monotonic()
+    _reject_storm_ts.append(now)
+    while _reject_storm_ts and now - _reject_storm_ts[0] > _REJECT_STORM_WINDOW_S:
+        _reject_storm_ts.popleft()
+    if len(_reject_storm_ts) < _REJECT_STORM_THRESHOLD:
+        return
+    _reject_storm_ts.clear()
+    global _reject_storm_last_fire
+    if now - _reject_storm_last_fire < _reject_storm_cooldown_s:
+        return   # 冷却期内：block 已拨（幂等），不再重复告警刷屏
+    _reject_storm_last_fire = now
+    try:
+        from trading.state_store import write_risk_control
+        write_risk_control(block_new_orders=True)
+        _alert_critical(
+            f"🚨 拒单风暴：{_REJECT_STORM_WINDOW_S:.0f}s 内 ≥{_REJECT_STORM_THRESHOLD} 单被柜台拒绝，"
+            f"已自动拨 block_new_orders=1（只拦增量买入，卖出/退出不受影响）。"
+            f"排查柜台/客户端状态后执行 `python -m trading.risk_ctrl block off` 解除")
+    except Exception:
+        logger.exception("拒单风暴自动拨 block 失败（上方告警已发，请人工 risk_ctrl block on）")
+
+
 def order_direction(ports, order_id: str) -> Optional[str]:
     """从 ``gw._orders`` 查订单方向（BUY/SELL）。
 
@@ -727,5 +771,6 @@ def advance_order_state_from_status(ports, update: Mapping[str, Any]) -> None:
                 _alert_critical(
                     f"⚠ 委托被柜台拒绝 {row.get('symbol', '?')}（{old_state}→REJECTED）："
                     f"{status_msg}——查 QMT 报警明细与客户端状态；该标的当日不重挂（G6）")
+                _note_reject_for_storm()
     except Exception:
         logger.exception("order 状态推进失败 lookup=%s（软降级，下个事件补推进）", lookup)
