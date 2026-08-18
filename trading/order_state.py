@@ -716,5 +716,16 @@ def advance_order_state_from_status(ports, update: Mapping[str, Any]) -> None:
                 "订单状态推进 oid=%s symbol=%s %s → %s status_msg=%r",
                 row["broker_oid"] or lookup, row.get("symbol", "?"),
                 old_state, new_state, status_msg)
+            # 2026-08-18 观测缺口修复（11 单全拒钉钉零告警实弹）：pre_open 的
+            # submitted 统计在时序上先于柜台异步拒单回报（09:22:00.05 挂完→
+            # 09:22:00.13 回报全拒），M4 漏挂/partial-rejected 两告警条件均不触
+            # 发——异步 REJECTED 是唯一知情点，live 必须叫醒人工（含完整拒因；
+            # 引擎日志的 status_msg 截断与告警无关，此处全文透传）。
+            if (new_state == "REJECTED"
+                    and old_state in ("PENDING", "SUBMITTED", "PARTIAL")
+                    and _mode() == "live"):
+                _alert_critical(
+                    f"⚠ 委托被柜台拒绝 {row.get('symbol', '?')}（{old_state}→REJECTED）："
+                    f"{status_msg}——查 QMT 报警明细与客户端状态；该标的当日不重挂（G6）")
     except Exception:
         logger.exception("order 状态推进失败 lookup=%s（软降级，下个事件补推进）", lookup)

@@ -721,6 +721,45 @@ def test_order_event_rejected_logs_status_msg(db, caplog):
     assert any("订单状态推进" in r.getMessage() and "REJECTED" in r.getMessage()
                and "价格超出涨跌停范围" in r.getMessage() for r in caplog.records)
 
+
+def test_order_event_rejected_alerts_in_live(db, monkeypatch):
+    """2026-08-18 观测缺口：live 异步 REJECTED 必须 _alert_critical（11 单全拒零告警实弹）。
+
+    时序背景：pre_open 的 submitted 统计先于柜台拒单回报（09:22:00.05 挂完 →
+    .13 回报全拒），M4/partial-rejected 告警条件均不触发——本回调是唯一知情点。
+    dry_run 不告警（守卫与既有范式一致）。
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from trading import state_store
+    from trading.critical import _mode
+
+    eng, gw = _make_real_chain_engine()
+    aid, real = "TEST_ACC", 987654
+    oid = "2026-08-18_300381.SZ_OPEN_1"
+    state_store.upsert_account(aid, broker="qmt")
+    state_store.insert_order(oid, f"{aid}_300381.SZ_2026-08-18", aid, "2026-08-18",
+                             "300381.SZ", "buy", "OPEN", 7900, 6.33,
+                             broker_oid=str(real), state="SUBMITTED")
+    with patch("trading.order_state._mode", return_value="live"),          patch("trading.order_state._alert_critical") as alert:
+        asyncio.run(_pump(gw, lambda: gw.on_stock_order(SimpleNamespace(
+            order_id=real, stock_code="300381.SZ", order_status=57, order_type=23,
+            order_volume=7900, traded_volume=0, traded_price=0.0,
+            status_msg="[COUNTER][120141][证券交易未初始化][init_date=20260817,curr_date=20260818]"))))
+        alert.assert_called_once()
+        msg = alert.call_args[0][0]
+        assert "300381.SZ" in msg and "证券交易未初始化" in msg
+
+    # dry_run：不告警
+    state_store.update_order_state(oid, "SUBMITTED")
+    with patch("trading.order_state._mode", return_value="dry_run"),          patch("trading.order_state._alert_critical") as alert2:
+        asyncio.run(_pump(gw, lambda: gw.on_stock_order(SimpleNamespace(
+            order_id=real, stock_code="300381.SZ", order_status=57, order_type=23,
+            order_volume=7900, traded_volume=0, traded_price=0.0,
+            status_msg="whatever"))))
+        alert2.assert_not_called()
+
 # ============================================================================
 # Task A3（live-mainchain-fixes）：方向反查 DB 优先 + 内存兜底
 # ============================================================================
