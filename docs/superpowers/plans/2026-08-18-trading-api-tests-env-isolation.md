@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **只动 tests/conftest.py 一个文件**；生产代码（config/auth/main）零改动。
-- **不破坏显式鉴权用例**：`tests/test_auth.py`、`tests/server/test_auth_read_cookie.py`、`tests/server/test_auth_fail_closed.py`、`tests/server/test_logs_sse_auth.py`、`tests/trading/test_main.py` 均在测试函数内显式 `monkeypatch.setenv("QUANTER_API_TOKEN", ...)`——同一 monkeypatch 实例后序生效，覆盖 autouse 默认（conftest.py:154-155 注释已声明该语义，本计划依赖它）。
+- **不破坏显式鉴权用例**：`tests/test_auth.py`、`tests/server/test_auth_read_cookie.py`、`tests/server/test_auth_fail_closed.py`、`tests/server/test_logs_sse_auth.py`、`tests/trading/test_main.py` 均在测试函数内显式管理 `QUANTER_API_TOKEN`（setenv 测「已配 token」路径；勘误 2026-08-18 评审：test_auth.py:41、test_auth_fail_closed.py:43/:55、test_logs_sse_auth.py:91 实为 **delenv** 测「未配」路径——与 autouse delenv 幂等，语义无害，门 B 27 绿证实）——setenv 同一 monkeypatch 实例后序生效，覆盖 autouse 默认（conftest.py:154-155 注释已声明该语义，本计划依赖它）。
 - 全中文注释，Why 像素级（沿用该 fixture 现有注释块风格扩写）。
 - 分支 `fix/test-env-token-isolation-0818`（自 master 2881d0bc 切出，与 `debt/compute-unit-retirement-0818` 互不依赖、可独立合入）；file:line 基准 2026-08-18，实施前以符号名 re-verify。
 
@@ -32,17 +32,19 @@
 
 ### Task 1：`_isolate_trade_env` 扩面 QUANTER_API_TOKEN
 
-- [ ] `tests/conftest.py` `_isolate_trade_env`（现 ~L157-160）体内追加：
+- [x] `tests/conftest.py` `_isolate_trade_env`（现 ~L157-160）体内追加：
 
 ```python
     monkeypatch.delenv("QUANTER_API_TOKEN", raising=False)
 ```
 
-- [ ] 同步扩写该 fixture 头部注释块：标题从「治 eod_plan confirmed=True 误判」扩为兼治「test_trading_api 恒 401」；Why 补三行——`.env` 08-16 起配置 `QUANTER_API_TOKEN` → require_write「token 已配 + 无 Bearer → 401」分支拒 TestClient；本 delenv 强制测试态「token 未配置 + dry_run → 放行 + WARNING」（auth.py 开发态语义）；显式 setenv 同名变量的鉴权用例后序覆盖不受影响。
-- [ ] **验证门 A（对症）**：`python -m pytest tests/test_trading_api.py -q` → 9 failed → **9 passed**。
-- [ ] **验证门 B（不伤邻）**：`python -m pytest tests/test_auth.py tests/server/test_auth_read_cookie.py tests/server/test_auth_fail_closed.py tests/server/test_logs_sse_auth.py tests/trading/test_main.py -q` → 全绿（显式 token 用例语义不变）。
-- [ ] **验证门 C（全量）**：`python -m pytest tests/ -q` → 期望 **2013 passed / 0 failed / 1 skipped**（基线：修复前 2004 passed / 9 failed / 1 skipped，2026-08-18 master 实测）。
-- [ ] 提交：`fix(tests): conftest 隔离扩面 QUANTER_API_TOKEN——治 test_trading_api 9 用例本机带 .env 恒 401（config 模块级 load_dotenv 污染链，require_write 已配 token 分支拒无 Bearer TestClient）；显式 setenv 鉴权用例不受影响`
+- [x] 同步扩写该 fixture 头部注释块：标题从「治 eod_plan confirmed=True 误判」扩为兼治「test_trading_api 恒 401」；Why 补三行——`.env` 08-16 起配置 `QUANTER_API_TOKEN` → require_write「token 已配 + 无 Bearer → 401」分支拒 TestClient；本 delenv 强制测试态「token 未配置 + dry_run → 放行 + WARNING」（auth.py 开发态语义）；显式 setenv 同名变量的鉴权用例后序覆盖不受影响。
+- [x] **验证门 A（对症）**：`python -m pytest tests/test_trading_api.py -q` → 9 failed → **9 passed**。（留痕：2026-08-18 评审复跑 9 passed；AI 于干净 worktree+复制 `.env` 复现条件复跑同 9 passed）
+- [x] **验证门 B（不伤邻）**：`python -m pytest tests/test_auth.py tests/server/test_auth_read_cookie.py tests/server/test_auth_fail_closed.py tests/server/test_logs_sse_auth.py tests/trading/test_main.py -q` → 全绿（显式 token 用例语义不变）。（留痕：评审复跑 27 passed；AI worktree 复跑同 27 passed）
+- [x] **验证门 C（全量）**：`python -m pytest tests/ -q` → **2047 passed / 0 failed / 1 skipped / 10 deselected**（2026-08-18 评审复跑实测，主树带真实 `.env` 与运行态 DB 环境）。
+  - **勘误（2026-08-18 评审）**：原文「期望 2013 / 基线 2004 passed / 9 failed，master 实测」数字有误——2004 系退役分支（删 ~43 个 compute_unit 测试）上的实测误标为 master；master 真实基线 **2038 passed / 9 failed**，修复后 2047/0，恰 9 个失败转绿、其余全同（1 skipped / 10 deselected 不变）。
+  - **复现边界备注（AI 复核补充）**：在**缺 gitignored 运行态文件**（`experiment/experiments.db` 等）的干净 worktree 跑全量，`test_auto_publish_guard_works_with_real_active_note` 等 1-5 例会**环境性失败**（读不到真实 ACTIVE 实验 → auto_publish guard 放行）——已实证与本文修复无关：基点 `2881d0bc` 同败、主树同测 1 passed。全量 0 失败口径须在带真实运行态的主树环境验证。
+- [x] 提交：`fix(tests): conftest 隔离扩面 QUANTER_API_TOKEN——治 test_trading_api 9 用例本机带 .env 恒 401（config 模块级 load_dotenv 污染链，require_write 已配 token 分支拒无 Bearer TestClient）；显式 setenv 鉴权用例不受影响`（= commit `510b0085`，只动 tests/conftest.py +14/-2）
 
 ## 明确不做（Out of Scope，候选后续工单）
 
@@ -53,3 +55,11 @@
 ## 验收口径
 
 带真实 `.env` 的本机跑全量套件 0 失败即收官；无 `.env` 环境行为不变（delenv 对不存在的变量是 no-op）。
+
+## 执行回填与勘误（2026-08-18 评审双轴收尾）
+
+- 评审结论：Standards 轴 0 发现（可合入）；Spec 轴 3 发现，全为文档收尾、代码本体无缺陷。三处处置：
+  ① 6 个 checkbox 回填 + 三门验证留痕（门 A 9 绿 / 门 B 27 绿——评审与 AI 复跑双重实证；门 C 2047/0——评审于主树实测）；
+  ② 门 C 基线数字勘误：2004→2038（2004 系退役分支数字误标 master）；
+  ③ 约束节 setenv 表述勘误：5 文件中 3 处（test_auth.py:41、test_auth_fail_closed.py:43/:55、test_logs_sse_auth.py:91）实为 delenv 测「未配」路径，与 autouse delenv 幂等、语义无害。
+- AI 复核补充：干净 worktree 跑全量会因缺 gitignored 运行态 DB 出 1-5 例环境性失败（基点同败、主树同测绿，与本修复无关）——已注记于门 C 复现边界，防后人困惑。
