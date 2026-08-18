@@ -6,3 +6,12 @@ data_lake/ = 物理存储层（Parquet 数据湖）。
   - 数据集资产元信息（source/market/granularity/script/freshness）单一真相源 =
     config/registry.py 的 DATASET_REGISTRY + TUSHARE_DATASETS。
   - 多湖路径注册 = config/data.py 的 LAKE_CONFIG["lakes"]。
+
+================================================================
+数据不入 git/LFS（2026-08-18 摘除裁决）：
+  - a_shares_daily.parquet（~460MB/版）曾走 LFS 版本化，每交易日新增一个全量
+    快照对象（~9GB/月）不可持续，已从 git 摘除（.gitignore 全量忽略 data_lake/*）。
+  - 重建：跑 ops/data_pipeline.py 日频增量（Tushare 主源）即可重建到最新；
+    完整历史重建见 config/registry.py DATASET_REGISTRY 各数据集的 script 声明。
+  - 备份：走 git 外通道（外置盘/网盘/rsync）；历史 10 个 LFS 快照对象保留在
+    远端可追溯，不再增长。
