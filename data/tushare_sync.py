@@ -538,6 +538,12 @@ def _sync_single(key, api, fields, date_col, out, cfg=None, start=None, end=None
     if (cfg or {}).get("date_range"):
         from data.integrity import atomic_write_parquet
         atomic_write_parquet(out, df)
+    elif (cfg or {}).get("snapshot"):
+        # snapshot（当前列表/滚动窗口型，2026-08-19）：行数随市场状态天然波动，默认
+        # 0.9 骤降守卫会误拦正常窗口收缩（实测三集新数据仅为历史堆积基线的 21-25%）；
+        # 弱化到 0.1——仍拦「<10% 基线」的真残片（接口异常返几十行时拒写），守卫
+        # 语义从「防收缩」收窄为「防残片」。safe_overwrite 内含原子写（G5 不旁路）。
+        safe_overwrite(out, df, min_ratio=0.1)
     else:
         safe_overwrite(out, df)
     logger.info("%s 写入：%s，%d 行", key, out, len(df))

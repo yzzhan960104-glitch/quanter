@@ -300,6 +300,10 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "date_col": "trade_date", "symbol_col": "ts_code",
         "fields": "ts_code,trade_date,name,exchange",
         "lake": "data_lake/margin_secs.parquet",
+        # snapshot=True：当前可两融标的字典——行数随市场状态天然波动（基线含无守卫时代的
+        # 历史堆积遗产），骤降守卫按 min_ratio=0.1 弱化（2026-08-19 首次日更暴露
+        # 默认 0.9 误拦正常窗口收缩：margin_secs 新数据仅为基线的 21-25%）。
+        "snapshot": True,
     },
     # —— 北向资金（moneyflow_hsgt）：切 Tushare 替代 akshare sync_north_flow ——
     # hsgt_top10（十大成交股）因代理/直连均无权限已整体删除（2026-08-05），北向总量
@@ -409,6 +413,10 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "date_col": "ann_date", "symbol_col": "ts_code",
         "fields": "ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type",
         "lake": "data_lake/share_float.parquet",
+        # snapshot=True：最新 6000 条解禁记录滚动窗口（by=single 系积分裁决，trade_date 参数无效）——行数随市场状态天然波动（基线含无守卫时代的
+        # 历史堆积遗产），骤降守卫按 min_ratio=0.1 弱化（2026-08-19 首次日更暴露
+        # 默认 0.9 误拦正常窗口收缩：share_float 新数据仅为基线的 21-25%）。
+        "snapshot": True,
     },
     "suspend_d": {
         # 每日停复牌（suspend_d）：单日全市场一次返，按 date 分页。
@@ -446,6 +454,10 @@ TUSHARE_DATASETS: Dict[str, Dict[str, Any]] = {
         "fields": "ts_code,name,market,management,custodian,found_date,list_date,issue_date,delist_date",
         "params": {"market": "E"},  # 服务端过滤场内基金（实测 market='EFT'=0 行，E 才正确）
         "lake": "data_lake/fund_basic.parquet",
+        # snapshot=True：当前生效场内基金列表（market=E 过滤）——行数随市场状态天然波动（基线含无守卫时代的
+        # 历史堆积遗产），骤降守卫按 min_ratio=0.1 弱化（2026-08-19 首次日更暴露
+        # 默认 0.9 误拦正常窗口收缩：fund_basic 新数据仅为基线的 21-25%）。
+        "snapshot": True,
     },
     "fund_daily": {
         # ETF 日线（fund_daily）：单 ETF 全历史一次返，按 symbol 分页。

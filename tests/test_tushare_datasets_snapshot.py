@@ -113,3 +113,46 @@ def test_daily_脚本切增量入口():
     原 sync_tushare.py 全量重建路径已封死（T12 实证致 1020万→3200 抹除）。
     """
     assert DATASET_REGISTRY["daily"]["script"] == "data/tools/sync_daily_incremental.py"
+
+# ============ 2026-08-19：snapshot 骤降守卫弱化（首次全量日更暴露三集误拦）===========
+def test_three_snapshot_sets_marked_and_by_unchanged():
+    """fund_basic/margin_secs/share_float 均为快照/滚动窗口型：by=single 不变
+    （share_float 系积分裁决：trade_date 参数无效 + 单页硬上限 6000），守卫弱化
+    靠 snapshot=True 标记驱动（_sync_single min_ratio 0.9→0.1）。"""
+    for k in ("fund_basic", "margin_secs", "share_float"):
+        cfg = TUSHARE_DATASETS[k]
+        assert cfg["by"] == "single", f"{k} by 不应改（积分/参数语义裁决）"
+        assert cfg.get("snapshot") is True, f"{k} 应标记 snapshot"
+
+
+def test_snapshot_guard_weak_but_blocks_shards(tmp_path, monkeypatch):
+    """_sync_single 快照分支：≥10% 基线放行（正常窗口收缩），<10% 拒写（真残片）。"""
+    import pandas as pd
+    import data.tushare_sync as ts
+    from data.integrity import WriteGuardError
+
+    lake = tmp_path / "fake_snap.parquet"
+    baseline = pd.DataFrame({"code": [f"S{i:06d}.SH" for i in range(1000)],
+                              "ann_date": ["20260101"] * 1000})
+    baseline.to_parquet(lake, index=False)
+    cfg = {"api": "fake_api", "by": "single", "date_col": None, "symbol_col": "code",
+           "fields": None, "lake": str(lake), "snapshot": True}
+
+    def _fetch(api, **kw):
+        return fetch_df
+    monkeypatch.setattr(ts, "_fetch_with_guard", _fetch)
+
+    # 200 行 = 20% 基线 → 正常窗口收缩，放行
+    fetch_df = pd.DataFrame({"code": [f"S{i:06d}.SH" for i in range(200)],
+                             "ann_date": ["20260818"] * 200})
+    ts._sync_single("fake_snap", "fake_api", None, None, str(lake), cfg=cfg)
+    assert len(pd.read_parquet(lake)) == 200
+
+    # 重建 1000 行基线后 50 行 = 5% 基线 → 真残片，拒写
+    baseline.to_parquet(lake, index=False)
+    fetch_df = pd.DataFrame({"code": [f"S{i:06d}.SH" for i in range(50)],
+                             "ann_date": ["20260818"] * 50})
+    import pytest
+    with pytest.raises(WriteGuardError):
+        ts._sync_single("fake_snap", "fake_api", None, None, str(lake), cfg=cfg)
+    assert len(pd.read_parquet(lake)) == 1000   # 基线未被残片覆盖
