@@ -500,9 +500,17 @@ def test_connect_minus_one_twice_still_raises(monkeypatch):
 
 
 def test_connect_rotates_sid_after_two_minus_one(monkeypatch):
-    """L2：首选 sid -1 两轮 → 自动轮换未占用 sid 重连成功（自愈，不抛错）。"""
+    """L2：首选 sid -1 两轮 → 自动轮换未占用 sid 重连成功（自愈，不抛错）。
+
+    前提（G8 客户端存活守卫，2026-08-19 修复）：L2 轮换前 connect 会探
+    ``_client_servable``——客户端不可服务（进程缺失/活跃文件陈旧）时 -1 语义是
+    「未就绪」而非「被占」，直进 L3 不轮换。本测焦点是「sid 被占」场景，须显式
+    声明前提「客户端在跑」（测试环境 D:ake 无真客户端，不 mock 恒走 L3——
+    本用例曾因此稳定失败而长期被误标「既有失败」）。
+    """
     instances = _install_reconnect_fake(monkeypatch, [-1, -1, 0])
     written = {}
+    monkeypatch.setattr(qmt_gateway, "_client_servable", lambda p, **kw: True)
     # T14（M2 单 SSoT）：writer 签名加 account_id（轮换点直写 DB 真相源），哑桩同签名
     monkeypatch.setattr(qmt_gateway, "_write_runtime_session",
                         lambda p, a, account_id=None: written.update(preferred=p, actual=a))
@@ -513,6 +521,24 @@ def test_connect_rotates_sid_after_two_minus_one(monkeypatch):
     assert gw._session_id == preferred + 1   # preferred → +1 轮换
     assert written == {"preferred": preferred, "actual": preferred + 1}
     assert len(instances) == 3            # 首选 2 轮 + 轮换 1 次
+
+
+def test_connect_skips_rotation_when_client_unservable(monkeypatch):
+    """G8 守卫契约：客户端不可服务 → -1 不轮换直进 L3（fail-closed）。
+
+    Why（G8 2026-08-14 实测）：客户端未就绪时轮换 100 候选纯属无效功——每候选
+    30s 超时 + start() 预分配 75MB down_queue 文件（2 分钟 ≈2.7GB 磁盘、最长
+    ~50 分钟「挂死」）。守卫必须跳过轮换，恢复交给 health_guard 轮询。
+    """
+    instances = _install_reconnect_fake(monkeypatch, [-1, -1, 0])
+    monkeypatch.setattr(qmt_gateway, "_client_servable", lambda p, **kw: False)
+    gw = QmtExecutionGateway()
+    with pytest.raises(ConnectionError, match="session"):
+        asyncio.run(gw.connect())
+    assert gw._lock_down is True
+    # 未轮换：只构造了主循环 2 个 trader（第 3 个 [-1,-1,0] 的 0 从未被消费）
+    assert len(instances) == 2
+    assert all(t.stopped for t in instances)
 
 
 def test_connect_cleans_session_files_before_first_attempt(monkeypatch, tmp_path):
