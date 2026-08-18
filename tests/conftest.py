@@ -143,18 +143,30 @@ def _install_fake_xtquant() -> None:
 _install_fake_xtquant()
 
 
-# ============ 隔离 config 包 load_dotenv 的 .env 污染（治 eod_plan confirmed=True 误判）============
+# ============ 隔离 config 包 load_dotenv 的 .env 污染（治 eod_plan confirmed=True 误判 + test_trading_api 恒 401）============
 # Why 全局 autouse：config/__init__.py:18 模块级 load_dotenv()——任何 import 链触及 config
 # 包即把 .env 注入 os.environ。完整 collection tests/trading/ 时某测试间接 import config
 # → AUTO_CONFIRM_PLAN=true / AUTO_TRADE_MODE=live 被注入 → eod_plan (engine.py:256) 读到
 # auto_confirmed=True → 落盘即 confirm_plan → plan.confirmed=True，而测试期望人审默认
 # confirmed=False → 误判失败。本 fixture 强制覆盖为测试默认（人审 + dry_run）。
+# 恒 401 同根（2026-08-18 扩面 QUANTER_API_TOKEN，tests/test_trading_api 9 用例全灭）：
+#   1. .env 08-16 起配置 QUANTER_API_TOKEN → require_write（presentation/server/http/auth.py，
+#      请求时读 env）走「token 已配 + 无 Bearer → 401」分支，恒拒不带鉴权头的 TestClient
+#      （6 例 assert 401==200/503 + 3 例 KeyError 皆此 401 detail JSON 之表象分裂）；
+#   2. 本 delenv 强制测试态「token 未配置 + dry_run → 放行 + WARNING」（auth.py 开发态语义，
+#      DG-G2：fail-closed 仅作用于 live，测试态 AUTO_TRADE_MODE 已被上出行钉死 dry_run）；
+#   3. 显式 monkeypatch.setenv("QUANTER_API_TOKEN", ...) 的鉴权用例后序覆盖本 delenv
+#      （同一 monkeypatch 实例，后序生效），token 校验语义用例不受影响。
 # 安全性：测试函数内显式 monkeypatch.setenv 同名变量会覆盖本默认（同一 monkeypatch 实例，
-# 后序生效）；Grep 全 tests/ 无测试依赖 AUTO_CONFIRM_PLAN=true，故 autouse 不破坏既有用例。
+# 后序生效）；Grep 全 tests/ 无测试依赖 AUTO_CONFIRM_PLAN=true，故 autouse 不破坏既有用例；
+# 无 .env 环境（变量本就不存在）delenv 为 no-op（raising=False），行为不变。
 @pytest.fixture(autouse=True)
 def _isolate_trade_env(monkeypatch):
     monkeypatch.setenv("AUTO_CONFIRM_PLAN", "")
     monkeypatch.setenv("AUTO_TRADE_MODE", "dry_run")
+    # .env 注入的 QUANTER_API_TOKEN 若在场即摘除——防 require_write「token 已配 + 无 Bearer
+    # → 401」分支拒无鉴权 TestClient（test_trading_api 9 用例恒 401 根因，Why 见上方注释块）。
+    monkeypatch.delenv("QUANTER_API_TOKEN", raising=False)
 # ============ C-8 V1：隔离 job 台账 DB（防测试写真实 logs/trading_job_run.db）============
 # Why autouse：pipeline_then_eod / pre_open 改造后会写台账；若不隔离，任何调用这些
 # 函数的既有测试都会把「测试日」写成 done，污染真实启动补跑判定（漏跑被误判为已跑）。
