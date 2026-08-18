@@ -449,7 +449,7 @@ specs（设计）/ plans（实现计划）均在 `docs/superpowers/`，按时间
 - **自动交易引擎（历史）**：[design](docs/superpowers/specs/2026-07-21-auto-trading-engine-design.md) / [plan](docs/superpowers/plans/2026-07-21-auto-trading-engine.md)
 - **数据中心与数据治理**：[design](docs/superpowers/specs/2026-07-14-data-center-and-data-governance-design.md)
 - **Tushare 数据快照扩容**：[design](docs/superpowers/specs/2026-07-25-tushare-data-snapshot-design.md) / [completion](docs/superpowers/specs/2026-07-25-tushare-data-snapshot-completion.md)
-- **compute unit**：[design](docs/superpowers/specs/2026-07-26-compute-unit-design.md)
+- **compute unit**（已退役 · ADR-17，仅存史料）：[design](docs/superpowers/specs/2026-07-26-compute-unit-design.md)
 - **broadcast 机器人总管**：[design](docs/superpowers/specs/2026-07-26-broadcast-robot-manager-design.md)
 - **实盘接入（QMT/miniQMT）**：[design](docs/superpowers/specs/2026-07-22-miniqmt-access-gap-design.md)
 

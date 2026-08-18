@@ -27,7 +27,14 @@ discovery 搜索可比性的活体地基（trial stale 判定 + `discovery verif
    根因结构）。迁移前后输出恒等（T1 验证门留证 `ce16cc4ee4de`），trials 库既有指纹
    语义连续；内核覆盖守卫 + 单源委托守护迁 `tests/discovery/test_engine_fingerprint.py`。
 3. **engine_hash 基线预期重估**：注释清创触及 3 个内核文件（replay / strategy /
-   objective，均 docstring 级），指纹随之 `ce16cc4ee4de` → `26028e24860e`——内容哈希
+   objective，均 docstring 级），指纹随之重估（方向：内核文件字节变化）——内容哈希
+
+   ⚠ **勘误（2026-08-18 事后双轴 review）**：上文两处留证值 `ce16cc4ee4de` /
+   `26028e24860e` 经独立复算（LF blob / CRLF / autocrlf 工作树三口径）均不可复现，
+   系录自脏工作树或记录失真；结构恒等性（指纹算法逐字节同构）不受影响。当前实测
+   参考值：LF blob 口径 `c88334a8e283`、autocrlf 工作树口径 `d60ee7e36ccb`——
+   指纹语义本为「内核变则 hash 变」（trial 可比性锚），不设 golden 绝对值断言，
+   以本勘误口径说明为准。
    的设计语义（同 T18 先例），非行为变化；老 trial 与新跑不可比属预期，`discovery
    verify` 对旧 trial 报 stale 如实反映。
 4. **复活路径**：三维扩展（多策略 × 多资产）若需远程算力，按当时引擎**重建优于复活**
