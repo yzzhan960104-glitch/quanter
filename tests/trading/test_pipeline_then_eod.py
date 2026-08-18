@@ -63,7 +63,7 @@ async def test_data_ready_runs_eod(monkeypatch):
          patch("trading.orchestrate.pipeline.resolve_active", return_value=[]), \
          patch("trading.orchestrate.pipeline.check_freshness",
                return_value=FreshnessResult("daily", True, today, today, "PASS")), \
-         patch("trading.orchestrate.pipeline._scan_and_spawn_repair", return_value=0):
+         patch("trading.orchestrate.pipeline._scan_and_spawn_repair", return_value=0),          patch("trading.orchestrate.pipeline._spawn_all_datasets_sync"):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
         eng = MagicMock()
@@ -93,7 +93,7 @@ async def test_multi_experiment_keys_union(monkeypatch):
          patch("trading.orchestrate.pipeline.resolve_active", return_value=exps), \
          patch("trading.orchestrate.pipeline.build_strategy", side_effect=[strat_a, strat_b]), \
          patch("trading.orchestrate.pipeline.check_freshness", side_effect=fake_cf), \
-         patch("trading.orchestrate.pipeline._scan_and_spawn_repair", return_value=0):
+         patch("trading.orchestrate.pipeline._scan_and_spawn_repair", return_value=0),          patch("trading.orchestrate.pipeline._spawn_all_datasets_sync"):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
         eng = MagicMock(); eng._eod = AsyncMock()
@@ -161,6 +161,9 @@ async def test_scan_fail_triggers_repair_but_eod_runs(monkeypatch):
                         lambda *a, **kw: popen_calls.append((a, kw)) or MagicMock())
     # 拦截 brief 播报（避免真跑网络/钉钉致测试卡）
     monkeypatch.setattr("ops.brief_all.run_brief_all", AsyncMock())
+    # 拦截全数据集同步 spawn（2026-08-19 新增尾部步骤；本测数 Popen 次数，
+    # 不掐会多计 1 次真起子进程烧配额）
+    monkeypatch.setattr(pl, "_spawn_all_datasets_sync", lambda: None)
 
     eng = MagicMock()
     eng._eod = AsyncMock()

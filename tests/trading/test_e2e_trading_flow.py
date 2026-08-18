@@ -909,6 +909,7 @@ def test_e2e_pipeline_then_eod_to_pre_open_gate_all_green(isolated, monkeypatch)
          patch("trading.orchestrate.pipeline.check_freshness",
                return_value=FreshnessResult("daily", True, PIPE_DATE, PIPE_DATE, "PASS")), \
          patch("trading.orchestrate.pipeline._scan_and_spawn_repair", return_value=0), \
+         patch("trading.orchestrate.pipeline._spawn_all_datasets_sync"), \
          patch("ops.brief_all.run_brief_all", new=AsyncMock(return_value=0)):
         proc = AsyncMock(); proc.wait.return_value = 0  # rc=0 采集成功
         cse.return_value = proc

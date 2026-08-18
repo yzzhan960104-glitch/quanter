@@ -32,6 +32,7 @@ async def test_for_date_passes_explicit_dates_to_eod():
                                                    "2026-07-31", "PASS")), \
          patch.object(pl, "upsert_data_ready") as udr, \
          patch.object(pl, "_scan_and_spawn_repair", return_value=0), \
+         patch.object(pl, "_spawn_all_datasets_sync"), \
          patch("ops.brief_all.run_brief_all", new=AsyncMock()):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
@@ -56,6 +57,7 @@ async def test_default_path_calls_eod_without_args():
                       return_value=FreshnessResult("daily", True, "2026-08-03",
                                                    "2026-08-03", "PASS")), \
          patch.object(pl, "_scan_and_spawn_repair", return_value=0), \
+         patch.object(pl, "_spawn_all_datasets_sync"), \
          patch("ops.brief_all.run_brief_all", new=AsyncMock()):
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc
@@ -79,6 +81,7 @@ async def test_run_eod_false_skips_eod_but_runs_brief():
                       return_value=FreshnessResult("daily", True, "2026-07-31",
                                                    "2026-07-31", "PASS")), \
          patch.object(pl, "_scan_and_spawn_repair", return_value=0), \
+         patch.object(pl, "_spawn_all_datasets_sync"), \
          patch("ops.brief_all.run_brief_all", new=AsyncMock()) as rba:
         proc = AsyncMock(); proc.wait.return_value = 0
         cse.return_value = proc

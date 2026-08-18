@@ -124,6 +124,33 @@ def _scan_and_spawn_repair(lake_dir: str) -> int:
         return 0
 
 
+
+def _spawn_all_datasets_sync() -> None:
+    """7. 全数据集每日尝试同步（2026-08-19 用户裁决）——异步 spawn 不阻塞事件链。
+
+    Why fire-and-forget 而非 STEPS 第 4 步：贵数据集（cyq_perf/share_float 等
+    by=symbol 全市场）单集可跑数十分钟——串进 STEPS 会把 eod/brief 拖到深夜。
+    挂在 brief 后 DETACHED 起子进程夜间慢跑；日志 logs/sync_all_datasets.log；
+    哨兵协议与前端同步通道兼容（成功清/失败 .failed），次日重试幂等
+    （sync_tushare resume=True，shard 最新即跳过）。
+    """
+    import subprocess
+    # Windows 后台分离（与 ops/trading_supervisor.py 拉起引擎同款 flags）：
+    # DETACHED 脱离控制台（父进程退出不陪葬）+ 新进程组（Ctrl-C 不传播）。
+    _DETACHED = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    try:
+        log_path = ROOT / "logs" / "sync_all_datasets.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as fh:
+            subprocess.Popen(  # noqa: Popen - fire and forget（夜间慢跑）
+                [sys.executable, "-m", "ops.sync_all_datasets"],
+                cwd=str(ROOT), stdout=fh, stderr=subprocess.STDOUT,
+                creationflags=_DETACHED)
+        logger.info("全数据集同步已 spawn（logs/sync_all_datasets.log）")
+    except Exception:
+        logger.exception("全数据集同步 spawn 失败（不影响主链，次日重试）")
+
+
 async def pipeline_then_eod(engine, *, for_date: str | None = None,
                             run_eod: bool = True) -> None:
     """C-2 事件链：采集 → 等完成 → 按策略声明校验数据 → eod → brief。
@@ -227,6 +254,8 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
             await run_brief_all()
         except Exception:
             logger.exception("brief 播报失败（不阻断 eod 已完成的 plan）")
+        # 7. 全数据集每日尝试同步（brief 后 spawn，不阻塞台账 done 与主链）
+        _spawn_all_datasets_sync()
         _ledger_finish(today, "done")
     except Exception:
         _ledger_finish(today, "failed", "未预期异常")
