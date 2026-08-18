@@ -36,22 +36,16 @@ DSR_GATE_MIN = 0.8
 
 
 def _engine_hash():
-    """回测内核指纹（与 compute_unit.hashes 同款算法，避免循环 import：本地重声明）。
+    """回测内核指纹（单源委托 discovery/fingerprint.engine_hash）。
 
-    P1-3：文件清单与 compute_unit/hashes.ENGINE_FILES 保持一致（tests/compute_unit/
-    test_hashes.py::test_engine_hash_matches_discovery_runner 断言两处输出相等）。
+    史：P1-3 时期曾与 compute_unit.hashes 双份实现重声明（防循环 import，靠
+    test 断言两处相等）；2026-08-18 compute_unit 退役（ADR-17）指纹迁
+    discovery/fingerprint 单源化，本函数退化为薄委托——tests/discovery/test_runner
+    多处 monkeypatch setattr 打在本模块属性上，保留本名作 patch 锚点。
     内核任一文件一动，engine_hash 变，老 trial 自然与新跑不可比。
     """
-    import hashlib
-    from pathlib import Path
-    from compute_unit.hashes import ENGINE_FILES
-    root = Path(__file__).resolve().parents[1]
-    h = hashlib.sha256()
-    for rel in ENGINE_FILES:
-        h.update(rel.encode("utf-8"))
-        with open(root / rel, "rb") as fh:
-            h.update(fh.read())
-    return h.hexdigest()[:12]
+    from discovery.fingerprint import engine_hash
+    return engine_hash()
 
 
 @dataclass

@@ -68,8 +68,8 @@ for label, override in [("*base_3e383d", {})] + GRID:
 # ── 判定（信息隔离：inner 排序，outer 只报告）──
 print("\n=== R1-2 判定（按 inner ann 排序；outer 仅报告不反馈选择）===", flush=True)
 try:
-    from compute_unit.hashes import _engine_hash
-    print(f"engine_hash={_engine_hash()}", flush=True)
+    from discovery.fingerprint import engine_hash
+    print(f"engine_hash={engine_hash()}", flush=True)
 except Exception:
     pass
 ranked = sorted(results.items(),

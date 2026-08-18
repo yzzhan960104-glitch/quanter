@@ -28,9 +28,8 @@ flowchart TB
   end
   subgraph L4["L4 分析层"]
     backtest["backtest<br/>4135 · 26 文件"]
-    discovery["discovery<br/>3720 · 25 文件"]
-    experiment["experiment<br/>497 · 6 文件"]
-    compute_unit["compute_unit<br/>771 · 8 文件"]
+    discovery["discovery<br/>3898 · 26 文件<br/>含 fingerprint（compute_unit 退役遗产）"]
+    experiment["experiment<br/>613 · 6 文件"]
   end
   subgraph L5["L5 接口与运维层"]
     presentation["presentation<br/>2474 · 25 文件<br/>FastAPI + Vue 只读"]
@@ -54,8 +53,6 @@ flowchart TB
   backtest -->|2| infra
   discovery -->|3| experiment
   discovery -->|2| infra
-  compute_unit -->|3| discovery
-  compute_unit -->|2| infra
   presentation -->|3| data
   presentation -->|2| infra
   presentation -->|2| backtest
@@ -70,7 +67,7 @@ flowchart TB
 ## 中枢分析
 
 **fan-in 最多（被依赖最重 → 基础设施）**：
-- `infra`（8 包入边：trading 14 / data 5 / ops 4 / presentation 2 / backtest 2 / discovery 2 / compute_unit 2 / broker 2）— **真·地基**：日志 / pyio / LLM / 告警通道全员依赖（T4 LocalFileChannel 双通道落此包）。
+- `infra`（8 包入边：trading 14 / data 5 / ops 4 / presentation 2 / backtest 2 / discovery 2 / broker 2 / experiment 1）— **真·地基**：日志 / pyio / LLM / 告警通道全员依赖（T4 LocalFileChannel 双通道落此包）。08-18：compute_unit(2) 随退役消失，同期 `experiment→infra:1` 新入（08-15 后 master 增量，与退役无关）。
 - `config`（data 12 / presentation 2 / backtest 1 / broadcast 1）— 配置中枢，**data 强耦合**（12 文件读 settings）。
 - `strategies`（trading 7 / backtest 7 / discovery 4）— 策略契约层（`Strategy` Protocol + T7 后 `price_levels` 单源），三类执行主体共用。
 
@@ -141,33 +138,32 @@ broker/
 ```
 backtest→config:1 · backtest→trading:1 · broadcast→backtest:1 · broadcast→config:1
 broadcast→experiment:1 · broadcast→presentation:1 · broadcast→trading:1 · broker→ops:1
-data→strategies:1 · discovery→backtest:1 · discovery→compute_unit:1 · discovery→data:1
-ops→backtest:1 · ops→data:1 · ops→presentation:1 · presentation→broadcast:1
-presentation→ops:1 · trading→broadcast:1
+data→strategies:1 · discovery→backtest:1 · discovery→data:1
+experiment→infra:1 · ops→backtest:1 · ops→data:1 · ops→presentation:1
+presentation→broadcast:1 · presentation→ops:1 · trading→broadcast:1
 ```
 
-（对照 08-14：`ops→data:1` 新入（T9 迁移文件 lazy import 记账）；`presentation→broker:1` 消失——复跑零命中，08-14 记载失准订正。）
+（对照 08-15：`discovery→compute_unit:1` 消失（compute_unit 退役 · ADR-17）；`experiment→infra:1` 新入（08-15 后 master 增量，与退役无关）。更早对照 08-14：`ops→data:1` 新入（T9 迁移文件 lazy import 记账）；`presentation→broker:1` 消失——复跑零命中，08-14 记载失准订正。）
 
-## 规模一览（行数 / .py 文件数 · 2026-08-15 扫描）
+## 规模一览（行数 / .py 文件数 · 2026-08-18 扫描）
 
 | 包 | 行 | 文件 | 包 | 行 | 文件 |
 |---|---|---|---|---|---|
-| trading | 14572 | 63 | strategies | 2359 | 11 |
-| data | 6994 | 31 | broadcast | 1622 | 9 |
-| backtest | 4135 | 26 | ops | 2087 | 16 |
-| presentation | 2474 | 25 | config | 1001 | 9 |
-| discovery | 3720 | 25 | infra | 963 | 10 |
-| broker | 2516 | 8 | compute_unit | 771 | 8 |
-|  |  |  | experiment | 497 | 6 |
+| trading | 14960 | 63 | strategies | 2384 | 11 |
+| data | 7706 | 31 | broadcast | 1712 | 9 |
+| backtest | 4135 | 26 | ops | 2118 | 16 |
+| presentation | 2556 | 25 | config | 1001 | 9 |
+| discovery | 3898 | 26 | infra | 963 | 10 |
+| broker | 2531 | 8 | experiment | 613 | 6 |
 
-**合计 ≈ 43.7k 行 · 247 .py 文件**（13 顶层包）。08-14→08-15 主要增量：trading 13814→14572（CR-3 盘中熔断 + W2-H2 ports + M2 上下文，同时 T10 删 re-export −224 行）；broker 2213→2516（四文件分层 + BrokerProtocol）；ops 1751→2087（run_data_check 迁入 + QuanterAudit 注册）；strategies +132（price_levels 单源）；infra +79（LocalFileChannel）；data 7064→6994（run_data_check 迁出）。
+**合计 ≈ 44.6k 行 · 240 .py 文件**（12 顶层包）。08-15→08-18 主要变化：**compute_unit 整体退役**（−771 行 −8 文件 −3 条边，ADR-17；指纹遗产 `discovery/fingerprint.py` +57 行）；其余为 08-15 后 master 增量（trading +388 / data +712 / experiment +116 等，CR-3 熔断与 fix(risk) 批次）。
 
 ## 复跑扫描（新增 import 边时重跑核对·单一归宿保真）
 
 ```bash
 python - <<'PY'
 import os, re
-PKGS=["trading","data","discovery","backtest","broker","strategies","ops","infra","broadcast","config","compute_unit","experiment","presentation"]
+PKGS=["trading","data","discovery","backtest","broker","strategies","ops","infra","broadcast","config","experiment","presentation"]
 pat=re.compile(r'^\s*(?:from|import)\s+('+'|'.join(PKGS)+r')\b')
 edges={}
 for src in PKGS:

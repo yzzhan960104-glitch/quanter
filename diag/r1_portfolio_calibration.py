@@ -60,8 +60,8 @@ for label, params in PARAM_SETS.items():
 
 print(f"=== 标定判定：符号全一致={'是' if agree else '否'} ===", flush=True)
 try:
-    from compute_unit.hashes import _engine_hash
-    print(f"engine_hash={_engine_hash()}", flush=True)
+    from discovery.fingerprint import engine_hash
+    print(f"engine_hash={engine_hash()}", flush=True)
 except Exception:
     pass
 with open(os.path.join("logs", "r1_portfolio_calibration.json"), "w", encoding="utf-8") as f:

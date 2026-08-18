@@ -16,9 +16,9 @@
 
 幂等:重复调用无副作用,异常静默(绝不因 stdio 治理反致入口崩溃)。
 
-P2-A 扩展(根治 stderr emoji 崩):compute_unit/__main__.py 的 `print(...❌...,
-file=sys.stderr)` 在 GBK 管道下同样会崩——失败路径正是最需要输出的场景。
-force_utf8_stdout 现在同时治 stdout + stderr(原仅 stdout)。
+P2-A 扩展(根治 stderr emoji 崩):已退役的 compute_unit CLI(2026-08-18,ADR-17)的
+`print(...❌..., file=sys.stderr)` 在 GBK 管道下同样会崩——失败路径正是最需要输出
+的场景。force_utf8_stdout 现在同时治 stdout + stderr(原仅 stdout)。
 """
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ def force_utf8_stdout() -> None:
 
     设计选择:
     - 同时治 stdout 和 stderr(stderr 在失败路径常带 emoji 错误信息,如
-      compute_unit `❌ 环境漂移`;GBK 管道下崩在错误输出处尤其伤——失败时
-      连诊断信息都看不到)。原仅治 stdout 的设计在 emoji 仅出现在成功路径
+      已退役 compute_unit 的 `❌ 环境漂移`;GBK 管道下崩在错误输出处尤其伤——
+      失败时连诊断信息都看不到)。原仅治 stdout 的设计在 emoji 仅出现在成功路径
       (`✅`) 时成立,引入 ❌ 等失败路径 emoji 后必须扩展。
     - 用 `errors="replace"` 而非 "strict":极端情况下用 ? 替代不可编码字符,
       保证 print 永不抛(运维入口"能跑完"比"输出完美"更重要)。

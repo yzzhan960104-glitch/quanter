@@ -159,7 +159,7 @@ def replay(
     ⚠️ 实例契约（2026-08-02 真实回放验证发现）：strategy 实例带跨 T 状态
     （scan_at 写 strategy_state / 颈线法 cooldown 锚点），**一个实例只能跑一次回放**——
     复用同一实例跑第二次会静默污染结果（cooldown 残留 → 命中被吞）。调用方必须
-    每个任务新建策略实例（worker / compute_unit.evaluate_replay 已遵循此契约）。
+    每个任务新建策略实例（discovery worker 已遵循此契约）。
 
     无前视红线：传给 scan_at 的 df_T 严格 = df.loc[:T]；策略内部预算指标用 .iloc[:T_pos+1] 截断。
 

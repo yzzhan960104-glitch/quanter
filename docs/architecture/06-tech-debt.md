@@ -135,5 +135,5 @@ flowchart LR
 
 ## 非痛点（明确不在债内 — MAP Out of scope）
 
-- `broadcast` / `config` / `discovery` / `experiment` / `ops` / `compute_unit`：非痛点模块，仅当三维扩展（[T3](../../plans/wayfinder/T3.md)）要求时由适配层工单驱动改造。
+- `broadcast` / `config` / `discovery` / `experiment` / `ops`：非痛点模块，仅当三维扩展（[T3](../../plans/wayfinder/T3.md)）要求时由适配层工单驱动改造。（`compute_unit` 原列于此，2026-08-18 整体退役【ADR-17】，不再在册。）
 - 颈线法策略算法本身（缺口在 [neckline-algorithm-gaps] memory 独立跟踪，非架构债）。**边界澄清**：CR-2 已收口「同一算法两份实现」的工程 SSoT 债；算法有效性问题（regime/期望/Kelly）属 A 波——**仍是当前最高优先空洞**（[roadmap 里程碑](roadmap.md)）。

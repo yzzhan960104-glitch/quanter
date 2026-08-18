@@ -66,7 +66,7 @@ class NecklineMethodStrategy:
 
     ⚠️ 实例契约（2026-08-02）：本类实例带跨 T 状态（self._last_signal_pos cooldown 锚点），
     一次实例只能服务一次回放（replay/scan_symbol）。重复调用会静默少命中——调用方必须
-    每任务新建实例（worker / compute_unit.evaluate_replay 已遵循）。
+    每任务新建实例（discovery worker 已遵循）。
     """
 
     # 数据集依赖声明（C-2 D3）：本策略仅依赖 daily 日线。本类是普通 class

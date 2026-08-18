@@ -44,8 +44,9 @@ def _engine_hash():
     method_v0 两文件，是 P1-3（2026-08-02 扩到 8 文件）漏改的陈旧口径——cmd_oos 用
     本函数写 trial.engine_hash，与 runner 版（ENGINE_FILES 8 文件）必然不等，跨机
     漂移校验误报 + 内核改动（如 objective.py）不触发 stale。收口：直接委托
-    discovery.runner._engine_hash（单源，test_engine_hash_matches_discovery_runner
-    守护 runner↔compute_unit.hashes 一致）。
+    discovery.runner._engine_hash（单源；2026-08-18 compute_unit 退役后指纹真身在
+    discovery/fingerprint.py，tests/discovery/test_engine_fingerprint.py 守护单源
+    一致，见 ADR-17）。
     """
     from discovery.runner import _engine_hash as _runner_engine_hash
     return _runner_engine_hash()

@@ -47,12 +47,12 @@
 
 ```
 L0 基础     : infra(963) · config(1001)         ← 最多被依赖（infra 8 包入边 = 真地基）
-L1 数据     : data(6994)                        ← 依赖 config + infra；零 trading 反向边（T9 后）
-L2 策略契约 : strategies(2359)                  ← Strategy Protocol + price_levels 单源（T7）
-L3 执行内核 : trading(14572) · broker(2516)     ← trading 最大 fan-out 中枢；engine.py 1481 行（T1+W1-B）；broker 四文件分层（W2-H1）
-L4 分析     : backtest(4135) · discovery(3720) · experiment(497) · compute_unit(771)
-L5 接口运维 : presentation(2474) · broadcast(1622) · ops(2087)
-合计 ≈ 43.7k 行 · 247 .py 文件（2026-08-15 扫描；较 08-14 净增 = debt/full-wave-0815：W1-B re-export 删除 + W2 broker 分层 + CR 族清偿）
+L1 数据     : data(7706)                        ← 依赖 config + infra；零 trading 反向边（T9 后）
+L2 策略契约 : strategies(2384)                  ← Strategy Protocol + price_levels 单源（T7）
+L3 执行内核 : trading(14960) · broker(2531)     ← trading 最大 fan-out 中枢；engine.py 1481 行（T1+W1-B）；broker 四文件分层（W2-H1）
+L4 分析     : backtest(4135) · discovery(3898) · experiment(613)
+L5 接口运维 : presentation(2556) · broadcast(1712) · ops(2118)
+合计 ≈ 44.6k 行 · 240 .py 文件 · 12 包（2026-08-18 扫描；compute_unit 已退役【ADR-17】，指纹遗产 discovery/fingerprint.py；余量为 08-15 后 master 增量）
 ```
 
 ## 维护协议
