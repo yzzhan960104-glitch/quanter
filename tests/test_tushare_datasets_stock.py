@@ -19,71 +19,15 @@ from config import TUSHARE_DATASETS, LAKE_CONFIG
 
 
 @pytest.fixture(autouse=True)
-def _isolate_tushare_registry():
-    """深拷贝 TUSHARE_DATASETS + LAKE_CONFIG['lakes']，测试后还原原对象引用。
-
-    Why autouse 深拷贝（Task 1 review 教训）：本文件的测试会就地覆盖全局
-    TUSHARE_DATASETS[key]['lake']（重定向到 tmp_path）与 LAKE_CONFIG['lakes'][key]。
-    若不还原，全局注册表会被污染——后续测试拿到指向 tmp_path 的 lake 路径（tmp_path
-    测试结束即销毁），导致跨测试顺序依赖 + 真实 sync 脚本写到错误路径。
-    手法与 tests/test_tushare_sync.py::_isolate_tushare_registry 完全一致：
-    clear()+update(saved) 保留原 dict 对象身份（其他模块 from config import 的引用不变），
-    嵌套 lakes 子 dict 由 deepcopy 兜底。
-    """
-    saved_datasets = copy.deepcopy(TUSHARE_DATASETS)
-    saved_lakes = copy.deepcopy(LAKE_CONFIG["lakes"])
-    yield
-    TUSHARE_DATASETS.clear()
-    TUSHARE_DATASETS.update(saved_datasets)
-    LAKE_CONFIG["lakes"].clear()
-    LAKE_CONFIG["lakes"].update(saved_lakes)
-
-
-class _FakePro:
-    """tushare pro 替身：按 api_name 返回可控 DataFrame。
-
-    Why __getattr__：pro 接口方法（pro.income / pro.balancesheet ...）在运行时由
-    tushare DataApi 动态分发，测试替身用 __getattr__ 一次性兜底所有 api_name，
-    避免逐方法硬编码。set(api, df) 注入可控数据。
-    """
-    def __init__(self):
-        self._data = {}
-
-    def set(self, api, df):
-        self._data[api] = df
-
-    def __getattr__(self, api):
-        def _c(**kw):
-            return self._data.get(api, pd.DataFrame())
-        return _c
-
+def _isolate_tushare_registry(tushare_registry_isolated):
+    """薄壳（原 ~40 行块收口 tests/conftest.py::tushare_registry_isolated，2026-08-19 W2）。"""
 
 @pytest.fixture
 def fake_pro(monkeypatch):
-    """mock pro 接口 + 限频/熔断器（acquire 直通、breaker 永远放行）。
-
-    Why 同时 mock 三个：sync_dataset 经 _fetch_with_guard 串联 rate_limiter → breaker
-    → get_pro，三道闸门任一未被 mock 都会触达真实 tushare/网络。fixture 一次性
-    把数据路径短路，让测试聚焦分页/落湖逻辑本身。
-
-    Why 双重 patch get_pro（关键防漏网）：data/tushare_sync.py 顶部用
-    `from data._tushare_compat import get_pro` 把函数对象绑到 tushare_sync 模块的
-    全局命名空间。`_fetch_with_guard` 体内 `pro = get_pro()` 解析的是 tushare_sync
-    模块的 get_pro（导入时绑定），而非 _tushare_compat 模块的 get_pro。
-    仅 patch `data._tushare_compat.get_pro` **不会** 改变 tushare_sync.get_pro 的绑定
-    ——旧实现下测试会穿透到真实 Tushare（.env 有 token 时静默命中真 API，
-    无 token 时返回空 DataFrame 导致 _build_multiindex 抛「shard 目录无数据」），
-    测试既不隔离也不稳定。本 fixture 同时 patch 两处绑定，保证替身真正短路。
-    """
-    fake = _FakePro()
-    monkeypatch.setattr("data._tushare_compat.get_pro", lambda: fake)
-    monkeypatch.setattr("data.tushare_sync.get_pro", lambda: fake)
-    monkeypatch.setattr("data.tushare_sync.tushare_rate_limiter",
-                        type("L", (), {"acquire": lambda self, n: None})())
-    monkeypatch.setattr("data.tushare_sync.tushare_breaker",
-                        type("B", (), {"allow_request": lambda self: True,
-                                       "record_success": lambda self: None,
-                                       "record_failure": lambda self: None})())
+    """薄壳（原 ~60 行块收口 tests/_tushare_stub.py，2026-08-19 W2）。"""
+    from tests._tushare_stub import FakePro, install_fake_pro
+    fake = FakePro(data=None)
+    install_fake_pro(monkeypatch, fake)
     return fake
 
 

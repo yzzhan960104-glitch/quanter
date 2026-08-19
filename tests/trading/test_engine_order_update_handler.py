@@ -192,19 +192,9 @@ def test_buy_fill_places_take_profit_once_idempotent(db):
 # T9（state-store-redesign）：成交回报 fill + trade_event(FILLED) + DB 幂等挂 TP1/TP2
 # ============================================================================
 @pytest.fixture
-def state_db(tmp_path, monkeypatch):
-    """隔离 state_store DB（_handle_order_update 落 fill/trade_event 用）。
-
-    同时 patch position_book._DEFAULT_DB（既有 apply_fill 调用）与 state_store._DEFAULT_DB。
-    """
-    from trading import state_store
-    db_path = str(tmp_path / "state.db")
-    monkeypatch.setattr(position_book, "_DEFAULT_DB", db_path)
-    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
-    position_book.init_db()
-    state_store.init_store()
-    return db_path
-
+def state_db(db):
+    """别名薄壳（原与 db fixture 逐字重复，2026-08-19 W2 二合一；保留旧名免动 20+ 调用点）。"""
+    return db
 
 def _buy_fill_update(symbol="300001.SZ", order_id="123"):
     return {

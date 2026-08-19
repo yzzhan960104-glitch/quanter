@@ -203,6 +203,28 @@ def _reset_resilience_singletons():
     yield
 
 
+# ============ tushare 注册表隔离（W2 收口 · 2026-08-19：原 5 文件复制块单源化）============
+# Why 非全局 autouse：仅数据层测试 mutate 全局注册表，全局 autouse 会给所有用例
+# 强加 deepcopy 开销。数据层各文件保留 2 行 autouse 薄壳引用本 fixture（文件内生效）。
+@pytest.fixture
+def tushare_registry_isolated():
+    """深拷贝 TUSHARE_DATASETS + LAKE_CONFIG['lakes']，测试后还原原对象。
+
+    Why 深拷贝：数据层测试就地覆盖全局注册表（重定向 lake 到 tmp_path / 覆盖字段集），
+    若不还原会污染后续测试（测试顺序依赖、隔离性破坏）。深拷贝处理嵌套 dict
+    （lakes 子键），yield 后还原引用让其它模块看到原始未改动的配置。
+    """
+    import copy as _copy
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    saved_datasets = _copy.deepcopy(TUSHARE_DATASETS)
+    saved_lakes = _copy.deepcopy(LAKE_CONFIG["lakes"])
+    yield
+    TUSHARE_DATASETS.clear()
+    TUSHARE_DATASETS.update(saved_datasets)
+    LAKE_CONFIG["lakes"].clear()
+    LAKE_CONFIG["lakes"].update(saved_lakes)
+
+
 # ============ SSoT Phase A：tmp_db fixture（共享隔离 state_store DB）============
 # Why 非 autouse：state_store 的 trade_event/order/fill/account 读写需显式 tmp DB 隔离，
 # 但许多既有测试不触及 state_store（直接走 .venv310/logs/ 默认 DB 亦无副作用）。autouse 会

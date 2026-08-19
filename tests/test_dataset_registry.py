@@ -234,44 +234,16 @@ def test_parquet_path_non_reused_lake_unchanged():
 # Why 复制而非 conftest 抽取：与 stock/etf/macro 三个文件保持一致手法，避免改动 conftest
 # 影响其它测试文件。mock pro 接口 + 限频/熔断器双 patch get_pro。
 
-class _FakePro:
-    """tushare pro 替身：按 api_name 返回可控 DataFrame（与 stock/etf/macro 文件同实现）。"""
-    def __init__(self):
-        self._data = {}
-
-    def set(self, api, df):
-        self._data[api] = df
-
-    def __getattr__(self, api):
-        def _c(**kw):
-            return self._data.get(api, pd.DataFrame())
-        return _c
-
 
 @pytest.fixture
 def fake_pro(monkeypatch):
-    """mock pro 接口 + 限频/熔断器。
-
-    单 patch get_pro：sync_macro_credit.py:39 已 `from data._tushare_compat import get_pro`
-    把 get_pro 绑定到自身模块命名空间（line 128 `pro = get_pro()` 走模块绑定），
-    故只需 patch `data.tools.sync_macro_credit.get_pro` 即可劫持调用（与 test_sync_macro_credit.py:38
-    单 patch 同手法）。无需再 patch `data._tushare_compat.get_pro`——那是对源模块的冗余 patch，
-    此处不触发源模块的 get_pro 调用路径。
-    """
-    fake = _FakePro()
-    monkeypatch.setattr("data.tools.sync_macro_credit.get_pro", lambda: fake)
-    # 限频/熔断器 patch：sync_macro_credit._fetch_with_guard 内部调用，不 patch 会
-    # 触达真实限流器（阻塞）或熔断器（OPEN 返空 DF → 宏观湖为空）。与 test_sync_macro_credit 同手法。
-    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_rate_limiter",
-                        type("L", (), {"acquire": lambda self, n: None})())
-    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_breaker",
-                        type("B", (), {"allow_request": lambda self: True,
-                                       "record_success": lambda self: None,
-                                       "record_failure": lambda self: None})())
+    """薄壳（原 ~60 行块收口 tests/_tushare_stub.py，2026-08-19 W2）。"""
+    from tests._tushare_stub import FakePro, install_fake_pro
+    fake = FakePro(data=None)
+    install_fake_pro(monkeypatch, fake, module_targets=("data.tools.sync_macro_credit",))
     return fake
 
 
-# 原始宏观指标 7 数据集 key（B 类合并后：szse/sse → mkt_daily 一个）
 MACRO_RAW_KEYS = ("cn_cpi", "cn_ppi", "cn_gdp", "cn_pmi", "shibor", "shibor_quote",
                   "mkt_daily")
 

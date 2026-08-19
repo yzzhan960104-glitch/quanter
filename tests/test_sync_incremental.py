@@ -16,7 +16,6 @@
   5. 新数据为空 → 不覆盖旧 parquet（接口故障/节假日防线）
   6. --days 回看上限：d0+1 早于 today-max_days 时，start 被截到 today-max_days
 """
-import copy
 import os
 import sys
 from datetime import datetime, timedelta
@@ -29,20 +28,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 @pytest.fixture(autouse=True)
-def _isolate_registry():
-    """深拷贝 TUSHARE_DATASETS + LAKE_CONFIG['lakes']，测试后还原原对象。
-
-    Why autouse 深拷贝：测试内就地覆盖全局 TUSHARE_DATASETS[key]['lake']（重定向到 tmp_path），
-    若不还原会污染后续测试。与 test_tushare_sync._isolate_tushare_registry 同范式。
-    """
-    from config import TUSHARE_DATASETS, LAKE_CONFIG
-    saved_datasets = copy.deepcopy(TUSHARE_DATASETS)
-    saved_lakes = copy.deepcopy(LAKE_CONFIG["lakes"])
-    yield
-    TUSHARE_DATASETS.clear()
-    TUSHARE_DATASETS.update(saved_datasets)
-    LAKE_CONFIG["lakes"].clear()
-    LAKE_CONFIG["lakes"].update(saved_lakes)
+def _isolate_registry(tushare_registry_isolated):
+    """薄壳（原 ~40 行块收口 tests/conftest.py::tushare_registry_isolated，2026-08-19 W2）。"""
 
 
 # ============ _latest_date：从 parquet 推 d0 ============

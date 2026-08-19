@@ -19,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from tests._neckline_fixtures import synth_pattern as _synth_pattern
 import pytest
 
 # 项目根挂 sys.path（与 test_neckline_recognition.py 同口径）
@@ -231,27 +233,6 @@ def test_neckline_cluster_matches_ref_random_sweep():
 # ============================================================================
 # ③ _detect_core_window 与 detect_neckline_method 全守卫等价（合成形态）
 # ============================================================================
-def _synth_pattern():
-    """合成 20 根可识别颈线形态（颈线=100 / bottom=90 / H=10 / ATR≈3.6）。
-
-    与 tests/test_neckline_recognition.py::_synth_pattern 同款设计（本文件独立复刻，
-    避免跨测试模块 import 私有 helper）：
-      顶部高点：pos5(100) + pos12(101) 两处 local maxima（±ATR 带内聚集）
-      底部谷：  pos8(90) + pos15/16(91) 两处 local minima（bottom_set={90,91}）
-      压制：    19/20 根 close<100 → suppression=0.95 ≥ 0.6
-      突破：    末根 pos19 close=102 > 100；带量 vol=500 ≥ 1.5×vol5=180
-    """
-    return [
-        (91, 93, 90, 91, 100), (92, 94, 91, 92, 100), (93, 95, 92, 93, 100),
-        (94, 96, 93, 94, 100), (95, 97, 94, 95, 100), (97, 100, 96, 98, 100),
-        (95, 96, 93, 94, 100), (93, 94, 91, 92, 100), (91, 93, 90, 91, 100),
-        (93, 95, 92, 93, 100), (95, 97, 94, 95, 100), (97, 99, 96, 97, 100),
-        (99, 101, 97, 99, 100), (97, 99, 95, 96, 100), (94, 96, 92, 93, 100),
-        (92, 94, 91, 92, 100), (92, 94, 91, 92, 100), (93, 95, 92, 93, 100),
-        (96, 98, 95, 97, 100), (102, 106, 98, 102, 500),
-    ]
-
-
 def _synth_df():
     rows = _synth_pattern()
     dates = pd.date_range("2024-01-01", periods=len(rows), freq="B")

@@ -7,10 +7,7 @@ from ops import trading_supervisor as s
 import ops.process_topology as pt
 
 
-class _FakeProc:
-    def __init__(self, stdout: str, returncode: int = 0):
-        self.stdout = stdout
-        self.returncode = returncode
+from tests._stubs import FakeProc as _FakeProc
 
 
 def test_port_holder_parses_netstat(monkeypatch):

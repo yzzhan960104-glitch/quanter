@@ -27,48 +27,15 @@ from config import TUSHARE_DATASETS, LAKE_CONFIG
 
 
 @pytest.fixture(autouse=True)
-def _isolate_tushare_registry():
-    """深拷贝 TUSHARE_DATASETS + LAKE_CONFIG['lakes']，测试后还原原对象引用。
-
-    Why autouse 深拷贝（与 stock/etf 文件同手法）：本文件的测试会就地覆盖全局
-    TUSHARE_DATASETS[key]['lake']（重定向到 tmp_path）。若不还原，全局注册表会被污染。
-    手法：clear()+update(saved) 保留原 dict 对象身份。
-    """
-    saved_datasets = copy.deepcopy(TUSHARE_DATASETS)
-    saved_lakes = copy.deepcopy(LAKE_CONFIG["lakes"])
-    yield
-    TUSHARE_DATASETS.clear()
-    TUSHARE_DATASETS.update(saved_datasets)
-    LAKE_CONFIG["lakes"].clear()
-    LAKE_CONFIG["lakes"].update(saved_lakes)
-
-
-class _FakePro:
-    """tushare pro 替身：按 api_name 返回可控 DataFrame（与 stock/etf 文件同实现）。"""
-    def __init__(self):
-        self._data = {}
-
-    def set(self, api, df):
-        self._data[api] = df
-
-    def __getattr__(self, api):
-        def _c(**kw):
-            return self._data.get(api, pd.DataFrame())
-        return _c
-
+def _isolate_tushare_registry(tushare_registry_isolated):
+    """薄壳（原 ~40 行块收口 tests/conftest.py::tushare_registry_isolated，2026-08-19 W2）。"""
 
 @pytest.fixture
 def fake_pro(monkeypatch):
-    """mock pro 接口 + 限频/熔断器（双 patch get_pro，与 stock/etf 文件同手法）。"""
-    fake = _FakePro()
-    monkeypatch.setattr("data._tushare_compat.get_pro", lambda: fake)
-    monkeypatch.setattr("data.tushare_sync.get_pro", lambda: fake)
-    monkeypatch.setattr("data.tushare_sync.tushare_rate_limiter",
-                        type("L", (), {"acquire": lambda self, n: None})())
-    monkeypatch.setattr("data.tushare_sync.tushare_breaker",
-                        type("B", (), {"allow_request": lambda self: True,
-                                       "record_success": lambda self: None,
-                                       "record_failure": lambda self: None})())
+    """薄壳（原 ~60 行块收口 tests/_tushare_stub.py，2026-08-19 W2）。"""
+    from tests._tushare_stub import FakePro, install_fake_pro
+    fake = FakePro(data=None)
+    install_fake_pro(monkeypatch, fake)
     return fake
 
 

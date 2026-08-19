@@ -28,6 +28,18 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+
+from tests._neckline_fixtures import ohlc as _ohlc
+
+# 基准场景：颈线 c*=100 / 谷底 bottom=90 / 形态高度 H=10 / ATR=2。
+# 代入默认 EXEC_DEFAULTS + DEFAULTS 推出关键价位（数值好算、分支边界清晰）：
+#   buy_limit   = c* + buy_limit_atr_mult·ATR = 100 + 1.0·2 = 102  （挂单价）
+#   base_stop   = c* − stop_atr_mult·ATR      = 100 − 1.0·2 = 98   （固定止损基准）
+#   tp1         = c* + tp1_h_mult·H           = 100 + 1.0·10 = 110 （第一止盈）
+#   tp2         = c* + tp_h_mult·H            = 100 + 2.0·10 = 120 （第二止盈）
+#   cancel_on   = c* + cancel_thresh_mult·H   = 100 + 1.0·10 = 110 （撤单阈值）
+#   max_wait=5, max_holding=15, tp1_portion=0.5
+C_STAR, BOTTOM, ATR = 100.0, 90.0, 2.0
 import pytest
 
 # 颈线法算法已收口进 strategies/neckline/ 子包（Layer2 Task 1.5），
@@ -50,29 +62,6 @@ from strategies.neckline import backtest as neckline_backtest  # noqa: E402  （
 # ============================================================================
 # 合成 OHLCV 辅助
 # ============================================================================
-def _ohlc(rows, start="2024-01-01"):
-    """rows: [(open, high, low, close, volume), ...] → DatetimeIndex DataFrame。
-
-    物理意图：构造确定性 OHLCV，让 simulate_exit 每个分支精确触发。DatetimeIndex
-    模拟真实 sym_df（simulate_exit 用 sym_df.index[idx].date() 取信号日/离场日）。
-    freq="B"（工作日）避免周末。调用方需自行保证 OHLC 物理一致性
-    （high ≥ max(open,close)，low ≤ min(open,close)）。
-    """
-    dates = pd.date_range(start, periods=len(rows), freq="B")
-    return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"], index=dates)
-
-
-# 基准场景：颈线 c*=100 / 谷底 bottom=90 / 形态高度 H=10 / ATR=2。
-# 代入默认 EXEC_DEFAULTS + DEFAULTS 推出关键价位（数值好算、分支边界清晰）：
-#   buy_limit   = c* + buy_limit_atr_mult·ATR = 100 + 1.0·2 = 102  （挂单价）
-#   base_stop   = c* − stop_atr_mult·ATR      = 100 − 1.0·2 = 98   （固定止损基准）
-#   tp1         = c* + tp1_h_mult·H           = 100 + 1.0·10 = 110 （第一止盈）
-#   tp2         = c* + tp_h_mult·H            = 100 + 2.0·10 = 120 （第二止盈）
-#   cancel_on   = c* + cancel_thresh_mult·H   = 100 + 1.0·10 = 110 （撤单阈值）
-#   max_wait=5, max_holding=15, tp1_portion=0.5
-C_STAR, BOTTOM, ATR = 100.0, 90.0, 2.0
-
-
 def _net_pct(raw_pct: float) -> float:
     """raw pnl(%) → 扣费后 net pnl(%)（与 simulate_exit factor 变换同源 · plan Task 12）。
 

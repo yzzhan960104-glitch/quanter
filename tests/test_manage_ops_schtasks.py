@@ -26,10 +26,7 @@ from ops.manage_ops_schtasks import (
 # ============ register_server：QuanterServer ONSTART ============
 
 
-class _FakeProc:
-    def __init__(self, returncode: int = 0, stdout: str = ""):
-        self.returncode = returncode
-        self.stdout = stdout
+from tests._stubs import FakeProc as _FakeProc
 
 
 def test_register_server_uses_boot_trigger_with_restart_on_failure():

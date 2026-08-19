@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+
+from tests._neckline_fixtures import ohlc as _ohlc
 import pytest
 
 # 颈线法算法已收口进 strategies/neckline/ 子包（Layer2 Task 1.5），
@@ -50,12 +52,6 @@ from strategies.neckline.method_v0 import (  # noqa: E402
 # ============================================================================
 # 合成 OHLCV 辅助
 # ============================================================================
-def _ohlc(rows, start="2024-01-01"):
-    """rows: [(open, high, low, close, volume), ...] → DatetimeIndex DataFrame（工作日）。"""
-    dates = pd.date_range(start, periods=len(rows), freq="B")
-    return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"], index=dates)
-
-
 def _synth_pattern():
     """合成 20 根可识别颈线形态（颈线=100 / bottom=90 / H=10 / ATR≈3.6）。
 

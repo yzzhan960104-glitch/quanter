@@ -71,10 +71,7 @@ def _audit_db(tmp_path, fills=(), positions=(), events=(), name="audit"):
     return db
 
 
-class _FakeProc:
-    def __init__(self, stdout: str = "", returncode: int = 0):
-        self.stdout = stdout
-        self.returncode = returncode
+from tests._stubs import FakeProc as _FakeProc
 
 
 def test_engine_process_count_ok_when_single(monkeypatch):

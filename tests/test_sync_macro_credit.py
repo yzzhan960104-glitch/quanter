@@ -16,32 +16,13 @@ import pandas as pd
 import pytest
 
 
-class _FakePro:
-    """tushare pro 替身：按 api_name 返回可控 DataFrame（cn_m M0/M1/M2 月频）。"""
-
-    def __init__(self):
-        self._data = {}
-
-    def set(self, api, df):
-        self._data[api] = df
-
-    def __getattr__(self, api):
-        def _c(**kw):
-            return self._data.get(api, pd.DataFrame())
-        return _c
-
 
 @pytest.fixture
 def fake_pro(monkeypatch):
-    """mock get_pro + 限频/熔断器（与 test_tushare_datasets_macro 同手法）。"""
-    fake = _FakePro()
-    monkeypatch.setattr("data.tools.sync_macro_credit.get_pro", lambda: fake)
-    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_rate_limiter",
-                        type("L", (), {"acquire": lambda self, n: None})())
-    monkeypatch.setattr("data.tools.sync_macro_credit.tushare_breaker",
-                        type("B", (), {"allow_request": lambda self: True,
-                                       "record_success": lambda self: None,
-                                       "record_failure": lambda self: None})())
+    """薄壳（原 ~60 行块收口 tests/_tushare_stub.py，2026-08-19 W2）。"""
+    from tests._tushare_stub import FakePro, install_fake_pro
+    fake = FakePro(data=None)
+    install_fake_pro(monkeypatch, fake, module_targets=("data.tools.sync_macro_credit",))
     return fake
 
 

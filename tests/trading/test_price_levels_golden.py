@@ -21,6 +21,8 @@
 """
 import pandas as pd
 
+from tests._neckline_fixtures import ohlc as _ohlc
+
 from strategies.neckline.backtest import EXEC_DEFAULTS, simulate_exit
 from strategies.neckline.method_v0 import DEFAULTS
 from strategies.neckline.price_levels import (
@@ -154,12 +156,6 @@ def test_plan_stop_cfg_missing_stop_atr_mult_falls_back_to_1_0():
 # ============================================================================
 # ③ 行为级等价：backtest 路径 / plan 路径 与单源同输入同价位
 # ============================================================================
-def _ohlc(rows, start="2024-01-01"):
-    """合成 OHLCV（与 tests/test_neckline_core._ohlc 同构，DatetimeIndex 模拟 sym_df）。"""
-    dates = pd.date_range(start, periods=len(rows), freq="B")
-    return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"], index=dates)
-
-
 def test_backtest_simulate_exit_matches_single_source():
     """backtest.simulate_exit 产出的 entry/tp1/tp2 与单源逐位一致（默认档 c*=100
     场景与 tests/test_neckline_core 基准同源：entry=102/tp1=110/tp2=120/risk=3.92）。"""
