@@ -16,11 +16,10 @@ _isolate_tushare_registry fixture（深拷贝还原全局注册表）+ fake_pro 
 （双 patch get_pro + rate_limiter/breaker 短路），因 pytest fixture 是文件级
 作用域，不能跨文件直接复用（conftest 未抽取）。
 """
-import copy
 import pandas as pd
 import pytest
 
-from config import TUSHARE_DATASETS, LAKE_CONFIG
+from config import TUSHARE_DATASETS
 
 
 @pytest.fixture(autouse=True)

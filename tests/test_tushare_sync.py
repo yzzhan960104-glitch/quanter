@@ -7,7 +7,6 @@
   仅验证同步器的分页/断点/落湖逻辑正确性。
 - 通过 TUSHARE_DATASETS[key] 临时覆盖落湖路径到 tmp_path，保证测试隔离无副作用。
 """
-import copy
 import os
 import pandas as pd
 import pytest

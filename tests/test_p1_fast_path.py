@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from tests._neckline_fixtures import synth_pattern as _synth_pattern
+from tests._neckline_fixtures import ohlc as _ohlc, synth_pattern as _synth_pattern
 import pytest
 
 # 项目根挂 sys.path（与 test_neckline_recognition.py 同口径）
@@ -234,9 +234,8 @@ def test_neckline_cluster_matches_ref_random_sweep():
 # ③ _detect_core_window 与 detect_neckline_method 全守卫等价（合成形态）
 # ============================================================================
 def _synth_df():
-    rows = _synth_pattern()
-    dates = pd.date_range("2024-01-01", periods=len(rows), freq="B")
-    return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"], index=dates)
+    # 薄壳（2026-08-19 评审收口：与 _neckline_fixtures.ohlc 构造逐字重复）
+    return _ohlc(_synth_pattern())
 
 
 _CFG_W20 = {**DEFAULTS, "window": 20}

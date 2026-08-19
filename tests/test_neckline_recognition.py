@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from tests._neckline_fixtures import ohlc as _ohlc
+from tests._neckline_fixtures import ohlc as _ohlc, synth_pattern as _synth_pattern
 import pytest
 
 # 颈线法算法已收口进 strategies/neckline/ 子包（Layer2 Task 1.5），
@@ -48,46 +48,11 @@ from strategies.neckline.method_v0 import (  # noqa: E402
     DEFAULTS,
 )
 
-
-# ============================================================================
-# 合成 OHLCV 辅助
-# ============================================================================
-def _synth_pattern():
-    """合成 20 根可识别颈线形态（颈线=100 / bottom=90 / H=10 / ATR≈3.6）。
-
-    每根显式指定，确保 detect 的 7 个守卫全部通过（见模块 docstring 的设计推演）。
-    返回 [(open, high, low, close, volume), ...]。拒绝路径测试基于此单一条件破坏。
-    """
-    return [
-        (91, 93, 90, 91, 100),       # pos0
-        (92, 94, 91, 92, 100),       # pos1
-        (93, 95, 92, 93, 100),       # pos2
-        (94, 96, 93, 94, 100),       # pos3
-        (95, 97, 94, 95, 100),       # pos4
-        (97, 100, 96, 98, 100),      # pos5  ← top1（local max, high=100）
-        (95, 96, 93, 94, 100),       # pos6
-        (93, 94, 91, 92, 100),       # pos7
-        (91, 93, 90, 91, 100),       # pos8  ← bottom1（local min, low=90=min_price）
-        (93, 95, 92, 93, 100),       # pos9
-        (95, 97, 94, 95, 100),       # pos10
-        (97, 99, 96, 97, 100),       # pos11
-        (99, 101, 97, 99, 100),      # pos12 ← top2（local max, high=101）
-        (97, 99, 95, 96, 100),       # pos13
-        (94, 96, 92, 93, 100),       # pos14
-        (92, 94, 91, 92, 100),       # pos15 ← bottom2 区（local min, low=91）
-        (92, 94, 91, 92, 100),       # pos16 ← bottom（local min, low=91，与 pos15 连续平原）
-        (93, 95, 92, 93, 100),       # pos17
-        (96, 98, 95, 97, 100),       # pos18
-        (102, 106, 98, 102, 500),    # pos19 ← 突破日（close=102>100, vol=500 放量）
-    ]
-
-
-# cfg：识别窗口缩到 20（默认 60），便于用 20 根合成形态测试；其余参数沿用 DEFAULTS
 _CFG_W20 = {**DEFAULTS, "window": 20}
 
 
 # ============================================================================
-# ① 基元
+# 合成 OHLCV 辅助
 # ============================================================================
 def test_local_minima():
     """局部极小值：某点 ≤ 左右各 w 根 → 离散低点；排除首尾各 w 根。"""

@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """QmtExecutionGateway 补全单测（on_account_status / query_asset / query_orders / 兜底 / polish / 持仓扩展）。"""
 import asyncio
+import time
+import types
+
 import pytest
+from unittest.mock import AsyncMock
+
+from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
 
 # Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）；W2-H1 再分四文件。
 # patch 内部全局（_alert_account_status/_XTQUANT_AVAILABLE/XtQuantTrader/xtconstant/
@@ -9,7 +15,9 @@ import pytest
 # 只是组装+re-export 垫片，patch 垫片无效）。
 from broker import qmt_connection as qmt_gateway
 from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
-from broker.qmt import QmtExecutionGateway
+from broker.qmt import QmtExecutionGateway, _map_qmt_status, _assert_status_contract
+# qmt_gateway.XtQuantTrader 就是 conftest 注入的 FakeXtQuantTrader 类对象
+FakeTrader = qmt_gateway.XtQuantTrader
 
 
 class _FakeLoop:
@@ -891,25 +899,6 @@ def test_fetch_broker_positions_full_includes_frozen(monkeypatch):
 # qmt_gateway.connect 捕获 `self._loop = get_running_loop()`，跨 asyncio.run 调用
 # 会因旧 loop 已关闭使 run_in_executor/call_soon_threadsafe 抛 RuntimeError。
 # ============================================================================
-import asyncio
-import time
-import types
-
-import pytest
-from unittest.mock import AsyncMock
-
-# Layer2 阶段3：真身迁 broker.qmt（原 trading.qmt_gateway）；W2-H1 再分四文件。
-# patch 内部全局（_CONNECT_TIMEOUT/XtQuantTrader/_client_servable 等）须指真身模块
-# ——现真身 = 契约根 broker.qmt_connection（broker.qmt 只是组装+re-export 垫片，
-# patch 垫片无效）。_ORDER_TIMEOUT 单源收口（N5 · Low ③）：qmt_io/qmt_business 均
-# 改调用点模块属性访问，patch 超时统一指 broker.qmt_connection（一处生效三读取方）。
-from broker import qmt_connection as qmt_gateway
-from broker.qmt import QmtExecutionGateway, _map_qmt_status, _assert_status_contract
-from trading.compute.types import OrderRequest  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 compute.types 真身
-from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
-
-# qmt_gateway.XtQuantTrader 就是 conftest 注入的 FakeXtQuantTrader 类对象
-FakeTrader = qmt_gateway.XtQuantTrader
 
 
 def _setup_env(monkeypatch):
@@ -980,7 +969,6 @@ def test_connect_timeout_raises(monkeypatch):
     物理意图：柜台断连/无响应时底层 start/connect/subscribe 是同步阻塞 C++ 调用，无 wait_for
     会永久卡住事件循环。wait_for 兜底后超时转 ConnectionError，由 _reconnect 重试。
     """
-    import time
     _setup_env(monkeypatch)
     monkeypatch.setattr(qmt_gateway, "_CONNECT_TIMEOUT", 0.05)
 
@@ -1074,7 +1062,6 @@ def test_connect_rotates_when_client_servable(monkeypatch):
 
 def test_submit_order_timeout_returns_failed(monkeypatch):
     """#9：order_stock_async 阻塞 → wait_for 超时返 FAILED（不抛、不卡事件循环）。"""
-    import time
     _setup_env(monkeypatch)
     # N5（Low ③ 单源收口）：qmt_business 调用点已改 ``qmt_connection._ORDER_TIMEOUT``
     # 模块属性访问——patch 契约根即生效（from-import 副本已删，patch 旧读取方无效）。
@@ -1098,7 +1085,6 @@ def test_submit_order_timeout_returns_failed(monkeypatch):
 
 def test_cleanup_orders_removes_stale_terminal_only(monkeypatch):
     """#10：cleanup_orders 删终态+超期单；保留非终态（无论时长）+ 终态未超期。"""
-    import time
     _setup_env(monkeypatch)
     now = time.time()
     gw = QmtExecutionGateway()
@@ -1201,12 +1187,6 @@ def test_on_disconnected_locks(monkeypatch):
     asyncio.run(run())
 
 
-# ============================================================================
-# Task E1（live-mainchain-fixes）：状态 51 保守映射 SUBMITTED（#9）
-# ============================================================================
-def test_status_51_reported_cancel_maps_to_submitted():
-    """51（已报待撤）保守映射 SUBMITTED：撤单刚受理不当终态（#9）。"""
-    from broker.qmt import _map_qmt_status
-    from trading.types.order_state import OrderState
+
 
     assert _map_qmt_status(51) is OrderState.SUBMITTED

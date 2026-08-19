@@ -22,6 +22,11 @@ def test_multilake_load_and_query_by_key(tmp_path):
     # 按 lake 查询，互不串味
     assert r.get_cross_section("2024-01-02", lake="daily").loc["000001.SZ", "close"] == 10.0
     assert r.get_cross_section("2024-01-02", lake="minute").loc["000001.SZ", "close"] == 20.0
+    # 单索引湖支持改造后的 MultiIndex 兼容断言（2026-08-19 评审补位：原专项例随 W1 删，
+    # 其独有断言——价格 ffill/量不 ffill 不被单索引分支破坏——并入本例，免专设脚手架）：
+    sec = r.get_cross_section("2024-01-03", lake="daily")   # 01-03 停牌日（close NaN/volume 0）
+    assert sec.loc["000001.SZ", "close"] == 10.0            # 停牌日价格 ffill
+    assert sec.loc["000001.SZ", "volume"] == 0              # volume 不 ffill
 
 
 def test_default_lake_backward_compat(tmp_path):

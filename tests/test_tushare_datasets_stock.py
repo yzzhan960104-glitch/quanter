@@ -11,11 +11,10 @@
 - **落湖契约**：三大报表经 sync_dataset 后产出 MultiIndex(date, symbol) parquet，这是
   DataLakeReader 双向切片的硬契约，test_fina_three_statements_lake 守卫。
 """
-import copy
 import pandas as pd
 import pytest
 
-from config import TUSHARE_DATASETS, LAKE_CONFIG
+from config import TUSHARE_DATASETS
 
 
 @pytest.fixture(autouse=True)

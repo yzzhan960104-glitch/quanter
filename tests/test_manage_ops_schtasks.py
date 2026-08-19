@@ -242,7 +242,6 @@ def test_retired_tasks_covers_pipeline_brief():
     assert {"QuanterDataPipeline", "QuanterBrief"} <= set(m.RETIRED_TASKS)
 
 
-
 def test_pipeline_tasks_kept_as_historical_metadata():
     """PIPELINE_TASKS：历史 supervisor 元数据（时间 + bat），register 不再 /Create。
 
@@ -257,7 +256,6 @@ def test_pipeline_tasks_kept_as_historical_metadata():
     assert by_name["QuanterBrief"][1].endswith("run_brief_all.bat")
 
 
-
 def test_legacy_tasks_cover_old_six():
     """LEGACY_TASKS：旧 6 零散任务全集（register 时 /Delete 清退防 schtasks 残留）。
 
@@ -267,7 +265,6 @@ def test_legacy_tasks_cover_old_six():
     assert set(m.LEGACY_TASKS) == {
         "QuanterTradingBrief", "QuanterStrategyBrief", "QuanterDataBrief",
         "QuanterDataCheckT1", "QuanterDailyIncremental", "QuanterDataCheckT2"}
-
 
 
 def test_register_clears_legacy_and_retired_creates_nothing(monkeypatch):
@@ -291,15 +288,12 @@ def test_register_clears_legacy_and_retired_creates_nothing(monkeypatch):
     assert len(deletes) == len(m.LEGACY_TASKS) + len(m.RETIRED_TASKS)
     # Final Fix 红线：绝不创建任何 schtasks（两个 supervisor 已退役）
     assert len(creates) == 0
-    # 删到的退役任务名正好是 RETIRED_TASKS 全集
-    deleted_names = {c[c.index("/TN") + 1] for c in deletes if c[1] == "/TN" or "/TN" in c}
-    # /TN 后跟任务名（schtasks /Delete /TN <name> /F）→ 取 /TN 的下一个 token
+    # 删到的退役任务名正好是 RETIRED_TASKS 全集（/TN 后跟任务名，schtasks /Delete /TN <name> /F）
     retired_deleted = {
         c[c.index("/TN") + 1] for c in deletes if "/TN" in c
         and c[c.index("/TN") + 1] in m.RETIRED_TASKS
     }
     assert retired_deleted == set(m.RETIRED_TASKS)
-
 
 
 def test_unregister_pipeline_brief_clears_retired(monkeypatch):

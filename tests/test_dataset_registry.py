@@ -14,7 +14,6 @@
   让前端 DataLakeView 可反射这些 Tushare 宏观资产。端到端测试验证 sync_macro 落湖 →
   CreditRegime.compute 返 1/0/-1（不抛、列名契约成立）。
 """
-import pandas as pd
 import pytest
 
 from config import LAKE_CONFIG, DATASET_REGISTRY, TUSHARE_DATASETS

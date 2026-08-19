@@ -19,7 +19,6 @@ _isolate_tushare_registry + fake_pro fixture（conftest 未抽取，文件级作
 注：mkt_daily 的 LAKE_CONFIG key 与 TUSHARE_DATASETS key 一致（mkt_daily），lake 路径
 mkt_daily.parquet（单一真相源：LAKE_CONFIG[key]==TUSHARE_DATASETS[key]['lake']）。
 """
-import copy
 import pandas as pd
 import pytest
 

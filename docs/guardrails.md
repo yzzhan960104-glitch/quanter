@@ -14,7 +14,7 @@
 |---|---|---|---|---|
 | 端口一致性 | `ops/check_ports.py` | 秒级 | 每次 `npm run dev`（predev 自动）+ CI | vite proxy 与后端 API_PORT 漂移（ECONNREFUSED） |
 | 前后端契约 | `ops/check_contracts.py` | 秒级 | CI | `api/*.ts` 调用了后端 openapi 不存在的端点（404/契约漂移） |
-| 后端单测 | `pytest tests` | ~3.5min | CI | 2,007 项后端逻辑/路由/状态机/鉴权回归（截至 2026-08-19 实测；08-16 停牌真值灌满 suspend_d 后一度 8min，同日 W0 向量化+mtime 缓存修复 `load_suspend_intervals`，见 debt/test-slim-0819 波次） |
+| 后端单测 | `pytest tests` | ~3.5min | CI | 2,007 项（**passed 口径**；另 1 skipped，collect 2,016 含 8 项 deselected slow——口径注记 2026-08-19 评审补）后端逻辑/路由/状态机/鉴权回归（截至 2026-08-19 实测；08-16 停牌真值灌满 suspend_d 后一度 8min，同日 W0 向量化+mtime 缓存修复 `load_suspend_intervals`，见 debt/test-slim-0819 波次） |
 | 前端类型 | `npm run typecheck`（vue-tsc） | ~30s | CI | TS 类型回归 |
 | 前端组件/单测 | `npm run test`（vitest + @vue/test-utils） | ~5s | CI | facade 契约姿势（URL/method/timeout）+ 组件渲染/emit 回归 |
 | E2E（L3） | `tests/e2e_long_cycle`（pytest 长周期闭环） | ~4.9min | 本地，波次合并前必跑（不入 CI） | plan→pre_open→fill→review 完整闭环行为等价 |
