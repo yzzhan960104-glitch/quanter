@@ -55,34 +55,6 @@ def test_dividend_uses_ann_date():
         "dividend 必须用 ann_date（分红方案公告日）索引，禁用 div_proc（文本进度，非日期）"
 
 
-def test_all_five_datasets_registered():
-    """五个新数据集必须在 TUSHARE_DATASETS 注册且关键字段完备。
-
-    Why 守卫完备性：sync_dataset 直接 cfg = TUSHARE_DATASETS[key]，缺任一 key 立即
-    KeyError；缺 api/by/date_col/symbol_col/fields/lake 任一字段，运行时崩在更深处。
-    配置层把契约钉死，PR review 漏一眼也守得住。
-    """
-    required_keys = ("fina_balance", "fina_cashflow", "forecast", "express", "dividend")
-    required_fields = ("api", "by", "date_col", "symbol_col", "fields", "lake")
-    for key in required_keys:
-        assert key in TUSHARE_DATASETS, f"{key} 未在 TUSHARE_DATASETS 注册"
-        cfg = TUSHARE_DATASETS[key]
-        for f in required_fields:
-            assert f in cfg, f"{key} 配置缺字段 {f}"
-        # by=symbol：财报/分红均逐标的拉取（单标的全历史一次返）
-        assert cfg["by"] == "symbol", f"{key} 分页模式应为 symbol（逐标的）"
-
-
-def test_five_datasets_lake_registered():
-    """五个新数据集必须在 LAKE_CONFIG['lakes'] 注册（DataLakeReader 寻址依赖）。"""
-    for key in ("fina_balance", "fina_cashflow", "forecast", "express", "dividend"):
-        assert key in LAKE_CONFIG["lakes"], \
-            f"{key} 未在 LAKE_CONFIG['lakes'] 注册，DataLakeReader 无法寻址"
-        # 落湖路径与 TUSHARE_DATASETS 声明必须一致（单一真相源，避免两处分叉）
-        assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
-            f"{key} 的 LAKE_CONFIG 路径与 TUSHARE_DATASETS 不一致"
-
-
 def test_fina_three_statements_lake(tmp_path, fake_pro, monkeypatch):
     """三大报表落 MultiIndex(date, symbol)。
 
@@ -142,33 +114,6 @@ def test_forecast_express_dividend_lake(tmp_path, fake_pro, monkeypatch):
         df = pd.read_parquet(TUSHARE_DATASETS[key]["lake"])
         assert df.index.names == ["date", "symbol"], f"{key} 索引名错误"
         assert len(df) == 1, f"{key} 行数错误"
-
-
-def test_task3to5_datasets_registered():
-    """Task 3-5 数据集配置完备性 + 落湖注册契约。
-
-    top_list 已退役删除（2026-08-05，Tushare 无接口权限）；其余各自独立湖。
-    """
-    by_date_specs = {
-        "moneyflow": ("trade_date", "ts_code"),
-        "top_inst": ("trade_date", "ts_code"),
-        "margin": ("trade_date", "exchange_id"),
-        "margin_detail": ("trade_date", "ts_code"),
-    }
-    for key, (date_col, sym) in by_date_specs.items():
-        assert key in TUSHARE_DATASETS, f"{key} 未注册"
-        cfg = TUSHARE_DATASETS[key]
-        assert cfg["by"] == "date", f"{key} by 应为 date"
-        assert cfg["date_col"] == date_col, f"{key} date_col 应为 {date_col}"
-        assert cfg["symbol_col"] == sym, f"{key} symbol_col 应为 {sym}"
-    assert TUSHARE_DATASETS["margin_secs"]["by"] == "single"
-    # 各自独立湖的 5 个：注册到 LAKE_CONFIG 且路径与 TUSHARE_DATASETS 一致
-    for key in ("moneyflow", "top_inst", "margin", "margin_detail", "margin_secs"):
-        assert key in LAKE_CONFIG["lakes"], f"{key} 未注册到 LAKE_CONFIG"
-        assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
-            f"{key} LAKE_CONFIG 与 TUSHARE_DATASETS 路径不一致"
-    # top_list 已退役删除：不得残留注册
-    assert "top_list" not in TUSHARE_DATASETS, "top_list 已退役（2026-08-05），不应再注册"
 
 
 def test_moneyflow_by_date(tmp_path, fake_pro, monkeypatch):
@@ -262,39 +207,6 @@ def test_moneyflow_hsgt_by_date(tmp_path, fake_pro, monkeypatch):
 # Plan A Task 7/8/10：板块概念 / 指数 / 股东解禁停牌
 # ====================================================================
 
-def test_ths_daily_registered():
-    """Task 7 板块数据集配置完备性 + 落湖注册契约。
-
-    Why 守卫完备性：sync_dataset 直接 cfg = TUSHARE_DATASETS[key]，缺任一字段运行时崩在深处。
-    concept/concept_detail 已退役删除（2026-08-05，直连无接口权限）；ths_daily 是同花顺
-    板块指数日线（by=date，单日全市场）。
-    """
-    assert "concept" not in TUSHARE_DATASETS, "concept 已退役（2026-08-05），不应再注册"
-    assert "concept_detail" not in TUSHARE_DATASETS, "concept_detail 已退役（2026-08-05），不应再注册"
-    # ths_daily：板块指数日线，date 模式（单日全市场板块行情一次返）
-    assert "ths_daily" in TUSHARE_DATASETS, "ths_daily 未注册"
-    cfg_ths = TUSHARE_DATASETS["ths_daily"]
-    for f in ("api", "by", "date_col", "symbol_col", "fields", "lake"):
-        assert f in cfg_ths, f"ths_daily 配置缺字段 {f}"
-    assert cfg_ths["by"] == "date", "ths_daily 应为 date（单日全市场板块行情）"
-    assert cfg_ths["date_col"] == "trade_date", "ths_daily date_col 应为 trade_date"
-    assert cfg_ths["symbol_col"] == "ts_code", "ths_daily symbol_col 应为 ts_code（板块指数代码）"
-
-
-def test_ths_daily_lake_registered():
-    """ths_daily 必须在 LAKE_CONFIG['lakes'] 注册（DataLakeReader 寻址依赖）。
-
-    Why 不复用 sector 湖：sector 湖由 akshare 写申万行业日线（sync_sector_daily），
-    ths_daily 是同花顺概念板块指数日线（不同分类口径 + 不同 ts_code 空间），
-    混写会互相覆盖。两者独立湖，各走各的 ts_code 空间。
-    """
-    key = "ths_daily"
-    assert key in LAKE_CONFIG["lakes"], f"{key} 未在 LAKE_CONFIG['lakes'] 注册"
-    assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
-        f"{key} LAKE_CONFIG 路径与 TUSHARE_DATASETS 不一致"
-    assert "concept" not in LAKE_CONFIG["lakes"], "concept 湖已退役删除（2026-08-05）"
-
-
 def test_ths_daily_by_date(tmp_path, fake_pro, monkeypatch):
     """ths_daily by=date 落 MultiIndex(date, symbol)，symbol 从 ts_code 列取（非文件名）。
 
@@ -321,35 +233,6 @@ def test_ths_daily_by_date(tmp_path, fake_pro, monkeypatch):
     # symbol 必须来自 ts_code 列（板块指数代码），绝不能是文件名里的交易日
     assert "20240105" not in syms, "ths_daily symbol 误取自文件名（交易日）"
     assert syms == {"885572.TI", "885538.TI"}, "ths_daily symbol 不在 ts_code 列"
-
-
-def test_index_datasets_registered():
-    """指数三数据集配置完备性 + 落湖注册契约。
-
-    Why 配置层守卫：sync_dataset 直接 cfg = TUSHARE_DATASETS[key]，缺 key/字段立即 KeyError。
-    index_daily by=symbol（symbols=指数代码由调用方传，不复用股票 _load_universe）；
-    index_weight by=date（symbol_col=con_code 成分股，非指数代码）；
-    index_member by=single（单次拉全量，date_col=in_date 纳入日）。
-    """
-    specs = {
-        "index_daily":  ("symbol", "trade_date", "ts_code"),
-        "index_weight": ("date",   "trade_date", "con_code"),
-        # index_member B 类订正：api=index_weight，by=symbol（逐指数），date_col=trade_date，
-        # symbol_col=con_code（成分股）。code_param=index_code（_sync_by_symbol 用此参数名拉指数）。
-        "index_member": ("symbol", "trade_date", "con_code"),
-    }
-    for key, (by, date_col, sym) in specs.items():
-        assert key in TUSHARE_DATASETS, f"{key} 未注册"
-        cfg = TUSHARE_DATASETS[key]
-        for f in ("api", "by", "date_col", "symbol_col", "fields", "lake"):
-            assert f in cfg, f"{key} 配置缺字段 {f}"
-        assert cfg["by"] == by, f"{key} by 应为 {by}"
-        assert cfg["date_col"] == date_col, f"{key} date_col 应为 {date_col}"
-        assert cfg["symbol_col"] == sym, f"{key} symbol_col 应为 {sym}"
-        # lake 路径在 LAKE_CONFIG 注册（DataLakeReader 寻址依赖，单一真相源）
-        assert key in LAKE_CONFIG["lakes"], f"{key} 未注册到 LAKE_CONFIG"
-        assert LAKE_CONFIG["lakes"][key] == cfg["lake"], \
-            f"{key} LAKE_CONFIG 与 TUSHARE_DATASETS lake 路径不一致"
 
 
 def test_index_daily_by_symbol(tmp_path, fake_pro, monkeypatch):
@@ -485,26 +368,6 @@ def test_a10_share_float_uses_ann_date_suspend_d_degraded():
         "suspend_d date_col 降级为 trade_date（API 不返 ann_date，前视防护降级）"
     assert TUSHARE_DATASETS["suspend_d"]["symbol_col"] == "ts_code", \
         "suspend_d symbol_col 应为 ts_code（by=date 从该列取 symbol，非文件名）"
-
-
-def test_a10_all_four_datasets_registered():
-    """A10 四个数据集配置完备性 + 落湖注册契约（单一真相源）。
-
-    Why 守卫完备性：sync_dataset 直接 cfg = TUSHARE_DATASETS[key]，缺任一 key 立即
-    KeyError；缺 api/by/date_col/symbol_col/fields/lake 任一字段，运行时崩在更深处。
-    配置层把契约钉死。落湖路径必须在 LAKE_CONFIG['lakes'] 注册且与 TUSHARE_DATASETS
-    一致（DataLakeReader 按 lakes[key] 寻址，两处分叉会导致寻址错湖）。
-    """
-    required_fields = ("api", "by", "date_col", "symbol_col", "fields", "lake")
-    for key in ("top10_holders", "top10_floatholders", "share_float", "suspend_d"):
-        assert key in TUSHARE_DATASETS, f"{key} 未在 TUSHARE_DATASETS 注册"
-        cfg = TUSHARE_DATASETS[key]
-        for f in required_fields:
-            assert f in cfg, f"{key} 配置缺字段 {f}"
-        # 四个湖均独立新增（不复用 dragon_list/north_flow/sector 等）
-        assert key in LAKE_CONFIG["lakes"], f"{key} 未在 LAKE_CONFIG['lakes'] 注册"
-        assert LAKE_CONFIG["lakes"][key] == cfg["lake"], \
-            f"{key} 的 LAKE_CONFIG 路径与 TUSHARE_DATASETS 不一致"
 
 
 def test_a10_suspend_d_uses_official_fields():

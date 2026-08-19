@@ -65,22 +65,8 @@ def test_is_client_ready_true_when_only_engine_down_queue_present(tmp_path):
 
 # ============================================================ _client_staleness_diag 四态覆盖
 # 诊断函数是 T2 _health_guard WARNING 文案的来源，文案需稳定可断言。
-# 四态：目录缺失 / 目录空 / 无活跃文件（仅目录存在） / 陈旧 N 分钟 / 正常。
-def test_staleness_diag_dir_missing(tmp_path):
-    """诊断态①：userdata 目录不存在 → 文案含「不存在/缺失」。"""
-    gw = _gw(str(tmp_path / "no_such_dir"))
-    diag = gw._client_staleness_diag()
-    assert "不存在" in diag or "缺失" in diag
-
-
-def test_staleness_diag_dir_empty(tmp_path):
-    """诊断态②：目录存在但空 → 文案含「目录空」。"""
-    userdata = tmp_path / "empty_mini"
-    userdata.mkdir()
-    gw = _gw(str(userdata))
-    assert "目录空" in gw._client_staleness_diag()
-
-
+# 诊断态覆盖：目录缺失/目录空 由 is_client_ready 例同断言（更全），
+# 此处守 无活跃文件/陈旧/正常 三态。
 def test_staleness_diag_no_active_files(tmp_path):
     """诊断态③：目录非空但无 miniqmtShm*/up_queue*/quoter 活跃文件
     （只有 down_queue 等引擎文件）→ 文案含「无活跃文件」。
@@ -534,46 +520,26 @@ async def test_health_guard_not_ready_warns_with_diag(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_health_guard_not_ready_alert_fires_on_first_round(monkeypatch):
-    """I-1：首次未就绪（第 1 轮）立即推钉钉——断线立刻可见，不延迟到第 10 轮。
+@pytest.mark.parametrize("rounds, expected_pushes", [(1, 1), (12, 2), (20, 3)],
+                         ids=["first_round", "throttle_10", "round_20"])
+async def test_health_guard_not_ready_alert_throttle(monkeypatch, rounds, expected_pushes):
+    """I-1 未就绪告警节流（原 3 个同构用例参数化合并，2026-08-19 W3）。
 
     物理意图：盘中 09:22 pre_open 前断线时，旧版节流要等到第 10 轮（≈10min 后）
-    才首推，pre_open 已被 gate 静默跳过。新口径 _not_ready_rounds==1 即推一条，
-    让操作员在 pre_open 窗口关闭前有机会介入。
+    才首推，pre_open 已被 gate 静默跳过。新口径首轮即推 + 后续每 10 轮节流推：
+      1 轮 → 1 推（断线立刻可见，操作员有机会在 pre_open 窗口关闭前介入）；
+      12 轮 → 2 推（第 1 + 第 10，第 11/12 轮不推）；
+      20 轮 → 3 推（第 1 + 第 10 + 第 20）。
     """
     from unittest.mock import patch
     eng, gw, fired = _make_engine_with_not_ready_gw(monkeypatch)
     with patch("trading.engine.get_gateway", return_value=gw):
-        await eng._health_guard()  # 仅 1 轮
-    assert len(fired) == 1, f"首轮应立即推 1 次钉钉（断线立刻可见），实际 {len(fired)}"
-    assert "目录不存在" in fired[0] or "客户端未安装" in fired[0]
-    assert "1 轮" in fired[0]
-    assert eng._not_ready_rounds == 1
-
-
-@pytest.mark.asyncio
-async def test_health_guard_not_ready_throttles_alert_every_10_rounds(monkeypatch):
-    """I-1：连续 12 轮未就绪 → 第 1 轮首推 + 第 10 轮再推（首轮即推 + 后续 10 轮节流）。"""
-    from unittest.mock import patch
-    eng, gw, fired = _make_engine_with_not_ready_gw(monkeypatch)
-    with patch("trading.engine.get_gateway", return_value=gw):
-        for _ in range(12):
+        for _ in range(rounds):
             await eng._health_guard()
-    # 12 轮推 2 次（第 1 轮首推 + 第 10 轮节流推），第 11/12 轮不推
-    assert len(fired) == 2, f"12 轮应推 2 次钉钉（首推 + 第 10 轮），实际 {len(fired)}"
+    assert len(fired) == expected_pushes, \
+        f"{rounds} 轮应推 {expected_pushes} 次钉钉，实际 {len(fired)}"
     assert "目录不存在" in fired[0] or "客户端未安装" in fired[0]
-    assert eng._not_ready_rounds == 12
-
-
-@pytest.mark.asyncio
-async def test_health_guard_not_ready_alert_at_round_20(monkeypatch):
-    """I-1：第 20 轮共推 3 次（第 1 轮首推 + 第 10 + 第 20 节流推）。"""
-    from unittest.mock import patch
-    eng, gw, fired = _make_engine_with_not_ready_gw(monkeypatch)
-    with patch("trading.engine.get_gateway", return_value=gw):
-        for _ in range(20):
-            await eng._health_guard()
-    assert len(fired) == 3, f"20 轮应推 3 次（第 1 + 第 10 + 第 20），实际 {len(fired)}"
+    assert eng._not_ready_rounds == rounds
 
 
 @pytest.mark.asyncio

@@ -171,44 +171,35 @@ def test_detect_recognizes_pattern():
     assert res["H_over_ATR"] < 4.0        # 深度守卫通过（防暴跌反弹）
 
 
-def test_detect_reject_no_breakout():
-    """守卫·突破：末根 close ≤ c* → 未突破，返回 None。"""
-    rows = _synth_pattern()
-    rows[-1] = (99, 101, 98, 99, 500)     # 末根 close=99 ≤ 颈线 100 → 未突破
-    df = _ohlc(rows)
-    assert detect_neckline_method(df, cfg=_CFG_W20) is None
+@pytest.mark.parametrize(
+    "last_row, cfg_overrides, guard_doc",
+    [
+        # 守卫·突破：末根 close=99 ≤ 颈线 100 → 未突破
+        ((99, 101, 98, 99, 500), {}, "末根 close ≤ c* → 未突破"),
+        # 守卫·带量：vol=100，vol5=100 → 100 < 1.5×100=150
+        ((102, 106, 98, 102, 100), {}, "末根 vol < breakout_vol_mult × vol5 → 突破未带量"),
+        # 守卫·深度：合成形态 H/ATR≈2.78，max_h_atr 收紧到 2.0 → 2.78 > 2.0（实证深形态胜率 27%）
+        (None, {"max_h_atr": 2.0}, "H/ATR > max_h_atr → 暴跌反弹嫌疑"),
+        # 守卫·聚集足够性：min_touches 提到 3（合成仅 2 个顶部）→ 连不成颈线
+        (None, {"min_touches": 3}, "顶部聚集数 < min_touches → 颈线不成立"),
+        # 守卫·压制时长：min_suppression 提到 0.99（合成实际 0.95）→ 颈线无效
+        (None, {"min_suppression": 0.99}, "压制时长占比 < min_suppression → 颈线无效"),
+    ],
+    ids=["no_breakout", "no_volume", "too_deep", "few_tops", "low_suppression"],
+)
+def test_detect_reject_guards(last_row, cfg_overrides, guard_doc):
+    """五守卫逐轴拒绝（原 5 个同构用例参数化合并，2026-08-19 W3）：单一条件破坏 → None。
 
-
-def test_detect_reject_no_volume():
-    """守卫·带量：末根 vol < breakout_vol_mult × vol5 → 突破未带量，返回 None。"""
-    rows = _synth_pattern()
-    rows[-1] = (102, 106, 98, 102, 100)   # vol=100，vol5=100 → 100 < 1.5×100=150
-    df = _ohlc(rows)
-    assert detect_neckline_method(df, cfg=_CFG_W20) is None
-
-
-def test_detect_reject_too_deep():
-    """守卫·深度：H/ATR > max_h_atr → 暴跌反弹嫌疑（实证深形态胜率 27%），返回 None。
-
-    合成形态 H/ATR≈2.78，把 max_h_atr 收紧到 2.0 → 2.78 > 2.0 触发拒绝。
+    物理意图：detect_neckline_method 的五道守卫（突破/带量/深度/聚集/压制）各挡一类
+    假形态——每轴只破坏一个条件（末根变异或 cfg 收紧），其余保持可识别基线，断言
+    返回 None。p1_fast_path 的内核等价例在此基线上另守「拒绝发生在内核」。
     """
-    df = _ohlc(_synth_pattern())
-    cfg = {**_CFG_W20, "max_h_atr": 2.0}
-    assert detect_neckline_method(df, cfg=cfg) is None
-
-
-def test_detect_reject_few_tops():
-    """守卫·聚集足够性：min_touches 提到 3（合成仅 2 个顶部）→ 连不成颈线，返回 None。"""
-    df = _ohlc(_synth_pattern())
-    cfg = {**_CFG_W20, "min_touches": 3}
-    assert detect_neckline_method(df, cfg=cfg) is None
-
-
-def test_detect_reject_low_suppression():
-    """守卫·压制时长：min_suppression 提到 0.99（合成实际 0.95）→ 颈线无效，返回 None。"""
-    df = _ohlc(_synth_pattern())
-    cfg = {**_CFG_W20, "min_suppression": 0.99}
-    assert detect_neckline_method(df, cfg=cfg) is None
+    rows = _synth_pattern()
+    if last_row is not None:
+        rows[-1] = last_row
+    df = _ohlc(rows)
+    cfg = {**_CFG_W20, **cfg_overrides}
+    assert detect_neckline_method(df, cfg=cfg) is None, guard_doc
 
 
 # ============================================================================

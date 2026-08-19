@@ -325,4 +325,95 @@ def test_sync_tushare_cli_no_longer_accepts_daily():
     """sync_tushare.py argparse choices 不再含 daily。"""
     assert "daily" not in list(TUSHARE_DATASETS.keys())
 
+# ============================================================================
+# TUSHARE_DATASETS 全量声明表（W3 表驱动收口 · 2026-08-19）
+# ============================================================================
+# 原 stock/etf/macro 三个 datasets 文件里 13 个 per-family「注册守卫」用例同模板
+# （fields 完备 + by/date_col/symbol_col/api 声明 + 湖注册），收口为一张全量声明表：
+# 每个数据集一行，四键即配置契约快照（新增数据集必须登记，双向对账兜底漏登/多登）。
+# 湖注册+路径一致性由 test_all_tushare_datasets_lakes_registered 全量交叉钉死，不再
+# 按 family 重复。行内注释承载各键的事故语境（前视红线/B 类订正/退役合并）。
+_DATASET_SPECS = [
+    ("cn_cpi", "cn_cpi", "single", "month", "month"),  # 宏观 single：index_mode=datetime（见 index_mode 专项例）
+    ("cn_gdp", "cn_gdp", "single", "quarter", "quarter"),
+    ("cn_pmi", "cn_pmi", "single", "MONTH", "MONTH"),
+    ("cn_ppi", "cn_ppi", "single", "month", "month"),
+    ("cyq_chips", "cyq_chips", "symbol", "trade_date", "ts_code"),
+    ("cyq_perf", "cyq_perf", "symbol", "trade_date", "ts_code"),
+    ("daily_basic", "daily_basic", "date", "trade_date", "ts_code"),
+    ("dividend", "dividend", "symbol", "ann_date", "ts_code"),  # 分红：ann_date 前视红线
+    ("express", "express", "symbol", "ann_date", "ts_code"),  # 快报：ann_date 前视红线
+    ("fina_balance", "balancesheet", "symbol", "ann_date", "ts_code"),  # 同上：ann_date 前视红线
+    ("fina_cashflow", "cashflow", "symbol", "ann_date", "ts_code"),  # 同上：ann_date 前视红线
+    ("fina_income", "income", "symbol", "ann_date", "ts_code"),  # 财报三表+预分配：by=symbol 逐标的全历史；date_col=ann_date 前视红线（公告日非报告期）
+    ("forecast", "forecast", "symbol", "ann_date", "ts_code"),  # 预告：ann_date 前视红线
+    ("fund_basic", "fund_basic", "single", "found_date", "ts_code"),
+    ("fund_daily", "fund_daily", "symbol", "trade_date", "ts_code"),
+    ("fund_nav", "fund_nav", "symbol", "nav_date", "ts_code"),
+    ("fund_portfolio", "fund_portfolio", "symbol", "ann_date", "ts_code"),  # ETF 前视红线：必须 ann_date（禁 end_date 报告期）
+    ("fund_share", "fund_share", "symbol", "trade_date", "ts_code"),
+    ("hs_const_sh", "hs_const", "single", "in_date", "ts_code"),
+    ("hs_const_sz", "hs_const", "single", "in_date", "ts_code"),
+    ("index_daily", "index_daily", "symbol", "trade_date", "ts_code"),
+    ("index_member", "index_weight", "symbol", "trade_date", "con_code"),  # B 类订正：api 复用 index_weight（成分股，code_param=index_code）
+    ("index_weight", "index_weight", "date", "trade_date", "con_code"),
+    ("margin", "margin", "date", "trade_date", "exchange_id"),  # symbol_col=exchange_id（市场级，非 ts_code）
+    ("margin_detail", "margin_detail", "date", "trade_date", "ts_code"),
+    ("margin_secs", "margin_secs", "single", "trade_date", "ts_code"),
+    ("mkt_daily", "daily_info", "date", "trade_date", "trade_date"),  # B 类合并：szse/sse→daily_info 沪深两市；旧 szse_daily/sse_daily 已退役
+    ("moneyflow", "moneyflow", "date", "trade_date", "ts_code"),
+    ("moneyflow_hsgt", "moneyflow_hsgt", "date", "trade_date", "trade_date"),
+    ("monthly", "monthly", "symbol", "trade_date", "ts_code"),
+    ("share_float", "share_float", "single", "ann_date", "ts_code"),  # A10：ann_date 前视红线
+    ("shibor", "shibor", "single", "date", "date"),
+    ("shibor_quote", "shibor_quote", "single", "date", "date"),
+    ("stk_factor_pro", "stk_factor_pro", "date", "trade_date", "ts_code"),
+    ("stock_basic", "stock_basic", "single", "list_date", "ts_code"),
+    ("suspend_d", "suspend_d", "date", "trade_date", "ts_code"),  # A10 停牌真值（4 真实列，旧幻觉字段已删——见 suspend_d_uses_official_fields）
+    ("ths_daily", "ths_daily", "date", "trade_date", "ts_code"),  # 不复用 sector 湖（akshare 申万 vs 同花顺概念，ts_code 空间不同）
+    ("top10_floatholders", "top10_floatholders", "symbol", "ann_date", "ts_code"),  # A10：ann_date 前视红线
+    ("top10_holders", "top10_holders", "symbol", "ann_date", "ts_code"),  # A10：ann_date 前视红线
+    ("top_inst", "top_inst", "date", "trade_date", "ts_code"),
+    ("weekly", "weekly", "symbol", "trade_date", "ts_code"),
+]
 
+
+@pytest.mark.parametrize("key, api, by, date_col, symbol_col", _DATASET_SPECS)
+def test_tushare_datasets_declared(key, api, by, date_col, symbol_col):
+    """每个数据集的 (api, by, date_col, symbol_col) 与声明表逐键一致 + fields/lake 完备。
+
+    Why 逐键参数化（而非 13 个 family 用例）：sync_dataset 直接 cfg = TUSHARE_DATASETS[key]，
+    缺任一字段运行时崩在深处；表驱动让失败信息精确到键，且新增数据集漏登记即红。
+    """
+    cfg = TUSHARE_DATASETS.get(key)
+    assert cfg is not None, f"{key} 未在 TUSHARE_DATASETS 注册"
+    for f in ("api", "by", "date_col", "symbol_col", "fields", "lake"):
+        assert f in cfg, f"{key} 配置缺字段 {f}"
+    assert cfg["api"] == api, f"{key} api 应为 {api}"
+    assert cfg["by"] == by, f"{key} by 应为 {by}"
+    assert cfg["date_col"] == date_col, f"{key} date_col 应为 {date_col}"
+    assert cfg["symbol_col"] == symbol_col, f"{key} symbol_col 应为 {symbol_col}"
+
+
+def test_dataset_declaration_table_reconciles():
+    """声明表 ↔ 注册表双向对账 + 退役键禁令。
+
+    表漏登（新增数据集没进表）/ 表多登（删数据集没删行）都失败——表即契约快照。
+    退役键（2026-08-05 直连无权限 / B 类合并）必须保持缺席，防复活。
+    """
+    declared = {row[0] for row in _DATASET_SPECS}
+    actual = set(TUSHARE_DATASETS)
+    assert declared == actual, (
+        f"声明表与注册表不一致：漏登 {sorted(actual - declared)} / 多登 {sorted(declared - actual)}")
+    for retired in ("concept", "concept_detail", "top_list", "szse_daily", "sse_daily"):
+        assert retired not in TUSHARE_DATASETS, f"{retired} 已退役，不应再注册"
+
+
+def test_macro_single_datasets_index_mode_datetime():
+    """宏观 single 数据集 index_mode=datetime（DatetimeIndex 湖契约，W3 收口保留的独有断言）。
+
+    Why：宏观湖无 symbol 层（全市场单序列），_sync_single 依据 index_mode='datetime'
+    分支重建时间索引；漏配则落扁平 df，DataLakeReader 按日期切片直接 KeyError。
+    """
+    for key in ("cn_cpi", "cn_ppi", "cn_gdp", "cn_pmi", "shibor", "shibor_quote"):
+        assert TUSHARE_DATASETS[key]["index_mode"] == "datetime",             f"{key} index_mode 应为 datetime（DatetimeIndex 宏观湖）"

@@ -36,41 +36,6 @@ def fake_pro(monkeypatch):
     return fake
 
 
-def test_etf_datasets_registered():
-    """Plan B 五个 ETF 数据集配置完备性 + 前视红线守卫。
-
-    Why 机器化守卫：sync_dataset 直接 cfg = TUSHARE_DATASETS[key]，缺任一 key/字段立即 KeyError。
-    前视红线（fund_portfolio 必须 ann_date）单独钉死——PR review 漏一眼也守得住。
-    """
-    required = ("fund_basic", "fund_daily", "fund_nav", "fund_portfolio", "fund_share")
-    required_fields = ("api", "by", "date_col", "symbol_col", "fields", "lake")
-    by_symbol_keys = ("fund_daily", "fund_nav", "fund_portfolio", "fund_share")
-    for key in required:
-        assert key in TUSHARE_DATASETS, f"{key} 未在 TUSHARE_DATASETS 注册"
-        cfg = TUSHARE_DATASETS[key]
-        for f in required_fields:
-            assert f in cfg, f"{key} 配置缺字段 {f}"
-    # fund_basic single（列表快照，不分页）；其余 4 个 by=symbol（逐标的）
-    assert TUSHARE_DATASETS["fund_basic"]["by"] == "single", "fund_basic 应为 single 模式"
-    for key in by_symbol_keys:
-        assert TUSHARE_DATASETS[key]["by"] == "symbol", f"{key} 应为 symbol 模式"
-    # 前视红线：fund_portfolio 必须 ann_date（禁 end_date）
-    assert TUSHARE_DATASETS["fund_portfolio"]["date_col"] == "ann_date", \
-        "fund_portfolio 必须用 ann_date（公告日）索引，禁用 end_date（报告期，前视偏差）"
-
-
-def test_etf_lakes_registered():
-    """五个 ETF 湖在 LAKE_CONFIG['lakes'] 注册，且路径与 TUSHARE_DATASETS 一致（单一真相源）。
-
-    Why 守卫：DataLakeReader 按 LAKE_CONFIG['lakes'][key] 寻址 parquet，路径分叉会导致
-    reader 读空文件而 sync 写到另一处。两处路径必须钉死一致。
-    """
-    for key in ("fund_basic", "fund_daily", "fund_nav", "fund_portfolio", "fund_share"):
-        assert key in LAKE_CONFIG["lakes"], f"{key} 未在 LAKE_CONFIG['lakes'] 注册"
-        assert LAKE_CONFIG["lakes"][key] == TUSHARE_DATASETS[key]["lake"], \
-            f"{key} 的 LAKE_CONFIG 路径与 TUSHARE_DATASETS 不一致"
-
-
 def test_fund_basic_single(tmp_path, fake_pro, monkeypatch):
     """fund_basic single 模式落扁平 df（场内基金列表快照，非 MultiIndex）。
 

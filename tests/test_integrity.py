@@ -545,29 +545,30 @@ def test_write_guard_min_ratio_default_is_09():
     assert WRITE_GUARD_MIN_RATIO == 0.9
 
 
-def test_check_row_count_drop_flags_crater():
-    # T12 场景：1020万 → 3200，新行数远小于基线 × 0.9 → 判骤降
-    ok, reason = check_row_count_drop(baseline=10_000_000, new=3200, min_ratio=0.9)
-    assert ok is False
-    assert "骤降" in reason or "drop" in reason.lower()
+@pytest.mark.parametrize(
+    "baseline, new, expected_ok, label",
+    [
+        # T12 场景：1020万 → 3200，新行数远小于基线 × 0.9 → 判骤降（事故锚）
+        (10_000_000, 3200, False, "crater"),
+        # 正常增量/增长：新行数 >= 基线 → 放行
+        (1000, 1005, True, "growth"),
+        # 边界：新行数 = baseline × 0.9 → 刚好放行（>= ratio 不算骤降）
+        (1000, 900, True, "boundary_at_ratio"),
+        # 边界：新行数 = baseline × 0.9 - 1 → 拒写
+        (1000, 899, False, "boundary_below_ratio"),
+    ],
+)
+def test_check_row_count_drop_boundaries(baseline, new, expected_ok, label):
+    """行数骤降守卫四边界（原 4 个同构用例参数化合并，2026-08-19 W3）。
 
-
-def test_check_row_count_drop_allows_growth():
-    # 正常增量/增长：新行数 >= 基线 → 放行
-    ok, _ = check_row_count_drop(baseline=1000, new=1005, min_ratio=0.9)
-    assert ok is True
-
-
-def test_check_row_count_drop_boundary_just_above_ratio():
-    # 边界：新行数 = baseline × 0.9 → 刚好放行（>= ratio 不算骤降）
-    ok, _ = check_row_count_drop(baseline=1000, new=900, min_ratio=0.9)
-    assert ok is True
-
-
-def test_check_row_count_drop_boundary_just_below_ratio():
-    # 边界：新行数 = baseline × 0.9 - 1 → 拒写
-    ok, _ = check_row_count_drop(baseline=1000, new=899, min_ratio=0.9)
-    assert ok is False
+    物理意图：T12 事故（a_shares_daily 1020万→3200 被残片覆盖）后所有湖写入口
+    的前置防线——新行数相对基线跌破 min_ratio 即拒写。四例覆盖事故值/增长/恰在
+    界上/恰在界下，>= 与 > 的边界语义由此钉死。
+    """
+    ok, reason = check_row_count_drop(baseline=baseline, new=new, min_ratio=0.9)
+    assert ok is expected_ok, f"{label}: 期望 {'放行' if expected_ok else '拒写'}，实际 reason={reason}"
+    if not expected_ok:
+        assert "骤降" in reason or "drop" in reason.lower()
 
 
 def test_existing_row_count_reads_metadata(tmp_path):

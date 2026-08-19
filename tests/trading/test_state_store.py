@@ -759,34 +759,29 @@ def _seed_signal(tmp_db, symbol, plan_date, *, experiment_id=None):
     state_store.insert_trade_event("ACC_TEST", tid, symbol, "SIGNAL", meta=json.dumps(meta))
 
 
-def test_list_signals_with_meta_by_plan_date_range_since_filter(tmp_db):
-    """since 区间按 plan_date（trade_id 后缀 substr(-10)），非 timestamp。
+@pytest.mark.parametrize(
+    "since, until, expected",
+    [
+        # since 区间按 plan_date（trade_id 后缀 substr(-10)），非 timestamp——若误用
+        # timestamp（写入时间=测试当下）做过滤，since=2026-07-03 会把所有 SIGNAL 滤掉
+        ("2026-07-03", None, {"600001.SH", "600002.SH"}),
+        # until 上界按 plan_date（含）
+        ("2026-07-02", "2026-07-04", {"600001.SH"}),
+        # since/until 均 None → 全量
+        (None, None, {"600000.SH", "600001.SH", "600002.SH"}),
+    ],
+    ids=["since_only", "since_until", "no_filter"],
+)
+def test_list_signals_with_meta_by_plan_date_range_filters(tmp_db, since, until, expected):
+    """plan_date 区间过滤三态（原 3 个同构用例参数化合并，2026-08-19 W3）。
 
-    致命日期轴：若误用 timestamp（写入时间 = 测试当下）做 since 过滤，
-    since=2026-07-05 会因 now < 2026-07-05 把所有 SIGNAL 滤掉。
+    物理意图：C2d experiment report 按 since/until 拉窗口内 SIGNAL 聚合——日期轴必须
+    是 plan_date（信号所属交易日）而非写入 timestamp，否则未来日期窗口恒空。
     """
     _seed_signal(tmp_db, "600000.SH", "2026-07-01")
     _seed_signal(tmp_db, "600001.SH", "2026-07-03")
     _seed_signal(tmp_db, "600002.SH", "2026-07-05")
-    rows = state_store.list_signals_with_meta_by_plan_date_range(since="2026-07-03")
-    assert {r["symbol"] for r in rows} == {"600001.SH", "600002.SH"}
+    rows = state_store.list_signals_with_meta_by_plan_date_range(since=since, until=until)
+    assert {r["symbol"] for r in rows} == expected
     # 每项含 plan_date 字段（C2d experiment report 按 p["date"] 聚合所需）
     assert all("plan_date" in r for r in rows)
-
-
-def test_list_signals_with_meta_by_plan_date_range_until_filter(tmp_db):
-    """until 上界按 plan_date（含）。"""
-    _seed_signal(tmp_db, "600000.SH", "2026-07-01")
-    _seed_signal(tmp_db, "600001.SH", "2026-07-03")
-    _seed_signal(tmp_db, "600002.SH", "2026-07-05")
-    rows = state_store.list_signals_with_meta_by_plan_date_range(
-        since="2026-07-02", until="2026-07-04")
-    assert {r["symbol"] for r in rows} == {"600001.SH"}
-
-
-def test_list_signals_with_meta_by_plan_date_range_no_filter_returns_all(tmp_db):
-    """since/until 均 None → 全量 SIGNAL。"""
-    _seed_signal(tmp_db, "600000.SH", "2026-07-01")
-    _seed_signal(tmp_db, "600001.SH", "2026-07-05")
-    rows = state_store.list_signals_with_meta_by_plan_date_range()
-    assert len(rows) == 2

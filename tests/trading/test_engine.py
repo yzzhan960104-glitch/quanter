@@ -169,61 +169,46 @@ def test_eod_plan_inserts_signal_event(monkeypatch, _state_db):
     assert plan_meta.get("rationale", "").startswith("颈线法@")
 
 
-def test_eod_plan_auto_confirm_event(monkeypatch, _state_db):
-    """AUTO_CONFIRM_PLAN=true → trade_event 有 CONFIRMED 行。"""
+def test_eod_plan_confirm_idempotent_veto_chain(monkeypatch, _state_db):
+    """eod_plan 事件链三段（原 3 个同构用例并为一条时序 saga，2026-08-19 W3）。
+
+    物理意图：同一 eod_plan 调用序列上的三个时序性质——分段断言逐级更强：
+      ① AUTO_CONFIRM_PLAN=true → trade_event 最新 action=CONFIRMED（自动确认）；
+      ② 重跑 eod_plan → SIGNAL 行仍只 1 条（UNIQUE 幂等，不重复记）；
+      ③ 研究员 veto 后重跑（auto_confirm 仍 true）→ 最新 action 保持 VETOED
+        （人审否决不被自动确认覆盖——veto 终局保护，原独立例 test_eod_plan_veto_protection）。
+    """
+    import sqlite3
     from trading import state_store
-    # N5（Low ②）：engine._submit 副本已删——eod_plan 防真单绊线迁真身。
     monkeypatch.setattr("trading.gateway_service._submit", _no_op_submit)
     monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
     monkeypatch.setenv("AUTO_CONFIRM_PLAN", "true")
-    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
-                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
+
+    async def _run():
+        await engine.eod_plan("2099-01-01", signals=_signal_600000(),
+                              atr_map={"600000.SH": 0.2}, capital=1_000_000)
+
+    # ① 首跑：自动确认生效
+    asyncio.run(_run())
     account_id = engine._resolve_account_id()
     trade_id = f"{account_id}_600000.SH_2099-01-01"
     assert state_store.get_latest_action(trade_id) == "CONFIRMED"
 
-
-def test_eod_plan_signal_idempotent(monkeypatch, _state_db):
-    """重跑 eod_plan → SIGNAL 已存在 → 跳过（UNIQUE 幂等，不重复记）。"""
-    import sqlite3
-    from trading import state_store
-    # N5（Low ②）：engine._submit 副本已删——eod_plan 防真单绊线迁真身。
-    monkeypatch.setattr("trading.gateway_service._submit", _no_op_submit)
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
-    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
-                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
-    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
-                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
-    # SIGNAL 行仍只有 1 条（幂等去重）
+    # ② 重跑：SIGNAL 幂等（UNIQUE 去重，仍 1 条）
+    asyncio.run(_run())
     with sqlite3.connect(_state_db) as con:
         n = con.execute(
             "SELECT COUNT(*) FROM trade_event WHERE action='SIGNAL' AND symbol='600000.SH'"
         ).fetchone()[0]
     assert n == 1
 
-
-def test_eod_plan_veto_protection(monkeypatch, _state_db):
-    """trade_event VETOED 后重跑 eod_plan → 不重写为 CONFIRMED（veto 保护）。"""
-    from trading import state_store
-    # N5（Low ②）：engine._submit 副本已删——eod_plan 防真单绊线迁真身。
-    monkeypatch.setattr("trading.gateway_service._submit", _no_op_submit)
-    monkeypatch.setattr(trading_plan, "push_plan_to_dingtalk", lambda d, o, **kw: True)
-    monkeypatch.setenv("AUTO_CONFIRM_PLAN", "true")
-    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
-                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
-    # 研究员 veto：写 VETOED 事件
-    account_id = engine._resolve_account_id()
-    trade_id = f"{account_id}_600000.SH_2099-01-01"
+    # ③ veto 后重跑：VETOED 终局保护（不被 auto_confirm 覆写）
     state_store.insert_trade_event(account_id, trade_id, "600000.SH", "VETOED")
-    # 重跑 eod_plan（auto_confirm 仍 true）→ 最新 action 应仍是 VETOED（不被 CONFIRMED 覆盖）
-    asyncio.run(engine.eod_plan("2099-01-01", signals=_signal_600000(),
-                                atr_map={"600000.SH": 0.2}, capital=1_000_000))
+    asyncio.run(_run())
     assert state_store.get_latest_action(trade_id) == "VETOED"
 
 
-# ----------------------------------------------------------------------------
-# T7（state-store-redesign）：cancel_all_open_orders 改查柜台（不依赖 gw._orders 内存）
-# ----------------------------------------------------------------------------
+
 def test_cancel_uses_query_orders_not_memory():
     """撤单查柜台：mock gw.query_orders 返 2 笔可撤单 + gw._orders 空 → 撤 2 笔。
 
@@ -1613,53 +1598,37 @@ def test_trade_cfg_stop_atr_mult_env_overrides(monkeypatch):
 # ============================================================================
 # 4.6 Task 6（P0-2 max_wait 等待窗口）：pre_open 按 formed_at+max_wait 过滤超期信号
 # ============================================================================
-def test_pre_open_skip_expired_signal(monkeypatch, _state_db):
-    """pre_open：order.formed_at 距今 > max_wait 交易日 → 跳过；<= max_wait → 挂。
+@pytest.mark.parametrize(
+    "formed_at, days_between, expected_submitted",
+    [
+        # formed_at 远早 + days=10 > max_wait=5 → 超期跳过（回测等回踩窗口，实盘不挂隔日单）
+        ("2026-07-01", 10, []),
+        # formed_at 3 交易日之前 <= max_wait=5 → 窗口内挂单（每日可挂）
+        ("2026-07-18", 3, ["300001.SZ"]),
+        # formed_at 缺失（老 plan）→ days=0 视作窗口内挂单（向后兼容）
+        (None, 0, ["300001.SZ"]),
+    ],
+    ids=["expired_skipped", "within_window_placed", "formed_at_missing_fallback"],
+)
+def test_pre_open_max_wait_gate(monkeypatch, _state_db, formed_at, days_between, expected_submitted):
+    """pre_open max_wait 窗口闸三态（原 3 个同构用例参数化合并，2026-08-19 W3）。
 
-    物理意图（plan Task 6 · 对齐缺口 P0-2）：
-        回测信号后 max_wait 天窗口等回踩，实盘只挂 1 天（次日 pre_open 撤昨日）。
-        pre_open 按 ``_trading_days_between(formed_at, today) > max_wait`` 过滤超期。
+    物理意图（plan Task 6 · 对齐缺口 P0-2）：回测信号后 max_wait 天窗口等回踩，
+    实盘按 ``_trading_days_between(formed_at, today) > max_wait`` 过滤超期；缺
+    formed_at 的老 plan 退化为 days=0（窗口内），不因缺字段漏挂。days 用 mock 决定性
+    返回（不依赖真实交易日历的日期间隔）。
     """
-    # C2c：DB 种已确认 SIGNAL，formed_at 远早 → 超期
-    _seed_signals_db("2099-01-02", [{
+    order_seed = {
         "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-        "stop_price": 9.0, "take_profit": 11.0,
-        "formed_at": "2026-07-01",   # 远早于 today（2026-07-22），距 > 5 交易日
-        "max_wait": 5,
-    }])
-
-    # monkeypatch _trading_days_between 返 10（> max_wait=5）→ 该单应被跳过
-    monkeypatch.setattr(engine, "get_gateway", lambda: object())
-    # W1-B（Task 10）：engine re-export 垫层已删，patch 迁消费方模块（pre_open 路径）。
-    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
-    # T10 顺手清：本行原 setattr(engine, ...) 是 W1-B 未迁完的死 patch（下方兄弟用例已迁
-    # phases.pre_open，此处漏迁；测试此前靠真实交易日历的巨大多日间隔侥幸通过，非 mock
-    # 决定性）——迁消费方物理路径，恢复「mock 决定性返 10」的本意。
-    monkeypatch.setattr("trading.phases.pre_open._trading_days_between", lambda s, e: 10)
-
-    submitted = []
-    async def _fake_submit(order, **kw):
-        submitted.append(order.symbol)
-        return {"state": "SUBMITTED"}
-    monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
-
-    result = asyncio.run(engine.pre_open("2099-01-02"))
-    assert submitted == [], "超期信号（formed_at 距今 > max_wait）应被跳过不挂"
-    assert result["submitted"] == 0
-
-
-def test_pre_open_within_max_wait_window_is_placed(monkeypatch, _state_db):
-    """pre_open：order.formed_at 距今 <= max_wait → 挂单（窗口内每日可挂）。"""
-    _seed_signals_db("2099-01-02", [{
-        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-        "stop_price": 9.0, "take_profit": 11.0,
-        "formed_at": "2026-07-18",   # 3 交易日之前
-        "max_wait": 5,                # <= max_wait → 应挂
-    }])
+        "stop_price": 9.0, "take_profit": 11.0, "max_wait": 5,
+    }
+    if formed_at is not None:
+        order_seed["formed_at"] = formed_at
+    _seed_signals_db("2099-01-02", [order_seed])
 
     monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: object())
     monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr("trading.phases.pre_open._trading_days_between", lambda s, e: 3)
+    monkeypatch.setattr("trading.phases.pre_open._trading_days_between", lambda s, e: days_between)
 
     submitted = []
     async def _fake_submit(order, **kw):
@@ -1668,32 +1637,9 @@ def test_pre_open_within_max_wait_window_is_placed(monkeypatch, _state_db):
     monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
 
     result = asyncio.run(engine.pre_open("2099-01-02"))
-    assert submitted == ["300001.SZ"]
-    assert result["submitted"] == 1
+    assert submitted == expected_submitted, f"days={days_between} 期望挂 {expected_submitted}"
+    assert result["submitted"] == len(expected_submitted)
 
-
-def test_pre_open_formed_at_missing_fallback_places(monkeypatch, _state_db):
-    """pre_open：order 缺 formed_at → days=0 视作窗口内，挂单（向后兼容老 plan）。"""
-    _seed_signals_db("2099-01-02", [{
-        "order": {"symbol": "300001.SZ", "qty": 100, "side": "buy", "price": 10.0},
-        "stop_price": 9.0, "take_profit": 11.0,
-        # 无 formed_at（老 plan，Task 2 前落盘的）
-        "max_wait": 5,
-    }])
-
-    monkeypatch.setattr("trading.phases.pre_open.get_gateway", lambda: object())
-    monkeypatch.setattr("trading.phases.pre_open._cancel_all_open_orders", _no_op_cancel)
-    monkeypatch.setattr("trading.phases.pre_open._trading_days_between", lambda s, e: 0)
-
-    submitted = []
-    async def _fake_submit(order, **kw):
-        submitted.append(order.symbol)
-        return {"state": "SUBMITTED"}
-    monkeypatch.setattr("trading.phases.pre_open._submit", _fake_submit)
-
-    result = asyncio.run(engine.pre_open("2099-01-02"))
-    assert submitted == ["300001.SZ"]
-    assert result["submitted"] == 1
 
 
 # ============================================================================
@@ -2455,3 +2401,55 @@ def test_buy_fill_attribution_failure_does_not_block(tmp_db, monkeypatch):
     # 成交主路径仍生效（position 行已建，只是归因未落）
     row = state_store.get_position("ACC_TEST", "600000.SH")
     assert row is not None, "归因失败不应阻断 apply_fill_to_position（成交红线优先）"
+
+
+# ============================================================================
+# M3 口径自检（原独立微文件 test_engine_sanity_check.py 并档，2026-08-19 W4）
+# ============================================================================
+"""M3 口径自检：_eod 落盘 key(next_trading_day) 与 _pre_open 读 key(today) 对齐。
+
+背景（[[eod-date-offbyone-fix]]）：
+    代码口径已修（_eod 落盘用 next_trading_day，_pre_open 读 today），但若进程跑的是
+    未重启的旧代码，口径会退回「today 落盘 → 次日 today 读 T+1 永远差一天」的旧 bug，
+    导致标的错位 + 永不挂单。TradingEngine 启动时主动校验 next_trading_day(today) != today，
+    确认次日计算口径正常，否则视为口径坏（拒进 live，降级 dry_run）。
+"""
+
+
+def test_sanity_check_passes_when_aligned(monkeypatch):
+    """T 日盘后：next_trading_day(today) 算出次日 → 落盘 key 与次日 today 读取口径一致 → 通过。"""
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    # 模拟 today=T，next_trading_day 算出 T+1（次日，口径正常）
+    monkeypatch.setattr("trading.engine.calendar.next_trading_day", lambda d: "2026-07-30")
+    assert eng._sanity_check_date_alignment(today="2026-07-29") is True
+
+
+def test_sanity_check_detects_offbyone(monkeypatch):
+    """next_trading_day 返 today 自身（旧 bug 口径）→ 自检失败（拒进 live）。"""
+    from trading.engine import TradingEngine
+    eng = TradingEngine()
+    # 旧 bug：next_trading_day(d) 返 d 自身，落盘 key=今日 → 次日读 today 永远差一天
+    monkeypatch.setattr("trading.engine.calendar.next_trading_day", lambda d: d)
+    assert eng._sanity_check_date_alignment(today="2026-07-29") is False
+
+
+# ============================================================================
+# U1 scheduler 硬化（原独立微文件 test_engine_scheduler_hardening.py 并档）
+# ============================================================================
+"""U1：APScheduler job_defaults 三参数硬化断言。
+
+物理意图：裸 AsyncIOScheduler() 无 job_defaults——机器休眠/慢触发会 job 堆积重叠
+（pre_open 跑超 9:22 与下次重叠双挂、stop_loss 30s 堆积补跑风暴）。三参数锁死。
+"""
+from trading.engine import TradingEngine
+
+
+def test_sched_job_defaults_hardened():
+    """构造 engine 即断言 sched.job_defaults 含三参数（防回归到裸构造）。"""
+    eng = TradingEngine()
+    # APScheduler 3.x 把 job_defaults 存在私有属性 _job_defaults（无公开 job_defaults 属性）
+    jd = eng.sched._job_defaults
+    assert jd.get("max_instances") == 1, f"max_instances 应为 1（防重叠双挂），实得 {jd.get('max_instances')}"
+    assert jd.get("misfire_grace_time") == 300, f"misfire_grace_time 应为 300s，实得 {jd.get('misfire_grace_time')}"
+    assert jd.get("coalesce") is True, f"coalesce 应为 True（堆积合并一次），实得 {jd.get('coalesce')}"

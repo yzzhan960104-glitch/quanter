@@ -187,49 +187,40 @@ class _FakeTraderProbe:
         return self._rc
 
 
-def test_probe_account_status_ok_when_api_responds(monkeypatch):
-    """query_account_status 返非 None → 客户端活着（ok=True）。rc<0（柜台业务错误）也算活着——
-    客户端应答了，非僵死。"""
+@pytest.mark.parametrize(
+    "trader, expected_ok, detail_sub",
+    [
+        # query_account_status 返非 None → 活着；rc<0（柜台业务错误）也算活着——应答了非僵死
+        ("rc0", True, "rc=0"),
+        ("rc_neg", True, None),
+        # 抛异常（疑客户端僵死/共享内存死）→ ok=False，detail 含异常类名
+        ("exc", False, "RuntimeError"),
+        # 返 None（无应答）→ ok=False（疑僵死）
+        ("none", False, "None"),
+        # trader 未装配（dry_run/未连）→ ok=False，不抛
+        ("no_trader", False, "未装配"),
+    ],
+    ids=["ok_rc0", "ok_neg_rc", "fail_exc", "fail_none", "fail_no_trader"],
+)
+def test_probe_account_status_states(monkeypatch, trader, expected_ok, detail_sub):
+    """probe_account_status 五态（原 5 个同构用例参数化合并，2026-08-19 W3）。
+
+    物理意图：探活的僵死判据是「有无应答」而非「业务成功」——rc=0 / rc<0 都是活着
+    （客户端应答了）；异常 / None 应答 / trader 未装配才是疑僵死。health_guard 据此
+    决定是否走重连，误判活着会漏自愈、误判僵死会无效轮换（G8 同族语义）。
+    """
     gw = _make_gw_with_fake_loop(monkeypatch)
-    gw._trader = _FakeTraderProbe(0)
+    gw._trader = {
+        "rc0": _FakeTraderProbe(0),
+        "rc_neg": _FakeTraderProbe(-1),
+        "exc": _FakeTraderProbe(None, exc=RuntimeError("client dead")),
+        "none": _FakeTraderProbe(None),
+        "no_trader": None,
+    }[trader]
     ok, detail = asyncio.run(gw.probe_account_status(timeout=1.0))
-    assert ok is True
-    assert "rc=0" in detail
-
-
-def test_probe_account_status_ok_on_negative_rc(monkeypatch):
-    """rc<0（柜台业务错误）→ 客户端仍应答了（活着），ok=True（僵死判据=有无应答，非业务成功）。"""
-    gw = _make_gw_with_fake_loop(monkeypatch)
-    gw._trader = _FakeTraderProbe(-1)
-    ok, _ = asyncio.run(gw.probe_account_status(timeout=1.0))
-    assert ok is True
-
-
-def test_probe_account_status_fail_on_exception(monkeypatch):
-    """query_account_status 抛异常（疑客户端僵死/共享内存死）→ ok=False，detail 含异常类名。"""
-    gw = _make_gw_with_fake_loop(monkeypatch)
-    gw._trader = _FakeTraderProbe(None, exc=RuntimeError("client dead"))
-    ok, detail = asyncio.run(gw.probe_account_status(timeout=1.0))
-    assert ok is False
-    assert "RuntimeError" in detail
-
-
-def test_probe_account_status_fail_on_none(monkeypatch):
-    """query_account_status 返 None（无应答）→ ok=False（疑僵死）。"""
-    gw = _make_gw_with_fake_loop(monkeypatch)
-    gw._trader = _FakeTraderProbe(None)
-    ok, detail = asyncio.run(gw.probe_account_status(timeout=1.0))
-    assert ok is False
-    assert "None" in detail
-
-
-def test_probe_account_status_fail_when_trader_none(monkeypatch):
-    """trader 未装配（dry_run/未连）→ ok=False，不抛。"""
-    gw = _make_gw_with_fake_loop(monkeypatch)
-    gw._trader = None
-    ok, detail = asyncio.run(gw.probe_account_status())
-    assert ok is False
-    assert "未装配" in detail
+    assert ok is expected_ok
+    if detail_sub is not None:
+        assert detail_sub in detail
 
 
 # === T4: query_orders / query_trades（主动查询，subscribe 兜底 + 对账强化）=====
@@ -711,94 +702,62 @@ def test_sync_orders_if_stale_noop_when_push_available(monkeypatch):
 # T6: _assert_status_contract 补全 11 态 + ACC 校验 + cancel_order 非终态 message
 # =============================================================================
 
-def test_assert_status_contract_validates_all_11_order_states(monkeypatch):
-    """_assert_status_contract 应覆盖 11 个 order 状态字面量（不止现有 7 个）。
+def _fake_xtconst():
+    """构造与模块字面量全一致的假 xtconstant（11 order 态 + 11 ACC 态，W3 收口）。
 
-    Why 必要：T1/T2 后 order 状态扩展到 11 个（+PARTSUCC_CANCEL=52/REPORTED_CANCEL=51
-    /WAIT_REPORTING=49/UNKNOWN=255），但现有契约只校验 7 个——缺校验的 4 个一旦在
-    xtquant 升级中漂移，_map_qmt_status 会静默错判状态（致命）。本用例构造假
-    xtconstant 全 11 态一致 → 通过；再故意漂移 PART_CANCEL → fail-fast RuntimeError。
+    Why 工厂（原两用例逐字重复两份 22 常量类，仅漂移键不同）：类属性经 dict 构建，
+    用例内 setattr 单键注入漂移。命名差异（ACCOUNT_STATUSING 非 LOGIN /
+    DISABLEBYSYS 非 DISABLE_BYSYS）是 xtquant 真实命名，防想当然改错。
+    """
+    g = qmt_gateway
+    return type("_FakeXtconst", (), {
+        # order 11 态
+        "ORDER_JUNK": g._QMT_ORDER_JUNK,
+        "ORDER_SUCCEEDED": g._QMT_ORDER_SUCCEEDED,
+        "ORDER_PART_SUCC": g._QMT_ORDER_PART_SUCC,
+        "ORDER_CANCELED": g._QMT_ORDER_CANCELED,
+        "ORDER_PART_CANCEL": g._QMT_ORDER_PART_CANCEL,
+        "ORDER_PARTSUCC_CANCEL": g._QMT_ORDER_PARTSUCC_CANCEL,
+        "ORDER_REPORTED_CANCEL": g._QMT_ORDER_REPORTED_CANCEL,
+        "ORDER_REPORTED": g._QMT_ORDER_REPORTED,
+        "ORDER_WAIT_REPORTING": g._QMT_ORDER_WAIT_REPORTING,
+        "ORDER_UNREPORTED": g._QMT_ORDER_UNREPORTED,
+        "ORDER_UNKNOWN": g._QMT_ORDER_UNKNOWN,
+        # ACC 11 态（命名差异：STATUSING / DISABLEBYSYS）
+        "ACCOUNT_STATUS_INVALID": g._QMT_ACC_INVALID,
+        "ACCOUNT_STATUS_OK": g._QMT_ACC_OK,
+        "ACCOUNT_STATUS_WAITING_LOGIN": g._QMT_ACC_WAITING_LOGIN,
+        "ACCOUNT_STATUSING": g._QMT_ACC_LOGINING,
+        "ACCOUNT_STATUS_FAIL": g._QMT_ACC_FAIL,
+        "ACCOUNT_STATUS_INITING": g._QMT_ACC_INITING,
+        "ACCOUNT_STATUS_CORRECTING": g._QMT_ACC_CORRECTING,
+        "ACCOUNT_STATUS_CLOSED": g._QMT_ACC_CLOSED,
+        "ACCOUNT_STATUS_ASSIS_FAIL": g._QMT_ACC_ASSIS_FAIL,
+        "ACCOUNT_STATUS_DISABLEBYSYS": g._QMT_ACC_DISABLE_BYSYS,
+        "ACCOUNT_STATUS_DISABLEBYUSER": g._QMT_ACC_DISABLE_BYUSER,
+    })
+
+
+@pytest.mark.parametrize("drift_attr", ["ORDER_PART_CANCEL", "ACCOUNT_STATUS_DISABLEBYSYS"],
+                         ids=["order_11_states", "acc_11_states"])
+def test_assert_status_contract_validates_all_states(monkeypatch, drift_attr):
+    """_assert_status_contract 双面守卫（原两用例合并，2026-08-19 W3）：全 22 态一致 → 不抛；任一漂移 → fail-fast。
+
+    Why 必要：order 11 态 + ACC 11 态字面量任一在 xtquant 升级中漂移，
+    _map_qmt_status 静默错判状态 / on_account_status 误锁漏锁网关（直接影响熔断
+    与发单）。漂移轴各取一面最危险代表：ORDER_PART_CANCEL（部分撤单错判→重复挂）
+    与 ACCOUNT_STATUS_DISABLEBYSYS（T1 fatal 状态漏锁）。
     """
     monkeypatch.setattr(qmt_gateway, "_XTQUANT_AVAILABLE", True)
-
-    class _FakeXtconst:
-        # 全 11 态与模块字面量一致
-        ORDER_JUNK = qmt_gateway._QMT_ORDER_JUNK
-        ORDER_SUCCEEDED = qmt_gateway._QMT_ORDER_SUCCEEDED
-        ORDER_PART_SUCC = qmt_gateway._QMT_ORDER_PART_SUCC
-        ORDER_CANCELED = qmt_gateway._QMT_ORDER_CANCELED
-        ORDER_PART_CANCEL = qmt_gateway._QMT_ORDER_PART_CANCEL
-        ORDER_PARTSUCC_CANCEL = qmt_gateway._QMT_ORDER_PARTSUCC_CANCEL
-        ORDER_REPORTED_CANCEL = qmt_gateway._QMT_ORDER_REPORTED_CANCEL
-        ORDER_REPORTED = qmt_gateway._QMT_ORDER_REPORTED
-        ORDER_WAIT_REPORTING = qmt_gateway._QMT_ORDER_WAIT_REPORTING
-        ORDER_UNREPORTED = qmt_gateway._QMT_ORDER_UNREPORTED
-        ORDER_UNKNOWN = qmt_gateway._QMT_ORDER_UNKNOWN
-        # ACC 态也需齐备（ACC 校验同一调用，否则 AttributeError）
-        ACCOUNT_STATUS_INVALID = qmt_gateway._QMT_ACC_INVALID
-        ACCOUNT_STATUS_OK = qmt_gateway._QMT_ACC_OK
-        ACCOUNT_STATUS_WAITING_LOGIN = qmt_gateway._QMT_ACC_WAITING_LOGIN
-        ACCOUNT_STATUSING = qmt_gateway._QMT_ACC_LOGINING  # 注意 STATUSING 命名差异
-        ACCOUNT_STATUS_FAIL = qmt_gateway._QMT_ACC_FAIL
-        ACCOUNT_STATUS_INITING = qmt_gateway._QMT_ACC_INITING
-        ACCOUNT_STATUS_CORRECTING = qmt_gateway._QMT_ACC_CORRECTING
-        ACCOUNT_STATUS_CLOSED = qmt_gateway._QMT_ACC_CLOSED
-        ACCOUNT_STATUS_ASSIS_FAIL = qmt_gateway._QMT_ACC_ASSIS_FAIL
-        ACCOUNT_STATUS_DISABLEBYSYS = qmt_gateway._QMT_ACC_DISABLE_BYSYS  # 无下划线 BYSYS
-        ACCOUNT_STATUS_DISABLEBYUSER = qmt_gateway._QMT_ACC_DISABLE_BYUSER
-
+    _FakeXtconst = _fake_xtconst()
     monkeypatch.setattr(qmt_gateway, "xtconstant", _FakeXtconst)
-    # 全 11 态一致 → 不抛
+    # 全 22 态一致 → 不抛
     qmt_gateway._assert_status_contract()
-    # 故意漂移 ORDER_PART_CANCEL → fail-fast
-    _FakeXtconst.ORDER_PART_CANCEL = 999
+    # 漂移注入键 → fail-fast
+    setattr(_FakeXtconst, drift_attr, 999)
     with pytest.raises(RuntimeError, match="xtconstant 枚举契约漂移"):
         qmt_gateway._assert_status_contract()
 
-
-def test_assert_status_contract_validates_all_11_account_states(monkeypatch):
-    """_assert_status_contract 应同步校验 11 个 ACCOUNT_STATUS 字面量（T1 新增防漂移）。
-
-    Why 必要：T1 新增 _QMT_ACC_* 10+1=11 个字面量，与 order 状态同受版本漂移风险
-    （账号状态若错乱，on_account_status 会误锁/漏锁网关，直接影响熔断与发单）。
-    本用例构造假 xtconstant 全 11 态 ACC 一致 → 通过；再漂移 DISABLEBYSYS → fail-fast。
-    重点覆盖命名差异：ACCOUNT_STATUSING（非 LOGIN）/ DISABLEBYSYS（非 DISABLE_BYSYS）。
-    """
-    monkeypatch.setattr(qmt_gateway, "_XTQUANT_AVAILABLE", True)
-
-    class _FakeXtconst:
-        # order 态齐备（同调用流程，防 AttributeError）
-        ORDER_JUNK = qmt_gateway._QMT_ORDER_JUNK
-        ORDER_SUCCEEDED = qmt_gateway._QMT_ORDER_SUCCEEDED
-        ORDER_PART_SUCC = qmt_gateway._QMT_ORDER_PART_SUCC
-        ORDER_CANCELED = qmt_gateway._QMT_ORDER_CANCELED
-        ORDER_PART_CANCEL = qmt_gateway._QMT_ORDER_PART_CANCEL
-        ORDER_PARTSUCC_CANCEL = qmt_gateway._QMT_ORDER_PARTSUCC_CANCEL
-        ORDER_REPORTED_CANCEL = qmt_gateway._QMT_ORDER_REPORTED_CANCEL
-        ORDER_REPORTED = qmt_gateway._QMT_ORDER_REPORTED
-        ORDER_WAIT_REPORTING = qmt_gateway._QMT_ORDER_WAIT_REPORTING
-        ORDER_UNREPORTED = qmt_gateway._QMT_ORDER_UNREPORTED
-        ORDER_UNKNOWN = qmt_gateway._QMT_ORDER_UNKNOWN
-        # 全 11 ACC 态与模块字面量一致（注意命名差异：STATUSING/DISABLEBYSYS）
-        ACCOUNT_STATUS_INVALID = qmt_gateway._QMT_ACC_INVALID
-        ACCOUNT_STATUS_OK = qmt_gateway._QMT_ACC_OK
-        ACCOUNT_STATUS_WAITING_LOGIN = qmt_gateway._QMT_ACC_WAITING_LOGIN
-        ACCOUNT_STATUSING = qmt_gateway._QMT_ACC_LOGINING
-        ACCOUNT_STATUS_FAIL = qmt_gateway._QMT_ACC_FAIL
-        ACCOUNT_STATUS_INITING = qmt_gateway._QMT_ACC_INITING
-        ACCOUNT_STATUS_CORRECTING = qmt_gateway._QMT_ACC_CORRECTING
-        ACCOUNT_STATUS_CLOSED = qmt_gateway._QMT_ACC_CLOSED
-        ACCOUNT_STATUS_ASSIS_FAIL = qmt_gateway._QMT_ACC_ASSIS_FAIL
-        ACCOUNT_STATUS_DISABLEBYSYS = qmt_gateway._QMT_ACC_DISABLE_BYSYS
-        ACCOUNT_STATUS_DISABLEBYUSER = qmt_gateway._QMT_ACC_DISABLE_BYUSER
-
-    monkeypatch.setattr(qmt_gateway, "xtconstant", _FakeXtconst)
-    # 全 11 ACC 态一致 → 不抛
-    qmt_gateway._assert_status_contract()
-    # 故意漂移 ACCOUNT_STATUS_DISABLEBYSYS → fail-fast（T1 新增 fatal 状态，漂移最危险）
-    _FakeXtconst.ACCOUNT_STATUS_DISABLEBYSYS = 999
-    with pytest.raises(RuntimeError, match="xtconstant 枚举契约漂移"):
-        qmt_gateway._assert_status_contract()
 
 
 def test_cancel_order_message_marks_non_terminal(monkeypatch):
