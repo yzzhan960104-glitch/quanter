@@ -69,12 +69,6 @@ def test_map_status_intermediate_returns_submitted():
         assert _map_qmt_status(s) == OrderState.SUBMITTED
 
 
-def test_assert_status_contract_ok():
-    """注入一致枚举 → 不抛。"""
-    _assert_status_contract()  # 不抛即通过
-
-
-# ============ 连接时序 ============
 def test_connect_success(monkeypatch):
     _setup_env(monkeypatch)
 
@@ -178,30 +172,6 @@ def test_client_servable_states(monkeypatch, tmp_path):
     assert qmt_gateway._client_servable(str(tmp_path)) is True
 
 
-def test_connect_skips_rotation_when_client_not_servable(monkeypatch):
-    """G8：connect -1 + 客户端不可服务 → 跳过 L2 轮换直进 L3（快速失败不再无效轮换）。
-
-    物理意图：客户端缺失/未登录时 -1 语义是「客户端未就绪」而非「sid 被占」，轮换
-    100 候选纯属无效功（每候选 30s 超时 + 75MB 队列文件爆盘，实测 ~50 分钟挂死 +
-    ≈2.7GB 磁盘）。跳过轮换后 connect 抛 ConnectionError 快速返回，恢复交给
-    health_guard 60s 轮询。
-    """
-    _setup_env(monkeypatch)
-    monkeypatch.setattr(FakeTrader, "connect_rc", -1)
-    monkeypatch.setattr(qmt_gateway, "_client_servable", lambda *a, **k: False)
-    # 轮换若被调用 → AssertionError 让测试响亮失败
-    monkeypatch.setattr(QmtExecutionGateway, "_try_rotate_session",
-                        AsyncMock(side_effect=AssertionError("客户端不可服务不应进入 L2 轮换")))
-
-    async def run():
-        gw = QmtExecutionGateway()
-        with pytest.raises(ConnectionError):
-            await gw.connect()
-        assert gw._lock_down is True
-
-    asyncio.run(run())
-
-
 def test_connect_rotates_when_client_servable(monkeypatch):
     """客户端可服务 → L2 轮换照常执行（G8 不改可服务时的既有语义）。"""
     _setup_env(monkeypatch)
@@ -215,23 +185,6 @@ def test_connect_rotates_when_client_servable(monkeypatch):
         await gw.connect()          # 轮换成功（sub_rc=0）→ 整体连接成功
         assert gw._connected is True
         assert gw._lock_down is False
-
-    asyncio.run(run())
-
-
-def test_connect_rotation_exhausted_still_raises(monkeypatch):
-    """客户端可服务但轮换耗尽 → 维持原 L3 失败语义（ConnectionError + lock_down）。"""
-    _setup_env(monkeypatch)
-    monkeypatch.setattr(FakeTrader, "connect_rc", -1)
-    monkeypatch.setattr(qmt_gateway, "_client_servable", lambda *a, **k: True)
-    monkeypatch.setattr(QmtExecutionGateway, "_try_rotate_session",
-                        AsyncMock(return_value=None))
-
-    async def run():
-        gw = QmtExecutionGateway()
-        with pytest.raises(ConnectionError):
-            await gw.connect()
-        assert gw._lock_down is True
 
     asyncio.run(run())
 

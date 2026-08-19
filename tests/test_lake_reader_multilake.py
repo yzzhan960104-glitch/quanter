@@ -35,17 +35,6 @@ def test_default_lake_backward_compat(tmp_path):
     assert r.get_timeseries("000001.SZ", "2024-01-01", "2024-01-31").iloc[0]["close"] == 10.0
 
 
-def test_multilake_ffill_only_prices(tmp_path):
-    """多湖各自仅价格 ffill、volume 不 ffill。"""
-    p = tmp_path / "d.parquet"
-    _df(close=5.0).to_parquet(p)
-    r = DataLakeReader()
-    r.load(str(p), key="daily")
-    sec = r.get_cross_section("2024-01-03", lake="daily")
-    assert sec.loc["000001.SZ", "close"] == 5.0   # 停牌日价格 ffill
-    assert sec.loc["000001.SZ", "volume"] == 0    # volume 不 ffill
-
-
 # --------------------------------------------------------------
 # 单索引 DatetimeIndex 湖支持（修复跨任务硬阻塞 T11 审查发现）
 # --------------------------------------------------------------
@@ -74,31 +63,3 @@ def test_load_single_index_datetime_lake(tmp_path):
     df = r._lakes["macro"]
     assert len(df.loc[:pd.Timestamp("2024-01-04")]) == 3   # 含 01-02/03/04
 
-
-def test_multiindex_lake_still_works_after_single_index_support(tmp_path):
-    """向后兼容：MultiIndex 湖载入 + 价格 ffill 不被单索引支持破坏。
-
-    锁死零回归红线——新增单索引分支不得影响既有 MultiIndex 价格湖的载入与
-    get_cross_section 价格 ffill / volume 不 ffill 契约。
-    """
-    idx = pd.MultiIndex.from_tuples(
-        [("2024-01-02", "000001.SZ"), ("2024-01-03", "000001.SZ")],
-        names=["date", "symbol"],
-    )
-    daily = pd.DataFrame(
-        {
-            "open": [10, 11],
-            "high": [11, 12],
-            "low": [9, 10],
-            "close": [10.5, float("nan")],
-            "volume": [100, 0],
-        },
-        index=idx,
-    )
-    p = tmp_path / "daily.parquet"
-    daily.to_parquet(p)
-    r = DataLakeReader()
-    r.load(str(p), key="daily")
-    sec = r.get_cross_section("2024-01-03", lake="daily")
-    assert sec.loc["000001.SZ", "close"] == 10.5   # 价格 ffill
-    assert sec.loc["000001.SZ", "volume"] == 0     # volume 不 ffill

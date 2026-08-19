@@ -144,38 +144,9 @@ def test_compute_subpackage_has_no_external_io_dependencies() -> None:
 @pytest.mark.parametrize(
     "module_path, attr",
     [
-        # check_order：真身单源在 trading.compute.risk（Layer2 阶段6 risk_shield 垫片已删）
-        ("trading.compute.risk", "check_order"),
-        ("trading.compute", "check_order"),
-        # build_orders_from_signals：真身单源 trading.compute.plan
-        # （Layer2 阶段6 follow-up #4a：signal_runner 垫片已删，双源契约随之退役）
-        ("trading.compute.plan", "build_orders_from_signals"),
-        ("trading.compute", "build_orders_from_signals"),
-        # stop 系列：compute.stop 真身 + compute 包 re-export（Layer2 follow-up #4c：order_state 垫片已删，
-        # 双源 is 契约退役，仅守 compute.stop↔compute 包级 re-export 同源）
-        ("trading.compute.stop", "compute_stop_price"),
-        ("trading.compute.stop", "check_stop_loss"),
-        ("trading.compute", "check_stop_loss"),
-        ("trading.compute.stop", "check_take_profit"),
-        ("trading.compute", "check_take_profit"),
-        ("trading.compute.stop", "update_trailing_stop"),
-        ("trading.compute", "update_trailing_stop"),
-        # reconcile：双入口同源（compute / compute 包 re-export）
-        # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，双源 is 契约退役，
-        # 仅留 compute.reconcile↔compute 包级同源（20+ 消费已迁直指 compute.reconcile 真身）
-        ("trading.compute.reconcile", "reconcile"),
-        ("trading.compute", "reconcile"),
-        # check_daily_loss_limit：真身单源在 trading.compute.breaker
-        # （Layer2 阶段6 circuit_breaker 垫片已删，cancel_all_open_orders 真身在 io.breaker）
-        ("trading.compute.breaker", "check_daily_loss_limit"),
-        ("trading.compute", "check_daily_loss_limit"),
-        # OrderRequest：双入口同源（compute.types / compute 包 re-export）
-        # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，双源 is 契约退役
-        ("trading.compute.types", "OrderRequest"),
-        ("trading.compute", "OrderRequest"),
-        # 伴随 dataclass（RiskDecision / PlannedOrder / ReconciliationResult）
-        # Task 6：caisen 遗产 ExitDecision 随 check_exit 一并废弃删除（trading.compute.exit
-        # 整模块删除）。颈线法 decide_exit 用 NecklineExitDecision（execution.py 专属契约）。
+        # 仅守「单源、无 re-export 对照物」的伴随 dataclass——下方 is 同源系列无法覆盖
+        # （is 系列已用更强的 import+identity 断言接管全部双入口函数/枚举对，2026-08-19
+        # 精简评审 W1 瘦身：原 24 参中 20 参与 is 系列完全重复，ImportError 信号等价）。
         ("trading.compute.risk", "RiskDecision"),
         ("trading.compute.plan", "PlannedOrder"),
         ("trading.compute.reconcile", "ReconciliationResult"),

@@ -12,14 +12,10 @@ Why 不真调 tushare：本脚本是数据链路最后一公里（每日增量 r
   ③ 除权检测：adj_d0 ≠ adj_today 标注（历史基准偏移，follow-up 全量重算）
   ④ 早返短路径：已最新 / 无新交易日（节假日空跑保护）
 """
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
+import pytest
 
 from data.tools import sync_daily_incremental as mod
 
@@ -252,3 +248,101 @@ def test_backscan_recent_clean_returns_empty():
     )
     trade_days = {"2024-09-02", "2024-09-03", "2024-09-04"}
     assert mod._backscan_recent(df, trade_days, suspend_intervals={}, days=30) == []
+
+
+# ============================================================================
+# ⑥ 写入守卫接入 + 分页限频（原根级 test_sync_daily_incremental.py 并入，2026-08-19 W1）
+# ============================================================================
+class _FakeDT:
+    """替身 datetime：today().strftime() 返回固定日期，让 sync 跑增量分支（d0 < today）。
+
+    Why 替身而非 patch 真实 datetime：sync_daily_incremental 顶部 `from datetime import
+    datetime` 已把 datetime 类绑定到模块名，monkeypatch.setattr(mod, "datetime", _FakeDT)
+    才能拦住 `datetime.today()`（patch datetime.datetime 拦不住模块级绑定，与 get_pro
+    局部 import 同理）。
+    """
+    @staticmethod
+    def today():
+        class _D:
+            def strftime(self, fmt):
+                return "2024-01-03"
+        return _D()
+
+
+def test_sync_daily_guard_propagates_reject(tmp_path, monkeypatch):
+    """增量同步落盘前守卫拒写 → WriteGuardError 传播（不静默吞）。
+
+    全链 mock（_build_pro + read_parquet + get_pro + datetime）让 sync_daily_incremental
+    跑到落盘点 combined.to_parquet；stub assert_safe_overwrite 抛错，证明接入点存在且
+    异常不被吞。守卫本身的 shrink 判定已在 test_integrity 覆盖（append 日常必增长，
+    真实 shrink 极罕见，故用 stub 反证接入）。上方 ② 组用例 stub safe_overwrite 为
+    「捕获不真写」，本测是唯一验证「拒写异常不被吞」的接入语义。
+    """
+    from data.integrity import WriteGuardError
+
+    lake_path = tmp_path / "a_shares_daily.parquet"
+    # 现有 lake（d0=2024-01-01，1 行）
+    fake_lake = pd.DataFrame(
+        {"close": [10.0]},
+        index=pd.MultiIndex.from_tuples(
+            [(pd.Timestamp("2024-01-01"), "000001.SZ")], names=["date", "symbol"]))
+
+    trade_days = ["20240102", "20240103"]
+    raw_by_day = {
+        "20240102": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240102"],
+                                  "open": [20.0], "high": [21.0], "low": [19.5],
+                                  "close": [20.0], "vol": [1000], "amount": [20000.0]}),
+        "20240103": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240103"],
+                                  "open": [22.0], "high": [22.5], "low": [21.5],
+                                  "close": [22.0], "vol": [1100], "amount": [24000.0]}),
+    }
+    adj_by_day = {
+        "20240101": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240101"], "adj_factor": [1.0]}),
+        "20240102": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240102"], "adj_factor": [1.0]}),
+        "20240103": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240103"], "adj_factor": [1.0]}),
+    }
+    pro = _build_pro(trade_days, raw_by_day, adj_by_day)
+
+    monkeypatch.setattr(mod, "LAKE", str(lake_path))
+    monkeypatch.setattr(mod.pd, "read_parquet", lambda p: fake_lake)
+    monkeypatch.setattr(mod, "get_pro", lambda: pro)
+    monkeypatch.setattr(mod, "datetime", _FakeDT)
+    # stub 守卫抛错，证明 sync 不静默吞（接入前此属性不存在 → monkeypatch raising error，
+    # 即 red；接入后 mock 生效 → WriteGuardError 传播 → green）
+    def _raise(*a, **k):
+        raise WriteGuardError("stub: combined 异常收缩")
+    monkeypatch.setattr(mod, "safe_overwrite", _raise)
+
+    # no_backscan/no_recompute_div=True 禁用回扫与除权重算，聚焦落盘点守卫路径
+    with pytest.raises(WriteGuardError):
+        mod.sync_daily_incremental(no_backscan=True, no_recompute_div=True)
+
+
+def test_fetch_paged_acquires_rate_limit_per_page(monkeypatch):
+    """_fetch_paged 每页前 acquire basic 桶令牌（T13-B #5，防 Tushare 限频封禁）。
+
+    物理意图：repair 多日补采 + sync 增量连续分页，无限频会撞 Tushare 500/min 封禁。
+    _fetch_paged 每页前 acquire basic 桶，一处改两处受益（sync + repair 共用）。
+    上方 ① 组的分页机制断言（offset 递增）与限频是正交两维——本测只守限频维。
+    """
+    from data.resilience import tushare_rate_limiter_basic
+
+    # mock 限频器 acquire 计数（避免真实令牌消耗 + 断言调用次数 = 页数）
+    acq_calls = []
+    monkeypatch.setattr(tushare_rate_limiter_basic, "acquire",
+                        lambda tokens=1.0: acq_calls.append(tokens))
+
+    # mock pro：第 1 页返 PAGE 行（满页），第 2 页返 100 行（< PAGE，终止）
+    page1 = pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(mod.PAGE)],
+                          "trade_date": ["20260101"] * mod.PAGE})
+    page2 = pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(100)],
+                          "trade_date": ["20260101"] * 100})
+    pages = [page1, page2]
+    pro = MagicMock()
+    pro.daily = MagicMock(side_effect=lambda **kw: pages.pop(0) if pages else pd.DataFrame())
+
+    df = mod._fetch_paged(pro, "daily", "20260101")
+
+    # 2 页 → acquire 2 次（每页前一次：page1 acquire→500 满→page2 acquire→100 末页 break）
+    assert len(acq_calls) == 2, f"每页应 acquire 一次（2 页期望 2 次），实际 {len(acq_calls)}"
+    assert len(df) == mod.PAGE + 100  # 500 + 100

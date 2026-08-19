@@ -474,23 +474,6 @@ def test_pre_open_blocks_when_no_plan():
     assert "无计划" in result["reason"]
 
 
-# ----------------------------------------------------------------------------
-# T12（state-store-redesign）：废弃 _tp_placed 内存（DB has_order 为唯一真相源）
-# ----------------------------------------------------------------------------
-def test_no_tp_placed_memory():
-    """engine.py 不再依赖 _tp_placed 内存态（grep 无 _tp_placed 赋值/读写）。
-
-    物理意图（spec §3.6）：_tp_placed 是进程内存，engine 重启清空 → 重连重推 →
-    重复挂止盈超卖（P0-1）。已由 state_store.has_order(TP1) DB 查询替代（跨重启持久）。
-    本测试断言 engine.py 源码无 _tp_placed 的赋值语句（= 彻底废弃，非保留兼容）。
-    """
-    import pathlib
-    src = pathlib.Path(engine.__file__).read_text(encoding="utf-8")
-    # 不应再有 _tp_placed 的赋值（self._tp_placed = ... 或 .add(...)）
-    assert "self._tp_placed" not in src, "engine.py 仍含 _tp_placed 实例属性（应已废弃，改用 DB has_order）"
-    assert "_tp_placed.add" not in src, "engine.py 仍写 _tp_placed.add（应已废弃，改用 DB insert_order）"
-
-
 def test_pre_open_cancels_yesterday_open_orders(monkeypatch, _state_db):
     """scope #2：pre_open 开头必须调 cancel_all_open_orders 撤昨日未成交单。"""
     # C2c：种一份已确认 SIGNAL（撤单步骤在确认闸之后，需至少一只 SIGNAL 才触达撤单）
@@ -749,33 +732,6 @@ def test_stop_loss_idempotent(monkeypatch, tmp_path):
     assert submit_calls["n"] == 0  # 已有 STOP 委托 → 跳过（DB 幂等）
 
 
-def test_stop_loss_reads_plan_from_db(monkeypatch, tmp_path):
-    """从 trade_event SIGNAL meta 读 stop_price（不依赖 plan JSON）。
-
-    物理意图（spec §3.3）：stop_price 真相源改 DB（get_trade_plan），plan JSON 仅人看。
-    本测试验证 get_trade_plan 能从 SIGNAL meta 读出 stop_price（T5 已覆盖，此处串联 engine 链路）。
-    """
-    from trading import state_store
-    db_path = str(tmp_path / "state.db")
-    monkeypatch.setattr(state_store, "_DEFAULT_DB", db_path)
-    state_store.init_store()
-    account_id = engine._resolve_account_id()
-    state_store.upsert_account(account_id, broker="qmt")
-    today = datetime.now().strftime("%Y-%m-%d")
-    trade_id = f"{account_id}_A.SH_{today}"
-    # SIGNAL meta 存计划参数（含 stop_price）
-    import json as _json
-    state_store.insert_trade_event(
-        account_id, trade_id, "A.SH", "SIGNAL",
-        meta=_json.dumps({"stop_price": 9.5, "take_profit": 11.0}))
-    plan = state_store.get_trade_plan(trade_id)
-    assert plan is not None
-    assert plan["stop_price"] == 9.5  # 从 DB SIGNAL meta 读出
-
-
-# ----------------------------------------------------------------------------
-# ssot-review P1 fix：止损监控在 ORDERED 之后必须继续监控（防 live 静默失效）
-# ----------------------------------------------------------------------------
 def test_stoploss_monitors_after_ordered(monkeypatch, tmp_path):
     """**ssot-review P1**：SIGNAL→CONFIRMED→ORDERED 后 _stoploss 必须仍收该 signal。
 

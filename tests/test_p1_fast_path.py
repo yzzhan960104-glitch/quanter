@@ -280,10 +280,15 @@ def test_detect_core_window_matches_detect_success():
     assert got == want
 
 
-@pytest.mark.parametrize("mutate", ["no_breakout", "no_volume", "too_deep",
-                                    "few_tops", "low_suppression"])
+@pytest.mark.parametrize("mutate", ["no_breakout", "too_deep"])
 def test_detect_core_window_matches_detect_rejections(mutate):
-    """内核 == detect_neckline_method（5 个拒绝边界）：守卫逐位一致返 None。"""
+    """内核 == detect_neckline_method（拒绝边界）：守卫逐位一致返 None。
+
+    参数轴瘦身（2026-08-19 精简评审 W1）：原 5 参中 no_volume/few_tops/low_suppression
+    与保留两参分别同轴（数据末根变异 / cfg 收紧变异），外层拒绝已由
+    test_neckline_recognition 的 5 个 test_detect_reject_* 全量钉死——本测只守
+    「拒绝发生在内核而非外层丢弃」的等价性，每轴 1 个代表参数即可传递该保证。
+    """
     rows = _synth_pattern()
     cfg = dict(_CFG_W20)
     if mutate == "no_breakout":

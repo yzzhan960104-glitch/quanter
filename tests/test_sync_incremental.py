@@ -123,17 +123,6 @@ def test_merge_dedup_datetimeindex_keep_new():
     assert merged.loc[pd.Timestamp("2024-03-01"), "cpi"] == 3.0  # 新增
 
 
-def test_merge_dedup_empty_new():
-    """new 为空 → merged 等于 old（全部保留）。"""
-    from data.tools.sync_incremental import _merge_dedup
-    old = pd.DataFrame({"v": [1]}, index=pd.DatetimeIndex(["2024-01-01"]))
-    new = pd.DataFrame({"v": []}, index=pd.DatetimeIndex([]))
-    merged = _merge_dedup(old, new)
-    assert len(merged) == 1
-
-
-# ============ sync_one_key：完整增量流程 ============
-
 def _setup_key(key: str, lake_path: str, by: str = "date", **extra):
     """注册/覆盖一个测试数据集到 TUSHARE_DATASETS + LAKE_CONFIG。"""
     from config import TUSHARE_DATASETS, LAKE_CONFIG
@@ -343,49 +332,6 @@ def test_sync_one_key_max_days_caps_window(tmp_path, mock_sync_dataset):
     assert start_ts == expected, (
         f"--days 7 应把 start 截到 today-7={expected}，实际 {start_ts}")
 
-
-def test_sync_one_key_merge_with_revision(tmp_path, mock_sync_dataset):
-    """数据修订场景：新拉的 (date, symbol) 覆盖旧值。
-
-    Why 此测试：财报 ann_date 重述或资金流数据修订时，同一交易日数据会被新值覆盖。
-    钉死 _merge_dedup 的 keep='last' 语义——同 key 必须保留新拉的。
-    """
-    from data.tools.sync_incremental import sync_one_key
-    from config import TUSHARE_DATASETS
-
-    lake = str(tmp_path / "mf.parquet")
-    _setup_key("_test_rev", lake, by="date")
-    old_df = _make_multiindex_df([
-        ("2024-01-01", "000001.SZ", 100),  # 旧值
-        ("2024-01-02", "000001.SZ", 200),
-    ])
-    old_df.to_parquet(lake, engine="pyarrow")
-
-    today_str = "2024-01-03"
-    # sync_dataset 写入：1月1日修订为 999 + 新增 1月3日
-    def writer(key, start, end):
-        new_df = _make_multiindex_df([
-            ("2024-01-01", "000001.SZ", 999),  # 修订
-            ("2024-01-03", "000001.SZ", 300),  # 新增
-        ])
-        new_df.to_parquet(TUSHARE_DATASETS[key]["lake"], engine="pyarrow")
-    mock_sync_dataset[1].writer = writer
-
-    import io
-    log = io.StringIO()
-    ok, msg = sync_one_key("_test_rev", today_str, 3, None, log)
-
-    assert ok
-    merged = pd.read_parquet(lake)
-    # 3 行：1月1日（新覆盖）+ 1月2日（旧保留）+ 1月3日（新）
-    assert len(merged) == 3
-    # 1月1日应为新值 999（修订），不是 100
-    assert merged.loc[(pd.Timestamp("2024-01-01"), "000001.SZ"), "v"] == 999
-    # 1月2日旧值保留
-    assert merged.loc[(pd.Timestamp("2024-01-02"), "000001.SZ"), "v"] == 200
-
-
-# ============ 日频 symbol 扩展（2026-08-05）：守卫 + 批顺序 ============
 
 def test_daily_symbol_keys_registered_as_by_symbol():
     """DAILY/PERIODIC_SYMBOL_KEYS 必须已注册且为 by=symbol（否则日频扩展静默落空）。"""

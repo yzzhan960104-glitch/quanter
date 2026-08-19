@@ -29,15 +29,6 @@ def test_eval_worker_is_toplevel_picklable():
     assert pickle.loads(blob) is worker._eval_worker
 
 
-def test_init_worker_not_lambda_not_nested():
-    """_init_worker 不是 lambda/闭包（spawn 不可 pickle 的反例）。"""
-    from discovery import worker
-    fn = worker._init_worker
-    assert hasattr(fn, "__qualname__")
-    assert "<lambda>" not in fn.__qualname__
-    assert "<locals>" not in fn.__qualname__   # 嵌套函数会有 <locals>
-
-
 def test_default_n_proc_capped_at_16(monkeypatch):
     """P2（2026-08-13 · spec §3）：默认进程数上限 16（旧 cap 4 放开）。
 

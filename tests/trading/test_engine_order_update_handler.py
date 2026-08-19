@@ -237,7 +237,6 @@ def test_trade_update_inserts_fill_and_event(state_db):
     import sqlite3
     from trading import state_store
     eng = TradingEngine()
-    eng._tp_placed = set()
     eng._gw = MagicMock()
     eng._gw._orders = {"123": {"order_type": 23}}  # BUY
     fake_mgr = MagicMock()
@@ -266,7 +265,6 @@ def test_tp_idempotent_via_db(state_db, monkeypatch):
     """
     from trading import state_store
     eng = TradingEngine()
-    eng._tp_placed = set()
     eng._gw = MagicMock()
     eng._gw._orders = {"123": {"order_type": 23}}  # BUY
     # 预置 TP1 已挂（模拟 DB 已记录止盈，trade_date=今日，与 handler 口径一致）
@@ -289,30 +287,6 @@ def test_tp_idempotent_via_db(state_db, monkeypatch):
     assert tp_calls["n"] == 0  # DB 幂等：已有 TP1 不重挂
 
 
-def test_tp_inserts_two_orders(state_db):
-    """成交后挂 tp1 + tp2 两笔 order（UNIQUE 幂等，落 DB 真相源）。
-
-    用 filled=1000/portion=0.5 → tp1_qty=500（整手非零，走分级两腿）。
-    """
-    import sqlite3
-    from trading import state_store
-    eng = TradingEngine()
-    eng._tp_placed = set()
-    eng._gw = MagicMock()
-    eng._gw._orders = {"123": {"order_type": 23}}  # BUY
-    # plan 用 qty=1000 + portion=0.5 → tp1=500/tp2=500（两腿都非零）
-    plan = _plan_with_tp()
-    plan["orders"][0]["order"]["qty"] = 1000
-    with patch("trading.trading_plan.load_plan", return_value=plan), \
-         patch("trading.phases.exit._submit", new=AsyncMock(return_value={"state": "FILLED", "order_id": "s1"})):
-        asyncio.run(place_take_profit("300001.SZ", 1000, 10.5, order_id="123"))
-    account_id = engine._resolve_account_id()
-    today = _today_str()
-    # TP1 + TP2 两笔 order 落库（trade_date=今日，与 _place_take_profit 口径一致）
-    assert state_store.has_order(account_id, today, "300001.SZ", "TP1") is True
-    assert state_store.has_order(account_id, today, "300001.SZ", "TP2") is True
-
-
 # ============================================================================
 # Task 7（P0-3 分级止盈 tp1/tp2）：_place_take_profit 挂两张限价卖单 + 整手分割
 # ============================================================================
@@ -331,7 +305,6 @@ def test_place_take_profit_two_legs(db):
       3) 两张都是 side="sell"（限价卖单）。
     """
     eng = TradingEngine()
-    eng._tp_placed = set()
     plan = {
         "confirmed": True,
         "orders": [{
@@ -356,6 +329,13 @@ def test_place_take_profit_two_legs(db):
     # tp2 leg：qty=500（余量），price=tp2=13.0
     tp2_leg = next(leg for leg in legs if leg.price == 13.0)
     assert tp2_leg.qty == 500
+    # DB 落库真相源断言（原 test_tp_inserts_two_orders 并入，2026-08-19 W1 精简：
+    # 两腿语义与落库在同一次调用断言，免一份独立弱变体脚手架）：
+    from trading import state_store
+    account_id = engine._resolve_account_id()
+    today = _today_str()
+    assert state_store.has_order(account_id, today, "300001.SZ", "TP1") is True
+    assert state_store.has_order(account_id, today, "300001.SZ", "TP2") is True
 
 
 def test_place_take_profit_skips_vetoed_symbol(db, monkeypatch):
@@ -402,7 +382,6 @@ def test_place_take_profit_tp1_qty_round_to_lot(db):
         含零股（券商接受卖出零股清仓）。若 filled×portion<100 → tp1_qty=0 全量 tp2。
     """
     eng = TradingEngine()
-    eng._tp_placed = set()
     plan = {
         "confirmed": True,
         "orders": [{
@@ -424,7 +403,6 @@ def test_place_take_profit_tp1_qty_round_to_lot(db):
 def test_place_take_profit_portion_zero_only_tp2(db):
     """portion=0 → 只挂 tp2（不锁利，全量博形态对称目标位）。"""
     eng = TradingEngine()
-    eng._tp_placed = set()
     plan = {
         "confirmed": True,
         "orders": [{
@@ -445,7 +423,6 @@ def test_place_take_profit_portion_zero_only_tp2(db):
 def test_place_take_profit_portion_full_only_tp1(db):
     """portion=1 → 只挂 tp1（全部在 tp1 锁利，不博 tp2）。"""
     eng = TradingEngine()
-    eng._tp_placed = set()
     plan = {
         "confirmed": True,
         "orders": [{
@@ -472,7 +449,6 @@ def test_place_take_profit_tp1_ge_tp2_falls_back_to_tp2_only(db):
         守卫：tp1≥tp2 时跳过 tp1，全量挂 tp2。
     """
     eng = TradingEngine()
-    eng._tp_placed = set()
     plan = {
         "confirmed": True,
         "orders": [{
@@ -495,7 +471,6 @@ def test_place_take_profit_tp1_ge_tp2_falls_back_to_tp2_only(db):
 def test_place_take_profit_no_tp1_in_plan_falls_back_to_tp2_only(db):
     """老 plan 无 tp1 字段（Task 7 前的 plan）→ 退回 tp2 单笔全平（向后兼容零回归）。"""
     eng = TradingEngine()
-    eng._tp_placed = set()
     plan = {
         "confirmed": True,
         "orders": [{
@@ -530,7 +505,6 @@ def test_place_take_profit_truncates_fractional_qty_to_int(db):
         ``OrderRequest.qty == 100``（int 截断，非 100.5 也非 10050）。
     """
     eng = TradingEngine()
-    eng._tp_placed = set()
     update = {
         "kind": "trade",
         "order_id": "456",
@@ -873,58 +847,6 @@ def test_e2e_real_callback_chain_fills_and_places_tp(db, monkeypatch):
 # ============================================================================
 # Task 6（W3.1 gateway-ssot-hardening）：成交回报 CSV/钉钉幂等
 # ============================================================================
-def test_trade_replay_notifies_only_once(state_db, monkeypatch, tmp_path):
-    """W3.1：同 (order_id, traded_time) 成交回报重放 → insert_fill 返 False →
-    钉钉不再重复推（与真相源同判定点，spec §3.3.1）。
-
-    08-04 事故根因：原 record_live_trade（CSV）+ notify_trade_event（钉钉）在 insert_fill
-    幂等判定**之外**无条件调，重放会轰炸钉钉。A1 平移后两路均与 _fill_inserted 同判定点，
-    重放（insert_fill=False）→ 钉钉不推。
-
-    A4 收口：原测试 monkeypatch LIVE_TRADE_LOG + 断言 CSV 只 1 行，CSV 写盘链路 A4 整体
-    退役后 LIVE_TRADE_LOG 常量删（monkeypatch AttributeError）。本测试去掉 CSV 断言，
-    保留「钉钉只 1 次」断言（fill 表只 1 行的硬证据在 test_trade_replay_csv_real_file_only_one_row）。
-    """
-    from trading import state_store
-
-    eng = TradingEngine()
-    eng._tp_placed = set()
-    # 预置 DB order 行：让 _order_direction 从 DB side 反查得 BUY（不依赖内存 _orders）
-    aid = engine._resolve_account_id()
-    today = _today_str()
-    state_store.upsert_account(aid, broker="qmt")
-    state_store.insert_order(
-        f"{today}_600000.SH_OPEN_1", f"{aid}_600000.SH_{today}", aid, today,
-        "600000.SH", "buy", "OPEN", 100, 10.0,
-        broker_oid="600000_SEQ_1", state="SUBMITTED")
-    # 内存 _orders 留空（强制走 DB 反查路径，与生产主推路径一致）
-    eng._gw = MagicMock()
-    eng._gw._orders = {}
-    eng._gw._seq_to_real = {}
-
-    update = {
-        "kind": "trade",
-        "order_id": "600000_SEQ_1",
-        "stock_code": "600000.SH",
-        "traded_volume": 100,
-        "traded_price": 10.5,
-        "traded_amount": 1050.0,
-        "traded_time": "20260801101000",  # 同笔成交时间（幂等键的一半）
-        "state": "FILLED",
-    }
-    fake_mgr = MagicMock()
-    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    with patch("infra.notifier.NotificationManager") as NM, \
-         patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
-        NM.get_default.return_value = fake_mgr
-        asyncio.run(eng._handle_order_update(update))   # 首次 → insert_fill=True → 钉钉推 1 次
-        asyncio.run(eng._handle_order_update(update))   # 重放 → insert_fill=False → 钉钉不推
-
-    # 重放应只推 1 次钉钉（与 _fill_inserted 同判定点）
-    assert fake_mgr.notify_trade_event.call_count == 1, \
-        f"重放应只推 1 次钉钉，实际 {fake_mgr.notify_trade_event.call_count}"
-
-
 def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path):
     """W3.1 真相源重放幂等断言（非 mock）：重放同 (order_id, traded_time) → fill 表只 1 行。
 
@@ -938,7 +860,6 @@ def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path
     from trading import state_store
 
     eng = TradingEngine()
-    eng._tp_placed = set()
     aid = engine._resolve_account_id()
     today = _today_str()
     state_store.upsert_account(aid, broker="qmt")
@@ -989,71 +910,6 @@ def test_trade_replay_csv_real_file_only_one_row(state_db, monkeypatch, tmp_path
     assert fake_mgr.notify_trade_event.call_count == 1
 
 
-def test_trade_direction_unknown_writes_no_csv_no_notify(state_db, monkeypatch, tmp_path):
-    """W3.1 完整收口：direction=None（方向未知旁路）不再写 CSV / 不再推钉钉。
-
-    物理意图（spec §3.3.1「同一判定点」）：
-        原 direction=None 分支无条件写 CSV + 推钉钉（"TRADE" 中性标签），与 insert_fill
-        的幂等判定不同判定点 —— 同一条「方向未知回报」被重放 N 次会重复落 CSV/推钉钉，
-        污染审计镜像与 IM 通知。W3 完整收口选 C：direction=None 时**不写 CSV / 不推钉钉**
-        （上方 _alert_critical 已告警人工对账，CSV 旁证在重放时反而污染真相源判定），
-        与 fill 表「direction 不在 (BUY,SELL) 时 insert_fill 不被调（无 fill 表行）」
-        同判定点（都不写），符合 spec §3.3.1。
-
-    断言（A4 平移：CSV 写盘链路退役，原「CSV 0 行」断言改为「fill 表 0 行」）：
-      1) fill 表不落行（direction 不在 BUY/SELL → insert_fill 不被调）；
-      2) notify_trade_event 不被调（钉钉 0 次）；
-      3) _alert_critical 仍被调（方向未知仍告警人工对账，保留既有红线）。
-    """
-    import sqlite3
-    from trading import state_store
-
-    eng = TradingEngine()
-    eng._tp_placed = set()
-    # 不预置 DB order 行、不塞 _orders → _order_direction 返 None（方向未知）
-    eng._gw = MagicMock()
-    eng._gw._orders = {}
-    eng._gw._seq_to_real = {}
-
-    update = {
-        "kind": "trade",
-        "order_id": "999999_UNKNOWN",  # DB 无行 / 内存无 order_type → direction=None
-        "stock_code": "600000.SH",
-        "traded_volume": 100,
-        "traded_price": 10.5,
-        "traded_amount": 1050.0,
-        "traded_time": "20260801101000",
-        "state": "FILLED",
-    }
-    fake_mgr = MagicMock()
-    fake_mgr.notify_trade_event = AsyncMock(return_value=[])
-    alert_calls = []
-    monkeypatch.setattr(
-        "trading.order_state._alert_critical", lambda msg: alert_calls.append(msg))
-    # Fix1：方向未知 _alert_critical 加了 live 守卫，dry_run 不推钉钉。
-    # 本测试断「_alert_critical 仍触发」必须 patch _mode=live 才能命中守卫。
-    # W1-A/T2-Task12：handle_order_update（order_state.py:325）读 order_state 顶部
-    # ``from trading.critical import _mode, _alert_critical`` 本地绑定 → patch
-    # engine._mode / engine._alert_critical 不命中函数体（setattr engine 模块属性同理失效）
-    # → 迁 trading.order_state 物理路径（上方 _alert_critical setattr + 本处 _mode）。
-    monkeypatch.setattr("trading.order_state._mode", lambda: "live")
-    with patch("infra.notifier.NotificationManager") as NM, \
-         patch("trading.phases.exit.place_take_profit", new=AsyncMock()):
-        NM.get_default.return_value = fake_mgr
-        asyncio.run(eng._handle_order_update(update))   # 首次（方向未知）
-        asyncio.run(eng._handle_order_update(update))   # 重放（方向未知）
-
-    # 1) fill 表不落行（direction=None 时 _fill_inserted=False，insert_fill 根本不被调）
-    with sqlite3.connect(state_db) as con:
-        n = con.execute("SELECT COUNT(*) FROM fill WHERE symbol='600000.SH'").fetchone()[0]
-    assert n == 0, f"direction=None 不应写 fill 表，实际 {n} 行"
-    # 2) 钉钉 0 次
-    assert fake_mgr.notify_trade_event.call_count == 0, (
-        f"direction=None 不应推钉钉，实际 {fake_mgr.notify_trade_event.call_count} 次")
-    # 3) _alert_critical 仍触发（方向未知仍告警人工对账）
-    assert len(alert_calls) >= 1, "direction=None 应触发 _alert_critical 人工对账告警"
-
-
 def test_direction_none_writes_trade_event_audit(state_db, monkeypatch):
     """direction=None 回报 → trade_event 落 DIRECTION_UNKNOWN 审计行（spec §A1）。
 
@@ -1075,7 +931,6 @@ def test_direction_none_writes_trade_event_audit(state_db, monkeypatch):
     from trading import state_store
 
     eng = TradingEngine()
-    eng._tp_placed = set()
     # 不预置 DB order 行、不塞 _orders → _order_direction 返 None（方向未知）
     eng._gw = MagicMock()
     eng._gw._orders = {}
@@ -1128,6 +983,9 @@ def test_direction_none_writes_trade_event_audit(state_db, monkeypatch):
         assert n_fill == 0, f"direction=None 不应写 fill 表，实际 {n_fill} 行"
     # 3) _alert_critical 仍触发（既有红线保留）
     assert len(alert_calls) >= 1, "direction=None 应触发 _alert_critical 人工对账告警"
+    # 钉钉不推（原 test_trade_direction_unknown_writes_no_csv_no_notify 独有断言并入，
+    # 2026-08-19 W1 精简：方向未知旁路与 fill 幂等同判定点，不轰炸 IM）：
+    assert fake_mgr.notify_trade_event.call_count == 0,         "direction=None 不应推钉钉（与 fill 表同判定点）"
 
 
 def test_e2e_trade_before_async_response_race(db, monkeypatch):
