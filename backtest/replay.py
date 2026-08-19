@@ -106,23 +106,18 @@ def _apply_continuity_filter(price_data: dict, strategy, start, end) -> dict:
         过滤后的 price_data（{symbol: df}，仅含通过完整性 gate 的 symbol）。
     """
     try:
-        from data.integrity import filter_universe_by_continuity, load_suspend_intervals, fetch_trade_days
-        import pandas as _pd
-        from pathlib import Path as _Path
+        from data.integrity import filter_universe_by_continuity, load_suspend_intervals_cached, fetch_trade_days
         # 解析策略 window（与 _eod._resolve_id_window 同源，缺失兜底 60）
         try:
             window = int(getattr(strategy, "id_cfg", {}).get("window") or 60)
         except (TypeError, ValueError):
             window = 60
-        # 加载 trade_days + susp（fail-open）
+        # 加载 trade_days + susp（fail-open）。susp 走 mtime 键缓存加载器（2026-08-19 W0）：
+        # 旧路径每次 replay 全量读 parquet + iterrows 重析 19.2 万行 ≈14.5s/次——discovery
+        # 批跑每 task 一次、单测每用例一次全在白付；向量化+同进程缓存后仅首次 ~0.2s。
         try:
             trade_days = fetch_trade_days(str(start), str(end))
-            susp_path = _Path("data_lake/suspend_d.parquet")
-            if susp_path.exists():
-                susp_df = _pd.read_parquet(susp_path)
-                susp = load_suspend_intervals(susp_df, trade_days)
-            else:
-                susp = {}
+            susp = load_suspend_intervals_cached(trade_days)
         except Exception as _e:
             _logger.warning("replay 完整性 gate 上下文加载失败（fail-open 放行）：%s", _e)
             trade_days, susp = set(), {}

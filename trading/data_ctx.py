@@ -181,14 +181,14 @@ def load_integrity_ctx(today: str):
     try:
         from datetime import datetime as _dt, timedelta as _td
         from pathlib import Path as _Path
-        import pandas as _pd
-        from data.integrity import load_suspend_intervals, fetch_trade_days
+        from data.integrity import load_suspend_intervals_cached, fetch_trade_days
         start = (_dt.strptime(today, "%Y-%m-%d") - _td(days=730)).strftime("%Y-%m-%d")
         trade_days = fetch_trade_days(start, today)
+        # susp 走 mtime 键缓存加载器（2026-08-19 W0）：旧路径每次全量读 parquet +
+        # iterrows 重析 19.2 万行；向量化+同进程缓存后仅首次 ~0.2s。缺文件告警保留。
         susp_path = _Path("data_lake/suspend_d.parquet")
         if susp_path.exists():
-            susp_df = _pd.read_parquet(susp_path)
-            susp = load_suspend_intervals(susp_df, trade_days)
+            susp = load_suspend_intervals_cached(trade_days)
         else:
             logger.warning("suspend_d.parquet 缺失，完整性 gate 无停牌 ground-truth（全判漏采）")
             susp = {}

@@ -93,34 +93,94 @@ def load_suspend_intervals(
         （调用方 .get(sym, set()) 取空集，语义=该标的从未停牌）。
     """
     intervals: dict[str, Set[str]] = {}
-    # per-symbol 独立重建（groupby 保证不跨标的串味）
-    for sym, grp in suspend_df.groupby(level="symbol"):
-        events = (grp.reset_index()
-                  .sort_values("date")[["date", "suspend_type"]])
-        sym_days: Set[str] = set()
-        pending_S: str | None = None
-        # 逐事件扫描：S 起区间、R 终区间
-        for _, row in events.iterrows():
-            dstr = pd.Timestamp(row["date"]).strftime("%Y-%m-%d")
-            t = row["suspend_type"]
-            if t == "S":
-                pending_S = dstr
-                sym_days.add(dstr)            # S 当日停牌（无行情）
-            elif t == "R":
-                if pending_S is not None:
-                    # [pending_S, R) 之间的交易日加入（含 S 已加，补中间交易日；R 不含=复牌有行情）
-                    for td in trade_days_set:
-                        if pending_S <= td < dstr:
-                            sym_days.add(td)
-                pending_S = None
-        # 末尾未复牌（S 后无 R）：从 S 到最大交易日都算停牌
-        if pending_S is not None:
-            for td in trade_days_set:
-                if td >= pending_S:
-                    sym_days.add(td)
-        if sym_days:
-            intervals[sym] = sym_days
+    # ── 向量化重构（2026-08-19 测试库精简评审 W0 实证）：旧实现逐事件 iterrows（19.2 万行
+    # × Series 构造 ≈14.5s/次）+ 每个区间 O(全交易日集) 线性扫描，且无缓存——backtest.replay
+    # 每次调用、engine._eod 每日、discovery 每 task 都全量重析一遍。重构后单次 <0.5s，语义
+    # 与旧实现逐位等价（真 parquet 双窗口金样比对验证，含 S 当日计入/R 当日不计/末尾未复牌
+    # 三条边界）。iterrows 反模式与 O(事件×交易日) 内层循环一并根除。──
+    #
+    # 排序口径：整表 reset 后按 (symbol, date) 稳定排序一次，等价于旧的 per-symbol
+    # groupby + sort_values("date")（同一标的内日期升序；同日同标的多事件保持原始相对顺序）。
+    events = (suspend_df.reset_index()[["symbol", "date", "suspend_type"]]
+              .sort_values(["symbol", "date"], kind="stable"))
+    # 日期一次性归一为 YYYY-MM-DD 字符串（与旧 pd.Timestamp(x).strftime 同口径；后续
+    # 区间端点比较是字典序=时间序，因格式定长零填充）。
+    date_strs = pd.to_datetime(events["date"]).dt.strftime("%Y-%m-%d").tolist()
+    symbols = events["symbol"].tolist()
+    types = events["suspend_type"].tolist()
+    # 交易日集转有序列表：区间展开用 bisect 二分定位（替代旧 O(全集) 扫描，精确同界——
+    # 左闭 [pending_S, 右开 R)，末尾未复牌左闭到尾）。
+    from bisect import bisect_left
+    sorted_days = sorted(trade_days_set)
+    sym_days: Set[str] = set()
+    cur_sym = None
+    pending_S: str | None = None
+    # 单趟扫描（symbol 已聚簇，等价 groupby）：S 起区间并当日计入；R 闭区间并清锚点。
+    for sym, dstr, t in zip(symbols, date_strs, types):
+        if sym != cur_sym:            # 切换标的：先结算上一标的（含其末尾未复牌展开）
+            if pending_S is not None:
+                lo = bisect_left(sorted_days, pending_S)
+                sym_days.update(sorted_days[lo:])
+            if cur_sym is not None and sym_days:
+                intervals[cur_sym] = sym_days
+            sym_days, pending_S, cur_sym = set(), None, sym
+        if t == "S":
+            pending_S = dstr
+            sym_days.add(dstr)        # S 当日停牌（无行情）
+        elif t == "R":
+            if pending_S is not None:
+                # [pending_S, R) 之间的交易日加入（含 S 已加，补中间交易日；R 不含=复牌有行情）
+                lo = bisect_left(sorted_days, pending_S)
+                hi = bisect_left(sorted_days, dstr)
+                sym_days.update(sorted_days[lo:hi])
+            pending_S = None
+    # 末尾未复牌（S 后无 R）：从 S 到最大交易日都算停牌
+    if pending_S is not None:
+        lo = bisect_left(sorted_days, pending_S)
+        sym_days.update(sorted_days[lo:])
+    if cur_sym is not None and sym_days:
+        intervals[cur_sym] = sym_days
     return intervals
+
+
+# ============================================================================
+# 湖加载缓存（W0 · 2026-08-19）：同进程内「读 suspend_d.parquet + 重建区间」只做一次
+# ============================================================================
+# Why：suspend_d 全量 19.2 万行 / 3,855 标的，即使向量化后单次解析 ~0.2s，同进程内
+# replay 多任务批跑（discovery 每 task 一次）、engine 每日多相位重复调用时结果完全
+# 一致（文件未变）。缓存键含 (绝对路径, mtime_ns, size, 交易日窗 frozenset)——夜间
+# 同步落盘或窗口变化任一变动即自动失效重析，无陈旧风险。
+_SUSP_LAKE_CACHE: dict[tuple, dict[str, Set[str]]] = {}
+_SUSP_CACHE_MAX = 8          # 上限防漂（不同交易日窗变体累积）；常规工作负载命中 1-2 键
+
+
+def load_suspend_intervals_cached(
+    trade_days_set: Set[str], susp_path: str = "data_lake/suspend_d.parquet"
+) -> dict[str, Set[str]]:
+    """读湖 + load_suspend_intervals 的进程内缓存版（mtime 键自动失效）。
+
+    物理意图：把「读 parquet + S/R 事件重建」从每次调用降为每 (文件版本, 窗口) 一次，
+    供 replay 完整性 gate / engine._eod / sync_daily_incremental / scan_integrity 四处
+    共用。文件不存在返空 dict（与各调用方原 susp_path.exists() else {} 分支同语义）。
+
+    ⚠️ 只读契约：返回值是跨调用方共享对象，调用方只读（.get(sym, set()) / 传入
+    check_window_continuity 等只读消费），不得原地修改；确需改写请先 dict 拷贝。
+    """
+    from pathlib import Path as _Path
+    path = _Path(susp_path)
+    try:
+        st = path.stat()
+        key = (str(path.resolve()), st.st_mtime_ns, st.st_size, frozenset(trade_days_set))
+    except OSError:
+        return {}
+    hit = _SUSP_LAKE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out = load_suspend_intervals(pd.read_parquet(path), trade_days_set)
+    if len(_SUSP_LAKE_CACHE) >= _SUSP_CACHE_MAX:
+        _SUSP_LAKE_CACHE.clear()
+    _SUSP_LAKE_CACHE[key] = out
+    return out
 
 
 # ============================================================================
