@@ -5,6 +5,42 @@ PARAMS_FINGERPRINT=3466a8fca0b554cb  生成物见 emquant/config/。
 from __future__ import annotations
 
 
+# [pilot-hoist:begin] ← 本行到 end 标记之间的块由 build_pilot.py【剪切】到产物 head 区
+#（§0 之前）——源里写在 pilot_body 顶部、产物里必须落在 §1 内核逐字块之前，两件事都对：
+#
+# What：先捕获「是否以脚本形态运行」，是则立刻重绑 __name__，令其后执行的 §1 内核
+#       逐字块尾部 `if __name__ == "__main__": main()`（method_v0.py:651 演示入口，
+#       读 CSV 全量扫描）判 False 跳过；pilot_body 尾部 `if _IS_MAIN: run_pilot()` 用
+#       【捕获值】而非 __name__ 本身，保证入口不被自身的抑制误伤。
+# Why 必须先于 §1 执行：Python 顺序执行，§1 的守卫在产物 ~804 行、先于 §2-§7 拼接位
+#       求值——抑制若留在 body 原位就是马后炮（演示块已执行并 NameError：method_v0.main
+#       引用了其从未 import 的 os）。故 build_pilot._hoist_entrance_guard 把本块剪出到
+#       head 区（§0 之前，控制器 progress 注记明示的合法落位），body 原位【剪切非复制】
+#       ——复制会让第二次 _IS_MAIN 赋值在已抑制的 __name__ 上重算出 False，尾部入口
+#       永久哑火（tests/emquant/test_events_orchestration.py::
+#       test_entrance_suppression_hoisted_before_kernel_guard 钉死唯一性与位次）。
+# Why C2 合法：本块一个字节不动内核（signal/method_v0 逐字保留），只在产物 head 拼
+#       入 pilot_body 源内容；import 形态（pytest 的 spec_from_file_location、掘金终端
+#       run() 的 import_module——Task 2 文档 Q9）下 __name__ 恒非 "__main__"，_IS_MAIN
+#       = False，整块 no-op——零影响零副作用。脚本形态（runbook 冒烟
+#       `python emquant/emquant_neckline_pilot.py`）下走 run_pilot()，其内读
+#       config/runtime.json（缺 token 即 raise），全程不触内核演示路径，也无需
+#       为演示块补 import os（抑制后该引用永不发生）。
+# Why 抑制分支里还要注册 sys.modules 别名：§1 的 Signal 是 dataclass + PEP563 字符串
+#       注解，@dataclass 装饰器在类创建期就要 `sys.modules[cls.__module__].__dict__`
+#       回查命名空间——重绑 __name__ 后类定义拿到的 __module__ 是
+#       "pilot_kernel_suppressed"，sys.modules 里没有这个键 → AttributeError
+#       （Task 4 报告 §5 同类坑的脚本形态变体）。别名指向正在运行的 __main__ 模块
+#       对象本身（同一命名空间，注解解析结果与不抑制时逐字节一致）；setdefault
+#       幂等，且整段只在脚本分支执行——import 形态零触碰。
+_IS_MAIN = (__name__ == "__main__")
+if _IS_MAIN:
+    import sys
+    sys.modules.setdefault("pilot_kernel_suppressed", sys.modules["__main__"])
+    __name__ = "pilot_kernel_suppressed"
+# [pilot-hoist:end]
+
+
 # ============================ §0 参数区（export_snapshot 导出的定稿快照）============================
 ID_PARAMS = {'breakout_vol_mult': 1.0, 'decay_tau': None, 'local_extrema_window': 5, 'max_h_atr': 5.0, 'min_bottoms': 3, 'min_rr': 2.0, 'min_suppression': 0.6, 'min_touches': 2, 'stop_atr_mult': 1.0, 'tp_h_mult': 2.5, 'window': 80}
 EXEC_PARAMS = {'buy_limit_atr_mult': 0.5, 'cancel_thresh_mult': 2.0, 'commission_rate': 0.0003, 'cooldown': 8, 'max_holding': 20, 'max_wait': 8, 'stamp_rate': 0.0005, 'tp1_h_mult': 1.0, 'tp1_portion': 0.3, 'trailing_floor': 0.0, 'trailing_grace': 0, 'trailing_step': 0.0, 'transfer_rate': 1e-05}
@@ -824,12 +860,16 @@ if __name__ == "__main__":
       仓库上下文，任何仓库依赖都当场 ImportError。本段 §3/§4 全部 stdlib 实现；
       §2 数据层在 stdlib 之外允许 pandas（§1 内核同依赖，掘金终端 Python 自带），
       gm 只经 `_api()` 惰性 seam 触达（见 §2 头注）。
+
+入口抑制（Task 4 遗留的 __main__ 演示块问题，Task 8 落地）——见下方 hoist 标记块。
 """
+
 import bisect
 import csv
 import json
 import os
 import tempfile
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -1087,8 +1127,12 @@ def _initial_state() -> dict:
                           exec_params,status,...}}（Task 7 生命周期判定消费）
         positions  dict[str, dict] {symbol: {entry_date,entry_price,qty,remaining_qty,
                           stop,tp1_price,tp1_done,tp2_price,trailing:{...},exec_params}}
+        last_signal dict[str, str] {symbol: formed_at}（Task 8 追加——cooldown 跨日去重
+                          的锚点 map，复刻 engine.py:1036-1050 _eod「最近 cooldown 日已
+                          plan 的标的集」；v1 兼容扩展：旧文件缺键 load 时填 {}）
     """
-    return {"version": 1, "scan_done": set(), "placed": {}, "orders": {}, "positions": {}}
+    return {"version": 1, "scan_done": set(), "placed": {}, "orders": {},
+            "positions": {}, "last_signal": {}}
 
 
 def load_state(path=None) -> dict:
@@ -1117,6 +1161,11 @@ def load_state(path=None) -> dict:
     if missing:
         raise RuntimeError(f"state.pkl 缺 schema v1 必备键 {missing}（文件不完整，须人工核对）：{p}")
     raw["scan_done"] = set(raw["scan_done"])                   # 盘上 list → 内存 set（成员测 O(1)，防重语义天然）
+    # last_signal（Task 8 追加键）的 v1 兼容扩展：旧文件（Task 5-7 期产物）缺键填默认
+    # {} 而非拒载——键值自描述（symbol→formed_at 日期串）、无歧义二义性、旧代码不读
+    # 它，填默认零风险；与 version!=1 的 fail-loud 不同类（那是结构不可知，这是结构
+    # 可知只是历史缺席）。schema 版本不升：升版会把「加一个可选键」放大成全量迁移。
+    raw.setdefault("last_signal", {})
     return raw
 
 
@@ -1698,10 +1747,706 @@ def absorb_reality(state, api_orders, api_positions):
     return state
 
 
+# ============================ §6 事件编排（盘前五阶段 / 盘中 tick 巡检 / 盘后收尾）============================
+# 物理定位（设计 §6）：本段把 §2-§5 的全部接口接成可运行的事件闭环——PilotRuntime 是
+# 编排核心（一个实例管一个交易日的 state/audit/日历缓存/订阅面），模块级 init/
+# pre_open_job/on_tick/after_close_job 是 gm 回调入口（Q3：模块级全局函数名 getattr
+# 约定，run() 里逐一抓取——不是装饰器不是 run 参数）。判定与下单的数学全部收口在
+# §5 纯函数，本段只做时序调度、audit 留痕与降级决策。
+#
+# 日期口径：全段走 _today_str()（本地机器日期=终端机器=北京时间），不用 context.now
+# （gm Context 的该属性未入 Task 2 核对文档的已验证面——seam 留 _today_str 供测试
+# 注入与未来切换，不押未核实的 SDK 行为）。
+#
+# audit 写失败纪律（Task 5 minor ③ 对账）：一切审计经 self._audit（try/except 接住→
+# print 降级→继续）——观测通道损失不拦交易（磁盘满不该让止损单挂不出去）；read_cap
+# 内嵌 WARN 的同类风险由 _read_cap_resilient 承接（见其头注）。数据层 _audit_warn
+# （§2）同哲学，Task 6 已落。
+#
+# 对账节流：on_tick 高频触发（订阅标的每 ~3s 一 tick），柜台对账（get_orders+
+# get_position 两次本机 HTTP）按 _ABSORB_THROTTLE_SECONDS 节流——成交转持仓的时延
+# 窗口 ≤ 节流阈值（30s 量级对试点止损管理足够；首跳必对账保证启动即真值）。
+_ABSORB_THROTTLE_SECONDS = 30.0
+
+
+def _today_str() -> str:
+    """当日 YYYY-MM-DD（本地机器日期=终端北京时间口径；测试 monkeypatch 本函数钉日期）。"""
+    return f"{date.today():%Y-%m-%d}"
+
+
+def _prev_trading_day(cal, today):
+    """cal（升序 YYYY-MM-DD 列表）中今日前一根 T-1——超期/扫描的基准日（C9 红线）。
+
+    今日不在历中也按「< today 的最大者」取（节假日/周末补跑场景：T-1 语义仍是最近
+    一根已收盘交易日）；无前根（历空/今日是历首）→ None（调用方显式降级，见 pre_open）。
+    """
+    i = bisect.bisect_left(cal, today)
+    return cal[i - 1] if i > 0 else None
+
+
+def _read_runtime_config(config_path=None) -> dict:
+    """读 config/runtime.json（token/strategy_id/account_id 三键）——缺文件/缺 token 即 raise。
+
+    Why fail-loud 而非静默空跑：token 缺位时 gm run() 会在连接期才炸（或更坏——连上
+    了匿名态），「启动期就指出按 README 填写」比「盘中炸出半跑状态」便宜一个数量级。
+    绝不硬编码 token（C8）：值只活在 runtime.json（gitignore），测试用 'test-token'。
+    """
+    p = Path(config_path) if config_path is not None else CONFIG_DIR / "runtime.json"
+    if not p.exists():
+        raise RuntimeError(
+            f"缺少 {p}（token/strategy_id/account_id）——按 README runbook 创建后再启动试点")
+    cfg = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(cfg, dict) or not str(cfg.get("token") or "").strip():
+        raise RuntimeError(f"runtime.json 缺 token（{p}）——按 README runbook 填写后重启")
+    return cfg
+
+
+def _c1_guard(account_id) -> None:
+    """C1 仿真守卫（08-21 修订版·账户白名单制）：account 必须 == PILOT_ACCOUNT_ID。
+
+    Why 白名单而非模式常量：gm 无 MODE_SIMULATION（Task 2 文档 Q1/D1——终端「仿真
+    交易」= MODE_LIVE 绑仿真柜台账户，SDK Python 层查不到账户类型标记），唯一可自动
+    化的防线是「绑定的是我们指定的那个账户」。env PILOT_ALLOW_LIVE=I_KNOW_REAL_MONEY
+    是唯一逃生门（知情实盘，字符串本身即确认动作）。
+    """
+    if account_id == PILOT_ACCOUNT_ID:
+        return
+    if os.environ.get("PILOT_ALLOW_LIVE") == "I_KNOW_REAL_MONEY":
+        return
+    raise RuntimeError(
+        f"C1 仿真守卫拒绝：account_id={account_id!r} 不在试点仿真账户白名单"
+        f"（PILOT_ACCOUNT_ID={PILOT_ACCOUNT_ID}）。掘金终端仿真交易与实盘在 SDK 层同为 "
+        f"MODE_LIVE，绑错账户=真金白银。确认要跑实盘请设 env PILOT_ALLOW_LIVE="
+        f"I_KNOW_REAL_MONEY（知情确认）；否则改 runtime.json 的 account_id 为仿真账户。")
+
+
+def _open_buy_amount(state):
+    """未终态买单占额合计（state_store.py:1470 get_open_buy_amount 的 pilot 同义）。
+
+    口径：(qty−filled)×price 逐单合计——成交部分已体现在持仓市值不重复扣，卖单是
+    退出方向不占增量额度；UNKNOWN（柜台吸收、方向未知）保守计入（多估占额 → 多拦
+    一单，方向性不对称下错拦可自愈、错放不可逆）。任一单 price/qty 残缺无法计值 →
+    None（fail-closed：「不知道占多少就盲放」是最坏组合，对齐 check_caps ①）。
+    """
+    total = 0.0
+    for o in (state.get("orders") or {}).values():
+        if o.get("status") in _TERMINAL_ORDER_STATES:
+            continue
+        if o.get("purpose") not in ("OPEN", "UNKNOWN"):
+            continue
+        try:
+            total += (int(o["qty"]) - int(o.get("filled") or 0)) * float(o["price"])
+        except (TypeError, ValueError, KeyError):
+            return None
+    return total
+
+
+class PilotRuntime:
+    """试点编排核心：五阶段 pre_open / tick 巡检 on_tick / 盘后 after_close / 对账 reconcile。
+
+    构造（api, workdir=None）：api=None → 生产（_a() 经 _api() 惰性取 gm.api）；测试
+    直注 FakeGm 离线。workdir=None → 生产布局（BASE_DIR 下 state/audit/config 三目录
+    就地）；显式 workdir → 三目录整体重定向（测试隔离：state/audit/runtime.json 全落
+    tmp，不污染仓库真值区）。
+    """
+
+    def __init__(self, api, workdir=None):
+        self.api = api
+        root = Path(workdir) if workdir is not None else BASE_DIR
+        self.state_file = root / "state" / "state.pkl"
+        self.audit_dir = root / "audit"
+        self.risk_flag = root / "state" / "RISK_BLOCK.flag"
+        self.cap_file = root / "state" / "CAP.txt"
+        self.config_file = root / "config" / "runtime.json"
+        self.state = load_state(path=self.state_file)
+        # bootstrap（gm init 回调）从 runtime.json 覆写；构造期缺省白名单账户——
+        # 测试/直构路径无 config 也能跑（C1 真守卫在 run_pilot/bootstrap 双点执行）
+        self.account = PILOT_ACCOUNT_ID
+        self.strategy_id = ""
+        self._cal = None            # 日历缓存（按日失效：跨日首用重建）
+        self._cal_date = None
+        self._subscribed = []       # 当日巡检订阅面（ts 口径；after_close 清）
+        self._last_absorb = None    # 上次柜台对账 time.time()（on_tick 节流锚）
+
+    # ---------------------------------------------------------- 小工具
+    def _a(self):
+        """gm api seam：显式注入优先（测试），否则 _api() 惰性取（生产，含中文诊断）。"""
+        return self.api if self.api is not None else _api()
+
+    def _audit(self, event, **fields):
+        """audit 写失败接住（Task 5 minor ③ 对账）：print 降级 + 继续——观测通道损失
+        绝不拦交易（磁盘满时止损单照挂；print 落终端 stdout 双通道兜底，晨检仍可见）。"""
+        try:
+            audit_log(event, audit_dir=self.audit_dir, **fields)
+        except Exception as e:  # 审计通道自身故障：降级 print，不上抛编排层
+            print(f"[audit 降级 print] event={event} {fields}（audit_log 失败：{e!r}）")
+
+    def _read_cap_resilient(self) -> float:
+        """read_cap 的防炸包装：CAP.txt 分支语义在审计不可用时保持不变。
+
+        两分支刻意不对称（read_cap 自身口径的忠实延伸）：
+          - 文件缺（正常态，缺省 1.0 不限制）：WARN 写失败 → 降级 print 后仍返 1.0
+            ——失败源是审计通道而非 CAP 语义，观测降级不改变交易口径；
+          - 文件在场（值合法原样返；值非法应 fail-closed 0.0）：WARN 写失败 → 返 0.0
+            ——无法区分「值合法」与「值非法但审计先炸」，保守全拦（误拦人工改文件，
+            误放=真金白银，方向性不对称同 §4）。
+        """
+        if not self.cap_file.exists():
+            try:
+                return read_cap(path=self.cap_file)          # 正常路径：返 1.0 + cap_missing WARN
+            except Exception as e:
+                print(f"[audit 降级 print] CAP.txt 缺失分支的 WARN 写失败，按缺省 1.0 继续：{e!r}")
+                return 1.0
+        try:
+            return read_cap(path=self.cap_file)
+        except Exception as e:
+            print(f"[audit 降级 print] CAP.txt 值判定阶段 WARN 写失败，保守视同 0（全拦）：{e!r}")
+            return 0.0
+
+    def _calendar(self, today):
+        """日历按日缓存：pre_open 建一次、on_tick 复用（per-tick 拉指数日线不可接受）。
+
+        空历 [] 也缓存——当日已定性降级（audit calendar_missing 已留痕），重试留给
+        次日（_cal_date 变化自然重建），不给 tick 热路径塞隐藏的 gm 调用。
+        """
+        if self._cal_date != today or self._cal is None:
+            self._cal = build_calendar(self._a(), today)
+            self._cal_date = today
+        return self._cal
+
+    def _has_open_sell(self, sym) -> bool:
+        """该标的是否有在途（非终态）卖出委托——重复卖出防重的依据。
+
+        Why 必须有：卖出挂出后 state 的 remaining_qty 要等下一轮对账吸收成交才减——
+        无此守卫，同价第二根 tick 会再挂一张同量卖单（双倍卖出=裸露空头方向错误）。
+        """
+        for o in self.state["orders"].values():
+            if (o.get("symbol") == sym
+                    and o.get("purpose") in ("EXPIRE", "STOP_LOSS", "TP1", "TP2")
+                    and o.get("status") not in _TERMINAL_ORDER_STATES):
+                return True
+        return False
+
+    def _query_equity(self):
+        """总权益（get_cash().nav，Q5：nav=市值+余额的柜台总权益口径）→ float | None。
+
+        空表/异常/非正数 → None（Q1/Q5 权威结论：查询失败静默返空——空=故障；编排层
+        显式转 None 触发 check_caps ① fail-closed 当日不挂，绝不拿 0 冒充真值）。
+        """
+        try:
+            cash = self._a().get_cash(self.account)
+        except Exception as e:
+            self._audit("WARN", type="get_cash_fail", err=f"{type(e).__name__}: {e}")
+            return None
+        if not cash:                                           # {} = 空表 = 故障
+            self._audit("WARN", type="get_cash_empty", account=self.account)
+            return None
+        nav = cash.get("nav")
+        try:
+            nav = float(nav)
+        except (TypeError, ValueError):
+            nav = None
+        if nav is None or not (nav > 0):                       # 反向写法拦 NaN
+            self._audit("WARN", type="get_cash_invalid", nav=nav)
+            return None
+        return nav
+
+    def _query_positions_mv(self):
+        """持仓市值合计（get_position 逐行 market_value，缺则 vwap×volume 兜底）→ float | None。
+
+        与 _query_equity 的刻意不对称（Why）：get_position 返 [] 是【正常空仓态】——
+        试点账户首日天然空仓，把 [] 当故障会让 placement 永久死锁（day-1 deadlock）；
+        查询失败的主形态是异常上抛（check_gm_status 抛 GmError，Task 2 文档 Q8），
+        异常 → None fail-closed。空表=故障的权威警示（Q1）针对的是 context.accounts
+        缓存路径（_get_account_info 静默 return），此处的直查 API 以异常为主故障面。
+        """
+        try:
+            plist = self._a().get_position(self.account)
+        except Exception as e:
+            self._audit("WARN", type="get_position_fail", err=f"{type(e).__name__}: {e}")
+            return None
+        if plist is None:
+            return None
+        total = 0.0
+        for p in plist:
+            mv = (p or {}).get("market_value")
+            if mv is None:
+                mv = (p.get("volume") or 0) * (p.get("price") or p.get("vwap") or 0)
+            try:
+                total += float(mv)
+            except (TypeError, ValueError):
+                self._audit("WARN", type="positions_mv_invalid", symbol=p.get("symbol"))
+                return None
+        return total
+
+    def _cancel_and_sync(self, oid, sym, stage, reason):
+        """撤单 + audit + state 同步落终态（撤单发起即视为不再挂——终态确认以下一轮
+        对账为准，此处同步只为让同轮后续额度计算不把已撤单继续占额）。"""
+        try:
+            cancel(self._a(), oid, self.account)
+        except Exception as e:
+            self._audit("WARN", type=f"{stage}_cancel_fail", cl_ord_id=oid, symbol=sym,
+                        err=f"{type(e).__name__}: {e}")
+            return
+        o = self.state["orders"].get(oid)
+        if o is not None and o.get("status") not in _TERMINAL_ORDER_STATES:
+            o["status"] = "CANCELLED"
+        self._audit("CANCEL", cl_ord_id=oid, symbol=sym, stage=stage, reason=reason)
+
+    # ---------------------------------------------------------- 事件：init 链
+    def bootstrap(self, context):
+        """gm init(context) 的编排体：读配置 → C1 复核 → 对账 → 订阅 → 注册双定时。
+
+        C1 双保险说明：run_pilot（入口）已拦一次；此处再拦覆盖「终端/人工绕过
+        run_pilot 直接驱动模块回调」的路径——守卫成本一次字符串比较，裸奔成本无上限。
+        """
+        cfg = _read_runtime_config(self.config_file)           # 缺 token → raise（中文指向 README）
+        _c1_guard(cfg.get("account_id"))
+        self.account = cfg.get("account_id") or PILOT_ACCOUNT_ID
+        self.strategy_id = cfg.get("strategy_id") or ""
+        self.reconcile(context)
+        self._subscribe_watchlist()
+        a = self._a()
+        # 定时注册（Q2：schedule(schedule_func, date_rule, time_rule)，回调只收 context；
+        # 实时模式仅 1d 可靠）。09:15:00 盘前时刻：源码与官方文档均无禁令（time_rule 是
+        # 纯时钟时刻，无时段校验代码），机制上应可触发——但属 Task 2 文档 §五残余
+        # 不确定清单第 1 条，live 首夜须验证 09:15 是否如约触发（不触发则五阶段
+        # 整体后移到首个可触发时刻，届时回评）。
+        a.schedule(pre_open_job, "1d", "09:15:00")
+        a.schedule(after_close_job, "1d", "15:35:00")
+        self._audit("INIT", account=self.account, strategy_id=self.strategy_id,
+                    subscribed=len(self._subscribed))
+
+    def _subscribe_watchlist(self):
+        """订阅当日巡检标的：持仓 ∪ 未终态挂单（ts→gm 符号，tick 频率）。
+
+        Why 这个集合：tick 巡检只为「pending 撤单判定 + positions 离场判定」供价——
+        无仓无挂的标的订阅是纯带宽浪费；新信号挂出的买单在阶段⑤落 state，下一轮
+        （重启后的 init）自动进订阅面。当日新建仓经对账吸收后同理由覆盖。
+        """
+        syms = set()
+        for sym, pos in self.state["positions"].items():
+            if int(pos.get("remaining_qty") or 0) > 0:
+                syms.add(sym)
+        for o in self.state["orders"].values():
+            if o.get("status") not in _TERMINAL_ORDER_STATES and o.get("symbol"):
+                syms.add(o["symbol"])
+        self._subscribed = sorted(syms)
+        if self._subscribed:
+            self._a().subscribe([to_gm_symbol(s) for s in self._subscribed], frequency="tick")
+
+    # ---------------------------------------------------------- 事件：对账
+    def reconcile(self, context=None):
+        """柜台↔state 幂等三查入口（absorb_reality 的调度壳 + 持仓富化 + 落盘）。
+
+        调用点：init（启动全量）/ pre_open 前置（隔夜成交撤单先落 state，五阶段吃
+        最新真值）/ on_tick 节流（盘中成交 30s 窗口内转持仓）。查询失败（异常）→
+        本轮不对账（state 不动）+ WARN 留痕——绝不拿空表当「柜台已清空」去修 state。
+        """
+        a = self._a()
+        try:
+            api_orders = a.get_orders()
+        except Exception as e:
+            self._audit("WARN", type="reconcile_orders_fail", err=f"{type(e).__name__}: {e}")
+            return
+        try:
+            api_positions = a.get_position(self.account)
+        except Exception as e:
+            self._audit("WARN", type="reconcile_positions_fail", err=f"{type(e).__name__}: {e}")
+            return
+        absorb_reality(self.state, api_orders, api_positions)
+        self._enrich_positions_from_orders()
+        self._audit("RECONCILE", orders=len(self.state["orders"]),
+                    positions=len(self.state["positions"]))
+        save_state(self.state, path=self.state_file)
+        self._last_absorb = time.time()
+
+    def _enrich_positions_from_orders(self):
+        """成交持仓的止损/止盈富化：按来源 OPEN 订单的信号几何补 trailing/stop/tp1/tp2。
+
+        Why 必须有：absorb_reality 转仓只拷量价与 exec_params（柜台没有信号几何），
+        trailing{}/stop=None 的持仓在 decide_position 里走不了活口径也触发不了止盈——
+        无人富化=成交仓裸奔。幂等性：stop/tp1 已在（非 None）即跳过，重复对账零副作用。
+        价位公式（§1 _detect_core_window ④ 同源）：stop=颈线−stop_atr_mult×ATR
+        （compute_stop_price holding_days=0 退化式）、tp1=颈线+tp1_h_mult×H、
+        tp2=颈线+tp_h_mult×H，H=颈线−谷底。
+        """
+        for sym, pos in self.state["positions"].items():
+            if int(pos.get("remaining_qty") or 0) <= 0:
+                continue
+            if pos.get("stop") is not None or pos.get("tp1_price") is not None:
+                continue                                      # 已富化（幂等闸）
+            origin = None
+            for o in self.state["orders"].values():           # dict 插入序：后挂的 OPEN 覆盖先挂
+                if (o.get("symbol") == sym and o.get("purpose") == "OPEN"
+                        and o.get("neckline") is not None and o.get("atr") is not None):
+                    origin = o
+            if origin is None:
+                continue                                      # 人工仓/丢档仓：无几何，晨检人工补
+            try:
+                neckline = float(origin["neckline"])
+                atr = float(origin["atr"])
+                bottom = float(origin.get("bottom") or neckline)
+            except (TypeError, ValueError):
+                self._audit("WARN", type="enrich_geometry_invalid", symbol=sym)
+                continue
+            h_geom = neckline - bottom
+            if not (h_geom > 0):                              # 反向写法拦 NaN/非正深度
+                self._audit("WARN", type="enrich_geometry_invalid", symbol=sym,
+                            neckline=neckline, bottom=bottom)
+                continue
+            ep = origin.get("exec_params") or {}
+            stop_mult = float(ep.get("stop_atr_mult", 1.0))
+            grace = int(ep.get("trailing_grace") or 0)
+            step = float(ep.get("trailing_step") or 0.0)
+            floor = ep.get("trailing_floor")
+            pos["trailing"] = {"neckline": neckline, "atr": atr, "stop_atr_mult": stop_mult,
+                               "grace": grace, "step": step, "floor": floor}
+            # 盘后预算固定价兜底（decide_position 的 pos["stop"] 回退路径）；当日活口径
+            # 由 trailing 六件套在 decide_position 内重算（holding_days 实时）
+            pos["stop"] = compute_stop_price(neckline, atr, 0, stop_mult, grace, step, floor)
+            pos["tp1_price"] = neckline + float(ep.get("tp1_h_mult", 1.0)) * h_geom
+            pos["tp2_price"] = neckline + float(ep.get("tp_h_mult", 2.0)) * h_geom
+            self._audit("POS_ENRICHED", symbol=sym, stop=pos["stop"],
+                        tp1_price=pos["tp1_price"], tp2_price=pos["tp2_price"])
+
+    # ---------------------------------------------------------- 事件：盘前五阶段
+    def pre_open(self, context):
+        """盘前五阶段（红线序，顺序不可换——每阶段动作独立 audit 留痕）：
+
+            ⓪（前置对账，非五阶段之一）absorb_reality：隔夜成交/撤单先落 state；
+            ① 撤非终态买单（get_orders 柜台实况驱动，audit 逐单）；
+            ② 超期平仓：trading_days_between(cal, entry_date, T-1) > max_holding
+               （严格大于；T-1=cal 中今日前一根，C9 基准日红线）→ fetch_limit_down
+               （API 值优先）挂跌停价卖；
+            ③ 扫描：UNIVERSE 逐 fetch_df_upto(end=T-1) → detect_signal → cooldown
+               跨日去重（last_signal 锚点）→ SIGNAL 行落 audit（scan_done 幂等防重扫）；
+            ④ 闸序：is_blocked → 跳过挂单段（存量管理 ①② 已跑完）；
+            ⑤ 挂限价买：entry=Signal.entry_price（=颈线+buy_limit_atr_mult×ATR，§1
+               装配式单源）、qty=⌊equity×pos_cap/entry/100⌋×100（pos_cap 取
+               TRADE_CFG，equity 经 get_cash，空表/异常→None→当日不挂）。
+
+        空历降级（Task 6→8 必记）：T-1 取不到（build_calendar 返 []/今日是历首）→
+        audit calendar_missing，②③ 停判（超期/扫描都依赖 T-1 或日数差，挂单依赖扫描
+        产物自然为零）——①是柜台实况驱动无历依赖，照跑。不炸不静默。
+        """
+        a = self._a()
+        today = _today_str()
+        st = self.state
+
+        # ── ⓪ 前置对账：五阶段全部吃最新真值（不动五阶段相对序——对账在所有阶段之前）──
+        self.reconcile(context)
+
+        # ── ① 撤非终态买单（get_orders 无参返日内全部委托，Q4；只撤买——卖是退出方向）──
+        try:
+            api_orders = a.get_orders()
+        except Exception as e:
+            api_orders = []
+            self._audit("WARN", type="pre_open_get_orders_fail", err=f"{type(e).__name__}: {e}")
+        for ao in api_orders or []:
+            oid = (ao or {}).get("cl_ord_id")
+            if not oid or ao.get("side") != 1:                # OrderSide_Buy=1
+                continue
+            if _gm_status_to_local(ao.get("status")) in _TERMINAL_ORDER_STATES:
+                continue                                      # 已成/已撤/已拒不再碰
+            try:
+                sym = from_gm_symbol(ao["symbol"])            # gm→ts（fail-loud 见 §5 头注）
+            except ValueError as e:
+                self._audit("WARN", type="pre_open_symbol_unmappable",
+                            cl_ord_id=oid, symbol=ao.get("symbol"), err=str(e))
+                continue
+            self._cancel_and_sync(oid, sym, "pre_open", "撤昨日非终态买单")
+
+        # ── 日历与 T-1（②③ 的基准日）──
+        cal = self._calendar(today)
+        t_minus_1 = _prev_trading_day(cal, today)
+        if t_minus_1 is None:
+            self._audit("WARN", type="calendar_missing", today=today,
+                        msg="build_calendar 空/无 T-1：①照跑；②超期与③扫描停判"
+                            "（max_wait/cooldown 同停）；挂单依赖扫描产物自然为零")
+
+        # ── ② 超期平仓（T-1 基准；恰等 max_holding 不平——与 decide_pending max_wait
+        #    同款「窗口内含第 max_holding 日」边界语义，双腿一进一出不错位）──
+        if t_minus_1 is not None:
+            for sym in sorted(st["positions"]):
+                pos = st["positions"][sym]
+                if int(pos.get("remaining_qty") or 0) <= 0:
+                    continue
+                if self._has_open_sell(sym):
+                    continue                                  # 在途卖单未终结：不重复挂
+                entry_date = pos.get("entry_date")
+                if not entry_date:
+                    continue                                  # 人工吸收仓无锚：留人工处置
+                ep = pos.get("exec_params") or {}
+                mh = int(ep["max_holding"]) if ep.get("max_holding") is not None \
+                    else int(EXEC_PARAMS["max_holding"])      # 信号定终身快照优先（快照实弹 20）
+                holding = trading_days_between(cal, entry_date, t_minus_1)
+                if not (holding > mh):
+                    continue
+                ld = fetch_limit_down(a, sym, end_date=today) # API 值优先（§5.2）
+                if ld is None:
+                    self._audit("WARN", type="expire_skip_no_limit_down", symbol=sym,
+                                entry_date=entry_date, holding_days=holding,
+                                msg="跌停价不可得，今日放弃超期平仓（不造错价顶上）")
+                    continue
+                qty = int(pos["remaining_qty"])
+                try:
+                    cid = sell_limit(a, sym, ld, qty, self.account)
+                except Exception as e:                         # GmError/断连：该标的放弃，不炸整段（后续标的照平）
+                    self._audit("WARN", type="expire_sell_fail", symbol=sym,
+                                err=f"{type(e).__name__}: {e}")
+                    continue
+                if cid is None:
+                    self._audit("WARN", type="expire_sell_empty_receipt", symbol=sym)
+                    continue
+                st["orders"][cid] = {"symbol": sym, "date": today, "price": ld, "qty": qty,
+                                     "purpose": "EXPIRE", "cancel_on": None,
+                                     "formed_at": None, "exec_params": {},
+                                     "status": "SUBMITTED", "filled": 0,
+                                     "account": self.account}
+                self._audit("EXPIRE_SELL", symbol=sym, entry_date=entry_date,
+                            holding_days=holding, max_holding=mh, price=ld,
+                            qty=qty, cl_ord_id=cid)
+
+        # ── ③ 扫描（scan_done 幂等防重扫：识别是纯函数重扫零风险，重扫只产重复噪声行）──
+        signals = []
+        if t_minus_1 is not None and today not in st["scan_done"]:
+            cooldown = int(EXEC_PARAMS["cooldown"])
+            for sym in UNIVERSE:
+                # 单标的挡板（engine.py:1034 _eod scan_live 同款）：识别内核对脏数据
+                # 抛错只损失该标的当日信号，不炸扫描环（scan_done/已收信号必须落袋）
+                try:
+                    df = fetch_df_upto(a, sym, t_minus_1)     # None → WARN 已留痕，跳过该标的
+                    if df is None:
+                        continue
+                    sig = detect_signal(sym, df, ID_PARAMS, EXEC_PARAMS, t_minus_1)
+                except Exception as e:
+                    self._audit("WARN", type="scan_fail", symbol=sym,
+                                err=f"{type(e).__name__}: {e}")
+                    continue
+                if sig is None:
+                    continue
+                # cooldown 跨日去重（engine.py:1036-1050 复刻）：最近 cooldown 交易日内
+                # 已产出过信号的标的丢弃新信号（防同形态连续触发连续挂单）
+                last = (st.get("last_signal") or {}).get(sym)
+                if last is not None and trading_days_between(cal, last, today) < cooldown:
+                    self._audit("SIGNAL_COOLDOWN_SKIP", symbol=sym, last_signal=last,
+                                cooldown=cooldown)
+                    continue
+                # 单仓一次性模型防重（decide_position 同源口径；本地 has_order(OPEN)+
+                # UNIQUE 约束的 pilot 对应）：已持仓（有剩余）或已有在途买单的标的不接新信号
+                held = int((st["positions"].get(sym) or {}).get("remaining_qty") or 0) > 0
+                open_buy = any(o.get("symbol") == sym and o.get("purpose") == "OPEN"
+                               and o.get("status") not in _TERMINAL_ORDER_STATES
+                               for o in st["orders"].values())
+                if held or open_buy:
+                    self._audit("SIGNAL_SKIP_HELD", symbol=sym, held=held, open_buy=open_buy)
+                    continue
+                formed = (pd.Timestamp(sig.formed_at).strftime("%Y-%m-%d")
+                          if sig.formed_at is not None else t_minus_1)
+                signals.append(sig)
+                st.setdefault("last_signal", {})[sym] = formed  # 锚点更新=信号被采信（≈本地 plan）
+                self._audit("SIGNAL", symbol=sym, neckline=sig.neckline,
+                            entry_price=sig.entry_price, rr=sig.rr, formed_at=formed,
+                            atr=sig.atr)
+            st["scan_done"].add(today)
+
+        # ── ④ 闸序：人工风控开关只拦增量（ADR-16；存量管理 ①② 已跑完）──
+        if is_blocked(path=self.risk_flag):
+            if signals:
+                self._audit("BLOCK_SKIP", msg="RISK_BLOCK.flag 在场：跳过挂单段"
+                            "（①撤单②超期平仓等存量管理照跑）")
+            signals = []
+
+        # ── ⑤ 挂限价买（逐单 check_caps；equity 一次查询逐单复用——CAP 额度式单调）──
+        if signals:
+            equity = self._query_equity()                     # 空表/异常 → None → 当日不挂
+            positions_mv = self._query_positions_mv()         # 异常 → None；空仓 [] → 0.0
+            open_buy = _open_buy_amount(st)                   # 残缺 → None（fail-closed）
+            cap = self._read_cap_resilient()
+            pos_cap = float(TRADE_CFG.get("pos_cap", 0.05))   # 快照 trade_cfg.pos_cap=0.05
+            for sig in signals:
+                try:
+                    entry = float(sig.entry_price)
+                except (TypeError, ValueError):
+                    # 防御档：detect 契约保证 entry_price 数值（§1 _post_detect 装配式），
+                    # 走到这=Signal 形态异变——拒该单不炸整段（后续信号照挂、state 照落盘）
+                    self._audit("ORDER_BLOCKED", symbol=sig.symbol,
+                                reason=f"信号 entry_price 残缺（{sig.entry_price!r}），拒挂")
+                    continue
+                qty = int(equity * pos_cap / entry / 100) * 100 if equity is not None else 0
+                ok, why = check_caps(st, equity, positions_mv, open_buy,
+                                     price=entry, qty=qty, today=today, cap=cap)
+                if not ok:
+                    self._audit("ORDER_BLOCKED", symbol=sig.symbol, reason=why)
+                    continue
+                try:
+                    cid = place_limit_buy(a, sig.symbol, entry, qty, self.account)
+                except Exception as e:                         # GmError/断连：该标的放弃，不炸挂单环
+                    self._audit("WARN", type="place_buy_fail", symbol=sig.symbol,
+                                err=f"{type(e).__name__}: {e}")
+                    continue
+                if cid is None:
+                    self._audit("WARN", type="place_buy_empty_receipt", symbol=sig.symbol)
+                    continue
+                # cancel_on = 颈线+cancel_thresh_mult×H（§1 _post_detect R1 守卫同式——
+                # 识别期挡多少、挂单期就撤多少，两层数学必须同源）
+                ep = sig.exec_params or {}
+                ctm = ep.get("cancel_thresh_mult", EXEC_PARAMS.get("cancel_thresh_mult"))
+                h_geom = (float(sig.neckline) - float(sig.bottom)
+                          if sig.bottom is not None else 0.0)
+                cancel_on = (float(sig.neckline) + float(ctm) * h_geom
+                             if (ctm is not None and h_geom > 0) else None)
+                formed = (pd.Timestamp(sig.formed_at).strftime("%Y-%m-%d")
+                          if sig.formed_at is not None else today)
+                st.setdefault("placed", {}).setdefault(today, []).append(cid)
+                st["orders"][cid] = {"symbol": sig.symbol, "date": today, "price": entry,
+                                     "qty": qty, "purpose": "OPEN", "cancel_on": cancel_on,
+                                     "formed_at": formed, "exec_params": dict(ep),
+                                     "neckline": sig.neckline, "atr": sig.atr,
+                                     "bottom": sig.bottom,          # 信号几何：成交富化（_enrich）的原料
+                                     "status": "SUBMITTED", "filled": 0,
+                                     "account": self.account}
+                open_buy = float(open_buy) + entry * qty       # 逐单扣减（check_caps ②口径）
+                self._audit("ORDER_PLACED", symbol=sig.symbol, price=entry, qty=qty,
+                            cl_ord_id=cid, cancel_on=cancel_on, formed_at=formed)
+
+        save_state(st, path=self.state_file)
+
+    # ---------------------------------------------------------- 事件：盘中巡检
+    def on_tick(self, context, tick):
+        """tick 巡检：pending → decide_pending → 撤；positions → decide_position → 卖。
+
+        tick 字段（Q3/D5 权威）：最新价=tick["price"]（非 last_price）、symbol 是 gm
+        格式（回调内折 ts）。卖出价口径：止损挂【现价】（跳空穿价也能即成交——限价挂
+        stop 价在跳空下方会永不成交，硬风控优先成交性）；tp1/tp2 挂【触发价】（市场
+        已在触发价上方，限价即成交且保底触发价）。
+        """
+        today = _today_str()
+        if self._last_absorb is None or time.time() - self._last_absorb >= _ABSORB_THROTTLE_SECONDS:
+            self.reconcile(context)                           # 首跳必对账；此后按节流窗吸收成交
+        cal = self._calendar(today)
+        st = self.state
+        sym = from_gm_symbol(tick["symbol"])                  # gm→ts（fail-loud：非沪深=异变炸给人工）
+        px = float(tick["price"])
+        acted = False
+
+        # ── pending：挂单等待期撤单判定（只判 OPEN——卖单无 cancel_on/max_wait 语义锚）──
+        for oid, o in list(st["orders"].items()):
+            if o.get("symbol") != sym or o.get("purpose") != "OPEN":
+                continue
+            if o.get("status") in _TERMINAL_ORDER_STATES:
+                continue
+            verdict = decide_pending(px, o, today, cal)       # 空历 → trading_days_between=0 → max_wait 恒不触发（Task 6 头注口径）
+            if verdict:
+                self._cancel_and_sync(oid, sym, "on_tick", verdict)
+                acted = True
+
+        # ── positions：离场判定（在途卖单守卫防重复挂卖）──
+        pos = st["positions"].get(sym)
+        if (pos is not None and int(pos.get("remaining_qty") or 0) > 0
+                and not self._has_open_sell(sym)):
+            verdict = decide_position(px, pos, today, cal)
+            if verdict:
+                _, qty, reason = verdict
+                if reason == "stop_loss":
+                    price = px                                # 止损跟现价（见头注）
+                elif reason == "tp2":
+                    price = float(pos.get("tp2_price") or px)
+                else:
+                    price = float(pos.get("tp1_price") or px)
+                try:
+                    cid = sell_limit(self._a(), sym, price, qty, self.account)
+                except Exception as e:                         # GmError/断连：本 tick 放弃，下 tick 重判重试
+                    self._audit("WARN", type="tick_sell_fail", symbol=sym, reason=reason,
+                                err=f"{type(e).__name__}: {e}")
+                    cid = None
+                if cid is not None:
+                    st["orders"][cid] = {"symbol": sym, "date": today, "price": price,
+                                         "qty": qty, "purpose": reason.upper(),
+                                         "cancel_on": None, "formed_at": None,
+                                         "exec_params": {}, "status": "SUBMITTED",
+                                         "filled": 0, "account": self.account}
+                    detail = {"symbol": sym, "reason": reason, "qty": qty, "price": price,
+                              "cl_ord_id": cid}
+                    if reason == "tp1":
+                        pos["tp1_done"] = True                # 一档一次：落单即置位（单仓一次性模型）
+                        if qty == int(pos.get("remaining_qty") or 0):
+                            # 已知分歧标记（Task 7 评审指令）：不足一手清剩余——本地两腿
+                            # 模型此档份额「沉到 tp2 腿」，pilot 清剩余；双轨复盘剔除用
+                            detail["known_divergence"] = "tp1_dust_clears"
+                    self._audit("SELL", **detail)
+                    acted = True
+        if acted:
+            save_state(st, path=self.state_file)              # 只在有动作时落盘（tick 热路径不写盘）
+
+    # ---------------------------------------------------------- 事件：盘后
+    def after_close(self, context):
+        """盘后三件套：EOD 审计收尾行 + 清当日动态订阅 + state 落盘。"""
+        today = _today_str()
+        st = self.state
+        placed_today = st.get("placed", {}).get(today, [])
+        open_cnt = sum(1 for o in st["orders"].values()
+                       if o.get("status") not in _TERMINAL_ORDER_STATES)
+        self._audit("EOD", date=today, positions=len(st["positions"]),
+                    open_orders=open_cnt, placed_today=len(placed_today),
+                    params_fingerprint=PARAMS_FINGERPRINT)
+        if self._subscribed:
+            self._a().unsubscribe([to_gm_symbol(s) for s in self._subscribed],
+                                  frequency="tick")
+            self._subscribed = []
+        save_state(st, path=self.state_file)
+
+
+# ---- §6 模块级 gm 回调入口（Q3：模块级全局函数名 getattr 约定；首参恒 context）----
+RT = None   # 全局运行时（init 建立后在场；回调先于 init 触发=编排事故，fail-loud）
+
+
+def _require_rt() -> "PilotRuntime":
+    """回调前置守卫：RT 未初始化即炸（中文诊断）——静默吞事件=策略假活着，更危险。"""
+    if RT is None:
+        raise RuntimeError("RT 未初始化：gm init 回调未执行（定时/tick 事件先于 init 触发"
+                           "属编排事故，须人工排查终端事件序）")
+    return RT
+
+
+def init(context):
+    """gm init 回调：建全局 RT → bootstrap（配置/对账/订阅/双定时注册）。"""
+    global RT
+    RT = PilotRuntime(api=None, workdir=None)                 # 生产布局：api 惰性 _api()、目录就地
+    RT.bootstrap(context)
+
+
+def pre_open_job(context):
+    """09:15:00 定时（Q2；live 待验证项）：盘前五阶段。"""
+    _require_rt().pre_open(context)
+
+
+def after_close_job(context):
+    """15:35:00 定时：盘后收尾（收尾行留给收盘后的人工复核窗口）。"""
+    _require_rt().after_close(context)
+
+
+def on_tick(context, tick):
+    """tick 巡检回调（订阅面=持仓∪未终态挂单）。"""
+    _require_rt().on_tick(context, tick)
+
+
 def run_pilot():
-    """试点主入口（Task 8 实现：五阶段事件编排——预开/开盘/盘中巡检/收盘/盘后）。"""
-    raise NotImplementedError("Task 8 实现")
+    """试点主入口：C1 仿真守卫 → gm run（MODE_LIVE 绑仿真账户，阻塞至 stop）。
+
+    运行形态（Task 2 文档 Q9）：run(filename=__file__) 剥 sys.path 前缀 → import_module
+    二次导入策略模块（该实例 __name__ 非 __main__，模块级回调 init/pre_open_job/
+    on_tick/after_close_job 被 run() getattr 抓取注册）；终端注入的命令行参数
+    （--strategy_id/--token/--mode/--serv_addr）优先于本函数实参——本函数传的是
+    兜底值。MODE_LIVE 主循环 gmi_poll 阻塞在 run() 内直到 stop()——本函数不返回。
+    """
+    cfg = _read_runtime_config()                              # 缺文件/缺 token → raise（中文）
+    _c1_guard(cfg.get("account_id"))                          # C1：账户白名单 + env 逃生门
+    a = _api()
+    a.run(strategy_id=str(cfg.get("strategy_id") or ""), filename=__file__,
+          mode=a.MODE_LIVE, token=str(cfg.get("token")))
 
 
-if __name__ == "__main__":
+if _IS_MAIN:                                                  # 入口用捕获值（见顶部 hoist 块头注）
     run_pilot()

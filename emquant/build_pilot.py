@@ -26,10 +26,41 @@ ROOT = Path(__file__).resolve().parents[1]
 FUTURE = "from __future__ import annotations"
 SIGNAL_IMPORT = "from .signal import Signal"
 
+# pilot_body 顶部「入口抑制块」的剪切标记（Task 8）：标记行本身随块一起搬进 head 区。
+# Why 存在：内核逐字块（§1）尾部有 method_v0 的 `if __name__ == "__main__": main()`
+# 演示守卫，位于产物 §2-§7 拼接位【之前】——抑制代码必须先于它执行才能拦住，而能落在
+# §1 之前的只有 head 区（§0 前后）。块内容详注见 pilot_body.py 的 hoist 标记块内注释。
+HOIST_BEGIN = "# [pilot-hoist:begin]"
+HOIST_END = "# [pilot-hoist:end]"
+
 
 def _strip(src: str, *drops: str) -> str:
     """删掉整行 strip 后与 drops 任一完全相等的行（C2 白名单逆变换，不做子串匹配）。"""
     return "\n".join(l for l in src.splitlines() if l.strip() not in drops).strip("\n")
+
+
+def _hoist_entrance_guard(body: str) -> tuple[str, str]:
+    """把 pilot_body 顶部的入口抑制标记块【剪切】出（head_block, body_rest）二元组。
+
+    Why 剪切而非复制：块内 `_IS_MAIN = (__name__ == "__main__")` 若在产物出现两次，
+    第二次（body 原位）会在脚本模式下把 _IS_MAIN 重算为 False（此时 __name__ 已被
+    首次执行改写为 "pilot_kernel_suppressed"）→ 尾部 `if _IS_MAIN: run_pilot()` 永不
+    触发——入口哑火。唯一一份、置于 head 区（§0 之前、§1 之前），才能既抑制内核
+    演示块又保住尾部入口（tests/emquant/test_events_orchestration.py::
+    test_entrance_suppression_hoisted_before_kernel_guard 钉死）。
+
+    Why 标记缺失即 raise 而非容错跳过：入口机制是 Task 8 的交付红线之一，静默退回
+    「脚本模式必炸」的旧态等于把事故藏进组装器——fail-loud 逼着改 pilot_body 的人
+    与本函数同步评审。
+    """
+    pre, found, rest = body.partition(HOIST_BEGIN)
+    if not found:
+        raise RuntimeError("pilot_body.py 缺入口抑制块起始标记（# [pilot-hoist:begin]）——"
+                           "Task 8 入口机制依赖，见 pilot_body.py 顶部 hoist 块头注")
+    block, found_end, post = rest.partition(HOIST_END)
+    if not found_end:
+        raise RuntimeError("pilot_body.py 缺入口抑制块结束标记（# [pilot-hoist:end]）")
+    return HOIST_BEGIN + block + HOIST_END, pre + post
 
 
 def build(output_path: Path | None = None) -> Path:
@@ -37,15 +68,18 @@ def build(output_path: Path | None = None) -> Path:
 
     输入：strategies/neckline/{signal,method_v0}.py（逐字内核）、emquant/config/
     {params_snapshot,universe}.json（§0 定稿数据）、emquant/pilot_body.py（§2-§7）。
-    段序（Why——识别先于执行，§0 常量供后段直接引用）：
-        head（docstring+future）→ §0 快照字面量+硬闸常量 → §1 内核逐字块 → §2-§7 body。
+    段序（Why——识别先于执行，§0 常量供后段直接引用；入口抑制块必须先于 §1 见
+    _hoist_entrance_guard 头注）：
+        head（docstring+future）→ 入口抑制块（pilot_body 顶部剪出）→ §0 快照字面量+
+        硬闸常量 → §1 内核逐字块 → §2-§7 body（剪出后的余量）。
     """
     snap = json.loads((ROOT / "emquant/config/params_snapshot.json").read_text(encoding="utf-8"))
     uni = json.loads((ROOT / "emquant/config/universe.json").read_text(encoding="utf-8"))
     # 内核逐字块：仅剥白名单两行（signal.py 无相对 import 行，只剥 future）
     sig = _strip((ROOT / "strategies/neckline/signal.py").read_text(encoding="utf-8"), FUTURE)
     mv0 = _strip((ROOT / "strategies/neckline/method_v0.py").read_text(encoding="utf-8"), FUTURE, SIGNAL_IMPORT)
-    body = (ROOT / "emquant/pilot_body.py").read_text(encoding="utf-8")
+    body_full = (ROOT / "emquant/pilot_body.py").read_text(encoding="utf-8")
+    hoist, body = _hoist_entrance_guard(body_full)   # 入口抑制块剪出到 head 区（§0/§1 之前）
     head = (
         "# -*- coding: utf-8 -*-\n"
         '"""东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。\n'
@@ -64,7 +98,7 @@ def build(output_path: Path | None = None) -> Path:
         "PILOT_MAX_POSITION_PCT = 0.05\n"
         "PILOT_ACCOUNT_ID = 'e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1'\n\n\n"
     )
-    parts = [head, sec0,
+    parts = [head, hoist + "\n\n", sec0,
              "# ============================ §1 识别内核（signal.py + method_v0.py 逐字块，C2）============================\n" + sig + "\n\n\n" + mv0 + "\n\n\n",
              "# ============================ §2-§7 执行编排（pilot_body.py）============================\n" + body]
     out = output_path or (ROOT / "emquant" / "emquant_neckline_pilot.py")

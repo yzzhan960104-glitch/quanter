@@ -96,9 +96,14 @@ def test_save_state_atomic(tmp_path, pilot, monkeypatch):
 
 
 def test_load_state_missing_returns_init(tmp_path, pilot):
-    """缺文件返 schema v1 空白态（首启语义）——scan_done 必须是 set（成员测/防重语义）。"""
+    """缺文件返 schema v1 空白态（首启语义）——scan_done 必须是 set（成员测/防重语义）。
+
+    last_signal 是 Task 8 追加的 v1 兼容键（cooldown 跨日去重锚点 map）——空白态
+    必含该键（编排层 setdefault 之外的第二道在场保证）。
+    """
     st = pilot.load_state(path=tmp_path / "不存在.pkl")
-    assert st == {"version": 1, "scan_done": set(), "placed": {}, "orders": {}, "positions": {}}
+    assert st == {"version": 1, "scan_done": set(), "placed": {}, "orders": {},
+                  "positions": {}, "last_signal": {}}
     assert isinstance(st["scan_done"], set)
 
 

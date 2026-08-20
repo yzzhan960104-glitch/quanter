@@ -35,6 +35,12 @@ Task 7 扩全（交易族，本文件是唯一定义点，只增不改既有口�
       （Q7 ds_instrument.py:118），字段含 pre_close/upper_limit/lower_limit（double）；
     - fill_order：测试注入成交的辅助面（真 SDK 由柜台撮合推进 filled_volume/status，
       替身必须给测试一个等效推进器——同步更新订单部成/已成与柜台持仓 vwap/volume）。
+
+Task 8 扩全（编排族，同款只增不改既有口径）：
+    - run/subscribe/unsubscribe/schedule 签名逐字（basic.py:399/129/217/388——backtest_*
+      族收 **kw）；MODE_LIVE=1 常量（Q1/D1：无 MODE_SIMULATION，终端仿真=MODE_LIVE 绑
+      仿真账户）；替身全记录型（run 不模拟 gmi_poll 阻塞、schedule 不模拟触发——
+      编排测试断言注册事实，触发时序属 live 验证清单）。
 """
 from __future__ import annotations
 
@@ -69,6 +75,12 @@ ORDER_STATUS = {
 # 替身在此只为签名形状逐字一致）
 OrderDuration_Unknown = 0
 OrderQualifier_Unknown = 0
+
+# gm/enum.py:130-132 运行模式常量（Q1/D1：**无 MODE_SIMULATION**——终端「仿真交易」
+# = MODE_LIVE 绑仿真柜台账户；Task 8 的 C1 守卫据此用账户白名单而非模式常量）
+MODE_UNKNOWN = 0
+MODE_LIVE = 1
+MODE_BACKTEST = 2
 
 
 class _DictLike(dict):
@@ -150,6 +162,11 @@ class FakeGm:
     OrderDuration_Unknown = OrderDuration_Unknown
     OrderQualifier_Unknown = OrderQualifier_Unknown
 
+    # 运行模式常量镜像（§6 run_pilot 经 a.MODE_LIVE 取值——同构接口面，漏配即假阴性）
+    MODE_UNKNOWN = MODE_UNKNOWN
+    MODE_LIVE = MODE_LIVE
+    MODE_BACKTEST = MODE_BACKTEST
+
     def __init__(self, raise_on_history: bool = False, empty_symbols=(),
                  symbol_info=None, raise_on_symbol_info: bool = False):
         self.raise_on_history = raise_on_history
@@ -165,6 +182,13 @@ class FakeGm:
         # fill_order 推进成交，get_orders 全量快照（真 SDK 日内全部委托口径，Q4）
         self.orders: dict[str, dict] = {}
         self._cl_seq = 0                       # cl_ord_id 自增计数器（真 SDK 唯一性由柜台保证）
+        # ── 编排族状态面（Task 8 扩全）──
+        # subscriptions：{gm符号: frequency} 当前订阅面（subscribe 建/unsubscribe 清）；
+        # schedules：已注册定时任务 [(func名, date_rule, time_rule)]；run_launched：
+        # run() 是否被调过（真身阻塞在 gmi_poll，替身不模拟阻塞——只记录启动事实）
+        self.subscriptions: dict[str, str] = {}
+        self.schedules: list[tuple] = []
+        self.run_launched = False
         # 柜台持仓/资金：fill_order 同步推进（简化：资金不随成交演化——CAP 闸测试由调用方
         # 显式注入数值，不依赖替身资金推演；持仓则真实推进，供对账测试消费）
         self.positions: dict[str, dict] = {}
@@ -316,6 +340,57 @@ class FakeGm:
                     p["available_now"] = p["available"]
         o["updated_at"] = datetime.now()
         return dict(o)
+
+    # ------------------------------------------------- subscribe/schedule/run（Task 8 编排族）
+    def subscribe(self, symbols, frequency=None, count=0, wait_group=False,
+                  wait_group_timeout='10s', unsubscribe_previous=False, fields=None,
+                  format="df"):
+        """行情订阅替身（basic.py:129 签名逐字；tick 最新价字段 price——Q3）。
+
+        记录型：calls 留全参快照 + subscriptions 维护当前订阅面（供 after_close 的
+        清订阅断言）；真身返 None，替身同形。
+        """
+        syms = [symbols] if isinstance(symbols, str) else list(symbols)
+        self.calls.append(dict(api="subscribe", symbols=syms, frequency=frequency,
+                               count=count, wait_group=wait_group,
+                               wait_group_timeout=wait_group_timeout,
+                               unsubscribe_previous=unsubscribe_previous,
+                               fields=fields, format=format))
+        for s in syms:
+            self.subscriptions[s] = frequency
+        return None
+
+    def unsubscribe(self, symbols, frequency='1d'):
+        """退订替身（basic.py:217 签名；从订阅面移除，缺席符号静默——真身同容错）。"""
+        syms = [symbols] if isinstance(symbols, str) else list(symbols)
+        self.calls.append(dict(api="unsubscribe", symbols=syms, frequency=frequency))
+        for s in syms:
+            self.subscriptions.pop(s, None)
+        return None
+
+    def schedule(self, schedule_func, date_rule, time_rule):
+        """定时任务替身（basic.py:388：回调只收一个 context 参数——Q2）。
+
+        记录函数名/频率/时刻三元组（真身写入 context.inside_schedules 由 C 层触发；
+        替身不模拟触发，断言注册事实即可——触发时序是 live 验证清单项）。
+        """
+        name = getattr(schedule_func, "__name__", str(schedule_func))
+        self.calls.append(dict(api="schedule", func=name, date_rule=date_rule,
+                               time_rule=time_rule))
+        self.schedules.append((name, date_rule, time_rule))
+        return None
+
+    def run(self, strategy_id='', filename='', mode=0, token='',
+            **backtest_kwargs):
+        """run 替身（basic.py:399 首五参逐字；backtest_* 族收 **kw——pilot 只传前五）。
+
+        真身：MODE_LIVE 下 gmi_poll 阻塞至 stop()（Q9）；替身只记录启动事实即返回
+        （阻塞语义由 C1/C9 用例在调用侧断言 mode/token/filename，不需要真阻塞）。
+        """
+        self.calls.append(dict(api="run", strategy_id=strategy_id, filename=filename,
+                               mode=mode, token=token))
+        self.run_launched = True
+        return None
 
     # ------------------------------------------------------------------ history
     def history(self, symbol, frequency, start_time, end_time, fields=None,
