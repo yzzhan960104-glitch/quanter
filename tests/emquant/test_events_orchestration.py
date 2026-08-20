@@ -34,6 +34,8 @@
     - 订阅三时点（Task 8 评审 R1 C-1）：bootstrap 崩溃重启 / pre_open ⓪后跨日重建
       （after_close 清空后常驻进程 day 2+ 不断供）/ ⑤后同日增补（当日新挂即入巡检
       面）——增量差集下发，gm subscribe 幂等性不赌 SDK、去重后调用；
+    - 订阅容错（Task 8 评审 Minor，Task 9 收口）：subscribe 抛错 → WARN 留痕降级
+      继续（不中止 pre_open——行情断≠交易断），账本不动、恢复后重试全差集；
     - ① 昨日判据（R1 I-2）：柜台单 created_at 日期==today 跳过（state 滞后时柜台
       是唯一真值源；缺失退 state 侧 date）——同日重跑不自杀当日进场（scan_done
       防重扫=撤了不补，进场静默丢失）；
@@ -428,6 +430,44 @@ def test_pre_open_cross_day_rebuilds_subscription(pilot, tmp_path, monkeypatch):
     assert fake.subscriptions == {"SZSE.300750": "tick", "SZSE.300059": "tick"}
     assert rt._subscribed == ["300059.SZ", "300750.SZ"]
     assert fake.orders[cid]["status"] == ORDER_STATUS["Canceled"]   # ① 随后撤昨日单（I-2 侧证）
+
+
+def test_pre_open_subscribe_failure_degrades_not_aborts(pilot, tmp_path, monkeypatch):
+    """订阅容错（Task 8 评审 Minor，Task 9 收口）：行情通道瞬时异常（subscribe 抛错）
+    不中止 pre_open——⓪' 重建失败后 ① 撤昨日单 / ⑤ 挂新单等交易通道动作照跑；订阅
+    账本不动，恢复后一次重试补齐全差集（行情断≠交易断的双通道现实组合）。"""
+    fake = FakeGm()
+    yid = pilot.place_limit_buy(fake, "688981.SH", 10.0, 100, "acc-y")
+    _backdate_order(fake, yid, T_MINUS_1)                   # 昨日单 → ① 的撤单对象
+    _back_counter_position(fake, "SZSE.300750", 150, 10.0)    # 持仓配柜台背书（absorb ③ 语义）
+    st = pilot._initial_state()
+    st["positions"]["300750.SZ"] = _pos_state(pilot, T_MINUS_1)   # 昨进仓不超期 → ⓪' 订阅面非空
+    sigs = {"300059.SZ": _signal(pilot, "300059.SZ")}
+    _pin(pilot, monkeypatch, tmp_path, universe=("300059.SZ",), detect=_detect_map(sigs))
+    rt = _rt(pilot, fake, tmp_path, state=st)
+
+    def _boom(symbols, **kw):
+        raise RuntimeError('{"status": 1100, "message": "模拟行情订阅失败（终端未连接/GmError 形态）"}')
+
+    orig_subscribe = fake.subscribe                          # 先存 bound method（恢复用）
+    fake.subscribe = _boom
+    rt.pre_open(_Ctx())                                      # 不炸：五阶段完整走完
+    # 交易通道动作全在（若 ⓪' 订阅异常上抛，①②⑤ 全部陪跳——本用例的红线）
+    assert fake.orders[yid]["status"] == ORDER_STATUS["Canceled"]   # ① 撤昨日单在
+    buys = [c for c in fake.calls if c.get("api") == "order_volume"
+            and c["side"] == 1 and c["price"] == pytest.approx(10.4)]
+    assert len(buys) == 1                                           # ⑤ 新挂单在
+    warns = [w for w in _details(tmp_path, "WARN") if w.get("type") == "subscribe_fail"]
+    # ⓪' 首发（⓪ 对账已吸收柜台昨日单 → 订阅面=持仓∪未终态单）+ ⑤' 再发（账本仍空 → 全差集）
+    assert len(warns) == 2
+    assert set(warns[0]["symbols"]) == {"300750.SZ", "688981.SH"}
+    assert set(warns[1]["symbols"]) == {"300059.SZ", "300750.SZ"}
+    assert rt._subscribed == []                                     # 账本不动（失败不吞成功）
+
+    fake.subscribe = orig_subscribe                                # 行情通道恢复
+    rt._subscribe_watchlist()                                      # 下次重试：全差集一次补齐
+    assert fake.subscriptions == {"SZSE.300059": "tick", "SZSE.300750": "tick"}
+    assert rt._subscribed == ["300059.SZ", "300750.SZ"]
 
 
 def test_pre_open_cancel_keeps_today_orders_only(pilot, tmp_path, monkeypatch):

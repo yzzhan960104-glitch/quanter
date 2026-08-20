@@ -1247,11 +1247,27 @@ class PilotRuntime:
 
     def _subscribe_incremental(self, syms):
         """增量订阅：差集去重后下发 subscribe（已订阅标的零重复——幂等性不赌 SDK，
-        去重后调用对「幂等/非幂等」两种 SDK 行为都安全）。"""
+        去重后调用对「幂等/非幂等」两种 SDK 行为都安全）。
+
+        容错（Task 8 评审遗留 Minor，Task 9 收口）：subscribe 抛错 → WARN 留痕降级
+        继续，不上抛。Why：本函数的两处调用点（pre_open ⓪' 重建 / ⑤' 增补）都钉在
+        五阶段主干上，行情通道瞬时异常（断连/限流/GmError）若直接炸出会中止整个
+        pre_open——①撤昨日单②超期平仓⑤挂单等【交易通道】动作全部陪跳（行情断≠
+        交易断的双通道现实组合，谁断谁降级，不许单通道故障劫持另一通道）。失败时
+        订阅账本刻意不动（账本只在 subscribe 成功后并入），下次调用自然重试全差集
+        ——与既有「失败不吞真值、窗口到期重试」语义一致（同 reconcile 退避口径）。
+        代价自觉：订阅失败窗口内 tick 巡检对相关标的断供（无价不判定），比「整段
+        pre_open 蒸发」可控——WARN 行进当日晨检面。
+        """
         pending = sorted(set(syms) - set(self._subscribed))
         if not pending:
             return
-        self._a().subscribe([to_gm_symbol(s) for s in pending], frequency="tick")
+        try:
+            self._a().subscribe([to_gm_symbol(s) for s in pending], frequency="tick")
+        except Exception as e:
+            self._audit("WARN", type="subscribe_fail", symbols=pending,
+                        err=f"{type(e).__name__}: {e}")
+            return                                          # 账本不动：下次重试全差集
         self._subscribed = sorted(set(self._subscribed) | set(pending))
 
     # ---------------------------------------------------------- 事件：对账
