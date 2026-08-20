@@ -45,7 +45,7 @@ tests/emquant/              # fake_gm.py + 5 个测试文件（见 plan 各任�
 
 ## 4. 功能需求
 
-- **FR1 参数快照**：`export_snapshot.py` 在 .venv310 下实例化 `NecklineMethodStrategy()`（无 override = 当前生产缺省口径）+ `trading.critical._trade_cfg()`（.env 实弹值），导出 `ID_PARAMS`/`EXEC_PARAMS` 全键（**必须含 `buy_limit_atr_mult` 与 `cooldown`**）+ `PARAMS_FINGERPRINT`（sha256(sorted kv)）。同时导出 UNIVERSE ≤300：来源=本地引擎实盘 `_load_universe` 同口径（**含创板科创过滤** `_filter_chuangke_kechuang`：剔 300/301/688/689 前缀），不足 300 用 data_lake 流动性补足；并核实 `_eod` 是否施加 cooldown 去重（若有则 pilot 同步复刻）。
+- **FR1 参数快照**：`export_snapshot.py` 在 .venv310 下实例化 `NecklineMethodStrategy()` + `trading.critical._trade_cfg()`（.env 实弹值），导出 `ID_PARAMS`/`EXEC_PARAMS` 全键（**必须含 `buy_limit_atr_mult` 与 `cooldown`**）+ `PARAMS_FINGERPRINT`（sha256(sorted kv)，**排除 exported_at**）。**若存在激活实验（engine 实弹口径）则并入实验参数**（08-21 实况：ACTIVE 实验 25c602，window=80/cooldown=8/buy_limit_atr_mult=0.5/max_holding=20/tp1_portion=0.3——快照冻结该口径，双轨期内不动，D4）。同时导出 UNIVERSE ≤300：来源=本地引擎 `load_universe` 同口径（**08-21 勘误：`_filter_chuangke_kechuang` 实义为「只保留」创板科创 300/301/688/689**，data_ctx.py:56 三处一致），近 60 日成交额降序取前 300；cooldown 结论：scan_live 无去重、`_eod` 引擎层补跨日去重（engine.py:1036-1050，formed_at 锚点）。
 - **FR2 状态层**：`state.pkl`（scan_done/placed/orders/positions 四表，schema 同设计 §3）tmp+rename 原子写；`RISK_BLOCK.flag`（存在=拦增量，存量管理照常）/ `CAP.txt`（缺省 1.0）。
 - **FR3 风控闸**：CAP 逐单扣减 `总权益×CAP−持仓市值−已挂买单金额`，查询失败 **fail-closed 当日不挂**；试点硬闸：单日新挂 ≤2、单票市值 ≤5%（写死 §0）。
 - **FR4 数据层**：gm `history` 定点前复权（ADJUST_PREV + adjust_end_time=T-1，end_time=T-1）→ df_upto（OHLCV 列名对齐 + DatetimeIndex）；符号映射 `600000.SH↔SHSE.600000`；交易日历从指数日线序列推导（不依赖额外 API）。
