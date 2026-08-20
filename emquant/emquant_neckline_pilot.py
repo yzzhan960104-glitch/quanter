@@ -1467,8 +1467,10 @@ def decide_pending(tick_price, order, today, cal):
       - cancel_on 触价：tick_price ≥ order["cancel_on"]（含等——decide_exit pending
         分支 simulate_exit:130 `high >= cancel_on` 同式；None=不配阈值放飞所有回踩）；
       - max_wait 过期：trading_days_between(cal, formed_at, today) **> max_wait**
-        （严格大于；formed_at 起算——backtest 挂单窗 range(buy_idx+1, min(buy_idx+
-        max_wait,...)+1) 的「窗口内含第 max_wait 个交易日」边界语义，恰好 == 不撤）。
+        （严格大于；formed_at 起算——backtest 挂单窗 range(signal_idx+1, min(signal_idx+
+        max_wait,...)+1) 的「窗口内含第 max_wait 个交易日」边界语义，恰好 == 不撤。
+        锚点是真身的 signal_idx（backtest.py:177-179，信号日起算）——不是 buy_idx：
+        buy_idx 是窗口内【成交日】，窗口边界不以成交日起算）。
     两因并发归因 cancel_on（价格事件盘中即时，max_wait 是窗口边界——对齐 decide_exit
     pending 分支的判序：窗口内逐根先判 cancel_on，窗口边界只是循环外限）。
 
@@ -1502,11 +1504,13 @@ def decide_position(tick_price, pos, today, cal):
         exit.py:190-193「份额沉到 tp2 腿」）。
       ④ 均未触发 → None。
 
-    当日止损价来源（两级）：pos["trailing"] 六件套齐（neckline/atr/stop_atr_mult/
-    grace/step/floor——信号定终身快照）→ compute_stop_price 活口径（holding_days =
-    trading_days_between(cal, entry_date, today)，与回测 i−buy_idx 同式：进场日=0）；
-    trailing 残缺 → 回退 pos["stop"]（盘后预算的当日固定价——execution docstring
-    离散化口径的兜底）。实弹快照（grace 0/step 0.0）下两路径恒等（=base_stop）。
+    当日止损价来源（两级）：pos["trailing"] 的 neckline/atr 在场（非 None）即走
+    compute_stop_price 活口径（holding_days = trading_days_between(cal, entry_date,
+    today)，与回测 i−buy_idx 同式：进场日=0——此处 buy_idx 是成交日，语义正确）；
+    余参缺省退化——stop_atr_mult→1.0 / grace→0 / step→0.0 / floor→None（实弹
+    六键齐的定终身快照之外，残键按此默认补齐而非弃走活口径）；neckline/atr 缺 →
+    回退 pos["stop"]（盘后预算的当日固定价——execution docstring 离散化口径的
+    兜底）。实弹快照（grace 0/step 0.0）下两路径恒等（=base_stop）。
 
     pos 契约（§3 schema v1 的 positions 值）：remaining_qty / tp1_price / tp1_done /
     tp2_price / trailing{...} / exec_params.tp1_portion / entry_date。remaining_qty

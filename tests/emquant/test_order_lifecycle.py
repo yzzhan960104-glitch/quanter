@@ -17,8 +17,10 @@
       （golden 对拍直接 import 仓库真身逐位相等）；
     - decide_pending：cancel_on 触价（tick≥order["cancel_on"]，decide_exit pending
       分支 simulate_exit:130 同式含等）；max_wait 严格大于（(formed_at,today] 交易日
-      数 > max_wait 才撤，== 不撤——backtest MAX_WAIT 窗口边界 range(buy_idx+1,
-      min(buy_idx+max_wait,...)+1) 的「窗口内含第 max_wait 日」语义）；
+      数 > max_wait 才撤，== 不撤——backtest MAX_WAIT 窗口边界 range(signal_idx+1,
+      min(signal_idx+max_wait,...)+1) 的「窗口内含第 max_wait 日」语义；锚点是真身
+      的 signal_idx（backtest.py:177-179，信号日起算），buy_idx 是窗内成交日、
+      窗口边界不以成交日起算）；
     - decide_position 优先序 stop→tp2→tp1：strategies/neckline/execution.py:249-294
       （priority 1 止损硬风控先于止盈；priority 2 tp2 全平；priority 3 tp1 一档一次）；
     - tp1 档量取整：trading/phases/exit.py:190 tp1_target=int(total×portion/100)*100
@@ -34,7 +36,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -254,7 +256,9 @@ def test_fetch_limit_down_total_failure_returns_none_with_audit(pilot, monkeypat
     monkeypatch.setattr(pilot, "AUDIT_DIR", tmp_path)
     fake = FakeGm(raise_on_symbol_info=True)
     assert pilot.fetch_limit_down(fake, "300750.SZ", end_date="2026-08-21") is None
-    rows = (tmp_path / "audit_20260821.csv").read_text(encoding="utf-8")
+    # 文件名与实现侧 audit_log 同源按运行日拼 f"audit_{date.today():%Y%m%d}.csv"
+    # （范式照抄 test_state_and_gates:195/205）——硬编码日期是次日起必炸的时间炸弹。
+    rows = (tmp_path / f"audit_{date.today():%Y%m%d}.csv").read_text(encoding="utf-8")
     assert "limit_down_fetch_fail" in rows and "300750.SZ" in rows
 
 
@@ -387,7 +391,8 @@ def test_decide_position_active_trailing_uses_holding_days(pilot):
 
 
 def test_decide_position_trailing_missing_falls_back_to_fixed_stop(pilot):
-    """trailing 快照残缺 → 回退 pos["stop"]（盘后预算的当日固定价，离散化口径兜底）。"""
+    """trailing 的 neckline/atr 缺 → 回退 pos["stop"]（盘后预算的当日固定价，离散化
+    口径兜底）；余参缺省不触发回退——活口径门槛只看 neckline/atr 在场（与实现一致）。"""
     pos = _pos()
     pos["trailing"] = {}
     pos["stop"] = 9.8
