@@ -31,6 +31,17 @@
     - audit 写失败（Task 5 minor ③ 对账）：观测通道损失不拦交易（print 降级）；
     - C1（08-21 修订版）：run_pilot 固定 MODE_LIVE + 账户白名单 PILOT_ACCOUNT_ID，
       env PILOT_ALLOW_LIVE=I_KNOW_REAL_MONEY 是唯一逃生门；
+    - 订阅三时点（Task 8 评审 R1 C-1）：bootstrap 崩溃重启 / pre_open ⓪后跨日重建
+      （after_close 清空后常驻进程 day 2+ 不断供）/ ⑤后同日增补（当日新挂即入巡检
+      面）——增量差集下发，gm subscribe 幂等性不赌 SDK、去重后调用；
+    - ① 昨日判据（R1 I-2）：柜台单 created_at 日期==today 跳过（state 滞后时柜台
+      是唯一真值源；缺失退 state 侧 date）——同日重跑不自杀当日进场（scan_done
+      防重扫=撤了不补，进场静默丢失）；
+    - equity fail-closed（R1 M-3 编排接线）：get_cash 抛错/空表 → equity=None →
+      有信号 0 挂单 + ORDER_BLOCKED 留 fail-closed 原因；
+    - 对账失败退避（R1 M-4）：reconcile 查询失败后 60s 窗内 on_tick 不重试；
+    - ② 后防御性落盘（R1 M-5）：超期卖上柜台后 state 先落——③④⑤ 中途异常不吃
+      「柜台有单 state 无单」的双卖窗口；
     - 入口抑制（Task 4 遗留）：§1 内核逐字块尾部 `if __name__ == "__main__": main()`
       在产物第 ~804 行、先于 §2-§7 拼接位执行——抑制块必须被组装器剪出到 head 区
       （§0 之前）且全产物唯一一份（复制会让第二次 _IS_MAIN 赋值把入口哑火）。
@@ -164,6 +175,13 @@ def _back_counter_position(fake, gm_sym, volume, vwap):
                               "available_now": volume, "market_value": volume * vwap}
 
 
+def _backdate_order(fake, cid, day):
+    """柜台单 created_at 显式定值（I-2 守卫以柜台日判「昨日单」——替身落单用真实
+    时钟，显式定值后用例期望不随真实运行日期漂移：真实日期恰与夹具 TODAY 同日时，
+    未定值的「昨日单」会被误判成当日单）。"""
+    fake.orders[cid]["created_at"] = datetime.fromisoformat(f"{day}T09:31:00")
+
+
 # ============================================================================
 # pre_open 五阶段（红线序）
 # ============================================================================
@@ -175,6 +193,7 @@ def test_pre_open_cancel_then_place_order(pilot, tmp_path, monkeypatch):
     """
     fake = FakeGm()
     yid = pilot.place_limit_buy(fake, "300750.SZ", 10.0, 100, "acc-y")   # 昨日挂单（在场柜台）
+    _backdate_order(fake, yid, T_MINUS_1)                   # created_at 回拨昨日（I-2 判据）
     sigs = {s: _signal(pilot, s) for s in ("300750.SZ", "688981.SH", "300059.SZ")}
     _pin(pilot, monkeypatch, tmp_path, universe=tuple(sigs), detect=_detect_map(sigs))
     rt = _rt(pilot, fake, tmp_path)
@@ -215,6 +234,7 @@ def test_pre_open_blocked_flag_skips_new_keeps_mgmt(pilot, tmp_path, monkeypatch
     fake = FakeGm(symbol_info={"SHSE.688981": {"pre_close": 10.0, "lower_limit": 7.77,
                                                "upper_limit": 12.0}})
     yid = pilot.place_limit_buy(fake, "300750.SZ", 10.0, 100, "acc-y")
+    _backdate_order(fake, yid, T_MINUS_1)                   # created_at 回拨昨日（I-2 判据）
     _back_counter_position(fake, "SHSE.688981", 150, 10.0)    # 持仓配柜台背书（absorb ③ 语义）
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "RISK_BLOCK.flag").write_text("", encoding="utf-8")   # 人工 touch
@@ -329,6 +349,7 @@ def test_calendar_missing_degrades(pilot, tmp_path, monkeypatch):
     """空历显式降级：①照跑、②超期停判、③扫描停（audit calendar_missing），不炸不静默。"""
     fake = FakeGm()
     yid = pilot.place_limit_buy(fake, "300750.SZ", 10.0, 100, "acc-y")
+    _backdate_order(fake, yid, T_MINUS_1)                   # created_at 回拨昨日（I-2 判据）
     i_t1 = CAL.index(T_MINUS_1)
     st = pilot._initial_state()
     st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - 30])   # 真超期，但无历不判
@@ -362,6 +383,129 @@ def test_audit_write_failure_does_not_block_trading(pilot, tmp_path, monkeypatch
     assert len(buys) == 1
     st = pilot.load_state(path=tmp_path / "state" / "state.pkl")       # state 通道独立于 audit
     assert len(st["placed"][TODAY]) == 1
+
+
+# ============================================================================
+# Task 8 评审 R1：订阅三时点（C-1）/ 撤单昨日判据（I-2）/ equity 接线（M-3）
+# / ②后防御落盘（M-5）——同波落在 pre_open 一段的四个修复面
+# ============================================================================
+def test_pre_open_same_day_new_orders_join_subscription(pilot, tmp_path, monkeypatch):
+    """C-1 时点③：⑤ 挂出的当日新买单即入订阅面——cancel_on/成交后止损的 tick 巡检
+    当日成立，不等次日 pre_open（否则当日新进场全无风控链供价）。"""
+    fake = FakeGm()
+    sigs = {"300750.SZ": _signal(pilot)}
+    _pin(pilot, monkeypatch, tmp_path, universe=("300750.SZ",), detect=_detect_map(sigs))
+    rt = _rt(pilot, fake, tmp_path)
+    rt.pre_open(_Ctx())                                       # 盘初空仓：⓪' 重建为 no-op
+
+    assert fake.subscriptions == {"SZSE.300750": "tick"}      # gm 侧订阅面（gm 符号）
+    assert rt._subscribed == ["300750.SZ"]                    # 账本镜像（ts 口径）
+    subs = [c for c in fake.calls if c.get("api") == "subscribe"]
+    assert len(subs) == 1 and subs[0]["symbols"] == ["SZSE.300750"]   # 增量：单次下发
+
+
+def test_pre_open_cross_day_rebuilds_subscription(pilot, tmp_path, monkeypatch):
+    """C-1 时点②：after_close 清空订阅后，day-2 pre_open 按 ⓪ 对账后的最新 state 重建
+    （= 新 positions ∪ 未终态 orders）——常驻进程 day 2+ 巡检不断供。"""
+    fake = FakeGm()
+    holder = {"today": TODAY}                                 # 可中途推进的日期锚
+    sigs = {"300750.SZ": _signal(pilot)}
+    _pin(pilot, monkeypatch, tmp_path, universe=("300750.SZ",), detect=_detect_map(sigs))
+    monkeypatch.setattr(pilot, "_today_str", lambda: holder["today"])
+    rt = _rt(pilot, fake, tmp_path)
+    rt.pre_open(_Ctx())                                       # day1：⑤ 挂单 + ⑤' 增补订阅
+    cid = rt.state["placed"][TODAY][0]
+    _backdate_order(fake, cid, TODAY)                         # 钉 created_at（不随真实钟漂）
+    rt.after_close(_Ctx())                                    # day1 盘后：订阅清空（生命周期终点）
+    assert fake.subscriptions == {} and rt._subscribed == []
+
+    holder["today"] = "2026-08-24"                            # day2（CAL 外的自然下一交易日）
+    _back_counter_position(fake, "SZSE.300059", 150, 10.0)    # day2 新持仓（柜台背书）
+    rt.state["positions"]["300059.SZ"] = _pos_state(pilot, T_MINUS_1)
+    rt.pre_open(_Ctx())                                       # day2：⓪' 跨日重建
+
+    # 订阅集 = 新 positions ∪ 未终态 orders（重建时点在 ⓪ 后 ① 前——昨日单此际在场）
+    assert fake.subscriptions == {"SZSE.300750": "tick", "SZSE.300059": "tick"}
+    assert rt._subscribed == ["300059.SZ", "300750.SZ"]
+    assert fake.orders[cid]["status"] == ORDER_STATUS["Canceled"]   # ① 随后撤昨日单（I-2 侧证）
+
+
+def test_pre_open_cancel_keeps_today_orders_only(pilot, tmp_path, monkeypatch):
+    """I-2 昨日判据：①只撤昨日单——当日单不被自杀（scan_done 防重扫=撤了不补，当日
+    进场静默丢失）；柜台 created_at 缺失时退回 state 侧 date 同守卫。"""
+    fake = FakeGm()
+    _pin(pilot, monkeypatch, tmp_path, universe=())           # 无信号：只考 ① 的守卫
+    rt = _rt(pilot, fake, tmp_path)
+    old_id = pilot.place_limit_buy(fake, "300750.SZ", 10.0, 100, "acc-y")
+    _backdate_order(fake, old_id, T_MINUS_1)                  # 昨日单 → 该撤
+    new_id = pilot.place_limit_buy(fake, "688981.SH", 10.0, 100, "acc-y")
+    _backdate_order(fake, new_id, TODAY)                      # 当日单 → 不撤
+    fb_id = pilot.place_limit_buy(fake, "300059.SZ", 10.0, 100, "acc-y")
+    fake.orders[fb_id]["created_at"] = None                   # 柜台字段缺失 → 退 state 判据
+    rt.state["orders"][fb_id] = {"symbol": "300059.SZ", "date": TODAY, "price": 10.0,
+                                 "qty": 100, "purpose": "OPEN", "cancel_on": None,
+                                 "formed_at": None, "exec_params": {}, "status": "SUBMITTED",
+                                 "filled": 0, "account": "acc-y"}
+
+    rt.pre_open(_Ctx())
+    assert fake.orders[old_id]["status"] == ORDER_STATUS["Canceled"]   # 昨日单撤（红线①）
+    assert fake.orders[new_id]["status"] == ORDER_STATUS["New"]        # 当日单留（柜台判据）
+    assert fake.orders[fb_id]["status"] == ORDER_STATUS["New"]         # 当日单留（state 退回判据）
+    cancels = _details(tmp_path, "CANCEL")
+    assert len(cancels) == 1 and cancels[0]["cl_ord_id"] == old_id     # 全场只撤昨日单
+
+
+def test_pre_open_equity_failure_fail_closed_no_orders(pilot, tmp_path, monkeypatch):
+    """M-3 编排接线：get_cash 空表/抛错 → equity=None → 有信号但 0 挂单，
+    ORDER_BLOCKED 逐单留 fail-closed 原因（Q1：空=故障，绝不拿 0 冒充真值）。"""
+    sigs = {"300750.SZ": _signal(pilot), "688981.SH": _signal(pilot, "688981.SH")}
+
+    fake_a = FakeGm()                                         # 场景一：空表（返 {}）
+    _pin(pilot, monkeypatch, tmp_path / "a", universe=tuple(sigs), detect=_detect_map(sigs))
+    rt_a = _rt(pilot, fake_a, tmp_path / "a")
+    fake_a.cash = {}
+    rt_a.pre_open(_Ctx())
+    assert [c for c in fake_a.calls if c.get("api") == "order_volume"] == []
+    blocked = _details(tmp_path / "a", "ORDER_BLOCKED")
+    assert len(blocked) == 2 and all("fail-closed" in b["reason"] for b in blocked)
+    assert any(w.get("type") == "get_cash_empty" for w in _details(tmp_path / "a", "WARN"))
+
+    fake_b = FakeGm()                                         # 场景二：异常上抛
+    _pin(pilot, monkeypatch, tmp_path / "b", universe=tuple(sigs), detect=_detect_map(sigs))
+    rt_b = _rt(pilot, fake_b, tmp_path / "b")
+
+    def _boom(account_id=None):
+        raise RuntimeError('{"status": 1100, "message": "模拟资金查询失败（终端未连接）"}')
+
+    fake_b.get_cash = _boom
+    rt_b.pre_open(_Ctx())
+    assert [c for c in fake_b.calls if c.get("api") == "order_volume"] == []
+    assert all("fail-closed" in b["reason"] for b in _details(tmp_path / "b", "ORDER_BLOCKED"))
+    assert any(w.get("type") == "get_cash_fail" for w in _details(tmp_path / "b", "WARN"))
+
+
+def test_pre_open_state_saved_after_expire_before_later_failure(pilot, tmp_path, monkeypatch):
+    """M-5：② 超期卖上柜台后、③④⑤ 中途异常炸出时 state 已先落盘——重启自愈不吃
+    「柜台有单 state 无单」的双卖窗口（_has_open_sell 失守=重复挂卖，致命方向）。"""
+    fake = FakeGm(symbol_info={"SHSE.688981": {"pre_close": 10.0, "lower_limit": 7.77,
+                                               "upper_limit": 12.0}})
+    _back_counter_position(fake, "SHSE.688981", 150, 10.0)
+    i_t1 = CAL.index(T_MINUS_1)
+    st = pilot._initial_state()
+    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - 21])   # 21 > 20 超期
+    _pin(pilot, monkeypatch, tmp_path, universe=())
+
+    def _boom(path=None):
+        raise RuntimeError("模拟 ④ 段异常（③④⑤ 中途炸出的形态代表）")
+
+    monkeypatch.setattr(pilot, "is_blocked", _boom)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    with pytest.raises(RuntimeError):
+        rt.pre_open(_Ctx())                                   # 函数尾统一落盘未达
+
+    disk = pilot.load_state(path=tmp_path / "state" / "state.pkl")
+    sells = [o for o in disk["orders"].values() if o.get("purpose") == "EXPIRE"]
+    assert len(sells) == 1 and sells[0]["symbol"] == "688981.SH"       # ② 的单已先落
 
 
 # ============================================================================
@@ -444,6 +588,31 @@ def test_on_tick_pending_cancel_on_touch(pilot, tmp_path, monkeypatch):
     row = _details(tmp_path, "CANCEL")[0]
     assert row["reason"] == "cancel_on" and row["stage"] == "on_tick"
     assert st["orders"][cid]["status"] == "CANCELLED"                  # state 同步落终态
+
+
+def test_on_tick_reconcile_failure_backoff(pilot, tmp_path, monkeypatch):
+    """M-4：柜台查询失败后 60s 退避——故障期不每 tick 重打两次注定失败的查询
+    （WARN 计数钉死=1）；退避窗过期后重试成功即复位锚（不残留死退避）。"""
+    fake = FakeGm()
+
+    def _boom():
+        raise RuntimeError('{"status": 1100, "message": "模拟委托查询失败（终端未连接）"}')
+
+    fake.get_orders = _boom                                   # 实例级注入（只影响本替身）
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path)
+    for _ in range(3):
+        rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 10.0})
+    fails = [w for w in _details(tmp_path, "WARN")
+             if w.get("type") == "reconcile_orders_fail"]
+    assert len(fails) == 1                   # 首 tick 失败一次；后两 tick 被退避闸拦下
+
+    del fake.get_orders                                       # 撤注入：柜台恢复可用
+    rt._absorb_retry_after = 0.0                              # 白盒推进：模拟退避窗已过（不真等 60s）
+    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 10.0})
+    assert rt._absorb_retry_after is None and rt._last_absorb is not None   # 成功复位双锚
+    assert len([w for w in _details(tmp_path, "WARN")
+                if w.get("type") == "reconcile_orders_fail"]) == 1          # 无新增失败
 
 
 # ============================================================================

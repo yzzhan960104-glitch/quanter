@@ -1767,6 +1767,14 @@ def absorb_reality(state, api_orders, api_positions):
 # get_position 两次本机 HTTP）按 _ABSORB_THROTTLE_SECONDS 节流——成交转持仓的时延
 # 窗口 ≤ 节流阈值（30s 量级对试点止损管理足够；首跳必对账保证启动即真值）。
 _ABSORB_THROTTLE_SECONDS = 30.0
+# 对账失败退避（M-4）：_last_absorb 只在成功时前移，若只有上面的节流闸，柜台故障期
+# 每根 tick 都要打满两次本机 HTTP 查询（对故障中的柜台/终端雪上加霜，且注定失败）。
+# 失败后 _ABSORB_FAILURE_BACKOFF_SECONDS 窗内 on_tick 不再重试，巡检判定继续吃上一份
+# state 真值；窗口到期由下一根 tick 自然承接重试。60s 取「节流窗翻倍」量级——闪断
+# 故障一窗即过，长故障也不会把成交转持仓的时延拖出分钟级（试点止损管理可容忍上界）。
+# 注意退避只拦 on_tick 热路径：bootstrap/pre_open 的 reconcile 不受影响（每日一次的
+# 全量对账值得无条件重试，不在退避语义内）。
+_ABSORB_FAILURE_BACKOFF_SECONDS = 60.0
 
 
 def _today_str() -> str:
@@ -1865,8 +1873,9 @@ class PilotRuntime:
         self.strategy_id = ""
         self._cal = None            # 日历缓存（按日失效：跨日首用重建）
         self._cal_date = None
-        self._subscribed = []       # 当日巡检订阅面（ts 口径；after_close 清）
-        self._last_absorb = None    # 上次柜台对账 time.time()（on_tick 节流锚）
+        self._subscribed = []       # 当日巡检订阅面（ts 口径；「已 subscribe 未 unsubscribe」的唯一账本，after_close 清）
+        self._last_absorb = None    # 上次柜台对账【成功】的 time.time()（on_tick 节流锚；失败不前移）
+        self._absorb_retry_after = None  # 对账失败退避到期时刻（M-4：失败时=now+退避窗；成功复位 None）
 
     # ---------------------------------------------------------- 小工具
     def _a(self):
@@ -2018,11 +2027,26 @@ class PilotRuntime:
                     subscribed=len(self._subscribed))
 
     def _subscribe_watchlist(self):
-        """订阅当日巡检标的：持仓 ∪ 未终态挂单（ts→gm 符号，tick 频率）。
+        """订阅巡检标的：持仓 ∪ 未终态挂单（ts→gm 符号，tick 频率）——增量差集下发。
 
         Why 这个集合：tick 巡检只为「pending 撤单判定 + positions 离场判定」供价——
-        无仓无挂的标的订阅是纯带宽浪费；新信号挂出的买单在阶段⑤落 state，下一轮
-        （重启后的 init）自动进订阅面。当日新建仓经对账吸收后同理由覆盖。
+        无仓无挂的标的订阅是纯带宽浪费。
+
+        订阅面三时点生命周期（C-1 评审修复——每时点各答一个「谁在什么场景补订阅」，
+        缺任何一层都有一段巡检失明窗口）：
+          1. bootstrap（init 一次）：进程崩溃/部署重启后，state 在途单与持仓的巡检
+             面由此恢复——新会话 gm 侧订阅从零开始，此层覆盖「盘中重启」场景；
+          2. pre_open ⓪后重建（见 pre_open 内调用点）：前日 after_close 清空订阅
+             （省带宽）后，常驻进程 day 2+ 若无人重建，当日持仓/在途单的止损/止盈/
+             cancel_on 巡检整体失明——pre_open 是常驻进程每日必经的第一事件，在
+             此按 ⓪ 对账后的最新 state 重建；
+          3. 阶段⑤后同日增补：当日新挂的买/卖当日就要被 tick 巡检管理（新买单的
+             cancel_on 触价撤单、成交转仓后的止损止盈），不等次日 pre_open。
+
+        幂等口径：gm subscribe 对已订阅标的是否幂等无权威结论（Task 2 核对文档未
+        覆盖）——统一按 self._subscribed（「已 subscribe 未 unsubscribe」的唯一账本）
+        取差集，差集空不下发，任意时点重复调用零副作用；after_close 的清退也以
+        同一账本为准，不漏清不错清。
         """
         syms = set()
         for sym, pos in self.state["positions"].items():
@@ -2031,9 +2055,16 @@ class PilotRuntime:
         for o in self.state["orders"].values():
             if o.get("status") not in _TERMINAL_ORDER_STATES and o.get("symbol"):
                 syms.add(o["symbol"])
-        self._subscribed = sorted(syms)
-        if self._subscribed:
-            self._a().subscribe([to_gm_symbol(s) for s in self._subscribed], frequency="tick")
+        self._subscribe_incremental(syms)
+
+    def _subscribe_incremental(self, syms):
+        """增量订阅：差集去重后下发 subscribe（已订阅标的零重复——幂等性不赌 SDK，
+        去重后调用对「幂等/非幂等」两种 SDK 行为都安全）。"""
+        pending = sorted(set(syms) - set(self._subscribed))
+        if not pending:
+            return
+        self._a().subscribe([to_gm_symbol(s) for s in pending], frequency="tick")
+        self._subscribed = sorted(set(self._subscribed) | set(pending))
 
     # ---------------------------------------------------------- 事件：对账
     def reconcile(self, context=None):
@@ -2041,18 +2072,22 @@ class PilotRuntime:
 
         调用点：init（启动全量）/ pre_open 前置（隔夜成交撤单先落 state，五阶段吃
         最新真值）/ on_tick 节流（盘中成交 30s 窗口内转持仓）。查询失败（异常）→
-        本轮不对账（state 不动）+ WARN 留痕——绝不拿空表当「柜台已清空」去修 state。
+        本轮不对账（state 不动）+ WARN 留痕 + 布置失败退避锚（M-4：on_tick 在
+        _ABSORB_FAILURE_BACKOFF_SECONDS 窗内不再重试——故障期不每 tick 打两次注定
+        失败的查询）——绝不拿空表当「柜台已清空」去修 state。
         """
         a = self._a()
         try:
             api_orders = a.get_orders()
         except Exception as e:
             self._audit("WARN", type="reconcile_orders_fail", err=f"{type(e).__name__}: {e}")
+            self._absorb_retry_after = time.time() + _ABSORB_FAILURE_BACKOFF_SECONDS
             return
         try:
             api_positions = a.get_position(self.account)
         except Exception as e:
             self._audit("WARN", type="reconcile_positions_fail", err=f"{type(e).__name__}: {e}")
+            self._absorb_retry_after = time.time() + _ABSORB_FAILURE_BACKOFF_SECONDS
             return
         absorb_reality(self.state, api_orders, api_positions)
         self._enrich_positions_from_orders()
@@ -2060,6 +2095,7 @@ class PilotRuntime:
                     positions=len(self.state["positions"]))
         save_state(self.state, path=self.state_file)
         self._last_absorb = time.time()
+        self._absorb_retry_after = None                   # 成功复位退避（不残留死退避）
 
     def _enrich_positions_from_orders(self):
         """成交持仓的止损/止盈富化：按来源 OPEN 订单的信号几何补 trailing/stop/tp1/tp2。
@@ -2115,7 +2151,10 @@ class PilotRuntime:
         """盘前五阶段（红线序，顺序不可换——每阶段动作独立 audit 留痕）：
 
             ⓪（前置对账，非五阶段之一）absorb_reality：隔夜成交/撤单先落 state；
-            ① 撤非终态买单（get_orders 柜台实况驱动，audit 逐单）；
+            ⓪' 订阅重建（C-1 三时点之二）：前日 after_close 清空的 tick 订阅面按
+               最新 state 恢复——常驻进程 day 2+ 的巡检不断供；
+            ① 撤【昨日】非终态买（get_orders 柜台实况驱动，audit 逐单；柜台单
+               created_at 日期==今日 → 跳过——同日重跑不自杀当日进场，I-2）；
             ② 超期平仓：trading_days_between(cal, entry_date, T-1) > max_holding
                （严格大于；T-1=cal 中今日前一根，C9 基准日红线）→ fetch_limit_down
                （API 值优先）挂跌停价卖；
@@ -2124,7 +2163,9 @@ class PilotRuntime:
             ④ 闸序：is_blocked → 跳过挂单段（存量管理 ①② 已跑完）；
             ⑤ 挂限价买：entry=Signal.entry_price（=颈线+buy_limit_atr_mult×ATR，§1
                装配式单源）、qty=⌊equity×pos_cap/entry/100⌋×100（pos_cap 取
-               TRADE_CFG，equity 经 get_cash，空表/异常→None→当日不挂）。
+               TRADE_CFG，equity 经 get_cash，空表/异常→None→当日不挂）；
+            ⑤' 订阅增补（C-1 三时点之三）：当日新挂（②超期卖/⑤买）即入 tick 巡检面
+               ——增量差集下发，已订阅标的零重复。
 
         空历降级（Task 6→8 必记）：T-1 取不到（build_calendar 返 []/今日是历首）→
         audit calendar_missing，②③ 停判（超期/扫描都依赖 T-1 或日数差，挂单依赖扫描
@@ -2137,7 +2178,14 @@ class PilotRuntime:
         # ── ⓪ 前置对账：五阶段全部吃最新真值（不动五阶段相对序——对账在所有阶段之前）──
         self.reconcile(context)
 
-        # ── ① 撤非终态买单（get_orders 无参返日内全部委托，Q4；只撤买——卖是退出方向）──
+        # ── ⓪' 订阅重建（C-1 三时点之二）：前日 after_close 已清空订阅（省带宽），
+        #    常驻进程 day 2+ 的持仓/在途单若无人重建订阅，当日 tick 巡检（止损/止盈/
+        #    cancel_on）整体失明——按 ⓪ 对账后的最新 state 重建。崩溃重启场景由
+        #    bootstrap 承担（三时点全图见 _subscribe_watchlist 头注）；增量差集下发，
+        #    同日重复触发 pre_open 时已订阅标的零重复。──
+        self._subscribe_watchlist()
+
+        # ── ① 撤【昨日】非终态买（get_orders 无参返日内全部委托，Q4；只撤买——卖是退出方向）──
         try:
             api_orders = a.get_orders()
         except Exception as e:
@@ -2149,6 +2197,16 @@ class PilotRuntime:
                 continue
             if _gm_status_to_local(ao.get("status")) in _TERMINAL_ORDER_STATES:
                 continue                                      # 已成/已撤/已拒不再碰
+            # 「昨日单」判据（I-2）：柜台 created_at 日期为准——state 可能滞后（⑤ 挂单
+            # 后进程崩溃未落盘、或 ⓪ 对账查询失败致 state 未吸收该单，两种场景下只有
+            # 柜台知道它是今日单）；柜台字段缺失（created_at 非 datetime/无值）再退回
+            # state 侧 orders[oid].date。Why 必须有此守卫：同日二次触发 pre_open（人工
+            # 补跑/catchup）时 scan_done 防重扫使 ⑤ 不会重挂——撤了当日单=当日进场
+            # 静默丢失；当日单的退出交给 on_tick 巡检（cancel_on/max_wait/成交后止损）。
+            placed_day = _date_str_of(ao.get("created_at")) \
+                or (st["orders"].get(oid) or {}).get("date")
+            if placed_day == today:
+                continue                                      # 当日单：不自杀
             try:
                 sym = from_gm_symbol(ao["symbol"])            # gm→ts（fail-loud 见 §5 头注）
             except ValueError as e:
@@ -2207,6 +2265,13 @@ class PilotRuntime:
                 self._audit("EXPIRE_SELL", symbol=sym, entry_date=entry_date,
                             holding_days=holding, max_holding=mh, price=ld,
                             qty=qty, cl_ord_id=cid)
+
+        # ── ② 后防御性落盘（M-5）：超期卖单此刻已上柜台，若 ③④⑤ 中途异常炸出而
+        #    state 只等函数尾统一落盘，「柜台有单、state 无单」的窗口敞开——重启后
+        #    reconcile 固能吸收柜台单自愈，但吸收窗口内 _has_open_sell 失守会再挂一张
+        #    同量卖单（双倍卖出=致命方向错误）。state 先落把窗口压到零。──
+        if t_minus_1 is not None:
+            save_state(st, path=self.state_file)
 
         # ── ③ 扫描（scan_done 幂等防重扫：识别是纯函数重扫零风险，重扫只产重复噪声行）──
         signals = []
@@ -2311,6 +2376,12 @@ class PilotRuntime:
                 self._audit("ORDER_PLACED", symbol=sig.symbol, price=entry, qty=qty,
                             cl_ord_id=cid, cancel_on=cancel_on, formed_at=formed)
 
+        # ── ⑤' 同日增补订阅（C-1 三时点之三）：当日新挂的 OPEN 买（与 ② 的超期卖）
+        #    当日就要被 tick 巡检管理（新买单的 cancel_on 触价撤单、成交转仓后的
+        #    止损止盈），不等次日 pre_open。按最新 state 重算 watchlist 增量差集
+        #    下发——已订阅标的零重复（幂等口径见 _subscribe_watchlist 头注）。──
+        self._subscribe_watchlist()
+
         save_state(st, path=self.state_file)
 
     # ---------------------------------------------------------- 事件：盘中巡检
@@ -2323,7 +2394,13 @@ class PilotRuntime:
         已在触发价上方，限价即成交且保底触发价）。
         """
         today = _today_str()
-        if self._last_absorb is None or time.time() - self._last_absorb >= _ABSORB_THROTTLE_SECONDS:
+        # 对账双闸：成功节流（30s 窗）× 失败退避（60s 窗，M-4）——首跳必对账；成功后
+        # 窗内不重查（省查询）；失败后窗内不重试（故障期不每 tick 打两次注定失败的
+        # 查询，巡检判定继续吃上一份 state 真值，窗口到期由下一根 tick 自然承接）。
+        _now = time.time()
+        if ((self._last_absorb is None
+             or _now - self._last_absorb >= _ABSORB_THROTTLE_SECONDS)
+                and (self._absorb_retry_after is None or _now >= self._absorb_retry_after)):
             self.reconcile(context)                           # 首跳必对账；此后按节流窗吸收成交
         cal = self._calendar(today)
         st = self.state
