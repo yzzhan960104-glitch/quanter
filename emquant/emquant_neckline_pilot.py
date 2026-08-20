@@ -821,14 +821,240 @@ if __name__ == "__main__":
     - 禁顶层 `import gm`（C4）：gm 只允许函数体内惰性 import——保证无 gm 环境
       可完整 import 单文件跑识别内核等价性测试（本任务阶段天然无 gm，纪律先行）；
     - 只许标准库（C3 同源）：不 import 仓库任何模块——单文件部署到掘金终端后无
-      仓库上下文，任何仓库依赖都当场 ImportError。本段 §3/§4 全部 stdlib 实现。
+      仓库上下文，任何仓库依赖都当场 ImportError。本段 §3/§4 全部 stdlib 实现；
+      §2 数据层在 stdlib 之外允许 pandas（§1 内核同依赖，掘金终端 Python 自带），
+      gm 只经 `_api()` 惰性 seam 触达（见 §2 头注）。
 """
+import bisect
 import csv
 import json
 import os
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+
+import pandas as pd
+
+
+# ============================ §2 数据层（符号映射 + 定点前复权取数 + 交易日历）============================
+# gm seam（C4 红线的数据层落点）：模块级 `_GM` 缓存 + `_api()` 惰性 import——顶层
+# `import gm` 会让无 gm 环境（仓库 .venv310 / 识别内核等价测试）连产物都 import 不了。
+# 本段所有 gm 调用一律经 `_api()`（或调用方注入 api 实参）；测试侧 monkeypatch 产物
+# 模块级 `_GM` 注入 tests/emquant/fake_gm.py 的 FakeGm（签名/12 列 bar/常量按 Task 2
+# 核对文档 docs/research/2026-08-21-gm-sdk-api-verified.md 钉死）。
+_GM = None
+
+
+def _api():
+    """惰性取 gm.api 模块（首调 import 并缓存进模块级 _GM；None 视为未初始化可重试）。
+
+    Why 缓存写模块属性而非闭包变量：测试注入点必须是【模块属性】——闭包变量
+    monkeypatch 不到，`monkeypatch.setattr(产物, "_GM", FakeGm())` 即完成离线替身。
+    Why 失败转 RuntimeError 中文诊断而非裸 ImportError 上抛：掘金环境问题（终端
+    venv 用错/未装 gm）在诊断文本里给出处置方向，晨检排障省一轮「看堆栈猜原因」；
+    RuntimeError 责任在调用方编排层决定停或降级，数据层自身不吞。
+    """
+    global _GM
+    if _GM is None:
+        try:
+            from gm import api as _gm_api
+        except Exception as e:  # ImportError 及 gm 包内任何加载期炸裂（缺 C 扩展/dll）统一收口
+            raise RuntimeError(
+                "gm SDK 不可用：§2 数据层取数/交易日历依赖掘金终端专用环境（.venv_emquant 内置 gm）。"
+                "在仓库环境跑识别内核等价测试不触达本路径属正常；执行编排（run_pilot）必须有 gm。"
+            ) from e
+        _GM = _gm_api
+    return _GM
+
+
+# ts↔gm 交易所码表：universe 导出侧已过滤北交所（300/301/688/689 前缀），这里只见
+# 沪深两市；表外后缀一律 fail-loud——见到 .BJ 说明上游过滤被绕过，映射错一只 =
+# 取数/下单打到错误市场，必须在启动期炸给人工（宁停不错）。
+_TS_SUFFIX_TO_GM = {".SH": "SHSE", ".SZ": "SZSE"}
+_GM_EXCHANGE_TO_TS = {v: k for k, v in _TS_SUFFIX_TO_GM.items()}
+
+
+def to_gm_symbol(ts: str) -> str:
+    """ts 格式 → gm 格式（600000.SH → SHSE.600000；000001.SZ → SZSE.000001）。
+
+    Why 独立映射函数而非裸字符串替换：universe/audit/state 全程 ts 口径（与本地腿
+    及 data_lake MultiIndex 同源），只在 gm 调用边界换装——映射集中一处，往返恒等
+    可测；gm 侧符号（SHSE.600000）绝不回流 state/audit（对拍两腿各持一套符号纪律）。
+    """
+    code, dot, suffix = ts.partition(".")
+    exchange = _TS_SUFFIX_TO_GM.get(dot + suffix)
+    if not code or exchange is None:
+        raise ValueError(
+            f"无法映射 gm 符号（仅支持沪深 ts 格式如 600000.SH/300750.SZ，北交所已在 "
+            f"universe 导出侧过滤，见到即上游异变须人工介入）：{ts!r}")
+    return f"{exchange}.{code}"
+
+
+def from_gm_symbol(gm_symbol: str) -> str:
+    """gm 格式 → ts 格式（SHSE.600000 → 600000.SH）——逆向映射同样 fail-loud。
+
+    消费场景：gm 侧回执（order/position 的 symbol 键是 gm 格式）落 state/audit 前
+    须折回 ts 口径；期货所（CFFEX 等）与北交所不在试点可交易面，映射即炸。
+    """
+    exchange, dot, code = gm_symbol.partition(".")
+    suffix = _GM_EXCHANGE_TO_TS.get(exchange)
+    if not dot or suffix is None or not code:
+        raise ValueError(
+            f"无法映射 ts 符号（仅支持 SHSE./SZSE. 前缀的 A 股 gm 符号）：{gm_symbol!r}")
+    return f"{code}{suffix}"
+
+
+def _audit_warn(type_: str, **fields) -> None:
+    """audit WARN 的防炸包装：audit_log 自身失败（磁盘满/目录被锁）时降级 print 不上抛。
+
+    Why：数据层失败路径的契约是「可观测地返 None」——若审计写失败再抛一层异常，
+    「降级跳过该标的」会被恶化成「编排整轮崩溃」，双故障叠加时策略停摆而非收缩。
+    print 落掘金终端进程 stdout，晨检的 audit CSV 与终端控制台双通道兜底。
+    """
+    try:
+        audit_log("WARN", type=type_, **fields)
+    except Exception as e:  # 审计通道自身故障：降级 print，绝不反炸数据层调用方
+        print(f"[audit 降级 print] WARN type={type_} {fields}（audit_log 失败：{e!r}）")
+
+
+# 取数回看自然日窗：200 交易日根数 × ~1.4（周末密度）≈ 280 自然日，再加春节/国庆
+# 连休与长期停牌冗余取整 500——同窗内已成交根数 ≥200 的把握充足；即便不足（超长
+# 停牌/次新），截断规则是「有多少返多少」，识别内核自带 len<window 守卫返 None，
+# 不会拿短数据硬算。Why 不精确到「日历倒数第 N 个交易日再起拉」：那要依赖日历先
+# 就位（build_calendar 又依赖取数）——互为前置的环；自然日宽窗一次拉够是日线场景
+# 的最简无环解。
+_FETCH_LOOKBACK_DAYS = 500
+
+
+def fetch_df_upto(api, ts_symbol: str, end_date: str):
+    """拉单标的截至 end_date 的定点前复权日线 → 识别内核口径 df（OHLCV+零点 DatetimeIndex）。
+
+    与本地腿对齐的口径（对拍命门，tests/emquant/test_data_layer.py 逐参钉死）：
+        - 闭区间含 end_date：本地腿 data_ctx.load_df_upto 是 .loc[:date]，T 日盘后
+          扫描当日 bar 必须在列；
+        - 定点前复权【两端同钉 end_date】：adjust=ADJUST_PREV 且 adjust_end_time=
+          end_date。Why 钉 adjust_end_time：缺省 ''（SDK 默认）会让前复权基准漂到
+          「服务端眼里的最新」，跨日重取同一 end_date 的历史段数值会因新除权事件
+          改变——对拍腿要求的「同日重取逐字节可重复」就此瓦解；钉到 end_date 后
+          复权曲面只由 [上市, end_date] 区间的除权事件决定，幂等可重放；
+        - skip_suspended=True：停牌日无 bar（本地腿 tushare 行集同构），日线根数=
+          实际成交日数，TR/ATR 不被停牌零成交量日稀释；
+        - index=DatetimeIndex(eob).normalize()：gm 日线 eob 是 bar 结束时刻（北京
+          时间 naive datetime；SDK 文档未钉死日线 eob 的时分秒——可能 15:00:00 也
+          可能零点，normalize 把两种可能都折到零点，Task 10 live 对拍再实测收口）；
+          本地腿 trade_date 索引
+          是零点 naive。折零点后 formed_at/index 与本地腿逐字段可比（对拍口径），
+          时区层面 gm 与 tushare 同为北京时间的 naive datetime，无 tz 换算需求；
+        - 尾部 2×window+40 根截断：识别窗 window（§0=80）+ ATR（Wilder RMA ~14 期
+          收敛）与 local_extrema 掩码的预热冗余 + 停牌跳空后的根数冗余。回测腿吃
+          全湖 5 年历史，本函数 200 根是「预热充分前提下的最小带宽」——比回测短
+          但识别窗内数值已无预热差异（120 根预热 >> 14 期）。
+
+    33000 服务端上限注记（Task 2 文档 Q6/D17）：单次 history 上限 33000 条（gm
+    METADATA v3.0.162，SDK Python 层无此常量）。日线 500 自然日 ≈ 340 根 << 33000，
+    单次调用即足【无需分页】；若未来切 60s 频率（≈240 bar/日 → 500 天 12 万条超限），
+    须按时间段切片分页（每片 ≤65 交易日）——届时在此扩，不在本版预造。
+
+    失败契约：gm 异常/空结果/列缺失 → None + audit WARN（type=fetch_fail/fetch_empty，
+    带 symbol/err 详情）——编排层 None-check 跳过该标的，绝不拿残缺 df 喂识别
+    （识别器没有「数据可能短一截」的守卫义务）。api 实参 None → 经 _api() 惰性取
+    （测试 monkeypatch _GM 注入替身的离线路径）。
+    """
+    a = _api() if api is None else api
+    n_roots = 2 * int(ID_PARAMS["window"]) + 40          # §0 快照 window=80 → 200 根
+    try:
+        start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=_FETCH_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        raw = a.history(symbol=to_gm_symbol(ts_symbol), frequency="1d",
+                        start_time=start, end_time=end_date,
+                        fields="eob,open,high,low,close,volume",
+                        skip_suspended=True, fill_missing=None,
+                        adjust=a.ADJUST_PREV, adjust_end_time=end_date, df=True)
+        if raw is None or len(raw) == 0:
+            _audit_warn("fetch_empty", symbol=ts_symbol, end_date=end_date, rows=0)
+            return None
+        out = raw[["open", "high", "low", "close", "volume"]].copy()   # 列缺失 → KeyError 进下方统一收口
+        out.index = pd.DatetimeIndex(pd.to_datetime(raw["eob"])).normalize()
+        out = out.sort_index()                                        # 升序（ATR/滑窗算子前提）
+        return out.tail(n_roots)                                      # 尾部截断：保最近、弃最老
+    except Exception as e:
+        # gm 抛错（GmError/断连）与形状异变（列缺失/schema 漂移）统一 WARN+None：
+        # 两者同属「取不到合规件数据」，audit 带异常摘要供晨检定位是通道问题还是口径问题
+        _audit_warn("fetch_fail", symbol=ts_symbol, end_date=end_date,
+                    err=f"{type(e).__name__}: {e}")
+        return None
+
+
+# 交易日历推导源：沪深300 现货指数。Why 指数而非个股：指数每个交易日必有 bar（无
+# 停牌/退市概念），eob 序列就是「窗口内真实发生过交易的日集」；Why 不用日历 API
+# （get_trading_dates，Q10）：日历与行情是两条服务端口径，多一层转换就多一处两腿
+# 分叉面——历从指数 bar 自推，与 fetch_df_upto 的 bar 同源自洽（对拍时历与 K 线
+# 不会互相矛盾）。
+_CALENDAR_INDEX = "SHSE.000300"
+
+
+def build_calendar(api, end_date: str, lookback_days: int = 500) -> list:
+    """拉 SHSE.000300 日线 eob 序列 → 升序去重 YYYY-MM-DD 交易日历。
+
+    lookback_days 是【自然日】回看窗宽（默认 500：trading_days_between 的消费场景
+    是 max_holding≤20/max_wait≤8 量级的日数差，500 自然日 ≈ 340 交易日的历史深度
+    富余两个数量级；调用方要更长窗显式传参）。指数无除权事件，adjust 不参与（不
+    传即 SDK 默认 None=不复权——对 eob 日期序列零影响）。
+
+    失败契约：gm 异常/空结果 → []（空历）+ audit WARN（cal_fetch_fail）。空历的
+    下游语义见 trading_days_between 头注——编排层（Task 8）必须对空历显式降级
+    （停扫或保守处置），本层不兜底造历（造一个错的历比没有历更危险）。
+    """
+    a = _api() if api is None else api
+    try:
+        start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=int(lookback_days))).strftime("%Y-%m-%d")
+        raw = a.history(symbol=_CALENDAR_INDEX, frequency="1d", start_time=start,
+                        end_time=end_date, fields="eob", df=True)
+        if raw is None or len(raw) == 0:
+            _audit_warn("cal_fetch_empty", end_date=end_date, lookback_days=int(lookback_days))
+            return []
+        # eob→YYYY-MM-DD 字符串化去重排序：index 每日一根（日线），set 防御性去重
+        # 只为把「重复行=服务端异变」折成无害结果（历的成员语义天然是集合）
+        return sorted({pd.Timestamp(t).strftime("%Y-%m-%d") for t in raw["eob"]})
+    except Exception as e:
+        _audit_warn("cal_fetch_fail", end_date=end_date, lookback_days=int(lookback_days),
+                    err=f"{type(e).__name__}: {e}")
+        return []
+
+
+def trading_days_between(cal, start, end) -> int:
+    """数 (start, end] 区间内的交易日——不含 start、含 end（trading/compute/stop.py:22
+    trading_days_between 的单文件可移植重述，口径逐字对齐）。
+
+    Why (start, end]：start 锚 formed_at/entry_date（信号形成/进场当日），end 是
+    「今日已到」的判断日——持有计数从进场次一交易日数起、含今日，与本地腿
+    max_holding/max_wait/cooldown 的日数差完全同式（跨腿对齐的命门，差一位就
+    双腿一进一出的错位平仓）。
+
+    边界（与 stop.py:22-70 逐字同语义）：
+        - start/end 缺失或解析失败（含非 str 类型）→ 0（保守视为窗口内，向后兼容）；
+        - ed <= sd → 0（同日=零持有、倒序=脏数据）。
+
+    与 stop.py 的【刻意差异】——空历返 0 而非退化自然日：
+        stop.py 在 trade_cal 取不到时退化自然日差（保守上界：自然日 ≥ 交易日，
+        宁可多判超期早退出）。单文件没有仓库 calendar 模块可依赖（C3），历由调用
+        方经 build_calendar 就位并【保证非空】；空历=取数已失败，此时本函数返 0
+        意味着「视同未超期」（fail-open，方向与 stop.py 相反）——因此空历绝不能
+        静默发生，编排层（Task 8）对 build_calendar 空结果必须显式降级（停扫/人工
+        处置），本函数保持纯函数可测、不做隐性兜底（造一个错历比没有历更危险）。
+    """
+    try:
+        sd = datetime.strptime(start, "%Y-%m-%d")   # None/非串/错格式 → TypeError/ValueError
+        ed = datetime.strptime(end, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return 0                                    # 日期缺失/格式错 → 0（保守窗口内）
+    if ed <= sd:
+        return 0
+    if not cal:
+        return 0                                    # 空历=未知（语义见头注，编排层责防）
+    # 升序字符串历上的双二分：(start, end] = bisect_right(end) − bisect_right(start)
+    # ——YYYY-MM-DD 定长格式字典序即时间序；与 stop.py 的自然日逐日枚举 memberships
+    # 数学等价（O(log n)，260 只标的 × 巡检频次下差一个量级的常数）
+    return bisect.bisect_right(cal, end) - bisect.bisect_right(cal, start)
 
 
 # ============================ §3 状态层（state.pkl 原子读写 + 人工风控双值文件）============================
