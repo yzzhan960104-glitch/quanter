@@ -109,10 +109,10 @@ git commit -m "docs(emquant): gm SDK 源码级 API 核对——签名/常量/列
   - trade_cfg = `_trade_cfg()`（pos_cap/max_wait/max_holding/trailing env 实弹值）；
   - **口径对齐说明写入 json**：本地引擎 exec 实弹 = EXEC_DEFAULTS（无实验 override 时）；若发现 `_eod` 有实验 override 通道且当前激活（查 `research/proposals.py` 最新 ACCEPTED + engine 读取点），把激活实验参数合并进 exec_params 并记 sources；
   - **cooldown 语义核实**：读 `trading/engine.py` `_eod`，确认 scan 后是否有 cooldown 去重（strategy.scan_at 有、scan_live 无——引擎层是否补）；结论与依据写进 json 的 `notes`；
-  - universe：定位引擎实盘 `_load_universe`（grep `trading/` 找定义），**复刻其口径**（含 `_filter_chuangke_kechuang` 剔 300/301/688/689），从 data_lake 取该池子；若池子 >300，按近 60 日成交额降序取前 300；若 <300 全取。列表用 ts 格式（`600000.SH`）。
+  - universe：定位引擎实盘 `_load_universe`（grep `trading/` 找定义），**复刻其口径**（含 `_filter_chuangke_kechuang`——**08-21 勘误：该过滤是「只保留」创业板/科创板 300/301/688/689，北交所与主板均不在池；原文「剔 300/301/688/689」方向写反**），从 data_lake 取该池子；若池子 >300，按近 60 日成交额降序取前 300；若 <300 全取。列表用 ts 格式（`300750.SZ`）。
   - fingerprint = `hashlib.sha256(json.dumps({id,exec,trade,universe_symbols}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]`。
 - [ ] **Step 2: 运行** `.venv310/Scripts/python.exe emquant/export_snapshot.py` → 生成两个 json；打印 fingerprint 与键数、universe 数。
-- [ ] **Step 3: 验证产物**：`.venv310/Scripts/python.exe -c "import json;d=json.load(open('emquant/config/params_snapshot.json',encoding='utf-8'));assert {'buy_limit_atr_mult','cooldown','trailing_grace','trailing_step','trailing_floor'}<=set(d['exec_params']);u=json.load(open('emquant/config/universe.json',encoding='utf-8'));assert len(u['symbols'])<=300;assert not any(s[:3] in ('300','301','688','689') for s in u['symbols'])"`
+- [ ] **Step 3: 验证产物**（**08-21 勘误：断言方向回改——universe 是创板科创 only 池（只保留 300/301/688/689），原 `assert not any(...)` 把保留池当剔除集，按原文跑必炸；正确断言是 all 在池内**）：`.venv310/Scripts/python.exe -c "import json;d=json.load(open('emquant/config/params_snapshot.json',encoding='utf-8'));assert {'buy_limit_atr_mult','cooldown','trailing_grace','trailing_step','trailing_floor'}<=set(d['exec_params']);u=json.load(open('emquant/config/universe.json',encoding='utf-8'));assert 0<len(u['symbols'])<=300;assert all(s[:3] in ('300','301','688','689') for s in u['symbols'])"`
 - [ ] **Step 4: Commit**
 
 ```bash

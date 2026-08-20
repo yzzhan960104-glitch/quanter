@@ -262,6 +262,38 @@ def test_fetch_limit_down_total_failure_returns_none_with_audit(pilot, monkeypat
     assert "limit_down_fetch_fail" in rows and "300750.SZ" in rows
 
 
+def test_fetch_limit_down_t1_close_fallback(pilot, monkeypatch, tmp_path):
+    """三级回退链末级（终审 I-3）：get_history_symbol 整体失败 + prev_date 在场 →
+    T-1 日线末根 close 自算跌停价（创板 20%）+ WARN 留痕（limit_down_fallback_t1）。
+
+    期望值从同一替身的 fetch_df_upto 末根 close 推出（合成序列确定性，无手算魔法数）
+    ——断言的正是「卖单价 = round(T-1收×0.80, 2)」这条链本身。
+    """
+    monkeypatch.setattr(pilot, "AUDIT_DIR", tmp_path)
+    probe = FakeGm()                                     # 行情通道正常：推 T-1 末根 close
+    prev_close = float(pilot.fetch_df_upto(probe, "300750.SZ", "2026-08-20")["close"].iloc[-1])
+    expected = pilot.limit_down_price(prev_close, "300750.SZ")
+    assert expected == round(prev_close * 0.80, 2)       # 20% 档自算（300 创业板）
+
+    fake = FakeGm(raise_on_symbol_info=True)            # 证券信息通道整体失败
+    got = pilot.fetch_limit_down(fake, "300750.SZ", end_date="2026-08-21",
+                                 prev_date="2026-08-20")
+    assert got == pytest.approx(expected)
+    rows = (tmp_path / f"audit_{date.today():%Y%m%d}.csv").read_text(encoding="utf-8")
+    assert "limit_down_fetch_fail" in rows               # 首级失败留痕（回退不吞证据）
+    assert "limit_down_fallback_t1" in rows              # 回退触发进晨检面
+
+
+def test_fetch_limit_down_t1_fallback_also_fails_gives_up(pilot, monkeypatch, tmp_path):
+    """回退链全败（I-3 边界）：prev_date 未传（编排层无历可喂）或 T-1 取数也失败 →
+    None 放弃——绝不造错价顶上（调用方 expire_skip_no_limit_down 语义的前提）。"""
+    monkeypatch.setattr(pilot, "AUDIT_DIR", tmp_path)
+    fake = FakeGm(raise_on_symbol_info=True, raise_on_history=True)   # 双通道全断
+    assert pilot.fetch_limit_down(fake, "300750.SZ", end_date="2026-08-21",
+                                  prev_date="2026-08-20") is None
+    assert pilot.fetch_limit_down(fake, "300750.SZ", end_date="2026-08-21") is None  # 未传 prev_date
+
+
 # ============================================================================
 # decide_pending：cancel_on 触价 + max_wait 严格大于（C9 口径红线）
 # ============================================================================

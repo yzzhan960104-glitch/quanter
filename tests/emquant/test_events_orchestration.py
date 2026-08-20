@@ -44,6 +44,11 @@
     - 对账失败退避（R1 M-4）：reconcile 查询失败后 60s 窗内 on_tick 不重试；
     - ② 后防御性落盘（R1 M-5）：超期卖上柜台后 state 先落——③④⑤ 中途异常不吃
       「柜台有单 state 无单」的双卖窗口；
+    - 终审 R2 修复面：跌停价三级回退（I-3——get_history_symbol 整体失败 → T-1
+      收盘自算 round(×0.80,2)）；定尺不足一手独立文案（M-5）；context.accounts
+      核验（M-1——空表/白名单不在场=故障 WARN）；unsubscribe 容错且账本恒清（M-4）；
+      tick 符号折算 WARN-skip 单事件降级（M-6）。fetch 末根不变量（I-2）与日历
+      「今日不在历」补计（I-1）在 test_data_layer / test_order_lifecycle 侧。
     - 入口抑制（Task 4 遗留）：§1 内核逐字块尾部 `if __name__ == "__main__": main()`
       在产物第 ~804 行、先于 §2-§7 拼接位执行——抑制块必须被组装器剪出到 head 区
       （§0 之前）且全产物唯一一份（复制会让第二次 _IS_MAIN 赋值把入口哑火）。
@@ -54,7 +59,7 @@ import csv
 import importlib.util
 import json
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -96,6 +101,17 @@ def pilot():
 
 class _Ctx:
     """gm context 占位（编排层不读其字段——日期口径走 _today_str seam，见 §6 头注）。"""
+
+
+class _CtxAccts:
+    """带 accounts 的 context 占位（终审 M-1：bootstrap 核验 context.accounts 用）。
+
+    形态对齐 Task 2 文档 Q1：context.accounts 是 Dict[account_id, Account]——测试只
+    需键集（值为任意），核验逻辑做成员测不触值。
+    """
+
+    def __init__(self, accounts):
+        self.accounts = accounts
 
 
 # ============================================================================
@@ -146,8 +162,12 @@ def _rt(pilot, fake, tmp_path, state=None):
 
 
 def _audit_rows(tmp_path):
-    """读 workdir 侧当日 audit CSV（§6 全部行经 _audit → audit_dir=workdir/audit）。"""
-    f = tmp_path / "audit" / f"audit_{date.today():%Y%m%d}.csv"
+    """读 workdir 侧当日 audit CSV（§6 全部行经 _audit → audit_dir=workdir/audit）。
+
+    文件名取夹具 TODAY（终审 M-3 后 audit_log 的按日分文件走 _today_str() seam，
+    _pin 已把它钉到 TODAY——读真实 date.today() 会在非 2026-08-21 的运行日错位）。
+    """
+    f = tmp_path / "audit" / f"audit_{TODAY.replace('-', '')}.csv"
     if not f.exists():
         return []
     return list(csv.reader(f.read_text(encoding="utf-8").splitlines()))
@@ -548,6 +568,49 @@ def test_pre_open_state_saved_after_expire_before_later_failure(pilot, tmp_path,
     assert len(sells) == 1 and sells[0]["symbol"] == "688981.SH"       # ② 的单已先落
 
 
+def test_expired_close_t1_close_fallback_price(pilot, tmp_path, monkeypatch):
+    """跌停价 T-1 收盘回退（终审 I-3 编排面）：get_history_symbol 整体失败 + T-1 取数
+    成功 → 超期卖单价格 = round(T-1 收盘×0.80, 2)——「缺一行证券信息=整日放弃超期
+    平仓」的洞补上（API 通道故障不再吃掉存量退出，20% 自算在创板科创池内几乎恒等）。"""
+    fake = FakeGm(raise_on_symbol_info=True)            # 证券信息通道整体失败（盘前当日行未生成的形态）
+    _back_counter_position(fake, "SHSE.688981", 150, 10.0)   # 持仓配柜台背书（absorb ③ 语义）
+    i_t1 = CAL.index(T_MINUS_1)
+    st = pilot._initial_state()
+    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - 21])   # 21 > 20 超期
+    _pin(pilot, monkeypatch, tmp_path, universe=())                     # 无信号干扰
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    # 期望值：同一行情口径下 T-1 末根 close 的 20% 自算（替身确定性合成，无手算魔法数）
+    prev_close = float(pilot.fetch_df_upto(FakeGm(), "688981.SH", T_MINUS_1)["close"].iloc[-1])
+    expected = pilot.limit_down_price(prev_close, "688981.SH")
+
+    rt.pre_open(_Ctx())
+
+    sells = [c for c in fake.calls if c.get("api") == "order_volume" and c["side"] == 2]
+    assert len(sells) == 1 and sells[0]["symbol"] == "SHSE.688981"
+    assert sells[0]["price"] == pytest.approx(expected)                 # = round(T-1收×0.80, 2)
+    dl_rows = (tmp_path / "dl_audit").glob("audit_*.csv")
+    assert any("limit_down_fallback_t1" in l
+               for f in dl_rows for l in f.read_text(encoding="utf-8").splitlines())  # 回退进晨检面
+
+
+def test_pre_open_sizing_below_one_lot_blocked_with_clear_reason(pilot, tmp_path, monkeypatch):
+    """定尺不足一手（终审 M-5）：equity×pos_cap 按当前 entry 凑不出 100 股 →
+    ORDER_BLOCKED 文案明示「定尺不足一手」——不再落进 check_caps ① 的「委托参数
+    残缺」（那是查询通道故障语义，会误导晨检排障方向）。"""
+    fake = FakeGm()
+    fake.cash["nav"] = 10_000.0                          # 10,000×5%=500 < 100×10.4=1040
+    sigs = {"300750.SZ": _signal(pilot)}
+    _pin(pilot, monkeypatch, tmp_path, universe=("300750.SZ",), detect=_detect_map(sigs))
+    rt = _rt(pilot, fake, tmp_path)
+    rt.pre_open(_Ctx())
+
+    assert [c for c in fake.calls if c.get("api") == "order_volume"] == []   # 不发废单
+    blocked = _details(tmp_path, "ORDER_BLOCKED")
+    assert len(blocked) == 1 and "定尺不足一手" in blocked[0]["reason"]
+    assert "100 股" in blocked[0]["reason"]
+    assert len(_details(tmp_path, "SIGNAL")) == 1                       # ③ 扫描照常留痕
+
+
 # ============================================================================
 # on_tick 巡检（pending 撤单 / 持仓离场 / tp1 已知分歧 / 在途卖单防重）
 # ============================================================================
@@ -655,6 +718,27 @@ def test_on_tick_reconcile_failure_backoff(pilot, tmp_path, monkeypatch):
                 if w.get("type") == "reconcile_orders_fail"]) == 1          # 无新增失败
 
 
+def test_on_tick_unmappable_symbol_warns_and_skips(pilot, tmp_path, monkeypatch):
+    """符号折算 WARN-skip（终审 M-6）：tick 带试点外符号（期货所形态）→ 不炸巡检环，
+    WARN 留痕跳过本事件；后续正常标的的 tick 照常处理（止损链不被单支异变劫持）。"""
+    fake = FakeGm()
+    _back_counter_position(fake, "SZSE.300750", 400, 10.4)
+    st = pilot._initial_state()
+    st["positions"]["300750.SZ"] = _managed_position(pilot, remaining=400)
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+
+    rt.on_tick(_Ctx(), {"symbol": "CFFEX.IF2409", "price": 3300.0})      # 异变 tick：不抛即过
+    warns = [w for w in _details(tmp_path, "WARN")
+             if w.get("type") == "tick_symbol_unmappable"]
+    assert len(warns) == 1 and warns[0]["symbol"] == "CFFEX.IF2409"
+    assert [c for c in fake.calls if c.get("api") == "order_volume"] == []
+
+    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 9.4})          # 正常 tick 照常止损
+    sells = [c for c in fake.calls if c.get("api") == "order_volume"]
+    assert len(sells) == 1 and sells[0]["side"] == 2                     # 巡检环未被劫持
+
+
 # ============================================================================
 # reconcile：幂等三查入口 + 持仓富化（信号几何 → 止损/止盈价）
 # ============================================================================
@@ -746,6 +830,31 @@ def test_bootstrap_missing_token_raises(pilot, tmp_path, monkeypatch):
         rt.bootstrap(_Ctx())
 
 
+def test_bootstrap_verifies_context_accounts(pilot, tmp_path, monkeypatch):
+    """context.accounts 核验（终审 M-1，Task 2 文档 Q1）：空表=故障 WARN（_set_accounts
+    静默 return 空表——不是正常态）；白名单账户不在场=终端绑定异变 WARN；在场=零此类
+    WARN。三形态一次钉死（WARN 不 raise：init 炸掉连 INIT 行都留不下，观测面更差）。"""
+    def _boot(accounts_ctx, sub):
+        fake = FakeGm()
+        work = tmp_path / sub                                 # 三形态各自独立 workdir（audit 不串读）
+        cfg_dir = work / "config"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / "runtime.json").write_text(
+            json.dumps({"token": "test-token", "strategy_id": "st-1",
+                        "account_id": pilot.PILOT_ACCOUNT_ID}), encoding="utf-8")
+        _pin(pilot, monkeypatch, work)
+        pilot.PilotRuntime(fake, workdir=work).bootstrap(accounts_ctx)
+        return [w for w in _details(work, "WARN")
+                if w.get("type") in ("bootstrap_accounts_empty", "bootstrap_account_absent")]
+
+    warns_empty = _boot(_CtxAccts({}), "empty")               # 空表：账户拉取失败形态
+    assert len(warns_empty) == 1 and warns_empty[0]["type"] == "bootstrap_accounts_empty"
+    warns_absent = _boot(_CtxAccts({"other-account": object()}), "absent")   # 白名单不在场
+    assert len(warns_absent) == 1 and warns_absent[0]["type"] == "bootstrap_account_absent"
+    warns_ok = _boot(_CtxAccts({pilot.PILOT_ACCOUNT_ID: object()}), "ok")    # 在场：零此类 WARN
+    assert warns_ok == []
+
+
 # ============================================================================
 # after_close：审计收尾 + 清订阅 + state 落盘
 # ============================================================================
@@ -763,6 +872,28 @@ def test_after_close_closes_the_day(pilot, tmp_path, monkeypatch):
     assert unsubs[0]["frequency"] == "tick"
     assert rt._subscribed == []
     assert (tmp_path / "state" / "state.pkl").exists()
+
+
+def test_after_close_unsubscribe_failure_still_clears_ledger(pilot, tmp_path, monkeypatch):
+    """清订阅容错（终审 M-4）：unsubscribe 抛错（断连/已收市）→ WARN 留痕不炸盘后
+    收尾，且账本【无论成败都清】——失败不清的后果是次日差集恒空（gm 侧订阅可能已
+    死而账本记在场）= 巡检静默断供；清账本后次日 pre_open ⓪' 全量重订自洽恢复。"""
+    fake = FakeGm()
+
+    def _boom(symbols, frequency="1d"):
+        raise RuntimeError('{"status": 1100, "message": "模拟退订失败（终端已断连）"}')
+
+    fake.unsubscribe = _boom                                         # 实例级注入（只影响本替身）
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path)
+    rt._subscribed = ["300750.SZ"]
+    rt.after_close(_Ctx())                                           # 不抛即过（EOD/state 不陪跳）
+
+    warns = [w for w in _details(tmp_path, "WARN") if w.get("type") == "unsubscribe_fail"]
+    assert len(warns) == 1 and warns[0]["symbols"] == ["300750.SZ"]
+    assert rt._subscribed == []                                      # 失败也清账本（红线）
+    assert "EOD" in _events(tmp_path)                                # 收尾行已落
+    assert (tmp_path / "state" / "state.pkl").exists()               # state 落盘不跳
 
 
 # ============================================================================

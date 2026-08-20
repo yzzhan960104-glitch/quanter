@@ -907,9 +907,11 @@ def _api():
     return _GM
 
 
-# ts↔gm 交易所码表：universe 导出侧已过滤北交所（300/301/688/689 前缀），这里只见
-# 沪深两市；表外后缀一律 fail-loud——见到 .BJ 说明上游过滤被绕过，映射错一只 =
-# 取数/下单打到错误市场，必须在启动期炸给人工（宁停不错）。
+# ts↔gm 交易所码表：universe 导出侧是创板科创 only 池——【只保留】创业板/科创板
+# （300/301/688/689 前缀），北交所与主板均不在池（08-21 勘误：原注「过滤北交所
+# （300/301/688/689 前缀）」把保留池误写成剔除集）；这里只见沪深两市；表外后缀
+# 一律 fail-loud——见到 .BJ 说明上游过滤被绕过，映射错一只 = 取数/下单打到错误
+# 市场，必须在启动期炸给人工（宁停不错）。
 _TS_SUFFIX_TO_GM = {".SH": "SHSE", ".SZ": "SZSE"}
 _GM_EXCHANGE_TO_TS = {v: k for k, v in _TS_SUFFIX_TO_GM.items()}
 
@@ -925,8 +927,9 @@ def to_gm_symbol(ts: str) -> str:
     exchange = _TS_SUFFIX_TO_GM.get(dot + suffix)
     if not code or exchange is None:
         raise ValueError(
-            f"无法映射 gm 符号（仅支持沪深 ts 格式如 600000.SH/300750.SZ，北交所已在 "
-            f"universe 导出侧过滤，见到即上游异变须人工介入）：{ts!r}")
+            f"无法映射 gm 符号（仅支持沪深 ts 格式如 300750.SZ/688111.SH；universe 是 "
+            f"创板科创 only 池——只保留 300/301/688/689，北交所与主板均不在池，见到即 "
+            f"上游异变须人工介入）：{ts!r}")
     return f"{exchange}.{code}"
 
 
@@ -995,10 +998,10 @@ def fetch_df_upto(api, ts_symbol: str, end_date: str):
     单次调用即足【无需分页】；若未来切 60s 频率（≈240 bar/日 → 500 天 12 万条超限），
     须按时间段切片分页（每片 ≤65 交易日）——届时在此扩，不在本版预造。
 
-    失败契约：gm 异常/空结果/列缺失 → None + audit WARN（type=fetch_fail/fetch_empty，
-    带 symbol/err 详情）——编排层 None-check 跳过该标的，绝不拿残缺 df 喂识别
-    （识别器没有「数据可能短一截」的守卫义务）。api 实参 None → 经 _api() 惰性取
-    （测试 monkeypatch _GM 注入替身的离线路径）。
+    失败契约：gm 异常/空结果/列缺失/【末根缺 end_date】→ None + audit WARN（type=
+    fetch_fail/fetch_empty/fetch_end_missing，带 symbol/err 详情）——编排层 None-check
+    跳过该标的，绝不拿残缺 df 喂识别（识别器没有「数据可能短一截」的守卫义务）。
+    api 实参 None → 经 _api() 惰性取（测试 monkeypatch _GM 注入替身的离线路径）。
     """
     a = _api() if api is None else api
     n_roots = 2 * int(ID_PARAMS["window"]) + 40          # §0 快照 window=80 → 200 根
@@ -1015,7 +1018,17 @@ def fetch_df_upto(api, ts_symbol: str, end_date: str):
         out = raw[["open", "high", "low", "close", "volume"]].copy()   # 列缺失 → KeyError 进下方统一收口
         out.index = pd.DatetimeIndex(pd.to_datetime(raw["eob"])).normalize()
         out = out.sort_index()                                        # 升序（ATR/滑窗算子前提）
-        return out.tail(n_roots)                                      # 尾部截断：保最近、弃最老
+        out = out.tail(n_roots)                                       # 尾部截断：保最近、弃最老
+        # 末根不变量（终审 I-2）：定点取数的契约是【闭区间含 end_date】——末根日期
+        # ≠ end_date 说明 history 的 end_time 端性行为异变（服务端把 end 当开区间/时
+        # 刻边界截掉当日 bar）。此时识别内核会在「少了最新一根」的序列上算信号：
+        # formed_at/颈线全部偏一日且不报错——条件性静默零信号或错位信号，比取数失败
+        # 更难察觉。宁可 WARN+None 让编排层跳过（故障可观测），不喂残缺 df。
+        if out.index[-1].strftime("%Y-%m-%d") != end_date:
+            _audit_warn("fetch_end_missing", symbol=ts_symbol, end_date=end_date,
+                        last_bar=out.index[-1].strftime("%Y-%m-%d"), rows=len(out))
+            return None
+        return out
     except Exception as e:
         # gm 抛错（GmError/断连）与形状异变（列缺失/schema 漂移）统一 WARN+None：
         # 两者同属「取不到合规件数据」，audit 带异常摘要供晨检定位是通道问题还是口径问题
@@ -1081,6 +1094,17 @@ def trading_days_between(cal, start, end) -> int:
         意味着「视同未超期」（fail-open，方向与 stop.py 相反）——因此空历绝不能
         静默发生，编排层（Task 8）对 build_calendar 空结果必须显式降级（停扫/人工
         处置），本函数保持纯函数可测、不做隐性兜底（造一个错历比没有历更危险）。
+
+    「end 不在历」补计 +1（终审 I-1）：
+        build_calendar 的指数 bar 只到最近【已收盘】日——盘中（pre_open 09:15 /
+        on_tick 全日）调用的 end=今日恒不在历上（今日指数 bar 要 15:00 后才存在），
+        若只数历成员，max_wait/cooldown/holding_days 会比本地系统性少计一日（本地
+        真身 pre_open.py:574 / engine.py:1315 在全量 trade_cal 上当日计入）。修法：
+        end > cal[-1] 时把 end 视为交易日补计 1。前提论证：gm 终端 schedule 仅在
+        交易日触发事件（非交易日无 pre_open/on_tick 调用），故 end 超出历尾时 end
+        必是「已到但未收盘」的交易日；若周末被意外调用，+1 对 max_wait/max_holding
+        是更早退出的保守方向，对 cooldown 与本地「end 计入」口径同向漂一日——两
+        消费面合计，补计是口径对齐项而非风险项。end 在历内（盘后/回放场景）零影响。
     """
     try:
         sd = datetime.strptime(start, "%Y-%m-%d")   # None/非串/错格式 → TypeError/ValueError
@@ -1094,7 +1118,10 @@ def trading_days_between(cal, start, end) -> int:
     # 升序字符串历上的双二分：(start, end] = bisect_right(end) − bisect_right(start)
     # ——YYYY-MM-DD 定长格式字典序即时间序；与 stop.py 的自然日逐日枚举 memberships
     # 数学等价（O(log n)，260 只标的 × 巡检频次下差一个量级的常数）
-    return bisect.bisect_right(cal, end) - bisect.bisect_right(cal, start)
+    n = bisect.bisect_right(cal, end) - bisect.bisect_right(cal, start)
+    if end > cal[-1]:
+        n += 1                                       # 今日不在历（盘中恒态）→ 补计（头注 I-1）
+    return n
 
 
 # ============================ §3 状态层（state.pkl 原子读写 + 人工风控双值文件）============================
@@ -1216,7 +1243,11 @@ def audit_log(event: str, audit_dir=None, **fields) -> None:
     """
     d = Path(audit_dir) if audit_dir is not None else AUDIT_DIR   # 调用时查模块常量：monkeypatch 即生效
     d.mkdir(parents=True, exist_ok=True)
-    p = d / f"audit_{date.today():%Y%m%d}.csv"                 # 按日分文件：晨检只看当天、复核期自然滚动
+    # 按日分文件走 _today_str() seam（终审 M-3）：全模块「今日」单一口径——跨午夜
+    # 补跑（15:35 盘后跨零点重触发等极端场景）与测试注入（monkeypatch _today_str 钉
+    # 日期）都落在同一份按日文件里；直取 date.today() 会在注入态把审计行写进真实
+    # 今天的文件，事件日期与文件日期口径分叉。晨检只看当天、复核期自然滚动不变。
+    p = d / f"audit_{_today_str().replace('-', '')}.csv"
     with p.open("a", encoding="utf-8", newline="") as f:       # newline=""：csv 模块接管换行（Windows CRLF 可控）
         csv.writer(f).writerow([
             datetime.now().isoformat(timespec="seconds"), event,
@@ -1284,6 +1315,11 @@ def check_caps(sod_state, equity, positions_mv, open_buy_amount, price, qty, tod
          未终态 buy 委托按 (qty−filled)×price 合计（成交部分已体现在持仓市值不
          重复扣；卖单是退出方向不占增量额度）。「逐单扣减」由调用方承担：每挂出
          一单把本单金额累进 open_buy_amount 再喂下一单（对齐 pre_open 循环侧）。
+         注记（终审 M-7）：CAP=1.0（缺省不限制）时本闸【仍执行】额度检查——本地
+         腿 max_pos=1.0 时直接跳过检查（phases/pre_open.py:510 `if max_pos < 1.0`
+         才启用）；pilot 恒查 = 恒紧于本地（quota=equity−mv−ob 仍会拦「超出总权益
+         减占额」的单），单票 5% 定尺下该差额几乎不可达，方向保守（多拦不错放）
+         可接受，不为对齐而引入「CAP≥1 跳过」的分支面。
       ③ 单日新挂 ≤ PILOT_MAX_NEW_ORDERS_PER_DAY（试点硬闸 FR3，§0 写死 2）：
          当日 placed 已达上限 → 拒（试点期规模闸，验收后可放开）。
       ④ 单票金额 ≤ PILOT_MAX_POSITION_PCT×equity（试点硬闸 FR3，§0 写死 5%）：
@@ -1459,52 +1495,74 @@ def limit_down_price(prev_close, symbol) -> float:
     return round(float(prev_close) * (1.0 - _limit_rate(symbol)), 2)
 
 
-def fetch_limit_down(api, ts_symbol, end_date=None):
+def fetch_limit_down(api, ts_symbol, end_date=None, prev_date=None):
     """取当日跌停价：get_history_symbol 的 lower_limit 优先（Q7 权威），失败/缺字段
-    回退 limit_down_price 自算——API 值优先。
+    逐级回退——同行 pre_close 自算 → prev_date（T-1）收盘价自算——API 值优先。
 
     Why API 优先：柜台/数据服务知道真实板位与 ST 状态（自算只认代码前缀），且
     除权日 pre_close 口径由服务端钉死；Why 保留自算回退：查询失败（断连/字段缺）
     不能让跌停定价整体失效——自算档位在创板科创 universe 内与 API 值几乎恒等。
 
-    失败契约：查询异常/空行/上下限与昨收全缺 → None + audit WARN（type=
-    limit_down_fetch_fail / limit_down_unavailable）——调用方（Task 8）对 None
-    显式降级（跳过依赖跌停价的动作），绝不造一个错价顶上（错的跌停价 = 卖单
-    挂错价位或风控误判）。
+    三级回退链（终审 I-3）：
+        ① API 值：lower_limit 有效正数即采信；
+        ② 同行 pre_close 自算（与 lower_limit 同源同日，口径自洽）；
+        ③ prev_date 收盘价自算：get_history_symbol 整体失败（异常/空行/双字段缺，
+           典型形态=盘前调用时【当日】证券信息行尚未生成）时，用 T-1 日线末根
+           close 走 limit_down_price（预置的 20% 自算）。prev_date 由调用方传入
+           （历归编排层所有：pre_open ② 传 t_minus_1）；不传则本层无从定 T-1
+           （自然日减一在周末/节假日错位），维持 None 放弃。Why 取 T-1 而非
+           「end_date 前一自然日」：跌停价=昨收×(1−档位)，除权日外 T-1 收盘就是
+           真值昨收；fetch_df_upto 的末根不变量（I-2）同时保证末根恰是 prev_date
+           当日。回退触发即 WARN 留痕（limit_down_fallback_t1）——API 通道降级
+           须进晨检面。
+
+    失败契约：三级全败 → None + audit WARN（type=limit_down_fetch_fail /
+    limit_down_unavailable）——调用方（Task 8）对 None 显式降级（跳过依赖跌停价
+    的动作），绝不造一个错价顶上（错的跌停价 = 卖单挂错价位或风控误判）。
     """
     a = _api() if api is None else api
     day = end_date or f"{date.today():%Y-%m-%d}"  # 未传即当日（调用方编排层显式传日保可测）
+    row = None
     try:
         rows = a.get_history_symbol(symbol=to_gm_symbol(ts_symbol),
                                     start_date=day, end_date=day, df=False)
         row = rows[-1] if rows else None          # 单日窗取末行（服务端返回序不假设）
+        if row is None:
+            _audit_warn("limit_down_fetch_fail", symbol=ts_symbol, end_date=day,
+                        err="空返回（无该日证券信息行）")
     except Exception as e:
         _audit_warn("limit_down_fetch_fail", symbol=ts_symbol, end_date=day,
                     err=f"{type(e).__name__}: {e}")
-        return None
-    if row is None:
-        _audit_warn("limit_down_fetch_fail", symbol=ts_symbol, end_date=day,
-                    err="空返回（无该日证券信息行）")
-        return None
-    # API 值优先：lower_limit 是有效正数（防 None/0/NaN——NaN 参与比较恒 False 被
-    # 反向写法拦下）即采信
-    ll = row.get("lower_limit")
-    try:
-        ll = float(ll)
-    except (TypeError, ValueError):
-        ll = None
-    if ll is not None and ll == ll and ll > 0:
-        return ll
-    # 回退自算：昨收用同行 pre_close（与 lower_limit 同源同日，口径自洽）
-    pc = row.get("pre_close")
-    try:
-        pc = float(pc)
-    except (TypeError, ValueError):
-        pc = None
-    if pc is not None and pc == pc and pc > 0:
-        return limit_down_price(pc, ts_symbol)
-    _audit_warn("limit_down_unavailable", symbol=ts_symbol, end_date=day,
-                err=f"lower_limit 与 pre_close 均缺（row 键：{sorted(row)}）")
+        row = None                                # 异常不提前 return：③ 的 T-1 回退仍可救
+    if row is not None:
+        # API 值优先：lower_limit 是有效正数（防 None/0/NaN——NaN 参与比较恒 False 被
+        # 反向写法拦下）即采信
+        ll = row.get("lower_limit")
+        try:
+            ll = float(ll)
+        except (TypeError, ValueError):
+            ll = None
+        if ll is not None and ll == ll and ll > 0:
+            return ll
+        # 回退②：昨收用同行 pre_close（与 lower_limit 同源同日，口径自洽）
+        pc = row.get("pre_close")
+        try:
+            pc = float(pc)
+        except (TypeError, ValueError):
+            pc = None
+        if pc is not None and pc == pc and pc > 0:
+            return limit_down_price(pc, ts_symbol)
+        _audit_warn("limit_down_unavailable", symbol=ts_symbol, end_date=day,
+                    err=f"lower_limit 与 pre_close 均缺（row 键：{sorted(row)}）")
+    # 回退③（I-3）：API 路径整体失败 → T-1 收盘价自算（prev_date 由编排层喂入）
+    if prev_date is not None:
+        df = fetch_df_upto(a, ts_symbol, prev_date)   # None/WARN 自治（含 I-2 末根不变量）
+        if df is not None:
+            px = float(df["close"].iloc[-1])
+            est = limit_down_price(px, ts_symbol)
+            _audit_warn("limit_down_fallback_t1", symbol=ts_symbol, end_date=day,
+                        prev_date=prev_date, prev_close=px, price=est)
+            return est
     return None
 
 
@@ -2013,6 +2071,24 @@ class PilotRuntime:
         _c1_guard(cfg.get("account_id"))
         self.account = cfg.get("account_id") or PILOT_ACCOUNT_ID
         self.strategy_id = cfg.get("strategy_id") or ""
+        # context.accounts 核验（终审 M-1，Task 2 文档 Q1 权威）：_set_accounts 拉取
+        # 失败是【静默 return 空表】——空表不是「无账户正常态」而是故障；白名单账户
+        # 不在场 = 终端绑定异变（策略↔账户绑定由终端 tradegw 按 strategy_id 维护，
+        # SDK 层查不到账户类型标记，唯一可自动化的验证就是「指定的那个账户确实在场」
+        # ——C1 配置侧守卫的运行态对侧证据）。两形态均 WARN 留痕（中文、可处置）
+        # 不 raise：init 链炸掉终端侧只看到策略退出、audit 连 INIT 行都没有，观测面
+        # 反而更差；WARN 进晨检清单（README 三）由人工核对终端绑定后处置。
+        accts = getattr(context, "accounts", None) or {}
+        if not accts:
+            self._audit("WARN", type="bootstrap_accounts_empty", account=self.account,
+                        msg="context.accounts 为空：账户表拉取失败或终端未绑定账户"
+                            "（Q1：静默空表=故障非正常态），后续柜台查询将不可用——"
+                            "须人工核对终端账户绑定后重启策略")
+        elif self.account not in accts:
+            self._audit("WARN", type="bootstrap_account_absent", account=self.account,
+                        msg=f"白名单账户 {self.account} 不在 context.accounts"
+                            f"（在场：{sorted(accts)}）：终端绑定与下单账户不一致，"
+                            f"须人工核对策略的账户绑定")
         self.reconcile(context)
         self._subscribe_watchlist()
         a = self._a()
@@ -2257,7 +2333,10 @@ class PilotRuntime:
                 holding = trading_days_between(cal, entry_date, t_minus_1)
                 if not (holding > mh):
                     continue
-                ld = fetch_limit_down(a, sym, end_date=today) # API 值优先（§5.2）
+                # 跌停价三级回退链（§5.2，终审 I-3）：API 值 → 同行 pre_close 自算
+                # → T-1 收盘自算（prev_date 喂 t_minus_1——盘前查当日证券信息行失败
+                # 的兜底，防「缺一行=整日放弃超期平仓」）
+                ld = fetch_limit_down(a, sym, end_date=today, prev_date=t_minus_1)
                 if ld is None:
                     self._audit("WARN", type="expire_skip_no_limit_down", symbol=sym,
                                 entry_date=entry_date, holding_days=holding,
@@ -2356,6 +2435,15 @@ class PilotRuntime:
                                 reason=f"信号 entry_price 残缺（{sig.entry_price!r}），拒挂")
                     continue
                 qty = int(equity * pos_cap / entry / 100) * 100 if equity is not None else 0
+                if equity is not None and qty <= 0:
+                    # 定尺不足一手（终审 M-5）：equity×pos_cap 按当前 entry 定不出
+                    # 100 股整数倍——不是参数残缺（check_caps ① 的旧文案会误导晨检
+                    # 去查查询通道），是「额度买不起一手」的正常业务拒绝，独立文案。
+                    self._audit("ORDER_BLOCKED", symbol=sig.symbol, reason=(
+                        f"定尺不足一手（equity×pos_cap 不够 100 股："
+                        f"{equity:.2f}×{pos_cap:g}={equity * pos_cap:.2f} < 100×"
+                        f"{entry:.2f}={entry * 100:.2f}）"))
+                    continue
                 ok, why = check_caps(st, equity, positions_mv, open_buy,
                                      price=entry, qty=qty, today=today, cap=cap)
                 if not ok:
@@ -2420,7 +2508,19 @@ class PilotRuntime:
             self.reconcile(context)                           # 首跳必对账；此后按节流窗吸收成交
         cal = self._calendar(today)
         st = self.state
-        sym = from_gm_symbol(tick["symbol"])                  # gm→ts（fail-loud：非沪深=异变炸给人工）
+        # gm→ts 符号折算（终审 M-6：fail-loud 改 WARN-skip 单事件降级）——tick 事件
+        # 是高频入口，一支试点外标的（柜台/行情侧异变注入的 CFFEX 等）把整根回调炸
+        # 出=巡检环死一只 tick 事件全部陪跳，且 gm 侧不会因我们炸了就停推；改为
+        # WARN 留痕（type=tick_symbol_unmappable）+ 跳过本事件（该 tick 无从折算
+        # symbol，巡检判定本就无从做起），其余标的的后续 tick 照常。启动期/对账期的
+        # from_gm_symbol 仍 fail-loud（那里的异变=结构性问题该炸给人工）。
+        try:
+            sym = from_gm_symbol(tick["symbol"])
+        except Exception as e:
+            self._audit("WARN", type="tick_symbol_unmappable",
+                        symbol=(tick or {}).get("symbol"),
+                        err=f"{type(e).__name__}: {e}")
+            return
         px = float(tick["price"])
         acted = False
 
@@ -2485,8 +2585,20 @@ class PilotRuntime:
                     open_orders=open_cnt, placed_today=len(placed_today),
                     params_fingerprint=PARAMS_FINGERPRINT)
         if self._subscribed:
-            self._a().unsubscribe([to_gm_symbol(s) for s in self._subscribed],
-                                  frequency="tick")
+            # 清订阅容错（终审 M-4）：unsubscribe 抛错（断连/终端已收市）只 WARN 不炸
+            # 盘后收尾（EOD 行已落、state 落盘在后，炸了=丢尾），且【无论成败都清
+            # 账本】——失败不清的后果是次日差集恒空：gm 侧订阅可能已死（会话断开），
+            # 账本却记着在场，pre_open ⓪' 的增量订阅永远不下发 = 巡检静默断供且无人
+            # 知道。清账本后次日 ⓪' 按最新 state 全量重订（gm subscribe 幂等性不赌
+            # SDK、已订阅标的重复下发也无害——_subscribe_incremental 头注口径），
+            # 语义自洽：账本恒等于「本会话已请求订阅面」，跨日恢复以重订为准。
+            try:
+                self._a().unsubscribe([to_gm_symbol(s) for s in self._subscribed],
+                                      frequency="tick")
+            except Exception as e:
+                self._audit("WARN", type="unsubscribe_fail",
+                            symbols=list(self._subscribed),
+                            err=f"{type(e).__name__}: {e}")
             self._subscribed = []
         save_state(st, path=self.state_file)
 

@@ -211,6 +211,29 @@ def test_fetch_df_upto_empty_returns_none(pilot, monkeypatch, tmp_path):
     assert any("fetch_empty" in r for r in rows)
 
 
+def test_fetch_df_upto_missing_last_bar_returns_none_with_audit(pilot, monkeypatch, tmp_path):
+    """末根不变量（终审 I-2）：history 返回缺 end_date 末根的 df → None + WARN。
+
+    Why 拦：end_time 端性若被服务端当开区间/时刻边界处理，少了最新一根的序列仍能
+    过识别内核（在偏一日的 formed_at 上算信号或静默零信号）——条件性静默比取数
+    失败更难察觉，三行防御让故障进 audit 晨检面（fetch_end_missing）。
+    """
+
+    class _MissingTail(FakeGm):
+        """history 剥掉末行——模拟 end_time 端性异变（返回序列恰缺 end_date 当日 bar）。"""
+
+        def history(self, symbol, frequency, start_time, end_time, **kw):
+            frame = super().history(symbol, frequency, start_time, end_time, **kw)
+            return frame.iloc[:-1] if len(frame) else frame
+
+    monkeypatch.setattr(pilot, "AUDIT_DIR", tmp_path / "audit")
+    df = pilot.fetch_df_upto(_MissingTail(), "300750.SZ", END)
+    assert df is None
+    rows = next(iter(tmp_path.glob("audit/audit_*.csv"))).read_text(encoding="utf-8").splitlines()
+    hit = [r for r in rows if "fetch_end_missing" in r]
+    assert len(hit) == 1 and "300750.SZ" in hit[0] and END in hit[0]
+
+
 # ============================================================================
 # build_calendar：指数日线推导交易日历
 # ============================================================================
@@ -272,3 +295,40 @@ def test_trading_days_between_tolerances(pilot):
     # 降级）承担，本函数保持纯函数可测不做隐性兜底。
     assert pilot.trading_days_between([], "2026-08-11", "2026-08-18") == 0
     assert pilot.trading_days_between(None, "2026-08-11", "2026-08-18") == 0
+
+
+def test_trading_days_between_today_not_in_calendar_counts(pilot):
+    """「今日不在历」补计 +1（终审 I-1）：盘中恒态——指数 bar 只到最近已收盘日，
+    end=今日 ∉ cal；不补计则 max_wait/cooldown/holding_days 比本地（全量 trade_cal
+    当日计入，pre_open.py:574 / engine.py:1315）系统性少一日。
+
+    断言形态：缺今日的历与含今日的历【同值】——补计后两份历在同样的 (start, end]
+    查询下不可区分（对齐本地「end 计入」口径的直接表达）。
+    """
+    CAL_NO_TODAY = CAL[:-1]                      # 模拟盘中 build_calendar：末根=昨日 T-1
+    assert CAL[-1] not in CAL_NO_TODAY           # 前提：今日确不在缺尾历上
+    for start in ("2026-08-11", "2026-08-14", "2026-08-20"):
+        assert (pilot.trading_days_between(CAL_NO_TODAY, start, CAL[-1])
+                == pilot.trading_days_between(CAL, start, CAL[-1]))
+    # 手算锚：含今日历上 (08-11, 08-21] = 12,13,14,17,18,19,20,21 共 8 日——缺尾历
+    # 计 7 + 补计 1 = 8
+    assert pilot.trading_days_between(CAL_NO_TODAY, "2026-08-11", "2026-08-21") == 8
+    # end 在历内（盘后/回放）零影响：end ≤ cal[-1] 不触发补计，既有口径不漂移
+    assert pilot.trading_days_between(CAL_NO_TODAY, "2026-08-11", "2026-08-20") \
+        == pilot.trading_days_between(CAL, "2026-08-11", "2026-08-20") == 7
+
+
+def test_prev_trading_day_regression_today_not_in_calendar(pilot):
+    """_prev_trading_day 回归（终审 I-1 伴随）：今日不在历（盘中恒态）→ prev =
+    cal[-1] = 真实 T-1——补计逻辑不得外溢到本函数（它是纯 bisect_left 取「< today
+    的最大者」，pre_open ②③ 的 T-1 基准日依赖此语义）。"""
+    CAL_NO_TODAY = CAL[:-1]                      # 末根 2026-08-20 = 盘中场景的真实 T-1
+    assert pilot._prev_trading_day(CAL_NO_TODAY, "2026-08-21") == "2026-08-20"
+    # 今日在历（盘后场景）：前一根仍是同一 T-1——两场景 T-1 同值（口径稳定）
+    assert pilot._prev_trading_day(CAL, "2026-08-21") == "2026-08-20"
+    # 周末补跑：周六/周日问 T-1 → 同取周五 08-21
+    assert pilot._prev_trading_day(CAL, "2026-08-22") == "2026-08-21"
+    assert pilot._prev_trading_day(CAL, "2026-08-23") == "2026-08-21"
+    # 边界：历空 / 今日 ≤ 历首 → None（调用方显式降级）
+    assert pilot._prev_trading_day([], "2026-08-21") is None
+    assert pilot._prev_trading_day(CAL, CAL[0]) is None

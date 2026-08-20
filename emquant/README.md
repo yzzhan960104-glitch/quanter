@@ -77,10 +77,17 @@ emquant_neckline_pilot.py（组装产物，勿手改）
 - [ ] **挂单 ≤2**：柜台挂单页未成交单 ≤2，且 audit `ORDER_PLACED` 行数 ≤2
   （试点硬闸 `PILOT_MAX_NEW_ORDERS_PER_DAY=2`；超限会是 `ORDER_BLOCKED` 行）。
 - [ ] **无 fail-closed WARN**：audit 无 `get_cash_fail/empty/invalid`、
-  `reconcile_orders_fail/positions_fail`、`pre_open_get_orders_fail` 等查询失败族
-  （出现=权益/持仓查不到 → 当日 fail-closed 不挂单，看终端连接态）。注意
-  `cap_missing` 是**正常态**（CAP.txt 缺省 1.0 不限制）；`fetch_fail/fetch_empty`
-  是单标的降级，成片出现才升级为通道事故。
+  `reconcile_orders_fail/positions_fail`、`pre_open_get_orders_fail`、
+  `bootstrap_accounts_empty/account_absent` 等查询失败族（出现=权益/持仓/账户
+  绑定查不到 → 当日 fail-closed 不挂单或账户绑定异变，看终端连接态与账户绑定）。
+  注意 `cap_missing` 是**正常态**（CAP.txt 缺省 1.0 不限制）；`fetch_fail/fetch_empty`
+  是单标的降级，成片出现才升级为通道事故；`limit_down_fallback_t1` 是跌停价
+  API 通道降级（已用 T-1 收盘自算兜底），偶发可观察、成片=数据服务异常。
+- [ ] **SIGNAL 行计数 >0**（终审修复新增）：当日 audit 有 `SIGNAL` 行（或
+  `SIGNAL_COOLDOWN_SKIP`/`SIGNAL_SKIP_HELD` 等跳过留痕）。若 =0 且当日有行情
+  （前一交易日 K 线可得），先查 `fetch_end_missing` WARN——那是 history
+  `end_time` 端性异变被末根不变量拦下的痕迹（缺末根的 df 已按故障丢弃，该标的
+  当日无信号），出现即对照本地腿当日信号面确认影响范围。
 
 ### token 失效的症状与处置
 
@@ -133,7 +140,8 @@ PYTHONUTF8=1 E:/quanter/.venv_emquant/Scripts/python.exe emquant/tools/gm_data_p
 产物：`emquant/state/parity_gm_YYYYMMDD.csv` + 失败清单
 `parity_pull_fail_YYYYMMDD.json`。退出码分流：**2 = runtime.json 缺失或 token 空
 （当前最可能先命中——回第 0 步）** / 3 = token 无效（status 1000，重新生成） /
-4 = 服务不在线（先拉起终端） / 5 = 缺锚表（回第 1 步） / 6 = 全部标的失败（看
+4 = 服务不在线（先拉起终端），**或探针返回 0 行（服务应答但无数据——检查终端
+登录态与数据服务配置后重试）** / 5 = 缺锚表（回第 1 步） / 6 = 全部标的失败（看
 异常摘要与终端日志）。
 
 第 3 步：对拍 + 报告（`.venv310`）：
@@ -201,6 +209,17 @@ compare 侧退出码 10–13 / 20–21（10 = data_lake 不存在；11 = lake �
    `_eod` 在扫描后按 formed_at 锚点 + cooldown（8 交易日）过滤同标的；pilot 以
    `state["last_signal"]` 锚点复刻同语义（依据与证据链见
    `params_snapshot.json` notes.cooldown_semantics）。
+8. **history `end_time` 含端性属 live 待验证项**（终审修复注记）：取数按闭区间
+   `含 end_date` 契约实现（与本地 `.loc[:date]` 同口径），已加**末根不变量**
+   防御——返回缺 `end_date` 末根时按故障丢弃（`fetch_end_missing` WARN + 返
+   None），绝不在偏一日的序列上算信号。首夜观察该 WARN 是否出现：出现即为
+   服务端端性行为与文档口径分叉，须回评取数参数。
+9. **get_history_symbol 盘前当日行可见性属 live 待验证项**（终审修复注记）：
+   跌停价取值以 `get_history_symbol` 的 `lower_limit` 优先，但盘前 09:15 调用时
+   【当日】证券信息行是否已生成未入已验证面。已有三级回退兜底（API 值 → 同行
+   pre_close 自算 → T-1 收盘价自算），盘前缺行时走 T-1 收盘自算（20% 档，创板
+   科创池内与 API 值几乎恒等，`limit_down_fallback_t1` WARN 留痕）；首夜观察
+   该 WARN 频度即可判定真实可见性。
 
 ---
 
