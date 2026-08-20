@@ -466,6 +466,425 @@ def check_caps(sod_state, equity, positions_mv, open_buy_amount, price, qty, tod
     return True, ""
 
 
+# ============================ §5 订单工具 + trailing 移植 + 生命周期判定 ============================
+# 物理定位（设计 §5）：本段是「执行参数 → 柜台动作」的翻译层——place/cancel/sell 是
+# gm Q4 契约的薄封装（形态钉死：order_volume 返 List[Dict] 取 [0]、order_cancel 收
+# dict），decide_pending/decide_position 是 C9 口径红线的纯判定（本地腿 decide_exit/
+# pre_open 同式），absorb_reality 是幂等三查的「以柜台实况修 state」纯逻辑。编排层
+# （Task 8 §6）只做时序调度与 audit 留痕，判定与下单的数学全部收口在此。
+
+
+# ---- 5.0 trailing 止损数学（strategies/neckline/execution.py:47-72 逐句移植）----
+def compute_stop_price(
+    neckline: float,
+    atr: float,
+    holding_days: int,
+    stop_atr_mult: float,
+    grace: int,
+    step: float,
+    floor: float | None,
+) -> float:
+    """给定持有天数算当日止损价（颈线基准，trailing 离散）。
+
+    【逐句移植自 strategies/neckline/execution.py:47-72（strangler 红线：函数体零改动，
+    7 行纯数学逐字对齐——签名/分支/边界/表达式序任何一处漂移都会被 tests/emquant/
+    test_order_lifecycle.py::test_compute_stop_price_golden 的仓库真身对拍当场拦下；
+    浮点表达式序一致 ⇒ 位位一致，== 即逐位相等）。】
+
+    物理意图（与 simulate_exit:160-173 完全同源）：
+    - grace 天内：用 base_stop（颈线 - stop_atr_mult×ATR，固定，给趋势确认空间）；
+    - grace 天后：每日收紧 step×ATR（eff_mult 递减），到 floor 卡底（收紧上限）；
+    - grace=0/step=0：退化为固定止损（=base_stop，兼容旧行为）。
+
+    离散化（二期）：盘后对每只持仓调本函数重算【次日】固定止损价；盘中监控用此固定价，
+    不移动（符合 spec「盘中不调整」）。回测里是逐根 K 线调；实盘改为每日一次。
+
+    实弹注记：试点快照 EXEC_PARAMS 的 trailing 三件 = grace 0 / step 0.0 / floor 0.0
+    → 恒走 base_stop 支（退化为固定止损=本地现状）——这正是双轨一致性要的：掘金腿
+    与本地腿在实弹参数下用同一颗退化数学，trailing 活跃分支仅为未来参数演进预置。
+    """
+    base_stop = neckline - stop_atr_mult * atr
+    if grace and step and holding_days > grace:
+        eff_mult = stop_atr_mult - (holding_days - grace) * step
+        if floor is not None:
+            eff_mult = max(eff_mult, floor)
+        return neckline - eff_mult * atr
+    return base_stop
+
+
+# ---- 5.1 柜台订单工具（place_limit_buy / cancel / sell_limit，Q4 口径）----
+def place_limit_buy(api, ts, price, qty, account):
+    """限价买入 → cl_ord_id（下单异常上抛 gm 原生 GmError；空回执返 None）。
+
+    gm 契约（Task 2 文档 Q4，trade.py:115-127）：order_volume 限价最小参数集 =
+    side=OrderSide_Buy(1) / order_type=OrderType_Limit(1) / position_effect=
+    PositionEffect_Open(1)（A 股现货无开平仓语义但字段必填，官方示例 Open 买）+
+    显式 price（默认 0 被柜台拒 IllegalPrice=8）+ 显式 account（C1 可审计：单据
+    落到白名单账户，绝不依赖终端侧默认解析）。返回 List[Dict] 取 [0]["cl_ord_id"]
+    （D6 通识错名警示——不是单 dict 不是裸 id）。
+
+    qty≤0 防御：负/零量是编程错（上游定尺/风控闸漏了），宁在本地炸也不发给柜台
+    造废单占拒单频次；price≤0 不在此拦——对齐柜台拒单路径（IllegalPrice 有审计
+    票据，比本地静默改价诚实）。
+    """
+    if int(qty) <= 0:
+        raise ValueError(f"place_limit_buy 拒绝非正量 qty={qty!r}（上游定尺异常，须人工查）")
+    a = _api() if api is None else api
+    res = a.order_volume(symbol=to_gm_symbol(ts), volume=int(qty),
+                         side=a.OrderSide_Buy, order_type=a.OrderType_Limit,
+                         position_effect=a.PositionEffect_Open,
+                         price=float(price), account=account)
+    if not res:
+        return None                               # 空回执=柜台没给订单体（异常形态，调用方降级）
+    first = res[0]
+    cid = first.get("cl_ord_id") if isinstance(first, dict) else None
+    return cid or None
+
+
+def sell_limit(api, ts, price, qty, account):
+    """限价卖出 → cl_ord_id（side=Sell(2)+position_effect=Close(2)，Q4 官方示例口径）。
+
+    与 place_limit_buy 同构的薄封装；卖出量防御同理由（qty≤0 本地炸——卖错数量是
+    致命方向，宁可炸给编排层降级也不发废单）。
+    """
+    if int(qty) <= 0:
+        raise ValueError(f"sell_limit 拒绝非正量 qty={qty!r}（卖出量异常，须人工查）")
+    a = _api() if api is None else api
+    res = a.order_volume(symbol=to_gm_symbol(ts), volume=int(qty),
+                         side=a.OrderSide_Sell, order_type=a.OrderType_Limit,
+                         position_effect=a.PositionEffect_Close,
+                         price=float(price), account=account)
+    if not res:
+        return None
+    first = res[0]
+    cid = first.get("cl_ord_id") if isinstance(first, dict) else None
+    return cid or None
+
+
+def cancel(api, cl_ord_id, account=""):
+    """撤单（order_cancel 收 {cl_ord_id, account_id} 两键 dict——Q4/D7，不是裸字符串）。
+
+    Why 签名比 brief 多 account 形参：gm 契约的撤单字典必须有 account_id 键；缺省
+    "" 透传后端由单账户解析（与 order_volume 的 account 语义同源），Task 8 编排层
+    显式传 PILOT_ACCOUNT_ID 保 C1 可审计。撤单语义（先撤后挂）归编排层：本函数只
+    发起不确认——撤单是否到终态以下一轮 absorb_reality 的柜台实况为准（对齐本地
+    M2「撤单发起后确认终态」的验收口径，但试点用对账轮询替代实时确认回调）。
+    """
+    a = _api() if api is None else api
+    a.order_cancel({"cl_ord_id": cl_ord_id, "account_id": account})
+
+
+# ---- 5.2 跌停价（自算档位 + get_history_symbol API 值优先）----
+def _limit_rate(symbol: str) -> float:
+    """按 ts 代码前缀取涨跌幅档位（创板科创 20% / 主板 10%——data_ctx._load_universe
+    同口径的 300/301/688/689 判别）。
+
+    ST 5% 档无法从代码判别（ST 标记在证券名不在代码里）——本函数职责边界到此，
+    ST 场景的正解是 fetch_limit_down 走 API 值（lower_limit 由数据服务按真实板位/
+    ST 状态给出，天然覆盖）。
+    """
+    code = symbol.partition(".")[0]
+    if code.startswith(("300", "301", "688", "689")):
+        return 0.20
+    return 0.10
+
+
+def limit_down_price(prev_close, symbol) -> float:
+    """自算跌停价 = round(prev_close × (1 − 档位), 2)（二位取整到分）。
+
+    universe 是创板科创 only → 实弹路径恒 round(prev_close×0.80, 2)；主板档保留
+    口径（快照池已滤但公式留全，防未来 universe 演进时口径漂移）。round 取 Python
+    内建（银行家舍入）——对 x×0.8/x×0.9 的二进制浮点表示，与交易所四舍五入在
+    「恰好半分」边界极罕见处可能差 1 分，此类边界以 fetch_limit_down 的 API 值
+    为准（API 值优先正是为此兜底）。
+    """
+    return round(float(prev_close) * (1.0 - _limit_rate(symbol)), 2)
+
+
+def fetch_limit_down(api, ts_symbol, end_date=None):
+    """取当日跌停价：get_history_symbol 的 lower_limit 优先（Q7 权威），失败/缺字段
+    回退 limit_down_price 自算——API 值优先。
+
+    Why API 优先：柜台/数据服务知道真实板位与 ST 状态（自算只认代码前缀），且
+    除权日 pre_close 口径由服务端钉死；Why 保留自算回退：查询失败（断连/字段缺）
+    不能让跌停定价整体失效——自算档位在创板科创 universe 内与 API 值几乎恒等。
+
+    失败契约：查询异常/空行/上下限与昨收全缺 → None + audit WARN（type=
+    limit_down_fetch_fail / limit_down_unavailable）——调用方（Task 8）对 None
+    显式降级（跳过依赖跌停价的动作），绝不造一个错价顶上（错的跌停价 = 卖单
+    挂错价位或风控误判）。
+    """
+    a = _api() if api is None else api
+    day = end_date or f"{date.today():%Y-%m-%d}"  # 未传即当日（调用方编排层显式传日保可测）
+    try:
+        rows = a.get_history_symbol(symbol=to_gm_symbol(ts_symbol),
+                                    start_date=day, end_date=day, df=False)
+        row = rows[-1] if rows else None          # 单日窗取末行（服务端返回序不假设）
+    except Exception as e:
+        _audit_warn("limit_down_fetch_fail", symbol=ts_symbol, end_date=day,
+                    err=f"{type(e).__name__}: {e}")
+        return None
+    if row is None:
+        _audit_warn("limit_down_fetch_fail", symbol=ts_symbol, end_date=day,
+                    err="空返回（无该日证券信息行）")
+        return None
+    # API 值优先：lower_limit 是有效正数（防 None/0/NaN——NaN 参与比较恒 False 被
+    # 反向写法拦下）即采信
+    ll = row.get("lower_limit")
+    try:
+        ll = float(ll)
+    except (TypeError, ValueError):
+        ll = None
+    if ll is not None and ll == ll and ll > 0:
+        return ll
+    # 回退自算：昨收用同行 pre_close（与 lower_limit 同源同日，口径自洽）
+    pc = row.get("pre_close")
+    try:
+        pc = float(pc)
+    except (TypeError, ValueError):
+        pc = None
+    if pc is not None and pc == pc and pc > 0:
+        return limit_down_price(pc, ts_symbol)
+    _audit_warn("limit_down_unavailable", symbol=ts_symbol, end_date=day,
+                err=f"lower_limit 与 pre_close 均缺（row 键：{sorted(row)}）")
+    return None
+
+
+# ---- 5.3 生命周期判定（decide_pending / decide_position，C9 口径红线）----
+def decide_pending(tick_price, order, today, cal):
+    """挂单等待期撤单判定（纯函数）→ "cancel_on" / "max_wait" / None（不撤）。
+
+    C9 口径（评审必查，两判据对齐本地腿）：
+      - cancel_on 触价：tick_price ≥ order["cancel_on"]（含等——decide_exit pending
+        分支 simulate_exit:130 `high >= cancel_on` 同式；None=不配阈值放飞所有回踩）；
+      - max_wait 过期：trading_days_between(cal, formed_at, today) **> max_wait**
+        （严格大于；formed_at 起算——backtest 挂单窗 range(buy_idx+1, min(buy_idx+
+        max_wait,...)+1) 的「窗口内含第 max_wait 个交易日」边界语义，恰好 == 不撤）。
+    两因并发归因 cancel_on（价格事件盘中即时，max_wait 是窗口边界——对齐 decide_exit
+    pending 分支的判序：窗口内逐根先判 cancel_on，窗口边界只是循环外限）。
+
+    order 契约（§3 schema v1 的 orders 值）：必含 cancel_on（可 None）、formed_at
+    （信号形成日，max_wait 锚点——与 date（挂单日）语义不同： formed_at 才是策略
+    语义上的等待起点）、exec_params.max_wait（信号定终身快照）。formed_at 缺失/
+    非法 → trading_days_between 容错返 0 → 视为未超期（宁等一日不误撤）。
+    """
+    cancel_on = order.get("cancel_on")
+    if cancel_on is not None and float(tick_price) >= float(cancel_on):
+        return "cancel_on"
+    max_wait = (order.get("exec_params") or {}).get("max_wait")
+    if max_wait is not None and trading_days_between(cal, order.get("formed_at"), today) > int(max_wait):
+        return "max_wait"
+    return None
+
+
+def decide_position(tick_price, pos, today, cal):
+    """持仓离场判定（纯函数）→ ("sell", qty, reason) / None（持有）；reason ∈
+    {stop_loss, tp2, tp1}。
+
+    C9 口径（优先序对齐本地 decide_exit，strategies/neckline/execution.py:249-294）：
+      ① stop 触价（tick ≤ 当日止损价，含等——priority 1 :249-259 硬风控先于止盈，
+        防日内闪崩穿底后反弹的假象）→ 卖 remaining 全量；
+      ② tp2 触价（tick ≥ tp2_price，含等——priority 2 :269-276）→ 清仓全量；
+      ③ tp1 触价（tick ≥ tp1_price 且 not tp1_done——priority 3 :287-294，tp1_done
+        即本地 lot1_open=False 对齐 simulate_exit:191 的一档一次）→ 卖 portion 档
+        一次：qty = floor(remaining×tp1_portion/100)×100（trading/phases/exit.py:190
+        tp1_target 同式向下整手）；不足一手（floor=0）→ 本档卖全部剩余（brief 钉死
+        ——单仓一次性模型下防零股残留/防 tp1_done 空转；两腿模型的对照语义见
+        exit.py:190-193「份额沉到 tp2 腿」）。
+      ④ 均未触发 → None。
+
+    当日止损价来源（两级）：pos["trailing"] 六件套齐（neckline/atr/stop_atr_mult/
+    grace/step/floor——信号定终身快照）→ compute_stop_price 活口径（holding_days =
+    trading_days_between(cal, entry_date, today)，与回测 i−buy_idx 同式：进场日=0）；
+    trailing 残缺 → 回退 pos["stop"]（盘后预算的当日固定价——execution docstring
+    离散化口径的兜底）。实弹快照（grace 0/step 0.0）下两路径恒等（=base_stop）。
+
+    pos 契约（§3 schema v1 的 positions 值）：remaining_qty / tp1_price / tp1_done /
+    tp2_price / trailing{...} / exec_params.tp1_portion / entry_date。remaining_qty
+    ≤0 → None（无仓可卖，防裸调炸 KeyError）。
+    """
+    remaining = int(pos.get("remaining_qty") or 0)
+    if remaining <= 0:
+        return None
+    px = float(tick_price)
+    # ① 当日止损价：trailing 快照齐 → compute_stop_price（5.0 移植真身）
+    tr = pos.get("trailing") or {}
+    if tr.get("neckline") is not None and tr.get("atr") is not None:
+        holding_days = trading_days_between(cal, pos.get("entry_date"), today)
+        stop = compute_stop_price(
+            neckline=float(tr["neckline"]), atr=float(tr["atr"]),
+            holding_days=holding_days,
+            stop_atr_mult=float(tr.get("stop_atr_mult", 1.0)),
+            grace=int(tr.get("grace") or 0),
+            step=float(tr.get("step") or 0.0),
+            floor=tr.get("floor"))
+    else:
+        stop = pos.get("stop")                    # 盘后预算固定价兜底（离散化口径）
+    # ② priority 1：止损（硬风控，全平剩余）
+    if stop is not None and px <= float(stop):
+        return ("sell", remaining, "stop_loss")
+    # ③ priority 2：tp2 全平
+    tp2 = pos.get("tp2_price")
+    if tp2 is not None and px >= float(tp2):
+        return ("sell", remaining, "tp2")
+    # ④ priority 3：tp1 一档一次（向下整手；不足一手清剩余）
+    tp1 = pos.get("tp1_price")
+    if tp1 is not None and not pos.get("tp1_done") and px >= float(tp1):
+        portion = float((pos.get("exec_params") or {}).get("tp1_portion") or 0.0)
+        qty = int(remaining * portion / 100) * 100   # exit.py:190 同式（向下整手）
+        if qty <= 0:
+            qty = remaining                           # 不足 100 股 → 本档卖全部剩余
+        return ("sell", qty, "tp1")
+    return None
+
+
+# ---- 5.4 柜台对账（absorb_reality 幂等三查）----
+# gm 订单状态 int → 本地 OrderState 词汇（trading/types/order_state.py:42-49 八态；
+# Task 2 文档 Q4 enum.py:23-37 权威值）。映射取舍（Why——错杀比错留危险）：
+#   - 未知/罕见码（4 DoneForDay、9 Suspended、11/13/14 等）一律保守映射【非终态】：
+#     把活单标成终态 = state 不再管理它 = 真单裸奔；把死单标成活态只是多管一轮，
+#     下一轮对账自愈。方向性不对称决定保守侧。
+#   - 7 Stopped → FAILED（终态：停止=不再工作，归异常桶供人工复核）；
+#     12 Expired → CANCELLED（终态未成交，与已撤同处置）。
+_GM_STATUS_TO_LOCAL = {
+    0: "PENDING",            # Unknown 未知（保守非终态）
+    1: "SUBMITTED",          # New 已报
+    2: "PARTIAL_FILLED",     # PartiallyFilled 部成
+    3: "FILLED",             # Filled 已成
+    4: "SUBMITTED",          # DoneForDay（保守非终态：当日终结次日可续）
+    5: "CANCELLED",          # Canceled 已撤
+    6: "SUBMITTED",          # PendingCancel 待撤（撤未生效，仍挂柜台——非终态）
+    7: "FAILED",             # Stopped 停止（终态，异常桶）
+    8: "REJECTED",           # Rejected 已拒绝
+    9: "SUBMITTED",          # Suspended 挂起（保守非终态）
+    10: "PENDING",           # PendingNew 待报
+    11: "SUBMITTED",         # Calculated（保守非终态）
+    12: "CANCELLED",         # Expired 已过期（终态未成交）
+    13: "SUBMITTED",         # AcceptedForBidding（保守非终态）
+    14: "SUBMITTED",         # PendingReplace（保守非终态）
+}
+
+# 终态集（state_store.py:69 死态集 REJECTED/FAILED/CANCELLED/PARTIAL_CANCELLED + FILLED
+# 成功终态）：FILLED 不算死态（不可重挂）也不算活态（不可撤）——对「state 有柜台无」
+# 判定而言它与死态同侧：next 交易日 get_orders 不再返昨日单，若误标 CANCELLED 会
+# 把已成交单的语义抹掉（成交→撤？持仓对账将失锚），故 FILLED 必须豁免改写。
+_TERMINAL_ORDER_STATES = frozenset(
+    {"FILLED", "CANCELLED", "PARTIAL_CANCELLED", "REJECTED", "FAILED"})
+
+
+def _gm_status_to_local(status):
+    """gm int 状态 → 本地 OrderState 字符串（未知值保守落 SUBMITTED 非终态）。"""
+    try:
+        return _GM_STATUS_TO_LOCAL.get(int(status), "SUBMITTED")
+    except (TypeError, ValueError):
+        return "SUBMITTED"                        # None/脏值：保守非终态（错留可自愈）
+
+
+def _date_str_of(value):
+    """gm created_at（datetime）→ YYYY-MM-DD；非 datetime/缺失 → None（不强塑）。"""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    return None
+
+
+def absorb_reality(state, api_orders, api_positions):
+    """柜台↔state 对账（纯逻辑：不落盘、不 audit——diff 留痕归 Task 8 编排层）。
+
+    幂等三查（C9 红线——「以柜台实况修 state」，同参数重复调用结果稳定）：
+      ① 订单正向：柜台有 state 无 → 吸收（PENDING/部成照单收编；成交部分转持仓，
+         exec_params={}——柜台没有信号信息，不伪造快照）；
+      ② 订单反向：state 有柜台无且【非终态】→ 标记 CANCELLED（视为已撤/未挂——
+         get_orders 只返日内单，昨日单属正常缺席，终态单绝不能被改写）；
+      ③ 持仓双向：qty 以柜台为准修 state（remaining_qty=柜台 volume；qty 保留
+         max(建仓量, volume) 作历史峰值），entry/exec_params 以 state 为准保留
+         （exec_params 是信号定终身的快照，柜台没有这个信息）；柜台有 state 无 →
+         吸收（entry 用柜台 vwap，exec_params={} 留人工补）；state 有柜台无 →
+         remaining_qty 归零（柜台已无此仓；entry/exec_params 档案保留供复盘）。
+
+    成交→持仓转换增量口径：filled_volume 相对 state 已记 filled 的增量 Δ 才转仓
+    （重复对账 Δ=0 不双计——幂等的实现核心）；entry_date 用 state 订单的 date
+    （挂单日是 state 内最接近成交日的真值，成交精确时刻柜台在 updated_at、试点
+    不为此加依赖）。买向加仓 / 卖向减仓双向处理（tp1 减仓卖单的柜台视角）。
+
+    api_orders/api_positions 形态：gm get_orders()/get_position() 返回项（Q4/Q5：
+    cl_ord_id/symbol(gm 格式)/side/status(int)/volume/filled_volume/created_at/
+    vwap）。symbol 经 from_gm_symbol 折 ts（fail-loud：非沪深代码=柜台有试点外
+    品种，炸给人工而非静默吞——试点账户是白名单专用户，见到即异变）。
+    """
+    # ── ①② 订单对账（先正向吸收/同步，再反向补撤——顺序保证同轮内先见实况再定性）──
+    api_order_ids = set()
+    for ao in (api_orders or []):
+        oid = (ao or {}).get("cl_ord_id")
+        if not oid:
+            continue                              # 无主键行（异变）：跳过不炸，audit 归 Task 8
+        api_order_ids.add(oid)
+        sym = from_gm_symbol(ao["symbol"])        # gm → ts（fail-loud，见 docstring）
+        filled = int(ao.get("filled_volume") or 0)
+        st_o = state["orders"].get(oid)
+        if st_o is None:
+            # 柜台有 state 无 → 吸收（未成交 PENDING/部成照收；成交转仓在下方增量段）
+            st_o = {"symbol": sym, "date": _date_str_of(ao.get("created_at")),
+                    "price": ao.get("price"), "qty": int(ao.get("volume") or 0),
+                    "purpose": "UNKNOWN", "cancel_on": None, "formed_at": None,
+                    "exec_params": {}, "filled": 0,
+                    "status": _gm_status_to_local(ao.get("status")),
+                    "account": ao.get("account_id")}
+            state["orders"][oid] = st_o
+        else:
+            # 双向在场 → 状态/量价以柜台为准（status 覆盖 + qty/price 刷新）
+            st_o["status"] = _gm_status_to_local(ao.get("status"))
+            st_o["qty"] = int(ao.get("volume") or 0)
+            st_o["price"] = ao.get("price")
+        prev_filled = int(st_o.get("filled") or 0)
+        st_o["filled"] = filled
+        if filled > prev_filled:
+            delta = filled - prev_filled          # 增量转仓（幂等核心：重放 Δ=0）
+            if ao.get("side") == 2:               # OrderSide_Sell：卖向成交 → 减持仓
+                pos = state["positions"].get(sym)
+                if pos is not None:
+                    pos["remaining_qty"] = max(0, int(pos.get("remaining_qty") or 0) - delta)
+            else:                                 # 买向成交 → 持仓转换/累加
+                pos = state["positions"].get(sym)
+                vwap = ao.get("filled_vwap") or ao.get("price")
+                if pos is None:
+                    state["positions"][sym] = {
+                        "entry_date": st_o.get("date"), "entry_price": vwap,
+                        "qty": delta, "remaining_qty": delta, "stop": None,
+                        "tp1_price": None, "tp1_done": False, "tp2_price": None,
+                        "trailing": {},
+                        "exec_params": dict(st_o.get("exec_params") or {})}
+                else:
+                    pos["qty"] = int(pos.get("qty") or 0) + delta
+                    pos["remaining_qty"] = int(pos.get("remaining_qty") or 0) + delta
+    for oid, st_o in state["orders"].items():
+        if oid not in api_order_ids and st_o.get("status") not in _TERMINAL_ORDER_STATES:
+            st_o["status"] = "CANCELLED"          # state 有柜台无且非终态 → 已撤/未挂
+    # ── ③ 持仓对账（qty 柜台为准 / entry+exec_params state 保留 / 双向吸收归零）──
+    api_pos_syms = set()
+    for ap in (api_positions or []):
+        sym = from_gm_symbol(ap["symbol"])
+        api_pos_syms.add(sym)
+        volume = int(ap.get("volume") or 0)
+        st_p = state["positions"].get(sym)
+        if st_p is None:
+            # 柜台有 state 无 → 吸收（人工仓/丢档仓）：entry 用柜台 vwap，
+            # exec_params/trailing 留空不伪造（信号信息柜台没有——晨检人工补）
+            state["positions"][sym] = {
+                "entry_date": None, "entry_price": ap.get("vwap"),
+                "qty": volume, "remaining_qty": volume, "stop": None,
+                "tp1_price": None, "tp1_done": False, "tp2_price": None,
+                "trailing": {}, "exec_params": {}}
+        else:
+            # 双向在场：数量柜台真值修 state（entry/exec_params/tp1_done 等档案保留）
+            st_p["remaining_qty"] = volume
+            if volume > int(st_p.get("qty") or 0):
+                st_p["qty"] = volume              # 柜台加仓（人工/多单）：建仓量峰值上调
+    for sym, st_p in state["positions"].items():
+        if sym not in api_pos_syms and int(st_p.get("remaining_qty") or 0) > 0:
+            st_p["remaining_qty"] = 0             # 柜台已无此仓 → 剩余归零（档案保留）
+    return state
+
+
 def run_pilot():
     """试点主入口（Task 8 实现：五阶段事件编排——预开/开盘/盘中巡检/收盘/盘后）。"""
     raise NotImplementedError("Task 8 实现")
