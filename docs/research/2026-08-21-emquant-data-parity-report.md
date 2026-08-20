@@ -83,6 +83,10 @@ gm.api._errors.GmError: {"status": 1000, "message": "错误或无效的token", "
 
 ## 三、晨间补跑 runbook（Task 11 承接进 README）
 
+> 环境注记：以下三步命令均在 **Git Bash、仓库根目录 `E:/quanter`** 下执行——命令是
+> POSIX 前缀写法（`PYTHONUTF8=1 <python> <脚本>`），PowerShell/cmd 的 env 前缀语法不同
+> 会直接报错（Task 11 并入 README 时保留此句）。
+
 ### 第 0 步：生成 token（人工，一次性）
 
 1. 打开挖金终端（`gmterm-serv` 常驻即可，UI 需登录态）；
@@ -103,7 +107,8 @@ PYTHONUTF8=1 E:/quanter/.venv_emquant/Scripts/python.exe emquant/tools/gm_data_p
 ```
 
 产物：`emquant/state/parity_gm_YYYYMMDD.csv` + 失败清单 `parity_pull_fail_YYYYMMDD.json`。
-退出码分流：3=token 无效 / 4=服务不在线（先拉起终端） / 5=缺锚表（回第 1 步） /
+退出码分流：**2=runtime.json 缺失或 token 空（当前 token 置空态下最可能先命中——回第 0
+步生成并填入）** / 3=token 无效 / 4=服务不在线（先拉起终端） / 5=缺锚表（回第 1 步） /
 6=全部标的失败（看异常摘要与终端日志）。
 
 ### 第 3 步：对拍 + 报告（.venv310）

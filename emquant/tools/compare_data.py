@@ -30,6 +30,7 @@ parity_gm_*.csv 与 data_lake/a_shares_daily.parquet（.venv310 才有 pyarrow �
 import argparse
 import json
 import sys
+import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -90,8 +91,17 @@ def _load_gm_leg(explicit: str):
         p = cands[-1]  # 文件名含 YYYYMMDD，字典序即时间序（同日多格式时取字典序后者，人工覆盖可控）
     reader = pd.read_parquet if p.suffix == ".parquet" else pd.read_csv
     df = reader(p)
-    if df.index.names != ["date", "symbol"]:
-        df = df.set_index(["date", "symbol"])
+    # 读回形状统一：parquet 保 MultiIndex、csv 把 date/symbol 读成普通列——先折成
+    # 列形状，让下面的 dtype 归一只有一个落点（两分支同款覆盖，不分头处理）
+    if df.index.names == ["date", "symbol"]:
+        df = df.reset_index()
+    # 日期 dtype 归一（评审 I-1）：pull 侧落盘的 date 本就是 "YYYY-MM-DD" 字符串
+    # （csv 读回必为 object；parquet 虽保 dtype 但源头即字符串），而 lake 腿 date
+    # level 是 datetime64——不归一则两腿 inner join 交集为空 → 全量
+    # insufficient_overlap → 一致率 NaN（晨间第 3 步必败且静默）。set_index 前
+    # 归一，已是 datetime64 时 to_datetime 幂等无损耗。
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index(["date", "symbol"])
     return df[_OHLC + ["volume"]].sort_index(), p.name
 
 
@@ -221,7 +231,7 @@ def _markdown_summary(res: dict, gm_leg_name: str) -> str:
 # ── selftest 子命令 ───────────────────────────────────────────────────────────
 
 def cmd_selftest(args) -> None:
-    """比对器双向自检：相等副本全过 + 扰动标的必现——无 gm/token 依赖的可信度凭证。"""
+    """比对器双向自检：相等副本全过 + 扰动标的必现 + 落盘读回归返腿——无 gm/token 依赖的可信度凭证。"""
     syms = _universe()
     lake = _load_lake(syms)
     # 抽 5 只有充分历史的标的：尾部 180 根（模拟 gm 腿产物形状，锚定语义隐含于
@@ -247,8 +257,31 @@ def cmd_selftest(args) -> None:
     print(f"[compare_data][selftest] 扰动标的 {picked[-1]}（close×1.0005）被判不一致："
           f"{'PASS' if tampered_caught else 'FAIL'}", flush=True)
     print(f"[compare_data][selftest] max_rel={res['max_rel']:.3e}（应 ~5e-4 量级）", flush=True)
-    if not (got_pass_ok and tampered_caught):
-        _die(21, "selftest 未过——比对器存在假阴/假阳，修好再对拍")
+
+    # ── 往返腿（评审 I-1 的读回边界钉死）─────────────────────────────────────
+    # 上面内存腿从 lake 直接构造 gm 状 df，两腿 date dtype 天然同源，测不出
+    # 「csv 字符串日期 × lake datetime64」的 join 断链面。此腿按 pull 侧同款
+    # 形状（MultiIndex 落 csv，date 为 YYYY-MM-DD 字符串）落盘再经 _load_gm_leg
+    # 读回，真实穿越读写边界：归一被删/新读回路径绕过时，读回 date level 退化为
+    # object、join 交集清零 → 全量 insufficient_overlap → 双向判定与内存腿分裂。
+    with tempfile.TemporaryDirectory() as td:
+        tmp_csv = Path(td) / "parity_gm_selftest_roundtrip.csv"
+        fake_gm.to_csv(tmp_csv, encoding="utf-8")
+        gm_rt, _ = _load_gm_leg(str(tmp_csv))
+        res_rt = compare_core(lake, gm_rt)
+    rt_dtype = str(gm_rt.index.get_level_values("date").dtype)
+    rt_dtype_ok = rt_dtype == "datetime64[ns]"
+    rt_join_ok = res_rt["participants"] == len(picked) and res_rt["insufficient_overlap"] == 0
+    rt_verdict_ok = (expect_pass.issubset(
+        {s for s in picked if s not in {e["symbol"] for e in res_rt["excludes"]}})
+        and picked[-1] in {e["symbol"] for e in res_rt["excludes"]})
+    print(f"[compare_data][selftest] 往返腿（落 csv 再读回）date level dtype={rt_dtype}"
+          f"（应 datetime64[ns]）：{'PASS' if rt_dtype_ok else 'FAIL'}", flush=True)
+    print(f"[compare_data][selftest] 往返腿 join 交集 {res_rt['participants']}/{len(picked)}、"
+          f"窗口不足 {res_rt['insufficient_overlap']}、双向判定与内存腿一致："
+          f"{'PASS' if (rt_join_ok and rt_verdict_ok) else 'FAIL'}", flush=True)
+    if not (got_pass_ok and tampered_caught and rt_dtype_ok and rt_join_ok and rt_verdict_ok):
+        _die(21, "selftest 未过——比对器存在假阴/假阳或读回断链，修好再对拍")
 
 
 def symbols_with_depth(lake: pd.DataFrame, syms: list, depth: int) -> list:
@@ -274,9 +307,12 @@ def cmd_compare(args) -> None:
     syms = _universe()
     lake = _load_lake(syms)
     gm, gm_leg_name = _load_gm_leg(args.gm_leg)
-    # gm 腿 symbol 应为 ts 口径（pull 落盘时已折回）；出现 SHSE./SZSE. 前缀即口径
-    # 事故，fail-loud 而非静默换装（换装会掩盖「符号纪律被破坏」这个上游异变）
-    bad = [s for s in gm.index.get_level_values("symbol").unique() if "." not in str(s)]
+    # gm 腿 symbol 应为 ts 口径（pull 落盘时已折回），形如 600519.SH / 300024.SZ。
+    # 守卫判据用 gm 前缀白名单而非「不含点」：SHSE.600519 同样含点，旧判据抓不住
+    # gm 前缀泄漏（评审 M-2）；出现 SHSE./SZSE. 前缀即口径事故，fail-loud 而非
+    # 静默换装（换装会掩盖「符号纪律被破坏」这个上游异变）
+    bad = [s for s in gm.index.get_level_values("symbol").unique()
+           if str(s).startswith(("SHSE.", "SZSE."))]
     if bad:
         _die(13, f"gm 腿出现非 ts 口径 symbol（疑似 gm 前缀泄漏）：{bad[:5]}")
     res = compare_core(lake, gm)
