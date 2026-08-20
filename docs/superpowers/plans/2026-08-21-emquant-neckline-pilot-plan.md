@@ -10,7 +10,7 @@
 
 ## Global Constraints（摘自 [spec](../specs/2026-08-21-emquant-neckline-pilot-spec.md)，每个任务隐含遵守）
 
-- **C1 仿真 only**：`MODE_SIMULATION` 硬编码；account=`e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1`；`PILOT_ALLOW_LIVE` 未显式设 `I_KNOW_REAL_MONEY` 时拒绝非仿真模式。
+- **C1 仿真 only（08-21 修订）**：gm 3.0.186 **无 MODE_SIMULATION 常量**（实测仅 MODE_LIVE=1/MODE_BACKTEST=2，仿真=MODE_LIVE+绑定仿真账户）→ 守卫改为**账户白名单**：run 模式固定 MODE_LIVE、account 硬编码仿真账户 `e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1`，白名单外账户且无 `PILOT_ALLOW_LIVE=I_KNOW_REAL_MONEY` → 拒绝启动。
 - **C2 内核逐字**：仅允许 ①删 `from .signal import Signal` 行 ②`from __future__ import annotations` 提升；等价性测试钉死。
 - **C3 零引擎改动**：不碰仓库既有文件（`.gitignore` 追加与 docs 除外）。
 - **C4 gm 懒加载**：无 gm 环境可 import 单文件；`_api()` seam + 模块级 `_GM`，测试 monkeypatch。
@@ -339,7 +339,7 @@ git commit -m "feat(emquant): 组装器+内核逐字等价测试——C2 白名�
 - Produces（gm 事件入口 + 编排核心，**单文件顶层**）：
   - `class PilotRuntime`：`__init__(api, workdir=None)`；方法 `pre_open(context)`（五阶段，见下）、`on_tick(context, tick)`、`after_close(context)`、`reconcile(context)`（幂等三查入口）
   - 模块级 `init(context)` / `pre_open_job(context)` / `after_close_job(context)` / `on_tick(context, tick)`（gm 回调名以 Task 2 为准）；`RT: PilotRuntime|None`
-  - `run_pilot()`：C1 守卫（mode 强制仿真 + `PILOT_ALLOW_LIVE` 检查）→ `run(...)`（参数以 Task 2 为准）
+  - `run_pilot()`：C1 守卫（08-21 修订：**账户白名单制**——account 必须等于硬编码仿真账户 `e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1`，否则需 env `PILOT_ALLOW_LIVE=I_KNOW_REAL_MONEY`；gm 无 MODE_SIMULATION 常量，run 模式固定 MODE_LIVE 绑仿真账户）→ `run(...)`（参数以 Task 2 为准）
 - **pre_open 五阶段（顺序红线）**：①`get_orders` 撤全部非终态买（audit 逐单）②超期平仓：positions 按 `trading_days_between(entry_date, T-1) > max_holding`（**T-1 基准日**，C9；T-1=cal 中今日前一根）挂 `limit_down_price` 卖 ③扫描：UNIVERSE 逐 `fetch_df_upto(end=T-1)` → `detect_signal`（当日信号落 audit；扫描完成置 scan_done）④闸序：`is_blocked()` → 跳过挂单段；否则逐单 `check_caps` ⑤挂限价买 `entry=neckline+buy_limit_atr_mult×ATR`、`qty=⌊equity×pos_cap/entry/100⌋×100`（equity/cash 以 Task 2 权威函数查，查询异常 fail-closed 当日不挂）；全部动作写 state+audit。
 - **on_tick**：pending → `decide_pending` → 撤；positions → `decide_position` → 卖；每笔 audit。tick 字段名以 Task 2 为准。
 - **after_close**：audit 收尾行 + `clear 动态订阅` + state 落盘。
@@ -351,7 +351,7 @@ git commit -m "feat(emquant): 组装器+内核逐字等价测试——C2 白名�
   - `test_expired_close_uses_t1_basis`（entry 距 T-1 恰 == max_holding 不平、> 才平，跌停价单）；
   - `test_scan_writes_audit_and_state`（信号行字段 symbol/neckline/entry_price/rr）；
   - `test_on_tick_stop_sells_all`、`test_reconcile_absorbs_counter_orders`；
-  - `test_run_pilot_refuses_non_simulation`（C1：无 PILOT_ALLOW_LIVE → raise）。
+  - `test_run_pilot_refuses_non_sim_account`（C1 修订版：account 非仿真白名单且无 PILOT_ALLOW_LIVE → raise；白名单账户放行）。
 - [ ] **Step 2: 失败确认 → Step 3: 实现 → build → 绿（含 Task 4-7 全部测试回归）**。
 - [ ] **Step 4: Commit** `feat(emquant): 事件编排——盘前五阶段红线序+tick 巡检+盘后审计`
 

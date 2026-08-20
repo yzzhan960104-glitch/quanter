@@ -10,7 +10,7 @@
 
 | # | 约束 | 依据 |
 |---|---|---|
-| C1 | **仿真 only**：run 模式硬编码 MODE_SIMULATION；account 固定仿真账户 `e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1`；除非 env `PILOT_ALLOW_LIVE=I_KNOW_REAL_MONEY` 否则拒绝实盘模式 | D2 + 资金安全 |
+| C1 | **仿真 only（08-21 修订：gm 3.0.186 无 MODE_SIMULATION 常量，仿真=MODE_LIVE+绑定仿真账户）**：run 模式固定 MODE_LIVE；account 硬白名单 = 仿真账户 `e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1`，启动守卫拒绝白名单外账户；除非 env `PILOT_ALLOW_LIVE=I_KNOW_REAL_MONEY` 否则拒绝一切实盘账户。Task 2 须核实账户类型查询法（如账户列表 API 的类型标记）供守卫二次校验 | D2 + 资金安全 |
 | C2 | **识别内核逐字**：`method_v0.py` + `signal.py` 进单文件仅允许两个变换——①删 `from .signal import Signal` 一行；②`from __future__ import annotations` 提升到组装文件顶部。其余逐字节一致，由等价性测试钉死 | 设计 §2 等价证据 |
 | C3 | **零引擎改动**：不修改仓库任何既有文件（除 `.gitignore` 追加与 docs）；生产引擎/策略/测试全部不动 | 试点隔离 |
 | C4 | **gm 懒加载**：单文件在无 gm 环境下可 import（§0-§4/§7 纯 stdlib+pandas；gm 调用经 `_api()` 惰性取，测试经模块级 seam 注入 FakeGm） | 本地 pytest 同一基线 |
@@ -61,6 +61,6 @@ tests/emquant/              # fake_gm.py + 5 个测试文件（见 plan 各任�
 2. 单文件在无 gm 的解释器下 `import emquant_neckline_pilot` 成功（C4）。
 3. 内核等价性测试逐字节通过（C2）。
 4. `export_snapshot.py` 产物键集完整（含 buy_limit_atr_mult/cooldown/trailing 三件）且 fingerprint 稳定。
-5. 仿真模式守卫测试：mode 非 simulation 且无 PILOT_ALLOW_LIVE → 拒绝启动。
+5. 仿真守卫测试：account 不在仿真白名单且无 PILOT_ALLOW_LIVE → 拒绝启动（gm 3.0.186 无 MODE_SIMULATION，见 C1 修订）。
 6. 所有提交在 feature 分支；`git status` 无生产文件改动（C3）。
 7. README runbook 完整（终端挂载步骤/晨检清单/回退三步 SOP/token 填写位）。
