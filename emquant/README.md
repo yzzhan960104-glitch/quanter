@@ -48,7 +48,16 @@ emquant_neckline_pilot.py（组装产物，勿手改）
 4. **绑定仿真账户**：策略设置里绑定仿真账户（即 account_id 那个账户）。SDK 层
    掘金「仿真交易」与实盘同为 MODE_LIVE，唯一自动防线是账户白名单守卫
    （C1：account_id 必须等于 `PILOT_ACCOUNT_ID`，否则启动期 raise）。
-5. **运行**：终端启动策略。init 链（读配置 → C1 复核 → 柜台对账 → 订阅 → 注册
+5. **运行（必须走仿真通道，勿点回测）**：终端下方「交易」区先**切换到「仿真」标签并
+   快捷登录仿真账户**，再到**策略列表 / 策略监控页**对该策略点「运行」。
+   ⚠️ **不要用策略编辑器右上角的「运行回测」按钮**——终端会经命令行注入
+   `--mode=2`（回测），**覆盖 `run(mode=MODE_LIVE)` 形参**（gm `basic.py:519`
+   `mode = convert(options.mode, int, mode)`，实测 2026-08-21），随后因
+   `backtest_start_time` 为空报
+   `GmError 1021: 非法日期时间格式; 回测开始时间:[]不符合[yyyy-mm-dd hh:mm:ss]`
+   ——本试点按仿真实盘事件模型设计（schedule 盘前五阶段/tick 巡检），不支持
+   回测模式，此报错即「入口走错」的确定性信号。
+   init 链（读配置 → C1 复核 → 柜台对账 → 订阅 → 注册
    09:15:00 / 15:35:00 双定时）跑通后，当日 `audit/audit_YYYYMMDD.csv` 首行落
    `INIT`。`state/`、`audit/` 目录首启自动创建。
 
