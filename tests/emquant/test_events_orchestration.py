@@ -919,7 +919,7 @@ def test_run_pilot_refuses_non_sim_account(pilot, tmp_path, monkeypatch):
 
 
 def test_run_pilot_whitelist_account_launches(pilot, tmp_path, monkeypatch):
-    """白名单账户直接放行：run(strategy_id/filename=__file__/MODE_LIVE/token) 全参可审计。"""
+    """白名单账户直接放行：run(strategy_id/裸 filename/MODE_LIVE/token) 全参可审计。"""
     fake = FakeGm()
     monkeypatch.setattr(pilot, "CONFIG_DIR", tmp_path)
     (tmp_path / "runtime.json").write_text(
@@ -931,7 +931,31 @@ def test_run_pilot_whitelist_account_launches(pilot, tmp_path, monkeypatch):
     r = next(c for c in fake.calls if c.get("api") == "run")
     assert r["strategy_id"] == "st-pilot" and r["token"] == "test-token"
     assert r["mode"] == 1
-    assert str(r["filename"]).replace("\\", "/").endswith("emquant/emquant_neckline_pilot.py")
+    # filename 必须是裸文件名（2026-08-21 终端首启实测修正，见下一个回归用例的 Why）
+    assert r["filename"] == "emquant_neckline_pilot.py"
+
+
+def test_run_pilot_filename_is_bare_name_not_absolute(pilot, tmp_path, monkeypatch):
+    """2026-08-21 终端首启实测回归：filename 传绝对路径在 Windows 盘符下必炸。
+
+    gm run()（basic.py:574-587）先剥「与 sys.path 的公共前缀」再转模块名
+    import_module——Windows 绝对路径的公共前缀常只剩盘符根，剥完剩
+    `\\Users\\...` → 转点成前导点开头的名字 → import_module 误判**相对导入**
+    抛 TypeError（终端实测 traceback 即此）。裸文件名走「脚本目录天然在
+    sys.path[0]」的原生解析；import 出的副本 __name__ != '__main__'，
+    顶部入口抑制守卫恰好令其不重入 run_pilot（无递归）。
+    """
+    fake = FakeGm()
+    monkeypatch.setattr(pilot, "CONFIG_DIR", tmp_path)
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"token": "test-token", "strategy_id": "st-pilot",
+                    "account_id": pilot.PILOT_ACCOUNT_ID}), encoding="utf-8")
+    monkeypatch.setenv("PILOT_ALLOW_LIVE", "I_KNOW_REAL_MONEY")
+    monkeypatch.setattr(pilot, "_GM", fake)
+    pilot.run_pilot()
+    r = next(c for c in fake.calls if c.get("api") == "run")
+    fn = str(r["filename"])
+    assert "/" not in fn and "\\" not in fn and not fn.startswith(".") and fn.endswith(".py")
 
 
 # ============================================================================

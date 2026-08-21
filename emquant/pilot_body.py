@@ -1837,7 +1837,15 @@ def run_pilot():
     cfg = _read_runtime_config()                              # 缺文件/缺 token → raise（中文）
     _c1_guard(cfg.get("account_id"))                          # C1：账户白名单 + env 逃生门
     a = _api()
-    a.run(strategy_id=str(cfg.get("strategy_id") or ""), filename=__file__,
+    # filename 必须传**裸文件名**（如 'main.py'），绝不能传 __file__ 绝对路径（2026-08-21
+    # 终端首启实测踩坑）：gm run() 内部（basic.py:574-587）会剥掉「与 sys.path 的公共
+    # 前缀」再转成模块名 import——Windows 盘符路径的最长公共前缀往往只剩盘符根，
+    # 剥完剩 `\Users\...` → 转点成 `.Users...`（前导点）→ import_module 误判相对导入
+    # 直接 TypeError。裸文件名则走「脚本目录已在 sys.path[0]」的 Python 原生解析，
+    # import_module('main') 命中同目录副本——该副本 __name__='main'（非 __main__），
+    # 顶部入口抑制守卫恰好令其不再调 run_pilot（无递归），SDK 从该副本抓事件回调。
+    a.run(strategy_id=str(cfg.get("strategy_id") or ""),
+          filename=os.path.basename(__file__),
           mode=a.MODE_LIVE, token=str(cfg.get("token")))
 
 
