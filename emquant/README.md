@@ -25,8 +25,9 @@ emquant_neckline_pilot.py（组装产物，勿手改）
 
 1. **新建策略**：掘金终端 → 量化研究 → 我的策略 → 新建 Python 策略（终端文件名
    惯例 `main.py`，内容粘贴本仓库 `emquant/emquant_neckline_pilot.py` 全文；或把
-   文件放入策略目录）。记下 strategy_id（当前既有真值
-   `7ed8526e-9bb7-11f1-a16b-7c10c93fcb7d`，策略列表 / `~/.emgm3/projects/` 目录名可见）。
+   文件放入策略目录）。记下 strategy_id（当前实跑腿真值
+   `08b25d85-9cf8-11f1-a09d-7c10c93fcb7d`——08-21 首启 audit INIT 行自证；
+   `7ed8526e-…` 为早期空目录已作废。策略列表 / `~/.emgm3/projects/` 目录名可见）。
 2. **建策略目录旁的 config**：产物按自身所在目录定位 `config/runtime.json`
    （`BASE_DIR = Path(__file__).resolve().parent`）——**终端跑的是策略目录里这份，
    不是仓库 `emquant/config/` 那份**。在策略目录下建 `config/runtime.json`：
@@ -34,7 +35,7 @@ emquant_neckline_pilot.py（组装产物，勿手改）
    ```json
    {
      "token": "<第 3 步生成的值>",
-     "strategy_id": "7ed8526e-9bb7-11f1-a16b-7c10c93fcb7d",
+     "strategy_id": "08b25d85-9cf8-11f1-a09d-7c10c93fcb7d",
      "account_id": "e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1"
    }
    ```
@@ -77,7 +78,7 @@ emquant_neckline_pilot.py（组装产物，勿手改）
   `tasklist | findstr /i "goldminer eastmoney"`——进程名不是这两个词，会漏报。
 - [ ] **策略运行态**：终端 UI 该策略状态为运行中（INIT 行日期=今日则 init 链已过）。
 
-### 09:15 后（09:20–09:30 窗口看三件事）
+### 09:15 后（09:20–09:30 窗口）
 
 - [ ] **audit CSV 首行存在**：`<策略目录>/audit/audit_YYYYMMDD.csv` 存在且首行
   `INIT`（detail 含 account / strategy_id / subscribed 数）；09:15 定时触发后应有
@@ -97,6 +98,16 @@ emquant_neckline_pilot.py（组装产物，勿手改）
   （前一交易日 K 线可得），先查 `fetch_end_missing` WARN——那是 history
   `end_time` 端性异变被末根不变量拦下的痕迹（缺末根的 df 已按故障丢弃，该标的
   当日无信号），出现即对照本地腿当日信号面确认影响范围。
+- [ ] **归档当日运行时**（盘后 15:35 后补跑更优——EOD 行与终态 state 已落）：
+
+  ```
+  PYTHONUTF8=1 E:/quanter/.venv310/Scripts/python.exe emquant/tools/archive_terminal_state.py
+  ```
+
+  把终端腿 state/audit 快照拷回 `emquant/archive/YYYY-MM-DD/`（gitignored，含
+  manifest 溯源+sha256）——终端侧单机单副本，这是双轨证据与 W3 采集器的原料
+  （详见已知限制 10）。同日重跑覆盖为更晚快照，幂等无害；多候选策略目录时按
+  提示 `--src` 显式指定。
 
 ### token 失效的症状与处置
 
@@ -229,6 +240,14 @@ compare 侧退出码 10–13 / 20–21（10 = data_lake 不存在；11 = lake �
    pre_close 自算 → T-1 收盘价自算），盘前缺行时走 T-1 收盘自算（20% 档，创板
    科创池内与 API 值几乎恒等，`limit_down_fallback_t1` WARN 留痕）；首夜观察
    该 WARN 频度即可判定真实可见性。
+10. **终端腿运行时单机单副本，靠仓库侧归档缓解**：state/audit 只活在终端策略
+    目录（`~/.emgm3/projects/<strategy_id>/`），重装终端/误删即丢——在途单与
+    持仓可由柜台对账（absorb_reality）重建，但历史 orders/positions 档案、
+    cooldown 锚（last_signal）与 audit 原始件不可再生。缓解：每日跑
+    `emquant/tools/archive_terminal_state.py`（晨检清单末项）把快照拷回
+    `emquant/archive/`。W3 若转正，演进为「audit → trading_state.db 采集器」
+    （仓库侧单向消费，掘金腿保持哑终端；本地库全表已预留 account_id 维度，
+    掘金账户天然隔离）。
 
 ---
 
