@@ -183,6 +183,11 @@ class NecklineMethodStrategy:
             # 颈线法附加字段（详情展示用，统计层不依赖）
             neckline=sim.get("neckline"),
             avg_pnl_pct=sim.get("avg_pnl_pct"),
+            # R4（2026-08-24）几何透传：atr/bottom 补进 scan_at 产物——止损解剖
+            # （diag/r4_stop_autopsy.py）逐笔归因依赖 H/ATR 与挂单距离特征；值取
+            # detect_signal 的 sig（识别层几何真源，simulate_exit 原样消费）。
+            atr=sig.atr,
+            bottom=sig.bottom,
         )]
 
     def scan_live(self, symbol: str, df_upto, date) -> list:

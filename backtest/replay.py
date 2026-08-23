@@ -371,6 +371,13 @@ def _compute_stats(hits: list, position_model: Optional[PositionModel] = None) -
             "rr": h.rr,
             "holding_bars": h.holding_bars,
             "avg_pnl_pct": h.avg_pnl_pct,
+            # R4（2026-08-24）止损解剖：补回识别几何五键——逐笔归因（diag/
+            # r4_stop_autopsy.py）的核心特征；加键向后兼容（消费方按需读）。
+            "formed_at": _iso(h.formed_at),
+            "neckline": h.neckline,
+            "bottom": h.bottom,
+            "atr": h.atr,
+            "breakout_date": _iso(h.breakout_date),
         }
         for h in sorted_hits
     ]
