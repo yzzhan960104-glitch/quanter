@@ -161,7 +161,8 @@ def _compact_report(report) -> dict:
 
 
 def evaluate_replay(params, universe, split, start=None, end=None,
-                    position_model: dict | None = None) -> dict:
+                    position_model: dict | None = None,
+                    block_dates: frozenset | None = None) -> dict:
     """replay 模式评估（P0-2）：给定 params 跑 backtest.replay → ReplayReport 口径指标。
 
     与 discovery evaluate 的差异：
@@ -170,6 +171,8 @@ def evaluate_replay(params, universe, split, start=None, end=None,
           非 kelly/calmar；
         - 分段：默认按 split.inner/outer 各跑一段；显式 start/end → 只评单段（inner）。
         - 资金：position_model（PositionModel.to_dict()）透传，None=默认 pos_cap 口径。
+        - R3 block_dates（2026-08-23）：透传 replay 引擎的模拟线拦截（autopromote
+          G2/G3 的可交易期口径消费点；日历由调用方经 manual_risk_sim 预计算）。
     """
     from backtest.models import PositionModel
     from backtest.replay import replay
@@ -195,7 +198,8 @@ def evaluate_replay(params, universe, split, start=None, end=None,
         # inner/outer 复用同一实例会让 outer 被 inner 的锚点污染（A8 fail-fast
         # 已把这种复用升级为 ValueError，此处是真实路径修复）。
         strategy = NecklineMethodStrategy(cfg_override=params)
-        rep = replay(universe, strategy, str(seg_start), str(seg_end), position_model=pm)
+        rep = replay(universe, strategy, str(seg_start), str(seg_end),
+                     position_model=pm, block_dates=block_dates)
         out[name] = report_metrics(rep)
         if name == "inner":
             inner_report = rep
