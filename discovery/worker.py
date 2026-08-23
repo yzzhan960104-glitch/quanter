@@ -53,7 +53,8 @@ def _objective_fn():
 
 # 子进程模块全局：initializer 一次 freeze 后填充，_eval_worker 读取复用。
 # 主进程也 import 本模块（读 _WORKER_STATE.ready=False 占位），但主进程不调 _eval_worker。
-_WORKER_STATE = {"universe": None, "split": None, "ready": False}
+_WORKER_STATE = {"universe": None, "split": None, "ready": False,
+                 "block_dates": None}
 
 
 def _init_worker(lake_start="2025-01-01", embargo_days=5):
@@ -61,6 +62,11 @@ def _init_worker(lake_start="2025-01-01", embargo_days=5):
 
     顶层定义（可 pickle，spawn 必需）。lake_start/embargo_days 是简单类型（str/int），
     可 pickle 跨进程传 initargs。后续 _eval_worker 复用此 universe，不重读 parquet。
+
+    R3（2026-08-23）：同点预计算人工风控模拟线日历（block_dates，DEFAULT_RULE
+    20d/−15%→−10%）——池子等权滚动回撤一次算好（~15s/进程），trial 热路径 O(1) 查表。
+    env DISCOVERY_MANUAL_RISK=off 跳过（对照/回滚零代码口，同 DISCOVERY_OBJECTIVE 风格）；
+    日历只喂搜索评估（ADR-16 红线：trading/ 永不触达）。
 
     P2 RSS 看门狗（spec §3）：freeze 后量本 worker RSS，超阈值 fail-loud 退出（stderr
     CRITICAL + os._exit(3)）——2026-08-03 MemoryError 的教训是"静默 OOM"，数据湖膨胀/
@@ -72,6 +78,9 @@ def _init_worker(lake_start="2025-01-01", embargo_days=5):
     _WORKER_STATE["universe"] = universe
     _WORKER_STATE["split"] = split
     _WORKER_STATE["ready"] = True
+    if os.getenv("DISCOVERY_MANUAL_RISK", "on").lower() != "off":
+        from discovery.manual_risk_sim import build_block_calendar
+        _WORKER_STATE["block_dates"] = build_block_calendar(universe)
     try:
         import psutil   # requirements.txt 已有（P0-4 diag 引入）
         rss_gb = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
@@ -101,7 +110,13 @@ def _eval_worker(params):
     if not _WORKER_STATE["ready"]:
         return None
     try:
-        res = _objective_fn()(params, _WORKER_STATE["universe"], _WORKER_STATE["split"])
+        fn = _objective_fn()
+        if fn is evaluate_portfolio and _WORKER_STATE.get("block_dates") is not None:
+            # R3：组合口径 + 模拟线日历在场 → 双口径评估（主目标=模拟线口径）
+            res = fn(params, _WORKER_STATE["universe"], _WORKER_STATE["split"],
+                     block_dates=_WORKER_STATE["block_dates"])
+        else:
+            res = fn(params, _WORKER_STATE["universe"], _WORKER_STATE["split"])
         # 耦合6 runtime 裁剪：n_total==0 = 挂单区间全空退化（spec §7.1 耦合6 代理）
         if res.get("n_total", 0) == 0:
             return None

@@ -347,3 +347,41 @@ def test_portfolio_metrics_feasibility_compatible(seg_2025, dates_2025):
     assert m["max_dd"] <= 0.4                       # 负值口径过闸（与正值同义）
     assert feasibility_gate(m) is True
     assert "sharpe" in m and "kelly" in m           # DSR 门控/展示消费的补充键
+
+
+# ---- R3 人工风控模拟线（block_dates，2026-08-23）拦截语义 ----
+def test_portfolio_metrics_blocks_signaled_entries(seg_2025, dates_2025):
+    """block_dates 拦 signal_date 命中日历的新入场（RISK_BLOCK.flag 拦增量语义）。
+
+    拦掉的信号整笔不存在（不是推迟）：n 下降、被拦笔的盈亏不进指标。
+    """
+    from datetime import date as _date
+    trades = [_mk_trade(f"S{i:02d}", f"2025-{m:02d}-03", f"2025-{m:02d}-04",
+                        f"2025-{m:02d}-18", 3.0)
+              for i, m in enumerate(range(1, 13), start=1)]
+    cal = frozenset({_date(2025, 3, 3), _date(2025, 7, 3)})   # 拦 3 月与 7 月首笔
+    m_raw = portfolio_metrics(trades, seg_2025, dates_2025)
+    m_blk = portfolio_metrics(trades, seg_2025, dates_2025, block_dates=cal)
+    assert m_raw["n"] == 12 and m_blk["n"] == 10
+    # 空日历（frozenset()）与 None 行为一致（无拦截）
+    m_empty = portfolio_metrics(trades, seg_2025, dates_2025, block_dates=frozenset())
+    assert m_empty["n"] == m_raw["n"]
+
+
+@pytest.mark.slow
+def test_evaluate_portfolio_dual_caliber_keys(champion_params):
+    """R3 双口径：block_dates 在场时附 inner_raw/outer_raw（对照口径）。
+
+    slow：跑真 run_full_scan（freeze 全湖 + 扫描，分钟级）——手动验收/合并前必跑。
+    """
+    from discovery.snapshot import freeze
+    from discovery.split import holdout_split
+    from discovery.manual_risk_sim import build_block_calendar
+    universe, _ = freeze("2021-01-01")
+    split = holdout_split()
+    cal = build_block_calendar(universe)
+    res = evaluate_portfolio(champion_params, universe, split, block_dates=cal)
+    assert "inner_raw" in res and "outer_raw" in res
+    assert "min_yearly_calmar_raw" in res["inner"]
+    # 拦截日历非空（真数据 2021-2026 必有触发段——校准报告实证）
+    assert cal, "真实池子 20d/-15% 日历为空=校准前提失效"

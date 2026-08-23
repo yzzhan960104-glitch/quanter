@@ -212,7 +212,7 @@ def evaluate_replay(params, universe, split, start=None, end=None,
 # R1-1（2026-08-16）：组合约束口径评估——搜索目标与实盘口径裂缝的修复
 # ============================================================================
 def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
-                      position_model=None) -> dict:
+                      position_model=None, block_dates=None) -> dict:
     """run_full_scan 的 filled → 组合约束口径指标（build_equity_curve 单源后处理）。
 
     R0 实证（口径裂缝）：scan 口径（evaluate/metrics_of 假设信号独立可下注）与 replay
@@ -225,9 +225,15 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
       - 分段按 signal_date（scan 口径惯例）；replay 按引擎逐日回放窗口；
       - 段末未平仓持仓不截断（replay 引擎同款——exit_date 可越出段末）；
       - 完整性 gate（_apply_continuity_filter）不在本路径——universe 由 freeze 已筛。
+
+    R3 block_dates（人工风控模拟线，2026-08-23）：非 None 时，signal_date 落在拦截
+    日历的新入场信号整体跳过（对齐 RISK_BLOCK.flag 拦增量语义——信号日≈挂单日，
+    拦掉的挂单没有这笔交易）。日历由调用方预计算（discovery.manual_risk_sim.
+    build_block_calendar）；ADR-16 红线：该语义只存在于回测评估，trading/ 永不触达。
     """
     from datetime import timedelta
     from backtest.models import PositionModel, build_equity_curve
+    from discovery.manual_risk_sim import is_blocked
 
     pm = position_model or PositionModel()   # 默认 pos_cap=0.05/max_positions=6/slip 5bps=实盘同源
     embargo_cutoff = segment.start + timedelta(days=embargo_days)
@@ -242,6 +248,8 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
             continue
         if embargo_days > 0 and d.date() < embargo_cutoff:
             continue
+        if block_dates is not None and is_blocked(d, block_dates):
+            continue                              # 模拟线拦增量：该信号日人工在拦，无此单
         trades.append({"symbol": r.get("symbol"),
                        "signal_date": d,                  # 保留（sharpe extras 消费）
                        "entry_date": r.get("buy_date"),   # scan 产物成交日键名（replay 侧叫 entry_date）
@@ -279,19 +287,26 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
     return out
 
 
-def evaluate_portfolio(params, universe, split, position_model=None) -> dict:
+def evaluate_portfolio(params, universe, split, position_model=None,
+                       block_dates=None) -> dict:
     """R1-1 组合口径评估：run_full_scan 一次 → inner/outer 分段 + 分年组合指标。
 
     返回形状与 evaluate() 对齐（inner 含 yearly_calmar/min_yearly_calmar），下游
     feasibility_gate / 排序可无缝消费。信息隔离语义同 evaluate：outer 只进报告。
     yearly 口径：按信号自然年构造 Segment 复用 portfolio_metrics（A2 的 min_yearly_calmar
     在组合口径下的同款「每一年都站得住」判别——n<30 年记 0.0 逃考惩罚同源）。
+
+    R3 双口径（2026-08-23，block_dates 非 None 时）：主口径（inner/outer/yearly）=
+    **模拟线口径**（可交易期——用户裁决「宏观回撤人工兜底」的评估落地）；另附
+    inner_raw/outer_raw/min_yearly_calmar_raw（无模拟线对照，回答「没有人工时策略
+    怎样」）。组合模拟部分毫秒级，双跑成本忽略；贵步 run_full_scan 共享一次。
+    ⚠️ 口径断层：engine_hash 随本函数变更重置（R1 先例），R3 trial 与 R2 不可直比。
     """
     from discovery.split import Segment
     all_filled = run_full_scan(params, universe)
     universe_dates = next(iter(universe.values())).index   # 交易日历（同区间取一）
     inner_m = portfolio_metrics(all_filled, split.inner, universe_dates,
-                                position_model=position_model)
+                                position_model=position_model, block_dates=block_dates)
     by_year = {}
     for r in all_filled:
         d = pd.to_datetime(r["signal_date"])
@@ -302,17 +317,36 @@ def evaluate_portfolio(params, universe, split, position_model=None) -> dict:
         seg_y = Segment(f"y{y}", pd.Timestamp(f"{y}-01-01").date(),
                         pd.Timestamp(f"{y}-12-31").date())
         m = portfolio_metrics(by_year[y], seg_y, universe_dates,
-                              position_model=position_model)
+                              position_model=position_model, block_dates=block_dates)
         yearly[y] = m["calmar"] if m["n"] >= 30 else 0.0
     inner_m["yearly_calmar"] = yearly
     inner_m["min_yearly_calmar"] = min(yearly.values()) if yearly else 0.0
-    return {
+    out = {
         "inner": inner_m,
         "outer": portfolio_metrics(all_filled, split.outer, universe_dates,
                                    embargo_days=split.embargo_days,
-                                   position_model=position_model),
+                                   position_model=position_model,
+                                   block_dates=block_dates),
         "n_total": len(all_filled),
     }
+    if block_dates is not None:
+        inner_raw = portfolio_metrics(all_filled, split.inner, universe_dates,
+                                      position_model=position_model)
+        yearly_raw = {}
+        for y in sorted(by_year):
+            seg_y = Segment(f"y{y}", pd.Timestamp(f"{y}-01-01").date(),
+                            pd.Timestamp(f"{y}-12-31").date())
+            m = portfolio_metrics(by_year[y], seg_y, universe_dates,
+                                  position_model=position_model)
+            yearly_raw[y] = m["calmar"] if m["n"] >= 30 else 0.0
+        inner_raw["yearly_calmar"] = yearly_raw
+        inner_raw["min_yearly_calmar"] = min(yearly_raw.values()) if yearly_raw else 0.0
+        out["inner_raw"] = inner_raw
+        out["outer_raw"] = portfolio_metrics(all_filled, split.outer, universe_dates,
+                                             embargo_days=split.embargo_days,
+                                             position_model=position_model)
+        inner_m["min_yearly_calmar_raw"] = inner_raw["min_yearly_calmar"]
+    return out
 
 
 # ============================================================================
