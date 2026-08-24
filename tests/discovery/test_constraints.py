@@ -45,13 +45,14 @@ def test_normalize_trailing_grace_positive_keeps_step_floor():
     assert p["trailing_floor"] == 0.5
 
 
-def test_is_feasible_tp1_le_tp_h():
-    """tp1_h_mult ≤ tp_h_mult（防退化，spec §7.1 耦合3）。"""
+def test_is_feasible_tp1_region_open_post_fix():
+    """~~tp1≤tp_h 禁区~~：R6-8（2026-08-26）撤除——幽灵成交修复（R6-4）后 tp1>tp_h
+    为合法且有据区域（新冠军 supp04+tp1=2.0 所在），两侧都应可行。"""
     from discovery.constraints import is_feasible
     assert is_feasible({"tp1_h_mult": 1.0, "tp_h_mult": 2.5, "cancel_thresh_mult": 3.0,
                         "trailing_grace": 5, "trailing_step": 0.1}) is True
     assert is_feasible({"tp1_h_mult": 3.0, "tp_h_mult": 2.5, "cancel_thresh_mult": 3.0,
-                        "trailing_grace": 5, "trailing_step": 0.1}) is False
+                        "trailing_grace": 5, "trailing_step": 0.1}) is True
 
 
 def test_is_feasible_cancel_ge_tp1():
@@ -77,20 +78,24 @@ def test_is_feasible_uses_normalized_trailing():
 
 
 def test_filter_feasible_keeps_legal_drops_illegal():
-    """filter_feasible 过滤整批：合法保留，非法丢弃，并先 normalize。"""
+    """filter_feasible 过滤整批：合法保留，非法丢弃，并先 normalize。
+
+    R6-8：tp1>tp_h 不再是滤除理由（幽灵修复后合法区）；滤除判据只剩耦合4（cancel<tp1）。
+    """
     from discovery.constraints import filter_feasible
     batch = [
         {"min_rr": 1.5, "tp1_h_mult": 1.0, "tp_h_mult": 2.5, "cancel_thresh_mult": 3.0,
          "trailing_grace": 5, "trailing_step": 0.1, "trailing_floor": 0.0, "window": 80},  # 合法
         {"min_rr": 2.0, "tp1_h_mult": 3.0, "tp_h_mult": 2.5, "cancel_thresh_mult": 3.0,
-         "trailing_grace": 5, "trailing_step": 0.1, "trailing_floor": 0.0, "window": 60},  # 非法（tp1>tp_h）
+         "trailing_grace": 5, "trailing_step": 0.1, "trailing_floor": 0.0, "window": 60},  # 合法（R6-8 后 tp1>tp_h 放行）
         {"min_rr": 2.0, "tp1_h_mult": 1.0, "tp_h_mult": 2.5, "cancel_thresh_mult": 0.5,
          "trailing_grace": 0, "trailing_step": 0.15, "trailing_floor": 0.5, "window": 40},  # 非法（cancel<tp1）
     ]
     kept = filter_feasible(batch)
-    assert len(kept) == 1
+    assert len(kept) == 2
     assert kept[0]["min_rr"] == 1.5          # P4：min_rr 活参数，保留原值（不强制 2.0）
     assert kept[0]["window"] == 80
+    assert kept[1]["window"] == 60           # tp1>tp_h 项保留
     # 第3条 grace=0 本应被 normalize 救回 trailing，但 cancel<tp1 仍非法 → 被滤
 
 

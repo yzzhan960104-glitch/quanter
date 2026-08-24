@@ -66,14 +66,15 @@ def test_scale_to_candidates_picks_valid_levels():
 
 
 def test_sample_search_all_feasible():
-    """sample_search 产出全部合法（经 filter_feasible，tp1≤tp_h + cancel≥tp1）。"""
-    from discovery.sampler import sample_search
+    """sample_search 产出全部合法（经 filter_feasible，cancel≥tp1；R6-8 后 tp1>tp_h 放行）。"""
+    from discovery.sampler import sample_search, PARAM_SPACE
     from discovery.constraints import is_feasible
     batch = sample_search(n_sobol=20, n_random=10, seed=42)
     assert len(batch) >= 10       # 至少裁剪后有若干合法
+    _min_rr_cands = dict((k, c) for k, c in PARAM_SPACE)["min_rr"]
     for p in batch:
         assert is_feasible(p) is True
-        assert p["min_rr"] in (1.0, 1.5, 2.0)   # P4：min_rr 活参数
+        assert p["min_rr"] in _min_rr_cands   # P4：min_rr 活参数（候选档随空间扩容动态）
         # trailing 一致性：grace=0 时 step/floor 必为 0
         if p["trailing_grace"] == 0:
             assert p["trailing_step"] == 0.0
