@@ -141,6 +141,18 @@ class NecklineMethodStrategy:
         if sig is None:
             return []
 
+        # R4-H1（2026-08-24）个股动量闸：突破日个股自身 20 日收益 < momentum_gate
+        # 则放弃该信号（止损解剖：止损组入场动量系统性弱于止盈组 Δ-2~4pp）。
+        # 无前视：df_T=df.loc[:T] 截至 T；20 日窗不足（次新/长停）按 0 处理（中性，
+        # 不因数据短误杀）。个股侧维度（ADR-16 红线注记见 DEFAULTS ⑪）。
+        _mg = self.id_cfg.get("momentum_gate")
+        if _mg is not None and len(df_T) > 20:
+            _c = df_T["close"]
+            _m20 = float(_c.iloc[-1] / _c.iloc[-21] - 1.0)
+            if _m20 < float(_mg):
+                self._last_signal_pos[symbol] = T_pos   # 与 skip 同口径：锚点更新防重扫
+                return []
+
         # 出场：simulate_exit 从 T_pos 推进 max_holding 根，需 full_df（推进用未来 K 线，属回测允许）。
         # 衔接（brief 澄清 4）：detect_signal 返的 Signal 含 neckline/bottom/atr 字段，从此处
         # 平滑取出喂 simulate_exit（原 res dict 同名字段 → Signal 同名字段，零语义漂移）。

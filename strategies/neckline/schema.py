@@ -34,6 +34,9 @@ class NecklineConfig(BaseModel):
     stop_atr_mult: float = Field(1.0, ge=0.0, description="止损 ATR 倍数（颈线−N×ATR）")
     tp_h_mult: float = Field(2.0, ge=1.0, description="止盈2 H 倍数（颈线+N×H）")
     decay_tau: Optional[float] = Field(None, description="颈线聚集时间衰减（None=等权）")
+    momentum_gate: Optional[float] = Field(
+        None, description="个股动量闸（R4-H1）：突破日个股 20 日收益 < 该值不入场；None=关闭。"
+                          "个股侧而非池子侧（ADR-16：池子动量=宏观 regime 触红线）")
 
     # —— 执行层（7 维，对齐 neckline_backtest.EXEC_DEFAULTS）——
     max_holding: int = Field(15, ge=1, description="成交后超时持仓日")

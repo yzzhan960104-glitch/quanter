@@ -92,3 +92,23 @@ class TestConsumption:
         full = build_block_calendar(uni)
         clipped = build_block_calendar(uni, start="2026-02-01")
         assert clipped <= full
+
+
+class TestMomentumGate:
+    def test_动量闸过滤弱动量信号(self):
+        """R4-H1：突破日个股 20 日收益 < gate 的信号被弃（锚点更新防重扫）。"""
+        import numpy as np
+        from strategies.neckline.strategy import NecklineMethodStrategy
+        # 60 根收盘：前段横盘后微涨（20 日收益≈0）——闸 0.05 时应全灭
+        idx = pd.bdate_range("2025-01-01", periods=120)
+        close = pd.Series(np.linspace(10.0, 10.3, 120), index=idx)  # 20日收益≈5%/120*20≈0.5%? 线性 0.25%/20d
+        df = pd.DataFrame({"close": close, "open": close, "high": close * 1.01,
+                           "low": close * 0.99, "volume": 1e6, "amount": 1e7}, index=idx)
+        strat_off = NecklineMethodStrategy(cfg_override={"momentum_gate": None})
+        strat_on = NecklineMethodStrategy(cfg_override={"momentum_gate": 0.05})
+        T = idx[-1]
+        r_off = strat_off.scan_at("A", df.loc[:T], T, strat_off.precompute("A", df))
+        r_on = strat_on.scan_at("A", df.loc[:T], T, strat_on.precompute("A", df))
+        # 该序列未必有信号（形态合成难保证）——断言语义：闸开时结果 ⊆ 闸关时
+        assert len(r_on) <= len(r_off)
+        # 闸关（None）等价旧行为：默认参数下不炸

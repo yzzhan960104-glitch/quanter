@@ -35,6 +35,7 @@ export const PARAM_META: Record<string, ParamMeta> = {
   stop_atr_mult:        { title: '止损ATR倍数',        group: '识别层' },
   tp_h_mult:            { title: '止盈2 H倍数',        group: '识别层' },
   decay_tau:            { title: '颈线时间衰减',       group: '识别层' },
+  momentum_gate:        { title: '个股动量闸',         group: '识别层' },
   // —— 执行层（挂单/止盈/仓位/撤单，7 维）——
   max_holding:          { title: '超时持仓日',         group: '执行层' },
   max_wait:             { title: '挂单等回踩期',       group: '执行层' },

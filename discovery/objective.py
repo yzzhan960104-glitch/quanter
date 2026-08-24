@@ -44,10 +44,33 @@ def run_full_scan(params, universe):
     id_cfg = {**DEFAULTS, **{k: params[k] for k in ID_KEYS}}
     exec_cfg = {**EXEC_DEFAULTS, **{k: params[k] for k in EXEC_KEYS}}
     window = id_cfg["window"]
+    # R4-H1 个股动量闸（2026-08-24）：scan 路径的消费点——strategy.scan_at 已有
+    # 同款过滤（replay 路径），此处覆盖 run_full_scan/scan_symbol 路径（组合口径
+    # 评估与 TPE 搜索走这条）。首夜实锤教训：闸只加 scan_at 时受控读数与 base
+    # 逐位相同（评估路径未触达）。语义一致：截至 signal_date 的 20 日收益 < gate
+    # 丢弃；数据 <21 根中性放行（次新/长停不误杀）。
+    _mg = id_cfg.get("momentum_gate")
+    _mg = float(_mg) if _mg is not None else None
     all_filled = []
     for sym, sym_df in universe.items():
         try:
             filled, _n_sig, _n_skip = scan_symbol(sym_df, window, exec=exec_cfg, id_cfg=id_cfg)
+            if _mg is not None and len(sym_df) > 20 and filled:
+                closes = sym_df["close"]
+                m20 = closes / closes.shift(20) - 1.0
+                kept = []
+                for r in filled:
+                    d = r.get("signal_date")
+                    if d is None:
+                        kept.append(r)
+                        continue
+                    ts = pd.Timestamp(d)
+                    if ts in m20.index:
+                        v = m20.loc[ts]
+                        if pd.notna(v) and float(v) < _mg:
+                            continue                     # 弱动量：弃
+                    kept.append(r)
+                filled = kept
             for r in filled:
                 r["symbol"] = sym
             all_filled.extend(filled)
