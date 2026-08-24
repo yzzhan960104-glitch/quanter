@@ -131,10 +131,14 @@ def _eval_one(params: dict, tag: str) -> dict:
 
 
 def _adoptable(base_res: dict, cand: dict) -> bool:
-    """预登记五条采纳闸（R4 教训：dd/年段约束先于看数写死在代码里）。"""
+    """预登记五条采纳闸（R4 教训：dd/年段约束先于看数写死在代码里）。
+
+    dd 比较取**幅值**（max_dd 约定为负数——首轮实锤：带符号比较会把「dd −25%→−21%
+    的改善」判成恶化拒收（cooldown=0 +212% 被错杀），而真恶化反而放行）。
+    """
     return (cand["raw_outer_ann"] > base_res["raw_outer_ann"] + ADOPT_RAW_PP
             and cand["mr_outer_ann"] >= base_res["mr_outer_ann"] - ADOPT_MR_TOL
-            and cand["raw_outer_dd"] <= base_res["raw_outer_dd"] + ADOPT_DD_TOL
+            and abs(cand["raw_outer_dd"]) <= abs(base_res["raw_outer_dd"]) + ADOPT_DD_TOL
             and cand["min_yr"] >= base_res["min_yr"] - ADOPT_MINYR_TOL
             and cand["n_inner"] >= ADOPT_N_FLOOR * base_res["n_inner"])
 
