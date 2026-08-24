@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 # 21 维参数分层键名（与 scripts/param_iter.PARAM_SPACE 同源；Plan 1 只需键名分层，不需候选值）
 ID_KEYS = ["window", "min_touches", "min_suppression", "local_extrema_window",
            "min_bottoms", "breakout_vol_mult", "min_rr", "max_h_atr",
-           "stop_atr_mult", "tp_h_mult", "decay_tau"]
+           "stop_atr_mult", "tp_h_mult", "decay_tau",
+           "momentum_gate"]   # R4-H1（2026-08-24）——漏列实锤：run_full_scan 按
+                              # 本清单过滤 params 进 id_cfg，漏键=闸在 scan_symbol
+                              # 路径静默失效（受控读数与 base 逐位相同的第二层根因）
 EXEC_KEYS = ["max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
              "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
              "trailing_grace", "trailing_step", "trailing_floor"]
@@ -41,8 +44,11 @@ def run_full_scan(params, universe):
     显式构造 id_cfg/exec_cfg 传入 scan_symbol（与 param_iter.run_one 同款，去全局 mutation）。
     遍历 universe 调 scan_symbol——单标的用 sym_df 全历史，保证 window/ATR 预热完整。
     """
-    id_cfg = {**DEFAULTS, **{k: params[k] for k in ID_KEYS}}
-    exec_cfg = {**EXEC_DEFAULTS, **{k: params[k] for k in EXEC_KEYS}}
+    # 缺键容错（R4 教训）：momentum_gate 是新增识别维，存量实验 params（21 键
+    # 时代）不含它——硬取 KeyError 会让全部存量 trial/DRAFT 评估崩。get+DEFAULTS
+    # 兜底：缺键=闸关（None），语义即「旧参数集行为零变化」。
+    id_cfg = {**DEFAULTS, **{k: params.get(k, DEFAULTS.get(k)) for k in ID_KEYS}}
+    exec_cfg = {**EXEC_DEFAULTS, **{k: params.get(k, EXEC_DEFAULTS.get(k)) for k in EXEC_KEYS}}
     window = id_cfg["window"]
     # R4-H1 个股动量闸（2026-08-24）：scan 路径的消费点——strategy.scan_at 已有
     # 同款过滤（replay 路径），此处覆盖 run_full_scan/scan_symbol 路径（组合口径

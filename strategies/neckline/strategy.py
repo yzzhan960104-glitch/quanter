@@ -46,6 +46,7 @@ from ..registry import register_strategy
 _NECKLINE_ID_KEYS = (
     "window", "min_touches", "min_suppression", "local_extrema_window", "min_bottoms",
     "breakout_vol_mult", "min_rr", "max_h_atr", "stop_atr_mult", "tp_h_mult", "decay_tau",
+    "momentum_gate",   # R4-H1 个股动量闸（2026-08-24）：识别层第 12 维
 )
 _NECKLINE_EXEC_KEYS = (
     "max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
