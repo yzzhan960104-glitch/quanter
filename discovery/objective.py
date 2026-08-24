@@ -35,7 +35,10 @@ ID_KEYS = ["window", "min_touches", "min_suppression", "local_extrema_window",
                               # 路径静默失效（受控读数与 base 逐位相同的第二层根因）
 EXEC_KEYS = ["max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
              "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
-             "trailing_grace", "trailing_step", "trailing_floor"]
+             "trailing_grace", "trailing_step", "trailing_floor",
+             # R6-5 腿 A/B 受控原型（2026-08-26）：入 EXEC_KEYS 才能经 run_full_scan
+             # 透传到 scan_symbol（momentum_gate 三层路径教训：漏列=参数静默失效）。
+             "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl"]
 
 
 def run_full_scan(params, universe):

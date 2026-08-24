@@ -75,6 +75,15 @@ EXEC_DEFAULTS = {
     "commission_rate": 0.0003,   # 佣金万三（双边，买+卖各一次）
     "stamp_rate": 0.0005,        # 印花税卖 0.05%（单边卖出）
     "transfer_rate": 0.00001,    # 过户费 0.001%（双边，沪市）
+    # R6-5 腿 A/B 受控原型参数（2026-08-26 用户裁决「都测试一下」；默认关=零行为变化，
+    # 由 tests/test_r6_phantom_and_legs.py 默认关逐位等价测试守护）：
+    # 腿 A（垂直月入场结构盲区，R6-3 实锤 2024-10 池子+9.7% 而 84% 信号 skip_no_pullback
+    # 弃单）：等待期无回踩 → 次日开盘市价追入（追入价≥tp2 形态目标透支仍弃）。
+    "chase_entry": False,
+    # 腿 B（V 反月出场结构盲区，R6-3 实锤 2026-08 58% timeout 仅 10% tp2；R4 H0 线索
+    # timeout 组 rr 为正=超期平仓截断正期望单）：超时日浮盈≥门槛 → 一次性延长持有。
+    "timeout_extend_days": 0,        # 延长日数（0=关）
+    "timeout_extend_min_pnl": 0.05,  # 延长门槛（超时日浮盈比例）
 }
 
 
@@ -175,10 +184,13 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     tp1 = levels.tp1               # 第一止盈（颈线+N×H）
     tp2 = levels.tp2               # 第二止盈（颈线+N×H，识别层参数）
     cancel_on = levels.cancel_on   # 撤单阈值（None=不撤单放飞所有信号；否则等待期 high≥此价即撤单防追高）
+    # tp1=None（未配置一档）是 price_levels 合法档：落盘字段用 None 保留（round(None) 炸）
+    tp1_out = round(tp1, 3) if tp1 is not None else None
 
     # ① 等回踩成交（用户逻辑修正：等待期 high≥tp1 → 涨幅已兑现，回踩是退潮，撤单）
     wait_end = min(signal_idx + max_wait, len(sym_df) - 1)
     buy_idx = None
+    chase = False         # 腿 A 追入标记（entry 记账口径分叉用，见下方 entry 赋值）
     for i in range(signal_idx + 1, wait_end + 1):
         low_i = float(sym_df["low"].iloc[i])
         high_i = float(sym_df["high"].iloc[i])
@@ -192,22 +204,37 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
                     "exit_reason": "skip_target_met",
                     "avg_pnl_pct": 0.0, "lot1_pnl_pct": 0.0, "lot2_pnl_pct": 0.0,
                     "neckline": round(c_star, 3), "entry": None,
-                    "risk_pct": None, "tp1": round(tp1, 3), "tp2": round(tp2, 3),
+                    "risk_pct": None, "tp1": tp1_out, "tp2": round(tp2, 3),
                     "same_day_both": same_day_both, "stop_gap": False}
         if low_i <= buy_limit:
             buy_idx = i
             break
     if buy_idx is None:
-        return {"signal_date": sym_df.index[signal_idx].date(),
-                "exit_reason": "skip_no_pullback",
-                "avg_pnl_pct": 0.0, "lot1_pnl_pct": 0.0, "lot2_pnl_pct": 0.0,
-                "neckline": round(c_star, 3), "entry": None,
-                "risk_pct": None, "tp1": round(tp1, 3), "tp2": round(tp2, 3),
-                "same_day_both": False, "stop_gap": False}
+        # R6-5 腿 A（chase_entry，默认 False=原 skip 语义逐位不变）：等待期无回踩不弃单，
+        # 改 wait_end 次日开盘市价追入——垂直拉升月对症（R6-3 实锤 2024-10 池子 +9.7%
+        # 而 84% 信号 skip_no_pullback 弃单=入场结构盲区）。追入价≥tp2 时形态目标已透支
+        # （追=负期望）仍按原语义弃单；数据尾端（wait_end=len-1）无次日可追同弃。
+        if (exec.get("chase_entry") and wait_end + 1 <= len(sym_df) - 1
+                and float(sym_df["open"].iloc[wait_end + 1]) < tp2):
+            buy_idx = wait_end + 1
+            chase = True
+        else:
+            return {"signal_date": sym_df.index[signal_idx].date(),
+                    "exit_reason": "skip_no_pullback",
+                    "avg_pnl_pct": 0.0, "lot1_pnl_pct": 0.0, "lot2_pnl_pct": 0.0,
+                    "neckline": round(c_star, 3), "entry": None,
+                    "risk_pct": None, "tp1": tp1_out, "tp2": round(tp2, 3),
+                    "same_day_both": False, "stop_gap": False}
 
-    entry = min(buy_limit, float(sym_df["open"].iloc[buy_idx]))
-    # 限价买单成交价：open>buy_limit（盘中回踩）→ 成交 buy_limit；open<=buy_limit（跳空低开）
-    # → 成交 open（市价<挂单价，更优）。旧版 entry=buy_limit 高估了跳空低开的买入价。
+    if chase:
+        # 腿 A 追入成交价=当根开盘价本身（市价单语义）——不得走 min(buy_limit, open)：
+        # 追入场景 open>buy_limit 恒真（无回踩），min 会记成从未成交过的更优挂单价
+        # （与 R6-4 幽灵成交同族的「未到达价位记账」错误）。
+        entry = float(sym_df["open"].iloc[buy_idx])
+    else:
+        entry = min(buy_limit, float(sym_df["open"].iloc[buy_idx]))
+        # 限价买单成交价：open>buy_limit（盘中回踩）→ 成交 buy_limit；open<=buy_limit（跳空低开）
+        # → 成交 open（市价<挂单价，更优）。旧版 entry=buy_limit 高估了跳空低开的买入价。
     end_idx = min(buy_idx + max_holding, len(sym_df) - 1)
 
     # ② 持有期逐根判 exit（Task 5 · U3 执行单源：改调 decide_exit 纯函数）
@@ -223,6 +250,7 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     # 每根传当前 lot1_open/lot2_open 给 state，否则下根 decide_exit 会重复触发同一触发器。
     lot1_open, lot2_open = True, True
     lot1_pnl, lot2_pnl = None, None
+    extended = False         # 腿 B 一次性延长标记（timeout_extend，见 TIMEOUT 分支）
     exit_reason = "timeout"
     exit_pos = end_idx   # 默认超时（is_last 或循环自然结束）；stop_loss/tp2 break 时覆盖
     stop_gap = False     # P0-1：止损触发日跳空低开（open<stop）标记（2026-08-03 Phase A）
@@ -245,7 +273,15 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     # 均收益 4-11% 远高于合规笔——止盈收紧方向的"收益引擎"曾实质依赖此漏洞）。
     # holding_days 维持 i - buy_idx：次日=第 1 个持有日，对齐实盘 pre_open 的
     # (entry, T-1] 交易日计数口径（C9）。
-    for i in range(buy_idx + 1, end_idx + 1):
+    # 循环上界一次估满（max_holding + 腿 B 一次性延长预算），实际终点由 end_idx 动态
+    # 控制——原 for-range 上界在循环开始时求值，腿 B mid-loop 延长 end_idx 不会扩
+    # range（首版实现实锤：延长后循环仍停在旧终点 → pnls 全 None → 误返 None）。
+    # 预算=0（默认）时 loop_end == end_idx，短路守卫恒不触发，行为逐位不变。
+    ext_budget = int(exec.get("timeout_extend_days", 0) or 0)
+    loop_end = min(buy_idx + max_holding + ext_budget, len(sym_df) - 1)
+    for i in range(buy_idx + 1, loop_end + 1):
+        if i > end_idx:
+            break   # 未延长（或延长已消化）到达终点：等价原 range 终点
         row = sym_df.iloc[i]
         high, low, close = float(row["high"]), float(row["low"]), float(row["close"])
         holding_days = i - buy_idx
@@ -297,7 +333,16 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             lot2_pnl = (tp2 - entry) / entry
             lot2_open = False
             if lot1_open:
-                lot1_pnl = (tp1 - entry) / entry
+                # R6-4 幽灵成交修复（2026-08-26 用户裁决「修复」）：lot1「同日一并卖」的
+                # 成交价必须是当根真实到达过的价位——high≥tp1 → 按 tp1 记（tp1≤tp2 的
+                # 全部常规配置 high≥tp2≥tp1 恒真，逐位不变，golden 钉死）；tp1>tp2（挂远
+                # 永不触发）且 high<tp1 时按 tp2 同价平仓——原版按从未到达的 tp1 记账即
+                # 幽灵成交（R6-1 实锤：tp1_h_mult=5 档 6590/18445 笔污染，0.7×82.7%+
+                # 0.3×20.5%=64.0% 与读数精确吻合，R6a 图谱 tp1_h_mult 2.0+ 档全部受染）。
+                # tp1=None（未配置一档）同落 tp2 = 全量 tp2 语义（原版此处 (None-entry)
+                # 会 TypeError 的潜伏崩溃一并消除）。
+                lot1_exit = tp1 if (tp1 is not None and high >= tp1) else tp2
+                lot1_pnl = (lot1_exit - entry) / entry
                 lot1_open = False
             exit_reason = "tp2"
             exit_pos = i
@@ -312,6 +357,18 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             continue
 
         if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TIMEOUT:
+            # R6-5 腿 B（timeout_extend，默认 days=0=零行为变化）：超时日浮盈≥门槛且未
+            # 延长过 → 一次性延长持有（V 反修复月对症——R6-3 实锤 2026-08 58% timeout
+            # 仅 10% tp2，崩跌基底 tp 锚远、持有截断在半山腰；R4 H0 线索 timeout 组 rr
+            # 为正=超期平仓截断正期望单）。延长期间 stop/tp1/tp2/trailing 照常判定，
+            # 新 is_last 到达再平（一次性，不链式）。数据尾端无余量不延长。
+            ext_days = exec.get("timeout_extend_days", 0) or 0
+            if (ext_days > 0 and not extended
+                    and end_idx < len(sym_df) - 1
+                    and (close - entry) / entry >= (exec.get("timeout_extend_min_pnl", 0.05))):
+                end_idx = min(end_idx + int(ext_days), len(sym_df) - 1)
+                extended = True
+                continue
             # 优先级4（原 :193-199）：is_last 超时强制平。lot1/lot2 各用 close 算 pnl。
             # decide_exit TIMEOUT 不判浮盈 threshold（Controller #5：is_last 直接平），
             # pnl 在本循环算（decide_exit 是纯决策不碰 pnl，对齐 Task 4 契约）。
@@ -345,7 +402,7 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         "neckline": round(c_star, 3),
         "entry": round(entry, 3),
         "risk_pct": round((entry - base_stop) / entry * 100, 2),  # 初始风险（基准止损 base_stop，trailing 动态前）
-        "tp1": round(tp1, 3), "tp2": round(tp2, 3),
+        "tp1": tp1_out, "tp2": round(tp2, 3),
         "H_over_ATR": round(H / atr_val, 2) if atr_val > 0 else None,
         "lot1_pnl_pct": round(lot1_pnl * 100, 2),
         "lot2_pnl_pct": round(lot2_pnl * 100, 2),

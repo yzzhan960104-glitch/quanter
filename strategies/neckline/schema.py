@@ -55,3 +55,13 @@ class NecklineConfig(BaseModel):
     trailing_grace: int = Field(0, ge=0, description="trailing 宽限天数 b（前 b 天不收紧，给趋势确认空间；0=无宽限即日收紧）")
     trailing_step: float = Field(0.0, ge=0.0, description="trailing 收紧速度 a（ATR/日；0=固定止损退化为旧默认）")
     trailing_floor: float = Field(0.5, ge=0.0, description="trailing 最低 ATR 倍数（收紧上限；0=收到颈线，0.5=颈线−0.5ATR）")
+
+    # —— R6-5 腿 A/B 受控原型（2026-08-26；默认关=零行为变化，对齐 EXEC_DEFAULTS）——
+    chase_entry: bool = Field(
+        False, description="腿 A：等待期无回踩 → 次日开盘市价追入（垂直月盲区；"
+                           "追入价≥tp2 仍弃单）")
+    timeout_extend_days: int = Field(
+        0, ge=0, description="腿 B：超时日浮盈≥timeout_extend_min_pnl 时一次性延长持有"
+                             "日数（0=关；V 反月出场盲区/R4 H0）")
+    timeout_extend_min_pnl: float = Field(
+        0.05, ge=0.0, description="腿 B 延长门槛（超时日浮盈比例）")

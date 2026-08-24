@@ -285,7 +285,10 @@ def decide_exit(state: dict, bar: dict, cfg: dict) -> NecklineExitDecision:
     # 必须 lot1_open=False（对齐 simulate_exit:191），否则下根 decide_exit 会重复触发 TP1
     # （lot1_open 仍 True）。simulate_exit:189-192 的 lot1_open=False 即此副作用。
     tp1 = state["tp1"]
-    if lot1_open and high >= tp1:
+    # R6-4 防御守卫（2026-08-26）：tp1=None（未配置一档，price_levels 合法档）时 TP1 分支
+    # 不触发（原 high>=tp1 对 None 比较 TypeError 的潜伏崩溃消除；全量 tp2 语义由
+    # priority 2 承接）。非 None 配置行为逐位不变。
+    if lot1_open and tp1 is not None and high >= tp1:
         return NecklineExitDecision(
             action=ExitAction.CLOSE,
             reason=ExitReason.TAKE_PROFIT,
