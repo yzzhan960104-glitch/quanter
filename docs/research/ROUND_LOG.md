@@ -169,3 +169,14 @@
   - 不敏感：tp1_portion（0.3-0.9 全 +84%）、trailing 三件（±1pp 噪声级）、window（80 最优 +94%）；
   - 峰值带/最优档的 +400~885% 级读数**全部戴着 R5b 红旗帽**（2022 反常 + 模拟保真度未验面）——是模拟口径上限，非可实现收益。
 - **R6 排程确认**（用户指令顺序）：①解耦缓存（scan_symbol 拆两段：识别事件几何缓存 (i,neckline,bottom,atr,formed_at) 按 id_cfg+snapshot+data 三键，段 2 用 price_levels 单源重算 entry/rr+simulate_exit——只动 backtest.py 不碰 C2 内核；预计 P1 类扫描 2-3×）→ ②弱动量×深形态条件交互（H1 对症）→ ③L3 追涨腿（8 月 V 反）。
+
+---
+
+## R6-1 · 2026-08-26 · 识别/执行解耦缓存落地 + tp1 渐近假设否决
+
+- **交付**：`backtest.py` scan_symbol 拆两段——段 1 识别循环 exec 无关化 + 进程内三键缓存（键 = id_cfg 稳定 hash ‖ 缓存代‖内核身份 + 数据内容指纹；R6-PhaseA 设计的 snapshot+data 双数据键落地为「识别输入内容指纹」自验证键，scan_symbol 层无 universe 级 snapshot 上下文，内容指纹数学上严格覆盖其职责）；段 2 = cancel_on close 守卫重放 + dedup（cooldown 识别语义留段 2）+ simulate_exit。**C2 红线守住**：method_v0.py / signal.py 逐字节未动；objective.py 零改动（scan_symbol 内部自动缓存，run_full_scan/evaluate_portfolio 免费受益，26 个既有 scan_symbol 调用方零迁移）。
+- **exec 污染点全表**（拆分依据，动识别内核时须复核）：① `_post_detect` cancel 守卫（cancel_thresh_mult——exec 参数但信号过滤语义）→ 段 2 逐位同式重放（H/cancel_on/比较三行运算顺序不重排，浮点等价红线）；② Signal.entry_price/exec_params（buy_limit 等）→ 剥离不缓存，段 2 simulate_exit 内部走 compute_price_levels 单源；detect 内核 rr 实为纯 id_cfg（entry=c_star，stop/tp 乘数皆识别层键），唯一真污染就是 ①②。**契约注记**：cancel 守卫从内核期移到编排层——生产路径逐位等价，但 mock 识别的测试桩不再自动绕过守卫（有意行为）。
+- **等价三层守护**（`tests/test_r6_id_exec_split.py` 7 项全绿）：拆分 == 拆分前逐行参考实现（真实数据 2 标的 × 9 组合含 cancel 档逐位对拍）；缓存命中路径 == 无缓存路径；同 id_cfg 异 exec 命中计数 + 键敏感性（id_cfg 变/数据变→miss；mock 桩与真内核缓存互不污染——内核 qualname 入键）。**2028 项 fast 测试全绿**（7:32）；diag 全 universe 端到端 BASE outer **+83.5% 与 R6a 真值逐位一致**（1201 标的零漂移实证）。
+- **提速实测**（`diag/r6_1_cache_speed.py`，freeze 2021 起 1201 标的单进程）：冷跑 **142.7s** → 3 个 exec-only 变体（max_holding=15 / tp1_portion=0.9+cooldown=8 / cancel=2.0+bl=2.5）**12.5-17.8s 全命中**（miss=0 / hit=1201）——单项 **8-11×**（识别 100% 跳过，余量=段 2 simulate + 组合模拟），cancel_thresh_mult 维同样命中（守卫重放设计的直接收益）。P1 类批（exec ~30/98 项）整体 2-3× 达成。缓存 44511 事件（上限 400k FIFO 驱逐 ~50-100MB 量级，P2 看门狗兼容）；env `NECKLINE_ID_CACHE=off` 零代码旁路（对照/回滚口）。
+- 🔴 **tp1 渐近假设否决**（R6-PhaseA 遗留确认项）：**tp1_portion=0 ≠ tp1_h_mult=5.0**——18445 笔中 6590 笔 avg_pnl 不同（同一笔 tp2 出场 20.47% vs 64.04%），inner/outer 全指标大幅分叉（outer +83.5% vs +885%）。**机制实锤（幽灵成交）**：simulate_exit tp2 全平分支「lot1 若仍持用 tp1 同日一并卖」——tp1>tp2（挂远永不触发）时 lot1 按**从未到达的 tp1 价位（颈线+5H）**记账且权重全额入 avg（0.7×82.7%+0.3×20.5%=64.0%，与读数精确吻合）。**R6a 图谱 tp1_h_mult 2.0/2.5/3.0/5.0 档（+367%~+885%）全部含此幽灵成分**，「tp1 挂远=关闭一档减仓全仓吃 tp2」的渐近语义不成立；真正语义干净的关闭一档是 tp1_portion=0（lot2@tp2）。修复方向（tp1>tp2 时 lot1 按 min(tp1,tp2) 记账 / 或判无效配置）属引擎成交语义变更，待裁决另开一轮——与 R5b「模拟保真度未验面」红旗同族且已有定量实锤。
+- engine_hash 随 backtest.py 变更重置 → `bdf324ea9fa7`（拆分逐位等价、读数可比性无损，trial 库按新 hash 分界）。
