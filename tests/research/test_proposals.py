@@ -240,7 +240,8 @@ def test_create_experiment_draft_materializes_partial_params(tmp_path, monkeypat
     out_id = proposals._create_experiment_draft({"min_rr": 1.5}, "disc_partia1")
     v = [v for v in estore.list_versions(exp_db)
          if v.experiment_id == out_id][0]
-    assert len(v.params) == 21
+    from discovery.objective import ID_KEYS, EXEC_KEYS
+    assert len(v.params) == len(set(ID_KEYS) | set(EXEC_KEYS))   # 识别+执行全键（R4 momentum_gate 后 22）
     assert v.params["min_rr"] == 1.5
     assert v.params["window"] == 60            # NecklineConfig 默认基座（策略 merge 同源）
 

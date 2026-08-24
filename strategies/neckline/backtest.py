@@ -236,7 +236,13 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         "tp1_portion": exec["tp1_portion"],
     }
 
-    for i in range(buy_idx, end_idx + 1):
+    # T+1 红线（R5b · 2026-08-25 实锤修复）：A 股现货当日买入不可当日卖出——
+    # 出场判定从 buy_idx **次日**起（原 range(buy_idx,...) 允许当日触发 stop/tp =
+    # 违规日内循环：实锤 base 3% 笔数/pnl 贡献 10%、tp_h=0.8 达 14%/29%，且违规笔
+    # 均收益 4-11% 远高于合规笔——止盈收紧方向的"收益引擎"曾实质依赖此漏洞）。
+    # holding_days 维持 i - buy_idx：次日=第 1 个持有日，对齐实盘 pre_open 的
+    # (entry, T-1] 交易日计数口径（C9）。
+    for i in range(buy_idx + 1, end_idx + 1):
         row = sym_df.iloc[i]
         high, low, close = float(row["high"]), float(row["low"]), float(row["close"])
         holding_days = i - buy_idx
