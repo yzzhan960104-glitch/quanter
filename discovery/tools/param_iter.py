@@ -46,13 +46,17 @@ from strategies.neckline.backtest import scan_symbol, risk_metrics, EXEC_DEFAULT
 #   max_wait 12-30 / buy_limit 2.0-3.0 / max_holding 25-40 等）+ tp1_h_mult 2.0-3.0
 # （R6-4 幽灵成交修复后 tp1>tp_h 反转区合法）。不加新维——sampler Sobol 方向数
 # 备至 21 维（momentum_gate 曾漏列但 H1 受控否决，无纳入价值）。
+# R6-10 剪枝冻结（2026-08-25 用户裁决「先把 C 线完整做完」·参数战役收官降维）：
+# 8 维冻结出空间（最优值定稿于冠军参数，引擎语义不动、只不搜）——
+#   不敏感 5 维（R6a 图谱全档 ±1pp 噪声级）：window(60)/tp1_portion(0.9)/
+#     trailing_grace(10)/trailing_step(0.05)/trailing_floor(0.5)
+#   默认最优 3 维（变档单调更差，R6a+R6-8 复扫双证）：min_touches(2)/
+#     min_bottoms(2)/local_extrema_window(3)
+# 空间 21→13 维（笛卡尔积 5.5e13→~2e8，砍 25 万倍）——结构面改动（B3/保真度）
+# 后若重开搜索，起步效率大幅提高。冻结维解除须有新实证（新结构面改变敏感性）。
 PARAM_SPACE = [
-    # —— 识别层（DEFAULTS）：形态判定 ——
-    ("window",              "id",   [40, 60, 80, 100, 120]),            # ① 识别窗口
-    ("min_touches",         "id",   [2, 3]),                            # ② 颈线聚集足够性
+    # —— 识别层（DEFAULTS）：形态判定 ——（冻结维注记见上，最优值以冠军参数为准）
     ("min_suppression",     "id",   [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]),    # ③ 压制时长
-    ("local_extrema_window","id",   [3, 5, 7]),                         # ④ 底部极值窗口
-    ("min_bottoms",         "id",   [2, 3, 4]),                         # ⑤ 双底/三底门槛
     ("breakout_vol_mult",   "id",   [0.5, 1.0, 1.5, 2.0]),              # ⑥ 突破带量
     ("min_rr",              "id",   [0.5, 1.0, 1.5, 2.0, 2.5]),         # ⑦ 盈亏比守卫
     ("max_h_atr",           "id",   [3.0, 3.5, 4.0, 4.5, 5.0, 5.5]),    # ⑧ 形态深度上限
@@ -65,13 +69,7 @@ PARAM_SPACE = [
     ("cooldown",            "exec", [0, 3, 5, 8]),                      # ⑭ 信号去重冷却
     ("buy_limit_atr_mult",  "exec", [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]),    # ⑮ 挂单价 ATR 倍数
     ("tp1_h_mult",          "exec", [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]),    # ⑯ 止盈1 的 H 倍数（>tp_h 合法：R6-4 修复后）
-    ("tp1_portion",         "exec", [0.3, 0.5, 0.7, 0.9]),              # ⑰ 止盈1 减仓比例
     ("cancel_thresh_mult",  "exec", [None, 1.0, 2.0, 3.0]),             # ⑱ 撤单阈值（None=不撤放飞）
-    # —— trailing 时间驱动移动止损（海龟风格 · simulate_exit 生效条件 grace>0 AND step>0）——
-    # grace=0 退化为固定止损（=当前 EXEC_DEFAULTS 默认，作基线对照，验证 trailing vs 固定谁优）
-    ("trailing_grace",  "exec", [0, 5, 10, 15, 20]),         # ⑲ 宽限期（0=关闭固定止损；5/10=前 N 天不收紧）
-    ("trailing_step",   "exec", [0.0, 0.05, 0.1, 0.15]),     # ⑳ 收紧速度（ATR/日；grace 后每日 stop 上移）
-    ("trailing_floor",  "exec", [0.0, 0.25, 0.5, 0.75]),     # ㉑ 收紧下限（0=到颈线；0.5=颈线−0.5ATR 卡住）
 ]
 # universe（创板+科创 2025至今）固定不调 = 第 22 个"概念参数"（21 可调 + universe）
 
