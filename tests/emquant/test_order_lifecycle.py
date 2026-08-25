@@ -386,6 +386,72 @@ def test_decide_position_tp2_clears_all(pilot):
     assert pilot.decide_position(12.5, _pos(remaining=200), "2026-08-21", CAL) == ("sell", 200, "tp2")
 
 
+# ============================================================================
+# R6-6 反转 regime（tp1_price > tp2_price，2026-08-26）：tp2_share/tp2_dust/
+# lot1 全卖/force_exit——新语义守护（对齐 R6-4 幽灵修复后的回测口径）
+# ============================================================================
+def test_decide_position_inverted_tp2_sells_share_not_all(pilot):
+    """反转形态 tp2 触价只卖 lot2 份额（(1−portion) 向下整手），不清仓。
+
+    R6-8 冠军形态（tp1=2H > tp2=1.5H, portion=0.9）：1000 股 @ tp2 触价 →
+    lot2=floor(1000×0.1/100)×100=100 股；lot1 900 股由 tp1 承接。
+    """
+    pos = _pos(remaining=1000, tp1=13.0, tp2=11.5, portion=0.9)
+    assert pilot.decide_position(11.5, pos, "2026-08-21", CAL) == ("sell", 100, "tp2_share")
+    assert pilot.decide_position(11.6, _pos(remaining=1000, tp1=13.0, tp2=11.5,
+                                            portion=0.9), "2026-08-21", CAL) == ("sell", 100, "tp2_share")
+
+
+def test_decide_position_inverted_tp2_done_then_tp1_all(pilot):
+    """tp2_done 已置（lot2 已出）：tp2 价区不再触发；触 tp1 → lot1 全卖（=剩余）。"""
+    pos = _pos(remaining=900, tp1=13.0, tp2=11.5, portion=0.9)
+    pos["tp2_done"] = True
+    # 11.5~13.0 区间：持有（lot1 等强势日）
+    assert pilot.decide_position(11.6, pos, "2026-08-21", CAL) is None
+    assert pilot.decide_position(12.9, dict(pos), "2026-08-21", CAL) is None
+    # 触 tp1（含等）→ 全卖剩余
+    assert pilot.decide_position(13.0, dict(pos), "2026-08-21", CAL) == ("sell", 900, "tp1")
+    assert pilot.decide_position(13.5, dict(pos), "2026-08-21", CAL) == ("sell", 900, "tp1")
+
+
+def test_decide_position_inverted_gap_tick_tp2_share_first(pilot):
+    """跳空 tick 直接 ≥ tp1：tp2 分支先判（priority 2 在前）→ 先卖 lot2 份额。
+
+    同日冲高到 tp1 的承接由下一根 tick 的 tp1 分支完成（tick 序自然复刻回测
+    「首触 tp2 当日 lot1 若摸 tp1 按 tp1 成交」；卖价用限价 tp2/tp1，跳空下
+    limit-or-better 不吃亏）。
+    """
+    pos = _pos(remaining=1000, tp1=13.0, tp2=11.5, portion=0.9)
+    assert pilot.decide_position(13.5, pos, "2026-08-21", CAL) == ("sell", 100, "tp2_share")
+
+
+def test_decide_position_inverted_tp2_dust_sinks_to_lot1(pilot):
+    """lot2 份额不足一手：("sell", 0, "tp2_dust")——置位不落单，份额沉 lot1。"""
+    pos = _pos(remaining=400, tp1=13.0, tp2=11.5, portion=0.9)
+    assert pilot.decide_position(11.6, pos, "2026-08-21", CAL) == ("sell", 0, "tp2_dust")
+
+
+def test_decide_position_inverted_stop_priority_unchanged(pilot):
+    """反转形态下 stop 仍最优先（priority 1 硬风控先于一切止盈）。"""
+    pos = _pos(remaining=1000, tp1=13.0, tp2=11.5, portion=0.9)
+    assert pilot.decide_position(9.5, pos, "2026-08-21", CAL) == ("sell", 1000, "stop_loss")
+
+
+def test_decide_position_force_exit_sells_all_at_tick(pilot):
+    """盘后 sweep 标记（tp2 已触 lot1 未出）：任意 tick 全量跟价出（tp2_eod_sweep）。"""
+    pos = _pos(remaining=900, tp1=13.0, tp2=11.5, portion=0.9)
+    pos["tp2_done"] = True
+    pos["force_exit"] = True
+    assert pilot.decide_position(11.8, pos, "2026-08-21", CAL) == ("sell", 900, "tp2_eod_sweep")
+    assert pilot.decide_position(9.8, dict(pos), "2026-08-21", CAL) == ("sell", 900, "tp2_eod_sweep")
+
+
+def test_decide_position_normal_regime_unchanged_by_inversion_code(pilot):
+    """正常 regime（tp1≤tp2）零行为变化：tp2 仍全平、tp1 仍 portion 档。"""
+    assert pilot.decide_position(12.0, _pos(remaining=400), "2026-08-21", CAL) == ("sell", 400, "tp2")
+    assert pilot.decide_position(11.0, _pos(remaining=400), "2026-08-21", CAL) == ("sell", 100, "tp1")
+
+
 def test_decide_position_tp1_once_and_lot_rounding(pilot):
     """tp1 一档一次：份额=floor(remaining×portion/100)×100 向下整手（exit.py:190 同式）。"""
     # 400×0.3/100=1.2 → floor 1 手 = 100 股

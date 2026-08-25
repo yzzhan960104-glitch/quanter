@@ -265,7 +265,8 @@ compare 侧退出码 10–13 / 20–21（10 = data_lake 不存在；11 = lake �
    PYTHONUTF8=1 E:/quanter/.venv310/Scripts/python.exe -c "import sys; sys.path.insert(0, 'emquant'); sys.modules['gm']=None; import importlib; m=importlib.import_module('emquant_neckline_pilot'); print('no-gm import ok', m.PARAMS_FINGERPRINT, len(m.UNIVERSE))"
    ```
 
-   预期输出指纹 `3466a8fca0b554cb`、universe 300 只。
+   预期输出指纹 `01903dec5029da9d`（R6-8 冠军快照，2026-08-26 换代；上一代
+   `3466a8fca0b554cb`）、universe 300 只。
 3. **`.venv_emquant` 禁止 pip install 新包**：gm 装在专用 venv，pandas/numpy 已与
    `.venv310` 钉齐版本；对拍中间产物用 csv 正是为双端零依赖等价（parquet 需
    pyarrow，禁装）。任何「顺手装个包」都可能破坏双环境对拍口径。

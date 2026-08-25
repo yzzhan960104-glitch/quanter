@@ -32,18 +32,20 @@ _UNIVERSE_JSON = _PROJECT_ROOT / "emquant" / "config" / "universe.json"
 
 # —— 快照定型键集（字面量钉死：上游 DEFAULTS/EXEC_DEFAULTS/_trade_cfg 加键属有意
 #    变更，应显式更新本表并重导快照，而非测试静默跟随）——
-# 识别层 11 键（strategies/neckline/method_v0.py:49 DEFAULTS）
+# 识别层 12 键（method_v0.DEFAULTS 11 + momentum_gate R4-H1）
 ID_KEYS = {
     "window", "min_touches", "min_suppression", "local_extrema_window", "min_bottoms",
     "breakout_vol_mult", "min_rr", "max_h_atr", "stop_atr_mult", "tp_h_mult", "decay_tau",
+    "momentum_gate",
 }
-# 执行层 13 键（strategies/neckline/backtest.py:53 EXEC_DEFAULTS：生命周期/挂单/止盈/
-# trailing 三件 + 费率三键——费率键不在实验 schema，恒为默认）
+# 执行层 16 键（EXEC_DEFAULTS：生命周期/挂单/止盈/trailing 三件 + 费率三键 +
+# R6-5 腿 A/B 三键——2026-08-26 R6-8 冠军快照换代时显式更新本表）
 EXEC_KEYS = {
     "max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
     "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
     "trailing_grace", "trailing_step", "trailing_floor",
     "commission_rate", "stamp_rate", "transfer_rate",
+    "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
 }
 # .env 实弹 14 键（trading/critical.py:187 _trade_cfg 全键）
 TRADE_KEYS = {

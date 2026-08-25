@@ -261,8 +261,9 @@ def test_pre_open_blocked_flag_skips_new_keeps_mgmt(pilot, tmp_path, monkeypatch
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "RISK_BLOCK.flag").write_text("", encoding="utf-8")   # 人工 touch
     i_t1 = CAL.index(T_MINUS_1)
+    _mh = int(pilot.EXEC_PARAMS["max_holding"])          # §0 换代健壮：超期龄期动态取
     st = pilot._initial_state()
-    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - 21])            # 21 > 20 超期
+    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - _mh - 1])        # 恰超 max_holding
     sigs = {"300750.SZ": _signal(pilot)}
     _pin(pilot, monkeypatch, tmp_path, universe=("300750.SZ",), detect=_detect_map(sigs))
     rt = _rt(pilot, fake, tmp_path, state=st)
@@ -286,9 +287,10 @@ def test_expired_close_uses_t1_basis(pilot, tmp_path, monkeypatch):
     _back_counter_position(fake, "SZSE.300750", 300, 10.0)   # 持仓配柜台背书（absorb ③ 语义）
     _back_counter_position(fake, "SHSE.688981", 150, 10.0)
     i_t1 = CAL.index(T_MINUS_1)
+    _mh = int(pilot.EXEC_PARAMS["max_holding"])          # §0 换代健壮：恰等/超期动态构造
     st = pilot._initial_state()
-    st["positions"]["300750.SZ"] = _pos_state(pilot, CAL[i_t1 - 20], remaining=300)  # 恰等 20：不平
-    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - 21], remaining=150)  # 21>20：平
+    st["positions"]["300750.SZ"] = _pos_state(pilot, CAL[i_t1 - _mh], remaining=300)   # 恰等：不平
+    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - _mh - 1], remaining=150)  # 恰超：平
     _pin(pilot, monkeypatch, tmp_path, universe=())                     # 无信号干扰
     rt = _rt(pilot, fake, tmp_path, state=st)
     rt.pre_open(_Ctx())
@@ -298,7 +300,7 @@ def test_expired_close_uses_t1_basis(pilot, tmp_path, monkeypatch):
     assert sells[0]["symbol"] == "SHSE.688981" and sells[0]["volume"] == 150
     assert sells[0]["price"] == pytest.approx(7.77)
     exp = _details(tmp_path, "EXPIRE_SELL")[0]
-    assert exp["holding_days"] == 21 and exp["max_holding"] == 20       # 审计留判定依据
+    assert exp["holding_days"] == _mh + 1 and exp["max_holding"] == _mh  # 审计留判定依据
 
 
 def test_scan_writes_audit_and_state(pilot, tmp_path, monkeypatch):
@@ -317,9 +319,13 @@ def test_scan_writes_audit_and_state(pilot, tmp_path, monkeypatch):
 
 
 def test_scan_cooldown_dedup(pilot, tmp_path, monkeypatch):
-    """cooldown 跨日去重（engine.py:1036-1050 复刻）：(last, today] < 8 丢、== 8 放。"""
+    """cooldown 跨日去重（engine.py:1036-1050 复刻）：(last, today] < cd 丢、== cd 放。
+
+    cooldown 显式注入 5（隔离 §0 值——R6-8 冠军 cooldown=0「不去重」本身是配置
+    语义，机制测试不随 §0 换代失效）。"""
+    monkeypatch.setitem(pilot.EXEC_PARAMS, "cooldown", 5)
     i_t = CAL.index(TODAY)
-    last_recent, last_edge = CAL[i_t - 7], CAL[i_t - 8]   # 7 < 8 丢 / 8 == 8 放
+    last_recent, last_edge = CAL[i_t - 4], CAL[i_t - 5]   # 4 < 5 丢 / 5 == 5 放
     sigs = {"300750.SZ": _signal(pilot)}
 
     # 近窗：去重丢弃 + 锚点不更新
@@ -551,8 +557,9 @@ def test_pre_open_state_saved_after_expire_before_later_failure(pilot, tmp_path,
                                                "upper_limit": 12.0}})
     _back_counter_position(fake, "SHSE.688981", 150, 10.0)
     i_t1 = CAL.index(T_MINUS_1)
+    _mh = int(pilot.EXEC_PARAMS["max_holding"])          # §0 换代健壮：超期龄期动态取
     st = pilot._initial_state()
-    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - 21])   # 21 > 20 超期
+    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - _mh - 1])   # 恰超 max_holding
     _pin(pilot, monkeypatch, tmp_path, universe=())
 
     def _boom(path=None):
@@ -575,8 +582,9 @@ def test_expired_close_t1_close_fallback_price(pilot, tmp_path, monkeypatch):
     fake = FakeGm(raise_on_symbol_info=True)            # 证券信息通道整体失败（盘前当日行未生成的形态）
     _back_counter_position(fake, "SHSE.688981", 150, 10.0)   # 持仓配柜台背书（absorb ③ 语义）
     i_t1 = CAL.index(T_MINUS_1)
+    _mh = int(pilot.EXEC_PARAMS["max_holding"])          # §0 换代健壮：超期龄期动态取
     st = pilot._initial_state()
-    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - 21])   # 21 > 20 超期
+    st["positions"]["688981.SH"] = _pos_state(pilot, CAL[i_t1 - _mh - 1])   # 恰超 max_holding
     _pin(pilot, monkeypatch, tmp_path, universe=())                     # 无信号干扰
     rt = _rt(pilot, fake, tmp_path, state=st)
     # 期望值：同一行情口径下 T-1 末根 close 的 20% 自算（替身确定性合成，无手算魔法数）

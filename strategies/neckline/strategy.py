@@ -53,6 +53,13 @@ _NECKLINE_EXEC_KEYS = (
     "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
     # trailing 层（U5 Task 8）：归 exec_cfg 透传到 decide_exit → compute_stop_price
     "trailing_grace", "trailing_step", "trailing_floor",
+    # R6-5 腿 A/B（2026-08-26 补列）：chase_entry/timeout_extend 归 exec_cfg 透传到
+    # simulate_exit（scan_at/replay 口径）与 Signal.exec_params（实盘快照）。首版
+    # 参数化时漏列本白名单——分流丢弃致 exec_cfg 回落默认 False：R6-8 冠军
+    # （chase_entry=True）在 replay 口径与 export_snapshot（掘金 §0）被静默降级为
+    # chase-off。修列后 replay 口径与 scan 口径（run_full_scan 直吃 params dict）
+    # 行为一致化（replay 读数将随 chase 生效而变化，属预期修正）。
+    "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
 )
 
 logger = logging.getLogger(__name__)

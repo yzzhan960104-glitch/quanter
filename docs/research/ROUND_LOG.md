@@ -268,3 +268,15 @@
 - **七门终审：六过一拒，G4/2024 折 −1.005——连续第四个候选死在同一位**（49e3755 −1.04 → 贪心栈 → supp04+tp1 −1.05 → 本候选 −1.005）。scan 年段 2024 为 **+90%**，wf 折（2023 末时点 universe + 信号口径 calmar）为 **−1.0**——差距主体是 universe 诚实性（今日流动性选池 = 幸存者偏差 vs 折末选池）+ 口径差。kelly_hat=0（下三分位仍落零 kelly 年）。
 - **战役级结论（G4 结构限性实锤）**：三个参数形态迥异的候选（49e3755 系 / 贪心栈+supp04+tp1 系 / 本循环 12 步产物）在 wf 2024 折全部 calmar ≈ −1.0——**2024 型微盘崩年在无前视 universe 上亏钱是策略族的结构性代价，参数优化无法治愈**；scan 口径军备竞赛（+83%→+115%→+515%）对 G4 纹丝不动。剩余路径维持 R6-7 结论：运行时兜底（人工 CAP 纪律化，用户裁决）或结构面改变（tp 锚/保真度攻坚），参数侧继续挖已无意义。+515% 读数全部戴 R5b 红旗帽。
 - **模拟盘部署（2026-08-25 用户裁决「接受 2024 型年份亏钱，更新默认策略上模拟盘」）**：`neckline_prop_20260825_8_loop` 经**人工 promote**（autopromote 门槛路径 G4 拒绝，走人审通道 `python -m experiment archive/promote`）成为 ACTIVE weight=1.0，旧 ACTIVE 25c602 归档；append_note 留痕（G4 豁免 + kelly_hat=0 + 泛滥量提示 + 回滚命令）。执行前安全核查：目标账户 `10110356` = QMT 模拟盘（东北证券测试版 userdata_mini，100 万虚拟资金）非真钱；引擎每周期动态 `resolve_active()` 读库**无需重启**；现存 2 个模拟盘持仓不受影响；EOD 链路健康（旧参数 3-11 单/日）。生效路径：18:00 EOD 产计划 → 次日 pre_open 挂单。**已知回测⇄实盘语义缺口（模拟盘要验的正是它）**：chase_entry（等待期末市价追入）在实盘路径无实现——深回踩挂单（颈线+2.5ATR）27 天超期后仅过期不追入；cooldown=0 的信号密度由 max_positions=6+资金约束自然节流。回滚：`python -m experiment rollback neckline_disc_20260725_25c602`。
+
+---
+
+## R6-9 · 2026-08-26 · 掘金（东财）试点换代接入——R6-8 冠军上双轨对照腿
+
+- **交付**：`emquant/emquant_neckline_pilot.py` 换代（§0 快照 `01903dec5029da9d`，champion=`neckline_r68_champion_20260826`）+ 完整接入方案（`docs/superpowers/plans/2026-08-26-emquant-r68-champion-integration.md`：部署步骤/验证协议/六项分歧台账/回滚 SOP）。
+- **pilot_body 反转 regime 手术（核心工程）**：新冠军 tp1=2H>tp2=1.5H，旧躯干 tp2 一触全平会丢掉最大单点边际（90% 仓位在 1.5H 被倒掉）。tick 状态机补齐：tp2 触价只卖 lot2 份额（reason=tp2_share，一档一次；不足一手 tp2_dust 沉 lot1）、tp1 触价 lot1 全卖、跳空 tick 序自然承接同日冲高（limit-or-better）、盘后 sweep（force_exit）次日首 tick 出复刻回测「lot1 随 tp2 同价平」；正常 regime（tp1≤tp2）零行为变化（守护测试钉死）。顺带清偿 0821 评审遗留 on_tick price 防御（脏 tick WARN 跳过不炸回调）。
+- **两个连带真 bug（本次挖出并修）**：
+  1. `strategy.py _NECKLINE_EXEC_KEYS` 漏列 R6-5 腿键——replay 口径（七门 G1-G3）与掘金快照一直在 **chase-off** 下跑（scan 口径不受影响，run_full_scan 直吃 params dict）；修列后两口径一致化（R6-8 七门 G1-G3 读数系 chase-off 口径留档不改写，chase-on 重跑待排程）。
+  2. `(1−portion)` 浮点下溢截断（1.0−0.9=0.0999…→int(0.999…)=0 把 lot2 整手截没）——epsilon 修复，新测试实锤抓出。
+- **ACTIVE 护栏联动修复**：人工晋级的版本 note 无 `outer ann=X%` 模式 → discovery auto_publish 护栏解析失效（fast 套件 bridge 测试抓出：ann=0% 的 trial 也会被自动发布）。按 append-only 纪律走「归档→重建带护栏 note 版本→promote」：ACTIVE 现为 `neckline_r68_champion_20260826`（参数逐字节同 R6-8 产物，note 含 outer ann=511.5% calmar=60.7 + G4 豁免留痕 + 回滚命令）；快照重导后指纹不变（参数未动）。QMT 引擎腿动态读库自动跟随，模拟持仓/挂单无感。
+- **测试**：tests/emquant **744 项全绿**（+8 反转 regime 守护；钉旧 §0 值的测试改造为换代健壮：超期龄期动态取 max_holding、cooldown 机制测试显式注入隔离值、键集字面量随代显式更新）+ fast 套件 2046 全绿。上实盘前置不变：双网关冲突（本机 QMT 引擎与掘金终端并存的柜台会话隔离）+ 08-13 审计项。

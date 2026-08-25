@@ -785,18 +785,29 @@ def decide_pending(tick_price, order, today, cal):
 
 def decide_position(tick_price, pos, today, cal):
     """持仓离场判定（纯函数）→ ("sell", qty, reason) / None（持有）；reason ∈
-    {stop_loss, tp2, tp1}。
+    {stop_loss, tp2, tp2_share, tp1, tp2_dust, tp2_eod_sweep}。
 
     C9 口径（优先序对齐本地 decide_exit，strategies/neckline/execution.py:249-294）：
+      ⓪ force_exit（盘后 sweep 标记，见 after_close 的 tp1_eod_sweep_marked）→
+        全量跟 tick 市价出（reason=tp2_eod_sweep——回测「lot1 随 tp2 同价平仓」的
+        次日首 tick 近似，隔夜跳空风险入对照报告 known_divergence 台账）；
       ① stop 触价（tick ≤ 当日止损价，含等——priority 1 :249-259 硬风控先于止盈，
         防日内闪崩穿底后反弹的假象）→ 卖 remaining 全量；
-      ② tp2 触价（tick ≥ tp2_price，含等——priority 2 :269-276）→ 清仓全量；
+      ② tp2 触价（tick ≥ tp2_price，含等——priority 2 :269-276）：
+        - 正常 regime（tp1 ≤ tp2，历史全档）：清仓全量（=decide_exit priority 2）；
+        - **反转 regime（tp1_price > tp2_price，R6-6 冠军形态 tp1=2H > tp2=1.5H）**：
+          只卖 lot2 份额 floor(remaining×(1−tp1_portion)/100)×100（reason=tp2_share，
+          置 tp2_done 一档一次）；不足一手 → ("sell", 0, "tp2_dust")——份额沉 lot1
+          不落单（known_divergence=tp2_dust_sinks）。对齐 R6-4 幽灵修复后的回测
+          语义：首触 tp2 当日 lot1 若摸到 tp1 则按 tp1 成交（由 ③ 的 tick 序自然
+          承接——同一冲高日 1.5H 先触 2H 后触），未摸到则随 tp2 同价平（tick 腿
+          无法当日收盘卖 → 盘后 force_exit 次日出，④⓪ 链）。
       ③ tp1 触价（tick ≥ tp1_price 且 not tp1_done——priority 3 :287-294，tp1_done
-        即本地 lot1_open=False 对齐 simulate_exit:191 的一档一次）→ 卖 portion 档
-        一次：qty = floor(remaining×tp1_portion/100)×100（trading/phases/exit.py:190
-        tp1_target 同式向下整手）；不足一手（floor=0）→ 本档卖全部剩余（brief 钉死
-        ——单仓一次性模型下防零股残留/防 tp1_done 空转；两腿模型的对照语义见
-        exit.py:190-193「份额沉到 tp2 腿」）。
+        即本地 lot1_open=False 对齐 simulate_exit:191 的一档一次）：
+        - 正常 regime：卖 portion 档一次：qty = floor(remaining×tp1_portion/100)×100
+          （trading/phases/exit.py:190 同式向下整手）；不足一手（floor=0）→ 本档卖
+          全部剩余（known_divergence=tp1_dust_clears）。
+        - 反转 regime：卖全部剩余（lot1 即剩余——tp1 在此是 lot1 的强势日目标位）。
       ④ 均未触发 → None。
 
     当日止损价来源（两级）：pos["trailing"] 的 neckline/atr 在场（非 None）即走
@@ -807,14 +818,18 @@ def decide_position(tick_price, pos, today, cal):
     回退 pos["stop"]（盘后预算的当日固定价——execution docstring 离散化口径的
     兜底）。实弹快照（grace 0/step 0.0）下两路径恒等（=base_stop）。
 
-    pos 契约（§3 schema v1 的 positions 值）：remaining_qty / tp1_price / tp1_done /
-    tp2_price / trailing{...} / exec_params.tp1_portion / entry_date。remaining_qty
-    ≤0 → None（无仓可卖，防裸调炸 KeyError）。
+    pos 契约（§3 schema v1.2 的 positions 值）：remaining_qty / tp1_price / tp1_done /
+    tp2_price / tp2_done（反转 regime 的 lot2 一档一次锚）/ force_exit（盘后 sweep
+    次日出场标记）/ trailing{...} / exec_params.tp1_portion / entry_date。
+    remaining_qty ≤0 → None（无仓可卖，防裸调炸 KeyError）。
     """
     remaining = int(pos.get("remaining_qty") or 0)
     if remaining <= 0:
         return None
     px = float(tick_price)
+    # ⓪ 盘后 sweep 残仓：强制出场（全量，跟 tick 价）
+    if pos.get("force_exit"):
+        return ("sell", remaining, "tp2_eod_sweep")
     # ① 当日止损价：trailing 快照齐 → compute_stop_price（5.0 移植真身）
     tr = pos.get("trailing") or {}
     if tr.get("neckline") is not None and tr.get("atr") is not None:
@@ -831,15 +846,29 @@ def decide_position(tick_price, pos, today, cal):
     # ② priority 1：止损（硬风控，全平剩余）
     if stop is not None and px <= float(stop):
         return ("sell", remaining, "stop_loss")
-    # ③ priority 2：tp2 全平
     tp2 = pos.get("tp2_price")
-    if tp2 is not None and px >= float(tp2):
-        return ("sell", remaining, "tp2")
-    # ④ priority 3：tp1 一档一次（向下整手；不足一手清剩余）
     tp1 = pos.get("tp1_price")
+    inverted = (tp1 is not None and tp2 is not None
+                and float(tp1) > float(tp2))       # R6-6 反转形态（tp1 挂 tp2 之上）
+    # ③ priority 2：tp2
+    if tp2 is not None and px >= float(tp2):
+        if not inverted:
+            return ("sell", remaining, "tp2")      # 正常 regime：全平（历史口径）
+        if not pos.get("tp2_done"):
+            portion = float((pos.get("exec_params") or {}).get("tp1_portion") or 0.0)
+            # epsilon 防 (1−portion) 浮点下溢截断（1.0−0.9=0.0999…→int(0.999…)=0
+            # 把整手份额截没——1000 股×10% 应得 100 股而非 dust；测试实锤）
+            qty = int(remaining * (1.0 - portion) / 100 + 1e-9) * 100   # lot2 份额（向下整手）
+            if qty <= 0:
+                return ("sell", 0, "tp2_dust")     # 不足一手：份额沉 lot1（置位不落单）
+            return ("sell", qty, "tp2_share")
+        # tp2_done 已置（lot2 已出）→ 落到 ③ 判 lot1
+    # ④ priority 3：tp1
     if tp1 is not None and not pos.get("tp1_done") and px >= float(tp1):
+        if inverted:
+            return ("sell", remaining, "tp1")      # 反转 regime：lot1 即剩余，全卖
         portion = float((pos.get("exec_params") or {}).get("tp1_portion") or 0.0)
-        qty = int(remaining * portion / 100) * 100   # exit.py:190 同式（向下整手）
+        qty = int(remaining * portion / 100) * 100  # exit.py:190 同式（向下整手）
         if qty <= 0:
             qty = remaining                           # 不足 100 股 → 本档卖全部剩余
         return ("sell", qty, "tp1")
@@ -959,6 +988,7 @@ def absorb_reality(state, api_orders, api_positions):
                         "entry_date": st_o.get("date"), "entry_price": vwap,
                         "qty": delta, "remaining_qty": delta, "stop": None,
                         "tp1_price": None, "tp1_done": False, "tp2_price": None,
+                        "tp2_done": False, "force_exit": False,
                         "trailing": {},
                         "exec_params": dict(st_o.get("exec_params") or {})}
                 else:
@@ -981,6 +1011,7 @@ def absorb_reality(state, api_orders, api_positions):
                 "entry_date": None, "entry_price": ap.get("vwap"),
                 "qty": volume, "remaining_qty": volume, "stop": None,
                 "tp1_price": None, "tp1_done": False, "tp2_price": None,
+                "tp2_done": False, "force_exit": False,
                 "trailing": {}, "exec_params": {}}
         else:
             # 双向在场：数量柜台真值修 state（entry/exec_params/tp1_done 等档案保留）
@@ -1709,7 +1740,19 @@ class PilotRuntime:
                         symbol=(tick or {}).get("symbol"),
                         err=f"{type(e).__name__}: {e}")
             return
-        px = float(tick["price"])
+        # tick 价防御（0821 评审遗留项 on_tick price 防御，2026-08-26 落地）：行情侧
+        # 异变（None/0/NaN/非数值）原样 float() 会把整根回调炸出——巡检环死一只脏
+        # tick 全部陪跳。改为 WARN 留痕（type=tick_price_invalid）+ 跳过本事件：
+        # 无有效价，pending/positions 判定本就无从做起；其余标的后续 tick 照常。
+        try:
+            px = float(tick["price"])
+            if not (px > 0.0) or px == float("inf") or px != px:
+                raise ValueError(f"非正/非有限 tick 价 {tick.get('price')!r}")
+        except Exception as e:
+            self._audit("WARN", type="tick_price_invalid",
+                        symbol=(tick or {}).get("symbol"),
+                        err=f"{type(e).__name__}: {e}")
+            return
         acted = False
 
         # ── pending：挂单等待期撤单判定（只判 OPEN——卖单无 cancel_on/max_wait 语义锚）──
@@ -1730,34 +1773,54 @@ class PilotRuntime:
             verdict = decide_position(px, pos, today, cal)
             if verdict:
                 _, qty, reason = verdict
-                if reason == "stop_loss":
-                    price = px                                # 止损跟现价（见头注）
-                elif reason == "tp2":
-                    price = float(pos.get("tp2_price") or px)
+                if qty <= 0:
+                    # 反转 regime 的 tp2_dust（lot2 份额不足一手）：份额沉 lot1，
+                    # 置位 tp2_done 不落单（防每 tick 重判空转 + 防 after_close 误扫）。
+                    pos["tp2_done"] = True
+                    self._audit("WARN", type="tp2_dust_sinks", symbol=sym,
+                                known_divergence="tp2_dust_sinks")
                 else:
-                    price = float(pos.get("tp1_price") or px)
-                try:
-                    cid = sell_limit(self._a(), sym, price, qty, self.account)
-                except Exception as e:                         # GmError/断连：本 tick 放弃，下 tick 重判重试
-                    self._audit("WARN", type="tick_sell_fail", symbol=sym, reason=reason,
-                                err=f"{type(e).__name__}: {e}")
-                    cid = None
-                if cid is not None:
-                    st["orders"][cid] = {"symbol": sym, "date": today, "price": price,
-                                         "qty": qty, "purpose": reason.upper(),
-                                         "cancel_on": None, "formed_at": None,
-                                         "exec_params": {}, "status": "SUBMITTED",
-                                         "filled": 0, "account": self.account}
-                    detail = {"symbol": sym, "reason": reason, "qty": qty, "price": price,
-                              "cl_ord_id": cid}
-                    if reason == "tp1":
-                        pos["tp1_done"] = True                # 一档一次：落单即置位（单仓一次性模型）
-                        if qty == int(pos.get("remaining_qty") or 0):
-                            # 已知分歧标记（Task 7 评审指令）：不足一手清剩余——本地两腿
-                            # 模型此档份额「沉到 tp2 腿」，pilot 清剩余；双轨复盘剔除用
-                            detail["known_divergence"] = "tp1_dust_clears"
-                    self._audit("SELL", **detail)
-                    acted = True
+                    if reason in ("stop_loss", "tp2_eod_sweep"):
+                        price = px                                # 止损/盘后 sweep 跟现价（见头注）
+                    elif reason in ("tp2", "tp2_share"):
+                        price = float(pos.get("tp2_price") or px)
+                    else:
+                        price = float(pos.get("tp1_price") or px)
+                    try:
+                        cid = sell_limit(self._a(), sym, price, qty, self.account)
+                    except Exception as e:                         # GmError/断连：本 tick 放弃，下 tick 重判重试
+                        self._audit("WARN", type="tick_sell_fail", symbol=sym, reason=reason,
+                                    err=f"{type(e).__name__}: {e}")
+                        cid = None
+                    if cid is not None:
+                        st["orders"][cid] = {"symbol": sym, "date": today, "price": price,
+                                             "qty": qty, "purpose": reason.upper(),
+                                             "cancel_on": None, "formed_at": None,
+                                             "exec_params": {}, "status": "SUBMITTED",
+                                             "filled": 0, "account": self.account}
+                        detail = {"symbol": sym, "reason": reason, "qty": qty, "price": price,
+                                  "cl_ord_id": cid}
+                        if reason == "tp2_share":
+                            # 反转 regime lot2 一档一次：落单即置位（tp1_done 同款语义）
+                            pos["tp2_done"] = True
+                        if reason == "tp2_eod_sweep":
+                            # 盘后 sweep 出场已落单：清标记（remaining 归零后自然无害，
+                            # 清标记防极端部分成交场景下次日重复强平）
+                            pos["force_exit"] = False
+                            detail["known_divergence"] = "tp1_eod_sweep_next_open"
+                        if reason == "tp1":
+                            pos["tp1_done"] = True                # 一档一次：落单即置位（单仓一次性模型）
+                            _tp1 = pos.get("tp1_price")
+                            _tp2 = pos.get("tp2_price")
+                            _inverted = (_tp1 is not None and _tp2 is not None
+                                         and float(_tp1) > float(_tp2))
+                            if not _inverted and qty == int(pos.get("remaining_qty") or 0):
+                                # 已知分歧标记（Task 7 评审指令）：不足一手清剩余——本地两腿
+                                # 模型此档份额「沉到 tp2 腿」，pilot 清剩余；双轨复盘剔除用
+                                # （反转 regime 的 tp1 全卖是 lot1 正常出场，非 dust 分歧）
+                                detail["known_divergence"] = "tp1_dust_clears"
+                        self._audit("SELL", **detail)
+                        acted = True
         if acted:
             save_state(st, path=self.state_file)              # 只在有动作时落盘（tick 热路径不写盘）
 
@@ -1772,6 +1835,18 @@ class PilotRuntime:
         self._audit("EOD", date=today, positions=len(st["positions"]),
                     open_orders=open_cnt, placed_today=len(placed_today),
                     params_fingerprint=PARAMS_FINGERPRINT)
+        # ── 反转形态盘后 sweep（R6-6 冠军形态对齐，2026-08-26）：tp2 已触（lot2 已出）
+        #    但 lot1 未出 → 置 force_exit，次日首 tick 市价出。对齐 R6-4 修复后回测
+        #    语义「首触 tp2 当日 lot1 未摸 tp1 → 随 tp2 同价平」——tick 腿无法当日
+        #    收盘卖，次日首 tick 是最近似（隔夜跳空风险入对照台账，
+        #    known_divergence=tp1_eod_sweep_next_open，on_tick 落单时标注）。
+        for sym, pos in st["positions"].items():
+            if (int(pos.get("remaining_qty") or 0) > 0
+                    and pos.get("tp2_done") and not pos.get("tp1_done")
+                    and not pos.get("force_exit")):
+                pos["force_exit"] = True
+                self._audit("WARN", type="tp1_eod_sweep_marked", symbol=sym,
+                            remaining_qty=pos.get("remaining_qty"))
         if self._subscribed:
             # 清订阅容错（终审 M-4）：unsubscribe 抛错（断连/终端已收市）只 WARN 不炸
             # 盘后收尾（EOD 行已落、state 落盘在后，炸了=丢尾），且【无论成败都清

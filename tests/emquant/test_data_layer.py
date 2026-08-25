@@ -109,8 +109,8 @@ def test_fetch_df_upto_contract(pilot):
     assert df is not None
     # 列恰五列且有序（识别内核按名取列；多余列 = 传输冗余，缺失列 = 内核 KeyError）
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
-    # 根数 = 2×window+40（§0 window=80）：识别窗 + ATR/极值预热 + 停牌跳空冗余
-    assert len(df) == 2 * pilot.ID_PARAMS["window"] + 40 == 200
+    # 根数 = 2×window+40（§0 换代健壮：动态取 window）：识别窗 + ATR/极值预热 + 停牌跳空冗余
+    assert len(df) == 2 * pilot.ID_PARAMS["window"] + 40
     # index：零点 DatetimeIndex 升序，末根 == 截断日（.loc[:date] 闭区间同口径）
     assert isinstance(df.index, pd.DatetimeIndex)
     assert df.index.is_monotonic_increasing
@@ -123,7 +123,8 @@ def test_fetch_df_upto_contract(pilot):
     lookback_start = (pd.Timestamp(END) - pd.Timedelta(days=500)).strftime("%Y-%m-%d")
     all_bdays = pd.bdate_range(lookback_start, END)
     assert len(all_bdays) > 200                                       # 截断前提：可得根数富余
-    assert df.index[0] == all_bdays[-200]
+    _n = 2 * pilot.ID_PARAMS["window"] + 40
+    assert df.index[0] == all_bdays[-_n]
 
 
 def test_fetch_df_upto_call_params(pilot):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。
-PARAMS_FINGERPRINT=3466a8fca0b554cb  生成物见 emquant/config/。
+PARAMS_FINGERPRINT=01903dec5029da9d  生成物见 emquant/config/。
 """
 from __future__ import annotations
 
@@ -42,11 +42,11 @@ if _IS_MAIN:
 
 
 # ============================ §0 参数区（export_snapshot 导出的定稿快照）============================
-ID_PARAMS = {'breakout_vol_mult': 1.0, 'decay_tau': None, 'local_extrema_window': 5, 'max_h_atr': 5.0, 'min_bottoms': 3, 'min_rr': 2.0, 'min_suppression': 0.6, 'min_touches': 2, 'stop_atr_mult': 1.0, 'tp_h_mult': 2.5, 'window': 80}
-EXEC_PARAMS = {'buy_limit_atr_mult': 0.5, 'cancel_thresh_mult': 2.0, 'commission_rate': 0.0003, 'cooldown': 8, 'max_holding': 20, 'max_wait': 8, 'stamp_rate': 0.0005, 'tp1_h_mult': 1.0, 'tp1_portion': 0.3, 'trailing_floor': 0.0, 'trailing_grace': 0, 'trailing_step': 0.0, 'transfer_rate': 1e-05}
+ID_PARAMS = {'breakout_vol_mult': 1.0, 'decay_tau': 60.0, 'local_extrema_window': 3, 'max_h_atr': 4.5, 'min_bottoms': 2, 'min_rr': 2.0, 'min_suppression': 0.3, 'min_touches': 2, 'momentum_gate': None, 'stop_atr_mult': 1.5, 'tp_h_mult': 1.5, 'window': 60}
+EXEC_PARAMS = {'buy_limit_atr_mult': 2.5, 'cancel_thresh_mult': None, 'chase_entry': True, 'commission_rate': 0.0003, 'cooldown': 0, 'max_holding': 30, 'max_wait': 27, 'stamp_rate': 0.0005, 'timeout_extend_days': 0, 'timeout_extend_min_pnl': 0.05, 'tp1_h_mult': 2.0, 'tp1_portion': 0.9, 'trailing_floor': 0.5, 'trailing_grace': 10, 'trailing_step': 0.05, 'transfer_rate': 1e-05}
 TRADE_CFG = {'cancel_thresh_mult': 1.0, 'floor': 0.5, 'grace': 5, 'kelly_fraction': 0.25, 'kelly_hat': 0.0, 'max_holding': 15, 'max_wait': 5, 'pos_cap': 0.05, 'sizing_mode': 'fixed', 'step': 0.1, 'stop_atr_mult': 1.0, 'tp1_h_mult': 1.0, 'tp1_portion': 0.5, 'tp_h_mult': 2.0}
-UNIVERSE = ['300308.SZ', '688825.SH', '300502.SZ', '688256.SH', '688836.SH', '300394.SZ', '688008.SH', '300750.SZ', '300476.SZ', '688525.SH', '688981.SH', '300408.SZ', '688012.SH', '300285.SZ', '688041.SH', '301308.SZ', '300274.SZ', '688498.SH', '688347.SH', '300136.SZ', '300604.SZ', '300433.SZ', '301526.SZ', '300223.SZ', '300475.SZ', '300059.SZ', '688072.SH', '300857.SZ', '300058.SZ', '688146.SH', '301217.SZ', '300666.SZ', '688766.SH', '300620.SZ', '688017.SH', '688521.SH', '688048.SH', '300570.SZ', '688126.SH', '688826.SH', '300757.SZ', '300548.SZ', '301511.SZ', '688313.SH', '300346.SZ', '300033.SZ', '300390.SZ', '300014.SZ', '301717.SZ', '688820.SH', '300395.SZ', '301396.SZ', '688120.SH', '300209.SZ', '688702.SH', '300054.SZ', '301205.SZ', '688797.SH', '688361.SH', '688808.SH', '688183.SH', '300319.SZ', '688627.SH', '688549.SH', '301666.SZ', '300418.SZ', '300672.SZ', '688630.SH', '688111.SH', '300442.SZ', '688629.SH', '300975.SZ', '301171.SZ', '688082.SH', '688167.SH', '688037.SH', '688110.SH', '300017.SZ', '301165.SZ', '300179.SZ', '300373.SZ', '301013.SZ', '688777.SH', '301583.SZ', '688362.SH', '300489.SZ', '300124.SZ', '688322.SH', '688396.SH', '300398.SZ', '300759.SZ', '688141.SH', '688519.SH', '301377.SZ', '300661.SZ', '300458.SZ', '300567.SZ', '300903.SZ', '688019.SH', '300450.SZ', '300037.SZ', '300776.SZ', '688234.SH', '688200.SH', '688300.SH', '300088.SZ', '688432.SH', '300751.SZ', '688195.SH', '300657.SZ', '300454.SZ', '300803.SZ', '300806.SZ', '688205.SH', '300782.SZ', '688668.SH', '688268.SH', '688409.SH', '301536.SZ', '300302.SZ', '688403.SH', '300503.SZ', '688002.SH', '688469.SH', '300438.SZ', '300085.SZ', '301358.SZ', '688635.SH', '688143.SH', '300870.SZ', '688507.SH', '688388.SH', '300184.SZ', '300260.SZ', '300139.SZ', '688249.SH', '300811.SZ', '301611.SZ', '301236.SZ', '301018.SZ', '688099.SH', '688596.SH', '300747.SZ', '301319.SZ', '688545.SH', '688025.SH', '300814.SZ', '301071.SZ', '300821.SZ', '688783.SH', '301486.SZ', '688308.SH', '688123.SH', '300738.SZ', '300568.SZ', '688257.SH', '301183.SZ', '688536.SH', '688235.SH', '300760.SZ', '688333.SH', '300164.SZ', '300364.SZ', '300131.SZ', '688172.SH', '300726.SZ', '688147.SH', '688802.SH', '301655.SZ', '688503.SH', '300115.SZ', '300679.SZ', '688795.SH', '301269.SZ', '688233.SH', '688676.SH', '301200.SZ', '300323.SZ', '300001.SZ', '300456.SZ', '300316.SZ', '300236.SZ', '301123.SZ', '300763.SZ', '688809.SH', '300339.SZ', '300042.SZ', '688548.SH', '300166.SZ', '688662.SH', '688411.SH', '300576.SZ', '300607.SZ', '688031.SH', '688301.SH', '300170.SZ', '688372.SH', '300769.SZ', '688700.SH', '300602.SZ', '300762.SZ', '300083.SZ', '688535.SH', '688331.SH', '300283.SZ', '301489.SZ', '301188.SZ', '300496.SZ', '300255.SZ', '688027.SH', '688220.SH', '688828.SH', '300342.SZ', '300623.SZ', '301128.SZ', '301707.SZ', '301392.SZ', '688800.SH', '300207.SZ', '300331.SZ', '300684.SZ', '300199.SZ', '300779.SZ', '300558.SZ', '300077.SZ', '301566.SZ', '300706.SZ', '300263.SZ', '300593.SZ', '300182.SZ', '300720.SZ', '688531.SH', '688387.SH', '688603.SH', '300383.SZ', '688106.SH', '300347.SZ', '688456.SH', '301292.SZ', '688158.SH', '300655.SZ', '688036.SH', '300953.SZ', '688585.SH', '688652.SH', '688213.SH', '688400.SH', '300835.SZ', '301005.SZ', '688385.SH', '688515.SH', '300843.SZ', '300613.SZ', '300322.SZ', '301150.SZ', '300265.SZ', '300748.SZ', '300420.SZ', '688729.SH', '301373.SZ', '688102.SH', '301550.SZ', '300328.SZ', '688047.SH', '688502.SH', '300174.SZ', '300024.SZ', '301338.SZ', '688052.SH', '688260.SH', '300671.SZ', '301389.SZ', '688449.SH', '301021.SZ', '688020.SH', '688390.SH', '688392.SH', '688122.SH', '688578.SH', '688559.SH', '688584.SH', '300201.SZ', '301362.SZ', '300566.SZ', '300480.SZ', '300534.SZ', '688343.SH', '301297.SZ', '300196.SZ', '300718.SZ', '301421.SZ', '301196.SZ', '688353.SH', '300142.SZ', '301099.SZ', '300102.SZ', '688169.SH', '300725.SZ', '300005.SZ', '300724.SZ']
-PARAMS_FINGERPRINT = '3466a8fca0b554cb'
+UNIVERSE = ['300308.SZ', '688825.SH', '300502.SZ', '688256.SH', '300394.SZ', '300750.SZ', '688008.SH', '300476.SZ', '688836.SH', '688525.SH', '300408.SZ', '300285.SZ', '688981.SH', '688012.SH', '301308.SZ', '688041.SH', '300274.SZ', '688498.SH', '300604.SZ', '688347.SH', '301526.SZ', '300433.SZ', '300136.SZ', '300223.SZ', '300475.SZ', '688072.SH', '300059.SZ', '300857.SZ', '688146.SH', '300058.SZ', '688766.SH', '300666.SZ', '301217.SZ', '688017.SH', '300620.SZ', '300570.SZ', '688521.SH', '688048.SH', '300548.SZ', '688126.SH', '300757.SZ', '688313.SH', '301511.SZ', '300346.SZ', '300390.SZ', '300033.SZ', '301396.SZ', '300014.SZ', '300209.SZ', '688120.SH', '300395.SZ', '688820.SH', '688702.SH', '301717.SZ', '688361.SH', '300054.SZ', '688826.SH', '688797.SH', '301205.SZ', '688808.SH', '300319.SZ', '688549.SH', '688627.SH', '300418.SZ', '688183.SH', '688111.SH', '688630.SH', '301666.SZ', '688167.SH', '301171.SZ', '688629.SH', '300672.SZ', '688082.SH', '688037.SH', '300442.SZ', '688110.SH', '301165.SZ', '300017.SZ', '300975.SZ', '300759.SZ', '300489.SZ', '300373.SZ', '301013.SZ', '688777.SH', '300179.SZ', '301583.SZ', '688362.SH', '688322.SH', '300124.SZ', '688141.SH', '688519.SH', '300398.SZ', '300903.SZ', '301377.SZ', '300458.SZ', '300661.SZ', '688396.SH', '300567.SZ', '688019.SH', '688432.SH', '688200.SH', '300450.SZ', '300454.SZ', '688300.SH', '688195.SH', '300806.SZ', '300037.SZ', '300751.SZ', '300776.SZ', '300088.SZ', '688234.SH', '300803.SZ', '688205.SH', '301536.SZ', '688409.SH', '300657.SZ', '300139.SZ', '688143.SH', '688268.SH', '688668.SH', '688002.SH', '688403.SH', '300503.SZ', '300438.SZ', '300782.SZ', '300302.SZ', '301358.SZ', '300870.SZ', '300085.SZ', '688507.SH', '688596.SH', '300260.SZ', '688388.SH', '688469.SH', '301611.SZ', '300811.SZ', '301018.SZ', '301236.SZ', '688635.SH', '301319.SZ', '688099.SH', '300184.SZ', '688249.SH', '688545.SH', '688025.SH', '300747.SZ', '688783.SH', '300821.SZ', '688123.SH', '300814.SZ', '300164.SZ', '688235.SH', '301183.SZ', '300760.SZ', '300738.SZ', '301486.SZ', '300568.SZ', '688536.SH', '688308.SH', '688257.SH', '688333.SH', '688147.SH', '301071.SZ', '688503.SH', '300131.SZ', '300364.SZ', '300679.SZ', '688802.SH', '300726.SZ', '688233.SH', '688676.SH', '688172.SH', '300115.SZ', '301200.SZ', '300323.SZ', '688795.SH', '688548.SH', '300001.SZ', '300236.SZ', '300607.SZ', '688809.SH', '688662.SH', '300339.SZ', '300042.SZ', '300316.SZ', '301123.SZ', '300763.SZ', '300083.SZ', '688031.SH', '301269.SZ', '300166.SZ', '300769.SZ', '688372.SH', '301489.SZ', '300762.SZ', '300456.SZ', '688331.SH', '300576.SZ', '300684.SZ', '300170.SZ', '688535.SH', '688700.SH', '300255.SZ', '301188.SZ', '688301.SH', '300142.SZ', '301128.SZ', '300283.SZ', '300602.SZ', '300558.SZ', '688800.SH', '300199.SZ', '688220.SH', '301392.SZ', '688828.SH', '300720.SZ', '300347.SZ', '300331.SZ', '300623.SZ', '688411.SH', '300779.SZ', '300207.SZ', '300342.SZ', '688027.SH', '300496.SZ', '300077.SZ', '300263.SZ', '300706.SZ', '301566.SZ', '300843.SZ', '688106.SH', '301292.SZ', '300593.SZ', '300182.SZ', '688456.SH', '301707.SZ', '688652.SH', '688158.SH', '688531.SH', '300383.SZ', '688036.SH', '300420.SZ', '688387.SH', '301005.SZ', '688585.SH', '300655.SZ', '688729.SH', '688515.SH', '688102.SH', '301655.SZ', '688603.SH', '300613.SZ', '301150.SZ', '688213.SH', '300328.SZ', '688400.SH', '300835.SZ', '301550.SZ', '300953.SZ', '300748.SZ', '688502.SH', '688385.SH', '300671.SZ', '301373.SZ', '300322.SZ', '300024.SZ', '300497.SZ', '300265.SZ', '688052.SH', '300534.SZ', '688260.SH', '688392.SH', '301338.SZ', '688449.SH', '688578.SH', '301389.SZ', '300765.SZ', '688047.SH', '300725.SZ', '301021.SZ', '688020.SH', '688390.SH', '300174.SZ', '688559.SH', '301196.SZ', '688353.SH', '688584.SH', '301297.SZ', '300480.SZ', '300566.SZ', '301362.SZ', '301080.SZ', '688343.SH', '301421.SZ', '300005.SZ', '300201.SZ', '688598.SH', '300718.SZ', '300102.SZ', '300196.SZ']
+PARAMS_FINGERPRINT = '01903dec5029da9d'
 # 试点硬闸（spec FR3）：单日新挂 ≤2；单票市值 ≤5%；仿真账户固定。
 PILOT_MAX_NEW_ORDERS_PER_DAY = 2
 PILOT_MAX_POSITION_PCT = 0.05
@@ -251,6 +251,11 @@ DEFAULTS = {
                                       #    (29.4%→26.2%)：中小盘+3点(top100~400 10.3→13.3)但大盘拖累更大
                                       #    (近期颈线=弱阻力，大盘控盘弱失效)。当前最优等权29.4%，暂回None。
                                       #    颈线漂移问题真实但纯时间衰减非正解，留作后续(量加权或其他)。
+    "momentum_gate": None,             # ⑪ 个股动量闸（R4-H1 · 2026-08-24）：突破日个股
+                                      #    自身 20 日收益 < 该值则不入场（None=关闭）。止损解剖实证：
+                                      #    止损组入场时动量系统性弱于止盈组（Δ-2~4pp）。**个股侧
+                                      #    而非池子侧**——池子动量=宏观 regime 撞 ADR-16 红线，
+                                      #    个股动量=信号质量维度。无前视：df_T 截至 T 计算。
 }
 
 # 顶部聚集的局部极值窗口（search_neckline 的 top_window——颈线顶部聚集口径固定，cfg 不可调）。
@@ -1597,18 +1602,29 @@ def decide_pending(tick_price, order, today, cal):
 
 def decide_position(tick_price, pos, today, cal):
     """持仓离场判定（纯函数）→ ("sell", qty, reason) / None（持有）；reason ∈
-    {stop_loss, tp2, tp1}。
+    {stop_loss, tp2, tp2_share, tp1, tp2_dust, tp2_eod_sweep}。
 
     C9 口径（优先序对齐本地 decide_exit，strategies/neckline/execution.py:249-294）：
+      ⓪ force_exit（盘后 sweep 标记，见 after_close 的 tp1_eod_sweep_marked）→
+        全量跟 tick 市价出（reason=tp2_eod_sweep——回测「lot1 随 tp2 同价平仓」的
+        次日首 tick 近似，隔夜跳空风险入对照报告 known_divergence 台账）；
       ① stop 触价（tick ≤ 当日止损价，含等——priority 1 :249-259 硬风控先于止盈，
         防日内闪崩穿底后反弹的假象）→ 卖 remaining 全量；
-      ② tp2 触价（tick ≥ tp2_price，含等——priority 2 :269-276）→ 清仓全量；
+      ② tp2 触价（tick ≥ tp2_price，含等——priority 2 :269-276）：
+        - 正常 regime（tp1 ≤ tp2，历史全档）：清仓全量（=decide_exit priority 2）；
+        - **反转 regime（tp1_price > tp2_price，R6-6 冠军形态 tp1=2H > tp2=1.5H）**：
+          只卖 lot2 份额 floor(remaining×(1−tp1_portion)/100)×100（reason=tp2_share，
+          置 tp2_done 一档一次）；不足一手 → ("sell", 0, "tp2_dust")——份额沉 lot1
+          不落单（known_divergence=tp2_dust_sinks）。对齐 R6-4 幽灵修复后的回测
+          语义：首触 tp2 当日 lot1 若摸到 tp1 则按 tp1 成交（由 ③ 的 tick 序自然
+          承接——同一冲高日 1.5H 先触 2H 后触），未摸到则随 tp2 同价平（tick 腿
+          无法当日收盘卖 → 盘后 force_exit 次日出，④⓪ 链）。
       ③ tp1 触价（tick ≥ tp1_price 且 not tp1_done——priority 3 :287-294，tp1_done
-        即本地 lot1_open=False 对齐 simulate_exit:191 的一档一次）→ 卖 portion 档
-        一次：qty = floor(remaining×tp1_portion/100)×100（trading/phases/exit.py:190
-        tp1_target 同式向下整手）；不足一手（floor=0）→ 本档卖全部剩余（brief 钉死
-        ——单仓一次性模型下防零股残留/防 tp1_done 空转；两腿模型的对照语义见
-        exit.py:190-193「份额沉到 tp2 腿」）。
+        即本地 lot1_open=False 对齐 simulate_exit:191 的一档一次）：
+        - 正常 regime：卖 portion 档一次：qty = floor(remaining×tp1_portion/100)×100
+          （trading/phases/exit.py:190 同式向下整手）；不足一手（floor=0）→ 本档卖
+          全部剩余（known_divergence=tp1_dust_clears）。
+        - 反转 regime：卖全部剩余（lot1 即剩余——tp1 在此是 lot1 的强势日目标位）。
       ④ 均未触发 → None。
 
     当日止损价来源（两级）：pos["trailing"] 的 neckline/atr 在场（非 None）即走
@@ -1619,14 +1635,18 @@ def decide_position(tick_price, pos, today, cal):
     回退 pos["stop"]（盘后预算的当日固定价——execution docstring 离散化口径的
     兜底）。实弹快照（grace 0/step 0.0）下两路径恒等（=base_stop）。
 
-    pos 契约（§3 schema v1 的 positions 值）：remaining_qty / tp1_price / tp1_done /
-    tp2_price / trailing{...} / exec_params.tp1_portion / entry_date。remaining_qty
-    ≤0 → None（无仓可卖，防裸调炸 KeyError）。
+    pos 契约（§3 schema v1.2 的 positions 值）：remaining_qty / tp1_price / tp1_done /
+    tp2_price / tp2_done（反转 regime 的 lot2 一档一次锚）/ force_exit（盘后 sweep
+    次日出场标记）/ trailing{...} / exec_params.tp1_portion / entry_date。
+    remaining_qty ≤0 → None（无仓可卖，防裸调炸 KeyError）。
     """
     remaining = int(pos.get("remaining_qty") or 0)
     if remaining <= 0:
         return None
     px = float(tick_price)
+    # ⓪ 盘后 sweep 残仓：强制出场（全量，跟 tick 价）
+    if pos.get("force_exit"):
+        return ("sell", remaining, "tp2_eod_sweep")
     # ① 当日止损价：trailing 快照齐 → compute_stop_price（5.0 移植真身）
     tr = pos.get("trailing") or {}
     if tr.get("neckline") is not None and tr.get("atr") is not None:
@@ -1643,15 +1663,29 @@ def decide_position(tick_price, pos, today, cal):
     # ② priority 1：止损（硬风控，全平剩余）
     if stop is not None and px <= float(stop):
         return ("sell", remaining, "stop_loss")
-    # ③ priority 2：tp2 全平
     tp2 = pos.get("tp2_price")
-    if tp2 is not None and px >= float(tp2):
-        return ("sell", remaining, "tp2")
-    # ④ priority 3：tp1 一档一次（向下整手；不足一手清剩余）
     tp1 = pos.get("tp1_price")
+    inverted = (tp1 is not None and tp2 is not None
+                and float(tp1) > float(tp2))       # R6-6 反转形态（tp1 挂 tp2 之上）
+    # ③ priority 2：tp2
+    if tp2 is not None and px >= float(tp2):
+        if not inverted:
+            return ("sell", remaining, "tp2")      # 正常 regime：全平（历史口径）
+        if not pos.get("tp2_done"):
+            portion = float((pos.get("exec_params") or {}).get("tp1_portion") or 0.0)
+            # epsilon 防 (1−portion) 浮点下溢截断（1.0−0.9=0.0999…→int(0.999…)=0
+            # 把整手份额截没——1000 股×10% 应得 100 股而非 dust；测试实锤）
+            qty = int(remaining * (1.0 - portion) / 100 + 1e-9) * 100   # lot2 份额（向下整手）
+            if qty <= 0:
+                return ("sell", 0, "tp2_dust")     # 不足一手：份额沉 lot1（置位不落单）
+            return ("sell", qty, "tp2_share")
+        # tp2_done 已置（lot2 已出）→ 落到 ③ 判 lot1
+    # ④ priority 3：tp1
     if tp1 is not None and not pos.get("tp1_done") and px >= float(tp1):
+        if inverted:
+            return ("sell", remaining, "tp1")      # 反转 regime：lot1 即剩余，全卖
         portion = float((pos.get("exec_params") or {}).get("tp1_portion") or 0.0)
-        qty = int(remaining * portion / 100) * 100   # exit.py:190 同式（向下整手）
+        qty = int(remaining * portion / 100) * 100  # exit.py:190 同式（向下整手）
         if qty <= 0:
             qty = remaining                           # 不足 100 股 → 本档卖全部剩余
         return ("sell", qty, "tp1")
@@ -1771,6 +1805,7 @@ def absorb_reality(state, api_orders, api_positions):
                         "entry_date": st_o.get("date"), "entry_price": vwap,
                         "qty": delta, "remaining_qty": delta, "stop": None,
                         "tp1_price": None, "tp1_done": False, "tp2_price": None,
+                        "tp2_done": False, "force_exit": False,
                         "trailing": {},
                         "exec_params": dict(st_o.get("exec_params") or {})}
                 else:
@@ -1793,6 +1828,7 @@ def absorb_reality(state, api_orders, api_positions):
                 "entry_date": None, "entry_price": ap.get("vwap"),
                 "qty": volume, "remaining_qty": volume, "stop": None,
                 "tp1_price": None, "tp1_done": False, "tp2_price": None,
+                "tp2_done": False, "force_exit": False,
                 "trailing": {}, "exec_params": {}}
         else:
             # 双向在场：数量柜台真值修 state（entry/exec_params/tp1_done 等档案保留）
@@ -2521,7 +2557,19 @@ class PilotRuntime:
                         symbol=(tick or {}).get("symbol"),
                         err=f"{type(e).__name__}: {e}")
             return
-        px = float(tick["price"])
+        # tick 价防御（0821 评审遗留项 on_tick price 防御，2026-08-26 落地）：行情侧
+        # 异变（None/0/NaN/非数值）原样 float() 会把整根回调炸出——巡检环死一只脏
+        # tick 全部陪跳。改为 WARN 留痕（type=tick_price_invalid）+ 跳过本事件：
+        # 无有效价，pending/positions 判定本就无从做起；其余标的后续 tick 照常。
+        try:
+            px = float(tick["price"])
+            if not (px > 0.0) or px == float("inf") or px != px:
+                raise ValueError(f"非正/非有限 tick 价 {tick.get('price')!r}")
+        except Exception as e:
+            self._audit("WARN", type="tick_price_invalid",
+                        symbol=(tick or {}).get("symbol"),
+                        err=f"{type(e).__name__}: {e}")
+            return
         acted = False
 
         # ── pending：挂单等待期撤单判定（只判 OPEN——卖单无 cancel_on/max_wait 语义锚）──
@@ -2542,34 +2590,54 @@ class PilotRuntime:
             verdict = decide_position(px, pos, today, cal)
             if verdict:
                 _, qty, reason = verdict
-                if reason == "stop_loss":
-                    price = px                                # 止损跟现价（见头注）
-                elif reason == "tp2":
-                    price = float(pos.get("tp2_price") or px)
+                if qty <= 0:
+                    # 反转 regime 的 tp2_dust（lot2 份额不足一手）：份额沉 lot1，
+                    # 置位 tp2_done 不落单（防每 tick 重判空转 + 防 after_close 误扫）。
+                    pos["tp2_done"] = True
+                    self._audit("WARN", type="tp2_dust_sinks", symbol=sym,
+                                known_divergence="tp2_dust_sinks")
                 else:
-                    price = float(pos.get("tp1_price") or px)
-                try:
-                    cid = sell_limit(self._a(), sym, price, qty, self.account)
-                except Exception as e:                         # GmError/断连：本 tick 放弃，下 tick 重判重试
-                    self._audit("WARN", type="tick_sell_fail", symbol=sym, reason=reason,
-                                err=f"{type(e).__name__}: {e}")
-                    cid = None
-                if cid is not None:
-                    st["orders"][cid] = {"symbol": sym, "date": today, "price": price,
-                                         "qty": qty, "purpose": reason.upper(),
-                                         "cancel_on": None, "formed_at": None,
-                                         "exec_params": {}, "status": "SUBMITTED",
-                                         "filled": 0, "account": self.account}
-                    detail = {"symbol": sym, "reason": reason, "qty": qty, "price": price,
-                              "cl_ord_id": cid}
-                    if reason == "tp1":
-                        pos["tp1_done"] = True                # 一档一次：落单即置位（单仓一次性模型）
-                        if qty == int(pos.get("remaining_qty") or 0):
-                            # 已知分歧标记（Task 7 评审指令）：不足一手清剩余——本地两腿
-                            # 模型此档份额「沉到 tp2 腿」，pilot 清剩余；双轨复盘剔除用
-                            detail["known_divergence"] = "tp1_dust_clears"
-                    self._audit("SELL", **detail)
-                    acted = True
+                    if reason in ("stop_loss", "tp2_eod_sweep"):
+                        price = px                                # 止损/盘后 sweep 跟现价（见头注）
+                    elif reason in ("tp2", "tp2_share"):
+                        price = float(pos.get("tp2_price") or px)
+                    else:
+                        price = float(pos.get("tp1_price") or px)
+                    try:
+                        cid = sell_limit(self._a(), sym, price, qty, self.account)
+                    except Exception as e:                         # GmError/断连：本 tick 放弃，下 tick 重判重试
+                        self._audit("WARN", type="tick_sell_fail", symbol=sym, reason=reason,
+                                    err=f"{type(e).__name__}: {e}")
+                        cid = None
+                    if cid is not None:
+                        st["orders"][cid] = {"symbol": sym, "date": today, "price": price,
+                                             "qty": qty, "purpose": reason.upper(),
+                                             "cancel_on": None, "formed_at": None,
+                                             "exec_params": {}, "status": "SUBMITTED",
+                                             "filled": 0, "account": self.account}
+                        detail = {"symbol": sym, "reason": reason, "qty": qty, "price": price,
+                                  "cl_ord_id": cid}
+                        if reason == "tp2_share":
+                            # 反转 regime lot2 一档一次：落单即置位（tp1_done 同款语义）
+                            pos["tp2_done"] = True
+                        if reason == "tp2_eod_sweep":
+                            # 盘后 sweep 出场已落单：清标记（remaining 归零后自然无害，
+                            # 清标记防极端部分成交场景下次日重复强平）
+                            pos["force_exit"] = False
+                            detail["known_divergence"] = "tp1_eod_sweep_next_open"
+                        if reason == "tp1":
+                            pos["tp1_done"] = True                # 一档一次：落单即置位（单仓一次性模型）
+                            _tp1 = pos.get("tp1_price")
+                            _tp2 = pos.get("tp2_price")
+                            _inverted = (_tp1 is not None and _tp2 is not None
+                                         and float(_tp1) > float(_tp2))
+                            if not _inverted and qty == int(pos.get("remaining_qty") or 0):
+                                # 已知分歧标记（Task 7 评审指令）：不足一手清剩余——本地两腿
+                                # 模型此档份额「沉到 tp2 腿」，pilot 清剩余；双轨复盘剔除用
+                                # （反转 regime 的 tp1 全卖是 lot1 正常出场，非 dust 分歧）
+                                detail["known_divergence"] = "tp1_dust_clears"
+                        self._audit("SELL", **detail)
+                        acted = True
         if acted:
             save_state(st, path=self.state_file)              # 只在有动作时落盘（tick 热路径不写盘）
 
@@ -2584,6 +2652,18 @@ class PilotRuntime:
         self._audit("EOD", date=today, positions=len(st["positions"]),
                     open_orders=open_cnt, placed_today=len(placed_today),
                     params_fingerprint=PARAMS_FINGERPRINT)
+        # ── 反转形态盘后 sweep（R6-6 冠军形态对齐，2026-08-26）：tp2 已触（lot2 已出）
+        #    但 lot1 未出 → 置 force_exit，次日首 tick 市价出。对齐 R6-4 修复后回测
+        #    语义「首触 tp2 当日 lot1 未摸 tp1 → 随 tp2 同价平」——tick 腿无法当日
+        #    收盘卖，次日首 tick 是最近似（隔夜跳空风险入对照台账，
+        #    known_divergence=tp1_eod_sweep_next_open，on_tick 落单时标注）。
+        for sym, pos in st["positions"].items():
+            if (int(pos.get("remaining_qty") or 0) > 0
+                    and pos.get("tp2_done") and not pos.get("tp1_done")
+                    and not pos.get("force_exit")):
+                pos["force_exit"] = True
+                self._audit("WARN", type="tp1_eod_sweep_marked", symbol=sym,
+                            remaining_qty=pos.get("remaining_qty"))
         if self._subscribed:
             # 清订阅容错（终审 M-4）：unsubscribe 抛错（断连/终端已收市）只 WARN 不炸
             # 盘后收尾（EOD 行已落、state 落盘在后，炸了=丢尾），且【无论成败都清
