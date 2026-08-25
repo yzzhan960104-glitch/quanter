@@ -9,7 +9,13 @@ B3 是结构面改动后的合法重搜场景（参数战役收官后唯一重�
 
 用法：
     PYTHONIOENCODING=utf-8 .venv310/Scripts/python.exe -u diag/r6_10_b3_loop.py --hours 9
-断点续跑：logs/r6_10_loop/state.json（deadline 取首启时刻，重启不重置）。
+断点续跑：logs/r6_10_loop/state.json。
+
+运行模式（2026-08-25 用户裁决「探索任务不设时间，阶段输出成果，跑到结束」）：
+    --hours N  时间预算模式（N 小时死线，与 R6-8 同款）；
+    --hours 0  **收敛驱动模式（探索任务默认）**——无死线，跑到假设空间自然收敛：
+               连续 2 整轮（coarse+fine+TPE）零采纳即终止；每轮 checkpoint 追加
+               阶段成果 progress.md（轮次/采纳链/当前 base 读数，人可直接看）。
 """
 import argparse
 import copy
@@ -60,6 +66,20 @@ COARSE = {
     "tp1_h_mult": [1.5, 2.5, 3.0],
     "cancel_thresh_mult": [1.0, 2.0],
 }
+# 收敛驱动模式（--hours 0）：连续 N 整轮零采纳 → 收敛终止（r4 zero_streak 同款纪律）
+CONVERGE_ROUNDS_NO_PROGRESS = 2
+
+
+def _fmt_pct(v) -> str:
+    """progress.md 用百分数；None/缺值 → '-'。"""
+    return f"{v:+.1%}" if isinstance(v, (int, float)) else "-"
+
+
+def _remaining(deadline) -> float:
+    """距死线秒数；deadline=None（收敛模式）→ +inf（时间门恒不触发）。"""
+    return float("inf") if deadline is None else deadline - time.time()
+
+
 # fine ±步长（数值维；clamp 到 sane 区间）
 FINE_STEPS = {
     "window": (20, 40, 120), "min_suppression": (0.05, 0.1, 0.8), "min_rr": (0.25, 0.5, 3.0),
@@ -165,7 +185,7 @@ def _sweep(base: dict, base_res: dict, mode: str, deadline: float, st: dict) -> 
     """一轮贪心扫（coarse 全档 / fine ±步长），立即采纳 + 重建工作表。"""
     n_eval, n_adopt = 0, 0
     done_dims_this_sweep: set = set()
-    while time.time() < deadline - 40 * 60:
+    while _remaining(deadline) > 40 * 60:
         if mode == "coarse":
             items = _worklist(base, COARSE, done_dims_this_sweep)
         else:
@@ -177,7 +197,7 @@ def _sweep(base: dict, base_res: dict, mode: str, deadline: float, st: dict) -> 
             break
         progressed = False
         for dim, lv in items:
-            if time.time() > deadline - 40 * 60:
+            if _remaining(deadline) < 40 * 60:
                 break
             try:
                 p = copy.deepcopy(base)
@@ -222,7 +242,7 @@ def _tpe_round(base: dict, base_res: dict, rnd: int, deadline: float, st: dict):
                             "--tpe-trials", "45", "--n-proc", "6",
                             "--seed", f"20260826{rnd:02d}"],
                            stdout=f, stderr=subprocess.STDOUT, cwd=str(ROOT),
-                           env=ENV, timeout=max(600, int(deadline - time.time()) - 45 * 60))
+                           env=ENV, timeout=max(600, int(_remaining(deadline)) - 45 * 60))
     except Exception as e:
         print(f"  [TPE r{rnd}] 子进程异常（续）：{type(e).__name__}: {e}", flush=True)
         return base, base_res, 0
@@ -289,7 +309,7 @@ def _final_phase(base: dict, st: dict, deadline: float):
         exp_id = _create_experiment_draft(base, source="r6_8_loop")
         st["final_draft_id"] = exp_id
         print(f"[final] DRAFT 已物化：{exp_id}", flush=True)
-        if deadline - time.time() >= 35 * 60:
+        if _remaining(deadline) >= 35 * 60:
             from research.autopromote import evaluate_gates
             gates = evaluate_gates(exp_id)
             st["final_gates"] = {k: v for k, v in gates.items() if k != "gates"}
@@ -311,21 +331,28 @@ def main() -> int:
 
     if STATE.exists():
         st = json.loads(STATE.read_text(encoding="utf-8"))
-        deadline = st["deadline"]
-        print(f"[loop] 断点续跑 round={st.get('round')} 采纳链 {len(st.get('adopted', []))} 步",
+        # --hours 0（收敛模式）恒无死线（忽略 state 旧死线——热切换语义）；
+        # --hours N 显式给定则重算（重启改预算的口子）。
+        deadline = None if args.hours == 0 else time.time() + args.hours * 3600
+        st["deadline"] = deadline
+        print(f"[loop] 断点续跑 round={st.get('round')} 采纳链 {len(st.get('adopted', []))} 步"
+              f"（{'收敛驱动（无死线）' if deadline is None else f'死线 {args.hours}h'}）",
               flush=True)
     else:
-        deadline = time.time() + args.hours * 3600
+        deadline = (None if args.hours == 0 else time.time() + args.hours * 3600)
         st = {"started_at": datetime.now().isoformat(timespec="seconds"),
-              "deadline": deadline, "round": 0, "base": _load_base(),
-              "adopted": [], "history": []}
+              "deadline": deadline, "round": 0, "rounds_no_progress": 0,
+              "base": _load_base(), "adopted": [], "history": []}
     base = st["base"]
 
-    print(f"[loop] base=R6-8 冠军（+B3 轴假设空间）；deadline {args.hours}h 后"
-          f"（剩 {(deadline-time.time())/3600:.1f}h）", flush=True)
+    print(f"[loop] base=R6-8 冠军（+B3 轴假设空间）；"
+          + (f"收敛驱动（无死线，连续 {CONVERGE_ROUNDS_NO_PROGRESS} 轮零采纳即停）"
+             if deadline is None else
+             f"deadline {args.hours}h 后（剩 {(deadline-time.time())/3600:.1f}h）"),
+          flush=True)
     base_res = _eval_one(copy.deepcopy(base), "BASE")
 
-    while time.time() < deadline - 40 * 60:
+    while _remaining(deadline) > 40 * 60:
         st["round"] += 1
         rnd = st["round"]
         t0 = time.time()
@@ -333,21 +360,42 @@ def main() -> int:
         print(f"\n===== Round {rnd}（剩 {left_h:.1f}h）=====", flush=True)
         n_eval = n_adopt = 0
         for mode in ("coarse", "fine"):
-            if time.time() >= deadline - 40 * 60:
+            if _remaining(deadline) < 40 * 60:
                 break
             base, base_res, ev, ad = _sweep(base, base_res, mode, deadline, st)
             n_eval += ev
             n_adopt += ad
         # TPE（需 ≥2h 余量：子进程 60 budget ~1h + 复核）
-        if time.time() < deadline - 2 * 3600:
+        if _remaining(deadline) > 2 * 3600:
             base, base_res, ad = _tpe_round(base, base_res, rnd, deadline, st)
             n_adopt += ad
         st["history"].append({"round": rnd, "took_min": round((time.time() - t0) / 60),
                               "n_eval": n_eval, "n_adopt": n_adopt,
                               "at": datetime.now().isoformat(timespec="seconds")})
+        # 收敛驱动（--hours 0）：整轮零采纳计数；连续 N 轮 → 假设空间收敛终止
+        st["rounds_no_progress"] = 0 if n_adopt > 0 else st.get("rounds_no_progress", 0) + 1
         STATE.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+        # 阶段成果（每轮追加 progress.md——轮次摘要人直接看，不待终局）
+        _r = st.get("base_res") or {}
+        _chain = "; ".join(f"{a.get('mode')}·{a.get('dim')}={a.get('lv')}"
+                           for a in st["adopted"]) or "-"
+        with open(LOOP_DIR / "progress.md", "a", encoding="utf-8") as f:
+            f.write(
+                f"## Round {rnd} · {datetime.now().isoformat(timespec='minutes')}"
+                f" · 用 {(time.time()-t0)/60:.0f}min · eval {n_eval} · 采纳 {n_adopt}"
+                f" · 无进展轮 {st['rounds_no_progress']}/{CONVERGE_ROUNDS_NO_PROGRESS}\n"
+                f"- base: raw {_fmt_pct(_r.get('raw_outer_ann'))} / 模拟线 "
+                f"{_fmt_pct(_r.get('mr_outer_ann'))} / min_yr {_r.get('min_yr') or 0:.1f}"
+                f" / n={_r.get('n_inner') or 0}\n"
+                f"- 采纳链: {_chain}\n\n")
         print(f"  [checkpoint] r{rnd} 用 {(time.time()-t0)/60:.0f}min "
-              f"(eval {n_eval} / 采纳 {n_adopt})", flush=True)
+              f"(eval {n_eval} / 采纳 {n_adopt} / 无进展轮 {st['rounds_no_progress']})",
+              flush=True)
+        if (deadline is None
+                and st["rounds_no_progress"] >= CONVERGE_ROUNDS_NO_PROGRESS):
+            print(f"[loop] 连续 {CONVERGE_ROUNDS_NO_PROGRESS} 轮零采纳——假设空间收敛，"
+                  f"自然终止（共 {rnd} 轮）", flush=True)
+            break
 
     print("\n[loop] 进入终局阶段", flush=True)
     _final_phase(base, st, deadline)
