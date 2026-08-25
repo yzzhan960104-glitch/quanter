@@ -84,6 +84,10 @@ EXEC_DEFAULTS = {
     # timeout 组 rr 为正=超期平仓截断正期望单）：超时日浮盈≥门槛 → 一次性延长持有。
     "timeout_extend_days": 0,        # 延长日数（0=关）
     "timeout_extend_min_pnl": 0.05,  # 延长门槛（超时日浮盈比例）
+    # R6-10 B3 tp 锚自适应（C 线④ · 2026-08-25）：H/ATR > tp_adapt_h_atr 时
+    # tp2/tp1 乘数 ×tp_adapt_scale（V 反修复月对症）。None=关（默认零行为变化）。
+    "tp_adapt_h_atr": None,
+    "tp_adapt_scale": 0.5,
 }
 
 
@@ -177,6 +181,8 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         tp_h_mult=id_cfg.get("tp_h_mult", PRICE_LEVEL_DEFAULTS["tp_h_mult"]),
         # cancel_thresh_mult=None 是合法配置（不撤单放飞），不走数值兜底
         cancel_thresh_mult=exec.get("cancel_thresh_mult"),
+        tp_adapt_h_atr=exec.get("tp_adapt_h_atr"),
+        tp_adapt_scale=exec.get("tp_adapt_scale", 0.5),
     )
     buy_limit = levels.buy_limit   # 挂单价（颈线+N×ATR；exec 恒有值故非 None）
     # 止损基准（颈线−N×ATR，固定；risk_pct 用此基准预告初始风险；持有期 trailing 动态调整见 loop）

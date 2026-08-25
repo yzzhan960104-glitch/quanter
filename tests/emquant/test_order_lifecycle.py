@@ -648,3 +648,39 @@ def test_absorb_reality_sell_fill_reduces_position(pilot):
     assert state["orders"][scid]["filled"] == 100
     assert state["positions"]["300750.SZ"]["remaining_qty"] == 300   # 400−100
     assert state["positions"]["300750.SZ"]["qty"] == 400             # 建仓量不动
+
+
+# ============================================================================
+# R6-10 chase（C 线② · 2026-08-25）：decide_pending 超期追入判定（纯函数层）
+# ============================================================================
+def _ord(chase=True, max_wait=5, formed_at="2026-08-10", cancel_on=None,
+         tp1=None, tp2=None, portion=0.9):
+    return {"symbol": "300750.SZ", "date": "2026-08-10", "price": 10.0, "qty": 500,
+            "purpose": "OPEN", "cancel_on": cancel_on, "formed_at": formed_at,
+            "exec_params": {"max_wait": max_wait, "chase_entry": chase,
+                            "tp1_portion": portion},
+            "neckline": 10.0, "bottom": 9.0, "atr": 0.5,
+            "status": "SUBMITTED", "filled": 0, "account": "a"}
+
+
+def test_decide_pending_chase_on_expiry_with_flag(pilot):
+    """chase_entry=True + 超期 → "chase"（不弃，交 on_tick 追入）。"""
+    # formed 08-10，today 08-21 → trading_days_between=9 > max_wait 5
+    assert pilot.decide_pending(10.0, _ord(chase=True), "2026-08-21", CAL) == "chase"
+
+
+def test_decide_pending_max_wait_when_chase_off(pilot):
+    """chase_entry=False（默认腿）+ 超期 → "max_wait"（原弃单语义零变化）。"""
+    assert pilot.decide_pending(10.0, _ord(chase=False), "2026-08-21", CAL) == "max_wait"
+
+
+def test_decide_pending_chase_not_triggered_within_window(pilot):
+    """窗口内（恰好 == max_wait，含第 N 日）→ None（chase 不提前触发）。"""
+    # formed 08-10，today 08-17 → 5 个交易日 == max_wait 5：不触发（边界含等语义）
+    assert pilot.decide_pending(10.0, _ord(chase=True), "2026-08-17", CAL) is None
+
+
+def test_decide_pending_cancel_on_priority_over_chase(pilot):
+    """cancel_on 触价仍最优先（chase 与 cancel 并存时撤单不追）。"""
+    o = _ord(chase=True, cancel_on=12.0)
+    assert pilot.decide_pending(12.5, o, "2026-08-21", CAL) == "cancel_on"

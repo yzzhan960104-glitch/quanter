@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。
-PARAMS_FINGERPRINT=01903dec5029da9d  生成物见 emquant/config/。
+PARAMS_FINGERPRINT=8858982628989013  生成物见 emquant/config/。
 PILOT_BUILD_STAMP: 2026-08-25 16:13:42 +0800 f995a5e9（部署核对：编辑器 Ctrl+F 搜本串，与仓库 git log -1 比对）。
 """
 from __future__ import annotations
@@ -44,10 +44,10 @@ if _IS_MAIN:
 
 # ============================ §0 参数区（export_snapshot 导出的定稿快照）============================
 ID_PARAMS = {'breakout_vol_mult': 1.0, 'decay_tau': 60.0, 'local_extrema_window': 3, 'max_h_atr': 4.5, 'min_bottoms': 2, 'min_rr': 2.0, 'min_suppression': 0.3, 'min_touches': 2, 'momentum_gate': None, 'stop_atr_mult': 1.5, 'tp_h_mult': 1.5, 'window': 60}
-EXEC_PARAMS = {'buy_limit_atr_mult': 2.5, 'cancel_thresh_mult': None, 'chase_entry': True, 'commission_rate': 0.0003, 'cooldown': 0, 'max_holding': 30, 'max_wait': 27, 'stamp_rate': 0.0005, 'timeout_extend_days': 0, 'timeout_extend_min_pnl': 0.05, 'tp1_h_mult': 2.0, 'tp1_portion': 0.9, 'trailing_floor': 0.5, 'trailing_grace': 10, 'trailing_step': 0.05, 'transfer_rate': 1e-05}
+EXEC_PARAMS = {'buy_limit_atr_mult': 2.5, 'cancel_thresh_mult': None, 'chase_entry': True, 'commission_rate': 0.0003, 'cooldown': 0, 'max_holding': 30, 'max_wait': 27, 'stamp_rate': 0.0005, 'timeout_extend_days': 0, 'timeout_extend_min_pnl': 0.05, 'tp1_h_mult': 2.0, 'tp1_portion': 0.9, 'tp_adapt_h_atr': None, 'tp_adapt_scale': 0.5, 'trailing_floor': 0.5, 'trailing_grace': 10, 'trailing_step': 0.05, 'transfer_rate': 1e-05}
 TRADE_CFG = {'cancel_thresh_mult': 1.0, 'floor': 0.5, 'grace': 5, 'kelly_fraction': 0.25, 'kelly_hat': 0.0, 'max_holding': 15, 'max_wait': 5, 'pos_cap': 0.05, 'sizing_mode': 'fixed', 'step': 0.1, 'stop_atr_mult': 1.0, 'tp1_h_mult': 1.0, 'tp1_portion': 0.5, 'tp_h_mult': 2.0}
-UNIVERSE = ['300308.SZ', '688825.SH', '300502.SZ', '688256.SH', '300394.SZ', '300750.SZ', '688008.SH', '300476.SZ', '688836.SH', '688525.SH', '300408.SZ', '300285.SZ', '688981.SH', '688012.SH', '301308.SZ', '688041.SH', '300274.SZ', '688498.SH', '300604.SZ', '688347.SH', '301526.SZ', '300433.SZ', '300136.SZ', '300223.SZ', '300475.SZ', '688072.SH', '300059.SZ', '300857.SZ', '688146.SH', '300058.SZ', '688766.SH', '300666.SZ', '301217.SZ', '688017.SH', '300620.SZ', '300570.SZ', '688521.SH', '688048.SH', '300548.SZ', '688126.SH', '300757.SZ', '688313.SH', '301511.SZ', '300346.SZ', '300390.SZ', '300033.SZ', '301396.SZ', '300014.SZ', '300209.SZ', '688120.SH', '300395.SZ', '688820.SH', '688702.SH', '301717.SZ', '688361.SH', '300054.SZ', '688826.SH', '688797.SH', '301205.SZ', '688808.SH', '300319.SZ', '688549.SH', '688627.SH', '300418.SZ', '688183.SH', '688111.SH', '688630.SH', '301666.SZ', '688167.SH', '301171.SZ', '688629.SH', '300672.SZ', '688082.SH', '688037.SH', '300442.SZ', '688110.SH', '301165.SZ', '300017.SZ', '300975.SZ', '300759.SZ', '300489.SZ', '300373.SZ', '301013.SZ', '688777.SH', '300179.SZ', '301583.SZ', '688362.SH', '688322.SH', '300124.SZ', '688141.SH', '688519.SH', '300398.SZ', '300903.SZ', '301377.SZ', '300458.SZ', '300661.SZ', '688396.SH', '300567.SZ', '688019.SH', '688432.SH', '688200.SH', '300450.SZ', '300454.SZ', '688300.SH', '688195.SH', '300806.SZ', '300037.SZ', '300751.SZ', '300776.SZ', '300088.SZ', '688234.SH', '300803.SZ', '688205.SH', '301536.SZ', '688409.SH', '300657.SZ', '300139.SZ', '688143.SH', '688268.SH', '688668.SH', '688002.SH', '688403.SH', '300503.SZ', '300438.SZ', '300782.SZ', '300302.SZ', '301358.SZ', '300870.SZ', '300085.SZ', '688507.SH', '688596.SH', '300260.SZ', '688388.SH', '688469.SH', '301611.SZ', '300811.SZ', '301018.SZ', '301236.SZ', '688635.SH', '301319.SZ', '688099.SH', '300184.SZ', '688249.SH', '688545.SH', '688025.SH', '300747.SZ', '688783.SH', '300821.SZ', '688123.SH', '300814.SZ', '300164.SZ', '688235.SH', '301183.SZ', '300760.SZ', '300738.SZ', '301486.SZ', '300568.SZ', '688536.SH', '688308.SH', '688257.SH', '688333.SH', '688147.SH', '301071.SZ', '688503.SH', '300131.SZ', '300364.SZ', '300679.SZ', '688802.SH', '300726.SZ', '688233.SH', '688676.SH', '688172.SH', '300115.SZ', '301200.SZ', '300323.SZ', '688795.SH', '688548.SH', '300001.SZ', '300236.SZ', '300607.SZ', '688809.SH', '688662.SH', '300339.SZ', '300042.SZ', '300316.SZ', '301123.SZ', '300763.SZ', '300083.SZ', '688031.SH', '301269.SZ', '300166.SZ', '300769.SZ', '688372.SH', '301489.SZ', '300762.SZ', '300456.SZ', '688331.SH', '300576.SZ', '300684.SZ', '300170.SZ', '688535.SH', '688700.SH', '300255.SZ', '301188.SZ', '688301.SH', '300142.SZ', '301128.SZ', '300283.SZ', '300602.SZ', '300558.SZ', '688800.SH', '300199.SZ', '688220.SH', '301392.SZ', '688828.SH', '300720.SZ', '300347.SZ', '300331.SZ', '300623.SZ', '688411.SH', '300779.SZ', '300207.SZ', '300342.SZ', '688027.SH', '300496.SZ', '300077.SZ', '300263.SZ', '300706.SZ', '301566.SZ', '300843.SZ', '688106.SH', '301292.SZ', '300593.SZ', '300182.SZ', '688456.SH', '301707.SZ', '688652.SH', '688158.SH', '688531.SH', '300383.SZ', '688036.SH', '300420.SZ', '688387.SH', '301005.SZ', '688585.SH', '300655.SZ', '688729.SH', '688515.SH', '688102.SH', '301655.SZ', '688603.SH', '300613.SZ', '301150.SZ', '688213.SH', '300328.SZ', '688400.SH', '300835.SZ', '301550.SZ', '300953.SZ', '300748.SZ', '688502.SH', '688385.SH', '300671.SZ', '301373.SZ', '300322.SZ', '300024.SZ', '300497.SZ', '300265.SZ', '688052.SH', '300534.SZ', '688260.SH', '688392.SH', '301338.SZ', '688449.SH', '688578.SH', '301389.SZ', '300765.SZ', '688047.SH', '300725.SZ', '301021.SZ', '688020.SH', '688390.SH', '300174.SZ', '688559.SH', '301196.SZ', '688353.SH', '688584.SH', '301297.SZ', '300480.SZ', '300566.SZ', '301362.SZ', '301080.SZ', '688343.SH', '301421.SZ', '300005.SZ', '300201.SZ', '688598.SH', '300718.SZ', '300102.SZ', '300196.SZ']
-PARAMS_FINGERPRINT = '01903dec5029da9d'
+UNIVERSE = ['300308.SZ', '688825.SH', '300502.SZ', '688256.SH', '300394.SZ', '300750.SZ', '688008.SH', '300476.SZ', '688525.SH', '300408.SZ', '300285.SZ', '688012.SH', '688836.SH', '688981.SH', '301308.SZ', '688041.SH', '688498.SH', '300274.SZ', '300604.SZ', '688347.SH', '301526.SZ', '300433.SZ', '300136.SZ', '688072.SH', '300223.SZ', '300475.SZ', '300059.SZ', '300857.SZ', '688146.SH', '688766.SH', '300058.SZ', '300666.SZ', '301217.SZ', '688017.SH', '300570.SZ', '300620.SZ', '688521.SH', '688048.SH', '300548.SZ', '688126.SH', '688313.SH', '300757.SZ', '301511.SZ', '300346.SZ', '300390.SZ', '301396.SZ', '300033.SZ', '300014.SZ', '688835.SH', '300209.SZ', '688120.SH', '688702.SH', '688361.SH', '300395.SZ', '688820.SH', '300054.SZ', '301717.SZ', '301205.SZ', '688797.SH', '300319.SZ', '688808.SH', '688549.SH', '688826.SH', '688627.SH', '300418.SZ', '688183.SH', '688167.SH', '688630.SH', '688111.SH', '301165.SZ', '688037.SH', '300017.SZ', '688082.SH', '688629.SH', '301666.SZ', '300442.SZ', '688110.SH', '300672.SZ', '301171.SZ', '300759.SZ', '300975.SZ', '300489.SZ', '300373.SZ', '301013.SZ', '688777.SH', '300179.SZ', '301583.SZ', '688362.SH', '688322.SH', '300124.SZ', '688141.SH', '688519.SH', '300903.SZ', '300398.SZ', '301377.SZ', '300458.SZ', '688432.SH', '688396.SH', '688019.SH', '300661.SZ', '300567.SZ', '688200.SH', '688300.SH', '300454.SZ', '300450.SZ', '688195.SH', '300751.SZ', '300806.SZ', '300139.SZ', '300037.SZ', '688143.SH', '300088.SZ', '300776.SZ', '301536.SZ', '688409.SH', '688234.SH', '300803.SZ', '688205.SH', '688668.SH', '300657.SZ', '688268.SH', '688002.SH', '688403.SH', '300503.SZ', '300438.SZ', '301358.SZ', '300870.SZ', '300782.SZ', '300302.SZ', '688596.SH', '301018.SZ', '300260.SZ', '300085.SZ', '301611.SZ', '688507.SH', '688388.SH', '688469.SH', '300811.SZ', '301236.SZ', '301319.SZ', '688545.SH', '688099.SH', '688025.SH', '688783.SH', '688249.SH', '300184.SZ', '300747.SZ', '300164.SZ', '300821.SZ', '688123.SH', '688635.SH', '300760.SZ', '688235.SH', '300814.SZ', '301183.SZ', '300738.SZ', '688536.SH', '688147.SH', '688503.SH', '300568.SZ', '301486.SZ', '688333.SH', '688257.SH', '300131.SZ', '688308.SH', '300679.SZ', '688233.SH', '301071.SZ', '300364.SZ', '688802.SH', '300726.SZ', '688676.SH', '300607.SZ', '301200.SZ', '300115.SZ', '688548.SH', '300323.SZ', '688172.SH', '300236.SZ', '300001.SZ', '688662.SH', '688795.SH', '688809.SH', '300042.SZ', '300083.SZ', '300142.SZ', '301123.SZ', '300684.SZ', '300316.SZ', '300339.SZ', '301489.SZ', '688372.SH', '300762.SZ', '300769.SZ', '300255.SZ', '300576.SZ', '300166.SZ', '300763.SZ', '688535.SH', '688331.SH', '688700.SH', '301128.SZ', '300199.SZ', '301188.SZ', '301269.SZ', '300602.SZ', '688031.SH', '300558.SZ', '688800.SH', '300170.SZ', '300283.SZ', '300347.SZ', '300720.SZ', '300456.SZ', '301392.SZ', '688220.SH', '300623.SZ', '300331.SZ', '688828.SH', '300779.SZ', '688301.SH', '300207.SZ', '300077.SZ', '300843.SZ', '300342.SZ', '300263.SZ', '300706.SZ', '688027.SH', '688106.SH', '301566.SZ', '301292.SZ', '300420.SZ', '300496.SZ', '300593.SZ', '688456.SH', '688652.SH', '301005.SZ', '688158.SH', '688036.SH', '688411.SH', '300383.SZ', '688585.SH', '688531.SH', '688729.SH', '688387.SH', '300182.SZ', '300655.SZ', '688102.SH', '688515.SH', '300328.SZ', '300613.SZ', '301707.SZ', '301150.SZ', '688603.SH', '301550.SZ', '688502.SH', '688213.SH', '300671.SZ', '300534.SZ', '300748.SZ', '300835.SZ', '688400.SH', '300953.SZ', '300497.SZ', '688392.SH', '300024.SZ', '688385.SH', '301373.SZ', '300765.SZ', '688260.SH', '688052.SH', '300322.SZ', '688578.SH', '301655.SZ', '688449.SH', '300265.SZ', '301389.SZ', '301338.SZ', '688020.SH', '301021.SZ', '301196.SZ', '301080.SZ', '688047.SH', '688353.SH', '688559.SH', '688584.SH', '301297.SZ', '300725.SZ', '300566.SZ', '688390.SH', '300480.SZ', '688169.SH', '301362.SZ', '300174.SZ', '688343.SH', '301421.SZ', '688598.SH', '300005.SZ', '688530.SH', '301099.SZ']
+PARAMS_FINGERPRINT = '8858982628989013'
 PILOT_BUILD_STAMP = '2026-08-25 16:13:42 +0800 f995a5e9'   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用
 # 试点硬闸（spec FR3）：单日新挂 ≤2；单票市值 ≤5%；仿真账户固定。
 PILOT_MAX_NEW_ORDERS_PER_DAY = 2
@@ -1575,7 +1575,7 @@ def fetch_limit_down(api, ts_symbol, end_date=None, prev_date=None):
 
 # ---- 5.3 生命周期判定（decide_pending / decide_position，C9 口径红线）----
 def decide_pending(tick_price, order, today, cal):
-    """挂单等待期撤单判定（纯函数）→ "cancel_on" / "max_wait" / None（不撤）。
+    """挂单等待期撤单判定（纯函数）→ "cancel_on" / "max_wait" / "chase" / None（不撤）。
 
     C9 口径（评审必查，两判据对齐本地腿）：
       - cancel_on 触价：tick_price ≥ order["cancel_on"]（含等——decide_exit pending
@@ -1584,7 +1584,11 @@ def decide_pending(tick_price, order, today, cal):
         （严格大于；formed_at 起算——backtest 挂单窗 range(signal_idx+1, min(signal_idx+
         max_wait,...)+1) 的「窗口内含第 max_wait 个交易日」边界语义，恰好 == 不撤。
         锚点是真身的 signal_idx（backtest.py:177-179，信号日起算）——不是 buy_idx：
-        buy_idx 是窗口内【成交日】，窗口边界不以成交日起算）。
+        buy_idx 是窗口内【成交日】，窗口边界不以成交日起算）；
+      - **chase（R6-10 C 线② · 2026-08-25）**：超期且 exec_params.chase_entry=True →
+        返 "chase" 交 on_tick 追入（现价守卫 tp2 + 撤旧单后追新单——回测
+        simulate_exit chase 语义的实盘兑现；守卫与撤旧逻辑在 on_tick 编排层，
+        本纯函数只判「该追」）。
     两因并发归因 cancel_on（价格事件盘中即时，max_wait 是窗口边界——对齐 decide_exit
     pending 分支的判序：窗口内逐根先判 cancel_on，窗口边界只是循环外限）。
 
@@ -1598,6 +1602,8 @@ def decide_pending(tick_price, order, today, cal):
         return "cancel_on"
     max_wait = (order.get("exec_params") or {}).get("max_wait")
     if max_wait is not None and trading_days_between(cal, order.get("formed_at"), today) > int(max_wait):
+        if (order.get("exec_params") or {}).get("chase_entry"):
+            return "chase"   # R6-10：超期追入判定（守卫/撤旧/挂新在 on_tick 编排层）
         return "max_wait"
     return None
 
@@ -2292,8 +2298,17 @@ class PilotRuntime:
             # 盘后预算固定价兜底（decide_position 的 pos["stop"] 回退路径）；当日活口径
             # 由 trailing 六件套在 decide_position 内重算（holding_days 实时）
             pos["stop"] = compute_stop_price(neckline, atr, 0, stop_mult, grace, step, floor)
-            pos["tp1_price"] = neckline + float(ep.get("tp1_h_mult", 1.0)) * h_geom
-            pos["tp2_price"] = neckline + float(ep.get("tp_h_mult", 2.0)) * h_geom
+            # R6-10 B3 对称（C 线④）：H/ATR 超阈值时 tp2/tp1 乘数 ×scale——与
+            # price_levels.compute_price_levels 同式（价位单源语义：深形态锚缩近）。
+            _tp1m = float(ep.get("tp1_h_mult", 1.0))
+            _tp2m = float(ep.get("tp_h_mult", 2.0))
+            _thr = ep.get("tp_adapt_h_atr")
+            if _thr is not None and atr > 0 and (h_geom / atr) > float(_thr):
+                _sc = float(ep.get("tp_adapt_scale", 0.5))
+                _tp1m *= _sc
+                _tp2m *= _sc
+            pos["tp1_price"] = neckline + _tp1m * h_geom
+            pos["tp2_price"] = neckline + _tp2m * h_geom
             self._audit("POS_ENRICHED", symbol=sym, stop=pos["stop"],
                         tp1_price=pos["tp1_price"], tp2_price=pos["tp2_price"])
 
@@ -2602,6 +2617,48 @@ class PilotRuntime:
             if o.get("status") in _TERMINAL_ORDER_STATES:
                 continue
             verdict = decide_pending(px, o, today, cal)       # 空历 → trading_days_between=0 → max_wait 恒不触发（Task 6 头注口径）
+            if verdict == "chase":
+                # R6-10 chase 追入（C 线② · 2026-08-25）：等待期届满不弃——守卫现价
+                # ≥ tp2（形态目标透支）仍弃；否则撤旧限价单、按现价限价追入（≈市价）。
+                # tp2 从本单几何算（enrich 同式：颈线+tp_h_mult×H，价格单源）。
+                # 守卫链 fail-closed：tp2 缺几何→None（不拦，追后 decide_position
+                # tp2 全平兜底）；追入挂单失败→本 tick 放弃下 tick 重判重试。
+                tp2 = None
+                try:
+                    _nl = float(o.get("neckline"))
+                    _bt = float(o.get("bottom"))
+                    if _nl > _bt:
+                        _tp_h = float((o.get("exec_params") or {}).get("tp_h_mult", 2.0))
+                        tp2 = _nl + _tp_h * (_nl - _bt)
+                except (TypeError, ValueError):
+                    tp2 = None
+                if tp2 is not None and px >= tp2:
+                    self._cancel_and_sync(oid, sym, "on_tick", "max_wait")
+                    self._audit("WARN", type="chase_target_exhausted", symbol=sym,
+                                px=px, tp2=tp2)
+                    acted = True
+                    continue
+                self._cancel_and_sync(oid, sym, "on_tick", "chase")
+                try:
+                    cid = place_limit_buy(self._a(), sym, px, int(o.get("qty") or 0),
+                                          self.account)
+                except Exception as e:
+                    self._audit("WARN", type="chase_buy_fail", symbol=sym,
+                                err=f"{type(e).__name__}: {e}")
+                    cid = None
+                if cid is not None:
+                    st["orders"][cid] = {"symbol": sym, "date": today, "price": px,
+                                         "qty": int(o.get("qty") or 0), "purpose": "CHASE",
+                                         "cancel_on": None, "formed_at": o.get("formed_at"),
+                                         "exec_params": dict(o.get("exec_params") or {}),
+                                         "neckline": o.get("neckline"),
+                                         "bottom": o.get("bottom"), "atr": o.get("atr"),
+                                         "status": "SUBMITTED", "filled": 0,
+                                         "account": self.account}
+                    self._audit("CHASE_BUY", symbol=sym, price=px,
+                                qty=int(o.get("qty") or 0), cl_ord_id=cid)
+                    acted = True
+                continue
             if verdict:
                 self._cancel_and_sync(oid, sym, "on_tick", verdict)
                 acted = True

@@ -756,7 +756,7 @@ def fetch_limit_down(api, ts_symbol, end_date=None, prev_date=None):
 
 # ---- 5.3 生命周期判定（decide_pending / decide_position，C9 口径红线）----
 def decide_pending(tick_price, order, today, cal):
-    """挂单等待期撤单判定（纯函数）→ "cancel_on" / "max_wait" / None（不撤）。
+    """挂单等待期撤单判定（纯函数）→ "cancel_on" / "max_wait" / "chase" / None（不撤）。
 
     C9 口径（评审必查，两判据对齐本地腿）：
       - cancel_on 触价：tick_price ≥ order["cancel_on"]（含等——decide_exit pending
@@ -765,7 +765,11 @@ def decide_pending(tick_price, order, today, cal):
         （严格大于；formed_at 起算——backtest 挂单窗 range(signal_idx+1, min(signal_idx+
         max_wait,...)+1) 的「窗口内含第 max_wait 个交易日」边界语义，恰好 == 不撤。
         锚点是真身的 signal_idx（backtest.py:177-179，信号日起算）——不是 buy_idx：
-        buy_idx 是窗口内【成交日】，窗口边界不以成交日起算）。
+        buy_idx 是窗口内【成交日】，窗口边界不以成交日起算）；
+      - **chase（R6-10 C 线② · 2026-08-25）**：超期且 exec_params.chase_entry=True →
+        返 "chase" 交 on_tick 追入（现价守卫 tp2 + 撤旧单后追新单——回测
+        simulate_exit chase 语义的实盘兑现；守卫与撤旧逻辑在 on_tick 编排层，
+        本纯函数只判「该追」）。
     两因并发归因 cancel_on（价格事件盘中即时，max_wait 是窗口边界——对齐 decide_exit
     pending 分支的判序：窗口内逐根先判 cancel_on，窗口边界只是循环外限）。
 
@@ -779,6 +783,8 @@ def decide_pending(tick_price, order, today, cal):
         return "cancel_on"
     max_wait = (order.get("exec_params") or {}).get("max_wait")
     if max_wait is not None and trading_days_between(cal, order.get("formed_at"), today) > int(max_wait):
+        if (order.get("exec_params") or {}).get("chase_entry"):
+            return "chase"   # R6-10：超期追入判定（守卫/撤旧/挂新在 on_tick 编排层）
         return "max_wait"
     return None
 
@@ -1473,8 +1479,17 @@ class PilotRuntime:
             # 盘后预算固定价兜底（decide_position 的 pos["stop"] 回退路径）；当日活口径
             # 由 trailing 六件套在 decide_position 内重算（holding_days 实时）
             pos["stop"] = compute_stop_price(neckline, atr, 0, stop_mult, grace, step, floor)
-            pos["tp1_price"] = neckline + float(ep.get("tp1_h_mult", 1.0)) * h_geom
-            pos["tp2_price"] = neckline + float(ep.get("tp_h_mult", 2.0)) * h_geom
+            # R6-10 B3 对称（C 线④）：H/ATR 超阈值时 tp2/tp1 乘数 ×scale——与
+            # price_levels.compute_price_levels 同式（价位单源语义：深形态锚缩近）。
+            _tp1m = float(ep.get("tp1_h_mult", 1.0))
+            _tp2m = float(ep.get("tp_h_mult", 2.0))
+            _thr = ep.get("tp_adapt_h_atr")
+            if _thr is not None and atr > 0 and (h_geom / atr) > float(_thr):
+                _sc = float(ep.get("tp_adapt_scale", 0.5))
+                _tp1m *= _sc
+                _tp2m *= _sc
+            pos["tp1_price"] = neckline + _tp1m * h_geom
+            pos["tp2_price"] = neckline + _tp2m * h_geom
             self._audit("POS_ENRICHED", symbol=sym, stop=pos["stop"],
                         tp1_price=pos["tp1_price"], tp2_price=pos["tp2_price"])
 
@@ -1783,6 +1798,48 @@ class PilotRuntime:
             if o.get("status") in _TERMINAL_ORDER_STATES:
                 continue
             verdict = decide_pending(px, o, today, cal)       # 空历 → trading_days_between=0 → max_wait 恒不触发（Task 6 头注口径）
+            if verdict == "chase":
+                # R6-10 chase 追入（C 线② · 2026-08-25）：等待期届满不弃——守卫现价
+                # ≥ tp2（形态目标透支）仍弃；否则撤旧限价单、按现价限价追入（≈市价）。
+                # tp2 从本单几何算（enrich 同式：颈线+tp_h_mult×H，价格单源）。
+                # 守卫链 fail-closed：tp2 缺几何→None（不拦，追后 decide_position
+                # tp2 全平兜底）；追入挂单失败→本 tick 放弃下 tick 重判重试。
+                tp2 = None
+                try:
+                    _nl = float(o.get("neckline"))
+                    _bt = float(o.get("bottom"))
+                    if _nl > _bt:
+                        _tp_h = float((o.get("exec_params") or {}).get("tp_h_mult", 2.0))
+                        tp2 = _nl + _tp_h * (_nl - _bt)
+                except (TypeError, ValueError):
+                    tp2 = None
+                if tp2 is not None and px >= tp2:
+                    self._cancel_and_sync(oid, sym, "on_tick", "max_wait")
+                    self._audit("WARN", type="chase_target_exhausted", symbol=sym,
+                                px=px, tp2=tp2)
+                    acted = True
+                    continue
+                self._cancel_and_sync(oid, sym, "on_tick", "chase")
+                try:
+                    cid = place_limit_buy(self._a(), sym, px, int(o.get("qty") or 0),
+                                          self.account)
+                except Exception as e:
+                    self._audit("WARN", type="chase_buy_fail", symbol=sym,
+                                err=f"{type(e).__name__}: {e}")
+                    cid = None
+                if cid is not None:
+                    st["orders"][cid] = {"symbol": sym, "date": today, "price": px,
+                                         "qty": int(o.get("qty") or 0), "purpose": "CHASE",
+                                         "cancel_on": None, "formed_at": o.get("formed_at"),
+                                         "exec_params": dict(o.get("exec_params") or {}),
+                                         "neckline": o.get("neckline"),
+                                         "bottom": o.get("bottom"), "atr": o.get("atr"),
+                                         "status": "SUBMITTED", "filled": 0,
+                                         "account": self.account}
+                    self._audit("CHASE_BUY", symbol=sym, price=px,
+                                qty=int(o.get("qty") or 0), cl_ord_id=cid)
+                    acted = True
+                continue
             if verdict:
                 self._cancel_and_sync(oid, sym, "on_tick", verdict)
                 acted = True

@@ -52,6 +52,8 @@ export const PARAM_META: Record<string, ParamMeta> = {
   chase_entry:          { title: '无回踩追入（腿A）',   group: '执行层' },
   timeout_extend_days:  { title: '超时延长日数（腿B）', group: '执行层' },
   timeout_extend_min_pnl: { title: '延长浮盈门槛（腿B）', group: '执行层' },
+  tp_adapt_h_atr:       { title: 'tp锚自适应阈值（B3）', group: '执行层' },
+  tp_adapt_scale:       { title: 'tp锚缩近系数（B3）', group: '执行层' },
 }
 
 /**

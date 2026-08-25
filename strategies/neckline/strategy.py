@@ -60,6 +60,7 @@ _NECKLINE_EXEC_KEYS = (
     # chase-off。修列后 replay 口径与 scan 口径（run_full_scan 直吃 params dict）
     # 行为一致化（replay 读数将随 chase 生效而变化，属预期修正）。
     "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
+    "tp_adapt_h_atr", "tp_adapt_scale",   # R6-10 B3：tp 锚自适应
 )
 
 logger = logging.getLogger(__name__)

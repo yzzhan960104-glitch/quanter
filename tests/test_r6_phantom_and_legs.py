@@ -242,3 +242,44 @@ def test_new_exec_keys_default_off_bit_exact_real_data():
         assert a == b, f"{sym} 新默认键（默认关）引入 scan 级行为漂移"
         checked += 1
     assert checked >= 1, "候选标的全取失败（数据环境异常）"
+
+
+# ============================================================================
+# R6-10 B3 tp 锚自适应（C 线④）：默认关零变化 + 深形态缩近
+# ============================================================================
+def test_tp_adapt_default_off_bit_exact():
+    """tp_adapt_h_atr=None（默认）：价位与不传参逐位一致（golden 语义延伸）。"""
+    from strategies.neckline.price_levels import compute_price_levels, PRICE_LEVEL_DEFAULTS as D
+    kw = dict(c_star=100.0, high=8.0, atr=2.0, stop_atr_mult=1.0,
+              buy_limit_atr_mult=1.0, tp1_h_mult=1.0, tp_h_mult=2.0,
+              cancel_thresh_mult=1.0)
+    a = compute_price_levels(**kw)
+    b = compute_price_levels(**kw, tp_adapt_h_atr=None, tp_adapt_scale=0.5)
+    assert (a.tp1, a.tp2, a.stop, a.buy_limit, a.cancel_on) == \
+           (b.tp1, b.tp2, b.stop, b.buy_limit, b.cancel_on)
+    assert a.tp2 == 116.0 and a.tp1 == 108.0   # 无自适应：100+2×8 / 100+1×8
+
+
+def test_tp_adapt_deep_form_shrinks_tp_anchors():
+    """H/ATR 超阈值：tp2/tp1 乘数 ×scale（100/2=5.0 > 4.0 → 2.0→1.0 / 1.0→0.5）。"""
+    from strategies.neckline.price_levels import compute_price_levels
+    lv = compute_price_levels(c_star=100.0, high=10.0, atr=2.0,   # H/ATR=5>4
+                              stop_atr_mult=1.0, buy_limit_atr_mult=1.0,
+                              tp1_h_mult=1.0, tp_h_mult=2.0,
+                              cancel_thresh_mult=1.0,
+                              tp_adapt_h_atr=4.0, tp_adapt_scale=0.5)
+    assert lv.tp2 == 110.0      # 100 + (2.0×0.5)×10
+    assert lv.tp1 == 105.0      # 100 + (1.0×0.5)×10
+    assert lv.stop == 98.0      # stop 不动
+    assert lv.buy_limit == 102.0 and lv.cancel_on == 110.0   # buy/cancel 不动
+
+
+def test_tp_adact_shallow_form_unchanged():
+    """H/ATR 未超阈值：自适应不触发（3.5 < 4.0）。"""
+    from strategies.neckline.price_levels import compute_price_levels
+    lv = compute_price_levels(c_star=100.0, high=7.0, atr=2.0,   # H/ATR=3.5<4
+                              stop_atr_mult=1.0, buy_limit_atr_mult=1.0,
+                              tp1_h_mult=1.0, tp_h_mult=2.0,
+                              cancel_thresh_mult=1.0,
+                              tp_adapt_h_atr=4.0, tp_adapt_scale=0.5)
+    assert lv.tp2 == 114.0 and lv.tp1 == 107.0   # 原乘数

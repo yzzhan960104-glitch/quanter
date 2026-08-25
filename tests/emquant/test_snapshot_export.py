@@ -46,6 +46,7 @@ EXEC_KEYS = {
     "trailing_grace", "trailing_step", "trailing_floor",
     "commission_rate", "stamp_rate", "transfer_rate",
     "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
+    "tp_adapt_h_atr", "tp_adapt_scale",   # R6-10 B3
 }
 # .env 实弹 14 键（trading/critical.py:187 _trade_cfg 全键）
 TRADE_KEYS = {

@@ -68,7 +68,8 @@ def test_params_structure(tmp_path):
     """参数空间端点：候选档三件套 + 约束提示（前端维度选择器联动契约）。"""
     db = _mk_db(tmp_path, [])
     out = _call(disc.params, db)
-    assert len(out["param_space"]) == 21
+    from discovery.sampler import PARAM_SPACE as _PS   # R6-10 剪枝后随空间动态
+    assert len(out["param_space"]) == len(_PS)
     first = out["param_space"][0]
     assert set(first.keys()) == {"key", "layer", "candidates"}
     assert len(out["constraints"]) == 4

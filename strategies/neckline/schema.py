@@ -65,3 +65,8 @@ class NecklineConfig(BaseModel):
                              "日数（0=关；V 反月出场盲区/R4 H0）")
     timeout_extend_min_pnl: float = Field(
         0.05, ge=0.0, description="腿 B 延长门槛（超时日浮盈比例）")
+    tp_adapt_h_atr: Optional[float] = Field(
+        None, description="R6-10 B3：tp 锚自适应阈值（H/ATR 超此值时 tp2/tp1 乘数"
+                          "×tp_adapt_scale；None=关——V 反修复月对症）")
+    tp_adapt_scale: float = Field(
+        0.5, gt=0.0, le=1.0, description="B3 缩近系数（默认 0.5）")
