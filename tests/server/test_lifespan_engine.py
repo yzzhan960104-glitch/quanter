@@ -39,3 +39,27 @@ async def test_lifespan_assembles_engine(monkeypatch):
         eng.shutdown.assert_called_once()
 
 
+
+
+@pytest.mark.asyncio
+async def test_lifespan_discovery_cron_disabled(monkeypatch):
+    """DISCOVERY_SCHEDULE=off（2026-08-25 用户裁决）：自动参数优化全停——
+    discovery cron 与 autopromote 日报 cron 均不注册，启动补跑不触发。"""
+    from presentation.server.main import lifespan
+
+    monkeypatch.setenv("DISCOVERY_SCHEDULE", "off")
+    monkeypatch.setenv("AUTO_PROMOTE_BRIEF", "off")
+    monkeypatch.setattr("presentation.server.main._discovery_missed_last_run",
+                        lambda: True)   # 即便判定错过昨晚运行，off 也须拦住补跑
+
+    eng = MagicMock()
+    eng.sched.running = True
+    eng.bootstrap = AsyncMock()
+    app = MagicMock()
+    app.state = MagicMock()
+
+    with patch("trading.engine.TradingEngine", return_value=eng):
+        async with lifespan(app):
+            job_ids = [c.kwargs.get("id") for c in eng.sched.add_job.call_args_list]
+            assert "discovery_daemon" not in job_ids, "off 模式仍注册了 discovery cron"
+            assert "autopromote_daily_brief" not in job_ids, "off 模式仍注册了 autopromote 日报"

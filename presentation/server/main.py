@@ -493,9 +493,16 @@ async def lifespan(app: FastAPI):
         if _eng is not None:
             import os as _os_cron
             from apscheduler.triggers.cron import CronTrigger
+            # DISCOVERY_SCHEDULE=off（2026-08-25 用户裁决）：自动参数优化全停——
+            # 不注册 discovery cron、不启动补跑（见下方 _discovery_missed_last_run 段），
+            # 参数优化改为高功率手动循环（diag/r*_loop.py 范式，跑完即停）。
+            if _os_cron.environ.get("DISCOVERY_SCHEDULE", "").lower() == "off":
+                logging.getLogger(__name__).info(
+                    "discovery cron 已停用（DISCOVERY_SCHEDULE=off，自动参数优化关闭——"
+                    "参数优化改为高功率手动启动执行）")
             # 24h 低功率（2026-08-03）：DISCOVERY_SCHEDULE=low-power → 每小时整点+5 分
             # 触发，job 内窗口判定（盘中/数据链时段跳过）；否则保持 02:00 夜间集中跑。
-            if _os_cron.environ.get("DISCOVERY_SCHEDULE", "").lower() == "low-power":
+            elif _os_cron.environ.get("DISCOVERY_SCHEDULE", "").lower() == "low-power":
                 _eng.sched.add_job(
                     _run_discovery_subprocess,
                     CronTrigger.from_crontab("5 * * * *"),
@@ -542,9 +549,15 @@ async def lifespan(app: FastAPI):
     # 对当日最新 DRAFT 跑七门 dry-run（只评估+播报，零写库；夜间真放行由
     # AUTO_PROMOTE_ENABLED 总开关另行控制）。日报让「门槛读数」每日可见，人审红线
     # 保留在开关与 G7 fail-closed 上。软降级同上。
+    # AUTO_PROMOTE_BRIEF=off（2026-08-25 用户裁决）：随自动参数优化全停一并停用——
+    # 七门评估需要时手动跑（diag/r6_7_promote_gates.py 范式）。
     try:
         _eng_ap = getattr(app.state, "trading_engine", None)
-        if _eng_ap is not None:
+        if _eng_ap is not None and os.environ.get("AUTO_PROMOTE_BRIEF", "").lower() == "off":
+            logging.getLogger(__name__).info(
+                "autopromote 日报 cron 已停用（AUTO_PROMOTE_BRIEF=off——七门评估需要时"
+                "手动跑 diag/r6_7_promote_gates.py 范式）")
+        elif _eng_ap is not None:
             from apscheduler.triggers.cron import CronTrigger
             _eng_ap.sched.add_job(
                 _run_autopromote_daily_brief,
@@ -564,8 +577,11 @@ async def lifespan(app: FastAPI):
     # （converged 跳过）去重——补跑 + 当晚 02:00 双跑靠此去重，不会重跑已收敛 snapshot。
     # 软降级：补跑判定 / 子进程拉起异常不阻断 uvicorn（try/except 兜底，与上方 engine/
     # training/connect/discovery cron 同源软降级范式）。
+    # DISCOVERY_SCHEDULE=off（2026-08-25）：停用模式下启动补跑一并跳过——否则每次
+    # 重启仍会拉一轮 discovery 子进程，停用形同虚设。
     try:
-        if _discovery_missed_last_run():
+        if (os.environ.get("DISCOVERY_SCHEDULE", "").lower() != "off"
+                and _discovery_missed_last_run()):
             logging.getLogger(__name__).warning(
                 "discovery 启动补跑：检测到 offline 跨昨晚 02:00，异步补跑")
             _run_discovery_subprocess()  # DETACHED 子进程，立即返不阻塞 uvicorn 起
