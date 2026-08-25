@@ -63,6 +63,32 @@ def _hoist_entrance_guard(body: str) -> tuple[str, str]:
     return HOIST_BEGIN + block + HOIST_END, pre + post
 
 
+def _build_stamp() -> str:
+    """产物版本锚：git HEAD 提交时间（精确到秒）+ 短 hash。
+
+    Why git 锚而非构建时钟（now()）：构建时钟破坏「同输入逐字节一致」幂等红线
+    （test_build_idempotent 重跑即红）；git HEAD 时间在同一次提交内恒定——同提交
+    重跑产物逐字节稳定，提交前进 stamp 前进，「掘金终端粘的是否最新版」用
+    Ctrl+F 搜 PILOT_BUILD_STAMP 一眼可判（2026-08-25 部署现场需求：旧版重复
+    粘贴导致同一崩溃复现两次的实锤教训）。
+    为什么限定五路输入路径而非全仓 HEAD：别的模块提交会推进 HEAD 而产物未变，
+    全仓锚会让「stamp 落后于 HEAD」的误报（部署核对口径=emquant 产物的最新
+    提交，非全仓最新提交）。git 不可用（异常）→ "unknown"（fail-visible 不
+    fail-loud：组装本身仍可完成，stamp 缺失在部署核对时自然暴露）。
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "log", "-1", "--format=%ci %h", "--",
+             "emquant/pilot_body.py", "emquant/build_pilot.py",
+             "emquant/config/", "strategies/neckline/signal.py",
+             "strategies/neckline/method_v0.py"],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=10)
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def build(output_path: Path | None = None) -> Path:
     """读五路输入 → 拼单文件 → 返回产物路径（幂等纯拼接）。
 
@@ -80,10 +106,12 @@ def build(output_path: Path | None = None) -> Path:
     mv0 = _strip((ROOT / "strategies/neckline/method_v0.py").read_text(encoding="utf-8"), FUTURE, SIGNAL_IMPORT)
     body_full = (ROOT / "emquant/pilot_body.py").read_text(encoding="utf-8")
     hoist, body = _hoist_entrance_guard(body_full)   # 入口抑制块剪出到 head 区（§0/§1 之前）
+    stamp = _build_stamp()
     head = (
         "# -*- coding: utf-8 -*-\n"
         '"""东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。\n'
         f"PARAMS_FINGERPRINT={snap['fingerprint']}  生成物见 emquant/config/。\n"
+        f"PILOT_BUILD_STAMP: {stamp}（部署核对：编辑器 Ctrl+F 搜本串，与仓库 git log -1 比对）。\n"
         '"""\n' + FUTURE + "\n\n"
     )
     sec0 = (
@@ -93,6 +121,7 @@ def build(output_path: Path | None = None) -> Path:
         f"TRADE_CFG = {snap['trade_cfg']!r}\n"
         f"UNIVERSE = {uni['symbols']!r}\n"
         f"PARAMS_FINGERPRINT = {snap['fingerprint']!r}\n"
+        f"PILOT_BUILD_STAMP = {stamp!r}   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用\n"
         "# 试点硬闸（spec FR3）：单日新挂 ≤2；单票市值 ≤5%；仿真账户固定。\n"
         "PILOT_MAX_NEW_ORDERS_PER_DAY = 2\n"
         "PILOT_MAX_POSITION_PCT = 0.05\n"

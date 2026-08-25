@@ -1335,8 +1335,12 @@ class PilotRuntime:
         # 整体后移到首个可触发时刻，届时回评）。
         a.schedule(pre_open_job, "1d", "09:15:00")
         a.schedule(after_close_job, "1d", "15:35:00")
+        # build_stamp：§0 注入的版本锚（build_pilot 生成时取 git HEAD 提交时间+短
+        # hash）——globals().get 防御：pilot_body 单独 exec（无 §0 段）时降级
+        # "unknown"，晨检对 INIT 行即可核对版本，不用开编辑器搜文件头。
         self._audit("INIT", account=self.account, strategy_id=self.strategy_id,
-                    subscribed=len(self._subscribed))
+                    subscribed=len(self._subscribed),
+                    build_stamp=globals().get("PILOT_BUILD_STAMP", "unknown"))
 
     def _subscribe_watchlist(self):
         """订阅巡检标的：持仓 ∪ 未终态挂单（ts→gm 符号，tick 频率）——增量差集下发。
