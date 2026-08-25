@@ -945,8 +945,13 @@ def absorb_reality(state, api_orders, api_positions):
 
     api_orders/api_positions 形态：gm get_orders()/get_position() 返回项（Q4/Q5：
     cl_ord_id/symbol(gm 格式)/side/status(int)/volume/filled_volume/created_at/
-    vwap）。symbol 经 from_gm_symbol 折 ts（fail-loud：非沪深代码=柜台有试点外
-    品种，炸给人工而非静默吞——试点账户是白名单专用户，见到即异变）。
+    vwap）。symbol 经 from_gm_symbol 折 ts——不可映射（非沪深 A 股 gm 符号）时
+    **WARN 留痕 + 跳过**（2026-08-25 实锤修正：仿真账户持北交所人工仓 920679，
+    gm 持仓返回裸代码无交易所前缀，原 fail-loud 把整条 init 链炸死——策略无法
+    启动管理自己的仓位。与 on_tick 的 M-6 终审降级同型同语义：试点账户白名单
+    语义由 C1 账户闸承担，symbol 级遇到试点外品种（北交所/人工仓/异变注入）
+    只降级留痕（order/position_symbol_unmappable），策略对其不吸收不管理，
+    人工仓人工管）。
     """
     # ── ①② 订单对账（先正向吸收/同步，再反向补撤——顺序保证同轮内先见实况再定性）──
     api_order_ids = set()
@@ -954,8 +959,14 @@ def absorb_reality(state, api_orders, api_positions):
         oid = (ao or {}).get("cl_ord_id")
         if not oid:
             continue                              # 无主键行（异变）：跳过不炸，audit 归 Task 8
+        try:
+            sym = from_gm_symbol(ao["symbol"])    # gm → ts（不可映射 → WARN+skip，见 docstring）
+        except Exception as e:
+            audit_log("WARN", type="order_symbol_unmappable",
+                      symbol=(ao or {}).get("symbol"),
+                      err=f"{type(e).__name__}: {e}")
+            continue
         api_order_ids.add(oid)
-        sym = from_gm_symbol(ao["symbol"])        # gm → ts（fail-loud，见 docstring）
         filled = int(ao.get("filled_volume") or 0)
         st_o = state["orders"].get(oid)
         if st_o is None:
@@ -1000,7 +1011,13 @@ def absorb_reality(state, api_orders, api_positions):
     # ── ③ 持仓对账（qty 柜台为准 / entry+exec_params state 保留 / 双向吸收归零）──
     api_pos_syms = set()
     for ap in (api_positions or []):
-        sym = from_gm_symbol(ap["symbol"])
+        try:
+            sym = from_gm_symbol(ap["symbol"])    # 不可映射（北交所人工仓等）→ WARN+skip
+        except Exception as e:
+            audit_log("WARN", type="position_symbol_unmappable",
+                      symbol=(ap or {}).get("symbol"),
+                      err=f"{type(e).__name__}: {e}")
+            continue
         api_pos_syms.add(sym)
         volume = int(ap.get("volume") or 0)
         st_p = state["positions"].get(sym)

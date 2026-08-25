@@ -591,6 +591,35 @@ def test_absorb_positions_bidirectional(pilot):
     assert state["positions"]["600000.SH"]["exec_params"] == {"tp1_portion": 0.3}  # 档案保留
 
 
+def test_absorb_unmappable_symbol_skips_not_raises(pilot, tmp_path, monkeypatch):
+    """不可映射 gm 符号（北交所人工仓裸码 920679 实锤 2026-08-25）→ WARN+skip 不炸。
+
+    原 fail-loud 把整条 init 链炸死（reconcile→absorb→from_gm_symbol），策略无法
+    启动管理自己的仓位；对齐 on_tick M-6 同型降级——试点外品种留痕不管。
+    """
+    monkeypatch.setattr(pilot, "AUDIT_DIR", tmp_path / "audit")   # audit_log 调用时查模块常量（§3 注记）
+    state = pilot._initial_state()
+    state["positions"]["300750.SZ"] = {
+        "entry_date": "2026-08-14", "entry_price": 10.4, "qty": 400, "remaining_qty": 400,
+        "stop": 9.5, "tp1_price": 11.0, "tp1_done": False, "tp2_price": 12.0,
+        "tp2_done": False, "force_exit": False,
+        "trailing": {}, "exec_params": {"tp1_portion": 0.3}}
+    api_positions = [
+        {"symbol": "SZSE.300750", "side": 1, "volume": 300, "vwap": 10.4},
+        {"symbol": "920679", "side": 1, "volume": 1000, "vwap": 8.8},   # 北交所裸码（无交易所前缀）
+    ]
+    api_orders = [{"cl_ord_id": "x1", "symbol": "920679", "side": 1, "volume": 1000,
+                   "price": 8.8, "status": 3, "filled_volume": 1000}]
+    pilot.absorb_reality(state, api_orders, api_positions)             # 不 raise 即通过
+
+    assert state["positions"]["300750.SZ"]["remaining_qty"] == 300     # 正常仓照常对账
+    assert not any("920679" in s for s in state["positions"])          # 不可映射仓不被吸收（人工仓人工管）
+    assert not any(o.get("symbol") == "920679" for o in state["orders"].values())
+    rows = list((tmp_path / "audit").glob("audit_*.csv"))
+    txt = "\n".join(f.read_text(encoding="utf-8") for f in rows)
+    assert "position_symbol_unmappable" in txt and "order_symbol_unmappable" in txt  # 留痕可见
+
+
 def test_absorb_reality_sell_fill_reduces_position(pilot):
     """卖向成交减持仓：sell_limit 部成后 absorb → remaining 扣减（tp1 减仓的柜台视角）。"""
     fake = FakeGm()
