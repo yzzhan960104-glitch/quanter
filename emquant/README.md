@@ -26,8 +26,9 @@ emquant_neckline_pilot.py（组装产物，勿手改）
 1. **新建策略**：掘金终端 → 量化研究 → 我的策略 → 新建 Python 策略（终端文件名
    惯例 `main.py`，内容粘贴本仓库 `emquant/emquant_neckline_pilot.py` 全文；或把
    文件放入策略目录）。记下 strategy_id（当前实跑腿真值
-   `08b25d85-9cf8-11f1-a09d-7c10c93fcb7d`——08-21 首启 audit INIT 行自证；
-   `7ed8526e-…` 为早期空目录已作废。策略列表 / `~/.emgm3/projects/` 目录名可见）。
+   `d9324346-9d1b-11f1-ae25-7c10c93fcb7d`——2026-08-25 R6-8 换代新目录；
+   `08b25d85-…` 上一代（runtime.json 已随迁、token 复用）、`7ed8526e-…`
+   早期空目录均已作废。策略列表 / `~/.emgm3/projects/` 目录名可见）。
 2. **建策略目录旁的 config**：产物按自身所在目录定位 `config/runtime.json`
    （`BASE_DIR = Path(__file__).resolve().parent`）——**终端跑的是策略目录里这份，
    不是仓库 `emquant/config/` 那份**。在策略目录下建 `config/runtime.json`：
