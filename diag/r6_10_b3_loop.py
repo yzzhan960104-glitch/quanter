@@ -356,8 +356,9 @@ def main() -> int:
         st["round"] += 1
         rnd = st["round"]
         t0 = time.time()
-        left_h = (deadline - time.time()) / 3600
-        print(f"\n===== Round {rnd}（剩 {left_h:.1f}h）=====", flush=True)
+        left_h = (_remaining(deadline) / 3600) if deadline is not None else float("inf")
+        print(f"\n===== Round {rnd}（剩 {'∞（收敛驱动）' if deadline is None else f'{left_h:.1f}h'}）=====",
+              flush=True)
         n_eval = n_adopt = 0
         for mode in ("coarse", "fine"):
             if _remaining(deadline) < 40 * 60:
