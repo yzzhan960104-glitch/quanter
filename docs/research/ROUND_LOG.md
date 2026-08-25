@@ -280,3 +280,14 @@
   2. `(1−portion)` 浮点下溢截断（1.0−0.9=0.0999…→int(0.999…)=0 把 lot2 整手截没）——epsilon 修复，新测试实锤抓出。
 - **ACTIVE 护栏联动修复**：人工晋级的版本 note 无 `outer ann=X%` 模式 → discovery auto_publish 护栏解析失效（fast 套件 bridge 测试抓出：ann=0% 的 trial 也会被自动发布）。按 append-only 纪律走「归档→重建带护栏 note 版本→promote」：ACTIVE 现为 `neckline_r68_champion_20260826`（参数逐字节同 R6-8 产物，note 含 outer ann=511.5% calmar=60.7 + G4 豁免留痕 + 回滚命令）；快照重导后指纹不变（参数未动）。QMT 引擎腿动态读库自动跟随，模拟持仓/挂单无感。
 - **测试**：tests/emquant **744 项全绿**（+8 反转 regime 守护；钉旧 §0 值的测试改造为换代健壮：超期龄期动态取 max_holding、cooldown 机制测试显式注入隔离值、键集字面量随代显式更新）+ fast 套件 2046 全绿。上实盘前置不变：双网关冲突（本机 QMT 引擎与掘金终端并存的柜台会话隔离）+ 08-13 审计项。
+
+---
+
+## R6-10 · 2026-08-25 · C 线收官夜——剪枝/chase 实盘/B3/2022 归因四连发
+
+- **① 剪枝冻结（1022b952）**：PARAM_SPACE 21→13 维（不敏感 5 + 默认最优 3 冻结出空间），笛卡尔积 5.5e13→~2e8 砍 25 万倍；解冻须新实证。
+- **② chase 实盘两侧（31974cb3）**：QMT pre_open 超期→当日现价限价追入（tp2 守卫/无价 fail-closed 弃/payload chased 计数）；掘金 decide_pending 返 "chase"→on_tick 撤旧+tick 价追入（审计 CHASE_BUY/chase_target_exhausted）。默认腿零变化。**生效待引擎重启**（19:38 一次重启早于提交，未吃到）。
+- **③ 2022 反常归因（R5b 红旗①关闭，`logs/r6_10_anomaly_2022.json`）**：机制假设证实——tight(0.7H) vs greedy(1.5H) 同 universe 2022 对照：-24.4%→+10.4%（scan 口径），tp2 占比 15%→40%、止损绝对量 1560→830（近端止盈在反弹日兑现，仓位先出不再漂移到止损）；月度 equity 正月恰为反弹月（2/5/8/10/11 月 +0.6%~+8.9%），阴跌月仍小亏。「熊市超跌反弹近端止盈高频兑现」成立；wf 折 +95.5% 的口径差（折独立 universe+幸存者偏差）维持 R6-8 结论。
+- **④ B3 tp 锚自适应（31974cb3）**：price_levels 加 tp_adapt_h_atr/scale（默认 None=关，golden 11 项零变化）；H/ATR 超阈值时 tp2/tp1 乘数×scale（同缩保结构）；五层接线（EXEC/EXEC_KEYS/schema/paramMeta/strategy 白名单/掘金 enrich 对称）。
+- **⑤ B3 受控循环发射**（`diag/r6_10_b3_loop.py`，base=R6-8 冠军原样，假设空间=B3 轴 6×6 网格+13 维复扫 48 项，五闸同 R6-8）：19:54 发射，明晨收官读数。
+- **新参数首夜实弹（今晚 18:00 EOD）**：date=2026-08-26 计划 **84 单**（旧参数 3-11 单/日 → 泛滥形态实弹显形，明早 pre_open 资金闸自然节流预计实挂 10-14 单）；19:37 post_close 对 84 个未成交计划标 CLOSED（生命周期收口正常语义，不拦明早挂单）。
