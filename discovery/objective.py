@@ -294,7 +294,8 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
                        "signal_date": d,                  # 保留（sharpe extras 消费）
                        "entry_date": r.get("buy_date"),   # scan 产物成交日键名（replay 侧叫 entry_date）
                        "exit_date": r.get("exit_date"),
-                       "avg_pnl_pct": r["avg_pnl_pct"], "rr": 0.0})
+                       "avg_pnl_pct": r["avg_pnl_pct"], "rr": 0.0,
+                       "entry_price": r.get("entry")})   # R6-11：整手约束用（缺→None→有限模式跳过）
     curve = build_equity_curve(trades, pm)
     # n_trading_days：段内交易日数（镜像 replay.py:222-227——各 symbol 同区间取一计数）
     n_days = int(((universe_dates >= pd.Timestamp(segment.start)) &

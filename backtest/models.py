@@ -41,6 +41,12 @@ class PositionModel:
     max_positions: int = 6
     risk_frac: float | None = None
     slippage_bps: float = 5.0
+    # R6-11 有限资金模式（2026-08-26 用户指令「回测架构考虑有限资金」）：
+    # lot_size > 0 时启用整手约束（A 股 100 股/手）+ 佣金最低收费（min_fee 元，
+    # 买卖各一次）——预算 floor 到整手、买不起一手跳过、min5 侵蚀小单。
+    # 默认 lot_size=0 = 原百分比世界（零回归，golden 钉死）。
+    lot_size: int = 0
+    min_fee: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -117,11 +123,27 @@ def build_equity_curve(trades: list[dict], model: PositionModel) -> list[dict]:
         if model.max_positions and len(active) >= model.max_positions:
             continue
         allocation = model.capital * model.pos_cap
+        # R6-11 有限资金模式：整手约束（floor 到 lot_size 倍数；不足一手跳过）
+        # + 佣金 min_fee（买卖各一次，从单笔收益扣——对小预算单笔是固定税）。
+        fee_drag = 0.0
+        if model.lot_size > 0:
+            entry_price = float(t.get("entry_price") or 0.0)
+            if entry_price <= 0:
+                continue                       # 无入场价（老流水）→ 有限模式跳过
+            n_lots = int(allocation // (entry_price * model.lot_size))
+            if n_lots <= 0:
+                continue                       # 买不起一手（高价股 vs 小预算）
+            allocation = n_lots * entry_price * model.lot_size
+            if model.min_fee > 0:
+                # min5 固定费：买+卖各一次 min(min_fee, 费率佣金)——保守取 min_fee
+                # 全额（费率佣金 < 5 元的小单正是 min5 生效场景）
+                fee_drag = 2.0 * model.min_fee / allocation
         if allocation > cash:
             continue
 
         ret = float(t.get("avg_pnl_pct") or 0.0) / 100.0
         ret -= model.slippage_bps * 2.0 / 10_000.0
+        ret -= fee_drag
         cash -= allocation
         active.append((t.get("symbol"), allocation, _iso(t.get("exit_date"))))
         run_rr += float(t.get("rr") or 0.0)
