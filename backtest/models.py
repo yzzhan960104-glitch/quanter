@@ -47,6 +47,13 @@ class PositionModel:
     # 默认 lot_size=0 = 原百分比世界（零回归，golden 钉死）。
     lot_size: int = 0
     min_fee: float = 0.0
+    # R6-11c 挂单冻结（2026-08-26 用户指令）：True 时每笔的资金/并发占用从
+    # signal_date+1（挂单日）起算而非 entry_date（成交日）——对资金与并发而言
+    # 「挂单冻结中」与「持仓中」等效（都占 allocation 占槽），唯一区别是占用
+    # 提前了等待期（signal→entry 的 max_wait 窗口）。Little's law 自动节流：
+    # 在途冻结满 → 新信号丢弃 → 成交率被资金容量压下来（对齐实盘 A 股限价
+    # 买单挂出即冻结资金的语义）。默认 False=原口径（零回归）。
+    freeze_pending: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -99,16 +106,30 @@ def build_equity_curve(trades: list[dict], model: PositionModel) -> list[dict]:
         return curve
 
     # pos_cap 模式（默认，对齐实盘 budget=capital×pos_cap）：加总不复利。
+    # R6-11c：freeze_pending=True 时每笔占用起点提前到 signal_date+1（挂单日）
+    # ——排序与释放判定统一走 occupy_from（占用起点），exit 释放口径不变。
+    def _occupy_from(t) -> str:
+        if not model.freeze_pending:
+            return _iso(t.get("entry_date"))
+        sd = t.get("signal_date")
+        if sd is None:
+            return _iso(t.get("entry_date"))
+        try:
+            import pandas as _pd
+            return _iso(_pd.Timestamp(sd) + _pd.Timedelta(days=1))
+        except Exception:
+            return _iso(t.get("entry_date"))
+
     by_entry = sorted(
         trades,
-        key=lambda t: (_iso(t.get("entry_date")), _iso(t.get("exit_date"))),
+        key=lambda t: (_occupy_from(t), _iso(t.get("exit_date"))),
     )
     curve: list[dict] = []
     active: list[tuple] = []      # (symbol, allocation, exit_key)
     cash = model.capital
     equity, run_rr = 1.0, 0.0
     for t in by_entry:
-        entry_key = _iso(t.get("entry_date"))
+        entry_key = _occupy_from(t)
         # 释放已到期持仓（exit ≤ 当前 entry）的占用资金。
         still, freed = [], 0.0
         for sym, alloc, ex_key in active:
