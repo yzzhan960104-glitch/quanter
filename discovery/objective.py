@@ -40,7 +40,9 @@ EXEC_KEYS = ["max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
              # 透传到 scan_symbol（momentum_gate 三层路径教训：漏列=参数静默失效）。
              "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
              # R6-10 B3：tp 锚自适应（默认关）
-             "tp_adapt_h_atr", "tp_adapt_scale"]
+             "tp_adapt_h_atr", "tp_adapt_scale",
+             # R6-10 L1：时间止损（默认关）
+             "time_stop_days"]
 
 
 def run_full_scan(params, universe):

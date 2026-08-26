@@ -103,6 +103,8 @@ class ExitReason(Enum):
     TAKE_PROFIT = "take_profit"
     TIMEOUT = "timeout"
     CANCEL_ON = "cancel_on"   # pending 期撤单（颈线法专属，2026-07-29 Task 4 新增）
+    TIME_STOP = "time_stop"   # R6-10 L1 时间止损（2026-08-26：N 日未触发任何 tp 离场——
+                              # 持有期分桶单调衰减 74%→35% 的结构化兑现，砍负尾）
     NONE = "none"
 
 
@@ -293,6 +295,20 @@ def decide_exit(state: dict, bar: dict, cfg: dict) -> NecklineExitDecision:
             action=ExitAction.CLOSE,
             reason=ExitReason.TAKE_PROFIT,
             portion=float(cfg["tp1_portion"]),
+            new_stop=stop,
+        )
+
+    # ── priority 3.5（R6-10 L1 · 2026-08-26）：时间止损——N 日未触发任何 tp 离场 ──
+    # 物理意图：持有期分桶实证单调衰减（3 日内 +4.7%/74% → 13-20 日 −1.8%/35%，
+    # 无反弹）——「拖着不到 tp」本身是假突破信号。time_stop_days（exec 键，0=关，
+    # 默认零行为）到期卖剩余全量（reason=time_stop；tp1 已触发的只卖 lot2 剩余，
+    # priority 3 在前自然保证）。stop/tp2/tp1 仍优先（本分支在其后）。
+    _tsd = cfg.get("time_stop_days") or 0
+    if _tsd and state.get("holding_days", 0) >= int(_tsd):
+        return NecklineExitDecision(
+            action=ExitAction.CLOSE,
+            reason=ExitReason.TIME_STOP,
+            portion=1.0,
             new_stop=stop,
         )
 

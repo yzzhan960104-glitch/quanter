@@ -70,3 +70,6 @@ class NecklineConfig(BaseModel):
                           "×tp_adapt_scale；None=关——V 反修复月对症）")
     tp_adapt_scale: float = Field(
         0.5, gt=0.0, le=1.0, description="B3 缩近系数（默认 0.5）")
+    time_stop_days: int = Field(
+        0, ge=0, description="R6-10 L1 时间止损：入场 N 个交易日未触发任何 tp → 离场"
+                             "（持有期分桶单调衰减的结构化兑现；0=关）")

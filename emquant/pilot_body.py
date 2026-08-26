@@ -878,6 +878,14 @@ def decide_position(tick_price, pos, today, cal):
         if qty <= 0:
             qty = remaining                           # 不足 100 股 → 本档卖全部剩余
         return ("sell", qty, "tp1")
+    # ⑤ priority 3.5（R6-10 L1 · 2026-08-26）：时间止损——N 日未触发任何 tp 离场
+    # （对齐 decide_exit TIME_STOP 分支；remaining 全量按 tick 价跟价卖，与
+    # stop_loss 同款成交方式——时间事件无目标价锚）。0/缺省=关（零行为变化）。
+    _tsd = int((pos.get("exec_params") or {}).get("time_stop_days") or 0)
+    if _tsd and today is not None:
+        _hd = trading_days_between(cal, pos.get("entry_date"), today)
+        if _hd >= _tsd:
+            return ("sell", remaining, "time_stop")
     return None
 
 
@@ -1858,8 +1866,8 @@ class PilotRuntime:
                     self._audit("WARN", type="tp2_dust_sinks", symbol=sym,
                                 known_divergence="tp2_dust_sinks")
                 else:
-                    if reason in ("stop_loss", "tp2_eod_sweep"):
-                        price = px                                # 止损/盘后 sweep 跟现价（见头注）
+                    if reason in ("stop_loss", "tp2_eod_sweep", "time_stop"):
+                        price = px          # 止损/盘后 sweep/时间止损 跟现价（时间事件无目标价锚）
                     elif reason in ("tp2", "tp2_share"):
                         price = float(pos.get("tp2_price") or px)
                     else:

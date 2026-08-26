@@ -61,6 +61,7 @@ _NECKLINE_EXEC_KEYS = (
     # 行为一致化（replay 读数将随 chase 生效而变化，属预期修正）。
     "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
     "tp_adapt_h_atr", "tp_adapt_scale",   # R6-10 B3：tp 锚自适应
+    "time_stop_days",                     # R6-10 L1：时间止损
 )
 
 logger = logging.getLogger(__name__)

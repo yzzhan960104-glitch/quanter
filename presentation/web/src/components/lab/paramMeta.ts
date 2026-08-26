@@ -54,6 +54,7 @@ export const PARAM_META: Record<string, ParamMeta> = {
   timeout_extend_min_pnl: { title: '延长浮盈门槛（腿B）', group: '执行层' },
   tp_adapt_h_atr:       { title: 'tp锚自适应阈值（B3）', group: '执行层' },
   tp_adapt_scale:       { title: 'tp锚缩近系数（B3）', group: '执行层' },
+  time_stop_days:       { title: '时间止损日数（L1）', group: '执行层' },
 }
 
 /**

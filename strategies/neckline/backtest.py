@@ -88,6 +88,9 @@ EXEC_DEFAULTS = {
     # tp2/tp1 乘数 ×tp_adapt_scale（V 反修复月对症）。None=关（默认零行为变化）。
     "tp_adapt_h_atr": None,
     "tp_adapt_scale": 0.5,
+    # R6-10 L1 时间止损（C 线延伸 · 2026-08-26 用户裁决）：入场 N 个交易日未触发
+    # 任何 tp → 离场（持有期分桶单调衰减的结构化兑现）。0=关（默认零行为变化）。
+    "time_stop_days": 0,
 }
 
 
@@ -271,6 +274,8 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         "trailing_step": exec.get("trailing_step", 0.0) or 0.0,
         "trailing_floor": exec.get("trailing_floor"),
         "tp1_portion": exec["tp1_portion"],
+        # R6-10 L1：时间止损（0=关——decide_exit priority 3.5，N 日未触发任何 tp）
+        "time_stop_days": exec.get("time_stop_days", 0) or 0,
     }
 
     # T+1 红线（R5b · 2026-08-25 实锤修复）：A 股现货当日买入不可当日卖出——
@@ -362,6 +367,16 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             lot1_open = False
             continue
 
+        if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TIME_STOP:
+            # R6-10 L1：时间止损——N 日未触发任何 tp，剩余全量按 close 平（与
+            # timeout 同款离场方式；holding_days 天数口径也同（i-buy_idx））
+            if lot1_open:
+                lot1_pnl = (close - entry) / entry
+            if lot2_open:
+                lot2_pnl = (close - entry) / entry
+            exit_reason = "time_stop"
+            exit_pos = i
+            break   # 中途出场（与 stop/tp2 同款；timeout 靠 is_last 无需 break，本分支必需）
         if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TIMEOUT:
             # R6-5 腿 B（timeout_extend，默认 days=0=零行为变化）：超时日浮盈≥门槛且未
             # 延长过 → 一次性延长持有（V 反修复月对症——R6-3 实锤 2026-08 58% timeout

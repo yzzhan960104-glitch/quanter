@@ -283,3 +283,78 @@ def test_tp_adact_shallow_form_unchanged():
                               cancel_thresh_mult=1.0,
                               tp_adapt_h_atr=4.0, tp_adapt_scale=0.5)
     assert lv.tp2 == 114.0 and lv.tp1 == 107.0   # 原乘数
+
+
+# ============================================================================
+# R6-10 L1 时间止损（2026-08-26）：N 日未触发任何 tp 离场
+# ============================================================================
+def _ts_exec(**over):
+    base = {**bk.EXEC_DEFAULTS, "commission_rate": 0.0, "stamp_rate": 0.0,
+            "transfer_rate": 0.0, "cancel_thresh_mult": None}
+    base.update(over)
+    return base
+
+
+def _ts_df(n_days_profit_then_flat=0, n=40):
+    """信号日 + 回踩成交（idx1）+ n 根缓涨不触 tp/stop。"""
+    rows = [(100, 101, 99, 100, 1000),          # 0 信号日
+            (103, 104, 101, 103, 1000)]         # 1 回踩成交 entry=102
+    for k in range(n - 2):
+        rows.append((103.0 + 0.02 * k, 103.5 + 0.02 * k, 102.5 + 0.02 * k,
+                     103.0 + 0.02 * k, 1000))   # 缓涨永不触 tp2=120/stop=98
+    return _df(rows)
+
+
+def test_time_stop_default_off_zero_change():
+    """time_stop_days=0（默认）：与不设该键行为逐位一致（timeout 出场）。"""
+    df = _ts_df(n=40)
+    id_cfg = _id_cfg(tp_h_mult=2.0)
+    a = bk.simulate_exit(df, 0, NLK, BOT, ATR, exec=_ts_exec(), id_cfg=id_cfg)
+    b = bk.simulate_exit(df, 0, NLK, BOT, ATR,
+                         exec=_ts_exec(time_stop_days=0), id_cfg=id_cfg)
+    assert a["exit_reason"] == b["exit_reason"] == "timeout"
+    assert a["avg_pnl_pct"] == b["avg_pnl_pct"]
+
+
+def test_time_stop_fires_at_n_days_close_exit():
+    """time_stop_days=7：第 7 个持有日未触发 tp → 按 close 平（reason=time_stop）。
+
+    entry=102（idx1 成交），持有日 1..7 = idx2..8，第 7 日 idx8 的 close
+    =103+0.02×6=103.12 → pnl=(103.12-102)/102（费 0）。
+    """
+    df = _ts_df(n=40)
+    sim = bk.simulate_exit(df, 0, NLK, BOT, ATR,
+                           exec=_ts_exec(time_stop_days=7),
+                           id_cfg=_id_cfg(tp_h_mult=2.0))
+    assert sim["exit_reason"] == "time_stop"
+    assert sim["exit_date"] == df.index[8].date()          # buy_idx=1 + 7 持有日
+    assert sim["holding_bars"] == 7
+    _close_7d = float(df["close"].iloc[8])
+    assert sim["avg_pnl_pct"] == round((_close_7d - 102.0) / 102.0 * 100, 2)
+
+
+def test_time_stop_not_fired_when_tp_hits_first():
+    """N 日内触发 tp2 → tp2 出场（time_stop 不越权——priority 3.5 在 tp2 后）。
+    """
+    rows = [(100, 101, 99, 100, 1000),
+            (103, 104, 101, 103, 1000)]
+    # 第 3 持有日（idx4）high 冲到 tp2=120
+    rows += [(103, 103.5, 102.5, 103, 1000), (103, 103.5, 102.5, 103, 1000),
+             (110, 121, 109, 118, 1000)]
+    rows += [(118, 119, 116, 118, 1000)] * 30
+    sim = bk.simulate_exit(_df(rows), 0, NLK, BOT, ATR,
+                           exec=_ts_exec(time_stop_days=7),
+                           id_cfg=_id_cfg(tp_h_mult=2.0))
+    assert sim["exit_reason"] == "tp2"                     # tp2 优先
+
+
+def test_time_stop_stop_priority_unchanged():
+    """持有期内穿止损 → stop_loss 仍最优先（time_stop 不拦硬风控）。"""
+    rows = [(100, 101, 99, 100, 1000),
+            (103, 104, 101, 103, 1000),
+            (100, 101, 96, 97, 1000)]                      # idx2: low=96 ≤ stop=98
+    rows += [(97, 98, 95, 96, 1000)] * 30
+    sim = bk.simulate_exit(_df(rows), 0, NLK, BOT, ATR,
+                           exec=_ts_exec(time_stop_days=7),
+                           id_cfg=_id_cfg(tp_h_mult=2.0))
+    assert sim["exit_reason"] == "stop_loss"
