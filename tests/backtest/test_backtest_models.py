@@ -165,32 +165,44 @@ def test_return_taken_identifies_taken_subset():
 
 
 # ============================================================================
-# R7-H-R7c 排队优先级（2026-08-26 信号质量延伸）：同占用日高 priority 先得槽
+# R7c 排队纪律 queue_order（2026-08-26 用户裁决「双口径并报」）：
+# exit_date=先知口径（默认，历史连续性）/ symbol=可部署口径（对外标准）/
+# priority=研究用（R7c）
 # ============================================================================
 def test_priority_queue_high_priority_wins_slot():
     """同日重叠候选、并发=1：priority 高者进场，低者被跳过。
 
-    手推：A(早出场, priority=0) vs B(晚出场, priority=9)——原序按 exit_date
-    A 先进；priority_queue 开启后 B 先进，A 挤掉。
+    手推：A(早出场, priority=0) vs B(晚出场, priority=9)——exit_date 序 A 先进；
+    queue_order="priority" 后 B 先进，A 挤掉。
     """
-    a = _t("A", "2024-01-02", "2024-01-05", 1.0, 5.0)
-    b = _t("B", "2024-01-02", "2024-01-09", 1.0, 8.0)
+    a = _t("300001.SZ", "2024-01-02", "2024-01-05", 1.0, 5.0)
+    b = _t("000001.SZ", "2024-01-02", "2024-01-09", 1.0, 8.0)
     a["priority"], b["priority"] = 0.0, 9.0
     curve, taken = build_equity_curve([a, b], PositionModel(
-        pos_cap=0.05, max_positions=1, slippage_bps=0, priority_queue=True),
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="priority"),
         return_taken=True)
-    assert [t["symbol"] for t in taken] == ["B"]
+    assert [t["symbol"] for t in taken] == ["000001.SZ"]
     assert curve[0]["pnl_pct"] == pytest.approx(8.0)
 
 
-def test_priority_queue_off_ignores_priority_key():
-    """默认关（零回归）：流水带 priority 键不生效——原序 (occupy, exit_date)。"""
-    a = _t("A", "2024-01-02", "2024-01-05", 1.0, 5.0)
-    b = _t("B", "2024-01-02", "2024-01-09", 1.0, 8.0)
+def test_default_queue_order_is_exit_date():
+    """默认 exit_date（先知口径，零回归）：流水带 priority 键不生效。"""
+    a = _t("300001.SZ", "2024-01-02", "2024-01-05", 1.0, 5.0)
+    b = _t("000001.SZ", "2024-01-02", "2024-01-09", 1.0, 8.0)
     a["priority"], b["priority"] = 0.0, 9.0
-    curve, taken = build_equity_curve([a, b], PositionModel(
+    _, taken = build_equity_curve([a, b], PositionModel(
         pos_cap=0.05, max_positions=1, slippage_bps=0), return_taken=True)
-    assert [t["symbol"] for t in taken] == ["A"]   # exit_date 早者先（原引擎序）
+    assert [t["symbol"] for t in taken] == ["300001.SZ"]   # exit_date 早者先
+
+
+def test_symbol_queue_order_is_deployable():
+    """symbol 口径（可部署）：同日候选按 symbol 字典序，与出场日无关。"""
+    a = _t("300001.SZ", "2024-01-02", "2024-01-05", 1.0, 5.0)   # 早出场
+    b = _t("000001.SZ", "2024-01-02", "2024-01-09", 1.0, 8.0)   # 字典序在前
+    _, taken = build_equity_curve([a, b], PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="symbol"),
+        return_taken=True)
+    assert [t["symbol"] for t in taken] == ["000001.SZ"]    # 字典序先，非出场日
 
 
 def test_priority_queue_missing_key_is_neutral_last():
@@ -199,6 +211,20 @@ def test_priority_queue_missing_key_is_neutral_last():
     b = _t("B", "2024-01-02", "2024-01-09", 1.0, 8.0)
     b["priority"] = 0.1
     _, taken = build_equity_curve([a, b], PositionModel(
-        pos_cap=0.05, max_positions=1, slippage_bps=0, priority_queue=True),
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="priority"),
         return_taken=True)
     assert [t["symbol"] for t in taken] == ["B"]
+
+
+def test_random_queue_order_is_deterministic_per_seed():
+    """random 口径：同种子逐位复现（可部署标准=多种子中位数的前提）。"""
+    trades = [_t(f"S{i}", "2024-01-02", f"2024-01-{10 + i}", 1.0, 5.0)
+              for i in range(6)]
+    c1 = build_equity_curve(trades, PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="random",
+        queue_seed=7))
+    c2 = build_equity_curve(trades, PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="random",
+        queue_seed=7))
+    assert c1 == c2
+    assert len(c1) == 1                       # 并发 1：随机挑 1 笔，合法结果

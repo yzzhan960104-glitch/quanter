@@ -13,7 +13,7 @@
   特征 = survivors.json 的 at_signal 存活集（bottom_disp/vol5_slope，方向 +1）；
   分数 = 方向对齐 z 等权平均（训练段 2022-2024 池内标准化，向量实现同
   build_scorer 的逐笔可得均值语义）；NaN 特征跳过、全缺记 0 中性；
-  重排 = PositionModel.priority_queue=True（同 occupy_from 内 priority 降序）；
+  重排 = PositionModel.queue_order="priority"（同 occupy_from 内 priority 降序）；
   对照 = 引擎原序（所有历史读数的口径）；两臂均固定 7.5% 仓位、同 PM——
   唯一差异是同日候选的进场顺序。
 
@@ -88,7 +88,7 @@ def run_pool(tag, df, feats, udates, split, seg_full):
     df["priority"] = vector_score(df, feats, train)
     base_filled = _to_filled_p(df, with_priority=False)
     prio_filled = _to_filled_p(df, with_priority=True)
-    pm_b, pm_p = _pm(), _pm(priority_queue=True)
+    pm_b, pm_p = _pm(), _pm(queue_order="priority")
 
     f_out = _ann([t for t in base_filled if outer.covers(t["signal_date"])],
                  outer, udates, pm_b)
@@ -101,7 +101,7 @@ def run_pool(tag, df, feats, udates, split, seg_full):
     f25 = _ann([t for t in base_filled if outer.covers(t["signal_date"])],
                outer, udates, _pm(slippage_bps=25))
     p25 = _ann([t for t in prio_filled if outer.covers(t["signal_date"])],
-               outer, udates, _pm(slippage_bps=25, priority_queue=True))
+               outer, udates, _pm(slippage_bps=25, queue_order="priority"))
     g4 = p25["ann"] > f25["ann"]
 
     yearly, g2 = {}, True
@@ -164,7 +164,7 @@ def main():
     feats = {s["feature"]: s["direction"] for s in surv["survivors"]
              if s["feature"] in ("bottom_disp", "vol5_slope")}
     assert set(feats) == {"bottom_disp", "vol5_slope"}, f"特征冻结域被破坏：{feats}"
-    print(f"[prereg] 特征冻结：{feats}；重排=priority_queue 高分先得槽；"
+    print(f"[prereg] 特征冻结：{feats}；重排=queue_order=priority 高分先得槽；"
           f"两臂同固定 7.5%；六闸见脚本头", flush=True)
 
     import pyarrow.parquet as pq

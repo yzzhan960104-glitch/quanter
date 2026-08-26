@@ -59,11 +59,17 @@ class PositionModel:
     # 3%-10%），否则回落 model.pos_cap。默认 False=固定仓位（零回归，golden
     # 钉死）；与 max_positions 并发闸正交（4 并发不变，只变每笔的量）。
     quality_alloc: bool = False
-    # R7-H-R7c 排队优先级（2026-08-26 信号质量方案延伸）：True 且流水带
-    # "priority" 键时，同占用日（occupy_from 相同）的候选按 priority 降序进场
-    # （高质先得槽）——只改同日候选的进场顺序，每笔仓位/总敞口/并发数不变。
-    # 默认 False=引擎原序 (occupy_from, exit_date) 零回归。
-    priority_queue: bool = False
+    # R7c 排队纪律（2026-08-26 用户裁决「双口径并报」）：同占用日候选的进场序。
+    #   "exit_date"（默认=历史先知口径）：最早出场先进场——确定性约定自 P0-1
+    #     存在；容量约束下等价于用未来信息做最短作业优先调度（实测外层 +402%
+    #     vs 可部署族 −5%~+20%），历史全部读数与 A/B 的连续性锚，仅内部用；
+    #   "symbol"：symbol 字典序（升序）——确定性可部署序之一；
+    #   "random"：同占用日内随机序（queue_seed 定种子）——**对外声明标准**的可
+    #     部署口径取多种子中位数（portfolio_metrics_dual 实现）；单序方差大
+    #     （升序 −4.7% vs 降序 +20% 外层实测），任意单序不可作标准；
+    #   "priority"（研究用）：流水带 "priority" 键时按其降序（缺键=0 中性末位）。
+    queue_order: str = "exit_date"
+    queue_seed: int = 42   # queue_order="random" 的种子（确定性复现用）
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -134,8 +140,26 @@ def build_equity_curve(trades: list[dict], model: PositionModel,
         except Exception:
             return _iso(t.get("entry_date"))
 
-    if model.priority_queue:
-        # R7-H-R7c：同占用日内高 priority 先进场（缺键/None 记 0=中性末位）
+    if model.queue_order == "symbol":
+        # 确定性可部署序之一：同占用日按 symbol 字典序（无未来信息）
+        by_entry = sorted(
+            trades,
+            key=lambda t: (_occupy_from(t), str(t.get("symbol") or ""),
+                           _iso(t.get("exit_date"))),
+        )
+    elif model.queue_order == "random":
+        # 可部署序（随机）：同占用日内种子随机——单序方差大（升/降序外层差
+        # 25pp 实测），标准口径用多种子中位数（见 portfolio_metrics_dual）
+        import random as _random
+        _rng = _random.Random(model.queue_seed)
+        _rkeys = [_rng.random() for _ in range(len(trades))]
+        by_entry = sorted(
+            ((_rk, t) for _rk, t in zip(_rkeys, trades)),
+            key=lambda p: (_occupy_from(p[1]), p[0]),
+        )
+        by_entry = [t for _, t in by_entry]
+    elif model.queue_order == "priority":
+        # 研究用：同占用日内高 priority 先进场（缺键/None 记 0=中性末位）
         by_entry = sorted(
             trades,
             key=lambda t: (_occupy_from(t), -float(t.get("priority") or 0.0),

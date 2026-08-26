@@ -333,6 +333,44 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
     return out
 
 
+def portfolio_metrics_dual(filled, segment, universe_dates, embargo_days=0,
+                           position_model=None, block_dates=None,
+                           n_seeds: int = 21) -> dict:
+    """R7c 双口径并报（2026-08-26 用户裁决）：同一流水 × 两种排队纪律。
+
+    oracle = 调用方 position_model 原样（默认=引擎 exit_date 同日序）——历史
+      先知口径：全部历史读数与 A/B 的连续性锚，容量约束下隐含「最早出场先进
+      场」的最短作业优先调度（外层 +402% vs 可部署族 −5%~+20% 实测，详见
+      ROUND_LOG R7c 节），仅内部连续性用；
+    deployable = 同一 PM 换 queue_order="random"，对 n_seeds 个种子取逐指标
+      **中位数**（seed_band 给极差）——单序方差大（symbol 升序 −4.7% vs 降序
+      +20% 外层实测），任意单一顺序不可作标准，多种子中位数是稳健可部署估计。
+    其余语义（分段/embargo/模拟线/整手/min5/冻结）两口径逐位同参，唯一差异
+    是同占用日候选的进场序。
+    """
+    from dataclasses import replace as _dc_replace
+    from backtest.models import PositionModel
+    import numpy as _np
+    pm = position_model or PositionModel(max_positions=4, pos_cap=0.075)
+    oracle = portfolio_metrics(filled, segment, universe_dates,
+                               embargo_days=embargo_days,
+                               position_model=pm, block_dates=block_dates)
+    seed_ms = [portfolio_metrics(
+        filled, segment, universe_dates, embargo_days=embargo_days,
+        position_model=_dc_replace(pm, queue_order="random", queue_seed=s),
+        block_dates=block_dates) for s in range(n_seeds)]
+    deployable = {}
+    for k in seed_ms[0]:
+        try:
+            vals = _np.array([float(m[k]) for m in seed_ms])
+            deployable[k] = float(_np.median(vals))
+            deployable[f"{k}_band"] = [float(vals.min()), float(vals.max())]
+        except (TypeError, ValueError):
+            deployable[k] = seed_ms[0][k]      # 非数值键（无）原样
+    return {"oracle": oracle, "deployable": deployable,
+            "n_seeds": n_seeds}
+
+
 def evaluate_portfolio(params, universe, split, position_model=None,
                        block_dates=None) -> dict:
     """R1-1 组合口径评估：run_full_scan 一次 → inner/outer 分段 + 分年组合指标。
