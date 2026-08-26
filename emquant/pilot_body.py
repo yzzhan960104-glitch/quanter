@@ -135,6 +135,22 @@ def from_gm_symbol(gm_symbol: str) -> str:
     return f"{code}{suffix}"
 
 
+def _tick_field(tick, key):
+    """tick 字段兜底读取（守卫/审计路径专用，绝不能抛）。
+
+    gm 3.8.19 实测（2026-08-26 首日实弹 09:33 崩溃教训）：on_tick 收到的
+    TickLikeDict2 是 C 扩展对象，运行时并非 dict 子类（c_sdk.pyi 的 dict 声明
+    失实）——实例 `.get` 解析为 None（按 dict 习惯调之即 TypeError），而
+    `__getitem__` 可用且缺键返 None。守卫 except 路径里再抛 = 守卫自杀（首只
+    脏 tick 的价格守卫正是这样把策略整死的）。故 tick 留痕 kwargs 一律走本
+    函数：能读读到、读不到 None，绝不把「留痕」恶化成「停摆」。
+    """
+    try:
+        return tick[key]
+    except Exception:
+        return None
+
+
 def _audit_warn(type_: str, **fields) -> None:
     """audit WARN 的防炸包装：audit_log 自身失败（磁盘满/目录被锁）时降级 print 不上抛。
 
@@ -1781,7 +1797,7 @@ class PilotRuntime:
             sym = from_gm_symbol(tick["symbol"])
         except Exception as e:
             self._audit("WARN", type="tick_symbol_unmappable",
-                        symbol=(tick or {}).get("symbol"),
+                        symbol=_tick_field(tick, "symbol"),
                         err=f"{type(e).__name__}: {e}")
             return
         # tick 价防御（0821 评审遗留项 on_tick price 防御，2026-08-26 落地）：行情侧
@@ -1791,10 +1807,10 @@ class PilotRuntime:
         try:
             px = float(tick["price"])
             if not (px > 0.0) or px == float("inf") or px != px:
-                raise ValueError(f"非正/非有限 tick 价 {tick.get('price')!r}")
+                raise ValueError(f"非正/非有限 tick 价 {_tick_field(tick, 'price')!r}")
         except Exception as e:
             self._audit("WARN", type="tick_price_invalid",
-                        symbol=(tick or {}).get("symbol"),
+                        symbol=_tick_field(tick, "symbol"),
                         err=f"{type(e).__name__}: {e}")
             return
         acted = False

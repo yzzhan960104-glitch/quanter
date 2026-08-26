@@ -103,6 +103,25 @@ class _Ctx:
     """gm context 占位（编排层不读其字段——日期口径走 _today_str seam，见 §6 头注）。"""
 
 
+class _SdkTick:
+    """gm 3.8.19 TickLikeDict2 实测形态替身（2026-08-26 首日实弹教训）。
+
+    C 扩展真身并非 dict 子类（c_sdk.pyi 的 dict 声明失实）：实例 `.get` 解析为
+    None（按 dict 习惯调 tick.get(...) 即 TypeError——当日首只脏 tick 的价格守卫
+    正是踩在报错路径的 .get 上把策略打死）、`__getitem__` 可用且缺键返 None、
+    对象恒真值。测试若用裸 dict 当 tick，一切 dict 习惯写法全数漏网（745 绿照样
+    实弹崩）；on_tick 系测试一律用本替身钉死真实形态。
+    """
+
+    get = None   # 实测：按 dict 习惯调 tick.get(...) 即 TypeError
+
+    def __init__(self, **fields):
+        self._fields = fields
+
+    def __getitem__(self, key):
+        return self._fields.get(key)   # 实测：缺键返 None（不抛 KeyError）
+
+
 class _CtxAccts:
     """带 accounts 的 context 占位（终审 M-1：bootstrap 核验 context.accounts 用）。
 
@@ -640,7 +659,7 @@ def test_on_tick_stop_sells_all(pilot, tmp_path, monkeypatch):
     st["positions"]["300750.SZ"] = _managed_position(pilot, remaining=400)
     _pin(pilot, monkeypatch, tmp_path)
     rt = _rt(pilot, fake, tmp_path, state=st)
-    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 9.4})        # tick.price（Q3/D5）
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=9.4))        # tick.price（Q3/D5）
 
     sells = [c for c in fake.calls if c.get("api") == "order_volume"]
     assert len(sells) == 1 and sells[0]["side"] == 2 and sells[0]["volume"] == 400
@@ -658,7 +677,7 @@ def test_on_tick_tp1_dust_clears_marks_known_divergence(pilot, tmp_path, monkeyp
     st["positions"]["300750.SZ"] = _managed_position(pilot, remaining=200)  # 200×0.3 不足一手
     _pin(pilot, monkeypatch, tmp_path)
     rt = _rt(pilot, fake, tmp_path, state=st)
-    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 11.0})       # 触 tp1
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=11.0))       # 触 tp1
 
     sells = [c for c in fake.calls if c.get("api") == "order_volume"]
     assert len(sells) == 1 and sells[0]["volume"] == 200               # 清全部剩余
@@ -676,8 +695,8 @@ def test_on_tick_no_duplicate_sell_while_pending(pilot, tmp_path, monkeypatch):
     st["positions"]["300750.SZ"] = _managed_position(pilot, remaining=400)
     _pin(pilot, monkeypatch, tmp_path)
     rt = _rt(pilot, fake, tmp_path, state=st)
-    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 9.4})
-    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 9.3})        # 同 symbol 连续 tick
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=9.4))
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=9.3))        # 同 symbol 连续 tick
 
     sells = [c for c in fake.calls if c.get("api") == "order_volume"]
     assert len(sells) == 1
@@ -693,7 +712,7 @@ def test_on_tick_pending_cancel_on_touch(pilot, tmp_path, monkeypatch):
                          "exec_params": {"max_wait": 8}, "status": "SUBMITTED", "filled": 0}
     _pin(pilot, monkeypatch, tmp_path)
     rt = _rt(pilot, fake, tmp_path, state=st)
-    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 11.2})
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=11.2))
 
     assert fake.orders[cid]["status"] == ORDER_STATUS["Canceled"]
     row = _details(tmp_path, "CANCEL")[0]
@@ -713,14 +732,14 @@ def test_on_tick_reconcile_failure_backoff(pilot, tmp_path, monkeypatch):
     _pin(pilot, monkeypatch, tmp_path)
     rt = _rt(pilot, fake, tmp_path)
     for _ in range(3):
-        rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 10.0})
+        rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=10.0))
     fails = [w for w in _details(tmp_path, "WARN")
              if w.get("type") == "reconcile_orders_fail"]
     assert len(fails) == 1                   # 首 tick 失败一次；后两 tick 被退避闸拦下
 
     del fake.get_orders                                       # 撤注入：柜台恢复可用
     rt._absorb_retry_after = 0.0                              # 白盒推进：模拟退避窗已过（不真等 60s）
-    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 10.0})
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=10.0))
     assert rt._absorb_retry_after is None and rt._last_absorb is not None   # 成功复位双锚
     assert len([w for w in _details(tmp_path, "WARN")
                 if w.get("type") == "reconcile_orders_fail"]) == 1          # 无新增失败
@@ -736,13 +755,42 @@ def test_on_tick_unmappable_symbol_warns_and_skips(pilot, tmp_path, monkeypatch)
     _pin(pilot, monkeypatch, tmp_path)
     rt = _rt(pilot, fake, tmp_path, state=st)
 
-    rt.on_tick(_Ctx(), {"symbol": "CFFEX.IF2409", "price": 3300.0})      # 异变 tick：不抛即过
+    rt.on_tick(_Ctx(), _SdkTick(symbol="CFFEX.IF2409", price=3300.0))      # 异变 tick：不抛即过
     warns = [w for w in _details(tmp_path, "WARN")
              if w.get("type") == "tick_symbol_unmappable"]
     assert len(warns) == 1 and warns[0]["symbol"] == "CFFEX.IF2409"
     assert [c for c in fake.calls if c.get("api") == "order_volume"] == []
 
-    rt.on_tick(_Ctx(), {"symbol": "SZSE.300750", "price": 9.4})          # 正常 tick 照常止损
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=9.4))          # 正常 tick 照常止损
+    sells = [c for c in fake.calls if c.get("api") == "order_volume"]
+    assert len(sells) == 1 and sells[0]["side"] == 2                     # 巡检环未被劫持
+
+
+def test_on_tick_invalid_price_warns_and_skips(pilot, tmp_path, monkeypatch):
+    """tick 价防御（2026-08-26 首日实弹崩点回归钉）：异变价（0.0/None）→ WARN 留痕
+    跳过本事件、绝不炸巡检环；后续正常 tick 照常止损。
+
+    当日 09:33 实弹：首只脏 tick 触发本守卫后，报错路径的 tick.get(...) 在
+    TickLikeDict2 上解析为 None（TypeError）——守卫自杀把策略整死。本测试用
+    _SdkTick 真身形态（get=None），修复前必红；两分支各验一腿：0.0 走
+    ValueError 腿、None 走 float() TypeError 腿，err 里须带原始异变值。
+    """
+    fake = FakeGm()
+    _back_counter_position(fake, "SZSE.300750", 400, 10.4)
+    st = pilot._initial_state()
+    st["positions"]["300750.SZ"] = _managed_position(pilot, remaining=400)
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=0.0))       # 非正价：不抛即过
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=None))      # None 价：float() 抛→同走 WARN
+    warns = [w for w in _details(tmp_path, "WARN")
+             if w.get("type") == "tick_price_invalid"]
+    assert len(warns) == 2 and warns[0]["symbol"] == "SZSE.300750"
+    assert "0.0" in warns[0]["err"] and "NoneType" in warns[1]["err"]
+    assert [c for c in fake.calls if c.get("api") == "order_volume"] == []
+
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SZSE.300750", price=9.4))       # 正常 tick 照常止损
     sells = [c for c in fake.calls if c.get("api") == "order_volume"]
     assert len(sells) == 1 and sells[0]["side"] == 2                     # 巡检环未被劫持
 
