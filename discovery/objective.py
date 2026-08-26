@@ -299,8 +299,8 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
                        "exit_date": r.get("exit_date"),
                        "avg_pnl_pct": r["avg_pnl_pct"], "rr": 0.0,
                        "entry_price": r.get("entry"),    # R6-11：整手约束用（缺→None→有限模式跳过）
-                       "pos_cap": r.get("pos_cap")})     # R7-P2：质量分层透传（quality_alloc
-                                                          # =False 时惰性，零回归）
+                       "pos_cap": r.get("pos_cap"),      # R7-P2：质量分层透传（惰性，零回归）
+                       "priority": r.get("priority")})   # R7-H-R7c：排队优先级透传（惰性，零回归）
     curve = build_equity_curve(trades, pm)
     # n_trading_days：段内交易日数（镜像 replay.py:222-227——各 symbol 同区间取一计数）
     n_days = int(((universe_dates >= pd.Timestamp(segment.start)) &

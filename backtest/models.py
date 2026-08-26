@@ -59,6 +59,11 @@ class PositionModel:
     # 3%-10%），否则回落 model.pos_cap。默认 False=固定仓位（零回归，golden
     # 钉死）；与 max_positions 并发闸正交（4 并发不变，只变每笔的量）。
     quality_alloc: bool = False
+    # R7-H-R7c 排队优先级（2026-08-26 信号质量方案延伸）：True 且流水带
+    # "priority" 键时，同占用日（occupy_from 相同）的候选按 priority 降序进场
+    # （高质先得槽）——只改同日候选的进场顺序，每笔仓位/总敞口/并发数不变。
+    # 默认 False=引擎原序 (occupy_from, exit_date) 零回归。
+    priority_queue: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -129,10 +134,18 @@ def build_equity_curve(trades: list[dict], model: PositionModel,
         except Exception:
             return _iso(t.get("entry_date"))
 
-    by_entry = sorted(
-        trades,
-        key=lambda t: (_occupy_from(t), _iso(t.get("exit_date"))),
-    )
+    if model.priority_queue:
+        # R7-H-R7c：同占用日内高 priority 先进场（缺键/None 记 0=中性末位）
+        by_entry = sorted(
+            trades,
+            key=lambda t: (_occupy_from(t), -float(t.get("priority") or 0.0),
+                           _iso(t.get("exit_date"))),
+        )
+    else:
+        by_entry = sorted(
+            trades,
+            key=lambda t: (_occupy_from(t), _iso(t.get("exit_date"))),
+        )
     curve: list[dict] = []
     taken: list[dict] = []     # R7-P2：真正进净值的流水子集（return_taken 用）
     active: list[tuple] = []      # (symbol, allocation, exit_key)

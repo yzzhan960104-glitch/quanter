@@ -162,3 +162,43 @@ def test_return_taken_identifies_taken_subset():
     # 默认返回形状不变（零回归）
     assert build_equity_curve(trades, PositionModel(
         pos_cap=0.05, max_positions=2, slippage_bps=0))[0]["equity"] == curve[0]["equity"]
+
+
+# ============================================================================
+# R7-H-R7c 排队优先级（2026-08-26 信号质量延伸）：同占用日高 priority 先得槽
+# ============================================================================
+def test_priority_queue_high_priority_wins_slot():
+    """同日重叠候选、并发=1：priority 高者进场，低者被跳过。
+
+    手推：A(早出场, priority=0) vs B(晚出场, priority=9)——原序按 exit_date
+    A 先进；priority_queue 开启后 B 先进，A 挤掉。
+    """
+    a = _t("A", "2024-01-02", "2024-01-05", 1.0, 5.0)
+    b = _t("B", "2024-01-02", "2024-01-09", 1.0, 8.0)
+    a["priority"], b["priority"] = 0.0, 9.0
+    curve, taken = build_equity_curve([a, b], PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, priority_queue=True),
+        return_taken=True)
+    assert [t["symbol"] for t in taken] == ["B"]
+    assert curve[0]["pnl_pct"] == pytest.approx(8.0)
+
+
+def test_priority_queue_off_ignores_priority_key():
+    """默认关（零回归）：流水带 priority 键不生效——原序 (occupy, exit_date)。"""
+    a = _t("A", "2024-01-02", "2024-01-05", 1.0, 5.0)
+    b = _t("B", "2024-01-02", "2024-01-09", 1.0, 8.0)
+    a["priority"], b["priority"] = 0.0, 9.0
+    curve, taken = build_equity_curve([a, b], PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0), return_taken=True)
+    assert [t["symbol"] for t in taken] == ["A"]   # exit_date 早者先（原引擎序）
+
+
+def test_priority_queue_missing_key_is_neutral_last():
+    """priority 缺键 = 0 中性：有分者先，缺分者按原序殿后，不炸。"""
+    a = _t("A", "2024-01-02", "2024-01-05", 1.0, 5.0)   # 无 priority
+    b = _t("B", "2024-01-02", "2024-01-09", 1.0, 8.0)
+    b["priority"] = 0.1
+    _, taken = build_equity_curve([a, b], PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, priority_queue=True),
+        return_taken=True)
+    assert [t["symbol"] for t in taken] == ["B"]
