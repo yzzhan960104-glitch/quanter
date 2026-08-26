@@ -275,7 +275,10 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
     from backtest.models import PositionModel, build_equity_curve
     from discovery.manual_risk_sim import is_blocked
 
-    pm = position_model or PositionModel()   # 默认 pos_cap=0.05/max_positions=6/slip 5bps=实盘同源
+    # R6-11b（用户裁决 2026-08-26）：默认组合结构切 4 并发 × 7.5%/笔（100w 基准
+    # 整手口径实测 +641% vs 旧 6×5% +558%——信号过剩下更高单笔集中度提升单位资金
+    # 效率；回撤不变）。显式传 position_model 的调用方不受影响。
+    pm = position_model or PositionModel(max_positions=4, pos_cap=0.075)
     embargo_cutoff = segment.start + timedelta(days=embargo_days)
     trades = []
     for r in filled:

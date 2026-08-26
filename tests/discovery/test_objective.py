@@ -263,7 +263,7 @@ def test_portfolio_metrics_basic_math(seg_2025, dates_2025):
     ]
     m = portfolio_metrics(trades, seg_2025, dates_2025)
     slip = 5.0 * 2 / 10_000 * 100           # 双边 5bps×2=10bps=0.1%/笔（pnl_pct 折减）
-    expect_equity = 1 + 0.05 * ((10.0 - slip) + (-5.0 - slip) + (8.0 - slip)) / 100
+    expect_equity = 1 + 0.075 * ((10.0 - slip) + (-5.0 - slip) + (8.0 - slip)) / 100  # R6-11b 4×7.5%
     assert m["n"] == 3 and m["n_taken"] == 3
     assert m["equity_end"] == pytest.approx(expect_equity, abs=1e-9)
     assert m["win_rate"] == pytest.approx(2 / 3)
@@ -275,11 +275,11 @@ def test_portfolio_metrics_basic_math(seg_2025, dates_2025):
 
 
 def test_portfolio_metrics_max_positions_cap(seg_2025, dates_2025):
-    """7 笔全并发 → 默认 max_positions=6 只接 6 笔（n_taken=6，n=7）——口径裂缝的机理钉死。"""
+    """7 笔全并发 → R6-11b 默认 max_positions=4 只接 4 笔——口径裂缝的机理钉死。"""
     trades = [_mk_trade(f"S{i}", "2025-02-03", "2025-02-04", "2025-03-14", 5.0)
               for i in range(7)]
     m = portfolio_metrics(trades, seg_2025, dates_2025)
-    assert m["n"] == 7 and m["n_taken"] == 6
+    assert m["n"] == 7 and m["n_taken"] == 4   # R6-11b：4 并发
 
 
 def test_portfolio_metrics_embargo_excludes_boundary(seg_2025, dates_2025):
