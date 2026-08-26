@@ -54,6 +54,11 @@ class PositionModel:
     # 在途冻结满 → 新信号丢弃 → 成交率被资金容量压下来（对齐实盘 A 股限价
     # 买单挂出即冻结资金的语义）。默认 False=原口径（零回归）。
     freeze_pending: bool = False
+    # R7-P2 质量分层（2026-08-26 信号质量方案 Phase 2）：True 且流水 dict 带
+    # "pos_cap" 键时，单笔仓位 = capital × 该笔 pos_cap（质量分→弹性仓位
+    # 3%-10%），否则回落 model.pos_cap。默认 False=固定仓位（零回归，golden
+    # 钉死）；与 max_positions 并发闸正交（4 并发不变，只变每笔的量）。
+    quality_alloc: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -67,13 +72,17 @@ def _iso(v) -> str:
     return str(v)
 
 
-def build_equity_curve(trades: list[dict], model: PositionModel) -> list[dict]:
+def build_equity_curve(trades: list[dict], model: PositionModel,
+                       return_taken: bool = False):
     """逐笔流水 → 组合净值曲线（按 exit_date 升序，equity_0=1.0）。
 
     参数：
         trades: _compute_stats 产出的流水 dict（symbol/entry_date/exit_date/rr/
                 avg_pnl_pct），entry/exit 可为 pd.Timestamp 或 str。
         model:  资金模型（PositionModel）。
+        return_taken: True 时返回 (curve, taken)——taken 为真正进净值的流水
+                子集（R7-P2 受控 A/B 的拥挤日闸需要逐笔归属；默认 False 保持
+                原返回形状，零回归）。
 
     返回：
         [{date, cumulative_rr, equity, pnl_pct}, ...]；空流水返 []。
@@ -103,7 +112,7 @@ def build_equity_curve(trades: list[dict], model: PositionModel) -> list[dict]:
                 "equity": eq,
                 "pnl_pct": rr * model.risk_frac * 100.0,
             })
-        return curve
+        return (curve, sorted_t) if return_taken else curve
 
     # pos_cap 模式（默认，对齐实盘 budget=capital×pos_cap）：加总不复利。
     # R6-11c：freeze_pending=True 时每笔占用起点提前到 signal_date+1（挂单日）
@@ -125,6 +134,7 @@ def build_equity_curve(trades: list[dict], model: PositionModel) -> list[dict]:
         key=lambda t: (_occupy_from(t), _iso(t.get("exit_date"))),
     )
     curve: list[dict] = []
+    taken: list[dict] = []     # R7-P2：真正进净值的流水子集（return_taken 用）
     active: list[tuple] = []      # (symbol, allocation, exit_key)
     cash = model.capital
     equity, run_rr = 1.0, 0.0
@@ -143,7 +153,14 @@ def build_equity_curve(trades: list[dict], model: PositionModel) -> list[dict]:
         # 并发上限 / 现金不足 → 跳过（净值与累计 rr 均不计）。
         if model.max_positions and len(active) >= model.max_positions:
             continue
-        allocation = model.capital * model.pos_cap
+        # R7-P2 质量分层：quality_alloc=True 且流水带 pos_cap 时按笔取 frac
+        # （质量分位→3%-10% 弹性仓位）；键缺失/模式关都回落固定 pos_cap。
+        frac = model.pos_cap
+        if model.quality_alloc:
+            _pc = t.get("pos_cap")
+            if _pc is not None:
+                frac = float(_pc)
+        allocation = model.capital * frac
         # R6-11 有限资金模式：整手约束（floor 到 lot_size 倍数；不足一手跳过）
         # + 佣金 min_fee（买卖各一次，从单笔收益扣——对小预算单笔是固定税）。
         fee_drag = 0.0
@@ -175,4 +192,5 @@ def build_equity_curve(trades: list[dict], model: PositionModel) -> list[dict]:
             "equity": equity,
             "pnl_pct": ret * 100.0,
         })
-    return curve
+        taken.append(t)
+    return (curve, taken) if return_taken else curve
