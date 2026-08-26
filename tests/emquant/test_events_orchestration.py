@@ -864,8 +864,14 @@ def test_bootstrap_registers_schedules_and_subscribes(pilot, tmp_path, monkeypat
 
     scheds = {(c["func"], c["date_rule"], c["time_rule"])
               for c in fake.calls if c.get("api") == "schedule"}
-    assert scheds == {("pre_open_job", "1d", "09:15:00"),
-                      ("after_close_job", "1d", "15:35:00")}
+    # R6-12：盘前/收盘移到行情确认期（09:31/15:36）+ 半点探针序列（schedule 可用性观测）
+    assert scheds == {("pre_open_job", "1d", "09:31:00"),
+                      ("after_close_job", "1d", "15:36:00"),
+                      ("schedule_probe_job", "1d", "10:31:00"),
+                      ("schedule_probe_job", "1d", "11:31:00"),
+                      ("schedule_probe_job", "1d", "13:31:00"),
+                      ("schedule_probe_job", "1d", "14:31:00"),
+                      ("schedule_probe_job", "1d", "15:31:00")}
     subs = [c for c in fake.calls if c.get("api") == "subscribe"]
     assert len(subs) == 1 and subs[0]["symbols"] == ["SZSE.300750"]    # 持仓∪挂单（gm 符号）
     assert subs[0]["frequency"] == "tick"

@@ -1101,6 +1101,15 @@ _ABSORB_THROTTLE_SECONDS = 30.0
 _ABSORB_FAILURE_BACKOFF_SECONDS = 60.0
 
 
+def _today_clock() -> str:
+    """本地时钟 HH:MM:SS（tick 自愈的越界判定用；None=取不到（异常防御））。"""
+    try:
+        from datetime import datetime as _dt
+        return _dt.now().strftime("%H:%M:%S")
+    except Exception:
+        return None
+
+
 def _today_str() -> str:
     """当日 YYYY-MM-DD（本地机器日期=终端北京时间口径；测试 monkeypatch 本函数钉日期）。"""
     return f"{date.today():%Y-%m-%d}"
@@ -1363,8 +1372,17 @@ class PilotRuntime:
         # 纯时钟时刻，无时段校验代码），机制上应可触发——但属 Task 2 文档 §五残余
         # 不确定清单第 1 条，live 首夜须验证 09:15 是否如约触发（不触发则五阶段
         # 整体后移到首个可触发时刻，届时回评）。
-        a.schedule(pre_open_job, "1d", "09:15:00")
-        a.schedule(after_close_job, "1d", "15:35:00")
+        # R6-12（2026-08-26 实锤修复）：09:15:00 定时未触发（audit 全日零 SIGNAL/
+        # 挂单/五阶段痕迹，tick 正常——定时服务对开盘前时刻不可靠或注册随终端
+        # 重启丢失，Task 2 不确定清单第 1 条 live 验证否决）。三重修复：
+        #   ① 盘前/收盘定时移到行情确认期（09:31 / 15:36——开盘后，定时服务必激活）；
+        #   ② 半点探针序列（09:31~15:31 每小时）：SCHEDULE_TICK 一行 audit——
+        #      schedule 可用性从「猜」变「看」，部署后下一个半点即见分晓；
+        #   ③ on_tick 自愈兜底（见 on_tick 头注）：tick 通道实证可靠，不赌 schedule。
+        a.schedule(pre_open_job, "1d", "09:31:00")
+        a.schedule(after_close_job, "1d", "15:36:00")
+        for _probe_hhmm in ("10:31", "11:31", "13:31", "14:31", "15:31"):
+            a.schedule(schedule_probe_job, "1d", f"{_probe_hhmm}:00")
         # build_stamp：§0 注入的版本锚（build_pilot 生成时取 git HEAD 提交时间+短
         # hash）——globals().get 防御：pilot_body 单独 exec（无 §0 段）时降级
         # "unknown"，晨检对 INIT 行即可核对版本，不用开编辑器搜文件头。
@@ -1775,8 +1793,27 @@ class PilotRuntime:
         格式（回调内折 ts）。卖出价口径：止损挂【现价】（跳空穿价也能即成交——限价挂
         stop 价在跳空下方会永不成交，硬风控优先成交性）；tp1/tp2 挂【触发价】（市场
         已在触发价上方，限价即成交且保底触发价）。
+
+        R6-12 tick 自愈兜底（2026-08-26）：schedule 服务实证不可靠（09:15 未触发）
+        而 tick 通道实证可靠（RECONCILE 心跳全天不断）——首个有效 tick 时刻越过
+        09:32/15:37 且当日对应任务未跑 → 就地补跑（幂等闸在 job 入口，重复补跑
+        只留一行 WARN）。不赌 schedule，tick 活着策略就自愈。
         """
         today = _today_str()
+        # —— tick 自愈（首跳即查，价格防御之前——补跑优先级高于本 tick 巡检）——
+        try:
+            _now = _today_clock()
+            if (self.state.get("last_pre_open_date") != today
+                    and _now is not None and _now >= "09:32:00"):
+                self._audit("WARN", type="tick_self_heal_pre_open", at=_now)
+                pre_open_job(context)
+            if (self.state.get("last_after_close_date") != today
+                    and _now is not None and _now >= "15:37:00"):
+                self._audit("WARN", type="tick_self_heal_after_close", at=_now)
+                after_close_job(context)
+        except Exception as e:
+            self._audit("WARN", type="tick_self_heal_fail",
+                        err=f"{type(e).__name__}: {e}")
         # 对账双闸：成功节流（30s 窗）× 失败退避（60s 窗，M-4）——首跳必对账；成功后
         # 窗内不重查（省查询）；失败后窗内不重试（故障期不每 tick 打两次注定失败的
         # 查询，巡检判定继续吃上一份 state 真值，窗口到期由下一根 tick 自然承接）。
@@ -1987,14 +2024,36 @@ def init(context):
     RT.bootstrap(context)
 
 
+def schedule_probe_job(context):
+    """半点探针（R6-12）：schedule 可用性观测——触发即写一行 SCHEDULE_TICK。
+
+    不做任何业务动作；audit 有行 = 定时服务活着，无行 = schedule 不可靠
+    （此时 tick 自愈是唯一通道）。部署后下一个半点看 audit 即验证。
+    """
+    rt = _require_rt()
+    rt._audit("SCHEDULE_TICK", probe=True)
+
+
 def pre_open_job(context):
-    """09:15:00 定时（Q2；live 待验证项）：盘前五阶段。"""
-    _require_rt().pre_open(context)
+    """09:31:00 定时（R6-12 从 09:15 移入行情确认期）：盘前五阶段（幂等总闸）。"""
+    rt = _require_rt()
+    today = _today_str()
+    if rt.state.get("last_pre_open_date") == today:
+        rt._audit("WARN", type="pre_open_duplicate_skip", date=today)
+        return
+    rt.state["last_pre_open_date"] = today
+    rt.pre_open(context)
 
 
 def after_close_job(context):
-    """15:35:00 定时：盘后收尾（收尾行留给收盘后的人工复核窗口）。"""
-    _require_rt().after_close(context)
+    """15:36:00 定时（R6-12）：盘后收尾（幂等总闸）。"""
+    rt = _require_rt()
+    today = _today_str()
+    if rt.state.get("last_after_close_date") == today:
+        rt._audit("WARN", type="after_close_duplicate_skip", date=today)
+        return
+    rt.state["last_after_close_date"] = today
+    rt.after_close(context)
 
 
 def on_tick(context, tick):
