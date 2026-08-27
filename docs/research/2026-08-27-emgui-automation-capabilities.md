@@ -66,6 +66,10 @@
 - 7002/7004 私有 HTTP 路由：价值低（L0 已覆盖交易面），除非未来需要"不经 SDK 的旁路查询"。
 - out/ JS bundle 里可能 grep 出 goldminer:// 路由表与内部 IPC 频道名——CDP 实验通过后再顺手做（JS 注入环境下 console 里直接实验更高效）。
 
+## 六.5、重大补遗：7002 网关 = 终端全功能 REST API（2026-08-27 深挖实锤）
+
+UI 包（out/ui/src/src.js）路由考古 + 实测确认：**7002 (rpcGwPort) 就是终端 UI 自己用的 HTTP API 网关**（gRPC-gateway 风格），Bearer token 即 runtime.json/gmterm-serv 命令行里的 token。已验证只读面：/v3/strategies、strategy-commands(启动配置)、account-trade/{positions,cash,orders,unfinished-orders,execrpts}/<acc>（实时读到 300433 持仓 100 股/浮盈/nav 100,007）、account-statuses、risk/logs、data-history/{bars,ticks}、backtests。变更面（schema 已反编译、未实弹）：POST strategy-commands/<sid>/stop {reason}、PUT strategy-commands/<sid>（启动配置）、下单/撤单/一键平仓/algo-orders/风控配置族。**结论修订：自动化主干 = 7002 API（不是 CDP）**——无需重启终端、已在运行、覆盖全部可交互功能；CDP 降级为 GUI 视觉调试的备选。沉淀为 .agents/skills/goldminer-terminal/SKILL.md。
+
 ## 结论
 
-**掘金终端作为主交易平台的自动化基座成立**：交易面走 SDK（不依赖 GUI，已验证全链路含成交）、观察面走脚本截屏+视觉（已投产）、控制面等 CDP 实验解锁（架构上确定可行，只差一次收盘后的带开关重启）。GUI 像素点击路径已系统性排除，不必再试。
+**掘金终端作为主交易平台的自动化基座成立且已完备**：交易面走 SDK（已验证全链路含成交）、**控制面走 7002 REST API（已实测，含启停/查询/风控全功能）**、观察面走 API+脚本截屏双通道（已投产）、GUI 像素点击已系统性排除。CDP 仅在需要 DOM 级视觉调试时再启用。
