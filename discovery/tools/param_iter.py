@@ -29,7 +29,7 @@ import json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 脚本直跑时 sys.path[0] 是脚本目录而非仓库根，`from strategies...` 会 ModuleNotFoundError。
-# 补插仓库根（tools → discovery → 仓库根 三级上溯），与 qmt_smoke.py 同款范式。
+# 补插仓库根（tools → discovery → 仓库根 三级上溯），仓库脚本自举范式。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pandas as pd
