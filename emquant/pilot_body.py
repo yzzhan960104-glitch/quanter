@@ -720,6 +720,62 @@ def limit_down_price(prev_close, symbol) -> float:
     return round(float(prev_close) * (1.0 - _limit_rate(symbol)), 2)
 
 
+def limit_up_price(prev_close, symbol) -> float:
+    """自算涨停价 = round(prev_close × (1 + 档位), 2)——limit_down_price 的镜像
+    （R6-13f：买入钳价的自算回退档）。"""
+    return round(float(prev_close) * (1.0 + _limit_rate(symbol)), 2)
+
+
+def fetch_limit_up(api, ts_symbol, end_date=None, prev_date=None):
+    """取当日涨停价（R6-13f，fetch_limit_down 的镜像三级回退）：upper_limit 优先 →
+    同行 pre_close 自算 → prev_date（T-1）收盘自算。
+
+    Why 需要：⑤/⑤'' 的入场价=颈线+乘数×ATR 可超出当日 ±20% 带——带外限价单被
+    柜台「8: [GMBROKER] 委托价不正确: 委托价超出涨跌停范围」必拒（2026-08-27 拒因
+    票据实锤：实弹 8 单全灭同因，含 47.43 合法 tick 价——非精度问题）。失败契约
+    同 fetch_limit_down：三级全败 → None + WARN，调用方降级=不钳（柜台终审，拒因
+    已被 R6-13e 留痕）。
+    """
+    a = _api() if api is None else api
+    day = end_date or f"{date.today():%Y-%m-%d}"
+    row = None
+    try:
+        rows = a.get_history_symbol(symbol=to_gm_symbol(ts_symbol),
+                                    start_date=day, end_date=day, df=False)
+        row = rows[-1] if rows else None
+        if row is None:
+            _audit_warn("limit_up_fetch_fail", symbol=ts_symbol, end_date=day,
+                        err="空返回（无该日证券信息行）")
+    except Exception as e:
+        _audit_warn("limit_up_fetch_fail", symbol=ts_symbol, end_date=day,
+                    err=f"{type(e).__name__}: {e}")
+        row = None
+    if row is not None:
+        ul = row.get("upper_limit")
+        try:
+            ul = float(ul)
+        except (TypeError, ValueError):
+            ul = None
+        if ul is not None and ul == ul and ul > 0:
+            return ul                                   # ① API 值优先
+        pc = row.get("pre_close")
+        try:
+            pc = float(pc)
+        except (TypeError, ValueError):
+            pc = None
+        if pc is not None and pc == pc and pc > 0:
+            return limit_up_price(pc, ts_symbol)        # ② 同行 pre_close 自算
+        _audit_warn("limit_up_unavailable", symbol=ts_symbol, end_date=day,
+                    err=f"upper_limit 与 pre_close 均缺（row 键：{sorted(row)}）")
+    if prev_date is not None:                           # ③ T-1 收盘自算（历归调用方）
+        df = fetch_df_upto(a, ts_symbol, prev_date)
+        if df is not None:
+            return limit_up_price(float(df["close"].iloc[-1]), ts_symbol)
+    _audit_warn("limit_up_fetch_fail", symbol=ts_symbol, end_date=day,
+                err="三级回退全败（API/同行 pre_close/T-1 收盘均不可用）")
+    return None
+
+
 def fetch_limit_down(api, ts_symbol, end_date=None, prev_date=None):
     """取当日跌停价：get_history_symbol 的 lower_limit 优先（Q7 权威），失败/缺字段
     逐级回退——同行 pre_close 自算 → prev_date（T-1）收盘价自算——API 值优先。
@@ -1807,6 +1863,14 @@ class PilotRuntime:
                     self._audit("ORDER_BLOCKED", symbol=sig.symbol,
                                 reason=f"信号 entry_price 残缺（{sig.entry_price!r}），拒挂")
                     continue
+                # R6-13f：入场价钳到当日涨停价内（拒因实锤「委托价超出涨跌停范围」
+                # 是史上全部拒单根因）。只降不升（min）；带取不到保持原价——柜台
+                # 终审兜底，拒因已被 R6-13e 留痕。钳后按钳价定尺（挂的实际价格）。
+                _up = fetch_limit_up(a, sig.symbol, end_date=today, prev_date=t_minus_1)
+                if _up is not None and entry > _up:
+                    self._audit("WARN", type="buy_price_clamped", symbol=sig.symbol,
+                                orig_entry=entry, clamped_to=_up)
+                    entry = _up
                 qty = int(equity * pos_cap / entry / 100) * 100 if equity is not None else 0
                 if equity is not None and qty <= 0:
                     # 定尺不足一手（终审 M-5）：equity×pos_cap 按当前 entry 定不出
@@ -1897,6 +1961,12 @@ class PilotRuntime:
                         self._audit("REPAIR_SKIP", cl_ord_id=oid, symbol=sym,
                                     reason=f"死单 price 残缺（{o.get('price')!r}），弃回补")
                         continue
+                    # R6-13f：回补同钳（死单价格多为带外拒单遗产——不钳则回补必再拒）
+                    _up_r = fetch_limit_up(a, sym, end_date=today, prev_date=t_minus_1)
+                    if _up_r is not None and entry_r > _up_r:
+                        self._audit("WARN", type="buy_price_clamped", symbol=sym,
+                                    orig_entry=entry_r, clamped_to=_up_r)
+                        entry_r = _up_r
                     qty_r = int(eq_r * pos_cap_r / entry_r / 100) * 100 if eq_r is not None else 0
                     if eq_r is not None and qty_r <= 0:
                         self._audit("ORDER_BLOCKED", symbol=sym, reason=(

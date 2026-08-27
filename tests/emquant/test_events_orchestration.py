@@ -728,7 +728,9 @@ def test_pre_open_repair_lot_too_small_blocked(pilot, tmp_path, monkeypatch):
     """⑤'' 定尺：equity×pos_cap 不足一手（新账户 10 万×5%=5000 < 100×60）→
     ORDER_BLOCKED 独立文案（回补定尺不足一手），不炸不挂——选项 A 口径下的
     高价股预期行为（301018@122 实弹同型）。"""
-    fake = FakeGm()
+    fake = FakeGm(symbol_info={"SZSE.301018": {"pre_close": 122.24,
+                                               "upper_limit": 146.69,
+                                               "lower_limit": 97.79}})  # 真实带：60 在带内不钳
     fake.cash["nav"] = 100_000.0                  # 新账户 10 万
     st = pilot._initial_state()
     st["scan_done"].add(TODAY)
@@ -847,6 +849,27 @@ def test_bootstrap_startup_repair_fires_in_window(pilot, tmp_path, monkeypatch):
               if w.get("type") == "startup_self_heal_repair"]
     assert heals2 == []
     assert [c for c in fake2.calls if c.get("api") == "order_volume"] == []
+
+
+def test_pre_open_clamps_entry_to_limit_up(pilot, tmp_path, monkeypatch):
+    """R6-13f：入场价超当日涨停带 → 钳到 upper_limit 挂出（拒因实锤「委托价超出
+    涨跌停范围」的根治）；qty 按钳后价定尺；buy_price_clamped WARN 留痕。"""
+    fake = FakeGm(symbol_info={"SZSE.300750": {"pre_close": 10.0,
+                                               "upper_limit": 10.2,
+                                               "lower_limit": 8.0}})
+    sigs = {"300750.SZ": _signal(pilot, "300750.SZ")}       # entry=10.4 > 带上沿 10.2
+    _pin(pilot, monkeypatch, tmp_path, universe=tuple(sigs), detect=_detect_map(sigs))
+    rt = _rt(pilot, fake, tmp_path)
+    rt.pre_open(_Ctx())
+
+    buys = [c for c in fake.calls if c.get("api") == "order_volume" and c["side"] == 1]
+    assert len(buys) == 1
+    assert buys[0]["price"] == pytest.approx(10.2)           # 钳到涨停价（非 10.4）
+    assert buys[0]["volume"] == 4900                         # ⌊1M×0.05/10.2/100⌋×100（钳价定尺）
+    clamp = [w for w in _details(tmp_path, "WARN") if w.get("type") == "buy_price_clamped"]
+    assert len(clamp) == 1 and clamp[0]["clamped_to"] == pytest.approx(10.2)
+    row = _details(tmp_path, "ORDER_PLACED")[0]
+    assert row["price"] == pytest.approx(10.2)
 
 
 def test_pre_open_dedup_cancels_older_duplicate(pilot, tmp_path, monkeypatch):
