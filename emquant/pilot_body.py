@@ -552,11 +552,22 @@ def check_caps(sod_state, equity, positions_mv, open_buy_amount, price, qty, tod
     if amount > quota:
         return False, (f"总仓位额度不足：本单 {amount:.2f} > 余量 {quota:.2f}"
                        f"（equity×CAP{c:g}−持仓{mv:.2f}−已挂{ob:.2f}）")
-    # ③ 单日新挂上限（试点硬闸 FR3）
+    # ③ 单日新挂上限（试点硬闸 FR3；2026-08-27 语义修订：只数【有效】挂单——
+    #    当日挂出且仍在途（非终态）或有成交（filled>0，含部分成交后撤）的单。
+    #    死单（REJECTED/柜台蒸发吸收为 CANCELLED 且零成交）不占额度：试点首两日
+    #    实弹实锤 4 单全灭（60M 单 vs 现金不足全拒），旧口径「按尝试计数」让策略
+    #    当日彻底哑火——用户裁决「没挂成功的单子随时重启随时挂」，额度语义从
+    #    「尝试次数」改为「在场效果」，与 ⑤'' 死单回补配套（回补重挂的死单自身
+    #    不占额；挂活即占额——天然防重试风暴：上限枚数的活单在场即拒新挂）。
     placed_today = sod_state.get("placed", {}).get(today, [])
-    if len(placed_today) >= PILOT_MAX_NEW_ORDERS_PER_DAY:
-        return False, (f"单日新挂已达试点上限 {PILOT_MAX_NEW_ORDERS_PER_DAY}"
-                       f"（placed[{today}] 共 {len(placed_today)} 单）")
+    odrs = sod_state.get("orders", {})
+    effective = [c for c in placed_today
+                 if int((odrs.get(c) or {}).get("filled") or 0) > 0
+                 or (odrs.get(c) or {}).get("status") not in _TERMINAL_ORDER_STATES]
+    if len(effective) >= PILOT_MAX_NEW_ORDERS_PER_DAY:
+        return False, (f"单日有效新挂已达试点上限 {PILOT_MAX_NEW_ORDERS_PER_DAY}"
+                       f"（placed[{today}] 共 {len(placed_today)} 单，"
+                       f"有效 {len(effective)} 单）")
     # ④ 单票金额上限（试点硬闸 FR3）
     sym_cap = PILOT_MAX_POSITION_PCT * eq
     if amount > sym_cap:
@@ -1209,6 +1220,7 @@ class PilotRuntime:
         self._subscribed = []       # 当日巡检订阅面（ts 口径；「已 subscribe 未 unsubscribe」的唯一账本，after_close 清）
         self._last_absorb = None    # 上次柜台对账【成功】的 time.time()（on_tick 节流锚；失败不前移）
         self._absorb_retry_after = None  # 对账失败退避到期时刻（M-4：失败时=now+退避窗；成功复位 None）
+        self._repair_fired_date = None  # 死单回补自愈闩（YYYY-MM-DD；每进程每日至多 fire 一次，见 on_tick）
 
     # ---------------------------------------------------------- 小工具
     def _a(self):
@@ -1777,6 +1789,99 @@ class PilotRuntime:
                 self._audit("ORDER_PLACED", symbol=sig.symbol, price=entry, qty=qty,
                             cl_ord_id=cid, cancel_on=cancel_on, formed_at=formed)
 
+        # ── ⑤'' 死单回补（2026-08-27 用户裁决「没挂成功的单子随时重启随时挂」）──
+        # 源=当日 purpose=OPEN 且已终态且零成交的死单（REJECTED=柜台拒；挂出后从
+        # get_orders 蒸发被 absorb ② 收敛的 CANCELLED=疑拒）。回补=按【当前】权益
+        # 重新定尺（老单 60M 是旧账户污染权益的产物，新权益 5%≈5000）重挂，几何
+        # 参数（neckline/atr/bottom/exec_params/formed_at）从死单档案原样继承——
+        # 信号语义零漂移，回补的只是「执行 attempt」。
+        # 守卫三件（与 ⑤ 同构）：
+        #   a. 同标的存在在途 OPEN 单或剩余持仓 → 跳过（防双挂/防对已成功标的重复
+        #      进场——死单与活单并存的场景：先挂死、回补挂活、再触发回补评估时
+        #      老死单仍在档，靠此闸拦住）；
+        #   b. RISK_BLOCK.flag 在场 → 整段跳过（ADR-16 只拦增量，同 ④）；
+        #   c. check_caps 逐单（额度只数有效挂单——死单自身不占额，见 ③ 修订）。
+        # 触发面：当日任意时点 pre_open 重跑（on_tick 自愈 repair 路径/人工 catchup）
+        # 都会路过本段；每进程每日最多 fire 一次（_repair_fired_date 闩，见 on_tick）
+        # ——「随时重启随时挂」的准确语义：重启=一次新的回补机会，挂而再死等下次
+        # 重启，不做盘中无限自动重试（防拒单风暴打柜台）。
+        if not is_blocked(path=self.risk_flag):
+            dead = [(oid, o) for oid, o in sorted(st["orders"].items())
+                    if o.get("date") == today and o.get("purpose") == "OPEN"
+                    and o.get("status") in _TERMINAL_ORDER_STATES
+                    and int(o.get("filled") or 0) == 0]
+            if dead:
+                eq_r = self._query_equity()
+                mv_r = self._query_positions_mv()
+                ob_r = _open_buy_amount(st)
+                cap_r = self._read_cap_resilient()
+                pos_cap_r = float(TRADE_CFG.get("pos_cap", 0.05))
+                for oid, o in dead:
+                    sym = o.get("symbol")
+                    held_now = int((st["positions"].get(sym) or {}).get("remaining_qty") or 0) > 0
+                    live_open = any(x.get("symbol") == sym and x.get("purpose") == "OPEN"
+                                    and x.get("status") not in _TERMINAL_ORDER_STATES
+                                    for x in st["orders"].values())
+                    if held_now or live_open:
+                        self._audit("REPAIR_SKIP", cl_ord_id=oid, symbol=sym,
+                                    reason="在途单/持仓在场，死单不回补（防双挂）")
+                        continue
+                    try:
+                        entry_r = float(o.get("price"))
+                    except (TypeError, ValueError):
+                        self._audit("REPAIR_SKIP", cl_ord_id=oid, symbol=sym,
+                                    reason=f"死单 price 残缺（{o.get('price')!r}），弃回补")
+                        continue
+                    qty_r = int(eq_r * pos_cap_r / entry_r / 100) * 100 if eq_r is not None else 0
+                    if eq_r is not None and qty_r <= 0:
+                        self._audit("ORDER_BLOCKED", symbol=sym, reason=(
+                            f"回补定尺不足一手（equity×pos_cap 不够 100 股："
+                            f"{eq_r:.2f}×{pos_cap_r:g}={eq_r * pos_cap_r:.2f} < 100×"
+                            f"{entry_r:.2f}={entry_r * 100:.2f}）"))
+                        continue
+                    ok_r, why_r = check_caps(st, eq_r, mv_r, ob_r,
+                                             price=entry_r, qty=qty_r, today=today, cap=cap_r)
+                    if not ok_r:
+                        self._audit("ORDER_BLOCKED", symbol=sym, reason=f"回补拒挂：{why_r}")
+                        continue
+                    try:
+                        cid_r = place_limit_buy(a, sym, entry_r, qty_r, self.account)
+                    except Exception as e:
+                        self._audit("WARN", type="repair_place_fail", symbol=sym,
+                                    err=f"{type(e).__name__}: {e}")
+                        continue
+                    if cid_r is None:
+                        self._audit("WARN", type="repair_place_empty_receipt", symbol=sym)
+                        continue
+                    ep_r = o.get("exec_params") or {}
+                    ctm_r = ep_r.get("cancel_thresh_mult", EXEC_PARAMS.get("cancel_thresh_mult"))
+                    h_geom_r = (float(o.get("neckline")) - float(o.get("bottom"))
+                                if o.get("bottom") is not None else 0.0)
+                    cancel_on_r = (float(o.get("neckline")) + float(ctm_r) * h_geom_r
+                                   if (ctm_r is not None and h_geom_r > 0
+                                       and o.get("neckline") is not None) else None)
+                    st.setdefault("placed", {}).setdefault(today, []).append(cid_r)
+                    st["orders"][cid_r] = {"symbol": sym, "date": today, "price": entry_r,
+                                           "qty": qty_r, "purpose": "OPEN",
+                                           "cancel_on": cancel_on_r,
+                                           "formed_at": o.get("formed_at"),
+                                           "exec_params": dict(ep_r),
+                                           "neckline": o.get("neckline"), "atr": o.get("atr"),
+                                           "bottom": o.get("bottom"),
+                                           "status": "SUBMITTED", "filled": 0,
+                                           "account": self.account}
+                    ob_r = float(ob_r) + entry_r * qty_r            # 逐单扣减（同 ⑤ 口径）
+                    self._audit("ORDER_PLACED", symbol=sym, price=entry_r, qty=qty_r,
+                                cl_ord_id=cid_r, cancel_on=cancel_on_r,
+                                formed_at=o.get("formed_at"), repair_of=oid)
+        else:
+            dead_n = sum(1 for o in st["orders"].values()
+                         if o.get("date") == today and o.get("purpose") == "OPEN"
+                         and o.get("status") in _TERMINAL_ORDER_STATES
+                         and int(o.get("filled") or 0) == 0)
+            if dead_n:
+                self._audit("BLOCK_SKIP", msg=f"RISK_BLOCK.flag 在场：死单回补 {dead_n} 单跳过")
+
         # ── ⑤' 同日增补订阅（C-1 三时点之三）：当日新挂的 OPEN 买（与 ② 的超期卖）
         #    当日就要被 tick 巡检管理（新买单的 cancel_on 触价撤单、成交转仓后的
         #    止损止盈），不等次日 pre_open。按最新 state 重算 watchlist 增量差集
@@ -1811,6 +1916,22 @@ class PilotRuntime:
                     and _now is not None and _now >= "15:37:00"):
                 self._audit("WARN", type="tick_self_heal_after_close", at=_now)
                 after_close_job(context)
+            # —— 死单回补自愈（2026-08-27 用户裁决）：当日 pre_open 已跑且存在可回补
+            #    死单（判据与 ⑤'' 同源：当日 OPEN+终态+零成交）→ 补跑 pre_open 走回补
+            #    段。每进程每日至多 fire 一次（_repair_fired_date 闩）：重启=新进程=
+            #    新一次机会（「随时重启随时挂」）；挂而再死不自动连环重试（防拒单
+            #    风暴打柜台），等下一次重启。窗口 09:32~15:00——收盘后挂单无意义
+            #    （15:36 after_close 起当日终结，残务归次日 pre_open）。
+            if (self._repair_fired_date != today
+                    and self.state.get("last_pre_open_date") == today
+                    and _now is not None and "09:32:00" <= _now < "15:00:00"
+                    and any(o.get("date") == today and o.get("purpose") == "OPEN"
+                            and o.get("status") in _TERMINAL_ORDER_STATES
+                            and int(o.get("filled") or 0) == 0
+                            for o in self.state["orders"].values())):
+                self._repair_fired_date = today
+                self._audit("WARN", type="tick_self_heal_repair", at=_now)
+                self.pre_open(context)
         except Exception as e:
             self._audit("WARN", type="tick_self_heal_fail",
                         err=f"{type(e).__name__}: {e}")
@@ -1971,8 +2092,15 @@ class PilotRuntime:
         placed_today = st.get("placed", {}).get(today, [])
         open_cnt = sum(1 for o in st["orders"].values()
                        if o.get("status") not in _TERMINAL_ORDER_STATES)
+        # 有效挂单计数（check_caps ③ 同口径）：在途或有成交——死单回补语义下的
+        # 当日真实进场效果，晨检直接看这行区分「挂了全死」与「挂活了」。
+        effective_today = sum(1 for c in placed_today
+                              if int((st["orders"].get(c) or {}).get("filled") or 0) > 0
+                              or (st["orders"].get(c) or {}).get("status")
+                              not in _TERMINAL_ORDER_STATES)
         self._audit("EOD", date=today, positions=len(st["positions"]),
                     open_orders=open_cnt, placed_today=len(placed_today),
+                    effective_today=effective_today,
                     params_fingerprint=PARAMS_FINGERPRINT)
         # ── 反转形态盘后 sweep（R6-6 冠军形态对齐，2026-08-26）：tp2 已触（lot2 已出）
         #    但 lot1 未出 → 置 force_exit，次日首 tick 市价出。对齐 R6-4 修复后回测

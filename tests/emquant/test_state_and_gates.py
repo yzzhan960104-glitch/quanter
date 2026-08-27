@@ -272,6 +272,24 @@ def test_daily_order_cap(pilot):
     assert ok                                                   # 4 万 < 5%×1M 单票闸不干扰
 
 
+def test_daily_order_cap_counts_effective_only(pilot):
+    """③ 语义修订（2026-08-27「没挂成功的单子随时重启随时挂」裁决）：单日上限只数
+    【有效】挂单——在途（非终态）或有成交（filled>0）的单。死单（REJECTED/零成交
+    CANCELLED）不占额——试点首两日实弹 4 单全灭的口径修复，与 ⑤'' 死单回补配套。
+    无档案单号（placed 有而 orders 无）保守计有效（消费方缺省非终态口径）。"""
+    st = _fresh_state(pilot, placed_today=["dead1", "dead2"])
+    st["orders"]["dead1"] = {"status": "REJECTED", "filled": 0}
+    st["orders"]["dead2"] = {"status": "CANCELLED", "filled": 0}
+    ok, _ = pilot.check_caps(st, 1_000_000, 0.0, 0.0, 10.0, 1_000, TODAY, cap=1.0)
+    assert ok                                       # 两死单不占额：有效 0/2，放行（回补可挂）
+    st["orders"]["dead1"]["status"] = "SUBMITTED"   # 一单挂活（在途）
+    ok, _ = pilot.check_caps(st, 1_000_000, 0.0, 0.0, 10.0, 1_000, TODAY, cap=1.0)
+    assert ok                                       # 有效 1/2，仍放行
+    st["orders"]["dead2"]["filled"] = 100           # 另一单 CANCELLED 终态但有成交
+    ok, why = pilot.check_caps(st, 1_000_000, 0.0, 0.0, 10.0, 1_000, TODAY, cap=1.0)
+    assert not ok and "有效" in why                 # 有效 2/2 → 拒（新文案含有效计数）
+
+
 def test_symbol_cap(pilot):
     """单票金额 ≤5%×equity（FR3）：60k > 50k 拒、恰等 50k 过（严格 >）。"""
     st = _fresh_state(pilot)

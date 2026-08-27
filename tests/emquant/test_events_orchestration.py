@@ -651,6 +651,143 @@ def _managed_position(pilot, remaining=400):
             "exec_params": {"tp1_portion": 0.3}}
 
 
+def _dead_open_order(cid, symbol, status="REJECTED", **over):
+    """当日死单档案（⑤'' 死单回补的输入）：几何参数齐备（neckline=10/bottom=8/
+    ctm=2.0 → 回补 cancel_on=10+2×2=14.0 可手算），status 默认 REJECTED=柜台拒。"""
+    o = {"symbol": symbol, "date": TODAY, "price": 10.4, "qty": 4800,
+         "purpose": "OPEN", "cancel_on": 14.0, "formed_at": T_MINUS_1,
+         "exec_params": {"cancel_thresh_mult": 2.0}, "neckline": 10.0,
+         "atr": 0.8, "bottom": 8.0, "status": status, "filled": 0,
+         "account": "fake"}
+    o.update(over)
+    return cid, o
+
+
+# ============================================================================
+# ⑤'' 死单回补 + tick 自愈 repair（2026-08-27「没挂成功的单子随时重启随时挂」）
+# ============================================================================
+def test_pre_open_repairs_dead_orders(pilot, tmp_path, monkeypatch):
+    """⑤''：当日 OPEN 死单（REJECTED/零成交）在 pre_open 重跑时按当前权益重新定尺
+    重挂——几何参数从死单档案继承（cancel_on=14.0 手算锚）、repair_of 留溯源；
+    同标第二张死单被在途守卫拦下（回补挂活即在场，防双挂）。"""
+    fake = FakeGm()
+    st = pilot._initial_state()
+    st["scan_done"].add(TODAY)                    # 当日扫描已完成：③ 不产新信号，回补是唯一挂单源
+    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "600000.SH")[1])
+    st["orders"]["dead2"] = dict(_dead_open_order("dead2", "600000.SH")[1])
+    st["placed"][TODAY] = ["dead1", "dead2"]      # 两死单：有效 0/2，额度全部可用
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    rt.pre_open(_Ctx())
+
+    placed = [c for c in fake.calls if c.get("api") == "order_volume"]
+    assert len(placed) == 1 and placed[0]["symbol"] == "SHSE.600000"
+    assert placed[0]["volume"] == 4800            # ⌊1M×0.05/10.4/100⌋×100（FakeGm nav 1M）
+    row = _details(tmp_path, "ORDER_PLACED")[0]
+    assert row["repair_of"] == "dead1" and row["cancel_on"] == 14.0
+    skips = _details(tmp_path, "REPAIR_SKIP")
+    assert len(skips) == 1 and skips[0]["cl_ord_id"] == "dead2"   # 同标第二死单：在途守卫拦
+    new_cid = next(c for c, o in st["orders"].items() if o.get("repair_of") is None
+                   and o["status"] == "SUBMITTED")
+    assert st["placed"][TODAY] == ["dead1", "dead2", new_cid]     # placed 追加（额度计数消费）
+
+
+def test_pre_open_repair_skips_live_sibling_and_held(pilot, tmp_path, monkeypatch):
+    """⑤'' 守卫：同标已有在途 OPEN 单（如首挂存活）或已有剩余持仓 → 死单不回补
+    （防对已成功标的重复进场），REPAIR_SKIP 留痕、零下单。
+
+    live 兄弟单须在柜台落真值（⓪ 对账以柜台实况修 state：state-only 的非终态单
+    会被 absorb ② 收敛 CANCELLED，守卫前提就被对账拆了）+ created_at 回填夹具日
+    （I-2：真实时钟日期 ≠ TODAY 会被 ① 误判昨日单撤掉）。
+    """
+    fake = FakeGm()
+    live_res = fake.order_volume("SHSE.600000", 4800, 1, 1, 1, price=10.4)
+    live_cid = live_res[0]["cl_ord_id"]
+    _backdate_order(fake, live_cid, TODAY)
+    st = pilot._initial_state()
+    st["scan_done"].add(TODAY)
+    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "600000.SH")[1])
+    st["orders"][live_cid] = dict(_dead_open_order(live_cid, "600000.SH",
+                                                   status="SUBMITTED")[1])
+    st["orders"]["dead3"] = dict(_dead_open_order("dead3", "300750.SZ")[1])
+    st["positions"]["300750.SZ"] = _managed_position(pilot, remaining=400)
+    st["placed"][TODAY] = ["dead1", live_cid, "dead3"]
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    # 300750 持仓需柜台背书（⓪ 对账 absorb ③ 语义：无背书持仓归零）
+    _back_counter_position(fake, "SZSE.300750", 400, 10.4)
+    rt.pre_open(_Ctx())
+
+    assert [c for c in fake.calls if c.get("api") == "order_volume"
+            and c["symbol"] != "SHSE.600000"] == []      # 除预置 live 单外零下单
+    skips = {s["cl_ord_id"] for s in _details(tmp_path, "REPAIR_SKIP")}
+    assert skips == {"dead1", "dead3"}            # 在途兄弟单/持仓两守卫各拦一张
+
+
+def test_pre_open_repair_lot_too_small_blocked(pilot, tmp_path, monkeypatch):
+    """⑤'' 定尺：equity×pos_cap 不足一手（新账户 10 万×5%=5000 < 100×60）→
+    ORDER_BLOCKED 独立文案（回补定尺不足一手），不炸不挂——选项 A 口径下的
+    高价股预期行为（301018@122 实弹同型）。"""
+    fake = FakeGm()
+    fake.cash["nav"] = 100_000.0                  # 新账户 10 万
+    st = pilot._initial_state()
+    st["scan_done"].add(TODAY)
+    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "301018.SZ", price=60.0)[1])
+    st["placed"][TODAY] = ["dead1"]
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    rt.pre_open(_Ctx())
+
+    assert [c for c in fake.calls if c.get("api") == "order_volume"] == []
+    blocked = _details(tmp_path, "ORDER_BLOCKED")
+    assert len(blocked) == 1 and "回补定尺不足一手" in blocked[0]["reason"]
+
+
+def test_on_tick_self_heal_repair_fires_once_per_process(pilot, tmp_path, monkeypatch):
+    """tick 自愈 repair：当日 pre_open 已跑 + 存在死单 + 窗口内（09:32~15:00）→ 首个
+    tick 补跑 pre_open 走回补段；同进程第二 tick 被闩拦（每进程每日一次——「随时
+    重启随时挂」= 重启=新进程=新一次机会，不做盘中无限重试）。"""
+    fake = FakeGm()
+    monkeypatch.setattr(pilot, "_today_clock", lambda: "10:00:00")
+    st = pilot._initial_state()
+    st["scan_done"].add(TODAY)
+    st["last_pre_open_date"] = TODAY              # 当日 pre_open 已跑：常规自愈不触发
+    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "600000.SH")[1])
+    st["placed"][TODAY] = ["dead1"]
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SHSE.600000", price=10.4))
+
+    heals = [w for w in _details(tmp_path, "WARN") if w.get("type") == "tick_self_heal_repair"]
+    assert len(heals) == 1
+    placed = [c for c in fake.calls if c.get("api") == "order_volume"]
+    assert len(placed) == 1 and placed[0]["symbol"] == "SHSE.600000"   # 回补已挂出
+
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SHSE.600000", price=10.4))     # 第二 tick：闩生效
+    assert len([c for c in fake.calls if c.get("api") == "order_volume"]) == 1
+    assert len([w for w in _details(tmp_path, "WARN")
+                if w.get("type") == "tick_self_heal_repair"]) == 1
+
+
+def test_on_tick_self_heal_repair_window_guard(pilot, tmp_path, monkeypatch):
+    """窗口守卫：15:00 后（收盘）不再触发回补——当日残务归 15:36 after_close 与
+    次日 pre_open（挂单窗口外重挂无成交语义）。"""
+    fake = FakeGm()
+    monkeypatch.setattr(pilot, "_today_clock", lambda: "15:05:00")
+    st = pilot._initial_state()
+    st["scan_done"].add(TODAY)
+    st["last_pre_open_date"] = TODAY
+    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "600000.SH")[1])
+    st["placed"][TODAY] = ["dead1"]
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    rt.on_tick(_Ctx(), _SdkTick(symbol="SHSE.600000", price=10.4))
+
+    assert [w for w in _details(tmp_path, "WARN")
+            if w.get("type") == "tick_self_heal_repair"] == []
+    assert [c for c in fake.calls if c.get("api") == "order_volume"] == []
+
+
 def test_on_tick_stop_sells_all(pilot, tmp_path, monkeypatch):
     """止损触价（tick ≤ stop=颈线−1×ATR=9.5）→ 卖剩余全量，限价跟现价（跳空也能成交）。"""
     fake = FakeGm()
