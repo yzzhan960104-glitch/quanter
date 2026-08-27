@@ -595,6 +595,24 @@ def test_absorb_race_grace_protects_fresh_orders(pilot):
     assert state["orders"]["o_legacy"]["status"] == "CANCELLED"   # 存量单（无锚）视同老单
 
 
+def test_absorb_captures_reject_reason(pilot):
+    """R6-13e：柜台拒因（ord_rej_reason+detail）随状态同步留痕进 state——实弹 8 单
+    全灭无一票据可查的补课；权限/资金/价格家族鉴别全靠它。"""
+    state = pilot._initial_state()
+    state["orders"]["o1"] = {"symbol": "600000.SH", "status": "SUBMITTED", "filled": 0,
+                             "placed_at": 0.0}
+    api_orders = [{"cl_ord_id": "o1", "symbol": "SHSE.600000", "side": 1,
+                   "status": ORDER_STATUS["Rejected"], "volume": 100, "price": 10.0,
+                   "filled_volume": 0, "filled_vwap": 0.0, "account_id": "acc-1",
+                   "created_at": datetime(2026, 8, 21, 9, 31, 0),
+                   "ord_rej_reason": 1001, "ord_rej_reason_detail": "无交易权限"}]
+    pilot.absorb_reality(state, api_orders, [], now=1_800_000_100.0)
+
+    o = state["orders"]["o1"]
+    assert o["status"] == "REJECTED"
+    assert "1001" in o["rej_reason"] and "无交易权限" in o["rej_reason"]
+
+
 def test_absorb_positions_bidirectional(pilot):
     """持仓三查：qty 以柜台为准修 state；entry/exec_params 以 state 保留；双向吸收/归零。"""
     state = pilot._initial_state()

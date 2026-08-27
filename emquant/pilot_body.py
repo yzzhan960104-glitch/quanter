@@ -1035,6 +1035,11 @@ def absorb_reality(state, api_orders, api_positions, *, now=None):
             st_o["status"] = _gm_status_to_local(ao.get("status"))
             st_o["qty"] = int(ao.get("volume") or 0)
             st_o["price"] = ao.get("price")
+            # R6-13e（2026-08-27）：拒因留痕——柜台 ord_rej_reason(+detail) 进 state。
+            # 此前实弹 8 单全灭无一张票据可查，权限/资金/价格家族的鉴别全靠它。
+            _rr = ao.get("ord_rej_reason")
+            if _rr not in (None, 0, ""):
+                st_o["rej_reason"] = f"{_rr}: {ao.get('ord_rej_reason_detail') or ''}".strip(": ")
         prev_filled = int(st_o.get("filled") or 0)
         st_o["filled"] = filled
         if filled > prev_filled:
@@ -1514,6 +1519,14 @@ class PilotRuntime:
             return
         absorb_reality(self.state, api_orders, api_positions)
         self._enrich_positions_from_orders()
+        # R6-13e：拒单首见告警——absorb 捕获的 rej_reason 每单只告警一次
+        # （rej_audited 闩，幂等）；晨检 grep order_rejected 即得全部拒因票据。
+        for oid, st_o in self.state["orders"].items():
+            if (st_o.get("status") == "REJECTED" and st_o.get("rej_reason")
+                    and not st_o.get("rej_audited")):
+                st_o["rej_audited"] = True
+                self._audit("WARN", type="order_rejected", cl_ord_id=oid,
+                            symbol=st_o.get("symbol"), reason=st_o.get("rej_reason"))
         self._audit("RECONCILE", orders=len(self.state["orders"]),
                     positions=len(self.state["positions"]))
         save_state(self.state, path=self.state_file)
