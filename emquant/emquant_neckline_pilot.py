@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。
 PARAMS_FINGERPRINT=8858982628989013  生成物见 emquant/config/。
-PILOT_BUILD_STAMP: 2026-08-27 10:04:41 +0800 5ecd2baf（部署核对：编辑器 Ctrl+F 搜本串，与仓库 git log -1 比对）。
+PILOT_BUILD_STAMP: 2026-08-27 12:54:15 +0800 39efb25f（部署核对：编辑器 Ctrl+F 搜本串，与仓库 git log -1 比对）。
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ EXEC_PARAMS = {'buy_limit_atr_mult': 2.5, 'cancel_thresh_mult': None, 'chase_ent
 TRADE_CFG = {'cancel_thresh_mult': 1.0, 'floor': 0.5, 'grace': 5, 'kelly_fraction': 0.25, 'kelly_hat': 0.0, 'max_holding': 15, 'max_wait': 5, 'pos_cap': 0.05, 'sizing_mode': 'fixed', 'step': 0.1, 'stop_atr_mult': 1.0, 'tp1_h_mult': 1.0, 'tp1_portion': 0.5, 'tp_h_mult': 2.0}
 UNIVERSE = ['300308.SZ', '688825.SH', '300502.SZ', '688256.SH', '300394.SZ', '300750.SZ', '688008.SH', '300476.SZ', '688525.SH', '300408.SZ', '300285.SZ', '688012.SH', '688836.SH', '688981.SH', '301308.SZ', '688041.SH', '688498.SH', '300274.SZ', '300604.SZ', '688347.SH', '301526.SZ', '300433.SZ', '300136.SZ', '688072.SH', '300223.SZ', '300475.SZ', '300059.SZ', '300857.SZ', '688146.SH', '688766.SH', '300058.SZ', '300666.SZ', '301217.SZ', '688017.SH', '300570.SZ', '300620.SZ', '688521.SH', '688048.SH', '300548.SZ', '688126.SH', '688313.SH', '300757.SZ', '301511.SZ', '300346.SZ', '300390.SZ', '301396.SZ', '300033.SZ', '300014.SZ', '688835.SH', '300209.SZ', '688120.SH', '688702.SH', '688361.SH', '300395.SZ', '688820.SH', '300054.SZ', '301717.SZ', '301205.SZ', '688797.SH', '300319.SZ', '688808.SH', '688549.SH', '688826.SH', '688627.SH', '300418.SZ', '688183.SH', '688167.SH', '688630.SH', '688111.SH', '301165.SZ', '688037.SH', '300017.SZ', '688082.SH', '688629.SH', '301666.SZ', '300442.SZ', '688110.SH', '300672.SZ', '301171.SZ', '300759.SZ', '300975.SZ', '300489.SZ', '300373.SZ', '301013.SZ', '688777.SH', '300179.SZ', '301583.SZ', '688362.SH', '688322.SH', '300124.SZ', '688141.SH', '688519.SH', '300903.SZ', '300398.SZ', '301377.SZ', '300458.SZ', '688432.SH', '688396.SH', '688019.SH', '300661.SZ', '300567.SZ', '688200.SH', '688300.SH', '300454.SZ', '300450.SZ', '688195.SH', '300751.SZ', '300806.SZ', '300139.SZ', '300037.SZ', '688143.SH', '300088.SZ', '300776.SZ', '301536.SZ', '688409.SH', '688234.SH', '300803.SZ', '688205.SH', '688668.SH', '300657.SZ', '688268.SH', '688002.SH', '688403.SH', '300503.SZ', '300438.SZ', '301358.SZ', '300870.SZ', '300782.SZ', '300302.SZ', '688596.SH', '301018.SZ', '300260.SZ', '300085.SZ', '301611.SZ', '688507.SH', '688388.SH', '688469.SH', '300811.SZ', '301236.SZ', '301319.SZ', '688545.SH', '688099.SH', '688025.SH', '688783.SH', '688249.SH', '300184.SZ', '300747.SZ', '300164.SZ', '300821.SZ', '688123.SH', '688635.SH', '300760.SZ', '688235.SH', '300814.SZ', '301183.SZ', '300738.SZ', '688536.SH', '688147.SH', '688503.SH', '300568.SZ', '301486.SZ', '688333.SH', '688257.SH', '300131.SZ', '688308.SH', '300679.SZ', '688233.SH', '301071.SZ', '300364.SZ', '688802.SH', '300726.SZ', '688676.SH', '300607.SZ', '301200.SZ', '300115.SZ', '688548.SH', '300323.SZ', '688172.SH', '300236.SZ', '300001.SZ', '688662.SH', '688795.SH', '688809.SH', '300042.SZ', '300083.SZ', '300142.SZ', '301123.SZ', '300684.SZ', '300316.SZ', '300339.SZ', '301489.SZ', '688372.SH', '300762.SZ', '300769.SZ', '300255.SZ', '300576.SZ', '300166.SZ', '300763.SZ', '688535.SH', '688331.SH', '688700.SH', '301128.SZ', '300199.SZ', '301188.SZ', '301269.SZ', '300602.SZ', '688031.SH', '300558.SZ', '688800.SH', '300170.SZ', '300283.SZ', '300347.SZ', '300720.SZ', '300456.SZ', '301392.SZ', '688220.SH', '300623.SZ', '300331.SZ', '688828.SH', '300779.SZ', '688301.SH', '300207.SZ', '300077.SZ', '300843.SZ', '300342.SZ', '300263.SZ', '300706.SZ', '688027.SH', '688106.SH', '301566.SZ', '301292.SZ', '300420.SZ', '300496.SZ', '300593.SZ', '688456.SH', '688652.SH', '301005.SZ', '688158.SH', '688036.SH', '688411.SH', '300383.SZ', '688585.SH', '688531.SH', '688729.SH', '688387.SH', '300182.SZ', '300655.SZ', '688102.SH', '688515.SH', '300328.SZ', '300613.SZ', '301707.SZ', '301150.SZ', '688603.SH', '301550.SZ', '688502.SH', '688213.SH', '300671.SZ', '300534.SZ', '300748.SZ', '300835.SZ', '688400.SH', '300953.SZ', '300497.SZ', '688392.SH', '300024.SZ', '688385.SH', '301373.SZ', '300765.SZ', '688260.SH', '688052.SH', '300322.SZ', '688578.SH', '301655.SZ', '688449.SH', '300265.SZ', '301389.SZ', '301338.SZ', '688020.SH', '301021.SZ', '301196.SZ', '301080.SZ', '688047.SH', '688353.SH', '688559.SH', '688584.SH', '301297.SZ', '300725.SZ', '300566.SZ', '688390.SH', '300480.SZ', '688169.SH', '301362.SZ', '300174.SZ', '688343.SH', '301421.SZ', '688598.SH', '300005.SZ', '688530.SH', '301099.SZ']
 PARAMS_FINGERPRINT = '8858982628989013'
-PILOT_BUILD_STAMP = '2026-08-27 10:04:41 +0800 5ecd2baf'   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用
+PILOT_BUILD_STAMP = '2026-08-27 12:54:15 +0800 39efb25f'   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用
 # 试点硬闸（spec FR3）：单日新挂 ≤2；单票市值 ≤5%；仿真账户固定。
 PILOT_MAX_NEW_ORDERS_PER_DAY = 2
 PILOT_MAX_POSITION_PCT = 0.05
@@ -2709,6 +2709,39 @@ class PilotRuntime:
 
         save_state(st, path=self.state_file)
 
+    # ---------------------------------------------------------- 事件：死单回补统一入口
+    def _repair_pass(self, context, source: str, use_latch: bool = True) -> None:
+        """死单回补双通道入口（2026-08-27）：条件=当日 pre_open 已跑 + 存在可回补死单
+        （当日 OPEN+终态+零成交，判据与 ⑤'' 同源）+ 窗口 09:32~15:00（收盘后挂单无
+        意义，残务归次日 pre_open）。
+
+        双通道 Why（2026-08-27 12:4x 实锤盲区）：回补触发原只住在 on_tick——但空仓+
+        全死单状态下订阅面为空（watchlist=持仓∪在途单），gm 只推已订阅标的 →
+        on_tick 零事件 → 回补聋死（账户切换 09:51 后 tick 痕迹归零的实证）。探针
+        schedule_probe_job 走 schedule 服务（R6-12 已验证可靠）不依赖订阅面，
+        13:31/14:31 两拍在窗内 → 探针兼任回补的无 tick 通道。
+
+        闸 semantics：tick 通道每进程每日一次（_repair_fired_date 闩——tick 每秒级
+        到达，无闩=拒单风暴打柜台；重启=新进程=新机会）；探针通道无闩（schedule 本身
+        小时级限频，重复评估被 ⑤'' 同标在途守卫拦成 no-op）。重挂成活后 ⑤' 订阅该
+        标的 → tick 通道自然复活（当日若再死，tick 通道还余一次机会）。
+        """
+        today = _today_str()
+        if use_latch and self._repair_fired_date == today:
+            return
+        _now = _today_clock()
+        if not (self.state.get("last_pre_open_date") == today
+                and _now is not None and "09:32:00" <= _now < "15:00:00"
+                and any(o.get("date") == today and o.get("purpose") == "OPEN"
+                        and o.get("status") in _TERMINAL_ORDER_STATES
+                        and int(o.get("filled") or 0) == 0
+                        for o in self.state["orders"].values())):
+            return
+        if use_latch:
+            self._repair_fired_date = today
+        self._audit("WARN", type=f"{source}_self_heal_repair", at=_now)
+        self.pre_open(context)
+
     # ---------------------------------------------------------- 事件：盘中巡检
     def on_tick(self, context, tick):
         """tick 巡检：pending → decide_pending → 撤；positions → decide_position → 卖。
@@ -2735,22 +2768,9 @@ class PilotRuntime:
                     and _now is not None and _now >= "15:37:00"):
                 self._audit("WARN", type="tick_self_heal_after_close", at=_now)
                 after_close_job(context)
-            # —— 死单回补自愈（2026-08-27 用户裁决）：当日 pre_open 已跑且存在可回补
-            #    死单（判据与 ⑤'' 同源：当日 OPEN+终态+零成交）→ 补跑 pre_open 走回补
-            #    段。每进程每日至多 fire 一次（_repair_fired_date 闩）：重启=新进程=
-            #    新一次机会（「随时重启随时挂」）；挂而再死不自动连环重试（防拒单
-            #    风暴打柜台），等下一次重启。窗口 09:32~15:00——收盘后挂单无意义
-            #    （15:36 after_close 起当日终结，残务归次日 pre_open）。
-            if (self._repair_fired_date != today
-                    and self.state.get("last_pre_open_date") == today
-                    and _now is not None and "09:32:00" <= _now < "15:00:00"
-                    and any(o.get("date") == today and o.get("purpose") == "OPEN"
-                            and o.get("status") in _TERMINAL_ORDER_STATES
-                            and int(o.get("filled") or 0) == 0
-                            for o in self.state["orders"].values())):
-                self._repair_fired_date = today
-                self._audit("WARN", type="tick_self_heal_repair", at=_now)
-                self.pre_open(context)
+            # —— 死单回补自愈（2026-08-27 用户裁决）：统一入口 _repair_pass（双通道
+            #    闸 semantics 见其头注——tick 通道每进程每日一次闩）。——
+            self._repair_pass(context, "tick")
         except Exception as e:
             self._audit("WARN", type="tick_self_heal_fail",
                         err=f"{type(e).__name__}: {e}")
@@ -2976,9 +2996,20 @@ def schedule_probe_job(context):
 
     不做任何业务动作；audit 有行 = 定时服务活着，无行 = schedule 不可靠
     （此时 tick 自愈是唯一通道）。部署后下一个半点看 audit 即验证。
+
+    R6-13（2026-08-27）兼任死单回补的无 tick 通道：空仓+全死单状态下订阅面为空
+    → on_tick 无事件（账户切换当日 09:51 后 tick 痕迹归零的实证）——探针走
+    schedule 服务不依赖订阅面，13:31/14:31 两拍在回补窗内。无闩直评（schedule
+    小时级限频，重复评估被 ⑤'' 同标在途守卫拦成 no-op）；15:31 拍在窗外由
+    _repair_pass 内部窗口自拒。
     """
     rt = _require_rt()
     rt._audit("SCHEDULE_TICK", probe=True)
+    try:
+        rt._repair_pass(context, "probe", use_latch=False)
+    except Exception as e:
+        rt._audit("WARN", type="probe_self_heal_fail",
+                  err=f"{type(e).__name__}: {e}")
 
 
 def pre_open_job(context):
