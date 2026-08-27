@@ -1890,6 +1890,39 @@ class PilotRuntime:
 
         save_state(st, path=self.state_file)
 
+    # ---------------------------------------------------------- 事件：死单回补统一入口
+    def _repair_pass(self, context, source: str, use_latch: bool = True) -> None:
+        """死单回补双通道入口（2026-08-27）：条件=当日 pre_open 已跑 + 存在可回补死单
+        （当日 OPEN+终态+零成交，判据与 ⑤'' 同源）+ 窗口 09:32~15:00（收盘后挂单无
+        意义，残务归次日 pre_open）。
+
+        双通道 Why（2026-08-27 12:4x 实锤盲区）：回补触发原只住在 on_tick——但空仓+
+        全死单状态下订阅面为空（watchlist=持仓∪在途单），gm 只推已订阅标的 →
+        on_tick 零事件 → 回补聋死（账户切换 09:51 后 tick 痕迹归零的实证）。探针
+        schedule_probe_job 走 schedule 服务（R6-12 已验证可靠）不依赖订阅面，
+        13:31/14:31 两拍在窗内 → 探针兼任回补的无 tick 通道。
+
+        闸 semantics：tick 通道每进程每日一次（_repair_fired_date 闩——tick 每秒级
+        到达，无闩=拒单风暴打柜台；重启=新进程=新机会）；探针通道无闩（schedule 本身
+        小时级限频，重复评估被 ⑤'' 同标在途守卫拦成 no-op）。重挂成活后 ⑤' 订阅该
+        标的 → tick 通道自然复活（当日若再死，tick 通道还余一次机会）。
+        """
+        today = _today_str()
+        if use_latch and self._repair_fired_date == today:
+            return
+        _now = _today_clock()
+        if not (self.state.get("last_pre_open_date") == today
+                and _now is not None and "09:32:00" <= _now < "15:00:00"
+                and any(o.get("date") == today and o.get("purpose") == "OPEN"
+                        and o.get("status") in _TERMINAL_ORDER_STATES
+                        and int(o.get("filled") or 0) == 0
+                        for o in self.state["orders"].values())):
+            return
+        if use_latch:
+            self._repair_fired_date = today
+        self._audit("WARN", type=f"{source}_self_heal_repair", at=_now)
+        self.pre_open(context)
+
     # ---------------------------------------------------------- 事件：盘中巡检
     def on_tick(self, context, tick):
         """tick 巡检：pending → decide_pending → 撤；positions → decide_position → 卖。
@@ -1916,22 +1949,9 @@ class PilotRuntime:
                     and _now is not None and _now >= "15:37:00"):
                 self._audit("WARN", type="tick_self_heal_after_close", at=_now)
                 after_close_job(context)
-            # —— 死单回补自愈（2026-08-27 用户裁决）：当日 pre_open 已跑且存在可回补
-            #    死单（判据与 ⑤'' 同源：当日 OPEN+终态+零成交）→ 补跑 pre_open 走回补
-            #    段。每进程每日至多 fire 一次（_repair_fired_date 闩）：重启=新进程=
-            #    新一次机会（「随时重启随时挂」）；挂而再死不自动连环重试（防拒单
-            #    风暴打柜台），等下一次重启。窗口 09:32~15:00——收盘后挂单无意义
-            #    （15:36 after_close 起当日终结，残务归次日 pre_open）。
-            if (self._repair_fired_date != today
-                    and self.state.get("last_pre_open_date") == today
-                    and _now is not None and "09:32:00" <= _now < "15:00:00"
-                    and any(o.get("date") == today and o.get("purpose") == "OPEN"
-                            and o.get("status") in _TERMINAL_ORDER_STATES
-                            and int(o.get("filled") or 0) == 0
-                            for o in self.state["orders"].values())):
-                self._repair_fired_date = today
-                self._audit("WARN", type="tick_self_heal_repair", at=_now)
-                self.pre_open(context)
+            # —— 死单回补自愈（2026-08-27 用户裁决）：统一入口 _repair_pass（双通道
+            #    闸 semantics 见其头注——tick 通道每进程每日一次闩）。——
+            self._repair_pass(context, "tick")
         except Exception as e:
             self._audit("WARN", type="tick_self_heal_fail",
                         err=f"{type(e).__name__}: {e}")
@@ -2157,9 +2177,20 @@ def schedule_probe_job(context):
 
     不做任何业务动作；audit 有行 = 定时服务活着，无行 = schedule 不可靠
     （此时 tick 自愈是唯一通道）。部署后下一个半点看 audit 即验证。
+
+    R6-13（2026-08-27）兼任死单回补的无 tick 通道：空仓+全死单状态下订阅面为空
+    → on_tick 无事件（账户切换当日 09:51 后 tick 痕迹归零的实证）——探针走
+    schedule 服务不依赖订阅面，13:31/14:31 两拍在回补窗内。无闩直评（schedule
+    小时级限频，重复评估被 ⑤'' 同标在途守卫拦成 no-op）；15:31 拍在窗外由
+    _repair_pass 内部窗口自拒。
     """
     rt = _require_rt()
     rt._audit("SCHEDULE_TICK", probe=True)
+    try:
+        rt._repair_pass(context, "probe", use_latch=False)
+    except Exception as e:
+        rt._audit("WARN", type="probe_self_heal_fail",
+                  err=f"{type(e).__name__}: {e}")
 
 
 def pre_open_job(context):

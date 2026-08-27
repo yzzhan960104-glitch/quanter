@@ -769,6 +769,37 @@ def test_on_tick_self_heal_repair_fires_once_per_process(pilot, tmp_path, monkey
                 if w.get("type") == "tick_self_heal_repair"]) == 1
 
 
+def test_probe_self_heal_repair_fires_without_ticks(pilot, tmp_path, monkeypatch):
+    """R6-13 探针兼任回补通道：空仓+全死单 → 订阅面空 → on_tick 无事件（账户切换
+    当日实锤盲区）——13:31 探针直评触发回补挂单（无闩，schedule 小时级限频）；
+    15:31 拍在窗外只留 SCHEDULE_TICK 不回补。"""
+    fake = FakeGm()
+    _pin(pilot, monkeypatch, tmp_path)
+    st = pilot._initial_state()
+    st["scan_done"].add(TODAY)
+    st["last_pre_open_date"] = TODAY
+    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "600000.SH")[1])
+    st["placed"][TODAY] = ["dead1"]
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    monkeypatch.setattr(pilot, "RT", rt)                 # 模块级 job 入口读全局 RT
+
+    monkeypatch.setattr(pilot, "_today_clock", lambda: "13:31:00")
+    pilot.schedule_probe_job(_Ctx())
+    heals = [w for w in _details(tmp_path, "WARN")
+             if w.get("type") == "probe_self_heal_repair"]
+    assert len(heals) == 1                               # 探针通道 fire（无 tick 参与）
+    placed = [c for c in fake.calls if c.get("api") == "order_volume"]
+    assert len(placed) == 1 and placed[0]["symbol"] == "SHSE.600000"
+    row = _details(tmp_path, "ORDER_PLACED")[0]
+    assert row["repair_of"] == "dead1"
+
+    monkeypatch.setattr(pilot, "_today_clock", lambda: "15:31:00")
+    pilot.schedule_probe_job(_Ctx())                     # 窗外拍：窗口闸自拒
+    assert len([c for c in fake.calls if c.get("api") == "order_volume"]) == 1
+    assert len([w for w in _details(tmp_path, "WARN")
+                if w.get("type") == "probe_self_heal_repair"]) == 1
+
+
 def test_on_tick_self_heal_repair_window_guard(pilot, tmp_path, monkeypatch):
     """窗口守卫：15:00 后（收盘）不再触发回补——当日残务归 15:36 after_close 与
     次日 pre_open（挂单窗口外重挂无成交语义）。"""
