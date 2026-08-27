@@ -1,6 +1,8 @@
 # QMT/东北证券全面退役方案——东财掘金升格唯一实盘平台与数据源
 
-> 日期：2026-08-27 ｜ 状态：**已批准**（三项裁决：①保留 tushare 研究湖 ②cockpit /live 退役 ③东北证券客户端 P3 用户手动卸载；P0 已落地）
+> 日期：2026-08-27 ｜ 状态：**P0-P3 全部执行完毕**（同日；P2 冷待机期由用户指令豁免）
+> 执行轨迹：P0=de19b6dd（看护/采集/晨检）→ P1=46c3895d（研究面-only 闸+/live 退役）→ P3=8ff0b839（QMT 执行层删除+ops_sched 研究面接管）
+> 锚点分支：archive/qmt-stack-final（删除前完整状态）
 > 决策背景：掘金腿 R6-13 系列收官（端到端成交验证 + 五项自愈机制），用户裁决掘金升格为主交易平台，全面废弃东北证券 QMT 栈，掘金为唯一【实盘】数据源。
 > **边界假设（默认口径，见§6 裁决点）**：tushare 研究主湖（data_lake，回测/发现/信号质量研究）**保留不动**——它与 QMT 栈无关；"唯一数据源"指实盘链路（行情/日历/tick/交易）不再有 QMT 通道。
 
@@ -66,17 +68,17 @@ QMT 栈（东北证券客户端 + MiniQMT/xtquant + broker/qmt* + 本地引擎 l
 3. **验收 KPI（连续 5 交易日）**：INIT/半点探针/EOD 全勤；零人工干预（无手动重启/改代码）；日终对账 API↔state.pkl 持仓资金零漂移；audit 无未解释的 WARN 洪泛
 4. 本地引擎照旧冷跑（其 QMT 腿零成交已实锤，风险敞口=零）
 
-### Phase 1 · 本地引擎降级（观察期满，用户点头）
+### Phase 1 · 本地引擎降级（✅ 2026-08-27 执行，用户指令提前——观察期 KPI 由用户裁决放弃）
 1. 停 `-m trading` 进程树 + `ops/trading_supervisor`
 2. server：下线引擎 jobs 与交易面 API（研究面保留）；cockpit `/live` 按 G-5 裁决处置
 3. L4 双轨发射器/日度对账 cron 中本地腿侧停用（掘金侧 fresh_window 观测保留）
 4. **回滚 RTO < 10 分钟**：重启脚本 + QMT 客户端原样未动
 5. 验收：3 个交易日掘金腿独立运转 + QMT 侧零进程零订单
 
-### Phase 2 · 冷待机期（1-2 周）
+### Phase 2 · 冷待机期（✅ 用户 2026-08-27 指令豁免——"p123 继续做"）
 QMT 全家保持"可回滚"状态但不再启动；东北证券客户端退出不卸载。验收：用户口头确认放弃回滚权。
 
-### Phase 3 · 拆除
+### Phase 3 · 拆除（✅ 2026-08-27 执行，8ff0b839）
 1. `qmt_data/` 7GB 删除（代码零引用实证在案）
 2. `xtquant/` + rar 归档移除；`E:\东北证券NET专业版` **用户手动卸载**（GUI 安装器，agent 不碰券商软件卸载）
 3. 代码隔离：`broker/qmt*`、`trading/` QMT 面、ops supervisor 等打 `# QUARANTINED 2026-08-xx QMT 退役` 头注，整体移入 `archive/qmt-retirement-<date>/` 分支（master 保历史可考，不物理删）
@@ -110,3 +112,22 @@ QMT 全家保持"可回滚"状态但不再启动；东北证券客户端退出�
 | 仿真→未来实盘切换时的账户纪律 | 中 | C1 白名单常量制不变；实盘切换=改常量+`PILOT_ALLOW_LIVE` 知情门，独立方案另立 |
 | 本地引擎知识流失（phases 判定细节） | 低 | 判定数学已移植 pilot 并有 C9 口径锚测试钉死；archive 分支可考 |
 | 拆除后误删研究依赖 | 低 | qmt_data 零引用已实证；拆除前置 grep 验收门槛 |
+
+
+## 八、P1-P3 执行纪要（2026-08-27 晚）
+
+**P1（46c3895d）**：QUANTER_TRADING_FACE=off 闸入 lifespan（后随 P3 升级为结构性删除）；/live 路由重定向 /cockpit + 导航退役；ops/start_server_research_only.bat；L4 双轨对账 cron 删除（对照对象已亡）。杀旧引擎树时波及其拉起的 5 个钉钉 connect bot 子进程（随研究面 server 重启自愈）。
+
+**P3（8ff0b839）**：
+- 删除：broker/qmt×5、trading/qmt_gateway、qmt_market_data（转盲价桩模块保 import 面）、tools/qmt_*×5、ops/{miniqmt_guard,trading_supervisor,restart_trading}、server trading API 路由、前端 LiveCockpitView；测试面删 12 文件改 8 文件。
+- **架构救赎（深挖发现）**：研究面四 cron（discovery/digest/autopromote）+18:00 数据管道原本全寄生在 engine.sched——引入 lifespan 自有 **ops_sched**（AsyncIOScheduler）接管；pipeline_then_eod 增 engine=None 分支跳过交易 eod 段（采集→湖修复→校验→brief→数据集同步照常）。C-8 全 job 启动补跑随引擎退役（数据侧 offline 补跑=已知遗留）。
+- ops processes 端点改制（supervisor 三查退役，engine_processes 保留）。
+- 资产：qmt_data 7GB + xtquant/ 已删（xtquant_250807.rar 留作备份）。
+- 回归：后端 1839 绿 + 前端 32 绿；研究面 server 以 P3 架构运行中（ops_sched 日志验证）。
+
+**遗留清单（非阻塞）**：
+1. 东北证券客户端卸载——用户手动（GUI 卸载器）。
+2. QuanterServer 开机自启——schtasks 注册被拒（需管理员 PowerShell 一次性注册 ops/start_server_research_only.bat，或开机手动跑）。
+3. cockpit 交易卡（StatusCard/AssetCard/TradesTable）仍轮询已删路由得 404 降级——前端专项清理待做（api/trading.ts 已加墓碑注记）。
+4. 重启跨 18:00 的数据链补跑缺口——次日 pipeline 自然接续或手动 `python -m ops.data_pipeline`。
+5. trading/ 引擎核心（engine/phases/order_state/calendar/critical）保留为研究依赖（emquant/export_snapshot 链、backtest mock、run_data_check），dormant 态不再装配。
