@@ -965,7 +965,7 @@ def _date_str_of(value):
     return None
 
 
-def absorb_reality(state, api_orders, api_positions):
+def absorb_reality(state, api_orders, api_positions, *, now=None):
     """柜台↔state 对账（纯逻辑：不落盘、不 audit——diff 留痕归 Task 8 编排层）。
 
     幂等三查（C9 红线——「以柜台实况修 state」，同参数重复调用结果稳定）：
@@ -994,6 +994,7 @@ def absorb_reality(state, api_orders, api_positions):
     只降级留痕（order/position_symbol_unmappable），策略对其不吸收不管理，
     人工仓人工管）。
     """
+    now = time.time() if now is None else float(now)   # 竞态宽限判据的时钟 seam（测试注入）
     # ── ①② 订单对账（先正向吸收/同步，再反向补撤——顺序保证同轮内先见实况再定性）──
     api_order_ids = set()
     for ao in (api_orders or []):
@@ -1048,6 +1049,12 @@ def absorb_reality(state, api_orders, api_positions):
                     pos["remaining_qty"] = int(pos.get("remaining_qty") or 0) + delta
     for oid, st_o in state["orders"].items():
         if oid not in api_order_ids and st_o.get("status") not in _TERMINAL_ORDER_STATES:
+            # R6-13b（2026-08-27 13:31 实弹竞态）：刚挂出的单在柜台 get_orders 里可能
+            # 还不可见（read-after-write——当日探针回补挂出 1 秒后下一轮对账即缺席，
+            # 被误判死单触发重复补挂）。60 秒宽限窗内不判死，状态留给下一轮对账用
+            # 柜台实况自证；无 placed_at 的存量单/柜台吸收单视同老单照旧收敛。
+            if (now - float(st_o.get("placed_at") or 0.0)) <= _ABSORB_RACE_GRACE_SECONDS:
+                continue
             st_o["status"] = "CANCELLED"          # state 有柜台无且非终态 → 已撤/未挂
     # ── ③ 持仓对账（qty 柜台为准 / entry+exec_params state 保留 / 双向吸收归零）──
     api_pos_syms = set()
@@ -1102,6 +1109,9 @@ def absorb_reality(state, api_orders, api_positions):
 # get_position 两次本机 HTTP）按 _ABSORB_THROTTLE_SECONDS 节流——成交转持仓的时延
 # 窗口 ≤ 节流阈值（30s 量级对试点止损管理足够；首跳必对账保证启动即真值）。
 _ABSORB_THROTTLE_SECONDS = 30.0
+# R6-13b：对账 read-after-write 竞态宽限窗——刚挂出的单柜台可能尚未可见，窗内缺席
+# 不判死（详见 absorb_reality ② 的就地注释；13:31 实弹事故复盘）。
+_ABSORB_RACE_GRACE_SECONDS = 60.0
 # 对账失败退避（M-4）：_last_absorb 只在成功时前移，若只有上面的节流闸，柜台故障期
 # 每根 tick 都要打满两次本机 HTTP 查询（对故障中的柜台/终端雪上加霜，且注定失败）。
 # 失败后 _ABSORB_FAILURE_BACKOFF_SECONDS 窗内 on_tick 不再重试，巡检判定继续吃上一份
@@ -1616,6 +1626,26 @@ class PilotRuntime:
                 continue
             self._cancel_and_sync(oid, sym, "pre_open", "撤昨日非终态买单")
 
+        # ── ①' 同标在途买单去重（R6-13b，2026-08-27 13:31 实弹事故复盘）──
+        # 同标 ≥2 张非终态 OPEN 单 → 撤旧留新（按 placed_at，缺省 0 视同最老）。
+        # Why 会发生：探针回补与 tick 回补 1 秒连发时，后一轮 ⓪ 对账的
+        # read-after-write 竞态把前一张刚挂的单判死（absorb ② 已加 60s 宽限堵源头，
+        # 本段是结果侧兜底——历史已产生的重复、以及任何其他来源的同标重复在途
+        # 单，都在下一轮 pre_open 收敛回单张）。撤旧留新而非撤新留旧：新单的
+        # placed_at 距当前权益定尺更近（旧单可能是竞态前的旧口径产物）。
+        _live_open = {}
+        for oid, st_o in st["orders"].items():
+            if (st_o.get("purpose") == "OPEN"
+                    and st_o.get("status") not in _TERMINAL_ORDER_STATES
+                    and st_o.get("symbol")):
+                _live_open.setdefault(st_o["symbol"], []).append(oid)
+        for sym, oids in _live_open.items():
+            if len(oids) > 1:
+                oids_by_age = sorted(
+                    oids, key=lambda o: float((st["orders"].get(o) or {}).get("placed_at") or 0.0))
+                for oid in oids_by_age[:-1]:
+                    self._cancel_and_sync(oid, sym, "dedup", "同标重复在途买单去重（撤旧留新）")
+
         # ── 日历与 T-1（②③ 的基准日）──
         cal = self._calendar(today)
         t_minus_1 = _prev_trading_day(cal, today)
@@ -1784,7 +1814,8 @@ class PilotRuntime:
                                      "neckline": sig.neckline, "atr": sig.atr,
                                      "bottom": sig.bottom,          # 信号几何：成交富化（_enrich）的原料
                                      "status": "SUBMITTED", "filled": 0,
-                                     "account": self.account}
+                                     "account": self.account,
+                                     "placed_at": time.time()}   # R6-13b：absorb ② 竞态宽限锚
                 open_buy = float(open_buy) + entry * qty       # 逐单扣减（check_caps ②口径）
                 self._audit("ORDER_PLACED", symbol=sig.symbol, price=entry, qty=qty,
                             cl_ord_id=cid, cancel_on=cancel_on, formed_at=formed)
@@ -1869,7 +1900,8 @@ class PilotRuntime:
                                            "neckline": o.get("neckline"), "atr": o.get("atr"),
                                            "bottom": o.get("bottom"),
                                            "status": "SUBMITTED", "filled": 0,
-                                           "account": self.account}
+                                           "account": self.account,
+                                           "placed_at": time.time()}   # R6-13b：同 ⑤
                     ob_r = float(ob_r) + entry_r * qty_r            # 逐单扣减（同 ⑤ 口径）
                     self._audit("ORDER_PLACED", symbol=sym, price=entry_r, qty=qty_r,
                                 cl_ord_id=cid_r, cancel_on=cancel_on_r,

@@ -800,6 +800,36 @@ def test_probe_self_heal_repair_fires_without_ticks(pilot, tmp_path, monkeypatch
                 if w.get("type") == "probe_self_heal_repair"]) == 1
 
 
+def test_pre_open_dedup_cancels_older_duplicate(pilot, tmp_path, monkeypatch):
+    """①' 同标去重（R6-13b）：两张同标在途 OPEN 单 → 撤旧留新（DEDUP CANCEL 留痕 +
+    柜台撤单），新单存活——13:31 实弹竞态双挂的结果侧兜底锚。"""
+    fake = FakeGm()
+    r1 = fake.order_volume("SHSE.600000", 100, 1, 1, 1, price=47.43)
+    r2 = fake.order_volume("SHSE.600000", 100, 1, 1, 1, price=47.43)
+    c1, c2 = r1[0]["cl_ord_id"], r2[0]["cl_ord_id"]
+    _backdate_order(fake, c1, TODAY)                     # 当日单：① 不撤（I-2 同日守卫）
+    _backdate_order(fake, c2, TODAY)
+    st = pilot._initial_state()
+    st["scan_done"].add(TODAY)
+    st["orders"][c1] = dict(_dead_open_order(c1, "600000.SH", status="SUBMITTED")[1],
+                            placed_at=100.0)             # 旧（竞态前产物）
+    st["orders"][c2] = dict(_dead_open_order(c2, "600000.SH", status="SUBMITTED")[1],
+                            placed_at=200.0)             # 新
+    st["placed"][TODAY] = [c1, c2]
+    _pin(pilot, monkeypatch, tmp_path)
+    rt = _rt(pilot, fake, tmp_path, state=st)
+    rt.pre_open(_Ctx())
+
+    cancels = [d for d in _details(tmp_path, "CANCEL") if d.get("stage") == "dedup"]
+    assert len(cancels) == 1 and cancels[0]["cl_ord_id"] == c1   # 只撤旧的
+    assert st["orders"][c1]["status"] == "CANCELLED"
+    assert st["orders"][c2]["status"] == "SUBMITTED"             # 新单存活
+    assert fake.orders[c1]["status"] == ORDER_STATUS["Canceled"] # 柜台真撤
+    assert fake.orders[c2]["status"] == ORDER_STATUS["New"]
+    assert [c for c in fake.calls if c.get("api") == "order_volume"
+            and c.get("symbol") != "SHSE.600000"] == []          # 无新挂单（去重非补挂）
+
+
 def test_on_tick_self_heal_repair_window_guard(pilot, tmp_path, monkeypatch):
     """窗口守卫：15:00 后（收盘）不再触发回补——当日残务归 15:36 after_close 与
     次日 pre_open（挂单窗口外重挂无成交语义）。"""

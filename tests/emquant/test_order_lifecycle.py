@@ -562,6 +562,24 @@ def test_absorb_orders_bidirectional(pilot):
     assert "300750.SZ" not in state["positions"]                 # 未成交 → 无持仓转换
 
 
+def test_absorb_race_grace_protects_fresh_orders(pilot):
+    """R6-13b：刚挂出（placed_at ≤60s）的单在柜台 get_orders 缺席时不判死——
+    read-after-write 竞态宽限（13:31 实弹：回补挂出 1 秒后下一轮对账缺席被误判死，
+    触发同标重复补挂）。超窗单/无 placed_at 存量单照旧收敛。"""
+    now = 1_800_000_000.0
+    state = pilot._initial_state()
+    state["orders"]["o_fresh"] = {"symbol": "600000.SH", "status": "SUBMITTED", "filled": 0,
+                                  "placed_at": now - 5}            # 宽限窗内
+    state["orders"]["o_stale"] = {"symbol": "000001.SZ", "status": "SUBMITTED", "filled": 0,
+                                  "placed_at": now - 120}          # 超窗
+    state["orders"]["o_legacy"] = {"symbol": "300750.SZ", "status": "SUBMITTED", "filled": 0}
+    pilot.absorb_reality(state, [], [], now=now)
+
+    assert state["orders"]["o_fresh"]["status"] == "SUBMITTED"    # 竞态窗内不判死
+    assert state["orders"]["o_stale"]["status"] == "CANCELLED"    # 超窗照旧收敛
+    assert state["orders"]["o_legacy"]["status"] == "CANCELLED"   # 存量单（无锚）视同老单
+
+
 def test_absorb_positions_bidirectional(pilot):
     """持仓三查：qty 以柜台为准修 state；entry/exec_params 以 state 保留；双向吸收/归零。"""
     state = pilot._initial_state()
