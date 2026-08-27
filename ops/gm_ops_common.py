@@ -56,3 +56,16 @@ def api_get(path: str, token: str, timeout: float = 3.0) -> tuple[int, object]:
         return e.code, None
     except (urllib.error.URLError, OSError, TimeoutError):
         return 0, None
+
+
+def notify(level: str, msg: str) -> None:
+    """钉钉告警（infra.notifier 多通道 + 本地 alerts.log 兜底；失败软降级不阻断主链）。
+
+    单源自持：原复用 ops/miniqmt_guard._notify，该模块随 QMT 退役 P3 删除
+    （2026-08-27），实现逐字迁此。
+    """
+    try:
+        from infra.notifier import NotificationManager, fire_and_forget
+        fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, level))
+    except Exception:
+        pass

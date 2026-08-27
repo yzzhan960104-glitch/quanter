@@ -41,21 +41,12 @@ from broker.base import (  # noqa: F401
 from broker.mock import (  # noqa: F401
     MockExecutionGateway,
 )
-# QMT 实盘实现（延迟 import 容错：无 xtquant 的开发/CI 环境仍可加载本包）
-from broker.qmt import (  # noqa: F401
-    QmtExecutionGateway,
-)
-# 行情模块级函数（单只/批量快照）
-from broker.qmt_quote import (  # noqa: F401
-    get_quote,
-    get_quotes,
-)
+# QMT 实盘实现已退役删除（2026-08-27 · QMT 退役 P3，掘金为唯一实盘平台；
+# archive/qmt-stack-final 分支可考）。base/mock 保留——backtest mock 与执行网关
+# 契约测试仍消费。
 
 __all__ = [
     "BaseExecutionGateway",
     "OrderResult",
     "MockExecutionGateway",
-    "QmtExecutionGateway",
-    "get_quote",
-    "get_quotes",
 ]

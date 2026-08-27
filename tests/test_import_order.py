@@ -32,9 +32,9 @@ def _import_in_fresh_process(stmt: str) -> subprocess.CompletedProcess:
         cwd=str(ROOT), env=env, timeout=180)
 
 
-def test_import_broker_qmt_first_does_not_crash():
-    """broker-first 加载序：`import broker.qmt` 必须不炸（断 gateway_service 环的回归哨）。"""
-    r = _import_in_fresh_process("import broker.qmt")
+def test_import_broker_mock_first_does_not_crash():
+    """broker-first 加载序：`import broker.mock` 必须不炸（断 gateway_service 环的回归哨）。"""
+    r = _import_in_fresh_process("import broker.mock")
     assert r.returncode == 0, (
         f"broker-first 加载序崩溃（潜伏 import 环回归）：\n{r.stderr}")
 

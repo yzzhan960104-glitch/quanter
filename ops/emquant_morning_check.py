@@ -31,7 +31,7 @@ except (AttributeError, OSError):
 
 from ops import gm_ops_common as gc
 from ops.gm_terminal_guard import _in_market_window, probe_api, probe_port_7001, probe_strategy_process
-from ops.miniqmt_guard import _notify
+from ops.gm_ops_common import notify as _notify
 
 
 def _load_state() -> dict:

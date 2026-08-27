@@ -1,6 +1,5 @@
 @echo off
-rem QMT é€€å½¹ P1ï¼ˆ2026-08-27ï¼‰ï¼šç ”ç©¶é¢-only æœåŠ¡å™¨å¯åŠ¨ã€‚QUANTER_TRADING_FACE=off ç»
-rem .env ç”Ÿæ•ˆï¼Œæ­¤å¤„æ˜¾å¼å†è®¾é˜² .env ä¸¢å¤±æ—¶é™é»˜å›žé€€ã€‚è¾“å‡ºé‡å®šå‘æ—¥å¿—ï¼ˆè„±ç¦»ç»ˆç«¯å¯è¯Šæ–­ï¼‰ã€‚
+rem QMT ÍËÒÛ P1£¨2026-08-27£©£ºÑÐ¾¿Ãæ-only ·þÎñÆ÷Æô¶¯£¨QUANTER_TRADING_FACE=off ÔÚ .env£¬
+rem trading/__main__ load_dotenv(override=True) ¶ÁÈë£»ÒýÇæ×°ÅäÒÑËæ P3 É¾³ý£¬´Ë±äÁ¿½ö×÷ÁôºÛ£©¡£
 cd /d E:\quanter
-set QUANTER_TRADING_FACE=off
 E:\quanter\.venv310\Scripts\python.exe -m trading >> E:\quanter\logs\server_research_only.log 2>&1

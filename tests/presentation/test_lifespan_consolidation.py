@@ -202,8 +202,9 @@ async def test_lifespan_stops_connect_bots_on_shutdown(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lifespan_registers_discovery_cron_02():
-    """lifespan startup 在 engine.sched add_job ``discovery_daemon`` cron 02:00。
+async def test_lifespan_registers_discovery_cron_02(monkeypatch):
+    monkeypatch.setenv("DISCOVERY_SCHEDULE", "")   # .env 的 off 会泄入——钉默认 02:00 分支
+    """lifespan startup 在 ops_sched add_job ``discovery_daemon`` cron 02:00（QMT 退役 P3 后）。
 
     物理意图：discovery cron 从 schtasks 收编 lifespan（spec §3.2），engine.sched
     AsyncIOScheduler 上挂 id="discovery_daemon" 的 job，trigger 为 CronTrigger(hour=2)。
@@ -217,14 +218,15 @@ async def test_lifespan_registers_discovery_cron_02():
     stack, _start, _stop, eng = _mock_lifespan_dependencies()
     # add_job 用 lambda 收集 id（func/trigger 实参不影响断言，聚焦 id）
     added_jobs: list[str] = []
-    eng.sched.add_job = lambda func, trigger=None, **kw: added_jobs.append(kw.get("id"))
+    pass  # QMT 退役 P3：cron 挂 ops_sched（app.state 直读，无需收集器）
     # mock _run_discovery_subprocess：避免 add_job 误触发或测试侧起 subprocess
     stack.enter_context(patch("presentation.server.main._run_discovery_subprocess"))
     with stack:
         async with lifespan(app):
             pass                    # startup 跑完 → yield（cron 已注册）
 
-    assert "discovery_daemon" in added_jobs    # discovery cron 02:00 注册
+    _ids = [j.id for j in app.state.ops_sched.get_jobs()]
+    assert "discovery_daemon" in _ids            # discovery cron 02:00 注册（ops_sched）
 
 
 def test_run_discovery_subprocess_detached(monkeypatch):
@@ -343,7 +345,8 @@ def test_discovery_missed_last_run_false_when_recent(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lifespan_catchup_runs_discovery_when_missed():
+async def test_lifespan_catchup_runs_discovery_when_missed(monkeypatch):
+    monkeypatch.setenv("DISCOVERY_SCHEDULE", "")   # 同上：off 泄入会跳过补跑
     """lifespan startup：_discovery_missed_last_run=True → 调 _run_discovery_subprocess 补跑。
 
     物理意图（spec §3.3）：startup 检测到 offline 跨昨晚 02:00（错过）→ 异步补跑
@@ -393,22 +396,7 @@ async def test_lifespan_catchup_skipped_when_recent():
 
 
 @pytest.mark.asyncio
-async def test_lifespan_creates_catchup_task_when_engine_started():
-    """engine 已 start → lifespan startup 创建 catchup_task 并 await run_startup_catchup。"""
-    from fastapi import FastAPI
-    from presentation.server.main import lifespan
-
-    app = FastAPI()
-    stack, _start, _stop, eng = _mock_lifespan_dependencies()
-    eng.sched.running = True                              # engine 已 start
-    catchup = stack.enter_context(
-        patch("trading.catchup.run_startup_catchup", new=AsyncMock()))
-    with stack:
-        async with lifespan(app):
-            task = getattr(app.state, "catchup_task", None)
-            assert task is not None                        # 任务已创建
-            await task                                     # 等补跑协程完成（AsyncMock 秒完）
-    catchup.assert_awaited_once()
+# C-8 启动补跑测试已随引擎退役删除（2026-08-27 · QMT 退役 P3）
 
 
 @pytest.mark.asyncio

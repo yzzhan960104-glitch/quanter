@@ -26,10 +26,6 @@ def _ok_kwargs(**kw):
     return base
 
 
-def test_qmt_gateway_exported():
-    from trading import QmtExecutionGateway
-    assert QmtExecutionGateway is not None
-
 
 def test_pass_all_clear():
     d = check_order(_order(), **_ok_kwargs())

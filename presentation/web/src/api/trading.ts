@@ -1,4 +1,10 @@
 /**
+/**
+ * ⚠️ QMT 退役（2026-08-27 P3）：服务端 /api/v1/trading/* 路由已删——本文件的
+ * 请求将 404（cockpit 组件按不可用态降级）。保留仅为 cockpit 组件的类型/调用
+ * 兼容，前端交易卡片的正式移除走后续前端专项。
+ */
+
  * 实盘交易 API 封装（Phase 1 · 前端只读化）
  *
  * 对应后端 server/api/v1/trading.py。复用 client.ts 的 apiClient。

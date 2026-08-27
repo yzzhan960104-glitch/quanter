@@ -37,7 +37,7 @@ except (AttributeError, OSError):
     pass
 
 from ops import gm_ops_common as gc
-from ops.miniqmt_guard import _notify  # 复用前任的 fire_and_forget 通知封装（同语义）
+from ops.gm_ops_common import notify as _notify  # QMT 退役 P3 后单源自持
 
 MARKET_WINDOW = ("09:10", "15:40")   # 进程在场判定的时段（含盘前缓冲与 EOD 后余量）
 

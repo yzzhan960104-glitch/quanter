@@ -45,7 +45,6 @@ from presentation.server.api.v1.ops import router as ops_router
 # 供给前端驾驶舱（T17 /dashboard）宏观灯/信贷曲线/板块流/ATR 四视图。
 from presentation.server.api.v1.macro import router as macro_router
 # 实盘交易（优雅降级真接 QMT；无 xtquant/缺凭证时 /status 返 unavailable，不阻断 lifespan）
-from presentation.server.api.v1.trading import router as trading_router
 # AI 参数训练 loop 路由（Spec 3 Task 6）：start/get/list/submit_review 四端点，
 # 驱动 orchestrator 状态机（CREATED→RUNNING→ANALYZING→AWAITING_REVIEW→…→DONE）。
 # 钉钉审核进程内调 handler 不走 HTTP；此 router 仅对外暴露状态查询 + 启停 + 审核提交。
@@ -412,40 +411,29 @@ async def lifespan(app: FastAPI):
     app.state.log_handler = log_handler
     root_logger.addHandler(log_handler)
 
-    # C-2 scheduling-orchestration Task 9：TradingEngine 装配（合并 engine 进 uvicorn 单进程）。
-    # 物理意图：原 ``python -m trading`` 独立常驻进程收编进本 lifespan——engine 与 server
-    # 同进程后，四触发点 cron 在 uvicorn 内跑，data 采集经 ``pipeline_then_eod`` 事件链驱动
-    # （取代 19:00 eod 时钟赌博）。dynamic_whitelist 物理隔离已由 W1 实例属性化完成
-    # （engine._dynamic_whitelist，server 路径 submit_order 不读实例属性 → 两端输入源互不污染）。
-    # Why try/except 不阻断：engine 装配失败（网关连不上 / state_store 建表失败 / 影子期不足）
-    # 绝不应让整个 API 起不来——engine 缺席时交易 API 仍可用（手动下单路径不依赖 scheduler），
-    # 仅自动 cron 编排缺席。与上面 replay_scheduler / training_orchestrator 同源软降级范式。
+    # TradingEngine 装配已整体退役（2026-08-27 · QMT 退役 P3，trading 包 QMT 执行层
+    # 已删除；引擎核心模块保留为研究依赖——emquant/export_snapshot 的 critical 通道、
+    # backtest mock 的 order_state、run_data_check 的 calendar）。历史实现见
+    # archive/qmt-stack-final 分支与 git 历史。QUANTER_TRADING_FACE env 不再读取。
     #
-    # QUANTER_TRADING_FACE=off（2026-08-27 · QMT 退役方案 P1，用户批准）：跳过 engine
-    # 装配——server 以「研究面-only」形态运行（数据管道/digest/discovery API 照常，交易
-    # 面自然降级 unavailable）。掘金腿已成唯一实盘平台，本地引擎的 cron 编排与网关
-    # 连接不再装配。回滚=删 .env 该行重启（RTO<10min，方案 §五 R3）。
-    if os.environ.get("QUANTER_TRADING_FACE", "on") == "off":
-        logging.getLogger(__name__).warning(
-            "QUANTER_TRADING_FACE=off：跳过 TradingEngine 装配（QMT 退役 P1 · 研究面-only）")
-    else:
-        try:
-            from trading.engine import TradingEngine
-            from trading.__main__ import log_startup_banner
-            # C-5 V2：装配 engine 前打启动 banner（session/account/mode/口径版本）。
-            # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链
-            # schtasks ONSTART→python -m trading→uvicorn→lifespan 之前无 banner，session 漂移无日志可
-            # 对比。banner 先于 bootstrap（含网关 connect）输出，便于排查 .env 漂移。
-            log_startup_banner()
-            eng = TradingEngine()
-            await eng.bootstrap()
-            # 影子期闸已按 ADR-16 修订移除（2026-08-17）——engine 启动不再被自动冻结；
-            # 新参数上实盘的缓冲由人工 risk_ctrl block 开关接管（只拦增量、存量退出照常）。
-            eng.start()
-            app.state.trading_engine = eng
-            logging.getLogger(__name__).info("TradingEngine 已装配并启动")
-        except Exception:
-            logging.getLogger(__name__).exception("TradingEngine 装配异常（已忽略）")
+    # ops_sched（QMT 退役 P3）：研究面自有调度器——原寄生 engine.sched 的四个研究
+    # cron（18:00 数据管道 / discovery / digest / autopromote）+ 交易 eod 退役后迁此。
+    # AsyncIOScheduler（pipeline_then_eod 是 async；lifespan startup 事件循环在场）。
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        _ops_sched = AsyncIOScheduler(timezone="Asia/Shanghai")
+        _ops_sched.start()
+        app.state.ops_sched = _ops_sched
+        # 18:00 数据管道（原 engine._pipeline_then_eod）：采集→湖修复→校验→brief→
+        # 数据集同步；engine=None 跳过交易 eod 段（pipeline.py P3 分支）。
+        from trading.orchestrate.pipeline import pipeline_then_eod
+        _ops_sched.add_job(
+            pipeline_then_eod, "cron", args=[None], day_of_week="mon-fri",
+            hour=18, minute=0, id="pipeline_then_eod", replace_existing=True)
+        logging.getLogger(__name__).info(
+            "ops_sched 已启动：pipeline_then_eod 18:00（研究面-only，engine=None）")
+    except Exception:
+        logging.getLogger(__name__).exception("ops_sched 装配异常（已忽略）")
 
     # C-7 V1：broadcast connect 收编进 lifespan（5 CONNECT_BOTS）。
     # 物理意图（spec §3.1）：start_all step ② connect 编排移此处，软降级（单 bot
@@ -498,7 +486,7 @@ async def lifespan(app: FastAPI):
     # Why getattr 防御：engine 装配块 try/except 隔离，极端失败时 state 上可能无
     # trading_engine——cron 注册必须对「未装配」也安全。
     try:
-        _eng = getattr(app.state, "trading_engine", None)
+        _eng = getattr(app.state, "ops_sched", None)
         if _eng is not None:
             import os as _os_cron
             from apscheduler.triggers.cron import CronTrigger
@@ -512,23 +500,23 @@ async def lifespan(app: FastAPI):
             # 24h 低功率（2026-08-03）：DISCOVERY_SCHEDULE=low-power → 每小时整点+5 分
             # 触发，job 内窗口判定（盘中/数据链时段跳过）；否则保持 02:00 夜间集中跑。
             elif _os_cron.environ.get("DISCOVERY_SCHEDULE", "").lower() == "low-power":
-                _eng.sched.add_job(
+                _eng.add_job(
                     _run_discovery_subprocess,
                     CronTrigger.from_crontab("5 * * * *"),
                     id="discovery_daemon",
                     replace_existing=True,
                 )
                 logging.getLogger(__name__).info(
-                    "discovery cron 每小时+5 分已注册到 engine.sched（24h 低功率模式）")
+                    "discovery cron 每小时+5 分已注册到 ops_sched（24h 低功率模式）")
             else:
-                _eng.sched.add_job(
+                _eng.add_job(
                     _run_discovery_subprocess,
                     CronTrigger(hour=2, minute=0),
                     id="discovery_daemon",
                     replace_existing=True,
                 )
                 logging.getLogger(__name__).info(
-                    "discovery cron 02:00 已注册到 engine.sched")
+                    "discovery cron 02:00 已注册到 ops_sched")
     except Exception:
         logging.getLogger(__name__).exception(
             "lifespan 装 discovery cron 异常（已忽略）")
@@ -537,19 +525,19 @@ async def lifespan(app: FastAPI):
     # 默认每交易日 18:30（pipeline_then_eod 18:00 之后，数据/回测期望已就绪），
     # env RESEARCH_DIGEST_CRON 可覆盖（crontab 5 段格式）。软降级同 discovery cron。
     try:
-        _eng_digest = getattr(app.state, "trading_engine", None)
+        _eng_digest = getattr(app.state, "ops_sched", None)
         if _eng_digest is not None:
             import os as _os_cron
             from apscheduler.triggers.cron import CronTrigger
             _digest_cron = _os_cron.environ.get("RESEARCH_DIGEST_CRON", _DIGEST_CRON_DEFAULT)
-            _eng_digest.sched.add_job(
+            _eng_digest.add_job(
                 _run_research_digest_push,
                 CronTrigger.from_crontab(_digest_cron),
                 id="research_digest_push",
                 replace_existing=True,
             )
             logging.getLogger(__name__).info(
-                "research digest cron %s 已注册到 engine.sched", _digest_cron)
+                "research digest cron %s 已注册到 ops_sched", _digest_cron)
     except Exception:
         logging.getLogger(__name__).exception(
             "lifespan 装 research digest cron 异常（已忽略）")
@@ -561,21 +549,21 @@ async def lifespan(app: FastAPI):
     # AUTO_PROMOTE_BRIEF=off（2026-08-25 用户裁决）：随自动参数优化全停一并停用——
     # 七门评估需要时手动跑（diag/r6_7_promote_gates.py 范式）。
     try:
-        _eng_ap = getattr(app.state, "trading_engine", None)
+        _eng_ap = getattr(app.state, "ops_sched", None)
         if _eng_ap is not None and os.environ.get("AUTO_PROMOTE_BRIEF", "").lower() == "off":
             logging.getLogger(__name__).info(
                 "autopromote 日报 cron 已停用（AUTO_PROMOTE_BRIEF=off——七门评估需要时"
                 "手动跑 diag/r6_7_promote_gates.py 范式）")
         elif _eng_ap is not None:
             from apscheduler.triggers.cron import CronTrigger
-            _eng_ap.sched.add_job(
+            _eng_ap.add_job(
                 _run_autopromote_daily_brief,
                 CronTrigger.from_crontab("35 18 * * mon-fri"),
                 id="autopromote_daily_brief",
                 replace_existing=True,
             )
             logging.getLogger(__name__).info(
-                "autopromote 日报 cron 18:35 已注册到 engine.sched")
+                "autopromote 日报 cron 18:35 已注册到 ops_sched")
     except Exception:
         logging.getLogger(__name__).exception(
             "lifespan 装 autopromote 日报 cron 异常（已忽略）")
@@ -602,14 +590,10 @@ async def lifespan(app: FastAPI):
     # 到「当前可用的一致态」（采集→data_ready→eod→brief + pre_open 窗口内补挂）。
     # 仅 engine 已 start（sched.running）时触发——影子期不足 scheduler 缺席，补跑无意义。
     # 软降级：创建异常不阻断 uvicorn（与上方 engine/training/connect/discovery 同范式）。
-    try:
-        from trading.catchup import run_startup_catchup
-        _eng_c8 = getattr(app.state, "trading_engine", None)
-        if _eng_c8 is not None and getattr(_eng_c8.sched, "running", False):
-            app.state.catchup_task = asyncio.create_task(run_startup_catchup(_eng_c8))
-            logging.getLogger(__name__).info("C-8 启动补跑任务已创建")
-    except Exception:
-        logging.getLogger(__name__).exception("C-8 启动补跑创建异常（已忽略）")
+    # C-8 全 job 启动补跑已随引擎退役（2026-08-27 · QMT 退役 P3）——其中交易侧
+    # （pre_open 窗口补挂）随之作废；数据侧 offline 补跑缺口列为已知项（方案 §P3
+    # 遗留：重启若跨 18:00，当日数据链靠次日 pipeline 自然接续或手动
+    # python -m ops.data_pipeline 补跑）。
 
     yield
     # C-8 V5：shutdown 取消启动补跑任务（软降级；任务随事件循环销毁自然结束，
@@ -649,15 +633,10 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception(
                 "shutdown connect bot=%s 异常（已忽略）", _bot)
 
-    # 销毁：TradingEngine scheduler（Task 9 · 合并 engine 进 uvicorn 后的优雅停机）。
-    # Why getattr 防御：lifespan 装配块 try/except 隔离，装配失败 / 影子期未 start 时
-    # state 上可能无 trading_engine 或 sched 未起——shutdown 路径必须对「未装配/未启动」
-    # 也安全（不能因 engine 装配失败而让整个 shutdown 崩，与 training_orchestrator 同范式）。
-    # sched.running 由 APScheduler 维护：start() 后 True，shutdown() 后 False——据此判定
-    # 是否需要调 shutdown，避免对未启动 scheduler 调 shutdown 抛 SchedulerNotRunningError。
-    _eng = getattr(app.state, "trading_engine", None)
-    if _eng is not None and getattr(_eng.sched, "running", False):
-        _eng.shutdown()
+    # ops_sched 优雅停机（QMT 退役 P3：研究面调度器；wait=False 进程退出场景）。
+    _ops = getattr(app.state, "ops_sched", None)
+    if _ops is not None and getattr(_ops, "running", False):
+        _ops.shutdown()
 
     # 销毁：卸载日志 handler（前端流 + 本地文件），避免重复挂载/引用泄漏
     # （reload 或测试复用进程时关键，否则 handler 单调累积致日志重复输出）
@@ -722,7 +701,7 @@ app.include_router(macro_router, prefix="/api/v1")
 # 实盘交易路由（优雅降级真接 QMT；lifespan 不自动 connect，单例 lazy 构造）
 # 【B-1/DG-G2】路由级鉴权：下单/熔断/连接等敏感端点强制 require_write——
 # live 模式无 token fail-closed 拒（401），dry_run 放行（开发/CI 不阻断）。
-app.include_router(trading_router, prefix="/api/v1", dependencies=[Depends(require_write)])
+# trading_router 已退役（2026-08-27 · QMT 退役 P3）——掘金为唯一实盘平台
 # AI 参数训练 loop（Spec 3 Task 7）：start/get/list/submit_review 四端点。
 # 训练提交/审核提交是写操作（落库 + 触发回测子进程），路由级鉴权保护；
 # 钉钉审核 handler 进程内调 orchestrator 不走 HTTP，不受 require_write 限制。

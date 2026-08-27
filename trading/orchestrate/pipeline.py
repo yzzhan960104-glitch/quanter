@@ -243,7 +243,11 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
         # 5. 全绿 → 跑 eod（C-8 V2：补跑传显式 data_day/plan_date；默认路径零变化）。
         # 原 4.5 A1 regime 前置段已按 ADR-16 移除（2026-08-17）——择时判断权归人工，
         # eod 照常产 T+1 计划，增量拦截在 pre_open 挂单侧由 risk_control 双值执行。
-        if run_eod:
+        # QMT 退役 P3（2026-08-27）：engine=None=研究面-only 链（server ops_sched 直挂，
+        # 无 TradingEngine）——跳过交易 eod 段，采集/修复/校验/brief/数据集同步照常。
+        if run_eod and engine is None:
+            logger.info("pipeline_then_eod 研究面-only：跳过交易 eod 段（engine=None）")
+        elif run_eod:
             if for_date is not None:
                 await engine._eod(data_day=today, plan_date=next_trading_day(today))
             else:

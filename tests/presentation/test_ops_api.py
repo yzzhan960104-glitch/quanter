@@ -16,18 +16,12 @@ def test_queue_size_counts_down_queue_bytes(tmp_path, monkeypatch):
 
 def test_processes_endpoint_assembles_one_screen(monkeypatch):
     from trading import gateway_service as trading_service
-    from ops import trading_supervisor as ts
+    from ops import process_topology as ts
 
-    monkeypatch.setattr(ts, "status", lambda port=8000, session_id=None: {
-        "port": 8000, "port_holder_pid": 1, "pid_file_pid": 1, "lock_held": True,
-        "engine_pids": [1], "client": {"running": True, "pid": 9},
-        "consistent": True, "drifts": []})
-    monkeypatch.setattr(trading_service, "get_status",
-                        lambda: {"connected": True, "locked": False, "mode": "live"})
-    monkeypatch.setenv("QMT_USERDATA_PATH", "")
+    monkeypatch.setattr(ts, "engine_processes",
+                        lambda: [{"pid": 1, "name": "python"}])
 
     result = asyncio.run(ops.processes())
-    assert result["port_holder_pid"] == 1
-    assert result["consistent"] is True
-    assert result["queue_size"] == 0
-    assert result["gateway_mode"]["mode"] == "live"
+    assert result["engine_processes"][0]["pid"] == 1       # QMT 退役 P3 新契约
+    assert result["server_alive"] is True
+    assert "queue_size" in result

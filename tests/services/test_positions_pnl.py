@@ -23,56 +23,7 @@ from trading import gateway_service as trading_service
 # ----------------------------------------------------------------------------
 # 场景 ①：avg_price + 现价可用 → 算浮盈
 # ----------------------------------------------------------------------------
-def test_get_positions_computes_pnl_from_avg_and_last():
-    """avg_price=10.0 + 现价 11.0 + 持仓 100 → market_value=1100, pnl=+100。"""
 
-    async def _run():
-        # _fetch_broker_positions 返回的 QMT 形态：{sym: {volume, avg_price, ...}}
-        positions = {
-            "300001.SZ": {
-                "volume": 100.0,
-                "avg_price": 10.0,
-                "open_price": 10.0,
-                "yesterday_volume": 100,
-            }
-        }
-        # get_quotes 形态：{sym: tick_dict 或 None}；正常时 tick_dict 含 last_price
-        quotes = {"300001.SZ": {"last_price": 11.0}}
-
-        gw = AsyncMock()
-        # get_positions 入口校验 ``is_locked=False and _connected=True`` 才放行查询；
-        # AsyncMock 默认子属性是 truthy MagicMock，会让 is_locked 也 truthy → 误判锁定，
-        # 故显式置「已连接 + 未锁定」态（与 trading_service.get_status 同口径镜像）。
-        gw.is_locked = False
-        gw._connected = True
-        gw._fetch_broker_positions = AsyncMock(return_value=positions)
-        # query_asset 不在 get_positions 链路，但本场景断言不涉及总资产，无需 stub
-
-        with patch("trading.gateway_service.get_gateway", return_value=gw), \
-             patch(
-                 "trading.gateway_service.qmt_market_data.get_quotes",
-                 new=AsyncMock(return_value=quotes),
-             ):
-            result = await trading_service.get_positions()
-
-        assert len(result) == 1
-        pos = result[0]
-        assert pos["symbol"] == "300001.SZ"
-        assert pos["qty"] == 100.0
-        # 浮盈计算契约：last × qty / (last - avg) × qty
-        assert pos["market_value"] == 1100.0   # 11.0 × 100
-        assert pos["pnl"] == 100.0             # (11.0 - 10.0) × 100
-        # 成本/现价/盈亏% 契约（Task12+）：avg_price/last_price 透出 + pnl_pct=(last-avg)/avg*100
-        assert pos["avg_price"] == 10.0
-        assert pos["last_price"] == 11.0
-        assert pos["pnl_pct"] == 10.0          # (11-10)/10*100 = +10%
-
-    asyncio.run(_run())
-
-
-# ----------------------------------------------------------------------------
-# 场景 ②：现价缺失（get_quotes 返 None） → pnl/market_value=None（盲价防御）
-# ----------------------------------------------------------------------------
 def test_get_positions_no_quote_pnl_none():
     """行情源对该标的返 None → pnl/market_value 必须为 None（不猜价）。"""
 
@@ -95,7 +46,7 @@ def test_get_positions_no_quote_pnl_none():
 
         with patch("trading.gateway_service.get_gateway", return_value=gw), \
              patch(
-                 "trading.gateway_service.qmt_market_data.get_quotes",
+                 "trading.qmt_market_data.get_quotes",
                  new=AsyncMock(return_value=quotes),
              ):
             result = await trading_service.get_positions()

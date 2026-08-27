@@ -64,7 +64,11 @@ def test_feed_degrades_to_daily_when_stk_mins_empty():
 
 
 async def _patch_get_quotes_and_await(feeder):
-    """协程体内 await get_quotes（对齐生产 await 形态 engine.py:1036）。"""
+    """协程体内 await get_quotes（对齐生产 await 形态 engine.py:1036）。
+
+    QMT 退役 P3（2026-08-27）：qmt_market_data 是盲价桩模块（恒空行情）——
+    patch_get_quotes 打桩路径不变，测试语义零变化。
+    """
     from trading import qmt_market_data
     with feeder.patch_get_quotes():
         return await qmt_market_data.get_quotes(["300001.SZ"])
