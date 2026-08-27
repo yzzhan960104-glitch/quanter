@@ -27,8 +27,11 @@ describe('router 路由表', () => {
   })
   it('保留核心只读路由', () => {
     const paths = router.getRoutes().map((r) => r.path)
-    for (const p of ['/discovery', '/dashboard', '/data', '/live', '/cockpit', '/jobs']) {
+    // '/live' 已退役（2026-08-27 · QMT 退役 P1）：改断言重定向而非组件路由
+    for (const p of ['/discovery', '/dashboard', '/data', '/cockpit', '/jobs']) {
       expect(paths).toContain(p)
     }
+    const live = router.getRoutes().find((r) => r.path === '/live')
+    expect(live?.redirect).toBe('/cockpit')   // 退役=重定向，非 404
   })
 })

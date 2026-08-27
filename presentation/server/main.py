@@ -420,23 +420,32 @@ async def lifespan(app: FastAPI):
     # Why try/except 不阻断：engine 装配失败（网关连不上 / state_store 建表失败 / 影子期不足）
     # 绝不应让整个 API 起不来——engine 缺席时交易 API 仍可用（手动下单路径不依赖 scheduler），
     # 仅自动 cron 编排缺席。与上面 replay_scheduler / training_orchestrator 同源软降级范式。
-    try:
-        from trading.engine import TradingEngine
-        from trading.__main__ import log_startup_banner
-        # C-5 V2：装配 engine 前打启动 banner（session/account/mode/口径版本）。
-        # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链
-        # schtasks ONSTART→python -m trading→uvicorn→lifespan 之前无 banner，session 漂移无日志可
-        # 对比。banner 先于 bootstrap（含网关 connect）输出，便于排查 .env 漂移。
-        log_startup_banner()
-        eng = TradingEngine()
-        await eng.bootstrap()
-        # 影子期闸已按 ADR-16 修订移除（2026-08-17）——engine 启动不再被自动冻结；
-        # 新参数上实盘的缓冲由人工 risk_ctrl block 开关接管（只拦增量、存量退出照常）。
-        eng.start()
-        app.state.trading_engine = eng
-        logging.getLogger(__name__).info("TradingEngine 已装配并启动")
-    except Exception:
-        logging.getLogger(__name__).exception("TradingEngine 装配异常（已忽略）")
+    #
+    # QUANTER_TRADING_FACE=off（2026-08-27 · QMT 退役方案 P1，用户批准）：跳过 engine
+    # 装配——server 以「研究面-only」形态运行（数据管道/digest/discovery API 照常，交易
+    # 面自然降级 unavailable）。掘金腿已成唯一实盘平台，本地引擎的 cron 编排与网关
+    # 连接不再装配。回滚=删 .env 该行重启（RTO<10min，方案 §五 R3）。
+    if os.environ.get("QUANTER_TRADING_FACE", "on") == "off":
+        logging.getLogger(__name__).warning(
+            "QUANTER_TRADING_FACE=off：跳过 TradingEngine 装配（QMT 退役 P1 · 研究面-only）")
+    else:
+        try:
+            from trading.engine import TradingEngine
+            from trading.__main__ import log_startup_banner
+            # C-5 V2：装配 engine 前打启动 banner（session/account/mode/口径版本）。
+            # 物理意图（spec §3.2 · [[qmt-connect-1-rootcause]]）：生产链
+            # schtasks ONSTART→python -m trading→uvicorn→lifespan 之前无 banner，session 漂移无日志可
+            # 对比。banner 先于 bootstrap（含网关 connect）输出，便于排查 .env 漂移。
+            log_startup_banner()
+            eng = TradingEngine()
+            await eng.bootstrap()
+            # 影子期闸已按 ADR-16 修订移除（2026-08-17）——engine 启动不再被自动冻结；
+            # 新参数上实盘的缓冲由人工 risk_ctrl block 开关接管（只拦增量、存量退出照常）。
+            eng.start()
+            app.state.trading_engine = eng
+            logging.getLogger(__name__).info("TradingEngine 已装配并启动")
+        except Exception:
+            logging.getLogger(__name__).exception("TradingEngine 装配异常（已忽略）")
 
     # C-7 V1：broadcast connect 收编进 lifespan（5 CONNECT_BOTS）。
     # 物理意图（spec §3.1）：start_all step ② connect 编排移此处，软降级（单 bot

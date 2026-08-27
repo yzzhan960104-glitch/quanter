@@ -29,7 +29,7 @@ import { computed, type Component } from 'vue'
 // Phase 1 · 前端只读化 Task 6：撤 MagicStick（AI 复盘导航项随 ReviewView 整删）。
 // G8 caisen 死视图清理：撤 TrendCharts（蔡森筛选）/ DataAnalysis（参数实验室）——
 //   对应导航项随 CaisenScreenView/ParamLabView 整删而移除，图标无消费者亦撤。
-import { DataBoard, Files, Monitor, View, Operation } from '@element-plus/icons-vue'
+import { DataBoard, Files, View, Operation } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const activeName = computed(() => route.path)
@@ -61,7 +61,8 @@ const researchNav: NavItem[] = [
 const liveNav: NavItem[] = [
   { to: '/cockpit', label: '综合看板', icon: View },
   { to: '/jobs', label: '作业驾驶舱', icon: Operation },
-  { to: '/live', label: '实盘中控', icon: Monitor },
+  // '/live 实盘中控' 已退役（2026-08-27 · QMT 退役方案 P1 裁决②）：掘金为唯一
+  // 实盘平台，观测走 goldminer-terminal skill（7002 API）；Monitor 图标随之退役。
 ]
 </script>
 
