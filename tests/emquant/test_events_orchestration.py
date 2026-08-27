@@ -800,6 +800,55 @@ def test_probe_self_heal_repair_fires_without_ticks(pilot, tmp_path, monkeypatch
                 if w.get("type") == "probe_self_heal_repair"]) == 1
 
 
+def test_bootstrap_startup_repair_fires_in_window(pilot, tmp_path, monkeypatch):
+    """R6-13d：启动即评估回补（用户裁决「一启动就执行」）——窗口内启动+当日死单 →
+    bootstrap 末尾直接 fire（不等半点探针/tick）；盘前启动窗口外只写 INIT 不回补。"""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "runtime.json").write_text(
+        json.dumps({"token": "test-token", "strategy_id": "st-1",
+                    "account_id": pilot.PILOT_ACCOUNT_ID}), encoding="utf-8")
+    _pin(pilot, monkeypatch, tmp_path)
+
+    fake = FakeGm()
+    st = pilot._initial_state()
+    st["scan_done"].add(TODAY)
+    st["last_pre_open_date"] = TODAY
+    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "600000.SH")[1])
+    st["placed"][TODAY] = ["dead1"]
+    rt = pilot.PilotRuntime(fake, workdir=tmp_path)
+    rt.state = st
+    monkeypatch.setattr(pilot, "_today_clock", lambda: "13:50:00")
+    rt.bootstrap(_Ctx())
+    heals = [w for w in _details(tmp_path, "WARN")
+             if w.get("type") == "startup_self_heal_repair"]
+    assert len(heals) == 1                                   # 启动通道 fire
+    placed = [c for c in fake.calls if c.get("api") == "order_volume"]
+    assert len(placed) == 1 and placed[0]["symbol"] == "SHSE.600000"
+    assert placed[0]["price"] == 10.4                        # R6-13c：取整后的挂单价
+
+    # 盘前启动（08:02 形态）：窗口闸自拒——INIT 照写、零回补
+    work2 = tmp_path / "w2"
+    (work2 / "config").mkdir(parents=True)
+    (work2 / "config" / "runtime.json").write_text(
+        json.dumps({"token": "test-token", "strategy_id": "st-1",
+                    "account_id": pilot.PILOT_ACCOUNT_ID}), encoding="utf-8")
+    fake2 = FakeGm()
+    rt2 = pilot.PilotRuntime(fake2, workdir=work2)
+    st2 = pilot._initial_state()                             # 同样带死单：考验的是窗口闸而非空态
+    st2["scan_done"].add(TODAY)
+    st2["last_pre_open_date"] = TODAY
+    st2["orders"]["dead1"] = dict(_dead_open_order("dead1", "600000.SH")[1])
+    st2["placed"][TODAY] = ["dead1"]
+    rt2.state = st2
+    monkeypatch.setattr(pilot, "_today_clock", lambda: "08:02:00")
+    rt2.bootstrap(_Ctx())
+    heals2 = [w for w in _details(work2, "WARN")
+              if w.get("type") == "startup_self_heal_repair"]
+    assert heals2 == []
+    assert [c for c in fake2.calls if c.get("api") == "order_volume"] == []
+
+
 def test_pre_open_dedup_cancels_older_duplicate(pilot, tmp_path, monkeypatch):
     """①' 同标去重（R6-13b）：两张同标在途 OPEN 单 → 撤旧留新（DEDUP CANCEL 留痕 +
     柜台撤单），新单存活——13:31 实弹竞态双挂的结果侧兜底锚。"""

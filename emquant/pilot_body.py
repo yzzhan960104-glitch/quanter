@@ -1421,6 +1421,17 @@ class PilotRuntime:
         self._audit("INIT", account=self.account, strategy_id=self.strategy_id,
                     subscribed=len(self._subscribed),
                     build_stamp=globals().get("PILOT_BUILD_STAMP", "unknown"))
+        # ── 启动即评估死单回补（R6-13d，2026-08-27 用户裁决「一启动就执行」）──
+        # 重启的语义就是「再试一次」——不该等下一个半点探针（14:31 失败再等=当日
+        # 收盘报废）。窗口/条件闸统一在 _repair_pass 内：盘前/收盘后启动自然不触发，
+        # 当日 pre_open 未跑过的启动由 09:31 定时/首 tick 自愈负责。启动是离散事件
+        # 无风暴风险（use_latch=False）；异常接住——回补故障绝不炸 init 链（策略
+        # 起不来比挂不出单更糟）。
+        try:
+            self._repair_pass(context, "startup", use_latch=False)
+        except Exception as e:
+            self._audit("WARN", type="startup_self_heal_fail",
+                        err=f"{type(e).__name__}: {e}")
 
     def _subscribe_watchlist(self):
         """订阅巡检标的：持仓 ∪ 未终态挂单（ts→gm 符号，tick 频率）——增量差集下发。
