@@ -635,9 +635,16 @@ def place_limit_buy(api, ts, price, qty, account):
     qty≤0 防御：负/零量是编程错（上游定尺/风控闸漏了），宁在本地炸也不发给柜台
     造废单占拒单频次；price≤0 不在此拦——对齐柜台拒单路径（IllegalPrice 有审计
     票据，比本地静默改价诚实）。
+
+    R6-13c（2026-08-27 价格取整）：价格统一 round(±,2) 到 A 股 0.01 tick——
+    entry=颈线+0.5×ATR 的原始浮点（如 47.42773416...）直发柜台=非法价格精度，
+    实弹 6 单「挂出即蒸发」的最大嫌疑根因（get_orders 全程不可见、无拒因票据，
+    与 IllegalPrice 家族的静默前拒形态吻合）。取整发生在这道 gm 边界=所有调用方
+    （⑤ 挂单/⑤'' 回补/on_tick 卖出族）单点收口。
     """
     if int(qty) <= 0:
         raise ValueError(f"place_limit_buy 拒绝非正量 qty={qty!r}（上游定尺异常，须人工查）")
+    price = round(float(price), 2)                       # A 股 tick=0.01（R6-13c）
     a = _api() if api is None else api
     res = a.order_volume(symbol=to_gm_symbol(ts), volume=int(qty),
                          side=a.OrderSide_Buy, order_type=a.OrderType_Limit,
@@ -654,10 +661,13 @@ def sell_limit(api, ts, price, qty, account):
     """限价卖出 → cl_ord_id（side=Sell(2)+position_effect=Close(2)，Q4 官方示例口径）。
 
     与 place_limit_buy 同构的薄封装；卖出量防御同理由（qty≤0 本地炸——卖错数量是
-    致命方向，宁可炸给编排层降级也不发废单）。
+    致命方向，宁可炸给编排层降级也不发废单）。价格同 R6-13c：round(±,2) 到 0.01
+    tick（止损挂现价本就是 tick 对齐；tp1/tp2 触发价是 neckline+mult×H 的原始
+    浮点——不取整同蒸发）。
     """
     if int(qty) <= 0:
         raise ValueError(f"sell_limit 拒绝非正量 qty={qty!r}（卖出量异常，须人工查）")
+    price = round(float(price), 2)                       # A 股 tick=0.01（R6-13c）
     a = _api() if api is None else api
     res = a.order_volume(symbol=to_gm_symbol(ts), volume=int(qty),
                          side=a.OrderSide_Sell, order_type=a.OrderType_Limit,

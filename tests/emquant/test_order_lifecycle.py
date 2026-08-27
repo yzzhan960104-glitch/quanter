@@ -203,6 +203,21 @@ def test_sell_limit_contract(pilot):
     assert kw["symbol"] == "SZSE.300750" and kw["price"] == 12.0
 
 
+def test_order_tools_round_price_to_tick(pilot):
+    """R6-13c：下单价格取整到 A 股 0.01 tick——entry=颈线+0.5×ATR 的原始浮点
+    （47.42773416...）直发柜台=非法价格精度，实弹 6 单「挂出即蒸发」的最大嫌疑
+    根因。买卖两侧同规（卖侧 tp 触发价同样是原始浮点）。"""
+    fake = FakeGm()
+    cid = pilot.place_limit_buy(fake, "600000.SH", 47.42773416666667, 100, "acc-1")
+    assert cid
+    kw = next(c for c in fake.calls if c.get("api") == "order_volume")
+    assert kw["price"] == 47.43                          # 四舍五入到分
+    cid2 = pilot.sell_limit(fake, "600000.SH", 9.999, 100, "acc-1")
+    assert cid2
+    kw2 = [c for c in fake.calls if c.get("api") == "order_volume"][-1]
+    assert kw2["price"] == 10.0
+
+
 def test_cancel_contract(pilot):
     """撤单：order_cancel 收 {cl_ord_id, account_id} dict（D7——不是裸字符串）。
 
