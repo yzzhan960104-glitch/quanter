@@ -35,10 +35,15 @@ def _queue_size(userdata: str | None = None) -> int:
 
 @router.get("/processes", summary="进程拓扑一屏视图")
 async def processes() -> dict:
-    """返回 supervisor.status() + 队列大小 + 网关态（同步薄包装，无 IO 阻塞点）。"""
-    # 延迟 import：避免路由导入期拉起 ops/trading_supervisor 的 dotenv/subprocess 链
-    from ops import trading_supervisor
-    st = trading_supervisor.status()
-    st["queue_size"] = _queue_size()
-    st["gateway_mode"] = trading_service.get_status()
-    return st
+    """进程一屏（QMT 退役 P3 改制 · 2026-08-27）：server/引擎进程拓扑 + 队列大小。
+
+    原 supervisor.status()（端口属主/pid 文件/QMT 客户端一致性三查）随
+    trading_supervisor 删除退役——掘金为唯一实盘平台，交易网关态走
+    goldminer-terminal skill（7002 API）。保留 engine_processes 探测（研究面
+    server 进程可见性）与队列大小。
+    """
+    from ops import process_topology
+    procs = process_topology.engine_processes()
+    return {"engine_processes": procs,
+            "server_alive": bool(procs),
+            "queue_size": _queue_size()}

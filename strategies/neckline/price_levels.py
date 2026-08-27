@@ -78,6 +78,8 @@ def compute_price_levels(
     tp1_h_mult: float | None,
     tp_h_mult: float,
     cancel_thresh_mult: float | None,
+    tp_adapt_h_atr: float | None = None,
+    tp_adapt_scale: float = 0.5,
 ) -> PriceLevels:
     """入场价位三件套计算（纯函数 · 零 I/O · 确定性）。
 
@@ -102,12 +104,22 @@ def compute_price_levels(
     atr），不得重排为 c* + (mult × atr) 之外的结合顺序——浮点最后一位 ulp 漂移也会
     被 golden（G4 乱小数档）拦下。
     """
+    # R6-10 B3（2026-08-25 · C 线④）：V 反修复月对症——崩跌基底 H/ATR 极大时
+    # tp2=颈线+N×H 远超可及（R6-3 实证 2026-08 58% timeout 仅 10% tp2）；
+    # 深形态锚按 scale 缩近（tp2/tp1 同缩保结构；持有期延长已证无效 R6-5 腿B）。
+    # 默认 tp_adapt_h_atr=None=关——全部配置逐位零变化（golden 钉死）；自适应只
+    # 作用 tp1/tp2 乘数（缩后仍走 c* + eff_mult × high 同式），stop/buy/cancel 不动。
+    eff_tp_h, eff_tp1_h = tp_h_mult, tp1_h_mult
+    if tp_adapt_h_atr is not None and atr > 0 and (high / atr) > tp_adapt_h_atr:
+        eff_tp_h = tp_h_mult * tp_adapt_scale
+        eff_tp1_h = (tp1_h_mult * tp_adapt_scale
+                     if tp1_h_mult is not None else None)
     return PriceLevels(
         buy_limit=(c_star + buy_limit_atr_mult * atr
                    if buy_limit_atr_mult is not None else None),
         stop=c_star - stop_atr_mult * atr,
-        tp1=(c_star + tp1_h_mult * high if tp1_h_mult is not None else None),
-        tp2=c_star + tp_h_mult * high,
+        tp1=(c_star + eff_tp1_h * high if eff_tp1_h is not None else None),
+        tp2=c_star + eff_tp_h * high,
         cancel_on=(c_star + cancel_thresh_mult * high
                    if cancel_thresh_mult is not None else None),
     )

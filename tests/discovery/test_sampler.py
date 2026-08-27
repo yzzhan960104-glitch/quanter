@@ -66,27 +66,25 @@ def test_scale_to_candidates_picks_valid_levels():
 
 
 def test_sample_search_all_feasible():
-    """sample_search 产出全部合法（经 filter_feasible，tp1≤tp_h + cancel≥tp1）。"""
-    from discovery.sampler import sample_search
+    """sample_search 产出全部合法（经 filter_feasible，cancel≥tp1；R6-8 后 tp1>tp_h 放行）。"""
+    from discovery.sampler import sample_search, PARAM_SPACE
     from discovery.constraints import is_feasible
     batch = sample_search(n_sobol=20, n_random=10, seed=42)
     assert len(batch) >= 10       # 至少裁剪后有若干合法
+    _min_rr_cands = dict((k, c) for k, c in PARAM_SPACE)["min_rr"]
     for p in batch:
         assert is_feasible(p) is True
-        assert p["min_rr"] in (1.0, 1.5, 2.0)   # P4：min_rr 活参数
-        # trailing 一致性：grace=0 时 step/floor 必为 0
-        if p["trailing_grace"] == 0:
-            assert p["trailing_step"] == 0.0
-            assert p["trailing_floor"] == 0.0
+        assert p["min_rr"] in _min_rr_cands   # P4：min_rr 活参数（候选档随空间扩容动态）
+        # trailing 一致性：R6-10 剪枝后 trailing 三维冻结出空间（grace=0 互锁
+        # normalize 已无采样面）；若未来解冻回空间，恢复 grace=0 → step/floor=0 断言
 
 
-def test_sample_search_has_21_dims():
-    """每条采样覆盖 21 维键。"""
-    from discovery.sampler import sample_search
-    from discovery.constraints import PARAM_KEYS
+def test_sample_search_covers_space_keys():
+    """每条采样覆盖 PARAM_SPACE 全键（R6-10 剪枝后 13 维，动态随空间）。"""
+    from discovery.sampler import sample_search, PARAM_SPACE
     batch = sample_search(n_sobol=5, n_random=5, seed=1)
     for p in batch:
-        for k in PARAM_KEYS:
+        for k, _cands in PARAM_SPACE:
             assert k in p, f"缺参数 {k}"
 
 

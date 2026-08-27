@@ -113,8 +113,9 @@ from typing import Any, Mapping, Optional
 from trading import clock
 from trading import calendar
 from trading import position_book as _position_book
-from trading import qmt_market_data
 from trading import state_store as _state_store
+
+from trading import qmt_market_data  # QMT 退役 P3：盲价桩模块（恒空行情，见其 docstring）
 # W1-A/T2-Task5：_resolve_account_id 反查切断 → 顶部直接 import trading.account
 # SSoT 真身（account 是叶子模块无环 · patch engine._resolve_account_id 失效 → Task 8-19 迁）。
 from trading.account import resolve_account_id as _resolve_account_id

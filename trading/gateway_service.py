@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     # submit 处局部变量注解（``from __future__ import annotations`` 下运行时零求值）
     # → TYPE_CHECKING 化零运行时代价，monkeypatch 语义不受影响（无任何运行时引用点）。
     from broker.base import OrderResult  # Layer2 阶段6 follow-up #4b：execution_gateway 垫片已删，直指 broker.base 真身
-from trading import qmt_market_data
 # W1-B（Task 10 · lazy 顶部化·模块对象风格）：state_store/clock/job_ledger 原散落 8 处
 # 函数内 lazy import 收口到顶部。Why 模块对象风格安全：调用点经 ``state_store.foo()`` /
 # ``job_ledger.foo()`` 属性访问，调用时读模块属性 → ``patch("trading.state_store.X")`` /
@@ -173,19 +172,11 @@ async def get_positions() -> list:
     if not raw:
         return []
 
-    # Task12 · 批量取现价算浮盈（修 pnl/market_value=None G6）：
-    # ``qmt_market_data.get_quotes`` 一次批量调 ``xtdata.get_full_tick(syms)``，比逐仓
-    # 单查 N→1 次 C++ 调用（与 stop_loss_monitor 同口径优化）。返回 {sym: tick_dict | None}，
-    # 缺失标的显式 None（盲价防御下游分支据此判 None）。
-    syms = list(raw.keys())
+    # Task12 原批量取现价算浮盈已随 QMT 行情层退役（2026-08-27 · QMT 退役 P3：
+    # qmt_market_data → broker/qmt_quote 删除）。本路径（QMT 网关 positions）恒盲价
+    # 降级——pnl/market_value=None（盲价防御红线原语义保留：持仓真相 vs 衍生浮盈）。
+    # 掘金腿的持仓/浮盈走 7002 API（goldminer-terminal skill）。
     quotes: dict = {}
-    if syms:
-        try:
-            quotes = await qmt_market_data.get_quotes(syms)
-        except Exception:
-            # 行情查询整体异常（xtdata 不可用/网络故障）→ 全 None 降级，绝不阻断持仓查询主路径
-            # （持仓 symbol/qty 是真相，浮盈是衍生——宁可空 pnl 也不能让 Cockpit 持仓表整页 500）。
-            logger.exception("取现价失败，pnl/market_value 将为 None（不猜价）")
 
     result = []
     for sym, pos in raw.items():

@@ -29,10 +29,20 @@ logger = logging.getLogger(__name__)
 # 21 维参数分层键名（与 scripts/param_iter.PARAM_SPACE 同源；Plan 1 只需键名分层，不需候选值）
 ID_KEYS = ["window", "min_touches", "min_suppression", "local_extrema_window",
            "min_bottoms", "breakout_vol_mult", "min_rr", "max_h_atr",
-           "stop_atr_mult", "tp_h_mult", "decay_tau"]
+           "stop_atr_mult", "tp_h_mult", "decay_tau",
+           "momentum_gate"]   # R4-H1（2026-08-24）——漏列实锤：run_full_scan 按
+                              # 本清单过滤 params 进 id_cfg，漏键=闸在 scan_symbol
+                              # 路径静默失效（受控读数与 base 逐位相同的第二层根因）
 EXEC_KEYS = ["max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
              "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
-             "trailing_grace", "trailing_step", "trailing_floor"]
+             "trailing_grace", "trailing_step", "trailing_floor",
+             # R6-5 腿 A/B 受控原型（2026-08-26）：入 EXEC_KEYS 才能经 run_full_scan
+             # 透传到 scan_symbol（momentum_gate 三层路径教训：漏列=参数静默失效）。
+             "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
+             # R6-10 B3：tp 锚自适应（默认关）
+             "tp_adapt_h_atr", "tp_adapt_scale",
+             # R6-10 L1：时间止损（默认关）
+             "time_stop_days"]
 
 
 def run_full_scan(params, universe):
@@ -41,13 +51,39 @@ def run_full_scan(params, universe):
     显式构造 id_cfg/exec_cfg 传入 scan_symbol（与 param_iter.run_one 同款，去全局 mutation）。
     遍历 universe 调 scan_symbol——单标的用 sym_df 全历史，保证 window/ATR 预热完整。
     """
-    id_cfg = {**DEFAULTS, **{k: params[k] for k in ID_KEYS}}
-    exec_cfg = {**EXEC_DEFAULTS, **{k: params[k] for k in EXEC_KEYS}}
+    # 缺键容错（R4 教训）：momentum_gate 是新增识别维，存量实验 params（21 键
+    # 时代）不含它——硬取 KeyError 会让全部存量 trial/DRAFT 评估崩。get+DEFAULTS
+    # 兜底：缺键=闸关（None），语义即「旧参数集行为零变化」。
+    id_cfg = {**DEFAULTS, **{k: params.get(k, DEFAULTS.get(k)) for k in ID_KEYS}}
+    exec_cfg = {**EXEC_DEFAULTS, **{k: params.get(k, EXEC_DEFAULTS.get(k)) for k in EXEC_KEYS}}
     window = id_cfg["window"]
+    # R4-H1 个股动量闸（2026-08-24）：scan 路径的消费点——strategy.scan_at 已有
+    # 同款过滤（replay 路径），此处覆盖 run_full_scan/scan_symbol 路径（组合口径
+    # 评估与 TPE 搜索走这条）。首夜实锤教训：闸只加 scan_at 时受控读数与 base
+    # 逐位相同（评估路径未触达）。语义一致：截至 signal_date 的 20 日收益 < gate
+    # 丢弃；数据 <21 根中性放行（次新/长停不误杀）。
+    _mg = id_cfg.get("momentum_gate")
+    _mg = float(_mg) if _mg is not None else None
     all_filled = []
     for sym, sym_df in universe.items():
         try:
             filled, _n_sig, _n_skip = scan_symbol(sym_df, window, exec=exec_cfg, id_cfg=id_cfg)
+            if _mg is not None and len(sym_df) > 20 and filled:
+                closes = sym_df["close"]
+                m20 = closes / closes.shift(20) - 1.0
+                kept = []
+                for r in filled:
+                    d = r.get("signal_date")
+                    if d is None:
+                        kept.append(r)
+                        continue
+                    ts = pd.Timestamp(d)
+                    if ts in m20.index:
+                        v = m20.loc[ts]
+                        if pd.notna(v) and float(v) < _mg:
+                            continue                     # 弱动量：弃
+                    kept.append(r)
+                filled = kept
             for r in filled:
                 r["symbol"] = sym
             all_filled.extend(filled)
@@ -161,7 +197,8 @@ def _compact_report(report) -> dict:
 
 
 def evaluate_replay(params, universe, split, start=None, end=None,
-                    position_model: dict | None = None) -> dict:
+                    position_model: dict | None = None,
+                    block_dates: frozenset | None = None) -> dict:
     """replay 模式评估（P0-2）：给定 params 跑 backtest.replay → ReplayReport 口径指标。
 
     与 discovery evaluate 的差异：
@@ -170,6 +207,8 @@ def evaluate_replay(params, universe, split, start=None, end=None,
           非 kelly/calmar；
         - 分段：默认按 split.inner/outer 各跑一段；显式 start/end → 只评单段（inner）。
         - 资金：position_model（PositionModel.to_dict()）透传，None=默认 pos_cap 口径。
+        - R3 block_dates（2026-08-23）：透传 replay 引擎的模拟线拦截（autopromote
+          G2/G3 的可交易期口径消费点；日历由调用方经 manual_risk_sim 预计算）。
     """
     from backtest.models import PositionModel
     from backtest.replay import replay
@@ -195,7 +234,8 @@ def evaluate_replay(params, universe, split, start=None, end=None,
         # inner/outer 复用同一实例会让 outer 被 inner 的锚点污染（A8 fail-fast
         # 已把这种复用升级为 ValueError，此处是真实路径修复）。
         strategy = NecklineMethodStrategy(cfg_override=params)
-        rep = replay(universe, strategy, str(seg_start), str(seg_end), position_model=pm)
+        rep = replay(universe, strategy, str(seg_start), str(seg_end),
+                     position_model=pm, block_dates=block_dates)
         out[name] = report_metrics(rep)
         if name == "inner":
             inner_report = rep
@@ -212,7 +252,7 @@ def evaluate_replay(params, universe, split, start=None, end=None,
 # R1-1（2026-08-16）：组合约束口径评估——搜索目标与实盘口径裂缝的修复
 # ============================================================================
 def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
-                      position_model=None) -> dict:
+                      position_model=None, block_dates=None) -> dict:
     """run_full_scan 的 filled → 组合约束口径指标（build_equity_curve 单源后处理）。
 
     R0 实证（口径裂缝）：scan 口径（evaluate/metrics_of 假设信号独立可下注）与 replay
@@ -225,11 +265,20 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
       - 分段按 signal_date（scan 口径惯例）；replay 按引擎逐日回放窗口；
       - 段末未平仓持仓不截断（replay 引擎同款——exit_date 可越出段末）；
       - 完整性 gate（_apply_continuity_filter）不在本路径——universe 由 freeze 已筛。
+
+    R3 block_dates（人工风控模拟线，2026-08-23）：非 None 时，signal_date 落在拦截
+    日历的新入场信号整体跳过（对齐 RISK_BLOCK.flag 拦增量语义——信号日≈挂单日，
+    拦掉的挂单没有这笔交易）。日历由调用方预计算（discovery.manual_risk_sim.
+    build_block_calendar）；ADR-16 红线：该语义只存在于回测评估，trading/ 永不触达。
     """
     from datetime import timedelta
     from backtest.models import PositionModel, build_equity_curve
+    from discovery.manual_risk_sim import is_blocked
 
-    pm = position_model or PositionModel()   # 默认 pos_cap=0.05/max_positions=6/slip 5bps=实盘同源
+    # R6-11b（用户裁决 2026-08-26）：默认组合结构切 4 并发 × 7.5%/笔（100w 基准
+    # 整手口径实测 +641% vs 旧 6×5% +558%——信号过剩下更高单笔集中度提升单位资金
+    # 效率；回撤不变）。显式传 position_model 的调用方不受影响。
+    pm = position_model or PositionModel(max_positions=4, pos_cap=0.075)
     embargo_cutoff = segment.start + timedelta(days=embargo_days)
     trades = []
     for r in filled:
@@ -242,11 +291,16 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
             continue
         if embargo_days > 0 and d.date() < embargo_cutoff:
             continue
+        if block_dates is not None and is_blocked(d, block_dates):
+            continue                              # 模拟线拦增量：该信号日人工在拦，无此单
         trades.append({"symbol": r.get("symbol"),
                        "signal_date": d,                  # 保留（sharpe extras 消费）
                        "entry_date": r.get("buy_date"),   # scan 产物成交日键名（replay 侧叫 entry_date）
                        "exit_date": r.get("exit_date"),
-                       "avg_pnl_pct": r["avg_pnl_pct"], "rr": 0.0})
+                       "avg_pnl_pct": r["avg_pnl_pct"], "rr": 0.0,
+                       "entry_price": r.get("entry"),    # R6-11：整手约束用（缺→None→有限模式跳过）
+                       "pos_cap": r.get("pos_cap"),      # R7-P2：质量分层透传（惰性，零回归）
+                       "priority": r.get("priority")})   # R7-H-R7c：排队优先级透传（惰性，零回归）
     curve = build_equity_curve(trades, pm)
     # n_trading_days：段内交易日数（镜像 replay.py:222-227——各 symbol 同区间取一计数）
     n_days = int(((universe_dates >= pd.Timestamp(segment.start)) &
@@ -279,19 +333,64 @@ def portfolio_metrics(filled, segment, universe_dates, embargo_days=0,
     return out
 
 
-def evaluate_portfolio(params, universe, split, position_model=None) -> dict:
+def portfolio_metrics_dual(filled, segment, universe_dates, embargo_days=0,
+                           position_model=None, block_dates=None,
+                           n_seeds: int = 21) -> dict:
+    """R7c 双口径并报（2026-08-26 用户裁决）：同一流水 × 两种排队纪律。
+
+    oracle = 调用方 position_model 原样（默认=引擎 exit_date 同日序）——历史
+      先知口径：全部历史读数与 A/B 的连续性锚，容量约束下隐含「最早出场先进
+      场」的最短作业优先调度（外层 +402% vs 可部署族 −5%~+20% 实测，详见
+      ROUND_LOG R7c 节），仅内部连续性用；
+    deployable = 同一 PM 换 queue_order="random"，对 n_seeds 个种子取逐指标
+      **中位数**（seed_band 给极差）——单序方差大（symbol 升序 −4.7% vs 降序
+      +20% 外层实测），任意单一顺序不可作标准，多种子中位数是稳健可部署估计。
+    其余语义（分段/embargo/模拟线/整手/min5/冻结）两口径逐位同参，唯一差异
+    是同占用日候选的进场序。
+    """
+    from dataclasses import replace as _dc_replace
+    from backtest.models import PositionModel
+    import numpy as _np
+    pm = position_model or PositionModel(max_positions=4, pos_cap=0.075)
+    oracle = portfolio_metrics(filled, segment, universe_dates,
+                               embargo_days=embargo_days,
+                               position_model=pm, block_dates=block_dates)
+    seed_ms = [portfolio_metrics(
+        filled, segment, universe_dates, embargo_days=embargo_days,
+        position_model=_dc_replace(pm, queue_order="random", queue_seed=s),
+        block_dates=block_dates) for s in range(n_seeds)]
+    deployable = {}
+    for k in seed_ms[0]:
+        try:
+            vals = _np.array([float(m[k]) for m in seed_ms])
+            deployable[k] = float(_np.median(vals))
+            deployable[f"{k}_band"] = [float(vals.min()), float(vals.max())]
+        except (TypeError, ValueError):
+            deployable[k] = seed_ms[0][k]      # 非数值键（无）原样
+    return {"oracle": oracle, "deployable": deployable,
+            "n_seeds": n_seeds}
+
+
+def evaluate_portfolio(params, universe, split, position_model=None,
+                       block_dates=None) -> dict:
     """R1-1 组合口径评估：run_full_scan 一次 → inner/outer 分段 + 分年组合指标。
 
     返回形状与 evaluate() 对齐（inner 含 yearly_calmar/min_yearly_calmar），下游
     feasibility_gate / 排序可无缝消费。信息隔离语义同 evaluate：outer 只进报告。
     yearly 口径：按信号自然年构造 Segment 复用 portfolio_metrics（A2 的 min_yearly_calmar
     在组合口径下的同款「每一年都站得住」判别——n<30 年记 0.0 逃考惩罚同源）。
+
+    R3 双口径（2026-08-23，block_dates 非 None 时）：主口径（inner/outer/yearly）=
+    **模拟线口径**（可交易期——用户裁决「宏观回撤人工兜底」的评估落地）；另附
+    inner_raw/outer_raw/min_yearly_calmar_raw（无模拟线对照，回答「没有人工时策略
+    怎样」）。组合模拟部分毫秒级，双跑成本忽略；贵步 run_full_scan 共享一次。
+    ⚠️ 口径断层：engine_hash 随本函数变更重置（R1 先例），R3 trial 与 R2 不可直比。
     """
     from discovery.split import Segment
     all_filled = run_full_scan(params, universe)
     universe_dates = next(iter(universe.values())).index   # 交易日历（同区间取一）
     inner_m = portfolio_metrics(all_filled, split.inner, universe_dates,
-                                position_model=position_model)
+                                position_model=position_model, block_dates=block_dates)
     by_year = {}
     for r in all_filled:
         d = pd.to_datetime(r["signal_date"])
@@ -302,17 +401,36 @@ def evaluate_portfolio(params, universe, split, position_model=None) -> dict:
         seg_y = Segment(f"y{y}", pd.Timestamp(f"{y}-01-01").date(),
                         pd.Timestamp(f"{y}-12-31").date())
         m = portfolio_metrics(by_year[y], seg_y, universe_dates,
-                              position_model=position_model)
+                              position_model=position_model, block_dates=block_dates)
         yearly[y] = m["calmar"] if m["n"] >= 30 else 0.0
     inner_m["yearly_calmar"] = yearly
     inner_m["min_yearly_calmar"] = min(yearly.values()) if yearly else 0.0
-    return {
+    out = {
         "inner": inner_m,
         "outer": portfolio_metrics(all_filled, split.outer, universe_dates,
                                    embargo_days=split.embargo_days,
-                                   position_model=position_model),
+                                   position_model=position_model,
+                                   block_dates=block_dates),
         "n_total": len(all_filled),
     }
+    if block_dates is not None:
+        inner_raw = portfolio_metrics(all_filled, split.inner, universe_dates,
+                                      position_model=position_model)
+        yearly_raw = {}
+        for y in sorted(by_year):
+            seg_y = Segment(f"y{y}", pd.Timestamp(f"{y}-01-01").date(),
+                            pd.Timestamp(f"{y}-12-31").date())
+            m = portfolio_metrics(by_year[y], seg_y, universe_dates,
+                                  position_model=position_model)
+            yearly_raw[y] = m["calmar"] if m["n"] >= 30 else 0.0
+        inner_raw["yearly_calmar"] = yearly_raw
+        inner_raw["min_yearly_calmar"] = min(yearly_raw.values()) if yearly_raw else 0.0
+        out["inner_raw"] = inner_raw
+        out["outer_raw"] = portfolio_metrics(all_filled, split.outer, universe_dates,
+                                             embargo_days=split.embargo_days,
+                                             position_model=position_model)
+        inner_m["min_yearly_calmar_raw"] = inner_raw["min_yearly_calmar"]
+    return out
 
 
 # ============================================================================

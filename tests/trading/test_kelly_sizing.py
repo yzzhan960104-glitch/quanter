@@ -6,7 +6,7 @@
      fail-closed 拒起；hat 越界钳制+CRITICAL（估计量语义，非风控红线语义）；
   ② eod_plan.compute 仓位注入（真链路，tmp_db 隔离 SIGNAL 落库 + 钉钉桩）：
      kelly 模式 min(hat×frac, pos_cap)；hat×frac>pos_cap 封顶回 pos_cap（单向安全）；
-     fixed 模式 qty 与改动前口径逐位一致（回归红线，5000 股=1e6×0.05/10 整百手）；
+     fixed 模式 qty 口径一致（回归红线，R6-11b 基准 7500 股=1e6×0.075/10 整百手）；
   ③ 影子日志：fixed+hat>0 打对照行但不改变 qty。
 
 实盘安全前提（AUTO_TRADE_MODE=live 在跑）：默认 fixed=零行为变化是本改动唯一合法
@@ -29,14 +29,17 @@ def _clean_sizing_env(monkeypatch):
 
 # ─────────────────────────── ① _trade_cfg 三键 ───────────────────────────
 
-def test_trade_cfg_defaults_zero_behavior_change():
+def test_trade_cfg_defaults_zero_behavior_change(monkeypatch):
     """默认：sizing_mode=fixed / fraction=0.25 / hat=0.0——部署即零行为变化。"""
+    # R6-11b：delenv TRADE_POS_CAP——默认层断言须隔离宿主/前序测试的 .env 渗入
+    # （discovery/server 侧模块顶层 load_dotenv 会把进程 env 污染成配置层值）
+    monkeypatch.delenv("TRADE_POS_CAP", raising=False)
     cfg = critical._trade_cfg()
     assert cfg["sizing_mode"] == "fixed"
     assert cfg["kelly_fraction"] == 0.25
     assert cfg["kelly_hat"] == 0.0
     # 其余键不受新增影响（抽查既有键仍在）
-    assert cfg["pos_cap"] == pytest.approx(0.05)
+    assert cfg["pos_cap"] == pytest.approx(0.05)   # 默认层未动（R6-11b 变更在 .env 配置层）
     assert cfg["stop_atr_mult"] == pytest.approx(1.0)
 
 
@@ -93,6 +96,8 @@ def _run_compute(tmp_db, monkeypatch, env):
     from trading import eod_plan, gateway_service
     for k, v in env.items():
         monkeypatch.setenv(k, v)
+    if "TRADE_POS_CAP" not in env:
+        monkeypatch.setenv("TRADE_POS_CAP", "0.075")   # R6-11b 基准（自持环境）
     monkeypatch.setattr(eod_plan.trading_plan, "push_plan_to_dingtalk",
                         lambda *a, **kw: None)
     async def _no_pos():
@@ -108,11 +113,11 @@ def _run_compute(tmp_db, monkeypatch, env):
 
 
 def test_compute_fixed_mode_qty_baseline(tmp_db, monkeypatch):
-    """回归红线：fixed 模式（默认 env）qty 与改动前逐位一致——1e6×0.05/10.0=5000 股
+    """回归红线：fixed 模式（默认 env）qty 口径一致——R6-11b 基准 1e6×0.075/10.0=7500 股
     （plan.py:141 int(budget/entry/100)*100 整百手），kelly 注入点不得污染 fixed 口径。"""
     res, orders = _run_compute(tmp_db, monkeypatch, {})
     assert res["n_orders"] == 1 and len(orders) == 1
-    assert orders[0]["order"]["qty"] == 5000
+    assert orders[0]["order"]["qty"] == 7500
 
 
 def test_compute_kelly_mode_shrinks_position(tmp_db, monkeypatch):
@@ -125,19 +130,19 @@ def test_compute_kelly_mode_shrinks_position(tmp_db, monkeypatch):
 def test_compute_kelly_capped_back_to_pos_cap(tmp_db, monkeypatch):
     """hat×fraction > pos_cap 时封顶回 pos_cap（单向安全：kelly 永不加仓）。
 
-    hat=0.5×frac=0.5=0.25 > 0.05 → 有效 0.05，qty 与 fixed 相同。
+    hat=0.5×frac=0.5=0.25 > 0.075 → 有效 0.075，qty 与 fixed 相同（R6-11b 基准）。
     """
     res, orders = _run_compute(tmp_db, monkeypatch, {"TRADE_SIZING_MODE": "kelly",
                                                      "TRADE_KELLY_HAT": "0.5",
                                                      "TRADE_KELLY_FRACTION": "0.5"})
-    assert orders[0]["order"]["qty"] == 5000
+    assert orders[0]["order"]["qty"] == 7500
 
 
 def test_compute_shadow_log_does_not_change_qty(tmp_db, monkeypatch, caplog):
     """影子日志：fixed+hat>0 只打对照行，qty 仍 fixed 口径（观察面零行为变化）。"""
     with caplog.at_level(logging.INFO, logger="trading.engine"):
         res, orders = _run_compute(tmp_db, monkeypatch, {"TRADE_KELLY_HAT": "0.12"})
-    assert orders[0]["order"]["qty"] == 5000
+    assert orders[0]["order"]["qty"] == 7500   # R6-11b 基准
     assert any("sizing-shadow" in r.message for r in caplog.records)
 
 

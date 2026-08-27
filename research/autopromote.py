@@ -150,9 +150,19 @@ def evaluate_gates(experiment_id: str, baseline_id: str | None = None,
                       "baseline_id": base_id, "candidate_id": experiment_id,
                       "lake_start": lake_start}
 
-    # ── G1-G3：replay 口径（实盘同源）──
-    res_base = evaluate_replay(base.params, universe, split)
-    res_cand = evaluate_replay(cand.params, universe, split)
+    # ── G1-G3：replay 口径 × R3 模拟线（2026-08-23 ADR-15 修订）──
+    # 口径变更：outer 段指标改在**人工风控模拟线**上评估（block_dates=池子等权
+    # 20d 滚动回撤 −15%→−10% 滞回日历）——用户裁决「震荡/趋势吃满盈利、宏观深度
+    # 回撤人工兜底」：策略对可交易期收益负责，G2/G3 在宏观回撤被人工拦截的假设
+    # 下比较基线与候选（同一日历，公平面不变）。R2 实证动机：raw outer 被 7 月
+    # −18.5% 池子回撤主导（结构性年段切换），把「可交易期更好的候选」误判为劣。
+    # 修订留痕：docs/architecture/15-autopromote-gates.md R3 段；日历构造=
+    # discovery.manual_risk_sim（ADR-16 红线：回测评估假设，trading/ 永不触达）。
+    from discovery.manual_risk_sim import build_block_calendar
+    block_dates = build_block_calendar(universe)
+    res_base = evaluate_replay(base.params, universe, split, block_dates=block_dates)
+    res_cand = evaluate_replay(cand.params, universe, split, block_dates=block_dates)
+    gates["_meta"]["manual_risk"] = "20d/-15%→-10% (R3)"
     bi, bo = res_base["inner"], res_base["outer"]
     ci, co = res_cand["inner"], res_cand["outer"]
     gates["G1_样本量"] = {

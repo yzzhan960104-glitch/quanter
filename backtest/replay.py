@@ -140,6 +140,7 @@ def replay(
     progress_cb=None,           # Callable[[done:int, total:int], None] —— 每 50 symbol 上报一次
     abort_cb=None,              # Callable[[], bool] —— True 即中止（symbol 循环顶抛 ReplayAborted）
     position_model: Optional[PositionModel] = None,   # 组合资金模型（默认 pos_cap 口径）
+    block_dates: Optional[frozenset] = None,          # R3 人工风控模拟线：被拦日跳过新信号
 ) -> ReplayReport:
     """对 price_data 滚动调 strategy.scan_at，返回 ReplayReport（策略中立）。
 
@@ -193,6 +194,12 @@ def replay(
             raise ReplayAborted()
         sym_state = state[symbol]
         for T in _iter_trading_days(df.index, start, end):
+            # R3 人工风控模拟线（2026-08-23，ADR-16 评估假设）：block_dates 命中日
+            # 跳过 scan_at——当日新信号整体不存在（拦增量语义，对齐 RISK_BLOCK.flag
+            # 在 pre_open 阶段④拦当日挂单）。纯集合判断零依赖（不 import
+            # discovery——backtest 层契约无污染；日历构造归调用方）。
+            if block_dates is not None and T.date() in block_dates:
+                continue
             try:
                 df_T = df.loc[:T]   # 严格无前视：只用 T 及之前的数据（含 T 当日）
                 hits = strategy.scan_at(symbol, df_T, T, sym_state)
@@ -364,6 +371,13 @@ def _compute_stats(hits: list, position_model: Optional[PositionModel] = None) -
             "rr": h.rr,
             "holding_bars": h.holding_bars,
             "avg_pnl_pct": h.avg_pnl_pct,
+            # R4（2026-08-24）止损解剖：补回识别几何五键——逐笔归因（diag/
+            # r4_stop_autopsy.py）的核心特征；加键向后兼容（消费方按需读）。
+            "formed_at": _iso(h.formed_at),
+            "neckline": h.neckline,
+            "bottom": h.bottom,
+            "atr": h.atr,
+            "breakout_date": _iso(h.breakout_date),
         }
         for h in sorted_hits
     ]

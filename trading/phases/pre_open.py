@@ -107,10 +107,46 @@ from trading.phases.stop_loss import (
 # engine._submit 失效 → Task 8-19 迁 monkeypatch trading.phases.pre_open.get_gateway / _submit）。
 from trading.gateway_service import get_gateway, _submit
 
+# R6-10 chase 实盘（C 线②）：现价快照与 tp2 守卫计算的纯辅助（io.quotes 单源）
+from trading.io.quotes import fetch_quotes as _fetch_quotes
+
 # logger 名硬编码 trading.engine（而非 __name__=trading.phases.pre_open）：pre_open 原是 engine
 # 模块级函数，日志打到 trading.engine logger。迁出后保 logger 名不变 = 观测面等价（运维按
 # trading.engine 过滤盘前挂单日志不断 + test_pre_open_* / test_l2 等 caplog 断言命中）。
 logger = logging.getLogger("trading.engine")
+
+
+async def _chase_price(symbol: str) -> float | None:
+    """chase 追入守卫用现价（io.quotes 单源；无价/异常 → None = fail-closed 弃）。"""
+    try:
+        snap = await _fetch_quotes([symbol])
+        q = snap.get(symbol) or {}
+        px = q.get("last_price")
+        return float(px) if px is not None and float(px) > 0 else None
+    except Exception:
+        logger.warning("pre_open chase 取现价失败 symbol=%s（fail-closed 弃单）", symbol,
+                       exc_info=True)
+        return None
+
+
+def _chase_tp2(o: dict) -> float | None:
+    """chase 守卫的 tp2（颈线+tp_h_mult×H；从 SIGNAL meta 几何算——价格单源同式）。
+
+    meta 缺几何（老信号/异变）→ None：守卫退化为「无价不追」的 fail-closed 方向
+    （tp2=None 时 _chase_price 判 px is None 才弃——px 有值仍追。Why 不 None 即弃：
+    缺几何是数据残缺不是形态透支，追入后巡检按持仓档案管理；真透支场景由
+    decide_position 的 tp2 全平兜底，追在高位的损失被 tp2 出场截断）。
+    """
+    try:
+        ep = o.get("exec_params") or {}
+        neckline = float(o.get("neckline"))
+        bottom = float(o.get("bottom"))
+        if not (neckline > bottom):
+            return None
+        tp_h = float(ep.get("tp_h_mult", 2.0))
+        return neckline + tp_h * (neckline - bottom)
+    except (TypeError, ValueError):
+        return None
 
 
 # ============================================================================
@@ -506,6 +542,12 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     # 总仓位额度（仅 max_pos<1.0 时启用）：quota = 比例×总权益 − 持仓市值，本轮挂单逐单扣减。
     # Why fail-closed：设置了上限但权益/市值查不到（断线/返空）→ 全跳过——「不知道占多少」
     # 时宁可多拦（人工可 trigger_pre_open_once 补挂），不可盲放。
+    # R6-11b 并发闸（用户裁决 2026-08-26：4 并发 × 7.5%/笔）：持仓 + 在途 OPEN
+    # 买单合计 ≥ MAX_POSITIONS → 跳过新挂（对齐回测 build_equity_curve 并发语义；
+    # 比回测更保守——在途挂单也计槽，防明日集中成交穿透并发上限）。0=不限制
+    # （零行为变化，向后兼容）。挂单成功后计数增量更新（免每单重查 DB）。
+    _max_pos_n = int(os.environ.get("MAX_POSITIONS", "0") or 0)
+    _occupied_n = 0
     _pos_quota: float | None = None   # None = 不限制（max_pos=1.0 默认，零行为变化）
     if _rc["max_pos"] < 1.0:
         _asset_rc: dict = {}
@@ -552,9 +594,24 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
     cfg_max_wait = int(os.getenv("TRADE_MAX_WAIT", "5"))
     n_submitted = 0
     n_expired = 0
+    n_chased = 0   # R6-10：chase 追入单计数（payload 可观测）
     n_rejected = 0   # C-4 U4：单只业务拒单计数（L2 聚合 CRITICAL 用，防告警风暴）
     n_pos_capped = 0  # ADR-16：总仓位额度超限跳过计数（聚合播报，防逐单刷屏）
     account_id = _resolve_account_id()
+    if _max_pos_n > 0:
+        try:
+            with _state_store._connect(_state_store._DEFAULT_DB) as _con:
+                _occupied_n = int(_con.execute(
+                    "SELECT COUNT(*) FROM position WHERE account_id=? AND qty > 0",
+                    (account_id,)).fetchone()[0])
+                _occupied_n += int(_con.execute(
+                    "SELECT COUNT(DISTINCT symbol) FROM \"order\" WHERE account_id=?"
+                    " AND purpose='OPEN' AND state IN ('PENDING','SUBMITTED','PARTIAL_FILLED')",
+                    (account_id,)).fetchone()[0])
+        except Exception:
+            logger.warning("pre_open 并发闸计数查询失败（fail-closed 拦增量）",
+                           exc_info=True)
+            _max_pos_n = -1   # 未知敞口 → 拦所有新挂（宁少勿超）
     # 确保 account 行存在（insert_order/trade_event FK 引用）
     # C-4 U3a：account 行是 insert_order/trade_event 的 FK 源——get_account/upsert_account
     # 失败=后续所有 DB 写 FK 全失效=DB 真故障。原软降级会让下游连环报 FK 错仍继续挂单，
@@ -569,14 +626,34 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
         od = o["order"]
         # max_wait 窗口过滤（plan Task 6）
         formed_at = o.get("formed_at")
+        chase_mode = False
         if formed_at:
             order_max_wait = int(o.get("max_wait") or cfg_max_wait)
             days_since = _trading_days_between(formed_at, today_for_max_wait)
             if days_since > order_max_wait:
-                n_expired += 1
-                logger.info("pre_open 跳过超期信号 symbol=%s formed_at=%s days=%d > max_wait=%d",
-                            od["symbol"], formed_at, days_since, order_max_wait)
-                continue
+                # R6-10 chase 实盘（C 线② · 2026-08-25）：等待期届满不弃单——改当日
+                # 现价限价追入（≈市价），守卫「现价 ≥ tp2 形态目标透支」仍弃。
+                # 对齐回测 simulate_exit chase_entry 语义（R6-8 冠军 chase=True 的
+                # 实盘兑现——2022 防御 alpha 腿）。现价取不到 → fail-closed 弃单
+                # （无价盲追 = 买错价，方向性错误宁可弃）。
+                if (o.get("exec_params") or {}).get("chase_entry"):
+                    px = await _chase_price(od["symbol"])
+                    tp2 = _chase_tp2(o)
+                    if px is None or (tp2 is not None and px >= tp2):
+                        n_expired += 1
+                        logger.info("pre_open chase 弃单 symbol=%s（现价=%s tp2=%s 形态透支/无价）",
+                                    od["symbol"], px, tp2)
+                        continue
+                    od = dict(od, price=px)
+                    chase_mode = True
+                    n_chased += 1
+                    logger.info("pre_open chase 追入 symbol=%s formed_at=%s days=%d 现价=%.3f",
+                                od["symbol"], formed_at, days_since, px)
+                else:
+                    n_expired += 1
+                    logger.info("pre_open 跳过超期信号 symbol=%s formed_at=%s days=%d > max_wait=%d",
+                                od["symbol"], formed_at, days_since, order_max_wait)
+                    continue
         # T8（state-store-redesign §4.1）DB 幂等挂单：
         # ① veto 保护：trade_event 最新 action=VETOED → 跳过（研究员否决不挂）
         # ② has_order(OPEN)：同日同标的已挂过 OPEN → 跳过（pre_open 重跑/崩溃重启不重复挂）
@@ -605,6 +682,13 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
                     "pre_open 总仓位额度跳过 symbol=%s 金额=%.2f > 剩余 %.2f（上限 %.0f%%）",
                     od["symbol"], _order_amt, _pos_quota, _rc["max_pos"])
                 continue
+        # R6-11b 并发闸：持仓+在途 OPEN ≥ MAX_POSITIONS → 跳过（含 fail-closed 计数失败）
+        if _max_pos_n != 0 and _occupied_n >= max(_max_pos_n, 0):
+            n_pos_capped += 1
+            logger.info("pre_open 并发闸跳过 symbol=%s（占用 %d ≥ 上限 %s）",
+                        od["symbol"], _occupied_n,
+                        _max_pos_n if _max_pos_n > 0 else "查询失败fail-closed")
+            continue
         order_req = OrderRequest(
             symbol=od["symbol"], qty=od["qty"], side=od["side"], price=od["price"],
         )
@@ -659,6 +743,8 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
             # ADR-16：挂单成功才扣减总仓位额度（拒单/失败单的额度在下轮重挂时仍可用）
             if _pos_quota is not None:
                 _pos_quota -= float(od["qty"]) * float(od["price"])
+            # R6-11b：在途并发计数增量（挂单成功即占槽；拒单不占）
+            _occupied_n += 1
             # T8：挂单成功 → 回填 order.state=SUBMITTED + broker_oid（seq）+ trade_event(ORDERED)
             try:
                 broker_oid = str(result.get("order_id") or "")
@@ -715,5 +801,7 @@ async def _pre_open_impl(date: str, ports: EnginePorts | None = None) -> dict:
         except Exception:
             logger.debug("总仓位超限播报软降级", exc_info=True)
     # A2：返回 submitted/rejected/total 供台账判定（submitted=0 且有单 → failed，不再 done 掩盖）。
+    # R6-10：chased 计数入 payload（chase 追入单可观测——晨检区分回踩单/追入单）。
     return {"submitted": n_submitted, "rejected": n_rejected,
-            "total": len(signals), "mode": _mode(), "pos_capped": n_pos_capped}
+            "total": len(signals), "mode": _mode(), "pos_capped": n_pos_capped,
+            "chased": n_chased}

@@ -206,3 +206,23 @@ def test_replay_rejects_reused_strategy_instance():
     strat._last_signal_pos = {"A": 5}   # 模拟已跑过一次的颈线策略残留状态
     with pytest.raises(ValueError, match="新建策略实例"):
         replay({"A": df}, strat, "2024-01-01", "2024-01-12")
+
+
+def test_replay_block_dates_skips_new_signals_on_blocked_days():
+    """R3 人工风控模拟线：block_dates 命中日的 scan_at 整体跳过（拦增量语义）。
+
+    两日信号各一笔：拦掉首日 → 只剩次日一笔；空日历 frozenset() 与缺省等价。
+    """
+    df = _df()
+    T1, T2 = df.index[2], df.index[3]
+    strat = _FakeStrategy(signals_by_T={
+        T1: _sig(entry=str(T1.date())), T2: _sig(entry=str(T2.date()))})
+    blocked = replay({"A": df}, strat, "2024-01-01", "2024-01-12",
+                     block_dates=frozenset({T1.date()}))
+    assert blocked.n_hits == 1
+    assert pd.Timestamp(blocked.trades[0]["entry_date"]) == T2
+    # 空日历 = 无拦截（与缺省行为一致）
+    empty = replay({"A": df}, _FakeStrategy(signals_by_T={
+        T1: _sig(entry=str(T1.date())), T2: _sig(entry=str(T2.date()))}),
+        "2024-01-01", "2024-01-12", block_dates=frozenset())
+    assert empty.n_hits == 2

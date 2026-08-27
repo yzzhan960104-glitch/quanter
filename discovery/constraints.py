@@ -13,8 +13,16 @@ Plan 2 实现范围（诚实收窄）：
   同时发现 TPE 采样绕过 normalize（Sobol 强制 2.0 而 TPE 自由 1.0/1.5/2.0）——搜索
   空间与评估空间不一致。收口：normalize 不再动 min_rr，TPE 建议经 normalize+is_feasible
   重抽（tpe_search_batch），min_rr 按候选档正常搜索。
-- 耦合 3（tp1 ≤ tp_h）：is_feasible 静态判定 ✓
-- 耦合 4（cancel ≥ tp1，None=放飞合法）：is_feasible 静态判定 ✓
+- ~~耦合 3（tp1 ≤ tp_h）~~：R6-8（2026-08-26）**撤除**——旧判据「止盈1 比止盈2
+  还远无意义」基于修复前语义：tp1>tp_h 时 lot1 按从未到达的 tp1 价位记账=幽灵成交
+  （R6-1 实锤，读数全是垃圾，禁区合理）。R6-4 修复（lot1 按当根真实到达价位记账）
+  后该区语义合法且为**当前冠军所在区**（supp04+tp1_h=2.0 > tp_h=1.5，真值
+  outer +115.4%）：tp1 限价挂 tp2 之上，首触 tp2 当根强势摸到 tp1 则 lot1 按
+  tp1 成交，否则随 tp2 同价平——「强势日多拿一段」的动量条件减仓。禁区不撤，
+  TPE 永远搜不到 R6-4 后的最优区（R5-P3 无一超旧前沿的结构性原因之一）。
+- 耦合 4（cancel ≥ tp1，None=放飞合法）：is_feasible 静态判定 ✓（保持——pending
+  期撤单价低于一档目标的组合仍判过保守；当前冠军 cancel=None 不受阻，语义厘清
+  defer 后续）
 - 耦合 5（suppression ↔ decay_tau 同开关）：**Plan 2 不裁剪**——代码实证二者独立可调
   （decay_tau=None 等权时 suppression 仍生效），spec §7.1 原文"捆绑调"语义在实证下退化为
   "都可调"，凭空裁剪会误杀合法组合。留 Plan 3 语义厘清后再定。
@@ -60,17 +68,15 @@ def normalize_params(params):
 
 
 def is_feasible(params):
-    """静态可行性判定（耦合 3/4）。params 应已 normalize。
+    """静态可行性判定（耦合 4；params 应已 normalize）。
 
-    - 耦合3：tp1_h_mult ≤ tp_h_mult（防 tp1>tp_h 退化——止盈1 比止盈2 还远无意义）。
+    - ~~耦合3 tp1≤tp_h~~：R6-8（2026-08-26）撤除——R6-4 幽灵成交修复后 tp1>tp_h
+      为合法且有据区域（新冠军 supp04+tp1=2.0 所在），旧禁区基于修复前的幽灵语义。
     - 耦合4：cancel_thresh_mult ≥ tp1_h_mult（防 cancel<tp1 过保守——未到 tp1 就撤单
       等于放弃突破）；cancel=None 视为放飞不撤（颈线法默认语义），合法。
     trailing 在 normalize 后已处置，此处不判（grace=0 时 step/floor 不参与判定）。
     """
     tp1 = params.get("tp1_h_mult", 0)
-    tp_h = params.get("tp_h_mult", 0)
-    if tp1 > tp_h:
-        return False
     cancel = params.get("cancel_thresh_mult", None)
     if cancel is not None and cancel < tp1:
         return False

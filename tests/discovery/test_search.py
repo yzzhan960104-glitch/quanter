@@ -203,13 +203,12 @@ def test_tpe_search_batch_warm_start_params_populated():
     """
     from discovery.search import tpe_search_batch
     from discovery.sampler import PARAM_SPACE
+    # R6-10 剪枝后空间 13 维：seed 只给空间内键（冻结键由冠军参数定稿，不入搜索）
     seeds = [
-        {"window": 80, "min_rr": 2.0, "min_touches": 2, "min_suppression": 0.6,
-         "local_extrema_window": 3, "min_bottoms": 2, "breakout_vol_mult": 1.5,
-         "max_h_atr": 4.0, "stop_atr_mult": 1.0, "tp_h_mult": 2.5, "decay_tau": None,
-         "max_holding": 15, "max_wait": 5, "cooldown": 5, "buy_limit_atr_mult": 1.0,
-         "tp1_h_mult": 1.0, "tp1_portion": 0.5, "cancel_thresh_mult": 1.0,
-         "trailing_grace": 0, "trailing_step": 0.0, "trailing_floor": 0.0},
+        {"min_rr": 2.0, "min_suppression": 0.3, "breakout_vol_mult": 1.0,
+         "max_h_atr": 4.5, "stop_atr_mult": 1.5, "tp_h_mult": 1.5, "decay_tau": 60,
+         "max_holding": 30, "max_wait": 27, "cooldown": 0, "buy_limit_atr_mult": 2.5,
+         "tp1_h_mult": 2.0, "cancel_thresh_mult": None},
     ]
 
     def _eval(plist):
@@ -219,11 +218,12 @@ def test_tpe_search_batch_warm_start_params_populated():
                                    param_space=PARAM_SPACE, batch_size=4)
     seed_trials = study.trials[:len(seeds)]
     assert all(len(t.params) == len(PARAM_SPACE) for t in seed_trials), (
-        f"warm-start trial params 应为 21 维全量，实际 {[len(t.params) for t in seed_trials]}")
+        f"warm-start trial params 应为空间全维（R6-10 剪枝后 {len(PARAM_SPACE)} 维），"
+        f"实际 {[len(t.params) for t in seed_trials]}")
     assert all(t.state.name == "COMPLETE" for t in seed_trials)
-    # params 与 seed 对齐（window/tp_h_mult 逐位；snap 只在越界时改动）
-    assert seed_trials[0].params["window"] == 80
-    assert seed_trials[0].params["tp_h_mult"] == 2.5
+    # params 与 seed 对齐（buy_limit/tp_h_mult 逐位；snap 只在越界时改动）
+    assert seed_trials[0].params["buy_limit_atr_mult"] == 2.5
+    assert seed_trials[0].params["tp_h_mult"] == 1.5
 
 
 # ============================================================================

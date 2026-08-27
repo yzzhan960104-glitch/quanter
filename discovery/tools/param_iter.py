@@ -29,7 +29,7 @@ import json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 脚本直跑时 sys.path[0] 是脚本目录而非仓库根，`from strategies...` 会 ModuleNotFoundError。
-# 补插仓库根（tools → discovery → 仓库根 三级上溯），与 qmt_smoke.py 同款范式。
+# 补插仓库根（tools → discovery → 仓库根 三级上溯），仓库脚本自举范式。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pandas as pd
@@ -41,32 +41,35 @@ from strategies.neckline.backtest import scan_symbol, risk_metrics, EXEC_DEFAULT
 # 每维给 2-3 档候选；window/min_suppression/max_h_atr/stop_atr_mult/tp_h_mult 沿用 v1 网格档
 # 新纳入：min_touches/local_extrema_window/min_bottoms/breakout_vol_mult/min_rr/decay_tau（识别层原漏调）
 #         + max_holding/max_wait/cooldown/buy_limit_atr_mult/tp1_h_mult/tp1_portion/cancel_thresh_mult（执行层原硬编码）
+# R6-8 扩容（2026-08-26，9h 自动优化循环前置）：档位并入 R6a 真值图谱最优档
+# （supp 0.2-0.4 / max_h_atr 4.5-5.5 / stop 2.0-2.5 / tp_h 0.65-0.8 峰值带 / cooldown 0 /
+#   max_wait 12-30 / buy_limit 2.0-3.0 / max_holding 25-40 等）+ tp1_h_mult 2.0-3.0
+# （R6-4 幽灵成交修复后 tp1>tp_h 反转区合法）。不加新维——sampler Sobol 方向数
+# 备至 21 维（momentum_gate 曾漏列但 H1 受控否决，无纳入价值）。
+# R6-10 剪枝冻结（2026-08-25 用户裁决「先把 C 线完整做完」·参数战役收官降维）：
+# 8 维冻结出空间（最优值定稿于冠军参数，引擎语义不动、只不搜）——
+#   不敏感 5 维（R6a 图谱全档 ±1pp 噪声级）：window(60)/tp1_portion(0.9)/
+#     trailing_grace(10)/trailing_step(0.05)/trailing_floor(0.5)
+#   默认最优 3 维（变档单调更差，R6a+R6-8 复扫双证）：min_touches(2)/
+#     min_bottoms(2)/local_extrema_window(3)
+# 空间 21→13 维（笛卡尔积 5.5e13→~2e8，砍 25 万倍）——结构面改动（B3/保真度）
+# 后若重开搜索，起步效率大幅提高。冻结维解除须有新实证（新结构面改变敏感性）。
 PARAM_SPACE = [
-    # —— 识别层（DEFAULTS）：形态判定 ——
-    ("window",              "id",   [40, 60, 80]),          # ① 识别窗口
-    ("min_touches",         "id",   [2, 3]),                # ② 颈线聚集足够性
-    ("min_suppression",     "id",   [0.5, 0.6, 0.7]),       # ③ 压制时长
-    ("local_extrema_window","id",   [3, 5]),                # ④ 底部极值窗口
-    ("min_bottoms",         "id",   [2, 3]),                # ⑤ 双底/三底门槛
-    ("breakout_vol_mult",   "id",   [1.0, 1.5, 2.0]),       # ⑥ 突破带量
-    ("min_rr",              "id",   [1.0, 1.5, 2.0]),       # ⑦ 盈亏比守卫
-    ("max_h_atr",           "id",   [3.0, 4.0, 5.0]),       # ⑧ 形态深度上限
-    ("stop_atr_mult",       "id",   [1.0, 1.5]),            # ⑨ 止损 ATR 倍数
-    ("tp_h_mult",           "id",   [1.5, 2.0, 2.5]),       # ⑩ 止盈2 的 H 倍数
-    ("decay_tau",           "id",   [None, 30, 60]),        # ⑪ 颈线时间衰减（None=等权）
+    # —— 识别层（DEFAULTS）：形态判定 ——（冻结维注记见上，最优值以冠军参数为准）
+    ("min_suppression",     "id",   [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]),    # ③ 压制时长
+    ("breakout_vol_mult",   "id",   [0.5, 1.0, 1.5, 2.0]),              # ⑥ 突破带量
+    ("min_rr",              "id",   [0.5, 1.0, 1.5, 2.0, 2.5]),         # ⑦ 盈亏比守卫
+    ("max_h_atr",           "id",   [3.0, 3.5, 4.0, 4.5, 5.0, 5.5]),    # ⑧ 形态深度上限
+    ("stop_atr_mult",       "id",   [1.0, 1.5, 2.0, 2.5]),              # ⑨ 止损 ATR 倍数
+    ("tp_h_mult",           "id",   [0.65, 0.7, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5]),  # ⑩ 止盈2 的 H 倍数
+    ("decay_tau",           "id",   [None, 30, 60, 90]),                # ⑪ 颈线时间衰减（None=等权）
     # —— 执行层（EXEC_DEFAULTS）：挂单/止盈/仓位/撤单 ——
-    ("max_holding",         "exec", [10, 15, 20]),          # ⑫ 成交后超时持仓日
-    ("max_wait",            "exec", [3, 5, 8]),             # ⑬ 挂单等回踩有效期
-    ("cooldown",            "exec", [3, 5, 8]),             # ⑭ 信号去重冷却
-    ("buy_limit_atr_mult",  "exec", [0.5, 1.0, 1.5]),       # ⑮ 挂单价 ATR 倍数
-    ("tp1_h_mult",          "exec", [0.5, 1.0, 1.5]),       # ⑯ 止盈1 的 H 倍数
-    ("tp1_portion",         "exec", [0.3, 0.5, 0.7]),       # ⑰ 止盈1 减仓比例
-    ("cancel_thresh_mult",  "exec", [None, 1.0, 2.0]),      # ⑱ 撤单阈值（None=不撤放飞）
-    # —— trailing 时间驱动移动止损（海龟风格 · simulate_exit 生效条件 grace>0 AND step>0）——
-    # grace=0 退化为固定止损（=当前 EXEC_DEFAULTS 默认，作基线对照，验证 trailing vs 固定谁优）
-    ("trailing_grace",  "exec", [0, 5, 10]),        # ⑲ 宽限期（0=关闭固定止损；5/10=前 N 天不收紧）
-    ("trailing_step",   "exec", [0.05, 0.1, 0.15]), # ⑳ 收紧速度（ATR/日；grace 后每日 stop 上移）
-    ("trailing_floor",  "exec", [0.0, 0.5]),        # ㉑ 收紧下限（0=到颈线；0.5=颈线−0.5ATR 卡住）
+    ("max_holding",         "exec", [10, 15, 20, 25, 30, 40]),          # ⑫ 成交后超时持仓日
+    ("max_wait",            "exec", [3, 5, 8, 12, 20, 30]),             # ⑬ 挂单等回踩有效期
+    ("cooldown",            "exec", [0, 3, 5, 8]),                      # ⑭ 信号去重冷却
+    ("buy_limit_atr_mult",  "exec", [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]),    # ⑮ 挂单价 ATR 倍数
+    ("tp1_h_mult",          "exec", [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]),    # ⑯ 止盈1 的 H 倍数（>tp_h 合法：R6-4 修复后）
+    ("cancel_thresh_mult",  "exec", [None, 1.0, 2.0, 3.0]),             # ⑱ 撤单阈值（None=不撤放飞）
 ]
 # universe（创板+科创 2025至今）固定不调 = 第 22 个"概念参数"（21 可调 + universe）
 

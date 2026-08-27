@@ -34,6 +34,9 @@ class NecklineConfig(BaseModel):
     stop_atr_mult: float = Field(1.0, ge=0.0, description="止损 ATR 倍数（颈线−N×ATR）")
     tp_h_mult: float = Field(2.0, ge=1.0, description="止盈2 H 倍数（颈线+N×H）")
     decay_tau: Optional[float] = Field(None, description="颈线聚集时间衰减（None=等权）")
+    momentum_gate: Optional[float] = Field(
+        None, description="个股动量闸（R4-H1）：突破日个股 20 日收益 < 该值不入场；None=关闭。"
+                          "个股侧而非池子侧（ADR-16：池子动量=宏观 regime 触红线）")
 
     # —— 执行层（7 维，对齐 neckline_backtest.EXEC_DEFAULTS）——
     max_holding: int = Field(15, ge=1, description="成交后超时持仓日")
@@ -52,3 +55,21 @@ class NecklineConfig(BaseModel):
     trailing_grace: int = Field(0, ge=0, description="trailing 宽限天数 b（前 b 天不收紧，给趋势确认空间；0=无宽限即日收紧）")
     trailing_step: float = Field(0.0, ge=0.0, description="trailing 收紧速度 a（ATR/日；0=固定止损退化为旧默认）")
     trailing_floor: float = Field(0.5, ge=0.0, description="trailing 最低 ATR 倍数（收紧上限；0=收到颈线，0.5=颈线−0.5ATR）")
+
+    # —— R6-5 腿 A/B 受控原型（2026-08-26；默认关=零行为变化，对齐 EXEC_DEFAULTS）——
+    chase_entry: bool = Field(
+        False, description="腿 A：等待期无回踩 → 次日开盘市价追入（垂直月盲区；"
+                           "追入价≥tp2 仍弃单）")
+    timeout_extend_days: int = Field(
+        0, ge=0, description="腿 B：超时日浮盈≥timeout_extend_min_pnl 时一次性延长持有"
+                             "日数（0=关；V 反月出场盲区/R4 H0）")
+    timeout_extend_min_pnl: float = Field(
+        0.05, ge=0.0, description="腿 B 延长门槛（超时日浮盈比例）")
+    tp_adapt_h_atr: Optional[float] = Field(
+        None, description="R6-10 B3：tp 锚自适应阈值（H/ATR 超此值时 tp2/tp1 乘数"
+                          "×tp_adapt_scale；None=关——V 反修复月对症）")
+    tp_adapt_scale: float = Field(
+        0.5, gt=0.0, le=1.0, description="B3 缩近系数（默认 0.5）")
+    time_stop_days: int = Field(
+        0, ge=0, description="R6-10 L1 时间止损：入场 N 个交易日未触发任何 tp → 离场"
+                             "（持有期分桶单调衰减的结构化兑现；0=关）")

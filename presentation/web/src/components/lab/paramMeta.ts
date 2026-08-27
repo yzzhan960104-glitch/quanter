@@ -35,6 +35,7 @@ export const PARAM_META: Record<string, ParamMeta> = {
   stop_atr_mult:        { title: '止损ATR倍数',        group: '识别层' },
   tp_h_mult:            { title: '止盈2 H倍数',        group: '识别层' },
   decay_tau:            { title: '颈线时间衰减',       group: '识别层' },
+  momentum_gate:        { title: '个股动量闸',         group: '识别层' },
   // —— 执行层（挂单/止盈/仓位/撤单，7 维）——
   max_holding:          { title: '超时持仓日',         group: '执行层' },
   max_wait:             { title: '挂单等回踩期',       group: '执行层' },
@@ -47,6 +48,13 @@ export const PARAM_META: Record<string, ParamMeta> = {
   trailing_grace:       { title: 'trailing宽限天数',    group: 'trailing层' },
   trailing_step:        { title: 'trailing收紧速度',    group: 'trailing层' },
   trailing_floor:       { title: 'trailing最低ATR倍',   group: 'trailing层' },
+  // —— R6-5 腿 A/B 受控原型（2026-08-26）默认关=零行为变化 ——
+  chase_entry:          { title: '无回踩追入（腿A）',   group: '执行层' },
+  timeout_extend_days:  { title: '超时延长日数（腿B）', group: '执行层' },
+  timeout_extend_min_pnl: { title: '延长浮盈门槛（腿B）', group: '执行层' },
+  tp_adapt_h_atr:       { title: 'tp锚自适应阈值（B3）', group: '执行层' },
+  tp_adapt_scale:       { title: 'tp锚缩近系数（B3）', group: '执行层' },
+  time_stop_days:       { title: '时间止损日数（L1）', group: '执行层' },
 }
 
 /**

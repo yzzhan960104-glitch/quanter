@@ -46,12 +46,22 @@ from ..registry import register_strategy
 _NECKLINE_ID_KEYS = (
     "window", "min_touches", "min_suppression", "local_extrema_window", "min_bottoms",
     "breakout_vol_mult", "min_rr", "max_h_atr", "stop_atr_mult", "tp_h_mult", "decay_tau",
+    "momentum_gate",   # R4-H1 个股动量闸（2026-08-24）：识别层第 12 维
 )
 _NECKLINE_EXEC_KEYS = (
     "max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
     "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
     # trailing 层（U5 Task 8）：归 exec_cfg 透传到 decide_exit → compute_stop_price
     "trailing_grace", "trailing_step", "trailing_floor",
+    # R6-5 腿 A/B（2026-08-26 补列）：chase_entry/timeout_extend 归 exec_cfg 透传到
+    # simulate_exit（scan_at/replay 口径）与 Signal.exec_params（实盘快照）。首版
+    # 参数化时漏列本白名单——分流丢弃致 exec_cfg 回落默认 False：R6-8 冠军
+    # （chase_entry=True）在 replay 口径与 export_snapshot（掘金 §0）被静默降级为
+    # chase-off。修列后 replay 口径与 scan 口径（run_full_scan 直吃 params dict）
+    # 行为一致化（replay 读数将随 chase 生效而变化，属预期修正）。
+    "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
+    "tp_adapt_h_atr", "tp_adapt_scale",   # R6-10 B3：tp 锚自适应
+    "time_stop_days",                     # R6-10 L1：时间止损
 )
 
 logger = logging.getLogger(__name__)
@@ -141,6 +151,18 @@ class NecklineMethodStrategy:
         if sig is None:
             return []
 
+        # R4-H1（2026-08-24）个股动量闸：突破日个股自身 20 日收益 < momentum_gate
+        # 则放弃该信号（止损解剖：止损组入场动量系统性弱于止盈组 Δ-2~4pp）。
+        # 无前视：df_T=df.loc[:T] 截至 T；20 日窗不足（次新/长停）按 0 处理（中性，
+        # 不因数据短误杀）。个股侧维度（ADR-16 红线注记见 DEFAULTS ⑪）。
+        _mg = self.id_cfg.get("momentum_gate")
+        if _mg is not None and len(df_T) > 20:
+            _c = df_T["close"]
+            _m20 = float(_c.iloc[-1] / _c.iloc[-21] - 1.0)
+            if _m20 < float(_mg):
+                self._last_signal_pos[symbol] = T_pos   # 与 skip 同口径：锚点更新防重扫
+                return []
+
         # 出场：simulate_exit 从 T_pos 推进 max_holding 根，需 full_df（推进用未来 K 线，属回测允许）。
         # 衔接（brief 澄清 4）：detect_signal 返的 Signal 含 neckline/bottom/atr 字段，从此处
         # 平滑取出喂 simulate_exit（原 res dict 同名字段 → Signal 同名字段，零语义漂移）。
@@ -183,6 +205,11 @@ class NecklineMethodStrategy:
             # 颈线法附加字段（详情展示用，统计层不依赖）
             neckline=sim.get("neckline"),
             avg_pnl_pct=sim.get("avg_pnl_pct"),
+            # R4（2026-08-24）几何透传：atr/bottom 补进 scan_at 产物——止损解剖
+            # （diag/r4_stop_autopsy.py）逐笔归因依赖 H/ATR 与挂单距离特征；值取
+            # detect_signal 的 sig（识别层几何真源，simulate_exit 原样消费）。
+            atr=sig.atr,
+            bottom=sig.bottom,
         )]
 
     def scan_live(self, symbol: str, df_upto, date) -> list:

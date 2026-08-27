@@ -400,3 +400,26 @@ def test_io_orchestrate_no_business_decision_warning() -> None:
             f"io/orchestrate 出现 {len(warnings)} 处疑似业务判定（启发式 warning，"
             f"需人工 review 是否真泄漏）：\n" + "\n".join(warnings)
         )
+
+
+# ============================================================================
+# 铁律 7（R3 · 2026-08-23 · ADR-16 工程隔离）：trading 全树零 discovery 依赖
+# ============================================================================
+
+# 物理意义：discovery 是研究/搜索层（含 R3 人工风控模拟线 manual_risk_sim——
+# 「宏观回撤人工兜底」的回测评估假设层）。ADR-16 裁决宏观择时判断权 100% 归
+# 人工：模拟线日历一旦被 trading import，就等于把「回测假设」偷渡成「实盘自动
+# 闸」——本铁律把这条红线机械化（R3 方案 §5.1）。trading 触达 discovery 整体
+# （不止 manual_risk_sim）本就无合法场景（搜索层依赖 strategies/backtest，方向
+# 只能反过来）。
+_TRADING_FORBIDDEN_ROOTS = {"discovery"}
+
+
+def test_trading_no_discovery_dependency() -> None:
+    """铁律 7：trading/ 零 discovery 依赖（ADR-16：宏观择时归人工，模拟线不进实盘）。"""
+    violations = _check_forbidden(
+        REPO_ROOT / "trading",
+        "trading",
+        _TRADING_FORBIDDEN_ROOTS,
+    )
+    assert not violations, "\n".join(violations)

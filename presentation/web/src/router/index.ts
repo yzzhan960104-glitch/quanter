@@ -5,7 +5,7 @@
  * - /           → 重定向 /discovery（搜索实验室：参数发现敏感性分析/热力图，研究第一入口）
  * - /discovery  → DiscoveryLabView（搜索实验室：敏感性仪表板/热力图/搜索进展，spec §4.3 只读）
  * - /dashboard  → DashboardView（活跃股池驾驶舱：2026-08-15 CR-8 删板块图块后单块布局）
- * - /live       → LiveCockpitView（实盘交易中控：QMT 连接 + 下单 + 订单/资产）
+ * - /live       → 已退役，重定向 /cockpit（2026-08-27 · QMT 退役 P1）
  * - /data       → DataLakeView（数据湖资产白盒反射）
  * - /cockpit    → CockpitView（综合看板：聚合流水/日志/心跳/资金/数据健康）
  * - /jobs       → JobCockpitView（作业驾驶舱：当天 pipeline/pre_open 台账 + 启动补跑四态）
@@ -26,7 +26,6 @@
  * - 各 View 互不依赖，按路由切片可显著降低首屏主 bundle 体积。
  */
 import { createRouter, createWebHistory } from 'vue-router'
-import LiveCockpitView from '../views/LiveCockpitView.vue'
 const DashboardView = () => import('../views/DashboardView.vue')
 const DataLakeView = () => import('../views/DataLakeView.vue')
 // 综合看板（Task 12 · 一期观测运营层前端收官）：聚合流水/日志/回测对比/心跳/资金/数据健康。
@@ -44,7 +43,8 @@ const router = createRouter({
     // 搜索实验室（P3 · spec §4.3）：敏感性仪表板 + 热力图 + 搜索进展（只读，研究动线首屏）。
     { path: '/discovery', name: 'discovery', component: DiscoveryLabView },
     { path: '/dashboard', name: 'dashboard', component: DashboardView },
-    { path: '/live', name: 'live', component: LiveCockpitView },
+    // '/live 实盘中控' 已退役（2026-08-27 · QMT 退役 P1）：重定向综合看板
+    { path: '/live', redirect: '/cockpit' },
     // 综合看板（Task 12）：实盘观测俯瞰入口，聚合心跳/资金/数据健康/流水/日志。
     { path: '/cockpit', name: 'cockpit', component: CockpitView },
     // 作业驾驶舱（Phase 2 · Task 12）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。

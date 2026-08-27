@@ -107,3 +107,124 @@ def test_default_slippage_is_conservative_5bps():
     curve = build_equity_curve(trades, PositionModel(pos_cap=0.05))
     # 10% 收益 − 双边 10bps → 净 9.9%，pos_cap 5% 贡献 = 0.00495
     assert curve[0]["equity"] == pytest.approx(1.0 + 0.05 * (0.10 - 0.0010))
+
+
+# ============================================================================
+# R7-P2 质量分层（2026-08-26 信号质量方案）：quality_alloc 按笔弹性仓位
+# ============================================================================
+def test_quality_alloc_uses_per_trade_pos_cap():
+    """quality_alloc=True：流水带 pos_cap 时每笔仓位=capital×该笔 pos_cap。
+
+    手推：A 笔 pos_cap=0.10 × 10% → +0.010；B 笔 pos_cap=0.03 × −5% → −0.0015
+    → equity 终值 1.0085（固定 5% 口径则为 1.0025——两口径在此分叉）。
+    """
+    a = _t("A", "2024-01-02", "2024-01-05", 2.0, 10.0)
+    b = _t("B", "2024-02-01", "2024-02-03", -1.0, -5.0)
+    a["pos_cap"], b["pos_cap"] = 0.10, 0.03
+    curve = build_equity_curve([a, b], PositionModel(
+        capital=1_000_000, pos_cap=0.05, max_positions=10, slippage_bps=0,
+        quality_alloc=True))
+    assert curve[0]["equity"] == pytest.approx(1.010)
+    assert curve[-1]["equity"] == pytest.approx(1.0085)
+
+
+def test_quality_alloc_off_ignores_pos_cap_key():
+    """默认关（零回归）：流水带 pos_cap 键也不生效——固定 pos_cap 口径逐位不变。"""
+    a = _t("A", "2024-01-02", "2024-01-05", 2.0, 10.0)
+    a["pos_cap"] = 0.10
+    curve = build_equity_curve([a], PositionModel(
+        capital=1_000_000, pos_cap=0.05, slippage_bps=0))
+    assert curve[0]["equity"] == pytest.approx(1.005)
+
+
+def test_quality_alloc_missing_key_falls_back():
+    """quality_alloc=True 但流水无 pos_cap 键 → 回落固定 pos_cap（不炸）。"""
+    curve = build_equity_curve([_t("A", "2024-01-02", "2024-01-05", 2.0, 10.0)],
+                               PositionModel(pos_cap=0.05, slippage_bps=0,
+                                             quality_alloc=True))
+    assert curve[0]["equity"] == pytest.approx(1.005)
+
+
+def test_return_taken_identifies_taken_subset():
+    """return_taken=True：返回真正进净值的流水子集（被并发闸跳过的不在）。
+
+    R7-P2 拥挤日闸需要逐笔归属（taken 集的 same_day_n 分层统计）。
+    """
+    trades = [
+        _t("A", "2024-01-02", "2024-01-10", 1.0, 5.0),
+        _t("B", "2024-01-03", "2024-01-11", 1.0, 5.0),
+        _t("C", "2024-01-04", "2024-01-12", 1.0, 5.0),   # 并发满 2 被跳过
+    ]
+    curve, taken = build_equity_curve(trades, PositionModel(
+        pos_cap=0.05, max_positions=2, slippage_bps=0), return_taken=True)
+    assert len(curve) == 2 and len(taken) == 2
+    assert [t["symbol"] for t in taken] == ["A", "B"]
+    # 默认返回形状不变（零回归）
+    assert build_equity_curve(trades, PositionModel(
+        pos_cap=0.05, max_positions=2, slippage_bps=0))[0]["equity"] == curve[0]["equity"]
+
+
+# ============================================================================
+# R7c 排队纪律 queue_order（2026-08-26 用户裁决「双口径并报」）：
+# exit_date=先知口径（默认，历史连续性）/ symbol=可部署口径（对外标准）/
+# priority=研究用（R7c）
+# ============================================================================
+def test_priority_queue_high_priority_wins_slot():
+    """同日重叠候选、并发=1：priority 高者进场，低者被跳过。
+
+    手推：A(早出场, priority=0) vs B(晚出场, priority=9)——exit_date 序 A 先进；
+    queue_order="priority" 后 B 先进，A 挤掉。
+    """
+    a = _t("300001.SZ", "2024-01-02", "2024-01-05", 1.0, 5.0)
+    b = _t("000001.SZ", "2024-01-02", "2024-01-09", 1.0, 8.0)
+    a["priority"], b["priority"] = 0.0, 9.0
+    curve, taken = build_equity_curve([a, b], PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="priority"),
+        return_taken=True)
+    assert [t["symbol"] for t in taken] == ["000001.SZ"]
+    assert curve[0]["pnl_pct"] == pytest.approx(8.0)
+
+
+def test_default_queue_order_is_exit_date():
+    """默认 exit_date（先知口径，零回归）：流水带 priority 键不生效。"""
+    a = _t("300001.SZ", "2024-01-02", "2024-01-05", 1.0, 5.0)
+    b = _t("000001.SZ", "2024-01-02", "2024-01-09", 1.0, 8.0)
+    a["priority"], b["priority"] = 0.0, 9.0
+    _, taken = build_equity_curve([a, b], PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0), return_taken=True)
+    assert [t["symbol"] for t in taken] == ["300001.SZ"]   # exit_date 早者先
+
+
+def test_symbol_queue_order_is_deployable():
+    """symbol 口径（可部署）：同日候选按 symbol 字典序，与出场日无关。"""
+    a = _t("300001.SZ", "2024-01-02", "2024-01-05", 1.0, 5.0)   # 早出场
+    b = _t("000001.SZ", "2024-01-02", "2024-01-09", 1.0, 8.0)   # 字典序在前
+    _, taken = build_equity_curve([a, b], PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="symbol"),
+        return_taken=True)
+    assert [t["symbol"] for t in taken] == ["000001.SZ"]    # 字典序先，非出场日
+
+
+def test_priority_queue_missing_key_is_neutral_last():
+    """priority 缺键 = 0 中性：有分者先，缺分者按原序殿后，不炸。"""
+    a = _t("A", "2024-01-02", "2024-01-05", 1.0, 5.0)   # 无 priority
+    b = _t("B", "2024-01-02", "2024-01-09", 1.0, 8.0)
+    b["priority"] = 0.1
+    _, taken = build_equity_curve([a, b], PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="priority"),
+        return_taken=True)
+    assert [t["symbol"] for t in taken] == ["B"]
+
+
+def test_random_queue_order_is_deterministic_per_seed():
+    """random 口径：同种子逐位复现（可部署标准=多种子中位数的前提）。"""
+    trades = [_t(f"S{i}", "2024-01-02", f"2024-01-{10 + i}", 1.0, 5.0)
+              for i in range(6)]
+    c1 = build_equity_curve(trades, PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="random",
+        queue_seed=7))
+    c2 = build_equity_curve(trades, PositionModel(
+        pos_cap=0.05, max_positions=1, slippage_bps=0, queue_order="random",
+        queue_seed=7))
+    assert c1 == c2
+    assert len(c1) == 1                       # 并发 1：随机挑 1 笔，合法结果

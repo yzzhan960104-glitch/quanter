@@ -101,6 +101,10 @@ def _mock_evaluations(monkeypatch, *, mutate=None):
     import discovery.snapshot as _snap
     class _M:  snapshot_hash = "snap_x"; universe_count = 1193
     monkeypatch.setattr(_snap, "freeze", lambda *a, **kw: ({}, _M()))
+    # R3（2026-08-23）：G1-G3 切模拟线口径——freeze 返回空 dict 真日历构建会炸，
+    # mock 成空日历（frozenset() = 无拦截，fake replay 读数语义不变）。
+    import discovery.manual_risk_sim as _mrs
+    monkeypatch.setattr(_mrs, "build_block_calendar", lambda *a, **kw: frozenset())
     return calls
 
 

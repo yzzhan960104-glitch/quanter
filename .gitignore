@@ -118,5 +118,16 @@ tests/e2e/_*.png
 # reasonix 工具本地数据/配置（同 .codex/ 范式，不入库）
 .reasonix/
 reasonix.toml
+
+# ========================
+# 东财掘金颈线试点运行时
+# ========================
+# 东财掘金试点运行时（state/audit/token 真值，不入库）
+.venv_emquant/
+emquant/state/
+emquant/audit/
+emquant/config/runtime.json
+# 终端腿运行时每日归档快照（archive_terminal_state.py 产物，运行时产物不入库）
+emquant/archive/
 # T13-A freshness 行数骤降 sidecar 基线（运行时状态，不入库）
 data_lake/.freshness_baseline.json

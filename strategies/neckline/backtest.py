@@ -16,8 +16,11 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os   # main():511 os.makedirs("logs") 用（U5 Task 8 补——原顶部漏 import os 致潜伏 NameError）
+# hashlib/json：R6-1（2026-08-26）识别事件缓存的稳定指纹（_stable_cfg_hash/_sym_data_hash）
 
 import numpy as np
 import pandas as pd
@@ -72,6 +75,22 @@ EXEC_DEFAULTS = {
     "commission_rate": 0.0003,   # 佣金万三（双边，买+卖各一次）
     "stamp_rate": 0.0005,        # 印花税卖 0.05%（单边卖出）
     "transfer_rate": 0.00001,    # 过户费 0.001%（双边，沪市）
+    # R6-5 腿 A/B 受控原型参数（2026-08-26 用户裁决「都测试一下」；默认关=零行为变化，
+    # 由 tests/test_r6_phantom_and_legs.py 默认关逐位等价测试守护）：
+    # 腿 A（垂直月入场结构盲区，R6-3 实锤 2024-10 池子+9.7% 而 84% 信号 skip_no_pullback
+    # 弃单）：等待期无回踩 → 次日开盘市价追入（追入价≥tp2 形态目标透支仍弃）。
+    "chase_entry": False,
+    # 腿 B（V 反月出场结构盲区，R6-3 实锤 2026-08 58% timeout 仅 10% tp2；R4 H0 线索
+    # timeout 组 rr 为正=超期平仓截断正期望单）：超时日浮盈≥门槛 → 一次性延长持有。
+    "timeout_extend_days": 0,        # 延长日数（0=关）
+    "timeout_extend_min_pnl": 0.05,  # 延长门槛（超时日浮盈比例）
+    # R6-10 B3 tp 锚自适应（C 线④ · 2026-08-25）：H/ATR > tp_adapt_h_atr 时
+    # tp2/tp1 乘数 ×tp_adapt_scale（V 反修复月对症）。None=关（默认零行为变化）。
+    "tp_adapt_h_atr": None,
+    "tp_adapt_scale": 0.5,
+    # R6-10 L1 时间止损（C 线延伸 · 2026-08-26 用户裁决）：入场 N 个交易日未触发
+    # 任何 tp → 离场（持有期分桶单调衰减的结构化兑现）。0=关（默认零行为变化）。
+    "time_stop_days": 0,
 }
 
 
@@ -165,6 +184,8 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         tp_h_mult=id_cfg.get("tp_h_mult", PRICE_LEVEL_DEFAULTS["tp_h_mult"]),
         # cancel_thresh_mult=None 是合法配置（不撤单放飞），不走数值兜底
         cancel_thresh_mult=exec.get("cancel_thresh_mult"),
+        tp_adapt_h_atr=exec.get("tp_adapt_h_atr"),
+        tp_adapt_scale=exec.get("tp_adapt_scale", 0.5),
     )
     buy_limit = levels.buy_limit   # 挂单价（颈线+N×ATR；exec 恒有值故非 None）
     # 止损基准（颈线−N×ATR，固定；risk_pct 用此基准预告初始风险；持有期 trailing 动态调整见 loop）
@@ -172,10 +193,13 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     tp1 = levels.tp1               # 第一止盈（颈线+N×H）
     tp2 = levels.tp2               # 第二止盈（颈线+N×H，识别层参数）
     cancel_on = levels.cancel_on   # 撤单阈值（None=不撤单放飞所有信号；否则等待期 high≥此价即撤单防追高）
+    # tp1=None（未配置一档）是 price_levels 合法档：落盘字段用 None 保留（round(None) 炸）
+    tp1_out = round(tp1, 3) if tp1 is not None else None
 
     # ① 等回踩成交（用户逻辑修正：等待期 high≥tp1 → 涨幅已兑现，回踩是退潮，撤单）
     wait_end = min(signal_idx + max_wait, len(sym_df) - 1)
     buy_idx = None
+    chase = False         # 腿 A 追入标记（entry 记账口径分叉用，见下方 entry 赋值）
     for i in range(signal_idx + 1, wait_end + 1):
         low_i = float(sym_df["low"].iloc[i])
         high_i = float(sym_df["high"].iloc[i])
@@ -189,22 +213,37 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
                     "exit_reason": "skip_target_met",
                     "avg_pnl_pct": 0.0, "lot1_pnl_pct": 0.0, "lot2_pnl_pct": 0.0,
                     "neckline": round(c_star, 3), "entry": None,
-                    "risk_pct": None, "tp1": round(tp1, 3), "tp2": round(tp2, 3),
+                    "risk_pct": None, "tp1": tp1_out, "tp2": round(tp2, 3),
                     "same_day_both": same_day_both, "stop_gap": False}
         if low_i <= buy_limit:
             buy_idx = i
             break
     if buy_idx is None:
-        return {"signal_date": sym_df.index[signal_idx].date(),
-                "exit_reason": "skip_no_pullback",
-                "avg_pnl_pct": 0.0, "lot1_pnl_pct": 0.0, "lot2_pnl_pct": 0.0,
-                "neckline": round(c_star, 3), "entry": None,
-                "risk_pct": None, "tp1": round(tp1, 3), "tp2": round(tp2, 3),
-                "same_day_both": False, "stop_gap": False}
+        # R6-5 腿 A（chase_entry，默认 False=原 skip 语义逐位不变）：等待期无回踩不弃单，
+        # 改 wait_end 次日开盘市价追入——垂直拉升月对症（R6-3 实锤 2024-10 池子 +9.7%
+        # 而 84% 信号 skip_no_pullback 弃单=入场结构盲区）。追入价≥tp2 时形态目标已透支
+        # （追=负期望）仍按原语义弃单；数据尾端（wait_end=len-1）无次日可追同弃。
+        if (exec.get("chase_entry") and wait_end + 1 <= len(sym_df) - 1
+                and float(sym_df["open"].iloc[wait_end + 1]) < tp2):
+            buy_idx = wait_end + 1
+            chase = True
+        else:
+            return {"signal_date": sym_df.index[signal_idx].date(),
+                    "exit_reason": "skip_no_pullback",
+                    "avg_pnl_pct": 0.0, "lot1_pnl_pct": 0.0, "lot2_pnl_pct": 0.0,
+                    "neckline": round(c_star, 3), "entry": None,
+                    "risk_pct": None, "tp1": tp1_out, "tp2": round(tp2, 3),
+                    "same_day_both": False, "stop_gap": False}
 
-    entry = min(buy_limit, float(sym_df["open"].iloc[buy_idx]))
-    # 限价买单成交价：open>buy_limit（盘中回踩）→ 成交 buy_limit；open<=buy_limit（跳空低开）
-    # → 成交 open（市价<挂单价，更优）。旧版 entry=buy_limit 高估了跳空低开的买入价。
+    if chase:
+        # 腿 A 追入成交价=当根开盘价本身（市价单语义）——不得走 min(buy_limit, open)：
+        # 追入场景 open>buy_limit 恒真（无回踩），min 会记成从未成交过的更优挂单价
+        # （与 R6-4 幽灵成交同族的「未到达价位记账」错误）。
+        entry = float(sym_df["open"].iloc[buy_idx])
+    else:
+        entry = min(buy_limit, float(sym_df["open"].iloc[buy_idx]))
+        # 限价买单成交价：open>buy_limit（盘中回踩）→ 成交 buy_limit；open<=buy_limit（跳空低开）
+        # → 成交 open（市价<挂单价，更优）。旧版 entry=buy_limit 高估了跳空低开的买入价。
     end_idx = min(buy_idx + max_holding, len(sym_df) - 1)
 
     # ② 持有期逐根判 exit（Task 5 · U3 执行单源：改调 decide_exit 纯函数）
@@ -220,6 +259,7 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     # 每根传当前 lot1_open/lot2_open 给 state，否则下根 decide_exit 会重复触发同一触发器。
     lot1_open, lot2_open = True, True
     lot1_pnl, lot2_pnl = None, None
+    extended = False         # 腿 B 一次性延长标记（timeout_extend，见 TIMEOUT 分支）
     exit_reason = "timeout"
     exit_pos = end_idx   # 默认超时（is_last 或循环自然结束）；stop_loss/tp2 break 时覆盖
     stop_gap = False     # P0-1：止损触发日跳空低开（open<stop）标记（2026-08-03 Phase A）
@@ -234,9 +274,25 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         "trailing_step": exec.get("trailing_step", 0.0) or 0.0,
         "trailing_floor": exec.get("trailing_floor"),
         "tp1_portion": exec["tp1_portion"],
+        # R6-10 L1：时间止损（0=关——decide_exit priority 3.5，N 日未触发任何 tp）
+        "time_stop_days": exec.get("time_stop_days", 0) or 0,
     }
 
-    for i in range(buy_idx, end_idx + 1):
+    # T+1 红线（R5b · 2026-08-25 实锤修复）：A 股现货当日买入不可当日卖出——
+    # 出场判定从 buy_idx **次日**起（原 range(buy_idx,...) 允许当日触发 stop/tp =
+    # 违规日内循环：实锤 base 3% 笔数/pnl 贡献 10%、tp_h=0.8 达 14%/29%，且违规笔
+    # 均收益 4-11% 远高于合规笔——止盈收紧方向的"收益引擎"曾实质依赖此漏洞）。
+    # holding_days 维持 i - buy_idx：次日=第 1 个持有日，对齐实盘 pre_open 的
+    # (entry, T-1] 交易日计数口径（C9）。
+    # 循环上界一次估满（max_holding + 腿 B 一次性延长预算），实际终点由 end_idx 动态
+    # 控制——原 for-range 上界在循环开始时求值，腿 B mid-loop 延长 end_idx 不会扩
+    # range（首版实现实锤：延长后循环仍停在旧终点 → pnls 全 None → 误返 None）。
+    # 预算=0（默认）时 loop_end == end_idx，短路守卫恒不触发，行为逐位不变。
+    ext_budget = int(exec.get("timeout_extend_days", 0) or 0)
+    loop_end = min(buy_idx + max_holding + ext_budget, len(sym_df) - 1)
+    for i in range(buy_idx + 1, loop_end + 1):
+        if i > end_idx:
+            break   # 未延长（或延长已消化）到达终点：等价原 range 终点
         row = sym_df.iloc[i]
         high, low, close = float(row["high"]), float(row["low"]), float(row["close"])
         holding_days = i - buy_idx
@@ -288,7 +344,16 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             lot2_pnl = (tp2 - entry) / entry
             lot2_open = False
             if lot1_open:
-                lot1_pnl = (tp1 - entry) / entry
+                # R6-4 幽灵成交修复（2026-08-26 用户裁决「修复」）：lot1「同日一并卖」的
+                # 成交价必须是当根真实到达过的价位——high≥tp1 → 按 tp1 记（tp1≤tp2 的
+                # 全部常规配置 high≥tp2≥tp1 恒真，逐位不变，golden 钉死）；tp1>tp2（挂远
+                # 永不触发）且 high<tp1 时按 tp2 同价平仓——原版按从未到达的 tp1 记账即
+                # 幽灵成交（R6-1 实锤：tp1_h_mult=5 档 6590/18445 笔污染，0.7×82.7%+
+                # 0.3×20.5%=64.0% 与读数精确吻合，R6a 图谱 tp1_h_mult 2.0+ 档全部受染）。
+                # tp1=None（未配置一档）同落 tp2 = 全量 tp2 语义（原版此处 (None-entry)
+                # 会 TypeError 的潜伏崩溃一并消除）。
+                lot1_exit = tp1 if (tp1 is not None and high >= tp1) else tp2
+                lot1_pnl = (lot1_exit - entry) / entry
                 lot1_open = False
             exit_reason = "tp2"
             exit_pos = i
@@ -302,7 +367,29 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             lot1_open = False
             continue
 
+        if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TIME_STOP:
+            # R6-10 L1：时间止损——N 日未触发任何 tp，剩余全量按 close 平（与
+            # timeout 同款离场方式；holding_days 天数口径也同（i-buy_idx））
+            if lot1_open:
+                lot1_pnl = (close - entry) / entry
+            if lot2_open:
+                lot2_pnl = (close - entry) / entry
+            exit_reason = "time_stop"
+            exit_pos = i
+            break   # 中途出场（与 stop/tp2 同款；timeout 靠 is_last 无需 break，本分支必需）
         if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TIMEOUT:
+            # R6-5 腿 B（timeout_extend，默认 days=0=零行为变化）：超时日浮盈≥门槛且未
+            # 延长过 → 一次性延长持有（V 反修复月对症——R6-3 实锤 2026-08 58% timeout
+            # 仅 10% tp2，崩跌基底 tp 锚远、持有截断在半山腰；R4 H0 线索 timeout 组 rr
+            # 为正=超期平仓截断正期望单）。延长期间 stop/tp1/tp2/trailing 照常判定，
+            # 新 is_last 到达再平（一次性，不链式）。数据尾端无余量不延长。
+            ext_days = exec.get("timeout_extend_days", 0) or 0
+            if (ext_days > 0 and not extended
+                    and end_idx < len(sym_df) - 1
+                    and (close - entry) / entry >= (exec.get("timeout_extend_min_pnl", 0.05))):
+                end_idx = min(end_idx + int(ext_days), len(sym_df) - 1)
+                extended = True
+                continue
             # 优先级4（原 :193-199）：is_last 超时强制平。lot1/lot2 各用 close 算 pnl。
             # decide_exit TIMEOUT 不判浮盈 threshold（Controller #5：is_last 直接平），
             # pnl 在本循环算（decide_exit 是纯决策不碰 pnl，对齐 Task 4 契约）。
@@ -336,7 +423,7 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         "neckline": round(c_star, 3),
         "entry": round(entry, 3),
         "risk_pct": round((entry - base_stop) / entry * 100, 2),  # 初始风险（基准止损 base_stop，trailing 动态前）
-        "tp1": round(tp1, 3), "tp2": round(tp2, 3),
+        "tp1": tp1_out, "tp2": round(tp2, 3),
         "H_over_ATR": round(H / atr_val, 2) if atr_val > 0 else None,
         "lot1_pnl_pct": round(lot1_pnl * 100, 2),
         "lot2_pnl_pct": round(lot2_pnl * 100, 2),
@@ -452,6 +539,150 @@ def risk_metrics(pnls, dates, pos_cap=0.05, freq_cap=150):
     return kelly, curve, ann, sharpe, max_dd
 
 
+# ============================================================================
+# R6-1（2026-08-26 · ROUND_LOG R6-PhaseA 排程①）：识别/执行解耦 + 识别事件缓存
+# ============================================================================
+# 物理意图：P1 类单维扫描中执行层 ~10 维（max_holding/max_wait/cooldown/buy_limit/
+# tp 组/cancel/trailing 等）不改变识别产物，却每次全量重跑识别循环（识别占
+# scan_symbol 耗时 >95%，单次全 universe 评估 ~2.5min）。把 scan_symbol 拆两段：
+# 段 1 识别循环（exec 无关，三键缓存）+ 段 2 快路径（cancel 守卫重放 + 去重 +
+# simulate_exit）——同 id_cfg 换 exec 的二次评估跳过识别，秒级。
+#
+# exec 对识别产物的污染点全表（拆分正确性的根基，动识别内核时须复核本清单）：
+#   1. _post_detect 的 cancel_on close 守卫（exec_cfg["cancel_thresh_mult"]）——
+#      exec 参数但信号过滤语义 → 段 1 以守卫中性 exec 调 detect_signal_fast，
+#      段 2 用同一公式逐位重放（见 scan_symbol 段 2）；
+#   2. Signal.entry_price/exec_params（buy_limit_atr_mult 等在识别装配期算入，
+#      detect 内核的 rr 本身纯 id_cfg——entry=c_star、stop/tp 乘数皆识别层键）——
+#      段 1 只缓存几何四元组 (neckline, bottom, atr, formed_at)（均为内核 round
+#      后定稿值），entry/rr 从不读 Signal 字段：段 2 的 simulate_exit 内部走
+#      compute_price_levels 单源（价位数学唯一归宿，CR-2/A5+C1）。
+# 红线：method_v0.py / signal.py 逐字节不动（C2 双轨地基）；拆分前后输出逐位
+# 一致由 tests/test_r6_id_exec_split.py 三层守护（拆分==一体化参考实现、缓存
+# 命中==无缓存、同 id_cfg 异 exec 二次评估命中）。
+_ID_CACHE_GEN = "r6-1"   # 识别路径语义变化时手工 bump（老缓存键自动失效）
+_ID_CACHE_MAX_EVENTS = 400_000   # 进程内缓存事件总量上限（~50-100MB，防长跑搜索无界增长）
+
+# 模块级缓存（进程内单例，同 discovery/worker.py _WORKER_STATE 范式：worker 进程
+# 跨 trial 复用，不随 params pickle 跨进程）。评估单线程，dict 操作 GIL 原子，无锁。
+_scan_id_cache: dict = {}   # key → list[(i, (neckline, bottom, atr, formed_at))]，勿原地 mutate
+_scan_id_cache_n_events = 0         # 已缓存事件总数（有界驱逐的计数基准）
+_scan_id_cache_stats = {"hit": 0, "miss": 0, "evict": 0}
+
+# 守卫中性 exec：cancel_thresh_mult=None 关掉 _post_detect 的 cancel_on close 守卫
+# （该守卫在 scan_symbol 段 2 重放）；entry_price/exec_params 装配残值不出段 1。
+_GUARD_NEUTRAL_EXEC = {"cancel_thresh_mult": None}
+
+
+def _stable_cfg_hash(cfg: dict) -> str:
+    """识别参数 dict → 稳定指纹（sort_keys JSON → sha256[:16]）。"""
+    return hashlib.sha256(
+        json.dumps(cfg, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def _sym_data_hash(sym_df) -> str:
+    """识别输入内容指纹：high/low/close/volume 四列 + index 行（ATR/极值掩码/衰减
+    权重皆由此派生；simulate_exit 独读的 open 不入指纹——段 2 每次现跑不缓存）。
+    pd.util.hash_pandas_object 进程内确定（缓存进程生命周期 < pandas 版本变化）。"""
+    h = hashlib.sha256()
+    rows = pd.util.hash_pandas_object(
+        sym_df[["high", "low", "close", "volume"]], index=True).to_numpy()
+    h.update(rows.tobytes())
+    h.update(str(len(sym_df)).encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def _scan_id_cache_state() -> dict:
+    """缓存状态快照（diag 提速实测/测试断言用）。"""
+    return {"count": len(_scan_id_cache), "events": _scan_id_cache_n_events,
+            **_scan_id_cache_stats}
+
+
+def _clear_scan_id_cache() -> None:
+    """清空识别事件缓存与计数器（测试隔离/运维复位用）。"""
+    global _scan_id_cache_n_events
+    _scan_id_cache.clear()
+    _scan_id_cache_n_events = 0
+    _scan_id_cache_stats.update(hit=0, miss=0, evict=0)
+
+
+def _id_cache_put(key, events) -> None:
+    """入缓存 + 总量有界驱逐（FIFO，dict 保持插入序）：超上限从最老条目逐出至
+    额度内——长跑搜索（数百 id_cfg 变体 × 全 universe）缓存无界增长会吃 worker
+    RSS 预算（P2 看门狗 6GB）。驱逐只损速度不损正确性（键完整时 miss 即重算）。"""
+    global _scan_id_cache_n_events
+    _scan_id_cache[key] = events
+    _scan_id_cache_n_events += len(events)
+    while _scan_id_cache_n_events > _ID_CACHE_MAX_EVENTS and len(_scan_id_cache) > 1:
+        oldest = next(iter(_scan_id_cache))
+        _scan_id_cache_n_events -= len(_scan_id_cache.pop(oldest))
+        _scan_id_cache_stats["evict"] += 1
+    # 单条目即超限（异常巨标的）：len>1 守卫防自逐——保最后一条，宁可占内存不失速
+
+
+def _identify_events(sym_df, id_cfg):
+    """段 1（R6-1 可缓存）：滚动识别循环 → 未去重原始识别事件（exec 无关）。
+
+    与拆分前 scan_symbol 识别段逐行同源（arr/ATR/极值掩码/衰减权重预计算 + 逐日
+    detect_signal_fast，P1 fast path 全套注记见 git 历史），唯二差异：
+      - exec 位传【守卫中性 exec】（cancel 守卫在段 2 重放）；
+      - Signal 只取几何四元组 (neckline, bottom, atr, formed_at)——装配字段
+        entry_price/exec_params 含 exec 污染不缓存；atr 是未取整的 ATR 末值
+        float(atr_arr[i])（_post_detect 同源，勿改为内核 round 后的 res["atr"]）。
+    """
+    # 预算全序列 ATR 一次（窗口对齐 id_cfg["window"]，与 scan_at 同源）。
+    atr_full = compute_atr(sym_df["high"], sym_df["low"], sym_df["close"], window=id_cfg["window"])
+    arr = {
+        "high": sym_df["high"].to_numpy(),
+        "low": sym_df["low"].to_numpy(),
+        "close": sym_df["close"].to_numpy(),
+        "volume": sym_df["volume"].to_numpy(),
+        "index": sym_df.index,
+    }
+    atr_arr = atr_full.to_numpy()
+    tops_mask = local_extrema_mask(arr["high"], TOPS_WINDOW, kind="max")   # 顶部聚集（TOPS_WINDOW 单源）
+    lows_mask = local_extrema_mask(arr["low"], id_cfg["local_extrema_window"], kind="min")
+    tau = id_cfg.get("decay_tau")
+    decay_weights = None
+    if tau and tau > 0:
+        decay_weights = decay_weights_of(id_cfg["window"], tau)   # exp(-(n-1-i)/tau) 单源
+
+    events = []
+    for i in range(id_cfg["window"], len(sym_df)):
+        # 识别统一（U2 · 2026-07-29 Task 3 → P1 2026-08-13 fast path）：与 scan_live/
+        # scan_at 同一识别内核（_detect_core_window + _post_detect），仅 exec 位中性化。
+        sig = detect_signal_fast(None, arr, i, id_cfg, _GUARD_NEUTRAL_EXEC,
+                                 sym_df.index[i], atr_arr,
+                                 tops_mask=tops_mask, lows_mask=lows_mask,
+                                 decay_weights=decay_weights)
+        if sig is not None:
+            events.append((i, (sig.neckline, sig.bottom, sig.atr, sig.formed_at)))
+    return events
+
+
+def _cached_identify_events(sym_df, id_cfg):
+    """段 1 的缓存包装，三键 = (id_cfg 稳定 hash ‖ 缓存代‖内核身份, 数据内容 hash)。
+
+    内核身份 = detect_signal_fast.__qualname__（调用时解析模块全局）——生产恒定
+    （跨 trial 复用即提速来源）；测试 monkeypatch 换桩自动换键，mock 事件不污染
+    真路径缓存、反之亦然。env NECKLINE_ID_CACHE=off 零代码旁路（对照/回滚口，
+    同 DISCOVERY_OBJECTIVE env 先例）。"""
+    if os.getenv("NECKLINE_ID_CACHE", "on").lower() == "off":
+        return _identify_events(sym_df, id_cfg)
+    key = (_stable_cfg_hash(id_cfg) + "|" + _ID_CACHE_GEN + "|"
+           + detect_signal_fast.__qualname__,
+           _sym_data_hash(sym_df))
+    cached = _scan_id_cache.get(key)
+    if cached is not None:
+        _scan_id_cache_stats["hit"] += 1
+        return cached
+    _scan_id_cache_stats["miss"] += 1
+    events = _identify_events(sym_df, id_cfg)
+    _id_cache_put(key, events)
+    return events
+
+
 def scan_symbol(sym_df, window, exec=None, id_cfg=None):
     """对单标的滚动识别 + 去重 + 模拟，返回成交结果列表与统计。
 
@@ -463,67 +694,39 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
         mutation 后：param_iter.run_one 已显式构造 id_cfg 传入（不再靠 DEFAULTS.update
         全局 patch），driver 路径由 NecklineMethodStrategy.scan_at 经 self.id_cfg 传入；
         两侧均显式透传，simulate_exit 亦经 id_cfg 显式接收（不读全局）。
+    R6-1（2026-08-26）：拆两段——段 1 识别循环 exec 无关化 + 三键进程内缓存（同
+    id_cfg 换 exec 的二次评估跳过识别，识别占耗时 >95%）；段 2 = cancel_on close
+    守卫重放（原在 _post_detect 内以 exec 判，公式逐位同款）→ dedup（cooldown 是
+    exec 参数但识别语义，去重放段 2）→ simulate_exit。拆分前后输出逐位一致
+    （tests/test_r6_id_exec_split.py 守护）。
     """
     if exec is None:
         exec = EXEC_DEFAULTS
     if id_cfg is None:
         id_cfg = {**DEFAULTS, "window": window}
-    # 预算全序列 ATR 一次（窗口对齐 id_cfg["window"]，与 scan_at 同源），下方仅用于
-    # 给每个 sig_idx 复算 ATR 末值喂 simulate_exit（与 detect_signal 内部 compute_atr 同口径，
-    # 两侧 rolling 到 sig_idx 等价）。
-    atr_full = compute_atr(sym_df["high"], sym_df["low"], sym_df["close"], window=id_cfg["window"])
 
-    # —— P1 fast path（2026-08-13 · spec §2.1）：预计算全序列数组 + 极值掩码 ——
-    # 物理意图：旧循环每 T 调 detect_signal(sym_df.iloc[:i+1], atr_full.iloc[:i+1])——
-    # 每次 iloc 切片都新建 DataFrame/Series 拷贝（O(n²) 总拷贝量），P0-1 cProfile 实测
-    # 识别路径占 scan_symbol cumtime ~80% 主导（pandas 切片/拷贝叶子 + search_neckline
-    # O(tops²) 循环）。fast path 改为：一次性预计算 numpy 数组 + 极值掩码 + 衰减权重，
-    # 逐日只做零拷贝窗口视图切片（s:pos+1）——detect_signal_fast 与 detect_signal 逐位
-    # 等价（tests/test_p1_fast_path.py + P0-3 冻结基线 compare() 守护）。
-    # 掩码全序列预计算与「逐窗口现场算」逐位一致：局部比较只用 ±w 邻居，窗口内位置
-    # 的邻居恒在窗口内，窗口切片的掩码 == 窗口上重算的掩码（P0 交接注记等价论证）。
-    arr = {
-        "high": sym_df["high"].to_numpy(),
-        "low": sym_df["low"].to_numpy(),
-        "close": sym_df["close"].to_numpy(),
-        "volume": sym_df["volume"].to_numpy(),
-        "index": sym_df.index,
-    }
-    atr_arr = atr_full.to_numpy()
-    tops_mask = local_extrema_mask(arr["high"], TOPS_WINDOW, kind="max")   # 顶部聚集（TOPS_WINDOW 单源，search_neckline 同源）
-    lows_mask = local_extrema_mask(arr["low"], id_cfg["local_extrema_window"], kind="min")
-    tau = id_cfg.get("decay_tau")
-    decay_weights = None
-    if tau and tau > 0:
-        decay_weights = decay_weights_of(id_cfg["window"], tau)   # exp(-(n-1-i)/tau) 单源
+    # —— 段 1（可缓存）：识别循环 → 未去重事件 [(i, (neckline, bottom, atr, formed_at))] ——
+    events = _cached_identify_events(sym_df, id_cfg)
 
-    signals = []
-    for i in range(id_cfg["window"], len(sym_df)):
-        # 识别统一（U2 · 2026-07-29 Task 3）：改调单一识别源 ``detect_signal``
-        # （strategies/neckline/method_v0.py:302，Task 2 已测），与 scan_live / scan_at 同源。
-        #
-        # 识别口径变化（brief 澄清 2，spec D9 设计预期）：原 scan_symbol 只调
-        # detect_neckline_method（无 cancel_on / 无当日突破过滤），改调 detect_signal 后识别层
-        # 多了【cancel_on close 守卫】+【当日突破过滤】——研究侧识别口径向实盘 scan_live 对齐
-        # （识别单源 D9）。这【可能让某些冲天突破信号被识别期 cancel_on 挡掉】，影响回测
-        # 结果，但 golden gate 在 Task 5（本 task 不跑 golden）。scan_symbol 的 detect_signal
-        # 路径与 scan_at 现在完全一致（都调 detect_signal），双轨一致性守护
-        # test_scan_symbol_matches_strategy 仍守 simulate_exit/去重链路不分叉。
-        #
-        # P1-6：预算好的 atr_full 按候选日截断传入（与 detect_signal 自算逐位等价，
-        # 由 test_detect_signal_precomputed_atr_equivalent 守卫），省每 i 全量重算。
-        # P1（2026-08-13）：改调 detect_signal_fast——同一识别内核（_detect_core_window +
-        # _post_detect 与 detect_signal 完全共用），只是入口从 df 切片换成全序列数组+位置，
-        # 消除逐日 iloc 双切片。date 入参仍为 sym_df.index[i]（自然日，DatetimeIndex label）。
-        sig = detect_signal_fast(None, arr, i, id_cfg, exec, sym_df.index[i], atr_arr,
-                                 tops_mask=tops_mask, lows_mask=lows_mask,
-                                 decay_weights=decay_weights)
-        if sig is not None:
-            signals.append((i, sig))
-    signals = dedup_signals(signals, cooldown=exec["cooldown"])
+    # —— 段 2：exec 语义逐项重放 ——
+    # cancel_on close 守卫（D9 识别期预判）：与 method_v0._post_detect 内联版逐位
+    # 同式——H/cancel_on/比较三行的运算顺序不得重排（浮点等价红线）；守卫只删行
+    # 不重排，对缓存事件按 i 升序过滤 == 原版在识别循环内逐 i 判。
+    cancel_thresh = exec.get("cancel_thresh_mult")
+    close_arr = sym_df["close"].to_numpy()
+    kept = []
+    for i, ev in events:
+        if cancel_thresh is not None:
+            H = ev[0] - ev[1]
+            cancel_on = ev[0] + cancel_thresh * H
+            if float(close_arr[i]) >= cancel_on:
+                continue   # 涨幅已兑现，不产回踩挂单信号（挡冲天突破）
+        kept.append((i, ev))
+    signals = dedup_signals(kept, cooldown=exec["cooldown"])
     filled = []
     n_skip = 0
-    for sig_idx, sig in signals:
+    for sig_idx, ev in signals:
+        neckline, bottom, atr_val, _formed_at = ev
         # 显式透传 id_cfg（Critical C1 修复·Layer2 #2a 去 mutation 后的正确性补强）：
         # 旧版靠 param_iter.run_one 的 DEFAULTS.update(id_params) 全局 mutation，让
         # simulate_exit 默认 id_cfg=None → 读"已 patch 的全局"。去 mutation 后全局变纯净，
@@ -531,7 +734,7 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
         # 悄悄丢弃 param_iter 搜到的非默认档（偷改目标函数，违反 spec #2 + golden 零漂移
         # 等价红线——默认参数下 1.0/2.0==DEFAULTS 故 golden 漏报）。此处转发 = 基线 mutation
         # 语义的真等价（与 run_one 旧版 update 后 simulate_exit 读到的值字面相同）。
-        sim = simulate_exit(sym_df, sig_idx, sig.neckline, sig.bottom, sig.atr,
+        sim = simulate_exit(sym_df, sig_idx, neckline, bottom, atr_val,
                             exec=exec, id_cfg=id_cfg)
         if sim is None:
             continue
@@ -545,8 +748,8 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
             #   去重决策）。此处保留 None 占位（backtest/tools/analyze_fullscan 等下游脚本对
             #   dropna 兼容），真实妥协——defer Task 5 在 detect_signal 侧补 Signal 元数据字段，
             #   不在本 fix 范围扩大返回类型。
-            # - H_over_ATR：由 simulate_exit 算并保留（sim 本就有，见 backtest.py:225，
-            #   H=c_star-bottom=sig.neckline-sig.bottom，atr_val=sig.atr，同源），勿覆盖为 None。
+            # - H_over_ATR：由 simulate_exit 算并保留（sim 本就有，见上方 simulate_exit，
+            #   H=c_star-bottom，atr_val=sig.atr，同源），勿覆盖为 None。
             #   下游 analyze_fullscan.py:17 等大量消费 trades["H_over_ATR"].dropna() 做形态深度
             #   分桶——原 implementer 多写一行 sim["H_over_ATR"]=None 把正确值冲掉致 dropna 全失效。
             vol_T = float(sym_df["volume"].iloc[sig_idx])
