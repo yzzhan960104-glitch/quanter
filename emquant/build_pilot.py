@@ -125,7 +125,7 @@ def build(output_path: Path | None = None) -> Path:
         "# 试点硬闸（spec FR3）：单日新挂 ≤2；单票市值 ≤5%；仿真账户固定。\n"
         "PILOT_MAX_NEW_ORDERS_PER_DAY = 2\n"
         "PILOT_MAX_POSITION_PCT = 0.05\n"
-        "PILOT_ACCOUNT_ID = 'e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1'\n\n\n"
+        "PILOT_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'\n\n\n"
     )
     parts = [head, hoist + "\n\n", sec0,
              "# ============================ §1 识别内核（signal.py + method_v0.py 逐字块，C2）============================\n" + sig + "\n\n\n" + mv0 + "\n\n\n",

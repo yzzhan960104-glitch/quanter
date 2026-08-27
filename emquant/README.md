@@ -36,12 +36,14 @@ emquant_neckline_pilot.py（组装产物，勿手改）
    ```json
    {
      "token": "<第 3 步生成的值>",
-     "strategy_id": "08b25d85-9cf8-11f1-a09d-7c10c93fcb7d",
-     "account_id": "e7cb55d6-04ab-4ea9-98fc-503d9f97d2a1"
+     "strategy_id": "d9324346-9d1b-11f1-ae25-7c10c93fcb7d",
+     "account_id": "67334fef-a137-11f1-8228-52560acd7da0"
    }
    ```
 
-   （account_id 已是仿真账户真值；三键语义与仓库侧
+   （account_id 已是仿真账户真值——2026-08-27 换代自 `e7cb55d6-…`
+   （12 亿预置仓组合污染权益，5% 定尺 ≈6000 万/单超出可用现金，柜台连续拒单）；
+   新账户初始资金 10 万，权益=现金，定尺回到真实口径。三键语义与仓库侧
    `emquant/config/runtime.json.example` 一致。缺文件 / 缺 token 启动即中文 raise，
    不静默空跑。）
 3. **生成 token**：终端右上角「系统管理 → 密钥管理」生成并复制（绑定本机 ID；
@@ -59,9 +61,9 @@ emquant_neckline_pilot.py（组装产物，勿手改）
    `GmError 1021: 非法日期时间格式; 回测开始时间:[]不符合[yyyy-mm-dd hh:mm:ss]`
    ——本试点按仿真实盘事件模型设计（schedule 盘前五阶段/tick 巡检），不支持
    回测模式，此报错即「入口走错」的确定性信号。
-   init 链（读配置 → C1 复核 → 柜台对账 → 订阅 → 注册
-   09:15:00 / 15:35:00 双定时）跑通后，当日 `audit/audit_YYYYMMDD.csv` 首行落
-   `INIT`。`state/`、`audit/` 目录首启自动创建。
+  init 链（读配置 → C1 复核 → 柜台对账 → 订阅 → 注册
+  09:31:00 盘前 / 15:36:00 盘后双定时 + 10:31~15:31 半点探针，R6-12 口径）跑通后，
+  当日 `audit/audit_YYYYMMDD.csv` 首行落 `INIT`。`state/`、`audit/` 目录首启自动创建。
 
 > 仓库侧冒烟（可选，验证脚本形态入口）：
 > `PYTHONUTF8=1 E:/quanter/.venv_emquant/Scripts/python.exe emquant/emquant_neckline_pilot.py`
