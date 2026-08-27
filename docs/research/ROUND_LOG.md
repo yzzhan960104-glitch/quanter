@@ -340,3 +340,12 @@
 - **Phase B**：16 维贪心 3 轮，唯一采纳 buy_limit_atr_mult 2.5→2.0（inner Δ+3.6pp 4/5 同向，G3-5 过）。方向假设对照：**出场侧吞吐族（max_holding/tp_h/trailing/tp_adapt）全档负或噪声内——「部署口径偏好紧出场」预测被否**；cancel_thresh 开启灾难级（−8.7~−12.0pp，放飞信号在部署口径更致命）；敏感方向在入场/识别侧（浅挂单=快成交短冻结），与吞吐精神一致但换了兑现维度。
 - **Phase C 终审（fail-closed 生效）**：champion（B3+buy_limit 2.0）vs 原 B3，K=21 配对——inner +2.94pp（16/21 同向）但 **outer holdout 2025-26 中位 −5.4pp（7/21）方向反转 → 整体 VETO**，oracle 全期 −2.2pp 同向佐证。维持 incumbent，ACTIVE/实盘零改动。
 - **战役级结论**：**参数杠杆在两个口径下均已到顶**（先知口径 R6 收官 + 部署口径本轮 150 评估唯一边际死于 holdout）——剩余杠杆确认不在参数面；H-R7d（吞吐感知可部署优先级，执行面）与 L4 双轨执行质量成为仅存的两条增益线。R8 的第二价值：部署口径参数响应地图（logs/r8_deploy_loop/）——window/min_bottoms/max_h_atr 弱正但不过闸，buy_limit 入场维唯一真信号但 OOS 反转。
+
+## R7-H-R7d · 2026-08-27 · 吞吐感知优先级双变体受控——双 VETO（eff 型教科书过拟合 / occ 型双段正但闸差一票），执行层增益线首战未获预登记确认
+
+- **发射**（用户指令「r7 r8 继续启动」——R8 已收官，正确对象=R7 台账登记的 H-R7d）：两阶段预登记写死于 `diag/quality_r7d_throughput.py`——Stage 1 对**槽位效率** t_eff=avg_pnl/occupancy（occupancy=wait+holding 交易日）与副目标 t_occ 做判别力普查（18 特征+15 交互，Bonferroni p<9.8e-4，年段 4/5+wf 双折）；Stage 2 受控 A/B（priority 序 vs random 21 种子，A1 inner 胜中位+≥15/21 / A2 outer holdout 同款一票否决 / A3 逐年 ≥−10pp / A4 换手 ≥70%）。
+- **Stage 1（判别力远厚于 pnl 轴）**：t_eff 存活 9 单特征+5 交互（h_atr/rr_id/pattern_days/ret5/ret20/breakout_ret/bvr/vol5_slope/pv_corr10+动量交互族）；t_occ 存活 5（suppression/ret20/ret60/atr_pct/vol5_slope 全负向=「安静稳定」候选占用更短）。occupancy 均值 13.0 天。
+- **Stage 2 双 VETO**：
+  - **eff 型（14 特征，主型）**：inner Δ+6.2pp 胜 20/21 → **outer holdout Δ−3.8pp 胜 4/21 反转**——富特征+交互的教科书过拟合形态（与 R8 buy_limit 同款死法）；
+  - **occ 型（5 特征取负，副型）**：inner +2.3pp 但 14/21（A1 差一票）、**outer +2.6pp 胜 15/21（holdout 过）**、2023 年 −16pp（A3 破）；吞吐实增（inner taken 325 vs 300）但胜率降至 0.48=多吃小单。
+- **裁决**：双 VETO 维持（occ 型「inner 差一票+outer 过」不构成采纳——闸后调整=购物）；**吞吐轴的信号是真实的**（占用可预测性远厚于 pnl、occ 优先实增吞吐、双段中位为正），登记为「待新窗口确认」第二候选（与 H-R7a 同队列）。执行层增益线（H-R7c/d + R7a 重查）至此全部未获预登记确认——**部署口径当前无可采纳增益，诚实读数=全期中位 +4.9% 维持**。
