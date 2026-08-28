@@ -225,7 +225,7 @@ async def pipeline_then_eod(engine, *, for_date: str | None = None,
         for k, r in results.items():
             try:
                 upsert_data_ready(today, k, ok=r.ok,
-                                  melted=(not all_ok and rc != 0),
+                                  melted=(not all_ok),   # W8：rc!=0 恒 False（上方已 raise）的死条件摘除
                                   latest_date=r.latest_date, expected_date=expected,
                                   message=r.message)
             except Exception:

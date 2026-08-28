@@ -29,6 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from trading import clock   # W8：finish_run 时间戳单一口子（C-6，与调用方 begin_run 传入口径同源）
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DB_PATH = "logs/trading_job_run.db"
@@ -127,7 +129,7 @@ def finish_run(job_name: str, business_date: str, status: str,
     conn.execute(
         "UPDATE job_run SET status=?, finished_at=?, message=? "
         "WHERE job_name=? AND business_date=?",
-        (status, datetime.now().isoformat(), message, job_name, business_date),
+        (status, clock.now().isoformat(), message, job_name, business_date),  # W8：C-6 单一时间源（对齐 begin_run）
     )
     conn.commit()
     conn.close()

@@ -165,6 +165,19 @@ class LocalFileChannel(NotificationChannel):
             logger.exception("LocalFileChannel 本地落痕失败 path=%s", self._log_path)
 
 
+def _mask_secrets(obj) -> str:
+    """异常/响应的日志脱敏（W8）：把 URL query 里的 token 类参数值替换为 ***。
+
+    Why 只按已知键掩码而非全 URL 打码：排障需要看到端点与错误码；凭证值才是
+    不可落盘面。覆盖 bot_token/access_token/secret/token/key 五类常见键（大小写不敏感）。"""
+    import re as _re
+    text = str(obj)
+    pattern = _re.compile(
+        r"((?:bot_token|access_token|secret|token|key)=[^&\s\"']+)",
+        _re.IGNORECASE)
+    return pattern.sub(lambda m: m.group(1).split("=", 1)[0] + "=***", text)
+
+
 class NotificationManager:
     """异步单例：并发投递所有通道，单通道失败软降级。"""
 
@@ -219,7 +232,9 @@ class NotificationManager:
         )
         for ch, res in zip(self._channels, results):
             if isinstance(res, Exception):
-                logger.error("通知通道 %s 投递失败：%s", type(ch).__name__, res)
+                # W8（2026-08-28 评审 P3-3）：异常 str 可能携带凭证 URL（TG bot_token /
+                # 钉钉 access_token 拼在请求 URL 里）——脱敏后再落日志。
+                logger.error("通知通道 %s 投递失败：%s", type(ch).__name__, _mask_secrets(res))
         return results
 
     async def notify_risk_event(self, msg: str, level: RiskLevel = "INFO") -> list:
