@@ -25,7 +25,11 @@ Layer2 阶段 3（剥 broker 模块）抽自 trading/execution_gateway.py。本�
 
 设计哲学（CLAUDE.md Karpathy 极简原则）：对账纯逻辑用纯函数 + dataclass 平铺
 实现，不引入事件/ORM 黑盒；向量化思路以单遍遍历并集 + 显式分类完成。
+
+W7（2026-08-28）：QMT 实现已退役——本契约保留为类型语言；
+现役实盘执行在掘金腿（emquant/pilot_body.py），不经本包。
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -131,7 +135,7 @@ class BaseExecutionGateway(ABC):
     async def get_quote(self, symbol: str) -> Optional[Mapping[str, Any]]:
         """查单标的实时快照（spec §3.3 新增基类契约，原模块级自由函数）。
 
-        返回结构（broker.qmt_quote._normalize_tick_sync 契约）::
+        返回结构（历史 broker.qmt_quote._normalize_tick_sync 契约，实现已随 QMT 退役）::
 
             {"last_price": float|None, "high_limit": float|None, "low_limit": float|None,
              "open": ..., "high": ..., "low": ..., "pre_close": ..., "volume": ...,
@@ -139,7 +143,7 @@ class BaseExecutionGateway(ABC):
 
         Why 上提基类：行情是执行域的一部分（risk_shield 涨跌停校验、stop_loss
         现价检查都依赖实时快照），原散落在 qmt_market_data 模块函数，剥出 broker
-        后统一为网关契约。Mock 实现可返占位假数据供回测/CI；QMT 委托 broker.qmt_quote.get_quote。
+        后统一为网关契约。Mock 实现可返占位假数据供回测/CI（QMT 实现已随 2026-08-28 退役删除）。
 
         降级语义：行情不可用（xtdata 缺失/异常/标的不存在）→ 返 ``None``，调用方
         按缺失降级（risk_shield 跳过涨跌停关、stop_loss 跳过现价检查），不抛错。

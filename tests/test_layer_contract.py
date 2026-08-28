@@ -293,7 +293,7 @@ def test_backtest_no_live_execution_dependency() -> None:
     """铁律 4：backtest/ 零 trading.engine/orchestrate/broker/execution 依赖。
 
     物理意义：回测是「历史的离线重放」，必须与实盘执行物理隔离——回测经
-    MockBroker 撮合，实盘经 broker.qmt 下单。一旦回测 import broker，回测就
+    MockBroker 撮合（QMT 已退役，实盘在掘金腿不经 broker）。一旦回测 import broker，回测就
     可能误触真实下单（灾难性）。
 
     允许的正向依赖：trading.compute / trading.types / trading.order_state（纯契约）/
