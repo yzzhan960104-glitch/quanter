@@ -38,12 +38,12 @@
   "notes": {
     "auto_trade_mode": "live",
     "cooldown_semantics": {
-      "conclusion": "scan_live 本身无 cooldown；引擎层 _eod 在 scan 后补跨日去重——pilot 必须复刻该语义（按 formed_at 锚点、cooldown 实弹=8 个交易日窗口、自然日回溯 cooldown+2 余量）",
+      "conclusion": "scan_live 本身无 cooldown；引擎层 _eod 在 scan 后补跨日去重——pilot 必须复刻该语义（按 formed_at 锚点、cooldown 取 ACTIVE 实验实弹值；自然日回溯 cooldown+2 余量）。注：R6-8 冠军（2026-08-26 起 ACTIVE）cooldown=0，跨日去重关闭——本快照 exec_params.cooldown=0 与引擎腿同源对齐；早期 R6-5 时代 ACTIVE 实验 cooldown=8 的口径已随冠军换代作废",
       "evidence": [
         "strategies/neckline/strategy.py:117-119（scan_at 回测路径：内存 _last_signal_pos 锚点，T_pos 差 < cooldown 跳过）",
         "strategies/neckline/strategy.py:231-232（scan_live 实盘路径：纯当日识别，无任何 cooldown 去重）",
         "trading/engine.py:1036-1050（_eod 在 scan 后按 cooldown 过滤同标的：cooldown=resolve_cooldown_days(experiments)，最近 cooldown+2 自然日 trade_event SIGNAL.meta.formed_at 标的集内的新信号丢弃）",
-        "trading/data_ctx.py:140-159（resolve_cooldown_days：取全部 ACTIVE 实验 params['cooldown'] 的 max，保守去重；当前 ACTIVE 实验=8）",
+        "trading/data_ctx.py:140-159（resolve_cooldown_days：取全部 ACTIVE 实验 params['cooldown'] 的 max，保守去重；R6-8 冠军 cooldown=0）",
         "trading/data_ctx.py:92-137（load_recent_plan_symbols：formed_at 锚点（非 timestamp/非 plan_date）+ 自然日回溯的 Why 全文）"
       ],
       "live_cooldown_days": 0
