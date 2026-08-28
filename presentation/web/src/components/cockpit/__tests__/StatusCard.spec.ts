@@ -60,7 +60,7 @@ describe('StatusCard.vue', () => {
     const w = mountCard()
     await flushPromises()
     expect(w.text()).toContain('策略运行中')
-    expect(w.text()).toContain('neckline_pilot:running')
+    expect(w.text()).toContain('neckline_pilot:stagerunning')
   })
 
   it('无 running 策略 → 「策略已停止」', async () => {

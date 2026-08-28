@@ -45,10 +45,16 @@ const subLine = computed(() => strategyLine.value || 'mode=gm-terminal')
 async function fetchStatus() {
   try {
     const ov: GmOverview = await getOverview()
-    const running = ov.strategies.some((s) => String(s.stage || '').toLowerCase() === 'running')
+    // stage 实测是数字（2026-08-29 双腿实证：终端启动器视角 3=模拟/实盘运行、
+    // 1=创建态；agent relaunch 拉起的实验腿进程在跑但 stage 停 1——终端只追踪
+    // 自己启动的进程）。三态灯=任一策略运行即绿；字符串形态保留兼容（W4-B 原假设）。
+    const running = ov.strategies.some((s) => {
+      const st = String(s.stage ?? '').toLowerCase()
+      return st === 'running' || Number(s.stage) === 3
+    })
     state.value = running ? 'running' : 'stopped'
     strategyLine.value = ov.strategies.length
-      ? ov.strategies.map((s) => `${s.name || s.id}:${s.stage ?? '?'}`).join(' / ')
+      ? ov.strategies.map((s) => `${s.name || s.id}:stage${s.stage ?? '?'}`).join(' / ')
       : '无策略'
   } catch {
     state.value = 'unreachable'
