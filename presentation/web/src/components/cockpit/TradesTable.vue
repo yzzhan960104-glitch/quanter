@@ -14,7 +14,7 @@
   <el-card shadow="never">
     <template #header>
       <div class="flex-between">
-        <span>交易流水</span>
+        <span>交易流水 · {{ leg === 'exp' ? '实验腿' : '主腿' }}</span>
         <el-button size="small" :loading="loading" @click="load">刷新</el-button>
       </div>
     </template>
@@ -38,11 +38,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, inject, watch, type Ref } from 'vue'
 import { getTrades, type GmTradeRow } from '../../api/gm'
 
 const loading = ref(false)
 const currentPage = ref(1)
+// 腿跟随（2026-08-29 多腿方案）：inject LegSelector 的全局腿态；无选择器祖先时
+// 缺省 main（组件独立使用/测试场景零依赖）。
+const leg = inject<Ref<string>>('cockpit-leg', ref('main'))
 // 本地分页（掘金 execrpts 端点一次拉全量，前端切片——日内成交笔数量级 << 1000）。
 const all = reactive<{ rows: GmTradeRow[] }>({ rows: [] })
 const page = reactive<{ trades: GmTradeRow[]; total: number; limit: number }>({
@@ -60,13 +63,16 @@ const page = reactive<{ trades: GmTradeRow[]; total: number; limit: number }>({
 async function load() {
   loading.value = true
   try {
-    all.rows = await getTrades()
+    all.rows = await getTrades({ leg: leg.value })
     page.total = all.rows.length
     onPage(1)
   } finally {
     loading.value = false
   }
 }
+
+// 切腿即重拉（当日流水按账户隔离——主腿/实验腿是两本账）。
+watch(leg, load)
 
 /** el-pagination 翻页回调：本地切片。 */
 function onPage(p: number) {

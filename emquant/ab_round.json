@@ -1,0 +1,9 @@
+{
+  "round_id": "calibration-01",
+  "type": "calibration",
+  "candidate": "同参零变量(0.075)——双腿机制校准,非参数实验",
+  "start": "2026-08-29",
+  "expect_diff": "zero",
+  "promote_gate": "10 交易日信号 diff=0 + 双腿工程闸全绿",
+  "notes": "2026-08-28 双轨方案 §6.1:主腿(c243da10)与实验腿(2c85bc7d[exp])同参并行;校准通过后实验腿承载首个真 candidate"
+}

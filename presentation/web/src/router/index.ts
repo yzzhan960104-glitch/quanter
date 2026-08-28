@@ -29,6 +29,7 @@ const DashboardView = () => import('../views/DashboardView.vue')
 const DataLakeView = () => import('../views/DataLakeView.vue')
 // 综合看板（Task 12 · 一期观测运营层前端收官）：聚合流水/日志/回测对比/心跳/资金/数据健康。
 const CockpitView = () => import('../views/CockpitView.vue')
+const ExperimentView = () => import('../views/ExperimentView.vue')
 // 作业驾驶舱（Phase 2 · Task 12 收官）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
 // 搜索实验室（P3 · 2026-08-13）：参数发现敏感性分析/热力图/进展（只读，spec §4）。
 const DiscoveryLabView = () => import('../views/DiscoveryLabView.vue')
@@ -45,6 +46,8 @@ const router = createRouter({
     { path: '/live', redirect: '/cockpit' },
     // 综合看板（Task 12）：实盘观测俯瞰入口，聚合心跳/资金/数据健康/流水/日志。
     { path: '/cockpit', name: 'cockpit', component: CockpitView },
+    // 实验对照（2026-08-29 多腿方案 P3）：双腿 A/B 的轮次/对照/下钻视图
+    { path: '/experiments', name: 'experiments', component: ExperimentView },
     // 作业驾驶舱（Phase 2 · Task 12）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
     { path: '/data', name: 'data', component: DataLakeView },
   ],

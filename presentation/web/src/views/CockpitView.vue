@@ -3,8 +3,10 @@
 
   物理意图（CLAUDE.md 极简 + 第一性原理）：
     把一期观测运营层的小部件按「上/中」两排聚合到同一屏，提供「俯瞰」视角：
-    - 上排：StatusCard 心跳 / AssetCard 资金 / DataHealthCard 数据健康（3 个 ~30 行摘要卡，
-      整体反映「网关连不连 / 账户有钱没钱 / 数据新不新」三项运营基本盘）。
+    - 顶栏：LegSelector 腿选择器（2026-08-29 多腿方案——主腿/实验腿切换，
+      TradesTable 跟随；DualAssetCard 恒双腿并排不随选择器）。
+    - 上排：StatusCard 心跳 / DualAssetCard 双腿资金 / DataHealthCard 数据健康
+      （整体反映「网关连不连 / 两国度有钱没钱 / 数据新不新」三项运营基本盘）。
     - 中排：TradesTable 流水 / TerminalLogs 日志（左实时成交、右实时日志，并排对照看
       「下单了 → 流水进了 → 日志记了」的链路一致性）。
 
@@ -28,10 +30,13 @@
 -->
 <template>
   <div class="cockpit">
-    <!-- 上排：三项运营基本盘（心跳 6 / 资金 6 / 数据健康 12，数据健康信息量更大占双倍） -->
+    <!-- 顶栏：腿选择器（双腿在役时显示；单腿自动隐藏） -->
+    <LegSelector />
+
+    <!-- 上排：三项运营基本盘（心跳 6 / 双腿资金 6 / 数据健康 12） -->
     <el-row :gutter="12">
       <el-col :span="6"><StatusCard /></el-col>
-      <el-col :span="6"><AssetCard /></el-col>
+      <el-col :span="6"><DualAssetCard /></el-col>
       <el-col :span="12"><DataHealthCard /></el-col>
     </el-row>
 
@@ -46,8 +51,9 @@
 <script setup lang="ts">
 // 三个轻量摘要小部件（Task 12 本任务新建）。
 import StatusCard from '../components/cockpit/StatusCard.vue'
-import AssetCard from '../components/cockpit/AssetCard.vue'
+import DualAssetCard from '../components/cockpit/DualAssetCard.vue'
 import DataHealthCard from '../components/cockpit/DataHealthCard.vue'
+import LegSelector from '../components/cockpit/LegSelector.vue'
 // 一期观测运营层既有组件（Task 9/10/11）。
 import TradesTable from '../components/cockpit/TradesTable.vue'
 import TerminalLogs from '../components/cockpit/TerminalLogs.vue'

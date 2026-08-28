@@ -150,58 +150,81 @@ def diff_orders(a: dict[str, dict], b: dict[str, dict]) -> dict:
     return d
 
 
-def build_report(day: str, main_rows: list[tuple], exp_rows: list[tuple],
-                 main_acc: str, exp_acc: str) -> tuple[str, list[str]]:
-    """(报告全文, 红旗列表)。红旗=校准轮口径下的任何结构性 diff + 工程闸异常。"""
+def compare(day: str, main_rows: list[tuple], exp_rows: list[tuple],
+            main_acc: str, exp_acc: str) -> dict:
+    """两腿对照的纯数据负载（2026-08-29 cockpit 多腿方案 §2.3 抽象）。
+
+    单源语义：本函数是对照逻辑的唯一实现——CLI 的 render()（钉钉文本）与
+    presentation 的 /api/v1/gm/ab（结构化 JSON）共同消费，展示层零业务复制。
+    flags 语义=校准轮口径：INIT 账户错配 + 信号/订单结构 diff 是红旗；qty 差
+    （资金口径）与「有事件但无 INIT」（跨日常驻形态）不是红旗。
+    """
     g_a, g_b = eng_gate(main_rows), eng_gate(exp_rows)
-    sig_a, sig_b = signals_map(main_rows), signals_map(exp_rows)
-    ord_a, ord_b = orders_map(main_rows), orders_map(exp_rows)
-    sig_d = diff_float_maps(sig_a, sig_b)
-    ord_d = diff_orders(ord_a, ord_b)
+    sig_d = diff_float_maps(signals_map(main_rows), signals_map(exp_rows))
+    ord_d = diff_orders(orders_map(main_rows), orders_map(exp_rows))
     flags: list[str] = []
 
-    def fmt_gate(label: str, g: dict, acc_expect: str, rows: list[tuple]) -> list[str]:
-        lines = [f"—— {label} ——"]
+    for label, g, acc_expect, rows in (("主腿", g_a, main_acc, main_rows),
+                                       ("实验腿", g_b, exp_acc, exp_rows)):
+        init = g["init"]
+        if init and str(init.get("account")) != acc_expect:
+            flags.append(f"[{label}] INIT account={init.get('account')} ≠ 期望 {acc_expect}")
+        elif rows and not init:
+            flags.append(f"[{label}] 当日有事件但无 INIT 行（跨日常驻形态，参考）")
+    if sig_d["added"] or sig_d["removed"] or sig_d["drifted"]:
+        flags.append(f"信号 diff：新增{sig_d['added']} 消失{sig_d['removed']} "
+                     f"漂移{[(x['symbol']) for x in sig_d['drifted']]}")
+    if ord_d["added"] or ord_d["removed"] or ord_d["drifted"]:
+        flags.append(f"订单结构 diff：新增{ord_d['added']} 消失{ord_d['removed']} "
+                     f"价漂移{[x['symbol'] for x in ord_d['drifted']]}")
+    return {"day": day, "main": g_a, "exp": g_b,
+            "signals": sig_d, "orders": ord_d, "flags": flags}
+
+
+def render(day: str, p: dict) -> str:
+    """compare 负载 → 人读文本（CLI 落档/钉钉形态）。纯展示，零业务判定。"""
+    lines = [f"掘金双腿对照 · {day}（incumbent=主腿 challenger=实验腿）"]
+
+    def fmt_gate(label: str, g: dict, rows: list[tuple]) -> None:
+        lines.append(f"—— {label} ——")
         init = g["init"]
         if init:
             lines.append(f"INIT: account={init.get('account')} stamp={init.get('build_stamp')}")
-            if str(init.get("account")) != acc_expect:
-                flags.append(f"[{label}] INIT account={init.get('account')} ≠ 期望 {acc_expect}")
-        elif rows:
-            flags.append(f"[{label}] 当日有事件但无 INIT 行（跨日常驻形态，参考）")
         cnt = " ".join(f"{ev}×{g['counts'][ev]}" for ev in _COUNT_EVENTS if g["counts"][ev])
         lines.append(f"事件漏斗: {cnt or '（当日零事件）'}")
         if g["warn_types"]:
             lines.append("WARN: " + " ".join(f"{k}×{v}" for k, v in sorted(g["warn_types"].items())))
-        return lines
 
-    lines = [f"掘金双腿对照 · {day}（incumbent=主腿 challenger=实验腿）"]
-    lines += fmt_gate("主腿", g_a, main_acc, main_rows)
-    lines += fmt_gate("实验腿", g_b, exp_acc, exp_rows)
-
+    fmt_gate("主腿", p["main"], [])
+    fmt_gate("实验腿", p["exp"], [])
+    sig, ord_d = p["signals"], p["orders"]
     lines.append("—— 信号对照（校准轮预期 diff=0）——")
-    if sig_d["added"] or sig_d["removed"] or sig_d["drifted"]:
-        flags.append(f"信号 diff：新增{sig_d['added']} 消失{sig_d['removed']} "
-                     f"漂移{[(x['symbol']) for x in sig_d['drifted']]}")
-        lines.append(f"新增: {sig_d['added'] or '—'}")
-        lines.append(f"消失: {sig_d['removed'] or '—'}")
-        lines.append(f"价漂移: {sig_d['drifted'] or '—'}")
+    if sig["added"] or sig["removed"] or sig["drifted"]:
+        lines.append(f"新增: {sig['added'] or '—'}")
+        lines.append(f"消失: {sig['removed'] or '—'}")
+        lines.append(f"价漂移: {sig['drifted'] or '—'}")
     else:
-        lines.append(f"完全一致（{len(sig_a)} 信号）" if sig_a else "两腿均零信号（对照面=空,弱一致）")
-
+        lines.append("两腿均零信号（对照面=空,弱一致）" if p["main"]["counts"]["SIGNAL"] == 0
+                     else f"完全一致（{p['main']['counts']['SIGNAL']} 信号）")
     lines.append("—— 订单对照（qty 差=资金口径差,预期形态）——")
     if ord_d["added"] or ord_d["removed"] or ord_d["drifted"]:
-        flags.append(f"订单结构 diff：新增{ord_d['added']} 消失{ord_d['removed']} "
-                     f"价漂移{[x['symbol'] for x in ord_d['drifted']]}")
         lines.append(f"新增: {ord_d['added'] or '—'}｜消失: {ord_d['removed'] or '—'}｜"
                      f"价漂移: {ord_d['drifted'] or '—'}")
     else:
-        lines.append(f"结构一致（{len(ord_a)} 单）" if ord_a else "两腿均零挂单")
+        lines.append("两腿均零挂单" if p["main"]["counts"]["ORDER_PLACED"] == 0
+                     else f"结构一致（{p['main']['counts']['ORDER_PLACED']} 单）")
     if ord_d["qty_diff"]:
         lines.append(f"qty 差（资金口径,预期）: "
                      + " ".join(f"{x['symbol']} {x['incumbent']}→{x['challenger']}"
                                 for x in ord_d["qty_diff"]))
-    return "\n".join(lines), flags
+    return "\n".join(lines)
+
+
+def build_report(day: str, main_rows: list[tuple], exp_rows: list[tuple],
+                 main_acc: str, exp_acc: str) -> tuple[str, list[str]]:
+    """兼容壳：compare + render → (文本, 红旗)。CLI 与测试的稳定入口。"""
+    p = compare(day, main_rows, exp_rows, main_acc, exp_acc)
+    return render(day, p), p["flags"]
 
 
 def main(argv: list[str] | None = None) -> int:

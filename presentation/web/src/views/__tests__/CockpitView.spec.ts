@@ -1,7 +1,7 @@
 /**
  * CockpitView 综合看板单测（Task 12 · 一期观测运营层前端收官）。
  *
- * 物理意图：验证综合看板编排正确——上排 StatusCard/AssetCard/DataHealthCard，中排
+ * 物理意图：验证综合看板编排正确——顶栏 LegSelector，上排 StatusCard/DualAssetCard/DataHealthCard，中排
  * TradesTable/TerminalLogs，5 个子组件全部被渲染到页面。
  *
  * 下排「回测对比」已随 caisen 退役移除（2026-08-13 · G8 契约清理）：原 ReplayCompare
@@ -55,14 +55,15 @@ beforeAll(() => {
   }
 })
 
-// 5 个子组件名（PascalCase），CockpitView 用默认名导入，stub 用组件名匹配。
-// 下排 ReplayCompare 已随 caisen 退役移除（G8），故从 6 减至 5。
+// 6 个子组件名（PascalCase），CockpitView 用默认名导入，stub 用组件名匹配。
+// 2026-08-29 多腿方案：AssetCard→DualAssetCard（双腿并排），新增 LegSelector。
 const CHILDREN = [
   'StatusCard',
-  'AssetCard',
+  'DualAssetCard',
   'DataHealthCard',
   'TradesTable',
   'TerminalLogs',
+  'LegSelector',
 ]
 
 const stubs = CHILDREN.reduce((acc, name) => {
@@ -79,7 +80,7 @@ const mountView = () =>
   })
 
 describe('CockpitView.vue', () => {
-  it('渲染全部 5 个子组件（上 3 / 中 2 编排）', () => {
+  it('渲染全部 6 个子组件（顶栏选择器 + 上 3 / 中 2 编排）', () => {
     const w = mountView()
     // 每个 stub 渲染为带 data-stub 属性的 div，验证全部 5 个都挂载到页面。
     for (const name of CHILDREN) {
@@ -92,7 +93,7 @@ describe('CockpitView.vue', () => {
     const text = w.text()
     // 子组件 stub 文本里包含中文名（便于可读断言）。
     expect(text).toContain('StatusCard')
-    expect(text).toContain('AssetCard')
+    expect(text).toContain('DualAssetCard')
     expect(text).toContain('DataHealthCard')
     expect(text).toContain('TradesTable')
     expect(text).toContain('TerminalLogs')

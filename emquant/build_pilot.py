@@ -80,15 +80,19 @@ def _build_stamp() -> str:
     粘贴导致同一崩溃复现两次的实锤教训）。
     为什么限定五路输入路径而非全仓 HEAD：别的模块提交会推进 HEAD 而产物未变，
     全仓锚会让「stamp 落后于 HEAD」的误报（部署核对口径=emquant 产物的最新
-    提交，非全仓最新提交）。git 不可用（异常）→ "unknown"（fail-visible 不
-    fail-loud：组装本身仍可完成，stamp 缺失在部署核对时自然暴露）。
+    提交，非全仓最新提交）。config/ 用**文件级锚**（params_snapshot/universe
+    两文件而非目录——2026-08-29 教训：ab_round.json 等运营档案若落 config/
+    会以目录粒度推 stamp,产物被迫随非输入文件重建）。git 不可用（异常）→
+    "unknown"（fail-visible 不 fail-loud：组装本身仍可完成，stamp 缺失在部署
+    核对时自然暴露）。
     """
     import subprocess
     try:
         out = subprocess.run(
             ["git", "log", "-1", "--format=%ci %h", "--",
              "emquant/pilot_body.py", "emquant/build_pilot.py",
-             "emquant/config/", "strategies/neckline/signal.py",
+             "emquant/config/params_snapshot.json", "emquant/config/universe.json",
+             "strategies/neckline/signal.py",
              "strategies/neckline/method_v0.py"],
             capture_output=True, text=True, cwd=str(ROOT), timeout=10)
         return out.stdout.strip() or "unknown"

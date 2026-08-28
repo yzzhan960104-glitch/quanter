@@ -74,24 +74,113 @@ export async function getOverview(): Promise<GmOverview> {
   return apiClient.get('/api/v1/gm/overview', { timeout: 5000 })
 }
 
-export async function getAsset(): Promise<GmAsset> {
-  const payload = await apiClient.get('/api/v1/gm/asset', { timeout: 5000 })
-  // cash 端点返单对象（或 {data:{}} 壳）——兼容两种形态取首
+/** 腿条目（/gm/legs）：LegSelector/DualAssetCard 的数据源（LEGS 注册表单源）。 */
+export interface GmLeg {
+  key: string              // "main" | "exp"
+  label: string            // 主腿 / 实验腿
+  role: string             // incumbent | challenger
+  account_id: string | null
+  strategy_id: string | null
+  strategy_name: string | null
+}
+
+export async function getLegs(): Promise<GmLeg[]> {
+  const payload = await apiClient.get('/api/v1/gm/legs', { timeout: 5000 })
+  return (payload as { legs?: GmLeg[] }).legs ?? []
+}
+
+/**
+ * 按腿取资产（缺省 main——未迁移组件零改动）。腿账户查询失败（未部署/网关断）
+ * 由 server 返 502，调用方 catch 后展示「—」降级（虚假繁荣防线）。
+ */
+export async function getAssetByLeg(leg: string = 'main'): Promise<GmAsset> {
+  const payload: unknown = await apiClient.get('/api/v1/gm/asset', { params: { leg }, timeout: 5000 })
   if (payload && typeof payload === 'object' && (payload as { data?: unknown }).data) {
     return (payload as { data: GmAsset }).data
   }
   return (payload ?? {}) as GmAsset
 }
 
-export async function getPositions(): Promise<GmPositionRow[]> {
-  return unwrap<GmPositionRow>(await apiClient.get('/api/v1/gm/positions', { timeout: 10000 }))
+export async function getPositions(leg: string = 'main'): Promise<GmPositionRow[]> {
+  return unwrap<GmPositionRow>(
+    await apiClient.get('/api/v1/gm/positions', { params: { leg }, timeout: 10000 }))
 }
 
-export async function getOrders(): Promise<GmOrderRow[]> {
-  return unwrap<GmOrderRow>(await apiClient.get('/api/v1/gm/orders', { timeout: 10000 }))
+export async function getOrders(leg: string = 'main'): Promise<GmOrderRow[]> {
+  return unwrap<GmOrderRow>(
+    await apiClient.get('/api/v1/gm/orders', { params: { leg }, timeout: 10000 }))
 }
 
-export async function getTrades(params: { limit?: number } = {}): Promise<GmTradeRow[]> {
+export async function getTrades(params: { leg?: string; limit?: number } = {}): Promise<GmTradeRow[]> {
   return unwrap<GmTradeRow>(
     await apiClient.get('/api/v1/gm/trades', { params, timeout: 10000 }))
+}
+
+// ─────────────────────── 双腿对照（/gm/ab，2026-08-29 多腿方案）───────────────────────
+
+/** 工程闸单腿统计（compare 负载的腿字段；counts 键为 audit 事件名）。 */
+export interface AbGate {
+  init: { account?: string; build_stamp?: string } | null
+  counts: Record<string, number>
+  warn_types: Record<string, number>
+}
+
+export interface AbDiff {
+  added: string[]
+  removed: string[]
+  drifted: Array<{ symbol: string; incumbent: number; challenger: number }>
+}
+
+export interface AbOrderDiff extends AbDiff {
+  qty_diff: Array<{ symbol: string; incumbent: number; challenger: number }>
+}
+
+/** /gm/ab 负载：ok=false 时 flags 非空（红旗）。single_leg=true 表示实验腿未部署。 */
+export interface AbDaily {
+  day: string
+  ok?: boolean
+  single_leg?: boolean
+  detail?: string
+  main?: AbGate
+  exp?: AbGate
+  signals?: AbDiff
+  orders?: AbOrderDiff
+  flags?: string[]
+}
+
+export async function getAbDaily(date?: string): Promise<AbDaily> {
+  return apiClient.get('/api/v1/gm/ab', { params: date ? { date } : {}, timeout: 8000 })
+}
+
+/** /gm/audit 事件流下钻行（detail 已是解析后的对象；失败行包 {raw}）。 */
+export interface AuditRow {
+  ts: string
+  event: string
+  detail: Record<string, unknown> & { raw?: string }
+}
+
+export async function getAudit(params: {
+  leg?: string; date?: string; event?: string; limit?: number
+}): Promise<AuditRow[]> {
+  const payload = await apiClient.get('/api/v1/gm/audit', { params, timeout: 8000 })
+  return (payload as { rows?: AuditRow[] }).rows ?? []
+}
+
+/** 轮次档案（/gm/round 透传 ab_round.json；404 时返回 null 由调用方展示占位）。 */
+export interface GmRound {
+  round_id: string
+  type: string              // calibration | candidate
+  candidate: string
+  start: string
+  expect_diff?: string
+  promote_gate?: string
+  notes?: string
+}
+
+export async function getRound(): Promise<GmRound | null> {
+  try {
+    return await apiClient.get('/api/v1/gm/round', { timeout: 5000 })
+  } catch {
+    return null
+  }
 }
