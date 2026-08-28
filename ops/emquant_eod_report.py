@@ -181,10 +181,11 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if args.register or args.unregister:
         if args.register:
-            py = ROOT / ".venv310" / "Scripts" / "python.exe"
+            # W0（0828 评审）：/TR 走 run_ops_task.bat 统一包装器（输出重定向防启动期静默）
+            bat = Path(__file__).parent / "run_ops_task.bat"
             rc = subprocess.run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", "15:45",
                                  "/TN", "QuanterEmquantEodReport",
-                                 "/TR", f'"{py}" "{Path(__file__)}"'],
+                                 "/TR", f'"{bat}" emquant_eod_report.py'],
                                 capture_output=True).returncode
             print("registered" if rc == 0 else f"failed rc={rc}")
             return rc

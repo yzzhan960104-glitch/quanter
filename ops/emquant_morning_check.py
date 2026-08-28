@@ -135,10 +135,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.register or args.unregister:
         import subprocess
         if args.register:
-            py = ROOT / ".venv310" / "Scripts" / "python.exe"
+            # W0（0828 评审）：/TR 走 run_ops_task.bat 统一包装器——schtasks 裸 python
+            # 不捕获 stdout/stderr，启动期崩溃零痕迹（详见 bat 头注）。
+            bat = Path(__file__).parent / "run_ops_task.bat"
             rc = subprocess.run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", "09:40",
                                  "/TN", "QuanterEmquantMorningCheck",
-                                 "/TR", f'"{py}" "{Path(__file__)}"'],
+                                 "/TR", f'"{bat}" emquant_morning_check.py'],
                                 capture_output=True).returncode
             print("registered" if rc == 0 else f"failed rc={rc}")
             return rc

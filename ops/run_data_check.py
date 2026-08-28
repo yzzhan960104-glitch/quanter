@@ -69,14 +69,18 @@ def _resync_key(key: str) -> tuple[bool, str]:
 
 
 def _alert(msg: str, level: str = "WARN") -> None:
-    """钉钉告警（fire_and_forget，失败软降级）。
+    """钉钉告警（同步装配发送，失败软降级）。
 
     ⚠️ import 走 ``infra.notifier`` 真身（与 Task10 engine.py handler 同口径）；
        ``infra.notifier`` 是 strangler 转发垫片，未来下线后会隐性断链，故直指 infra 真身。
+    W0（2026-08-28 全库评审 P0-2）：与 ops.gm_ops_common.notify 同修——裸 get_default()
+    零通道静默 + fire_and_forget daemon 线程退出竞态，本检查点是短命进程，改同步直发。
     """
     try:
-        from infra.notifier import NotificationManager, fire_and_forget
-        fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, level))
+        import asyncio
+
+        from infra.notifier import build_default_manager
+        asyncio.run(build_default_manager().notify_risk_event(msg, level))
     except Exception:
         logger.exception("告警发送失败（不影响检查主流程）")
 
