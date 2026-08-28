@@ -60,7 +60,7 @@ import pandas as pd
 from config import TUSHARE_DATASETS
 from data.tushare_sync import sync_dataset
 # 写入守卫行数检查 SSoT（T13-A）：[6] merged 最终落盘防 merge bug 致异常收缩抹除。
-from data.integrity import check_row_count_drop
+from data.integrity import atomic_write_parquet, check_row_count_drop  # W2-4
 
 # 复用 sync_all_tushare.classify() 拿 quick 批 keys（单一真相源：分批口径不在两处维护）
 from data.tools.sync_all_tushare import classify
@@ -274,7 +274,7 @@ def sync_one_key(key: str, today_str: str, fallback_years: int,
         # 旧数据存在时还原旧 parquet（防止 single 模式把旧数据覆盖成空）
         if old_df is not None and not old_df.empty:
             try:
-                old_df.to_parquet(lake, engine="pyarrow")
+                atomic_write_parquet(lake, old_df)   # W2-4：原子还原（直写半截=旧湖损坏）
             except Exception as e:
                 print(f"[{key}] ⚠️ 还原旧 parquet 失败 {type(e).__name__}: {e}", file=log, flush=True)
         print(f"[{key}] ⏭ 新数据为空，保留旧 parquet {dt:.0f}s", file=log, flush=True)
@@ -295,12 +295,15 @@ def sync_one_key(key: str, today_str: str, fallback_years: int,
         _ok, _reason = check_row_count_drop(len(old_df), len(merged))
         if not _ok:
             print(f"[{key}] ❌ 写入守卫拒写：{_reason}（还原旧湖）", file=log, flush=True)
-            old_df.to_parquet(lake, engine="pyarrow")
+            atomic_write_parquet(lake, old_df)   # W2-4：原子还原
             return False, f"merged 骤降拒写：{_reason}"
 
     # 落盘回原路径（pyarrow 引擎与 _build_multiindex / _sync_single 一致，避免引擎混用）
     try:
-        merged.to_parquet(lake, engine="pyarrow")
+        # W2-4（2026-08-28 评审 P1-4）：直写 → 原子写（tmp+fsync+os.replace）。守卫不
+        # 走 safe_overwrite（其文件基线在 [4] 窗口中间态上会误判），上方内存基线
+        # check_row_count_drop 已是本路径的正确守卫——此处只补原子性。
+        atomic_write_parquet(lake, merged)
     except Exception as e:
         dt = time.time() - t0
         print(f"[{key}] ❌ 落盘失败 {dt:.0f}s {type(e).__name__}: {e}", file=log, flush=True)

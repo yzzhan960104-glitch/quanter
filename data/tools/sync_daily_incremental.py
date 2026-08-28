@@ -68,6 +68,77 @@ def _fetch_paged(pro, api: str, trade_date: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+# W2-2：真实时钟 import 期绑定——测试 patch datetime 类/模块属性均不影响闸钟；
+# 闸自身的测试经 _intraday_guard(now=...) 显式注入。
+_REAL_NOW = datetime.now
+# W2-5：除权重算失败 pending sidecar（原子写；下轮 sync 优先重试）
+_PENDING_RECOMPUTE = "data_lake/.syncing/pending_recompute.json"
+
+
+def _load_pending_recompute() -> list[str]:
+    """读上轮除权重算失败清单（缺文件/损坏返 []——sidecar 是加速重试的账本，
+    读失败不阻断主流程，只是丢一轮重试）。"""
+    import json
+    from pathlib import Path
+    p = Path(_PENDING_RECOMPUTE)
+    try:
+        if not p.exists():
+            return []
+        return list(dict.fromkeys(json.loads(p.read_text(encoding="utf-8"))))
+    except Exception as e:
+        logger.warning("pending_recompute sidecar 读失败（忽略，视为无待重试）：%s", e)
+        return []
+
+
+def _save_pending_recompute(symbols: list[str]) -> None:
+    """落失败清单（tmp+replace 原子写；空清单=清账）。"""
+    import json
+    import os
+    import tempfile
+    from pathlib import Path
+    p = Path(_PENDING_RECOMPUTE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not symbols:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".pending_recompute.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(sorted(set(symbols)), f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    logger.warning("除权重算失败 %d 只已记 pending sidecar（下轮 sync 优先重试）：%s",
+                   len(set(symbols)), sorted(set(symbols))[:10])
+
+
+def _intraday_guard(allow: bool, now=None) -> None:
+    """W2-2 交易时段硬闸：工作日 09:15–15:05 拒跑（防盘中/未收盘同步把半截 bar
+    写湖——d0>=today 短路让当日行永不修复，是 P0-3 的触发面）。周末全天放行；
+    allow=True 是人工紧急补数逃生口。17:30 pipeline 与跨 18:00 补跑天然在窗外。
+    now 参数：测试注入固定时刻（生产缺省 _REAL_NOW()）。"""
+    if allow:
+        return
+    n = now if now is not None else _REAL_NOW()
+    if n.weekday() >= 5:
+        return
+    hm = n.strftime("%H:%M")
+    if "09:15" <= hm < "15:05":
+        raise RuntimeError(
+            f"交易时段拒跑（{n:%Y-%m-%d %H:%M} 工作日盘中）：tushare daily 盘中返回"
+            "部分标的/现价 close，半截 bar 落湖后 d0>=today 短路永不修复。"
+            "紧急补数用 --allow-intraday 显式越过。")
+
+
 def _trade_days(pro, d0: str, today: str) -> list[str]:
     """[d0+1, today] 的交易日列表（trade_cal 剔除 d0 + 节假日）。
 
@@ -156,28 +227,50 @@ def _recompute_symbol(pro, symbol: str, todayc: str) -> pd.DataFrame:
     return merged[["date", "symbol"] + OUT_COLS].set_index(["date", "symbol"]).sort_index()
 
 
-def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = False) -> str:
+def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = False,
+                           refetch_today: bool = False,
+                           allow_intraday: bool = False) -> str:
     """增量同步入口：读 d0 → 拉新交易日 raw daily + adj_factor → 前复权 → append 落盘。
 
     no_backscan=True 禁用规则5近期连续性回扫（调试用；生产默认开启回扫防缺口累积）。
     no_recompute_div=True 禁用除权标的历史 qfq 全量重算（调试用；生产默认开启消除除权断崖）。
+    refetch_today=True（W2-2，2026-08-28 评审）：d0==today 时强制重取当日（半截 bar
+        修复口——dedup keep="last" 覆盖旧行；配合交易时段闸防盘中再写半截）。
+    allow_intraday=True：越过 W2-2 交易时段硬闸（人工紧急补数逃生口）。
+
+    W2 硬闸（2026-08-28 评审 P0-3 三件，本函数内联两件）：
+      ① adj 完整性：merge 后任一行 adj_factor/latest_adj 为 NaN → 整批拒落盘 +
+         raise（下一轮从 d0 重取自愈）。Why 整批而非剔行：剔行留日级缺口比失败更难
+         察觉（integrity 只按日期在场判完整）；NaN 价格落湖后被 d0>=today 短路
+         永不修复才是事故本体。
+      ② 交易时段闸：工作日 09:15-15:05 拒跑（盘中 tushare daily 返回部分标的/现价
+         close → 半截 bar 落湖且当日短路不再修复）。17:30 pipeline 与跨 18:00 补跑
+         不受影响；周末全天放行。
     """
+    _intraday_guard(allow_intraday)
     df = pd.read_parquet(LAKE)
     d0 = str(pd.Timestamp(df.index.get_level_values("date").max()).date())
     today = datetime.today().strftime("%Y-%m-%d")
     if d0 >= today:
-        return f"已最新 {d0}，无需同步"
+        if d0 == today and refetch_today:
+            logger.warning("refetch_today：重取当日 %s（dedup keep=last 覆盖旧行）", today)
+        else:
+            return f"已最新 {d0}，无需同步"
     # 延迟 get_pro：d0 已最新时不触发 tushare token 解析 + 模块 import（显式边界，
     # 节假日空跑不应无谓加载重依赖；守 Karpathy「彻底掌控执行环境」哲学）。
     pro = get_pro()
     days = _trade_days(pro, d0, today)
+    if d0 == today and refetch_today:
+        days = [today.replace("-", "")]        # 重取模式：当日即目标日
     if not days:
         return f"无新交易日（d0={d0} today={today}，可能节假日）"
     logger.info("增量同步 %s → %s，新交易日 %s", d0, today, days)
 
-    # ① 分页拉 adj_factor [d0, today]（含 d0 作除权检测锚 + 新日期作前复权 latest）
+    # ① 分页拉 adj_factor [d0, today]（含 d0 作除权检测锚 + 新日期作前复权 latest）；
+    # 去重守卫（W2-2）：refetch_today 模式下 days 含 d0 自身，不去重会同日双拉 →
+    # adj 重复行 → 除权检测 set_index 后 Series 索引歧义 + merge 重复行。
     adj_frames = []
-    for td in [d0.replace("-", "")] + days:
+    for td in sorted(set([d0.replace("-", "")] + days)):
         af = _fetch_paged(pro, "adj_factor", td)
         if not af.empty:
             adj_frames.append(af)
@@ -207,6 +300,16 @@ def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = F
     latest_adj = (merged.sort_values(["symbol", "trade_date"])
                        .groupby("symbol")["adj_factor"].last())
     merged["latest_adj"] = merged["symbol"].map(latest_adj)
+    # W2-1（2026-08-28 评审 P0-3）adj 完整性硬闸：任一行 adj_factor/latest_adj NaN
+    # → 整批拒落盘 raise（下一轮从 d0 重取自愈）。对齐 _recompute_symbol 的 P1-A
+    # 守卫（同模块内两口径必须一致——主路径裸奔是事故本体）。NaN 样本进日志供排障。
+    _nan_adj = merged["adj_factor"].isna() | merged["latest_adj"].isna()
+    if _nan_adj.any():
+        _bad = merged[_nan_adj][["symbol", "trade_date"]].head(10)
+        raise RuntimeError(
+            f"adj 完整性闸触发：{int(_nan_adj.sum())} 行 adj_factor/latest_adj 为 NaN"
+            f"（top: {_bad.to_dict('records')}）——整批拒落盘，检查 adj_factor 接口"
+            f"是否当日未发布/部分返回；恢复后重跑自 d0={d0} 重取")
     for col in PRICE_COLS:
         if col in merged.columns:
             merged[col] = merged[col] * merged["adj_factor"] / merged["latest_adj"]
@@ -236,23 +339,35 @@ def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = F
     # ⚠️ 配额影响（P2）：per-symbol 全历史调用（1 标的 ≈ 2 次 daily/adj_factor 请求），
     # 除权季单次可能几十只；_fetch_with_guard 统一限频兜底（basic 桶 ~500/min），
     # 超时/熔断按数据集语义返空跳过该标的（不阻断整批 sync）。
-    if div_syms and not no_recompute_div:
-        logger.warning("除权标的 %d 只，全量重算历史 qfq 基线：%s", len(div_syms), div_syms)
-        for sym in div_syms:
-            # 单标的异常 → warning + continue，不阻断整批（与 docstring「不阻断整批 sync」语义对齐）。
-            # 历史回归：adj 空响应/缺列、merge 异常、Tushare 限频熔断返空等，任一标的失败
-            # 都不应让 combined.to_parquet 不执行（否则非除权标的的日更也不落盘）。
+    # W2-5（2026-08-28 评审 P1-5）：失败标的落 pending sidecar，下一轮 sync 优先重试
+    # ——原实现失败仅 warning，同一标的新旧 qfq 基线永久混合（除权断崖残留且无人知）。
+    pending_prev = _load_pending_recompute()
+    div_retry = [s for s in pending_prev if s not in div_syms]
+    if div_retry:
+        logger.warning("上轮除权重算失败 %d 只转入本轮重试：%s", len(div_retry), div_retry[:10])
+    div_effective = div_syms + div_retry
+    failed_recompute: list[str] = []
+    if div_effective and not no_recompute_div:
+        logger.warning("除权标的 %d 只，全量重算历史 qfq 基线：%s", len(div_effective), div_effective)
+        for sym in div_effective:
+            # 单标的异常 → warning + 记入失败清单，不阻断整批（与 docstring「不阻断
+            # 整批 sync」语义对齐）；失败标的由 pending sidecar 在下一轮 sync 优先重试。
             try:
                 fixed = _recompute_symbol(pro, sym, todayc)
             except Exception as e:
-                logger.warning("除权标的 %s 重算异常（跳过，不阻断整批）：%s", sym, e)
+                logger.warning("除权标的 %s 重算异常（跳过不阻断整批，转下轮重试）：%s", sym, e)
+                failed_recompute.append(sym)
                 continue
             if fixed.empty:
-                logger.warning("除权标的 %s 全量重算返空（停牌/退市/接口异常），跳过", sym)
+                logger.warning("除权标的 %s 全量重算返空（停牌/退市/接口异常），转下轮重试", sym)
+                failed_recompute.append(sym)
                 continue
             combined = combined[combined.index.get_level_values("symbol") != sym]
             combined = pd.concat([combined, fixed])
         combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+        _save_pending_recompute(failed_recompute)
+    elif div_effective:
+        _save_pending_recompute(div_effective)   # 显式禁用也算未完成，保留待下轮
     # 写入守卫 + 原子落盘（T13-A 防御性 + G5 原子写）：safe_overwrite 内部完成
     # 「守卫 + tmp + fsync + os.replace」原子写入，调用方不再紧跟 to_parquet（防半截损坏）。
     # append 日常 combined >= 现有放行，捕获 dedup/recompute bug 致 combined 异常收缩。
@@ -303,10 +418,16 @@ if __name__ == "__main__":
                       help="禁用近期连续性回扫（调试用）")
     _ap2.add_argument("--no-recompute-div", action="store_true",
                       help="禁用除权标的历史 qfq 全量重算（调试用；生产默认开启消除除权断崖）")
+    _ap2.add_argument("--refetch-today", action="store_true",
+                      help="W2-2：d0==today 时强制重取当日（半截 bar 修复口，dedup 覆盖旧行）")
+    _ap2.add_argument("--allow-intraday", action="store_true",
+                      help="W2-2：越过交易时段硬闸（人工紧急补数逃生口）")
     _args = _ap2.parse_args()
     try:
         print(sync_daily_incremental(no_backscan=_args.no_backscan,
-                                     no_recompute_div=_args.no_recompute_div))
+                                     no_recompute_div=_args.no_recompute_div,
+                                     refetch_today=_args.refetch_today,
+                                     allow_intraday=_args.allow_intraday))
         sys.exit(0)
     except Exception as e:
         logger.exception("增量同步失败")

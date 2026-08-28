@@ -111,3 +111,48 @@ def test_freshness_baseline_only_updates_on_healthy(tmp_path):
     check_freshness("daily", "2026-08-01", lake_dir=str(tmp_path))  # 骤降，不更新基线
     baseline = json.loads((tmp_path / ".freshness_baseline.json").read_text(encoding="utf-8"))
     assert baseline["daily"]["row_count"] == 10000
+
+
+# ============================================================================
+# W2-3（2026-08-28 评审 P1-3）：日级行数环比——防「当日部分写入」骗过 max-date
+# ============================================================================
+def _write_lake(lake_dir, rows):
+    import pandas as pd
+    df = pd.DataFrame(
+        {"close": [10.0] * len(rows)},
+        index=pd.MultiIndex.from_tuples(rows, names=["date", "symbol"]))
+    p = lake_dir / "a_shares_daily.parquet"   # key "daily" 的实际映射文件名
+    df.to_parquet(p)
+    return p
+
+
+def test_day_level_partial_write_fails(tmp_path):
+    """latest==expected 但当日行数只有次新日的 50% → FAIL（W2-3 主场景）。"""
+    import pandas as pd
+    from data.freshness import check_freshness
+    rows = ([(pd.Timestamp("2026-08-27"), f"{i:06d}.SZ") for i in range(1000)]
+            + [(pd.Timestamp("2026-08-28"), f"{i:06d}.SZ") for i in range(500)])  # 半截
+    _write_lake(tmp_path, rows)
+    r = check_freshness("daily", "2026-08-28", lake_dir=str(tmp_path))
+    assert not r.ok and "当日行数环比骤降" in r.message
+
+
+def test_day_level_normal_variance_passes(tmp_path):
+    """当日行数 99% 于次新（正常退市/上市缓变）→ PASS。"""
+    import pandas as pd
+    from data.freshness import check_freshness
+    rows = ([(pd.Timestamp("2026-08-27"), f"{i:06d}.SZ") for i in range(1000)]
+            + [(pd.Timestamp("2026-08-28"), f"{i:06d}.SZ") for i in range(990)])
+    _write_lake(tmp_path, rows)
+    r = check_freshness("daily", "2026-08-28", lake_dir=str(tmp_path))
+    assert r.ok, r.message
+
+
+def test_day_level_single_day_lake_passes(tmp_path):
+    """单日湖（无次新日可比）→ 放行（首日基线语义，同 crater 检测）。"""
+    import pandas as pd
+    from data.freshness import check_freshness
+    rows = [(pd.Timestamp("2026-08-28"), f"{i:06d}.SZ") for i in range(10)]
+    _write_lake(tmp_path, rows)
+    r = check_freshness("daily", "2026-08-28", lake_dir=str(tmp_path))
+    assert r.ok, r.message
