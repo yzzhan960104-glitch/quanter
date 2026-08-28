@@ -100,14 +100,20 @@ def init_db(db_path=DEFAULT_DB_PATH):
                 conn.execute(f"ALTER TABLE search_run ADD COLUMN {col} {decl}")
 
 
-def trial_id_of(params, snapshot_hash, seed=0):
-    """trial_id = sha256(params+snapshot+seed)[:12]，天然去重键（spec §3.2）。
+def trial_id_of(params, snapshot_hash, seed=0, engine_hash=""):
+    """trial_id = sha256(params+snapshot+seed+engine_hash)[:12]，天然去重键（spec §3.2）。
 
-    物理意图：同一组 params 在同一快照、同一 seed 下，回测结果必须可复现——故 trial_id
-    作为去重键，使断点续跑/重跑天然幂等（INSERT OR IGNORE 见 write_trial）。
+    物理意图：同一组 params 在同一快照、同一 seed、同一内核下，回测结果必须可复现
+    ——故 trial_id 作为去重键，使断点续跑/重跑天然幂等（INSERT OR IGNORE 见
+    write_trial）。
+    W5-2（2026-08-28 全库评审 P1-1）：engine_hash 纳入签名——原实现只记不执行，
+    fingerprint.py「内核任一文件一动，老 trial 自然与新跑不可比」的承诺名存实亡：
+    内核变更后同 params 重跑被 trial_exists 当重复静默跳过、Pareto/DSR 排序混入
+    跨内核 trial。默认 "" 向后兼容（旧调用/read 路径不填 = 旧行为，老 trial_id
+    天然不变——新旧 id 空间自然分流，无需迁移）。
     default=str 防 numpy/decimal 等非原生类型序列化失败。
     """
-    sig = json.dumps({"p": params, "s": snapshot_hash, "seed": seed},
+    sig = json.dumps({"p": params, "s": snapshot_hash, "seed": seed, "e": engine_hash},
                      sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:12]
 
@@ -152,15 +158,23 @@ def trial_exists(conn, trial_id):
     return conn.execute("SELECT 1 FROM trial WHERE trial_id=?", (trial_id,)).fetchone() is not None
 
 
-def read_trials_by_snapshot(conn, snapshot_hash):
+def read_trials_by_snapshot(conn, snapshot_hash, engine_hash=None):
     """读某 snapshot 下所有 trial（Pareto/DSR 计算用，spec §3.4）。
 
     返回 list[dict]，每项含 trial_id/inner_metrics/outer_metrics/source。
     inner_metrics/outer_metrics 是 JSON 字符串（write_trial 存的），调用方 json.loads。
+    engine_hash（W5-2）：非 None 时按内核指纹过滤——跨内核 trial 的口径不可比
+    （评估数学/数据切片可能已变），排序/DSR 的 n_trials 不应混入；None=旧行为全量。
     """
-    rows = conn.execute(
-        "SELECT trial_id, inner_metrics, outer_metrics, source FROM trial WHERE snapshot_hash=?",
-        (snapshot_hash,)).fetchall()
+    if engine_hash is None:
+        rows = conn.execute(
+            "SELECT trial_id, inner_metrics, outer_metrics, source FROM trial WHERE snapshot_hash=?",
+            (snapshot_hash,)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT trial_id, inner_metrics, outer_metrics, source FROM trial "
+            "WHERE snapshot_hash=? AND engine_hash=?",
+            (snapshot_hash, engine_hash)).fetchall()
     return [dict(r) for r in rows]
 
 

@@ -86,7 +86,7 @@ def test_sync_already_latest_returns_early():
          patch.object(mod, "datetime") as mock_dt:
         # today = d0 = 2026-07-24 → 早返
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
-        msg = mod.sync_daily_incremental()
+        msg = mod.sync_daily_incremental(allow_intraday=True)
     assert "已最新" in msg
     assert mock_get_pro.call_count == 0  # 早返不拉 pro
 
@@ -102,7 +102,7 @@ def test_sync_no_new_trade_day_returns_early():
          patch.object(mod, "get_pro", return_value=pro), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
-        msg = mod.sync_daily_incremental()
+        msg = mod.sync_daily_incremental(allow_intraday=True)
     assert "无新交易日" in msg
     assert pro.daily.call_count == 0  # 节假日空窗不拉 daily
 
@@ -155,7 +155,7 @@ def test_sync_incremental_recomputes_qfq_and_appends():
          patch.object(mod, "safe_overwrite", fake_safe_overwrite), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
-        msg = mod.sync_daily_incremental()
+        msg = mod.sync_daily_incremental(allow_intraday=True)
 
     assert "OK 最新日" in msg
     df = written["df"]
@@ -205,7 +205,7 @@ def test_sync_detects_dividend_when_adj_changes():
          patch.object(mod, "safe_overwrite", fake_safe_overwrite), \
          patch("datetime.datetime") as mock_dt:
         mock_dt.today.return_value.strftime.return_value = "2026-07-24"
-        msg = mod.sync_daily_incremental()
+        msg = mod.sync_daily_incremental(allow_intraday=True)
     # msg 含「除权标的 1 只待重算」（adj 1.0 → 2.0 跳变被 detect）
     assert "除权标的" in msg and "1" in msg
 
@@ -315,7 +315,8 @@ def test_sync_daily_guard_propagates_reject(tmp_path, monkeypatch):
 
     # no_backscan/no_recompute_div=True 禁用回扫与除权重算，聚焦落盘点守卫路径
     with pytest.raises(WriteGuardError):
-        mod.sync_daily_incremental(no_backscan=True, no_recompute_div=True)
+        mod.sync_daily_incremental(no_backscan=True, no_recompute_div=True,
+                                   allow_intraday=True)
 
 
 def test_fetch_paged_acquires_rate_limit_per_page(monkeypatch):
@@ -346,3 +347,119 @@ def test_fetch_paged_acquires_rate_limit_per_page(monkeypatch):
     # 2 页 → acquire 2 次（每页前一次：page1 acquire→500 满→page2 acquire→100 末页 break）
     assert len(acq_calls) == 2, f"每页应 acquire 一次（2 页期望 2 次），实际 {len(acq_calls)}"
     assert len(df) == mod.PAGE + 100  # 500 + 100
+
+
+# ============================================================================
+# W2（2026-08-28 全库评审清偿）：交易时段闸 / adj 完整性拒写 / 当日重拉 / 除权重算 sidecar
+# ============================================================================
+from datetime import datetime as _dt
+
+
+def test_intraday_guard_blocks_weekday_market_hours():
+    """工作日 09:15–15:05 拒跑（半截 bar 落湖防护，P0-3 触发面）。"""
+    for h, m in [(9, 15), (10, 30), (14, 59), (15, 4)]:
+        with pytest.raises(RuntimeError, match="交易时段拒跑"):
+            mod._intraday_guard(False, now=_dt(2026, 8, 28, h, m))   # 周五
+
+
+def test_intraday_guard_allows_outside_hours_and_weekend():
+    """盘前/收盘后/周末放行（17:30 pipeline 与跨 18:00 补跑在窗外）。"""
+    for d, h, m in [(28, 9, 14), (28, 15, 5), (28, 23, 0), (29, 10, 0), (30, 12, 0)]:
+        mod._intraday_guard(False, now=_dt(2026, 8, d, h, m))        # 不抛
+    mod._intraday_guard(True, now=_dt(2026, 8, 28, 10, 0))           # 逃生口
+
+
+def test_adj_nan_refuses_write():
+    """W2-1：merge 后 adj_factor NaN → 整批拒落盘 raise（绝不写 NaN 价格行）。
+
+    构造：07-23 raw 有 2 标的，adj 只回 1 只 → 缺失行 adj_factor=NaN → 必炸且
+    safe_overwrite 不被触达（湖零污染）。"""
+    fake_lake = pd.DataFrame(
+        {"close": [10.0]},
+        index=pd.MultiIndex.from_tuples(
+            [(pd.Timestamp("2026-07-20"), "000001.SZ")], names=["date", "symbol"]))
+    trade_days = ["20260723"]
+    raw_by_day = {
+        "20260723": pd.DataFrame({
+            "ts_code": ["000001.SZ", "000002.SZ"], "trade_date": ["20260723"] * 2,
+            "open": [22.0, 8.0], "high": [22.5, 8.5], "low": [21.5, 7.5],
+            "close": [22.0, 8.0], "vol": [1100, 2200], "amount": [24000.0, 17000.0]}),
+    }
+    adj_by_day = {   # 只有 000001 的 adj —— 000002 merge 后 NaN
+        "20260720": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20260720"], "adj_factor": [1.0]}),
+        "20260723": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20260723"], "adj_factor": [1.0]}),
+    }
+    pro = _build_pro(trade_days, raw_by_day, adj_by_day)
+    called = []
+
+    def fail_if_called(path, df, **k):
+        called.append(path)
+
+    with patch.object(mod.pd, "read_parquet", return_value=fake_lake), \
+         patch.object(mod, "get_pro", return_value=pro), \
+         patch.object(mod, "safe_overwrite", fail_if_called), \
+         patch("datetime.datetime") as mock_dt:
+        mock_dt.today.return_value.strftime.return_value = "2026-07-24"
+        with pytest.raises(RuntimeError, match="adj 完整性闸"):
+            mod.sync_daily_incremental(no_backscan=True, no_recompute_div=True,
+                                       allow_intraday=True)
+    assert called == [], "adj NaN 时绝不落盘"
+
+
+def test_refetch_today_repulls_and_overwrites():
+    """W2-2 refetch_today：d0==today 仍重取当日，dedup keep=last 覆盖旧行（半截修复口）。"""
+    fake_lake = pd.DataFrame(
+        {"close": [9.5]},   # 盘中写的半截 close
+        index=pd.MultiIndex.from_tuples(
+            [(pd.Timestamp("2026-07-23"), "000001.SZ")], names=["date", "symbol"]))
+    trade_days = ["20260723"]
+    raw_by_day = {
+        "20260723": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20260723"],
+                                  "open": [22.0], "high": [22.5], "low": [21.5],
+                                  "close": [22.0], "vol": [1100], "amount": [24000.0]}),
+    }
+    adj_by_day = {
+        "20260723": pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20260723"], "adj_factor": [1.0]}),
+    }
+    pro = _build_pro(trade_days, raw_by_day, adj_by_day)
+    written = {}
+
+    class _DT0723:
+        """模块级 datetime 绑定的替身（patch("datetime.datetime") 拦不住 from-import 绑定）。"""
+        @staticmethod
+        def today():
+            class _D:
+                def strftime(self, fmt):
+                    return "2026-07-23"
+            return _D()
+
+    def fake_safe_overwrite(path, df, **k):
+        written["df"] = df
+
+    real_dt = mod.datetime
+    mod.datetime = _DT0723
+    try:
+        with patch.object(mod.pd, "read_parquet", return_value=fake_lake), \
+             patch.object(mod, "get_pro", return_value=pro), \
+             patch.object(mod, "safe_overwrite", fake_safe_overwrite):
+            msg = mod.sync_daily_incremental(no_backscan=True, no_recompute_div=True,
+                                             refetch_today=True, allow_intraday=True)
+    finally:
+        mod.datetime = real_dt
+    assert "OK 最新日" in msg
+    df = written["df"]
+    assert abs(df.loc[(pd.Timestamp("2026-07-23"), "000001.SZ")]["close"] - 22.0) < 1e-6, \
+        "半截 close 9.5 必须被重取的 22.0 覆盖"
+
+
+def test_pending_recompute_sidecar_roundtrip(tmp_path, monkeypatch):
+    """W2-5：失败清单原子落盘 + 下轮读回优先重试。"""
+    import json
+    monkeypatch.setattr(mod, "_PENDING_RECOMPUTE", str(tmp_path / "pending.json"))
+    mod._save_pending_recompute(["000002.SZ", "000003.SZ"])
+    assert mod._load_pending_recompute() == ["000002.SZ", "000003.SZ"]
+    mod._save_pending_recompute([])          # 成功清账
+    assert mod._load_pending_recompute() == []
+    # 损坏 sidecar 读失败 → []（不阻断主流程）
+    (tmp_path / "pending.json").write_text("not-json", encoding="utf-8")
+    assert mod._load_pending_recompute() == []

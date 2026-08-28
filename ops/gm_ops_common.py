@@ -69,11 +69,17 @@ def api_get(path: str, token: str, timeout: float = 3.0) -> tuple[int, object]:
 def notify(level: str, msg: str) -> None:
     """钉钉告警（infra.notifier 多通道 + 本地 alerts.log 兜底；失败软降级不阻断主链）。
 
-    单源自持：原复用 ops/miniqmt_guard._notify，该模块随 QMT 退役 P3 删除
-    （2026-08-27），实现逐字迁此。
+    W0（2026-08-28 全库评审 P0-2 修复）：三件套是短命批处理，本函数改【同步发送】——
+    build_default_manager() 装配通道（get_default 裸单例零通道零留痕，08-27~08-28 晨检/
+    EOD/看护告警整体静默的根因）+ asyncio.run 直发。Why 不用 fire_and_forget：其
+    daemon 线程在脚本 return 后被解释器终期化掐断（HTTP 10s 超时窗口内必丢一批）；
+    批处理脚本 notify 后无后续逻辑，同步阻塞 3-10s 零代价，消灭整类退出竞态。
+    引擎常驻侧（trading/pipeline）仍用 fire_and_forget，互不影响。
     """
     try:
-        from infra.notifier import NotificationManager, fire_and_forget
-        fire_and_forget(NotificationManager.get_default().notify_risk_event(msg, level))
-    except Exception:
-        pass
+        import asyncio
+
+        from infra.notifier import build_default_manager
+        asyncio.run(build_default_manager().notify_risk_event(msg, level))
+    except Exception as e:  # 通道自身故障：print 进 schtasks 日志（W0 bat 包装器），不炸主链
+        print(f"[notify 降级 print] level={level} msg={msg!r}（通道失败：{e!r}）")

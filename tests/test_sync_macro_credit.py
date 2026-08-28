@@ -202,3 +202,33 @@ def test_sync_macro_merge_seam_no_bfill_no_future_leak(tmp_path, monkeypatch):
     # 同时验证未来段保持原值未被污染（合并不应反向影响 existing 已知值）。
     late = got.loc[idx_old, "shrzgm"]
     assert (late == pd.Series([100.0, 200.0, 300.0], index=idx_old)).all()
+
+
+# ============================================================================
+# W2-6（2026-08-28 评审 P0-1）：月频发布滞后——钉死"锚报告期月首即 ffill"的前视根因
+# ============================================================================
+def test_align_to_daily_monthly_publish_lag_blocks_lookahead():
+    """publish_lag_days=15：202401 期值最早在 2024-01-16 可见（次月 10-15 日公布的
+    保守代理）。1 月上旬读到 1 月终值=前视，必须为 NaN（由 2023-12 期 ffill 供给）。"""
+    import pandas as pd
+    from data.tools.sync_macro_credit import align_to_daily
+
+    m = pd.DataFrame({"月份": ["202401", "202402"],
+                      "m2": [9.2, 9.5]})
+    daily = align_to_daily(m, date_col="月份", start="2024-01-01", end="2024-02-29",
+                           value_cols=["m2"], publish_lag_days=15)
+    # 202401 期锚 01-01+15d=01-16 可见；02-05 仍只能看到 202401（9.2）——
+    # 202402 终值 9.5 要等 02-16（次月中旬公布代理）才可见
+    assert abs(daily.loc["2024-02-05", "m2"] - 9.2) < 1e-9, "公布前只能看到上期"
+    assert abs(daily.loc["2024-02-16", "m2"] - 9.5) < 1e-9, "滞后期满后当期可见"
+
+
+def test_align_to_daily_zero_lag_keeps_legacy_semantics():
+    """publish_lag_days=0（日频源如 dr007）：行为与旧口径逐值一致（回归锚）。"""
+    import pandas as pd
+    from data.tools.sync_macro_credit import align_to_daily
+
+    d = pd.DataFrame({"日期": ["2024-01-05"], "r": [1.8]})
+    daily = align_to_daily(d, date_col="日期", start="2024-01-01", end="2024-01-10")
+    assert abs(daily.loc["2024-01-05", "r"] - 1.8) < 1e-9
+    assert pd.isna(daily.loc["2024-01-04", "r"])

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from ops import manage_ops_schtasks as m
 from ops.manage_ops_schtasks import (
     main,
@@ -81,18 +83,16 @@ def test_register_server_falls_back_to_schtasks_when_powershell_fails():
     assert "/RU" in cmd and "TestUser" in cmd
 
 
-def test_register_guard_creates_minute_task():
-    """B2-4: QuanterMiniQmtGuard = /SC MINUTE /MO 5 + venv python miniqmt_guard.py --once。"""
-    cmds: list[list[str]] = []
-    with patch("ops.manage_ops_schtasks._schtasks",
-               side_effect=lambda a: cmds.append(a) or 0):
-        register_guard()
-    create_cmds = [c for c in cmds if "/Create" in c]
-    assert len(create_cmds) == 1
-    cmd = " ".join(create_cmds[0])
-    assert "/SC" in cmd and "MINUTE" in cmd and "/MO" in cmd and "5" in cmd
-    assert "QuanterMiniQmtGuard" in cmd
-    assert "miniqmt_guard.py" in cmd and "--once" in cmd
+def test_register_guard_refuses_and_points_to_gm(capsys):
+    """W3（2026-08-28 退役）：miniqmt_guard.py 已删——register_guard 拒注册并指向
+    gm_terminal_guard 接棒者（防误用建出每 5 分钟失败一次的死任务）。"""
+    from ops import manage_ops_schtasks as m
+    with pytest.raises(SystemExit) as ei:
+        m.register_guard()
+    assert ei.value.code == 2
+    out = capsys.readouterr().out
+    assert "已退役" in out and "gm_terminal_guard" in out
+
 
 
 # ============ unregister_discovery：退 QuanterDiscoveryDaemon ============

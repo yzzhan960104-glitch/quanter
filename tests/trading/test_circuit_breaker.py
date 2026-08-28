@@ -20,14 +20,14 @@ import os
 # 本测试用 cb 别名聚合两者，保持测试体内 cb.check_daily_loss_limit /
 # cb.cancel_all_open_orders 调用零改动（语义仍是「熔断」工具函数对）。
 from trading.compute.breaker import check_daily_loss_limit as _check_loss
-from trading.io.breaker import cancel_all_open_orders as _cancel_all
+# W6-A：io.breaker（cancel_all 撤单壳）随 QMT live 面删除——撤单属柜台副作用，
+# 掘金腿的对应物是 pilot_body._cancel_and_sync（tests/emquant 侧守卫）。
 from trading.types.order_state import OrderState  # Layer2 follow-up #4c：改指 types 真身
 
 
 class _CBShim:
-    """聚合 compute.breaker + io.breaker 两真身的熔断工具对（兼容旧 cb 别名）。"""
+    """W6-A 后只剩 compute.breaker 真身（io 侧撤单壳已删，见文件头注）。"""
     check_daily_loss_limit = staticmethod(_check_loss)
-    cancel_all_open_orders = staticmethod(_cancel_all)
 
 
 cb = _CBShim
@@ -85,85 +85,3 @@ def test_daily_loss_limit_env_unset_default(monkeypatch):
 
 
 # --------------------------------------------------------------- 撤未终态单
-
-
-class _FakeGW:
-    """最小网关桩：仅暴露 ``_orders`` 与 async ``cancel_order``。
-
-    state 必须用 ``OrderState`` 枚举构造，以对齐真实网关 _orders 的类型契约。
-    """
-
-    def __init__(self, orders):
-        self._orders = orders
-        self.cancelled = []
-
-    async def cancel_order(self, oid):
-        self.cancelled.append(oid)
-        return None
-
-
-def test_cancel_all_open_orders_skips_terminal_states():
-    """只撤未终态单，FILLED/CANCELLED/REJECTED/FAILED/PARTIAL_CANCELLED 一律不撤。"""
-    gw = _FakeGW({
-        "1": {"state": OrderState.SUBMITTED},          # 未终态 -> 撤
-        "2": {"state": OrderState.FILLED},             # 终态 -> 不撤
-        "3": {"state": OrderState.CANCELLED},          # 终态 -> 不撤
-        "4": {"state": OrderState.REJECTED},           # 终态 -> 不撤
-        "5": {"state": OrderState.FAILED},             # 终态 -> 不撤
-        "6": {"state": OrderState.PARTIAL_CANCELLED},  # 终态 -> 不撤
-        "7": {"state": OrderState.PARTIAL_FILLED},     # 未终态 -> 撤
-        "8": {"state": OrderState.PENDING},            # 未终态 -> 撤
-    })
-    n = asyncio.run(cb.cancel_all_open_orders(gw))
-    # 仅 1/7/8 撤单，顺序按 _orders 迭代序（Python 3.7+ dict 保序）
-    # 返回值契约（M2 T3）：{cancelled, unconfirmed}；_FakeGW 无 _confirm_cancelled
-    # 方法 → 鸭子类型跳过确认，unconfirmed 恒 0（向后兼容）。
-    assert n["cancelled"] == 3
-    assert n["unconfirmed"] == 0
-    assert gw.cancelled == ["1", "7", "8"]
-
-
-def test_cancel_all_open_orders_resilient_to_single_failure():
-    """单笔撤单抛异常不中断后续，logger.exception 记录后继续。
-
-    Why：熔断路径必须尽最大努力撤完所有未终态单，一笔柜台异常不能让其余
-    敞口单继续暴露——熔断的物理意图就是「宁可错杀也要把所有口子堵上」。
-    """
-    class FailGW(_FakeGW):
-        async def cancel_order(self, oid):
-            if oid == "1":
-                raise RuntimeError("模拟柜台超时")
-            self.cancelled.append(oid)
-
-    gw = FailGW({
-        "1": {"state": OrderState.SUBMITTED},
-        "2": {"state": OrderState.SUBMITTED},
-    })
-    n = asyncio.run(cb.cancel_all_open_orders(gw))
-    # 第一笔失败被吞，第二笔仍被撤
-    # 返回值契约（M2 T3）：{cancelled, unconfirmed}。
-    assert n["cancelled"] == 1
-    assert n["unconfirmed"] == 0
-    assert gw.cancelled == ["2"]
-
-
-def test_cancel_all_open_orders_missing_orders_attr():
-    """gw 无 _orders 属性时返 0，不抛 AttributeError（防御性：熔断路径不允许未捕获异常）。"""
-    class BareGW:
-        async def cancel_order(self, oid):
-            raise AssertionError("不应被调用")
-
-    n = asyncio.run(cb.cancel_all_open_orders(BareGW()))
-    # 返回值契约（M2 T3）：{cancelled, unconfirmed}；无 _orders → 都 0。
-    assert n["cancelled"] == 0
-    assert n["unconfirmed"] == 0
-
-
-def test_cancel_all_open_orders_empty():
-    """_orders 为空字典时返 0。"""
-    gw = _FakeGW({})
-    res = asyncio.run(cb.cancel_all_open_orders(gw))
-    # 返回值契约（M2 T3）：{cancelled, unconfirmed}；空 _orders → 都 0。
-    assert res["cancelled"] == 0
-    assert res["unconfirmed"] == 0
-    assert gw.cancelled == []

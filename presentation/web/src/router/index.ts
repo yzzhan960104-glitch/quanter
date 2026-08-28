@@ -8,7 +8,6 @@
  * - /live       → 已退役，重定向 /cockpit（2026-08-27 · QMT 退役 P1）
  * - /data       → DataLakeView（数据湖资产白盒反射）
  * - /cockpit    → CockpitView（综合看板：聚合流水/日志/心跳/资金/数据健康）
- * - /jobs       → JobCockpitView（作业驾驶舱：当天 pipeline/pre_open 台账 + 启动补跑四态）
  *
  * Why 删 /caisen + /lab（2026-08-13 · G8 契约清理）：
  * - 后端 server/api/v1/caisen.py 随 caisen 形态整体退役已删（master 策略 = neckline，
@@ -31,7 +30,6 @@ const DataLakeView = () => import('../views/DataLakeView.vue')
 // 综合看板（Task 12 · 一期观测运营层前端收官）：聚合流水/日志/回测对比/心跳/资金/数据健康。
 const CockpitView = () => import('../views/CockpitView.vue')
 // 作业驾驶舱（Phase 2 · Task 12 收官）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
-const JobCockpitView = () => import('../views/JobCockpitView.vue')
 // 搜索实验室（P3 · 2026-08-13）：参数发现敏感性分析/热力图/进展（只读，spec §4）。
 const DiscoveryLabView = () => import('../views/DiscoveryLabView.vue')
 
@@ -48,7 +46,6 @@ const router = createRouter({
     // 综合看板（Task 12）：实盘观测俯瞰入口，聚合心跳/资金/数据健康/流水/日志。
     { path: '/cockpit', name: 'cockpit', component: CockpitView },
     // 作业驾驶舱（Phase 2 · Task 12）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
-    { path: '/jobs', name: 'jobs', component: JobCockpitView },
     { path: '/data', name: 'data', component: DataLakeView },
   ],
 })

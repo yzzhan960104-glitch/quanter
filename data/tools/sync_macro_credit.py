@@ -48,6 +48,7 @@ def align_to_daily(
     end: str,
     *,
     value_cols: list[str] | None = None,
+    publish_lag_days: int = 0,
 ) -> pd.DataFrame:
     """月频/日频 DataFrame → reindex 到工作日日历 + 仅向前 ffill。
 
@@ -63,6 +64,11 @@ def align_to_daily(
         date_col:  日期列名（如 "月份"/"日期"）。
         start/end: 'YYYY-MM-DD' 日历范围。
         value_cols: 仅对这些列 ffill（默认全部列）；显式传入可避免误填非数值列。
+        publish_lag_days: 发布滞后自然日（W2-6，2026-08-28 评审 P0-1）。月频源必传
+            15：央行/akshare 月度终值（M2/社融）实际在次月 10-15 日公布，锚"报告期
+            月首"再 ffill = 1~1.5 个月前视（回测曲线虚高的系统性来源）。对齐同仓
+            FRED 路径标准（data/fetcher.py:568-573 月频 +15 天"确保不可能提前看到"）。
+            日频源（如 dr007）传 0。
 
     返回：
         DatetimeIndex（工作日）的 DataFrame，值列已向前填充，index.name='date'。
@@ -82,6 +88,7 @@ def align_to_daily(
         parsed = pd.to_datetime(cleaned, format="%Y-%m", errors="coerce")
     if parsed.isna().mean() > 0.5:  # 仍失败 → 试 6 位 YYYYMM
         parsed = pd.to_datetime(_vals, format="%Y%m", errors="coerce")
+    parsed = parsed + pd.Timedelta(days=publish_lag_days) if publish_lag_days else parsed
     d[date_col] = parsed
     d = d.dropna(subset=[date_col])  # 丢弃最终仍解析失败的脏行
     d = d.set_index(date_col).sort_index()
@@ -161,7 +168,8 @@ def fetch_macro_series(start: str, end: str) -> pd.DataFrame:
     )
     if not cn_m.empty:
         # _pick 把 cn_m 的 month 列防御性归一（若上游改名为别的，仍能取到日期列）。
-        m = align_to_daily(_pick(cn_m, "month"), "month", start, end)
+        m = align_to_daily(_pick(cn_m, "month"), "month", start, end,
+                            publish_lag_days=15)   # W2-6：月频发布滞后
         # cn_m 字段名 m1_yoy/m2_yoy → CreditRegime 消费的标准名 M1同比增长/M2同比增长。
         # 归一映射而非硬编码列名：字段漂移时只改映射表，不改下游算式。
         for col, key in [("m1_yoy", "M1同比增长"), ("m2_yoy", "M2同比增长")]:
@@ -175,7 +183,8 @@ def fetch_macro_series(start: str, end: str) -> pd.DataFrame:
     ak = AKShareClient()
     shrzgm = ak.fetch_macro_raw("shrzgm")
     if not shrzgm.empty:
-        s = align_to_daily(_pick(shrzgm, "月份"), "月份", start, end)
+        s = align_to_daily(_pick(shrzgm, "月份"), "月份", start, end,
+                            publish_lag_days=15)   # W2-6：月频发布滞后
         series["shrzgm"] = s.iloc[:, 0]
     dr007 = ak.fetch_macro_raw("dr007")
     if not dr007.empty:

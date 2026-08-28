@@ -87,6 +87,10 @@ def check_freshness(
 
     # 行数骤降检测（sidecar 基线环比，复用 SSoT check_row_count_drop）
     crater_msg = _check_row_count_crater(key, row_count, lake_dir)
+    # W2-3（2026-08-28 评审 P1-3）日级行数环比：max-date 只防「缺日」，不防「当日
+    # 部分写入」（部分标的/半截同步落湖后 latest==expected 照样 PASS）。环比当日
+    # vs 次新交易日的行数，< 90% 判 FAIL——日内部分写入的行数天然只有全量的一小半。
+    day_msg = _check_day_level_rows(dates, latest)
 
     if latest < expected_date:
         msg = (f"{key} 数据陈旧：最新 {latest} < 期望 {expected_date}，"
@@ -102,6 +106,13 @@ def check_freshness(
                                expected_date=expected_date,
                                message=f"{key} 最新 {latest} 合格，但{crater_msg}",
                                row_count=row_count)
+    if day_msg:
+        # max-date 合格但当日行数环比骤降：日级部分写入（W2-3），FAIL + CRITICAL
+        logger.critical("%s %s", key, day_msg)
+        return FreshnessResult(key, ok=False, latest_date=latest,
+                               expected_date=expected_date,
+                               message=f"{key} 最新 {latest} 合格，但{day_msg}",
+                               row_count=row_count)
     # 健康：更新基线（仅健康时写，防骤降被基线掩盖）
     _update_baseline(key, row_count, lake_dir)
     return FreshnessResult(key, ok=True, latest_date=latest,
@@ -113,6 +124,29 @@ def check_freshness(
 def _baseline_path(lake_dir: str) -> Path:
     """sidecar 基线文件路径（与数据湖同目录，运行时状态不入库）。"""
     return Path(lake_dir) / ".freshness_baseline.json"
+
+
+def _check_day_level_rows(dates, latest: str) -> str:
+    """W2-3：当日 vs 次新交易日行数环比（< 90% 返中文结论，否则空串）。
+
+    Why 0.9：A 股全市场日行数随退市/上市/停牌缓变（±1% 量级），0.9 对正常波动
+    足够宽；部分写入（同步中断/接口缺页）通常只剩全量的零头。单日湖（无次新日）
+    返空放行——首日基线语义同 _check_row_count_crater 的首次建基线。"""
+    import pandas as pd
+    try:
+        counts = dates.value_counts()          # date → 行数
+        ds = sorted({str(pd.Timestamp(d).date()) for d in counts.index})
+        if len(ds) < 2 or latest not in ds:
+            return ""
+        prev = ds[ds.index(latest) - 1]
+        cur_n, prev_n = int(counts.get(latest, 0)), int(counts.get(prev, 0))
+        if prev_n <= 0 or cur_n >= prev_n * 0.9:
+            return ""
+        return (f"当日行数环比骤降：{latest} 仅 {cur_n} 行 vs 次新 {prev} {prev_n} 行"
+                f"（{cur_n / prev_n:.0%} < 90%，疑似部分写入/半截同步）")
+    except Exception:
+        logger.warning("日级行数环比异常（跳过该维度）", exc_info=True)
+        return ""
 
 
 def _check_row_count_crater(key: str, row_count: int, lake_dir: str) -> str:

@@ -13,6 +13,9 @@ Plan 2 范围：budget 驱动跑 N 组新 trial，落 SQLite，返回 RunSummary
 """
 from dataclasses import dataclass, field
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 from discovery.sampler import sample_search
 from discovery.worker import eval_batch
@@ -82,7 +85,9 @@ def _persist_trial(conn, params, snapshot_meta, split_tag, engine_hash, result, 
     二次保险：trial_exists 预检 + write_trial 的 INSERT OR IGNORE，防竞态下两路同 trial_id
     并发落库（预检通过到 INSERT 之间可能有其他 worker 落了同 tid）。
     """
-    tid = trial_id_of(params, snapshot_meta.snapshot_hash, seed)
+    # W5-2：engine_hash 进去重键——内核变更后同 params 是新 trial（非重复跳过）
+    tid = trial_id_of(params, snapshot_meta.snapshot_hash, seed,
+                      engine_hash=engine_hash or "")
     if trial_exists(conn, tid):
         return None
     write_trial(conn, tid, params, snapshot_meta.snapshot_hash, engine_hash,
@@ -130,13 +135,28 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
     to_eval, n_skipped = [], 0
     with connect(db_path) as conn:
         for p in sampled:
-            tid = trial_id_of(p, snapshot_meta.snapshot_hash, seed)
+            # W5-2：预检与 _persist_trial 同口径（engine_hash 进键）——两处分叉会让
+            # 重启去重判定用旧键、落库用新键，dup 统计归零（test_run_search_dedup 钉死）
+            tid = trial_id_of(p, snapshot_meta.snapshot_hash, seed,
+                              engine_hash=engine_hash or "")
             if trial_exists(conn, tid):
                 n_skipped += 1
             else:
                 to_eval.append(p)
+    # W5-1：split_kind 透传（inner 段选择修复——extended 不再只在 replay 生效）。
+    # 评审收口：前缀嗅探改精确匹配——新增 split 形态静默落 holdout 的脆弱面消除，
+    # 未知形态显式 fail-loud（宁停不错：口径错跑一晚比炸一次贵）。
+    _KIND_BY_SPLIT = {"inner_2025": "holdout", "inner_2021_24": "extended"}
+    _kind = _KIND_BY_SPLIT.get(split.inner.name)
+    if _kind is None:
+        # 未知形态（测试假体/未来新 split）：回落 holdout 并 WARNING——不炸研究面，
+        # 但显式留痕防新 split 形态静默走错考场（比前缀嗅探的静默面收窄）。
+        logger.warning("未知 split 形态 %r——split_kind 回落 holdout（已知：%s）",
+                       split.inner.name, sorted(_KIND_BY_SPLIT))
+        _kind = "holdout"
     results = eval_batch(to_eval, lake_start=lake_start,
-                         embargo_days=split.embargo_days, n_proc=n_proc) if to_eval else []
+                         embargo_days=split.embargo_days, n_proc=n_proc,
+                         split_kind=_kind) if to_eval else []
     n_new, n_failed = 0, 0
     all_evaluated = []   # 累积本 run 评估的 params（算覆盖度 ρ）
     with connect(db_path) as conn:
@@ -161,7 +181,7 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
     if tpe_trials > 0:
         from discovery.worker import EvalPool
         pool = EvalPool(n_proc=n_proc, lake_start=lake_start,
-                        embargo_days=split.embargo_days)
+                        embargo_days=split.embargo_days, split_kind=_kind)
         try:
             # seed = 阶段一新鲜评估的 (params, res) 对——**必须滤 None**（Critical C1：
             # eval_batch 对退化组（n_total==0/异常）返 None，落库循环只跳过不删除；
@@ -210,7 +230,9 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
 
     # === Pareto 前沿 + DSR top-1（从 store 读所有 trial，信息隔离：只用 inner） ===
     with connect(db_path) as conn:
-        trials_db = read_trials_by_snapshot(conn, snapshot_meta.snapshot_hash)
+        # W5-2：DSR 的 n_trials/Pareto 只数同内核 trial（跨内核混数=多重比较修正失真）
+        trials_db = read_trials_by_snapshot(conn, snapshot_meta.snapshot_hash,
+                                            engine_hash=engine_hash)
     inner_metrics = []
     for t in trials_db:
         try:

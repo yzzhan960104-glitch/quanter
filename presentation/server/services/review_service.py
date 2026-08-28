@@ -28,7 +28,9 @@ from typing import Any, Dict, Optional
 from infra.llm import get_llm_client
 from infra.llm.base import LLMConfigError
 from presentation.server.schemas.review import ReviewRequest, ReviewReport
-from trading.gateway_service import export_trades
+# W6-A（2026-08-28 完成退役）：export_trades 自 trading.gateway_service 收编至此
+# （唯一剩余消费者）——实现只依赖 state_store.fill（保留面），与网关无关。
+from presentation.server.services.trades_export import export_trades
 
 logger = logging.getLogger(__name__)
 

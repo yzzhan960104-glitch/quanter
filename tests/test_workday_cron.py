@@ -29,13 +29,8 @@ def test_mon_fri_matches_monday():
 
 
 def test_engine_cron_defaults_use_mon_fri():
-    """engine 三个盘后 job 的默认 cron 必须用 ``mon-fri``（防 ``1-5`` 回归）。"""
-    from trading.engine import (PIPELINE_CRON_DEFAULT, PRE_OPEN_CRON_DEFAULT,
-                                POST_CLOSE_CRON_DEFAULT)
-    for expr in (PIPELINE_CRON_DEFAULT, PRE_OPEN_CRON_DEFAULT, POST_CLOSE_CRON_DEFAULT):
-        assert "mon-fri" in expr
-        assert "1-5" not in expr
-
+    """W6-A 退役占位：engine cron 常量随 trading.engine 删除（掘金唯一平台，
+    cron 面=ops_sched 四任务）。口径考古见 archive/qmt-stack-final。"""
 
 def test_digest_cron_default_uses_mon_fri():
     """research digest cron 默认值必须 ``mon-fri``（周一也推送，与 pipeline 同语义）。"""

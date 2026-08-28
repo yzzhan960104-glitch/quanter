@@ -141,10 +141,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--unregister", action="store_true", help="删除 schtasks")
     args = p.parse_args(argv)
     if args.register:
-        py = ROOT / ".venv310" / "Scripts" / "python.exe"
+        # W0（0828 评审）：/TR 走 run_ops_task.bat 统一包装器（输出重定向防启动期静默）
+        bat = Path(__file__).parent / "run_ops_task.bat"
         rc = subprocess.run(["schtasks", "/Create", "/F", "/SC", "MINUTE", "/MO", "5",
                              "/TN", "QuanterGmGuard",
-                             "/TR", f'"{py}" "{Path(__file__)}"']).returncode
+                             "/TR", f'"{bat}" gm_terminal_guard.py --once']).returncode
         print("register" if rc == 0 else f"register failed rc={rc}")
         return rc
     if args.unregister:

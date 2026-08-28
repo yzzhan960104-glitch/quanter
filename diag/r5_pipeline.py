@@ -272,9 +272,11 @@ def phase4(st, base):
     # 补充：R5 新 trial（engine_hash=4b54e947，85 个）的 min_yr top2——P3 按 min_yr
     # 选 top3 复核可能漏掉"min_yr 中游但 raw 高"的新 trial，此处直查补齐
     try:
+        from discovery.fingerprint import engine_hash   # W8：魔法值 '4b54e9475dd8' 改现算
         tcon = sqlite3.connect(f"file:{ROOT/'logs/discovery_trials.db'}?mode=ro", uri=True)
         rows = [r for r in tcon.execute(
-            "SELECT trial_id, params, inner_metrics FROM trial WHERE engine_hash='4b54e9475dd8'")]
+            "SELECT trial_id, params, inner_metrics FROM trial WHERE engine_hash=?",
+            (engine_hash(),))]
         tcon.close()
         tops_new = sorted(rows, key=lambda r: json.loads(r[2]).get("min_yearly_calmar", -9),
                           reverse=True)[:2]

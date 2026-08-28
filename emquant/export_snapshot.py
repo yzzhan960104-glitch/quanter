@@ -247,12 +247,15 @@ def main() -> int:
     assert os.getenv("AUTO_TRADE_MODE") is not None, (
         ".env 未加载（AUTO_TRADE_MODE 不在环境）——_trade_cfg 将全走缺省值，"
         "拒绝导出（防纸面默认冒充实弹）")
-    # ② 实弹值钉死——pos_cap 当前 .env 实弹=0.05。缺省值同为 0.05，故①才是加载
-    #    证明、本条是【已知实弹值防漂移】锚：.env 若改值，此断言强制导出者有意识
-    #    同步更新（快照任务就该把已核实的实弹钉死，而非来者不拒）。
-    assert trade_cfg["pos_cap"] == 0.05, (
-        f"trade_cfg.pos_cap={trade_cfg['pos_cap']} != 0.05——实弹已变或有异常，"
-        "请核实 .env 并有意更新本锚")
+    # ② 实弹值钉死——pos_cap 当前 .env 实弹=0.075（2026-08-28 c243da10 用户裁决对齐
+    #    R6-11b「4并×7.5%」，快照手术指纹 7fe3d5b3f4a04786；旧值 0.05/旧指纹
+    #    8858982628989013 留档）。本条是【已知实弹值防漂移】锚：.env 若再改值，此
+    #    断言强制导出者有意识同步更新（快照任务就该把已核实的实弹钉死，而非来者不拒）。
+    #    硬闸联动：§0 的 PILOT_MAX_NEW_ORDERS_PER_DAY=4 / PILOT_MAX_POSITION_PCT=0.075
+    #    与本锚同源（build_pilot 写死），改 pos_cap 须三处同查。
+    assert trade_cfg["pos_cap"] == 0.075, (
+        f"trade_cfg.pos_cap={trade_cfg['pos_cap']} != 0.075——实弹已变或有异常，"
+        "请核实 .env 并有意更新本锚（联动 build_pilot 硬闸三处）")
 
     # ── ③ data_lake 取数 + universe 构建 ────────────────────────────────────
     # 与 _eod（engine.py:956）同路径同读法；455MB 单次读入（本脚本一次性消费）。

@@ -181,10 +181,11 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if args.register or args.unregister:
         if args.register:
-            py = ROOT / ".venv310" / "Scripts" / "python.exe"
+            # W0（0828 评审）：/TR 走 run_ops_task.bat 统一包装器（输出重定向防启动期静默）
+            bat = Path(__file__).parent / "run_ops_task.bat"
             rc = subprocess.run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", "15:45",
                                  "/TN", "QuanterEmquantEodReport",
-                                 "/TR", f'"{py}" "{Path(__file__)}"'],
+                                 "/TR", f'"{bat}" emquant_eod_report.py'],
                                 capture_output=True).returncode
             print("registered" if rc == 0 else f"failed rc={rc}")
             return rc
@@ -194,6 +195,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     now = datetime.now()
+    # W3（2026-08-28 评审 P3）：交易日闸——周末 15:45 schtasks 照触发会推
+    # 「信号 0 → 挂单 0 → 成交 0」全零播报（_audit_stats 缺文件返全零是明示设计，
+    # 但周末推全零是噪声）。显式 --date 回看不受闸（人工意图优先）。
+    if not args.date and now.weekday() >= 5:
+        notify("INFO", f"掘金EOD {now:%Y-%m-%d} 非交易日（周末），跳过日终播报——schtask 心跳正常")
+        return 0
     report = build_report(now if not args.date else
                           datetime.strptime(args.date, "%Y-%m-%d"))
     print(report)

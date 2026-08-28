@@ -170,6 +170,10 @@ class Runner:
         return None
 
     # —— 过滤器族（D2-D7；None/缺数据中性放行=数据不足不误杀，R4-H1 同语义）——
+    # ⚠️ W5-4（2026-08-28 全库评审 P1-5）D2_dow 是 KNOWN_NON_DEPLOYABLE 维度：
+    # buy_date（成交日）是市场决定的未来随机变量——挂单何时触发不受交易者控制，
+    # 「禁周一成交」无法在信号日执行。该维即使过预登记闸也不可采纳（回测增益
+    # 实盘不可达的假 edge），保留仅作统计挖掘对照；采纳闸对 D2_* 应恒 VETO。
     def keep(self, rec, dim, lv):
         if dim == "D2_dow":
             dow = pd.Timestamp(rec["buy_date"]).dayofweek

@@ -19,26 +19,10 @@
       </div>
     </template>
     <el-table :data="page.trades" size="small" height="320" v-loading="loading">
-      <el-table-column prop="timestamp" label="时间" width="150" />
-      <el-table-column prop="symbol" label="标的" width="110" />
-      <el-table-column label="方向" width="80">
-        <template #default="{ row }">
-          <!-- 方向徽章：buy=红/danger（视觉警示买入动作）· sell=绿/success（视觉提示卖出动作）。
-               Why .toLowerCase() 双保险：后端 trading_service.query_trades 已规范化 direction
-               为小写口径（治本），此处再兜一层防御——若未来接其他数据源（如直读 CSV/gateway 原始
-               回报）回传大写 BUY/SELL，徽章颜色也不会被 'BUY' !== 'buy' 误判成 success（卖色）。 -->
-          <el-tag
-            :type="(row.direction || '').toLowerCase() === 'buy' ? 'danger' : 'success'"
-            size="small"
-          >
-            {{ row.direction }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <!-- shares/price 联合类型：留默认插槽渲染，不做数值格式化（见组件头注释）。 -->
-      <el-table-column prop="shares" label="数量" width="80" />
-      <el-table-column prop="price" label="价格" width="80" />
-      <el-table-column prop="strategy" label="策略" />
+      <el-table-column prop="symbol" label="标的" width="130" />
+      <el-table-column prop="volume" label="数量" width="100" />
+      <el-table-column prop="price" label="价格" width="100" />
+      <el-table-column prop="execId" label="成交编号" />
     </el-table>
     <!-- 分页仅在总数超过单页上限时出现，避免单页 2 条数据也挂个分页条的视觉噪声。 -->
     <el-pagination
@@ -55,19 +39,15 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-// 路径修正：本文件在 src/components/cockpit/，src/api/trading.ts 是 ../../api/trading。
-// brief Step 3 骨架写的 '../../../api/trading' 多退一层会跳出 src 目录，此处显式修正。
-import { queryTrades, type TradesPage } from '../../api/trading'
-import { toLocalDateStr } from '../../utils/date'
-
-// 当天日期（YYYY-MM-DD）：流水查询窗口默认只看今天，与驾驶舱「观测运营层」定位一致。
-// 用本地时区工具：toISOString 在北京凌晨 0-8 点会取到 UTC 昨日，流水查询整体错位一天。
-const today = toLocalDateStr()
+import { getTrades, type GmTradeRow } from '../../api/gm'
 
 const loading = ref(false)
 const currentPage = ref(1)
-// 分页响应初值：空 trades + total 0，保证首帧渲染不报错、el-table 显示空态。
-const page = reactive<TradesPage>({ trades: [], total: 0, limit: 100, offset: 0 })
+// 本地分页（掘金 execrpts 端点一次拉全量，前端切片——日内成交笔数量级 << 1000）。
+const all = reactive<{ rows: GmTradeRow[] }>({ rows: [] })
+const page = reactive<{ trades: GmTradeRow[]; total: number; limit: number }>({
+  trades: [], total: 0, limit: 50,
+})
 
 /**
  * 拉取当前页流水。
@@ -80,22 +60,19 @@ const page = reactive<TradesPage>({ trades: [], total: 0, limit: 100, offset: 0 
 async function load() {
   loading.value = true
   try {
-    const r = await queryTrades({
-      start: today,
-      end: today,
-      limit: 100,
-      offset: (currentPage.value - 1) * 100,
-    })
-    Object.assign(page, r)
+    all.rows = await getTrades()
+    page.total = all.rows.length
+    onPage(1)
   } finally {
     loading.value = false
   }
 }
 
-/** el-pagination 翻页回调：更新当前页后重拉。 */
+/** el-pagination 翻页回调：本地切片。 */
 function onPage(p: number) {
   currentPage.value = p
-  load()
+  const start = (p - 1) * page.limit
+  page.trades = all.rows.slice(start, start + page.limit)
 }
 
 // 挂载即拉当天流水（驾驶舱首屏即用）。

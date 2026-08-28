@@ -282,12 +282,23 @@ def cmd_champions(args):
     from discovery.dsr import deflated_sharpe
     from discovery.judging import feasibility_gate
     db = _db_path()
+    # W5-2（2026-08-28 评审收尾）：engine_hash 过滤——跨内核 trial 的口径不可比
+    # （评估数学/数据切片可能已变），冠军报告与 DSR 的 n_trials 只数同内核 trial。
+    # 缺省过滤当前指纹；--all-engines 显式看全量（跨版本对照的排障口）。
+    from discovery.runner import _engine_hash
+    eng = None if getattr(args, "all_engines", False) else _engine_hash()
     with connect(db) as conn:
-        rows = conn.execute(
-            "SELECT trial_id, snapshot_hash, inner_metrics FROM trial ORDER BY created_at DESC"
-        ).fetchall()
+        if eng is None:
+            rows = conn.execute(
+                "SELECT trial_id, snapshot_hash, inner_metrics FROM trial ORDER BY created_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT trial_id, snapshot_hash, inner_metrics FROM trial "
+                "WHERE engine_hash=? ORDER BY created_at DESC", (eng,)).fetchall()
     if not rows:
-        print(f"无 trial 记录（db={db}）")
+        print(f"无 trial 记录（db={db}"
+              + (f"，engine_hash={eng[:12]}" if eng else "") + "）")
         return
     latest = rows[0]["snapshot_hash"]
     trials = [r for r in rows if r["snapshot_hash"] == latest]
@@ -379,6 +390,8 @@ def main(argv=None):
     ap_r.set_defaults(func=cmd_run)
     ap_c = sub.add_parser("champions", help="Pareto 前沿 + DSR 冠军报告（Plan 3）")
     ap_c.add_argument("--top-n", type=int, default=10, dest="top_n", help="报 top-N")
+    ap_c.add_argument("--all-engines", action="store_true", dest="all_engines",
+                      help="W5-2：不过滤 engine_hash（跨内核版本对照排障口；默认只看当前内核）")
     ap_c.set_defaults(func=cmd_champions)
     ap_wf = sub.add_parser("wf", help="四折 walk-forward 交叉验证（P5 分析工具）")
     ap_wf.add_argument("--embargo", type=int, default=5, help="折间 embargo 天数")

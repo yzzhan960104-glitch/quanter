@@ -46,7 +46,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from ops.process_topology import (
-    client_status as _client_status,
+    gm_terminal_status as _gm_terminal_status,
     default_port as _default_port,
     engine_processes as _engine_processes,
     pid_file_owner as _pid_file_owner,
@@ -304,13 +304,17 @@ def check_engine_process_count():
     return f"引擎进程数 {n} > 1（C-5 单例红线，端口 8000 / QMT session 抢占）" if n > 1 else None
 
 
-def check_client_process():
-    """miniQMT 客户端进程数 == 1（A6；0=未起，>1=多实例，None=探测失败）。"""
-    st = _client_status()
-    if st.get("count") is None:
-        return "miniQMT 客户端进程探测失败（PowerShell 不可用/超时）"
-    if st["count"] != 1:
-        return f"miniQMT 客户端进程数 {st['count']} != 1（应恰好一个 XtMiniQmt.exe）"
+def check_gm_terminal():
+    """掘金终端进程在线（W3，2026-08-28 替换 miniQMT 检查——QMT 已退役，旧检查
+    count=0 恒 FAIL 每日误报 ERROR）。emgm3（终端 UI）与 gmterm-serv（网关）双探测：
+    任一缺失即 FAIL（网关死=7001/7002 全断；UI 死=降级态），探测失败=FAIL（不静默）。"""
+    st = _gm_terminal_status()
+    if st.get("emgm3") is None or st.get("gateway") is None:
+        return "掘金终端进程探测失败（PowerShell 不可用/超时）"
+    if st["emgm3"] < 1:
+        return f"掘金终端 emgm3 进程数 {st['emgm3']}（终端未运行，人工拉起）"
+    if st["gateway"] < 1:
+        return f"掘金网关 gmterm-serv 进程数 {st['gateway']}（7001/7002 全断，人工拉起终端）"
     return None
 
 
@@ -419,7 +423,7 @@ def main():
     ]
     checks_runtime = [
         ("引擎进程数", check_engine_process_count),
-        ("miniQMT 客户端进程", check_client_process),
+        ("掘金终端进程", check_gm_terminal),
         ("端口属主一致性", check_port_owner_consistency),
         ("护栏 BANNED", check_guard_ripgrep),
     ]

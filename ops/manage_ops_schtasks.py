@@ -34,7 +34,11 @@ sys.path.insert(0, str(ROOT))
 #   register()/unregister()/unregister_pipeline_brief() 清退时用这份名单删（幂等
 #   /Delete /F，不存在不报错）。绝不可在 register() 里 /Create 它们。
 # T8 补 QuanterDailyBrief：C-8 后该系统 schtasks 已删，加入名单幂等清退防被误重建后残留。
-RETIRED_TASKS = ["QuanterDataPipeline", "QuanterBrief", "QuanterDailyBrief"]
+# W3（2026-08-28 评审）：QuanterMiniQmtGuard 入清退名单——其目标脚本
+# ops/miniqmt_guard.py 已随 QMT 退役删除，任务若在本机会每 5 分钟失败一次；
+# 掘金侧看护接棒者是 ops/gm_terminal_guard.py --register（QuanterGmGuard）。
+RETIRED_TASKS = ["QuanterDataPipeline", "QuanterBrief", "QuanterDailyBrief",
+                 "QuanterMiniQmtGuard"]
 
 # 方案 C 历史的 2 个 supervisor 任务定义（时间 + bat 路径）。
 # ⚠️ Final Fix：``register()`` 不再迭代本表创建任务（两个任务已退役，重建=与新事件链
@@ -177,21 +181,14 @@ def _register_with_powershell(user: str) -> int:
 
 
 def register_guard() -> None:
-    """B2-4：注册 QuanterMiniQmtGuard（每 5 分钟一轮，独立于引擎生命周期）。
-
-    物理意图（spec §4.3）：miniQMT 客户端保活不能寄生在引擎里（引擎崩了 guard 还在）；
-    用 schtasks /SC MINUTE /MO 5 独立调度，与引擎解耦。G3 裁定。
+    """已退役（W3，2026-08-28 全库评审）：目标脚本 ops/miniqmt_guard.py 已随 QMT
+    退役 P3 删除（掘金升格唯一平台）。拒注册并指向接棒者，防误用建出每 5 分钟
+    失败一次的死任务；本机残留任务由 register()/unregister() 经 RETIRED_TASKS 清退。
     """
-    tr = (f'"{ROOT / ".venv310" / "Scripts" / "python.exe"}" '
-          f'"{ROOT / "ops" / "miniqmt_guard.py"}" --once')
-    rc = _schtasks(["/Create", "/SC", "MINUTE", "/MO", "5",
-                    "/TN", "QuanterMiniQmtGuard", "/TR", tr, "/F"])
-    print(f"{'OK' if rc == 0 else 'FAIL(权限/语法)'} QuanterMiniQmtGuard @ 每5分钟 → "
-          f"miniqmt_guard.py --once")
-    if rc != 0:
-        print("[!] 手动注册：\n"
-              f"   schtasks /Create /SC MINUTE /MO 5 /TN QuanterMiniQmtGuard "
-              f"/TR \"{tr}\" /F")
+    print("QuanterMiniQmtGuard 已退役（miniqmt_guard.py 已删）——掘金看护请用：\n"
+          f"  {ROOT / '.venv310' / 'Scripts' / 'python.exe'} "
+          f"{ROOT / 'ops' / 'gm_terminal_guard.py'} --register")
+    sys.exit(2)
 
 
 def register_audit() -> None:
@@ -271,7 +268,7 @@ def main(argv=None) -> int:
     g.add_argument("--register-server", action="store_true",
                    help="C-7：注册 QuanterServer ONSTART（开机 session 0 后台起 python -m trading）")
     g.add_argument("--register-guard", action="store_true",
-                   help="B2-4：注册 QuanterMiniQmtGuard（每 5 分钟客户端看门狗）")
+                   help="已退役：拒注册并指向 gm_terminal_guard（QMT 退役 W3）")
     g.add_argument("--register-audit", action="store_true",
                    help="CR-7：注册 QuanterAudit（每日 16:05 跑 audit_ssot 巡检，errs→exit1）")
     g.add_argument("--unregister", action="store_true")

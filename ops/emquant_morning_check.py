@@ -135,10 +135,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.register or args.unregister:
         import subprocess
         if args.register:
-            py = ROOT / ".venv310" / "Scripts" / "python.exe"
+            # W0（0828 评审）：/TR 走 run_ops_task.bat 统一包装器——schtasks 裸 python
+            # 不捕获 stdout/stderr，启动期崩溃零痕迹（详见 bat 头注）。
+            bat = Path(__file__).parent / "run_ops_task.bat"
             rc = subprocess.run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", "09:40",
                                  "/TN", "QuanterEmquantMorningCheck",
-                                 "/TR", f'"{py}" "{Path(__file__)}"'],
+                                 "/TR", f'"{bat}" emquant_morning_check.py'],
                                 capture_output=True).returncode
             print("registered" if rc == 0 else f"failed rc={rc}")
             return rc
@@ -148,6 +150,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     now = datetime.now()
+    # W3（2026-08-28 评审 P1）：交易日闸——schtasks /SC DAILY 周末照触发，而周末
+    # 「盘前已跑」必 FAIL（last_pre_open_date 停在周五）→ 每周末误报。周末直接
+    # 心跳播报跳过。注：法定节假日（非周末的非交易日）仍会做全量检查——节假日
+    # 数据面检查多能通过（audit/EOD 文件在），残余误报风险留观，长期解=接交易日历。
+    if now.weekday() >= 5:
+        _notify("INFO", f"掘金晨检 {now:%Y-%m-%d} 非交易日（周末），跳过深检——schtask 心跳正常")
+        return 0
     checks = run_checks(now)
     bad = [c for c in checks if not c["ok"]]
     report = "\n".join(

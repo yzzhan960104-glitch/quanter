@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。
 PARAMS_FINGERPRINT=7fe3d5b3f4a04786  生成物见 emquant/config/。
-PILOT_BUILD_STAMP: 2026-08-28 10:32:02 +0800 c243da10（部署核对：编辑器 Ctrl+F 搜本串，与仓库 git log -1 比对）。
+PILOT_BUILD_STAMP: 2026-08-28 14:09:22 +0800 2c85bc7d（部署核对：编辑器 Ctrl+F 搜本串，与仓库 git log -1 比对）。
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ EXEC_PARAMS = {'buy_limit_atr_mult': 2.5, 'cancel_thresh_mult': None, 'chase_ent
 TRADE_CFG = {'cancel_thresh_mult': 1.0, 'floor': 0.5, 'grace': 5, 'kelly_fraction': 0.25, 'kelly_hat': 0.0, 'max_holding': 15, 'max_wait': 5, 'pos_cap': 0.075, 'sizing_mode': 'fixed', 'step': 0.1, 'stop_atr_mult': 1.0, 'tp1_h_mult': 1.0, 'tp1_portion': 0.5, 'tp_h_mult': 2.0}
 UNIVERSE = ['300308.SZ', '688825.SH', '300502.SZ', '688256.SH', '300394.SZ', '300750.SZ', '688008.SH', '300476.SZ', '688525.SH', '300408.SZ', '300285.SZ', '688012.SH', '688836.SH', '688981.SH', '301308.SZ', '688041.SH', '688498.SH', '300274.SZ', '300604.SZ', '688347.SH', '301526.SZ', '300433.SZ', '300136.SZ', '688072.SH', '300223.SZ', '300475.SZ', '300059.SZ', '300857.SZ', '688146.SH', '688766.SH', '300058.SZ', '300666.SZ', '301217.SZ', '688017.SH', '300570.SZ', '300620.SZ', '688521.SH', '688048.SH', '300548.SZ', '688126.SH', '688313.SH', '300757.SZ', '301511.SZ', '300346.SZ', '300390.SZ', '301396.SZ', '300033.SZ', '300014.SZ', '688835.SH', '300209.SZ', '688120.SH', '688702.SH', '688361.SH', '300395.SZ', '688820.SH', '300054.SZ', '301717.SZ', '301205.SZ', '688797.SH', '300319.SZ', '688808.SH', '688549.SH', '688826.SH', '688627.SH', '300418.SZ', '688183.SH', '688167.SH', '688630.SH', '688111.SH', '301165.SZ', '688037.SH', '300017.SZ', '688082.SH', '688629.SH', '301666.SZ', '300442.SZ', '688110.SH', '300672.SZ', '301171.SZ', '300759.SZ', '300975.SZ', '300489.SZ', '300373.SZ', '301013.SZ', '688777.SH', '300179.SZ', '301583.SZ', '688362.SH', '688322.SH', '300124.SZ', '688141.SH', '688519.SH', '300903.SZ', '300398.SZ', '301377.SZ', '300458.SZ', '688432.SH', '688396.SH', '688019.SH', '300661.SZ', '300567.SZ', '688200.SH', '688300.SH', '300454.SZ', '300450.SZ', '688195.SH', '300751.SZ', '300806.SZ', '300139.SZ', '300037.SZ', '688143.SH', '300088.SZ', '300776.SZ', '301536.SZ', '688409.SH', '688234.SH', '300803.SZ', '688205.SH', '688668.SH', '300657.SZ', '688268.SH', '688002.SH', '688403.SH', '300503.SZ', '300438.SZ', '301358.SZ', '300870.SZ', '300782.SZ', '300302.SZ', '688596.SH', '301018.SZ', '300260.SZ', '300085.SZ', '301611.SZ', '688507.SH', '688388.SH', '688469.SH', '300811.SZ', '301236.SZ', '301319.SZ', '688545.SH', '688099.SH', '688025.SH', '688783.SH', '688249.SH', '300184.SZ', '300747.SZ', '300164.SZ', '300821.SZ', '688123.SH', '688635.SH', '300760.SZ', '688235.SH', '300814.SZ', '301183.SZ', '300738.SZ', '688536.SH', '688147.SH', '688503.SH', '300568.SZ', '301486.SZ', '688333.SH', '688257.SH', '300131.SZ', '688308.SH', '300679.SZ', '688233.SH', '301071.SZ', '300364.SZ', '688802.SH', '300726.SZ', '688676.SH', '300607.SZ', '301200.SZ', '300115.SZ', '688548.SH', '300323.SZ', '688172.SH', '300236.SZ', '300001.SZ', '688662.SH', '688795.SH', '688809.SH', '300042.SZ', '300083.SZ', '300142.SZ', '301123.SZ', '300684.SZ', '300316.SZ', '300339.SZ', '301489.SZ', '688372.SH', '300762.SZ', '300769.SZ', '300255.SZ', '300576.SZ', '300166.SZ', '300763.SZ', '688535.SH', '688331.SH', '688700.SH', '301128.SZ', '300199.SZ', '301188.SZ', '301269.SZ', '300602.SZ', '688031.SH', '300558.SZ', '688800.SH', '300170.SZ', '300283.SZ', '300347.SZ', '300720.SZ', '300456.SZ', '301392.SZ', '688220.SH', '300623.SZ', '300331.SZ', '688828.SH', '300779.SZ', '688301.SH', '300207.SZ', '300077.SZ', '300843.SZ', '300342.SZ', '300263.SZ', '300706.SZ', '688027.SH', '688106.SH', '301566.SZ', '301292.SZ', '300420.SZ', '300496.SZ', '300593.SZ', '688456.SH', '688652.SH', '301005.SZ', '688158.SH', '688036.SH', '688411.SH', '300383.SZ', '688585.SH', '688531.SH', '688729.SH', '688387.SH', '300182.SZ', '300655.SZ', '688102.SH', '688515.SH', '300328.SZ', '300613.SZ', '301707.SZ', '301150.SZ', '688603.SH', '301550.SZ', '688502.SH', '688213.SH', '300671.SZ', '300534.SZ', '300748.SZ', '300835.SZ', '688400.SH', '300953.SZ', '300497.SZ', '688392.SH', '300024.SZ', '688385.SH', '301373.SZ', '300765.SZ', '688260.SH', '688052.SH', '300322.SZ', '688578.SH', '301655.SZ', '688449.SH', '300265.SZ', '301389.SZ', '301338.SZ', '688020.SH', '301021.SZ', '301196.SZ', '301080.SZ', '688047.SH', '688353.SH', '688559.SH', '688584.SH', '301297.SZ', '300725.SZ', '300566.SZ', '688390.SH', '300480.SZ', '688169.SH', '301362.SZ', '300174.SZ', '688343.SH', '301421.SZ', '688598.SH', '300005.SZ', '688530.SH', '301099.SZ']
 PARAMS_FINGERPRINT = '7fe3d5b3f4a04786'
-PILOT_BUILD_STAMP = '2026-08-28 10:32:02 +0800 c243da10'   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用
+PILOT_BUILD_STAMP = '2026-08-28 14:09:22 +0800 2c85bc7d'   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用
 # 硬闸（2026-08-28 用户裁决：对齐 R6-11b 最新策略基准 4并×7.5%）：单日新挂
 # ≤4（4 并发）；单票市值 ≤7.5%（与快照 pos_cap 同值，二次核验闸随动）；账户固定。
 PILOT_MAX_NEW_ORDERS_PER_DAY = 4
@@ -1012,7 +1012,7 @@ def fetch_df_upto(api, ts_symbol: str, end_date: str):
           本地腿 trade_date 索引
           是零点 naive。折零点后 formed_at/index 与本地腿逐字段可比（对拍口径），
           时区层面 gm 与 tushare 同为北京时间的 naive datetime，无 tz 换算需求；
-        - 尾部 2×window+40 根截断：识别窗 window（§0=80）+ ATR（Wilder RMA ~14 期
+        - 尾部 2×window+40 根截断：识别窗 window（快照实弹=60）+ ATR（Wilder RMA ~14 期
           收敛）与 local_extrema 掩码的预热冗余 + 停牌跳空后的根数冗余。回测腿吃
           全湖 5 年历史，本函数 200 根是「预热充分前提下的最小带宽」——比回测短
           但识别窗内数值已无预热差异（120 根预热 >> 14 期）。
@@ -1028,7 +1028,7 @@ def fetch_df_upto(api, ts_symbol: str, end_date: str):
     api 实参 None → 经 _api() 惰性取（测试 monkeypatch _GM 注入替身的离线路径）。
     """
     a = _api() if api is None else api
-    n_roots = 2 * int(ID_PARAMS["window"]) + 40          # §0 快照 window=80 → 200 根
+    n_roots = 2 * int(ID_PARAMS["window"]) + 40          # 快照实弹 window=60 → 160 根
     try:
         start = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=_FETCH_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
         raw = a.history(symbol=to_gm_symbol(ts_symbol), frequency="1d",
@@ -1344,11 +1344,11 @@ def check_caps(sod_state, equity, positions_mv, open_buy_amount, price, qty, tod
          才启用）；pilot 恒查 = 恒紧于本地（quota=equity−mv−ob 仍会拦「超出总权益
          减占额」的单），单票 5% 定尺下该差额几乎不可达，方向保守（多拦不错放）
          可接受，不为对齐而引入「CAP≥1 跳过」的分支面。
-      ③ 单日新挂 ≤ PILOT_MAX_NEW_ORDERS_PER_DAY（试点硬闸 FR3，§0 写死 2）：
+      ③ 单日新挂 ≤ PILOT_MAX_NEW_ORDERS_PER_DAY（试点硬闸 FR3，§0 实弹=4，c243da10 对齐）：
          当日 placed 已达上限 → 拒（试点期规模闸，验收后可放开）。
-      ④ 单票金额 ≤ PILOT_MAX_POSITION_PCT×equity（试点硬闸 FR3，§0 写死 5%）：
+      ④ 单票金额 ≤ PILOT_MAX_POSITION_PCT×equity（试点硬闸 FR3，§0 实弹=7.5%）：
          一单一票，单票新增敞口即本单金额；同票次日补挂的聚合敞口由 ② 总闸兜底。
-         挂单量公式 qty=⌊equity×pos_cap/entry/100⌋×100 本就按 5% 定尺，本闸是
+         挂单量公式 qty=⌊equity×pos_cap/entry/100⌋×100 本就按 7.5% 定尺，本闸是
          对「定尺漂移/人工误用」的二次核验。
     恰等边界一律放行：② 与 ④ 的比较均用严格 >（对齐 pre_open.py:602
     `_order_amt > _pos_quota` 才拦——恰好吃满额度是合法满仓，不是违规）。
@@ -1428,9 +1428,11 @@ def compute_stop_price(
     离散化（二期）：盘后对每只持仓调本函数重算【次日】固定止损价；盘中监控用此固定价，
     不移动（符合 spec「盘中不调整」）。回测里是逐根 K 线调；实盘改为每日一次。
 
-    实弹注记：试点快照 EXEC_PARAMS 的 trailing 三件 = grace 0 / step 0.0 / floor 0.0
-    → 恒走 base_stop 支（退化为固定止损=本地现状）——这正是双轨一致性要的：掘金腿
-    与本地腿在实弹参数下用同一颗退化数学，trailing 活跃分支仅为未来参数演进预置。
+    实弹注记（W1-6 修订，2026-08-28）：trailing 三件随冠军参数演进——R6-8 冠军快照
+    为 grace 10 / step 0.05 / floor 0.5（活跃 trailing：10 日后每日收紧 0.05×ATR，
+    乘数卡底 0.5），【非】早期文档口径的 0/0.0/0.0 退化固定止损。grace=0/step=0.0
+    时本函数退化为恒 base_stop（固定止损）——双轨一致性由「同一颗数学 + 同一份快照
+    参数」保证，参数形态只由快照承载。
     """
     base_stop = neckline - stop_atr_mult * atr
     if grace and step and holding_days > grace:
@@ -1835,6 +1837,15 @@ _GM_STATUS_TO_LOCAL = {
 _TERMINAL_ORDER_STATES = frozenset(
     {"FILLED", "CANCELLED", "PARTIAL_CANCELLED", "REJECTED", "FAILED"})
 
+# 买向 purpose 单源（W1-2，2026-08-28 评审 P0-4）：OPEN=⑤/⑤'' 挂的限价买、CHASE=
+# R6-10 追入买。三个消费面（CAP 占额 _open_buy_amount / ⑤'' 回补 live_open / ③ 信号
+# 防重 open_buy）历史上只认 "OPEN"——chase 在途单不计额度、不挡回补（参数一改即
+# 同日双买 2×7.5%）。全部收口到本集合。
+_BUY_SIDE_PURPOSES = frozenset({"OPEN", "CHASE"})
+# 占额/防重口径在买向之外保守纳入 UNKNOWN（柜台吸收单，方向未知时按买向处理：
+# 多拦一单方向安全，错拦可自愈——同 _open_buy_amount 原有语义）。
+_BUY_AMOUNT_PURPOSES = _BUY_SIDE_PURPOSES | {"UNKNOWN"}
+
 
 def _gm_status_to_local(status):
     """gm int 状态 → 本地 OrderState 字符串（未知值保守落 SUBMITTED 非终态）。"""
@@ -1851,8 +1862,13 @@ def _date_str_of(value):
     return None
 
 
-def absorb_reality(state, api_orders, api_positions, *, now=None):
+def absorb_reality(state, api_orders, api_positions, *, now=None, fill_sink=None):
     """柜台↔state 对账（纯逻辑：不落盘、不 audit——diff 留痕归 Task 8 编排层）。
+
+    fill_sink（W1-4，2026-08-28 评审）：可选回调，每笔 fill 增量发生时以
+    (symbol/side/qty/price/cl_ord_id/filled_total) kwargs 调用一次——reconcile 注入
+    self._audit("FILL") 后成交/部分成交逐笔进 audit CSV（此前只有 RECONCILE 计数，
+    拒单侧 R6-13e 有票据而成交侧无，晨检对拍缺半边）。默认 None：纯函数契约不变。
 
     幂等三查（C9 红线——「以柜台实况修 state」，同参数重复调用结果稳定）：
       ① 订单正向：柜台有 state 无 → 吸收（PENDING/部成照单收编；成交部分转持仓，
@@ -1920,6 +1936,14 @@ def absorb_reality(state, api_orders, api_positions, *, now=None):
         st_o["filled"] = filled
         if filled > prev_filled:
             delta = filled - prev_filled          # 增量转仓（幂等核心：重放 Δ=0）
+            if fill_sink is not None:             # W1-4：成交逐笔审计（见函数头注）
+                try:
+                    fill_sink(symbol=sym,
+                              side="sell" if ao.get("side") == 2 else "buy",
+                              qty=delta, price=(ao.get("filled_vwap") or ao.get("price")),
+                              cl_ord_id=oid, filled_total=filled)
+                except Exception:
+                    pass                          # 审计失败绝不炸对账主链（同 _audit 降级哲学）
             if ao.get("side") == 2:               # OrderSide_Sell：卖向成交 → 减持仓
                 pos = state["positions"].get(sym)
                 if pos is not None:
@@ -2011,6 +2035,9 @@ _ABSORB_RACE_GRACE_SECONDS = 60.0
 # 注意退避只拦 on_tick 热路径：bootstrap/pre_open 的 reconcile 不受影响（每日一次的
 # 全量对账值得无条件重试，不在退避语义内）。
 _ABSORB_FAILURE_BACKOFF_SECONDS = 60.0
+# W8（2026-08-28 评审 P3-1）：placed/scan_done 跨日清理保留窗（自然日）——消费面
+# 只查当日键（check_caps ③ / after_close / ③ 扫描），历史键零消费者纯增长。
+_STATE_HISTORY_KEEP_DAYS = 10
 
 
 def _today_clock() -> str:
@@ -2078,14 +2105,16 @@ def _open_buy_amount(state):
 
     口径：(qty−filled)×price 逐单合计——成交部分已体现在持仓市值不重复扣，卖单是
     退出方向不占增量额度；UNKNOWN（柜台吸收、方向未知）保守计入（多估占额 → 多拦
-    一单，方向性不对称下错拦可自愈、错放不可逆）。任一单 price/qty 残缺无法计值 →
-    None（fail-closed：「不知道占多少就盲放」是最坏组合，对齐 check_caps ①）。
+    一单，方向性不对称下错拦可自愈、错放不可逆）。CHASE（R6-10 追入买）是真实买向
+    敞口，W1-2 起与 OPEN 同口径计入（原只认 OPEN/UNKNOWN，chase 在途不占额=CAP
+    额度被穿透的缺口）。任一单 price/qty 残缺无法计值 → None（fail-closed：
+    「不知道占多少就盲放」是最坏组合，对齐 check_caps ①）。
     """
     total = 0.0
     for o in (state.get("orders") or {}).values():
         if o.get("status") in _TERMINAL_ORDER_STATES:
             continue
-        if o.get("purpose") not in ("OPEN", "UNKNOWN"):
+        if o.get("purpose") not in _BUY_AMOUNT_PURPOSES:
             continue
         try:
             total += (int(o["qty"]) - int(o.get("filled") or 0)) * float(o["price"])
@@ -2174,10 +2203,18 @@ class PilotRuntime:
 
         Why 必须有：卖出挂出后 state 的 remaining_qty 要等下一轮对账吸收成交才减——
         无此守卫，同价第二根 tick 会再挂一张同量卖单（双倍卖出=裸露空头方向错误）。
+
+        W1-1（2026-08-28 评审 P0-1）：判定由正向白名单（EXPIRE/STOP_LOSS/TP1/TP2
+        四目）改为【非买向】——TP2_SHARE/TIME_STOP/TP2_EOD_SWEEP 三个后加 purpose
+        漏在白名单外（反转 regime tp2→tp1 连续冲高在 30s 对账窗内双倍卖出 lot2 的
+        根因，on_tick 落单 purpose=reason.upper() 是开放集合）。反转语义让未来新增
+        任何卖向 reason 自动被守卫覆盖（「新增枚举忘扩白名单」与删除残留清查互为
+        镜像教训）。purpose 缺失/UNKNOWN（柜台吸收单）保守计入卖向：在途时挡一轮
+        挂卖（方向安全，audit 可见），错挡可自愈。
         """
         for o in self.state["orders"].values():
             if (o.get("symbol") == sym
-                    and o.get("purpose") in ("EXPIRE", "STOP_LOSS", "TP1", "TP2")
+                    and o.get("purpose") not in _BUY_SIDE_PURPOSES
                     and o.get("status") not in _TERMINAL_ORDER_STATES):
                 return True
         return False
@@ -2393,7 +2430,8 @@ class PilotRuntime:
             self._audit("WARN", type="reconcile_positions_fail", err=f"{type(e).__name__}: {e}")
             self._absorb_retry_after = time.time() + _ABSORB_FAILURE_BACKOFF_SECONDS
             return
-        absorb_reality(self.state, api_orders, api_positions)
+        absorb_reality(self.state, api_orders, api_positions,
+                       fill_sink=lambda **kw: self._audit("FILL", **kw))
         self._enrich_positions_from_orders()
         # R6-13e：拒单首见告警——absorb 捕获的 rej_reason 每单只告警一次
         # （rej_audited 闩，幂等）；晨检 grep order_rejected 即得全部拒因票据。
@@ -2643,9 +2681,11 @@ class PilotRuntime:
                                 cooldown=cooldown)
                     continue
                 # 单仓一次性模型防重（decide_position 同源口径；本地 has_order(OPEN)+
-                # UNIQUE 约束的 pilot 对应）：已持仓（有剩余）或已有在途买单的标的不接新信号
+                # UNIQUE 约束的 pilot 对应）：已持仓（有剩余）或已有在途买向单（W1-2：
+                # OPEN∪CHASE∪UNKNOWN——chase 在途时不再接同标的新信号）的标的不接新信号
                 held = int((st["positions"].get(sym) or {}).get("remaining_qty") or 0) > 0
-                open_buy = any(o.get("symbol") == sym and o.get("purpose") == "OPEN"
+                open_buy = any(o.get("symbol") == sym
+                               and o.get("purpose") in _BUY_AMOUNT_PURPOSES
                                and o.get("status") not in _TERMINAL_ORDER_STATES
                                for o in st["orders"].values())
                 if held or open_buy:
@@ -2673,7 +2713,8 @@ class PilotRuntime:
             positions_mv = self._query_positions_mv()         # 异常 → None；空仓 [] → 0.0
             open_buy = _open_buy_amount(st)                   # 残缺 → None（fail-closed）
             cap = self._read_cap_resilient()
-            pos_cap = float(TRADE_CFG.get("pos_cap", 0.05))   # 快照 trade_cfg.pos_cap=0.05
+            # 缺省与快照实弹同值 0.075（评审收口：export 锚"三处同查"的第四处，c243da10）
+            pos_cap = float(TRADE_CFG.get("pos_cap", 0.075))
             for sig in signals:
                 try:
                     entry = float(sig.entry_price)
@@ -2737,6 +2778,9 @@ class PilotRuntime:
                 open_buy = float(open_buy) + entry * qty       # 逐单扣减（check_caps ②口径）
                 self._audit("ORDER_PLACED", symbol=sig.symbol, price=entry, qty=qty,
                             cl_ord_id=cid, cancel_on=cancel_on, formed_at=formed)
+                save_state(st, path=self.state_file)   # W1-3：逐单落盘——place→save 崩溃窗
+                # （进程被 kill/磁盘满）内重启，守卫（placed/①' 去重/check_caps ③）全部
+                # 查 state 而看不见柜台在途单 → 重复挂单。窗口压到单笔间隔=零残留敞口。
 
         # ── ⑤'' 死单回补（2026-08-27 用户裁决「没挂成功的单子随时重启随时挂」）──
         # 源=当日 purpose=OPEN 且已终态且零成交的死单（REJECTED=柜台拒；挂出后从
@@ -2764,11 +2808,13 @@ class PilotRuntime:
                 mv_r = self._query_positions_mv()
                 ob_r = _open_buy_amount(st)
                 cap_r = self._read_cap_resilient()
-                pos_cap_r = float(TRADE_CFG.get("pos_cap", 0.05))
+                # 缺省同上：与快照实弹同值 0.075（评审收口）
+                pos_cap_r = float(TRADE_CFG.get("pos_cap", 0.075))
                 for oid, o in dead:
                     sym = o.get("symbol")
                     held_now = int((st["positions"].get(sym) or {}).get("remaining_qty") or 0) > 0
-                    live_open = any(x.get("symbol") == sym and x.get("purpose") == "OPEN"
+                    live_open = any(x.get("symbol") == sym
+                                    and x.get("purpose") in _BUY_AMOUNT_PURPOSES
                                     and x.get("status") not in _TERMINAL_ORDER_STATES
                                     for x in st["orders"].values())
                     if held_now or live_open:
@@ -2830,6 +2876,7 @@ class PilotRuntime:
                     self._audit("ORDER_PLACED", symbol=sym, price=entry_r, qty=qty_r,
                                 cl_ord_id=cid_r, cancel_on=cancel_on_r,
                                 formed_at=o.get("formed_at"), repair_of=oid)
+                    save_state(st, path=self.state_file)   # W1-3：逐单落盘（同 ⑤ 头注）
         else:
             dead_n = sum(1 for o in st["orders"].values()
                          if o.get("date") == today and o.get("purpose") == "OPEN"
@@ -2994,8 +3041,12 @@ class PilotRuntime:
                                          "bottom": o.get("bottom"), "atr": o.get("atr"),
                                          "status": "SUBMITTED", "filled": 0,
                                          "account": self.account}
+                    # W1-2：chase 计入单日闸口径（check_caps ③「在场效果」语义——
+                    # chase 挂活即占额，天然防追入风暴）。
+                    st.setdefault("placed", {}).setdefault(today, []).append(cid)
                     self._audit("CHASE_BUY", symbol=sym, price=px,
                                 qty=int(o.get("qty") or 0), cl_ord_id=cid)
+                    save_state(st, path=self.state_file)   # W1-3：逐单落盘（同 ⑤ 头注）
                     acted = True
                 continue
             if verdict:
@@ -3056,6 +3107,8 @@ class PilotRuntime:
                                 # （反转 regime 的 tp1 全卖是 lot1 正常出场，非 dust 分歧）
                                 detail["known_divergence"] = "tp1_dust_clears"
                         self._audit("SELL", **detail)
+                        save_state(st, path=self.state_file)   # W1-3：卖单落单即落盘
+                        # （崩溃窗内 UNKNOWN 吸收 + _has_open_sell 盲区 → 重启双挂卖）
                         acted = True
         if acted:
             save_state(st, path=self.state_file)              # 只在有动作时落盘（tick 热路径不写盘）
@@ -3106,6 +3159,15 @@ class PilotRuntime:
                             symbols=list(self._subscribed),
                             err=f"{type(e).__name__}: {e}")
             self._subscribed = []
+        # ── W8（2026-08-28 评审 P3-1）：跨日冗余清理——placed/scan_done 只保留最近
+        #    _STATE_HISTORY_KEEP_DAYS 个日期键（消费面核对见常量头注；orders/positions
+        #    终态档案不清，归档走 tools/archive_terminal_state.py 人工处置）。走
+        #    _today_str seam 与全模块「今日」口径一致（跨零点补跑/测试注入同判）。
+        _cutoff = f"{(datetime.strptime(_today_str(), '%Y-%m-%d') - timedelta(days=_STATE_HISTORY_KEEP_DAYS)):%Y-%m-%d}"
+        _placed = st.get("placed") or {}
+        for _d in [k for k in _placed if k < _cutoff]:
+            del _placed[_d]
+        st["scan_done"] = {d for d in (st.get("scan_done") or ()) if d >= _cutoff}
         save_state(st, path=self.state_file)
 
 
