@@ -80,6 +80,19 @@ def _remaining(deadline) -> float:
     return float("inf") if deadline is None else deadline - time.time()
 
 
+def _tpe_timeout(deadline) -> int:
+    """TPE 子进程 timeout（W5-3，2026-08-28 评审 P1-4）。
+
+    事故形态：收敛模式（--hours 0，deadline=None）下原式
+    ``max(600, int(_remaining(deadline)) - 45*60)`` 里 int(inf) 抛 OverflowError，
+    被 _tpe_round 的 except 吞成一行「子进程异常（续）」——B3 战役的 TPE 精修臂
+    在收敛模式下从未真正运行，三臂宣称与事实不符。收敛模式给 6h 硬顶（TPE
+    budget=60 的最坏量级 + 冗余；进程级兜底，不悬无穷）。"""
+    if deadline is None:
+        return 6 * 3600
+    return max(600, int(_remaining(deadline)) - 45 * 60)
+
+
 # fine ±步长（数值维；clamp 到 sane 区间）
 FINE_STEPS = {
     "window": (20, 40, 120), "min_suppression": (0.05, 0.1, 0.8), "min_rr": (0.25, 0.5, 3.0),
@@ -242,7 +255,7 @@ def _tpe_round(base: dict, base_res: dict, rnd: int, deadline: float, st: dict):
                             "--tpe-trials", "45", "--n-proc", "6",
                             "--seed", f"20260826{rnd:02d}"],
                            stdout=f, stderr=subprocess.STDOUT, cwd=str(ROOT),
-                           env=ENV, timeout=max(600, int(_remaining(deadline)) - 45 * 60))
+                           env=ENV, timeout=_tpe_timeout(deadline))
     except Exception as e:
         print(f"  [TPE r{rnd}] 子进程异常（续）：{type(e).__name__}: {e}", flush=True)
         return base, base_res, 0

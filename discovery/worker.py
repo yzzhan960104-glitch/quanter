@@ -57,11 +57,17 @@ _WORKER_STATE = {"universe": None, "split": None, "ready": False,
                  "block_dates": None}
 
 
-def _init_worker(lake_start="2025-01-01", embargo_days=5):
+def _init_worker(lake_start="2025-01-01", embargo_days=5, split_kind="holdout"):
     """Pool initializer：子进程启动时一次 freeze 加载 universe + split 到 _WORKER_STATE。
 
-    顶层定义（可 pickle，spawn 必需）。lake_start/embargo_days 是简单类型（str/int），
-    可 pickle 跨进程传 initargs。后续 _eval_worker 复用此 universe，不重读 parquet。
+    顶层定义（可 pickle，spawn 必需）。lake_start/embargo_days/split_kind 是简单类型
+    （str/int），可 pickle 跨进程传 initargs。后续 _eval_worker 复用此 universe，不重读
+    parquet。
+
+    W5-1（2026-08-28 全库评审 P0-2）：split_kind 是扩展切分修复——原实现硬编码
+    holdout_split()（inner=2025 单年），cli 传入的 extended_split（inner=2021-24 各年
+    min 考场）从不进 worker，A2「2025 特化」修复在搜索热路径从未生效（只在 replay/
+    复评生效）。"extended" → extended_split()，其余值 → holdout_split()（容错默认）。
 
     R3（2026-08-23）：同点预计算人工风控模拟线日历（block_dates，DEFAULT_RULE
     20d/−15%→−10%）——池子等权滚动回撤一次算好（~15s/进程），trial 热路径 O(1) 查表。
@@ -74,7 +80,11 @@ def _init_worker(lake_start="2025-01-01", embargo_days=5):
     看门狗自身异常吞掉（测量失败降级不阻断跑批）。
     """
     universe, _meta = freeze(lake_start=lake_start)
-    split = holdout_split(embargo_days=embargo_days)
+    if split_kind == "extended":
+        from discovery.split import extended_split
+        split = extended_split(embargo_days=embargo_days)
+    else:
+        split = holdout_split(embargo_days=embargo_days)
     _WORKER_STATE["universe"] = universe
     _WORKER_STATE["split"] = split
     _WORKER_STATE["ready"] = True
@@ -180,7 +190,8 @@ def memory_cap_n_proc():
     return max(1, int((avail_gb - reserve_gb) / rss_est_gb))
 
 
-def eval_batch(params_list, lake_start="2025-01-01", embargo_days=5, n_proc=None):
+def eval_batch(params_list, lake_start="2025-01-01", embargo_days=5, n_proc=None,
+               split_kind="holdout"):
     """便捷封装：主进程建 Pool + initializer + map _eval_worker + 收集结果。
 
     返回 list，每项为 (params, result_dict) 或 None（异常组）。调用方按需 filter null。
@@ -196,7 +207,7 @@ def eval_batch(params_list, lake_start="2025-01-01", embargo_days=5, n_proc=None
     # 默认 fork 但 spawn 更安全——避免 fork 继承父进程内存/锁状态的坑）。
     ctx = mp.get_context("spawn")
     with ctx.Pool(processes=n_proc, initializer=_init_worker,
-                  initargs=(lake_start, embargo_days)) as pool:
+                  initargs=(lake_start, embargo_days, split_kind)) as pool:
         results = pool.map(_eval_worker, params_list)
     return results
 
@@ -211,13 +222,14 @@ class EvalPool:
     eval_batch（语义不变）。
     """
 
-    def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5):
+    def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5,
+                 split_kind="holdout"):
         if n_proc is None:
             n_proc = _default_n_proc()
         n_proc = min(n_proc, memory_cap_n_proc())
         ctx = mp.get_context("spawn")
         self._pool = ctx.Pool(processes=n_proc, initializer=_init_worker,
-                              initargs=(lake_start, embargo_days))
+                              initargs=(lake_start, embargo_days, split_kind))
 
     def eval(self, params_list):
         """评估一批 params → list[(params, result)|None]（与 eval_batch 同语义）。"""

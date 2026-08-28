@@ -219,7 +219,8 @@ def _mock_search_deps(monkeypatch, runner, *, sampled, tpe_params=None, tpe_valu
         # fake 长驻池（runner 阶段二 `from discovery.worker import EvalPool` 引用的是
         # worker 模块名——patch 物理路径 worker.EvalPool）
         class _FakePool:
-            def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5):
+            def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5,
+                         split_kind="holdout"):   # W5-1：签名随 EvalPool 扩参
                 pass
             def eval(self, plist):
                 return [(p, _RES) for p in plist]
@@ -308,7 +309,8 @@ def test_run_search_tpe_seeds_filter_none_results(tmp_path, monkeypatch):
     # TPE batch 不 mock：走真 tpe_search_batch（evaluate 回调走 fake pool）
     import discovery.worker as worker_mod
     class _FakePool:
-        def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5):
+        def __init__(self, n_proc=None, lake_start="2025-01-01", embargo_days=5,
+                     split_kind="holdout"):   # W5-1：签名随 EvalPool 扩参
             pass
         def eval(self, plist):
             return [(p, {"inner": {"ann": 0.4, "calmar": 2.0, "max_dd": 0.3, "n": 50},

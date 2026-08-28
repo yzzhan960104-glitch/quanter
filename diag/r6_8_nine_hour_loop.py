@@ -239,7 +239,8 @@ def _tpe_round(base: dict, base_res: dict, rnd: int, deadline: float, st: dict):
                             "--tpe-trials", "45", "--n-proc", "6",
                             "--seed", f"20260826{rnd:02d}"],
                            stdout=f, stderr=subprocess.STDOUT, cwd=str(ROOT),
-                           env=ENV, timeout=max(600, int(deadline - time.time()) - 45 * 60))
+                           env=ENV, timeout=(6 * 3600 if deadline is None else
+                                             max(600, int(deadline - time.time()) - 45 * 60)))
     except Exception as e:
         print(f"  [TPE r{rnd}] 子进程异常（续）：{type(e).__name__}: {e}", flush=True)
         return base, base_res, 0
