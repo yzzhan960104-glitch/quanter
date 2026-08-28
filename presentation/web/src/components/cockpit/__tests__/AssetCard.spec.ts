@@ -1,13 +1,8 @@
 /**
- * AssetCard 资金小部件单测（Task 12 · 一期观测运营层）。
+ * AssetCard 资金小部件单测（W4-B 改接掘金后的契约重建，2026-08-28）。
  *
- * 物理意图：验证组件 onMounted → getAsset 拉资金 → 渲染总资产/可用资金（.toFixed(0) 整数）。
- *
- * 边界 case：
- *   - 字段为 0（未连网关）→ 显示「—」而非 0（杜绝虚假归零误导）。
- *   - 字段为非零数值 → 显示 toFixed(0) 整数。
- *
- * Why vi.hoisted + vi.mock：组件 setup 即拉 /trading/asset，jsdom 下必须替换 getAsset。
+ * 物理意图：onMounted → getAsset（server /gm/asset 代理掘金 cash 端点）→ 渲染
+ * 总权益(nav)/可用资金(available) 的 toFixed(0) 整数；字段缺失/零 → 「—」防误读归零。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -37,12 +32,11 @@ class MockObserver {
     dispatchEvent: vi.fn(),
   }))
 
-// 固定资产响应：总资产 123456.78、可用资金 50000.5 → 期望渲染 toFixed(0) 整数「123457」「50001」。
 const { mockAsset } = vi.hoisted(() => ({
-  mockAsset: { asset: { cash: 50000.5, total_asset: 123456.78, market_value: 73456.28 } },
+  mockAsset: { nav: 123456.78, available: 50000.5, frozen: 0, market_value: 73456.28 },
 }))
 
-vi.mock('../../../api/trading', () => ({
+vi.mock('../../../api/gm', () => ({
   getAsset: vi.fn().mockResolvedValue(mockAsset),
 }))
 
@@ -59,27 +53,24 @@ describe('AssetCard.vue', () => {
     vi.useRealTimers()
   })
 
-  it('onMounted 拉资金并渲染整数化的总资产/可用资金', async () => {
+  it('onMounted 拉资金并渲染整数化的总权益/可用资金', async () => {
     const w = mountCard()
     await flushPromises()
-    // toFixed(0) 四舍六入：123456.78 → 123457；50000.5 → 50001（JS Math.round 半数向上）。
     expect(w.text()).toContain('123457')
     expect(w.text()).toContain('50001')
   })
 
-  it('未连接（cash/total_asset 为 0）时显示「—」而非 0', async () => {
-    // 动态切 mock 返回零值（模拟未连网关后端返回空字段）。
-    const { getAsset } = await import('../../../api/trading')
-    ;(getAsset as any).mockResolvedValueOnce({ asset: { cash: 0, total_asset: 0, market_value: 0 } })
+  it('字段缺失（掘金 cash 返空对象）时显示「—」而非 0', async () => {
+    const { getAsset } = await import('../../../api/gm')
+    ;(getAsset as any).mockResolvedValueOnce({})
     const w = mountCard()
     await flushPromises()
-    // 零值应显示「—」两个（总资产 / 可用资金 各一个）。
     const dashCount = (w.text().match(/—/g) || []).length
     expect(dashCount).toBeGreaterThanOrEqual(2)
   })
 
   it('5s 轮询再次调用 getAsset，卸载后停止', async () => {
-    const { getAsset } = await import('../../../api/trading')
+    const { getAsset } = await import('../../../api/gm')
     const w = mountCard()
     await flushPromises()
     expect(getAsset).toHaveBeenCalledTimes(1)

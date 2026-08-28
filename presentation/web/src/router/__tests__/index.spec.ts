@@ -28,7 +28,8 @@ describe('router 路由表', () => {
   it('保留核心只读路由', () => {
     const paths = router.getRoutes().map((r) => r.path)
     // '/live' 已退役（2026-08-27 · QMT 退役 P1）：改断言重定向而非组件路由
-    for (const p of ['/discovery', '/dashboard', '/data', '/cockpit', '/jobs']) {
+    // '/jobs' 已退役（2026-08-28 · 评审 W4-A：jobs API 随 trading router P3 删除，视图失去数据源）
+    for (const p of ['/discovery', '/dashboard', '/data', '/cockpit']) {
       expect(paths).toContain(p)
     }
     const live = router.getRoutes().find((r) => r.path === '/live')

@@ -41,6 +41,7 @@ from presentation.server.api.v1.logs import (
 )
 # B2-3：进程拓扑观测端点（三合一 + 客户端 + 队列 + 网关态一屏）
 from presentation.server.api.v1.ops import router as ops_router
+from presentation.server.api.v1.gm import router as gm_router
 # 宏观/板块/因子只读端点（T16）：读内存湖 + CreditRegime，零写入，
 # 供给前端驾驶舱（T17 /dashboard）宏观灯/信贷曲线/板块流/ATR 四视图。
 from presentation.server.api.v1.macro import router as macro_router
@@ -717,6 +718,10 @@ app.include_router(research_router, prefix="/api/v1", dependencies=[Depends(requ
 # 分析结果不应被写权限误伤（spec §4.2）；research_router 的 proposal 写端点保持写鉴权。
 app.include_router(discovery_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1", dependencies=[Depends(require_write)])
+# 掘金终端只读观测代理（W4-B，2026-08-28 评审）：cockpit 三卡数据源——7002 网关
+# GET 透传（持仓/资金/委托/成交流水/总览），token 只活在 server 进程。cookie 只读
+# 鉴权同 logs_router（SSE/观测面板同族，不需要写权限）。
+app.include_router(gm_router, prefix="/api/v1", dependencies=[Depends(require_read_cookie)])
 
 
 # ============ SSE 只读 cookie 换取端点（DG-G2 cookie「设置侧」） ============
