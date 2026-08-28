@@ -41,7 +41,12 @@ def test_guard_healthy_and_degraded(monkeypatch):
 
 
 def test_guard_auto_heal_only_when_terminal_healthy(monkeypatch):
-    """自愈前置=终端健康：终端挂时绝不瞎拉策略（拉起也连不上，徒增噪声）。"""
+    """自愈前置=终端健康：终端挂时绝不瞎拉策略（拉起也连不上，徒增噪声）。
+
+    钉单腿（gc.active_legs→main）：.env 部署 GM_EXP_STRATEGY_DIR 后真实环境是
+    双腿（heal 计数=腿数），本用例断言的是「终端健康与否」这一单变量，隔离腿数。"""
+    monkeypatch.setattr(guard.gc, "active_legs",
+                        lambda: [guard.gc.LEGS[0]])
     monkeypatch.setattr(guard, "_in_market_window", lambda: True)
     monkeypatch.setattr(guard, "probe_api", lambda cfg: (True, 200))
     monkeypatch.setattr(guard.gc, "runtime_config",
@@ -120,14 +125,15 @@ def test_morning_check_drift_detection(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "probe_strategy_process", lambda d: 1)
 
     monkeypatch.setattr(mc.gc, "runtime_config",
-                        lambda: {"token": "t", "account_id": "acc-1"})
-    monkeypatch.setattr(mc, "_api_position_symbols", lambda token: ["300433.SZ"])
+                        lambda d=None: {"token": "t", "account_id": "acc-1"})
+    monkeypatch.setattr(mc, "_api_position_symbols",
+                        lambda token, acc: ["300433.SZ"])
     checks = {c["name"]: c for c in mc.run_checks()}
     assert checks["终端网关"]["ok"] and checks["策略进程"]["ok"]
     assert checks["INIT账户核"]["ok"] and checks["盘前已跑"]["ok"]
     assert checks["账实对账"]["ok"]                      # API=state={300433}
 
     monkeypatch.setattr(mc, "_api_position_symbols",
-                        lambda token: ["300433.SZ", "301018.SZ"])
+                        lambda token, acc: ["300433.SZ", "301018.SZ"])
     checks = {c["name"]: c for c in mc.run_checks()}
     assert not checks["账实对账"]["ok"] and "漂移" in checks["账实对账"]["detail"]

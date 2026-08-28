@@ -46,7 +46,7 @@ def test_build_report_renders(tmp_path, monkeypatch):
     from ops import gm_ops_common as gc
     monkeypatch.setattr(gc, "GM_STRATEGY_DIR", tmp_path)
     monkeypatch.setattr(gc, "runtime_config",
-                        lambda: {"token": "t", "account_id": "acc-1"})
+                        lambda d=None: {"token": "t", "account_id": "acc-1"})
     monkeypatch.setattr(rpt, "_api_snapshot",
                         lambda token, acc: ([{"sym": "300433.SZ", "qty": 100,
                                                "vwap": 38.91, "fpnl": 12.0,

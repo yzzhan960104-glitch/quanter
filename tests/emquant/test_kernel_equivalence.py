@@ -257,3 +257,25 @@ def test_build_idempotent(tmp_path):
     assert p1.read_text(encoding="utf-8") == ARTIFACT.read_text(encoding="utf-8"), (
         "重跑 build 与已提交产物不一致：生成物被手改，或源（内核/快照/pilot_body）变更后未重跑 build"
     )
+
+
+def test_build_exp_leg_idempotent_and_account_locked(tmp_path):
+    """双腿形态（2026-08-28 双轨 §4.1）：--leg exp 产物幂等 + §0 账户锁注入 +
+    stamp 带 [exp] 后缀 + 主产物不受 exp 构建影响（主腿回归红线）。"""
+    build = _import_build()
+    exp1 = build.build(tmp_path / "exp_once.py",
+                       account_id=build.DEFAULT_EXP_ACCOUNT_ID, leg_suffix=" [exp]")
+    exp2 = build.build(tmp_path / "exp_twice.py",
+                       account_id=build.DEFAULT_EXP_ACCOUNT_ID, leg_suffix=" [exp]")
+    assert exp1.read_bytes() == exp2.read_bytes(), "exp 腿 build 非幂等"
+    txt = exp1.read_text(encoding="utf-8")
+    assert f"PILOT_ACCOUNT_ID = {build.DEFAULT_EXP_ACCOUNT_ID!r}" in txt, (
+        "exp 产物未注入实验账户（C1 产物级账户锁失效——误粘主目录将不会被拒）")
+    assert " [exp]" in txt, "exp 产物 stamp 缺腿后缀（晨检无法辨腿）"
+    # C1 锁死的对侧证明：主账户串不得再作为 exp 产物的绑定账户出现
+    assert f"PILOT_ACCOUNT_ID = {build.MAIN_ACCOUNT_ID!r}" not in txt
+    # 主腿缺省路径回归：exp 构建前后主产物字节不变
+    main_p = build.build(tmp_path / "main.py")
+    main_again = build.build(tmp_path / "main2.py")
+    assert main_p.read_bytes() == main_again.read_bytes()
+    assert main_p.read_text(encoding="utf-8") == ARTIFACT.read_text(encoding="utf-8")

@@ -20,7 +20,7 @@
     manifest.json         本工具生成：源目录绝对路径/发现方式/拷贝时刻/逐文件
                           size+sha256——归档可追溯到策略目录，哈希供完整性核对。
 
-产物落位：emquant/archive/YYYY-MM-DD/（跑批日一目录）——同日重跑覆盖当日目录
+产物落位：emquant/archive/<leg>/<YYYY-MM-DD>/（腿×跑批日一目录，2026-08-28 双腿化）——同日重跑覆盖当日目录
     （拿到的是更晚时点的快照，幂等），跨日互不干扰，20 日双轨自然形成时间序列。
     归档目录 gitignore（运行时产物不入库，同 state/audit 治理）。
 
@@ -30,12 +30,14 @@
 
 用法（Git Bash、仓库根目录）：
     PYTHONUTF8=1 E:/quanter/.venv310/Scripts/python.exe emquant/tools/archive_terminal_state.py
-    # 自动发现多候选腿（>1 个目录有运行时数据）时显式指定：
-    ... archive_terminal_state.py --src "C:/Users/<user>/.emgm3/projects/<strategy_id>"
+    # 双腿形态（2026-08-28 双轨 §4.3）：按 ops/gm_ops_common.LEGS 注册表逐腿归档，
+    # 落 emquant/archive/<leg>/<YYYY-MM-DD>/（main 恒在；exp 部署后 env 启用自动跟进）。
+    # 显式归档任意目录（单腿回看/异位目录）：
+    ... archive_terminal_state.py --src "<策略目录>" --leg main
 
-退出码：0=成功 / 2=自动发现无果（~/.emgm3/projects 下无含运行时数据的目录）/
-    3=--src 显式指定的目录无运行时数据 / 4=拷贝过程异常。仅 stdlib（工具链家族
-    约定：.venv310/.venv_emquant 双端零依赖差异，parquet 级依赖禁入）。
+退出码：0=成功（全部在役腿）/ 2=无在役腿 / 3=--src 目录无效 / 4=拷贝过程异常。
+依赖：stdlib + ops.gm_ops_common（腿注册表单源；其 dotenv 为 ImportError 容错可选，
+.venv310/.venv_emquant 双端零差异，parquet 级依赖禁入）。
 """
 from __future__ import annotations
 
@@ -48,7 +50,9 @@ from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-_PROJECTS_DIR = Path.home() / ".emgm3" / "projects"   # 掘金终端策略目录根（Windows 下 expanduser=USERPROFILE）
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from ops import gm_ops_common as gc   # noqa: E402 腿注册表单源（sys.path 注入后）
 # 归档收清单：源相对路径 → 语义（manifest 的 files 键沿用相对路径，检索直观）
 _RUNTIME_FILES = ("state/state.pkl", "state/RISK_BLOCK.flag", "state/CAP.txt")
 _AUDIT_GLOB = "audit/audit_*.csv"
@@ -65,79 +69,70 @@ def _has_runtime_data(d: Path) -> bool:
     return bool(list(d.glob(_AUDIT_GLOB)))
 
 
-def _discover_sources() -> list[Path]:
-    """扫终端策略目录根，返回全部含运行时数据的目录（升序稳定序）。"""
-    if not _PROJECTS_DIR.is_dir():
-        return []
-    return sorted(d for d in _PROJECTS_DIR.iterdir() if d.is_dir() and _has_runtime_data(d))
-
-
 def _sha256(p: Path) -> str:
     h = hashlib.sha256()
     h.update(p.read_bytes())
     return h.hexdigest()
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="掘金终端腿运行时归档（仓库侧单向采集，哑终端零改动）")
-    ap.add_argument("--src", help="终端策略目录（缺省自动发现 ~/.emgm3/projects/ 下含运行时数据者）")
-    ap.add_argument("--dest", default=str(ROOT / "emquant" / "archive"),
-                    help="归档根目录（默认 emquant/archive/）")
-    args = ap.parse_args()
-
-    # ── 源目录解析：显式优先，否则自动发现（多候选=列出并退出，人工裁决）──
-    if args.src:
-        src = Path(args.src)
-        kind = "explicit"
-        if not src.is_dir():
-            print(f"[archive] 终止：--src 目录不存在：{src}")
-            return 3
-        if not _has_runtime_data(src):
-            print(f"[archive] 终止：--src 目录无运行时数据（无 audit csv 且无 state.pkl）：{src}")
-            return 3
-    else:
-        cands = _discover_sources()
-        if not cands:
-            print(f"[archive] 终止：{_PROJECTS_DIR} 下未发现含运行时数据的策略目录"
-                  "（终端未装/未首启/目录异位——确认后用 --src 显式指定）")
-            return 2
-        if len(cands) > 1:
-            print(f"[archive] 终止：发现多个含运行时数据的策略目录，须 --src 显式指定其一：")
-            for c in cands:
-                print(f"    {c}")
-            return 2
-        src = cands[0]
-        kind = "auto-discovered"
-
-    # ── 快照清单：audit 全量 + 三件运行时文件（在场才收）──
+def _archive_one(src: Path, dest_root: Path, leg_key: str, kind: str) -> int:
+    """单腿归档（audit 全量 + 三件运行时文件 → dest_root/<leg>/<今日>/）。"""
+    if not _has_runtime_data(src):
+        print(f"[archive] 跳过（无运行时数据——未首启/新部署腿）：{src}")
+        return 0
     files: list[Path] = sorted(src.glob(_AUDIT_GLOB))
     files += [src / rel for rel in _RUNTIME_FILES if (src / rel).exists()]
     if not files:
         print(f"[archive] 终止：源目录运行时文件均不在场（形态异变，人工核查）：{src}")
         return 3
-
-    # ── 拷贝：按跑批日一目录，同日重跑覆盖（更晚时点快照）；copy2 保 mtime 供对时 ──
-    day_dir = Path(args.dest) / f"{date.today():%Y-%m-%d}"
+    day_dir = dest_root / leg_key / f"{date.today():%Y-%m-%d}"
     day_dir.mkdir(parents=True, exist_ok=True)
-    manifest = {"archived_at": datetime.now().isoformat(timespec="seconds"),
+    manifest = {"leg": leg_key, "archived_at": datetime.now().isoformat(timespec="seconds"),
                 "source_dir": str(src.resolve()), "source_kind": kind, "files": {}}
     try:
         for f in files:
-            rel = f.relative_to(src).as_posix()
-            target = day_dir / f.name          # 快照目录平铺（audit 文件名自带日期，state 同名覆盖即最新）
+            target = day_dir / f.name        # 平铺（audit 文件名自带日期，state 同名覆盖即最新）
             shutil.copy2(f, target)
-            manifest["files"][rel] = {"size": f.stat().st_size, "sha256": _sha256(f)}
+            manifest["files"][f.name] = {"size": f.stat().st_size, "sha256": _sha256(f)}
     except OSError as e:
         print(f"[archive] 终止：拷贝异常（源被锁/磁盘满？）：{type(e).__name__}: {e}")
         return 4
     (day_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    print(f"[archive] 源（{kind}）：{src}")
-    print(f"[archive] 归档：{day_dir}")
-    for rel, meta in manifest["files"].items():
-        print(f"[archive]   {rel}  {meta['size']}B  sha256={meta['sha256'][:12]}…")
+    print(f"[archive][{leg_key}] 源（{kind}）：{src}")
+    print(f"[archive][{leg_key}] 归档：{day_dir}（{len(manifest['files'])} 件）")
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="掘金终端腿运行时归档（仓库侧单向采集，哑终端零改动）")
+    ap.add_argument("--src", help="显式归档任意策略目录（缺省=按腿注册表逐腿）")
+    ap.add_argument("--leg", default="main", choices=[l.key for l in gc.LEGS],
+                    help="--src 时归入的腿子目录（默认 main）")
+    ap.add_argument("--dest", default=str(ROOT / "emquant" / "archive"),
+                    help="归档根目录（默认 emquant/archive/）")
+    args = ap.parse_args()
+
+    dest_root = Path(args.dest)
+    if args.src:
+        src = Path(args.src)
+        if not src.is_dir():
+            print(f"[archive] 终止：--src 目录不存在：{src}")
+            return 3
+        rc = _archive_one(src, dest_root, args.leg, "explicit")
+        return rc
+    # 注册表主路径：逐在役腿归档（腿发现单源=ops/gm_ops_common.active_legs）
+    legs = gc.active_legs()
+    if not legs:
+        print("[archive] 终止：无在役腿（main 恒应在——env GM_STRATEGY_DIR 指向不存在目录？）")
+        return 2
+    worst = 0
+    for leg in legs:
+        d = gc.leg_strategy_dir(leg)
+        if d is None:
+            continue
+        worst = max(worst, _archive_one(d, dest_root, leg.key, "registry"))
+    return worst
 
 
 if __name__ == "__main__":

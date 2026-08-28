@@ -97,34 +97,45 @@ def auto_heal_strategy(strategy_dir: Path) -> bool:
 
 
 def run_once(auto_heal: bool = True) -> dict:
-    cfg = gc.runtime_config()
+    """跑一轮三层探测。双腿形态（2026-08-28 双轨 §4.3）：终端/API 层全局查一次
+    （gmterm-serv 是两腿共享的单点）；进程层按腿探测+按腿自愈，problems 带腿标签。
+    exp 腿未部署（env 未设）时 active_legs 只含 main——单腿时代语义完全保留。"""
+    cfg = gc.runtime_config()                       # 终端 token：腿间同值，取主腿缺省即可
     port_ok = probe_port_7001()
     api_ok, api_status = probe_api(cfg)
-    proc_n = probe_strategy_process(gc.GM_STRATEGY_DIR)
     window = _in_market_window()
-    healed = False
 
     problems: list[str] = []
     if not port_ok:
         problems.append("7001 不可连（gmterm-serv/终端疑似未运行）")
     if not api_ok:
         problems.append(f"7002 API 心跳失败（status={api_status}；401=token 失效须换 runtime.json）")
-    if window and proc_n == 0:
-        problems.append("交易时段策略进程缺失")
-    if proc_n > 1:
-        problems.append(f"策略进程数={proc_n}（>1 疑似双策略，须人工核查）")
 
-    if auto_heal and window and proc_n == 0 and port_ok and api_ok:
-        healed = auto_heal_strategy(gc.GM_STRATEGY_DIR)
-        if healed:
-            problems = [p for p in problems if p != "交易时段策略进程缺失"]
+    legs_state: dict[str, dict] = {}
+    any_healed = False
+    for leg in gc.active_legs():
+        leg_dir = gc.leg_strategy_dir(leg)
+        proc_n = probe_strategy_process(leg_dir)
+        leg_problems = []
+        if window and proc_n == 0:
+            leg_problems.append(f"[{leg.label}] 交易时段策略进程缺失")
+        if proc_n > 1:
+            leg_problems.append(f"[{leg.label}] 策略进程数={proc_n}（>1 疑似双策略，须人工核查）")
+        healed = False
+        if auto_heal and window and proc_n == 0 and port_ok and api_ok:
+            healed = auto_heal_strategy(leg_dir)
+            if healed:
+                leg_problems = [p for p in leg_problems if "进程缺失" not in p]
+                _notify("INFO", f"掘金看护：[{leg.label}] 策略进程缺失已自动 relaunch 恢复（终端/API 健康）")
+                any_healed = True
+        problems.extend(leg_problems)
+        legs_state[leg.key] = {"strategy_procs": proc_n, "auto_healed": healed}
 
     st = {"at": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "port_7001": port_ok,
-          "api_7002": api_ok, "api_status": api_status, "strategy_procs": proc_n,
-          "market_window": window, "auto_healed": healed, "ok": not problems,
-          "problems": problems}
-    if healed:
-        _notify("INFO", f"掘金看护：策略进程缺失已自动 relaunch 恢复（终端/API 健康）")
+          "api_7002": api_ok, "api_status": api_status,
+          "strategy_procs": legs_state.get("main", {}).get("strategy_procs", -1),
+          "legs": legs_state, "market_window": window, "auto_healed": any_healed,
+          "ok": not problems, "problems": problems}
     if problems:
         _notify("ERROR" if (not port_ok or not api_ok) else "WARN",
                 "掘金看护告警：" + "；".join(problems)

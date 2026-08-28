@@ -26,6 +26,13 @@ ROOT = Path(__file__).resolve().parents[1]
 FUTURE = "from __future__ import annotations"
 SIGNAL_IMPORT = "from .signal import Signal"
 
+# 双腿账户常量（2026-08-28 双轨方案 §4.1）：C1 产物级账户锁的编译层——每腿产物编译
+# 各自的 PILOT_ACCOUNT_ID，误交叉部署（实验产物粘主目录/反之）在 C1 启动期即拒。
+# DEFAULT_EXP_ACCOUNT_ID 与 ops/gm_ops_common 同名常量互为镜像（emquant/ops 两家族
+# 不互相 import；漂移由 C1 守卫兜底——产物绑错账户=启动拒绝，不是静默跑错腿）。
+MAIN_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'
+DEFAULT_EXP_ACCOUNT_ID = 'c4ba3b2e-a2da-11f1-9262-52560acd7da0'
+
 # pilot_body 顶部「入口抑制块」的剪切标记（Task 8）：标记行本身随块一起搬进 head 区。
 # Why 存在：内核逐字块（§1）尾部有 method_v0 的 `if __name__ == "__main__": main()`
 # 演示守卫，位于产物 §2-§7 拼接位【之前】——抑制代码必须先于它执行才能拦住，而能落在
@@ -89,8 +96,14 @@ def _build_stamp() -> str:
         return "unknown"
 
 
-def build(output_path: Path | None = None) -> Path:
+def build(output_path: Path | None = None, account_id: str = MAIN_ACCOUNT_ID,
+          leg_suffix: str = "") -> Path:
     """读五路输入 → 拼单文件 → 返回产物路径（幂等纯拼接）。
+
+    双腿形态（2026-08-28 双轨方案 §4.1）：account_id 注入 §0 的 PILOT_ACCOUNT_ID
+    （缺省=主账户，主产物字节不变——回归红线）；leg_suffix 追加进 stamp（exp 腿用
+    " [exp]"，晨检看 INIT 行即辨腿，杜绝「比较对象错版本」）。实验产物走
+    emquant_neckline_pilot_exp.py，与主产物同纪律入库（幂等断言+部署核对+评审 diff）。
 
     输入：strategies/neckline/{signal,method_v0}.py（逐字内核）、emquant/config/
     {params_snapshot,universe}.json（§0 定稿数据）、emquant/pilot_body.py（§2-§7）。
@@ -106,7 +119,7 @@ def build(output_path: Path | None = None) -> Path:
     mv0 = _strip((ROOT / "strategies/neckline/method_v0.py").read_text(encoding="utf-8"), FUTURE, SIGNAL_IMPORT)
     body_full = (ROOT / "emquant/pilot_body.py").read_text(encoding="utf-8")
     hoist, body = _hoist_entrance_guard(body_full)   # 入口抑制块剪出到 head 区（§0/§1 之前）
-    stamp = _build_stamp()
+    stamp = _build_stamp() + leg_suffix
     head = (
         "# -*- coding: utf-8 -*-\n"
         '"""东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。\n'
@@ -126,7 +139,7 @@ def build(output_path: Path | None = None) -> Path:
         "# ≤4（4 并发）；单票市值 ≤7.5%（与快照 pos_cap 同值，二次核验闸随动）；账户固定。\n"
         "PILOT_MAX_NEW_ORDERS_PER_DAY = 4\n"
         "PILOT_MAX_POSITION_PCT = 0.075\n"
-        "PILOT_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'\n\n\n"
+        f"PILOT_ACCOUNT_ID = {account_id!r}\n\n\n"
     )
     parts = [head, hoist + "\n\n", sec0,
              "# ============================ §1 识别内核（signal.py + method_v0.py 逐字块，C2）============================\n" + sig + "\n\n\n" + mv0 + "\n\n\n",
@@ -136,5 +149,26 @@ def build(output_path: Path | None = None) -> Path:
     return out
 
 
+def _cli() -> int:
+    """CLI：--leg main|exp。exp 缺省产物=_exp.py、账户=env GM_EXP_ACCOUNT_ID 或镜像常量。"""
+    import argparse
+    import os
+    ap = argparse.ArgumentParser(description="组装单文件产物（主/实验腿）")
+    ap.add_argument("--leg", choices=["main", "exp"], default="main")
+    ap.add_argument("--account-id", help="覆盖 §0 PILOT_ACCOUNT_ID（缺省按腿）")
+    ap.add_argument("--out", help="输出路径（缺省按腿）")
+    args = ap.parse_args()
+    if args.leg == "main":
+        account = args.account_id or MAIN_ACCOUNT_ID
+        out = Path(args.out) if args.out else None
+        suffix = ""
+    else:
+        account = args.account_id or os.environ.get("GM_EXP_ACCOUNT_ID") or DEFAULT_EXP_ACCOUNT_ID
+        out = Path(args.out) if args.out else (ROOT / "emquant" / "emquant_neckline_pilot_exp.py")
+        suffix = " [exp]"
+    print(build(out, account_id=account, leg_suffix=suffix))
+    return 0
+
+
 if __name__ == "__main__":
-    print(build())
+    raise SystemExit(_cli())

@@ -28,6 +28,52 @@ GM_STRATEGY_DIR = Path(os.environ.get(
 GM_API_BASE = os.environ.get("GM_API_BASE", "http://127.0.0.1:7002")
 
 
+# ────────────────────────── 双腿注册表（2026-08-28 双轨方案 §4.2）─────────────────────────
+# 物理意图：「主腿(incumbent)/实验腿(challenger)」是三件套/ingest/归档/对照脚本的
+# 共同事实源——目录与账户的映射散在任何一处都会漂移（单源纪律）。目录经 env 覆写：
+#   - main：GM_STRATEGY_DIR（沿用既有键，已注册 schtasks 命令行零变更）；
+#   - exp ：GM_EXP_STRATEGY_DIR / GM_EXP_ACCOUNT_ID（.env，部署实验腿时写入；
+#           未设或目录不存在 = 实验腿未启用，消费方静默跳过——未部署期零告警噪音）。
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class LegDef:
+    key: str                            # "main"/"exp"（归档子目录名、报告标签源）
+    label: str                          # 钉钉/报告文案标签
+    strategy_dir_env: str               # 目录覆写 env 键
+    account_env: str                    # 账户覆写 env 键
+    default_strategy_dir: Path | None   # main=硬缺省；exp=None（须 env 显式给）
+
+
+_MAIN_LEG = LegDef("main", "主腿", "GM_STRATEGY_DIR", "GM_MAIN_ACCOUNT_ID", GM_STRATEGY_DIR)
+_EXP_LEG = LegDef("exp", "实验腿", "GM_EXP_STRATEGY_DIR", "GM_EXP_ACCOUNT_ID", None)
+LEGS = (_MAIN_LEG, _EXP_LEG)
+
+# 实验账户（2026-08-28 零 GUI 建成，复现命令见 emquant/tools/gm_sim_account.py）：
+# 期初 10 万 / simulate 撮合 / gm-broker-1 通道（与主账户同款）。作 exp 腿 env 未设时
+# build_pilot --leg exp 的缺省——与 runtime.json 的 account_id 交叉验证（C1 产物级
+# 账户锁的意图层对侧）。
+DEFAULT_EXP_ACCOUNT_ID = "c4ba3b2e-a2da-11f1-9262-52560acd7da0"
+
+
+def leg_strategy_dir(leg: LegDef) -> Path | None:
+    """腿的策略目录：env 显式覆写 > 硬缺省；exp 无缺省（未配置即 None）。"""
+    v = os.environ.get(leg.strategy_dir_env)
+    return Path(v) if v else leg.default_strategy_dir
+
+
+def active_legs() -> list[LegDef]:
+    """在役腿集合。main 恒在（其目录缺失由消费方照常报错——与单腿时代语义一致，
+    不因注册表引入「主腿静默消失」的新故障面）；exp 需 env 已设且目录存在。"""
+    out = [_MAIN_LEG]
+    d = leg_strategy_dir(_EXP_LEG)
+    if d is not None and d.exists():
+        out.append(_EXP_LEG)
+    return out
+
+
 def runtime_config(strategy_dir: Path | None = None) -> dict:
     """读策略目录 config/runtime.json（token/strategy_id/account_id）。缺文件抛错。"""
     d = strategy_dir or GM_STRATEGY_DIR

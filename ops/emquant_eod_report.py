@@ -36,9 +36,9 @@ from ops import gm_ops_common as gc
 from ops.gm_ops_common import notify
 
 
-def _audit_stats(day: str) -> dict:
+def _audit_stats(day: str, leg_dir: Path | None = None) -> dict:
     """当日 audit 漏斗统计（缺文件=全零，不报错——非交易日/停机日语义）。"""
-    src = gc.audit_csv_path(day)
+    src = gc.audit_csv_path(day, leg_dir)
     st = {"signals": 0, "placed": 0, "fills": 0, "blocked": Counter(),
           "clamped": 0, "repaired": 0, "eod": None}
     if not src.exists():
@@ -104,10 +104,10 @@ def _name_map(ts_symbols: list[str]) -> dict[str, str]:
         return {}
 
 
-def _stop_tp_map() -> dict[str, tuple]:
+def _stop_tp_map(leg_dir: Path | None = None) -> dict[str, tuple]:
     """state.pkl 持仓 → (stop, tp1, tp2)（enrich 挂载的定终身价；读失败=空表降级）。"""
     try:
-        st = json.loads(gc.state_pkl_path().read_text(encoding="utf-8"))
+        st = json.loads(gc.state_pkl_path(leg_dir).read_text(encoding="utf-8"))
         out = {}
         for sym, pos in (st.get("positions") or {}).items():
             if int((pos or {}).get("remaining_qty") or 0) > 0:
@@ -131,14 +131,17 @@ def _api_snapshot(token: str, account_id: str) -> tuple[list, dict | None]:
     return rows, cash_row
 
 
-def build_report(now: datetime | None = None) -> str:
+def build_report(now: datetime | None = None, leg_dir: Path | None = None,
+                 leg_label: str = "主腿") -> str:
+    """单腿日终报告（双腿形态 2026-08-28：main() 按 active_legs 循环；leg_dir=None
+    走 gc.GM_STRATEGY_DIR 缺省——单腿调用方/既有测试语义不变）。"""
     now = now or datetime.now()
     day = f"{now:%Y-%m-%d}"
-    cfg = gc.runtime_config()
-    st = _audit_stats(day)
+    cfg = gc.runtime_config(leg_dir)
+    st = _audit_stats(day, leg_dir)
     positions, cash = _api_snapshot(str(cfg.get("token") or ""),
                                     str(cfg.get("account_id") or ""))
-    lines = [f"掘金日终播报 · {day}"]
+    lines = [f"掘金日终播报 · {day} · {leg_label}"]
     blk = " / ".join(f"{k}×{v}" for k, v in st["blocked"].items()) or "无"
     lines.append(f"① 漏斗：信号 {st['signals']} → 挂单 {st['placed']}"
                  f"（回补 {st['repaired']}、钳价 {st['clamped']}）→ 成交 {st['fills']}"
@@ -201,14 +204,21 @@ def main(argv: list[str] | None = None) -> int:
     if not args.date and now.weekday() >= 5:
         notify("INFO", f"掘金EOD {now:%Y-%m-%d} 非交易日（周末），跳过日终播报——schtask 心跳正常")
         return 0
-    report = build_report(now if not args.date else
-                          datetime.strptime(args.date, "%Y-%m-%d"))
-    print(report)
-    log = ROOT / "logs" / f"emquant_eod_{(args.date or f'{now:%Y-%m-%d}')}.txt"
-    log.parent.mkdir(exist_ok=True)
-    log.write_text(report, encoding="utf-8")
+    # 双腿形态（2026-08-28 双轨 §4.3）：逐腿出报告，双腿拼一条钉钉（拆两条会被
+    # 群折叠语义拆散对照关系）；报告文件按腿分文件落档。
+    day_str = args.date or f"{now:%Y-%m-%d}"
+    parts = []
+    for leg in gc.active_legs():
+        report = build_report(now if not args.date else datetime.strptime(args.date, "%Y-%m-%d"),
+                              gc.leg_strategy_dir(leg), leg.label)
+        parts.append(report)
+        log = ROOT / "logs" / f"emquant_eod_{leg.key}_{day_str}.txt"
+        log.parent.mkdir(exist_ok=True)
+        log.write_text(report, encoding="utf-8")
+    full = "\n\n".join(parts)
+    print(full)
     if not args.no_push:
-        notify("INFO", report)
+        notify("INFO", full)
     return 0
 
 

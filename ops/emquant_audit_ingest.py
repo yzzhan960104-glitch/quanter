@@ -44,9 +44,32 @@ CREATE TABLE IF NOT EXISTS terminal_audit (
     account_id  TEXT,
     strategy_id TEXT,
     ingested_at TEXT NOT NULL,
-    UNIQUE(ts, event, detail)
+    UNIQUE(ts, event, detail, account_id)
 )
 """
+
+
+def _ensure_table(con: sqlite3.Connection) -> None:
+    """建表或迁移旧唯一键（双腿真雷修复，2026-08-28 双轨方案 §4.3）。
+
+    旧键 UNIQUE(ts,event,detail) 不含 account_id——两腿各自 10:31:00 写
+    SCHEDULE_TICK（同秒+同 detail）时第二腿撞键被 INSERT OR IGNORE 静默吞，
+    实验腿数据丢失。迁移=新键重建表搬数（terminal_audit 是台账非源数据，audit
+    CSV 才是源，重建零损失；同 (ts,event,detail,account_id) 旧行若自身有重复
+    搬运时去重——不丢信息只去冗余）。
+    """
+    con.execute(_DDL)
+    sql = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='terminal_audit'"
+    ).fetchone()
+    if sql and "UNIQUE(ts, event, detail, account_id)" not in sql[0]:
+        con.execute("ALTER TABLE terminal_audit RENAME TO terminal_audit_old")
+        con.execute(_DDL)
+        con.execute(
+            "INSERT OR IGNORE INTO terminal_audit"
+            "(ts,event,detail,account_id,strategy_id,ingested_at)"
+            " SELECT ts,event,detail,account_id,strategy_id,ingested_at FROM terminal_audit_old")
+        con.execute("DROP TABLE terminal_audit_old")
 
 
 def _extract_ids(detail_json: str) -> tuple[str | None, str | None]:
@@ -59,16 +82,31 @@ def _extract_ids(detail_json: str) -> tuple[str | None, str | None]:
 
 def ingest_day(day: str, db_path: Path = DB_PATH,
                strategy_dir: Path | None = None) -> dict:
-    """采集单日 audit CSV → dict(inserted, skipped, file)。文件缺失 → file=None。"""
+    """采集单日 audit CSV → dict(inserted, skipped, file)。文件缺失 → file=None。
+
+    账户归属三级兜底（2026-08-28 双轨补强）：行内 detail 键 > 当日最近 INIT 继承 >
+    该腿 runtime.json 的 account_id（文件级真值）。第三级是双腿形态必需：bootstrap
+    的 audit 序是 RECONCILE **先于** INIT（reconcile→audit INIT，pilot_body.bootstrap
+    顺序），INIT 前置行靠行内/继承都拿不到账户——两腿各有 RECONCILE 落 NULL 则无法
+    归腿，对照脚本的按账户查询会漏行。"""
     src = gc.audit_csv_path(day, strategy_dir)
     if not src.exists():
         return {"day": day, "file": None, "inserted": 0, "skipped": 0}
+    leg_default_account = ""
+    leg_default_strategy = ""
+    if strategy_dir is not None:
+        try:
+            cfg = gc.runtime_config(strategy_dir)
+            leg_default_account = str(cfg.get("account_id") or "")
+            leg_default_strategy = str(cfg.get("strategy_id") or "")
+        except (OSError, ValueError):
+            pass                                    # runtime 缺失=文件级兜底不可用，降级旧语义
     ingested_at = f"{datetime.now():%Y-%m-%dT%H:%M:%S}"
     inserted = skipped = 0
     last_account = ""
     last_strategy = ""
     with sqlite3.connect(db_path) as con:
-        con.execute(_DDL)
+        _ensure_table(con)
         with src.open(encoding="utf-8", newline="") as fh:
             for row in csv.reader(fh):
                 if len(row) < 2 or not row[0]:
@@ -83,8 +121,9 @@ def ingest_day(day: str, db_path: Path = DB_PATH,
                     "INSERT OR IGNORE INTO terminal_audit"
                     "(ts,event,detail,account_id,strategy_id,ingested_at)"
                     " VALUES (?,?,?,?,?,?)",
-                    (ts, event, detail, acct or last_account or None,
-                     sid or last_strategy or None, ingested_at))
+                    (ts, event, detail,
+                     acct or last_account or leg_default_account or None,
+                     sid or last_strategy or leg_default_strategy or None, ingested_at))
                 inserted += cur.rowcount or 0
                 skipped += 0 if (cur.rowcount or 0) else 1
     return {"day": day, "file": str(src), "inserted": inserted, "skipped": skipped}
@@ -120,7 +159,11 @@ def main(argv: list[str] | None = None) -> int:
         days = [(today - timedelta(days=i)).strftime("%Y-%m-%d")
                 for i in range(args.backfill)]
     for d in sorted(days):
-        print(json.dumps(ingest_day(d), ensure_ascii=False))
+        # 双腿形态（2026-08-28 双轨 §4.3）：逐腿采集当日文件——行级 account_id
+        # 区分腿（_ensure_table 的唯一键含 account_id，两腿同秒同事件不再互吞）。
+        for leg in gc.active_legs():
+            print(json.dumps(ingest_day(d, strategy_dir=gc.leg_strategy_dir(leg)),
+                             ensure_ascii=False))
     return 0
 
 

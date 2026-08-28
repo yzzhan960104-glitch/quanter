@@ -34,9 +34,9 @@ from ops.gm_terminal_guard import _in_market_window, probe_api, probe_port_7001,
 from ops.gm_ops_common import notify as _notify
 
 
-def _load_state() -> dict:
+def _load_state(leg_dir: Path | None = None) -> dict:
     try:
-        return json.loads(gc.state_pkl_path().read_text(encoding="utf-8"))
+        return json.loads(gc.state_pkl_path(leg_dir).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
@@ -56,9 +56,9 @@ def _today_init(audit_path: Path, today: str) -> dict | None:
     return init
 
 
-def _api_position_symbols(token: str) -> list[str] | None:
+def _api_position_symbols(token: str, account_id: str) -> list[str] | None:
     status, payload = gc.api_get(
-        f"/v3/account-trade/positions/{gc.runtime_config().get('account_id')}", token)
+        f"/v3/account-trade/positions/{account_id}", token)
     if status != 200 or not isinstance(payload, dict):
         return None
     syms = []
@@ -72,10 +72,12 @@ def _api_position_symbols(token: str) -> list[str] | None:
     return syms
 
 
-def run_checks(now: datetime | None = None) -> list[dict]:
+def run_checks(now: datetime | None = None, leg_dir: Path | None = None) -> list[dict]:
+    """单腿六查（双腿形态 2026-08-28：main() 按 active_legs 循环调用；leg_dir=None
+    走 gc.GM_STRATEGY_DIR 缺省——单腿调用方/旧测试语义不变）。"""
     now = now or datetime.now()
     today = f"{now:%Y-%m-%d}"
-    cfg = gc.runtime_config()
+    cfg = gc.runtime_config(leg_dir)
     token = str(cfg.get("token") or "")
     checks: list[dict] = []
 
@@ -87,10 +89,10 @@ def run_checks(now: datetime | None = None) -> list[dict]:
     add("终端网关", port_ok and api_ok,
         f"7001={'通' if port_ok else '断'} 7002={'通' if api_ok else f'status={api_status}'}")
 
-    proc_n = probe_strategy_process(gc.GM_STRATEGY_DIR)
+    proc_n = probe_strategy_process(leg_dir or gc.GM_STRATEGY_DIR)
     add("策略进程", proc_n == 1, f"进程数={proc_n}")
 
-    init = _today_init(gc.audit_csv_path(today), today)
+    init = _today_init(gc.audit_csv_path(today, leg_dir), today)
     expect_acc = str(cfg.get("account_id") or "")
     got_acc = str((init or {}).get("account") or "")
     # 常驻跨日语义（2026-08-28 实跑纠偏）：进程不重启就没有当日 INIT——健康形态。
@@ -101,12 +103,12 @@ def run_checks(now: datetime | None = None) -> list[dict]:
          f"account={got_acc} stamp={(init or {}).get('build_stamp', '—')}")
         + f"（期望账户 {expect_acc}）")
 
-    state = _load_state()
+    state = _load_state(leg_dir)
     po = state.get("last_pre_open_date")
     add("盘前已跑", po == today, f"last_pre_open_date={po}（期望 {today}）")
 
     if api_ok:
-        api_syms = _api_position_symbols(token)
+        api_syms = _api_position_symbols(token, expect_acc)
         st_syms = sorted(s for s, p in (state.get("positions") or {}).items()
                          if int((p or {}).get("remaining_qty") or 0) > 0)
         if api_syms is None:
@@ -119,7 +121,7 @@ def run_checks(now: datetime | None = None) -> list[dict]:
         add("账实对账", False, "API 不可用，跳过（上查已报）")
 
     st, unfinished = gc.api_get(
-        f"/v3/account-trade/unfinished-orders/{cfg.get('account_id')}", token)
+        f"/v3/account-trade/unfinished-orders/{expect_acc}", token)
     n_unf = len((unfinished or {}).get("data") or []) if st == 200 else -1
     add("在途单", True, f"在途={n_unf} 张（信息项）" if n_unf >= 0 else "查询失败（信息项）")
 
@@ -157,21 +159,29 @@ def main(argv: list[str] | None = None) -> int:
     if now.weekday() >= 5:
         _notify("INFO", f"掘金晨检 {now:%Y-%m-%d} 非交易日（周末），跳过深检——schtask 心跳正常")
         return 0
-    checks = run_checks(now)
-    bad = [c for c in checks if not c["ok"]]
-    report = "\n".join(
-        f"{'✅' if c['ok'] else '❌'} {c['name']}: {c['detail']}" for c in checks)
+    # 双腿形态（2026-08-28 双轨 §4.3）：按 active_legs 逐腿六查；exp 未部署时
+    # 只有主腿——单腿时代报告形态不变。exp 腿异常同样进 WARN（不静默），报告
+    # 文案带 [实验腿] 标签区分。
+    all_bad: list[dict] = []
+    reports: list[str] = []
+    for leg in gc.active_legs():
+        checks = run_checks(now, gc.leg_strategy_dir(leg))
+        bad = [c for c in checks if not c["ok"]]
+        all_bad.extend({"leg": leg.label, **c} for c in bad)
+        reports.append(f"—— {leg.label} ——\n" + "\n".join(
+            f"{'✅' if c['ok'] else '❌'} {c['name']}: {c['detail']}" for c in checks))
+    report = "\n".join(reports)
     out = f"掘金晨检 {now:%Y-%m-%d %H:%M}\n{report}"
     print(out)
     log = ROOT / "logs" / f"emquant_check_{now:%Y-%m-%d}.txt"
     log.parent.mkdir(exist_ok=True)
     log.write_text(out, encoding="utf-8")
-    if bad:
-        _notify("WARN", f"掘金晨检 {len(bad)}/{len(checks)} 项异常：\n" +
-                "\n".join(f"❌ {c['name']}: {c['detail']}" for c in bad))
+    if all_bad:
+        _notify("WARN", f"掘金晨检 {len(all_bad)} 项异常：\n" +
+                "\n".join(f"❌ [{b['leg']}] {b['name']}: {b['detail']}" for b in all_bad))
     elif not args.quiet_ok:
         _notify("INFO", "掘金晨检全绿 ✅\n" + report)
-    return 1 if bad else 0
+    return 1 if all_bad else 0
 
 
 if __name__ == "__main__":
