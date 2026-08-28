@@ -9,7 +9,9 @@ import pytest
 import pandas as pd
 from datetime import datetime
 
-from trading import OrderStateMachine, OrderState
+# W6-A：状态机保留面真身（回测撮合消费）；OrderState 枚举单源 types/
+from trading.order_state import OrderStateMachine
+from trading.types.order_state import OrderState
 from backtest import MockBroker
 
 

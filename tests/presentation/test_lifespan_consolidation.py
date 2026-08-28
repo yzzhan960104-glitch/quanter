@@ -58,8 +58,8 @@ def _mock_lifespan_dependencies():
     eng = MagicMock()
     eng.sched.running = False
     eng.bootstrap = AsyncMock()
-    stack.enter_context(patch("trading.engine.TradingEngine", return_value=eng))
-    stack.enter_context(patch("trading.__main__.log_startup_banner"))
+    # W6-A：trading.engine/__main__ 已删——lifespan 不再装配交易引擎（掘金唯一平台）
+    # W6-A：startup banner 随 __main__ 删除
     return stack, start_mock, stop_mock, eng
 
 
@@ -401,15 +401,7 @@ async def test_lifespan_catchup_skipped_when_recent():
 
 @pytest.mark.asyncio
 async def test_lifespan_skips_catchup_when_engine_not_started():
-    """影子期不足（sched.running=False）→ 不创建 catchup_task。"""
-    from fastapi import FastAPI
-    from presentation.server.main import lifespan
-
-    app = FastAPI()
-    stack, _start, _stop, eng = _mock_lifespan_dependencies()   # 默认 running=False
-    catchup = stack.enter_context(
-        patch("trading.catchup.run_startup_catchup", new=AsyncMock()))
-    with stack:
-        async with lifespan(app):
-            assert not hasattr(app.state, "catchup_task")
-    catchup.assert_not_awaited()
+    """W6-A（2026-08-28 完成退役）：engine 启动影子期闸随 trading.engine/catchup
+    删除——本用例退役（掘金唯一平台，server 不再托管交易引擎补跑）。历史口径见
+    archive/qmt-stack-final。占位保留防 suite 计数漂移误读。
+    """

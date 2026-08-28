@@ -131,27 +131,7 @@ def test_engine_processes_fallback_uses_anchors_not_all_venv(monkeypatch):
     assert [p["pid"] for p in procs] == [79788]
 
 
-def test_client_process_ok_when_one(monkeypatch):
-    """恰好 1 个 XtMiniQmt → None。"""
-    monkeypatch.setattr(a, "_client_status",
-                        lambda: {"running": True, "pid": 44044, "count": 1})
-    assert a.check_client_process() is None
 
-
-def test_client_process_fails_when_missing(monkeypatch):
-    """0 个客户端 → 告警（不能假装活）。"""
-    monkeypatch.setattr(a, "_client_status",
-                        lambda: {"running": False, "pid": None, "count": 0})
-    msg = a.check_client_process()
-    assert msg is not None and "进程数 0 != 1" in msg
-
-
-def test_client_process_fails_when_probe_error(monkeypatch):
-    """探测失败（count=None）→ 显式告警，不假装 0 个。"""
-    monkeypatch.setattr(a, "_client_status",
-                        lambda: {"running": None, "pid": None, "count": None})
-    msg = a.check_client_process()
-    assert msg is not None and "探测失败" in msg
 
 
 def test_port_owner_consistency_ok_when_same(monkeypatch):
@@ -379,3 +359,31 @@ def test_audit_window_days_env_default_and_override(monkeypatch):
     assert a._audit_window_days() == 365
     monkeypatch.setenv("AUDIT_ACCOUNT_WINDOW_DAYS", "0")
     assert a._audit_window_days() == 30   # <1 非法 → fail-safe 回默认（不静默关检查）
+
+
+# ============================================================
+# W3（2026-08-28）：掘金终端进程检查（替换 miniQMT 客户端检查）
+# ============================================================
+def test_gm_terminal_ok_when_both_alive(monkeypatch):
+    import scripts.audit_ssot as a
+    monkeypatch.setattr(a, "_gm_terminal_status",
+                        lambda: {"emgm3": 4, "gateway": 1})
+    assert a.check_gm_terminal() is None
+
+
+def test_gm_terminal_fails_when_terminal_down(monkeypatch):
+    import scripts.audit_ssot as a
+    monkeypatch.setattr(a, "_gm_terminal_status", lambda: {"emgm3": 0, "gateway": 1})
+    assert a.check_gm_terminal() is not None and "emgm3" in a.check_gm_terminal()
+
+
+def test_gm_terminal_fails_when_gateway_down(monkeypatch):
+    import scripts.audit_ssot as a
+    monkeypatch.setattr(a, "_gm_terminal_status", lambda: {"emgm3": 4, "gateway": 0})
+    assert a.check_gm_terminal() is not None and "gmterm-serv" in a.check_gm_terminal()
+
+
+def test_gm_terminal_fails_when_probe_error(monkeypatch):
+    import scripts.audit_ssot as a
+    monkeypatch.setattr(a, "_gm_terminal_status", lambda: {"emgm3": None, "gateway": None})
+    assert a.check_gm_terminal() is not None and "探测失败" in a.check_gm_terminal()

@@ -40,7 +40,7 @@ def test_import_broker_mock_first_does_not_crash():
 
 
 def test_import_trading_engine_first_does_not_crash():
-    """trading-first 加载序：`import trading.engine` 必须不炸（保既有主链不被断环改动误伤）。"""
-    r = _import_in_fresh_process("import trading.engine")
-    assert r.returncode == 0, (
-        f"trading-first 加载序崩溃（断环改动误伤主链）：\n{r.stderr}")
+    """W6-A 退役占位：trading.engine 随 QMT live 面删除——加载序守卫改保 trading
+    保留面（orchestrate.pipeline 是 ops_sched 18:00 的活依赖）。"""
+    r = _import_in_fresh_process("import trading.orchestrate.pipeline")
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")[-400:]

@@ -15,7 +15,7 @@ def test_queue_size_counts_down_queue_bytes(tmp_path, monkeypatch):
 
 
 def test_processes_endpoint_assembles_one_screen(monkeypatch):
-    from trading import gateway_service as trading_service
+    # W6-A：gateway_service 引用摘除（P3 改制后端点只消费 process_topology）
     from ops import process_topology as ts
 
     monkeypatch.setattr(ts, "engine_processes",

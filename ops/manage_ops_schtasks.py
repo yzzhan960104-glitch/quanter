@@ -185,8 +185,7 @@ def register_guard() -> None:
     退役 P3 删除（掘金升格唯一平台）。拒注册并指向接棒者，防误用建出每 5 分钟
     失败一次的死任务；本机残留任务由 register()/unregister() 经 RETIRED_TASKS 清退。
     """
-    print("QuanterMiniQmtGuard 已退役（miniqmt_guard.py 已删）——掘金看护请用：
-"
+    print("QuanterMiniQmtGuard 已退役（miniqmt_guard.py 已删）——掘金看护请用：\n"
           f"  {ROOT / '.venv310' / 'Scripts' / 'python.exe'} "
           f"{ROOT / 'ops' / 'gm_terminal_guard.py'} --register")
     sys.exit(2)

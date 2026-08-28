@@ -147,7 +147,9 @@ def _fetch_trading_snapshot(date: str) -> tuple[list, dict | None, list | None, 
     try:
         # W1-A/T2：trading_service 下沉至 trading/gateway_service（切断 presentation 反查）；
         # 保局部名 trading_service 以最小化本块改动（query_trades 调用不动），行为零变更。
-        from trading import gateway_service as trading_service
+        # W6-A（2026-08-28）：gateway_service 随 QMT live 面删除——query_trades
+        # 收编至 server/services/trades_export（实现逐字，数据源同为 state_store.fill）
+        from presentation.server.services import trades_export as trading_service
         trades_payload = trading_service.query_trades(date, date, limit=100)
         trades = list(trades_payload.get("trades", [])) if trades_payload else []
     except Exception:

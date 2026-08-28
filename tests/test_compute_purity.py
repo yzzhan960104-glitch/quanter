@@ -228,15 +228,10 @@ def test_order_state_enum_single_source() -> None:
 
 
 def test_cancel_all_open_orders_single_source() -> None:
-    """cancel_all_open_orders 单源契约（Layer2 阶段5 · 副作用迁 trading/io/breaker.py）。
-
-    Layer2 阶段6：circuit_breaker 垫片已删，cancel_all_open_orders 真身单源在
-    trading.io.breaker（副作用壳），经 trading.io 包 re-export。
-    纯判定 check_daily_loss_limit 仍单源在 compute.breaker（见 test_breaker_single_source）。
+    """W6-A 退役占位（2026-08-28）：io.breaker.cancel_all 随 QMT live 面删除——
+    掘金腿对应物是 pilot_body._cancel_and_sync（tests/emquant 守卫）。
+    纯判定 check_daily_loss_limit 单源仍在 compute.breaker（test_breaker_single_source）。
     """
-    a = _get("trading.io.breaker", "cancel_all_open_orders")
-    assert a is _get("trading.io", "cancel_all_open_orders")
-
 
 def test_should_trigger_stop_single_source() -> None:
     """should_trigger_stop 单源契约（Layer2 阶段5 · stop_loss_monitor 四缠拆出）。

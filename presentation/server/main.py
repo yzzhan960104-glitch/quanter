@@ -607,18 +607,8 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception("C-8 启动补跑任务 cancel 异常（已忽略）")
 
 
-    # 销毁：优雅断开交易网关（B-18）——logout 释放券商会话，防进程退出时连接泄漏。
-    # Why try/except 吞异常：shutdown 路径不应因网关断开失败而阻塞后续 handler 清理；
-    # 无网关装配（开发态/CI）时 get_gateway 返 None，直接跳过。
-    try:
-        from trading.gateway_service import get_gateway
-        gw = get_gateway()
-        if gw is not None:
-            await gw.disconnect()
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "lifespan shutdown 断开交易网关异常（已忽略，继续清理日志 handler）"
-        )
+    # W6-A（2026-08-28 完成退役）：交易网关 shutdown 块随 gateway_service 删除——
+    # 掘金为唯一实盘平台，server 不再持有任何券商网关（历史考古：git show b7e01c20^）。
 
     # C-7 V1：shutdown 树杀 connect bots（与 startup start 对偶）。
     # 物理意图：startup 起的 dev connect 常驻进程（含其拉起的 Claude Code 子进程），
