@@ -93,9 +93,13 @@ def run_checks(now: datetime | None = None) -> list[dict]:
     init = _today_init(gc.audit_csv_path(today), today)
     expect_acc = str(cfg.get("account_id") or "")
     got_acc = str((init or {}).get("account") or "")
-    add("今日INIT", init is not None and got_acc == expect_acc,
-        f"INIT={'有' if init else '无'} account={got_acc or '—'}（期望 {expect_acc}）"
-        f" stamp={(init or {}).get('build_stamp', '—')}")
+    # 常驻跨日语义（2026-08-28 实跑纠偏）：进程不重启就没有当日 INIT——健康形态。
+    # 本检查只抓「当日重启过但绑错账户」；策略是否在役由盘前已跑+进程两查负责。
+    init_ok = (init is None) or (got_acc == expect_acc)
+    add("INIT账户核", init_ok,
+        (f"常驻跨日（无当日 INIT，正常）" if init is None else
+         f"account={got_acc} stamp={(init or {}).get('build_stamp', '—')}")
+        + f"（期望账户 {expect_acc}）")
 
     state = _load_state()
     po = state.get("last_pre_open_date")
@@ -124,7 +128,7 @@ def run_checks(now: datetime | None = None) -> list[dict]:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="掘金腿晨检（QMT 退役 P0/G-3）")
-    p.add_argument("--ping-ok", action="store_true", help="正常时也发 INFO 报平安")
+    p.add_argument("--quiet-ok", action="store_true", help="正常时静默（默认每日播报全绿——2026-08-28 钉钉对齐掘金）")
     p.add_argument("--register", action="store_true", help="注册 09:40 每日 schtasks")
     p.add_argument("--unregister", action="store_true")
     args = p.parse_args(argv)
@@ -156,8 +160,8 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         _notify("WARN", f"掘金晨检 {len(bad)}/{len(checks)} 项异常：\n" +
                 "\n".join(f"❌ {c['name']}: {c['detail']}" for c in bad))
-    elif args.ping_ok:
-        _notify("INFO", f"掘金晨检全绿（{len(checks)} 项）")
+    elif not args.quiet_ok:
+        _notify("INFO", "掘金晨检全绿 ✅\n" + report)
     return 1 if bad else 0
 
 

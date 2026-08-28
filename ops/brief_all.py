@@ -30,7 +30,9 @@ os.chdir(ROOT)
 PY = sys.executable
 
 # 三个播报 bot 串行（各自独立 robotCode + 幂等文件，互不干扰）
-BOTS = ["trading", "strategy", "data"]
+# QMT 退役（2026-08-28）：trading bot 段退役——其数据源（/api/v1/trading/* 引擎面）已删，
+# 恒空态推送。实盘日报职责移交 ops/emquant_eod_report.py（掘金 15:45 日终播报）。
+BOTS = ["strategy", "data"]
 
 
 async def run_brief_all() -> int:

@@ -14,6 +14,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# 钉钉凭证在 .env（DINGTALK_*）——schtasks 环境无 .env 自动加载，三件套+日报统一在此
+# 读入（miniqmt_guard 前任同款范式；ImportError 容错=无 dotenv 机器仅少推送不炸）。
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+except ImportError:
+    pass
+
 GM_STRATEGY_DIR = Path(os.environ.get(
     "GM_STRATEGY_DIR",
     r"C:\Users\yzzhan\.emgm3\projects\d9324346-9d1b-11f1-ae25-7c10c93fcb7d"))

@@ -124,7 +124,7 @@ def test_morning_check_drift_detection(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "_api_position_symbols", lambda token: ["300433.SZ"])
     checks = {c["name"]: c for c in mc.run_checks()}
     assert checks["终端网关"]["ok"] and checks["策略进程"]["ok"]
-    assert checks["今日INIT"]["ok"] and checks["盘前已跑"]["ok"]
+    assert checks["INIT账户核"]["ok"] and checks["盘前已跑"]["ok"]
     assert checks["账实对账"]["ok"]                      # API=state={300433}
 
     monkeypatch.setattr(mc, "_api_position_symbols",
