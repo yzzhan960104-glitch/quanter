@@ -263,39 +263,42 @@ def test_cap_fail_closed(pilot):
 
 
 def test_daily_order_cap(pilot):
-    """单日新挂 ≤2（FR3 试点硬闸）：当日 placed 已 2 → 拒；只 1 → 过。其余闸全绿隔离本闸。"""
-    st = _fresh_state(pilot, placed_today=["id1", "id2"])       # 当日已挂 2 单
+    """单日新挂 ≤4（2026-08-28 对齐 4并基准）：当日 placed 已 4 → 拒；只 3 → 过。其余闸全绿隔离本闸。"""
+    st = _fresh_state(pilot, placed_today=["id1", "id2", "id3", "id4"])   # 当日已挂 4 单
     ok, why = pilot.check_caps(st, 1_000_000, 0.0, 0.0, price=10.0, qty=4_000, today=TODAY, cap=1.0)
     assert not ok and "单日" in why
-    st2 = _fresh_state(pilot, placed_today=["id1"])
+    st2 = _fresh_state(pilot, placed_today=["id1", "id2", "id3"])
     ok, _ = pilot.check_caps(st2, 1_000_000, 0.0, 0.0, 10.0, 4_000, TODAY, cap=1.0)
-    assert ok                                                   # 4 万 < 5%×1M 单票闸不干扰
+    assert ok                                                   # 4 万 < 7.5%×1M 单票闸不干扰
 
 
 def test_daily_order_cap_counts_effective_only(pilot):
+    """4 并基准下的有效计数（上限 4）。"""
     """③ 语义修订（2026-08-27「没挂成功的单子随时重启随时挂」裁决）：单日上限只数
     【有效】挂单——在途（非终态）或有成交（filled>0）的单。死单（REJECTED/零成交
     CANCELLED）不占额——试点首两日实弹 4 单全灭的口径修复，与 ⑤'' 死单回补配套。
     无档案单号（placed 有而 orders 无）保守计有效（消费方缺省非终态口径）。"""
-    st = _fresh_state(pilot, placed_today=["dead1", "dead2"])
-    st["orders"]["dead1"] = {"status": "REJECTED", "filled": 0}
-    st["orders"]["dead2"] = {"status": "CANCELLED", "filled": 0}
+    st = _fresh_state(pilot, placed_today=["d1", "d2", "d3", "d4", "d5"])
+    for i in range(1, 6):
+        st["orders"][f"d{i}"] = {"status": "REJECTED", "filled": 0}
     ok, _ = pilot.check_caps(st, 1_000_000, 0.0, 0.0, 10.0, 1_000, TODAY, cap=1.0)
-    assert ok                                       # 两死单不占额：有效 0/2，放行（回补可挂）
-    st["orders"]["dead1"]["status"] = "SUBMITTED"   # 一单挂活（在途）
+    assert ok                                       # 五死单不占额：有效 0/4，放行（回补可挂）
+    st["orders"]["d1"]["status"] = "SUBMITTED"      # 挂活×3
+    st["orders"]["d2"]["status"] = "SUBMITTED"
+    st["orders"]["d3"]["status"] = "SUBMITTED"
     ok, _ = pilot.check_caps(st, 1_000_000, 0.0, 0.0, 10.0, 1_000, TODAY, cap=1.0)
-    assert ok                                       # 有效 1/2，仍放行
-    st["orders"]["dead2"]["filled"] = 100           # 另一单 CANCELLED 终态但有成交
+    assert ok                                       # 有效 3/4，仍放行
+    st["orders"]["d4"]["filled"] = 100              # 第四单终态但有成交
     ok, why = pilot.check_caps(st, 1_000_000, 0.0, 0.0, 10.0, 1_000, TODAY, cap=1.0)
-    assert not ok and "有效" in why                 # 有效 2/2 → 拒（新文案含有效计数）
+    assert not ok and "有效" in why                 # 有效 4/4 → 拒
 
 
 def test_symbol_cap(pilot):
-    """单票金额 ≤5%×equity（FR3）：60k > 50k 拒、恰等 50k 过（严格 >）。"""
+    """单票金额 ≤7.5%×equity（2026-08-28 对齐）：90k > 75k 拒、恰等 75k 过（严格 >）。"""
     st = _fresh_state(pilot)
-    ok, why = pilot.check_caps(st, 1_000_000, 0.0, 0.0, price=10.0, qty=6_000, today=TODAY, cap=1.0)
+    ok, why = pilot.check_caps(st, 1_000_000, 0.0, 0.0, price=10.0, qty=9_000, today=TODAY, cap=1.0)
     assert not ok and "单票" in why
-    ok, _ = pilot.check_caps(st, 1_000_000, 0.0, 0.0, 10.0, 5_000, TODAY, cap=1.0)
+    ok, _ = pilot.check_caps(st, 1_000_000, 0.0, 0.0, 10.0, 7_500, TODAY, cap=1.0)
     assert ok
 
 

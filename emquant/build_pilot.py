@@ -122,9 +122,10 @@ def build(output_path: Path | None = None) -> Path:
         f"UNIVERSE = {uni['symbols']!r}\n"
         f"PARAMS_FINGERPRINT = {snap['fingerprint']!r}\n"
         f"PILOT_BUILD_STAMP = {stamp!r}   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用\n"
-        "# 试点硬闸（spec FR3）：单日新挂 ≤2；单票市值 ≤5%；仿真账户固定。\n"
-        "PILOT_MAX_NEW_ORDERS_PER_DAY = 2\n"
-        "PILOT_MAX_POSITION_PCT = 0.05\n"
+        "# 硬闸（2026-08-28 用户裁决：对齐 R6-11b 最新策略基准 4并×7.5%）：单日新挂\n"
+        "# ≤4（4 并发）；单票市值 ≤7.5%（与快照 pos_cap 同值，二次核验闸随动）；账户固定。\n"
+        "PILOT_MAX_NEW_ORDERS_PER_DAY = 4\n"
+        "PILOT_MAX_POSITION_PCT = 0.075\n"
         "PILOT_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'\n\n\n"
     )
     parts = [head, hoist + "\n\n", sec0,

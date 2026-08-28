@@ -227,10 +227,11 @@ def _backdate_order(fake, cid, day):
 # pre_open 五阶段（红线序）
 # ============================================================================
 def test_pre_open_cancel_then_place_order(pilot, tmp_path, monkeypatch):
-    """①昨日买单被撤 + ⑤新信号按 entry 公式挂出 + ③单日 ≤2 闸（三阶段一链钉死）。
+    """①昨日买单被撤 + ⑤新信号按 entry 公式挂出（三阶段一链钉死）。
 
-    手算锚：equity=FakeGm nav 1,000,000；entry=10.4 → qty=⌊1M×0.05/10.4/100⌋×100=4800
-    （金额 49,920 ≤ 单票 5%×1M=50,000 恰好放行）；cancel_on=颈线+2.0×H=10+2×2=14.0。
+    2026-08-28 对齐 4并×7.5%：单日 4 闸下三个信号全挂。手算锚：equity=1M；
+    entry=10.4 → qty=⌊1M×0.075/10.4/100⌋×100=7200（金额 74,880 ≤ 75,000）；
+    cancel_on=颈线+2.0×H=10+2×2=14.0。
     """
     fake = FakeGm()
     yid = pilot.place_limit_buy(fake, "300750.SZ", 10.0, 100, "acc-y")   # 昨日挂单（在场柜台）
@@ -243,13 +244,11 @@ def test_pre_open_cancel_then_place_order(pilot, tmp_path, monkeypatch):
     # ① 昨日非终态买单被撤（audit 逐单留痕）
     assert fake.orders[yid]["status"] == ORDER_STATUS["Canceled"]
     assert "CANCEL" in _events(tmp_path)
-    # ⑤ 三个信号只挂两单（试点硬闸 FR3：单日新挂 ≤2）
+    # ⑤ 三个信号全挂（2026-08-28 对齐后单日 4 > 3）
     buys = [c for c in fake.calls if c.get("api") == "order_volume"
             and c["side"] == 1 and c["price"] == pytest.approx(10.4)]
-    assert len(buys) == 2 and all(c["volume"] == 4800 for c in buys)
-    blocked = _details(tmp_path, "ORDER_BLOCKED")
-    assert len(blocked) == 1 and "单日" in blocked[0]["reason"]
-    assert blocked[0]["symbol"] == "300059.SZ"               # 第三单按扫描序被拦
+    assert len(buys) == 3 and all(c["volume"] == 7200 for c in buys)
+    assert _details(tmp_path, "ORDER_BLOCKED") == []
     # SIGNAL 行字段（brief：symbol/neckline/entry_price/rr）
     sig_rows = _details(tmp_path, "SIGNAL")
     assert len(sig_rows) == 3
@@ -259,10 +258,10 @@ def test_pre_open_cancel_then_place_order(pilot, tmp_path, monkeypatch):
     # state 落盘：scan_done/placed/orders（cancel_on/formed_at/exec_params 定终身）
     st = pilot.load_state(path=tmp_path / "state" / "state.pkl")
     assert st["scan_done"] == {TODAY}
-    assert len(st["placed"][TODAY]) == 2
+    assert len(st["placed"][TODAY]) == 3
     for cid in st["placed"][TODAY]:
         o = st["orders"][cid]
-        assert o["purpose"] == "OPEN" and o["qty"] == 4800
+        assert o["purpose"] == "OPEN" and o["qty"] == 7200
         assert o["price"] == pytest.approx(10.4)
         assert o["cancel_on"] == pytest.approx(14.0)          # 颈线+cancel_thresh_mult×H
         assert o["formed_at"] == T_MINUS_1
@@ -654,7 +653,7 @@ def _managed_position(pilot, remaining=400):
 def _dead_open_order(cid, symbol, status="REJECTED", **over):
     """当日死单档案（⑤'' 死单回补的输入）：几何参数齐备（neckline=10/bottom=8/
     ctm=2.0 → 回补 cancel_on=10+2×2=14.0 可手算），status 默认 REJECTED=柜台拒。"""
-    o = {"symbol": symbol, "date": TODAY, "price": 10.4, "qty": 4800,
+    o = {"symbol": symbol, "date": TODAY, "price": 10.4, "qty": 7200,
          "purpose": "OPEN", "cancel_on": 14.0, "formed_at": T_MINUS_1,
          "exec_params": {"cancel_thresh_mult": 2.0}, "neckline": 10.0,
          "atr": 0.8, "bottom": 8.0, "status": status, "filled": 0,
@@ -682,7 +681,7 @@ def test_pre_open_repairs_dead_orders(pilot, tmp_path, monkeypatch):
 
     placed = [c for c in fake.calls if c.get("api") == "order_volume"]
     assert len(placed) == 1 and placed[0]["symbol"] == "SHSE.600000"
-    assert placed[0]["volume"] == 4800            # ⌊1M×0.05/10.4/100⌋×100（FakeGm nav 1M）
+    assert placed[0]["volume"] == 7200            # ⌊1M×0.075/10.4/100⌋×100（FakeGm nav 1M）
     row = _details(tmp_path, "ORDER_PLACED")[0]
     assert row["repair_of"] == "dead1" and row["cancel_on"] == 14.0
     skips = _details(tmp_path, "REPAIR_SKIP")
@@ -701,7 +700,7 @@ def test_pre_open_repair_skips_live_sibling_and_held(pilot, tmp_path, monkeypatc
     （I-2：真实时钟日期 ≠ TODAY 会被 ① 误判昨日单撤掉）。
     """
     fake = FakeGm()
-    live_res = fake.order_volume("SHSE.600000", 4800, 1, 1, 1, price=10.4)
+    live_res = fake.order_volume("SHSE.600000", 7200, 1, 1, 1, price=10.4)
     live_cid = live_res[0]["cl_ord_id"]
     _backdate_order(fake, live_cid, TODAY)
     st = pilot._initial_state()
@@ -725,16 +724,16 @@ def test_pre_open_repair_skips_live_sibling_and_held(pilot, tmp_path, monkeypatc
 
 
 def test_pre_open_repair_lot_too_small_blocked(pilot, tmp_path, monkeypatch):
-    """⑤'' 定尺：equity×pos_cap 不足一手（新账户 10 万×5%=5000 < 100×60）→
+    """⑤'' 定尺：equity×pos_cap 不足一手（账户 10 万×7.5%=7500 < 100×80）→
     ORDER_BLOCKED 独立文案（回补定尺不足一手），不炸不挂——选项 A 口径下的
     高价股预期行为（301018@122 实弹同型）。"""
-    fake = FakeGm(symbol_info={"SZSE.301018": {"pre_close": 122.24,
-                                               "upper_limit": 146.69,
-                                               "lower_limit": 97.79}})  # 真实带：60 在带内不钳
-    fake.cash["nav"] = 100_000.0                  # 新账户 10 万
+    fake = FakeGm(symbol_info={"SZSE.301018": {"pre_close": 90.0,
+                                               "upper_limit": 108.0,
+                                               "lower_limit": 72.0}})  # 真实带：80 在带内不钳
+    fake.cash["nav"] = 100_000.0                  # 账户 10 万×7.5%=7500 < 100×80=8000 → 拦
     st = pilot._initial_state()
     st["scan_done"].add(TODAY)
-    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "301018.SZ", price=60.0)[1])
+    st["orders"]["dead1"] = dict(_dead_open_order("dead1", "301018.SZ", price=80.0)[1])
     st["placed"][TODAY] = ["dead1"]
     _pin(pilot, monkeypatch, tmp_path)
     rt = _rt(pilot, fake, tmp_path, state=st)
@@ -865,7 +864,7 @@ def test_pre_open_clamps_entry_to_limit_up(pilot, tmp_path, monkeypatch):
     buys = [c for c in fake.calls if c.get("api") == "order_volume" and c["side"] == 1]
     assert len(buys) == 1
     assert buys[0]["price"] == pytest.approx(10.2)           # 钳到涨停价（非 10.4）
-    assert buys[0]["volume"] == 4900                         # ⌊1M×0.05/10.2/100⌋×100（钳价定尺）
+    assert buys[0]["volume"] == 7300                         # ⌊1M×0.075/10.2/100⌋×100（钳价定尺）
     clamp = [w for w in _details(tmp_path, "WARN") if w.get("type") == "buy_price_clamped"]
     assert len(clamp) == 1 and clamp[0]["clamped_to"] == pytest.approx(10.2)
     row = _details(tmp_path, "ORDER_PLACED")[0]
@@ -975,9 +974,9 @@ def test_on_tick_no_duplicate_sell_while_pending(pilot, tmp_path, monkeypatch):
 def test_on_tick_pending_cancel_on_touch(pilot, tmp_path, monkeypatch):
     """挂单等待期：tick ≥ cancel_on → 撤单（decide_pending 判定 + audit 留 reason）。"""
     fake = FakeGm()
-    cid = pilot.place_limit_buy(fake, "300750.SZ", 10.4, 4800, "acc-1")
+    cid = pilot.place_limit_buy(fake, "300750.SZ", 10.4, 7200, "acc-1")
     st = pilot._initial_state()
-    st["orders"][cid] = {"symbol": "300750.SZ", "date": TODAY, "price": 10.4, "qty": 4800,
+    st["orders"][cid] = {"symbol": "300750.SZ", "date": TODAY, "price": 10.4, "qty": 7200,
                          "purpose": "OPEN", "cancel_on": 11.0, "formed_at": T_MINUS_1,
                          "exec_params": {"max_wait": 8}, "status": "SUBMITTED", "filled": 0}
     _pin(pilot, monkeypatch, tmp_path)
@@ -1103,7 +1102,7 @@ def test_reconcile_enriches_position_from_order_geometry(pilot, tmp_path, monkey
 
     rt.reconcile(_Ctx())
     pos = rt.state["positions"]["300750.SZ"]
-    assert pos["remaining_qty"] == 4800 and pos["entry_date"] == TODAY
+    assert pos["remaining_qty"] == 7200 and pos["entry_date"] == TODAY
     tr = pos["trailing"]                                               # trailing 六件套（活口径原料）
     assert tr["neckline"] == pytest.approx(10.0) and tr["atr"] == pytest.approx(0.8)
     assert tr["stop_atr_mult"] == 1.0 and tr["grace"] == 0

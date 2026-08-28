@@ -124,10 +124,11 @@ def test_exec_cost_keys_present():
 
 
 def test_trade_cfg_key_set_and_live_pos_cap():
-    """trade_cfg 14 键 + pos_cap=0.05 实弹锚（.env 实弹值，导出期已自检，此处钉产物）。"""
+    """trade_cfg 14 键 + pos_cap=0.075 实弹锚（2026-08-28 用户裁决对齐 R6-11b 4并×7.5%；
+    旧值 0.05 随旧指纹 8858982628989013 留档）。"""
     d = _load_params()
     assert set(d["trade_cfg"]) == TRADE_KEYS
-    assert d["trade_cfg"]["pos_cap"] == 0.05
+    assert d["trade_cfg"]["pos_cap"] == 0.075
 
 
 # ============================================================================
