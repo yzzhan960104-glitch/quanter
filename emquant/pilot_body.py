@@ -1893,7 +1893,8 @@ class PilotRuntime:
             positions_mv = self._query_positions_mv()         # 异常 → None；空仓 [] → 0.0
             open_buy = _open_buy_amount(st)                   # 残缺 → None（fail-closed）
             cap = self._read_cap_resilient()
-            pos_cap = float(TRADE_CFG.get("pos_cap", 0.05))   # 快照 trade_cfg.pos_cap=0.075（c243da10）
+            # 缺省与快照实弹同值 0.075（评审收口：export 锚"三处同查"的第四处，c243da10）
+            pos_cap = float(TRADE_CFG.get("pos_cap", 0.075))
             for sig in signals:
                 try:
                     entry = float(sig.entry_price)
@@ -1987,7 +1988,8 @@ class PilotRuntime:
                 mv_r = self._query_positions_mv()
                 ob_r = _open_buy_amount(st)
                 cap_r = self._read_cap_resilient()
-                pos_cap_r = float(TRADE_CFG.get("pos_cap", 0.05))
+                # 缺省同上：与快照实弹同值 0.075（评审收口）
+                pos_cap_r = float(TRADE_CFG.get("pos_cap", 0.075))
                 for oid, o in dead:
                     sym = o.get("symbol")
                     held_now = int((st["positions"].get(sym) or {}).get("remaining_qty") or 0) > 0

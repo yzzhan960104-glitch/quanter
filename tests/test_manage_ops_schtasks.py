@@ -94,13 +94,6 @@ def test_register_guard_refuses_and_points_to_gm(capsys):
     assert "已退役" in out and "gm_terminal_guard" in out
 
 
-def _capsafe(m):
-    import contextlib, io
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        pass
-    return buf.getvalue()
-
 
 # ============ unregister_discovery：退 QuanterDiscoveryDaemon ============
 

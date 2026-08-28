@@ -27,14 +27,19 @@ from ops import gm_ops_common as gc
 router = APIRouter(prefix="/gm", tags=["gm-readonly"])
 
 
-def _proxy(path: str) -> JSONResponse:
-    """GET 7002 → 透传 JSON。非 200/连接失败 → 502 带中文排障信息（不裸抛）。"""
+def _cfg_token() -> str:
+    """读 runtime.json 的 token（评审收口：与 account 的重复构造抽单源）。"""
     try:
         cfg = gc.runtime_config()
     except Exception as e:                      # 缺 runtime.json/缺 token：策略目录异变
         raise HTTPException(502, f"掘金 runtime.json 不可读：{e}") from e
-    token = str(cfg.get("token") or "")
-    account = str(cfg.get("account_id") or "")
+    return str(cfg.get("token") or "")
+
+
+def _proxy(path: str) -> JSONResponse:
+    """GET 7002 → 透传 JSON。非 200/连接失败 → 502 带中文排障信息（不裸抛）。"""
+    token = _cfg_token()
+    account = str(gc.runtime_config().get("account_id") or "")
     status, payload = gc.api_get(path.format(account=account), token, timeout=4.0)
     if status != 200 or payload is None:
         return JSONResponse(status_code=502, content={
@@ -46,11 +51,7 @@ def _proxy(path: str) -> JSONResponse:
 @router.get("/overview", summary="终端总览：策略列表 + 账户连接状态")
 async def overview() -> JSONResponse:
     """StatusCard 数据源：策略 stage/进程态 + 账户通道连接（两次 7002 聚合）。"""
-    try:
-        cfg = gc.runtime_config()
-        token = str(cfg.get("token") or "")
-    except Exception as e:
-        raise HTTPException(502, f"掘金 runtime.json 不可读：{e}") from e
+    token = _cfg_token()
     s1, strategies = gc.api_get("/v3/strategies", token, timeout=4.0)
     s2, accounts = gc.api_get("/v3/account-statuses", token, timeout=4.0)
     if s1 != 200:

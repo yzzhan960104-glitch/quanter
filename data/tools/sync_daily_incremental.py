@@ -139,6 +139,25 @@ def _intraday_guard(allow: bool, now=None) -> None:
             "紧急补数用 --allow-intraday 显式越过。")
 
 
+def _notify_critical_sync_fail(exc: Exception) -> None:
+    """同步失败 CRITICAL 告警（W2-1 评审收口，2026-08-28）。
+
+    方案 §W2-1 明文「CRITICAL 告警（走 W0 notifier）+非零退出」——原实现只有
+    raise/exit1，data_pipeline 侧仅 print，adj 完整性闸触发后无人知晓（闸本身硬，
+    告警面没闭合）。best-effort：notifier 不可用绝不二次炸主链（print 兜底进
+    schtasks 日志，与 ops/gm_ops_common.notify 同哲学但此处直接内联——data 工具
+    不 import ops 包，防跨层依赖）。"""
+    try:
+        import asyncio
+        from infra.notifier import build_default_manager
+        asyncio.run(build_default_manager().notify_risk_event(
+            f"日线增量同步失败：{type(exc).__name__}: {exc}——data_ready 将不就绪，"
+            f"eod/信号面当日停摆；排查 adj 接口/时段闸后重跑（--refetch-today 可修半截）",
+            "CRITICAL"))
+    except Exception as e:   # 通道故障降级 print（不掩盖原始失败）
+        print(f"[sync CRITICAL 降级 print] 增量同步失败 {exc!r}（notify 亦失败：{e!r}）")
+
+
 def _trade_days(pro, d0: str, today: str) -> list[str]:
     """[d0+1, today] 的交易日列表（trade_cal 剔除 d0 + 节假日）。
 
@@ -344,6 +363,8 @@ def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = F
     pending_prev = _load_pending_recompute()
     div_retry = [s for s in pending_prev if s not in div_syms]
     if div_retry:
+        # W2-5（评审收口）：连续失败升级——pending 里的标的本轮再失败=两轮连败，
+        # 除权断崖持续在场，warning 升 critical（sidecar 兜底仍自动重试）。
         logger.warning("上轮除权重算失败 %d 只转入本轮重试：%s", len(div_retry), div_retry[:10])
     div_effective = div_syms + div_retry
     failed_recompute: list[str] = []
@@ -366,6 +387,10 @@ def sync_daily_incremental(no_backscan: bool = False, no_recompute_div: bool = F
             combined = pd.concat([combined, fixed])
         combined = combined[~combined.index.duplicated(keep="last")].sort_index()
         _save_pending_recompute(failed_recompute)
+        _again = sorted(set(failed_recompute) & set(pending_prev))
+        if _again:
+            logger.critical("除权重算连续失败 %d 只（断崖持续在场，须人工查接口/配额）：%s",
+                            len(_again), _again[:10])
     elif div_effective:
         _save_pending_recompute(div_effective)   # 显式禁用也算未完成，保留待下轮
     # 写入守卫 + 原子落盘（T13-A 防御性 + G5 原子写）：safe_overwrite 内部完成
@@ -432,4 +457,5 @@ if __name__ == "__main__":
     except Exception as e:
         logger.exception("增量同步失败")
         print(f"FAIL: {e}")
+        _notify_critical_sync_fail(e)   # W2-1（评审收口）：闸触发无人知的告警面闭合
         sys.exit(1)

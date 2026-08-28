@@ -221,3 +221,25 @@
 - W2-6 宏观滞后会使 macro 湖历史值变化——研究重测须遵守"同湖重跑原脚本"纪律；
 - 每波单分支单 PR 粒度，revert 即回；W1 产物部署回滚=贴回旧产物；
 - 最大不确定性：W1-1 修复后 `_has_open_sell` 对 UNKNOWN 的保守纳入可能在极端场景多挡一轮挂卖（方向安全，audit 可见）——接受。
+
+---
+
+## 七、双轴 code review 收口留档（2026-08-28 下午）
+
+评审发现与处置（全部亲验后清偿）：
+- **W2-1 告警面闭合**：sync_daily_incremental 失败路径补 best-effort CRITICAL notify
+  （原方案明文要求、首跑缺失）；W2-5 连续失败升 critical。
+- **W5-2 补完**：cmd_champions 加 engine_hash 过滤（--all-engines 排障口）。
+- **Standards**：r6_8 补 `_tpe_timeout` 同构副本（含事故注记）；`_capsafe` 死函数删；
+  order_state 死 import 删；pilot_body pos_cap 缺省对齐 0.075（两处）；runner split
+  嗅探改精确映射+未知形态 WARNING 回落；gm.py 抽 `_cfg_token`；trades_export 抽
+  `_fmt_ts` + direction 双口径注记（upper/lower 是两个消费面契约，非漂移）。
+
+**对方案明文的三处显式偏离**（评审裁定可接受，留档）：
+1. `/jobs` 视图采用【删除】而非 §W4-A 字面"占位态"——B 方案接管三卡数据源后占位无
+   观测价值，路由级删除更彻底（前端死契约测试同步清除）。
+2. W8 公式注入【不改】——复核 detail 列恒为 json.dumps(dict) 以 `{` 开头，结构性
+   不可能以 =/+/-/@ 起始，Excel 公式注入面不存在。
+3. W6 保留面超方案清单 7 模块（data_ctx/trading_plan/types/critical/single_instance/
+   risk_ctrl/order_state 裁剪版）——逐模块有活消费者（broadcast/process_topology/
+   backtest.mock_broker/state_store），trading/__init__ 已逐模块列明。

@@ -178,6 +178,18 @@ def _fine_levels(base: dict, dim: str) -> list:
     return out
 
 
+def _tpe_timeout(deadline) -> int:
+    """TPE 子进程 timeout（W5-3 同构修复，2026-08-28 评审 Standards 硬违规收口）。
+
+    Why 同构复制而非 import r6_10._tpe_timeout：diag 脚本间互 import 会执行对方模块级
+    副作用（ENV/目录创建），故两个长跑循环各自持副本——单源语义在 r6_10（含完整
+    事故注记：deadline=None 收敛模式下 int(inf) OverflowError 被 except 吞掉，
+    TPE 臂从未真跑），改此处须同步 r6_10。收敛模式 6h 硬顶=进程级兜底不悬无穷。"""
+    if deadline is None:
+        return 6 * 3600
+    return max(600, int(deadline - time.time()) - 45 * 60)
+
+
 def _sweep(base: dict, base_res: dict, mode: str, deadline: float, st: dict) -> tuple:
     """一轮贪心扫（coarse 全档 / fine ±步长），立即采纳 + 重建工作表。"""
     n_eval, n_adopt = 0, 0
@@ -239,8 +251,7 @@ def _tpe_round(base: dict, base_res: dict, rnd: int, deadline: float, st: dict):
                             "--tpe-trials", "45", "--n-proc", "6",
                             "--seed", f"20260826{rnd:02d}"],
                            stdout=f, stderr=subprocess.STDOUT, cwd=str(ROOT),
-                           env=ENV, timeout=(6 * 3600 if deadline is None else
-                                             max(600, int(deadline - time.time()) - 45 * 60)))
+                           env=ENV, timeout=_tpe_timeout(deadline))
     except Exception as e:
         print(f"  [TPE r{rnd}] 子进程异常（续）：{type(e).__name__}: {e}", flush=True)
         return base, base_res, 0

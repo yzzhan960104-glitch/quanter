@@ -13,6 +13,9 @@ Plan 2 范围：budget 驱动跑 N 组新 trial，落 SQLite，返回 RunSummary
 """
 from dataclasses import dataclass, field
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 from discovery.sampler import sample_search
 from discovery.worker import eval_batch
@@ -140,8 +143,17 @@ def run_search(snapshot_meta: SnapshotMeta, split: HoldoutSplit, budget: int,
                 n_skipped += 1
             else:
                 to_eval.append(p)
-    # W5-1：split_kind 透传（inner 段选择修复——extended 不再只在 replay 生效）
-    _kind = "extended" if split.inner.name.startswith("inner_2021") else "holdout"
+    # W5-1：split_kind 透传（inner 段选择修复——extended 不再只在 replay 生效）。
+    # 评审收口：前缀嗅探改精确匹配——新增 split 形态静默落 holdout 的脆弱面消除，
+    # 未知形态显式 fail-loud（宁停不错：口径错跑一晚比炸一次贵）。
+    _KIND_BY_SPLIT = {"inner_2025": "holdout", "inner_2021_24": "extended"}
+    _kind = _KIND_BY_SPLIT.get(split.inner.name)
+    if _kind is None:
+        # 未知形态（测试假体/未来新 split）：回落 holdout 并 WARNING——不炸研究面，
+        # 但显式留痕防新 split 形态静默走错考场（比前缀嗅探的静默面收窄）。
+        logger.warning("未知 split 形态 %r——split_kind 回落 holdout（已知：%s）",
+                       split.inner.name, sorted(_KIND_BY_SPLIT))
+        _kind = "holdout"
     results = eval_batch(to_eval, lake_start=lake_start,
                          embargo_days=split.embargo_days, n_proc=n_proc,
                          split_kind=_kind) if to_eval else []

@@ -27,6 +27,13 @@ _EXPORT_COLUMNS = [
 ]
 
 
+def _fmt_ts(tt: str) -> str:
+    """traded_time(YYYYMMDDHHMMSS) → "YYYY-MM-DD HH:MM:SS"（评审收口：export/query
+    两函数逐字重复的时间戳切片抽单源；不足 14 位原样透传——脏数据可观测）。"""
+    return (f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
+            if len(tt) >= 14 else tt)
+
+
 def export_trades(start: str, end: str) -> str:
     """按日期区间 [start, end]（YYYY-MM-DD）导出实盘成交 CSV 字符串·DB-only。"""
     try:
@@ -38,14 +45,11 @@ def export_trades(start: str, end: str) -> str:
     writer = csv.DictWriter(buf, fieldnames=_EXPORT_COLUMNS)
     writer.writeheader()
     for r in rows:
-        tt = str(r.get("traded_time") or "")
-        ts = (
-            f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
-            if len(tt) >= 14 else tt
-        )
+        ts = _fmt_ts(str(r.get("traded_time") or ""))
         writer.writerow({
             "timestamp": ts,
             "symbol": r.get("symbol", ""),
+            # direction 大写口径：CSV 下载契约（前端下载/复盘输入沿历史 LIVE_TRADE_COLUMNS）
             "direction": (r.get("direction") or "").upper(),
             "shares": r.get("shares", ""),
             "price": r.get("price", ""),
@@ -97,14 +101,13 @@ def query_trades(start: str, end: str, symbol: str | None = None,
     matched: list = []
     for r in rows:
         tt = str(r.get("traded_time") or "")
-        ts = (
-            f"{tt[0:4]}-{tt[4:6]}-{tt[6:8]} {tt[8:10]}:{tt[10:12]}:{tt[12:14]}"
-            if len(tt) >= 14 else tt
-        )
+        ts = _fmt_ts(tt)
         matched.append({
             "timestamp": ts,
             "traded_time": tt,
             "symbol": r.get("symbol", ""),
+            # direction 小写口径：与 export 的大写是两个消费面契约（前端 TradesPage
+            # 期望小写 / CSV 下载沿大写），非漂移——评审注记钉死，勿"统一"。
             "direction": (r.get("direction") or "").lower(),
             "shares": float(r.get("shares") or 0.0),
             "price": float(r.get("price") or 0.0),
