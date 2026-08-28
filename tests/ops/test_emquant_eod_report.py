@@ -49,12 +49,20 @@ def test_build_report_renders(tmp_path, monkeypatch):
                         lambda: {"token": "t", "account_id": "acc-1"})
     monkeypatch.setattr(rpt, "_api_snapshot",
                         lambda token, acc: ([{"sym": "300433.SZ", "qty": 100,
-                                               "vwap": 38.91, "fpnl": 12.0}],
+                                               "vwap": 38.91, "fpnl": 12.0,
+                                               "last": 39.03}],
                                             {"nav": 100007, "available": 96104,
                                              "market_value": 3903}))
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "state.pkl").write_text(json.dumps(
+        {"positions": {"300433.SZ": {"remaining_qty": 100, "stop": 33.94,
+                                      "tp1_price": 55.4, "tp2_price": 51.3}}},
+        ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(rpt, "_name_map", lambda syms: {"300433.SZ": "蓝思科技"})
     from datetime import datetime
     txt = rpt.build_report(datetime(2026, 8, 28, 15, 45))
     assert "掘金日终播报 · 2026-08-28" in txt
     assert "信号 0 → 挂单 0" in txt          # 无 audit 文件=零漏斗
-    assert "300433.SZ×100@38.91(+12)" in txt
+    assert "300433.SZ 蓝思科技 ×100｜成本 38.91｜现 39.03｜浮盈 +12" in txt
+    assert "止损 33.94｜止盈 TP1 55.40/TP2 51.30" in txt
     assert "nav 100,007" in txt

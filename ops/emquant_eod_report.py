@@ -90,6 +90,33 @@ def _gm_symbol_to_ts(sym: str) -> str:
     return f"{code}.{'SH' if ex == 'SHSE' else 'SZ' if ex == 'SZSE' else ex}"
 
 
+def _name_map(ts_symbols: list[str]) -> dict[str, str]:
+    """ts 符号 → 中文公司名（data_lake/stock_basic.parquet 单源；缺行/读失败回退
+    '—'——名字是展示层增强，绝不让它阻断日报主链）。"""
+    try:
+        import pandas as pd
+        df = pd.read_parquet(ROOT / "data_lake" / "stock_basic.parquet",
+                             columns=["ts_code", "name"])
+        want = set(ts_symbols)
+        sub = df[df["ts_code"].isin(want)]
+        return dict(zip(sub["ts_code"], sub["name"]))
+    except Exception:
+        return {}
+
+
+def _stop_tp_map() -> dict[str, tuple]:
+    """state.pkl 持仓 → (stop, tp1, tp2)（enrich 挂载的定终身价；读失败=空表降级）。"""
+    try:
+        st = json.loads(gc.state_pkl_path().read_text(encoding="utf-8"))
+        out = {}
+        for sym, pos in (st.get("positions") or {}).items():
+            if int((pos or {}).get("remaining_qty") or 0) > 0:
+                out[sym] = (pos.get("stop"), pos.get("tp1_price"), pos.get("tp2_price"))
+        return out
+    except (OSError, ValueError):
+        return {}
+
+
 def _api_snapshot(token: str, account_id: str) -> tuple[list, dict | None]:
     _, pos = gc.api_get(f"/v3/account-trade/positions/{account_id}", token)
     _, cash = gc.api_get(f"/v3/account-trade/cash/{account_id}", token)
@@ -98,7 +125,8 @@ def _api_snapshot(token: str, account_id: str) -> tuple[list, dict | None]:
         if int(p.get("volume") or 0) > 0:
             rows.append({"sym": _gm_symbol_to_ts(p.get("symbol", "?")),
                          "qty": int(p["volume"]), "vwap": float(p.get("vwap") or 0),
-                         "fpnl": float(p.get("fpnl") or 0)})
+                         "fpnl": float(p.get("fpnl") or 0),
+                         "last": float(p.get("price") or 0)})
     cash_row = ((cash or {}).get("data") or [None])[0]
     return rows, cash_row
 
@@ -116,10 +144,20 @@ def build_report(now: datetime | None = None) -> str:
                  f"（回补 {st['repaired']}、钳价 {st['clamped']}）→ 成交 {st['fills']}"
                  f"｜拦截：{blk}")
     if positions:
-        pos_txt = "；".join(f"{p['sym']}×{p['qty']}@{p['vwap']:.2f}"
-                            f"({'+' if p['fpnl'] >= 0 else ''}{p['fpnl']:.0f})"
-                            for p in positions)
-        lines.append(f"② 持仓：{pos_txt}")
+        names = _name_map([p["sym"] for p in positions])
+        stops = _stop_tp_map()
+        lines.append(f"② 持仓（{len(positions)} 只）：")
+        for p in positions:
+            stop, tp1, tp2 = stops.get(p["sym"], (None, None, None))
+
+            def _f(v, nd=2):
+                return f"{v:.{nd}f}" if isinstance(v, (int, float)) and v == v else "—"
+
+            lines.append(
+                f"- {p['sym']} {names.get(p['sym'], '—')} ×{p['qty']}"
+                f"｜成本 {_f(p['vwap'])}｜现 {_f(p['last'])}"
+                f"｜浮盈 {'+' if p['fpnl'] >= 0 else ''}{p['fpnl']:.0f}"
+                f"｜止损 {_f(stop)}｜止盈 TP1 {_f(tp1)}/TP2 {_f(tp2)}")
     else:
         lines.append("② 持仓：空仓")
     if cash:
