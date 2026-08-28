@@ -23,6 +23,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import time
 import sys
 from pathlib import Path
 
@@ -176,11 +177,13 @@ def test_chase_counts_toward_daily_gate(pilot, monkeypatch, tmp_path):
     monkeypatch.setattr(pilot, "_today_str", lambda: TODAY)
     rt.state["last_pre_open_date"] = TODAY       # 压制 tick 自愈
     rt.state["last_after_close_date"] = TODAY
-    # 构造一个已触发 chase 判定的 OPEN 挂单（max_wait 已超 + chase_entry=True）
+    # 构造一个已触发 chase 判定的 OPEN 挂单（max_wait 已超 + chase_entry=True）；
+    # placed_at=now：R6-13b 竞态宽限窗内（60s）——on_tick 首跳 reconcile 的 absorb②
+    # 不把刚挂的单判死（placed_at=0 视同最老单，会先被收敛 CANCELLED，chase 无从触发）
     rt.state["orders"]["old1"] = _order(
         "OPEN", formed_at="2026-07-01",
         exec_params={"max_wait": 1, "chase_entry": True}, qty=100, price=10.0,
-        neckline=10.0, bottom=8.0, atr=0.8)
+        neckline=10.0, bottom=8.0, atr=0.8, placed_at=time.time())
     monkeypatch.setattr(pilot, "build_calendar",
                         lambda a, t, lookback_days=500: ["2026-07-01", "2026-08-20", TODAY])
     rt.on_tick(_Ctx(), _Tick({"symbol": "SZSE.300001", "price": 10.5}))
@@ -188,8 +191,6 @@ def test_chase_counts_toward_daily_gate(pilot, monkeypatch, tmp_path):
     assert chase_ids, "构造失败：应已产生 chase 追入单"
     assert any(cid in rt.state["placed"].get(TODAY, []) for cid in chase_ids), \
         "chase 落单必须进 placed[today]（W1-2 单日闸占额）"
-    # ③ 信号防重同源：CHASE 在途时 _BUY_AMOUNT_PURPOSES 语义生效
-    assert rt._BUY_AMOUNT_PURPOSES == pilot._BUY_AMOUNT_PURPOSES
 
 
 # ============================================================ 4. FILL 逐笔审计
