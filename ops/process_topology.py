@@ -164,7 +164,11 @@ def engine_processes() -> list[dict]:
 
 
 def client_status() -> dict:
-    """miniQMT 客户端进程探测（XtMiniQmt*；count=None=探测失败，0=未起，>1=多实例）。"""
+    """miniQMT 客户端进程探测（XtMiniQmt*；count=None=探测失败，0=未起，>1=多实例）。
+
+    ⚠️ QMT 已退役（2026-08-27，掘金升格唯一平台）——本函数保留仅供历史排障参照，
+    运维巡检的消费方已切 gm_terminal_status（W3，2026-08-28）。
+    """
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -178,3 +182,28 @@ def client_status() -> dict:
         return {"running": len(pids) > 0, "pid": pid, "count": len(pids)}
     except Exception:
         return {"running": None, "pid": None, "count": None}
+
+
+def gm_terminal_status() -> dict:
+    """掘金终端进程探测（W3，2026-08-28）：emgm3（终端 UI，多进程正常）+ gmterm-serv
+    （本地网关，监听 7001-7004）。返回 {emgm3, gateway}，各为进程数或 None=探测失败。
+
+    Why 双探测：终端 UI 死但网关活着=行情/交易可能仍通（降级态）；网关死=7001/7002
+    全断（策略进程心跳与 API 面全灭）——单看 emgm3 会漏网关死、单看网关会漏 UI 死。
+    实测（2026-08-28 本机）：emgm3.exe ×4 + gmterm-serv.exe ×1（pid 即 7001 属主）。
+    """
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "@('emgm3','gmterm-serv') | ForEach-Object { "
+             "(Get-Process -Name ($_ + '*') -ErrorAction SilentlyContinue).Count }"],
+            capture_output=True, text=True, errors="replace", timeout=8)
+        if r.returncode != 0:
+            raise RuntimeError(f"gm probe rc={r.returncode}")
+        counts = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
+        # PS 5.1 对 Count 为 0/1 时可能拍平成裸标量序列——逐行序即 [emgm3, gateway]
+        if len(counts) < 2:
+            raise RuntimeError(f"gm probe 输出形态异常: {counts!r}")
+        return {"emgm3": int(counts[0]), "gateway": int(counts[1])}
+    except Exception:
+        return {"emgm3": None, "gateway": None}

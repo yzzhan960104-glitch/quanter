@@ -58,7 +58,7 @@ def _ensure_port_free(port: int) -> None:
     if _bind_ok(port):
         return
     print(f"[dev] 端口 {port} 被占，调 clean_ports.py 清残留...")
-    subprocess.run([str(VENV_PY), str(ROOT / "scripts" / "clean_ports.py")], cwd=ROOT)
+    subprocess.run([str(VENV_PY), str(ROOT / "ops" / "clean_ports.py")], cwd=ROOT)
     time.sleep(1.0)
     if not _bind_ok(port):
         print(f"[dev] 警告：{port} 清理后仍被占（kernel 僵尸/winnat 保留），"
