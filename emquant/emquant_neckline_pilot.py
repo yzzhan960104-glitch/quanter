@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。
 PARAMS_FINGERPRINT=7fe3d5b3f4a04786  生成物见 emquant/config/。
-PILOT_BUILD_STAMP: 2026-08-29 17:53:03 +0800 3dcb1e3d（部署核对：编辑器 Ctrl+F 搜本串，与仓库 git log -1 比对）。
+PILOT_BUILD_STAMP: 2026-08-29 18:26:13 +0800 e0a1204c（部署核对：编辑器 Ctrl+F 搜本串，与仓库 git log -1 比对）。
 """
 from __future__ import annotations
 
@@ -48,12 +48,12 @@ EXEC_PARAMS = {'buy_limit_atr_mult': 2.5, 'cancel_thresh_mult': None, 'chase_ent
 TRADE_CFG = {'cancel_thresh_mult': 1.0, 'floor': 0.5, 'grace': 5, 'kelly_fraction': 0.25, 'kelly_hat': 0.0, 'max_holding': 15, 'max_wait': 5, 'pos_cap': 0.075, 'sizing_mode': 'fixed', 'step': 0.1, 'stop_atr_mult': 1.0, 'tp1_h_mult': 1.0, 'tp1_portion': 0.5, 'tp_h_mult': 2.0}
 UNIVERSE = ['300308.SZ', '688825.SH', '300502.SZ', '688256.SH', '300394.SZ', '300750.SZ', '688008.SH', '300476.SZ', '688525.SH', '300408.SZ', '300285.SZ', '688012.SH', '688836.SH', '688981.SH', '301308.SZ', '688041.SH', '688498.SH', '300274.SZ', '300604.SZ', '688347.SH', '301526.SZ', '300433.SZ', '300136.SZ', '688072.SH', '300223.SZ', '300475.SZ', '300059.SZ', '300857.SZ', '688146.SH', '688766.SH', '300058.SZ', '300666.SZ', '301217.SZ', '688017.SH', '300570.SZ', '300620.SZ', '688521.SH', '688048.SH', '300548.SZ', '688126.SH', '688313.SH', '300757.SZ', '301511.SZ', '300346.SZ', '300390.SZ', '301396.SZ', '300033.SZ', '300014.SZ', '688835.SH', '300209.SZ', '688120.SH', '688702.SH', '688361.SH', '300395.SZ', '688820.SH', '300054.SZ', '301717.SZ', '301205.SZ', '688797.SH', '300319.SZ', '688808.SH', '688549.SH', '688826.SH', '688627.SH', '300418.SZ', '688183.SH', '688167.SH', '688630.SH', '688111.SH', '301165.SZ', '688037.SH', '300017.SZ', '688082.SH', '688629.SH', '301666.SZ', '300442.SZ', '688110.SH', '300672.SZ', '301171.SZ', '300759.SZ', '300975.SZ', '300489.SZ', '300373.SZ', '301013.SZ', '688777.SH', '300179.SZ', '301583.SZ', '688362.SH', '688322.SH', '300124.SZ', '688141.SH', '688519.SH', '300903.SZ', '300398.SZ', '301377.SZ', '300458.SZ', '688432.SH', '688396.SH', '688019.SH', '300661.SZ', '300567.SZ', '688200.SH', '688300.SH', '300454.SZ', '300450.SZ', '688195.SH', '300751.SZ', '300806.SZ', '300139.SZ', '300037.SZ', '688143.SH', '300088.SZ', '300776.SZ', '301536.SZ', '688409.SH', '688234.SH', '300803.SZ', '688205.SH', '688668.SH', '300657.SZ', '688268.SH', '688002.SH', '688403.SH', '300503.SZ', '300438.SZ', '301358.SZ', '300870.SZ', '300782.SZ', '300302.SZ', '688596.SH', '301018.SZ', '300260.SZ', '300085.SZ', '301611.SZ', '688507.SH', '688388.SH', '688469.SH', '300811.SZ', '301236.SZ', '301319.SZ', '688545.SH', '688099.SH', '688025.SH', '688783.SH', '688249.SH', '300184.SZ', '300747.SZ', '300164.SZ', '300821.SZ', '688123.SH', '688635.SH', '300760.SZ', '688235.SH', '300814.SZ', '301183.SZ', '300738.SZ', '688536.SH', '688147.SH', '688503.SH', '300568.SZ', '301486.SZ', '688333.SH', '688257.SH', '300131.SZ', '688308.SH', '300679.SZ', '688233.SH', '301071.SZ', '300364.SZ', '688802.SH', '300726.SZ', '688676.SH', '300607.SZ', '301200.SZ', '300115.SZ', '688548.SH', '300323.SZ', '688172.SH', '300236.SZ', '300001.SZ', '688662.SH', '688795.SH', '688809.SH', '300042.SZ', '300083.SZ', '300142.SZ', '301123.SZ', '300684.SZ', '300316.SZ', '300339.SZ', '301489.SZ', '688372.SH', '300762.SZ', '300769.SZ', '300255.SZ', '300576.SZ', '300166.SZ', '300763.SZ', '688535.SH', '688331.SH', '688700.SH', '301128.SZ', '300199.SZ', '301188.SZ', '301269.SZ', '300602.SZ', '688031.SH', '300558.SZ', '688800.SH', '300170.SZ', '300283.SZ', '300347.SZ', '300720.SZ', '300456.SZ', '301392.SZ', '688220.SH', '300623.SZ', '300331.SZ', '688828.SH', '300779.SZ', '688301.SH', '300207.SZ', '300077.SZ', '300843.SZ', '300342.SZ', '300263.SZ', '300706.SZ', '688027.SH', '688106.SH', '301566.SZ', '301292.SZ', '300420.SZ', '300496.SZ', '300593.SZ', '688456.SH', '688652.SH', '301005.SZ', '688158.SH', '688036.SH', '688411.SH', '300383.SZ', '688585.SH', '688531.SH', '688729.SH', '688387.SH', '300182.SZ', '300655.SZ', '688102.SH', '688515.SH', '300328.SZ', '300613.SZ', '301707.SZ', '301150.SZ', '688603.SH', '301550.SZ', '688502.SH', '688213.SH', '300671.SZ', '300534.SZ', '300748.SZ', '300835.SZ', '688400.SH', '300953.SZ', '300497.SZ', '688392.SH', '300024.SZ', '688385.SH', '301373.SZ', '300765.SZ', '688260.SH', '688052.SH', '300322.SZ', '688578.SH', '301655.SZ', '688449.SH', '300265.SZ', '301389.SZ', '301338.SZ', '688020.SH', '301021.SZ', '301196.SZ', '301080.SZ', '688047.SH', '688353.SH', '688559.SH', '688584.SH', '301297.SZ', '300725.SZ', '300566.SZ', '688390.SH', '300480.SZ', '688169.SH', '301362.SZ', '300174.SZ', '688343.SH', '301421.SZ', '688598.SH', '300005.SZ', '688530.SH', '301099.SZ']
 PARAMS_FINGERPRINT = '7fe3d5b3f4a04786'
-PILOT_BUILD_STAMP = '2026-08-29 17:53:03 +0800 3dcb1e3d'   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用
+PILOT_BUILD_STAMP = '2026-08-29 18:26:13 +0800 e0a1204c'   # 版本锚（git HEAD 提交时间 + 短 hash）——部署核对用
 # 硬闸（2026-08-28 用户裁决：对齐 R6-11b 最新策略基准 4并×7.5%）：单日新挂
 # ≤4（4 并发）；单票市值 ≤7.5%（与快照 pos_cap 同值，二次核验闸随动）；账户固定。
 PILOT_MAX_NEW_ORDERS_PER_DAY = 4
 PILOT_MAX_POSITION_PCT = 0.075
-AMIHUD_FILTER = {'enabled': True, 'window': 60, 'min_days': 48, 'pct_line': 0.4, 'min_signals': 4}
+AMIHUD_FILTER = {'enabled': True, 'window': 60, 'min_days': 48, 'keep_top': 5}
 PILOT_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'
 
 
@@ -1324,31 +1324,32 @@ def fetch_amihud60(api, ts_symbol: str, end_date: str,
         return None
 
 
-def apply_amihud_filter(signals, values, pct_line, min_signals):
-    """amihud 信号池分位过滤·触发式（纯函数）。
+def apply_amihud_filter(signals, values, keep_top):
+    """amihud keep-top 过滤（纯函数 · 2026-08-29 v3 用户裁决 keep_top=5）。
 
-    规格（两窗验证，勿改——改了重过四闸）：
-    - len(signals) < min_signals（=单日闸 4，无抢槽竞争）→ 全保留（exempt=True）；
-    - 有效值不足 min_signals → 全保留（exempt=True，fail-open：数据不可用绝不
-      砍信号，较回测 NaN-keep 更保守的一面）；
-    - 否则组内升序分位（低 amihud=低分位，pandas rank(pct=True) 同义）：
-      分位 ≤ pct_line 剔除，其余/无值保留。
-    返回 (kept, [(symbol, pct), ...], exempt: bool)。
+    规格（两窗验证：universe 子集四闸全过——剔 65%，外层 Δ+17.8pp/全期
+    Δ+2.3pp/五年逐年全正；史前窗全期 +0.78pp/后半 +0.41pp 全正）：
+    - len(signals) ≤ keep_top → 全保留（当日容量内无竞争，豁免）；
+    - 有效值 < keep_top → 全保留（豁免。fail-open：回测覆盖 ~100% 未锻炼
+      低覆盖分支，实盘数据断供日绝不砍信号——与 v2 的豁免哲学同源）；
+    - 否则：amihud60 降序（高=最不流动=质量侧）留前 keep_top，其余（含
+      无值）剔除——与验证 mask 逐位同义。
+    返回 (kept, [(symbol, amihud60_or_None), ...], exempt: bool)。
     """
-    if len(signals) < int(min_signals):
+    if len(signals) <= int(keep_top):
         return list(signals), [], True
     valid = {s: v for s, v in values.items() if v is not None}
-    if len(valid) < int(min_signals):
+    if len(valid) < int(keep_top):
         return list(signals), [], True
-    ordered = sorted(valid.items(), key=lambda kv: kv[1])
-    pct = {s: (i + 1) / len(ordered) for i, (s, _) in enumerate(ordered)}
+    top_syms = {s for s, _ in sorted(valid.items(), key=lambda kv: -kv[1])
+                [:int(keep_top)]}
     kept, dropped = [], []
     for sig in signals:
-        p = pct.get(sig.symbol)
-        if p is not None and p <= float(pct_line):
-            dropped.append((sig.symbol, round(p, 4)))
-        else:
+        if sig.symbol in top_syms:
             kept.append(sig)
+        else:
+            v = values.get(sig.symbol)
+            dropped.append((sig.symbol, None if v is None else round(v, 6)))
     return kept, dropped, False
 
 
@@ -2768,13 +2769,14 @@ class PilotRuntime:
                             "（①撤单②超期平仓等存量管理照跑）")
             signals = []
 
-        # ── ④' amihud 非流动性信号过滤·触发式（2026-08-29 用户裁决"直上 NECK"）──
-        # 规格（两窗验证：logs/quality/factor_zoo/liveuni_cutdown.* + 史前窗触发式
-        # 确认——universe 全市场线/板内线/总是过滤均已否决，勿回退到那些形态）：
-        # 当日信号数 ≥ min_signals（=单日闸 4：抢槽竞争存在）才启用；信号股各取
-        # 60 日 close+amount 算 amihud60（数据至 t_minus_1=突破日，识别同视野），
-        # 当日信号池内分位 ≤ 0.40 剔除；不足 4 或有效值不足 → 全保留（豁免留痕）。
-        # 策略自含：零外部文件/零 staleness；识别内核与其余参数零改动。
+        # ── ④' amihud keep-top 信号过滤（2026-08-29 v3 用户裁决 keep_top=5）──
+        # 规格（两窗验证：liveuni keep-top 族——kt=5 唯一全窗口无瑕疵档：
+        # universe 子集外层 Δ+17.8pp/全期 Δ+2.3pp/五年逐年全正；史前窗
+        # +0.78/+0.41 全正。kt=4 差 0.09pp 触线、分位族/全市场线/板内线均否决）：
+        # 当日信号 > keep_top 时，按 amihud60 降序留前 keep_top（高质量=最不
+        # 流动），其余剔除；≤ keep_top 或有效值不足 → 全保留豁免留痕。信号股
+        # 各取 60 日 close+amount 现算（数据至 t_minus_1=突破日，识别同视野）。
+        # 策略自含零外部文件；识别内核与其余参数零改动。
         if signals and AMIHUD_FILTER.get("enabled") and t_minus_1 is not None:
             _af = AMIHUD_FILTER
             _vals = {}
@@ -2785,16 +2787,15 @@ class PilotRuntime:
                 except Exception:
                     _vals[sig.symbol] = None
             signals, dropped_amihud, _exempt = apply_amihud_filter(
-                signals, _vals, _af["pct_line"], _af["min_signals"])
+                signals, _vals, _af["keep_top"])
             if _exempt:
                 self._audit("AMIHUD_FILTER_EXEMPT",
                             n_signals=len(signals),
                             n_valid=sum(1 for v in _vals.values() if v is not None),
-                            min_signals=_af["min_signals"])
-            for sym, p in dropped_amihud:
+                            keep_top=_af["keep_top"])
+            for sym, val in dropped_amihud:
                 self._audit("SIGNAL_FILTERED_AMIHUD", symbol=sym,
-                            amihud_pool_pct=p, line=float(_af["pct_line"]),
-                            asof=t_minus_1)
+                            amihud60=val, asof=t_minus_1)
 
         # ── ⑤ 挂限价买（逐单 check_caps；equity 一次查询逐单复用——CAP 额度式单调）──
         if signals:
