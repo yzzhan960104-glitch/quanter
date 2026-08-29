@@ -96,6 +96,7 @@ def test_filter_missing_value_keep(pilot):
 # ── ③ §0 规格常量与组装器镜像 ─────────────────────────────────────
 def test_sec0_filter_cfg_matches_builder(pilot):
     from emquant.build_pilot import AMIHUD_FILTER_CFG
+    # 2026-08-29 回退：enabled=False（universe 校准错配，见 build_pilot 注释）——
+    # 镜像断言只锁「产物=组装器」一致性，enabled 值由部署裁决面持有
     assert pilot.AMIHUD_FILTER == AMIHUD_FILTER_CFG
-    assert pilot.AMIHUD_FILTER["enabled"] is True
     assert pilot.AMIHUD_FILTER["pct_line"] == pytest.approx(0.40)
