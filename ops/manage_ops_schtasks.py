@@ -38,7 +38,14 @@ sys.path.insert(0, str(ROOT))
 # ops/miniqmt_guard.py 已随 QMT 退役删除，任务若在本机会每 5 分钟失败一次；
 # 掘金侧看护接棒者是 ops/gm_terminal_guard.py --register（QuanterGmGuard）。
 RETIRED_TASKS = ["QuanterDataPipeline", "QuanterBrief", "QuanterDailyBrief",
-                 "QuanterMiniQmtGuard"]
+                 "QuanterMiniQmtGuard",
+                 # W9（2026-08-30 用户裁决）：掘金运维六 schtasks 全量收编 server
+                 # lifespan（presentation/server/main.py OPS_TASK_CRONS 表驱动，
+                 # 时刻表逐字迁移）。用户以桌面 bat 人工保证 server 常活，schtasks
+                 # 双轨退役防重复触发（晨检双推/台账双写/guard 双巡检）。
+                 "QuanterEmquantMorningCheck", "QuanterEmquantIngest",
+                 "QuanterEmquantEodReport", "QuanterGmAbCompare",
+                 "QuanterAudit", "QuanterGmGuard"]
 
 # 方案 C 历史的 2 个 supervisor 任务定义（时间 + bat 路径）。
 # ⚠️ Final Fix：``register()`` 不再迭代本表创建任务（两个任务已退役，重建=与新事件链
@@ -205,8 +212,9 @@ def register_audit() -> None:
     Why 退出码可消费：audit_ssot errs→exit 1 / 全绿 exit 0，任务计划程序
     「上次运行结果」直接反映巡检红绿，运维一眼可见（不需要翻 stdout 日志）。
 
-    ⚠️ 红线：QuanterAudit 是**活跃**任务，绝不加入 RETIRED_TASKS/LEGACY_TASKS
-    清退清单（register()/unregister() 兜底迭代这两份名单，误列入会删成静默裸奔）。
+    ⚠️ 历史红线已废止（W9 2026-08-30）：QuanterAudit 已随六运维任务收编 server
+    lifespan（main.py OPS_TASK_CRONS 的 ops_audit_ssot @16:05），本注册函数与其
+    schtasks 均已退役——保留仅供历史溯源，勿再调用（重建=与 server cron 双触发）。
     """
     tr = f'"{ROOT / "ops" / "run_audit.bat"}"'
     rc = _schtasks(["/Create", "/SC", "DAILY", "/MO", "1", "/ST", "16:05",

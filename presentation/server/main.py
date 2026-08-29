@@ -178,6 +178,50 @@ def _run_research_digest_push() -> None:
                            log_name="research_digest.log")
 
 
+# ============================================================================
+# W9（2026-08-30 用户裁决）：掘金运维六 schtasks 全量收编 server lifespan
+# ============================================================================
+# 背景：用户以桌面 bat 人工保证 server 常活（「看护者独立」原则由人承担——server
+# 死则六任务同死是接受面），schtasks 双轨退役（manage_ops_schtasks RETIRED_TASKS
+# 同步扩容防重建）。时刻表=原 schtasks 逐字迁移（行为不变红线：daily 保持 daily、
+# guard 保持 5min 间隔；脚本自身幂等/周末无操作照旧）。触发范式与 discovery/digest
+# 同款：DETACHED 子进程 + 日志重定向（_spawn_venv_subprocess 单源）。
+OPS_TASK_CRONS = [
+    # (job_id, venv 子进程参数, 触发类型, 触发参数, 日志名)
+    ("ops_morning_check", ["-m", "ops.emquant_morning_check"], "cron",
+     {"hour": 9, "minute": 40}, "ops_morning_check.log"),
+    ("ops_emquant_ingest", ["-m", "ops.emquant_audit_ingest"], "cron",
+     {"hour": 15, "minute": 40}, "ops_emquant_ingest.log"),
+    ("ops_eod_report", ["-m", "ops.emquant_eod_report"], "cron",
+     {"hour": 15, "minute": 45}, "ops_eod_report.log"),
+    ("ops_gm_ab_compare", ["-m", "ops.emquant_ab_compare"], "cron",
+     {"hour": 15, "minute": 50}, "ops_gm_ab_compare.log"),
+    ("ops_audit_ssot", ["scripts/audit_ssot.py"], "cron",
+     {"hour": 16, "minute": 5}, "audit_schtask.log"),
+    ("ops_gm_guard", ["-m", "ops.gm_terminal_guard", "--once"], "interval",
+     {"seconds": 300}, "gm_guard_cron.log"),
+]
+
+
+def register_ops_task_crons(scheduler) -> list[str]:
+    """六运维任务挂调度器（独立函数：测试注入 fake scheduler 直接调，免起 app）。
+
+    返回成功挂载的 job_id 列表；单项装配失败软降级（exception 记日志，不阻断
+    其余任务——与 lifespan 既有装配范式一致）。
+    """
+    armed: list[str] = []
+    for job_id, args, trig, tkw, log in OPS_TASK_CRONS:
+        try:
+            scheduler.add_job(
+                lambda a=args, l=log: _spawn_venv_subprocess(a, l),
+                trig, id=job_id, replace_existing=True, **tkw)
+            armed.append(job_id)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                f"ops_sched 装配 {job_id} 异常（已忽略）")
+    return armed
+
+
 def _run_autopromote_daily_brief() -> None:
     """autopromote 门槛日报 cron job：DETACHED 子进程对最新 DRAFT 跑七门 dry-run。
 
@@ -433,6 +477,11 @@ async def lifespan(app: FastAPI):
             hour=18, minute=0, id="pipeline_then_eod", replace_existing=True)
         logging.getLogger(__name__).info(
             "ops_sched 已启动：pipeline_then_eod 18:00（研究面-only，engine=None）")
+        # W9（2026-08-30）：六运维 schtasks 收编（晨检/台账/EOD 报告/双腿对照/
+        # audit 巡检/gm 看护）——表驱动注册，见 OPS_TASK_CRONS 头注。
+        _armed_ops = register_ops_task_crons(_ops_sched)
+        print(f"[ops_sched] 运维收编 {len(_armed_ops)}/{len(OPS_TASK_CRONS)}："
+              f"{sorted(_armed_ops)}", flush=True)
     except Exception:
         logging.getLogger(__name__).exception("ops_sched 装配异常（已忽略）")
 

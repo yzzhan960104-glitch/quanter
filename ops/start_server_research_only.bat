@@ -1,5 +1,7 @@
 @echo off
-rem QMT ÍËÒÛ P1£¨2026-08-27£©£ºÑÐ¾¿Ãæ-only ·þÎñÆ÷Æô¶¯£¨QUANTER_TRADING_FACE=off ÔÚ .env£¬
-rem trading/__main__ load_dotenv(override=True) ¶ÁÈë£»ÒýÇæ×°ÅäÒÑËæ P3 É¾³ý£¬´Ë±äÁ¿½ö×÷ÁôºÛ£©¡£
+rem ç ”ç©¶é¢-only æœåŠ¡å™¨å¯åŠ¨ï¼ˆW6 åŽ V2ï¼Œ2026-08-29 ä¿®æ­£ï¼špython -m trading å·²éšå¼•æ“Žé€€å½¹åˆ é™¤ï¼Œ
+rem æ­£ç¡®å…¥å£=uvicorn ç›´å¯ã€‚server çš„ lifespan æ‰˜ç®¡ ops_schedï¼špipeline_then_eod 18:00
+rem å‘¨ä¸€è‡³å‘¨äº”ï¼ˆé‡‡é›†â†’æ ¡éªŒâ†’briefï¼‰+ discovery daemon + digestâ€”â€”server æ­»=ç®¡é“æ­»ï¼ˆ08-28/29
+rem æ¹–æ–­ä¾›ä¸¤å¤©çš„æ ¹å› ï¼‰ã€‚
 cd /d E:\quanter
-E:\quanter\.venv310\Scripts\python.exe -m trading >> E:\quanter\logs\server_research_only.log 2>&1
+E:\quanter\.venv310\Scripts\python.exe -m uvicorn presentation.server.main:app --host 127.0.0.1 --port 8000 >> E:\quanter\logs\server_research_only.log 2>&1
