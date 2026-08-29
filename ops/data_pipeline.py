@@ -42,6 +42,9 @@ STEPS = [
     ("① T1 检查（T-1 完整性）",   [PY, "-m", "ops.run_data_check", "t1"]),
     ("② 日频采集（T 日 daily）",  [PY, "data/tools/sync_daily_incremental.py"]),
     ("③ T2 检查（T 完整性·熔断）", [PY, "-m", "ops.run_data_check", "t2"]),
+    # ④ amihud 分位写入（2026-08-29 NECK 信号过滤数据面）：湖已含 T 日 → 截面
+    #    分位写主腿 state/，策略 T+1 15:36 消费（lag-1 形态已过四闸）。
+    ("④ amihud 分位写入",          [PY, "-m", "ops.amihud_pct_writer"]),
 ]
 
 

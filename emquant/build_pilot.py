@@ -33,6 +33,15 @@ SIGNAL_IMPORT = "from .signal import Signal"
 MAIN_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'
 DEFAULT_EXP_ACCOUNT_ID = 'c4ba3b2e-a2da-11f1-9262-52560acd7da0'
 
+# amihud 信号过滤规格（2026-08-29 用户裁决采纳，NECK 主腿）：信号后过滤层——
+# 当日全市场 amihud60 分位 < pct_line 的信号不发单。走 §0 字面量先例（同
+# PILOT_MAX_NEW_ORDERS_PER_DAY），不进 params_snapshot——识别参数指纹零变化
+# （用户裁决「其他参数都没变」）。window/min_days 与 ops/amihud_pct_writer 侧
+# 镜像；改任何值都要重过 signal_cutdown 四闸（语义=验证红线，见
+# logs/quality/factor_zoo/signal_cutdown_final.md）。
+AMIHUD_FILTER_CFG = {'enabled': True, 'window': 60, 'min_days': 48,
+                     'pct_line': 0.40, 'max_stale_days': 3}
+
 # pilot_body 顶部「入口抑制块」的剪切标记（Task 8）：标记行本身随块一起搬进 head 区。
 # Why 存在：内核逐字块（§1）尾部有 method_v0 的 `if __name__ == "__main__": main()`
 # 演示守卫，位于产物 §2-§7 拼接位【之前】——抑制代码必须先于它执行才能拦住，而能落在
@@ -143,6 +152,7 @@ def build(output_path: Path | None = None, account_id: str = MAIN_ACCOUNT_ID,
         "# ≤4（4 并发）；单票市值 ≤7.5%（与快照 pos_cap 同值，二次核验闸随动）；账户固定。\n"
         "PILOT_MAX_NEW_ORDERS_PER_DAY = 4\n"
         "PILOT_MAX_POSITION_PCT = 0.075\n"
+        f"AMIHUD_FILTER = {AMIHUD_FILTER_CFG!r}\n"
         f"PILOT_ACCOUNT_ID = {account_id!r}\n\n\n"
     )
     parts = [head, hoist + "\n\n", sec0,

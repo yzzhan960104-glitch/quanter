@@ -471,6 +471,52 @@ def is_blocked(path=None) -> bool:
     return p.exists()
 
 
+def load_amihud_pct(path=None, today=None):
+    """读取 amihud60 全市场分位表（ops.amihud_pct_writer 每晚经 pipeline ④ 写入）。
+
+    返回 {ts_symbol: pct(0-1)} 或 None（缺失/过期/损坏/空表——统一 None 由调用方
+    fail-open 旁路 + WARN 一次，维持现任行为：过滤是增益项不是生存项，数据面
+    故障绝不升级为停摆）。过期口径：文件 date 距今 > AMIHUD_FILTER["max_stale_days"]
+    自然日（含周末容差；writer 挂 pipeline 每晚跑，>3 天没新文件=采集链断了）。
+    """
+    import json as _json
+    from datetime import date as _date, datetime as _dt
+
+    cfg = AMIHUD_FILTER
+    p = Path(path) if path is not None else BASE_DIR / "state" / "amihud_pct_latest.json"
+    try:
+        payload = _json.loads(p.read_text(encoding="utf-8"))
+        d = _dt.strptime(str(payload["date"]), "%Y-%m-%d").date()
+    except Exception:
+        return None
+    today = today or _date.today()
+    if (today - d).days > int(cfg.get("max_stale_days", 3)):
+        return None
+    pct = payload.get("pct")
+    return pct if isinstance(pct, dict) and pct else None
+
+
+def apply_amihud_filter(signals, pct_map, pct_line):
+    """amihud 非流动性过滤（纯函数）：分位 < pct_line 的信号剔除，无值放行。
+
+    语义与回测验证逐位一致（signal_cutdown_final.md / writer 语义四闸 PASS）：
+    - 无值（次新/停牌/截面缺）放行 = 回测 NaN-keep 同款——fail-open 只豁免
+      个股级缺值，截面级故障由 load_amihud_pct 的 None 旁路兜住；
+    - 返回 (kept_signals, [(symbol, pct), ...] 被剔清单) 供编排层逐笔留痕。
+    """
+    kept, dropped = [], []
+    for sig in signals:
+        p = pct_map.get(sig.symbol)
+        if p is None:
+            kept.append(sig)
+            continue
+        if float(p) < float(pct_line):
+            dropped.append((sig.symbol, float(p)))
+            continue
+        kept.append(sig)
+    return kept, dropped
+
+
 def read_cap(path=None) -> float:
     """人工仓位上限（ADR-16 max_total_position 的文件化身）：读 CAP.txt → [0.0, 1.0]。
 
@@ -1886,6 +1932,26 @@ class PilotRuntime:
                 self._audit("BLOCK_SKIP", msg="RISK_BLOCK.flag 在场：跳过挂单段"
                             "（①撤单②超期平仓等存量管理照跑）")
             signals = []
+
+        # ── ④' amihud 非流动性信号过滤（2026-08-29 用户裁决采纳）──
+        # 规格=logs/quality/factor_zoo/signal_cutdown_final.md：当日全市场 amihud60
+        # 分位 < 0.40 的信号不发单（砍 ~44% 信号，可部署口径外层 Δ+16.2pp/全期
+        # +2.3pp/逐年全过/taken 49→70，史前窗时间外全期持平）。数据面=
+        # ops.amihud_pct_writer 每晚 pipeline ④ 步写入（坏行 ffill+滞后一天=已
+        # 验证形态）。识别内核/其余参数零改动（C2/用户「其他参数不变」裁决）。
+        if signals and AMIHUD_FILTER.get("enabled"):
+            pct_map = load_amihud_pct()
+            if pct_map is None:
+                self._audit("WARN", type="amihud_filter_bypass",
+                            msg="amihud 分位文件缺失/过期/不可读——本日过滤旁路"
+                                "（fail-open=维持现任行为），晨检查 pipeline ④ 步")
+            else:
+                signals, dropped_amihud = apply_amihud_filter(
+                    signals, pct_map, float(AMIHUD_FILTER["pct_line"]))
+                for sym, p in dropped_amihud:
+                    self._audit("SIGNAL_FILTERED_AMIHUD", symbol=sym,
+                                amihud_pct=round(p, 4),
+                                line=float(AMIHUD_FILTER["pct_line"]))
 
         # ── ⑤ 挂限价买（逐单 check_caps；equity 一次查询逐单复用——CAP 额度式单调）──
         if signals:
