@@ -503,31 +503,32 @@ def fetch_amihud60(api, ts_symbol: str, end_date: str,
         return None
 
 
-def apply_amihud_filter(signals, values, pct_line, min_signals):
-    """amihud 信号池分位过滤·触发式（纯函数）。
+def apply_amihud_filter(signals, values, keep_top):
+    """amihud keep-top 过滤（纯函数 · 2026-08-29 v3 用户裁决 keep_top=5）。
 
-    规格（两窗验证，勿改——改了重过四闸）：
-    - len(signals) < min_signals（=单日闸 4，无抢槽竞争）→ 全保留（exempt=True）；
-    - 有效值不足 min_signals → 全保留（exempt=True，fail-open：数据不可用绝不
-      砍信号，较回测 NaN-keep 更保守的一面）；
-    - 否则组内升序分位（低 amihud=低分位，pandas rank(pct=True) 同义）：
-      分位 ≤ pct_line 剔除，其余/无值保留。
-    返回 (kept, [(symbol, pct), ...], exempt: bool)。
+    规格（两窗验证：universe 子集四闸全过——剔 65%，外层 Δ+17.8pp/全期
+    Δ+2.3pp/五年逐年全正；史前窗全期 +0.78pp/后半 +0.41pp 全正）：
+    - len(signals) ≤ keep_top → 全保留（当日容量内无竞争，豁免）；
+    - 有效值 < keep_top → 全保留（豁免。fail-open：回测覆盖 ~100% 未锻炼
+      低覆盖分支，实盘数据断供日绝不砍信号——与 v2 的豁免哲学同源）；
+    - 否则：amihud60 降序（高=最不流动=质量侧）留前 keep_top，其余（含
+      无值）剔除——与验证 mask 逐位同义。
+    返回 (kept, [(symbol, amihud60_or_None), ...], exempt: bool)。
     """
-    if len(signals) < int(min_signals):
+    if len(signals) <= int(keep_top):
         return list(signals), [], True
     valid = {s: v for s, v in values.items() if v is not None}
-    if len(valid) < int(min_signals):
+    if len(valid) < int(keep_top):
         return list(signals), [], True
-    ordered = sorted(valid.items(), key=lambda kv: kv[1])
-    pct = {s: (i + 1) / len(ordered) for i, (s, _) in enumerate(ordered)}
+    top_syms = {s for s, _ in sorted(valid.items(), key=lambda kv: -kv[1])
+                [:int(keep_top)]}
     kept, dropped = [], []
     for sig in signals:
-        p = pct.get(sig.symbol)
-        if p is not None and p <= float(pct_line):
-            dropped.append((sig.symbol, round(p, 4)))
-        else:
+        if sig.symbol in top_syms:
             kept.append(sig)
+        else:
+            v = values.get(sig.symbol)
+            dropped.append((sig.symbol, None if v is None else round(v, 6)))
     return kept, dropped, False
 
 
@@ -1947,13 +1948,14 @@ class PilotRuntime:
                             "（①撤单②超期平仓等存量管理照跑）")
             signals = []
 
-        # ── ④' amihud 非流动性信号过滤·触发式（2026-08-29 用户裁决"直上 NECK"）──
-        # 规格（两窗验证：logs/quality/factor_zoo/liveuni_cutdown.* + 史前窗触发式
-        # 确认——universe 全市场线/板内线/总是过滤均已否决，勿回退到那些形态）：
-        # 当日信号数 ≥ min_signals（=单日闸 4：抢槽竞争存在）才启用；信号股各取
-        # 60 日 close+amount 算 amihud60（数据至 t_minus_1=突破日，识别同视野），
-        # 当日信号池内分位 ≤ 0.40 剔除；不足 4 或有效值不足 → 全保留（豁免留痕）。
-        # 策略自含：零外部文件/零 staleness；识别内核与其余参数零改动。
+        # ── ④' amihud keep-top 信号过滤（2026-08-29 v3 用户裁决 keep_top=5）──
+        # 规格（两窗验证：liveuni keep-top 族——kt=5 唯一全窗口无瑕疵档：
+        # universe 子集外层 Δ+17.8pp/全期 Δ+2.3pp/五年逐年全正；史前窗
+        # +0.78/+0.41 全正。kt=4 差 0.09pp 触线、分位族/全市场线/板内线均否决）：
+        # 当日信号 > keep_top 时，按 amihud60 降序留前 keep_top（高质量=最不
+        # 流动），其余剔除；≤ keep_top 或有效值不足 → 全保留豁免留痕。信号股
+        # 各取 60 日 close+amount 现算（数据至 t_minus_1=突破日，识别同视野）。
+        # 策略自含零外部文件；识别内核与其余参数零改动。
         if signals and AMIHUD_FILTER.get("enabled") and t_minus_1 is not None:
             _af = AMIHUD_FILTER
             _vals = {}
@@ -1964,16 +1966,15 @@ class PilotRuntime:
                 except Exception:
                     _vals[sig.symbol] = None
             signals, dropped_amihud, _exempt = apply_amihud_filter(
-                signals, _vals, _af["pct_line"], _af["min_signals"])
+                signals, _vals, _af["keep_top"])
             if _exempt:
                 self._audit("AMIHUD_FILTER_EXEMPT",
                             n_signals=len(signals),
                             n_valid=sum(1 for v in _vals.values() if v is not None),
-                            min_signals=_af["min_signals"])
-            for sym, p in dropped_amihud:
+                            keep_top=_af["keep_top"])
+            for sym, val in dropped_amihud:
                 self._audit("SIGNAL_FILTERED_AMIHUD", symbol=sym,
-                            amihud_pool_pct=p, line=float(_af["pct_line"]),
-                            asof=t_minus_1)
+                            amihud60=val, asof=t_minus_1)
 
         # ── ⑤ 挂限价买（逐单 check_caps；equity 一次查询逐单复用——CAP 额度式单调）──
         if signals:

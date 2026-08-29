@@ -33,14 +33,14 @@ SIGNAL_IMPORT = "from .signal import Signal"
 MAIN_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'
 DEFAULT_EXP_ACCOUNT_ID = 'c4ba3b2e-a2da-11f1-9262-52560acd7da0'
 
-# amihud 信号过滤·触发式规格（2026-08-29 用户裁决"直上 NECK"）：当日信号数
-# ≥ min_signals（=单日闸 4，抢槽竞争存在）才启用；信号股 60 日 amihud60 在
-# 当日信号池内分位 ≤ pct_line 剔除。验证=universe 子集四闸（外层 Δ+8.6pp/
-# 全期 Δ+1.2pp/逐年容差内）+ 史前窗触发式确认（全期 +0.36pp/后半 +0.28pp）；
-# 全市场线/板内线/总是过滤三形态已否决（universe 错配），勿回退。策略自含
-# （fetch_amihud60 现算，零外部文件）；识别参数指纹 7fe3d5b3 零变化。
+# amihud keep-top 信号过滤规格（2026-08-29 v3 用户裁决 keep_top=5）：当日信号
+# > keep_top 时按 amihud60 降序留前 keep_top（高=最不流动=质量侧），其余剔；
+# ≤ keep_top 或有效值不足 → 全保留豁免。验证=universe 子集四闸全过（剔 65%，
+# 外层 Δ+17.8pp/全期 Δ+2.3pp/五年逐年全正）+ 史前窗（+0.78/+0.41 全正）；
+# kt=4 差 0.09pp 触线、分位族/全市场线/板内线均否决，勿回退。策略自含
+# （fetch_amihud60 现算）；识别参数指纹 7fe3d5b3 零变化。
 AMIHUD_FILTER_CFG = {'enabled': True, 'window': 60, 'min_days': 48,
-                     'pct_line': 0.40, 'min_signals': 4}
+                     'keep_top': 5}
 
 # pilot_body 顶部「入口抑制块」的剪切标记（Task 8）：标记行本身随块一起搬进 head 区。
 # Why 存在：内核逐字块（§1）尾部有 method_v0 的 `if __name__ == "__main__": main()`
