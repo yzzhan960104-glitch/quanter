@@ -33,14 +33,14 @@ SIGNAL_IMPORT = "from .signal import Signal"
 MAIN_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'
 DEFAULT_EXP_ACCOUNT_ID = 'c4ba3b2e-a2da-11f1-9262-52560acd7da0'
 
-# amihud 信号过滤规格（2026-08-29 部署当日回退：enabled=False）：全市场 0.40 线
-# 在回测混合池过四闸，但实盘 universe=创业板/科创板 300 只（中位全市场分位
-# 0.09、仅 1/285 在线上）→ 信号全灭；universe 内相对线三档（30/40/50%）四闸
-# 全灭（2024 年段 −7~−20pp，信号级 IC+0.046 不迁移为年段稳定增益）。
-# 代码+writer+audit 事件保留（数据资产），消费开关关闭。重新启用须先过
-# universe 约束下的四闸重校准（教训：回测池≠实盘 universe 的校准迁移缺口）。
-AMIHUD_FILTER_CFG = {'enabled': False, 'window': 60, 'min_days': 48,
-                     'pct_line': 0.40, 'max_stale_days': 3}
+# amihud 信号过滤·触发式规格（2026-08-29 用户裁决"直上 NECK"）：当日信号数
+# ≥ min_signals（=单日闸 4，抢槽竞争存在）才启用；信号股 60 日 amihud60 在
+# 当日信号池内分位 ≤ pct_line 剔除。验证=universe 子集四闸（外层 Δ+8.6pp/
+# 全期 Δ+1.2pp/逐年容差内）+ 史前窗触发式确认（全期 +0.36pp/后半 +0.28pp）；
+# 全市场线/板内线/总是过滤三形态已否决（universe 错配），勿回退。策略自含
+# （fetch_amihud60 现算，零外部文件）；识别参数指纹 7fe3d5b3 零变化。
+AMIHUD_FILTER_CFG = {'enabled': True, 'window': 60, 'min_days': 48,
+                     'pct_line': 0.40, 'min_signals': 4}
 
 # pilot_body 顶部「入口抑制块」的剪切标记（Task 8）：标记行本身随块一起搬进 head 区。
 # Why 存在：内核逐字块（§1）尾部有 method_v0 的 `if __name__ == "__main__": main()`

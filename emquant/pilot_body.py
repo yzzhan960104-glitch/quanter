@@ -471,50 +471,64 @@ def is_blocked(path=None) -> bool:
     return p.exists()
 
 
-def load_amihud_pct(path=None, today=None):
-    """读取 amihud60 全市场分位表（ops.amihud_pct_writer 每晚经 pipeline ④ 写入）。
+def fetch_amihud60(api, ts_symbol: str, end_date: str,
+                   window: int, min_days: int):
+    """单标的 amihud60（60 日 |日收益|/成交额 均值）→ float 或 None（数据不足/失败）。
 
-    返回 {ts_symbol: pct(0-1)} 或 None（缺失/过期/损坏/空表——统一 None 由调用方
-    fail-open 旁路 + WARN 一次，维持现任行为：过滤是增益项不是生存项，数据面
-    故障绝不升级为停摆）。过期口径：文件 date 距今 > AMIHUD_FILTER["max_stale_days"]
-    自然日（含周末容差；writer 挂 pipeline 每晚跑，>3 天没新文件=采集链断了）。
+    口径与回测验证逐位一致（liveuni_cutdown + 史前窗触发式确认）：
+    - close 用定点前复权（adjust_end_time 钉 end_date，同 fetch_df_upto 幂等口径），
+      amount 原始成交额（tushare 千元口径与湖一致，回测同源）；
+    - skip_suspended=True；窗口 window 根、有效（ret/amount 双全）≥ min_days 才算；
+    - end_date=识别同视野的 t_minus_1（突破日）——与回测 signal_date 行语义对齐。
+    失败契约：安静返 None（该信号按无值放行/组内豁免兜底）——本函数每信号股
+    一次小拉取，逐符号 WARN 会在触发日刷屏，异常面由调用方汇总留痕。
     """
-    import json as _json
-    from datetime import date as _date, datetime as _dt
-
-    cfg = AMIHUD_FILTER
-    p = Path(path) if path is not None else BASE_DIR / "state" / "amihud_pct_latest.json"
+    a = _api() if api is None else api
     try:
-        payload = _json.loads(p.read_text(encoding="utf-8"))
-        d = _dt.strptime(str(payload["date"]), "%Y-%m-%d").date()
+        from datetime import timedelta as _td
+        start = (datetime.strptime(end_date, "%Y-%m-%d")
+                 - _td(days=_FETCH_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        raw = a.history(symbol=to_gm_symbol(ts_symbol), frequency="1d",
+                        start_time=start, end_time=end_date,
+                        fields="eob,close,amount",
+                        skip_suspended=True, fill_missing=None,
+                        adjust=a.ADJUST_PREV, adjust_end_time=end_date, df=True)
+        if raw is None or len(raw) == 0:
+            return None
+        c = pd.to_numeric(raw["close"], errors="coerce")
+        amt = pd.to_numeric(raw["amount"], errors="coerce")
+        s = ((c.pct_change().abs()) / amt.where(amt > 0)).tail(window).dropna()
+        return float(s.mean()) if len(s) >= int(min_days) else None
     except Exception:
         return None
-    today = today or _date.today()
-    if (today - d).days > int(cfg.get("max_stale_days", 3)):
-        return None
-    pct = payload.get("pct")
-    return pct if isinstance(pct, dict) and pct else None
 
 
-def apply_amihud_filter(signals, pct_map, pct_line):
-    """amihud 非流动性过滤（纯函数）：分位 < pct_line 的信号剔除，无值放行。
+def apply_amihud_filter(signals, values, pct_line, min_signals):
+    """amihud 信号池分位过滤·触发式（纯函数）。
 
-    语义与回测验证逐位一致（signal_cutdown_final.md / writer 语义四闸 PASS）：
-    - 无值（次新/停牌/截面缺）放行 = 回测 NaN-keep 同款——fail-open 只豁免
-      个股级缺值，截面级故障由 load_amihud_pct 的 None 旁路兜住；
-    - 返回 (kept_signals, [(symbol, pct), ...] 被剔清单) 供编排层逐笔留痕。
+    规格（两窗验证，勿改——改了重过四闸）：
+    - len(signals) < min_signals（=单日闸 4，无抢槽竞争）→ 全保留（exempt=True）；
+    - 有效值不足 min_signals → 全保留（exempt=True，fail-open：数据不可用绝不
+      砍信号，较回测 NaN-keep 更保守的一面）；
+    - 否则组内升序分位（低 amihud=低分位，pandas rank(pct=True) 同义）：
+      分位 ≤ pct_line 剔除，其余/无值保留。
+    返回 (kept, [(symbol, pct), ...], exempt: bool)。
     """
+    if len(signals) < int(min_signals):
+        return list(signals), [], True
+    valid = {s: v for s, v in values.items() if v is not None}
+    if len(valid) < int(min_signals):
+        return list(signals), [], True
+    ordered = sorted(valid.items(), key=lambda kv: kv[1])
+    pct = {s: (i + 1) / len(ordered) for i, (s, _) in enumerate(ordered)}
     kept, dropped = [], []
     for sig in signals:
-        p = pct_map.get(sig.symbol)
-        if p is None:
+        p = pct.get(sig.symbol)
+        if p is not None and p <= float(pct_line):
+            dropped.append((sig.symbol, round(p, 4)))
+        else:
             kept.append(sig)
-            continue
-        if float(p) < float(pct_line):
-            dropped.append((sig.symbol, float(p)))
-            continue
-        kept.append(sig)
-    return kept, dropped
+    return kept, dropped, False
 
 
 def read_cap(path=None) -> float:
@@ -1933,25 +1947,33 @@ class PilotRuntime:
                             "（①撤单②超期平仓等存量管理照跑）")
             signals = []
 
-        # ── ④' amihud 非流动性信号过滤（2026-08-29 用户裁决采纳）──
-        # 规格=logs/quality/factor_zoo/signal_cutdown_final.md：当日全市场 amihud60
-        # 分位 < 0.40 的信号不发单（砍 ~44% 信号，可部署口径外层 Δ+16.2pp/全期
-        # +2.3pp/逐年全过/taken 49→70，史前窗时间外全期持平）。数据面=
-        # ops.amihud_pct_writer 每晚 pipeline ④ 步写入（坏行 ffill+滞后一天=已
-        # 验证形态）。识别内核/其余参数零改动（C2/用户「其他参数不变」裁决）。
-        if signals and AMIHUD_FILTER.get("enabled"):
-            pct_map = load_amihud_pct()
-            if pct_map is None:
-                self._audit("WARN", type="amihud_filter_bypass",
-                            msg="amihud 分位文件缺失/过期/不可读——本日过滤旁路"
-                                "（fail-open=维持现任行为），晨检查 pipeline ④ 步")
-            else:
-                signals, dropped_amihud = apply_amihud_filter(
-                    signals, pct_map, float(AMIHUD_FILTER["pct_line"]))
-                for sym, p in dropped_amihud:
-                    self._audit("SIGNAL_FILTERED_AMIHUD", symbol=sym,
-                                amihud_pct=round(p, 4),
-                                line=float(AMIHUD_FILTER["pct_line"]))
+        # ── ④' amihud 非流动性信号过滤·触发式（2026-08-29 用户裁决"直上 NECK"）──
+        # 规格（两窗验证：logs/quality/factor_zoo/liveuni_cutdown.* + 史前窗触发式
+        # 确认——universe 全市场线/板内线/总是过滤均已否决，勿回退到那些形态）：
+        # 当日信号数 ≥ min_signals（=单日闸 4：抢槽竞争存在）才启用；信号股各取
+        # 60 日 close+amount 算 amihud60（数据至 t_minus_1=突破日，识别同视野），
+        # 当日信号池内分位 ≤ 0.40 剔除；不足 4 或有效值不足 → 全保留（豁免留痕）。
+        # 策略自含：零外部文件/零 staleness；识别内核与其余参数零改动。
+        if signals and AMIHUD_FILTER.get("enabled") and t_minus_1 is not None:
+            _af = AMIHUD_FILTER
+            _vals = {}
+            for sig in signals:
+                try:
+                    _vals[sig.symbol] = fetch_amihud60(
+                        a, sig.symbol, t_minus_1, _af["window"], _af["min_days"])
+                except Exception:
+                    _vals[sig.symbol] = None
+            signals, dropped_amihud, _exempt = apply_amihud_filter(
+                signals, _vals, _af["pct_line"], _af["min_signals"])
+            if _exempt:
+                self._audit("AMIHUD_FILTER_EXEMPT",
+                            n_signals=len(signals),
+                            n_valid=sum(1 for v in _vals.values() if v is not None),
+                            min_signals=_af["min_signals"])
+            for sym, p in dropped_amihud:
+                self._audit("SIGNAL_FILTERED_AMIHUD", symbol=sym,
+                            amihud_pool_pct=p, line=float(_af["pct_line"]),
+                            asof=t_minus_1)
 
         # ── ⑤ 挂限价买（逐单 check_caps；equity 一次查询逐单复用——CAP 额度式单调）──
         if signals:
