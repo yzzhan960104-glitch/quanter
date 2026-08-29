@@ -168,7 +168,11 @@ def main(argv: list[str] | None = None) -> int:
           {"strategyId": sid, "accountIds": [acc], "stage": 3, "extData": {acc: ""}})
     st, _ = _http("PUT", f"{gc.GM_API_BASE}/v3/strategies/{sid}", tok,
                   {"strategyId": sid, "name": args.strategy_name, "language": "python", "stage": 3})
-    print(f"[provision] ⑥ 双绑定+交易态(stage=3) HTTP{st}")
+    # ⑥b 云端同置:UI「我的策略」的形态标签(研究/交易)读云端条目 stage——
+    #     只改本机 UI 仍显示「研究」(2026-08-29 用户 GUI 实锤纠偏,两处都要 PUT)。
+    st2, _ = _http("PUT", f"{SC_API}/v3/strategy-center/strategies/{sid}", etok,
+                   {"name": args.strategy_name, "language": "python", "stage": 3}, cloud_h)
+    print(f"[provision] ⑥ 双绑定+交易态(本机 HTTP{st} + 云端 HTTP{st2})")
 
     # ⑦ 启动+验 INIT
     r = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File",
