@@ -585,7 +585,7 @@ def check_caps(sod_state, equity, positions_mv, open_buy_amount, price, qty, tod
          才启用）；pilot 恒查 = 恒紧于本地（quota=equity−mv−ob 仍会拦「超出总权益
          减占额」的单），单票 5% 定尺下该差额几乎不可达，方向保守（多拦不错放）
          可接受，不为对齐而引入「CAP≥1 跳过」的分支面。
-      ③ 单日新挂 ≤ PILOT_MAX_NEW_ORDERS_PER_DAY（试点硬闸 FR3，§0 实弹=4，c243da10 对齐）：
+      ③ 单日新挂 ≤ PILOT_MAX_NEW_ORDERS_PER_DAY（试点硬闸 FR3，§0 实弹=5，2026-08-29 用户裁决与 amihud keep_top=5 对齐——留 5 只即挂 5 单）：
          当日 placed 已达上限 → 拒（试点期规模闸，验收后可放开）。
       ④ 单票金额 ≤ PILOT_MAX_POSITION_PCT×equity（试点硬闸 FR3，§0 实弹=7.5%）：
          一单一票，单票新增敞口即本单金额；同票次日补挂的聚合敞口由 ② 总闸兜底。
