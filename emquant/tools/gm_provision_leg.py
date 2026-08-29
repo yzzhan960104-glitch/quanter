@@ -14,7 +14,8 @@
     ⑤ 目录:    ~/.emgm3/projects/<id>/ 建 main.py + config/runtime.json(token 复用主腿)
                + relaunch_strategy.ps1(目录名替换自主腿模板)
     ⑥ 绑定:    PUT strategy-commands(directory/path)+ PUT strategies/<id>/accounts
-    ⑦ 启动:    relaunch → 验 audit INIT(stamp/account/strategy_id 三锚)
+    ⑦ 状态表:  POST /v3/strategy-statuses(UI 列表状态列的记录表——不写恒显'研究中')
+    ⑧ 启动:    relaunch → 验 audit INIT(stamp/account/strategy_id 三锚)
 
 关键事实(逆向成果,勿重新踩坑):
     - 掘金两体系:云端 strategy-center(「我的策略」列表源)与本机 gmterm-serv(运行时),
@@ -174,7 +175,14 @@ def main(argv: list[str] | None = None) -> int:
                    {"name": args.strategy_name, "language": "python", "stage": 3}, cloud_h)
     print(f"[provision] ⑥ 双绑定+交易态(本机 HTTP{st} + 云端 HTTP{st2})")
 
-    # ⑦ 启动+验 INIT
+    # ⑦ 状态记录表写入:UI 列表的状态列(研究中/运行中/停止)读【记录表】——
+    #    GET /v3/strategy-statuses 是实时探测(两表不同源!),从未被写入的策略恒显
+    #    "研究中"。UI 启动按钮的记账动作=POST /v3/strategy-statuses(2026-08-29 破译)。
+    _http("POST", f"{gc.GM_API_BASE}/v3/strategy-statuses", tok,
+          {"data": [{"strategyId": sid, "status": {"state": 3}}]})
+    print("[provision] ⑦ 状态记录表已写(state=3,UI 显示运行中)")
+
+    # ⑧ 启动+验 INIT
     r = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File",
                         str(leg_dir / "relaunch_strategy.ps1")],
                        capture_output=True, text=True, timeout=180)
