@@ -160,12 +160,15 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(cfg, indent=2), encoding="utf-8")
     print(f"[provision] ⑤ 目录就位 {leg_dir}")
 
-    # ⑥ 双绑定
+    # ⑥ 双绑定+交易态:stage 枚举 STUDY=1/SIMULATION=2/LIVE=3(仿真交易归 LIVE,
+    #    与 gm MODE_LIVE 语义一致)——不 PUT stage=3 则策略停在「研究」,UI 不关联账户。
     _http("PUT", f"{gc.GM_API_BASE}/v3/strategy-commands/{sid}", tok,
           {"strategy_id": sid, "directory": str(leg_dir), "path": str(leg_dir / "main.py")})
     _http("PUT", f"{gc.GM_API_BASE}/v3/strategies/{sid}/accounts", tok,
-          {"strategyId": sid, "accountIds": [acc], "stage": 1, "extData": {acc: ""}})
-    print("[provision] ⑥ 启动配置+账户绑定完成")
+          {"strategyId": sid, "accountIds": [acc], "stage": 3, "extData": {acc: ""}})
+    st, _ = _http("PUT", f"{gc.GM_API_BASE}/v3/strategies/{sid}", tok,
+                  {"strategyId": sid, "name": args.strategy_name, "language": "python", "stage": 3})
+    print(f"[provision] ⑥ 双绑定+交易态(stage=3) HTTP{st}")
 
     # ⑦ 启动+验 INIT
     r = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File",
