@@ -33,13 +33,13 @@ SIGNAL_IMPORT = "from .signal import Signal"
 MAIN_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'
 DEFAULT_EXP_ACCOUNT_ID = 'c4ba3b2e-a2da-11f1-9262-52560acd7da0'
 
-# amihud 信号过滤规格（2026-08-29 用户裁决采纳，NECK 主腿）：信号后过滤层——
-# 当日全市场 amihud60 分位 < pct_line 的信号不发单。走 §0 字面量先例（同
-# PILOT_MAX_NEW_ORDERS_PER_DAY），不进 params_snapshot——识别参数指纹零变化
-# （用户裁决「其他参数都没变」）。window/min_days 与 ops/amihud_pct_writer 侧
-# 镜像；改任何值都要重过 signal_cutdown 四闸（语义=验证红线，见
-# logs/quality/factor_zoo/signal_cutdown_final.md）。
-AMIHUD_FILTER_CFG = {'enabled': True, 'window': 60, 'min_days': 48,
+# amihud 信号过滤规格（2026-08-29 部署当日回退：enabled=False）：全市场 0.40 线
+# 在回测混合池过四闸，但实盘 universe=创业板/科创板 300 只（中位全市场分位
+# 0.09、仅 1/285 在线上）→ 信号全灭；universe 内相对线三档（30/40/50%）四闸
+# 全灭（2024 年段 −7~−20pp，信号级 IC+0.046 不迁移为年段稳定增益）。
+# 代码+writer+audit 事件保留（数据资产），消费开关关闭。重新启用须先过
+# universe 约束下的四闸重校准（教训：回测池≠实盘 universe 的校准迁移缺口）。
+AMIHUD_FILTER_CFG = {'enabled': False, 'window': 60, 'min_days': 48,
                      'pct_line': 0.40, 'max_stale_days': 3}
 
 # pilot_body 顶部「入口抑制块」的剪切标记（Task 8）：标记行本身随块一起搬进 head 区。
