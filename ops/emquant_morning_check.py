@@ -133,6 +133,40 @@ def run_checks(now: datetime | None = None, leg_dir: Path | None = None) -> list
     return checks
 
 
+def _scan_facts(today: str, leg_dir: Path | None = None) -> dict:
+    """audit 只读解析（⑦ 今日计划渲染与 ⑦' 预演对拍共源单源）。
+
+    返回 {"signals": [detail...], "placed": {sym: detail}, "filled": set,
+    "skip_held": n, "blocked": n}；缺 audit 文件=空集（未扫描/非交易日语义）。
+    """
+    import csv
+    src = gc.audit_csv_path(today, leg_dir)
+    facts = {"signals": [], "placed": {}, "filled": set(),
+             "skip_held": 0, "blocked": 0}
+    if not src.exists():
+        return facts
+    with src.open(encoding="utf-8", newline="") as fh:
+        for row in csv.reader(fh):
+            if len(row) < 2 or not row[0].startswith(today):
+                continue
+            ev = row[1]
+            try:
+                d = json.loads(row[2]) if len(row) > 2 and row[2] else {}
+            except ValueError:
+                d = {}
+            if ev == "SIGNAL" and d.get("symbol"):
+                facts["signals"].append(d)
+            elif ev == "ORDER_PLACED" and d.get("symbol"):
+                facts["placed"][str(d["symbol"])] = d
+            elif ev in ("POS_ENRICHED", "FILL") and d.get("symbol"):
+                facts["filled"].add(str(d["symbol"]))
+            elif ev == "SIGNAL_SKIP_HELD":
+                facts["skip_held"] += 1
+            elif ev == "ORDER_BLOCKED":
+                facts["blocked"] += 1
+    return facts
+
+
 def _plan_lines(today: str, leg_dir: Path | None = None) -> list[str]:
     """⑦ 今日计划段：audit 只读解析 SIGNAL→挂单/成交状态（09:31 扫描结果播报）。
 
@@ -140,65 +174,84 @@ def _plan_lines(today: str, leg_dir: Path | None = None) -> list[str]:
     → ⏳ 在途；仅 SIGNAL → 未挂（拦截/额度/集合竞价未回）。缺 audit 文件=
     尚未扫描/非交易日 → 「无新信号」占位（不炸，与 _audit_stats 同降级语义）。
     """
-    import csv
-    src = gc.audit_csv_path(today, leg_dir)
-    signals: list[dict] = []
-    placed: dict[str, dict] = {}
-    filled: set[str] = set()
-    skip_held = 0
-    blocked = 0
-    if src.exists():
-        with src.open(encoding="utf-8", newline="") as fh:
-            for row in csv.reader(fh):
-                if len(row) < 2 or not row[0].startswith(today):
-                    continue
-                ev = row[1]
-                try:
-                    d = json.loads(row[2]) if len(row) > 2 and row[2] else {}
-                except ValueError:
-                    d = {}
-                if ev == "SIGNAL" and d.get("symbol"):
-                    signals.append(d)
-                elif ev == "ORDER_PLACED" and d.get("symbol"):
-                    placed[str(d["symbol"])] = d
-                elif ev in ("POS_ENRICHED", "FILL") and d.get("symbol"):
-                    filled.add(str(d["symbol"]))
-                elif ev == "SIGNAL_SKIP_HELD":
-                    skip_held += 1
-                elif ev == "ORDER_BLOCKED":
-                    blocked += 1
+    facts = _scan_facts(today, leg_dir)
 
     def _n(v, nd=2):
         return f"{v:.{nd}f}" if isinstance(v, (int, float)) and v == v else "—"
 
     names: dict[str, str] = {}
-    if signals:
+    if facts["signals"]:
         try:
             from ops.emquant_eod_report import _name_map
-            names = _name_map([str(d["symbol"]) for d in signals])
+            names = _name_map([str(d["symbol"]) for d in facts["signals"]])
         except Exception:
             names = {}
 
     out = ["**⑦ 今日计划**（09:31 扫描执行）"]
-    if not signals:
+    if not facts["signals"]:
         out.append("- 今日无新信号（轮动空档日）")
-    for d in signals:
+    for d in facts["signals"]:
         sym = str(d.get("symbol", "?"))
-        pl = placed.get(sym)
+        pl = facts["placed"].get(sym)
         qty_s = (f" ×{int(pl.get('qty') or 0)} @ {_n(pl.get('price'))}"
                  if pl else "")
-        status = ("✅ 已成交" if sym in filled
+        status = ("✅ 已成交" if sym in facts["filled"]
                   else "⏳ 在途" if pl else "· 未挂（拦截/额度）")
         out.append(f"- **{names.get(sym, '—')}** {sym}{qty_s}"
                    f"｜颈线 {_n(d.get('neckline'))} · RR {_n(d.get('rr'), 1)}"
                    f"｜{status}")
     tail = []
-    if skip_held:
-        tail.append(f"已持有跳过 {skip_held}")
-    if blocked:
-        tail.append(f"拦截 {blocked}")
+    if facts["skip_held"]:
+        tail.append(f"已持有跳过 {facts['skip_held']}")
+    if facts["blocked"]:
+        tail.append(f"拦截 {facts['blocked']}")
     if tail:
         out.append("- ⏭ " + " · ".join(tail))
+    return out
+
+
+def _preview_recon_lines(today: str, facts: dict) -> list[str]:
+    """⑦' 预演对拍（逻辑对齐的每日实证，2026-09-01 用户需求"提前知道+逻辑对齐"）。
+
+    读昨晚 18:10 预演档案（logs/plan_preview_<today>.json）与今晨实挂
+    （facts["placed"]）逐单比对：集合一致 + 量相等 + 价在 1 分容差内（钳价
+    取整边界）→ 一致。漂移逐项列明（预演有实无=隔夜闸态变化；实有预演无=
+    数据源差异或隔夜状态；价量漂移=定尺/钳价边界）——长期跑下来就是对
+    "湖预演 ↔ GM 实跑"逻辑对齐性的滚动实证。缺档案→降级占位不炸。
+    """
+    import json as _json
+    p = ROOT / "logs" / f"plan_preview_{today}.json"
+    if not p.exists():
+        return ["- 预演对拍：无昨晚档案（未生成/非交易日/预演未部署期），跳过"]
+    try:
+        art = _json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["- 预演对拍：档案损坏，跳过（不影响本段其余内容）"]
+    plan = {str(r.get("sym")): r for r in (art.get("plan") or [])}
+    actual = facts.get("placed") or {}
+    both = sorted(set(plan) & set(actual))
+    only_p = sorted(set(plan) - set(actual))
+    only_a = sorted(set(actual) - set(plan))
+    drift = []
+    for s in both:
+        q_a = int(actual[s].get("qty") or 0)
+        p_p, q_p = float(plan[s].get("entry") or 0), int(plan[s].get("qty") or 0)
+        p_a = float(actual[s].get("price") or 0)
+        if q_a != q_p or (p_p and p_a and abs(p_p - p_a) > 0.011):
+            drift.append((s, q_p, p_p, q_a, p_a))
+    total = len(set(plan) | set(actual))
+    if not only_p and not only_a and not drift:
+        if not total:
+            return ["- 预演对拍：双边空（预演 0 单 / 实挂 0 单）✅ 对齐"]
+        return [f"- 预演对拍：{len(both)}/{total} 一致 ✅（湖预演↔GM 实跑逻辑对齐实证）"]
+    ok = len(both) - len(drift)
+    out = [f"- 预演对拍：一致 {ok}/{total} ⚠️（stamp={art.get('stamp', '?')[:20]}…）"]
+    for s in only_p:
+        out.append(f"  - 预演有·实无：{s}（隔夜闸态变化？RISK_BLOCK/资金/持仓——查 audit")
+    for s in only_a:
+        out.append(f"  - 实有·预演无：{s}（数据源差异或隔夜状态——查湖↔GM 该标的日线")
+    for s, q_p, p_p, q_a, p_a in drift:
+        out.append(f"  - 价量漂移：{s} 预演×{q_p}@{p_p:.2f} 实×{q_a}@{p_a:.2f}")
     return out
 
 
@@ -239,13 +292,16 @@ def main(argv: list[str] | None = None) -> int:
     all_bad: list[dict] = []
     reports: list[str] = []
     for leg in gc.active_legs():
-        checks = run_checks(now, gc.leg_strategy_dir(leg))
+        leg_dir = gc.leg_strategy_dir(leg)
+        checks = run_checks(now, leg_dir)
         bad = [c for c in checks if not c["ok"]]
         all_bad.extend({"leg": leg.label, **c} for c in bad)
-        leg_dir = gc.leg_strategy_dir(leg)
         body = [f"**—— {leg.label} ——**"] + [
             f"{'✅' if c['ok'] else '❌'} {c['name']}: {c['detail']}" for c in checks]
+        facts = _scan_facts(f"{now:%Y-%m-%d}", leg_dir)
         body += [""] + _plan_lines(f"{now:%Y-%m-%d}", leg_dir)
+        if leg.key == "main":   # 预演档案按主腿生成（exp 无预演面）
+            body += _preview_recon_lines(f"{now:%Y-%m-%d}", facts)
         reports.append("\n".join(body))
     report = "\n\n".join(reports)
     out = f"### 🌅 掘金晨检 · {now:%Y-%m-%d %H:%M}\n\n{report}"

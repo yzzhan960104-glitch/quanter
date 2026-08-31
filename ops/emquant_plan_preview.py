@@ -215,6 +215,25 @@ def build_preview(m, *, no_push: bool = False) -> tuple[str, dict]:
     md = "\n".join(lines)
     summary = dict(data_day=day, n_signals=len(signals), n_plan=len(plan),
                    n_blocked=len(blocked), equity=equity)
+    # 档案落盘（逻辑对齐机制的一半）：今晨晨检 ⑦' 预演对拍读这份档案与实挂逐单
+    # 比对——把"预演准确性"从一次性对拍升级为每日实证。文件名=计划日（对拍侧
+    # 按 today 直查）；--no-push 也落盘（回填口径）。
+    try:
+        from trading.calendar import next_trading_day
+        plan_date = next_trading_day(day)
+        art = {"generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+               "stamp": m.PILOT_BUILD_STAMP, "data_day": day, "plan_date": plan_date,
+               "equity": equity, **summary,
+               "plan": plan, "dropped_amihud": dropped_amihud,
+               "skip_held": [{"sym": s, "why": w} for s, w in skip_held],
+               "blocked": [{"sym": s, "why": w} for s, w in blocked],
+               "risk_block": bool(blocked_flag)}
+        path = ROOT / "logs" / f"plan_preview_{plan_date}.json"
+        path.write_text(json.dumps(art, ensure_ascii=False, indent=1, default=str),
+                        encoding="utf-8")
+        print(f"[artifact] 档案已落 {path}")
+    except Exception as e:   # 档案失败不阻断推送主链（对拍侧按缺档案降级）
+        print(f"[artifact] 档案落盘失败（不阻断）：{type(e).__name__}: {e}")
     if not no_push:
         from ops.gm_ops_common import notify
         notify("INFO", md)
