@@ -68,13 +68,14 @@ def test_build_report_renders(tmp_path, monkeypatch):
     assert "**蓝思科技** 300433.SZ ×100｜成本 38.91 → 现 39.03｜**+12**" in txt
     assert "止损 33.94（-13%）" in txt       # 距现价 39.03 的百分比
     assert "nav **100,007**" in txt
-    # ⑤ 明日预案（2026-09-01 桥）：entry_date/exec_params 缺失 → 「第—天」降级不炸
-    assert "**⑤ 明日预案（T+1 持仓管理）**" in txt
-    assert "300433.SZ · 第—天｜止损 33.94（-13%）" in txt
+    # ⑤ 明日预案（2026-09-01 桥，同日改例外制）：无例外（无 entry_date/flags）
+    # → 不逐只重列，一句话收口指向 ②（与持仓去重）
+    assert "**⑤ 明日预案（T+1）**" in txt
+    assert "其余 1 只按 ② 定身位继续执行" in txt
 
 
 def test_build_report_next_day_plan(tmp_path, monkeypatch):
-    """⑤明日预案：持仓天数/上限/超期预警/tp1_done 切换目标位。"""
+    """⑤明日预案（例外制）：只列超期/TP切换等例外项，其余收口去重。"""
     from ops import gm_ops_common as gc
     monkeypatch.setattr(gc, "GM_STRATEGY_DIR", tmp_path)
     monkeypatch.setattr(gc, "runtime_config",
@@ -85,14 +86,25 @@ def test_build_report_next_day_plan(tmp_path, monkeypatch):
                                                "last": 39.03}], None))
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "state.pkl").write_text(json.dumps(
-        {"positions": {"300433.SZ": {
-            "remaining_qty": 100, "stop": 33.94, "tp1_price": 55.4,
-            "tp2_price": 51.3, "tp1_done": True,
-            "entry_date": "2026-07-25",
-            "exec_params": {"max_holding": 30}}}},
+        {"positions": {
+            "300433.SZ": {
+                "remaining_qty": 100, "stop": 33.94, "tp1_price": 55.4,
+                "tp2_price": 51.3, "tp1_done": True,
+                "entry_date": "2026-07-25",
+                "exec_params": {"max_holding": 30}},
+            "300456.SZ": {   # 安静持仓：无任何例外 → 归入「其余」收口
+                "remaining_qty": 100, "stop": 30.0, "tp1_price": 49.0,
+                "tp2_price": 45.0, "entry_date": "2026-08-27",
+                "exec_params": {"max_holding": 30}}}},
         ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(rpt, "_name_map", lambda syms: {"300433.SZ": "蓝思科技"})
+    monkeypatch.setattr(rpt, "_name_map",
+                        lambda syms: {"300433.SZ": "蓝思科技", "300456.SZ": "赛微电子"})
     from datetime import datetime
     txt = rpt.build_report(datetime(2026, 8, 28, 15, 45))
-    assert "第34天/上限30 ⚠️超期预警" in txt     # (08-28 − 07-25)=34 ≥ 30
-    assert "TP1 已兑｜余 TP2 51.30" in txt        # tp1_done → 下一目标 TP2
+    # 例外1：超期（34 ≥ 30）+ TP1 已兑现 → 双 bit 一行
+    assert "⚠️ **蓝思科技** 300433.SZ" in txt
+    assert "第34/30天 **已到超期线**——明日尾盘超期平仓" in txt
+    assert "TP1 已兑现，上望目标切 TP2 51.30" in txt
+    # 安静持仓去重收口（止损/TP 只在 ② 出现一次）
+    assert "其余 1 只按 ② 定身位继续执行" in txt
+    assert "赛微电子 300456.SZ · 第" not in txt        # 例外段不逐只重列

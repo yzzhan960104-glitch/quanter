@@ -9,10 +9,12 @@ T+1 计划推送位（引擎 eod 已随 QMT 退役，其 76 单僵尸计划不�
   ② 持仓表：7002 API 实时（symbol × qty × vwap × 浮盈，按浮盈降序）；
   ③ 资金面：nav / 可用 / 冻结（市值）；
   ④ EOD 摘要：audit 的 EOD 行（effective_today/open_orders/positions）；
-  ⑤ 明日预案（T+1 · 2026-09-01 新增"掘金侧计划→播报"桥）：持仓管理逐只
-     列明日执行的止损/止盈位（含距现价 %、持仓天数、超期预警）+ 新信号
-     扫描时点说明（GM 侧新候选在次晨 09:31 扫描落 audit，15:45 时点尚不存在
-     ——与旧本地腿"T 日 EOD 产 T+1 计划"的口径差异在此明示，不冒充预告）。
+  ⑤ 明日预案（T+1 · 2026-09-01 新增"掘金侧计划→播报"桥，同日改**例外制**）：
+     止损/止盈是定身位、隔日不变，逐只重列与 ② 同源=噪声（用户质询"为什么不和
+     持仓去重"后修正）——本段只列「明日起变化/需动作」项：超期线/临近超期、
+     TP1 已兑现目标切换、force_exit 标记；其余持仓一句话收口指向 ②。新信号
+     扫描时点=次晨 09:31（GM 侧无盘前预产计划，明示不冒充预告——与旧本地腿
+     "T 日 EOD 产 T+1 计划"的口径差异在此说明）。
 
 排版：DingTalk markdown 约束（#/粗体/引用/列表，无表格无着色）——段标加粗、
 关键数字加粗、止损止盈带距现价百分比，浮盈正负不着色靠符号+合计行锚定。
@@ -232,29 +234,43 @@ def build_report(now: datetime | None = None, leg_dir: Path | None = None,
                      f"｜placed_today={e.get('placed_today')}")
         lines.append("")
 
-    # ⑤ 明日预案（T+1 持仓管理；新信号扫描在次晨 09:31——GM 侧无盘前预产计划，
-    # 明示时点不冒充预告，新挂单以次晨 09:40 晨检「今日计划」段为准）
-    lines.append("**⑤ 明日预案（T+1 持仓管理）**")
+    # ⑤ 明日预案（T+1）：例外制（2026-09-01 用户质询"为什么不和持仓去重"后的
+    # 信息架构修正）——止损/止盈是 entry 挂载的定身位，隔日不变（trailing 活态
+    # 才随价上移），逐只重复渲染与 ② 完全同源=噪声。故 ⑤ 只列「明日起变化/需
+    # 动作」项：超期线/临近超期（尾盘 force_exit）、TP1 已兑现（上望切 TP2）、
+    # force_exit 标记；其余持仓一句话收口指向 ② 的定身位。新信号扫描在次晨
+    # 09:31——GM 侧无盘前预产计划，明示时点不冒充预告（次晨 09:40 晨检为准确认）。
+    lines.append("**⑤ 明日预案（T+1）**")
     lines.append("- 新信号：明早 09:31 盘前扫描自动挂单（详见 09:40 晨检「今日计划」段）")
     if live:
         lasts = {p["sym"]: p["last"] for p in positions}
-        for sym, pos in sorted(live.items()):
+        exceptions: list[tuple[int, str]] = []
+        quiet = 0
+        for sym, pos in live.items():
             days = _days_held(pos.get("entry_date"), day)
             mh = int((pos.get("exec_params") or {}).get("max_holding") or 0)
-            day_s = (f"第{days}天" if days is not None else "第—天") + \
-                    (f"/上限{mh}" if mh else "")
-            flag = ""
+            last = lasts.get(sym)
+            bits = []
             if days is not None and mh:
                 if days >= mh:
-                    flag = " ⚠️超期预警"
+                    bits.append(f"第{days}/{mh}天 **已到超期线**——明日尾盘超期平仓")
                 elif days >= mh - 3:
-                    flag = " ⚠️临近超期"
-            stop, tp1, tp2 = pos.get("stop"), pos.get("tp1_price"), pos.get("tp2_price")
-            last = lasts.get(sym)
-            tgt = (f"TP1 已兑｜余 TP2 {_f(tp2)}{_pct(tp2, last)}" if pos.get("tp1_done")
-                   else f"TP1 {_f(tp1)}{_pct(tp1, last)} / TP2 {_f(tp2)}{_pct(tp2, last)}")
-            lines.append(f"- **{names.get(sym, '—')}** {sym} · {day_s}{flag}"
-                         f"｜止损 {_f(stop)}{_pct(stop, last)}｜{tgt}")
+                    bits.append(f"第{days}/{mh}天 临近超期")
+            if pos.get("tp1_done"):
+                bits.append(f"TP1 已兑现，上望目标切 TP2 {_f(pos.get('tp2_price'))}"
+                            f"{_pct(pos.get('tp2_price'), last)}")
+            if pos.get("force_exit"):
+                bits.append("force_exit 标记在场")
+            if bits:
+                exceptions.append((-(days if days is not None else 0),
+                                    f"- ⚠️ **{names.get(sym, '—')}** {sym}："
+                                    + "；".join(bits)))
+            else:
+                quiet += 1
+        lines.extend(ln for _, ln in sorted(exceptions, key=lambda x: x[0]))
+        if quiet:
+            lines.append(f"- 其余 {quiet} 只按 ② 定身位继续执行"
+                         f"（止损/TP 见上；trailing 活态下止损随价上移）")
     else:
         lines.append("- 持仓管理：无持仓")
     return "\n".join(lines)
