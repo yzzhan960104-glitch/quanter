@@ -198,6 +198,10 @@ OPS_TASK_CRONS = [
      {"hour": 15, "minute": 50}, "ops_gm_ab_compare.log"),
     ("ops_audit_ssot", ["scripts/audit_ssot.py"], "cron",
      {"hour": 16, "minute": 5}, "audit_schtask.log"),
+    # 2026-09-01 计划→播报桥第三块：18:10 次日计划预演（管道 18:00-18:02 落完
+    # T 日湖数据后离线复刻次晨 09:31 识别链，预演≠计划恒带标签）。
+    ("ops_plan_preview", ["-m", "ops.emquant_plan_preview"], "cron",
+     {"hour": 18, "minute": 10, "day_of_week": "mon-fri"}, "ops_plan_preview.log"),
     ("ops_gm_guard", ["-m", "ops.gm_terminal_guard", "--once"], "interval",
      {"seconds": 300}, "gm_guard_cron.log"),
 ]

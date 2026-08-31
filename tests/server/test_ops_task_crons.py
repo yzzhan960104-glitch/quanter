@@ -2,8 +2,9 @@
 """W9 六运维 schtasks 收编 server 的注册面测试（2026-08-30）。
 
 钉死三件：
-  ① OPS_TASK_CRONS 表完整性：恰 6 项、job_id 唯一、与原 schtasks 时刻表逐字
-     对齐（晨检 09:40/台账 15:40/EOD 15:45/对照 15:50/audit 16:05/guard 5min）；
+  ① OPS_TASK_CRONS 表完整性：W9 六项 + 2026-09-01 计划预演槽（18:10 mon-fri）
+     共 7 项、job_id 唯一、W9 六项与原 schtasks 时刻表逐字对齐（晨检 09:40/
+     台账 15:40/EOD 15:45/对照 15:50/audit 16:05/guard 5min）；
   ② register_ops_task_crons 用 fake scheduler 走全表（独立函数免起 app）；
   ③ manage_ops_schtasks.RETIRED_TASKS 含六名（双轨退役防重建的清退面）。
 """
@@ -32,11 +33,11 @@ def main_mod():
     return _main()
 
 
-def test_table_has_six_unique_jobs_matching_schtasks_schedule(main_mod):
+def test_table_has_seven_unique_jobs_matching_schedule(main_mod):
     table = main_mod.OPS_TASK_CRONS
-    assert len(table) == 6
+    assert len(table) == 7
     ids = [t[0] for t in table]
-    assert len(set(ids)) == 6
+    assert len(set(ids)) == 7
     sched = {t[0]: (t[2], t[3]) for t in table}
     assert sched["ops_morning_check"] == ("cron", {"hour": 9, "minute": 40})
     assert sched["ops_emquant_ingest"] == ("cron", {"hour": 15, "minute": 40})
@@ -44,9 +45,12 @@ def test_table_has_six_unique_jobs_matching_schtasks_schedule(main_mod):
     assert sched["ops_gm_ab_compare"] == ("cron", {"hour": 15, "minute": 50})
     assert sched["ops_audit_ssot"] == ("cron", {"hour": 16, "minute": 5})
     assert sched["ops_gm_guard"] == ("interval", {"seconds": 300})
+    # 2026-09-01 计划→播报桥第三块：管道 18:00-18:02 落完 T 日湖数据后的预演槽
+    assert sched["ops_plan_preview"] == (
+        "cron", {"hour": 18, "minute": 10, "day_of_week": "mon-fri"})
 
 
-def test_register_with_fake_scheduler_arms_all_six(main_mod):
+def test_register_with_fake_scheduler_arms_all(main_mod):
     armed_calls = []
 
     class FakeSched:
@@ -55,7 +59,7 @@ def test_register_with_fake_scheduler_arms_all_six(main_mod):
 
     armed = main_mod.register_ops_task_crons(FakeSched())
     assert armed == [t[0] for t in main_mod.OPS_TASK_CRONS]
-    assert len(armed_calls) == 6
+    assert len(armed_calls) == 7
     guard = [c for c in armed_calls if c[0] == "ops_gm_guard"][0]
     assert guard[1] == "interval" and guard[2] == {"seconds": 300}
 
@@ -70,7 +74,7 @@ def test_register_soft_degrades_on_single_failure(main_mod):
                 raise RuntimeError("boom")
 
     armed = main_mod.register_ops_task_crons(FakeSched2())
-    assert len(armed) == 5          # 首项失败软降级，其余五项照挂
+    assert len(armed) == 6          # 首项失败软降级，其余六项照挂
 
 
 def test_retired_tasks_cover_six_for_cleanup():
