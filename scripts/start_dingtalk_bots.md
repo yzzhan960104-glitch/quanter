@@ -26,27 +26,28 @@ python -m broadcast connect --start cli
   - 工作目录：项目根（读 CLAUDE.md/memory/代码；省略则跑空白 Temp 目录、不了解项目做不了开发，已踩坑）
 - unified-app-id 已入 `.env:CLI_BOT_UNIFIED_APP_ID`，文档不再重复硬编码。
 
-### 2. 审查训练机器人（yzzhan参数优化）
+### 2. 审查训练机器人（yzzhan参数优化）——已退役
+（2026-08-31 写端点全量退役：桥脚本 dingtalk_review_bridge.py、`POST /api/v1/training/review`
+与 `/research/proposals/review` 端点、training loop 状态机连根删除；CONNECT_BOTS 注册表
+同批移除 review 条目，钉钉侧「yzzhan参数优化」app 资源由用户自行下线即可。）
 ```bash
-python -m broadcast connect --start review
+python -m broadcast connect --start review   # 已失效：bot 不在注册表
 ```
-- @yzzhan参数优化 → dws 收 → bridge脚本 → `POST /api/v1/training/review` → orchestrator.submit_review（training loop 人审关卡）
-- `agent_cmd` 由 `CONNECT_BOTS.review` 固化为相对路径 `.venv310/Scripts/python.exe infra/tools/dingtalk_review_bridge.py`（靠 connect_manager Popen cwd 锁项目根，化解旧绝对路径踩坑——dws cwd 不是项目根时相对路径找不到 python.exe）。
-- 身份闸：`.env` 的 `DINGTALK_ALLOWED_STAFF_IDS`（限制谁能 @触发 training loop；Task4 删 ReviewChatbotHandler 白名单后 dws 层补，省略 = 任何人 @都能触发训练消耗算力）。
 
-### 3. uvicorn 服务（training loop + webhook 推 + /review 端点 + 观测层 API）
+### 3. uvicorn 服务（观测层 API · 纯只读）
 ```bash
 F:/quanter/.venv310/Scripts/python.exe -m uvicorn presentation.server.main:app --host 127.0.0.1 --port 8000
 ```
-- lifespan 装 TrainingLoopOrchestrator（daemon）+ replay_scheduler
-- DingTalkNotifier（webhook 推报告/回显，urllib，不用 dingtalk-stream SDK）
-- 一期观测层 API（`/trades` `/data/datasets` SSE 日志 等）也挂此 app；前端 `/cockpit` 看板依赖它。
+- lifespan 装 replay_scheduler + ops 调度族（training loop 装配已随 2026-08-31 退役删除）
+- 观测层 API（`/api/v1/gm/*` `/data/datasets` SSE 日志 等）挂此 app；前端 `/cockpit` 看板依赖它。
+- 2026-08-31 写端点全量退役后为纯只读服务（全库唯一 POST = `/auth/read-cookie`）。
 
 ---
 
 ## connect 机器人统一托管（broadcast 升格 · 2026-07-26）
 
-5 个 dev connect 对话机器人不再手工敲命令，统一由 broadcast 托管：
+4 个 dev connect 对话机器人不再手工敲命令，统一由 broadcast 托管（review bot 已随
+2026-08-31 写端点全量退役下线）：
 
 | 命令 | 作用 |
 |------|------|
@@ -193,13 +194,12 @@ cd F:/quanter
 - 或立即手动触发 schtasks：`.venv310/Scripts/python.exe ops/manage_ops_schtasks.py --rerun trading`（data/strategy 同理）。
 - 群应收到 3 份当日播报；无报错即上线完成。
 
-## 上线后常驻进程清单（一期 · 共 6 个）
+## 上线后常驻进程清单（review bot 已退役 · 共 5 个）
 
 | 进程 | 职责 | 启动命令见 |
 |------|------|-----------|
-| uvicorn presentation.server.main:app (127.0.0.1:8000) | training loop + webhook + 观测层 API（`/trades` `/data/datasets` SSE 等） | 「一、3」 |
+| uvicorn presentation.server.main:app (127.0.0.1:8000) | 观测层 API（纯只读：`/api/v1/gm/*` `/data/datasets` SSE 等） | 「一、3」 |
 | `yzzhanCli通用` 常驻 | 通用 Claude Code 对话 | `broadcast connect --start cli` |
-| `yzzhan参数优化` 常驻 | training loop 人审桥 | `broadcast connect --start review` |
 | `quanter交易` 常驻 | 交易专业 @查询 | `broadcast connect --start trading_q` |
 | `quanter数据` 常驻 | 数据专业 @查询 | `broadcast connect --start data_q` |
 | `quanter策略` 常驻 | 策略专业 @查询 | `broadcast connect --start strategy_q` |

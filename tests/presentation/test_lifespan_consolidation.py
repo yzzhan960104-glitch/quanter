@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""C-7 V1：lifespan 装 broadcast connect（5 CONNECT_BOTS start/stop 软降级）。
+"""C-7 V1：lifespan 装 broadcast connect（4 CONNECT_BOTS start/stop 软降级）。
 
 物理意图（spec §3.1）：start_all step ② connect 编排收编进 lifespan，软降级
 （单 bot 失败不阻断 uvicorn）。live reload=False（C-5 V1）不 reload，connect 不抖动。
@@ -25,7 +25,7 @@ def _mock_lifespan_dependencies():
       - build_default_manager：通知通道装配（无凭证也 import dws 链，过重）
       - DataLakeReader.get_instance：多湖 parquet load（文件系统 + 内存）
       - replay scheduler/pool：ProcessPoolExecutor 子进程 + APScheduler 线程
-      - training_orchestrator：daemon 线程 + DB init
+        （training_orchestrator 装配块已随 2026-08-31 写端点全量退役删除，无需 mock）
       - symbol_names.load_all：Tushare pro 全量 stock_basic
       - data_service.sweep_stale_on_startup：daemon 线程内 trigger_sync 子进程
       - TradingEngine：网关 + scheduler（既有 test_lifespan_engine.py 已 mock 范式）
@@ -46,10 +46,6 @@ def _mock_lifespan_dependencies():
     stack.enter_context(patch("backtest.worker._init_worker"))
     stack.enter_context(patch("backtest.scheduler.ReplayScheduler"))
     stack.enter_context(patch("concurrent.futures.ProcessPoolExecutor"))
-    stack.enter_context(patch("backtest.optimize.training_loops_db.init_db"))
-    stack.enter_context(patch("backtest.optimize.training_loops_db.reset_interrupted"))
-    stack.enter_context(patch("backtest.optimize.training_loop.TrainingLoopOrchestrator"))
-    stack.enter_context(patch("backtest.optimize.training_dingtalk.ReviewBotConfig.from_env", return_value=None))
     stack.enter_context(patch("data.symbol_names.load_all"))
     stack.enter_context(patch("presentation.server.services.data_service.sweep_stale_on_startup", return_value=[]))
     # TradingEngine mock（影子期闸已移除 ADR-16 修订 · 2026-08-17）
@@ -64,23 +60,23 @@ def _mock_lifespan_dependencies():
 
 
 @pytest.mark.asyncio
-async def test_lifespan_starts_all_5_connect_bots(monkeypatch):
-    """lifespan startup 遍历 5 CONNECT_BOTS 调 connect_manager.start。
+async def test_lifespan_starts_all_connect_bots(monkeypatch):
+    """lifespan startup 遍历全部 CONNECT_BOTS 调 connect_manager.start。
 
-    验：start 对每个 bot 各调一次，app.state.connect_bots 记录全部 5 bot。
+    验：start 对每个 bot 各调一次，app.state.connect_bots 记录全部 bot。
     （shutdown 段亦会跑，stop_mock 已 mock 掉，此处聚焦 startup 断言。）
     """
     from broadcast.__main__ import CONNECT_BOTS
     from fastapi import FastAPI
     from presentation.server.main import lifespan
 
-    # 本用例测生产路径（5 bot 真起）：显式取消 conftest 的 QUANTER_TESTING 隔离 env
+    # 本用例测生产路径（全部 bot 真起）：显式取消 conftest 的 QUANTER_TESTING 隔离 env
     monkeypatch.delenv("QUANTER_TESTING", raising=False)
     app = FastAPI()
     stack, start_mock, stop_mock, _eng = _mock_lifespan_dependencies()
     with stack:
         async with lifespan(app):           # startup 跑完 → 进 yield
-            # startup 已完成：connect_manager.start 应被调 5 次（每 bot 一次）
+            # startup 已完成：connect_manager.start 每 bot 各调一次
             started_bots = [call.args[0] for call in start_mock.call_args_list]
             assert set(started_bots) == set(CONNECT_BOTS.keys())
             assert app.state.connect_bots == list(CONNECT_BOTS.keys())
@@ -88,7 +84,7 @@ async def test_lifespan_starts_all_5_connect_bots(monkeypatch):
 
     # 再核一次（退出 scope 后断言，避免 mock 作用域误差）
     start_mock.assert_called()
-    assert start_mock.call_count == len(CONNECT_BOTS)   # 5
+    assert start_mock.call_count == len(CONNECT_BOTS)
 
 
 @pytest.mark.asyncio
@@ -123,11 +119,11 @@ async def test_lifespan_testing_skips_production_file_handler(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_lifespan_connect_soft_degrade_on_single_bot_failure(monkeypatch):
-    """单 bot start 抛 RuntimeError → 跳过该 bot，其余 4 bot 正常起，不阻断 uvicorn。
+    """单 bot start 抛 RuntimeError → 跳过该 bot，其余 bot 正常起，不阻断 uvicorn。
 
     物理意图（spec §3.1 软降级）：配置缺失（unified_app_id 未填等）抛 RuntimeError
     （见 connect_manager.build_cmd 的身份闸），lifespan 须跳过该 bot 继续起其余，
-    与 engine/training_orchestrator 同源软降级范式（装配失败不阻断 uvicorn）。
+    与 engine 同源软降级范式（装配失败不阻断 uvicorn）。
     """
     from broadcast.__main__ import CONNECT_BOTS
     from fastapi import FastAPI
@@ -136,28 +132,29 @@ async def test_lifespan_connect_soft_degrade_on_single_bot_failure(monkeypatch):
     monkeypatch.delenv("QUANTER_TESTING", raising=False)
     app = FastAPI()
     stack, start_mock, stop_mock, _eng = _mock_lifespan_dependencies()
-    # 覆盖 start：review bot 抛 RuntimeError（模拟配置缺失），其余正常
+    # 覆盖 start：首个 bot 抛 RuntimeError（模拟配置缺失），其余正常
+    _fail_bot = sorted(CONNECT_BOTS)[0]
     started_bots = []
 
     def _fake_start(bot, cfg, defaults):
-        if bot == "review":
-            raise RuntimeError("配置缺失：缺 REVIEW_BOT_UNIFIED_APP_ID")
+        if bot == _fail_bot:
+            raise RuntimeError(f"配置缺失：缺 {cfg['unified_env']}")
         started_bots.append(bot)
         return "started"
 
     start_mock.side_effect = _fake_start
     with stack:
         async with lifespan(app):
-            # review 失败跳过，其余 4 bot 正常起
-            assert "review" not in started_bots
-            assert set(started_bots) == set(CONNECT_BOTS.keys()) - {"review"}
-            # app.state.connect_bots 不含 review（失败的不记录）
-            assert "review" not in app.state.connect_bots
-            assert set(app.state.connect_bots) == set(CONNECT_BOTS.keys()) - {"review"}
+            # 失败 bot 跳过，其余 bot 正常起
+            assert _fail_bot not in started_bots
+            assert set(started_bots) == set(CONNECT_BOTS.keys()) - {_fail_bot}
+            # app.state.connect_bots 不含失败 bot（失败的不记录）
+            assert _fail_bot not in app.state.connect_bots
+            assert set(app.state.connect_bots) == set(CONNECT_BOTS.keys()) - {_fail_bot}
 
-    # 软降级核心断言：review 抛异常但 lifespan 未传播（async with 正常退出），
-    # 其余 4 bot 仍被 start（start 总调用次数=5，含失败的那次）
-    assert start_mock.call_count == len(CONNECT_BOTS)   # 5（review 也被尝试调用过）
+    # 软降级核心断言：失败 bot 抛异常但 lifespan 未传播（async with 正常退出），
+    # 其余 bot 仍被 start（start 总调用次数=全部 bot 数，含失败的那次）
+    assert start_mock.call_count == len(CONNECT_BOTS)
 
 
 @pytest.mark.asyncio
@@ -178,7 +175,7 @@ async def test_lifespan_stops_connect_bots_on_shutdown(monkeypatch):
     stack, start_mock, stop_mock, _eng = _mock_lifespan_dependencies()
     with stack:
         async with lifespan(app):
-            # startup 已填充 app.state.connect_bots（5 bot）
+            # startup 已填充 app.state.connect_bots（全部 bot）
             assert app.state.connect_bots == list(CONNECT_BOTS.keys())
             stop_mock.reset_mock()              # 清掉无关调用，专注 shutdown 段
         # 退出 async with → shutdown 段跑完

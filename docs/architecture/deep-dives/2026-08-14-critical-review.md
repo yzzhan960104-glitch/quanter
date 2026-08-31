@@ -160,6 +160,7 @@
 - `POST /api/v1/auth/read-cookie`（G2 补的「设置侧」死端，`main.py:684`）**全前端无人调用**——`TerminalLogs.vue:60` 直接 `new EventSource`。dry_run 无碍；**live 配 token 那天，综合看板日志面板静默 401**。G2 修了后端半截，前端半截悬空。
 - `/macro/sector/flow` 后端自述「sectors 恒空（数据源已退役）…彻底下线待前端确认后移除」（`macro.py:46-48`）——宏观驾驶舱板块图**结构性永远空态**，双向搁置。
 - 孤儿路由：training 5 端点 + research proposals 5 端点 + `/ops/processes` + `/review/diagnose` 后端健在、前端 facade 缺失（router 自述「重建需配套 training.ts facade」）。
+  **〔2026-08-31 状态注记〕**本条所列写端点已全量退役删除（用户裁决，逆转 2026-08-15 CR-8 ③的保留处置）：training/proposals POST/review/diagnose/data sync 整删，钉钉人审桥与 training loop 状态机连根退役；后端收敛纯只读，全库唯一 POST = `/auth/read-cookie`。详见 docs/architecture/06-tech-debt.md CR-8 行。
 
 ### CR-9（Medium·元治理）：三套工单体系状态失同步
 

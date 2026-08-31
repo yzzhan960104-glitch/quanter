@@ -27,8 +27,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from presentation.server.http.config import CORS_ORIGINS, LOG_CONFIG
 from presentation.server.http._responses import StrictJSONResponse
-# API 鉴权依赖（B-1）：挂在敏感 router（trading/training/data/review/ops）上，
-# DG-G2 fail-closed——live 模式无 token 硬拒（防默认裸奔），dry_run 放行（开发/CI）。
+# API 鉴权依赖（B-1）：require_write 挂 POST /auth/read-cookie（SSE cookie 握手）与
+# ops router 上；require_read_cookie 挂 logs/gm。DG-G2 fail-closed——live 模式无 token
+# 硬拒（防默认裸奔），dry_run 放行（开发/CI）。
+# （training/review 路由与 data/research 的 POST 写端点已随 2026-08-31 写端点全量退役删除，
+# 后端收敛为纯只读服务——全库唯一 POST = /api/v1/auth/read-cookie。）
 from presentation.server.http.auth import (
     _configured_token,
     require_read_cookie,
@@ -45,16 +48,13 @@ from presentation.server.api.v1.gm import router as gm_router
 # 宏观/板块/因子只读端点（T16）：读内存湖 + CreditRegime，零写入，
 # 供给前端驾驶舱（T17 /dashboard）宏观灯/信贷曲线/板块流/ATR 四视图。
 from presentation.server.api.v1.macro import router as macro_router
-# 实盘交易（优雅降级真接 QMT；无 xtquant/缺凭证时 /status 返 unavailable，不阻断 lifespan）
-# AI 参数训练 loop 路由（Spec 3 Task 6）：start/get/list/submit_review 四端点，
-# 驱动 orchestrator 状态机（CREATED→RUNNING→ANALYZING→AWAITING_REVIEW→…→DONE）。
-# 钉钉审核进程内调 handler 不走 HTTP；此 router 仅对外暴露状态查询 + 启停 + 审核提交。
-from presentation.server.api.v1.training import router as training_router
-# 数据湖资产路由（层级一）：扫描 parquet mtime + 哨兵推导状态，触发同步起 daemon 子进程
+# 实盘交易路由已退役（2026-08-27 · QMT 退役 P3）；训练 loop 路由已退役
+# （2026-08-31 写端点全量退役，training.py 整删）。
+# 数据湖资产路由（层级一）：扫描 parquet mtime + 哨兵推导状态（只读；
+# sync 写端点已随 2026-08-31 退役删除，同步由 lifespan sweep/pipeline 编排）
 from presentation.server.api.v1.data import router as data_router
-# AI 复盘路由（层级六）：GLM 调用 + 三级降级，CPU/网络阻塞走线程池
-from presentation.server.api.v1.review import router as review_router
-# Phase C 研究提案路由（2026-08-03）：Agent 提案生成/验证/钉钉审批/发布桥。
+# Phase C 研究提案路由（2026-08-03）：只读提案列表（generate/verify/publish 等
+# 写端点已随 2026-08-31 退役删除，引擎由 digest cron 直调驱动）。
 from presentation.server.api.v1.research import router as research_router
 from presentation.server.api.v1.discovery import router as discovery_router
 # 通知装配：Telegram/企微/钉钉三通道按凭证装配，缺凭证跳过对应通道
@@ -364,36 +364,9 @@ async def lifespan(app: FastAPI):
             "lifespan 装配周度回测提交线程异常（已忽略，播报新鲜度降级为只读）"
         )
 
-    # 启动：训练 loop 编排器 + webhook 推报告 notifier（Spec 3 Task 7）
-    # Why 寄生 uvicorn（合「零守护进程」哲学）：orchestrator daemon 线程寄生主进程，
-    # 非独立 Celery/PM2。与上面 replay_scheduler / data sweep 同源。
-    # （dws-migration Task 4 后不再起 dingtalk-stream 审核机器人；@审核改走 dws 桥，
-    # 见下方装配块注释。）
-    # Why try/except 不阻断：凭证缺/库异常不应让整个 API 起不来——orchestrator 缺席时 training
-    # API 端点返 503/空状态，但 uvicorn 仍可起（其他业务不受影响）。重启恢复靠 reset_interrupted()
-    # 把残留 RUNNING/ANALYZING → STOPPED（进程崩溃/重启时清理半成品 loop）。
-    # 凭证软降级：REVIEW_* 未配 → _NoopNotifier（loop 可跑但无推送）。
-    try:
-        from backtest.optimize import training_loops_db
-        from backtest.optimize.training_loop import TrainingLoopOrchestrator
-        from backtest.optimize.training_dingtalk import (
-            ReviewBotConfig,
-            DingTalkNotifier,
-            _NoopNotifier,
-        )
-        training_loops_db.init_db()                       # 建 training_loops 表（幂等）
-        training_loops_db.reset_interrupted()             # 重启恢复：残留 RUNNING/ANALYZING → STOPPED
-        _review_cfg = ReviewBotConfig.from_env()          # 凭证齐返 cfg，否则 None
-        _notifier = DingTalkNotifier(_review_cfg) if _review_cfg is not None else _NoopNotifier()
-        app.state.training_orchestrator = TrainingLoopOrchestrator(_notifier)
-        app.state.training_orchestrator.start_daemon()    # daemon 线程跑 _loop 状态机
-        # @审核消息已改走 dws dev connect 桥（dingtalk_review_bridge.py →
-        # POST /api/v1/training/review），不再在此起 dingtalk-stream 审核机器人。
-        # 此处仅装配 webhook 推报告 notifier + orchestrator daemon，@接收由 dws 桥负责。
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "lifespan 装配训练 loop 异常（已忽略，training API 将降级）"
-        )
+    # （训练 loop 编排器装配块已随 2026-08-31 写端点全量退役删除：三个 POST
+    # start/stop/review 是状态机唯一驱动入口，路由删除后装配即死守护线程；
+    # training_loop.py / training_dingtalk.py / training_loops_db.py 整删。）
 
     # 启动：加载 symbol→企业名映射（#1，Tushare pro.stock_basic 全量，降级返 symbol）
     # Why 同步加载（非 daemon 线程）：stock_basic 一次 <1MB 快，且 list_plans 首请求需 symbol_name
@@ -485,14 +458,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("ops_sched 装配异常（已忽略）")
 
-    # C-7 V1：broadcast connect 收编进 lifespan（5 CONNECT_BOTS）。
+    # C-7 V1：broadcast connect 收编进 lifespan（4 CONNECT_BOTS，review bot 已随
+    # 2026-08-31 写端点退役下线）。
     # 物理意图（spec §3.1）：start_all step ② connect 编排移此处，软降级（单 bot
     # 失败不阻断 uvicorn）。live reload=False（C-5 V1）不 reload，connect 不抖动。
-    # 与上方 engine/training_orchestrator 同源软降级范式——装配失败仅记日志不传播。
+    # 与上方 engine 同源软降级范式——装配失败仅记日志不传播。
     # app.state.connect_bots：记录已起 bot，供 shutdown stop 对偶（树杀 dev connect +
     # Claude Code 子进程，防资源泄漏）。
     try:
-        # A5（P1-2）：dev/测试实例不随服务器拉起 5 个 connect bot——dev.py 显式注入
+        # A5（P1-2）：dev/测试实例不随服务器拉起 4 个 connect bot——dev.py 显式注入
         # QUANTER_DEV_SKIP_CONNECT_BOTS=1；pytest 用 QUANTER_TESTING=1。否则每个
         # dev 起停都带 5 个 bot 起停（08-05 日志 taskkill 30s 超时实证），且测试会
         # 拉起真 bot 污染环境。
@@ -509,7 +483,7 @@ async def lifespan(app: FastAPI):
             from broadcast.__main__ import CONNECT_BOTS, CONNECT_DEFAULTS
             from broadcast import connect_manager
             started_bots: list[str] = []
-            for _bot in CONNECT_BOTS:            # cli/trading_q/data_q/strategy_q/review
+            for _bot in CONNECT_BOTS:            # cli/trading_q/data_q/strategy_q
                 try:
                     connect_manager.start(_bot, CONNECT_BOTS[_bot], CONNECT_DEFAULTS)
                     started_bots.append(_bot)
@@ -532,7 +506,7 @@ async def lifespan(app: FastAPI):
     # 物理意图（spec §3.2）：discovery 从 schtasks DAILY 02:00 收编到 engine.sched
     # AsyncIOScheduler，触发 _run_discovery_subprocess（DETACHED 子进程跑 cli daemon）。
     # 软降级：engine 未装配（None）/ 影子期未 start sched / add_job 抛异常 → 跳过，
-    # 不阻断 uvicorn（与上方 engine/training/connect 同源软降级范式）。
+    # 不阻断 uvicorn（与上方 engine/connect 同源软降级范式）。
     # Why getattr 防御：engine 装配块 try/except 隔离，极端失败时 state 上可能无
     # trading_engine——cron 注册必须对「未装配」也安全。
     try:
@@ -639,7 +613,7 @@ async def lifespan(app: FastAPI):
     # 物理意图：生产机不 7x24，offline 跨 18:00 pipeline / 09:22 pre_open 时，启动补跑
     # 到「当前可用的一致态」（采集→data_ready→eod→brief + pre_open 窗口内补挂）。
     # 仅 engine 已 start（sched.running）时触发——影子期不足 scheduler 缺席，补跑无意义。
-    # 软降级：创建异常不阻断 uvicorn（与上方 engine/training/connect/discovery 同范式）。
+    # 软降级：创建异常不阻断 uvicorn（与上方 engine/connect/discovery 同范式）。
     # C-8 全 job 启动补跑已随引擎退役（2026-08-27 · QMT 退役 P3）——其中交易侧
     # （pre_open 窗口补挂）随之作废；数据侧 offline 补跑缺口列为已知项（方案 §P3
     # 遗留：重启若跨 18:00，当日数据链靠次日 pipeline 自然接续或手动
@@ -691,22 +665,17 @@ async def lifespan(app: FastAPI):
     _pool = getattr(app.state, "replay_pool", None)
     if _pool is not None:
         _pool.shutdown(wait=False)
-    # 销毁：训练 loop daemon（Spec 3 Task 7）。@审核 stream 已在 dws-migration Task 4 删除，
-    # 不再有 review_bot_task 需要 cancel，shutdown 仅停 orchestrator daemon 线程。
-    # Why getattr 防御：lifespan 装配块 try/except 隔离，装配失败时 state 上无此属性；
-    # shutdown 路径必须对「未装配」也安全（不能因 training 装配失败而让整个 shutdown 崩）。
-    # stop_daemon 设 daemon 线程 stop 标志（线程自行退出，不 join 阻塞 uvicorn 退出）。
-    _orch = getattr(app.state, "training_orchestrator", None)
-    if _orch is not None:
-        _orch.stop_daemon()
+    # （训练 loop orchestrator daemon 的 stop_daemon 已随 2026-08-31 写端点全量
+    # 退役删除——装配块同删，state 上不再有 training_orchestrator。）
 
 
 # ============ 创建应用 ============
 app = FastAPI(
     title="Quanter 量化回测平台",
     description=(
-        "量化交易驾驶舱 API：宏观/板块/数据湖只读视图 + 实盘交易 + AI 复盘。"
-        "（HMM 组合回测已在蔡森专精化 Phase 1·Task 5 移除）"
+        "量化交易驾驶舱 API：宏观/板块/数据湖/掘金终端只读观测视图。"
+        "（2026-08-31 写端点全量退役后为纯只读服务，全库唯一 POST = auth/read-cookie；"
+        "HMM 组合回测已在蔡森专精化 Phase 1·Task 5 移除，实盘交易路由已于 QMT 退役 P3 移除）"
     ),
     version="2.0.0",
     lifespan=lifespan,
@@ -720,11 +689,13 @@ app = FastAPI(
 # 开发阶段允许前端 Vite dev server 跨域访问后端 API
 # 【B-1】allow_methods 收敛为实际使用的谓词（不再 "*"，配合 allow_credentials=True
 # 缩小跨域攻击面）；allow_origins 读 CORS_ORIGINS 白名单（仅本地 dev 端口）。
+# 2026-08-31 写端点退役后再收一档：GET=全部只读端点，POST 仅为 /auth/read-cookie
+# cookie 握手 + CORS 预检，PUT/PATCH/DELETE 已无任何端点消费。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],      # 允许所有请求头（含 Authorization Bearer）
 )
 
@@ -738,23 +709,16 @@ app.include_router(logs_router, prefix="/api/v1", dependencies=[Depends(require_
 # 宏观/板块/因子只读端点：四端点全部只读内存湖，无网络/无写入，
 # 缺数据湖时端点内部短路返空结构（离线降级），不阻断 lifespan。
 app.include_router(macro_router, prefix="/api/v1")
-# 实盘交易路由（优雅降级真接 QMT；lifespan 不自动 connect，单例 lazy 构造）
-# 【B-1/DG-G2】路由级鉴权：下单/熔断/连接等敏感端点强制 require_write——
-# live 模式无 token fail-closed 拒（401），dry_run 放行（开发/CI 不阻断）。
-# trading_router 已退役（2026-08-27 · QMT 退役 P3）——掘金为唯一实盘平台
-# AI 参数训练 loop（Spec 3 Task 7）：start/get/list/submit_review 四端点。
-# 训练提交/审核提交是写操作（落库 + 触发回测子进程），路由级鉴权保护；
-# 钉钉审核 handler 进程内调 orchestrator 不走 HTTP，不受 require_write 限制。
-app.include_router(training_router, prefix="/api/v1", dependencies=[Depends(require_write)])
-# 数据湖资产（层级一）：纯字典注册表 + 文件系统状态推导，零守护进程，不阻断 lifespan
-# sync 端点可起同步子进程/落盘，路由级鉴权保护。
-app.include_router(data_router, prefix="/api/v1", dependencies=[Depends(require_write)])
-# AI 复盘（层级六）：GLM 调用 + 三级降级（缺凭证/调用失败/无数据均不阻断）
-# diagnose 触发外部 LLM 调用（成本/滥用面），路由级鉴权保护。
-app.include_router(review_router, prefix="/api/v1", dependencies=[Depends(require_write)])
-app.include_router(research_router, prefix="/api/v1", dependencies=[Depends(require_write)])
+# 实盘交易路由已退役（2026-08-27 · QMT 退役 P3）——掘金为唯一实盘平台。
+# 训练 loop / AI 复盘路由已退役（2026-08-31 写端点全量退役）——training.py /
+# review.py 整删，后端收敛为纯只读服务。
+# 数据湖资产（层级一）：纯字典注册表 + 文件系统状态推导，零守护进程，不阻断 lifespan。
+# 只剩 GET /datasets（sync 写端点已删），对齐 discovery 只读不挂写鉴权先例。
+app.include_router(data_router, prefix="/api/v1")
+# 研究提案（Phase C）：只剩 GET /proposals 只读列表（写端点已删），同上不挂写鉴权。
+app.include_router(research_router, prefix="/api/v1")
 # P3 参数发现敏感性分析：纯只读端点（读 discovery DB + 纯函数），**不挂** require_write——
-# 分析结果不应被写权限误伤（spec §4.2）；research_router 的 proposal 写端点保持写鉴权。
+# 分析结果不应被写权限误伤（spec §4.2）。
 app.include_router(discovery_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1", dependencies=[Depends(require_write)])
 # 掘金终端只读观测代理（W4-B，2026-08-28 评审）：cockpit 三卡数据源——7002 网关

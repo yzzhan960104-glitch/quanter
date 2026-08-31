@@ -41,7 +41,7 @@
 │  API 路由：          │          │  · RoundCard (轮次档案)    │
 │  /api/v1/gm/*      │          │  · AuditExplorer (事件流)  │
 │  /api/v1/research/* │          │                             │
-│  /api/v1/trading/* │          │                             │
+│  (只读)             │          │                             │
 └─────────┬───────────┘          └─────────────────────────────┘
           │
           ▼
@@ -82,9 +82,9 @@
 | ops_gm_ab_compare | 双腿 A/B 对照 | cron 15:50 |
 | ops_audit_ssot | 7 项 SSOT 巡检 | cron 16:05 |
 | ops_gm_guard | 终端/策略进程看护 | interval 5min |
-| broadcast connect | 5 个钉钉 bot 连接 | 随 lifespan |
+| broadcast connect | 4 个钉钉 bot 连接（review 人审 bot 已随 2026-08-31 写端点退役下线） | 随 lifespan |
 
-**API 路由**（`/api/v1/`前缀，挂载层统一 `require_read_cookie` 鉴权）：
+**API 路由**（`/api/v1/`前缀；gm/logs 走 `require_read_cookie` cookie 鉴权，discovery/macro/data/research 为纯只读不挂写鉴权，ops 挂 Bearer。2026-08-31 写端点全量退役后，全库唯一 POST = `/auth/read-cookie`）：
 
 | 路由组 | 功能 | 数据源 |
 |---|---|---|
@@ -214,15 +214,17 @@ discovery/digest 同范式——server 重启不杀正在跑的子进程。
         │
         ▼ FastAPI /api/v1/gm/* （只读代理，token 只活在 server 进程）
         │
-        ▼ Axios (client.ts → VITE_API_TOKEN → require_read_cookie)
+        ▼ Axios (client.ts Bearer → POST /auth/read-cookie 换 cookie → require_read_cookie)
         │
         ▼ Vue 组件（按 leg 参数切换数据源）
         │
         ▼ ECharts / Element Plus 渲染
 ```
 
-**鉴权**：前端 `VITE_API_TOKEN`（.env）→ 请求头 Cookie → server `require_read_cookie`
-校验 → 掘金 token 绝不进前端 bundle（内网假设不扩散到终端 token）。
+**鉴权**：前端 `VITE_API_TOKEN`（.env）→ Bearer 调 `POST /api/v1/auth/read-cookie` 换
+HttpOnly cookie `quanter_ro` → gm/logs/SSE 走 cookie 鉴权（`require_read_cookie`）；
+掘金 token 绝不进前端 bundle（内网假设不扩散到终端 token）。写端点已随 2026-08-31
+全量退役，后端为纯只读服务。
 
 ### 3.5 构建与部署
 
@@ -317,7 +319,7 @@ E:\quanter\
 ├── presentation/
 │   ├── server/                  # FastAPI 后端
 │   │   ├── main.py             #   app + lifespan + ops_sched
-│   │   └── api/v1/              #   路由（gm/research/trading）
+│   │   └── api/v1/              #   路由（gm/research/data/macro/discovery/ops/logs，纯只读）
 │   └── web/                     # Vue3 前端
 │       └── src/
 │           ├── views/           #   页面视图

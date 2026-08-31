@@ -12,7 +12,8 @@ fast gate 清单（秒~分钟级，push 必跑）：
     ④ 前端类型检查 vue-tsc          —— web 类型守门（防 TS 类型回归）
 
 不在 fast gate（慢、需服务编排，文档另述手动跑法）：
-    - E2E（Playwright）：tests/e2e/caisen_token_path.py + with_server.py，本地按需手跑。
+    - E2E（Playwright）：原 tests/e2e/caisen_token_path.py + with_server.py 已随
+      caisen 形态退役删除（commit 76cec71b），无现存 E2E 套件。
 
 设计（反黑盒 / 跨平台）：
     - 纯标准库，零新依赖；sys.executable 跑 Python 类检查（规避「多解释器错位」——曾踩 playwright

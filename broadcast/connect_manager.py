@@ -7,15 +7,17 @@
 命令组装（spec §4.3）：
 - claudecode 类：dws dev connect --unified-app-id <env> --channel claudecode
   --agent-memory --agent-approval-mode ask --allowed-users <env> --agent-workdir <env>
-- custom 类（review）：dws dev connect --unified-app-id <env> --channel custom
+- custom 类：dws dev connect --unified-app-id <env> --channel custom
   --agent-cmd "<agent_cmd>" --allowed-users <env>
+（custom 分支为通用机制保留——历史唯一消费者 review 桥已随 2026-08-31
+写端点全量退役下线，当前 CONNECT_BOTS 四 bot 全为 claudecode 类。）
 
 安全底线（spec R3 / C2）：approval_mode 永远取 defaults["approval_mode"]="ask"，
 本模块不接受 cfg 覆盖——省略 = 钉钉一句话驱动本机 Claude Code 自动改代码/跑高危命令。
 
 cwd 锁根（spec R6 / C4）：start() 在 Popen 时显式传 cwd=PROJECT_ROOT，
 化解 start_dingtalk_bots.md「dws cwd 非项目根、相对 agent_cmd 踩坑」教训——
-dev connect 继承项目根 cwd，review 的相对 agent_cmd 才能找到 python.exe 与桥脚本。
+dev connect 继承项目根 cwd，custom 类的相对 agent_cmd 才能可靠解析。
 """
 from __future__ import annotations
 
@@ -88,7 +90,7 @@ def build_cmd(bot: str, cfg: dict, defaults: dict) -> list[str]:
         if workdir:
             cmd += ["--agent-workdir", workdir]
     elif cfg["channel"] == "custom":
-        # custom 类：agent-cmd 喂业务脚本（review 桥）；相对路径靠 Popen cwd 锁根（C4）
+        # custom 类：agent-cmd 喂业务脚本；相对路径靠 Popen cwd 锁根（C4）
         cmd += ["--agent-cmd", cfg["agent_cmd"]]
         cmd += ["--allowed-users", allowed]
     else:

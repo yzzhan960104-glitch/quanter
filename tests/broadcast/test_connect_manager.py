@@ -8,11 +8,13 @@ from __future__ import annotations
 import broadcast.connect_manager as cm
 
 # ── fixture：等价 Task 3 的 CONNECT_BOTS / CONNECT_DEFAULTS（本任务先用字面量）──
+# （custom 类历史唯一消费者 review 桥已随 2026-08-31 写端点退役下线，
+#   custom 分支作为 connect_manager 通用机制保留，此处用占位 cfg 验证组装。）
 CLS_CFG = {"unified_env": "CLI_BOT_UNIFIED_APP_ID", "channel": "claudecode"}
 CUSTOM_CFG = {
-    "unified_env": "REVIEW_BOT_UNIFIED_APP_ID",
+    "unified_env": "MYBOT_UNIFIED_APP_ID",
     "channel": "custom",
-    "agent_cmd": ".venv310/Scripts/python.exe infra/tools/dingtalk_review_bridge.py",
+    "agent_cmd": ".venv310/Scripts/python.exe infra/tools/some_agent.py",
 }
 DEFAULTS = {
     "allowed_users_env": "DINGTALK_ALLOWED_STAFF_IDS",
@@ -43,11 +45,11 @@ def test_build_cmd_claudecode(monkeypatch):
     assert "--agent-workdir" in cmd and "E:/quanter" in cmd
 
 
-def test_build_cmd_custom_review(monkeypatch):
-    """custom 类（review）：channel=custom + agent-cmd 相对路径（C4），无 workdir/memory。"""
-    monkeypatch.setenv("REVIEW_BOT_UNIFIED_APP_ID", "e2695383-6fe9-4617-9439-2a8538af3107")
+def test_build_cmd_custom(monkeypatch):
+    """custom 类：channel=custom + agent-cmd 相对路径（C4），无 workdir/memory。"""
+    monkeypatch.setenv("MYBOT_UNIFIED_APP_ID", "e2695383-6fe9-4617-9439-2a8538af3107")
     monkeypatch.setenv("DINGTALK_ALLOWED_STAFF_IDS", "staff001")
-    cmd = cm.build_cmd("review", CUSTOM_CFG, DEFAULTS)
+    cmd = cm.build_cmd("mybot", CUSTOM_CFG, DEFAULTS)
     assert "--channel" in cmd and "custom" in cmd
     assert "--agent-cmd" in cmd
     assert cmd[cmd.index("--agent-cmd") + 1] == CUSTOM_CFG["agent_cmd"]  # 相对路径原样

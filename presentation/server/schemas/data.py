@@ -2,7 +2,8 @@
 """层级一·数据湖资产的 Pydantic 契约。
 
 - DatasetAsset：单条数据集资产（GET /data/datasets 返回项，前端表格直接消费）。
-- SyncResponse：触发同步的响应（POST /data/sync/{key}）。
+- DatasetListResponse：列表响应包装。
+（SyncResponse 已随 2026-08-31 写端点退役删除。）
 
 设计原则：
 - 字段全部 JSON 可序列化；时间用 ISO 字符串，缺失用 None（前端容错展示 '—'）。
@@ -29,13 +30,6 @@ class DatasetAsset(BaseModel):
     data_end: Optional[str] = None      # 最新数据日（ISO；同上）
     latest_sync: Optional[str] = None   # 最近一次同步时刻（parquet mtime ISO；缺失则 None）
     last_error: Optional[str] = None    # 失败原因（status=failed 时填，stderr 尾部）
-
-
-class SyncResponse(BaseModel):
-    """POST /data/sync/{key} 响应。"""
-    key: str
-    status: DatasetStatus               # 触发后恒为 syncing（key 非法由路由层转 404）
-    message: str
 
 
 class DatasetListResponse(BaseModel):

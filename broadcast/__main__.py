@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """每日播报 CLI 入口（一期观测运营层 · `python -m broadcast`）。
 
-机器人总管（一期）：push 播报类 3 个 + connect 对话类 5 个
+机器人总管（一期）：push 播报类 3 个 + connect 对话类 4 个
   - push   ：trading / data / strategy（一次性 schtasks 触发，本模块 push 主流程）
-  - connect：cli / trading_q / data_q / strategy_q / review（dev connect 后台常驻，
-             由 connect_manager 管理，Task 4 接入 CLI 子命令路由）
+  - connect：cli / trading_q / data_q / strategy_q（dev connect 后台常驻，
+             由 connect_manager 管理，Task 4 接入 CLI 子命令路由；
+             review bot 已随 2026-08-31 写端点全量退役下线）
 
 B4（2026-08-05）播报幂等收敛 job_ledger 单口：
   - 旧：`logs/.last_<bot>_brief` 文件（每 bot 独立，同日不重发）
@@ -64,14 +65,14 @@ SUPPORTED_BOTS = tuple(PUSH_BOTS.keys())  # ("trading","data","strategy")
 # 对话类（connect）：dws dev connect 后台常驻，broadcast connect --start 拉起
 #   unified_env：.env 中该机器人 unified-app-id（dev connect 建联用）
 #   channel    ：claudecode=对话（dev connect 自动拉 Claude Code）/ custom=业务脚本
-#   agent_cmd  ：仅 channel=custom 的 review 有；相对路径靠 connect_manager.Popen cwd 锁根
+# （review bot——唯一的 custom channel——已随 2026-08-31 写端点全量退役下线：
+#   桥脚本 dingtalk_review_bridge.py 与其转发的 /training/review、
+#   /research/proposals/review 两写端点同批整删。）
 CONNECT_BOTS = {
     "cli":         {"unified_env": "CLI_BOT_UNIFIED_APP_ID",      "channel": "claudecode"},  # yzzhanCli通用
     "trading_q":   {"unified_env": "TRADING_BOT_UNIFIED_APP_ID",  "channel": "claudecode"},  # quanter交易
     "data_q":      {"unified_env": "DATA_BOT_UNIFIED_APP_ID",     "channel": "claudecode"},  # quanter数据
     "strategy_q":  {"unified_env": "STRATEGY_BOT_UNIFIED_APP_ID", "channel": "claudecode"},  # quanter策略
-    "review":      {"unified_env": "REVIEW_BOT_UNIFIED_APP_ID",   "channel": "custom",
-                    "agent_cmd": ".venv310/Scripts/python.exe infra/tools/dingtalk_review_bridge.py"},  # yzzhan参数优化
 }
 # claudecode 类共用的 dev connect 启动参数（DRY，不每 bot 重复）
 CONNECT_DEFAULTS = {
@@ -710,7 +711,7 @@ def _main_connect(argv: list[str]) -> int:
 
 
 def _connect_start(target: str) -> int:
-    """拉起 connect 机器人。target='all' 需二次确认（防误启 5 个 Claude Code 实例）。"""
+    """拉起 connect 机器人。target='all' 需二次确认（防误启 4 个 Claude Code 实例）。"""
     bots = list(CONNECT_BOTS) if target == "all" else [target]
     for b in bots:
         if b not in CONNECT_BOTS:

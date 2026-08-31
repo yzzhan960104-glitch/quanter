@@ -3,20 +3,22 @@
 
 端点：
 - GET  /api/v1/data/datasets        列出全部数据集资产（前端表格数据源）
-- POST /api/v1/data/sync/{key}      触发某数据集同步（写哨兵 + 后台子进程）
 
 设计原则（与 strategies/trading 路由同纪律）：
 - 路由层只做参数校验 + 调 service + 异常转 HTTP；业务逻辑全在 data_service。
 - list_datasets 纯读文件系统 + 内存湖，无阻塞 IO，直接同步返回（不走 run_in_threadpool）。
-- trigger_sync 仅写哨兵 + 起 daemon 线程（毫秒级），亦直接返回。
 - 使用 response_model 暴露 Pydantic 契约（OpenAPI 可见，前端类型对齐有据）。
+
+历史：POST /sync/{key} 已随 2026-08-31 写端点全量退役删除——手动触发入口早在
+DataLakeView 撤「立即同步」时已无消费者，同步统一由 lifespan 启动 sweep 与
+18:00 pipeline 事件链编排（data_service.trigger_sync 保留，非 HTTP 驱动）。
 """
 import logging
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
-from presentation.server.schemas.data import DatasetAsset, SyncResponse
+from presentation.server.schemas.data import DatasetAsset
 from presentation.server.services import data_service
 
 logger = logging.getLogger(__name__)
@@ -31,16 +33,3 @@ async def list_datasets() -> List[DatasetAsset]:
     data_start/data_end/latest_sync/last_error（前端 DataLakeView 表格直接消费）。
     """
     return data_service.list_datasets()
-
-
-@router.post("/sync/{key}", response_model=SyncResponse, summary="触发某数据集同步")
-async def trigger_sync(key: str) -> SyncResponse:
-    """写 .syncing/{key} 哨兵 + 后台 daemon 子进程跑 sync 脚本，立即返回 syncing。
-
-    幂等：syncing 中重复触发直接返回 syncing，不二次派发（防 parquet 互覆盖）。
-    key 未登记 → 404。
-    """
-    try:
-        return SyncResponse(**data_service.trigger_sync(key))
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))

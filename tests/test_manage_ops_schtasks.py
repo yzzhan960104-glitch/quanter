@@ -180,10 +180,15 @@ def test_register_audit_creates_daily_task():
 
 
 def test_register_audit_not_in_cleanup_lists():
-    """CR-7 红线：QuanterAudit 是活跃任务，绝不可进 RETIRED/LEGACY 清退清单——
-    register()/unregister() 兜底清退迭代这两份名单，误列入会把巡检调度删成静默裸奔。"""
+    """W9（2026-08-30 用户裁决）终态锁：QuanterAudit 已随掘金运维六 schtasks 全量
+    收编 server lifespan 而【入】RETIRED_TASKS——清退名单在旧机幂等 /Delete 防
+    schtasks 与 lifespan 双轨重复触发（晨检双推/台账双写/guard 双巡检）。本守卫
+    锁死该终态：误从 RETIRED_TASKS 移除 = 旧机可重建 schtasks 双触发；误入
+    LEGACY_TASKS = 语义错位（LEGACY 仅供 --list/--rerun 历史清查）。
+    （CR-7 原始方向「绝不可进清退名单」的前提——QuanterAudit 是活跃 schtasks——
+    已随 W9 收编失效，2026-08-31 订正守卫方向。）"""
     from ops.manage_ops_schtasks import RETIRED_TASKS, LEGACY_TASKS
-    assert "QuanterAudit" not in RETIRED_TASKS
+    assert "QuanterAudit" in RETIRED_TASKS
     assert "QuanterAudit" not in LEGACY_TASKS
 
 

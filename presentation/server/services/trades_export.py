@@ -3,7 +3,8 @@
 
 物理定位：原 trading.gateway_service.export_trades（gateway_service 随 QMT live
 面删除）——实现本体只读 state_store.fill 表（保留面），与券商网关零耦合，故随
-唯一消费者（review_service 复盘）迁入 server/services。
+原消费者（review_service 复盘，已随 2026-08-31 写端点退役删除）迁入
+server/services；现存消费者为 broadcast 播报链。
 
 契约不变（前端下载红线）：
     - 字段顺序 _EXPORT_COLUMNS（timestamp,symbol,direction,shares,price,strategy,

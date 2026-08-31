@@ -14,7 +14,7 @@
     backtest/ 只依赖 trading.compute（离场判定纯函数）/ strategies（颈线法策略本体）
     / data（行情加载）+ stdlib/pandas。严禁 ``import trading.engine |
     trading.orchestrate | execution | broker``——回测不触盘中执行编排、不接券商 I/O。
-    颈线法异步回测链路 intact：optimize.training_loop → tasks_db → worker 内
+    颈线法异步回测链路 intact：optimize（训练驱动已退役）→ tasks_db → worker 内
     neckline 分支调 backtest.replay（策略中立 driver，仅依赖 strategies.base.Strategy）。
 
 公开符号（按子模块分域 re-export）：
@@ -22,7 +22,8 @@
     - 异步任务生命周期：run_replay_worker, ReplayScheduler
     - 任务表 CRUD：init_db, create_task, get_task, list_tasks, ...
     - 历史结果存取：save_run, list_runs, get_run, delete_run
-    - 参数优化子包：backtest.optimize（training_loop/analyzer/loops_db/dingtalk）
+    - 参数优化子包：backtest.optimize（仅存 training_analyzer；
+      training_loop/loops_db/dingtalk 已随 2026-08-31 写端点全量退役删除）
     - 回测撮合模拟器：MockBroker
 """
 from __future__ import annotations
@@ -41,7 +42,8 @@ from backtest.replay import (  # noqa: F401
 
 # ============================================================================
 # 异步任务生命周期（backtest/worker.py + backtest/scheduler.py）
-# 颈线法经 optimize.training_loop → tasks_db → scheduler → worker 跑参数网格。
+# 颈线法经 tasks_db → scheduler → worker 跑参数网格（原 optimize.training_loop
+# 训练驱动已随 2026-08-31 写端点全量退役删除）。
 # ============================================================================
 from backtest.worker import (  # noqa: F401
     run_replay_worker,

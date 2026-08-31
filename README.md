@@ -7,7 +7,7 @@ Quanter 是一套面向 **A 股** 的量化研究平台：以**颈线法形态�
 - **主策略 · 颈线法**：颈线聚集带定位 + 压制时长验证 + 挂单回踩进场 + 分级止盈 + 可选海龟 trailing（`strategies/neckline/`）。策略本体与回测/执行解耦，经 `Strategy` Protocol 注入。
 - **参数发现引擎 · discovery**：Plan 1-4 闭环（L0-L5 可信度），快照冻结 → 2025/2026 holdout 嵌套 OOS → 分层裁判 → Sobol/TPE 搜索 → 帕累托前沿 → daemon 生产入口 → 冠军 publish 至 experiment。已收编进引擎 lifespan cron 02:00 + 启动补跑。CLI `python -m discovery {oos,verify,daemon,publish}`。
 - **实验版本中心 · experiment**：实盘下单的策略版本配置中心，`resolve_active()` 给 scan 发放当前生效的 `(strategy_name, params, weight)` 列表，支持版本切换 + 审计日志 + 权重校验。
-- **回测引擎 · backtest**：`replay` 策略中立回测器 + 异步任务队列（worker/scheduler/tasks_db）+ 参数优化（`optimize/training_*`）+ 回测撮合模拟器（MockBroker）。**单向依赖铁律**：只依赖 `trading.compute`（离场纯函数）+ `strategies` + `data`，严禁触碰 `trading.engine`/`broker`（回测求变、交易求稳，分离防污染）。
+- **回测引擎 · backtest**：`replay` 策略中立回测器 + 异步任务队列（worker/scheduler/tasks_db）+ 回测撮合模拟器（MockBroker）。**单向依赖铁律**：只依赖 `trading.compute`（离场纯函数）+ `strategies` + `data`，严禁触碰 `trading.engine`/`broker`（回测求变、交易求稳，分离防污染）。（原 `optimize/training_loop` 训练 loop 已随 2026-08-31 写端点全量退役删除，仅存 training_analyzer 纯函数。）
 - **实盘自动交易引擎 · trading（二期主线）**：单进程 `python -m trading` → uvicorn lifespan 装配 TradingEngine（APScheduler 六 job），事件链驱动盘后 pipeline、三段 gate 的 pre_open、30s 盘中巡检、盘后对账/熔断，C-8 启动补跑保证生产机不 7x24 时的最终一致性。
 - **数据中心**：Tushare 通用同步器（20+ 数据集，配置驱动），AKShare / JQData 辅助。
 - **后端引擎**：FastAPI（异步）+ 纯 Python 量化内核（Pandas/NumPy 显式向量化，拒绝黑盒）。
@@ -28,13 +28,13 @@ Quanter 是一套面向 **A 股** 的量化研究平台：以**颈线法形态�
 ```
 quanter/
 ├─ 接口层 presentation/         web/+server/ 收编（README §2 语义落地）
-│  ├─ web/                      前端 6 视图(CaisenScreen/ParamLab/Dashboard/LiveCockpit/DataLake/Review)
-│  └─ server/                   FastAPI 应用
-│     ├─ api/v1/                HTTP 路由(caisen·data·macro·review·trading·training·logs + sse)
+│  ├─ web/                      前端 5 视图(Discovery/Dashboard/Cockpit/Experiments/DataLake)
+│  └─ server/                   FastAPI 应用（2026-08-31 写端点全量退役后为纯只读服务）
+│     ├─ api/v1/                HTTP 路由(data·gm·macro·discovery·research·ops·logs + sse)
 │     ├─ services/              应用服务(编排用例,聚合各域)
 │     ├─ schemas/               请求/响应 DTO
 │     ├─ http/                  HTTP 运行时基建(auth/config/_responses)
-│     └─ main.py                app 装配 + lifespan（引擎/discovery/connect/补跑收编点）
+│     └─ main.py                app 装配 + lifespan（调度/connect/补跑收编点）
 │
 ├─ 执行编排层 trading/          实盘执行引擎
 │  ├─ engine.py                 TradingEngine：APScheduler 六 job + 网关自愈 + 熔断
@@ -145,15 +145,14 @@ python -m ops.manage_ops_schtasks --register-server
 1. 装配钉钉/企微/Telegram 通知通道（`build_default_manager`）；
 2. 按 `LAKE_CONFIG["lakes"]` 加载多湖 parquet（缺失离线降级）；
 3. 异步回测调度器（ProcessPoolExecutor concurrency=1 + ReplayScheduler）；
-4. 训练 loop 编排器 + 报告 notifier（`reset_interrupted` 清残留）；
-5. 加载 symbol→企业名映射；
-6. 后台线程扫 stale/missing 数据集并触发补同步；
-7. 三路日志装配（本地文件 + 前端 SSE 流 + 控制台）；
-8. **TradingEngine 装配**：banner → `TradingEngine()` → `bootstrap()`（网关 connect + 成交回报回调注册 + position_book/state_store 建表迁移）→ `eng.start()`（原影子期闸已移除 ADR-16 修订 1，engine 无条件启动）；
-9. **broadcast connect 5 bot** 起常驻（cli/trading_q/data_q/strategy_q/review）；
-10. **discovery cron 每小时+5 分（24h 低功率模式）** 注册进 engine.sched（DETACHED subprocess 跑 daemon）；
-11. **discovery 启动补跑**：检测跨过昨晚 02:00 → 异步补跑（轮次/seed 幂等去重）；
-12. **C-8 全 job 启动补跑**：`asyncio.create_task(run_startup_catchup(engine))`（见 4.4）。
+4. 加载 symbol→企业名映射；
+5. 后台线程扫 stale/missing 数据集并触发补同步；
+6. 三路日志装配（本地文件 + 前端 SSE 流 + 控制台）；
+7. **TradingEngine 装配**：banner → `TradingEngine()` → `bootstrap()`（网关 connect + 成交回报回调注册 + position_book/state_store 建表迁移）→ `eng.start()`（原影子期闸已移除 ADR-16 修订 1，engine 无条件启动）；
+8. **broadcast connect 4 bot** 起常驻（cli/trading_q/data_q/strategy_q；review bot 已随 2026-08-31 写端点退役下线）；
+9. **discovery cron 每小时+5 分（24h 低功率模式）** 注册进 engine.sched（DETACHED subprocess 跑 daemon）；
+10. **discovery 启动补跑**：检测跨过昨晚 02:00 → 异步补跑（轮次/seed 幂等去重）；
+11. **C-8 全 job 启动补跑**：`asyncio.create_task(run_startup_catchup(engine))`（见 4.4）。
 
 ### 4.3 常驻调度与日生命周期
 
@@ -176,7 +175,7 @@ TradingEngine 装配 APScheduler（`max_instances=1` + `misfire_grace_time=300` 
 09:30-11:30 / 13:00-15:00  stop_loss 30s 巡检（止损/TP 补挂/pending 撤单）
 15:30  post_close（对账+兜底+熔断+trailing+超期平仓+清白名单）
 18:00  pipeline 事件链（采集→校验→data_ready→eod 扫信号→brief 播报）
-盘后   研究员在 /review 或钉钉人审确认 T+1 计划（confirmed=True）
+盘后   research digest（18:30）自动生成/验证研究提案并钉钉播报（@回复人审入口已随 2026-08-31 写端点退役）
 ```
 
 关键语义：`_eod` 扫 **T 日** 盘后突破、产 **T+1** 计划（落盘 key = `next_trading_day`），pre_open 读 **today** 的计划——口径全链对齐（C-6 单一时间源 `clock.now/today/trading_day`，杜绝 eod/pre_open key 错位）。
@@ -371,18 +370,17 @@ python data/tools/sync_jqdata_1min.py     # JQData 分钟级(配额双机制防�
 
 默认 `http://127.0.0.1:8000`，API 文档 `/docs`。lifespan 自动装配引擎 + 调度 + 补跑（见 §4）。直接 `uvicorn presentation.server.main:app` 也走同一 lifespan（引擎装配软降级不阻断）；差异仅在 `python -m trading` 会先 `load_dotenv(override=True)` 并强制 live 模式不 reload。
 
-### 9.2 前端（6 视图）
+### 9.2 前端（5 视图）
 
 ```bash
 cd presentation/web && npm run dev
 ```
 
-- `/caisen` —— **形态扫描**：颈线候选 + 颈线/盈亏比/止损可视化。
-- `/param-lab` —— **参数训练**：异步回测 + 参数扫描 + AI 分析。
-- `/dashboard` —— **驾驶舱**（宏观 CTA / CreditRegime 已下线；板块资金流端点保留，前端视图待适配）。
-- `/live` —— **实盘驾驶舱**：QMT 网关持仓/订单/风控（心跳四态 unavailable/disconnected/live/vetoed_by_risk，2s 轮询）。
-- `/data-lake` —— **数据中心**：Tushare 数据集资产表 + 同步触发。
-- `/review` —— **审核**：候选计划 approve/reject + 钉钉远程审核。
+- `/discovery` —— **搜索实验室**：参数发现敏感性分析/热力图/搜索进展（研究第一入口，spec §4 只读）。
+- `/dashboard` —— **驾驶舱**：活跃股池（宏观 CTA / CreditRegime 已下线；板块资金流端点保留）。
+- `/cockpit` —— **综合看板**：掘金双腿观测（资金/持仓/流水/终端日志 SSE/数据健康）。
+- `/experiments` —— **实验对照**：A/B 轮次档案 + 当日对照 + 事件流下钻（只读）。
+- `/data` —— **数据中心**：Tushare 数据集资产表（只读反射；手动同步触发已随 2026-08-31 写端点退役删除）。
 
 ### 9.3 参数发现引擎 CLI（离线入口）
 
@@ -420,7 +418,7 @@ pytest -m e2e_long tests/e2e_long_cycle/   # C1-C7 长周期时序回放（30-90
 | **回测引擎** | ParamLab / CLI | `replay` 策略中立回测 + 异步任务队列 + 参数优化；回测/实盘共用 `decide_exit` |
 | **数据中心** | DataLake | Tushare 20+ 数据集，registry 反射 + 同步状态（healthy/stale）+ 启动 stale sweep |
 | **实盘接入** | LiveCockpit | miniQMT 极速交易（gateway QMT 唯一，EMT 已废弃），网关健康自愈 + 熔断 |
-| **钉钉机器人** | push 3 + connect 5 | push（trading/data/strategy 每日播报）+ connect（cli/trading_q/data_q/strategy_q/review 对话与人审），dws 接入 |
+| **钉钉机器人** | push 3 + connect 4 | push（trading/data/strategy 每日播报）+ connect（cli/trading_q/data_q/strategy_q 对话），dws 接入（review 人审 bot 已随 2026-08-31 写端点退役下线） |
 | **E2E 长周期回放** | `pytest -m e2e_long` | C1-C7 23 日时序回放，真实成交/持仓落表断言 + 报表推送 |
 | ~~宏观驾驶舱~~ | Dashboard | 宏观 CTA / CreditRegime 已下线；板块资金流端点保留 |
 
@@ -461,7 +459,7 @@ specs（设计）/ plans（实现计划）均在 `docs/superpowers/`，按时间
 
 **push 播报类（出站 · 一次性）**：trading / data / strategy 三个机器人，由 pipeline 事件链尾部 `ops/brief_all.py` 串行触发（也可 schtasks 到点 / 手动 `python -m broadcast --bot <bot> --force`），各自独立 robotCode + 幂等文件（`logs/.last_<bot>_brief`，同日不重发；market 行情播报已于 2026-07-26 下线）。
 
-**connect 对话/人审类（dws dev connect 常驻 · 入站）**：cli（yzzhanCli 通用对话）/ trading_q / data_q / strategy_q（claudecode 通道，身份闸 `DINGTALK_ALLOWED_STAFF_IDS` + `--agent-approval-mode ask` 审批闸）+ review（custom 通道 → `infra/tools/dingtalk_review_bridge.py` → `POST /api/v1/training/review` 训练人审）。5 个 bot 由 **lifespan 启动时统一拉起、shutdown 树杀**（C-7 收编）。
+**connect 对话类（dws dev connect 常驻 · 入站）**：cli（yzzhanCli 通用对话）/ trading_q / data_q / strategy_q（claudecode 通道，身份闸 `DINGTALK_ALLOWED_STAFF_IDS` + `--agent-approval-mode ask` 审批闸）。4 个 bot 由 **lifespan 启动时统一拉起、shutdown 树杀**（C-7 收编）。review 人审 bot（custom 通道 → 桥 → `POST /api/v1/training/review`）已随 2026-08-31 写端点全量退役下线。
 
 > 旧 `scripts/start_dingtalk_bots.md` 的手动启动步骤已收编进 lifespan；仅开发/调试场景仍需手动起。
 
