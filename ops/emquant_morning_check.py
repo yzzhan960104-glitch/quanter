@@ -12,6 +12,11 @@
   ④ 盘前已跑：state.pkl 的 last_pre_open_date == 今日（09:31 定时/自愈兜底）；
   ⑤ 账实对账：7002 持仓 symbol 集合 == state.pkl remaining_qty>0 集合（漂移即 WARN）；
   ⑥ 在途单面：7002 unfinished-orders 非空时列出（信息项，不告警——回补/自愈会消化）。
+
+⑦ 今日计划段（2026-09-01「掘金侧计划→播报」桥 · 晨检半场）：GM 侧新信号在
+  09:31 盘前扫描落 audit（formed_at=T-1 完成形态），09:40 时挂单/成交状态已齐
+  ——本段把「今天买什么、按什么价、什么风控位、成交与否」一次播清，对齐旧本地
+  腿 T+1 计划推送的信息位（EOD 15:45 半场=⑤明日持仓预案，两段合璧）。
 """
 from __future__ import annotations
 
@@ -128,6 +133,75 @@ def run_checks(now: datetime | None = None, leg_dir: Path | None = None) -> list
     return checks
 
 
+def _plan_lines(today: str, leg_dir: Path | None = None) -> list[str]:
+    """⑦ 今日计划段：audit 只读解析 SIGNAL→挂单/成交状态（09:31 扫描结果播报）。
+
+    状态判定：POS_ENRICHED/FILL 有 symbol → ✅ 已成交；有 ORDER_PLACED 无成交
+    → ⏳ 在途；仅 SIGNAL → 未挂（拦截/额度/集合竞价未回）。缺 audit 文件=
+    尚未扫描/非交易日 → 「无新信号」占位（不炸，与 _audit_stats 同降级语义）。
+    """
+    import csv
+    src = gc.audit_csv_path(today, leg_dir)
+    signals: list[dict] = []
+    placed: dict[str, dict] = {}
+    filled: set[str] = set()
+    skip_held = 0
+    blocked = 0
+    if src.exists():
+        with src.open(encoding="utf-8", newline="") as fh:
+            for row in csv.reader(fh):
+                if len(row) < 2 or not row[0].startswith(today):
+                    continue
+                ev = row[1]
+                try:
+                    d = json.loads(row[2]) if len(row) > 2 and row[2] else {}
+                except ValueError:
+                    d = {}
+                if ev == "SIGNAL" and d.get("symbol"):
+                    signals.append(d)
+                elif ev == "ORDER_PLACED" and d.get("symbol"):
+                    placed[str(d["symbol"])] = d
+                elif ev in ("POS_ENRICHED", "FILL") and d.get("symbol"):
+                    filled.add(str(d["symbol"]))
+                elif ev == "SIGNAL_SKIP_HELD":
+                    skip_held += 1
+                elif ev == "ORDER_BLOCKED":
+                    blocked += 1
+
+    def _n(v, nd=2):
+        return f"{v:.{nd}f}" if isinstance(v, (int, float)) and v == v else "—"
+
+    names: dict[str, str] = {}
+    if signals:
+        try:
+            from ops.emquant_eod_report import _name_map
+            names = _name_map([str(d["symbol"]) for d in signals])
+        except Exception:
+            names = {}
+
+    out = ["**⑦ 今日计划**（09:31 扫描执行）"]
+    if not signals:
+        out.append("- 今日无新信号（轮动空档日）")
+    for d in signals:
+        sym = str(d.get("symbol", "?"))
+        pl = placed.get(sym)
+        qty_s = (f" ×{int(pl.get('qty') or 0)} @ {_n(pl.get('price'))}"
+                 if pl else "")
+        status = ("✅ 已成交" if sym in filled
+                  else "⏳ 在途" if pl else "· 未挂（拦截/额度）")
+        out.append(f"- **{names.get(sym, '—')}** {sym}{qty_s}"
+                   f"｜颈线 {_n(d.get('neckline'))} · RR {_n(d.get('rr'), 1)}"
+                   f"｜{status}")
+    tail = []
+    if skip_held:
+        tail.append(f"已持有跳过 {skip_held}")
+    if blocked:
+        tail.append(f"拦截 {blocked}")
+    if tail:
+        out.append("- ⏭ " + " · ".join(tail))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="掘金腿晨检（QMT 退役 P0/G-3）")
     p.add_argument("--quiet-ok", action="store_true", help="正常时静默（默认每日播报全绿——2026-08-28 钉钉对齐掘金）")
@@ -161,17 +235,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     # 双腿形态（2026-08-28 双轨 §4.3）：按 active_legs 逐腿六查；exp 未部署时
     # 只有主腿——单腿时代报告形态不变。exp 腿异常同样进 WARN（不静默），报告
-    # 文案带 [实验腿] 标签区分。
+    # 文案带 [实验腿] 标签区分。2026-09-01：每腿追加 ⑦今日计划段（markdown 化）。
     all_bad: list[dict] = []
     reports: list[str] = []
     for leg in gc.active_legs():
         checks = run_checks(now, gc.leg_strategy_dir(leg))
         bad = [c for c in checks if not c["ok"]]
         all_bad.extend({"leg": leg.label, **c} for c in bad)
-        reports.append(f"—— {leg.label} ——\n" + "\n".join(
-            f"{'✅' if c['ok'] else '❌'} {c['name']}: {c['detail']}" for c in checks))
-    report = "\n".join(reports)
-    out = f"掘金晨检 {now:%Y-%m-%d %H:%M}\n{report}"
+        leg_dir = gc.leg_strategy_dir(leg)
+        body = [f"**—— {leg.label} ——**"] + [
+            f"{'✅' if c['ok'] else '❌'} {c['name']}: {c['detail']}" for c in checks]
+        body += [""] + _plan_lines(f"{now:%Y-%m-%d}", leg_dir)
+        reports.append("\n".join(body))
+    report = "\n\n".join(reports)
+    out = f"### 🌅 掘金晨检 · {now:%Y-%m-%d %H:%M}\n\n{report}"
     print(out)
     log = ROOT / "logs" / f"emquant_check_{now:%Y-%m-%d}.txt"
     log.parent.mkdir(exist_ok=True)
@@ -180,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         _notify("WARN", f"掘金晨检 {len(all_bad)} 项异常：\n" +
                 "\n".join(f"❌ [{b['leg']}] {b['name']}: {b['detail']}" for b in all_bad))
     elif not args.quiet_ok:
-        _notify("INFO", "掘金晨检全绿 ✅\n" + report)
+        _notify("INFO", "掘金晨检全绿 ✅\n\n" + report)
     return 1 if all_bad else 0
 
 

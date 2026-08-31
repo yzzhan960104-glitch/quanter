@@ -63,6 +63,36 @@ def test_build_report_renders(tmp_path, monkeypatch):
     txt = rpt.build_report(datetime(2026, 8, 28, 15, 45))
     assert "掘金日终播报 · 2026-08-28" in txt
     assert "信号 0 → 挂单 0" in txt          # 无 audit 文件=零漏斗
-    assert "300433.SZ 蓝思科技 ×100｜成本 38.91｜现 39.03｜浮盈 +12" in txt
-    assert "止损 33.94｜止盈 TP1 55.40/TP2 51.30" in txt
-    assert "nav 100,007" in txt
+    # ② 持仓快照：markdown 化（名称加粗 + 距现价 %）+ 浮盈合计行
+    assert "**② 持仓快照**（1 只 · 浮盈合计 **+12**）" in txt
+    assert "**蓝思科技** 300433.SZ ×100｜成本 38.91 → 现 39.03｜**+12**" in txt
+    assert "止损 33.94（-13%）" in txt       # 距现价 39.03 的百分比
+    assert "nav **100,007**" in txt
+    # ⑤ 明日预案（2026-09-01 桥）：entry_date/exec_params 缺失 → 「第—天」降级不炸
+    assert "**⑤ 明日预案（T+1 持仓管理）**" in txt
+    assert "300433.SZ · 第—天｜止损 33.94（-13%）" in txt
+
+
+def test_build_report_next_day_plan(tmp_path, monkeypatch):
+    """⑤明日预案：持仓天数/上限/超期预警/tp1_done 切换目标位。"""
+    from ops import gm_ops_common as gc
+    monkeypatch.setattr(gc, "GM_STRATEGY_DIR", tmp_path)
+    monkeypatch.setattr(gc, "runtime_config",
+                        lambda d=None: {"token": "t", "account_id": "acc-1"})
+    monkeypatch.setattr(rpt, "_api_snapshot",
+                        lambda token, acc: ([{"sym": "300433.SZ", "qty": 100,
+                                               "vwap": 38.91, "fpnl": 12.0,
+                                               "last": 39.03}], None))
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "state.pkl").write_text(json.dumps(
+        {"positions": {"300433.SZ": {
+            "remaining_qty": 100, "stop": 33.94, "tp1_price": 55.4,
+            "tp2_price": 51.3, "tp1_done": True,
+            "entry_date": "2026-07-25",
+            "exec_params": {"max_holding": 30}}}},
+        ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(rpt, "_name_map", lambda syms: {"300433.SZ": "蓝思科技"})
+    from datetime import datetime
+    txt = rpt.build_report(datetime(2026, 8, 28, 15, 45))
+    assert "第34天/上限30 ⚠️超期预警" in txt     # (08-28 − 07-25)=34 ≥ 30
+    assert "TP1 已兑｜余 TP2 51.30" in txt        # tp1_done → 下一目标 TP2

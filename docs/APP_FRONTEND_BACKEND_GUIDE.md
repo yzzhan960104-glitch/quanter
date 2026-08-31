@@ -76,9 +76,9 @@
 | pipeline_then_eod | 数据管道（采集→校验→brief→数据集同步） | cron 18:00 周一至五 |
 | discovery daemon | 低功率参数探索 | cron 02:00 |
 | research digest | 研究摘要推钉钉 | cron 18:30 |
-| ops_morning_check | 晨检（掘金腿状态摘要推钉钉） | cron 09:40 |
+| ops_morning_check | 晨检（掘金腿六查 + ⑦今日计划段推钉钉） | cron 09:40 |
 | ops_emquant_ingest | 掘金腿 audit CSV → experiments.db | cron 15:40 |
-| ops_eod_report | EOD 报告（当日交易摘要） | cron 15:45 |
+| ops_eod_report | EOD 报告（漏斗/持仓/资金/⑤明日预案，DingTalk markdown） | cron 15:45 |
 | ops_gm_ab_compare | 双腿 A/B 对照 | cron 15:50 |
 | ops_audit_ssot | 7 项 SSOT 巡检 | cron 16:05 |
 | ops_gm_guard | 终端/策略进程看护 | interval 5min |

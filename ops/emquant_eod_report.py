@@ -6,11 +6,19 @@ T+1 计划推送位（引擎 eod 已随 QMT 退役，其 76 单僵尸计划不�
 
   ① 当日漏斗：信号 N → 挂单 M（含钳价/回补标记）→ 成交 K → 拦截分布
      （定尺不足一手 / 单日上限 / 额度）逐类计数；
-  ② 持仓表：7002 API 实时（symbol × qty × vwap × 浮盈）；
+  ② 持仓表：7002 API 实时（symbol × qty × vwap × 浮盈，按浮盈降序）；
   ③ 资金面：nav / 可用 / 冻结（市值）；
-  ④ EOD 摘要：audit 的 EOD 行（effective_today/open_orders/positions）。
+  ④ EOD 摘要：audit 的 EOD 行（effective_today/open_orders/positions）；
+  ⑤ 明日预案（T+1 · 2026-09-01 新增"掘金侧计划→播报"桥）：持仓管理逐只
+     列明日执行的止损/止盈位（含距现价 %、持仓天数、超期预警）+ 新信号
+     扫描时点说明（GM 侧新候选在次晨 09:31 扫描落 audit，15:45 时点尚不存在
+     ——与旧本地腿"T 日 EOD 产 T+1 计划"的口径差异在此明示，不冒充预告）。
 
-数据源全部只读：audit CSV（策略目录）+ 7002 REST（Bearer=runtime.json）。
+排版：DingTalk markdown 约束（#/粗体/引用/列表，无表格无着色）——段标加粗、
+关键数字加粗、止损止盈带距现价百分比，浮盈正负不着色靠符号+合计行锚定。
+
+数据源全部只读：audit CSV（策略目录）+ 7002 REST（Bearer=runtime.json）
++ state.pkl（entry_date/止损止盈定身价）。
 报告全文落 logs/emquant_eod_YYYY-MM-DD.txt（复盘留痕），钉钉 INFO 单条推送。
 """
 from __future__ import annotations
@@ -106,15 +114,48 @@ def _name_map(ts_symbols: list[str]) -> dict[str, str]:
 
 def _stop_tp_map(leg_dir: Path | None = None) -> dict[str, tuple]:
     """state.pkl 持仓 → (stop, tp1, tp2)（enrich 挂载的定终身价；读失败=空表降级）。"""
+    m = _live_pos_map(leg_dir)
+    return {s: (p.get("stop"), p.get("tp1_price"), p.get("tp2_price"))
+            for s, p in m.items()}
+
+
+def _live_pos_map(leg_dir: Path | None = None) -> dict[str, dict]:
+    """state.pkl 活口持仓 → 完整 pos dict（stop/tp/entry_date/exec_params）。
+
+    ⑤明日预案的数据源：entry_date 算持仓天数、exec_params.max_holding 判超期
+    预警、tp1_done 判下一目标位。读失败=空表降级（预案段渲染"—"，不炸主链）。
+    """
     try:
         st = json.loads(gc.state_pkl_path(leg_dir).read_text(encoding="utf-8"))
-        out = {}
-        for sym, pos in (st.get("positions") or {}).items():
-            if int((pos or {}).get("remaining_qty") or 0) > 0:
-                out[sym] = (pos.get("stop"), pos.get("tp1_price"), pos.get("tp2_price"))
-        return out
+        return {sym: pos for sym, pos in (st.get("positions") or {}).items()
+                if int((pos or {}).get("remaining_qty") or 0) > 0}
     except (OSError, ValueError):
         return {}
+
+
+def _f(v, nd=2):
+    """数值格式化；None/NaN → '—'（展示层绝不输出 None 字面量）。"""
+    return f"{v:.{nd}f}" if isinstance(v, (int, float)) and v == v else "—"
+
+
+def _pct(target, last):
+    """目标价距现价百分比（+x%/-x%）；任一侧缺价 → 空串（不硬造）。"""
+    if not (isinstance(target, (int, float)) and isinstance(last, (int, float))
+            and target == target and last == last and last > 0):
+        return ""
+    return f"（{target / last - 1:+.0%}）"
+
+
+def _days_held(entry_date: str | None, day: str) -> int | None:
+    """自然日持仓天数；entry_date 缺失/解析失败 → None。"""
+    if not entry_date:
+        return None
+    try:
+        from datetime import date as _date
+        y, m, d = (int(x) for x in str(entry_date)[:10].split("-"))
+        return (_date.fromisoformat(day) - _date(y, m, d)).days
+    except (ValueError, TypeError):
+        return None
 
 
 def _api_snapshot(token: str, account_id: str) -> tuple[list, dict | None]:
@@ -134,44 +175,88 @@ def _api_snapshot(token: str, account_id: str) -> tuple[list, dict | None]:
 def build_report(now: datetime | None = None, leg_dir: Path | None = None,
                  leg_label: str = "主腿") -> str:
     """单腿日终报告（双腿形态 2026-08-28：main() 按 active_legs 循环；leg_dir=None
-    走 gc.GM_STRATEGY_DIR 缺省——单腿调用方/既有测试语义不变）。"""
+    走 gc.GM_STRATEGY_DIR 缺省——单腿调用方/既有测试语义不变）。
+
+    2026-09-01 排版升级：DingTalk markdown（段标加粗/关键数字加粗/止损止盈带
+    距现价百分比/持仓按浮盈降序+合计）+ 新增 ⑤明日预案段（掘金侧计划→播报桥）。
+    """
     now = now or datetime.now()
     day = f"{now:%Y-%m-%d}"
     cfg = gc.runtime_config(leg_dir)
     st = _audit_stats(day, leg_dir)
     positions, cash = _api_snapshot(str(cfg.get("token") or ""),
                                     str(cfg.get("account_id") or ""))
-    lines = [f"掘金日终播报 · {day} · {leg_label}"]
+    live = _live_pos_map(leg_dir)
+    names = _name_map([p["sym"] for p in positions] + list(live))
+    lines = [f"### 📊 掘金日终播报 · {day} · {leg_label}", ""]
+
+    # ① 漏斗
     blk = " / ".join(f"{k}×{v}" for k, v in st["blocked"].items()) or "无"
-    lines.append(f"① 漏斗：信号 {st['signals']} → 挂单 {st['placed']}"
-                 f"（回补 {st['repaired']}、钳价 {st['clamped']}）→ 成交 {st['fills']}"
+    lines.append(f"**① 今日漏斗**：信号 {st['signals']} → 挂单 {st['placed']}"
+                 f"（回补 {st['repaired']} · 钳价 {st['clamped']}）→ 成交 {st['fills']}"
                  f"｜拦截：{blk}")
+    lines.append("")
+
+    # ② 持仓快照（按浮盈降序；止损止盈带距现价 %）
     if positions:
-        names = _name_map([p["sym"] for p in positions])
-        stops = _stop_tp_map()
-        lines.append(f"② 持仓（{len(positions)} 只）：")
-        for p in positions:
-            stop, tp1, tp2 = stops.get(p["sym"], (None, None, None))
-
-            def _f(v, nd=2):
-                return f"{v:.{nd}f}" if isinstance(v, (int, float)) and v == v else "—"
-
+        rows = sorted(positions, key=lambda p: p["fpnl"], reverse=True)
+        total = sum(p["fpnl"] for p in rows)
+        lines.append(f"**② 持仓快照**（{len(rows)} 只 · 浮盈合计 "
+                     f"**{'+' if total >= 0 else ''}{total:,.0f}**）")
+        for p in rows:
+            stop, tp1, tp2 = (live.get(p["sym"]) or {}).get("stop"), \
+                (live.get(p["sym"]) or {}).get("tp1_price"), \
+                (live.get(p["sym"]) or {}).get("tp2_price")
             lines.append(
-                f"- {p['sym']} {names.get(p['sym'], '—')} ×{p['qty']}"
-                f"｜成本 {_f(p['vwap'])}｜现 {_f(p['last'])}"
-                f"｜浮盈 {'+' if p['fpnl'] >= 0 else ''}{p['fpnl']:.0f}"
-                f"｜止损 {_f(stop)}｜止盈 TP1 {_f(tp1)}/TP2 {_f(tp2)}")
+                f"- **{names.get(p['sym'], '—')}** {p['sym']} ×{p['qty']}"
+                f"｜成本 {_f(p['vwap'])} → 现 {_f(p['last'])}"
+                f"｜**{'+' if p['fpnl'] >= 0 else ''}{p['fpnl']:.0f}**"
+                f"｜止损 {_f(stop)}{_pct(stop, p['last'])}"
+                f"｜TP1 {_f(tp1)}{_pct(tp1, p['last'])} / TP2 {_f(tp2)}{_pct(tp2, p['last'])}")
     else:
-        lines.append("② 持仓：空仓")
+        lines.append("**② 持仓快照**：空仓")
+    lines.append("")
+
+    # ③ 资金面
     if cash:
-        lines.append(f"③ 资金：nav {float(cash.get('nav') or 0):,.0f}"
+        lines.append(f"**③ 资金面**：nav **{float(cash.get('nav') or 0):,.0f}**"
                      f"｜可用 {float(cash.get('available') or 0):,.0f}"
                      f"｜市值 {float(cash.get('market_value') or 0):,.0f}")
+        lines.append("")
+
+    # ④ EOD 摘要
     e = st["eod"] or {}
     if e:
-        lines.append(f"④ EOD：effective_today={e.get('effective_today')}"
+        lines.append(f"**④ EOD 摘要**：effective_today={e.get('effective_today')}"
                      f"｜open_orders={e.get('open_orders')}"
                      f"｜placed_today={e.get('placed_today')}")
+        lines.append("")
+
+    # ⑤ 明日预案（T+1 持仓管理；新信号扫描在次晨 09:31——GM 侧无盘前预产计划，
+    # 明示时点不冒充预告，新挂单以次晨 09:40 晨检「今日计划」段为准）
+    lines.append("**⑤ 明日预案（T+1 持仓管理）**")
+    lines.append("- 新信号：明早 09:31 盘前扫描自动挂单（详见 09:40 晨检「今日计划」段）")
+    if live:
+        lasts = {p["sym"]: p["last"] for p in positions}
+        for sym, pos in sorted(live.items()):
+            days = _days_held(pos.get("entry_date"), day)
+            mh = int((pos.get("exec_params") or {}).get("max_holding") or 0)
+            day_s = (f"第{days}天" if days is not None else "第—天") + \
+                    (f"/上限{mh}" if mh else "")
+            flag = ""
+            if days is not None and mh:
+                if days >= mh:
+                    flag = " ⚠️超期预警"
+                elif days >= mh - 3:
+                    flag = " ⚠️临近超期"
+            stop, tp1, tp2 = pos.get("stop"), pos.get("tp1_price"), pos.get("tp2_price")
+            last = lasts.get(sym)
+            tgt = (f"TP1 已兑｜余 TP2 {_f(tp2)}{_pct(tp2, last)}" if pos.get("tp1_done")
+                   else f"TP1 {_f(tp1)}{_pct(tp1, last)} / TP2 {_f(tp2)}{_pct(tp2, last)}")
+            lines.append(f"- **{names.get(sym, '—')}** {sym} · {day_s}{flag}"
+                         f"｜止损 {_f(stop)}{_pct(stop, last)}｜{tgt}")
+    else:
+        lines.append("- 持仓管理：无持仓")
     return "\n".join(lines)
 
 
