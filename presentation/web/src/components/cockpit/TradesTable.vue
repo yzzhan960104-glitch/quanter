@@ -79,10 +79,12 @@ const toTs = (sym?: string): string => {
 const num = (v: unknown, nd = 2): string =>
   (typeof v === 'number' && Number.isFinite(v)) ? v.toFixed(nd) : '—'
 const timeOf = (iso?: string): string => {
+  // 7002 created_at 是 UTC（Z 后缀）——必须转本地时区显示，否则北京时间
+  // 09:31 的成交会显示成 01:31（2026-09-02 用户反馈"数据不对"的实际根源之一）
   if (!iso) return '—'
   const d = new Date(iso)
   return Number.isNaN(d.getTime())
-    ? String(iso).slice(11, 19) || '—' : d.toTimeString().slice(0, 8)
+    ? String(iso).slice(11, 19) || '—' : d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
 async function load() {
