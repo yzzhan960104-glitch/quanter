@@ -171,19 +171,22 @@ function render() {
   for (const pl of priceLines) candle.removePriceLine(pl)
   priceLines = []
   const m = props.data.marks || {}
-  const lines: Array<[number | null | undefined, string, string, boolean]> = [
-    [m.entry_price, '#2962ff', 'entry', false],
-    [m.stop, '#26a69a', '止损', false],
-    [m.tp1_price, '#ef5350', 'TP1', false],
-    [m.tp2_price, '#f23645', 'TP2', false],
-    [m.neckline, '#f0b90b', '颈线', true],
+  // 决策线全实线+加粗（2026-09-02 用户反馈：虚线白底看不清）；axisLabel
+  // 跟随线色（title 字号由库控制在 label 内）。
+  const lines: Array<[number | null | undefined, string, string]> = [
+    [m.entry_price, '#2962ff', 'entry'],
+    [m.stop, '#26a69a', '止损'],
+    [m.tp1_price, '#ef5350', 'TP1'],
+    [m.tp2_price, '#f23645', 'TP2'],
+    [m.neckline, '#f0b90b', '颈线'],
   ]
-  for (const [price, color, title, dashed] of lines) {
+  for (const [price, color, title] of lines) {
     if (price != null && Number.isFinite(price)) {
       priceLines.push(candle.createPriceLine({
-        price, color, lineWidth: 1, lineStyle: dashed ? 2 : 0,
+        price, color, lineWidth: 2, lineStyle: 0,
         axisLabelVisible: true, title,
-      }))
+        axisLabelView: { color, fontSize: 11 },
+      } as never))
     }
   }
 
