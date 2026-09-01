@@ -620,11 +620,11 @@ def test_expired_close_t1_close_fallback_price(pilot, tmp_path, monkeypatch):
 
 
 def test_pre_open_sizing_below_one_lot_blocked_with_clear_reason(pilot, tmp_path, monkeypatch):
-    """定尺不足一手（终审 M-5）：equity×pos_cap 按当前 entry 凑不出 100 股 →
-    ORDER_BLOCKED 文案明示「定尺不足一手」——不再落进 check_caps ① 的「委托参数
-    残缺」（那是查询通道故障语义，会误导晨检排障方向）。"""
+    """定尺不足最小申报量（终审 M-5 + 2026-09-01 板块感知）：equity×pos_cap 按
+    当前 entry 凑不出最小可申报股数 → ORDER_BLOCKED 文案明示门槛——不再落进
+    check_caps ① 的「委托参数残缺」（那是查询通道故障语义，会误导晨检排障方向）。"""
     fake = FakeGm()
-    fake.cash["nav"] = 10_000.0                          # 10,000×5%=500 < 100×10.4=1040
+    fake.cash["nav"] = 10_000.0                          # 10,000×7.5%=750 < 100×10.4=1040
     sigs = {"300750.SZ": _signal(pilot)}
     _pin(pilot, monkeypatch, tmp_path, universe=("300750.SZ",), detect=_detect_map(sigs))
     rt = _rt(pilot, fake, tmp_path)
@@ -632,9 +632,30 @@ def test_pre_open_sizing_below_one_lot_blocked_with_clear_reason(pilot, tmp_path
 
     assert [c for c in fake.calls if c.get("api") == "order_volume"] == []   # 不发废单
     blocked = _details(tmp_path, "ORDER_BLOCKED")
-    assert len(blocked) == 1 and "定尺不足一手" in blocked[0]["reason"]
+    assert len(blocked) == 1 and "定尺不足最小申报量" in blocked[0]["reason"]
     assert "100 股" in blocked[0]["reason"]
     assert len(_details(tmp_path, "SIGNAL")) == 1                       # ③ 扫描照常留痕
+
+
+def test_pre_open_sizing_star_min_200_blocked(pilot, tmp_path, monkeypatch):
+    """科创板最小申报量 200 股（2026-09-01 东威科技 688700 ×100 实弹连拒教训）：
+    预算凑得出 100 股但 <200（科创板门槛）→ ORDER_BLOCKED 明示科创板门槛不发
+    必拒废单；同预算同价位的创业板标的照常挂单（100 股口径回归零变化）。"""
+    fake = FakeGm()
+    fake.cash["nav"] = 20_000.0          # 20,000×7.5%=1500：100×10.4=1040 ✓ 但 200×10.4=2080 ✗
+    sigs = {"688700.SH": _signal(pilot, symbol="688700.SH"),
+            "300750.SZ": _signal(pilot)}
+    _pin(pilot, monkeypatch, tmp_path, universe=("688700.SH", "300750.SZ"),
+         detect=_detect_map(sigs))
+    rt = _rt(pilot, fake, tmp_path)
+    rt.pre_open(_Ctx())
+
+    buys = [c for c in fake.calls if c.get("api") == "order_volume" and c["side"] == 1]
+    assert len(buys) == 1 and buys[0]["symbol"] == "SZSE.300750"       # 创业板照挂 ×100
+    assert buys[0]["volume"] == 100
+    blocked = _details(tmp_path, "ORDER_BLOCKED")
+    assert len(blocked) == 1 and "200 股" in blocked[0]["reason"] \
+        and "688700.SH" in str(blocked[0])                             # 科创板明示门槛
 
 
 # ============================================================================
@@ -725,7 +746,7 @@ def test_pre_open_repair_skips_live_sibling_and_held(pilot, tmp_path, monkeypatc
 
 def test_pre_open_repair_lot_too_small_blocked(pilot, tmp_path, monkeypatch):
     """⑤'' 定尺：equity×pos_cap 不足一手（账户 10 万×7.5%=7500 < 100×80）→
-    ORDER_BLOCKED 独立文案（回补定尺不足一手），不炸不挂——选项 A 口径下的
+    ORDER_BLOCKED 独立文案（回补定尺不足最小申报量），不炸不挂——选项 A 口径下的
     高价股预期行为（301018@122 实弹同型）。"""
     fake = FakeGm(symbol_info={"SZSE.301018": {"pre_close": 90.0,
                                                "upper_limit": 108.0,
@@ -741,7 +762,7 @@ def test_pre_open_repair_lot_too_small_blocked(pilot, tmp_path, monkeypatch):
 
     assert [c for c in fake.calls if c.get("api") == "order_volume"] == []
     blocked = _details(tmp_path, "ORDER_BLOCKED")
-    assert len(blocked) == 1 and "回补定尺不足一手" in blocked[0]["reason"]
+    assert len(blocked) == 1 and "回补定尺不足最小申报量" in blocked[0]["reason"]
 
 
 def test_on_tick_self_heal_repair_fires_once_per_process(pilot, tmp_path, monkeypatch):

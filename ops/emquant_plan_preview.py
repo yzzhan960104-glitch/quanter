@@ -163,12 +163,13 @@ def build_preview(m, *, no_push: bool = False) -> tuple[str, dict]:
             qty = int(equity * pos_cap / entry / 100) * 100
         else:
             qty = 0
+        minq = m._min_order_qty(s.symbol)   # 板块感知（科创板≥200，与策略 2026-09-01 同口径）
         if equity is None:
             blocked.append((s.symbol, "资金不可得（7002）"))
-        elif qty <= 0:
-            blocked.append((s.symbol, f"定尺不足一手"
+        elif qty < minq:
+            blocked.append((s.symbol, f"定尺不足最小申报量"
                             f"（{equity:.0f}×{pos_cap:g}={equity * pos_cap:.0f}"
-                            f" < 100×{entry:.2f}）"))
+                            f" < {minq}×{entry:.2f}；科创板≥200/其余≥100）"))
         elif n_eff >= cap:
             blocked.append((s.symbol, f"单日上限 {cap}"))
         else:

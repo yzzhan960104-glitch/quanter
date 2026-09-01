@@ -757,6 +757,23 @@ def cancel(api, cl_ord_id, account=""):
 
 
 # ---- 5.2 跌停价（自算档位 + get_history_symbol API 值优先）----
+def _min_order_qty(symbol: str | None) -> int:
+    """单笔限价申报最小数量（板块感知）：科创板（688/689）200 股，其余 100 股。
+
+    2026-09-01 实弹教训（东威科技 688700 ×100 买单连遭柜台拒）：
+    「通过限价申报买卖科创板股票,单笔申报数量应当不小于200股」——定尺/分腿
+    的可行性门槛必须板块感知。口径选择：200 股以上法规允许 1 股递增，但本策略
+    维持 100 整手取整（保守无奇数股），只抬门槛不改步长。卖出侧「余额不足
+    最小量一次性卖出」柜台合法（止损/超期/tp1 反转全量卖路径不受影响），故
+    仅【部分卖】（反转 regime 的 tp2_share lot2 / 正常 regime 的 tp1 档）需要
+    此门槛。symbol=None（调用方未传，历史测试形态）→ 100 股口径不炸。
+    """
+    if not symbol:
+        return 100
+    code = str(symbol).partition(".")[0]
+    return 200 if code.startswith(("688", "689")) else 100
+
+
 def _limit_rate(symbol: str) -> float:
     """按 ts 代码前缀取涨跌幅档位（创板科创 20% / 主板 10%——data_ctx._load_universe
     同口径的 300/301/688/689 判别）。
@@ -945,7 +962,7 @@ def decide_pending(tick_price, order, today, cal):
     return None
 
 
-def decide_position(tick_price, pos, today, cal):
+def decide_position(tick_price, pos, today, cal, symbol=None):
     """持仓离场判定（纯函数）→ ("sell", qty, reason) / None（持有）；reason ∈
     {stop_loss, tp2, tp2_share, tp1, tp2_dust, tp2_eod_sweep}。
 
@@ -1021,9 +1038,9 @@ def decide_position(tick_price, pos, today, cal):
             # epsilon 防 (1−portion) 浮点下溢截断（1.0−0.9=0.0999…→int(0.999…)=0
             # 把整手份额截没——1000 股×10% 应得 100 股而非 dust；测试实锤）
             qty = int(remaining * (1.0 - portion) / 100 + 1e-9) * 100   # lot2 份额（向下整手）
-            if qty <= 0:
-                return ("sell", 0, "tp2_dust")     # 不足一手：份额沉 lot1（置位不落单）
-            return ("sell", qty, "tp2_share")
+            if qty < _min_order_qty(symbol):
+                return ("sell", 0, "tp2_dust")     # 不足最小申报量（科创板200股门槛，
+            return ("sell", qty, "tp2_share")      # 2026-09-01）：份额沉 lot1（置位不落单）
         # tp2_done 已置（lot2 已出）→ 落到 ③ 判 lot1
     # ④ priority 3：tp1
     if tp1 is not None and not pos.get("tp1_done") and px >= float(tp1):
@@ -1031,8 +1048,8 @@ def decide_position(tick_price, pos, today, cal):
             return ("sell", remaining, "tp1")      # 反转 regime：lot1 即剩余，全卖
         portion = float((pos.get("exec_params") or {}).get("tp1_portion") or 0.0)
         qty = int(remaining * portion / 100) * 100  # exit.py:190 同式（向下整手）
-        if qty <= 0:
-            qty = remaining                           # 不足 100 股 → 本档卖全部剩余
+        if qty < _min_order_qty(symbol):
+            qty = remaining        # 不足最小申报量（科创板200，2026-09-01）→ 本档卖全部剩余
         return ("sell", qty, "tp1")
     # ⑤ priority 3.5（R6-10 L1 · 2026-08-26）：时间止损——N 日未触发任何 tp 离场
     # （对齐 decide_exit TIME_STOP 分支；remaining 全量按 tick 价跟价卖，与
@@ -2002,14 +2019,17 @@ class PilotRuntime:
                                 orig_entry=entry, clamped_to=_up)
                     entry = _up
                 qty = int(equity * pos_cap / entry / 100) * 100 if equity is not None else 0
-                if equity is not None and qty <= 0:
-                    # 定尺不足一手（终审 M-5）：equity×pos_cap 按当前 entry 定不出
-                    # 100 股整数倍——不是参数残缺（check_caps ① 的旧文案会误导晨检
-                    # 去查查询通道），是「额度买不起一手」的正常业务拒绝，独立文案。
+                _minq = _min_order_qty(sig.symbol)
+                if equity is not None and qty < _minq:
+                    # 定尺不足最小申报量（终审 M-5 + 2026-09-01 科创板 200 股门槛：
+                    # 东威科技 688700 ×100 实弹连拒教训）：equity×pos_cap 按当前
+                    # entry 定不出最小可申报量——不是参数残缺（check_caps ① 的旧
+                    # 文案会误导晨检查查询通道），是「额度买不起最小申报量」的
+                    # 正常业务拒绝，独立文案。
                     self._audit("ORDER_BLOCKED", symbol=sig.symbol, reason=(
-                        f"定尺不足一手（equity×pos_cap 不够 100 股："
-                        f"{equity:.2f}×{pos_cap:g}={equity * pos_cap:.2f} < 100×"
-                        f"{entry:.2f}={entry * 100:.2f}）"))
+                        f"定尺不足最小申报量（equity×pos_cap 不够 {_minq} 股："
+                        f"{equity:.2f}×{pos_cap:g}={equity * pos_cap:.2f} < {_minq}×"
+                        f"{entry:.2f}={entry * _minq:.2f}；科创板≥200/其余≥100）"))
                     continue
                 ok, why = check_caps(st, equity, positions_mv, open_buy,
                                      price=entry, qty=qty, today=today, cap=cap)
@@ -2103,11 +2123,12 @@ class PilotRuntime:
                                     orig_entry=entry_r, clamped_to=_up_r)
                         entry_r = _up_r
                     qty_r = int(eq_r * pos_cap_r / entry_r / 100) * 100 if eq_r is not None else 0
-                    if eq_r is not None and qty_r <= 0:
+                    _minq_r = _min_order_qty(sym)
+                    if eq_r is not None and qty_r < _minq_r:
                         self._audit("ORDER_BLOCKED", symbol=sym, reason=(
-                            f"回补定尺不足一手（equity×pos_cap 不够 100 股："
-                            f"{eq_r:.2f}×{pos_cap_r:g}={eq_r * pos_cap_r:.2f} < 100×"
-                            f"{entry_r:.2f}={entry_r * 100:.2f}）"))
+                            f"回补定尺不足最小申报量（equity×pos_cap 不够 {_minq_r} 股："
+                            f"{eq_r:.2f}×{pos_cap_r:g}={eq_r * pos_cap_r:.2f} < {_minq_r}×"
+                            f"{entry_r:.2f}={entry_r * _minq_r:.2f}；科创板≥200/其余≥100）"))
                         continue
                     ok_r, why_r = check_caps(st, eq_r, mv_r, ob_r,
                                              price=entry_r, qty=qty_r, today=today, cap=cap_r)
@@ -2326,7 +2347,7 @@ class PilotRuntime:
         pos = st["positions"].get(sym)
         if (pos is not None and int(pos.get("remaining_qty") or 0) > 0
                 and not self._has_open_sell(sym)):
-            verdict = decide_position(px, pos, today, cal)
+            verdict = decide_position(px, pos, today, cal, symbol=sym)
             if verdict:
                 _, qty, reason = verdict
                 if qty <= 0:

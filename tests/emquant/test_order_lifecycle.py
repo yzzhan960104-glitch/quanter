@@ -446,6 +446,42 @@ def test_decide_position_inverted_tp2_dust_sinks_to_lot1(pilot):
     assert pilot.decide_position(11.6, pos, "2026-08-21", CAL) == ("sell", 0, "tp2_dust")
 
 
+# ============================================================================
+# 2026-09-01 科创板最小申报量（东威科技 688700 ×100 实弹连拒教训）：
+# _min_order_qty 板块感知门槛——688/689 ≥200 股，其余 ≥100；卖出侧「余额不足
+# 最小量一次性卖出」柜台合法 → 全量卖路径不受影响，仅部分卖受门槛约束。
+# ============================================================================
+def test_min_order_qty_board_aware(pilot):
+    assert pilot._min_order_qty("688700.SH") == 200      # 科创板
+    assert pilot._min_order_qty("689009.SH") == 200      # 科创板 CDR
+    assert pilot._min_order_qty("300657.SZ") == 100      # 创业板
+    assert pilot._min_order_qty("600000.SH") == 100      # 主板
+    assert pilot._min_order_qty(None) == 100             # 历史调用形态缺省不炸
+
+
+def test_decide_position_star_tp2_share_below_200_sinks(pilot):
+    """科创板 lot2=100 股（<200）→ tp2_dust 沉 lot1；创业板同额照卖；lot2≥200 照卖。"""
+    pos = _pos(remaining=1000, tp1=13.0, tp2=11.5, portion=0.9)
+    assert pilot.decide_position(11.5, dict(pos), "2026-08-21", CAL,
+                                 symbol="688700.SH") == ("sell", 0, "tp2_dust")
+    assert pilot.decide_position(11.5, dict(pos), "2026-08-21", CAL,
+                                 symbol="300657.SZ") == ("sell", 100, "tp2_share")
+    # lot2 份额 ≥200（remaining 3000 → lot2 300）科创板照常部分卖
+    pos3k = _pos(remaining=3000, tp1=13.0, tp2=11.5, portion=0.9)
+    assert pilot.decide_position(11.5, dict(pos3k), "2026-08-21", CAL,
+                                 symbol="688388.SH") == ("sell", 300, "tp2_share")
+
+
+def test_decide_position_star_tp1_partial_below_200_sells_all(pilot):
+    """正常 regime tp1 部分卖：科创板凑不足 200 → 本档卖全部剩余（一次性合法）。"""
+    pos = _pos(remaining=210, tp1=13.0, tp2=15.0, portion=0.9)   # 正常 regime（tp1<tp2）
+    # int(210×0.9/100)×100=100 < 200 → 卖全部 210（科创板）；创业板同额卖 100
+    assert pilot.decide_position(13.0, dict(pos), "2026-08-21", CAL,
+                                 symbol="688700.SH") == ("sell", 210, "tp1")
+    assert pilot.decide_position(13.0, dict(pos), "2026-08-21", CAL,
+                                 symbol="300657.SZ") == ("sell", 100, "tp1")
+
+
 def test_decide_position_inverted_stop_priority_unchanged(pilot):
     """反转形态下 stop 仍最优先（priority 1 硬风控先于一切止盈）。"""
     pos = _pos(remaining=1000, tp1=13.0, tp2=11.5, portion=0.9)
