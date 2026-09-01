@@ -40,6 +40,11 @@
       <el-col :span="12"><DataHealthCard /></el-col>
     </el-row>
 
+    <!-- 持仓排（2026-09-01 可视化重构：补cockpit 持仓洞——盈亏条+K线回放抽屉） -->
+    <el-row :gutter="12" style="margin-top: 12px;">
+      <el-col :span="24"><PositionsPanel /></el-col>
+    </el-row>
+
     <!-- 中排：流水 + 日志并排（观测「下单→成交→入日志」链路一致性）。
          公网静态模式（yzzhan.xin）无后端 → SSE 日志卡隐藏（其余卡全走静态快照），
          流水卡占满整行。 -->
@@ -57,6 +62,7 @@ import StatusCard from '../components/cockpit/StatusCard.vue'
 import DualAssetCard from '../components/cockpit/DualAssetCard.vue'
 import DataHealthCard from '../components/cockpit/DataHealthCard.vue'
 import LegSelector from '../components/cockpit/LegSelector.vue'
+import PositionsPanel from '../components/cockpit/PositionsPanel.vue'
 // 一期观测运营层既有组件（Task 9/10/11）。
 import TradesTable from '../components/cockpit/TradesTable.vue'
 import TerminalLogs from '../components/cockpit/TerminalLogs.vue'

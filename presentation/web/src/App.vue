@@ -63,8 +63,9 @@ const researchNav: NavItem[] = STATIC_MODE ? [
 // 与「实盘中控」(/live，含真下单/撤单) 同段但只读。
 // Phase 2 · Task 12 新增「作业驾驶舱」(/jobs)：当天 pipeline/pre_open 台账 + 启动补跑四态，
 // 置于「综合看板」与「实盘中控」之间（按"全局俯瞰 → 调度台账 → 真实下单"的观测深入动线）。
-// 公网静态模式：作业驾驶舱（内网台账语义）不公开，仅 cockpit/experiments。
+// 公网静态模式：作业驾驶舱（内网台账语义）不公开，首页=净值总览（P1 重构）。
 const liveNav: NavItem[] = STATIC_MODE ? [
+  { to: '/', label: '首页', icon: View },
   { to: '/cockpit', label: '综合看板', icon: View },
   { to: '/experiments', label: '实验对照', icon: DataAnalysis },
 ] : [

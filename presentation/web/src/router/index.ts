@@ -34,16 +34,18 @@ const ExperimentView = () => import('../views/ExperimentView.vue')
 // 作业驾驶舱（Phase 2 · Task 12 收官）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
 // 搜索实验室（P3 · 2026-08-13）：参数发现敏感性分析/热力图/进展（只读，spec §4）。
 const DiscoveryLabView = () => import('../views/DiscoveryLabView.vue')
+// 公网首页（可视化重构 P1 · 2026-09-01）：净值曲线族英雄页——访客 3 秒看懂"赚不赚"。
+const HomeView = () => import('../views/HomeView.vue')
 
 // 公网静态模式（VITE_STATIC_DATA=1 · yzzhan.xin）：路由收敛为公开观测面——
-// cockpit/experiments/data（数据健康度）。discovery（研究 IP）与 dashboard（内网
-// 宏观）不公开；未知路径兜底回 cockpit（公开站不暴露内部 404 面）。
+// 首页(净值总览)/cockpit/experiments/data（数据健康度）。discovery（研究 IP）
+// 与 dashboard（内网宏观）不公开；未知路径兜底回首页（公开站不暴露内部 404 面）。
 const staticRoutes = [
-  { path: '/', redirect: '/cockpit' },
+  { path: '/', name: 'home', component: HomeView },
   { path: '/cockpit', name: 'cockpit', component: CockpitView },
   { path: '/experiments', name: 'experiments', component: ExperimentView },
   { path: '/data', name: 'data', component: DataLakeView },
-  { path: '/:pathMatch(.*)*', redirect: '/cockpit' },
+  { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
 const router = createRouter(

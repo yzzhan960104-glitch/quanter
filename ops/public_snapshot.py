@@ -207,7 +207,84 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
                "mode": "public-readonly-snapshot",
                "note": "公网只读快照：静态发布、零写入通路；account 已掩码、"
                        "敏感键已剔除；数据时点=generated_at，非实时"})
+
+    # ── 净值历史（可视化重构 P1：首页净值曲线族）──
+    from ops import nav_history
+    doc = nav_history.update()
+    n_files += 1
+    print(f"  ✓ nav_history.json（{len(doc['days'])} 天，era 起 {doc['era_start']}）")
+
+    # ── OHLCV 快照（P2 静态半场：持仓+当日信号标的的 K 线回放数据）──
+    _ohlcv_files(w)                     # w 闭包自增 n_files
     return {"files": n_files, "generated_at": f"{t0:%Y-%m-%d %H:%M:%S}"}
+
+
+def _ohlcv_files(w) -> int:
+    """持仓+当日信号标的 → ohlcv_<sym>.json（160 根日 K + 颈线/止损/止盈画线）。
+
+    marks 三源合璧：state.pkl 持仓（entry/stop/tp 定身位）+ audit SIGNAL（颈线/RR/
+    formed_at）+ 湖日线（OHLCV，前复权）。缺任一源优雅降级（画线缺就不画）。
+    """
+    import pandas as pd
+    from ops import gm_ops_common as gc
+    from ops.emquant_eod_report import _name_map
+
+    syms: dict[str, dict] = {}          # {sym: marks}
+    for leg in gc.active_legs():
+        leg_dir = gc.leg_strategy_dir(leg)
+        try:
+            st = json.loads(gc.state_pkl_path(leg_dir).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            st = {}
+        for sym, pos in (st.get("positions") or {}).items():
+            if int((pos or {}).get("remaining_qty") or 0) > 0:
+                syms.setdefault(sym, {}).update({
+                    "entry_date": pos.get("entry_date"),
+                    "entry_price": pos.get("entry_price"),
+                    "stop": pos.get("stop"),
+                    "tp1_price": pos.get("tp1_price"),
+                    "tp2_price": pos.get("tp2_price"),
+                    "formed_at": pos.get("formed_at") or pos.get("entry_date"),
+                })
+        # 当日 SIGNAL（未成仓的新信号也给 K 线：颈线/entry/RR）
+        src = gc.audit_csv_path(f"{datetime.now():%Y-%m-%d}", leg_dir)
+        if src.exists():
+            for row in __import__("csv").reader(src.open(encoding="utf-8")):
+                if len(row) >= 3 and row[1] == "SIGNAL" and row[0].startswith(
+                        f"{datetime.now():%Y-%m-%d}"):
+                    try:
+                        d = json.loads(row[2])
+                    except ValueError:
+                        continue
+                    if d.get("symbol"):
+                        m = syms.setdefault(d["symbol"], {})
+                        m.setdefault("neckline", d.get("neckline"))
+                        m.setdefault("signal_entry", d.get("entry_price"))
+                        m.setdefault("rr", d.get("rr"))
+                        m.setdefault("formed_at", d.get("formed_at"))
+
+    if not syms:
+        return 0
+    lake = pd.read_parquet(ROOT / "data_lake" / "a_shares_daily.parquet")
+    cutoff = pd.Timestamp(datetime.now()) - pd.Timedelta(days=420)
+    names = _name_map(list(syms))
+    n = 0
+    for sym, marks in sorted(syms.items()):
+        try:
+            g = lake.xs(sym, level="symbol").sort_index()
+            g = g.loc[cutoff:, ["open", "high", "low", "close", "volume"]].tail(160)
+            rows = [[round(float(o), 3), round(float(h), 3), round(float(l), 3),
+                     round(float(c), 3), int(v)]
+                    for o, h, l, c, v in zip(g["open"], g["high"], g["low"],
+                                             g["close"], g["volume"])]
+            w(f"ohlcv_{sym}", {"symbol": sym, "name": names.get(sym, "—"),
+                               "dates": [f"{d:%Y-%m-%d}" for d in g.index],
+                               "rows": rows, "marks": marks,
+                               "asof": f"{datetime.now():%Y-%m-%d %H:%M}"})
+            n += 1
+        except KeyError:
+            print(f"  ⚠ ohlcv 缺湖数据跳过：{sym}")
+    return n
 
 
 def main(argv: list[str] | None = None) -> int:
