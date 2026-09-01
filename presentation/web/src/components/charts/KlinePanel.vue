@@ -229,14 +229,29 @@ function applyRange() {
     chart.timeScale().fitContent()
     return
   }
-  const start = props.data.dates[n - Number(range.value)]
-  const end = props.data.dates[n - 1]
-  chart.timeScale().setVisibleRange(
-    { from: start as unknown as Time, to: end as unknown as Time })
+  // 按序号钉窗口：首根 bar 索引 = n-N，右垫 0——可视范围严格=最近 N 根，
+  // 左侧历史数据不进初始视口（09-02 用户截图 bug：autoSize 未就绪时
+  // setVisibleRange 被布局重算覆盖 → 160 根全塞入+画线横穿全图）。
+  const barCount = Number(range.value)
+  chart.timeScale().applyOptions({ rightOffset: 0, barSpacing: 7 })
+  chart.timeScale().setVisibleLogicalRange({
+    from: n - barCount, to: n - 1,
+  })
 }
 
-onMounted(render)
-watch(() => props.data, render)
+// 抽屉场景：el-dialog/drawer 开启动画期间容器宽度是中间态，autoSize 量到的
+// 首帧会歪。rAF×2 等布局稳定再渲染；宽度仍未就绪（0）再等一轮。
+function renderWhenReady(attempt = 0) {
+  if (el.value && el.value.clientWidth > 50) {
+    render()
+    return
+  }
+  if (attempt > 20) { render(); return }        // 兜底：极端隐藏场景也强制画
+  requestAnimationFrame(() => renderWhenReady(attempt + 1))
+}
+
+onMounted(() => renderWhenReady())
+watch(() => props.data, () => renderWhenReady())
 onBeforeUnmount(destroyChart)
 </script>
 
