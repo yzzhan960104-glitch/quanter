@@ -166,7 +166,14 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
         st, payload = gc.api_get(f"/v3/account-trade/orders/{la}", lt, timeout=4.0)
         w(f"gm_orders_{leg.key}", (payload or {}).get("data") or [] if st == 200 else [])
         st, payload = gc.api_get(f"/v3/account-trade/execrpts/{la}", lt, timeout=4.0)
-        w(f"gm_trades_{leg.key}", (payload or {}).get("data") or [] if st == 200 else [])
+        today_rows = (payload or {}).get("data") or [] if st == 200 else []
+        w(f"gm_trades_{leg.key}", today_rows)
+        # 成交史（2026-09-02 用户反馈"流水比持仓还少"）：柜台 execrpts 按自然日
+        # 滚动只给当日，持仓是累积的——流水必须跨日才对得上。主源=state 订单史
+        # （filled>0 的全部历史，12 笔与 8 持仓对账吻合）；今日柜台实况覆盖同单
+        # （partial 成交以柜台 latest 为准）。行形状与 execrpts 对齐（前端零改动）。
+        w(f"gm_trades_history_{leg.key}",
+          _trade_history(gc.leg_strategy_dir(leg), today_rows))
 
     # ── ab 对照：近 N 日（AbHistoryCard 10 日循环全覆盖；缺日已隐含空窗）──
     main_leg = next((l for l in gc.active_legs() if l.key == "main"), None)
@@ -282,6 +289,66 @@ def _read_cap(path: Path) -> float:
         return v if 0.0 <= v <= 1.0 else 1.0
     except (OSError, ValueError):
         return 1.0
+
+
+def leg_dir(leg):
+    """leg 对象 → 策略目录（免 import gm_ops_common 的便捷转发）。"""
+    from ops import gm_ops_common as gc
+    return gc.leg_strategy_dir(leg)
+
+
+def _trade_history(leg_dir_path: Path, today_rows: list | None = None) -> list:
+    """跨日成交史：state 订单史（filled>0）→ execrpts 形状行。
+
+    - 委托时间取 o['placed_at']（epoch 秒）→ ISO 本地；date 键=交易日
+    - 价格优先 o['price']（限价帽；marketable limit 下成交价≤帽，state 未存
+      均价时以帽价近似——展示口径，精确成交价以今日柜台行为准）
+    - today_rows（今日柜台 execrpts）按 cl_ord_id 覆盖：价格/数量/时间以柜台
+      真值优先（state 落盘可能滞后于柜台回报）
+    """
+    import json as _json
+    from datetime import datetime, timezone, timedelta as _td
+    from ops import gm_ops_common as gc
+
+    CN = timezone(_td(hours=8))
+    try:
+        st = _json.loads(gc.state_pkl_path(leg_dir_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    out: dict[str, dict] = {}
+    for oid, o in (st.get("orders") or {}).items():
+        if not (o.get("filled") or 0) > 0:
+            continue
+        placed = o.get("placed_at")
+        ts = (datetime.fromtimestamp(float(placed), CN).isoformat()
+              if placed else f"{o.get('date', '')}T09:31:00+08:00")
+        sym = o.get("symbol") or ""
+        ex = "SHSE" if sym.endswith(".SH") else "SZSE"
+        out[oid] = {
+            "cl_ord_id": oid, "symbol": f"{ex}.{sym.split('.')[0]}",
+            "side": 1,                              # state 订单史=开仓买方向（卖出走 EXPIRE/TICK 卖单也入 orders——side 按单型回填）
+            "price": float(o.get("price") or 0),
+            "volume": int(o.get("filled") or 0),
+            "amount": round(float(o.get("price") or 0) * float(o.get("filled") or 0), 2),
+            "created_at": ts,
+            "date": o.get("date"),
+            "purpose": o.get("purpose"),
+        }
+    # 卖出方向回填：purpose ∈ 卖出族（EXPIRE/TICK_EXIT/TP_*）→ side=2
+    sell_purposes = {"EXPIRE", "TIME_EXIT", "TP", "STOP", "TRAIL", "FORCE", "EOD"}
+    for oid, row in out.items():
+        p = str(row.get("purpose") or "")
+        if any(k in p for k in sell_purposes) or "SELL" in p:
+            row["side"] = 2
+    # 今日柜台实况覆盖（cl_ord_id 对齐；柜台价/量/时间是权威）
+    for r in today_rows or []:
+        cid = r.get("cl_ord_id")
+        if cid in out:
+            out[cid].update({k: r[k] for k in ("price", "volume", "amount",
+                                               "created_at", "side") if r.get(k) is not None})
+        elif r not in out.values():
+            out[f"broker-{cid}"] = {**r, "date": str(r.get("created_at", ""))[:10]}
+    return sorted(out.values(), key=lambda r: r.get("created_at") or "", reverse=True)
 
 
 def _ohlcv_files(w) -> int:

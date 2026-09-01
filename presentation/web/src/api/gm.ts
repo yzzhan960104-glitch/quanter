@@ -118,7 +118,9 @@ export async function getOrders(leg: string = 'main'): Promise<GmOrderRow[]> {
 }
 
 export async function getTrades(params: { leg?: string; limit?: number } = {}): Promise<GmTradeRow[]> {
-  if (STATIC_MODE) return staticGet<GmTradeRow[]>(`gm_trades_${params.leg ?? 'main'}`, [])
+  // 静态态读跨日成交史（gm_trades_history：state 订单史+今日柜台校准）——
+  // 柜台 execrpts 按自然日滚动只给当日，会"流水比持仓还少"（09-02 用户反馈）
+  if (STATIC_MODE) return staticGet<GmTradeRow[]>(`gm_trades_history_${params.leg ?? 'main'}`, [])
   return unwrap<GmTradeRow>(
     await apiClient.get('/api/v1/gm/trades', { params, timeout: 10000 }))
 }

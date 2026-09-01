@@ -10,11 +10,14 @@
   <el-card shadow="never">
     <template #header>
       <div class="flex-between">
-        <span>交易流水 · {{ leg === 'exp' ? '实验腿' : '主腿' }}</span>
+        <span>交易流水 · {{ leg === 'exp' ? '实验腿' : '主腿' }}（近 {{ spanDays }} 个交易日 {{ all.rows.length }} 笔）</span>
         <el-button size="small" :loading="loading" @click="load">刷新</el-button>
       </div>
     </template>
     <el-table :data="page.trades" size="small" height="320" v-loading="loading">
+      <el-table-column label="日期" width="90">
+        <template #default="{ row }">{{ dayOf(row) }}</template>
+      </el-table-column>
       <el-table-column label="时间" width="84">
         <template #default="{ row }">{{ timeOf(row.created_at) }}</template>
       </el-table-column>
@@ -57,7 +60,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, inject, watch, type Ref } from 'vue'
+import { computed, ref, reactive, onMounted, inject, watch, type Ref } from 'vue'
 import { getTrades, type GmTradeRow } from '../../api/gm'
 import { getOhlcv } from '../../api/home'
 
@@ -78,6 +81,15 @@ const toTs = (sym?: string): string => {
 }
 const num = (v: unknown, nd = 2): string =>
   (typeof v === 'number' && Number.isFinite(v)) ? v.toFixed(nd) : '—'
+const dayOf = (row: Record<string, unknown>): string => {
+  if (row.date) return String(row.date).slice(5)
+  const t = String(row.created_at || '')
+  return t.length >= 10 ? t.slice(5, 10) : '—'
+}
+const spanDays = computed(() => {
+  const days = new Set(all.rows.map((r) => dayOf(r)))
+  return Math.max(1, days.size)
+})
 const timeOf = (iso?: string): string => {
   // 7002 created_at 是 UTC（Z 后缀）——必须转本地时区显示，否则北京时间
   // 09:31 的成交会显示成 01:31（2026-09-02 用户反馈"数据不对"的实际根源之一）
