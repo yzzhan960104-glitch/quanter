@@ -310,6 +310,10 @@ def _ohlcv_files(w) -> int:
                     "tp1_price": pos.get("tp1_price"),
                     "tp2_price": pos.get("tp2_price"),
                     "formed_at": pos.get("formed_at") or pos.get("entry_date"),
+                    # 颈线（09-01 用户问"有颈线么"）：trailing 六件套的 neckline 即
+                    # 信号颈线（enrich 挂载的追踪锚=识别颈线同值，08-27 实证
+                    # 300433 trailing.neckline 39.0 == SIGNAL 颈线）
+                    "neckline": (pos.get("trailing") or {}).get("neckline"),
                 })
         # 当日 SIGNAL（未成仓的新信号也给 K 线：颈线/entry/RR）
         src = gc.audit_csv_path(f"{datetime.now():%Y-%m-%d}", leg_dir)

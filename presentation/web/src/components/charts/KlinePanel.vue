@@ -19,14 +19,22 @@
       <el-segmented v-model="range" :options="rangeOptions" size="small"
                     @change="applyRange" />
     </div>
+    <div class="ma-row">
+      <span v-for="ma in MA_DEFS" :key="ma.p" class="ma-chip"
+            
+            :style="maOn[ma.p] ? { color: ma.color, borderColor: ma.color } : {}"
+            @click="toggleMa(ma.p)">
+        MA{{ ma.p }}<em v-if="maVals[ma.p] != null"> {{ maVals[ma.p] }}</em>
+      </span>
+    </div>
     <div ref="el" class="kline"></div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
-  createChart, CandlestickSeries, HistogramSeries, createSeriesMarkers,
+  createChart, CandlestickSeries, HistogramSeries, LineSeries, createSeriesMarkers,
   ColorType, CrosshairMode,
   type IChartApi, type ISeriesApi, type IPriceLine,
   type CandlestickData, type HistogramData, type Time, type UTCTimestamp,
@@ -47,6 +55,55 @@ const rangeOptions = [
   { label: '全部', value: 'all' },
 ]
 
+/** 均线组（09-01 用户需求②"默认展示 120 日线"）：MA5/10/20/60/120，
+ *  默认开 20/60/120（5/10 关——降噪）；chip 可点切换；悬停读值。 */
+const MA_DEFS = [
+  { p: 5, color: '#f78166', on: false },
+  { p: 10, color: '#d29922', on: false },
+  { p: 20, color: '#2962ff', on: true },
+  { p: 60, color: '#bc8cff', on: true },
+  { p: 120, color: '#86909c', on: true },
+] as const
+const maOn = reactive<Record<number, boolean>>(
+  Object.fromEntries(MA_DEFS.map((m) => [m.p, m.on])))
+const maVals = ref<Record<number, string | null>>({})
+let maSeries: Record<number, ISeriesApi<'Line'> | null> = {}
+
+/** 前端算 MA（数据只有 160 根，13000 点内全数组算零成本）。 */
+function maAt(closes: number[], period: number, i: number): number | null {
+  if (i + 1 < period) return null
+  let sum = 0
+  for (let k = i + 1 - period; k <= i; k++) sum += closes[k]
+  return +(sum / period).toFixed(2)
+}
+
+function rebuildMa() {
+  if (!chart) return
+  for (const k of Object.keys(maSeries)) {
+    const p = Number(k)
+    if (!maOn[p] && maSeries[p]) { chart.removeSeries(maSeries[p]!); maSeries[p] = null }
+  }
+  const closes = props.data.rows.map((r) => r[3])
+  for (const def of MA_DEFS) {
+    if (!maOn[def.p]) continue
+    if (!maSeries[def.p]) {
+      maSeries[def.p] = chart.addSeries(LineSeries, {
+        color: def.color, lineWidth: 1, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: false,
+      })
+    }
+    maSeries[def.p]!.setData(props.data.dates.map((d, i) => ({
+      time: d as unknown as UTCTimestamp,
+      value: maAt(closes, def.p, i),
+    })).filter((x) => x.value != null) as { time: Time; value: number }[])
+  }
+}
+
+function toggleMa(p: number) {
+  maOn[p] = !maOn[p]
+  rebuildMa()
+}
+
 /** 悬停 OHLC 读数（十字光标联动）。 */
 const legend = ref<{ o: string; h: string; l: string; c: string; v: string; cls: string } | null>(null)
 
@@ -60,6 +117,7 @@ function destroyChart() {
   candle = null
   volume = null
   priceLines = []
+  maSeries = {}
 }
 
 function render() {
@@ -151,8 +209,16 @@ function render() {
     const r = rows[i]
     legend.value = { o: fmtP(r[0]), h: fmtP(r[1]), l: fmtP(r[2]), c: fmtP(r[3]),
       v: fmtV(r[4]), cls: r[3] >= r[0] ? 'up' : 'down' }
+    const closes = props.data.rows.map((x) => x[3])
+    const vals: Record<number, string | null> = {}
+    for (const def of MA_DEFS) {
+      const v = maAt(closes, def.p, i)
+      vals[def.p] = v != null ? fmtP(v) : null
+    }
+    maVals.value = vals
   })
 
+  rebuildMa()
   applyRange()
 }
 
@@ -184,5 +250,10 @@ onBeforeUnmount(destroyChart)
 .ohlc-legend .hint { color: var(--el-text-color-secondary); }
 .up { color: #ef5350; }
 .down { color: #26a69a; }
+.ma-row { display: flex; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.ma-chip { font-size: 11px; padding: 1px 8px; border: 1px solid var(--qt-border, #dcdfe6);
+           border-radius: 10px; color: var(--el-text-color-secondary); cursor: pointer;
+           user-select: none; }
+.ma-chip em { font-style: normal; font-family: var(--qt-font-mono, monospace); }
 .kline { height: 380px; width: 100%; }
 </style>
