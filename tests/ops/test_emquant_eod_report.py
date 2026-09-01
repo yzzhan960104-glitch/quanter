@@ -88,8 +88,9 @@ def test_build_report_next_day_plan(tmp_path, monkeypatch):
     (tmp_path / "state" / "state.pkl").write_text(json.dumps(
         {"positions": {
             "300433.SZ": {
+                # 反转 regime（tp1 55.4 > tp2 51.3）+ tp2 已兑 → 主仓上望 TP1
                 "remaining_qty": 100, "stop": 33.94, "tp1_price": 55.4,
-                "tp2_price": 51.3, "tp1_done": True,
+                "tp2_price": 51.3, "tp2_done": True,
                 "entry_date": "2026-07-25",
                 "exec_params": {"max_holding": 30}},
             "300456.SZ": {   # 安静持仓：无任何例外 → 归入「其余」收口
@@ -101,10 +102,10 @@ def test_build_report_next_day_plan(tmp_path, monkeypatch):
                         lambda syms: {"300433.SZ": "蓝思科技", "300456.SZ": "赛微电子"})
     from datetime import datetime
     txt = rpt.build_report(datetime(2026, 8, 28, 15, 45))
-    # 例外1：超期（34 ≥ 30）+ TP1 已兑现 → 双 bit 一行
+    # 例外1：超期（34 ≥ 30）+ 反转 regime tp2 已兑 → 主仓上望 TP1（2026-09-01 修向）
     assert "⚠️ **蓝思科技** 300433.SZ" in txt
     assert "第34/30天 **已到超期线**——明日尾盘超期平仓" in txt
-    assert "TP1 已兑现，上望目标切 TP2 51.30" in txt
+    assert "TP2 已兑（lot2 落袋），主仓上望 TP1 55.40" in txt
     # 安静持仓去重收口（止损/TP 只在 ② 出现一次）
     assert "其余 1 只按 ② 定身位继续执行" in txt
     assert "赛微电子 300456.SZ · 第" not in txt        # 例外段不逐只重列

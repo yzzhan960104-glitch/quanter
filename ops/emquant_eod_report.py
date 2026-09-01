@@ -256,9 +256,16 @@ def build_report(now: datetime | None = None, leg_dir: Path | None = None,
                     bits.append(f"第{days}/{mh}天 **已到超期线**——明日尾盘超期平仓")
                 elif days >= mh - 3:
                     bits.append(f"第{days}/{mh}天 临近超期")
-            if pos.get("tp1_done"):
-                bits.append(f"TP1 已兑现，上望目标切 TP2 {_f(pos.get('tp2_price'))}"
-                            f"{_pct(pos.get('tp2_price'), last)}")
+            # 止盈档进度（regime 感知，2026-09-01 修向）：现役 R6-8 是反转 regime
+            # （tp1=2H > tp2=1.5H）——先触 TP2 卖 lot2（10%），主仓上望 TP1（2H）；
+            # tp1_done 在反转 regime=清仓（remaining=0，不会出现在持仓里），此分支
+            # 仅正常 regime（tp1<tp2，历史档）可达。方向按价格序判，不猜 regime。
+            tp1, tp2 = pos.get("tp1_price"), pos.get("tp2_price")
+            inverted = (tp1 is not None and tp2 is not None and float(tp1) > float(tp2))
+            if inverted and pos.get("tp2_done") and not pos.get("tp1_done"):
+                bits.append(f"TP2 已兑（lot2 落袋），主仓上望 TP1 {_f(tp1)}{_pct(tp1, last)}")
+            elif not inverted and pos.get("tp1_done"):
+                bits.append(f"TP1 已兑现，上望目标切 TP2 {_f(tp2)}{_pct(tp2, last)}")
             if pos.get("force_exit"):
                 bits.append("force_exit 标记在场")
             if bits:
