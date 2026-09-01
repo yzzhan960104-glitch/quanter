@@ -21,6 +21,16 @@
           <span class="name">{{ rich(row.symbol)?.name }}</span>
         </template>
       </el-table-column>
+      <el-table-column label="进场日" width="90">
+        <template #default="{ row }">{{ rich(row.symbol)?.marks?.entry_date?.slice(5) || '—' }}</template>
+      </el-table-column>
+      <el-table-column label="预计超期" width="90">
+        <template #default="{ row }">
+          <span :class="expireCls(row.symbol)">
+            {{ rich(row.symbol)?.marks?.expire_date?.slice(5) || '—' }}
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column prop="volume" label="数量" width="80" />
       <el-table-column label="成本" width="76">
         <template #default="{ row }">{{ fmt(row.vwap) }}</template>
@@ -99,6 +109,18 @@ const last = (sym?: string): string | null => {
 const m = (sym: string | undefined, key: 'stop' | 'tp1_price' | 'tp2_price'): string =>
   fmt(rich(sym)?.marks?.[key])
 const pnlClass = (row: GmPositionRow) => ((row.fpnl ?? 0) >= 0 ? 'up' : 'down')
+/** 预计超期着色：距超期 ≤3 交易日 → 橙警示；已越线 → 红（策略次日尾盘将强平）。 */
+const expireCls = (sym?: string): string => {
+  const m = rich(sym)?.marks
+  if (!m?.expire_date) return ''
+  const days = m.max_holding ?? 30
+  const held = m.entry_date
+    ? Math.round((Date.now() - new Date(m.entry_date).getTime()) / 86400000) : 0
+  // 自然日近似（展示口径）：剩余 <25% 或已越线即警示
+  if (held >= days * 1.45) return 'expired'
+  if (held >= days * 1.45 - 5) return 'expiring'
+  return ''
+}
 
 const maxAbs = computed(() => Math.max(1, ...rows.value.map((r) => Math.abs(r.fpnl || 0))))
 const barWidth = (fpnl?: number) =>
@@ -144,6 +166,8 @@ onMounted(load)
 .bar.up { background: linear-gradient(90deg, #ef535055, #ef5350); }
 .bar.down { background: linear-gradient(90deg, #26a69a55, #26a69a); }
 .up { color: #ef5350; }
+.expiring { color: var(--qt-warn, #b88230); font-weight: 600; }
+.expired { color: #ef5350; font-weight: 700; }
 .down { color: #26a69a; }
 .drawer-body { padding: 0 8px; }
 .kline-meta { display: flex; gap: 16px; margin-bottom: 8px;

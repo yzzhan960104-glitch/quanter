@@ -297,6 +297,56 @@ def leg_dir(leg):
     return gc.leg_strategy_dir(leg)
 
 
+_SH_CAL: list[str] | None = None
+
+def _sh_calendar() -> list[str]:
+    """A 股交易日历（升序 ISO）：基准缓存的 000001.SH 日线（全量 2010 起），
+    缺则降级湖 index_daily。模块级缓存一次。"""
+    global _SH_CAL
+    if _SH_CAL is not None:
+        return _SH_CAL
+    import json as _json
+    days: set[str] = set()
+    cache = ROOT / "logs" / "benchmarks_cache.json"
+    if cache.exists():
+        try:
+            c = json.loads(cache.read_text(encoding="utf-8"))
+            days.update(c.get("000001.SH", {}).keys())
+            # 交易日历（含未来法定节假日精确口径）优先——上证日线只到昨日
+            tc = c.get("TRADE_CAL") or []
+            days.update(tc)
+        except (OSError, ValueError):
+            pass
+    if not days:
+        import pandas as pd
+        idx = pd.read_parquet(ROOT / "data_lake" / "index_daily.parquet")
+        days.update(str(d)[:10] for d in idx.index.get_level_values("date"))
+    from ops.benchmarks import _norm
+    _SH_CAL = sorted(_norm(d) for d in days)
+    return _SH_CAL
+
+
+def _expire_date(entry_date, max_holding: int) -> str | None:
+    """进场后第 max_holding+1 个交易日（超期平仓触发日；策略口径 T-1 基准）。
+    日历内=精确交易日；越过日历末端=按周末外推（周一~周五序列）。"""
+    if not entry_date:
+        return None
+    cal = _sh_calendar()
+    import bisect
+    i = bisect.bisect_left(cal, str(entry_date))
+    j = i + max_holding + 1
+    if j < len(cal):
+        return cal[j]
+    from datetime import date as _date, timedelta as _td
+    d = _date.fromisoformat(cal[-1]) if cal else _date.today()
+    step = j - len(cal) + 1
+    while step > 0:
+        d += _td(days=1)
+        if d.weekday() < 5:
+            step -= 1
+    return f"{d:%Y-%m-%d}"
+
+
 def _trade_history(leg_dir_path: Path, today_rows: list | None = None) -> list:
     """跨日成交史：state 订单史（filled>0）→ execrpts 形状行。
 
@@ -381,6 +431,15 @@ def _ohlcv_files(w) -> int:
                     # 信号颈线（enrich 挂载的追踪锚=识别颈线同值，08-27 实证
                     # 300433 trailing.neckline 39.0 == SIGNAL 颈线）
                     "neckline": (pos.get("trailing") or {}).get("neckline"),
+                    # 09-02 用户需求：下单日期+超时卖出日期。超期判定=策略
+                    # trading_days_between(entry, T-1) > max_holding → 触发日=
+                    # entry 后第 max_holding+1 个交易日（上证日历推算，日历外
+                    # 按周末外推）。
+                    "max_holding": int((pos.get("exec_params") or {})
+                                       .get("max_holding") or 30),
+                    "expire_date": _expire_date(
+                        pos.get("entry_date"),
+                        int((pos.get("exec_params") or {}).get("max_holding") or 30)),
                 })
         # 当日 SIGNAL（未成仓的新信号也给 K 线：颈线/entry/RR）
         src = gc.audit_csv_path(f"{datetime.now():%Y-%m-%d}", leg_dir)

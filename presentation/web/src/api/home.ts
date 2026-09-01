@@ -36,6 +36,8 @@ export interface OhlcvMarks {
   neckline?: number | null
   signal_entry?: number | null
   rr?: number | null
+  max_holding?: number | null
+  expire_date?: string | null
 }
 
 export interface OhlcvData {

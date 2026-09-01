@@ -97,11 +97,24 @@ def update() -> dict:
             fresh = _fetch(pro, code, start, end)
             if fresh:
                 cache[code] = fresh
+        # 交易日历（含未来法定节假日精确口径——09-02 超期日推算精度依赖：
+        # 周末外推会误把国庆黄金周当交易日，偏早可达一周）
+        try:
+            cal = pro.trade_cal(exchange="SSE", start_date="20100101",
+                                end_date="20271231")
+            if cal is not None and not cal.empty:
+                cache["TRADE_CAL"] = sorted(
+                    r["cal_date"] for _, r in cal.iterrows() if r["is_open"] == 1)
+        except Exception:
+            pass                                   # 日历失败降级周末外推
     except Exception as e:
         print(f"  ⚠ Tushare 不可用，走缓存/湖降级：{type(e).__name__}")
 
-    # 统一 ISO 键（cache 内 Tushare 紧凑键 / 湖破折号键混居 → 全部规整）
-    cache = {c: {_norm(d): v for d, v in rows.items()} for c, rows in cache.items()}
+    # 统一 ISO 键（cache 内 Tushare 紧凑键 / 湖破折号键混居 → 全部规整）；
+    # TRADE_CAL 是日期列表（非 {date: close} 行典）——直通不归一。
+    cache = {c: (rows if c == "TRADE_CAL"
+                 else {_norm(d): v for d, v in rows.items()})
+             for c, rows in cache.items()}
     sh = cache.get("000001.SH") or {
         _norm(d): v for d, v in _lake_sh_series(
             ERA, f"{datetime.now():%Y-%m-%d}").items()}
