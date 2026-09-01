@@ -36,6 +36,8 @@ const ExperimentView = () => import('../views/ExperimentView.vue')
 const DiscoveryLabView = () => import('../views/DiscoveryLabView.vue')
 // 公网首页（可视化重构 P1 · 2026-09-01）：净值曲线族英雄页——访客 3 秒看懂"赚不赚"。
 const HomeView = () => import('../views/HomeView.vue')
+// 腿详情（2026-09-01 需求②）：策略全量信息+风控参数（静态档案消费）。
+const LegDetailView = () => import('../views/LegDetailView.vue')
 
 // 公网静态模式（VITE_STATIC_DATA=1 · yzzhan.xin）：路由收敛为公开观测面——
 // 首页(净值总览)/cockpit/experiments/data（数据健康度）。discovery（研究 IP）
@@ -43,6 +45,7 @@ const HomeView = () => import('../views/HomeView.vue')
 const staticRoutes = [
   { path: '/', name: 'home', component: HomeView },
   { path: '/cockpit', name: 'cockpit', component: CockpitView },
+  { path: '/leg/:leg', name: 'leg-detail', component: LegDetailView },
   { path: '/experiments', name: 'experiments', component: ExperimentView },
   { path: '/data', name: 'data', component: DataLakeView },
   { path: '/:pathMatch(.*)*', redirect: '/' },
@@ -63,6 +66,7 @@ const router = createRouter(
     { path: '/live', redirect: '/cockpit' },
     // 综合看板（Task 12）：实盘观测俯瞰入口，聚合心跳/资金/数据健康/流水/日志。
     { path: '/cockpit', name: 'cockpit', component: CockpitView },
+  { path: '/leg/:leg', name: 'leg-detail', component: LegDetailView },
     // 实验对照（2026-08-29 多腿方案 P3）：双腿 A/B 的轮次/对照/下钻视图
     { path: '/experiments', name: 'experiments', component: ExperimentView },
     // 作业驾驶舱（Phase 2 · Task 12）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。

@@ -1,14 +1,10 @@
 <!--
-  TradesTable —— 交易流水表组件（一期观测运营层 · Task 9）。
+  TradesTable —— 交易流水表组件（一期观测运营层 · Task 9；2026-09-01 全字段升级）。
 
-  物理意图：驾驶舱「交易流水」卡片。挂载即拉当天实盘流水（queryTrades facade →
-  GET /api/v1/trading/trades），el-table 分页展示，方向用 el-tag 徽章着色
-  （buy=红/danger 视觉警示买入动作 · sell=绿/success 视觉提示卖出动作）。
-
-  Why 不对 shares/price 调 .toFixed()：TradeRecord 中这两个字段为 number|string
-  联合类型（后端 LIVE_TRADE_COLUMNS 可能返回字符串化的 Decimal/BigInt），
-  直接 .toFixed() 在字符串分支会抛 TypeError。这里把 el-table-column 留默认插槽渲染，
-  EP 会按原样输出，规避类型坑；若后续要统一小数位，需先 Number(x) 再 toFixed。
+  物理意图：驾驶舱「交易流水」卡——当日成交全字段作战记录：时间/方向/标的+
+  公司名/价格/数量/金额/委托号。方向 tag：买=红（A股买入警示色）/卖=绿。
+  数据=GET /api/v1/gm/trades（在线）或 gm_trades_<leg>.json 静态快照；
+  公司名经 ohlcv 快照富化（缺快照 '—' 不猜）。
 -->
 <template>
   <el-card shadow="never">
@@ -19,12 +15,35 @@
       </div>
     </template>
     <el-table :data="page.trades" size="small" height="320" v-loading="loading">
-      <el-table-column prop="symbol" label="标的" width="130" />
-      <el-table-column prop="volume" label="数量" width="100" />
-      <el-table-column prop="price" label="价格" width="100" />
-      <el-table-column prop="execId" label="成交编号" />
+      <el-table-column label="时间" width="84">
+        <template #default="{ row }">{{ timeOf(row.created_at) }}</template>
+      </el-table-column>
+      <el-table-column label="方向" width="62">
+        <template #default="{ row }">
+          <el-tag :type="row.side === 1 ? 'danger' : 'success'" size="small" effect="plain">
+            {{ row.side === 1 ? '买入' : '卖出' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="标的" min-width="150">
+        <template #default="{ row }">
+          <span class="sym">{{ toTs(row.symbol) }}</span>
+          <span class="name">{{ names[toTs(row.symbol)] || '' }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="价格" width="82">
+        <template #default="{ row }">{{ num(row.price) }}</template>
+      </el-table-column>
+      <el-table-column prop="volume" label="数量" width="76" />
+      <el-table-column label="金额" width="96">
+        <template #default="{ row }">{{ num(row.amount, 0) }}</template>
+      </el-table-column>
+      <el-table-column label="委托号" min-width="110">
+        <template #default="{ row }">
+          <span class="oid">{{ String(row.clOrdId || row.cl_ord_id || '').slice(0, 8) }}</span>
+        </template>
+      </el-table-column>
     </el-table>
-    <!-- 分页仅在总数超过单页上限时出现，避免单页 2 条数据也挂个分页条的视觉噪声。 -->
     <el-pagination
       v-if="page.total > page.limit"
       layout="prev, pager, next"
@@ -40,26 +59,32 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, inject, watch, type Ref } from 'vue'
 import { getTrades, type GmTradeRow } from '../../api/gm'
+import { getOhlcv } from '../../api/home'
 
 const loading = ref(false)
 const currentPage = ref(1)
-// 腿跟随（2026-08-29 多腿方案）：inject LegSelector 的全局腿态；无选择器祖先时
-// 缺省 main（组件独立使用/测试场景零依赖）。
 const leg = inject<Ref<string>>('cockpit-leg', ref('main'))
-// 本地分页（掘金 execrpts 端点一次拉全量，前端切片——日内成交笔数量级 << 1000）。
 const all = reactive<{ rows: GmTradeRow[] }>({ rows: [] })
 const page = reactive<{ trades: GmTradeRow[]; total: number; limit: number }>({
   trades: [], total: 0, limit: 50,
 })
+/** ts 符号 → 公司名（ohlcv 快照富化；缺快照不显示——绝不猜名）。 */
+const names = ref<Record<string, string>>({})
 
-/**
- * 拉取当前页流水。
- *
- * Why try/finally 包裹 loading：queryTrades 抛错时也要把 loading 关掉，
- * 否则按钮永远转圈、用户无法重试——这是 EP v-loading 常见的「假死」坑。
- * 错误本身不在此处吞掉：默认会被 vue 的全局 errorHandler 捕获并打 console，
- * 这里只负责状态机回正。
- */
+const toTs = (sym?: string): string => {
+  const [ex, code] = String(sym || '.').split('.')
+  const sfx: Record<string, string> = { SHSE: 'SH', SZSE: 'SZ' }
+  return `${code}.${sfx[ex] || ex}`
+}
+const num = (v: unknown, nd = 2): string =>
+  (typeof v === 'number' && Number.isFinite(v)) ? v.toFixed(nd) : '—'
+const timeOf = (iso?: string): string => {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime())
+    ? String(iso).slice(11, 19) || '—' : d.toTimeString().slice(0, 8)
+}
+
 async function load() {
   loading.value = true
   try {
@@ -69,28 +94,28 @@ async function load() {
   } finally {
     loading.value = false
   }
+  const uniq = Array.from(new Set(all.rows.map((r) => toTs(r.symbol))))
+  const got = await Promise.all(uniq.map(async (s) => {
+    const d = await getOhlcv(s).catch(() => null)
+    return [s, d?.name ?? ''] as const
+  }))
+  names.value = Object.fromEntries(got)
 }
 
-// 切腿即重拉（当日流水按账户隔离——主腿/实验腿是两本账）。
-watch(leg, load)
-
-/** el-pagination 翻页回调：本地切片。 */
 function onPage(p: number) {
   currentPage.value = p
   const start = (p - 1) * page.limit
   page.trades = all.rows.slice(start, start + page.limit)
 }
 
-// 挂载即拉当天流水（驾驶舱首屏即用）。
+watch(leg, load)
 onMounted(load)
 </script>
 
 <style scoped>
-/* 头部标题/按钮两端对齐：复用全站工具类风格的轻量本地兜底，
-   防止未全局引入 .flex-between 时头部样式崩塌。 */
-.flex-between {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+.sym { font-family: var(--qt-font-mono, monospace); }
+.name { color: var(--el-text-color-secondary); font-size: 12px; margin-left: 8px; }
+.oid { font-family: var(--qt-font-mono, monospace);
+       color: var(--el-text-color-secondary); font-size: 11px; }
 </style>

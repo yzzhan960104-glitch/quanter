@@ -225,7 +225,63 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
 
     # ── OHLCV 快照（P2 静态半场：持仓+当日信号标的的 K 线回放数据）──
     _ohlcv_files(w)                     # w 闭包自增 n_files
+
+    # ── 腿详情档案（需求②③：策略全量信息 + 手动风控参数）──
+    _leg_detail_files(w)
     return {"files": n_files, "generated_at": f"{t0:%Y-%m-%d %H:%M:%S}"}
+
+
+def _leg_detail_files(w) -> int:
+    """每腿策略全量档案 leg_detail_<leg>.json。
+
+    数据源三路合一：①终端部署的 main.py（importlib 读 §0 常量——**运行真相**，
+    不是仓库副本；main.py 有 __main__ 闸，import 不起策略）②state/ 下人工风控
+    文件化身（RISK_BLOCK.flag 存在性 + CAP.txt 仓位上限）③/gm/legs 身份。
+    ①失败（文件异常）→ 参数区缺省展示 error 字段，不炸快照主链。
+    """
+    import importlib.util as ilu
+    from ops import gm_ops_common as gc
+
+    identity = {l["key"]: l for l in _legs_payload()}
+    for leg in gc.active_legs():
+        leg_dir = gc.leg_strategy_dir(leg)
+        detail = {"leg": identity.get(leg.key, {"key": leg.key, "label": leg.label})}
+        try:
+            spec = ilu.spec_from_file_location(f"pilot_detail_{leg.key}",
+                                               leg_dir / "main.py")
+            m = ilu.module_from_spec(spec)
+            sys.modules[spec.name] = m
+            spec.loader.exec_module(m)
+            detail.update({
+                "build_stamp": getattr(m, "PILOT_BUILD_STAMP", None),
+                "id_params": dict(getattr(m, "ID_PARAMS", {}) or {}),
+                "exec_params": dict(getattr(m, "EXEC_PARAMS", {}) or {}),
+                "trade_cfg": dict(getattr(m, "TRADE_CFG", {}) or {}),
+                "amihud_filter": dict(getattr(m, "AMIHUD_FILTER", {}) or {}),
+                "universe_size": len(getattr(m, "UNIVERSE", []) or []),
+                "daily_order_cap": getattr(m, "PILOT_MAX_NEW_ORDERS_PER_DAY", None),
+            })
+        except Exception as e:
+            detail["artifact_error"] = f"{type(e).__name__}: {e}"
+        # ② 人工风控文件化身（ADR-16：state/RISK_BLOCK.flag + state/CAP.txt）
+        state_dir = leg_dir / "state"
+        detail["risk"] = {
+            "risk_block": (state_dir / "RISK_BLOCK.flag").exists(),
+            "cap_total": _read_cap(state_dir / "CAP.txt"),
+            "note": "RISK_BLOCK=增量挂单人工闸（存在即拦）；CAP.txt=人工总仓位"
+                    "上限（缺省 1.0）；pos_cap=单票仓位上限（TRADE_CFG）",
+        }
+        w(f"leg_detail_{leg.key}", detail)
+    return 0
+
+
+def _read_cap(path: Path) -> float:
+    """CAP.txt → [0,1] 人工总仓位上限（缺省 1.0；坏值防御回 1.0）。"""
+    try:
+        v = float(path.read_text(encoding="utf-8").strip())
+        return v if 0.0 <= v <= 1.0 else 1.0
+    except (OSError, ValueError):
+        return 1.0
 
 
 def _ohlcv_files(w) -> int:

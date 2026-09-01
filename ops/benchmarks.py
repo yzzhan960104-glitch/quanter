@@ -36,18 +36,29 @@ def _tushare():
 
 
 def _fetch(pro, ts_code: str, start: str, end: str) -> dict[str, float]:
-    """单指数拉取 → {date: close}；index_global（美股）与 index_daily（A 股）双形态。"""
-    try:
-        if "." in ts_code:
-            df = pro.index_daily(ts_code=ts_code, start_date=start, end_date=end)
-        else:
-            df = pro.index_global(ts_code=ts_code, start_date=start, end_date=end)
-        if df is None or df.empty:
-            return {}
-        return dict(zip(df["trade_date"].astype(str),
-                        df["close"].astype(float)))
-    except Exception:
-        return {}
+    """单指数分段拉取 → {date: close}。5 年一段合并（Tushare 单次行数上限防御）；
+    index_global（美股）与 index_daily（A 股）按代码带不带 '.' 双形态。"""
+    out: dict[str, float] = {}
+    cur = datetime.strptime(start, "%Y%m%d")
+    stop = datetime.strptime(end, "%Y%m%d")
+    while cur < stop:
+        seg_end = min(cur + timedelta(days=365 * 5), stop)
+        try:
+            if "." in ts_code:
+                df = pro.index_daily(ts_code=ts_code,
+                                     start_date=f"{cur:%Y%m%d}",
+                                     end_date=f"{seg_end:%Y%m%d}")
+            else:
+                df = pro.index_global(ts_code=ts_code,
+                                      start_date=f"{cur:%Y%m%d}",
+                                      end_date=f"{seg_end:%Y%m%d}")
+            if df is not None and not df.empty:
+                out.update(dict(zip(df["trade_date"].astype(str),
+                                    df["close"].astype(float))))
+        except Exception:
+            pass                                   # 单段失败继续（部分历史优于全空）
+        cur = seg_end + timedelta(days=1)
+    return out
 
 
 def _lake_sh_series(start: str, end: str) -> dict[str, float]:
@@ -69,7 +80,9 @@ def _norm(d: str) -> str:
 
 
 def update() -> dict:
-    start = (datetime.strptime(ERA, "%Y-%m-%d") - timedelta(days=20)).strftime("%Y%m%d")
+    # 2026-09-01 用户需求④：全量 2010→今（图可缩放全景）；展示层默认年初至今窗口
+    # （归一锚=当年首个交易日，前端 NavCurve 消费）。
+    start = "20100101"
     end = f"{datetime.now():%Y%m%d}"
 
     cache: dict = {}
@@ -94,7 +107,10 @@ def update() -> dict:
             ERA, f"{datetime.now():%Y-%m-%d}").items()}
     if not sh:
         raise SystemExit("benchmarks: 上证轴不可得（Tushare+湖双降级皆空）")
-    axis = sorted(d for d in sh if d >= ERA)
+    axis = sorted(d for d in sh if d >= "2010-01-01")
+    # 年初锚（展示层 YTD 归一用；当年首个 A 股交易日）
+    year = datetime.now().year
+    ytd_anchor = next((d for d in axis if d >= f"{year}-01-01"), axis[0])
 
     def ff(code: str) -> list[float | None]:
         raw = cache.get(code) or {}
@@ -107,7 +123,7 @@ def update() -> dict:
             out.append(last)
         return out
 
-    doc = {"era_start": ERA, "axis": axis,
+    doc = {"era_start": ERA, "ytd_anchor": ytd_anchor, "axis": axis,
            "series": [{"code": c, "name": NAMES[c], "points": ff(c)}
                       for c in ("000001.SH", "IXIC", "SPX")],
            "updated_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}"}

@@ -9,12 +9,16 @@
 <template>
   <div v-if="legs.length > 1" class="leg-selector">
     <el-segmented v-model="current" :options="options" size="small" />
+    <router-link v-if="STATIC_MODE" :to="`/leg/${current}`" class="leg-detail-link">
+      详情 »
+    </router-link>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, provide, watch } from 'vue'
 import { getLegs, type GmLeg } from '../../api/gm'
+import { STATIC_MODE } from '../../api/static'
 
 const STORAGE_KEY = 'cockpit-leg'
 const legs = ref<GmLeg[]>([])
@@ -45,6 +49,11 @@ defineExpose({ legs, current })
 .leg-selector {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
   padding: 0 var(--qt-space-2) var(--qt-space-2);
 }
+.leg-detail-link { font-size: 12px; color: var(--el-text-color-secondary);
+                   text-decoration: none; }
+.leg-detail-link:hover { color: var(--qt-accent, #2962ff); }
 </style>

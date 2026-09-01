@@ -62,6 +62,7 @@ export interface BenchSeries {
 
 export interface Benchmarks {
   era_start: string
+  ytd_anchor?: string            // 当年首个 A 股交易日（YTD 归一锚）
   axis: string[]
   series: BenchSeries[]
   updated_at?: string
@@ -69,4 +70,29 @@ export interface Benchmarks {
 
 export function getBenchmarks(): Promise<Benchmarks | null> {
   return staticGet<Benchmarks | null>('benchmarks', null)
+}
+
+/** 腿策略全量档案（需求②③）：部署产物 §0 常量 + 人工风控文件化身 + 身份。 */
+export interface LegRisk {
+  risk_block: boolean
+  cap_total: number
+  note?: string
+}
+
+export interface LegDetail {
+  leg: { key?: string; label?: string; role?: string; strategy_id?: string | null
+         strategy_name?: string | null; account_id?: string | null }
+  build_stamp?: string
+  id_params?: Record<string, unknown>
+  exec_params?: Record<string, unknown>
+  trade_cfg?: Record<string, unknown>
+  amihud_filter?: Record<string, unknown>
+  universe_size?: number
+  daily_order_cap?: number
+  risk?: LegRisk
+  artifact_error?: string
+}
+
+export function getLegDetail(leg: string): Promise<LegDetail | null> {
+  return staticGet<LegDetail | null>(`leg_detail_${leg}`, null)
 }
