@@ -38,14 +38,14 @@ function render() {
       autoSize: true,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#d1d4dc',
+        textColor: '#4e5969',
       },
       grid: {
-        vertLines: { color: 'rgba(43,49,57,0.5)' },
-        horzLines: { color: 'rgba(43,49,57,0.5)' },
+        vertLines: { color: 'rgba(220,223,230,0.7)' },
+        horzLines: { color: 'rgba(220,223,230,0.7)' },
       },
-      rightPriceScale: { borderColor: '#2b3139' },
-      timeScale: { borderColor: '#2b3139' },
+      rightPriceScale: { borderColor: '#dcdfe6' },
+      timeScale: { borderColor: '#dcdfe6' },
       localization: { locale: 'zh-CN' },
     })
     series = chart.addSeries(CandlestickSeries, {

@@ -1,19 +1,20 @@
 <!--
-  NavCurve 净值曲线族（可视化重构 P1 · 2026-09-01）。
+  NavCurve 收益率曲线族（可视化重构 P1 · 2026-09-01；同日需求④改收益率同图对比）。
 
-  物理意图：回答"钱赚不赚"——上格双腿净值（较入金基数 %）双线，下格回撤水下图
-  （较区间高点 %），dataZoom 联动。数据=nav_history 快照（时代口径：自两腿各
-  入金 20 万起算，10 万试点时代不混画——见 ops/nav_history.py 红线注）。
+  物理意图：回答"钱赚不赚，跑赢大盘没有"——上格双腿累计收益（较入金基数 %）与
+  上证/纳指/标普三基准同图（各按自身 era 首日归一），下格主腿回撤水下图，
+  dataZoom 联动。x 轴=基准文件的 A 股交易日轴（净值日 ⊆ 该轴；基准线在净值
+  空缺日不画点）。数据=nav_history + benchmarks 快照（时代口径见 ops/nav_history.py）。
 -->
 <template>
   <el-card shadow="never">
     <template #header>
       <div class="flex-between">
-        <span>净值曲线 <span class="sub">（较入金 {{ (base / 10000).toFixed(0) }} 万 · %）</span></span>
+        <span>累计收益率 <span class="sub">（era 起 · 与基准同图）</span></span>
         <span v-if="updated" class="sub">至 {{ updated }}</span>
       </div>
     </template>
-    <v-chart v-if="days.length" class="chart" :option="option" theme="terminal-dark" autoresize />
+    <v-chart v-if="days.length" class="chart" :option="option" theme="terminal-light" autoresize />
     <el-empty v-else description="净值历史累积中（自 era 起每交易日一点）" :image-size="60" />
     <div v-if="preEraNote" class="pre-era">{{ preEraNote }}</div>
   </el-card>
@@ -25,16 +26,16 @@ import VChart from 'vue-echarts'
 import { LineChart } from 'echarts/charts'
 import {
   GridComponent, TooltipComponent, LegendComponent,
-  DataZoomComponent, MarkPointComponent,
+  DataZoomComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { use } from 'echarts/core'
-import type { NavHistory, NavDay } from '../../api/home'
+import type { NavHistory, NavDay, Benchmarks } from '../../api/home'
 
 use([LineChart, GridComponent, TooltipComponent, LegendComponent,
-     DataZoomComponent, MarkPointComponent, CanvasRenderer])
+     DataZoomComponent, CanvasRenderer])
 
-const props = defineProps<{ history: NavHistory }>()
+const props = defineProps<{ history: NavHistory; benchmarks?: Benchmarks | null }>()
 
 const days = computed(() => props.history.days ?? [])
 const base = computed(() => props.history.base || 200000)
@@ -44,19 +45,43 @@ const updated = computed(() => {
 })
 const preEraNote = computed(() => props.history.pre_era_note || '')
 
-/** 腿 → 净值 % 序列（首日较 base，其后较前日锚定的连续净值）。 */
-function seriesOf(leg: string): number[] {
-  return days.value.map((d: NavDay) => {
-    const nav = d.legs?.[leg]
-    return nav != null ? +((nav / base.value - 1) * 100).toFixed(3) : NaN
+/** x 轴：基准 A 股交易日轴优先（净值日并入并集，防基准文件缺当日）。 */
+const axis = computed<string[]>(() => {
+  const a = props.benchmarks?.axis ?? []
+  const extra = days.value.map((d) => d.date).filter((d) => !a.includes(d))
+  return Array.from(new Set([...a, ...extra])).sort()
+})
+
+const navByDate = computed<Map<string, NavDay>>(() =>
+  new Map(days.value.map((d) => [d.date, d])))
+
+/** 腿 → 轴对齐的累计收益 %（轴上无净值日 → null 断点）。 */
+function seriesOf(leg: string): Array<number | null> {
+  return axis.value.map((d) => {
+    const nav = navByDate.value.get(d)?.legs?.[leg]
+    return nav != null ? +((nav / base.value - 1) * 100).toFixed(3) : null
   })
 }
 
-/** 回撤 %（较区间内前高；NaN 日透传为 null 断线）。 */
-function drawdownOf(leg: string): (number | null)[] {
+/** 基准 → 轴对齐累计收益 %（较自身首个非空点归一）。 */
+function benchSeries(idx: number): Array<number | null> {
+  const s = props.benchmarks?.series?.[idx]
+  if (!s || !props.benchmarks) return []
+  const axisB = props.benchmarks.axis
+  const first = s.points.find((p) => p != null)
+  if (first == null) return []
+  const byDate = new Map(axisB.map((d, i) => [d, s.points[i]]))
+  return axis.value.map((d) => {
+    const v = byDate.get(d)
+    return v != null ? +((v / first - 1) * 100).toFixed(3) : null
+  })
+}
+
+/** 主腿回撤 %（较轴内前高）。 */
+function drawdownOf(leg: string): Array<number | null> {
   let peak = -Infinity
-  return days.value.map((d: NavDay) => {
-    const nav = d.legs?.[leg]
+  return axis.value.map((d) => {
+    const nav = navByDate.value.get(d)?.legs?.[leg]
     if (nav == null) return null
     peak = Math.max(peak, nav)
     return +((nav / peak - 1) * 100).toFixed(3)
@@ -64,35 +89,46 @@ function drawdownOf(leg: string): (number | null)[] {
 }
 
 const option = computed(() => {
-  const ds = days.value.map((d: NavDay) => d.date)
-  const main = seriesOf('main')
-  const exp = seriesOf('exp')
+  const hasBench = !!props.benchmarks?.series?.length
+  const legend = ['主腿', '实验腿', ...(hasBench
+    ? (props.benchmarks!.series.map((s) => s.name)) : [])]
+  // 基准弱化样式：细线+低调灰阶（腿是主角）
+  const benchStyle = (color: string) => ({
+    type: 'line', showSymbol: false, lineStyle: { width: 1, color, opacity: 0.85 },
+    itemStyle: { color }, emphasis: { focus: 'series' }, connectNulls: true, z: 1,
+  })
+  const benchColors = ['#86909c', '#d29922', '#bc8cff']
   return {
     tooltip: { trigger: 'axis', valueFormatter: (v: number) => `${v}%` },
-    legend: { data: ['主腿', '实验腿'], top: 0 },
+    legend: { data: legend, top: 0 },
     grid: [
       { left: 48, right: 16, top: 28, height: '52%' },
-      { left: 48, right: 16, top: '72%', height: '18%' },
+      { left: 48, right: 16, top: '74%', height: '16%' },
     ],
     xAxis: [
-      { type: 'category', data: ds, boundaryGap: false },
-      { type: 'category', gridIndex: 1, data: ds, boundaryGap: false, axisLabel: { show: false } },
+      { type: 'category', data: axis.value, boundaryGap: false },
+      { type: 'category', gridIndex: 1, data: axis.value, boundaryGap: false,
+        axisLabel: { show: false } },
     ],
     yAxis: [
-      { type: 'value', axisLabel: { formatter: '{value}%' }, splitLine: { lineStyle: { color: '#2b3139' } } },
+      { type: 'value', axisLabel: { formatter: '{value}%' },
+        splitLine: { lineStyle: { color: '#eef1f6' } } },
       { type: 'value', gridIndex: 1, max: 0, axisLabel: { formatter: '{value}%' },
         splitLine: { show: false } },
     ],
     dataZoom: [{ type: 'inside', xAxisIndex: [0, 1] }],
     series: [
-      { name: '主腿', type: 'line', data: main, showSymbol: true, symbolSize: 5,
-        lineStyle: { width: 2 }, emphasis: { focus: 'series' },
+      { name: '主腿', type: 'line', data: seriesOf('main'), showSymbol: true,
+        symbolSize: 5, lineStyle: { width: 2.5 }, emphasis: { focus: 'series' },
         connectNulls: true, z: 3 },
-      { name: '实验腿', type: 'line', data: exp, showSymbol: true, symbolSize: 5,
-        lineStyle: { width: 2, type: 'dashed' }, emphasis: { focus: 'series' },
-        connectNulls: true },
+      { name: '实验腿', type: 'line', data: seriesOf('exp'), showSymbol: true,
+        symbolSize: 5, lineStyle: { width: 2, type: 'dashed' },
+        emphasis: { focus: 'series' }, connectNulls: true, z: 2 },
+      ...((props.benchmarks?.series ?? []).map((s, i) => ({
+        name: s.name, data: benchSeries(i), ...benchStyle(benchColors[i % 3]),
+      }))),
       { name: '回撤(主腿)', type: 'line', xAxisIndex: 1, yAxisIndex: 1,
-        data: drawdownOf('main'), areaStyle: { opacity: 0.35 }, showSymbol: false,
+        data: drawdownOf('main'), areaStyle: { opacity: 0.3 }, showSymbol: false,
         lineStyle: { width: 1, color: '#26a69a' }, itemStyle: { color: '#26a69a' } },
     ],
   }

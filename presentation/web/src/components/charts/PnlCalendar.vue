@@ -15,7 +15,7 @@
         </el-select>
       </div>
     </template>
-    <v-chart v-if="cells.length" class="chart" :option="option" theme="terminal-dark" autoresize />
+    <v-chart v-if="cells.length" class="chart" :option="option" theme="terminal-light" autoresize />
     <el-empty v-else description="日收益累积中" :image-size="60" />
   </el-card>
 </template>
@@ -54,20 +54,20 @@ const option = computed(() => ({
     `${p.data[0]}<br/>日收益 <b>${p.data[1]}%</b>` },
   visualMap: {
     min: -3, max: 3, calculable: false, orient: 'horizontal', left: 'center', bottom: 0,
-    itemHeight: 90, textStyle: { color: '#787b86' },
+    itemHeight: 90, textStyle: { color: '#86909c' },
     // A 股惯例：红=赚 绿=亏；中性灰=停牌/缺数据邻域
-    inRange: { color: ['#26a69a', '#2b3139', '#ef5350'] },
+    inRange: { color: ['#26a69a', '#f0f2f5', '#ef5350'] },
   },
   calendar: {
     range: cells.value.length
       ? [cells.value[0][0], cells.value[cells.value.length - 1][0]] : [],
     cellSize: ['auto', 16],
     left: 40, right: 12, top: 24,
-    itemStyle: { color: '#1b222d', borderColor: '#131722', borderWidth: 2 },
+    itemStyle: { color: '#ffffff', borderColor: '#f5f7fa', borderWidth: 2 },
     yearLabel: { show: false },
-    dayLabel: { color: '#787b86', firstDay: 1 },
-    monthLabel: { color: '#787b86' },
-    splitLine: { lineStyle: { color: '#2b3139' } },
+    dayLabel: { color: '#86909c', firstDay: 1 },
+    monthLabel: { color: '#86909c' },
+    splitLine: { lineStyle: { color: '#dcdfe6' } },
   },
   series: [{
     type: 'heatmap', coordinateSystem: 'calendar', data: cells.value,

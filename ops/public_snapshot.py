@@ -157,7 +157,10 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
                              str(cfg.get("account_id") or ""))
         lt, la = leg_cfgs[leg.key]
         st, payload = gc.api_get(f"/v3/account-trade/cash/{la}", lt, timeout=4.0)
-        w(f"gm_asset_{leg.key}", (payload or {}).get("data") or {} if st == 200 else {})
+        # cash 端点 data 是 [row] 列表——写 row 对象（facade 契约 GmAsset；
+        # 09-01 用户反馈"资产为空"根因=此前整列表落盘，DualAssetCard 取不到字段）
+        w(f"gm_asset_{leg.key}",
+          ((payload or {}).get("data") or [{}])[0] if st == 200 else {})
         st, payload = gc.api_get(f"/v3/account-trade/positions/{la}", lt, timeout=4.0)
         w(f"gm_positions_{leg.key}", (payload or {}).get("data") or [] if st == 200 else [])
         st, payload = gc.api_get(f"/v3/account-trade/orders/{la}", lt, timeout=4.0)
@@ -213,6 +216,12 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
     doc = nav_history.update()
     n_files += 1
     print(f"  ✓ nav_history.json（{len(doc['days'])} 天，era 起 {doc['era_start']}）")
+
+    # ── 基准指数（需求④：上证/纳指/标普同图对比）──
+    from ops import benchmarks as bm
+    bdoc = bm.update()
+    n_files += 1
+    print(f"  ✓ benchmarks.json（轴 {len(bdoc['axis'])} 天 × {len(bdoc['series'])} 基准）")
 
     # ── OHLCV 快照（P2 静态半场：持仓+当日信号标的的 K 线回放数据）──
     _ohlcv_files(w)                     # w 闭包自增 n_files

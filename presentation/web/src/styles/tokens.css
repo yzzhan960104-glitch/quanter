@@ -26,6 +26,69 @@
  *   --qt-font-*   字体栈（Inter 优先，离线降级系统栈）
  *   --qt-fs-*     字号（title/body/caption））
  */
+/*
+ * 亮色为默认主题（2026-09-01 用户裁决：yzzhan.xin 公网亮色化）。
+ * 暗色（极夜黑）完整保留在 html.dark 作用域——main.ts 重新挂 .dark 类即可整体
+ * 切回，零删除。共享度量（间距/圆角/字体/字号）与主题无关，落 :root。
+ */
+:root {
+  /* —— 中性壳层（亮色：云雾白体系） —— */
+  --qt-bg-page: #f5f7fa;
+  --qt-bg-card: #ffffff;
+  --qt-bg-overlay: #f0f2f5;
+  --qt-bg-elevated: #eef1f6;
+
+  /* —— 边框 —— */
+  --qt-border: #dcdfe6;
+  --qt-border-strong: #c0c4cc;
+
+  /* —— 文字层级 —— */
+  --qt-text-primary: #1f2329;
+  --qt-text-regular: #4e5969;
+  --qt-text-secondary: #86909c;
+  --qt-text-placeholder: #a9aeb8;
+
+  /* —— 语义/交易色（红涨绿跌与 Quant 蓝不变——TV light 同色对白底可读） —— */
+  --qt-accent: #2962ff;
+  --qt-up: #ef5350;
+  --qt-down: #26a69a;
+  --qt-warn: #b88230;
+
+  /* —— 终端主题色（GitHub-light） —— */
+  --qt-terminal-bg: #f6f8fa;
+  --qt-terminal-fg: #24292f;
+  --qt-terminal-error: #cf222e;
+
+/* —— 间距（4/8 节奏，消除此前 6/8/10/12/14/16px 六种散乱取值） —— */
+  --qt-space-1: 4px;
+  --qt-space-2: 8px;
+  --qt-space-3: 12px;
+  --qt-space-4: 16px;
+  --qt-space-5: 20px;
+  --qt-space-6: 24px;
+
+  /* —— 圆角 —— */
+  --qt-radius-sm: 4px;          /* tag/小元素/输入 */
+  --qt-radius: 6px;             /* 卡片（默认） */
+  --qt-radius-lg: 8px;          /* 大容器 */
+
+  /* —— 字体栈 —— */
+  /*
+   * Inter 优先：fintech/trading 公认最佳字体，数字字形与等宽表现优于系统字体。
+   * 离线/内网降级：Inter 加载失败时，后续 -apple-system/Segoe UI/PingFang SC 自动接管，
+   *   不阻断功能（本项目数据源多为内网代理，联网拉字体不可靠，故保留稳健降级链）。
+   */
+  --qt-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --qt-font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* —— 字号 —— */
+  --qt-fs-title: 13px;          /* 区块小标题统一口径（消除此前 12/13/15px 三档分裂） */
+  --qt-fs-body: 13px;
+  --qt-fs-caption: 11px;        /* 次级说明/标签 */
+}
+
+/* 暗色降级块（原极夜黑全量色值；作用域激活 = html.dark） */
 html.dark {
   /* —— 中性壳层 —— */
   --qt-bg-page: #131722;        /* 页面底（极夜黑，= --el-bg-color-page） */
@@ -67,32 +130,4 @@ html.dark {
   --qt-terminal-bg: #0d1117;    /* 终端画布底（GitHub-dark 标准黑） */
   --qt-terminal-fg: #c9d1d9;    /* 终端默认前景文（GitHub-dark 默认浅灰） */
   --qt-terminal-error: #f85149; /* ERROR 级别红（GitHub-dark 标准 error 色，区别于 A 股涨红 --qt-up） */
-
-  /* —— 间距（4/8 节奏，消除此前 6/8/10/12/14/16px 六种散乱取值） —— */
-  --qt-space-1: 4px;
-  --qt-space-2: 8px;
-  --qt-space-3: 12px;
-  --qt-space-4: 16px;
-  --qt-space-5: 20px;
-  --qt-space-6: 24px;
-
-  /* —— 圆角 —— */
-  --qt-radius-sm: 4px;          /* tag/小元素/输入 */
-  --qt-radius: 6px;             /* 卡片（默认） */
-  --qt-radius-lg: 8px;          /* 大容器 */
-
-  /* —— 字体栈 —— */
-  /*
-   * Inter 优先：fintech/trading 公认最佳字体，数字字形与等宽表现优于系统字体。
-   * 离线/内网降级：Inter 加载失败时，后续 -apple-system/Segoe UI/PingFang SC 自动接管，
-   *   不阻断功能（本项目数据源多为内网代理，联网拉字体不可靠，故保留稳健降级链）。
-   */
-  --qt-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  --qt-font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-
-  /* —— 字号 —— */
-  --qt-fs-title: 13px;          /* 区块小标题统一口径（消除此前 12/13/15px 三档分裂） */
-  --qt-fs-body: 13px;
-  --qt-fs-caption: 11px;        /* 次级说明/标签 */
 }

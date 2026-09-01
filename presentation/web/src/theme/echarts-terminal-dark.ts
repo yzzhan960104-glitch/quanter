@@ -46,3 +46,41 @@ export function initTerminalDarkTheme(): void {
     color: ['#2962ff', '#f78166', '#26a69a', '#d29922', '#bc8cff'],
   })
 }
+
+/**
+ * 亮色主题（terminal-light · 2026-09-01 公网亮色化）：云雾白体系——卡片白底上
+ * 透明画布、灰阶轴线（#dcdfe6/#86909c）、TradingView light 同源的红涨绿跌与
+ * Quant 蓝调色板。与 terminal-dark 同构注册，组件 theme="terminal-light" 引用。
+ */
+export function initLightTheme(): void {
+  registerTheme('terminal-light', {
+    backgroundColor: 'transparent',
+    textStyle: { color: '#4e5969' },
+    title: { textStyle: { color: '#1f2329' }, subtextStyle: { color: '#86909c' } },
+    legend: { textStyle: { color: '#4e5969' } },
+    tooltip: {
+      backgroundColor: 'rgba(255,255,255,0.96)',
+      borderColor: '#dcdfe6',
+      textStyle: { color: '#1f2329' },
+    },
+    categoryAxis: {
+      axisLine: { lineStyle: { color: '#c0c4cc' } },
+      axisLabel: { color: '#86909c' },
+      splitLine: { show: false },
+    },
+    valueAxis: {
+      axisLine: { lineStyle: { color: '#c0c4cc' } },
+      axisLabel: { color: '#86909c' },
+      splitLine: { lineStyle: { color: '#eef1f6' } },
+    },
+    candlestick: {
+      itemStyle: {
+        color: '#ef5350',         // 阳线（涨）—— 红（A 股惯例，与暗色同源不变）
+        color0: '#26a69a',        // 阴线（跌）—— 绿
+        borderColor: '#ef5350',
+        borderColor0: '#26a69a',
+      },
+    },
+    color: ['#2962ff', '#f78166', '#26a69a', '#d29922', '#bc8cff'],
+  })
+}

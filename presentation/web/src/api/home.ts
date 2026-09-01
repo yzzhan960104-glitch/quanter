@@ -51,3 +51,22 @@ export interface OhlcvData {
 export function getOhlcv(sym: string): Promise<OhlcvData | null> {
   return staticGet<OhlcvData | null>(`ohlcv_${sym}`, null)
 }
+
+/** 基准指数（首页收益率同图对比 · 2026-09-01 需求④）：A 股交易日轴 + 三基准
+ * 前向填充收盘（美股休市日沿用前收——同期累计收益对比的标准口径）。 */
+export interface BenchSeries {
+  code: string
+  name: string
+  points: Array<number | null>
+}
+
+export interface Benchmarks {
+  era_start: string
+  axis: string[]
+  series: BenchSeries[]
+  updated_at?: string
+}
+
+export function getBenchmarks(): Promise<Benchmarks | null> {
+  return staticGet<Benchmarks | null>('benchmarks', null)
+}

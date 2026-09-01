@@ -27,7 +27,7 @@
       </div>
     </div>
 
-    <NavCurve :history="history" />
+    <NavCurve :history="history" :benchmarks="benchmarks" />
 
     <el-row :gutter="12" style="margin-top: 12px">
       <el-col :span="14"><PnlCalendar :history="history" /></el-col>
@@ -51,11 +51,12 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { getNavHistory, type NavHistory } from '../api/home'
+import { getNavHistory, getBenchmarks, type NavHistory, type Benchmarks } from '../api/home'
 import NavCurve from '../components/charts/NavCurve.vue'
 import PnlCalendar from '../components/charts/PnlCalendar.vue'
 
 const history = ref<NavHistory>({ base: 200000, era_start: '', days: [] })
+const benchmarks = ref<Benchmarks | null>(null)
 
 const stats = computed(() => {
   const days = history.value.days ?? []
@@ -78,6 +79,7 @@ onMounted(async () => {
   try {
     history.value = await getNavHistory()
   } catch { /* 快照缺失：图表组件自降级占位 */ }
+  benchmarks.value = await getBenchmarks().catch(() => null)
 })
 </script>
 
@@ -90,7 +92,7 @@ onMounted(async () => {
 .hero-title .thin { font-weight: 300; font-size: 18px; color: var(--el-text-color-secondary); }
 .hero-sub { color: var(--el-text-color-secondary); font-size: 13px; margin: 8px 0 0; max-width: 560px; }
 .stat-cards { display: flex; gap: 12px; }
-.stat-card { background: var(--el-bg-color-overlay, #1b222d); border: 1px solid #2b3139;
+.stat-card { background: var(--qt-bg-card, #ffffff); border: 1px solid var(--qt-border, #dcdfe6);
              border-radius: 8px; padding: 12px 18px; min-width: 150px; }
 .stat-label { color: var(--el-text-color-secondary); font-size: 12px; }
 .stat-nav { font-size: 22px; font-weight: 600; margin: 4px 0; }
@@ -99,7 +101,7 @@ onMounted(async () => {
 .up { color: #ef5350; }
 .down { color: #26a69a; }
 .links-card .link { display: flex; justify-content: space-between; align-items: baseline;
-                    padding: 10px 4px; border-bottom: 1px solid #2b3139;
+                    padding: 10px 4px; border-bottom: 1px solid var(--qt-border, #dcdfe6);
                     color: var(--el-text-color-primary); text-decoration: none; }
 .links-card .link:last-child { border-bottom: none; }
 .links-card .link .sub { color: var(--el-text-color-secondary); font-size: 12px; }
