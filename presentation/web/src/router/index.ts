@@ -25,18 +25,33 @@
  * - 各 View 互不依赖，按路由切片可显著降低首屏主 bundle 体积。
  */
 import { createRouter, createWebHistory } from 'vue-router'
+import { STATIC_MODE } from '../api/static'
 const DashboardView = () => import('../views/DashboardView.vue')
 const DataLakeView = () => import('../views/DataLakeView.vue')
-// 综合看板（Task 12 · 一期观测运营层前端收官）：聚合流水/日志/回测对比/心跳/资金/数据健康。
+// 综合看板（Task 12 · 一期观测运营层前端收官）：聚合流水/日志/心跳/资金/数据健康。
 const CockpitView = () => import('../views/CockpitView.vue')
 const ExperimentView = () => import('../views/ExperimentView.vue')
 // 作业驾驶舱（Phase 2 · Task 12 收官）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
 // 搜索实验室（P3 · 2026-08-13）：参数发现敏感性分析/热力图/进展（只读，spec §4）。
 const DiscoveryLabView = () => import('../views/DiscoveryLabView.vue')
 
-const router = createRouter({
-  history: createWebHistory(),
-  routes: [
+// 公网静态模式（VITE_STATIC_DATA=1 · yzzhan.xin）：路由收敛为公开观测面——
+// cockpit/experiments/data（数据健康度）。discovery（研究 IP）与 dashboard（内网
+// 宏观）不公开；未知路径兜底回 cockpit（公开站不暴露内部 404 面）。
+const staticRoutes = [
+  { path: '/', redirect: '/cockpit' },
+  { path: '/cockpit', name: 'cockpit', component: CockpitView },
+  { path: '/experiments', name: 'experiments', component: ExperimentView },
+  { path: '/data', name: 'data', component: DataLakeView },
+  { path: '/:pathMatch(.*)*', redirect: '/cockpit' },
+]
+
+const router = createRouter(
+  STATIC_MODE
+    ? { history: createWebHistory(), routes: staticRoutes }
+    : {
+        history: createWebHistory(),
+        routes: [
     // 首页改指搜索实验室：caisen 退役后，参数发现敏感性分析作为研究第一入口（spec §4 P3）。
     { path: '/', redirect: '/discovery' },
     // 搜索实验室（P3 · spec §4.3）：敏感性仪表板 + 热力图 + 搜索进展（只读，研究动线首屏）。
@@ -50,7 +65,8 @@ const router = createRouter({
     { path: '/experiments', name: 'experiments', component: ExperimentView },
     // 作业驾驶舱（Phase 2 · Task 12）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
     { path: '/data', name: 'data', component: DataLakeView },
-  ],
-})
+        ],
+      },
+)
 
 export default router

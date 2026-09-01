@@ -40,16 +40,19 @@
       <el-col :span="12"><DataHealthCard /></el-col>
     </el-row>
 
-    <!-- 中排：流水 + 日志并排（观测「下单→成交→入日志」链路一致性） -->
+    <!-- 中排：流水 + 日志并排（观测「下单→成交→入日志」链路一致性）。
+         公网静态模式（yzzhan.xin）无后端 → SSE 日志卡隐藏（其余卡全走静态快照），
+         流水卡占满整行。 -->
     <el-row :gutter="12" style="margin-top: 12px;">
-      <el-col :span="12"><TradesTable /></el-col>
-      <el-col :span="12"><TerminalLogs /></el-col>
+      <el-col :span="staticMode ? 24 : 12"><TradesTable /></el-col>
+      <el-col v-if="!staticMode" :span="12"><TerminalLogs /></el-col>
     </el-row>
   </div>
 </template>
 
 <script setup lang="ts">
 // 三个轻量摘要小部件（Task 12 本任务新建）。
+import { STATIC_MODE as staticMode } from '../api/static'
 import StatusCard from '../components/cockpit/StatusCard.vue'
 import DualAssetCard from '../components/cockpit/DualAssetCard.vue'
 import DataHealthCard from '../components/cockpit/DataHealthCard.vue'

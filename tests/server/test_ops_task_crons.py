@@ -33,11 +33,11 @@ def main_mod():
     return _main()
 
 
-def test_table_has_seven_unique_jobs_matching_schedule(main_mod):
+def test_table_has_eight_unique_jobs_matching_schedule(main_mod):
     table = main_mod.OPS_TASK_CRONS
-    assert len(table) == 7
+    assert len(table) == 8
     ids = [t[0] for t in table]
-    assert len(set(ids)) == 7
+    assert len(set(ids)) == 8
     sched = {t[0]: (t[2], t[3]) for t in table}
     assert sched["ops_morning_check"] == ("cron", {"hour": 9, "minute": 40})
     assert sched["ops_emquant_ingest"] == ("cron", {"hour": 15, "minute": 40})
@@ -48,6 +48,9 @@ def test_table_has_seven_unique_jobs_matching_schedule(main_mod):
     # 2026-09-01 计划→播报桥第三块：管道 18:00-18:02 落完 T 日湖数据后的预演槽
     assert sched["ops_plan_preview"] == (
         "cron", {"hour": 18, "minute": 10, "day_of_week": "mon-fri"})
+    # 2026-09-01 公网发布（yzzhan.xin）：交易日 9:35~15:35 每小时（CF 免费额度内）
+    assert sched["ops_publish_public"] == (
+        "cron", {"hour": "9-15", "minute": 35, "day_of_week": "mon-fri"})
 
 
 def test_register_with_fake_scheduler_arms_all(main_mod):
@@ -59,7 +62,7 @@ def test_register_with_fake_scheduler_arms_all(main_mod):
 
     armed = main_mod.register_ops_task_crons(FakeSched())
     assert armed == [t[0] for t in main_mod.OPS_TASK_CRONS]
-    assert len(armed_calls) == 7
+    assert len(armed_calls) == 8
     guard = [c for c in armed_calls if c[0] == "ops_gm_guard"][0]
     assert guard[1] == "interval" and guard[2] == {"seconds": 300}
 
@@ -74,7 +77,7 @@ def test_register_soft_degrades_on_single_failure(main_mod):
                 raise RuntimeError("boom")
 
     armed = main_mod.register_ops_task_crons(FakeSched2())
-    assert len(armed) == 6          # 首项失败软降级，其余六项照挂
+    assert len(armed) == 7          # 首项失败软降级，其余七项照挂
 
 
 def test_retired_tasks_cover_six_for_cleanup():

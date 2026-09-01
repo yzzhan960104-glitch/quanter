@@ -19,6 +19,7 @@
  */
 import axios, { type AxiosInstance } from 'axios'
 import { ElMessage } from 'element-plus'
+import { STATIC_MODE } from './static'
 
 /**
  * 创建 Axios 实例
@@ -47,8 +48,10 @@ export const apiClient: AxiosInstance = axios.create({
 //
 // 两端对称（零摩擦）：token 为空（未配置 VITE_API_TOKEN）则不注入，后端开发态
 // （未配置 QUANTER_API_TOKEN）同样放行——本地开发与 CI 不受影响。
+// 公网静态模式（VITE_STATIC_DATA）强制不注入：无后端可调、任何 token（哪怕是
+// 开发态占位）都不该进公开 bundle——.env.local 会对所有 mode 生效，此处是硬闸。
 apiClient.interceptors.request.use((config) => {
-  const token = import.meta.env.VITE_API_TOKEN
+  const token = STATIC_MODE ? '' : import.meta.env.VITE_API_TOKEN
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }

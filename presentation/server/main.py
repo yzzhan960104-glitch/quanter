@@ -202,6 +202,10 @@ OPS_TASK_CRONS = [
     # T 日湖数据后离线复刻次晨 09:31 识别链，预演≠计划恒带标签）。
     ("ops_plan_preview", ["-m", "ops.emquant_plan_preview"], "cron",
      {"hour": 18, "minute": 10, "day_of_week": "mon-fri"}, "ops_plan_preview.log"),
+    # 2026-09-01 公网发布（yzzhan.xin · CF Pages）：交易日 9:35~15:35 每小时
+    # 快照+构建+直推（7 跳/日 ≈ 210/月，CF 免费额度内；发布链见 ops.publish_public）。
+    ("ops_publish_public", ["-m", "ops.publish_public"], "cron",
+     {"hour": "9-15", "minute": 35, "day_of_week": "mon-fri"}, "ops_publish_public.log"),
     ("ops_gm_guard", ["-m", "ops.gm_terminal_guard", "--once"], "interval",
      {"seconds": 300}, "gm_guard_cron.log"),
 ]

@@ -7,6 +7,7 @@
  * 实测面对齐；全部只读——交易动作族是 skill 纪律禁区，永不进本文件。
  */
 import { apiClient } from './client'
+import { STATIC_MODE, staticGet, staticToday } from './static'
 
 /** 策略条目（/v3/strategies[].data）：stage=运行态。 */
 export interface GmStrategy {
@@ -71,6 +72,7 @@ function unwrap<T>(payload: unknown): T[] {
 }
 
 export async function getOverview(): Promise<GmOverview> {
+  if (STATIC_MODE) return staticGet<GmOverview>('gm_overview')
   return apiClient.get('/api/v1/gm/overview', { timeout: 5000 })
 }
 
@@ -85,6 +87,7 @@ export interface GmLeg {
 }
 
 export async function getLegs(): Promise<GmLeg[]> {
+  if (STATIC_MODE) return staticGet<GmLeg[]>('gm_legs', [])
   const payload = await apiClient.get('/api/v1/gm/legs', { timeout: 5000 })
   return (payload as { legs?: GmLeg[] }).legs ?? []
 }
@@ -94,6 +97,7 @@ export async function getLegs(): Promise<GmLeg[]> {
  * 由 server 返 502，调用方 catch 后展示「—」降级（虚假繁荣防线）。
  */
 export async function getAssetByLeg(leg: string = 'main'): Promise<GmAsset> {
+  if (STATIC_MODE) return staticGet<GmAsset>(`gm_asset_${leg}`)
   const payload: unknown = await apiClient.get('/api/v1/gm/asset', { params: { leg }, timeout: 5000 })
   if (payload && typeof payload === 'object' && (payload as { data?: unknown }).data) {
     return (payload as { data: GmAsset }).data
@@ -102,16 +106,19 @@ export async function getAssetByLeg(leg: string = 'main'): Promise<GmAsset> {
 }
 
 export async function getPositions(leg: string = 'main'): Promise<GmPositionRow[]> {
+  if (STATIC_MODE) return staticGet<GmPositionRow[]>(`gm_positions_${leg}`, [])
   return unwrap<GmPositionRow>(
     await apiClient.get('/api/v1/gm/positions', { params: { leg }, timeout: 10000 }))
 }
 
 export async function getOrders(leg: string = 'main'): Promise<GmOrderRow[]> {
+  if (STATIC_MODE) return staticGet<GmOrderRow[]>(`gm_orders_${leg}`, [])
   return unwrap<GmOrderRow>(
     await apiClient.get('/api/v1/gm/orders', { params: { leg }, timeout: 10000 }))
 }
 
 export async function getTrades(params: { leg?: string; limit?: number } = {}): Promise<GmTradeRow[]> {
+  if (STATIC_MODE) return staticGet<GmTradeRow[]>(`gm_trades_${params.leg ?? 'main'}`, [])
   return unwrap<GmTradeRow>(
     await apiClient.get('/api/v1/gm/trades', { params, timeout: 10000 }))
 }
@@ -149,6 +156,7 @@ export interface AbDaily {
 }
 
 export async function getAbDaily(date?: string): Promise<AbDaily> {
+  if (STATIC_MODE) return staticGet<AbDaily>(`gm_ab_${date ?? staticToday()}`)
   return apiClient.get('/api/v1/gm/ab', { params: date ? { date } : {}, timeout: 8000 })
 }
 
@@ -162,6 +170,13 @@ export interface AuditRow {
 export async function getAudit(params: {
   leg?: string; date?: string; event?: string; limit?: number
 }): Promise<AuditRow[]> {
+  if (STATIC_MODE) {
+    // 静态快照仅含近 N 日（public_snapshot 生成窗口）；缺日 → 空数组降级。
+    // event 过滤在快照数据不变的前提下无法服务端做，前端原样返回（生成端已
+    // 全量落盘，行数=当日 audit 规模，可控）。
+    return staticGet<AuditRow[]>(
+      `gm_audit_${params.leg ?? 'main'}_${params.date ?? staticToday()}`, [])
+  }
   const payload = await apiClient.get('/api/v1/gm/audit', { params, timeout: 8000 })
   return (payload as { rows?: AuditRow[] }).rows ?? []
 }
@@ -178,6 +193,7 @@ export interface GmRound {
 }
 
 export async function getRound(): Promise<GmRound | null> {
+  if (STATIC_MODE) return staticGet<GmRound | null>('gm_round', null)
   try {
     return await apiClient.get('/api/v1/gm/round', { timeout: 5000 })
   } catch {

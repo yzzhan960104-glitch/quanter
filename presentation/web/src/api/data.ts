@@ -8,6 +8,7 @@
  * 前端表格徽章按此着色，绝不本地推断（杜绝「虚假健康」）。
  */
 import { apiClient } from './client'
+import { STATIC_MODE, staticGet } from './static'
 
 /** 数据集状态五态（与后端 DatasetStatus Literal 同源） */
 export type DatasetStatus = 'syncing' | 'healthy' | 'stale' | 'missing' | 'failed'
@@ -29,5 +30,6 @@ export interface DatasetAsset {
 
 /** 列出全部数据集资产（前端 DataLakeView 表格数据源） */
 export function getDatasets(): Promise<DatasetAsset[]> {
+  if (STATIC_MODE) return staticGet<DatasetAsset[]>('datasets', [])
   return apiClient.get('/api/v1/data/datasets', { timeout: 10000 })
 }
