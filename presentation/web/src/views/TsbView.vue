@@ -196,7 +196,9 @@ function mkOption(keys: Array<keyof TsbDoc['series']>, axis: string[]) {
             ? `${((v - 1) * 100) > 0 ? '+' : ''}${((v - 1) * 100).toFixed(0)}%`
             : `${v > 0 ? '+' : ''}${v}%` },
           splitLine: { lineStyle: { color: '#eef1f6' } } }),
-    dataZoom: [{ type: 'inside' }],
+    // 滚轮语义：纯滚轮=页面滚动（图表不再劫持），Ctrl+滚轮=图内缩放
+    //（09-02 用户反馈"滚轮不能操作滚动容器"——inside zoom 默认吞滚轮）
+    dataZoom: [{ type: 'inside', zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false }],
     series: keys.map((k, ki) => ({
       name: NAME[k], type: 'line', data: align(k, axis),
       showSymbol: false, connectNulls: true, emphasis: { focus: 'series' },

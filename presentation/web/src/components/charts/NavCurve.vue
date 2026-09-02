@@ -126,8 +126,10 @@ const option = computed(() => {
       { type: 'value', gridIndex: 1, max: 0, axisLabel: { formatter: '{value}%' },
         splitLine: { show: false } },
     ],
-    // 默认窗口=年初至今（需求④）；滚轮可缩放回 2010 全景（数据全量在轴上）
+    // 默认窗口=年初至今；Ctrl+滚轮=图内缩放（纯滚轮还给页面滚动——
+    // 同机会观察页 09-02 滚轮劫持修复），数据全量在轴上可拉回 2010
     dataZoom: [{ type: 'inside', xAxisIndex: [0, 1],
+                zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false,
                 startValue: ytdStart.value || axis.value[0] }],
     series: [
       { name: '主腿', type: 'line', data: seriesOf('main'), showSymbol: true,
