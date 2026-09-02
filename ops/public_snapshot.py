@@ -363,7 +363,11 @@ def _sh_calendar() -> list[str]:
         idx = pd.read_parquet(ROOT / "data_lake" / "index_daily.parquet")
         days.update(str(d)[:10] for d in idx.index.get_level_values("date"))
     from ops.benchmarks import _norm
-    _SH_CAL = sorted(_norm(d) for d in days)
+    # 去重必须在 _norm 之后：set 收的是原始值（'2026-08-20' 与 '2026-08-20T00:00:00'
+    # 等同日异形在 set 层互不相等，norm 成同串后才可判重）——sorted 直接排产生
+    # 2 倍重复日历（8420 vs 4372），_expire_date 的 bisect 索引密度翻倍 → 超期日
+    # 偏早；trailing 回放的 holding_days 也会翻倍（09-03 实锤修复）
+    _SH_CAL = sorted(set(_norm(d) for d in days))
     return _SH_CAL
 
 
@@ -563,6 +567,53 @@ def _plan_card(w) -> int:
     return 0
 
 
+def _trailing_path(leg_dir: Path, pos: dict) -> list:
+    """trailing 止损轨迹逐日回放（P5.3）：部署产物 compute_stop_price 真身口径。
+
+    holding_days = (entry, t] 区间交易日数（与策略 trading_days_between 同式），
+    对 entry 起每个交易日回放止损价；末点=当前止损位（与持仓 stop 列一致——
+    300433 实证 33.9434 吻合）。neckline/atr 缺 → []（画线缺就不画，不猜）。
+    """
+    import importlib.util as ilu
+    import bisect as _bisect
+
+    tr = pos.get("trailing") or {}
+    entry = str(pos.get("entry_date") or "")
+    if tr.get("neckline") is None or tr.get("atr") is None or not entry:
+        return []
+    try:
+        spec = ilu.spec_from_file_location(
+            f"pilot_trail_{leg_dir.name[:8]}", leg_dir / "main.py")
+        m = ilu.module_from_spec(spec)
+        sys.modules[spec.name] = m
+        spec.loader.exec_module(m)
+        stop_fn = m.compute_stop_price
+    except Exception as e:
+        print(f"  ⚠ trailing 回放降级（部署产物加载失败 {type(e).__name__}）")
+        return []
+
+    cal = _sh_calendar()
+    i0 = _bisect.bisect_left(cal, entry)
+    if i0 >= len(cal) or cal[i0] != entry:
+        i0 = max(0, i0 - 1)                 # entry 非交易日（脏数据）→ 前一交易日锚
+    today = f"{datetime.now():%Y-%m-%d}"
+    path = []
+    for j in range(i0, len(cal)):
+        t = cal[j]
+        if t > today:
+            break
+        holding_days = j - i0              # (entry, t] 交易日数（entry 日=0）
+        stop = stop_fn(
+            neckline=float(tr["neckline"]), atr=float(tr["atr"]),
+            holding_days=holding_days,
+            stop_atr_mult=float(tr.get("stop_atr_mult", 1.0)),
+            grace=int(tr.get("grace") or 0),
+            step=float(tr.get("step") or 0.0),
+            floor=tr.get("floor"))
+        path.append([t, round(float(stop), 3)])
+    return path
+
+
 def _ohlcv_files(w) -> int:
     """持仓+当日信号标的 → ohlcv_<sym>.json（160 根日 K + 颈线/止损/止盈画线）。
 
@@ -589,6 +640,9 @@ def _ohlcv_files(w) -> int:
                     "tp1_price": pos.get("tp1_price"),
                     "tp2_price": pos.get("tp2_price"),
                     "formed_at": pos.get("formed_at") or pos.get("entry_date"),
+                    # trailing 止损轨迹（P5.3）：部署产物 compute_stop_price
+                    # 逐日回放 [[date, stop], ...]——KlinePanel 画绿色虚线阶梯
+                    "trailing_path": _trailing_path(leg_dir, pos),
                     # 颈线（09-01 用户问"有颈线么"）：trailing 六件套的 neckline 即
                     # 信号颈线（enrich 挂载的追踪锚=识别颈线同值，08-27 实证
                     # 300433 trailing.neckline 39.0 == SIGNAL 颈线）

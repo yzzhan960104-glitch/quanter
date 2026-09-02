@@ -35,7 +35,7 @@
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   createChart, CandlestickSeries, HistogramSeries, LineSeries, createSeriesMarkers,
-  ColorType, CrosshairMode,
+  ColorType, CrosshairMode, LineStyle, LineType,
   type IChartApi, type ISeriesApi, type IPriceLine,
   type CandlestickData, type HistogramData, type Time, type UTCTimestamp,
 } from 'lightweight-charts'
@@ -193,6 +193,21 @@ function render() {
         axisLabelView: { color, fontSize: 11 },
       } as never))
     }
+  }
+
+  // trailing 止损轨迹（P5.3）：绿色虚线阶梯——区别于「止损」静态实线（盘后
+  // 预算固定价）。grace 内恒 base_stop（平段），grace 后每日 step×ATR 抬升
+  // （阶梯）；末点=当前止损位。快照缺 trailing_path（非持仓/残 trailing）不画。
+  if (m.trailing_path?.length) {
+    const trail = chart.addSeries(LineSeries, {
+      color: '#00a870', lineWidth: 2, lineStyle: LineStyle.Dashed,
+      lineType: LineType.WithSteps,
+      priceLineVisible: false, lastValueVisible: true,
+      crosshairMarkerVisible: false,
+    })
+    trail.setData(m.trailing_path
+      .filter(([d]) => props.data.dates.includes(d))
+      .map(([d, v]) => ({ time: d as unknown as UTCTimestamp, value: v })))
   }
 
   // 信号/进场 marker

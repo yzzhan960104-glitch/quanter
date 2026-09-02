@@ -45,6 +45,8 @@ export interface OhlcvMarks {
   rr?: number | null
   max_holding?: number | null
   expire_date?: string | null
+  /** trailing 止损轨迹逐日回放 [[date, stop], ...]（P5.3；末点=当前止损位）。 */
+  trailing_path?: Array<[string, number]>
 }
 
 export interface OhlcvData {
