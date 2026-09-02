@@ -131,7 +131,10 @@ const barWidth = (fpnl?: number) =>
 async function load() {
   loading.value = true
   try {
-    rows.value = await getPositions(leg.value)
+    // 持仓排序（09-02 用户需求：按收益排序）：浮动盈亏降序——赚最多的排最上，
+    // 拖后腿的一眼可见（与盈亏条形长度方向一致）；缺 fpnl 的排尾部。
+    rows.value = (await getPositions(leg.value)).slice().sort(
+      (a, b) => (b.fpnl ?? -Infinity) - (a.fpnl ?? -Infinity))
   } catch {
     rows.value = []
   } finally {
