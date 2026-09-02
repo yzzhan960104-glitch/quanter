@@ -230,6 +230,12 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
     n_files += 1
     print(f"  ✓ benchmarks.json（轴 {len(bdoc['axis'])} 天 × {len(bdoc['series'])} 基准）")
 
+    # ── TSB 机会观察（09-02：紫金×纽约金、美元指数×US10Y×纽约金）──
+    from ops import tsb_data
+    tdoc = tsb_data.update()
+    n_files += 1
+    print(f"  ✓ tsb.json（{ {k: len(v['dates']) for k, v in tdoc['series'].items()} }）")
+
     # ── OHLCV 快照（P2 静态半场：持仓+当日信号标的的 K 线回放数据）──
     _ohlcv_files(w)                     # w 闭包自增 n_files
 

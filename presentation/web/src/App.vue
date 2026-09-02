@@ -50,6 +50,7 @@ interface NavItem {
 // 公网静态模式（yzzhan.xin）：仅留「数据湖」（数据健康度=公开观测面）；搜索实验室
 // （研究 IP）与宏观驾驶舱（内网宏观）不公开——与 router staticRoutes 同口径。
 const researchNav: NavItem[] = STATIC_MODE ? [
+  { to: '/tsb', label: 'TSB 观察', icon: DataBoard },
   { to: '/data', label: '数据湖', icon: Files },
 ] : [
   // 搜索实验室（P3）：参数发现敏感性分析/热力图（只读，spec §4，研究动线首屏）

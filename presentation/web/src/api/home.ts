@@ -98,3 +98,19 @@ export interface LegDetail {
 export function getLegDetail(leg: string): Promise<LegDetail | null> {
   return staticGet<LegDetail | null>(`leg_detail_${leg}`, null)
 }
+
+/** TSB 机会观察（09-02）：紫金×纽约金、美元指数×US10Y×纽约金。 */
+export interface TsbSeries {
+  dates: string[]
+  points: number[]
+}
+
+export interface TsbDoc {
+  series: Record<'zijin' | 'gold' | 'dxy' | 'us10y', TsbSeries>
+  meta?: Record<string, string>
+  updated_at?: string
+}
+
+export function getTsb(): Promise<TsbDoc | null> {
+  return staticGet<TsbDoc | null>('tsb', null)
+}
