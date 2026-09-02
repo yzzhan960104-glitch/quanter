@@ -179,10 +179,12 @@ function mkOption(keys: Array<keyof TsbDoc['series']>, axis: string[]) {
     grid: { left: 52, right: 16, top: 30, bottom: 28 },
     xAxis: { type: 'category', data: axis, boundaryGap: false },
     yAxis: (mode.value === 'relative'
-      ? { type: 'value', min: 0, max: 100,
-          axisLabel: { formatter: '{value}' },
-          name: '区间位（0=窗口最低 100=最高）',
-          nameTextStyle: { color: '#86909c', fontSize: 10 },
+      ? { type: 'value', min: -6, max: 106,
+          // 极值=0/100 恰在边界会被切半——上下各留 6% 呼吸带（09-02 用户反馈
+          // "最高最低不在图里"）；刻度只标 0-100 区间位，呼吸带不标数
+          axisLabel: { formatter: (v: number) =>
+            (v >= 0 && v <= 100) ? String(v) : '' },
+          name: '区间位', nameTextStyle: { color: '#86909c' },
           splitLine: { lineStyle: { color: '#eef1f6' } } }
       : { type: mode.value === 'log' ? 'log' : 'value', logBase: 10,
           axisLabel: { formatter: (v: number) => mode.value === 'log'
