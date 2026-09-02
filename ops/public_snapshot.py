@@ -162,7 +162,9 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
         w(f"gm_asset_{leg.key}",
           ((payload or {}).get("data") or [{}])[0] if st == 200 else {})
         st, payload = gc.api_get(f"/v3/account-trade/positions/{la}", lt, timeout=4.0)
-        w(f"gm_positions_{leg.key}", (payload or {}).get("data") or [] if st == 200 else [])
+        positions = (payload or {}).get("data") or [] if st == 200 else []
+        _enrich_industry(positions)           # P5.2：行业列富化（环形图数据源）
+        w(f"gm_positions_{leg.key}", positions)
         st, payload = gc.api_get(f"/v3/account-trade/orders/{la}", lt, timeout=4.0)
         w(f"gm_orders_{leg.key}", (payload or {}).get("data") or [] if st == 200 else [])
         st, payload = gc.api_get(f"/v3/account-trade/execrpts/{la}", lt, timeout=4.0)
@@ -298,6 +300,36 @@ def _read_cap(path: Path) -> float:
         return v if 0.0 <= v <= 1.0 else 1.0
     except (OSError, ValueError):
         return 1.0
+
+
+_INDUSTRY_MAP: dict[str, str] | None = None
+
+
+def _industry_map() -> dict[str, str]:
+    """ts_code → 行业（stock_basic.parquet；模块级缓存一次，缺库返空表降级）。"""
+    global _INDUSTRY_MAP
+    if _INDUSTRY_MAP is None:
+        import pandas as pd
+        try:
+            basic = pd.read_parquet(ROOT / "data_lake" / "stock_basic.parquet",
+                                    columns=["ts_code", "industry"])
+            _INDUSTRY_MAP = {str(t): str(i) for t, i in
+                             zip(basic["ts_code"], basic["industry"])}
+        except (OSError, KeyError, ImportError):
+            _INDUSTRY_MAP = {}
+    return _INDUSTRY_MAP
+
+
+def _enrich_industry(positions: list) -> None:
+    """positions 行内挂 industry（SZSE.300433 → 300433.SZ join；缺映射置 None）。"""
+    imap = _industry_map()
+    for r in positions:
+        if not isinstance(r, dict):
+            continue
+        sym = str(r.get("symbol") or "")
+        ex, _, code = sym.partition(".")
+        ts = f"{code}.{('SH' if ex == 'SHSE' else 'SZ' if ex == 'SZSE' else ex)}"
+        r["industry"] = imap.get(ts)
 
 
 def leg_dir(leg):

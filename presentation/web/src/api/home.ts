@@ -6,10 +6,17 @@
  */
 import { staticGet } from './static'
 
+/** 单腿资产构成（P5.2：EOD 日志+实时点双源；缺段=null 前端不画）。 */
+export interface LegAssets {
+  available?: number | null
+  market_value?: number | null
+}
+
 /** 单日净值（legs: main/exp → nav 绝对值，元）。 */
 export interface NavDay {
   date: string
   legs: Record<string, number>
+  assets?: Record<string, LegAssets>
 }
 
 export interface NavHistory {

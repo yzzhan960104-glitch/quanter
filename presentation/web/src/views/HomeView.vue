@@ -33,6 +33,10 @@
       <NavCurve :history="history" :benchmarks="benchmarks" />
     </div>
 
+    <div style="margin-top: 12px">
+      <AllocationCard />
+    </div>
+
     <el-row :gutter="12" style="margin-top: 12px">
       <el-col :span="14"><PnlCalendar :history="history" /></el-col>
       <el-col :span="10">
@@ -61,6 +65,7 @@ import { computed, onMounted, ref } from 'vue'
 import { getNavHistory, getBenchmarks, type NavHistory, type Benchmarks } from '../api/home'
 import NavCurve from '../components/charts/NavCurve.vue'
 import PnlCalendar from '../components/charts/PnlCalendar.vue'
+import AllocationCard from '../components/charts/AllocationCard.vue'
 import PlanCard from '../components/plan/PlanCard.vue'
 
 const history = ref<NavHistory>({ base: 200000, era_start: '', days: [] })

@@ -31,13 +31,15 @@ export interface GmAsset {
   [k: string]: unknown
 }
 
-/** 持仓行（/v3/account-trade/positions）。 */
+/** 持仓行（/v3/account-trade/positions；industry=快照管道富化列 P5.2）。 */
 export interface GmPositionRow {
   symbol?: string         // gm 格式 SZSE.300433
   volume?: number
   vwap?: number
   fpnl?: number           // 浮动盈亏
   available?: number
+  market_value?: number   // 持仓市值（环形图聚合源）
+  industry?: string | null  // 行业（stock_basic.parquet 富化；缺映射 null）
   [k: string]: unknown
 }
 
