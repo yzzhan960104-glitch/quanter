@@ -109,7 +109,21 @@ const option = computed(() => {
   })
   const benchColors = ['#86909c', '#d29922', '#bc8cff']
   return {
-    tooltip: { trigger: 'axis', valueFormatter: (v: number) => `${v}%` },
+    // tooltip：无值序列不渲染行（09-02 用户反馈"undefined%"——轴日存在但序列
+    // 该日 null（纪元前的腿/未更新的基准）时 valueFormatter 收到 null 拼出
+    // undefined；过滤后既无 undefined 也不伪造 0%）
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: Array<{ seriesName: string; value: number | null
+        marker: string }>) => {
+        const rows = (params || []).filter((pp) => pp.value != null
+          && Number.isFinite(pp.value))
+        if (!rows.length) return ''
+        return `<b>${(params?.[0] as { axisValue?: string })?.axisValue ?? ''}</b><br/>`
+          + rows.map((pp) => `${pp.marker}${pp.seriesName}：`
+            + `${pp.value! > 0 ? '+' : ''}${pp.value}%`).join('<br/>')
+      },
+    },
     legend: { data: legend, top: 0 },
     grid: [
       { left: 48, right: 16, top: 28, height: '52%' },
