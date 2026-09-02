@@ -447,22 +447,36 @@ def _ohlcv_files(w) -> int:
                         pos.get("entry_date"),
                         int((pos.get("exec_params") or {}).get("max_holding") or 30)),
                 })
-        # 当日 SIGNAL（未成仓的新信号也给 K 线：颈线/entry/RR）
-        src = gc.audit_csv_path(f"{datetime.now():%Y-%m-%d}", leg_dir)
-        if src.exists():
-            for row in __import__("csv").reader(src.open(encoding="utf-8")):
-                if len(row) >= 3 and row[1] == "SIGNAL" and row[0].startswith(
-                        f"{datetime.now():%Y-%m-%d}"):
-                    try:
-                        d = json.loads(row[2])
-                    except ValueError:
-                        continue
-                    if d.get("symbol"):
-                        m = syms.setdefault(d["symbol"], {})
-                        m.setdefault("neckline", d.get("neckline"))
-                        m.setdefault("signal_entry", d.get("entry_price"))
-                        m.setdefault("rr", d.get("rr"))
-                        m.setdefault("formed_at", d.get("formed_at"))
+        # SIGNAL 回扫（当日新信号 + 持仓的历史信号——按日回扫至多 45 天）：
+        # 理论委托 entry=颈线+2.5×ATR（超涨停带会被钳，成交远低于它）；state 的
+        # entry_price 是成交价（marketable limit 贴盘口≈颈线，09-02 用户问
+        # "颈线和 entry 为什么基本一样"的根源——两线语义必须分开画）。
+        import csv as _csv
+        from datetime import timedelta as _td
+        held_syms = {sym for sym, mk in syms.items() if mk.get("entry_date")}
+        for back in range(45):
+            day = f"{datetime.now() - _td(days=back):%Y-%m-%d}"
+            src = gc.audit_csv_path(day, leg_dir)
+            if not src.exists():
+                continue
+            for row in _csv.reader(src.open(encoding="utf-8")):
+                if len(row) < 3 or row[1] != "SIGNAL":
+                    continue
+                try:
+                    d = json.loads(row[2])
+                except ValueError:
+                    continue
+                sym = d.get("symbol")
+                # 当日信号（任意）或仍持有标的的历史信号（回扫只为补精确值）
+                if not sym or (back > 0 and sym not in held_syms):
+                    continue
+                if back > 0 and syms.get(sym, {}).get("signal_entry") is not None:
+                    continue                       # 已有（最新日的）不覆盖
+                m = syms.setdefault(sym, {})
+                m.setdefault("neckline", d.get("neckline"))
+                m.setdefault("signal_entry", d.get("entry_price"))
+                m.setdefault("rr", d.get("rr"))
+                m.setdefault("formed_at", d.get("formed_at"))
 
     if not syms:
         return 0

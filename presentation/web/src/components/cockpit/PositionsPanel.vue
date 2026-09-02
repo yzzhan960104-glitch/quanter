@@ -69,6 +69,8 @@
         <div class="kline-meta">
           <span v-if="kline.marks?.rr">RR {{ kline.marks.rr }}</span>
           <span v-if="kline.marks?.formed_at">形态日 {{ kline.marks.formed_at }}</span>
+          <span v-if="kline.marks?.signal_entry">委托 {{ kline.marks.signal_entry.toFixed(2) }}</span>
+          <span v-if="kline.marks?.entry_price">成本 {{ kline.marks.entry_price.toFixed(2) }}</span>
           <span class="sub">数据截至 {{ kline.asof }} · 前复权</span>
         </div>
         <KlinePanel :data="kline" />

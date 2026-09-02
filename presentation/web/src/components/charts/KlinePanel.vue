@@ -173,8 +173,13 @@ function render() {
   const m = props.data.marks || {}
   // 决策线全实线+加粗（2026-09-02 用户反馈：虚线白底看不清）；axisLabel
   // 跟随线色（title 字号由库控制在 label 内）。
+  // entry 语义分家（09-02 用户问"颈线和 entry 为什么基本一样"）：理论委托
+  // =颈线+2.5×ATR（蓝实线，常远高于市价/被钳涨停）；成交成本=state 成交价
+  //（青线，marketable limit 贴盘口≈颈线）。缺理论值时回落成交价（标 *）。
+  const theoEntry = m.signal_entry ?? m.entry_price
   const lines: Array<[number | null | undefined, string, string]> = [
-    [m.entry_price, '#2962ff', 'entry'],
+    [theoEntry, '#2962ff', m.signal_entry != null ? 'entry' : 'entry*'],
+    [m.entry_price, '#13c2c2', '成本'],
     [m.stop, '#26a69a', '止损'],
     [m.tp1_price, '#ef5350', 'TP1'],
     [m.tp2_price, '#f23645', 'TP2'],
