@@ -1,9 +1,10 @@
 <!--
   TsbView TSB 机会观察（2026-09-02 用户需求）。
 
-  两图联动（共享窗口选择 YTD/1Y/3Y/全部，各序列较窗口锚归一 %）：
+  三图联动（共享窗口选择 YTD/1Y/3Y/全部，各序列较窗口锚归一 %）：
     图一：紫金矿业 × 纽约金（COMEX 主力）——金股/金价相对强弱
     图二：美元指数 × 美债10Y × 纽约金——利率-美元-金三角
+    图三：海南橡胶 × 沪胶主力连续——胶股/胶价相对强弱
   各序列交易日历不同（A 股/COMEX/外汇/美债），轴取并集、缺数日 null 断点
   connectNulls 平滑。数据源注记见页脚（DXY=六成分对子自算）。
 -->
@@ -23,6 +24,11 @@
     <el-card shadow="never" style="margin-top: 12px">
       <template #header>美元指数 × 美债 10Y × 纽约金 · 累计涨跌 %</template>
       <v-chart v-if="doc" class="chart" :option="opt2" theme="terminal-light" autoresize />
+    </el-card>
+
+    <el-card shadow="never" style="margin-top: 12px">
+      <template #header>海南橡胶 × 沪胶主力连续（RU0）· 累计涨跌 %</template>
+      <v-chart v-if="doc" class="chart" :option="opt3" theme="terminal-light" autoresize />
     </el-card>
 
     <div class="foot">
@@ -97,9 +103,12 @@ const STYLE: Record<string, { color: string; width: number; dash?: 'solid' | 'da
   gold: { color: '#f0b90b', width: 2 },
   dxy: { color: '#86909c', width: 2 },
   us10y: { color: '#ef5350', width: 2, dash: 'dashed' },
+  rubber: { color: '#2962ff', width: 2.5 },
+  rufu: { color: '#26a69a', width: 2 },
 }
 const NAME: Record<string, string> = {
   zijin: '紫金矿业', gold: '纽约金', dxy: '美元指数', us10y: '美债10Y',
+  rubber: '海南橡胶', rufu: '沪胶主力',
 }
 
 function mkOption(keys: Array<keyof TsbDoc['series']>, axis: string[]) {
@@ -123,8 +132,10 @@ function mkOption(keys: Array<keyof TsbDoc['series']>, axis: string[]) {
 
 const axis1 = computed(() => (doc.value ? unionAxis(['zijin', 'gold']) : []))
 const axis2 = computed(() => (doc.value ? unionAxis(['dxy', 'us10y', 'gold']) : []))
+const axis3 = computed(() => (doc.value ? unionAxis(['rubber', 'rufu']) : []))
 const opt1 = computed(() => mkOption(['zijin', 'gold'], axis1.value))
 const opt2 = computed(() => mkOption(['dxy', 'us10y', 'gold'], axis2.value))
+const opt3 = computed(() => mkOption(['rubber', 'rufu'], axis3.value))
 
 onMounted(async () => {
   doc.value = await getTsb().catch(() => null)

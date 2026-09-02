@@ -106,7 +106,7 @@ export interface TsbSeries {
 }
 
 export interface TsbDoc {
-  series: Record<'zijin' | 'gold' | 'dxy' | 'us10y', TsbSeries>
+  series: Record<'zijin' | 'gold' | 'dxy' | 'us10y' | 'rubber' | 'rufu', TsbSeries>
   meta?: Record<string, string>
   updated_at?: string
 }

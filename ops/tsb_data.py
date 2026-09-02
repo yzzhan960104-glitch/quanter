@@ -10,6 +10,8 @@
                        0.04 = 汇差级。直接源东财拉黑/新浪腾讯无此代码后的硬解）
   美债 10Y          —— Tushare us_tycr 收益率曲线 y10 列（2018 起）
   紫金矿业 601899.SH —— 湖 a_shares_daily（2008 起全量，前复权）
+  海南橡胶 601118.SH —— 湖（2016 起，前复权）；沪胶主力连续 RU0 ——
+                       新浪国内期货 InnerFuturesNewService（2005 起，元/吨）
 
 产物 public/data/tsb.json：四序列各自 {dates, points}（互不对齐——前端按窗口
 锚归一时各自取「≤窗口首日的最近一根」为锚，缺数段 null 断点）。
@@ -98,10 +100,27 @@ def _us10y() -> dict[str, float]:
     return out
 
 
-def _zijin() -> dict[str, float]:
+def _sina_ru0() -> dict[str, float]:
+    """新浪国内期货 沪胶主力连续 RU0 日 K → {iso: close}（短键 d/c；元/吨）。"""
+    import urllib.request
+    u = ("https://stock.finance.sina.com.cn/futures/api/jsonp.php/var%20_t=/"
+         "InnerFuturesNewService.getDailyKLine?symbol=RU0")
+    req = urllib.request.Request(u, headers={
+        "User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        body = r.read().decode("gbk", "replace")
+    m = re.search(r"\((\[.*\])\)", body, re.S)
+    rows = json.loads(m.group(1)) if m else []
+    if not rows:
+        raise RuntimeError("sina RU0 空返回")
+    return {r["d"]: float(r["c"]) for r in rows if r.get("c")}
+
+
+def _stock(sym: str) -> dict[str, float]:
+    """湖 A 股日线 → {iso: close}（紫金/海胶共用）。"""
     import pandas as pd
     df = pd.read_parquet(ROOT / "data_lake" / "a_shares_daily.parquet")
-    sub = df.xs("601899.SH", level="symbol")["close"].sort_index()
+    sub = df.xs(sym, level="symbol")["close"].sort_index()
     return {f"{d:%Y-%m-%d}": float(v) for d, v in sub.items()}
 
 
@@ -114,7 +133,9 @@ def update() -> dict:
             cache = {}
 
     for key, fn in {"gold": _sina_gc, "dxy": _dxy_from_pairs,
-                    "us10y": _us10y, "zijin": _zijin}.items():
+                    "us10y": _us10y, "zijin": lambda: _stock("601899.SH"),
+                    "rubber": lambda: _stock("601118.SH"),
+                    "rufu": _sina_ru0}.items():
         try:
             fresh = fn()
             if fresh:
@@ -129,12 +150,15 @@ def update() -> dict:
 
     doc = {
         "series": {"zijin": ser("zijin"), "gold": ser("gold"),
-                   "dxy": ser("dxy"), "us10y": ser("us10y")},
+                   "dxy": ser("dxy"), "us10y": ser("us10y"),
+                   "rubber": ser("rubber"), "rufu": ser("rufu")},
         "meta": {
             "gold": "纽约金 = COMEX 黄金主力连续（新浪 GC）",
             "dxy": "美元指数（六成分对子按 ICE 官方权重自算，汇差级精度）",
             "us10y": "美债 10Y 到期收益率 %（Tushare us_tycr）",
             "zijin": "紫金矿业 601899.SH（数据湖，前复权）",
+            "rubber": "海南橡胶 601118.SH（数据湖，前复权）",
+            "rufu": "沪胶主力连续 RU0（新浪国内期货，元/吨）",
         },
         "updated_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
     }
