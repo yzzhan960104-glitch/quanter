@@ -1,7 +1,8 @@
 <!--
-  TsbView TSB 机会观察（2026-09-02 用户需求）。
+  TsbView 机会观察（2026-09-02 用户需求）。
 
-  三图联动（共享窗口选择 YTD/1Y/3Y/全部，各序列较窗口锚归一 %）：
+  三图联动（窗口 YTD/1Y/3Y/全部 + 线性/对数刻度切换；序列=窗口锚归一指数，
+  对数模式下 +100% 与 −50% 视觉等距——长周期复利感知的正确刻度）：
     图一：紫金矿业 × 纽约金（COMEX 主力）——金股/金价相对强弱
     图二：美元指数 × 美债10Y × 纽约金——利率-美元-金三角
     图三：海南橡胶 × 沪胶主力连续——胶股/胶价相对强弱
@@ -11,8 +12,11 @@
 <template>
   <div class="tsb">
     <div class="head">
-      <h2>TSB 机会观察</h2>
-      <el-segmented v-model="win" :options="winOptions" size="small" />
+      <h2>机会观察</h2>
+      <div class="ctrl">
+        <el-segmented v-model="scale" :options="scaleOptions" size="small" />
+        <el-segmented v-model="win" :options="winOptions" size="small" />
+      </div>
     </div>
 
     <el-card shadow="never">
@@ -53,6 +57,10 @@ use([LineChart, GridComponent, TooltipComponent, LegendComponent,
 
 const doc = ref<TsbDoc | null>(null)
 const win = ref<'ytd' | '1y' | '3y' | 'all'>('1y')
+const scale = ref<'log' | 'linear'>('log')
+const scaleOptions = [
+  { label: '对数', value: 'log' }, { label: '线性', value: 'linear' },
+]
 const winOptions = [
   { label: '年初至今', value: 'ytd' }, { label: '1年', value: '1y' },
   { label: '3年', value: '3y' }, { label: '全部', value: 'all' },
@@ -113,11 +121,14 @@ const NAME: Record<string, string> = {
 
 function mkOption(keys: Array<keyof TsbDoc['series']>, axis: string[]) {
   return {
-    tooltip: { trigger: 'axis', valueFormatter: (v: number) => `${v}%` },
+    tooltip: { trigger: 'axis', valueFormatter: (v: number) =>
+      scale.value === 'log' ? `${((v - 1) * 100).toFixed(2)}%` : `${v}%` },
     legend: { top: 0, data: keys.map((k) => NAME[k]) },
     grid: { left: 52, right: 16, top: 30, bottom: 28 },
     xAxis: { type: 'category', data: axis, boundaryGap: false },
-    yAxis: { type: 'value', axisLabel: { formatter: '{value}%' },
+    yAxis: { type: scale.value === 'log' ? 'log' : 'value',
+             logBase: 10,
+             axisLabel: { formatter: (v: number) => `${v > 0 ? '+' : ''}${v}%` },
              splitLine: { lineStyle: { color: '#eef1f6' } } },
     dataZoom: [{ type: 'inside' }],
     series: keys.map((k) => ({
@@ -146,6 +157,7 @@ onMounted(async () => {
 .tsb { padding: var(--qt-space-3, 12px); max-width: 1200px; margin: 0 auto; }
 .head { display: flex; align-items: center; justify-content: space-between;
         margin-bottom: 12px; }
+.ctrl { display: flex; gap: 10px; align-items: center; }
 .head h2 { margin: 0; }
 .chart { height: 340px; width: 100%; }
 .foot { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px;

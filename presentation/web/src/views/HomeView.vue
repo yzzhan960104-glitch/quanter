@@ -44,7 +44,7 @@
             <span>数据湖</span><span class="sub">43 数据集健康度</span>
           </router-link>
           <router-link to="/tsb" class="link">
-            <span>TSB 机会观察</span><span class="sub">紫金×纽约金 · 美元×US10Y×金</span>
+            <span>机会观察</span><span class="sub">紫金×纽约金 · 美元×US10Y×金</span>
           </router-link>
         </el-card>
       </el-col>
