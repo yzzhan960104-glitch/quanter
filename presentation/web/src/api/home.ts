@@ -108,14 +108,17 @@ export function getLegDetail(leg: string): Promise<LegDetail | null> {
   return staticGet<LegDetail | null>(`leg_detail_${leg}`, null)
 }
 
-/** TSB 机会观察（09-02）：紫金×纽约金、美元指数×US10Y×纽约金。 */
+/** TSB 机会观察（09-02 起四组；P6.4 扩池铜/原油/白银）。 */
 export interface TsbSeries {
   dates: string[]
   points: number[]
 }
 
+export type TsbKey = 'zijin' | 'gold' | 'dxy' | 'us10y' | 'rubber' | 'rufu'
+  | 'jx_copper' | 'cu' | 'petro' | 'crude' | 'shengda' | 'ag'
+
 export interface TsbDoc {
-  series: Record<'zijin' | 'gold' | 'dxy' | 'us10y' | 'rubber' | 'rufu', TsbSeries>
+  series: Record<TsbKey, TsbSeries>
   meta?: Record<string, string>
   updated_at?: string
 }

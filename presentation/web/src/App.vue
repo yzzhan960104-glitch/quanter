@@ -51,6 +51,7 @@ interface NavItem {
 // （研究 IP）与宏观驾驶舱（内网宏观）不公开——与 router staticRoutes 同口径。
 const researchNav: NavItem[] = STATIC_MODE ? [
   { to: '/opportunity', label: '机会观察', icon: DataBoard },
+  { to: '/research', label: '研究提案', icon: DataAnalysis },
   { to: '/ops', label: '运维面板', icon: Operation },
   { to: '/data', label: '数据湖', icon: Files },
 ] : [

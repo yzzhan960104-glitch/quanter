@@ -42,11 +42,11 @@ def _norm(d) -> str:
     return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
 
 
-def _sina_gc() -> dict[str, float]:
-    """新浪全球期货 COMEX 黄金主力日 K → {iso: close}。"""
+def _sina_global(symbol: str) -> dict[str, float]:
+    """新浪全球期货日 K → {iso: close}（GC 黄金/CL 原油共用；外盘美元计价）。"""
     import urllib.request
     u = ("https://stock.finance.sina.com.cn/futures/api/jsonp.php/var%20_t=/"
-         "GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=GC")
+         f"GlobalFuturesService.getGlobalFuturesDailyKLine?symbol={symbol}")
     req = urllib.request.Request(u, headers={
         "User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
     with urllib.request.urlopen(req, timeout=25) as r:
@@ -54,8 +54,13 @@ def _sina_gc() -> dict[str, float]:
     m = re.search(r"\((\[.*\])\)", body, re.S)
     rows = json.loads(m.group(1)) if m else []
     if not rows:
-        raise RuntimeError("sina GC 空返回")
+        raise RuntimeError(f"sina {symbol} 空返回")
     return {r["date"]: float(r["close"]) for r in rows if r.get("close")}
+
+
+def _sina_gc() -> dict[str, float]:
+    """纽约金 COMEX 黄金主力日 K（P6.4 起 _sina_global 参数化，留键名锚）。"""
+    return _sina_global("GC")
 
 
 def _dxy_from_pairs() -> dict[str, float]:
@@ -100,11 +105,11 @@ def _us10y() -> dict[str, float]:
     return out
 
 
-def _sina_ru0() -> dict[str, float]:
-    """新浪国内期货 沪胶主力连续 RU0 日 K → {iso: close}（短键 d/c；元/吨）。"""
+def _sina_inner(symbol: str) -> dict[str, float]:
+    """新浪国内期货主力连续日 K → {iso: close}（短键 d/c；RU0/AG0/CU0 共用）。"""
     import urllib.request
     u = ("https://stock.finance.sina.com.cn/futures/api/jsonp.php/var%20_t=/"
-         "InnerFuturesNewService.getDailyKLine?symbol=RU0")
+         f"InnerFuturesNewService.getDailyKLine?symbol={symbol}")
     req = urllib.request.Request(u, headers={
         "User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
     with urllib.request.urlopen(req, timeout=25) as r:
@@ -112,8 +117,13 @@ def _sina_ru0() -> dict[str, float]:
     m = re.search(r"\((\[.*\])\)", body, re.S)
     rows = json.loads(m.group(1)) if m else []
     if not rows:
-        raise RuntimeError("sina RU0 空返回")
+        raise RuntimeError(f"sina {symbol} 空返回")
     return {r["d"]: float(r["c"]) for r in rows if r.get("c")}
+
+
+def _sina_ru0() -> dict[str, float]:
+    """沪胶主力连续 RU0（P6.4 起 _sina_inner 参数化，留键名锚）。"""
+    return _sina_inner("RU0")
 
 
 def _stock(sym: str) -> dict[str, float]:
@@ -135,7 +145,14 @@ def update() -> dict:
     for key, fn in {"gold": _sina_gc, "dxy": _dxy_from_pairs,
                     "us10y": _us10y, "zijin": lambda: _stock("601899.SH"),
                     "rubber": lambda: _stock("601118.SH"),
-                    "rufu": _sina_ru0}.items():
+                    "rufu": _sina_ru0,
+                    # P6.4 扩池：铜/原油/白银 × 对应 A 股（fetcher 两行一组）
+                    "cu": lambda: _sina_inner("CU0"),
+                    "jx_copper": lambda: _stock("600368.SH"),
+                    "crude": lambda: _sina_global("CL"),
+                    "petro": lambda: _stock("601857.SH"),
+                    "ag": lambda: _sina_inner("AG0"),
+                    "shengda": lambda: _stock("000603.SZ")}.items():
         try:
             fresh = fn()
             if fresh:
@@ -151,7 +168,10 @@ def update() -> dict:
     doc = {
         "series": {"zijin": ser("zijin"), "gold": ser("gold"),
                    "dxy": ser("dxy"), "us10y": ser("us10y"),
-                   "rubber": ser("rubber"), "rufu": ser("rufu")},
+                   "rubber": ser("rubber"), "rufu": ser("rufu"),
+                   "jx_copper": ser("jx_copper"), "cu": ser("cu"),
+                   "petro": ser("petro"), "crude": ser("crude"),
+                   "shengda": ser("shengda"), "ag": ser("ag")},
         "meta": {
             "gold": "纽约金 = COMEX 黄金主力连续（新浪 GC）",
             "dxy": "美元指数（六成分对子按 ICE 官方权重自算，汇差级精度）",
@@ -159,6 +179,12 @@ def update() -> dict:
             "zijin": "紫金矿业 601899.SH（数据湖，前复权）",
             "rubber": "海南橡胶 601118.SH（数据湖，前复权）",
             "rufu": "沪胶主力连续 RU0（新浪国内期货，元/吨）",
+            "cu": "沪铜主力连续 CU0（新浪国内期货，元/吨）",
+            "jx_copper": "江西铜业 600368.SH（数据湖，前复权）",
+            "crude": "纽约原油 = WTI 原油主力连续（新浪 CL，美元/桶）",
+            "petro": "中国石油 601857.SH（数据湖，前复权）",
+            "ag": "沪银主力连续 AG0（新浪国内期货，元/千克）",
+            "shengda": "盛达资源 000603.SZ（数据湖，前复权）",
         },
         "updated_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
     }

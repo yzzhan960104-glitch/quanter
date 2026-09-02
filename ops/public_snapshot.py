@@ -249,7 +249,135 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
 
     # ── 运维健康面板（P5.4：任务台账+告警时间线+进程拓扑）──
     _ops_health(w)
+
+    # ── 研究线三快照（P6：提案流/版本演进/回测队列）──
+    _research_files(w)
     return {"files": n_files, "generated_at": f"{t0:%Y-%m-%d %H:%M:%S}"}
+
+
+def _research_files(w) -> int:
+    """P6 研究线三快照：proposals / experiment_versions / backtest_queue。
+
+    全读现有资产（方案 §五红线：不为可视化造新 DB）：
+    - logs/research_proposals.db（mode=ro）：研究提案全生命周期
+      （hypothesis/params/expected/risk/verdict）+ 状态管道统计
+    - experiment/experiments.db 经 experiment.store.list_versions：版本演进
+      （best_annual 从 note「outer ann=XX% calmar=YY」正则抽——store 无指标列）
+    - data/replay_tasks.db（mode=ro）：回测队列近 20 行 + docs/research_digest.md
+      关键行抽取（实盘 vs 回测期望——漂移对照条数据源）
+    """
+    import re as _re
+
+    def _j(s):
+        try:
+            return json.loads(s) if s else None
+        except ValueError:
+            return {"raw": s}
+
+    # ── 提案流 ──
+    proposals: list[dict] = []
+    pdb = ROOT / "logs" / "research_proposals.db"
+    if pdb.exists():
+        try:
+            uri = f"file:{pdb.as_posix()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as con:
+                rows = con.execute(
+                    "SELECT proposal_id, created_at, change_type, hypothesis,"
+                    " params_json, expected_effect, risk, status, verification_json,"
+                    " experiment_id, note FROM research_proposal"
+                    " ORDER BY created_at DESC").fetchall()
+            for (pid, cat, ctype, hyp, pj, eff, risk, status, vj, eid, note) in rows:
+                proposals.append({
+                    "id": pid, "created_at": cat, "change_type": ctype,
+                    "hypothesis": hyp, "params": _j(pj),
+                    "expected": eff, "risk": risk, "status": status,
+                    "verification": _j(vj), "experiment_id": eid, "note": note})
+        except sqlite3.Error as e:
+            print(f"  ⚠ proposals 降级空表：{e}")
+    pipe: dict[str, int] = {}
+    for p in proposals:
+        pipe[p["status"]] = pipe.get(p["status"], 0) + 1
+    w("proposals", {"generated_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
+                    "pipeline": pipe, "rows": proposals,
+                    "note": "研究提案流（logs/research_proposals.db 只读）：假设→"
+                            "参数→预期→验证 verdict 全链留痕"})
+
+    # ── 版本演进 ──
+    versions: list[dict] = []
+    try:
+        from experiment.store import list_versions
+        for v in list_versions(str(_AB_DB)):
+            d = v if isinstance(v, dict) else {
+                k: getattr(v, k) for k in ("experiment_id", "strategy_name",
+                                           "params", "weight", "status", "version",
+                                           "source", "note", "created_at")}
+            note = str(d.get("note") or "")
+            ann = _re.search(r"ann=([0-9.]+)%", note)
+            cal = _re.search(r"calmar=([0-9.]+)", note)
+            versions.append({
+                "experiment_id": d.get("experiment_id"),
+                "strategy_name": d.get("strategy_name"),
+                "version": d.get("version"),
+                "status": str(d.get("status") or "").split(".")[-1],  # 枚举短名
+                "weight": d.get("weight"),
+                "best_annual": float(ann.group(1)) if ann else None,
+                "calmar": float(cal.group(1)) if cal else None,
+                "note": note, "created_at": d.get("created_at"),
+                "params": d.get("params") or {}})
+    except Exception as e:
+        print(f"  ⚠ experiment_versions 降级空表：{type(e).__name__}: {e}")
+    w("experiment_versions", {
+        "generated_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
+        "rows": versions,
+        "note": "版本演进（experiment.store.list_versions 只读）；best_annual/calmar"
+                " 从版本 note「outer ann=% calmar=」抽取（store 无指标列）"})
+
+    # ── 回测队列 + digest 对照 ──
+    tasks: list[dict] = []
+    rdb = ROOT / "data" / "replay_tasks.db"
+    if rdb.exists():
+        try:
+            uri = f"file:{rdb.as_posix()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as con:
+                rows = con.execute(
+                    "SELECT task_id, created_at, status, progress, start, end,"
+                    " cfg_override, error, finished_at FROM replay_tasks"
+                    " ORDER BY created_at DESC LIMIT 20").fetchall()
+            for (tid, cat, status, prog, s0, s1, cfg, err, fin) in rows:
+                tasks.append({"task": tid[:8], "created_at": cat,
+                              "status": status, "progress": prog,
+                              "window": f"{s0}~{s1}",
+                              "cfg": _j(cfg) if isinstance(cfg, str) else cfg,
+                              "error": err, "finished_at": fin})
+        except sqlite3.Error as e:
+            print(f"  ⚠ replay_tasks 降级空表：{e}")
+
+    digest: dict = {}
+    dmd = ROOT / "docs" / "research_digest.md"
+    if dmd.exists():
+        text = dmd.read_text(encoding="utf-8", errors="replace")
+        m = _re.search(r"# 研究摘要 (\d{4}-\d{2}-\d{2})", text)
+        live_n = _re.search(r"实盘成交：(\S+)", text)
+        live_wr = _re.search(r"胜率：(\S+)", text)
+        live_rr = _re.search(r"均 rr：(\S+)", text)
+        exp = _re.search(r"期望：成交 (\S+) 笔 / 胜率 (\S+) / 均 rr (\S+)", text)
+        drift = _re.search(r"漂移对比\n- 状态：\*{0,2}([^*\n]+)", text)
+        digest = {
+            "day": m.group(1) if m else None,
+            "live": {"trades": live_n.group(1) if live_n else None,
+                     "win_rate": live_wr.group(1) if live_wr else None,
+                     "avg_rr": live_rr.group(1) if live_rr else None},
+            "expect": {"trades": exp.group(1) if exp else None,
+                       "win_rate": exp.group(2) if exp else None,
+                       "avg_rr": exp.group(3) if exp else None},
+            "drift": drift.group(1).strip() if drift else None,
+        }
+    w("backtest_queue", {
+        "generated_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
+        "tasks": tasks, "digest": digest,
+        "note": "回测队列（data/replay_tasks.db 只读近 20）+ digest 摘要"
+                "（docs/research_digest.md 关键行抽取：实盘 vs 回测期望漂移对照）"})
+    return 0
 
 
 def _ops_health(w) -> int:

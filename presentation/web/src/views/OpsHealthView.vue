@@ -78,6 +78,75 @@
         </el-card>
       </el-col>
     </el-row>
+    <el-row :gutter="12" style="margin-top: 12px;">
+      <el-col :span="14">
+        <el-card shadow="never">
+          <template #header>
+            <div class="flex-between">
+              <span>回测队列 <span class="sub">（近 {{ queue?.tasks.length || 0 }} 任务）</span></span>
+              <span class="sub">{{ qStat.SUCCESS || 0 }} 成功 / {{ qStat.FAILED || 0 }} 失败</span>
+            </div>
+          </template>
+          <el-table :data="queue?.tasks || []" size="small" height="280"
+                    :empty-text="queue ? '暂无回测任务' : '加载中…'">
+            <el-table-column label="任务" width="76">
+              <template #default="{ row }">
+                <span class="mono">{{ row.task }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="创建" width="140">
+              <template #default="{ row }">{{ String(row.created_at || '').slice(0, 16) }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="80">
+              <template #default="{ row }">
+                <el-tag :type="row.status === 'SUCCESS' ? 'success'
+                  : row.status === 'FAILED' ? 'danger' : 'info'"
+                        size="small" effect="plain">
+                  {{ row.status === 'SUCCESS' ? '完成' : row.status === 'FAILED' ? '失败' : row.status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="窗口" min-width="150">
+              <template #default="{ row }">{{ row.window }}</template>
+            </el-table-column>
+            <el-table-column label="参数摘要" min-width="200">
+              <template #default="{ row }">
+                <span class="mono cfg">{{ cfgOf(row) }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-col>
+      <el-col :span="10">
+        <el-card shadow="never">
+          <template #header>
+            <div class="flex-between">
+              <span>回测期望 × 实盘 <span class="sub">（digest {{ queue?.digest?.day || '—' }}）</span></span>
+              <el-tag size="small" effect="plain" type="info">{{ queue?.digest?.drift || '—' }}</el-tag>
+            </div>
+          </template>
+          <div v-if="queue?.digest" class="cmp">
+            <div class="cmp-row cmp-head">
+              <span></span><span>成交笔数</span><span>胜率</span><span>均 rr</span>
+            </div>
+            <div class="cmp-row">
+              <span class="cmp-name">回测期望</span>
+              <span class="mono">{{ queue.digest.expect?.trades ?? '—' }}</span>
+              <span class="mono">{{ queue.digest.expect?.win_rate ?? '—' }}</span>
+              <span class="mono">{{ queue.digest.expect?.avg_rr ?? '—' }}</span>
+            </div>
+            <div class="cmp-row">
+              <span class="cmp-name">实盘（fill 去重）</span>
+              <span class="mono">{{ queue.digest.live?.trades ?? '—' }}</span>
+              <span class="mono">{{ queue.digest.live?.win_rate ?? '—' }}</span>
+              <span class="mono">{{ queue.digest.live?.avg_rr ?? '—' }}</span>
+            </div>
+            <div class="sub cmp-note">{{ queue.note }}</div>
+          </div>
+          <el-empty v-else description="digest 摘要累积中" :image-size="50" />
+        </el-card>
+      </el-col>
+    </el-row>
     <div class="sub footer-note">{{ doc?.note }}</div>
   </div>
 </template>
@@ -85,8 +154,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { getOpsHealth, type OpsHealthDoc, type JobRunRow } from '../api/ops'
+import { getBacktestQueue, type BacktestQueueDoc, type ReplayTask } from '../api/research'
 
 const doc = ref<OpsHealthDoc | null>(null)
+const queue = ref<BacktestQueueDoc | null>(null)
+
+const qStat = computed<Record<string, number>>(() => {
+  const s: Record<string, number> = {}
+  for (const t of queue.value?.tasks ?? []) s[t.status] = (s[t.status] ?? 0) + 1
+  return s
+})
+
+/** 参数摘要：cfg 键值对拼一行（长则截）。 */
+function cfgOf(t: ReplayTask): string {
+  const cfg = t.cfg
+  if (!cfg || typeof cfg !== 'object') return '—'
+  const s = Object.entries(cfg).map(([k, v]) => `${k}=${String(v)}`).join(' ')
+  return s.length > 60 ? s.slice(0, 58) + '…' : s
+}
 
 /** 台账 pivot：行=业务日（降序），列=任务名（首现序），格=该日该任务最新一次。 */
 const grid = computed<Array<{ day: string; cells: Record<string, JobRunRow> }>>(() => {
@@ -148,6 +233,7 @@ const tlType = (lv: string): 'danger' | 'warning' | 'primary' | 'info' =>
 
 onMounted(async () => {
   doc.value = await getOpsHealth().catch(() => null)
+  queue.value = await getBacktestQueue().catch(() => null)
 })
 </script>
 
@@ -178,4 +264,13 @@ onMounted(async () => {
 .lv-info { color: var(--el-text-color-secondary); }
 .alert-msg { font-size: 12px; color: var(--el-text-color-regular); word-break: break-all; }
 .footer-note { margin: 10px 4px; }
+.cmp { padding: 4px 0; }
+.cmp-row { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 6px;
+           padding: 8px 0; border-bottom: 1px dashed var(--qt-border, #dcdfe6);
+           font-size: 13px; align-items: center; }
+.cmp-row:last-of-type { border-bottom: none; }
+.cmp-head { color: var(--el-text-color-secondary); font-size: 12px; }
+.cmp-name { color: var(--el-text-color-primary); font-size: 12px; }
+.cmp-note { margin-top: 8px; }
+.cfg { font-size: 11px; color: var(--el-text-color-secondary); }
 </style>

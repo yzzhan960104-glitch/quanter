@@ -73,6 +73,9 @@
     </el-row>
 
     <el-row style="margin-top: 12px">
+      <el-col :span="24"><VersionHistoryCard /></el-col>
+    </el-row>
+    <el-row style="margin-top: 12px">
       <el-col :span="24"><PositionsPanel /></el-col>
     </el-row>
     <el-row style="margin-top: 12px">
@@ -87,6 +90,7 @@ import { useRoute } from 'vue-router'
 import { getLegDetail, type LegDetail } from '../api/home'
 import PositionsPanel from '../components/cockpit/PositionsPanel.vue'
 import TradesTable from '../components/cockpit/TradesTable.vue'
+import VersionHistoryCard from '../components/experiment/VersionHistoryCard.vue'
 
 const route = useRoute()
 const legKey = computed(() => String(route.params.leg || 'main'))

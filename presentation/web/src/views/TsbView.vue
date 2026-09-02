@@ -9,6 +9,8 @@
     图一：紫金矿业 × 纽约金（COMEX 主力）——金股/金价相对强弱
     图二：美元指数 × 美债10Y × 纽约金——利率-美元-金三角
     图三：海南橡胶 × 沪胶主力连续——胶股/胶价相对强弱
+    图四~六（P6.4 扩池）：江西铜业×沪铜（CU0）／中国石油×纽约原油（WTI）／
+      盛达资源×沪银（AG0）——大宗商品链 A 股映射三组
   各序列交易日历不同（A 股/COMEX/外汇/美债），轴取并集、缺数日 null 断点
   connectNulls 平滑。数据源注记见页脚（DXY=六成分对子自算）。
 -->
@@ -36,6 +38,21 @@
     <el-card shadow="never" style="margin-top: 12px">
       <template #header>海南橡胶 × 沪胶主力连续（RU0）· 累计涨跌 %</template>
       <v-chart v-if="doc" class="chart" :option="opt3" theme="terminal-light" autoresize />
+    </el-card>
+
+    <el-card shadow="never" style="margin-top: 12px">
+      <template #header>江西铜业 × 沪铜主力连续（CU0）· 累计涨跌 %</template>
+      <v-chart v-if="doc" class="chart" :option="opt4" theme="terminal-light" autoresize />
+    </el-card>
+
+    <el-card shadow="never" style="margin-top: 12px">
+      <template #header>中国石油 × 纽约原油（WTI）· 累计涨跌 %</template>
+      <v-chart v-if="doc" class="chart" :option="opt5" theme="terminal-light" autoresize />
+    </el-card>
+
+    <el-card shadow="never" style="margin-top: 12px">
+      <template #header>盛达资源 × 沪银主力连续（AG0）· 累计涨跌 %</template>
+      <v-chart v-if="doc" class="chart" :option="opt6" theme="terminal-light" autoresize />
     </el-card>
 
     <div class="foot">
@@ -131,10 +148,19 @@ const STYLE: Record<string, { color: string; width: number; dash?: 'solid' | 'da
   us10y: { color: '#ef5350', width: 2, dash: 'dashed' },
   rubber: { color: '#2962ff', width: 2.5 },
   rufu: { color: '#26a69a', width: 2 },
+  // P6.4 扩池：铜/原油/白银（A 股蓝实线 × 商品橙绿线，沿用金/胶配色语义）
+  jx_copper: { color: '#2962ff', width: 2.5 },
+  cu: { color: '#c2502a', width: 2 },
+  petro: { color: '#2962ff', width: 2.5 },
+  crude: { color: '#5b8ff9', width: 2 },
+  shengda: { color: '#2962ff', width: 2.5 },
+  ag: { color: '#8d9fe0', width: 2 },
 }
 const NAME: Record<string, string> = {
   zijin: '紫金矿业', gold: '纽约金', dxy: '美元指数', us10y: '美债10Y',
   rubber: '海南橡胶', rufu: '沪胶主力',
+  jx_copper: '江西铜业', cu: '沪铜主力', petro: '中国石油', crude: '纽约原油',
+  shengda: '盛达资源', ag: '沪银主力',
 }
 
 /** 轴对齐的真实涨跌 %（tooltip 用：相对模式下主值是区间位，% 是第二读数）。 */
@@ -218,9 +244,15 @@ function mkOption(keys: Array<keyof TsbDoc['series']>, axis: string[]) {
 const axis1 = computed(() => (doc.value ? unionAxis(['zijin', 'gold']) : []))
 const axis2 = computed(() => (doc.value ? unionAxis(['dxy', 'us10y', 'gold']) : []))
 const axis3 = computed(() => (doc.value ? unionAxis(['rubber', 'rufu']) : []))
+const axis4 = computed(() => (doc.value ? unionAxis(['jx_copper', 'cu']) : []))
+const axis5 = computed(() => (doc.value ? unionAxis(['petro', 'crude']) : []))
+const axis6 = computed(() => (doc.value ? unionAxis(['shengda', 'ag']) : []))
 const opt1 = computed(() => mkOption(['zijin', 'gold'], axis1.value))
 const opt2 = computed(() => mkOption(['dxy', 'us10y', 'gold'], axis2.value))
 const opt3 = computed(() => mkOption(['rubber', 'rufu'], axis3.value))
+const opt4 = computed(() => mkOption(['jx_copper', 'cu'], axis4.value))
+const opt5 = computed(() => mkOption(['petro', 'crude'], axis5.value))
+const opt6 = computed(() => mkOption(['shengda', 'ag'], axis6.value))
 
 onMounted(async () => {
   doc.value = await getTsb().catch(() => null)

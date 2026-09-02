@@ -42,6 +42,8 @@ const LegDetailView = () => import('../views/LegDetailView.vue')
 const TsbView = () => import('../views/TsbView.vue')
 // 运维健康面板（P5.4 · 2026-09-03）：任务台账+告警时间线+进程拓扑（快照时点）。
 const OpsHealthView = () => import('../views/OpsHealthView.vue')
+// 研究提案流（P6.1 · 2026-09-03）：假设→参数→验证 verdict 生命线（快照只读）。
+const ProposalsView = () => import('../views/ProposalsView.vue')
 
 // 公网静态模式（VITE_STATIC_DATA=1 · yzzhan.xin）：路由收敛为公开观测面——
 // 首页(净值总览)/cockpit/experiments/data/ops（数据健康度）。discovery（研究 IP）
@@ -54,6 +56,7 @@ const staticRoutes = [
   { path: '/experiments', name: 'experiments', component: ExperimentView },
   { path: '/data', name: 'data', component: DataLakeView },
   { path: '/ops', name: 'ops', component: OpsHealthView },
+  { path: '/research', name: 'research', component: ProposalsView },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
@@ -81,6 +84,7 @@ const router = createRouter(
     // 运维健康面板（P5.4）：任务台账+告警+进程拓扑（作业驾驶舱 /jobs 名分兑现，
     // 在线态与公开态同组件——数据全走 ops_health.json 快照）。
     { path: '/ops', name: 'ops', component: OpsHealthView },
+    { path: '/research', name: 'research', component: ProposalsView },
     { path: '/opportunity', name: 'opportunity', component: TsbView },
         ],
       },
