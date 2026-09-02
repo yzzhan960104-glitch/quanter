@@ -51,6 +51,7 @@ interface NavItem {
 // （研究 IP）与宏观驾驶舱（内网宏观）不公开——与 router staticRoutes 同口径。
 const researchNav: NavItem[] = STATIC_MODE ? [
   { to: '/opportunity', label: '机会观察', icon: DataBoard },
+  { to: '/ops', label: '运维面板', icon: Operation },
   { to: '/data', label: '数据湖', icon: Files },
 ] : [
   // 搜索实验室（P3）：参数发现敏感性分析/热力图（只读，spec §4，研究动线首屏）
@@ -72,7 +73,9 @@ const liveNav: NavItem[] = STATIC_MODE ? [
 ] : [
   { to: '/cockpit', label: '综合看板', icon: View },
   { to: '/experiments', label: '实验对照', icon: DataAnalysis },
-  { to: '/jobs', label: '作业驾驶舱', icon: Operation },
+  { to: '/ops', label: '运维面板', icon: Operation },
+  // '/jobs 作业驾驶舱'（Phase 2 占位）已收编进 /ops（P5.4 · 2026-09-03）：
+  // 台账/告警/进程三合一公开态，原 /jobs 死路由（无 component）不再挂导航。
   // '/live 实盘中控' 已退役（2026-08-27 · QMT 退役方案 P1 裁决②）：掘金为唯一
   // 实盘平台，观测走 goldminer-terminal skill（7002 API）；Monitor 图标随之退役。
 ]

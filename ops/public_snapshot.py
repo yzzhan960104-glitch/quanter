@@ -246,7 +246,104 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
 
     # ── 腿详情档案（需求②③：策略全量信息 + 手动风控参数）──
     _leg_detail_files(w)
+
+    # ── 运维健康面板（P5.4：任务台账+告警时间线+进程拓扑）──
+    _ops_health(w)
     return {"files": n_files, "generated_at": f"{t0:%Y-%m-%d %H:%M:%S}"}
+
+
+def _ops_health(w) -> int:
+    """运维健康快照 ops_health.json（P5.4 /ops 三源）。
+
+    a) job_run 近 14 日台账（logs/trading_job_run.db 只读——单写者纪律 mode=ro）；
+    b) alerts.log 尾部解析（`ts | LEVEL | msg` 行；钉钉播报正文无时间戳行跳过），
+       非 '-' 级取最近 200 条；
+    c) 进程拓扑快照时点捕获：server（engine_processes）+ 掘金终端双探测
+       （gm_terminal_status）+ 每腿策略 stage（7002 /v3/strategies）。
+    任何一源失败降级空/None 不炸主链（探测失败≠进程不存在，None=未知）。
+    """
+    import re
+    from datetime import timedelta as _td
+    from ops import gm_ops_common as gc
+
+    # a) job_run 台账
+    runs: list[dict] = []
+    db = ROOT / "logs" / "trading_job_run.db"
+    if db.exists():
+        try:
+            since = f"{datetime.now() - _td(days=14):%Y-%m-%d}"
+            uri = f"file:{db.as_posix()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as con:
+                rows = con.execute(
+                    "SELECT job_name, business_date, status, started_at, finished_at,"
+                    " message FROM job_run WHERE started_at >= ?"
+                    " ORDER BY started_at DESC", (since,)).fetchall()
+            runs = [{"job": j, "date": b, "status": s, "started_at": sa,
+                     "finished_at": fa, "message": msg}
+                    for j, b, s, sa, fa, msg in rows]
+        except sqlite3.Error as e:
+            print(f"  ⚠ job_run 台账降级空表：{e}")
+
+    # b) alerts 尾部（600 行窗口 → 带时间戳行 → 最近 200）
+    alerts: list[dict] = []
+    log = ROOT / "logs" / "alerts.log"
+    if log.exists():
+        try:
+            tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-600:]
+            pat = re.compile(
+                r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s*\|\s*([A-Za-z]+)\s*\|\s*(.*)$")
+            for line in reversed(tail):                # 新→旧收，够 200 止
+                m = pat.match(line.strip())
+                if not m or m.group(2) == "-":
+                    continue
+                alerts.append({"ts": m.group(1), "level": m.group(2),
+                               "msg": m.group(3)[:300]})
+                if len(alerts) >= 200:
+                    break
+        except OSError as e:
+            print(f"  ⚠ alerts 解析降级空表：{e}")
+
+    # c) 进程拓扑（快照时点）：server + 终端双探测 + 每腿策略 stage
+    procs: dict = {"note": "快照时点探测（非实时）；None=探测失败（≠不存在）"}
+    try:
+        from ops import process_topology as pt
+        eng = pt.engine_processes()
+        procs["server"] = {"running": bool(eng), "pids": [p["pid"] for p in eng]}
+        gm = pt.gm_terminal_status()
+        procs["emgm3"] = gm.get("emgm3")               # 终端 UI 进程数
+        procs["gateway"] = gm.get("gateway")           # 本地网关（7001-7004）
+    except Exception as e:
+        procs["probe_error"] = f"{type(e).__name__}: {e}"
+    strategies: dict = {}
+    try:
+        token = str(gc.runtime_config().get("token") or "")
+        st, payload = gc.api_get("/v3/strategies", token, timeout=4.0)
+        if st == 200:
+            for s in (payload or {}).get("data") or []:
+                if isinstance(s, dict) and s.get("strategy_id"):
+                    strategies[str(s["strategy_id"])] = str(s.get("stage") or "")
+    except Exception:
+        pass
+    legs_stage = []
+    for leg in gc.active_legs():
+        try:
+            cfg = gc.runtime_config(gc.leg_strategy_dir(leg))
+        except (OSError, ValueError):
+            cfg = {}
+        sid = str(cfg.get("strategy_id") or "")
+        legs_stage.append({"key": leg.key, "label": leg.label,
+                           "stage": strategies.get(sid) or None})
+    procs["legs"] = legs_stage
+
+    w("ops_health", {
+        "generated_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
+        "job_runs": runs,
+        "alerts": alerts,
+        "processes": procs,
+        "note": "任务台账=job_run 近 14 日（mode=ro 只读）；告警=alerts.log 尾部"
+                " 200 条（WARN/CRITICAL 为主，INFO 灰显）；进程=快照时点探测",
+    })
+    return 0
 
 
 def _leg_detail_files(w) -> int:

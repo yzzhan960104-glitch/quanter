@@ -40,9 +40,11 @@ const HomeView = () => import('../views/HomeView.vue')
 const LegDetailView = () => import('../views/LegDetailView.vue')
 // 机会观察（2026-09-02）：紫金×纽约金、美元×US10Y×纽约金、海胶×沪胶。
 const TsbView = () => import('../views/TsbView.vue')
+// 运维健康面板（P5.4 · 2026-09-03）：任务台账+告警时间线+进程拓扑（快照时点）。
+const OpsHealthView = () => import('../views/OpsHealthView.vue')
 
 // 公网静态模式（VITE_STATIC_DATA=1 · yzzhan.xin）：路由收敛为公开观测面——
-// 首页(净值总览)/cockpit/experiments/data（数据健康度）。discovery（研究 IP）
+// 首页(净值总览)/cockpit/experiments/data/ops（数据健康度）。discovery（研究 IP）
 // 与 dashboard（内网宏观）不公开；未知路径兜底回首页（公开站不暴露内部 404 面）。
 const staticRoutes = [
   { path: '/', name: 'home', component: HomeView },
@@ -51,6 +53,7 @@ const staticRoutes = [
   { path: '/opportunity', name: 'opportunity', component: TsbView },
   { path: '/experiments', name: 'experiments', component: ExperimentView },
   { path: '/data', name: 'data', component: DataLakeView },
+  { path: '/ops', name: 'ops', component: OpsHealthView },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
@@ -73,8 +76,11 @@ const router = createRouter(
   { path: '/opportunity', name: 'opportunity', component: TsbView },
     // 实验对照（2026-08-29 多腿方案 P3）：双腿 A/B 的轮次/对照/下钻视图
     { path: '/experiments', name: 'experiments', component: ExperimentView },
-    // 作业驾驶舱（Phase 2 · Task 12）：当天 pipeline/pre_open 台账 + 启动补跑四态（只读）。
+    // 数据湖（Task 12 原作业驾驶舱语义收编进 /ops · P5.4）。
     { path: '/data', name: 'data', component: DataLakeView },
+    // 运维健康面板（P5.4）：任务台账+告警+进程拓扑（作业驾驶舱 /jobs 名分兑现，
+    // 在线态与公开态同组件——数据全走 ops_health.json 快照）。
+    { path: '/ops', name: 'ops', component: OpsHealthView },
     { path: '/opportunity', name: 'opportunity', component: TsbView },
         ],
       },
