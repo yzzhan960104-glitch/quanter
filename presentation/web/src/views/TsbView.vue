@@ -226,7 +226,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.tsb { padding: var(--qt-space-3, 12px); max-width: 1200px; margin: 0 auto; }
+.tsb { flex: 1; overflow-y: auto; padding: var(--qt-space-3, 12px); max-width: 1200px; margin: 0 auto; width: 100%; }
 .head { display: flex; align-items: center; justify-content: space-between;
         margin-bottom: 12px; }
 .ctrl { display: flex; gap: 10px; align-items: center; }

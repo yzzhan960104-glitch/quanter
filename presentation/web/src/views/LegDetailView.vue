@@ -113,7 +113,7 @@ const pct = (v: unknown, dflt = 0) =>
 </script>
 
 <style scoped>
-.leg-detail { padding: var(--qt-space-3, 12px); max-width: 1200px; margin: 0 auto; }
+.leg-detail { flex: 1; overflow-y: auto; width: 100%; padding: var(--qt-space-3, 12px); max-width: 1200px; margin: 0 auto; }
 .head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
 .head h2 { margin: 0; }
 .sub { font-size: 13px; font-weight: 400; color: var(--el-text-color-secondary); }

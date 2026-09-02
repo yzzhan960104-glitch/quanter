@@ -87,7 +87,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.home { padding: var(--qt-space-3, 16px); max-width: 1200px; margin: 0 auto;
+.home { flex: 1; overflow-y: auto; width: 100%; padding: var(--qt-space-3, 16px); max-width: 1200px; margin: 0 auto;
         background: var(--qt-bg-page); min-height: 100%; }
 .hero { display: flex; justify-content: space-between; align-items: flex-end;
         gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
