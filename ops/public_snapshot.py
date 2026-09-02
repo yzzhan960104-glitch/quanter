@@ -491,6 +491,31 @@ def _plan_card(w) -> int:
         except (OSError, ValueError):
             pass
 
+    # 明日预演（09-02 用户裁决：终态私域站+鉴权后置，预演完整上站）——取
+    # plan_date 最大的预演档案；== today 的作为执行日回看（preview 块），
+    # > today 的作为盘前参考整段公开。私域前提下的完整功能形态。
+    next_preview = None
+    pps = sorted(ROOT.glob("logs/plan_preview_*.json"))
+    if pps:
+        try:
+            art = json.loads(pps[-1].read_text(encoding="utf-8"))
+            if str(art.get("plan_date", "")) > today:
+                from ops.emquant_eod_report import _name_map as _nm
+                pn = _nm([str(r.get("sym")) for r in (art.get("plan") or [])]
+                         + list(art.get("dropped_amihud") or [])
+                         + [b.get("sym") for b in (art.get("blocked") or [])])
+                next_preview = {
+                    "plan_date": art.get("plan_date"),
+                    "stamp": art.get("stamp"), "equity": art.get("equity"),
+                    "rows": [{**r, "name": pn.get(str(r.get("sym")), "—")}
+                             for r in (art.get("plan") or [])],
+                    "dropped_amihud": [str(x) for x in (art.get("dropped_amihud") or [])],
+                    "skip_held": art.get("skip_held") or [],
+                    "blocked": art.get("blocked") or [],
+                }
+        except (OSError, ValueError):
+            pass
+
     w("plan_card", {
         "today": today,
         "rows": rows,
@@ -499,7 +524,9 @@ def _plan_card(w) -> int:
                     "skip_held": facts["skip_held"],
                     "blocked": facts["blocked"]},
         "preview": preview,
-        "note": "明日预演 18:10 仅推钉钉；公网于执行日收盘后公开（防前跑红线）",
+        "next_preview": next_preview,
+        "note": "预演≠计划：识别层与实跑同源逐字段一致，差异来自运行时闸态；"
+                "权威以 09:31 实挂为准（站点终态私域，鉴权建设中）",
     })
     return 0
 

@@ -127,6 +127,17 @@ export interface PlanRow {
   status: 'filled' | 'placed' | 'signal'
 }
 
+export interface NextPlanRow {
+  sym: string
+  name?: string
+  qty: number
+  entry: number
+  clamped?: boolean
+  neckline?: number | null
+  rr?: number | null
+  formed?: string
+}
+
 export interface PlanCardDoc {
   today: string
   rows: PlanRow[]
@@ -134,6 +145,11 @@ export interface PlanCardDoc {
   preview: { stamp?: string; equity?: number
     recon: { ok: number; total: number; only_preview: string[]
              only_actual: string[]; drift: string[] } } | null
+  next_preview: { plan_date: string; stamp?: string; equity?: number
+    rows: NextPlanRow[]
+    dropped_amihud: string[]
+    skip_held: Array<{ sym: string; why?: string }>
+    blocked: Array<{ sym: string; why?: string }> } | null
   note?: string
 }
 

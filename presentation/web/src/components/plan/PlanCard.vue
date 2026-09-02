@@ -43,6 +43,42 @@
         </template>
       </el-table-column>
     </el-table>
+    <template v-if="doc?.next_preview">
+      <el-divider content-position="left">
+        明日预演 · {{ doc.next_preview.plan_date }}（盘前参考）
+      </el-divider>
+      <el-table :data="doc.next_preview.rows" size="small" @row-click="open"
+                empty-text="拟挂 0 单（无候选或全被闸拦）">
+        <el-table-column label="标的" min-width="150">
+          <template #default="{ row }">
+            <span class="sym">{{ row.sym }}</span><span class="name">{{ row.name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="qty" label="数量" width="80" />
+        <el-table-column label="委托价" width="96">
+          <template #default="{ row }">
+            {{ row.entry?.toFixed(2) }}{{ row.clamped ? ' 钳' : '' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="颈线" width="76">
+          <template #default="{ row }">{{ row.neckline?.toFixed(2) ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column label="RR" width="60">
+          <template #default="{ row }">{{ row.rr?.toFixed(1) ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column label="形态日" width="96">
+          <template #default="{ row }">{{ row.formed }}</template>
+        </el-table-column>
+      </el-table>
+      <div v-if="doc.next_preview.blocked?.length || doc.next_preview.skip_held?.length"
+           class="next-foot">
+        <span v-for="b in doc.next_preview.blocked" :key="'b' + b.sym">
+          拦截 · {{ b.sym }}：{{ b.why }}</span>
+        <span v-for="k in doc.next_preview.skip_held" :key="'k' + k.sym">
+          跳过 · {{ k.sym }}（{{ k.why === 'cooldown' ? '冷却' : '已持有' }}）</span>
+      </div>
+    </template>
+
     <div class="foot">
       <span v-if="doc">信号 {{ doc.summary.signals }} · 成交 {{ doc.summary.filled }}
         · 持仓跳过 {{ doc.summary.skip_held }} · 拦截 {{ doc.summary.blocked }}</span>
@@ -99,4 +135,6 @@ onMounted(async () => {
 .foot { display: flex; justify-content: space-between; margin-top: 8px;
         font-size: 12px; color: var(--el-text-color-regular); flex-wrap: wrap; gap: 8px; }
 .kmeta { display: flex; gap: 16px; margin-bottom: 8px; font-size: 13px; }
+.next-foot { display: flex; flex-direction: column; gap: 2px; margin-top: 6px;
+             font-size: 11px; color: var(--el-text-color-secondary); }
 </style>
