@@ -9,10 +9,15 @@
     <template #header>
       <div class="flex-between">
         <span>日收益日历 <span class="sub">（{{ legLabel }}）</span></span>
-        <el-select v-model="leg" size="small" style="width: 96px">
+        <div class="ctrl">
+          <el-button size="small" text @click="offset--">‹</el-button>
+          <span class="month">{{ monthLabel }}</span>
+          <el-button size="small" text :disabled="offset >= 0" @click="offset++">›</el-button>
+          <el-select v-model="leg" size="small" style="width: 96px">
           <el-option label="主腿" value="main" />
           <el-option label="实验腿" value="exp" />
         </el-select>
+        </div>
       </div>
     </template>
     <v-chart v-if="cells.length" class="chart" :option="option" theme="terminal-light" autoresize />
@@ -34,6 +39,23 @@ use([HeatmapChart, CalendarComponent, TooltipComponent, VisualMapComponent, Canv
 const props = defineProps<{ history: NavHistory }>()
 const leg = ref<'main' | 'exp'>('main')
 const legLabel = computed(() => (leg.value === 'main' ? '主腿' : '实验腿'))
+// 月度视图（09-02 用户需求）：以最新数据所在月为基准，offset 翻月（≥0 禁前翻未来）
+const offset = ref(0)
+const baseMonth = computed(() => {
+  const ds = props.history.days ?? []
+  if (ds.length) return ds[ds.length - 1].date.slice(0, 7)
+  const n = new Date()
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`
+})
+const monthRange = computed(() => {
+  const [y, m] = baseMonth.value.split('-').map(Number)
+  const d = new Date(y, m - 1 + offset.value, 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+})
+const monthLabel = computed(() => {
+  const [y, m] = monthRange.value.split('-')
+  return `${y} 年 ${Number(m)} 月`
+})
 
 /** [(date, 日收益%)]：首日较 base，其后较前日（前日缺 → 较 base）。 */
 const cells = computed<[string, number][]>(() => {
@@ -59,8 +81,7 @@ const option = computed(() => ({
     inRange: { color: ['#26a69a', '#f0f2f5', '#ef5350'] },
   },
   calendar: {
-    range: cells.value.length
-      ? [cells.value[0][0], cells.value[cells.value.length - 1][0]] : [],
+    range: monthRange.value,
     cellSize: ['auto', 16],
     left: 40, right: 12, top: 24,
     itemStyle: { color: '#ffffff', borderColor: '#f5f7fa', borderWidth: 2 },
@@ -78,5 +99,7 @@ const option = computed(() => ({
 <style scoped>
 .chart { height: 200px; width: 100%; }
 .flex-between { display: flex; align-items: center; justify-content: space-between; }
+.ctrl { display: flex; align-items: center; gap: 4px; }
+.month { font-size: 12px; color: var(--el-text-color-regular); min-width: 76px; text-align: center; }
 .sub { color: var(--el-text-color-secondary); font-size: 12px; font-weight: normal; }
 </style>
