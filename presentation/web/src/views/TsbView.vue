@@ -3,8 +3,8 @@
 
   三图联动（窗口 YTD/1Y/3Y/全部 × 刻度三态）。刻度语义（2026-09-02 用户需求：
   看指标间涨跌的相对同步关系，又不让高波动指标把低波动压成平线）：
-    相对归一（默认）：每序列按自身窗口 [min,max] 映射 0-100 区间位——
-      等幅展示，紫金的 40% 摆幅与美元的 3% 摆幅占同一视觉带宽，看形态同步；
+    相对归一（默认）：起点锚定——所有线从 0 出发，±100=各自窗口内最大涨/跌
+      幅度（等幅不压制 + 起点统一，方向形状保真）；
     对数涨跌 / 线性涨跌：窗口锚归一的真实涨跌%（跨指标量级可比）：
     图一：紫金矿业 × 纽约金（COMEX 主力）——金股/金价相对强弱
     图二：美元指数 × 美债10Y × 纽约金——利率-美元-金三角
@@ -101,13 +101,16 @@ function align(key: keyof TsbDoc['series'], axis: string[]):
     return factors.map((f) => f == null ? null
       : mode.value === 'log' ? +f.toFixed(4) : +((f - 1) * 100).toFixed(2))
   }
-  // 相对归一：窗口内 [min,max] → [0,100]（各自波动尺度，等幅展示）
-  const vals = factors.filter((f): f is number => f != null)
-  if (!vals.length) return factors.map(() => null)
-  const mn = Math.min(...vals), mx = Math.max(...vals)
-  if (mx - mn < 1e-12) return factors.map(() => 50)
+  // 相对归一（起点锚定）：所有线从 0 出发，窗口内最大涨或跌=±100——
+  // 既统一起点（09-02 用户问"起点为什么不是0"），又等幅不互相压制。
+  // 语义=各自最大幅度的百分比；形状/方向保真，符号不变。
+  const devs = factors.filter((f): f is number => f != null)
+    .map((f) => (f - 1) * 100)
+  if (!devs.length) return factors.map(() => null)
+  const maxAbs = Math.max(...devs.map(Math.abs))
+  if (maxAbs < 1e-9) return factors.map(() => 0)
   return factors.map((f) => f == null ? null
-    : +(((f - mn) / (mx - mn)) * 100).toFixed(1))
+    : +(((f - 1) * 100 / maxAbs) * 100).toFixed(1))
 }
 
 /** 并集轴（窗口内）。 */
@@ -177,14 +180,16 @@ function mkOption(keys: Array<keyof TsbDoc['series']>, axis: string[]) {
     },
     legend: { top: 0, data: keys.map((k) => NAME[k]) },
     grid: { left: 52, right: 16, top: 30, bottom: 28 },
-    xAxis: { type: 'category', data: axis, boundaryGap: false },
+    xAxis: { type: 'category', data: axis, boundaryGap: false,
+             axisLine: { onZero: false } },
     yAxis: (mode.value === 'relative'
-      ? { type: 'value', min: -6, max: 106,
-          // 极值=0/100 恰在边界会被切半——上下各留 6% 呼吸带（09-02 用户反馈
-          // "最高最低不在图里"）；刻度只标 0-100 区间位，呼吸带不标数
+      ? { type: 'value', min: -112, max: 112,
+          // ±100=各自窗口最大幅度，恰在边界会被切半——上下各留呼吸带
+          //（09-02 两次用户反馈："最高最低不在图里"+"起点为什么不是0"）
           axisLabel: { formatter: (v: number) =>
-            (v >= 0 && v <= 100) ? String(v) : '' },
-          name: '区间位', nameTextStyle: { color: '#86909c' },
+            (Math.abs(v) <= 100) ? String(v) : '' },
+          name: '相对幅度（起点0 · ±100=各自窗口最大涨跌）',
+          nameTextStyle: { color: '#86909c' },
           splitLine: { lineStyle: { color: '#eef1f6' } } }
       : { type: mode.value === 'log' ? 'log' : 'value', logBase: 10,
           axisLabel: { formatter: (v: number) => mode.value === 'log'
@@ -192,12 +197,18 @@ function mkOption(keys: Array<keyof TsbDoc['series']>, axis: string[]) {
             : `${v > 0 ? '+' : ''}${v}%` },
           splitLine: { lineStyle: { color: '#eef1f6' } } }),
     dataZoom: [{ type: 'inside' }],
-    series: keys.map((k) => ({
+    series: keys.map((k, ki) => ({
       name: NAME[k], type: 'line', data: align(k, axis),
       showSymbol: false, connectNulls: true, emphasis: { focus: 'series' },
       lineStyle: { color: STYLE[k].color, width: STYLE[k].width,
                    type: STYLE[k].dash === 'dashed' ? 'dashed' : 'solid' },
       itemStyle: { color: STYLE[k].color },
+      // 首序列挂 0 基准线（相对模式下=起点/涨跌分界，灰虚线不抢戏）
+      ...(ki === 0 ? { markLine: {
+        silent: true, symbol: 'none', label: { show: false },
+        lineStyle: { color: '#c0c4cc', type: 'dashed', width: 1 },
+        data: mode.value === 'relative' ? [{ yAxis: 0 }] : [],
+      } } : {}),
     })),
   }
 }
