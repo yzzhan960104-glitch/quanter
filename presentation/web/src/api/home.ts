@@ -114,3 +114,29 @@ export interface TsbDoc {
 export function getTsb(): Promise<TsbDoc | null> {
   return staticGet<TsbDoc | null>('tsb', null)
 }
+
+/** 每日计划卡（09-02）：今日实况 + 昨晚预演回看（执行日收盘后公开）。 */
+export interface PlanRow {
+  sym: string
+  name: string
+  qty: number | null
+  price: number | null
+  neckline?: number | null
+  rr?: number | null
+  formed?: string
+  status: 'filled' | 'placed' | 'signal'
+}
+
+export interface PlanCardDoc {
+  today: string
+  rows: PlanRow[]
+  summary: { signals: number; filled: number; skip_held: number; blocked: number }
+  preview: { stamp?: string; equity?: number
+    recon: { ok: number; total: number; only_preview: string[]
+             only_actual: string[]; drift: string[] } } | null
+  note?: string
+}
+
+export function getPlanCard(): Promise<PlanCardDoc | null> {
+  return staticGet<PlanCardDoc | null>('plan_card', null)
+}

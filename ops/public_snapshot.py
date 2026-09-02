@@ -239,6 +239,9 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
     # ── OHLCV 快照（P2 静态半场：持仓+当日信号标的的 K 线回放数据）──
     _ohlcv_files(w)                     # w 闭包自增 n_files
 
+    # ── 每日计划卡（09-02：今日实况+预演回看，前跑红线见函数注）──
+    _plan_card(w)
+
     # ── 腿详情档案（需求②③：策略全量信息 + 手动风控参数）──
     _leg_detail_files(w)
     return {"files": n_files, "generated_at": f"{t0:%Y-%m-%d %H:%M:%S}"}
@@ -405,6 +408,100 @@ def _trade_history(leg_dir_path: Path, today_rows: list | None = None) -> list:
         elif r not in out.values():
             out[f"broker-{cid}"] = {**r, "date": str(r.get("created_at", ""))[:10]}
     return sorted(out.values(), key=lambda r: r.get("created_at") or "", reverse=True)
+
+
+def _plan_card(w) -> int:
+    """每日计划卡（09-02 用户需求）：今日实况（audit 驱动）+ 昨晚预演回看。
+
+    前跑红线：明日预演（plan_date > today）绝不入公网快照——盘前公开
+    marketable limit 的买入意向=送前跑；预演档案仅在执行日（plan_date ==
+    today，即已 09:31 执行）公开，作为对拍记录。预演缺失（cron 未跑/未部署
+    期）→ preview=null 优雅降级。
+    """
+    import csv as _csv
+    from datetime import datetime as _dt
+    from ops import gm_ops_common as gc
+    from ops.emquant_eod_report import _name_map
+
+    today = f"{_dt.now():%Y-%m-%d}"
+    main_dir = gc.leg_strategy_dir(next(l for l in gc.active_legs() if l.key == "main"))
+
+    facts = {"signals": [], "placed": {}, "filled": set(),
+             "skip_held": 0, "blocked": 0}
+    src = gc.audit_csv_path(today, main_dir)
+    if src.exists():
+        for row in _csv.reader(src.open(encoding="utf-8")):
+            if len(row) < 2 or not row[0].startswith(today):
+                continue
+            ev = row[1]
+            try:
+                d = json.loads(row[2]) if len(row) > 2 and row[2] else {}
+            except ValueError:
+                d = {}
+            if ev == "SIGNAL" and d.get("symbol"):
+                facts["signals"].append(d)
+            elif ev == "ORDER_PLACED" and d.get("symbol"):
+                facts["placed"][str(d["symbol"])] = d
+            elif ev in ("POS_ENRICHED", "FILL") and d.get("symbol"):
+                facts["filled"].add(str(d["symbol"]))
+            elif ev == "SIGNAL_SKIP_HELD":
+                facts["skip_held"] += 1
+            elif ev == "ORDER_BLOCKED":
+                facts["blocked"] += 1
+
+    names = _name_map([str(d.get("symbol")) for d in facts["signals"]])
+    rows = []
+    for d in facts["signals"]:
+        sym = str(d.get("symbol", "?"))
+        pl = facts["placed"].get(sym)
+        rows.append({
+            "sym": sym, "name": names.get(sym, "—"),
+            "qty": int(pl.get("qty") or 0) if pl else None,
+            "price": pl.get("price") if pl else None,
+            "neckline": d.get("neckline"), "rr": d.get("rr"),
+            "formed": str(d.get("formed_at") or ""),
+            "status": "filled" if sym in facts["filled"]
+            else "placed" if pl else "signal",
+        })
+
+    # 昨晚预演回看（已执行 → 公开 + 对拍）
+    preview = None
+    pp = ROOT / "logs" / f"plan_preview_{today}.json"
+    if pp.exists():
+        try:
+            art = json.loads(pp.read_text(encoding="utf-8"))
+            if art.get("plan_date") == today:
+                plan = {str(r.get("sym")): r for r in (art.get("plan") or [])}
+                actual = facts["placed"]
+                both = set(plan) & set(actual)
+                only_p = set(plan) - set(actual)
+                only_a = set(actual) - set(plan)
+                drift = [s for s in both
+                         if int(actual[s].get("qty") or 0) != int(plan[s].get("qty") or 0)
+                         or abs(float(actual[s].get("price") or 0)
+                                - float(plan[s].get("entry") or 0)) > 0.011]
+                total = len(set(plan) | set(actual))
+                preview = {
+                    "stamp": art.get("stamp"), "equity": art.get("equity"),
+                    "recon": {"ok": len(both) - len(drift), "total": total,
+                              "only_preview": sorted(only_p),
+                              "only_actual": sorted(only_a),
+                              "drift": sorted(drift)},
+                }
+        except (OSError, ValueError):
+            pass
+
+    w("plan_card", {
+        "today": today,
+        "rows": rows,
+        "summary": {"signals": len(facts["signals"]),
+                    "filled": len(facts["filled"]),
+                    "skip_held": facts["skip_held"],
+                    "blocked": facts["blocked"]},
+        "preview": preview,
+        "note": "明日预演 18:10 仅推钉钉；公网于执行日收盘后公开（防前跑红线）",
+    })
+    return 0
 
 
 def _ohlcv_files(w) -> int:
