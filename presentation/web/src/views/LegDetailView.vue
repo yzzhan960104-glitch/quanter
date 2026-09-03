@@ -94,6 +94,7 @@ import { getLegDetail, type LegDetail } from '../api/home'
 import PositionsPanel from '../components/cockpit/PositionsPanel.vue'
 import TradesTable from '../components/cockpit/TradesTable.vue'
 import VersionHistoryCard from '../components/experiment/VersionHistoryCard.vue'
+import LoserReviewCard from '../components/cockpit/LoserReviewCard.vue'
 
 const route = useRoute()
 const legKey = computed(() => String(route.params.leg || 'main'))

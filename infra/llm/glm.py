@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """infra/llm/glm.py —— GlmClient：z.ai GLM 实现（OpenAI Chat 兼容协议）。
 
-协议根因（2026-09-03 官方文档实锤 + 全天实测复盘）：
-- 凭证是 GLM Coding Plan 订阅——官方文档明文「订阅过 Coding Plan（含过期）
-  的 key 目前只能经 OpenAI Chat Completion 兼容协议访问模型 API」。
-- 此前走 Anthropic 兼容端点：短请求碰巧能过、长请求（1.3k+ 字归因 prompt）
-  长时间静默后超时——Anthropic 端点对 Coding Plan key 的支持不完整，
-  一直误判为「端点拥塞」，实为协议路径不对。
-- 现默认 https://api.z.ai/api/paas/v4/chat/completions（Bearer 鉴权，
-  官方对 Coding Plan 的正道）；GLM_PROTOCOL=anthropic 可切回旧路径（保险）。
+协议与计费终局（2026-09-04 实证翻案）：
+- **默认 Anthropic 端点**：消费 GLM Coding Plan 周配额（订阅额度）——
+  09-04 实测 IPv4 修复后 8s 秒通，配额健在。
+- OpenAI 端点（paas/v4）走**按量余额池**：本账户空池，任何请求即 429
+  code 1113「余额不足」——09-03 曾误判为「Coding Plan 只支持 OpenAI 协议」，
+  实为 IPv6 黑洞（协议无关）+ 按量池无钱的叠加误导。
+- GLM_PROTOCOL=openai 可切按量池（充值后可用）。
 
 流式与思考分离（官方 Deep Thinking 文档口径）：
 - 流式 delta 双通道：delta.content=正文 / delta.reasoning_content=思考——
@@ -84,7 +83,11 @@ class GlmClient:
         # 凭证双 fallback（GLM_API_KEY 优先，兼容历史 ZHIPU_API_KEY 命名）
         self._api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
         self._model = os.getenv("GLM_MODEL", "glm-4")
-        self._protocol = os.getenv("GLM_PROTOCOL", "openai").lower()
+        # 默认 anthropic（2026-09-04 实证终局）：该端点消费 GLM Coding Plan
+        # 周配额（用户订阅额度）；OpenAI 端点 paas/v4 走按量余额池（本账户
+        # 空池——429 code 1113 即此）。09-03 的「协议不支持」判断作废：当时
+        # 挂起的真因是 IPv6 黑洞（见 _IPv4HTTPSConnection 注释），协议无关。
+        self._protocol = os.getenv("GLM_PROTOCOL", "anthropic").lower()
 
     def with_model(self, model: str) -> "GlmClient":
         """同凭证同配置、换模型名的变体（降级兜底用，如 5.3→5.3-flash）。"""
