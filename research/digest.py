@@ -431,6 +431,13 @@ def main(argv=None) -> str:
     md = build_digest(str(date.today()), live, expectation, active_experiment=active_exp,
                       discovery_status=discovery_bridge.load_discovery_status(),
                       analysis_md=analysis_md)
+    # 09-03 线①：实盘亏损归因段注入（loser_review 18:05 产物→提案 LLM 的实盘
+    # 视野）。缺产物返回空串，digest 主链零依赖。
+    try:
+        from research.explore_loop import render_loser_section
+        md += render_loser_section(str(date.today()))
+    except Exception:
+        logger.exception("实盘归因段注入失败（降级跳过）")
     pid = None   # 当轮生成的提案 id（--verify-proposals 消费；未生成时 None 跳过验证）
     if args.proposals:
         pid = proposals.generate_proposal(

@@ -14,7 +14,9 @@ export interface LoserAnalysis {
   evidence?: string | null       // 量化证据
   confidence?: string | null     // 高/中/低
   risk_state?: string | null     // 持有观察/收紧关注/临近风控线（词表外 null）
+  param_directions?: Record<string, string> | null  // 研究探索方向提示（非执行）
   markdown?: string | null       // 深度分析正文
+  actual_model?: string | null   // 实际产出模型（flash 兜底时标注）
   error?: string | null
 }
 

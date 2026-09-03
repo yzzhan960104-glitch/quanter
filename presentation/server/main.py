@@ -204,6 +204,11 @@ OPS_TASK_CRONS = [
     # public_snapshot。
     ("ops_loser_review", ["-m", "ops.loser_review"], "cron",
      {"hour": 18, "minute": 5, "day_of_week": "mon-fri"}, "ops_loser_review.log"),
+    # 2026-09-03 归因驱动定向参数探索环：18:45（归因 18:05/digest 提案 18:30
+    # 之后；LLM 零新增调用，回测扫描 20-40 分钟）。最优格走既有提案流
+    # verify→publish DRAFT——止步 DRAFT，promote 仍走 autopromote 七门/人审。
+    ("ops_explore_loop", ["-m", "research.explore_loop"], "cron",
+     {"hour": 18, "minute": 45, "day_of_week": "mon-fri"}, "ops_explore_loop.log"),
     # 2026-09-01 计划→播报桥第三块：18:10 次日计划预演（管道 18:00-18:02 落完
     # T 日湖数据后离线复刻次晨 09:31 识别链，预演≠计划恒带标签）。
     ("ops_plan_preview", ["-m", "ops.emquant_plan_preview"], "cron",
