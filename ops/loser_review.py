@@ -55,7 +55,8 @@ trailing 止损随持有天数逐日收紧，TP 分档止盈，超期强平）�
 - 进场以来行情：最高 {high} / 最低 {low}（现价距进场后高点回撤 {dd_pct}%）
 - 同期市场：上证 {sh_pct}%，沪深300 {hs300_pct}%
 
-## 进场以来日 K（date,open,high,low,close,volume；含进场前 20 根背景）
+## 进场以来行情（压缩口径：背景=进场前 20 日收盘；进场后=逐日 收盘/涨跌%
+与当日振幅；量能=进场后均量 vs 背景均量倍数）
 {klines}
 
 ## 分析要求（输出两部分）
@@ -122,8 +123,12 @@ def _market_pct(index_code: str, entry_date: str) -> float | None:
         return None
 
 
-def _klines_for(sym: str, entry_date: str, before: int = 20) -> tuple[list, dict]:
-    """进场前 N 根背景 + 进场后全部日 K + 进场后高低/回撤统计（湖前复权）。"""
+def _klines_for(sym: str, entry_date: str, before: int = 20) -> tuple[list, dict, int | None]:
+    """进场前 N 根背景 + 进场后全部日 K + 进场后高低/回撤统计（湖前复权）。
+
+    返回 (rows, stat, entry_idx)：entry_idx=进场景在 rows 中的下标（渲染分界
+    锚；entry 非交易日=None → 全窗口按背景压缩+尾部 10 根展开兜底）。
+    """
     import pandas as pd
     df = pd.read_parquet(ROOT / "data_lake" / "a_shares_daily.parquet",
                          columns=["open", "high", "low", "close", "volume"])
@@ -145,7 +150,8 @@ def _klines_for(sym: str, entry_date: str, before: int = 20) -> tuple[list, dict
     stat = {"high": round(hi, 2), "low": round(lo, 2),
             "dd_pct": round((last / hi - 1) * 100, 1) if hi > 0 else None,
             "since_entry_pct": round((last / entry_close - 1) * 100, 1)}
-    return rows, stat
+    offset = (idx - max(0, idx - before)) if idx is not None else None
+    return rows, stat, offset
 
 
 def build_context() -> list[dict]:
@@ -195,9 +201,9 @@ def build_context() -> list[dict]:
                          - bisect.bisect(cal, entry_date)) if entry_date in cal else None
             sig = _signal_of(leg_dir, pos_sym)
             try:
-                klines, kstat = _klines_for(pos_sym, entry_date)
+                klines, kstat, k_entry_idx = _klines_for(pos_sym, entry_date)
             except KeyError:
-                klines, kstat = [], {}
+                klines, kstat, k_entry_idx = [], {}, None
             ts_sym = pos_sym                        # state 键已是 ts 口径
             last = float(row.get("last_price") or row.get("price") or 0)
             stop = pos.get("stop")
@@ -234,6 +240,7 @@ def build_context() -> list[dict]:
                 "market": {"sh_pct": _market_pct("000001.SH", entry_date),
                            "hs300_pct": _market_pct("000300.SH", entry_date)},
                 "_klines": klines,                # prompt 专用，不落盘
+                "_kline_entry_idx": k_entry_idx,  # 渲染分界锚，不落盘
                 "_leg_dir": str(leg_dir),         # 内部键，落盘前剔除
             })
     return out
@@ -272,7 +279,42 @@ def make_prompt(ctx: dict) -> str:
         high=_fmt(k.get("high")), low=_fmt(k.get("low")), dd_pct=k.get("dd_pct"),
         sh_pct=m.get("sh_pct") if m.get("sh_pct") is not None else "—",
         hs300_pct=m.get("hs300_pct") if m.get("hs300_pct") is not None else "—",
-        klines=kl or "（湖缺该标的日线）")
+        klines=_render_klines(ctx.get("_klines") or [],
+                              ctx.get("_kline_entry_idx")))
+
+
+def _render_klines(klines: list, entry_idx: int | None) -> str:
+    """K 线块压缩渲染（09-03 实测：逐根 OHLCV 5 列×25 行会让 glm-5.3 思考
+    300s+ 静默超时——任何 budget/effort/流式组合都救不回；压缩后思考量骤降）。
+
+    进场前背景 → 一行收盘序列；进场日起 → 逐日 close/涨跌%/振幅（归因主体，
+    ←进场 标记锚在 entry_idx）；量能 → 进场后均量/背景均量倍数（一行）。
+    """
+    if not klines:
+        return "（湖缺该标的日线）"
+    if entry_idx is None:                       # 进场日脏数据 → 尾 10 根展开兜底
+        entry_idx = max(0, len(klines) - 10)
+    head, tail = klines[:entry_idx], klines[entry_idx:]
+    lines = []
+    if head:
+        closes = " ".join(f"{r[4]:g}" for r in head)
+        lines.append(f"背景收盘（{head[0][0]}~{head[-1][0]}，{len(head)}日）：{closes}")
+        bg_vol = sum(r[5] for r in head) / len(head)
+    else:
+        bg_vol = None
+    prev_c = None
+    for r in tail:
+        d, _o, h, l, c, v = r
+        pct = "" if prev_c is None else f" {(c / prev_c - 1) * 100:+.1f}%"
+        amp = f"{(h - l) / l * 100:.1f}%" if l else "—"
+        mark = " ←进场" if prev_c is None else ""
+        lines.append(f"{d} 收{c:g}{pct} 振幅{amp}{mark}")
+        prev_c = c
+    if bg_vol and tail:
+        after_vol = sum(r[5] for r in tail) / len(tail)
+        if bg_vol:
+            lines.append(f"量能：进场后均量/背景均量 = {after_vol / bg_vol:.2f}×")
+    return "\n".join(lines)
 
 
 def _parse_llm(text: str) -> dict:
@@ -304,30 +346,41 @@ def _parse_llm(text: str) -> dict:
 
 
 def analyze_one(ctx: dict) -> dict:
-    """单持仓 LLM 归因；失败退避重试一次后仍失败 → error 字段降级。
+    """单持仓 LLM 归因。三段韧性：主档双败 → flash 兜底一次 → error 降级。
 
-    z.ai 端点存在过载时段（本环境已知：529/静默慢，见 infra/tools/
-    llm_throttle_proxy.py 先例）——30s 退避一次显著提高单轮跑全的概率，
-    双败则该行 error 降级（次日 cron 自然重试，任务式语义）。
+    实测矩阵（09-03，z.ai Anthropic 端点）：旗舰档（max/high 长思考）在端点
+    拥塞时段对归因 prompt 完全静默——max 600s+ 挂起、high 思考吃光 token；
+    端点空闲时 max 正常（短 prompt 27s 验证）。故：max 优先（用户指定深度），
+    双败降 glm-5.3-flash（同代轻量档）兜底当日产物，analysis 记 actual_model
+    供前端标注——深度优先、可用性兜底。思考档 LOSER_REVIEW_EFFORT 可配。
     """
     import time as _time
     from infra.llm import get_llm_client
     from infra.llm.base import LLMConfigError
 
-    # thinking 预算 1024：约束思考产出（时长墙钟仍随端点负载浮动）；
-    # max_tokens 4096 = 思考 1k + 正文 3k（600 字中文余量足）
+    effort = os.getenv("LOSER_REVIEW_EFFORT", "max")
+    base = get_llm_client()
+    fallback = getattr(base, "with_model", lambda _m: base)("glm-5.3-flash")
+    # 主档单次（拥塞时 300s 超时即弃，不重试——10 只串行的 cron 窗口预算
+    # 有限；空闲时段一次就成，拥塞时段重试也是白等）→ flash 兜底
+    attempts = [(base, f"主档 effort={effort}", 0),
+                (fallback, "兜底 glm-5.3-flash", 5)]
     last_err: Exception | None = None
-    for attempt in range(2):
+    for client, label, delay in attempts:
+        if delay:
+            _time.sleep(delay)
         try:
-            text = get_llm_client().call(make_prompt(ctx), max_tokens=4096,
-                                         temperature=0.3, thinking_budget=1024)
-            return _parse_llm(text)
+            text = client.call(make_prompt(ctx), max_tokens=16384,
+                               temperature=0.3,
+                               reasoning_effort=effort if client is base else "max")
+            parsed = _parse_llm(text)
+            if not parsed.get("primary") and not parsed.get("markdown"):
+                raise RuntimeError(str(parsed.get("error") or "响应无正文"))
+            parsed["actual_model"] = getattr(client, "_model", None)
+            return parsed
         except (LLMConfigError, OSError, RuntimeError, ValueError) as e:
             last_err = e
-            if attempt == 0:
-                print(f"    ↻ {ctx['symbol']} 第 {attempt + 1} 次失败"
-                      f"（{type(e).__name__}），30s 退避重试…")
-                _time.sleep(30)
+            print(f"    ↻ {ctx['symbol']} {label}失败（{type(e).__name__}），换下一档…")
     return {"primary": None, "secondary": None, "evidence": None,
             "confidence": None, "risk_state": None, "markdown": None,
             "error": f"{type(last_err).__name__}: {last_err}"}

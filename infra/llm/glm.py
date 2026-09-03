@@ -33,15 +33,24 @@ class GlmClient:
         self._api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
         self._model = os.getenv("GLM_MODEL", "glm-4")
 
+    def with_model(self, model: str) -> "GlmClient":
+        """同凭证同配置、换模型名的变体（降级兜底用，如 5.3→5.3-flash）。"""
+        clone = GlmClient.__new__(GlmClient)
+        clone._api_key = self._api_key
+        clone._model = model
+        return clone
+
     def call(self, prompt: str, *, max_tokens: int = 4096,
              temperature: float = 0.3,
-             thinking_budget: int | None = None) -> str:
+             thinking_budget: int | None = None,
+             reasoning_effort: str | None = None) -> str:
         """调 GLM 返回模型文本。凭证缺失抛 LLMConfigError，网络异常向上抛。
 
-        thinking_budget：reasoning 模型（glm-5.3+）的思考段预算（Anthropic
-        协议 thinking.budget_tokens，计入 max_tokens）。不传=服务端默认（可能
-        无节制思考至超时/耗尽 max_tokens 只剩 thinking 无正文）；深度分析
-        调用方应显式给预算（如 3072）并把 max_tokens 设为预算+正文空间。
+        thinking_budget：Anthropic 协议 thinking.budget_tokens（计入
+        max_tokens）——GLM-5.x 上仅约束思考 token 产出，不约束思考墙钟时长。
+        reasoning_effort：GLM-5.3+ 的思考深度档（low/high/max，max=默认），
+        顶层字段（z.ai Anthropic 兼容端点实测透传支持）；深度分析用 max。
+        两者独立，可单用；GLM-5.3 思考不可禁用（无 disabled）。
         """
         if not self._api_key:
             raise LLMConfigError("GLM_API_KEY / ZHIPU_API_KEY 未配置")
@@ -51,13 +60,15 @@ class GlmClient:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature,
             # 流式（SSE）：reasoning 模型长思考期间服务端数分钟不发一个字节，
-            # 非流式下客户端读超时必炸（实测归因 prompt 300s 两次超时）；
-            # 流式逐 delta 发包，timeout 退化为「包间隔」语义，思考再长也扛住
+            # 非流式下客户端读超时必炸；流式逐 delta 发包，timeout 退化为
+            # 「包间隔」语义，思考再长也扛住
             "stream": True,
         }
         if thinking_budget is not None:
             body_d["thinking"] = {"type": "enabled",
                                   "budget_tokens": thinking_budget}
+        if reasoning_effort is not None:
+            body_d["reasoning_effort"] = reasoning_effort
         body = json.dumps(body_d).encode("utf-8")
         req = urllib.request.Request(GLM_URL, data=body, method="POST")
         # 双投鉴权：z.ai AUTH_TOKEN 认 Bearer、标准 Anthropic 认 x-api-key

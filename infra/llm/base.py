@@ -30,4 +30,5 @@ class LLMClient(Protocol):
 
     def call(self, prompt: str, *, max_tokens: int = 4096,
              temperature: float = 0.3,
-             thinking_budget: int | None = None) -> str: ...
+             thinking_budget: int | None = None,
+             reasoning_effort: str | None = None) -> str: ...

@@ -103,17 +103,18 @@ def _mk_lake(tmp_path: Path):
     return lake, px
 
 
-def test_klines_window_before_plus_all_after(tmp_path, monkeypatch):
+def test_klines_window_before_plus_all_after_and_entry_idx(tmp_path, monkeypatch):
     """进场前 20 根背景 + 进场后全部（含最新日）——窗口终点不截在进场日。"""
     import pandas as pd
     lake, _ = _mk_lake(tmp_path)
     monkeypatch.setattr(lr, "ROOT", tmp_path)
     days = pd.bdate_range("2026-08-01", "2026-09-03")
     entry = f"{days[21]:%Y-%m-%d}"                    # 8 月第 22 个交易日进场
-    klines, stat = lr._klines_for("300433.SZ", entry, before=20)
+    klines, stat, eidx = lr._klines_for("300433.SZ", entry, before=20)
     total = len(days)
     assert len(klines) == total - (21 - 20)           # 前 20 + 进场日起全部
     assert klines[-1][0] == "2026-09-03"              # 最新日在窗口内
+    assert eidx == 20 and klines[eidx][0] == entry    # 进场景锚=进场日
     assert stat["high"] > stat["low"]
     assert stat["dd_pct"] <= 0                        # 上行序列：现价=高点，回撤 0
 
