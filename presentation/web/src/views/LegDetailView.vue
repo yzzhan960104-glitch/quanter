@@ -76,6 +76,9 @@
       <el-col :span="24"><VersionHistoryCard /></el-col>
     </el-row>
     <el-row style="margin-top: 12px">
+      <el-col :span="24"><LoserReviewCard :leg="legKey" /></el-col>
+    </el-row>
+    <el-row style="margin-top: 12px">
       <el-col :span="24"><PositionsPanel /></el-col>
     </el-row>
     <el-row style="margin-top: 12px">

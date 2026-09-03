@@ -2,8 +2,9 @@
 """W9 六运维 schtasks 收编 server 的注册面测试（2026-08-30）。
 
 钉死三件：
-  ① OPS_TASK_CRONS 表完整性：W9 六项 + 2026-09-01 计划预演槽（18:10 mon-fri）
-     共 7 项、job_id 唯一、W9 六项与原 schtasks 时刻表逐字对齐（晨检 09:40/
+  ① OPS_TASK_CRONS 表完整性：W9 六项 + 2026-09-01 计划预演槽（18:10）与
+     公网发布槽（9-15 时每小时）+ 2026-09-03 亏损归因槽（16:15 mon-fri）
+     共 9 项、job_id 唯一、W9 六项与原 schtasks 时刻表逐字对齐（晨检 09:40/
      台账 15:40/EOD 15:45/对照 15:50/audit 16:05/guard 5min）；
   ② register_ops_task_crons 用 fake scheduler 走全表（独立函数免起 app）；
   ③ manage_ops_schtasks.RETIRED_TASKS 含六名（双轨退役防重建的清退面）。
@@ -33,11 +34,11 @@ def main_mod():
     return _main()
 
 
-def test_table_has_eight_unique_jobs_matching_schedule(main_mod):
+def test_table_has_nine_unique_jobs_matching_schedule(main_mod):
     table = main_mod.OPS_TASK_CRONS
-    assert len(table) == 8
+    assert len(table) == 9
     ids = [t[0] for t in table]
-    assert len(set(ids)) == 8
+    assert len(set(ids)) == 9
     sched = {t[0]: (t[2], t[3]) for t in table}
     assert sched["ops_morning_check"] == ("cron", {"hour": 9, "minute": 40})
     assert sched["ops_emquant_ingest"] == ("cron", {"hour": 15, "minute": 40})
@@ -51,6 +52,9 @@ def test_table_has_eight_unique_jobs_matching_schedule(main_mod):
     # 2026-09-01 公网发布（yzzhan.xin）：交易日 9:35~15:35 每小时（CF 免费额度内）
     assert sched["ops_publish_public"] == (
         "cron", {"hour": "9-15", "minute": 35, "day_of_week": "mon-fri"})
+    # 2026-09-03 亏损持仓 LLM 归因：EOD 15:45/audit 16:05 之后，18:00 管道前收口
+    assert sched["ops_loser_review"] == (
+        "cron", {"hour": 16, "minute": 15, "day_of_week": "mon-fri"})
 
 
 def test_register_with_fake_scheduler_arms_all(main_mod):
@@ -62,7 +66,7 @@ def test_register_with_fake_scheduler_arms_all(main_mod):
 
     armed = main_mod.register_ops_task_crons(FakeSched())
     assert armed == [t[0] for t in main_mod.OPS_TASK_CRONS]
-    assert len(armed_calls) == 8
+    assert len(armed_calls) == 9
     guard = [c for c in armed_calls if c[0] == "ops_gm_guard"][0]
     assert guard[1] == "interval" and guard[2] == {"seconds": 300}
 
@@ -77,7 +81,7 @@ def test_register_soft_degrades_on_single_failure(main_mod):
                 raise RuntimeError("boom")
 
     armed = main_mod.register_ops_task_crons(FakeSched2())
-    assert len(armed) == 7          # 首项失败软降级，其余七项照挂
+    assert len(armed) == 8          # 首项失败软降级，其余八项照挂
 
 
 def test_retired_tasks_cover_six_for_cleanup():

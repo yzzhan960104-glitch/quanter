@@ -254,7 +254,33 @@ def build_snapshot(days_ab: int = 10, days_audit: int = 2) -> dict:
 
     # ── 研究线三快照（P6：提案流/版本演进/回测队列）──
     _research_files(w)
+
+    # ── 亏损持仓 LLM 归因（09-03：读当日 loser_review 产物上站）──
+    _loser_review(w)
     return {"files": n_files, "generated_at": f"{t0:%Y-%m-%d %H:%M:%S}"}
+
+
+def _loser_review(w) -> int:
+    """当日亏损归因上站（ops/loser_review.py 的产物透传）。
+
+    生成本体在 16:15 cron（或手动 python -m ops.loser_review）——快照只读
+    logs/loser_review_{day}.json，缺文件优雅降级 null（16:15 前的盘中发布
+    自然看不到当日归因）。内容为 LLM 归因观点+持仓事实，无账户/凭证面。
+    """
+    today = f"{datetime.now():%Y-%m-%d}"
+    src = ROOT / "logs" / f"loser_review_{today}.json"
+    if not src.exists():
+        w("loser_review", {"day": today, "legs": None,
+                           "note": "当日亏损归因尚未生成（16:15 盘后 cron）"})
+        return 0
+    try:
+        doc = json.loads(src.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        w("loser_review", {"day": today, "legs": None,
+                           "note": f"产物解析失败：{e}"})
+        return 0
+    w("loser_review", doc)
+    return 1
 
 
 def _research_files(w) -> int:

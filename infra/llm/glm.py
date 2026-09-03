@@ -18,7 +18,11 @@ from infra.llm.base import LLMConfigError
 
 # z.ai Anthropic Messages 兼容端点（同原 review_service.GLM_URL，逐字搬移）
 GLM_URL = "https://api.z.ai/api/anthropic/v1/messages"
-_LLM_TIMEOUT = 60
+# 流式下 timeout=相邻 SSE 包的间隔上限。z.ai glm-5.3 对长 prompt 的思考期
+# **完全静默**（thinking delta 也不发，实测 2k 字归因 prompt 静默 150s+，
+# budget 参数压不住思考时长）——间隔容忍必须 > 最长思考段；300s 下单次
+# 归因 ~3 分钟、10 只串行 ~30 分钟，16:15 cron 在 18:00 管道前收口
+_LLM_TIMEOUT = 300
 
 
 class GlmClient:
@@ -30,23 +34,54 @@ class GlmClient:
         self._model = os.getenv("GLM_MODEL", "glm-4")
 
     def call(self, prompt: str, *, max_tokens: int = 4096,
-             temperature: float = 0.3) -> str:
-        """调 GLM 返回模型文本。凭证缺失抛 LLMConfigError，网络异常向上抛。"""
+             temperature: float = 0.3,
+             thinking_budget: int | None = None) -> str:
+        """调 GLM 返回模型文本。凭证缺失抛 LLMConfigError，网络异常向上抛。
+
+        thinking_budget：reasoning 模型（glm-5.3+）的思考段预算（Anthropic
+        协议 thinking.budget_tokens，计入 max_tokens）。不传=服务端默认（可能
+        无节制思考至超时/耗尽 max_tokens 只剩 thinking 无正文）；深度分析
+        调用方应显式给预算（如 3072）并把 max_tokens 设为预算+正文空间。
+        """
         if not self._api_key:
             raise LLMConfigError("GLM_API_KEY / ZHIPU_API_KEY 未配置")
-        body = json.dumps({
+        body_d: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature,
-        }).encode("utf-8")
+            # 流式（SSE）：reasoning 模型长思考期间服务端数分钟不发一个字节，
+            # 非流式下客户端读超时必炸（实测归因 prompt 300s 两次超时）；
+            # 流式逐 delta 发包，timeout 退化为「包间隔」语义，思考再长也扛住
+            "stream": True,
+        }
+        if thinking_budget is not None:
+            body_d["thinking"] = {"type": "enabled",
+                                  "budget_tokens": thinking_budget}
+        body = json.dumps(body_d).encode("utf-8")
         req = urllib.request.Request(GLM_URL, data=body, method="POST")
         # 双投鉴权：z.ai AUTH_TOKEN 认 Bearer、标准 Anthropic 认 x-api-key
         req.add_header("x-api-key", self._api_key)
         req.add_header("Authorization", f"Bearer {self._api_key}")
         req.add_header("Content-Type", "application/json")
         req.add_header("anthropic-version", "2023-06-01")
+        chunks: list[str] = []
         with urllib.request.urlopen(req, timeout=_LLM_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        # Anthropic Messages 响应：content=[{type:"text", text:"..."}]，取首块文本
-        return data["content"][0]["text"]
+            for raw in resp:                          # SSE 行流
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    evt = json.loads(payload)
+                except ValueError:
+                    continue
+                delta = evt.get("delta") or {}
+                if evt.get("type") == "content_block_delta" \
+                        and delta.get("type") == "text_delta":
+                    chunks.append(str(delta.get("text") or ""))
+        if not chunks:
+            raise RuntimeError("GLM 流式响应无 text delta（思考耗尽或异常终止）")
+        return "".join(chunks)

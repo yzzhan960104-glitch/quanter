@@ -74,6 +74,19 @@
           <span class="sub">数据截至 {{ kline.asof }} · 前复权</span>
         </div>
         <KlinePanel :data="kline" />
+        <!-- 亏损归因摘要（09-03：浮亏标的且当日有分析时展示，点击去腿详情看全文） -->
+        <div v-if="loserHit" class="loser-peek">
+          <div class="peek-head">
+            <span class="peek-title">LLM 亏损归因</span>
+            <span v-if="loserHit.analysis?.risk_state" class="peek-state"
+                  :class="loserHit.analysis.risk_state === '临近风控线' ? 'bad'
+                    : loserHit.analysis.risk_state === '收紧关注' ? 'warn' : 'ok'">
+              {{ loserHit.analysis.risk_state }}
+            </span>
+          </div>
+          <div class="peek-primary">{{ loserHit.analysis?.primary || loserHit.analysis?.error }}</div>
+          <router-link :to="`/leg/${leg}`" class="peek-link">查看完整归因 →</router-link>
+        </div>
       </div>
       <el-empty v-else-if="drawer" description="该标的无 K 线快照（非持仓/当日信号标的不预生成）" />
     </el-drawer>
@@ -84,6 +97,7 @@
 import { computed, inject, onMounted, ref, watch, type Ref } from 'vue'
 import { getPositions, type GmPositionRow } from '../../api/gm'
 import { getOhlcv, type OhlcvData } from '../../api/home'
+import { getLoserReview, type LoserRow } from '../../api/review'
 import KlinePanel from '../charts/KlinePanel.vue'
 
 const leg = inject<Ref<string>>('cockpit-leg', ref('main'))
@@ -92,6 +106,15 @@ const rows = ref<GmPositionRow[]>([])
 const drawer = ref(false)
 const drawerTitle = ref('')
 const kline = ref<OhlcvData | null>(null)
+/** 抽屉当前标的对应的当日亏损归因行（无则不渲染摘要段）。 */
+const loserDoc = ref<Awaited<ReturnType<typeof getLoserReview>>>(null)
+const loserHit = computed<LoserRow | null>(() => {
+  if (!drawer.value || !kline.value || !loserDoc.value?.legs) return null
+  const ts = kline.value.symbol
+  return loserDoc.value.legs
+    .find((l) => l.leg === leg.value)?.rows
+    .find((r) => r.symbol === ts && (r.fpnl ?? 0) < 0) ?? null
+})
 /** ts 符号 → ohlcv 快照（名称/现价/目标价的富化源；无快照标的优雅缺省）。 */
 const enrich = ref<Record<string, OhlcvData | null>>({})
 
@@ -156,7 +179,10 @@ async function open(row: GmPositionRow) {
 }
 
 watch(leg, load)
-onMounted(load)
+onMounted(() => {
+  load()
+  getLoserReview().then((d) => { loserDoc.value = d }).catch(() => {})
+})
 </script>
 
 <style scoped>
@@ -177,4 +203,15 @@ onMounted(load)
 .drawer-body { padding: 0 8px; }
 .kline-meta { display: flex; gap: 16px; margin-bottom: 8px;
               color: var(--el-text-color-primary); font-size: 13px; }
+.loser-peek { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--qt-border, #dcdfe6);
+              border-radius: 6px; background: var(--qt-bg-overlay, #fafafa); }
+.peek-head { display: flex; align-items: center; gap: 10px; }
+.peek-title { font-weight: 600; font-size: 13px; }
+.peek-state { font-size: 12px; padding: 1px 10px; border-radius: 10px; }
+.peek-state.ok { color: #2eaf62; background: rgba(46, 175, 98, 0.1); }
+.peek-state.warn { color: var(--qt-warn, #b88230); background: rgba(184, 130, 48, 0.12); }
+.peek-state.bad { color: #fff; background: #ef5350; font-weight: 700; }
+.peek-primary { font-size: 13px; margin: 6px 0;
+                color: var(--el-text-color-regular); }
+.peek-link { font-size: 12px; color: var(--qt-accent, #2962ff); text-decoration: none; }
 </style>
