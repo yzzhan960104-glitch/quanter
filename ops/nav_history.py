@@ -55,13 +55,18 @@ def parse_eod_logs() -> tuple[dict[str, dict[str, dict]], dict[str, float]]:
         m = re.match(r"emquant_eod_(?:(main|exp)_)?(\d{4}-\d{2}-\d{2})\.txt$", f.name)
         if not m:
             continue
-        leg, day = m.group(1) or "pre_era", m.group(2)
+        leg, day = m.group(1), m.group(2)
+        # 旧单腿命名（无前缀）是 main 腿前身：ERA 前只入 pre_era 存证桶；
+        # ERA 后若再出现（迟到补报）归 main——绝不落 "pre_era" 腿键产幽灵腿
+        #（code-review J-17：幽灵腿会污染前端「双腿 assets 齐」过滤致整日被丢）
+        if not leg:
+            leg = "pre_era" if day < ERA_START else "main"
         text = f.read_text(encoding="utf-8", errors="replace")
         hit = _NAV_RE.search(text)
         if not hit:
             continue
         nav = _num(hit.group(1))
-        if day < ERA_START:
+        if leg == "pre_era":
             pre_era[day] = nav
             continue
         avail_m = _AVAIL_RE.search(text)
@@ -71,6 +76,7 @@ def parse_eod_logs() -> tuple[dict[str, dict[str, dict]], dict[str, float]]:
             "available": _num(avail_m.group(1)) if avail_m else None,
             "market_value": _num(mv_m.group(1)) if mv_m else None,
         }
+    pre_era = {d: v for d, v in pre_era.items() if v is not None}
     return days, pre_era
 
 
@@ -100,18 +106,20 @@ def update() -> dict:
             merged.setdefault(d["date"], {}).setdefault(leg, {}).update(a)
 
     parsed, pre_era = parse_eod_logs()
+    today = f"{datetime.now():%Y-%m-%d}"
     for day, legs in parsed.items():
         for leg, vals in legs.items():
-            # 回填值不覆盖已有 nav（实时点更准）；assets 缺段补回填
             cur = merged.setdefault(day, {}).setdefault(leg, {})
-            if cur.get("nav") is None:
+            # 历史日：实时点/已有值不覆盖（幂等保护）；today：EOD 终值覆盖盘中
+            # 实时点（code-review J-5「盘中发布中毒」——中午手动 publish 落盘中
+            # nav 后，若晚间 7002 恰断，不覆盖=当日点永久钉死在午间值无自愈）
+            if cur.get("nav") is None or day == today:
                 cur["nav"] = vals["nav"]
             for k in ("available", "market_value"):
-                if cur.get(k) is None and vals[k] is not None:
+                if vals[k] is not None and (cur.get(k) is None or day == today):
                     cur[k] = vals[k]
 
     # 实时点（当日）：7002 cash nav/available/market_value，双腿
-    today = f"{datetime.now():%Y-%m-%d}"
     if today >= ERA_START:
         try:
             token = str(gc.runtime_config().get("token") or "")
@@ -131,17 +139,24 @@ def update() -> dict:
         except Exception:
             pass                                  # 实时点失败不阻断（回填值兜底）
 
-    # 输出形状：legs（净值族既有消费者零改动）+ assets（P5.2 堆叠图，可选）
+    # 输出形状：legs（净值族既有消费者零改动）+ assets（P5.2 堆叠图，可选）。
+    # assets 逐键判 None 后再 round（code-review HV-1：「任一非 None 即入桶」的
+    # 过滤配上无条件 round=旧格式单段日志（有可用无市值）直接 TypeError，且
+    # 炸点在 build_snapshot 中段——后段全部快照不再写出）
     days = []
     for d in sorted(merged):
         if d < ERA_START:
             continue
         legs = {k: round(v["nav"], 2) for k, v in sorted(merged[d].items())
                 if v.get("nav") is not None}
-        assets = {k: {"available": round(v["available"], 2),
-                      "market_value": round(v["market_value"], 2)}
-                  for k, v in sorted(merged[d].items())
-                  if v.get("available") is not None or v.get("market_value") is not None}
+        assets = {}
+        for k, v in sorted(merged[d].items()):
+            row = {kk: round(vv, 2) for kk, vv in
+                   (("available", v.get("available")),
+                    ("market_value", v.get("market_value")))
+                   if vv is not None}
+            if row:
+                assets[k] = row
         day_doc: dict = {"date": d, "legs": legs}
         if assets:
             day_doc["assets"] = assets

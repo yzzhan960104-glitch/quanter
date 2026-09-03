@@ -10,7 +10,14 @@
 -->
 <template>
   <div class="ops-view">
-    <el-row :gutter="12">
+    <!-- 锚点导航（方案 §〇.6 多卡页）：长页五段一键跳转 -->
+    <div class="anchors">
+      <a href="#ops-procs">进程</a><a href="#ops-ledger">台账</a>
+      <a href="#ops-alerts">告警</a><a href="#ops-backtest">回测×digest</a>
+      <span class="sub">快照 @ {{ doc?.generated_at || '—' }}（非实时）</span>
+    </div>
+
+    <el-row :gutter="12" id="ops-procs">
       <el-col :span="24">
         <el-card shadow="never">
           <template #header>
@@ -32,7 +39,7 @@
     </el-row>
 
     <el-row :gutter="12" style="margin-top: 12px;">
-      <el-col :span="15">
+      <el-col :span="15" id="ops-ledger">
         <el-card shadow="never">
           <template #header>
             <div class="flex-between">
@@ -57,7 +64,7 @@
           </el-table>
         </el-card>
       </el-col>
-      <el-col :span="9">
+      <el-col :span="9" id="ops-alerts">
         <el-card shadow="never">
           <template #header>
             <div class="flex-between">
@@ -78,7 +85,7 @@
         </el-card>
       </el-col>
     </el-row>
-    <el-row :gutter="12" style="margin-top: 12px;">
+    <el-row :gutter="12" style="margin-top: 12px;" id="ops-backtest">
       <el-col :span="14">
         <el-card shadow="never">
           <template #header>
@@ -173,7 +180,10 @@ function cfgOf(t: ReplayTask): string {
   return s.length > 60 ? s.slice(0, 58) + '…' : s
 }
 
-/** 台账 pivot：行=业务日（降序），列=任务名（首现序），格=该日该任务最新一次。 */
+/** 台账 pivot：行=业务日（**降序**），列=任务名（首现序），格=该日该任务最新一次。
+ *  code-review HV-2：Map 插入序=started_at 壁钟首现序≠业务日序（brief 类任务
+ *  在次一交易日 18:01 补报上一 business_date，每个快照夜都会把 T-1 插到 T 之上）
+ *  ——收齐后必须按业务日显式降序。 */
 const grid = computed<Array<{ day: string; cells: Record<string, JobRunRow> }>>(() => {
   const byDay = new Map<string, Record<string, JobRunRow>>()
   for (const r of doc.value?.job_runs ?? []) {          // 已按 started_at 降序
@@ -182,6 +192,7 @@ const grid = computed<Array<{ day: string; cells: Record<string, JobRunRow> }>>(
     byDay.set(r.date, cells)
   }
   return Array.from(byDay, ([day, cells]) => ({ day, cells }))
+    .sort((a, b) => (a.day < b.day ? 1 : -1))
 })
 const jobDays = computed(() => grid.value.map((g) => g.day))
 const jobJobs = computed(() => {
@@ -194,8 +205,12 @@ const jobJobs = computed(() => {
 const runsDone = computed(() =>
   (doc.value?.job_runs ?? []).filter((r) => r.status === 'done').length)
 
-const tagOf = (s: string) => s === 'done' ? '✓' : s === 'failed' ? '✗' : '⏭'
-const clsOf = (s: string) => s === 'done' ? 'ok' : s === 'failed' ? 'bad' : 'skip'
+/** 台账格图标（J-9：running 单列——快照时点 pipeline 未结束即 running，
+ *  塌成「跳过」会掩盖在跑事实）。 */
+const tagOf = (s: string) => s === 'done' ? '✓' : s === 'failed' ? '✗'
+  : s === 'running' ? '◐' : '⏭'
+const clsOf = (s: string) => s === 'done' ? 'ok' : s === 'failed' ? 'bad'
+  : s === 'running' ? 'run' : 'skip'
 function tipOf(r: JobRunRow): string {
   const dur = (r.started_at && r.finished_at)
     ? `耗时 ${((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000).toFixed(1)}s`
@@ -240,6 +255,13 @@ onMounted(async () => {
 <style scoped>
 .ops-view { flex: 1; overflow-y: auto; width: 100%;
             padding: var(--qt-space-3, 16px); background: var(--qt-bg-page); }
+.anchors { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.anchors a { font-size: 12px; color: var(--qt-accent, #2962ff); text-decoration: none;
+             padding: 2px 10px; border: 1px solid var(--qt-border, #dcdfe6);
+             border-radius: 10px; }
+.anchors a:hover { background: rgba(41, 98, 255, 0.08); }
+.anchors { scroll-margin-top: 8px; }
+#ops-procs, #ops-ledger, #ops-alerts, #ops-backtest { scroll-margin-top: 8px; }
 .flex-between { display: flex; align-items: center; justify-content: space-between; }
 .sub { color: var(--el-text-color-secondary); font-size: 12px; font-weight: normal; }
 .lights { display: flex; gap: 24px; flex-wrap: wrap; }
@@ -257,6 +279,7 @@ onMounted(async () => {
 .cell.ok { color: #2eaf62; background: rgba(46, 175, 98, 0.1); }
 .cell.bad { color: #fff; background: #ef5350; font-weight: 700; }
 .cell.skip { color: var(--qt-warn, #b88230); background: rgba(184, 130, 48, 0.12); }
+.cell.run { color: #2962ff; background: rgba(41, 98, 255, 0.1); font-weight: 700; }
 .cell.none { color: var(--el-text-color-placeholder); }
 .lv { font-size: 10px; font-weight: 700; margin-right: 6px; }
 .lv-critical, .lv-error { color: #ef5350; }

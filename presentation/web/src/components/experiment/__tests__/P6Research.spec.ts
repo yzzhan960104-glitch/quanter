@@ -60,7 +60,9 @@ describe('P6 研究线组件', () => {
     await flushPromises()
     expect(w.text()).toContain('已发布')
     expect(w.text()).toContain('已否决')
-    expect(w.text()).toContain('PUBLISHED 1')
+    // 管道 chips 走状态枚举中文化（J-12 后：英文态名不再直出）
+    expect(w.text()).toContain('已发布 1')
+    expect(w.text()).toContain('已否决 1')
     expect(w.text()).toContain('收紧止损降低深亏')
     // diff 高亮：相邻提案 min_rr 变更（1.5→2.5）着色；stop_atr_mult 不变不亮
     const drifted = w.findAll('.param.drift').map((x) => x.text())

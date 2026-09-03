@@ -11,8 +11,9 @@
     <div class="head">
       <h2>研究提案流</h2>
       <div class="pipe">
-        <span v-for="(n, s) in doc?.pipeline" :key="s" class="pipe-chip" :class="`st-${String(s).toLowerCase()}`">
-          {{ s }} {{ n }}
+        <span v-for="(n, s) in doc?.pipeline" :key="s" class="pipe-chip"
+              :class="`st-${statusOfP(String(s)).type}`">
+          {{ statusOfP(String(s)).label }} {{ n }}
         </span>
         <span class="sub">共 {{ doc?.rows.length || 0 }} 条 · {{ doc?.generated_at }}</span>
       </div>
@@ -26,9 +27,8 @@
         </el-table-column>
         <el-table-column label="状态" width="92">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'PUBLISHED' ? 'success' : 'danger'"
-                    size="small" effect="plain">
-              {{ row.status === 'PUBLISHED' ? '已发布' : '已否决' }}
+            <el-tag :type="statusOfP(row.status).type" size="small" effect="plain">
+              {{ statusOfP(row.status).label }}
             </el-tag>
           </template>
         </el-table-column>
@@ -49,7 +49,7 @@
           <template #default="{ row }">
             <el-tooltip v-if="row.verification?.reason" placement="top"
                         :content="JSON.stringify(row.verification)">
-              <span class="verdict" :class="row.status === 'PUBLISHED' ? 'ok' : 'bad'">
+              <span class="verdict" :class="statusOfP(row.status).type === 'success' ? 'ok' : 'bad'">
                 {{ verdictOf(row) }}
               </span>
             </el-tooltip>
@@ -72,6 +72,16 @@ import { onMounted, ref } from 'vue'
 import { getProposals, type ProposalsDoc, type ProposalRow } from '../api/research'
 
 const doc = ref<ProposalsDoc | null>(null)
+
+/** 状态显式枚举（code-review J-12：非 PUBLISHED 一律红「已否决」是二元塌缩，
+ *  未来新增 DRAFT/VERIFIED 等态会错标——未知态中性灰不猜）。 */
+const STATUS_ZH: Record<string, { label: string; type: 'success' | 'danger' | 'info' }> = {
+  PUBLISHED: { label: '已发布', type: 'success' },
+  REJECTED: { label: '已否决', type: 'danger' },
+  VERIFIED: { label: '已验证', type: 'info' },
+  DRAFT: { label: '草稿', type: 'info' },
+}
+const statusOfP = (s: string) => STATUS_ZH[s] ?? { label: s, type: 'info' }
 
 const shortVal = (v: unknown): string => {
   const s = String(v)
@@ -105,8 +115,9 @@ onMounted(async () => {
 .head h2 { margin: 0; }
 .pipe { display: flex; align-items: center; gap: 8px; }
 .pipe-chip { font-size: 12px; padding: 2px 10px; border-radius: 10px; }
-.st-published { color: #2eaf62; background: rgba(46, 175, 98, 0.1); }
-.st-rejected { color: #ef5350; background: rgba(239, 83, 80, 0.08); }
+.st-success { color: #2eaf62; background: rgba(46, 175, 98, 0.1); }
+.st-danger { color: #ef5350; background: rgba(239, 83, 80, 0.08); }
+.st-info { color: var(--el-text-color-secondary); background: rgba(134, 144, 156, 0.1); }
 .sub { color: var(--el-text-color-secondary); font-size: 12px; }
 .hyp { font-size: 12px; line-height: 1.5; }
 .param { display: inline-block; font-family: var(--qt-font-mono, monospace);

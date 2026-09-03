@@ -14,8 +14,10 @@
 脱敏红线（公开=全世界可看，含搜索引擎）：
   - account_id → 前 8 位 + '…'（辨识腿即可，不泄全号）
   - detail/任意层键名含 token/secret 的字段剔除；account 字段值同掩码
-  - 绝不入快照：掘金 token、次日计划预演（前跑风险红线）、内网路径、研究面
-    数据（discovery 试验=研究 IP——静态站点路由已收敛 cockpit/experiments/data）
+  - 绝不入快照：掘金 token、次日计划预演（前跑风险红线）、内网路径、
+    discovery 试验面（研究 IP：参数发现敏感性/搜索过程——与 P6 公开的
+    研究提案/版本/队列不同源，见 2026-09-02 方案 §6 vs §〇.7：研究线
+    三快照按方案明文裁决公开，discovery 仍收敛至鉴权后 P7 开放）
 
 产物：presentation/web/public/data/*.json（vite 构建期拷入 dist/data/；目录
 已 gitignore——快照是发布期再生产物，不是源码）。文件形状=前端 facade 静态
@@ -285,7 +287,7 @@ def _research_files(w) -> int:
                     "SELECT proposal_id, created_at, change_type, hypothesis,"
                     " params_json, expected_effect, risk, status, verification_json,"
                     " experiment_id, note FROM research_proposal"
-                    " ORDER BY created_at DESC").fetchall()
+                    " ORDER BY created_at DESC LIMIT 200").fetchall()
             for (pid, cat, ctype, hyp, pj, eff, risk, status, vj, eid, note) in rows:
                 proposals.append({
                     "id": pid, "created_at": cat, "change_type": ctype,
@@ -356,6 +358,10 @@ def _research_files(w) -> int:
     dmd = ROOT / "docs" / "research_digest.md"
     if dmd.exists():
         text = dmd.read_text(encoding="utf-8", errors="replace")
+        # 只取首个「# 研究摘要」块（code-review J-13：五个正则若全文首匹配，
+        # writer 改追加历史段后会静默钉在最早那天——锚定头块后追加无害）
+        nxt = text.find("# 研究摘要", 1)
+        text = text[:nxt] if nxt > 0 else text
         m = _re.search(r"# 研究摘要 (\d{4}-\d{2}-\d{2})", text)
         live_n = _re.search(r"实盘成交：(\S+)", text)
         live_wr = _re.search(r"胜率：(\S+)", text)
@@ -531,7 +537,11 @@ _INDUSTRY_MAP: dict[str, str] | None = None
 
 
 def _industry_map() -> dict[str, str]:
-    """ts_code → 行业（stock_basic.parquet；模块级缓存一次，缺库返空表降级）。"""
+    """ts_code → 行业（stock_basic.parquet；模块级缓存一次，缺库返空表降级）。
+
+    NaN 行业剔除（code-review J-14）：str(nan)='nan' 会产出字面 'nan' 扇区
+    而非走「未分类」兜底。
+    """
     global _INDUSTRY_MAP
     if _INDUSTRY_MAP is None:
         import pandas as pd
@@ -539,7 +549,8 @@ def _industry_map() -> dict[str, str]:
             basic = pd.read_parquet(ROOT / "data_lake" / "stock_basic.parquet",
                                     columns=["ts_code", "industry"])
             _INDUSTRY_MAP = {str(t): str(i) for t, i in
-                             zip(basic["ts_code"], basic["industry"])}
+                             zip(basic["ts_code"], basic["industry"])
+                             if pd.notna(i)}
         except (OSError, KeyError, ImportError):
             _INDUSTRY_MAP = {}
     return _INDUSTRY_MAP
@@ -806,6 +817,8 @@ def _trailing_path(leg_dir: Path, pos: dict) -> list:
     entry = str(pos.get("entry_date") or "")
     if tr.get("neckline") is None or tr.get("atr") is None or not entry:
         return []
+    cal = _sh_calendar()
+    import bisect as _bisect
     try:
         spec = ilu.spec_from_file_location(
             f"pilot_trail_{leg_dir.name[:8]}", leg_dir / "main.py")
@@ -813,30 +826,35 @@ def _trailing_path(leg_dir: Path, pos: dict) -> list:
         sys.modules[spec.name] = m
         spec.loader.exec_module(m)
         stop_fn = m.compute_stop_price
-    except Exception as e:
-        print(f"  ⚠ trailing 回放降级（部署产物加载失败 {type(e).__name__}）")
-        return []
 
-    cal = _sh_calendar()
-    i0 = _bisect.bisect_left(cal, entry)
-    if i0 >= len(cal) or cal[i0] != entry:
-        i0 = max(0, i0 - 1)                 # entry 非交易日（脏数据）→ 前一交易日锚
-    today = f"{datetime.now():%Y-%m-%d}"
-    path = []
-    for j in range(i0, len(cal)):
-        t = cal[j]
-        if t > today:
-            break
-        holding_days = j - i0              # (entry, t] 交易日数（entry 日=0）
-        stop = stop_fn(
-            neckline=float(tr["neckline"]), atr=float(tr["atr"]),
-            holding_days=holding_days,
-            stop_atr_mult=float(tr.get("stop_atr_mult", 1.0)),
-            grace=int(tr.get("grace") or 0),
-            step=float(tr.get("step") or 0.0),
-            floor=tr.get("floor"))
-        path.append([t, round(float(stop), 3)])
-    return path
+        # 锚点=首个 ≥ entry 的日历日（bisect_left 本身）——不用「前一交易日」
+        # 回退（code-review J-3：周末/停牌 entry 回退会在入场前多画一个
+        # base_stop 点，与策略 trading_days_between 的 bisect_right 口径分叉）
+        i0 = _bisect.bisect_left(cal, entry)
+        if i0 >= len(cal):
+            return []                     # entry 越过日历末端（未来日）=无轨迹
+        today = f"{datetime.now():%Y-%m-%d}"
+        path = []
+        for j in range(i0, len(cal)):
+            t = cal[j]
+            if t > today:
+                break
+            holding_days = j - i0        # (entry, t] 交易日数（entry 日=0）
+            stop = stop_fn(
+                neckline=float(tr["neckline"]), atr=float(tr["atr"]),
+                holding_days=holding_days,
+                stop_atr_mult=float(tr.get("stop_atr_mult", 1.0)),
+                grace=int(tr.get("grace") or 0),
+                step=float(tr.get("step") or 0.0),
+                floor=tr.get("floor"))
+            path.append([t, round(float(stop), 3)])
+        return path
+    except Exception as e:
+        # 整段降级（code-review J-1：此前 try 只包 importlib 段——部署产物内
+        # 运行时异常会穿透到 build_snapshot 中段带走后段全部快照；「加载失败
+        # 降级」的承诺必须覆盖调用段）
+        print(f"  ⚠ trailing 回放降级空表（{type(e).__name__}: {e}）")
+        return []
 
 
 def _ohlcv_files(w) -> int:

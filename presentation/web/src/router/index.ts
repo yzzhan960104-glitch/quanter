@@ -75,8 +75,8 @@ const router = createRouter(
     { path: '/live', redirect: '/cockpit' },
     // 综合看板（Task 12）：实盘观测俯瞰入口，聚合心跳/资金/数据健康/流水/日志。
     { path: '/cockpit', name: 'cockpit', component: CockpitView },
-  { path: '/leg/:leg', name: 'leg-detail', component: LegDetailView },
-  { path: '/opportunity', name: 'opportunity', component: TsbView },
+    { path: '/leg/:leg', name: 'leg-detail', component: LegDetailView },
+    { path: '/opportunity', name: 'opportunity', component: TsbView },
     // 实验对照（2026-08-29 多腿方案 P3）：双腿 A/B 的轮次/对照/下钻视图
     { path: '/experiments', name: 'experiments', component: ExperimentView },
     // 数据湖（Task 12 原作业驾驶舱语义收编进 /ops · P5.4）。
@@ -85,7 +85,6 @@ const router = createRouter(
     // 在线态与公开态同组件——数据全走 ops_health.json 快照）。
     { path: '/ops', name: 'ops', component: OpsHealthView },
     { path: '/research', name: 'research', component: ProposalsView },
-    { path: '/opportunity', name: 'opportunity', component: TsbView },
         ],
       },
 )

@@ -61,16 +61,87 @@ def test_update_assets_backward_compat(tmp_path, monkeypatch):
         key = "main"
         label = "主腿"
 
+    import sys as _sys
     import types
+    import ops as _ops_pkg
     fake_gc = types.ModuleType("ops.gm_ops_common")
     fake_gc.active_legs = lambda: []
     fake_gc.runtime_config = lambda *a, **k: {}
-    monkeypatch.setitem(__import__("sys").modules, "ops.gm_ops_common", fake_gc)
+    # 双路 patch：函数内 `from ops import gm_ops_common` 在 ops 包已挂真身属性时
+    # 直接 getattr 绕过 sys.modules（全量跑时前面测试已 import 真身）——
+    # 包属性与 sys.modules 必须同时换，单 patch sys.modules 只在冷进程生效
+    monkeypatch.setitem(_sys.modules, "ops.gm_ops_common", fake_gc)
+    monkeypatch.setattr(_ops_pkg, "gm_ops_common", fake_gc, raising=False)
 
     doc = nh.update()
     by_date = {d["date"]: d for d in doc["days"]}
     assert by_date[nh.ERA_START]["legs"]["main"] == 201843.0   # 旧日保住
     assert "assets" not in by_date[nh.ERA_START]               # 无 assets 源=不造数
+
+
+def test_update_single_segment_log_no_crash(tmp_path, monkeypatch):
+    """code-review HV-1 回归：单段日志（有可用无市值）不得 round(None) 崩溃。
+
+    旧格式「③ 资金：nav X｜可用 Y」在 ERA 日出现时，update() 输出的 assets
+    只含 available 键——缺段键不落、不炸（炸点会在 build_snapshot 中段带走
+    后段全部快照文件）。
+    """
+    import json
+    import types
+    monkeypatch.setattr(nh, "LOGS", tmp_path)
+    out = tmp_path / "nav_history.json"
+    out.write_text(json.dumps({"base": 200000.0, "era_start": nh.ERA_START,
+                               "days": []}), encoding="utf-8")
+    monkeypatch.setattr(nh, "OUT", out)
+    (tmp_path / f"emquant_eod_main_{nh.ERA_START}.txt").write_text(
+        "③ 资金：nav 201,843｜可用 137,890", encoding="utf-8")   # 无市值段
+
+    fake_gc = types.ModuleType("ops.gm_ops_common")
+    fake_gc.active_legs = lambda: []
+    fake_gc.runtime_config = lambda *a, **k: {}
+    import sys as _sys
+    import ops as _ops_pkg
+    monkeypatch.setitem(_sys.modules, "ops.gm_ops_common", fake_gc)
+    monkeypatch.setattr(_ops_pkg, "gm_ops_common", fake_gc, raising=False)
+
+    doc = nh.update()                                          # 不抛=断言通过
+    day = next(d for d in doc["days"] if d["date"] == nh.ERA_START)
+    assert day["legs"]["main"] == 201843.0
+    assert day["assets"]["main"] == {"available": 137890.0}    # 缺段键不落
+
+
+def test_update_today_eod_overrides_stale_realtime(tmp_path, monkeypatch):
+    """code-review J-5 回归：当日 EOD 终值必须能覆盖盘中实时点（盘中发布中毒）。"""
+    import json
+    import types
+    from datetime import datetime as _dt
+    monkeypatch.setattr(nh, "LOGS", tmp_path)
+    out = tmp_path / "nav_history.json"
+    today = f"{_dt.now():%Y-%m-%d}"
+    # 场景：中午手动 publish 已把盘中值 199000 落进 today
+    out.write_text(json.dumps({"base": 200000.0, "era_start": nh.ERA_START,
+                               "days": [{"date": today,
+                                         "legs": {"main": 199000.0},
+                                         "assets": {"main": {"available": 199000.0,
+                                                             "market_value": 0.0}}}]}),
+                   encoding="utf-8")
+    monkeypatch.setattr(nh, "OUT", out)
+    # 晚间 EOD 日志生成（终值 198014）且 7002 断（active_legs 空 → 实时点不写）
+    (tmp_path / f"emquant_eod_main_{today}.txt").write_text(
+        "**③ 资金面**：nav **198,014**｜可用 67,899｜市值 130,115", encoding="utf-8")
+
+    fake_gc = types.ModuleType("ops.gm_ops_common")
+    fake_gc.active_legs = lambda: []
+    fake_gc.runtime_config = lambda *a, **k: {}
+    import sys as _sys
+    import ops as _ops_pkg
+    monkeypatch.setitem(_sys.modules, "ops.gm_ops_common", fake_gc)
+    monkeypatch.setattr(_ops_pkg, "gm_ops_common", fake_gc, raising=False)
+
+    doc = nh.update()
+    day = next(d for d in doc["days"] if d["date"] == today)
+    assert day["legs"]["main"] == 198014.0                     # EOD 覆盖盘中值
+    assert day["assets"]["main"]["market_value"] == 130115.0
 
 
 def test_era_start_enforced(tmp_path, monkeypatch):

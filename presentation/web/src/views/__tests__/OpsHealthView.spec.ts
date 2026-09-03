@@ -50,6 +50,11 @@ const { doc } = vi.hoisted(() => ({
 vi.mock('../../api/ops', () => ({
   getOpsHealth: vi.fn().mockResolvedValue(doc),
 }))
+// code-review J-10：视图还拉回测队列快照——不 mock 会真发 fetch（靠相对 URL
+// 必失败的巧合通过，基建一变就漂）
+vi.mock('../../api/research', () => ({
+  getBacktestQueue: vi.fn().mockResolvedValue(null),
+}))
 
 import OpsHealthView from '../OpsHealthView.vue'
 
@@ -76,9 +81,28 @@ describe('OpsHealthView.vue', () => {
     expect(w.text()).toContain('盘后对账偏差')
   })
 
-  it('skip 格 tooltip 带 message（人工风控拦截可读）', async () => {
+  it('台账 pivot 行按业务日降序（跨日补跑不乱序，HV-2 回归）+ skip 格 tooltip 带 message', async () => {
+    const { getOpsHealth } = await import('../../api/ops')
+    // brief_data(09-01) 补报于 09-02 18:01（壁钟晚于 pipeline(09-02)）——
+    // 修复前 Map 首现序会把 09-01 插在 09-02 之上
+    ;(getOpsHealth as any).mockResolvedValueOnce({
+      ...doc,
+      job_runs: [
+        { job: 'brief_data', date: '2026-09-01', status: 'done',
+          started_at: '2026-09-02T18:01:58', finished_at: '2026-09-02T18:01:58', message: '' },
+        { job: 'pipeline', date: '2026-09-02', status: 'done',
+          started_at: '2026-09-02T18:00:00', finished_at: '2026-09-02T18:01:58', message: '' },
+        { job: 'pre_open', date: '2026-08-27', status: 'skipped',
+          started_at: '2026-08-27T09:22:00', finished_at: '2026-08-27T09:22:00',
+          message: '人工风控开关：拦截增量下单' },
+      ],
+    })
     const w = mountView()
     await flushPromises()
+    const days = w.findAll('.el-table__row').map((r) => r.text().slice(0, 5))
+    expect(days[0]).toContain('09-02')
+    expect(days[1]).toContain('09-01')
+    expect(days[2]).toContain('08-27')
     const tip = w.findAllComponents({ name: 'ElTooltip' })
         .find((t) => String(t.props('content') || '').includes('人工风控开关'))
     expect(tip).toBeTruthy()

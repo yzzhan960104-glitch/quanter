@@ -51,7 +51,9 @@ const positions = ref<GmPositionRow[]>([])
 
 const wan = (v: number) => (v / 10000).toFixed(1)
 
-/** 行业聚合：双腿持仓 market_value（缺则 vwap×volume 成本近似）by industry。 */
+/** 行业聚合：双腿持仓 market_value 聚合；缺市值行退 vwap×volume=**成本口径
+ *  近似（code-review F3：fpnl≠0 时与真实市值有偏，防御分支——现快照行行有
+ *  market_value 不触发）。 */
 const industries = computed<Array<{ name: string; value: number }>>(() => {
   const agg = new Map<string, number>()
   for (const r of positions.value) {

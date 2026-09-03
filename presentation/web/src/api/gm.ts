@@ -43,16 +43,20 @@ export interface GmPositionRow {
   [k: string]: unknown
 }
 
-/** 委托行（/v3/account-trade/orders，含状态/拒因）。 */
+/** 委托行（/v3/account-trade/orders，含状态/拒因）。
+ *  键名=7002 实测 snake_case（code-review J-4：此前声明 camelCase 系接口撒谎，
+ *  靠索引签名掩盖）。状态值语义对齐部署产物 _GM_STATUS_TO_LOCAL：
+ *  3=成交 8=拒 5/12=撤/过期 6=待撤（非终态）2=部成 其余=在途/待报。 */
 export interface GmOrderRow {
-  clOrdId?: string
+  cl_ord_id?: string
   symbol?: string
   side?: number           // 1=买 2=卖
-  status?: number         // int 状态词汇见终端 skill
+  status?: number
   price?: number
   volume?: number
-  filledVolume?: number
+  filled_volume?: number
   ordRejReason?: string | null
+  created_at?: string     // UTC（Z 后缀）——展示前必须转本地时区
   [k: string]: unknown
 }
 

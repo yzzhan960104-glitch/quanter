@@ -47,7 +47,7 @@
       </el-table-column>
       <el-table-column label="委托号" min-width="110">
         <template #default="{ row }">
-          <span class="oid">{{ String(row.cl_ord_id || row.clOrdId || '').slice(0, 8) }}</span>
+          <span class="oid">{{ String(row.cl_ord_id || '').slice(0, 8) }}</span>
         </template>
       </el-table-column>
     </el-table>
@@ -83,30 +83,42 @@ const timeOf = (iso?: string): string => {
     ? String(iso).slice(11, 19) || '—' : d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
-/** 状态 tag 映射（方案 §5.1：3=成交 8=拒 5/6=撤；有部分成交的中间态显部分）。 */
-function statusOf(row: GmOrderRow): { label: string; type: 'success' | 'warning' | 'info' | 'primary' } {
+/** 状态 tag 映射（code-review J-4 单源化：对齐部署产物 _GM_STATUS_TO_LOCAL，
+ *  保守方向纪律=错杀比错留危险——待撤(6)/挂起(9) 等非终态绝不标「已撤」，
+ *  否则操作员误判死单补挂=重复敞口）。 */
+function statusOf(row: GmOrderRow): { label: string; type: 'success' | 'warning' | 'info' | 'primary' | 'danger' } {
   const filled = Number(row.filled_volume ?? 0)
-  if (row.status === 3) return { label: '成交', type: 'success' }
-  if (filled > 0) return { label: `部分 ${filled}`, type: 'warning' }
-  if (row.status === 5 || row.status === 6) return { label: '已撤', type: 'info' }
-  return { label: row.status != null ? `在途 ${row.status}` : '在途', type: 'primary' }
+  switch (row.status) {
+    case 3: return { label: '成交', type: 'success' }
+    case 8: return { label: '已拒', type: 'danger' }
+    case 2: return { label: `部分 ${filled}`, type: 'warning' }
+    case 5: return { label: '已撤', type: 'info' }
+    case 12: return { label: '过期', type: 'info' }
+    case 6: return { label: '待撤', type: 'primary' }
+    case 7: return { label: '失败', type: 'warning' }
+    default: return { label: row.status != null ? `在途 ${row.status}` : '在途', type: 'primary' }
+  }
 }
 
+let loadSeq = 0                            // 请求代际令牌（J-15：快速切腿时旧响应后到不得覆盖新腿）
 async function load() {
+  const seq = ++loadSeq
   loading.value = true
   try {
-    rows.value = await getOrders(leg.value)
+    const data = await getOrders(leg.value)
+    if (seq !== loadSeq) return
+    rows.value = data
   } catch {
-    rows.value = []
+    if (seq === loadSeq) rows.value = []
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
   const uniq = Array.from(new Set(rows.value.map((r) => toTs(r.symbol))))
   const got = await Promise.all(uniq.map(async (s) => {
     const d = await getOhlcv(s).catch(() => null)
     return [s, d?.name ?? ''] as const
   }))
-  names.value = Object.fromEntries(got)
+  if (seq === loadSeq) names.value = Object.fromEntries(got)
 }
 
 watch(leg, load)

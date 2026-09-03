@@ -57,7 +57,21 @@ def test_trailing_path_degrades_without_source(tmp_path, monkeypatch):
     assert ps._trailing_path(bad_dir, pos) == []
 
 
-def test_sh_calendar_dedup_after_norm():
-    """日历去重红线（09-03 实锤）：_norm 后必须唯一（重复日历令 holding_days 翻倍）。"""
+def test_sh_calendar_dedup_after_norm(tmp_path, monkeypatch):
+    """日历去重红线（09-03 实锤）：_norm 后必须唯一（重复日历令 holding_days 翻倍）。
+
+    code-review HV-3：真实现的缓存/湖源均不经 git（CI 纯 checkout 无数据供给）
+    ——用受控假缓存（含 ISO 与紧凑 YYYYMMDD 同日异形键）驱动**真实现**：
+    修复前 sorted(_norm(...) for ...) 产 6 条重复，修复后 sorted(set(...)) 4 条。
+    """
+    import json
+    (tmp_path / "logs").mkdir(parents=True)
+    (tmp_path / "logs" / "benchmarks_cache.json").write_text(json.dumps({
+        "000001.SH": {"2026-08-27": 1.0, "20260828": 1.0, "2026-08-28": 1.0},
+        "TRADE_CAL": ["2026-08-31", "20260901", "2026-09-01"],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "ROOT", tmp_path)
+    monkeypatch.setattr(ps, "_SH_CAL", None)          # 清模块级缓存
     cal = ps._sh_calendar()
+    assert cal == ["2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01"]
     assert len(cal) == len(set(cal))

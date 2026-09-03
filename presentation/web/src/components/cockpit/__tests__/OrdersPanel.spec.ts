@@ -30,6 +30,10 @@ const { mockOrders } = vi.hoisted(() => ({
     { symbol: 'SZSE.300182', side: 1, status: 5, price: 4.5,
       volume: 10000, filled_volume: 0, cl_ord_id: 'bbb36c2b-a66d',
       created_at: '2026-09-02T01:31:16.000Z', ordRejReason: null },
+    // J-4 回归：status 6=PendingCancel 待撤（非终态）——绝不可标「已撤」
+    { symbol: 'SHSE.688111', side: 2, status: 6, price: 88.0,
+      volume: 300, filled_volume: 0, cl_ord_id: 'ccc36c2b-a66d',
+      created_at: '2026-09-02T01:31:17.000Z', ordRejReason: null },
   ],
 }))
 
@@ -60,10 +64,12 @@ describe('OrdersPanel.vue', () => {
     // 已成交 n/N 读数
     expect(w.text()).toContain('500/500')
     expect(w.text()).toContain('0/200')
-    // 状态映射：3=成交 8=已拒 5=已撤
+    // 状态映射：3=成交 8=已拒 5=已撤 6=待撤（非终态，J-4 单源化回归）
     expect(w.text()).toContain('成交')
     expect(w.text()).toContain('已拒')
     expect(w.text()).toContain('已撤')
+    expect(w.text()).toContain('待撤')
+    expect(w.text()).not.toContain('已撤 ⚠')
     // 委托号截短 8 位
     expect(w.text()).toContain('fcd36c2b')
   })

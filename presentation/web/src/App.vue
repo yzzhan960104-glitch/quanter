@@ -47,8 +47,10 @@ interface NavItem {
 // Phase 1 · 前端只读化 Task 6：撤「AI 复盘」项（diagnose 为写操作，随 ReviewView 整删）。
 // G8（2026-08-13）：撤「蔡森筛选」+「参数实验室」（caisen.ts 调死端点，CaisenScreenView
 //   + ParamLabView 整删让 check_contracts gate② 绿；首页改指 /discovery）。
-// 公网静态模式（yzzhan.xin）：仅留「数据湖」（数据健康度=公开观测面）；搜索实验室
-// （研究 IP）与宏观驾驶舱（内网宏观）不公开——与 router staticRoutes 同口径。
+// 公网静态模式（yzzhan.xin）：公开观测面=机会观察/研究提案（P6 方案裁决公开，
+// discovery 试验面仍不公开见 ops/public_snapshot.py 头注）/运维面板（P5.4，
+// 原「作业驾驶舱」占位语义收编）/数据湖；搜索实验室（研究 IP）与宏观驾驶舱
+// （内网宏观）不公开——与 router staticRoutes 同口径。
 const researchNav: NavItem[] = STATIC_MODE ? [
   { to: '/opportunity', label: '机会观察', icon: DataBoard },
   { to: '/research', label: '研究提案', icon: DataAnalysis },
@@ -62,11 +64,9 @@ const researchNav: NavItem[] = STATIC_MODE ? [
 ]
 
 // 右段：实盘（唯一真实下单的高危入口，分隔线区隔）。
-// 含「综合看板」(/cockpit)：观测俯瞰视角聚合心跳/资金/数据健康/流水/日志/回测对比，
-// 与「实盘中控」(/live，含真下单/撤单) 同段但只读。
-// Phase 2 · Task 12 新增「作业驾驶舱」(/jobs)：当天 pipeline/pre_open 台账 + 启动补跑四态，
-// 置于「综合看板」与「实盘中控」之间（按"全局俯瞰 → 调度台账 → 真实下单"的观测深入动线）。
-// 公网静态模式：作业驾驶舱（内网台账语义）不公开，首页=净值总览（P1 重构）。
+// 含「综合看板」(/cockpit)：观测俯瞰视角聚合心跳/资金/数据健康/流水/日志。
+// 公网静态模式：首页=净值总览（P1 重构）；
+// 「作业驾驶舱」(/jobs) 占位语义已收编进 /ops（P5.4，2026-09-03）。
 const liveNav: NavItem[] = STATIC_MODE ? [
   { to: '/', label: '首页', icon: View },
   { to: '/cockpit', label: '综合看板', icon: View },

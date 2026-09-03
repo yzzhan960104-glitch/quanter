@@ -5,7 +5,7 @@
  * 未分类，缺市值行跳过）；②堆叠面积=nav_history days[].assets 双腿齐日
  * 的现金/市值序列（cash+mv=nav 逐日闭合）。快照缺失 → 两图空态不炸。
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 
@@ -20,6 +20,9 @@ class MockObserver {
 
 // jsdom 无 canvas npm 包：zrender 拿不到 2d context 会 unhandled rejection——
 // stub 一个全方法 Proxy context（measureText 返回零宽，dpr 等 set 全吞）。
+// afterAll 还原（code-review J-11：原型污染不还原，依赖 vitest 默认 per-file
+// 隔离才安全——配置一变就串文件）
+const _origGetContext = (globalThis as any).HTMLCanvasElement.prototype.getContext
 const ctxStub: any = new Proxy({}, {
   get: (_t, p) => {
     if (p === 'measureText') return () => ({ width: 0 })
@@ -29,6 +32,9 @@ const ctxStub: any = new Proxy({}, {
   set: () => true,
 })
 ;(globalThis as any).HTMLCanvasElement.prototype.getContext = () => ctxStub
+afterAll(() => {
+  ;(globalThis as any).HTMLCanvasElement.prototype.getContext = _origGetContext
+})
 
 const { navDoc, positions, legs } = vi.hoisted(() => ({
   navDoc: {
