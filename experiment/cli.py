@@ -109,8 +109,10 @@ def main(argv: list = None) -> int:
                 else:
                     _aio.run(_mgr.notify_risk_event(
                         f"实验上线：{args.experiment_id} → ACTIVE（weight={args.weight}）——"
-                        f"影子期闸已移除（ADR-16 修订），新参数即刻生效；"
-                        f"如需缓冲请 risk_ctrl block on", "WARN"))
+                        f"掘金腿不读 DB，参数需换代部署才生效：18:50 watch 将自动构建"
+                        f"就绪包，人工确认后 python -m ops.promote_pipeline deploy "
+                        f"--leg exp（默认 dry-run）；如需缓冲请 risk_ctrl block on",
+                        "WARN"))
             except Exception:
                 print("（上线播报发送失败，promote 本身已成功）")
         elif args.cmd == "set-weight":

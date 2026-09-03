@@ -209,6 +209,10 @@ OPS_TASK_CRONS = [
     # verify→publish DRAFT——止步 DRAFT，promote 仍走 autopromote 七门/人审。
     ("ops_explore_loop", ["-m", "research.explore_loop"], "cron",
      {"hour": 18, "minute": 45, "day_of_week": "mon-fri"}, "ops_explore_loop.log"),
+    # 2026-09-03 换代自动化 watch：18:50（探索环后）。ACTIVE/快照/部署腿三方
+    # 分叉检测 → 就绪包构建+播报；deploy 永人审触发（--execute+时窗闸），不进 cron。
+    ("ops_promote_watch", ["-m", "ops.promote_pipeline", "watch"], "cron",
+     {"hour": 18, "minute": 50, "day_of_week": "mon-fri"}, "ops_promote_watch.log"),
     # 2026-09-01 计划→播报桥第三块：18:10 次日计划预演（管道 18:00-18:02 落完
     # T 日湖数据后离线复刻次晨 09:31 识别链，预演≠计划恒带标签）。
     ("ops_plan_preview", ["-m", "ops.emquant_plan_preview"], "cron",
