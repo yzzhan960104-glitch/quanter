@@ -198,11 +198,12 @@ OPS_TASK_CRONS = [
      {"hour": 15, "minute": 50}, "ops_gm_ab_compare.log"),
     ("ops_audit_ssot", ["scripts/audit_ssot.py"], "cron",
      {"hour": 16, "minute": 5}, "audit_schtask.log"),
-    # 2026-09-03 亏损持仓 LLM 深度归因：16:15（EOD 报告 15:45/audit_ssot 16:05
-    # 之后数据全齐；z.ai glm-5.3 reasoning 模型逐只 2-5min 串行，18:00 管道前
-    # 收口）。产物 logs/loser_review_{day}.json，上站走 public_snapshot。
+    # 2026-09-03 亏损持仓 LLM 深度归因：18:05（用户裁决 18 点段；18:00-18:02
+    # pipeline 写湖，归因读湖需避让两分钟，18:10 预演前起跑。z.ai glm-5.3
+    # reasoning 逐只 2-5min 串行）。产物 logs/loser_review_{day}.json，上站走
+    # public_snapshot。
     ("ops_loser_review", ["-m", "ops.loser_review"], "cron",
-     {"hour": 16, "minute": 15, "day_of_week": "mon-fri"}, "ops_loser_review.log"),
+     {"hour": 18, "minute": 5, "day_of_week": "mon-fri"}, "ops_loser_review.log"),
     # 2026-09-01 计划→播报桥第三块：18:10 次日计划预演（管道 18:00-18:02 落完
     # T 日湖数据后离线复刻次晨 09:31 识别链，预演≠计划恒带标签）。
     ("ops_plan_preview", ["-m", "ops.emquant_plan_preview"], "cron",

@@ -3,7 +3,7 @@
 
 钉死三件：
   ① OPS_TASK_CRONS 表完整性：W9 六项 + 2026-09-01 计划预演槽（18:10）与
-     公网发布槽（9-15 时每小时）+ 2026-09-03 亏损归因槽（16:15 mon-fri）
+     公网发布槽（9-15 时每小时）+ 2026-09-03 亏损归因槽（18:05 mon-fri）
      共 9 项、job_id 唯一、W9 六项与原 schtasks 时刻表逐字对齐（晨检 09:40/
      台账 15:40/EOD 15:45/对照 15:50/audit 16:05/guard 5min）；
   ② register_ops_task_crons 用 fake scheduler 走全表（独立函数免起 app）；
@@ -52,9 +52,9 @@ def test_table_has_nine_unique_jobs_matching_schedule(main_mod):
     # 2026-09-01 公网发布（yzzhan.xin）：交易日 9:35~15:35 每小时（CF 免费额度内）
     assert sched["ops_publish_public"] == (
         "cron", {"hour": "9-15", "minute": 35, "day_of_week": "mon-fri"})
-    # 2026-09-03 亏损持仓 LLM 归因：EOD 15:45/audit 16:05 之后，18:00 管道前收口
+    # 2026-09-03 亏损归因：用户裁决 18 点段；18:05 避 18:00-18:02 管道写湖窗口
     assert sched["ops_loser_review"] == (
-        "cron", {"hour": 16, "minute": 15, "day_of_week": "mon-fri"})
+        "cron", {"hour": 18, "minute": 5, "day_of_week": "mon-fri"})
 
 
 def test_register_with_fake_scheduler_arms_all(main_mod):

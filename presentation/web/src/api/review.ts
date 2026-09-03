@@ -1,8 +1,8 @@
 /**
  * 亏损持仓 LLM 深度归因 facade（2026-09-03 · ops/loser_review.py 产物）。
  *
- * 数据=loser_review.json 快照（16:15 盘后 cron 逐只 glm-5.3 归因；
- * 快照层透传当日产物，16:15 前发布=legs null 降级）。只读分析红线：
+ * 数据=loser_review.json 快照（18:05 盘后 cron 逐只 glm-5.3 归因；
+ * 快照层透传当日产物，18:05 前发布=legs null 降级）。只读分析红线：
  * risk_state 三档是状态描述，绝不构成交易指令。
  */
 import { staticGet } from './static'
@@ -59,7 +59,7 @@ export interface LoserReviewDoc {
   day: string
   generated_at?: string
   model?: string
-  legs: LoserLeg[] | null       // null=当日未生成（16:15 前/生成失败）
+  legs: LoserLeg[] | null       // null=当日未生成（18:05 前/生成失败）
   note?: string
 }
 

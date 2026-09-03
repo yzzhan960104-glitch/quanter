@@ -7,7 +7,7 @@
 ## 一、架构（全走既有不变量）
 
 ```
-16:15 cron（OPS_TASK_CRONS，mon-fri；server 重启后生效）
+18:05 cron（OPS_TASK_CRONS，mon-fri；用户裁决 18 点段，避 18:00-18:02 管道写湖窗口）
   └─ python -m ops.loser_review          # DETACHED 子进程，logs/ops_loser_review.log
        ├─ 组装：7002 positions(fpnl<0) ∩ state.pkl 活仓 → 每只上下文六块
        │   身份(stock_basic 名/行业) / 进场(entry+audit SIGNAL 回扫：颈线/RR/ATR/理论价)
@@ -16,7 +16,7 @@
        ├─ LLM：infra/llm 现成端口（get_llm_client），每只一次串行
        │   输出=JSON(主因/次因/证据/置信度/风险状态三档)+markdown 深度正文
        └─ 产物 logs/loser_review_{day}.json + job_run 台账(ops_loser_review)
-快照：public_snapshot._loser_review 透传当日产物 → loser_review.json（16:15 前
+快照：public_snapshot._loser_review 透传当日产物 → loser_review.json（18:05 前
   发布自然降级 legs=null）
 前端：api/review.ts facade + LoserReviewCard（腿详情页）+ PositionsPanel 抽屉摘要
 ```
@@ -29,7 +29,7 @@
   thinking.budget_tokens，计入 max_tokens）——不控制思考时长但约束思考产出。
 - `base.py` Protocol 同步可选参数（老调用方 proposals/training_analyzer 零影响）。
 - 归因调用参数：max_tokens=4096 + thinking_budget=1024；单只实测 ~2-3 分钟，
-  10 只串行 ~30 分钟（16:15→16:45，18:00 管道前收口）。
+  10 只串行 ~30 分钟（18:05 起 30 分钟，18:10 预演并行不冲突）。
 
 ## 三、红线
 
@@ -58,4 +58,4 @@
 
 - 不产生交易信号/参数修改执行链（参数演进只属研究线提案流）；
 - 不动策略与 server 只读架构；不为分析新建 DB（logs JSON 即产物）；
-- 不做盘中实时归因（快照时点语义，16:15 一次/日）。
+- 不做盘中实时归因（快照时点语义，18:05 一次/日）。
