@@ -1,12 +1,21 @@
 # -*- coding: utf-8 -*-
-"""infra/llm/glm.py —— GlmClient：z.ai Anthropic 兼容端点实现。
+"""infra/llm/glm.py —— GlmClient：z.ai GLM 实现（OpenAI Chat 兼容协议）。
 
-封装原 server.services.review_service._call_glm 的 urllib 逻辑（逻辑零改动）：
-- 端点 GLM_URL = z.ai /api/anthropic/v1/messages（复用「coding plan」订阅额度，
-  非智谱按量余额池——后者已 code 1113 耗尽）。
-- 双投鉴权 x-api-key + Authorization: Bearer（兼容 Anthropic 与 z.ai 两套约定）。
-- anthropic-version 头为协议必填（2023-06-01）。
-凭证/模型从 env 读（GLM_API_KEY/ZHIPU_API_KEY/GLM_MODEL），绝不硬编码。
+协议根因（2026-09-03 官方文档实锤 + 全天实测复盘）：
+- 凭证是 GLM Coding Plan 订阅——官方文档明文「订阅过 Coding Plan（含过期）
+  的 key 目前只能经 OpenAI Chat Completion 兼容协议访问模型 API」。
+- 此前走 Anthropic 兼容端点：短请求碰巧能过、长请求（1.3k+ 字归因 prompt）
+  长时间静默后超时——Anthropic 端点对 Coding Plan key 的支持不完整，
+  一直误判为「端点拥塞」，实为协议路径不对。
+- 现默认 https://api.z.ai/api/paas/v4/chat/completions（Bearer 鉴权，
+  官方对 Coding Plan 的正道）；GLM_PROTOCOL=anthropic 可切回旧路径（保险）。
+
+流式与思考分离（官方 Deep Thinking 文档口径）：
+- 流式 delta 双通道：delta.content=正文 / delta.reasoning_content=思考——
+  本客户端只收正文（思考段对调用方是黑盒，也避免静默期读超时：正文 delta
+  到达即证明连接活着）。
+- glm-5.3 思考不可禁用（thinking.type 仅 enabled）；reasoning_effort 三档
+  low/high/max（max=默认，复杂任务推荐）。
 """
 from __future__ import annotations
 
@@ -16,52 +25,98 @@ import urllib.request
 
 from infra.llm.base import LLMConfigError
 
-# z.ai Anthropic Messages 兼容端点（同原 review_service.GLM_URL，逐字搬移）
-GLM_URL = "https://api.z.ai/api/anthropic/v1/messages"
-# 流式下 timeout=相邻 SSE 包的间隔上限。z.ai glm-5.3 对长 prompt 的思考期
-# **完全静默**（thinking delta 也不发，实测 2k 字归因 prompt 静默 150s+，
-# budget 参数压不住思考时长）——间隔容忍必须 > 最长思考段；300s 下单次
-# 归因 ~3 分钟、10 只串行 ~30 分钟，16:15 cron 在 18:00 管道前收口
+# 端点：默认 OpenAI Chat 兼容（Coding Plan 正道）；anthropic 分支留保险
+_OPENAI_URL = "https://api.z.ai/api/paas/v4/chat/completions"
+_ANTHROPIC_URL = "https://api.z.ai/api/anthropic/v1/messages"
+# 包间隔上限：reasoning 模型思考期可能数分钟不发正文 delta，流式下 timeout
+# 是「相邻包间隔」语义——300s 容忍思考段（归因实测 ~1-3 分钟思考+正文）
 _LLM_TIMEOUT = 300
 
 
 class GlmClient:
-    """GLM（z.ai）LLM 实现。凭证/模型在构造时从 env 读入并持有。"""
+    """GLM（z.ai）LLM 实现。凭证/模型/协议在构造时从 env 读入并持有。"""
 
     def __init__(self) -> None:
         # 凭证双 fallback（GLM_API_KEY 优先，兼容历史 ZHIPU_API_KEY 命名）
         self._api_key = os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
         self._model = os.getenv("GLM_MODEL", "glm-4")
+        self._protocol = os.getenv("GLM_PROTOCOL", "openai").lower()
 
     def with_model(self, model: str) -> "GlmClient":
         """同凭证同配置、换模型名的变体（降级兜底用，如 5.3→5.3-flash）。"""
         clone = GlmClient.__new__(GlmClient)
         clone._api_key = self._api_key
         clone._model = model
+        clone._protocol = self._protocol
         return clone
 
     def call(self, prompt: str, *, max_tokens: int = 4096,
              temperature: float = 0.3,
              thinking_budget: int | None = None,
              reasoning_effort: str | None = None) -> str:
-        """调 GLM 返回模型文本。凭证缺失抛 LLMConfigError，网络异常向上抛。
+        """调 GLM 返回模型正文文本。凭证缺失抛 LLMConfigError，网络异常向上抛。
 
-        thinking_budget：Anthropic 协议 thinking.budget_tokens（计入
-        max_tokens）——GLM-5.x 上仅约束思考 token 产出，不约束思考墙钟时长。
-        reasoning_effort：GLM-5.3+ 的思考深度档（low/high/max，max=默认），
-        顶层字段（z.ai Anthropic 兼容端点实测透传支持）；深度分析用 max。
-        两者独立，可单用；GLM-5.3 思考不可禁用（无 disabled）。
+        thinking_budget：Anthropic 协议 thinking.budget_tokens（计入 max_tokens）
+        ——GLM-5.x 上不约束思考墙钟时长，仅 anthropic 分支消费。
+        reasoning_effort：GLM-5.3+ 思考深度档（low/high/max，默认 max）。
+        流式为两协议共用：思考期静默的读超时问题靠正文 delta 活性消解。
         """
         if not self._api_key:
             raise LLMConfigError("GLM_API_KEY / ZHIPU_API_KEY 未配置")
+        if self._protocol == "anthropic":
+            return self._call_anthropic(prompt, max_tokens=max_tokens,
+                                        temperature=temperature,
+                                        thinking_budget=thinking_budget,
+                                        reasoning_effort=reasoning_effort)
         body_d: dict = {
             "model": self._model,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature,
-            # 流式（SSE）：reasoning 模型长思考期间服务端数分钟不发一个字节，
-            # 非流式下客户端读超时必炸；流式逐 delta 发包，timeout 退化为
-            # 「包间隔」语义，思考再长也扛住
+            "stream": True,
+        }
+        if reasoning_effort is not None:
+            body_d["thinking"] = {"type": "enabled"}
+            body_d["reasoning_effort"] = reasoning_effort
+        req = urllib.request.Request(_OPENAI_URL,
+                                     data=json.dumps(body_d).encode("utf-8"),
+                                     method="POST")
+        req.add_header("Authorization", f"Bearer {self._api_key}")
+        req.add_header("Content-Type", "application/json")
+        chunks: list[str] = []
+        with urllib.request.urlopen(req, timeout=_LLM_TIMEOUT) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    evt = json.loads(payload)
+                except ValueError:
+                    continue
+                # OpenAI 流式：choices[0].delta.content=正文（思考在
+                # delta.reasoning_content，弃——429/错误事件也走 choices 结构）
+                choices = evt.get("choices") or []
+                if choices and isinstance(choices[0], dict):
+                    d = choices[0].get("delta") or {}
+                    if d.get("content"):
+                        chunks.append(str(d["content"]))
+        if not chunks:
+            raise RuntimeError("GLM 流式响应无正文 delta（思考耗尽或异常终止）")
+        return "".join(chunks)
+
+    # ─────────────── Anthropic 兼容分支（GLM_PROTOCOL=anthropic 保险路径） ───────────────
+
+    def _call_anthropic(self, prompt: str, *, max_tokens: int,
+                        temperature: float, thinking_budget: int | None,
+                        reasoning_effort: str | None) -> str:
+        body_d: dict = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
             "stream": True,
         }
         if thinking_budget is not None:
@@ -69,16 +124,16 @@ class GlmClient:
                                   "budget_tokens": thinking_budget}
         if reasoning_effort is not None:
             body_d["reasoning_effort"] = reasoning_effort
-        body = json.dumps(body_d).encode("utf-8")
-        req = urllib.request.Request(GLM_URL, data=body, method="POST")
-        # 双投鉴权：z.ai AUTH_TOKEN 认 Bearer、标准 Anthropic 认 x-api-key
+        req = urllib.request.Request(_ANTHROPIC_URL,
+                                     data=json.dumps(body_d).encode("utf-8"),
+                                     method="POST")
         req.add_header("x-api-key", self._api_key)
         req.add_header("Authorization", f"Bearer {self._api_key}")
         req.add_header("Content-Type", "application/json")
         req.add_header("anthropic-version", "2023-06-01")
         chunks: list[str] = []
         with urllib.request.urlopen(req, timeout=_LLM_TIMEOUT) as resp:
-            for raw in resp:                          # SSE 行流
+            for raw in resp:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
                     continue

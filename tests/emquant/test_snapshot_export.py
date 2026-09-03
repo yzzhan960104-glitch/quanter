@@ -47,6 +47,7 @@ EXEC_KEYS = {
     "commission_rate", "stamp_rate", "transfer_rate",
     "chase_entry", "timeout_extend_days", "timeout_extend_min_pnl",
     "tp_adapt_h_atr", "tp_adapt_scale",   # R6-10 B3
+    "time_stop_days",                     # r610_b3 ACTIVE 面（09-03 watch 导出实证）
 }
 # .env 实弹 14 键（trading/critical.py:187 _trade_cfg 全键）
 TRADE_KEYS = {
