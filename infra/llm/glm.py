@@ -19,8 +19,11 @@
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import socket
+import urllib.error
 import urllib.request
 
 from infra.llm.base import LLMConfigError
@@ -31,6 +34,47 @@ _ANTHROPIC_URL = "https://api.z.ai/api/anthropic/v1/messages"
 # 包间隔上限：reasoning 模型思考期可能数分钟不发正文 delta，流式下 timeout
 # 是「相邻包间隔」语义——300s 容忍思考段（归因实测 ~1-3 分钟思考+正文）
 _LLM_TIMEOUT = 300
+
+
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    """强制 IPv4 的 HTTPS 连接（2026-09-04 实锤根因之二）。
+
+    api.z.ai 的 AAAA 记录在本机 IPv6 出口黑洞：getaddrinfo 返回 v6 在前，
+    urllib/httpx 按序连接挂在 v6 的 TLS 握手（SSL handshake timed out），
+    而 curl 靠 Happy Eyeballs 竞速秒切 v4——表现为「curl 通 Python 挂」的
+    间歇性假拥塞。作用域化修复：只对本 client 的连接强制 AF_INET。
+    """
+
+    def connect(self):                            # noqa: D102（覆写父类）
+        af, st, proto, _, sa = socket.getaddrinfo(
+            self.host, self.port, socket.AF_INET,
+            socket.SOCK_STREAM, socket.IPPROTO_TCP)[0]
+        s = socket.socket(af, st, proto)
+        s.settimeout(self.timeout)
+        s.connect(sa)
+        self.sock = self._context.wrap_socket(s, server_hostname=self.host)
+
+
+class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_IPv4HTTPSConnection, req)
+
+
+def _open(req, timeout: float):
+    """带 IPv4 强制与可读错误翻译的 urlopen。"""
+    try:
+        return urllib.request.build_opener(_IPv4HTTPSHandler()).open(
+            req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            body = e.read().decode("utf-8", "replace")
+            if "1113" in body:
+                # 智谱/z.ai 余额族错误码（glm.py 历史注释同源：08 月曾因
+                # bigmodel 1113 切 z.ai——本次是 Coding Plan 订阅额度耗尽）
+                raise RuntimeError(
+                    "GLM 额度耗尽（code 1113：余额/资源包不足）——Coding Plan "
+                    "订阅额度被耗尽或到期，需充值或等额度周期重置；非代码问题") from e
+        raise
 
 
 class GlmClient:
@@ -84,7 +128,7 @@ class GlmClient:
         req.add_header("Authorization", f"Bearer {self._api_key}")
         req.add_header("Content-Type", "application/json")
         chunks: list[str] = []
-        with urllib.request.urlopen(req, timeout=_LLM_TIMEOUT) as resp:
+        with _open(req, _LLM_TIMEOUT) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
@@ -132,7 +176,7 @@ class GlmClient:
         req.add_header("Content-Type", "application/json")
         req.add_header("anthropic-version", "2023-06-01")
         chunks: list[str] = []
-        with urllib.request.urlopen(req, timeout=_LLM_TIMEOUT) as resp:
+        with _open(req, _LLM_TIMEOUT) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
