@@ -230,7 +230,12 @@ def verify_proposal(db_path: str, proposal_id: str, lake_start: str = "2025-01-0
         _save_verification(db_path, proposal_id, result)
         return False
     res_base = evaluate_replay(baseline_params, universe, split)
-    res_prop = evaluate_replay(json.loads(p["params_json"]), universe, split)
+    # 09-04 口径修正（马拉松实锤）：提案 params 是 partial（1-3 键 diff），此前
+    # 直接拿 partial 跑=「NecklineConfig 默认参数为底」——与基线（ACTIVE 全
+    # 参数）不对称比较，08-21 起 13 连拒的冤案件来源（ts8 提案 p_60faf2e4 实证：
+    # 默认底的 inner 胜率/rr 全崩）。正确口径=**冠军参数 + partial diff**。
+    res_prop = evaluate_replay({**baseline_params,
+                                **json.loads(p["params_json"])}, universe, split)
     ok, reason = _judge(res_base, res_prop)
     result = {
         "verdict": "approved" if ok else "rejected",

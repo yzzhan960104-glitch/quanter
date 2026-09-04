@@ -1,0 +1,74 @@
+[
+ {
+  "year": 2021,
+  "variant": "base",
+  "n_hits": 9364,
+  "win_rate": 0.5998504912430586,
+  "avg_rr": 0.20214317506929486,
+  "annualized_return": 2.9329501131772697,
+  "max_drawdown": -0.01963954491801967
+ },
+ {
+  "year": 2021,
+  "variant": "ts8",
+  "n_hits": 9364,
+  "win_rate": 0.5718709953011534,
+  "avg_rr": 0.1384101325589671,
+  "annualized_return": 2.9598793155859937,
+  "max_drawdown": -0.01963954491801967
+ },
+ {
+  "year": 2022,
+  "variant": "base",
+  "n_hits": 7739,
+  "win_rate": 0.4310634448895206,
+  "avg_rr": -0.14960125045127365,
+  "annualized_return": 1.395365592954624,
+  "max_drawdown": -0.15135773740266645
+ },
+ {
+  "year": 2022,
+  "variant": "ts8",
+  "n_hits": 7739,
+  "win_rate": 0.4532885385708748,
+  "avg_rr": -0.06396476491532742,
+  "annualized_return": 1.3592778740354552,
+  "max_drawdown": -0.1526055710165637
+ },
+ {
+  "year": 2023,
+  "variant": "base",
+  "n_hits": 12243,
+  "win_rate": 0.4585477415666095,
+  "avg_rr": -0.03470782585029755,
+  "annualized_return": 2.6822169148280293,
+  "max_drawdown": -0.024073484391410105
+ },
+ {
+  "year": 2023,
+  "variant": "ts8",
+  "n_hits": 12243,
+  "win_rate": 0.47570040022870214,
+  "avg_rr": 0.016166755463406172,
+  "annualized_return": 2.7077274225628916,
+  "max_drawdown": -0.02233591840597693
+ },
+ {
+  "year": 2024,
+  "variant": "base",
+  "n_hits": 8194,
+  "win_rate": 0.6488894312911887,
+  "avg_rr": 0.24185236714309166,
+  "annualized_return": 1.2817075978952075,
+  "max_drawdown": -0.10768000000000022
+ },
+ {
+  "year": 2024,
+  "variant": "ts8",
+  "n_hits": 8194,
+  "win_rate": 0.6109348303636808,
+  "avg_rr": 0.1847935765175985,
+  "annualized_return": 1.3123325605804204,
+  "max_drawdown": -0.09050500000000017
+ }
+]

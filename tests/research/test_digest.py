@@ -235,6 +235,10 @@ def test_main_push_flag_calls_push_digest(tmp_path, monkeypatch):
     monkeypatch.setattr(digest, "load_backtest_expectation", lambda **k: None)
     monkeypatch.setattr(digest, "load_live_perf_from_state_store", lambda **k: {})
     monkeypatch.setattr(digest, "build_digest", lambda *a, **k: "MD")
+    # 09-03 线①：main 会 append 实盘亏损归因段（读 logs/loser_review_{today}
+    # 真实产物）——测试隔离按无产物日返回空段，断言保持纯 MD 口径
+    import research.explore_loop as _el
+    monkeypatch.setattr(_el, "render_loser_section", lambda day: "")
     pushed = []
     monkeypatch.setattr(digest, "push_digest", lambda md, *a: pushed.append(md))
     out_path = str(tmp_path / "digest.md")
