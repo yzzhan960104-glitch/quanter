@@ -119,8 +119,18 @@ def update() -> dict:
                 if vals[k] is not None and (cur.get(k) is None or day == today):
                     cur[k] = vals[k]
 
-    # 实时点（当日）：7002 cash nav/available/market_value，双腿
-    if today >= ERA_START:
+    # 实时点（当日）：7002 cash nav/available/market_value，双腿。
+    # 双守卫（09-04「昨日收益=0」bug 实锤修复）：
+    #   ① 仅交易时段（09:10-15:40）写——凌晨/深夜跑 update 时柜台返回的是
+    #      上一收盘价，写进 today 键=前日值复制（09-04 行被 00:59 发布污染成
+    #      09-03 值，真实 main -2.82% 被藏掉）；
+    #   ② 不覆盖 parsed 已回填的当日 EOD 值——收盘后 EOD 日志（15:45）是
+    #      终态权威，实时点（如 16:00 手动跑）不得回写盘中/等值旧价。
+    now_hm = datetime.now().hour * 60 + datetime.now().minute
+    in_session = 9 * 60 + 10 <= now_hm <= 15 * 60 + 40
+    eod_today_legs = {leg for day, legs in parsed.items()
+                      if day == today for leg in legs}
+    if today >= ERA_START and in_session:
         try:
             token = str(gc.runtime_config().get("token") or "")
             for leg in gc.active_legs():
@@ -129,7 +139,8 @@ def update() -> dict:
                     f"/v3/account-trade/cash/{cfg.get('account_id')}",
                     str(cfg.get("token") or token), timeout=4.0)
                 row = ((payload or {}).get("data") or [None])[0]
-                if st == 200 and row and row.get("nav") is not None:
+                if (st == 200 and row and row.get("nav") is not None
+                        and leg.key not in eod_today_legs):
                     cur = merged.setdefault(today, {}).setdefault(leg.key, {})
                     cur["nav"] = float(row["nav"])
                     if row.get("available") is not None:

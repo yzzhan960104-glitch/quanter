@@ -327,6 +327,13 @@ def main(argv: list[str] | None = None) -> int:
     print(full)
     if not args.no_push:
         notify("INFO", full)
+    # 09-04 净值链钩子：EOD 日志刚落（终态权威）→ 立即回填 nav_history
+    # （发布跳最后一跳 15:35 早于本脚本 15:45，此前当日收盘值结构性缺失）
+    try:
+        from ops import nav_history as _nh
+        _nh.update()
+    except Exception:
+        print("[nav_history] EOD 后回填失败（不阻断播报，次日发布自愈）")
     return 0
 
 
