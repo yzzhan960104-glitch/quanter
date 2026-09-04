@@ -1,0 +1,146 @@
+{
+ "generated_at": "2026-09-04 14:23:25",
+ "inner": {
+  "n_trades": 11159,
+  "n_days": 243,
+  "chase_n": 103,
+  "chase_share": 0.009,
+  "rows": {
+   "no-filter": {
+    "n_kept": 11159,
+    "n_dropped": 0,
+    "win_rate": 0.703,
+    "avg_rr": 0.42,
+    "cagr": 2.401,
+    "max_dd": -0.023,
+    "dropped_avg_pnl": null
+   },
+   "skip@2.0": {
+    "n_kept": 6505,
+    "n_dropped": 4654,
+    "win_rate": 0.62,
+    "avg_rr": 0.568,
+    "cagr": 1.72,
+    "max_dd": -0.037,
+    "dropped_avg_pnl": 3.1
+   },
+   "skip@2.5": {
+    "n_kept": 9401,
+    "n_dropped": 1758,
+    "win_rate": 0.68,
+    "avg_rr": 0.462,
+    "cagr": 2.321,
+    "max_dd": -0.053,
+    "dropped_avg_pnl": 2.93
+   },
+   "skip@3.0": {
+    "n_kept": 11059,
+    "n_dropped": 100,
+    "win_rate": 0.702,
+    "avg_rr": 0.424,
+    "cagr": 2.432,
+    "max_dd": -0.027,
+    "dropped_avg_pnl": 0.89
+   },
+   "half@2.0": {
+    "n_kept": 11159,
+    "n_dropped": 4654,
+    "win_rate": 0.703,
+    "avg_rr": 0.376,
+    "cagr": 1.646,
+    "max_dd": -0.026,
+    "dropped_avg_pnl": 3.1
+   },
+   "half@2.5": {
+    "n_kept": 11159,
+    "n_dropped": 1758,
+    "win_rate": 0.703,
+    "avg_rr": 0.405,
+    "cagr": 2.159,
+    "max_dd": -0.024,
+    "dropped_avg_pnl": 2.93
+   },
+   "half@3.0": {
+    "n_kept": 11159,
+    "n_dropped": 100,
+    "win_rate": 0.703,
+    "avg_rr": 0.42,
+    "cagr": 2.379,
+    "max_dd": -0.023,
+    "dropped_avg_pnl": 0.89
+   }
+  }
+ },
+ "outer": {
+  "n_trades": 11783,
+  "n_days": 163,
+  "chase_n": 71,
+  "chase_share": 0.006,
+  "rows": {
+   "no-filter": {
+    "n_kept": 11783,
+    "n_dropped": 0,
+    "win_rate": 0.565,
+    "avg_rr": 0.112,
+    "cagr": 5.58,
+    "max_dd": -0.029,
+    "dropped_avg_pnl": null
+   },
+   "skip@2.0": {
+    "n_kept": 6645,
+    "n_dropped": 5138,
+    "win_rate": 0.461,
+    "avg_rr": 0.168,
+    "cagr": 2.469,
+    "max_dd": -0.082,
+    "dropped_avg_pnl": 0.47
+   },
+   "skip@2.5": {
+    "n_kept": 9836,
+    "n_dropped": 1947,
+    "win_rate": 0.537,
+    "avg_rr": 0.13,
+    "cagr": 4.958,
+    "max_dd": -0.032,
+    "dropped_avg_pnl": 0.16
+   },
+   "skip@3.0": {
+    "n_kept": 11721,
+    "n_dropped": 62,
+    "win_rate": 0.564,
+    "avg_rr": 0.113,
+    "cagr": 5.688,
+    "max_dd": -0.028,
+    "dropped_avg_pnl": -0.9
+   },
+   "half@2.0": {
+    "n_kept": 11783,
+    "n_dropped": 5138,
+    "win_rate": 0.565,
+    "avg_rr": 0.104,
+    "cagr": 3.368,
+    "max_dd": -0.038,
+    "dropped_avg_pnl": 0.47
+   },
+   "half@2.5": {
+    "n_kept": 11783,
+    "n_dropped": 1947,
+    "win_rate": 0.565,
+    "avg_rr": 0.11,
+    "cagr": 4.804,
+    "max_dd": -0.032,
+    "dropped_avg_pnl": 0.16
+   },
+   "half@3.0": {
+    "n_kept": 11783,
+    "n_dropped": 62,
+    "win_rate": 0.565,
+    "avg_rr": 0.113,
+    "cagr": 5.553,
+    "max_dd": -0.029,
+    "dropped_avg_pnl": -0.9
+   }
+  }
+ },
+ "note": "溢价分层过滤逐笔重放回测：skip/half×2.0/2.5/3.0，equity=同款 PositionModel（并发/现金约束，skip 释放额度可复用）"
+}
