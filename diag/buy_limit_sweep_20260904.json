@@ -1,0 +1,174 @@
+{
+ "generated_at": "2026-09-04 12:19:29",
+ "grid": [
+  {
+   "n": 1.0,
+   "n_hits": 9521,
+   "win_rate": 0.6074992122676189,
+   "avg_rr": 0.499097816773495,
+   "annualized_return": 1.6208083302760095,
+   "max_drawdown": -0.04624583746351374
+  },
+  {
+   "n": 1.25,
+   "n_hits": 9789,
+   "win_rate": 0.625600163448769,
+   "avg_rr": 0.4850687508594926,
+   "annualized_return": 1.8227332819782514,
+   "max_drawdown": -0.04417727208750111
+  },
+  {
+   "n": 1.5,
+   "n_hits": 10114,
+   "win_rate": 0.6403994463120427,
+   "avg_rr": 0.46966924600381715,
+   "annualized_return": 2.1241750562785433,
+   "max_drawdown": -0.03588422792740942
+  },
+  {
+   "n": 1.75,
+   "n_hits": 10400,
+   "win_rate": 0.6584615384615384,
+   "avg_rr": 0.4578191393827794,
+   "annualized_return": 2.3071747943551646,
+   "max_drawdown": -0.040596363474407426
+  },
+  {
+   "n": 2.0,
+   "n_hits": 10641,
+   "win_rate": 0.6733389719011371,
+   "avg_rr": 0.44305611641235276,
+   "annualized_return": 2.4848171118789844,
+   "max_drawdown": -0.042168092518534706
+  },
+  {
+   "n": 2.25,
+   "n_hits": 10946,
+   "win_rate": 0.6899323953955783,
+   "avg_rr": 0.43137893046201825,
+   "annualized_return": 2.5177968665320796,
+   "max_drawdown": -0.03019046068696074
+  },
+  {
+   "n": 2.5,
+   "n_hits": 11159,
+   "win_rate": 0.7029303701048482,
+   "avg_rr": 0.42037734044906694,
+   "annualized_return": 2.401452477720702,
+   "max_drawdown": -0.023263511097246448
+  },
+  {
+   "n": 2.75,
+   "n_hits": 11384,
+   "win_rate": 0.7138088545326774,
+   "avg_rr": 0.40421341829857776,
+   "annualized_return": 2.2531894296274464,
+   "max_drawdown": -0.02053693245909627
+  },
+  {
+   "n": 3.0,
+   "n_hits": 11572,
+   "win_rate": 0.7214828897338403,
+   "avg_rr": 0.3904696008426493,
+   "annualized_return": 2.330154796482298,
+   "max_drawdown": -0.019041123785081937
+  },
+  {
+   "n": 3.5,
+   "n_hits": 11882,
+   "win_rate": 0.7040902205015991,
+   "avg_rr": 0.3699518789889115,
+   "annualized_return": 1.7601346714515156,
+   "max_drawdown": -0.019983181022231844
+  }
+ ],
+ "meta": {
+  "params": {
+   "window": 60,
+   "min_touches": 2,
+   "min_suppression": 0.15,
+   "local_extrema_window": 3,
+   "min_bottoms": 2,
+   "breakout_vol_mult": 1.0,
+   "min_rr": 2.0,
+   "max_h_atr": 5.5,
+   "stop_atr_mult": 1.5,
+   "tp_h_mult": 1.5,
+   "decay_tau": 90,
+   "max_holding": 30,
+   "max_wait": 27,
+   "cooldown": 0,
+   "buy_limit_atr_mult": 2.5,
+   "tp1_h_mult": 2.0,
+   "tp1_portion": 0.9,
+   "cancel_thresh_mult": null,
+   "trailing_grace": 10,
+   "trailing_step": 0.05,
+   "trailing_floor": 0.5,
+   "chase_entry": true,
+   "tp_adapt_h_atr": 3.0,
+   "tp_adapt_scale": 0.7
+  },
+  "split": {
+   "inner": "Segment(name='inner_2025', start=datetime.date(2025, 1, 1), end=datetime.date(2025, 12, 31))",
+   "outer": "Segment(name='outer_2026', start=datetime.date(2026, 1, 1), end=datetime.date(2026, 12, 31))"
+  }
+ },
+ "per_trade_buckets_atr": [
+  {
+   "range": "-4.29~0.52",
+   "n": 2231,
+   "avg_pnl": 4.96,
+   "avg_rr": 0.782,
+   "win": 0.531
+  },
+  {
+   "range": "0.52~1.22",
+   "n": 2231,
+   "avg_pnl": 4.55,
+   "avg_rr": 0.552,
+   "win": 0.625
+  },
+  {
+   "range": "1.22~2.08",
+   "n": 2231,
+   "avg_pnl": 3.71,
+   "avg_rr": 0.354,
+   "win": 0.719
+  },
+  {
+   "range": "2.08~2.5",
+   "n": 2231,
+   "avg_pnl": 3.8,
+   "avg_rr": 0.275,
+   "win": 0.861
+  },
+  {
+   "range": "2.5~5.15",
+   "n": 2235,
+   "avg_pnl": 2.29,
+   "avg_rr": 0.139,
+   "win": 0.778
+  }
+ ],
+ "n_trades": 11159,
+ "outer": [
+  {
+   "label": "基线",
+   "n": 2.5,
+   "n_hits": null,
+   "win_rate": null,
+   "avg_rr": null,
+   "annualized_return": null
+  },
+  {
+   "label": "最优",
+   "n": 2.25,
+   "n_hits": null,
+   "win_rate": null,
+   "avg_rr": null,
+   "annualized_return": null
+  }
+ ],
+ "note": "挂单价溢价推演回测：N 扫描（其余冠军参数持住，inner=2025 全市场）+基线逐笔溢价分桶；回测按挂单价成交=溢价伤害上界"
+}
