@@ -246,9 +246,12 @@ def deploy(leg: str = "exp", execute: bool = False, allow_main: bool = False) ->
             _git("commit", "-m", f"chore(deploy): 换代产物 {artifact.name}"
                  f"（两段提交第二段，champion={pending['champion']}）")
         stamp = _git("log", "-1", "--format=%ci %h", "--", str(artifact))
-        # ④ 备份+复制（bak 链锚换代前 stamp）
+        # ④ 备份+复制（bak 链锚换代前 stamp；Windows 文件名禁冒号——stamp
+        # 含 "09:47:13 +0800" 形态必须消毒，09-04 首次实弹在 replace 步炸出）
+        import re as _re
         prev_stamp = (pending.get("deployed_stamps") or {}).get(leg) or "pre"
-        bak = leg_dir / f"main.py.bak_{prev_stamp}"
+        safe_stamp = _re.sub(r"[^0-9A-Za-z_.+-]+", "_", str(prev_stamp))[:60]
+        bak = leg_dir / f"main.py.bak_{safe_stamp}"
         (leg_dir / "main.py").replace(bak)
         (leg_dir / "main.py").write_text(
             artifact.read_text(encoding="utf-8"), encoding="utf-8")
