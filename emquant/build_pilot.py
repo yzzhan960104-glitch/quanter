@@ -42,6 +42,12 @@ DEFAULT_EXP_ACCOUNT_ID = 'c4ba3b2e-a2da-11f1-9262-52560acd7da0'
 AMIHUD_FILTER_CFG = {'enabled': True, 'window': 60, 'min_days': 48,
                      'keep_top': 5}
 
+# 均衡栈守卫缺省（p_b221cbf5 · 2026-09-07）：主/exp 腿全关=零回归；
+# --balanced 腿开启（T1 大盘节流 + skip@3.0 追价守卫）。数字依据见
+# docs/research/2026-09-06-retrial-committee.md 附录（四方面对比）。
+MARKET_THROTTLE_CFG_OFF = {'enabled': False, 'index': '399006.SZ', 'ma_window': 60}
+MARKET_THROTTLE_CFG_ON = {'enabled': True, 'index': '399006.SZ', 'ma_window': 60}
+
 # pilot_body 顶部「入口抑制块」的剪切标记（Task 8）：标记行本身随块一起搬进 head 区。
 # Why 存在：内核逐字块（§1）尾部有 method_v0 的 `if __name__ == "__main__": main()`
 # 演示守卫，位于产物 §2-§7 拼接位【之前】——抑制代码必须先于它执行才能拦住，而能落在
@@ -110,7 +116,7 @@ def _build_stamp() -> str:
 
 
 def build(output_path: Path | None = None, account_id: str = MAIN_ACCOUNT_ID,
-          leg_suffix: str = "") -> Path:
+          leg_suffix: str = "", balanced: bool = False) -> Path:
     """读五路输入 → 拼单文件 → 返回产物路径（幂等纯拼接）。
 
     双腿形态（2026-08-28 双轨方案 §4.1）：account_id 注入 §0 的 PILOT_ACCOUNT_ID
@@ -133,6 +139,8 @@ def build(output_path: Path | None = None, account_id: str = MAIN_ACCOUNT_ID,
     body_full = (ROOT / "emquant/pilot_body.py").read_text(encoding="utf-8")
     hoist, body = _hoist_entrance_guard(body_full)   # 入口抑制块剪出到 head 区（§0/§1 之前）
     stamp = _build_stamp() + leg_suffix
+    _mt_cfg = MARKET_THROTTLE_CFG_ON if balanced else MARKET_THROTTLE_CFG_OFF
+    _chase_skip = 3.0 if balanced else None
     head = (
         "# -*- coding: utf-8 -*-\n"
         '"""东财掘金·颈线策略单文件试点（组装产物，勿手改——改 pilot_body.py 后重跑 build_pilot.py）。\n'
@@ -154,7 +162,17 @@ def build(output_path: Path | None = None, account_id: str = MAIN_ACCOUNT_ID,
         "PILOT_MAX_NEW_ORDERS_PER_DAY = 5\n"
         "PILOT_MAX_POSITION_PCT = 0.075\n"
         f"AMIHUD_FILTER = {AMIHUD_FILTER_CFG!r}\n"
-        f"PILOT_ACCOUNT_ID = {account_id!r}\n\n\n"
+        f"PILOT_ACCOUNT_ID = {account_id!r}\n"
+        "# ── 均衡栈守卫（p_b221cbf5 · 2026-09-07 委员会重审判产物）──────────────────\n"
+        "# ① MARKET_THROTTLE（T1 大盘节流）：创业板指收盘<MA60 → 跳过挂单段与死单回补\n"
+        "#    （只拦增量，存量管理照跑，语义同 RISK_BLOCK；fail-open=数据失败不拦+WARN）。\n"
+        "#    依据：六年实盘口径 dd -27.5→-10.6%/calmar 0.81→1.82（docs/research/\n"
+        "#    2026-09-06-retrial-committee.md）。\n"
+        "# ② CHASE_SKIP_ATR（skip@3.0 追价守卫）：chase 追入现价>颈线+N×ATR → 撤旧弃追\n"
+        "#    （阈值平台 2.75-3.5，预注册取 3.0）。\n"
+        "# 主/exp 腿默认全关（零回归）；--balanced 产出的均衡栈腿开启。\n"
+        f"MARKET_THROTTLE = {_mt_cfg!r}\n"
+        f"CHASE_SKIP_ATR = {_chase_skip!r}\n\n\n"
     )
     parts = [head, hoist + "\n\n", sec0,
              "# ============================ §1 识别内核（signal.py + method_v0.py 逐字块，C2）============================\n" + sig + "\n\n\n" + mv0 + "\n\n\n",
@@ -169,7 +187,7 @@ def _cli() -> int:
     import argparse
     import os
     ap = argparse.ArgumentParser(description="组装单文件产物（主/实验腿）")
-    ap.add_argument("--leg", choices=["main", "exp"], default="main")
+    ap.add_argument("--leg", choices=["main", "exp", "balanced"], default="main")
     ap.add_argument("--account-id", help="覆盖 §0 PILOT_ACCOUNT_ID（缺省按腿）")
     ap.add_argument("--out", help="输出路径（缺省按腿）")
     args = ap.parse_args()
@@ -177,11 +195,16 @@ def _cli() -> int:
         account = args.account_id or MAIN_ACCOUNT_ID
         out = Path(args.out) if args.out else None
         suffix = ""
+    elif args.leg == "balanced":
+        account = args.account_id or ""
+        out = Path(args.out) if args.out else (ROOT / "emquant" / "emquant_neckline_pilot_balanced.py")
+        suffix = " [balanced]"
     else:
         account = args.account_id or os.environ.get("GM_EXP_ACCOUNT_ID") or DEFAULT_EXP_ACCOUNT_ID
         out = Path(args.out) if args.out else (ROOT / "emquant" / "emquant_neckline_pilot_exp.py")
         suffix = " [exp]"
-    print(build(out, account_id=account, leg_suffix=suffix))
+    print(build(out, account_id=account, leg_suffix=suffix,
+                balanced=(args.leg == "balanced")))
     return 0
 
 

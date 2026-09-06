@@ -56,6 +56,16 @@ PILOT_MAX_NEW_ORDERS_PER_DAY = 5
 PILOT_MAX_POSITION_PCT = 0.075
 AMIHUD_FILTER = {'enabled': True, 'window': 60, 'min_days': 48, 'keep_top': 5}
 PILOT_ACCOUNT_ID = '67334fef-a137-11f1-8228-52560acd7da0'
+# ── 均衡栈守卫（p_b221cbf5 · 2026-09-07 委员会重审判产物）──────────────────
+# ① MARKET_THROTTLE（T1 大盘节流）：创业板指收盘<MA60 → 跳过挂单段与死单回补
+#    （只拦增量，存量管理照跑，语义同 RISK_BLOCK；fail-open=数据失败不拦+WARN）。
+#    依据：六年实盘口径 dd -27.5→-10.6%/calmar 0.81→1.82（docs/research/
+#    2026-09-06-retrial-committee.md）。
+# ② CHASE_SKIP_ATR（skip@3.0 追价守卫）：chase 追入现价>颈线+N×ATR → 撤旧弃追
+#    （阈值平台 2.75-3.5，预注册取 3.0）。
+# 主/exp 腿默认全关（零回归）；--balanced 产出的均衡栈腿开启。
+MARKET_THROTTLE = {'enabled': False, 'index': '399006.SZ', 'ma_window': 60}
+CHASE_SKIP_ATR = None
 
 
 
@@ -1291,6 +1301,36 @@ def is_blocked(path=None) -> bool:
     """
     p = Path(path) if path is not None else RISK_BLOCK_FLAG
     return p.exists()
+
+def market_throttle_blocked(api, end_date, cfg=None):
+    """T1 大盘节流判定（均衡栈守卫① · MARKET_THROTTLE，p_b221cbf5）：对应指数
+    最近一根日线收盘 < 其 MA(ma_window) → True（拦增量）。
+
+    - 数据：gm history 指数日线（eob+close，至 end_date=T-1，识别同视野）；
+      to_gm_symbol 映射同个股（399006.SZ→SZSE.399006）。
+    - fail-open 契约（同完整性 gate 哲学）：拉取失败/数据不足（< ma_window 根）
+      → None=不拦，调用方 WARN 留痕——数据故障不该变成静默停机。
+    - 回测同口径：diag/retrial_committee.py（cyb_ratio<1.0 拦新仓，六年
+      dd -27.5→-10.6%）。
+    """
+    _cfg = cfg or MARKET_THROTTLE
+    a = _api() if api is None else api
+    try:
+        from datetime import timedelta as _td
+        win = int(_cfg.get("ma_window") or 60)
+        start = (datetime.strptime(end_date, "%Y-%m-%d")
+                 - _td(days=win * 3)).strftime("%Y-%m-%d")
+        raw = a.history(symbol=to_gm_symbol(_cfg.get("index") or "399006.SZ"),
+                        frequency="1d", start_time=start, end_time=end_date,
+                        fields="eob,close", df=True, skip_suspended=True)
+        if raw is None or len(raw) < win or "close" not in raw:
+            return None
+        closes = raw.sort_values("eob")["close"].astype(float).tolist()
+        ma = sum(closes[-win:]) / win
+        return closes[-1] < ma
+    except Exception:
+        return None
+
 
 
 def fetch_amihud60(api, ts_symbol: str, end_date: str,
@@ -2787,6 +2827,19 @@ class PilotRuntime:
                             "（①撤单②超期平仓等存量管理照跑）")
             signals = []
 
+        # ── ④b T1 大盘节流（均衡栈守卫① · p_b221cbf5）：指数<MA60 拦增量，语义与
+        #    ④ RISK_BLOCK 同型（只拦新挂，存量管理照跑）。fail-open：数据取不到
+        #    → 不拦 + WARN（数据故障≠静默停机）。MARKET_THROTTLE 默认关=零回归。──
+        if signals and MARKET_THROTTLE.get("enabled") and t_minus_1:
+            _tb = market_throttle_blocked(a, t_minus_1)
+            if _tb is None:
+                self._audit("WARN", type="throttle_data_fail",
+                            index=MARKET_THROTTLE.get("index"), end=t_minus_1)
+            elif _tb:
+                self._audit("THROTTLE_SKIP", msg="大盘节流:指数收盘<MA60,跳过挂单段"
+                            "（存量管理照跑）", index=MARKET_THROTTLE.get("index"))
+                signals = []
+
         # ── ④' amihud keep-top 信号过滤（2026-08-29 v3 用户裁决 keep_top=5）──
         # 规格（两窗验证：liveuni keep-top 族——kt=5 唯一全窗口无瑕疵档：
         # universe 子集外层 Δ+17.8pp/全期 Δ+2.3pp/五年逐年全正；史前窗
@@ -2909,7 +2962,11 @@ class PilotRuntime:
         # 都会路过本段；每进程每日最多 fire 一次（_repair_fired_date 闩，见 on_tick）
         # ——「随时重启随时挂」的准确语义：重启=一次新的回补机会，挂而再死等下次
         # 重启，不做盘中无限自动重试（防拒单风暴打柜台）。
-        if not is_blocked(path=self.risk_flag):
+        # 死单回补闸：RISK_BLOCK 与 T1 大盘节流双拦（节流日连回补也不做——
+        # 防「拦了首发却从回补口进仓」的旁路；节流判定 fail-open None 不拦）。
+        _throttle_on = (MARKET_THROTTLE.get("enabled") and t_minus_1
+                        and market_throttle_blocked(a, t_minus_1) is True)
+        if not is_blocked(path=self.risk_flag) and not _throttle_on:
             dead = [(oid, o) for oid, o in sorted(st["orders"].items())
                     if o.get("date") == today and o.get("purpose") == "OPEN"
                     and o.get("status") in _TERMINAL_ORDER_STATES
@@ -2995,7 +3052,10 @@ class PilotRuntime:
                          and o.get("status") in _TERMINAL_ORDER_STATES
                          and int(o.get("filled") or 0) == 0)
             if dead_n:
-                self._audit("BLOCK_SKIP", msg=f"RISK_BLOCK.flag 在场：死单回补 {dead_n} 单跳过")
+                if is_blocked(path=self.risk_flag):
+                    self._audit("BLOCK_SKIP", msg=f"RISK_BLOCK.flag 在场：死单回补 {dead_n} 单跳过")
+                else:
+                    self._audit("THROTTLE_SKIP", msg=f"大盘节流：死单回补 {dead_n} 单跳过")
 
         # ── ⑤' 同日增补订阅（C-1 三时点之三）：当日新挂的 OPEN 买（与 ② 的超期卖）
         #    当日就要被 tick 巡检管理（新买单的 cancel_on 触价撤单、成交转仓后的
@@ -3136,6 +3196,22 @@ class PilotRuntime:
                                 px=px, tp2=tp2)
                     acted = True
                     continue
+                # 均衡栈守卫②（skip@3.0 追价守卫 · p_b221cbf5）：追入现价超过
+                # 颈线+CHASE_SKIP_ATR×ATR → 撤旧单弃追（极端追价单不入；阈值平台
+                # 2.75-3.5，预注册取 3.0）。几何缺失 → 不拦（fail-open 同 tp2 链）。
+                if CHASE_SKIP_ATR is not None:
+                    try:
+                        _nl2 = float(o.get("neckline"))
+                        _atr2 = float(o.get("atr"))
+                        if _nl2 > 0 and _atr2 > 0 and px > _nl2 + CHASE_SKIP_ATR * _atr2:
+                            self._cancel_and_sync(oid, sym, "on_tick", "chase_skip")
+                            self._audit("CHASE_SKIP", symbol=sym, px=px,
+                                        cap=round(_nl2 + CHASE_SKIP_ATR * _atr2, 3),
+                                        skip_atr=CHASE_SKIP_ATR)
+                            acted = True
+                            continue
+                    except (TypeError, ValueError):
+                        pass
                 self._cancel_and_sync(oid, sym, "on_tick", "chase")
                 try:
                     cid = place_limit_buy(self._a(), sym, px, int(o.get("qty") or 0),
