@@ -44,6 +44,8 @@ const TsbView = () => import('../views/TsbView.vue')
 const OpsHealthView = () => import('../views/OpsHealthView.vue')
 // 研究提案流（P6.1 · 2026-09-03）：假设→参数→验证 verdict 生命线（快照只读）。
 const ProposalsView = () => import('../views/ProposalsView.vue')
+// 每日回顾（2026-09-07）：分账户四区块（持仓/今日交易/亏损归因/明日计划+委员会评审）。
+const DailyReviewView = () => import('../views/DailyReviewView.vue')
 
 // 公网静态模式（VITE_STATIC_DATA=1 · yzzhan.xin）：路由收敛为公开观测面——
 // 首页(净值总览)/cockpit/experiments/data/ops（数据健康度）。discovery（研究 IP）
@@ -57,6 +59,7 @@ const staticRoutes = [
   { path: '/data', name: 'data', component: DataLakeView },
   { path: '/ops', name: 'ops', component: OpsHealthView },
   { path: '/research', name: 'research', component: ProposalsView },
+  { path: '/review', name: 'review', component: DailyReviewView },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
@@ -85,6 +88,8 @@ const router = createRouter(
     // 在线态与公开态同组件——数据全走 ops_health.json 快照）。
     { path: '/ops', name: 'ops', component: OpsHealthView },
     { path: '/research', name: 'research', component: ProposalsView },
+    // 每日回顾（2026-09-07）：分账户四区块一页回顾（只读快照 + 委员会评审附签）。
+    { path: '/review', name: 'review', component: DailyReviewView },
         ],
       },
 )

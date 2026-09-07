@@ -810,6 +810,10 @@ def _plan_card(w) -> int:
                     "dropped_amihud": [str(x) for x in (art.get("dropped_amihud") or [])],
                     "skip_held": art.get("skip_held") or [],
                     "blocked": art.get("blocked") or [],
+                    # 每日回顾页附件（2026-09-07）：委员会评审 + 均衡栈守卫预判
+                    # （emquant_plan_preview.attach_committee_review 落进同一档案；缺=旧档案）
+                    "committee_review": art.get("committee_review"),
+                    "guards": art.get("guards"),
                 }
         except (OSError, ValueError):
             pass

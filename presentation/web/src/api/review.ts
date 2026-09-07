@@ -57,12 +57,34 @@ export interface LoserLeg {
   rows: LoserRow[]
 }
 
+/**
+ * 委员会评审附签（research/committee/review.py review_conclusion 产物形状；
+ * loser_review 与 plan_preview 两处同形，前端一套渲染）。
+ * verdict：PASS 无异议 / NOTES 有备注 / ESCALATE 触及否决知识需人审 /
+ * UNAVAILABLE 评审关闭或不可用（fail-open 兜底）。红线：评审=假设与观点，
+ * 永不构成交易指令（disclaimer 强制携带）。
+ */
+export interface CommitteeReview {
+  verdict?: 'PASS' | 'NOTES' | 'ESCALATE' | 'UNAVAILABLE' | string
+  kb_conflicts?: string[]
+  tier0_conflicts?: string[]
+  fact_checks?: Array<{ claim?: string; ok?: boolean; note?: string } | string>
+  evidence_grade?: string
+  notes?: string
+  llm_calls?: number
+  tier?: string
+  elapsed_s?: number
+  artifact?: string | null
+  disclaimer?: string
+}
+
 export interface LoserReviewDoc {
   day: string
   generated_at?: string
   model?: string
   legs: LoserLeg[] | null       // null=当日未生成（18:05 前/生成失败）
   note?: string
+  committee_review?: CommitteeReview | null
 }
 
 export function getLoserReview(): Promise<LoserReviewDoc | null> {

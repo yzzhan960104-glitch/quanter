@@ -30,7 +30,7 @@ import { STATIC_MODE } from './api/static'
 // Phase 1 · 前端只读化 Task 6：撤 MagicStick（AI 复盘导航项随 ReviewView 整删）。
 // G8 caisen 死视图清理：撤 TrendCharts（蔡森筛选）/ DataAnalysis（参数实验室）——
 //   对应导航项随 CaisenScreenView/ParamLabView 整删而移除，图标无消费者亦撤。
-import { DataBoard, Files, View, Operation, DataAnalysis } from '@element-plus/icons-vue'
+import { DataBoard, Files, View, Operation, DataAnalysis, Calendar } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const activeName = computed(() => route.path)
@@ -71,9 +71,11 @@ const liveNav: NavItem[] = STATIC_MODE ? [
   { to: '/', label: '首页', icon: View },
   { to: '/cockpit', label: '综合看板', icon: View },
   { to: '/experiments', label: '实验对照', icon: DataAnalysis },
+  { to: '/review', label: '每日回顾', icon: Calendar },
 ] : [
   { to: '/cockpit', label: '综合看板', icon: View },
   { to: '/experiments', label: '实验对照', icon: DataAnalysis },
+  { to: '/review', label: '每日回顾', icon: Calendar },
   { to: '/ops', label: '运维面板', icon: Operation },
   // '/jobs 作业驾驶舱'（Phase 2 占位）已收编进 /ops（P5.4 · 2026-09-03）：
   // 台账/告警/进程三合一公开态，原 /jobs 死路由（无 component）不再挂导航。

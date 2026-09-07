@@ -161,8 +161,22 @@ export interface PlanCardDoc {
     rows: NextPlanRow[]
     dropped_amihud: string[]
     skip_held: Array<{ sym: string; why?: string }>
-    blocked: Array<{ sym: string; why?: string }> } | null
+    blocked: Array<{ sym: string; why?: string }>
+    /** 每日回顾页附件（2026-09-07）：委员会评审 + 均衡栈守卫预判（旧档案缺省） */
+    committee_review?: import('./review').CommitteeReview | null
+    guards?: PlanGuards | null } | null
   note?: string
+}
+
+/** 均衡栈守卫预判（ops/emquant_plan_preview.balanced_guards 同形）。 */
+export interface PlanGuards {
+  index?: string
+  ma_window?: number
+  chase_skip_atr?: number
+  t1?: { close?: number; ma?: number; ratio?: number; blocked?: boolean
+         as_of?: string; balanced_action?: string } | null
+  t1_error?: string
+  rows?: Array<{ sym?: string; premium_atr_est?: number | null; chase_skip_note?: string }>
 }
 
 export function getPlanCard(): Promise<PlanCardDoc | null> {

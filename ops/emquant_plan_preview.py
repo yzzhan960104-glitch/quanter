@@ -40,6 +40,97 @@ except (AttributeError, OSError):
 PILOT = ROOT / "emquant" / "emquant_neckline_pilot.py"
 
 
+def balanced_guards(data_day: str, plan: list, index: str = "399006.SZ",
+                    ma_window: int = 60, chase_skip_atr: float = 3.0) -> dict:
+    """均衡栈守卫预判（每日回顾页「明日计划」附件 · 2026-09-07）。
+
+    与部署产物 market_throttle_blocked / CHASE_SKIP_ATR 同口径，但从湖算
+    （预演时点 T=data_day 收盘，实盘 pre_open 用 gm history 拉同一根 K 线）：
+    - t1：指数（创业板指）data_day 收盘 vs MA60 → 均衡栈腿明日是否停新仓；
+    - rows：逐单挂单溢价（entry−neckline）/ATR 估值——预演行无 atr，用
+      buy_limit_atr_mult=2.5 反推（挂单价=颈线+2.5ATR ⇒ 溢价恒 2.5，帽内），
+      skip@3.0 只在 chase 追入时生效，此处仅作提示。
+    fail-open：湖缺数据 → t1=None（页面显示「不可判」，不伪造）。
+    """
+    out = {"index": index, "ma_window": ma_window, "chase_skip_atr": chase_skip_atr,
+           "t1": None, "rows": []}
+    try:
+        import pandas as pd
+        idx = pd.read_parquet(ROOT / "data_lake" / "index_daily.parquet", columns=["close"])
+        code, ex = index.split(".")
+        gm_sym = ("SZSE." if ex == "SZ" else "SHSE.") + code     # 湖可能是 ts 或 gm 两种符号口径
+        try:
+            s = idx.xs(index, level="symbol")["close"].sort_index()
+        except KeyError:
+            s = idx.xs(gm_sym, level="symbol")["close"].sort_index()
+        s = s[s.index <= pd.Timestamp(data_day)]
+        if len(s) >= ma_window:
+            close, ma = float(s.iloc[-1]), float(s.iloc[-ma_window:].mean())
+            out["t1"] = {"close": round(close, 2), "ma": round(ma, 2),
+                         "ratio": round(close / ma, 4), "blocked": close < ma,
+                         "as_of": str(s.index[-1].date()),
+                         "balanced_action": "明日停新仓（T1 大盘节流命中：指数<MA60）"
+                         if close < ma else "正常挂单（指数≥MA60）"}
+    except Exception as e:  # noqa: BLE001 —— 守卫预判失败不阻断预演
+        out["t1_error"] = f"{type(e).__name__}: {e}"[:120]
+    for r in plan or []:
+        try:
+            entry, neck = float(r.get("entry") or 0), float(r.get("neckline") or 0)
+            atr_est = (entry - neck) / 2.5 if entry > neck else None
+            prem = round((entry - neck) / atr_est, 2) if atr_est else None
+            out["rows"].append({"sym": r.get("sym"), "premium_atr_est": prem,
+                                "chase_skip_note": f"挂单溢价≈{prem}ATR（帽内）；仅 chase 追入超 "
+                                                   f"{chase_skip_atr}ATR 时弃单" if prem else "几何缺失"})
+        except (TypeError, ValueError, ZeroDivisionError):
+            out["rows"].append({"sym": r.get("sym"), "premium_atr_est": None})
+    return out
+
+
+def attach_committee_review(path: Path, tier: str = "B") -> dict:
+    """给预演档案追加 committee_review + guards（幂等：重跑覆盖两键，其余不动）。
+
+    评审对象=预演正文（信号→挂单→拦截漏斗 + 逐单几何）+ 守卫预判；kind=
+    plan_preview_{plan_date}（产物落 logs/committee_reviews/）。fail-open：
+    委员会不可用 → verdict=UNAVAILABLE 仍落键（页面显示「评审不可用」而非缺块）。
+    与 loser_review 的 committee_review 同形状（verdict/kb_conflicts/evidence_grade/
+    notes/llm_calls/artifact/disclaimer），前端一套渲染。
+    """
+    art = json.loads(Path(path).read_text(encoding="utf-8"))
+    guards = balanced_guards(str(art.get("data_day") or ""), art.get("plan") or [])
+    art["guards"] = guards
+    rows_txt = "\n".join(
+        f"- {r.get('sym')} qty={r.get('qty')} 挂单价={r.get('entry')} 颈线={r.get('neckline')} "
+        f"rr={r.get('rr')} 形成日={r.get('formed')}" for r in (art.get("plan") or [])) or "- （无计划单）"
+    t1 = guards.get("t1") or {}
+    doc = (f"# 明日计划预演 {art.get('plan_date')}（数据日 {art.get('data_day')}）\n"
+           f"版本锚 {art.get('stamp')}；权益 {art.get('equity')}；信号 {art.get('n_signals')} → "
+           f"计划 {art.get('n_plan')}（拦截 {art.get('n_blocked')}，amihud 剔除 "
+           f"{len(art.get('dropped_amihud') or [])}，已持有跳过 {len(art.get('skip_held') or [])}）\n\n"
+           f"## 计划单\n{rows_txt}\n\n"
+           f"## 拦截明细\n" + ("\n".join(f"- {b.get('sym')}: {b.get('why')}" for b in (art.get('blocked') or [])) or "- 无") +
+           f"\n\n## 均衡栈守卫预判\nT1 大盘节流：{t1.get('balanced_action', '不可判')}"
+           f"（{guards.get('index')} 收盘 {t1.get('close')} vs MA60 {t1.get('ma')}，ratio {t1.get('ratio')}）\n"
+           f"追价守卫 skip@{guards.get('chase_skip_atr')}：挂单价溢价恒 2.5ATR 帽内，仅 chase 追入触发。\n\n"
+           f"请以知识库（regime_dependence/throttle_design/filters_7waves/pertrade_calibers）"
+           f"核查：①明日是否处于策略期望为负的行情状态；②计划单的形态几何/rr 是否触及已否决"
+           f"形状；③两腿（主腿无守卫 vs 均衡栈腿 T1+skip）明日行为差异是否合理。"
+           f"只做事实核查与风险标注，不给交易指令。")
+    try:
+        from research.committee.review import review_conclusion
+        cr = review_conclusion(f"plan_preview_{art.get('plan_date')}", doc, tier=tier,
+                               subject={"plan_date": art.get("plan_date"), "n_plan": art.get("n_plan"),
+                                        "guards": guards})
+    except Exception as e:  # noqa: BLE001
+        cr = {"verdict": "UNAVAILABLE", "kb_conflicts": [], "evidence_grade": "",
+              "notes": f"{type(e).__name__}: {e}"[:200], "llm_calls": 0, "artifact": None}
+    cr.pop("transcripts", None)                        # 档案瘦身：完整 transcript 在 committee_reviews 产物
+    if len(json.dumps(cr.get("fact_checks") or [], ensure_ascii=False)) > 4000:
+        cr.pop("fact_checks", None)
+    art["committee_review"] = cr
+    Path(path).write_text(json.dumps(art, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    return {"verdict": cr.get("verdict"), "t1": t1.get("balanced_action"), "llm_calls": cr.get("llm_calls")}
+
+
 def load_product():
     """importlib 加载掘金产物（dataclass PEP563：先注册 sys.modules 再 exec）。"""
     spec = importlib.util.spec_from_file_location("pilot_artifact_preview", PILOT)
@@ -233,6 +324,12 @@ def build_preview(m, *, no_push: bool = False) -> tuple[str, dict]:
         path.write_text(json.dumps(art, ensure_ascii=False, indent=1, default=str),
                         encoding="utf-8")
         print(f"[artifact] 档案已落 {path}")
+        # 每日回顾页附件（2026-09-07）：委员会评审 + 均衡栈守卫预判追加进同一档案
+        # （fail-open：评审不可用也落 UNAVAILABLE 键，页面显示「不可用」而非缺块）。
+        try:
+            print(f"[committee] {attach_committee_review(path)}")
+        except Exception as e:  # noqa: BLE001 —— 评审失败不阻断预演主链
+            print(f"[committee] 评审追加失败（不阻断）：{type(e).__name__}: {e}")
     except Exception as e:   # 档案失败不阻断推送主链（对拍侧按缺档案降级）
         print(f"[artifact] 档案落盘失败（不阻断）：{type(e).__name__}: {e}")
     if not no_push:
