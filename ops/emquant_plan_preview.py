@@ -86,7 +86,7 @@ def balanced_guards(data_day: str, plan: list, index: str = "399006.SZ",
     return out
 
 
-def attach_committee_review(path: Path, tier: str = "B") -> dict:
+def attach_committee_review(path: Path, tier: str = "A") -> dict:
     """给预演档案追加 committee_review + guards（幂等：重跑覆盖两键，其余不动）。
 
     评审对象=预演正文（信号→挂单→拦截漏斗 + 逐单几何）+ 守卫预判；kind=

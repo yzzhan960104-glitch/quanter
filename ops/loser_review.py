@@ -210,9 +210,14 @@ def build_context() -> list[dict]:
             except KeyError:
                 klines, kstat, k_entry_idx = [], {}, None
             ts_sym = pos_sym                        # state 键已是 ts 口径
-            last = float(row.get("last_price") or row.get("price") or 0)
+            # 现价/浮亏%口径（2026-09-06 委员会质证实证修正）：7002 行 price=实时，
+            # last_price/vwap 为陈旧快照字段（300433 实证冻结在 08-28，湖证 09-04
+            # 收盘 35.14 vs last_price 38.91）；真实浮亏%=fpnl/cost（持仓成本金额）。
+            last = float(row.get("price") or row.get("last_price") or 0)
             stop = pos.get("stop")
             grace = int(tr.get("grace") or 0)
+            _cost = float(row.get("cost") or 0) or (
+                float(row.get("vwap") or 0) * int(row.get("volume") or 1))
             out.append({
                 "leg": leg.key, "leg_label": leg.label,
                 "symbol": ts_sym, "name": _name_of(ts_sym) or ts_sym,
@@ -223,8 +228,7 @@ def build_context() -> list[dict]:
                 "last": round(last, 2) if last else None,
                 "fpnl": round(float(row.get("fpnl") or 0), 0),
                 "fpnl_pct": round(float(row.get("fpnl") or 0)
-                                  / max(1e-9, float(row.get("vwap") or 1)
-                                        * int(row.get("volume") or 1)) * 100, 1),
+                                  / max(1e-9, _cost) * 100, 1),
                 "days_held": days_held, "max_holding": max_hold,
                 "expire_date": _expire_date(entry_date, max_hold),
                 "stop": stop,
@@ -426,12 +430,51 @@ def run(day: str | None = None, force: bool = False) -> dict:
         "note": "浮亏持仓（fpnl<0）每日盘后 LLM 深度归因：主/次因+量化证据+风险状态"
                 "三档（持有观察/收紧关注/临近风控线）；只读分析，不构成交易指令",
     }
+    doc = _committee_gate(doc, day)      # 质证工序（Tier B 附签，fail-open）
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
     finish_run(JOB_NAME, day, "done",
                message=f"{len(ctxs)} 只浮亏归因 @ {doc['model']}")
     print(f"[loser_review] {out.name}（{len(ctxs)} 只，"
           f"{(datetime.now() - t0).total_seconds():.0f}s）")
+    return doc
+
+
+def _committee_gate(doc: dict, day: str) -> dict:
+    """委员会质证工序（2026-09-06 嵌入设计）：当日归因结论 → Tier B 批量附签。
+
+    语义：附签不拦截（fail-open）——verdict/知识库冲突/证据等级落 doc[
+    committee_review]，explore_loop 与人可读；评审不可用=UNAVAILABLE 照常出产物。
+    """
+    if os.getenv("COMMITTEE_GATE", "1") == "0":
+        doc["committee_review"] = {"verdict": "UNAVAILABLE", "notes": "评审关闭"}
+        return doc
+    try:
+        from research.committee.review import review_conclusion
+        rows = []
+        for leg in doc.get("legs", []):
+            for r in leg.get("rows", []):
+                a = r.get("analysis") or {}
+                rows.append(
+                    f"- {r.get('symbol')} {r.get('name')}（亏 {r.get('fpnl_pct')}%"
+                    f" 持 {r.get('days_held')} 日）：主因 {a.get('primary') or a.get('error') or '—'}"
+                    f"｜次因 {a.get('secondary') or '—'}｜置信 {a.get('confidence') or '—'}"
+                    f"｜风险 {a.get('risk_state') or '—'}｜探索方向 {a.get('param_directions') or {}}")
+        if not rows:
+            return doc
+        review_doc = (f"每日亏损归因结论清单（{day}，loser_review 产物，"
+                      f"待质证的是逐只的主/次因与参数探索方向）：\n" + "\n".join(rows)
+                      + "\n\n（口径提示：query_positions 是**当前时点**快照且交易日历"
+                        "随指数湖滞后一日——核对历史日文档的持仓数字时，差异可能来自"
+                        "时点/口径而非原文档错误，请在 fact_checks 里标注判别依据）")
+        review = review_conclusion(f"loser_review_{day}", review_doc,
+                                   tier="A", timeout_s=900)
+        doc["committee_review"] = {k: review.get(k) for k in
+                                   ("verdict", "kb_conflicts", "evidence_grade",
+                                    "notes", "llm_calls", "artifact")}
+    except Exception as e:              # noqa: BLE001 —— fail-open 生存底线
+        doc["committee_review"] = {"verdict": "UNAVAILABLE",
+                                   "notes": f"{type(e).__name__}: {e}"[:200]}
     return doc
 
 

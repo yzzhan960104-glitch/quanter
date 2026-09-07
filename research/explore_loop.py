@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -203,6 +204,8 @@ def run(day: str | None = None, force: bool = False) -> dict:
                 best = c
 
     # ④ 升格：最优格 → 既有提案流（create→verify→publish DRAFT；绝不 promote）
+    #    质证工序（2026-09-06）：最优格先过 Tier B 评审——ESCALATE 则放弃该格
+    #    （fail-closed 于「进提案库」这步：网格还有别的格/别的天，不亏探索面）
     promoted = None
     if best:
         from research import proposals as P
@@ -211,24 +214,52 @@ def run(day: str | None = None, force: bool = False) -> dict:
                f"定向扫描 {best['key']}={best['value']}（基线 {base_v}）inner 年化 "
                f"{best['metrics'].get('annualized_return', 0):.1%} vs 基线 "
                f"{base_inner.get('annualized_return', 0):.1%}")
-        pid = P.create_proposal(
-            P._DEFAULT_DB, change_type="A", hypothesis=hyp[:200],
-            params={best["key"]: best["value"]},
-            expected_effect=f"定向探索最优格（inner 改善过 _judge 门槛）",
-            risk="探索环产物，outer 验证未做前置判断", note="explore_loop")
-        print(f"[explore] 最优格升格提案 {pid} → 既有 verify 流…")
-        try:
-            ok = P.verify_proposal(P._DEFAULT_DB, pid)
-            promoted = {"proposal_id": pid, "verified": ok}
-            if ok:
-                exp_id = P.publish_proposal(P._DEFAULT_DB, pid)
-                promoted["experiment_id"] = exp_id
-                print(f"[explore] APPROVED → DRAFT {exp_id}（promote 走人审闸，红线不破）")
-            else:
-                print(f"[explore] 提案 {pid} 被 verify 拒（理由进学习回路）")
-        except Exception as e:
-            promoted = {"proposal_id": pid, "error": f"{type(e).__name__}: {e}"}
-            print(f"[explore] 提案验证异常（留 PENDING 人工处置）：{e}")
+        committee = None
+        if os.getenv("COMMITTEE_GATE", "1") != "0":
+            try:
+                from research.committee.review import review_conclusion
+                committee = review_conclusion(
+                    f"explore_{day}",
+                    f"{hyp}\n最优格 metrics：{json.dumps(best['metrics'], default=str)}"
+                    f"\n基线 inner：{json.dumps(base_inner, default=str)}"
+                    f"\n来源：当日归因意见→网格扫描后的最优格，待质证后进提案流。",
+                    tier="A", timeout_s=900,
+                    subject={"params": {best["key"]: best["value"]}})
+            except Exception as e:      # noqa: BLE001 —— 评审失败=放行（fail-open）
+                committee = {"verdict": "UNAVAILABLE",
+                             "notes": f"{type(e).__name__}: {e}"[:200]}
+        if committee and committee.get("verdict") == "ESCALATE":
+            promoted = {"skipped_by_committee": True,
+                        "reason": str(committee.get("notes", ""))[:300],
+                        "artifact": committee.get("artifact")}
+            print(f"[explore] 最优格被委员会 ESCALATE 放弃（理由进探索报告）："
+                  f"{promoted['reason'][:120]}")
+        else:
+            cnote = "explore_loop" + (
+                f"｜committee:{committee.get('verdict')}" if committee else "")
+            pid = P.create_proposal(
+                P._DEFAULT_DB, change_type="A", hypothesis=hyp[:200],
+                params={best["key"]: best["value"]},
+                expected_effect=f"定向探索最优格（inner 改善过 _judge 门槛）",
+                risk="探索环产物，outer 验证未做前置判断", note=cnote)
+            print(f"[explore] 最优格升格提案 {pid} → 既有 verify 流…")
+            try:
+                ok = P.verify_proposal(P._DEFAULT_DB, pid)
+                promoted = {"proposal_id": pid, "verified": ok,
+                            "committee": {k: committee.get(k) for k in
+                                          ("verdict", "notes")} if committee else None}
+                if ok:
+                    exp_id = P.publish_proposal(P._DEFAULT_DB, pid)
+                    promoted["experiment_id"] = exp_id
+                    print(f"[explore] APPROVED → DRAFT {exp_id}（promote 走人审闸，红线不破）")
+                else:
+                    print(f"[explore] 提案 {pid} 被 verify 拒（理由进学习回路）")
+            except P.CommitteeEscalated as e:
+                promoted = {"proposal_id": pid, "escalated": str(e)[:300]}
+                print(f"[explore] publish 被委员会拦截转人审：{e}")
+            except Exception as e:
+                promoted = {"proposal_id": pid, "error": f"{type(e).__name__}: {e}"}
+                print(f"[explore] 提案验证异常（留 PENDING 人工处置）：{e}")
 
     return _finish("done", f"{len(grids)} 维 {len(cells)} 格，"
                    f"最优格{'升格 ' + promoted['proposal_id'] if promoted else '无达标'}",
