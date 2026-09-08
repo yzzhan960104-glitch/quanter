@@ -264,14 +264,20 @@ def _loser_review(w) -> int:
     """当日亏损归因上站（ops/loser_review.py 的产物透传）。
 
     生成本体在 18:05 cron（或手动 python -m ops.loser_review）——快照只读
-    logs/loser_review_{day}.json，缺文件优雅降级 null（18:05 前的盘中发布
-    自然看不到当日归因）。内容为 LLM 归因观点+持仓事实，无账户/凭证面。
+    logs/loser_review_{day}.json。**回退最新可得日**（2026-09-08 用户实弹反馈：
+    盘中发布只读当日文件 → 每日回顾页归因区在 18:05 前恒空；改为当日缺失时取
+    最新档案日，doc 自带 day/generated_at 供前端标注「归因日」，杜绝把昨日
+    归因误读为当日）。内容为 LLM 归因观点+持仓事实，无账户/凭证面。
     """
     today = f"{datetime.now():%Y-%m-%d}"
     src = ROOT / "logs" / f"loser_review_{today}.json"
     if not src.exists():
+        cands = [p for p in sorted(ROOT.glob("logs/loser_review_*.json"))
+                 if not p.name.endswith(".bak")]
+        src = cands[-1] if cands else None
+    if src is None or not src.exists():
         w("loser_review", {"day": today, "legs": None,
-                           "note": "当日亏损归因尚未生成（18:05 盘后 cron）"})
+                           "note": "亏损归因尚未生成（18:05 盘后 cron 首跑后可见）"})
         return 0
     try:
         doc = json.loads(src.read_text(encoding="utf-8"))
@@ -279,6 +285,8 @@ def _loser_review(w) -> int:
         w("loser_review", {"day": today, "legs": None,
                            "note": f"产物解析失败：{e}"})
         return 0
+    if doc.get("day") != today:
+        doc["stale"] = True          # 前端渲染「归因日≠今日」徽标
     w("loser_review", doc)
     return 1
 

@@ -11,7 +11,11 @@
   <el-card shadow="never">
     <template #header>
       <div class="flex-between">
-        <span>亏损归因 <span class="sub">（{{ legLabel }} · 浮亏 {{ rows.length }} 只）</span></span>
+        <span>亏损归因 <span class="sub">（{{ legLabel }} · 浮亏 {{ rows.length }} 只）</span>
+          <el-tag v-if="doc?.stale" size="small" type="warning" effect="plain" style="margin-left: 8px">
+            归因日 {{ doc?.day }}（当日 18:05 后更新）
+          </el-tag>
+        </span>
         <span class="sub">{{ doc?.model || '—' }} · {{ doc?.generated_at || '' }}</span>
       </div>
     </template>

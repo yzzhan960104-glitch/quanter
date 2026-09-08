@@ -85,6 +85,7 @@ export interface LoserReviewDoc {
   legs: LoserLeg[] | null       // null=当日未生成（18:05 前/生成失败）
   note?: string
   committee_review?: CommitteeReview | null
+  stale?: boolean               // true=归因日≠今日（快照回退最新可得档案,前端标徽标）
 }
 
 export function getLoserReview(): Promise<LoserReviewDoc | null> {
