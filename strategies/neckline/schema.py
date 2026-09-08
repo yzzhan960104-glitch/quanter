@@ -73,3 +73,7 @@ class NecklineConfig(BaseModel):
     time_stop_days: int = Field(
         0, ge=0, description="R6-10 L1 时间止损：入场 N 个交易日未触发任何 tp → 离场"
                              "（持有期分桶单调衰减的结构化兑现；0=关）")
+    price_limit_model: bool = Field(
+        False, description="涨跌停价格限制建模（主板扩池前置）：True=回测按标的"
+                           "当日涨跌停价钳挂单/成交价（防触板带失真）；False=旧"
+                           "行为零回归。backtest.py:211 单源消费")
