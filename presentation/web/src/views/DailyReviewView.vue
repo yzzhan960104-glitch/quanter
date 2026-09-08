@@ -186,7 +186,15 @@ watch(leg, loadLeg)
 </script>
 
 <style scoped>
-.review-page { padding: 4px 0 24px; }
+/* 根容器自管滚动（App 壳 100vh+overflow:hidden，各视图负责自己的滚动区——HomeView 同法） */
+.review-page {
+  flex: 1;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--qt-space-3, 16px);
+}
 .review-head { display: flex; justify-content: space-between; align-items: center;
   flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
 .title { display: flex; align-items: baseline; gap: 10px; }

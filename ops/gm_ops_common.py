@@ -32,8 +32,9 @@ GM_API_BASE = os.environ.get("GM_API_BASE", "http://127.0.0.1:7002")
 # 物理意图：「主腿(incumbent)/实验腿(challenger)」是三件套/ingest/归档/对照脚本的
 # 共同事实源——目录与账户的映射散在任何一处都会漂移（单源纪律）。目录经 env 覆写：
 #   - main：GM_STRATEGY_DIR（沿用既有键，已注册 schtasks 命令行零变更）；
-#   - exp ：GM_EXP_STRATEGY_DIR / GM_EXP_ACCOUNT_ID（.env，部署实验腿时写入；
-#           未设或目录不存在 = 实验腿未启用，消费方静默跳过——未部署期零告警噪音）。
+#   - exp ：GM_EXP_STRATEGY_DIR / GM_EXP_ACCOUNT_ID（.env，部署该槽位腿时写入；
+#           未设或目录不存在 = 该腿未启用，消费方静默跳过——未部署期零告警噪音。
+#           当前槽位=均衡栈腿，09-07 A 方案换代替换原实验腿。）
 
 from dataclasses import dataclass
 
@@ -48,14 +49,16 @@ class LegDef:
 
 
 _MAIN_LEG = LegDef("main", "主腿", "GM_STRATEGY_DIR", "GM_MAIN_ACCOUNT_ID", GM_STRATEGY_DIR)
-_EXP_LEG = LegDef("exp", "实验腿", "GM_EXP_STRATEGY_DIR", "GM_EXP_ACCOUNT_ID", None)
+# 槽位语义（2026-09-07 A 方案换代）：exp 槽=均衡栈腿（NECK-BALANCED，策略
+# adef4759/账户 a461af44；原 r10leg 实验腿 09-07 退役，旧目录 5557c9cb 归档）。
+_EXP_LEG = LegDef("exp", "均衡栈腿", "GM_EXP_STRATEGY_DIR", "GM_EXP_ACCOUNT_ID", None)
 LEGS = (_MAIN_LEG, _EXP_LEG)
 
 # 实验账户（2026-08-28 零 GUI 建成，复现命令见 emquant/tools/gm_sim_account.py）：
 # 期初 10 万 / simulate 撮合 / gm-broker-1 通道（与主账户同款）。作 exp 腿 env 未设时
 # build_pilot --leg exp 的缺省——与 runtime.json 的 account_id 交叉验证（C1 产物级
 # 账户锁的意图层对侧）。
-DEFAULT_EXP_ACCOUNT_ID = "c4ba3b2e-a2da-11f1-9262-52560acd7da0"
+DEFAULT_EXP_ACCOUNT_ID = "a461af44-aa79-11f1-a5b6-52560acd7da0"   # 均衡栈试点（09-07 换代；旧 c4ba3b2e 已删）
 
 
 def leg_strategy_dir(leg: LegDef) -> Path | None:
