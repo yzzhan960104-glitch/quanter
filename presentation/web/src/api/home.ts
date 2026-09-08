@@ -152,8 +152,13 @@ export interface NextPlanRow {
 
 export interface PlanCardDoc {
   today: string
+  leg?: string
+  leg_label?: string
   rows: PlanRow[]
-  summary: { signals: number; filled: number; skip_held: number; blocked: number }
+  /** 漏斗逐级(2026-09-08):total=识别总数(新信号+持有跳过互斥);amihud/blocked/
+   *  throttle 作用于其后各级为子集;placed=实挂;filled=成交。旧卡缺 total/amihud/placed/throttle。 */
+  summary: { signals: number; filled: number; skip_held: number; blocked: number
+             total?: number; amihud?: number; placed?: number; throttle?: number }
   preview: { stamp?: string; equity?: number
     recon: { ok: number; total: number; only_preview: string[]
              only_actual: string[]; drift: string[] } } | null
@@ -179,6 +184,7 @@ export interface PlanGuards {
   rows?: Array<{ sym?: string; premium_atr_est?: number | null; chase_skip_note?: string }>
 }
 
-export function getPlanCard(): Promise<PlanCardDoc | null> {
-  return staticGet<PlanCardDoc | null>('plan_card', null)
+export function getPlanCard(leg?: string): Promise<PlanCardDoc | null> {
+  // 分腿计划卡(2026-09-08):leg 指定读 plan_card_{leg};缺省=主腿旧键(HomeView 兼容)
+  return staticGet<PlanCardDoc | null>(leg ? `plan_card_${leg}` : 'plan_card', null)
 }

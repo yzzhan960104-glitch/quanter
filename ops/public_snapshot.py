@@ -719,13 +719,26 @@ def _plan_card(w) -> int:
     import csv as _csv
     from datetime import datetime as _dt
     from ops import gm_ops_common as gc
-    from ops.emquant_eod_report import _name_map
 
     today = f"{_dt.now():%Y-%m-%d}"
-    main_dir = gc.leg_strategy_dir(next(l for l in gc.active_legs() if l.key == "main"))
+    # 2026-09-08 分腿计划卡（用户实弹反馈：均衡栈腿页签不能看主腿实况）：
+    # 每条在役腿独立产 plan_card_{leg}；main 兼容写旧键 plan_card（HomeView）。
+    for leg in gc.active_legs():
+        _plan_card_leg(w, today, leg, legacy=(leg.key == "main"))
+    return 0
+
+
+def _plan_card_leg(w, today, leg, legacy: bool) -> None:
+    """单腿计划卡：今日实况读**该腿自己的 audit**（持仓跳过/拦截独立分腿）；
+    预演块（preview/next_preview）仅主腿渲染——预演链当前只跑主腿，均衡栈腿
+    的明日行为由 T1 守卫预判（市场级事实，两腿同值）呈现。"""
+    from ops.emquant_eod_report import _name_map
+    from ops import gm_ops_common as gc
+    import csv as _csv
+    main_dir = gc.leg_strategy_dir(leg)
 
     facts = {"signals": [], "placed": {}, "filled": set(),
-             "skip_held": 0, "blocked": 0}
+             "skip_held": 0, "blocked": 0, "amihud": 0, "throttle": 0}
     src = gc.audit_csv_path(today, main_dir)
     if src.exists():
         for row in _csv.reader(src.open(encoding="utf-8")):
@@ -744,6 +757,10 @@ def _plan_card(w) -> int:
                 facts["filled"].add(str(d["symbol"]))
             elif ev == "SIGNAL_SKIP_HELD":
                 facts["skip_held"] += 1
+            elif ev == "SIGNAL_FILTERED_AMIHUD":
+                facts["amihud"] += 1
+            elif ev == "THROTTLE_SKIP":
+                facts["throttle"] += 1
             elif ev == "ORDER_BLOCKED":
                 facts["blocked"] += 1
 
@@ -762,10 +779,10 @@ def _plan_card(w) -> int:
             else "placed" if pl else "signal",
         })
 
-    # 昨晚预演回看（已执行 → 公开 + 对拍）
+    # 昨晚预演回看（已执行 → 公开 + 对拍）——仅主腿（预演链只跑主腿）
     preview = None
     pp = ROOT / "logs" / f"plan_preview_{today}.json"
-    if pp.exists():
+    if pp.exists() and legacy:
         try:
             art = json.loads(pp.read_text(encoding="utf-8"))
             if art.get("plan_date") == today:
@@ -794,7 +811,7 @@ def _plan_card(w) -> int:
     # > today 的作为盘前参考整段公开。私域前提下的完整功能形态。
     next_preview = None
     pps = sorted(ROOT.glob("logs/plan_preview_*.json"))
-    if pps:
+    if pps and legacy:
         try:
             art = json.loads(pps[-1].read_text(encoding="utf-8"))
             if str(art.get("plan_date", "")) > today:
@@ -818,19 +835,45 @@ def _plan_card(w) -> int:
         except (OSError, ValueError):
             pass
 
-    w("plan_card", {
+    w(f"plan_card_{leg.key}", {
         "today": today,
+        "leg": leg.key,
+        "leg_label": leg.label,
         "rows": rows,
-        "summary": {"signals": len(facts["signals"]),
+        # 2026-09-08 漏斗语义修正（用户实弹反馈「0+7+5>11」）：四数非同层分区。
+        # total=识别总数=SIGNAL+SIGNAL_SKIP_HELD（互斥）；signals=过持有筛后的
+        # 新信号；amihud=keep-top5 剔除（signals 的子集）；blocked=挂单段拦截
+        # （amihud 后候选的子集）；placed=实挂（blocked 补集）；filled=已成交。
+        "summary": {"total": len(facts["signals"]) + facts["skip_held"],
+                    "signals": len(facts["signals"]),
                     "filled": len(facts["filled"]),
                     "skip_held": facts["skip_held"],
-                    "blocked": facts["blocked"]},
+                    "amihud": facts["amihud"],
+                    "blocked": facts["blocked"],
+                    "throttle": facts["throttle"],
+                    "placed": len(facts["placed"])},
         "preview": preview,
         "next_preview": next_preview,
         "note": "预演≠计划：识别层与实跑同源逐字段一致，差异来自运行时闸态；"
-                "权威以 09:31 实挂为准（站点终态私域，鉴权建设中）",
+                "权威以 09:31 实挂为准（站点终态私域，鉴权建设中）"
+                + ("" if legacy else f"；本卡=「{leg.label}」独立实况"
+                   "（预演块为主腿档案，该腿预演链未部署）"),
     })
-    return 0
+    if legacy:                       # HomeView 旧键兼容（主腿同内容双写）
+        w("plan_card", {
+            "today": today, "rows": rows,
+            "summary": {"total": len(facts["signals"]) + facts["skip_held"],
+                        "signals": len(facts["signals"]),
+                        "filled": len(facts["filled"]),
+                        "skip_held": facts["skip_held"],
+                        "amihud": facts["amihud"],
+                        "blocked": facts["blocked"],
+                        "throttle": facts["throttle"],
+                        "placed": len(facts["placed"])},
+            "preview": preview, "next_preview": next_preview,
+            "note": "预演≠计划：识别层与实跑同源逐字段一致，差异来自运行时闸态；"
+                    "权威以 09:31 实挂为准（站点终态私域，鉴权建设中）",
+        })
 
 
 def _trailing_path(leg_dir: Path, pos: dict) -> list:

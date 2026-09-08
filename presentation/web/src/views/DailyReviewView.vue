@@ -85,7 +85,7 @@
 
     <el-row :gutter="12" class="mt">
       <el-col :span="24">
-        <PlanCard />
+        <PlanCard :leg="leg" />
         <CommitteeReviewPanel :review="planDoc?.next_preview?.committee_review"
                               :guards="planDoc?.next_preview?.guards"
                               placeholder class="mt-half" />

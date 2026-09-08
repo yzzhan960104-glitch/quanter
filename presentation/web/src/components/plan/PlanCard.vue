@@ -80,8 +80,20 @@
     </template>
 
     <div class="foot">
-      <span v-if="doc">信号 {{ doc.summary.signals }} · 成交 {{ doc.summary.filled }}
-        · 持仓跳过 {{ doc.summary.skip_held }} · 拦截 {{ doc.summary.blocked }}</span>
+      <!-- 漏斗语义(2026-09-08 修正):各数为逐级子集而非同层分区——
+           识别=新信号+持有跳过(互斥);amihud 剔/挂单拦截/T1 节流作用于其后各级 -->
+      <span v-if="doc" class="funnel">
+        识别 {{ doc.summary.total ?? doc.summary.signals + doc.summary.skip_held }}
+        → 跳过持有 {{ doc.summary.skip_held }}
+        → 新信号 {{ doc.summary.signals }}
+        → amihud剔 {{ doc.summary.amihud ?? 0 }}
+        <template v-if="doc.summary.throttle">
+          → <b class="throttle-hit">T1 节流拦截挂单段（{{ doc.summary.throttle }} 次）</b>
+        </template>
+        → 挂单拦截 {{ doc.summary.blocked }}
+        → 实挂 {{ doc.summary.placed ?? 0 }}
+        → 成交 {{ doc.summary.filled }}
+      </span>
       <span class="sub">{{ doc?.note }}</span>
     </div>
 
@@ -100,10 +112,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { getPlanCard, getOhlcv, type PlanCardDoc, type OhlcvData } from '../../api/home'
 import KlinePanel from '../charts/KlinePanel.vue'
 
+/** leg=腿键（main/exp——分腿计划卡 2026-09-08；缺省=旧单卡行为，HomeView 兼容） */
+const props = defineProps<{ leg?: string }>()
 const doc = ref<PlanCardDoc | null>(null)
 const drawer = ref(false)
 const drawerTitle = ref('')
@@ -122,9 +136,11 @@ async function open(row: { sym: string; name: string }) {
   kline.value = await getOhlcv(row.sym).catch(() => null)
 }
 
-onMounted(async () => {
-  doc.value = await getPlanCard().catch(() => null)
-})
+async function load() {
+  doc.value = await getPlanCard(props.leg).catch(() => null)
+}
+onMounted(load)
+watch(() => props.leg, load)
 </script>
 
 <style scoped>
@@ -137,4 +153,6 @@ onMounted(async () => {
 .kmeta { display: flex; gap: 16px; margin-bottom: 8px; font-size: 13px; }
 .next-foot { display: flex; flex-direction: column; gap: 2px; margin-top: 6px;
              font-size: 11px; color: var(--el-text-color-secondary); }
+.funnel { font-size: 12.5px; color: var(--el-text-color-regular); }
+.throttle-hit { color: var(--el-color-danger); }
 </style>
