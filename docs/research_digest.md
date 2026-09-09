@@ -1,4 +1,4 @@
-# 研究摘要 2026-09-08
+# 研究摘要 2026-09-09
 
 ## 实盘表现（fill 去重归因）
 - 实盘成交：0 笔
@@ -42,14 +42,15 @@
 - 新冠军：calmar=13.64 outer ann=35.9%
 
 ## 委员会评审台（质证工序 · 近 2 日）
+- plan_preview_2026-09-10 [Tier A] **NOTES**（9 次调用）｜KB冲突: 无重提七波否决形状（2.5ATR帽/skip@3.0/T1 均为 KB 实证终态，rr 维度不在否决面内）；deep 定
 - plan_preview_2026-09-09 [Tier A] **NOTES**（10 次调用）｜KB冲突: 无硬冲突；三处标注：①deep=负期望系口径压缩（throttle_design 09-06分化证据：deep双峰202
 - plan_preview_2026-09-08 [Tier A] **NOTES**（10 次调用）｜KB冲突: T1两区冻结版在deep停新仓 vs throttle_design三区DRAFT只帽缠线带——已登记未决分歧，DRAF
 - plan_preview_2026-09-08 [Tier B] **NOTES**（3 次调用）｜KB冲突: T1 二元闸在 deep 区停新仓，与 throttle_design 三区版 DRAFT（仅缠线带停、deep 保留抄
+- opt0908_r8_exit_grid [Tier A] **NOTES**（13 次调用）｜KB冲突: 无同形状否决:1.75纯键在rejected_proposals(8案全捆绑)无先例,不触发T3.3重提驳回;但报告基线
+- opt0908_r7_pertrade_grid [Tier A] **NOTES**（10 次调用）｜KB冲突: 六年分年全正判据与 regime_dependence/above_bull_proxy（指数阴年全负、净期望 77.6
 - opt0908_r6b_limit_model [Tier A] **NOTES**（12 次调用）｜KB冲突: 无方向冲突（plm 保守方向、非七波/R10 同型）；缺口：R6 NOT READY 判定与中间态长扫教训未入档，随采纳
 - opt0908_r6_pool_expansion [Tier A] **PASS**（11 次调用）｜干净带 +0.73% 在本席语料上分毫不差地复现，是报告最强外部证据；拒绝性裁决零参数风险故 PASS——三项强制条件：
 - opt0908_r5_validation [Tier A] **NOTES**（11 次调用）｜设计强度过中评级风险关但 OOS 为零、平台仅两点——附条件放行：fresh_window 成熟复核+排名6-7边际笔监
 - opt0908_r4_final [Tier A] **NOTES**（11 次调用）｜KB冲突: 无新冲突：throttle_design 含 R1 终弃+R4 重走记录，cooldown_semantics 含 R4
 - opt0908_r3_validation [Tier A] **NOTES**（11 次调用）｜KB冲突: r10_veto: cd2格outer ann负让渡39.1vs46.1且outer dd/calmar未报——报告自认
 - opt0908_r2_validation [Tier A] **NOTES**（11 次调用）｜KB冲突: 无硬冲突（cooldown 不在 rejected_proposals 库，cd2 非重提死方向）
-- opt0908_r1_validation [Tier A] **NOTES**（8 次调用）｜KB冲突: a_bull 所引 production 2025-11 FAIL 记录在 KB time_stop 检索中不存在——t
-- loser_review_2026-09-07 [Tier B] **ESCALATE**（3 次调用）｜KB冲突: momentum_gate 任何启用都降年化（filters_7waves 元结论），清单8条建议收紧动量闸
