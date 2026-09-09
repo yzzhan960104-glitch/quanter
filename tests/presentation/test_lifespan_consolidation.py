@@ -227,25 +227,28 @@ async def test_lifespan_registers_discovery_cron_02(monkeypatch):
 
 
 def test_run_discovery_subprocess_detached(monkeypatch):
-    """_run_discovery_subprocess 起 DETACHED 子进程 ``python -m discovery daemon``。
+    """_run_discovery_subprocess 起后台分离子进程 ``python -m discovery daemon``。
 
     验：(1) subprocess.Popen 调一次；(2) cmd=[venv_py, -m, discovery, daemon]（复用
     cli cmd_daemon 装配，不重写 freeze/split 默认参数）；(3) creationflags 含
-    DETACHED_PROCESS(0x8)——子进程独立进程组，uvicorn 退出不杀 discovery 夜跑。
+    CREATE_NO_WINDOW(0x08000000)+CREATE_NEW_PROCESS_GROUP——子进程独立进程组
+    （uvicorn 退出不杀夜跑）且子树共享隐藏控制台（09-08 弹窗根治：DETACHED_PROCESS
+    无控制台会让孙控制台程序各自新建可见窗口）。
     """
     from presentation.server.main import _run_discovery_subprocess
 
     # 固定非 low-power：机器 env DISCOVERY_SCHEDULE=low-power 时按当前时段可能跳过
-    # （如 12:58 在 9-16 窗口外），导致 Popen 不触发——本测试只验 detach 语义，不验调度。
+    # （如 12:58 在 9-16 窗口外），导致 Popen 不触发——本测试只验后台分离语义，不验调度。
     monkeypatch.setenv("DISCOVERY_SCHEDULE", "")
     with patch("presentation.server.main._subprocess.Popen") as popen:
         _run_discovery_subprocess()
     popen.assert_called_once()
     cmd = popen.call_args[0][0]
     assert "-m" in cmd and "discovery" in cmd and "daemon" in cmd
-    # DETACHED 标志（creationflags 含 DETACHED_PROCESS = 0x8）
+    # 静默分离标志（creationflags 含 CREATE_NO_WINDOW + CREATE_NEW_PROCESS_GROUP）
     flags = popen.call_args[1].get("creationflags", 0)
-    assert flags & 0x00000008      # DETACHED_PROCESS 位
+    assert flags & 0x08000000      # CREATE_NO_WINDOW 位
+    assert flags & 0x00000200      # CREATE_NEW_PROCESS_GROUP 位
 
 
 # ============ C-7 V3：discovery 启动补跑（offline 容错） ============

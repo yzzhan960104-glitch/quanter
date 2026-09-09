@@ -74,12 +74,14 @@ import subprocess as _subprocess
 # 2026-08-03 周一断链实证，tests/test_workday_cron.py 钉死）。
 _DIGEST_CRON_DEFAULT = "30 18 * * mon-fri"
 
-# Windows DETACHED 标志（broadcast/connect_manager.py 等既有范式，C-7 前 ops/start_all.py 同源）：
+# Windows 后台分离 flags（broadcast/connect_manager.py 等既有范式，C-7 前 ops/start_all.py 同源）：
 #   CREATE_NEW_PROCESS_GROUP(0x200) → 子进程独立进程组（Ctrl+C 不传播）；
-#   DETACHED_PROCESS(0x8)           → 无控制台（独立于父进程 uvicorn 的 stdio）。
-# 二者组合：uvicorn 退出/重启不杀 discovery 夜跑子进程（长任务不依附 server 生命周期）。
+#   CREATE_NO_WINDOW(0x08000000)     → 隐藏控制台（可继承）。
+# 09-08 弹窗根治第二轮：弃 DETACHED_PROCESS（无控制台——孙控制台程序会各自新建
+# 可见窗口=桌面弹窗，gm_guard powershell/npm/dws 实证），换 CREATE_NO_WINDOW——
+# 子树共享一个不可见控制台，孙进程继承而非开窗；stdout 仍重定向日志文件不受影响。
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
-_DETACHED_PROCESS = 0x00000008
+_CREATE_NO_WINDOW = 0x08000000
 
 
 def _discovery_low_power_allowed(now=None) -> bool:
@@ -136,7 +138,7 @@ def _run_discovery_subprocess(low_power: bool | None = None) -> None:
         stdout=_log_fh,
         stderr=_subprocess.STDOUT,
         stdin=_subprocess.DEVNULL,
-        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
+        creationflags=_CREATE_NEW_PROCESS_GROUP | _CREATE_NO_WINDOW,
         close_fds=True,
     )
 
@@ -157,7 +159,7 @@ def _spawn_venv_subprocess(args: list, log_name: str) -> None:
         stdout=_log_fh,
         stderr=_subprocess.STDOUT,
         stdin=_subprocess.DEVNULL,
-        creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS,
+        creationflags=_CREATE_NEW_PROCESS_GROUP | _CREATE_NO_WINDOW,
         close_fds=True,
     )
 

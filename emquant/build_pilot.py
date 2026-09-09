@@ -101,7 +101,12 @@ def _build_stamp() -> str:
     "unknown"（fail-visible 不 fail-loud：组装本身仍可完成，stamp 缺失在部署
     核对时自然暴露）。
     """
+    import os
     import subprocess
+    # CREATE_NO_WINDOW（0x08000000）与 infra/winproc.SILENT 同值内联：本脚本以
+    # 脚本形态被拉起（sys.path 无项目根，emquant 家族不 import 项目包）；父进程
+    # 多为 promote watch DETACHED 链（无控制台），spawn git 会新建控制台窗口=弹窗。
+    _silent = {"creationflags": 0x08000000} if os.name == "nt" else {}
     try:
         out = subprocess.run(
             ["git", "log", "-1", "--format=%ci %h", "--",
@@ -109,7 +114,7 @@ def _build_stamp() -> str:
              "emquant/config/params_snapshot.json", "emquant/config/universe.json",
              "strategies/neckline/signal.py",
              "strategies/neckline/method_v0.py"],
-            capture_output=True, text=True, cwd=str(ROOT), timeout=10)
+            capture_output=True, text=True, cwd=str(ROOT), timeout=10, **_silent)
         return out.stdout.strip() or "unknown"
     except Exception:
         return "unknown"

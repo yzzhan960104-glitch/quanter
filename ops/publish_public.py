@@ -42,6 +42,9 @@ try:
 except ImportError:
     pass
 
+from infra.winproc import SILENT  # 交易时段每小时 cron（DETACHED 无控制台）spawn
+# npm/npx/node/git 控制台程序会新建窗口=每小时弹窗，统一 CREATE_NO_WINDOW
+
 PROJECT = "yzzhan-view"          # CF Pages 项目名（自定义域绑在它上面）
 PROD_BRANCH = "main"
 
@@ -57,7 +60,7 @@ def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 600) -> int:
     exe = shutil.which(cmd[0]) or cmd[0]
     print(f"$ {' '.join(cmd)}" + (f"  (cwd={cwd})" if cwd else ""), flush=True)
     rc = subprocess.run([exe, *cmd[1:]], cwd=str(cwd) if cwd else None,
-                        timeout=timeout).returncode
+                        timeout=timeout, **SILENT).returncode
     if rc != 0:
         raise SystemExit(f"步骤失败 rc={rc}：{' '.join(cmd)}")
     return rc
@@ -68,7 +71,8 @@ def _wrangler(*args: str, timeout: int = 600) -> subprocess.CompletedProcess:
     exe = shutil.which("npx") or "npx"
     return subprocess.run([exe, "--no-install", "wrangler", *args],
                           cwd=str(WEB), capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout)
+                          encoding="utf-8", errors="replace", timeout=timeout,
+                          **SILENT)
 
 
 def main(argv: list[str] | None = None) -> int:

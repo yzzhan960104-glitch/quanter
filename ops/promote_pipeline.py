@@ -34,6 +34,9 @@ try:
 except (AttributeError, OSError):
     pass
 
+from infra.winproc import SILENT  # 18:50 watch cron（DETACHED 无控制台）spawn git/
+# powershell/venv python 会新建控制台窗口=弹窗，统一 CREATE_NO_WINDOW
+
 JOB_NAME = "ops_promote_watch"
 PENDING = ROOT / "logs" / "pending_deployment.json"
 SNAPSHOT = ROOT / "emquant" / "config" / "params_snapshot.json"
@@ -141,7 +144,7 @@ def watch() -> dict:
             pass
         r = subprocess.run([str(PY), str(ROOT / "emquant" / "export_snapshot.py")],
                            capture_output=True, text=True, cwd=str(ROOT),
-                           timeout=600)
+                           timeout=600, **SILENT)
         if r.returncode != 0:
             raise RuntimeError(f"export rc={r.returncode}: {r.stderr[-300:]}")
         new_params = json.loads(SNAPSHOT.read_text(encoding="utf-8")) \
@@ -221,7 +224,7 @@ def deploy(leg: str = "exp", execute: bool = False, allow_main: bool = False) ->
 
     def _git(*args):
         r = subprocess.run(["git", *args], capture_output=True, text=True,
-                           cwd=str(ROOT))
+                           cwd=str(ROOT), **SILENT)
         if r.returncode != 0:
             raise RuntimeError(f"git {args[0]}: {r.stderr[-200:]}")
         return r.stdout.strip()
@@ -230,19 +233,19 @@ def deploy(leg: str = "exp", execute: bool = False, allow_main: bool = False) ->
         # ① 两段 stamp 第一段：commit config（export 已产工作区变更）
         _git("add", "emquant/config/params_snapshot.json", "emquant/config/universe.json")
         if subprocess.run(["git", "diff", "--cached", "--quiet"],
-                          cwd=str(ROOT)).returncode != 0:
+                          cwd=str(ROOT), **SILENT).returncode != 0:
             _git("commit", "-m", f"chore(deploy): 换代就绪 config（champion="
                  f"{pending['champion']}，watch 产物）")
         # ② build（stamp 锚刚提交的 config；两腿统一走 CLI 形态）
         r = subprocess.run([str(PY), str(ROOT / "emquant" / "build_pilot.py"),
                             "--leg", leg], capture_output=True, text=True,
-                           cwd=str(ROOT), timeout=300)
+                           cwd=str(ROOT), timeout=300, **SILENT)
         if r.returncode != 0:
             raise RuntimeError(f"build rc={r.returncode}: {r.stderr[-300:]}")
         # ③ 两段 stamp 第二段：commit 产物
         _git("add", str(artifact))
         if subprocess.run(["git", "diff", "--cached", "--quiet"],
-                          cwd=str(ROOT)).returncode != 0:
+                          cwd=str(ROOT), **SILENT).returncode != 0:
             _git("commit", "-m", f"chore(deploy): 换代产物 {artifact.name}"
                  f"（两段提交第二段，champion={pending['champion']}）")
         stamp = _git("log", "-1", "--format=%ci %h", "--", str(artifact))
@@ -258,7 +261,7 @@ def deploy(leg: str = "exp", execute: bool = False, allow_main: bool = False) ->
         # ⑤ relaunch
         subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                         "-File", str(leg_dir / "relaunch_strategy.ps1")],
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, timeout=120, **SILENT)
         _notify("INFO", f"✅ 换代部署已执行：{pending['champion']} → {leg} 腿"
                        f"（stamp {stamp}；备份 {bak.name}）。验证：audit INIT 三锚"
                        f"+次日 ab_compare/晨检自动核；回滚=cp {bak.name} main.py + relaunch")

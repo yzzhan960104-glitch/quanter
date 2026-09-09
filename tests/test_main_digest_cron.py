@@ -2,14 +2,14 @@
 """research digest 周期推送 cron 注册单测（2026-08-03 · 钉钉周期同步）。
 
 物理意图：长周期 Agent 观察环的推送腿——lifespan 里注册每日盘后 cron，
-触发 DETACHED 子进程 ``python -m research.digest --push``（零事件循环阻塞，
+触发后台分离子进程 ``python -m research.digest --push``（零事件循环阻塞，
 与 discovery cron 同范式），钉钉收到"实盘 vs 回测期望"研究摘要。
 """
 import presentation.server.main as main
 
 
 def test_run_research_digest_push_spawns_detached_subprocess(monkeypatch):
-    """_run_research_digest_push 必须用 DETACHED 子进程跑 research.digest --push。"""
+    """_run_research_digest_push 必须用静默分离子进程跑 research.digest --push。"""
     calls = []
 
     class _FakePopen:
@@ -22,4 +22,6 @@ def test_run_research_digest_push_spawns_detached_subprocess(monkeypatch):
     cmd = calls[0]["args"]
     assert cmd[1:3] == ["-m", "research.digest"]
     assert "--push" in cmd and "--proposals" in cmd
-    assert calls[0]["creationflags"] & main._DETACHED_PROCESS
+    # 09-08 弹窗根治：CREATE_NO_WINDOW（隐藏可继承控制台）+ 独立进程组
+    assert calls[0]["creationflags"] & main._CREATE_NO_WINDOW
+    assert calls[0]["creationflags"] & main._CREATE_NEW_PROCESS_GROUP

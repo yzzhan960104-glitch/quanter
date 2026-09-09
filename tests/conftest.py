@@ -63,6 +63,10 @@ def _isolate_trade_env(monkeypatch):
     # .env 注入的 QUANTER_API_TOKEN 若在场即摘除——防 require_write「token 已配 + 无 Bearer
     # → 401」分支拒无鉴权 TestClient（test_trading_api 9 用例恒 401 根因，Why 见上方注释块）。
     monkeypatch.delenv("QUANTER_API_TOKEN", raising=False)
+    # 委员会评审闸默认关（2026-09-06 质证工序）：防 publish 路径测试触发真实 GLM Tier A
+    # 评审（review.py 的 load_dotenv 会把 .env 的 GLM_API_KEY 带进测试进程）——烧配额+
+    # 拖慢测试。需要开闸的用例在测试内 monkeypatch.setenv("COMMITTEE_GATE", "1") 后序覆盖。
+    monkeypatch.setenv("COMMITTEE_GATE", "0")
 # ============ C-8 V1：隔离 job 台账 DB（防测试写真实 logs/trading_job_run.db）============
 # Why autouse：pipeline_then_eod / pre_open 改造后会写台账；若不隔离，任何调用这些
 # 函数的既有测试都会把「测试日」写成 done，污染真实启动补跑判定（漏跑被误判为已跑）。

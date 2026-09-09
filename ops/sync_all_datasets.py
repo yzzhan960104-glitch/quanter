@@ -33,6 +33,9 @@ ROOT = Path(__file__).resolve().parent.parent
 import sys
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from infra.winproc import SILENT  # 本进程由 18:00 管道 DETACHED 拉起（无控制台），
+# 逐数据集 spawn python 会各新建一个控制台窗口=晚间连环弹窗，统一 CREATE_NO_WINDOW
 SYNCING_DIR = ROOT / "data_lake" / ".syncing"
 LOG = ROOT / "logs" / "sync_all_datasets.log"
 
@@ -109,7 +112,7 @@ def run_all(timeout_sec: int = PER_DATASET_TIMEOUT_SEC) -> tuple[int, int]:
         try:
             proc = subprocess.run(
                 _build_cmd(key, spec), capture_output=True, text=True,
-                timeout=timeout_sec, check=False, cwd=str(ROOT))
+                timeout=timeout_sec, check=False, cwd=str(ROOT), **SILENT)
         except subprocess.TimeoutExpired:
             _mark_failed(key, f"超时（>{timeout_sec}s）被 kill")
             fail += 1

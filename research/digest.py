@@ -175,12 +175,38 @@ def build_digest(digest_date, live: dict, expectation: dict | None,
         "",
         "## 参数探索（discovery 低功率）",
         _discovery_block(discovery_status),
+        "",
+        "## 委员会评审台（质证工序 · 近 2 日）",
+        _committee_block(),
     ]
     # T3.1 逐笔归因段（可选）：插在漂移对比之后——分析输入加厚的落点（AI 回路缺口①：
     # 此前 digest/训练环只有 6 字段摘要，无「亏在哪种出场/哪个月」的归因面）
     if analysis_md:
         lines.insert(lines.index("## 数据与实验状态"), analysis_md.rstrip() + "\n")
     return "\n".join(lines)
+
+
+def _committee_block() -> str:
+    """评审台段（2026-09-06 质证工序）：近 2 日委员会评审 verdict 一览（人读）。"""
+    try:
+        from research.committee.review import recent_reviews
+        reviews = recent_reviews(days=2)
+    except Exception:                              # noqa: BLE001 —— 观测层降级
+        return "- 评审台不可用（模块异常）"
+    if not reviews:
+        return "- 近 2 日无评审记录（质证工序：loser_review/explore/publish 闸自动产生）"
+    out = []
+    for r in reviews:
+        head = (f"- {r.get('kind', '?')} [Tier {r.get('tier') or '?'}] "
+                f"**{r.get('verdict', '?')}**（{r.get('llm_calls', 0)} 次调用）")
+        notes = str(r.get("notes") or "").strip()
+        kbc = r.get("kb_conflicts") or []
+        if kbc:
+            head += f"｜KB冲突: {str(kbc[0])[:60]}"
+        elif notes:
+            head += f"｜{notes[:60]}"
+        out.append(head)
+    return "\n".join(out)
 
 
 def _discovery_block(st: dict | None) -> str:

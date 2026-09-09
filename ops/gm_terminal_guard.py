@@ -38,6 +38,8 @@ except (AttributeError, OSError):
 
 from ops import gm_ops_common as gc
 from ops.gm_ops_common import notify as _notify  # QMT 退役 P3 后单源自持
+from infra.winproc import SILENT  # 无人值守 cron 子进程（DETACHED 无控制台）再 spawn
+# powershell 会新建控制台窗口=桌面弹窗（5 分钟一轮），统一 CREATE_NO_WINDOW
 
 MARKET_WINDOW = ("09:10", "15:40")   # 进程在场判定的时段（含盘前缓冲与 EOD 后余量）
 
@@ -66,30 +68,46 @@ def probe_api(cfg: dict) -> tuple[bool, int]:
 
 
 def probe_strategy_process(strategy_dir: Path) -> int:
-    """策略 python 进程数（CommandLine 含 <策略目录>\main.py）。
+    """策略 python 进程数（CommandLine 含 <策略目录>\\main.py）。
 
     PS5.1 坑：单命中时管道产物是裸对象（无 Count 属性→空输出），零命中是 $null
     ——必须 @() 强制数组再 .Count，否则单进程会被报成 0（18:21 实测假阴性：
     进程 17576 在场却报 0，晨检若带此 bug 会天天误告警）。
+    09-08：腿进程已切 pythonw.exe（弹窗根治，relaunch ps1 换 GUI 子系统）——
+    过滤器必须同时匹配 python.exe/pythonw.exe，否则探测恒 0 → 交易时段
+    auto_heal 每 5 分钟误重启。
     """
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "@(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+             "@(Get-CimInstance Win32_Process -Filter "
+             "\"Name='python.exe' OR Name='pythonw.exe'\" | "
              f"Where-Object {{ $_.CommandLine -like '*{strategy_dir.name}*main.py*' }}).Count"],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20, **SILENT)
         return int((out.stdout or "").strip() or 0)
     except (subprocess.SubprocessError, ValueError):
         return -1                                     # 查询失败≠进程不在，返回 -1 交上层措辞
 
 
 def auto_heal_strategy(strategy_dir: Path) -> bool:
+    """relaunch 策略腿（kill 旧 + Start-Process 拉新，细节见 ps1 头注）。
+
+    Why 文件重定向而非 capture_output 管道（09-07 13:06 实弹教训）：ps1 的
+    Start-Process 孙进程会继承 powershell 的句柄——管道写端被长命孙进程持有时，
+    timeout kill 掉 powershell 后 communicate 读线程永远等不到 EOF，guard 僵尸
+    11 小时（conhost 弹窗常驻 + 该轮 auto_heal 永不返回）。改落
+    logs/gm_guard_heal.log（append）：文件句柄无 EOF 等待语义，kill 后立即返回，
+    这一死锁类整体消灭。
+    """
+    heal_log = ROOT / "logs" / "gm_guard_heal.log"
     try:
-        r = subprocess.run(
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File",
-             str(strategy_dir / "relaunch_strategy.ps1")],
-            capture_output=True, text=True, timeout=120)
-        print(r.stdout, r.stderr)
+        with heal_log.open("a", encoding="utf-8") as fh:
+            r = subprocess.run(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File",
+                 str(strategy_dir / "relaunch_strategy.ps1")],
+                stdout=fh, stderr=subprocess.STDOUT, timeout=120, **SILENT)
+        if r.returncode != 0:
+            print(f"auto-heal rc={r.returncode}（输出细节见 logs/gm_guard_heal.log）")
         return r.returncode == 0
     except subprocess.SubprocessError as e:
         print(f"auto-heal failed: {e!r}")

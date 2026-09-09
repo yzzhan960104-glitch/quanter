@@ -22,6 +22,7 @@ import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
+import os
 
 from discovery.objective import evaluate_replay
 from discovery.snapshot import freeze
@@ -55,6 +56,9 @@ _LEGAL = {
     # 需要重新 verify——REJECTED 不再是终态。重跑会覆写 verification_json，
     # note 留痕（COALESCE 追加），审计链不断。
     ("REJECTED", "VERIFYING"),
+    # 委员会评审闸（2026-09-06 质证工序）：APPROVED 拟 publish 时 Tier A 评审
+    # ESCALATE → 转人审（唯一 fail-closed 点；评审不可用=UNAVAILABLE 不走此迁移）
+    ("APPROVED", "NEEDS_HUMAN"),
 }
 
 _SCHEMA = """
@@ -84,19 +88,34 @@ def _connect(db_path: str):
 
 
 def init_db(db_path: str = _DEFAULT_DB) -> None:
-    """幂等建表。"""
+    """幂等建表（含 committee_json 列迁移——2026-09-06 质证工序，向后兼容）。"""
     with _connect(db_path) as con:
         con.executescript(_SCHEMA)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(research_proposal)")}
+        if "committee_json" not in cols:
+            con.execute("ALTER TABLE research_proposal ADD COLUMN committee_json TEXT")
 
 
 def create_proposal(db_path: str, *, change_type: str, hypothesis: str,
                     params: dict | None = None, expected_effect: str = "",
                     risk: str = "", note: str = "") -> str:
-    """落一条 PENDING 提案（A 档 params 必须过 NecklineConfig 值域，B/C 可空）。"""
+    """落一条 PENDING 提案（A 档 params 必须过 NecklineConfig 值域，B/C 可空）。
+
+    Tier 0 谱面闸（2026-09-06 质证工序）内嵌：参数形状/文本关键词与否决知识
+    冲突时**只记入 note 不拦截**（拦截权在评审层 ESCALATE）。
+    """
     if change_type not in ("A", "B", "C"):
         raise ValueError(f"非法 change_type={change_type!r}（A/B/C）")
     if params is not None:
         _validate_params(params)
+    try:
+        from research.committee.kb import tier0_scan
+        conflicts = tier0_scan(params, hypothesis)
+    except Exception:                              # noqa: BLE001 —— 谱面闸缺失不炸主链
+        conflicts = []
+    if conflicts:
+        note = (note or "") + "｜Tier0冲突: " + "; ".join(conflicts)
+        logger.warning("Tier 0 谱面闸命中冲突: %s", conflicts)
     init_db(db_path)
     proposal_id = f"p_{uuid.uuid4().hex[:8]}"
     with _connect(db_path) as con:
@@ -456,11 +475,41 @@ def _create_experiment_draft(params: dict, source: str) -> str:
     return experiment_id
 
 
+class CommitteeEscalated(Exception):
+    """委员会评审 ESCALATE——publish 被拦，提案已转 NEEDS_HUMAN（人审域）。"""
+
+
+def _save_committee(db_path: str, proposal_id: str, review: dict) -> None:
+    """评审产物落提案行（committee_json 列，与 verification_json 对称）。"""
+    slim = {k: review.get(k) for k in ("verdict", "kb_conflicts", "fact_checks",
+                                       "evidence_grade", "notes", "llm_calls",
+                                       "artifact", "tier", "elapsed_s")}
+    with _connect(db_path) as con:
+        con.execute("UPDATE research_proposal SET committee_json=? WHERE proposal_id=?",
+                    (json.dumps(slim, ensure_ascii=False, default=str), proposal_id))
+
+
 def publish_proposal(db_path: str, proposal_id: str) -> str:
-    """APPROVED 提案 → experiment DRAFT → PUBLISHED（返回 experiment_id）。"""
+    """APPROVED 提案 → experiment DRAFT → PUBLISHED（返回 experiment_id）。
+
+    委员会评审闸（2026-09-06 质证工序，唯一 fail-closed 点）：publish 前跑
+    Tier A scoped 评审；ESCALATE → 提案转 NEEDS_HUMAN 并抛 CommitteeEscalated；
+    UNAVAILABLE/PASS/NOTES → 照常 publish（fail-open，评审意见落 committee_json）。
+    COMMITTEE_GATE=0 可全局停用（测试/紧急口）。
+    """
     p = get_proposal(db_path, proposal_id)
     if p is None or p["status"] != "APPROVED":
         raise ValueError(f"仅 APPROVED 可 publish（当前 {p['status'] if p else '不存在'}）")
+    if os.getenv("COMMITTEE_GATE", "1") != "0":
+        from research.committee.review import review_proposal_for_publish
+        review = review_proposal_for_publish(db_path, proposal_id)  # 内部 fail-open
+        _save_committee(db_path, proposal_id, review)
+        if review.get("verdict") == "ESCALATE":
+            _transition(db_path, proposal_id, "NEEDS_HUMAN",
+                        note=f"委员会 ESCALATE：{str(review.get('notes', ''))[:180]}")
+            raise CommitteeEscalated(
+                f"提案 {proposal_id} 被委员会 ESCALATE 拦下转人审："
+                f"{str(review.get('notes', ''))[:200]}（评审产物 {review.get('artifact')}）")
     params = json.loads(p["params_json"])
     exp_id = _create_experiment_draft(params, proposal_id)
     mark_published(db_path, proposal_id, exp_id)

@@ -47,9 +47,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # PID/日志目录（运行时幂等文件，.gitignore 已含 logs/）
 RUN_DIR = Path("logs") / "broadcast_connect"
 
-# Windows 进程创建标志：新进程组 + detach（后台独立，不随父 CLI 退出而死）
+# Windows 进程创建标志：新进程组 + 隐藏控制台（后台独立，不随父 CLI 退出而死）。
+# 09-08 弹窗根治第二轮：弃 DETACHED_PROCESS（无控制台 → bot 链的 node/dws 孙进程
+# 各自新建可见控制台窗口=弹窗），换 CREATE_NO_WINDOW——cmd 垫片拿到隐藏可继承
+# 控制台，node/dws 全链继承同一个，不再开窗。
 CREATE_NEW_PROCESS_GROUP = 0x00000200
-DETACHED_PROCESS = 0x00000008
+CREATE_NO_WINDOW = 0x08000000
 
 
 def build_cmd(bot: str, cfg: dict, defaults: dict) -> list[str]:
@@ -157,7 +160,7 @@ def start(bot: str, cfg: dict, defaults: dict) -> str:
     """后台拉起 dev connect（幂等：已跑则跳过）。返 'started' | 'already_running'。
 
     cwd 锁根（C4）：Popen 传 cwd=PROJECT_ROOT，dev connect 继承 → review 相对 agent_cmd 可用。
-    后台 detach：creationflags=CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS，不随父 CLI 退出而死。
+    后台分离：creationflags=CREATE_NEW_PROCESS_GROUP|CREATE_NO_WINDOW，不随父 CLI 退出而死。
     """
     pid = _read_pid(bot)
     if pid is not None and _is_alive(pid):
@@ -176,7 +179,7 @@ def start(bot: str, cfg: dict, defaults: dict) -> str:
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         cwd=PROJECT_ROOT,                                   # C4：锁项目根
-        creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+        creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
         close_fds=True,
     )
     _write_pid(bot, proc.pid)
@@ -194,9 +197,11 @@ def stop(bot: str) -> str:
         return "not_running"
     try:
         # /F 强制 /T 树杀：漏 /T = dev connect 死了但 Claude Code 子进程还活着（孤儿吃资源）
+        # errors="replace"：中文 locale 下 taskkill 输出 GBK（「成功: 已终止…」），纯
+        # text=True 按 utf-8 解码会炸 reader 线程（09-08 bot 重启实弹，非致命但刷屏）。
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, errors="replace", timeout=30,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         logger.warning("taskkill bot=%s pid=%s 异常，仍清 PID 文件", bot, pid, exc_info=True)

@@ -80,7 +80,7 @@ def test_build_cmd_missing_allowed_users_raises(monkeypatch):
 
 
 def test_start_writes_pid_and_detaches(monkeypatch, tmp_path):
-    """start：Popen 用 DETACHED 标志 + cwd=PROJECT_ROOT，落 PID 文件。"""
+    """start：Popen 用静默分离标志（CREATE_NO_WINDOW）+ cwd=PROJECT_ROOT，落 PID 文件。"""
     monkeypatch.setenv("CLI_BOT_UNIFIED_APP_ID", "u-cli")
     monkeypatch.setenv("DINGTALK_ALLOWED_STAFF_IDS", "s1")
     monkeypatch.setenv("BROADCAST_AGENT_WORKDIR", "E:/quanter")
@@ -102,8 +102,9 @@ def test_start_writes_pid_and_detaches(monkeypatch, tmp_path):
     assert (tmp_path / "cli.pid").read_text() == "4242"
     # C4：cwd 锁项目根
     assert captured["cwd"] == cm.PROJECT_ROOT
-    # 后台 detach：必须同时含两个标志
-    assert captured["creationflags"] == cm.CREATE_NEW_PROCESS_GROUP | cm.DETACHED_PROCESS
+    # 后台静默分离（09-08 弹窗根治）：新进程组 + 隐藏可继承控制台（node/dws 孙进程
+    # 继承同一个隐藏控制台，不再各自开窗；旧 DETACHED_PROCESS 无控制台=bot 链弹窗源）
+    assert captured["creationflags"] == cm.CREATE_NEW_PROCESS_GROUP | cm.CREATE_NO_WINDOW
 
 
 def test_start_skips_when_already_running(monkeypatch, tmp_path):

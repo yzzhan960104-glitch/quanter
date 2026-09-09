@@ -17,6 +17,9 @@ import os
 import subprocess
 from pathlib import Path
 
+from infra.winproc import SILENT  # 无控制台父进程（DETACHED cron 链）spawn powershell/
+# netstat 会新建控制台窗口=弹窗；audit_ssot/public_snapshot 消费方均无人值守链
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -42,7 +45,8 @@ def port_holder_pid(port: int | None = None) -> int | None:
     port = default_port() if port is None else port
     try:
         out = subprocess.run(["netstat", "-ano"], capture_output=True,
-                             text=True, errors="replace", timeout=10).stdout
+                             text=True, errors="replace", timeout=10,
+                             **SILENT).stdout
     except Exception:
         return None
     for line in out.splitlines():
@@ -73,7 +77,7 @@ def _pid_alive(pid: int) -> bool:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              f"(Get-Process -Id {pid} -ErrorAction SilentlyContinue | Measure-Object).Count"],
-            capture_output=True, text=True, errors="replace", timeout=8)
+            capture_output=True, text=True, errors="replace", timeout=8, **SILENT)
         return (r.stdout or "").strip() == "1"
     except Exception:
         return False
@@ -131,7 +135,7 @@ def engine_processes() -> list[dict]:
              "Get-CimInstance Win32_Process | "
              "Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine | "
              "ConvertTo-Json -Compress"],
-            capture_output=True, text=True, errors="replace", timeout=8)
+            capture_output=True, text=True, errors="replace", timeout=8, **SILENT)
         raw = json.loads(r.stdout) if r.stdout.strip() else []
         if r.returncode != 0 or not raw:
             # PowerShell/CIM 失败（rc≠0 或空输出）→ 走 except 降级锚点，不返回假空。
@@ -174,7 +178,7 @@ def client_status() -> dict:
             ["powershell", "-NoProfile", "-Command",
              "(Get-Process -Name 'XtMiniQmt*' -ErrorAction SilentlyContinue | "
              "Select-Object -First 1).Id"],
-            capture_output=True, text=True, errors="replace", timeout=8)
+            capture_output=True, text=True, errors="replace", timeout=8, **SILENT)
         if r.returncode != 0:
             raise RuntimeError(f"client probe rc={r.returncode}")
         pids = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
@@ -197,7 +201,7 @@ def gm_terminal_status() -> dict:
             ["powershell", "-NoProfile", "-Command",
              "@('emgm3','gmterm-serv') | ForEach-Object { "
              "(Get-Process -Name ($_ + '*') -ErrorAction SilentlyContinue).Count }"],
-            capture_output=True, text=True, errors="replace", timeout=8)
+            capture_output=True, text=True, errors="replace", timeout=8, **SILENT)
         if r.returncode != 0:
             raise RuntimeError(f"gm probe rc={r.returncode}")
         counts = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]

@@ -153,8 +153,13 @@ def main(argv: list[str] | None = None) -> int:
     src_py = Path(args.deploy_artifact) if args.deploy_artifact else main_leg / "main.py"
     shutil.copy2(src_py, leg_dir / "main.py")
     ps1 = (main_leg / "relaunch_strategy.ps1").read_text(encoding="ascii", errors="replace")
+    # 模板目录名双替换（09-08 实弹教训）：ps1 的 kill 过滤器用的是 **8 位前缀**
+    # `*d9324346*main.py*` 而非完整 GUID——只 replace 全名会 miss 过滤器行 → 新腿
+    # ps1 的 kill 目标仍指主腿（运行=杀主腿+拉起本腿重复进程，2026-09-08 00:39
+    # 实弹踩中）。前缀 8 位在 .emgm3 projects 内唯一，双替换兜住两处形态。
     (leg_dir / "relaunch_strategy.ps1").write_text(
-        ps1.replace(main_leg.name, sid), encoding="ascii")
+        ps1.replace(main_leg.name, sid).replace(main_leg.name[:8], sid[:8]),
+        encoding="ascii")
     cfg = {"token": tok, "strategy_id": sid, "account_id": acc}
     (leg_dir / "config").mkdir(exist_ok=True)
     (leg_dir / "config" / "runtime.json").write_text(

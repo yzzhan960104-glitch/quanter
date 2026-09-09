@@ -16,6 +16,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from infra.winproc import SILENT  # 推送常发自 DETACHED bot/运维 cron（无控制台），
+# dws/node 是控制台程序会新建窗口=每次钉钉推送弹窗，统一 CREATE_NO_WINDOW
+
 logger = logging.getLogger(__name__)
 
 # npm 全局安装时 dws 真身相对垫片的固定位置（npm 布局约定）：
@@ -90,7 +93,8 @@ def push_brief(
         "-y",
     ]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, **SILENT)
     except FileNotFoundError:
         logger.error("dws 不在 PATH，推送失败")
         return False

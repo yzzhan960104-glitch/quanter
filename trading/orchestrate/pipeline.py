@@ -135,9 +135,11 @@ def _spawn_all_datasets_sync() -> None:
     （sync_tushare resume=True，shard 最新即跳过）。
     """
     import subprocess
-    # Windows 后台分离（与 ops/trading_supervisor.py 拉起引擎同款 flags）：
-    # DETACHED 脱离控制台（父进程退出不陪葬）+ 新进程组（Ctrl-C 不传播）。
-    _DETACHED = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    # Windows 后台分离 + 静默（09-08 弹窗根治第二轮）：CREATE_NO_WINDOW 给子进程一个
+    # 隐藏可继承控制台——孙进程（逐数据集 python）继承它而非各自新建可见窗口；
+    # 弃 DETACHED_PROCESS（无控制台 → 每个孙控制台程序各开一个可见窗口=弹窗）。
+    # 新进程组保留（Ctrl-C 不传播，父进程退出不陪葬）。
+    _SILENT_TREE = 0x08000000 | 0x00000200   # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     try:
         log_path = ROOT / "logs" / "sync_all_datasets.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,7 +147,7 @@ def _spawn_all_datasets_sync() -> None:
             subprocess.Popen(  # noqa: Popen - fire and forget（夜间慢跑）
                 [sys.executable, "-m", "ops.sync_all_datasets"],
                 cwd=str(ROOT), stdout=fh, stderr=subprocess.STDOUT,
-                creationflags=_DETACHED)
+                creationflags=_SILENT_TREE)
         logger.info("全数据集同步已 spawn（logs/sync_all_datasets.log）")
     except Exception:
         logger.exception("全数据集同步 spawn 失败（不影响主链，次日重试）")
