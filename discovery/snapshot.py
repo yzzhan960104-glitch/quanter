@@ -107,12 +107,18 @@ def data_content_hash(universe, lake_start="2025-01-01"):
     return h.hexdigest()[:16]
 
 
-def load_universe(start="2025-01-01"):
-    """加载创板科创 start 至今可交易标的 → {symbol: sym_df}。
+def load_universe(start="2025-01-01", end=None):
+    """加载创板科创 start 至 end 可交易标的 → {symbol: sym_df}。
 
-    近30日均成交额≥1e5 千元（=1亿元）过滤流动性。sym_df 含 start 至今 OHLCV（含
-    2026），供 objective 全历史跑 scan_symbol + 按 signal_date 分段（不硬切 df，
+    近30日均成交额≥1e5 千元（=1亿元）过滤流动性。sym_df 含 start 至 end OHLCV，
+    供 objective 全历史跑 scan_symbol + 按 signal_date 分段（不硬切 df，
     避免 window/ATR 预热丢失——探查脚本验证过的范式）。
+
+    end（2026-09-09 前视修复）：流动性 tail(30) 与数据窗的上界。None=至今
+    （原口径，零回归）。历史窗搜索（inner 2021-2024 等）必须传 end=窗末——
+    旧实现 tail(30) 恒取「今天」口径的最新 30 根，2021 折的标的池由 2026
+    流动性选出 = 前视（load_universe_window 的 P5 分折防线已同款处理，本函数
+    补齐同能力给 freeze 主路径）。end 也进 parquet filters（省内存同 start）。
 
     2026-08-03 资源优化：read_parquet 直接带 pyarrow filters（date>=start），
     只读 start 之后的行——旧实现先全量读 1019 万行再筛，每 worker ~1.3GB；
@@ -120,9 +126,12 @@ def load_universe(start="2025-01-01"):
     是内存峰值来源，这是最重要的单项削减。
     """
     try:
+        _filters = [("date", ">=", pd.Timestamp(start))]
+        if end is not None:
+            _filters.append(("date", "<=", pd.Timestamp(end)))
         lake = pd.read_parquet(
             LAKE_PATH,
-            filters=[("date", ">=", pd.Timestamp(start))],
+            filters=_filters,
         )
     except Exception:
         # filters 推送失败（异常湖/旧引擎）→ 回退全量读再筛（语义不变，仅内存优化）
@@ -130,7 +139,10 @@ def load_universe(start="2025-01-01"):
         logger.warning("load_universe parquet filters 推送失败，回退全量读（内存优化失效）",
                        exc_info=True)
         lake = pd.read_parquet(LAKE_PATH)
-    lake = lake[lake.index.get_level_values("date") >= pd.Timestamp(start)]
+    _mask = lake.index.get_level_values("date") >= pd.Timestamp(start)
+    if end is not None:
+        _mask &= lake.index.get_level_values("date") <= pd.Timestamp(end)
+    lake = lake[_mask]
     syms = lake.index.get_level_values("symbol").unique().tolist()
     # 近30日均成交额（千元）；按 symbol 取 tail(30) 均值，对齐 param_iter 口径
     amt = lake.groupby("symbol")["amount"].apply(lambda s: s.tail(30).mean() if len(s) > 0 else 0.0)
@@ -147,18 +159,23 @@ def load_universe(start="2025-01-01"):
     return universe
 
 
-def freeze(lake_start="2025-01-01"):
+def freeze(lake_start="2025-01-01", lake_end=None):
     """冻结一个快照：加载 universe + 算指纹 → (universe, SnapshotMeta)。
 
-    universe 全量加载（start 至今），objective 再按 signal_date 切 inner/outer，
-    而非此处切——保证 scan_symbol 有完整历史做 window/ATR 预热。
+    universe 全量加载（start 至 lake_end，None=至今），objective 再按 signal_date
+    切 inner/outer，而非此处切——保证 scan_symbol 有完整历史做 window/ATR 预热。
+
+    lake_end（2026-09-09 前视修复透传）：历史窗搜索时传窗末，universe 流动性
+    口径截止窗末而非「今天」（见 load_universe.end）。None=原口径零回归；lake_end
+    影响 universe → universe_count/date_range → snapshot_hash 自然分叉，历史
+    快照指纹不受影响。
 
     P6-D2（2026-08-13）：连续性状态入快照——n_stale_symbols（尾部陈旧标的数，离线
     代理）计入 snapshot_hash 并告警。物理意图：discovery 在残缺数据上搜索会产出
     误导性冠军（300214.SZ 教训）；补采修复 → n_stale 变化 → hash 变 → 跨夜收敛
     显式重置（spec §7 D6-2）。
     """
-    universe = load_universe(start=lake_start)
+    universe = load_universe(start=lake_start, end=lake_end)
     dates = []
     for sym_df in universe.values():
         dates.extend(list(sym_df.index))

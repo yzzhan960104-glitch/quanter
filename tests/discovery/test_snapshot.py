@@ -52,7 +52,7 @@ def test_freeze_meta_includes_data_hash(monkeypatch):
     """freeze 产出 SnapshotMeta.data_hash（与内容指纹一致，落库审计用）。"""
     from discovery import snapshot
     monkeypatch.setattr(snapshot, "load_universe",
-                        lambda start="2025-01-01": _mini_universe())
+                        lambda start="2025-01-01", end=None: _mini_universe())
     u, meta = snapshot.freeze(lake_start="2025-01-01")
     assert meta.data_hash == snapshot.data_content_hash(u, "2025-01-01")
     assert len(meta.data_hash) == 16
@@ -104,6 +104,44 @@ def test_load_universe_reads_with_date_filter(monkeypatch):
     assert calls["filters"] == [("date", ">=", pd.Timestamp("2025-01-01"))]
     # 创板科创 + 流动性过滤后只剩 300001.SZ
     assert set(universe.keys()) == {"300001.SZ"}
+
+
+def test_load_universe_end_cuts_liquidity_lookahead(tmp_path, monkeypatch):
+    """end 滤窗（2026-09-09 前视修复）：流动性 tail(30) 截止 end 而非「今天」。
+
+    迷你湖两只创板标的：A=2025上半年活跃+2026沉寂，B=全程活跃。
+    end=None（原口径）→ tail(30)=2026 段 → A 被剔（2026 流动性选 2025 标的池
+    = 前视）；end=2025-06-30 → tail(30)=2025-06 段 → A 保留，且数据不含 2026。
+    """
+    from discovery import snapshot
+
+    def _sym(sym, seg1_amt, seg2_amt):
+        idx1 = pd.date_range("2025-01-01", "2025-06-30", freq="B")
+        idx2 = pd.date_range("2026-01-01", "2026-03-31", freq="B")
+        df = pd.concat([
+            pd.DataFrame({"amount": [seg1_amt] * len(idx1), "close": [10.0] * len(idx1)},
+                         index=idx1),
+            pd.DataFrame({"amount": [seg2_amt] * len(idx2), "close": [10.0] * len(idx2)},
+                         index=idx2),
+        ])
+        df["symbol"] = sym
+        return df.reset_index().rename(columns={"index": "date"})
+
+    lake = pd.concat([_sym("300001.SZ", 2e5, 1e3),      # 2025 活跃 / 2026 沉寂
+                      _sym("300002.SZ", 2e5, 2e5)])     # 全程活跃
+    lake = lake.set_index(["date", "symbol"]).sort_index()
+    p = tmp_path / "mini_daily.parquet"
+    lake.to_parquet(p)
+    monkeypatch.setattr(snapshot, "LAKE_PATH", str(p))
+
+    u_today = snapshot.load_universe("2025-01-01")             # 原口径（零回归锚）
+    assert "300001.SZ" not in u_today
+    assert "300002.SZ" in u_today
+
+    u_cut = snapshot.load_universe("2025-01-01", end="2025-06-30")
+    assert "300001.SZ" in u_cut                                # 前视解除
+    assert "300002.SZ" in u_cut
+    assert u_cut["300001.SZ"].index.max() <= pd.Timestamp("2025-06-30")
 
 
 @pytest.mark.slow
