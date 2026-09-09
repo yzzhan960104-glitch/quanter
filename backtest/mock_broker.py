@@ -152,25 +152,32 @@ class MockBroker:
         返回：
             是否成功执行
         """
-        if order.get_state() != OrderState.SUBMITTED:
+        if order.get_state() not in (OrderState.SUBMITTED, OrderState.PARTIAL_FILLED):
             raise ValueError(f"订单状态 {order.get_state()} 不支持执行")
 
         order_info = order.get_order_info()
+        # 本笔撮合股数：PARTIAL_FILLED 续成交时 = 剩余股数。2026-09-09 死锁修复：
+        # 原守卫只放 SUBMITTED，部分成交置 PARTIAL_FILLED 后剩余股数永无成交路
+        # （order_state 状态机本就支持 PARTIAL_FILLED→FILLED，撮合层却拒绝执行，
+        # 资金/持仓停在半截）。
+        remaining = int(order_info["shares"]) - int(order_info.get("filled_shares") or 0)
 
-        # 计算滑点后的价格
+        # 计算滑点后的价格（按本笔实际撮合股数计单量冲击）
         slippage_price = self._calculate_slippage(
             market_price=market_price,
-            shares=order_info["shares"],
+            shares=remaining,
             avg_volume=avg_volume,
             direction=order_info["direction"],
             current_volume=current_volume,
         )
 
-        # 判断是否部分成交
-        if self.rng.random() < self.partial_fill_prob:
+        # 判断是否部分成交（仅首轮 SUBMITTED 抽签；续成交直接全成剩余——
+        # 再抽签会按剩余股数反复 0.3~0.8 折截断，小单无限拖延）
+        if (order.get_state() == OrderState.SUBMITTED
+                and self.rng.random() < self.partial_fill_prob):
             # 部分成交：仅成交订单的一部分（30%~80%），订单停留在 PARTIAL_FILLED 态，
             # 剩余部分由后续 execute_order 调用完成（真实部分成交语义）。
-            # Why 不在此自动补完剩余：原实现在此立即 fill(remaining) 把订单推到 FILLED，
+            # Why 不在此自动补完剩余：立即 fill(remaining) 把订单推到 FILLED，
             # 使「部分成交」名存实亡（filled_shares 恒等于下单量），违背部分成交语义。
             filled_shares = int(order_info["shares"] * self.rng.uniform(0.3, 0.8))
             order.fill(filled_shares, slippage_price)
@@ -178,11 +185,11 @@ class MockBroker:
             # 更新账户（仅按实际成交股数记账）
             self._update_account(order_info, filled_shares, slippage_price)
         else:
-            # 完全成交
-            order.fill(order_info["shares"], slippage_price)
+            # 完全成交（首轮全成，或 PARTIAL_FILLED 续成交剩余股数）
+            order.fill(remaining, slippage_price)
 
             # 更新账户
-            self._update_account(order_info, order_info["shares"], slippage_price)
+            self._update_account(order_info, remaining, slippage_price)
 
         return True
 
