@@ -49,7 +49,7 @@ _NECKLINE_ID_KEYS = (
     "momentum_gate",   # R4-H1 个股动量闸（2026-08-24）：识别层第 12 维
 )
 _NECKLINE_EXEC_KEYS = (
-    "max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
+    "max_holding", "max_wait", "cooldown", "buy_limit_atr_mult", "price_limit_model",
     "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
     # trailing 层（U5 Task 8）：归 exec_cfg 透传到 decide_exit → compute_stop_price
     "trailing_grace", "trailing_step", "trailing_floor",
@@ -170,7 +170,7 @@ class NecklineMethodStrategy:
         # 与原 atr_full.iloc[T_pos] 同根（都是 window 对齐 ATR rolling 到 T）。
         sim = simulate_exit(
             full_df, T_pos, sig.neckline, sig.bottom, sig.atr,
-            exec=self.exec_cfg, id_cfg=self.id_cfg,
+            exec=self.exec_cfg, id_cfg=self.id_cfg, symbol=symbol,
         )
         # 消费信号（无论成交与否，cooldown 锚点更新，防同形态连续 T 重复计）
         self._last_signal_pos[symbol] = T_pos
@@ -202,6 +202,8 @@ class NecklineMethodStrategy:
             exit_reason=sim["exit_reason"],
             rr=rr,
             holding_bars=sim.get("holding_bars", 0),
+            # R6 涨跌停建模：封跌停卖出顺延标记（可观测性——语料可统计顺延笔量）
+            limit_deferred=sim.get("limit_deferred", False),
             # 颈线法附加字段（详情展示用，统计层不依赖）
             neckline=sim.get("neckline"),
             avg_pnl_pct=sim.get("avg_pnl_pct"),

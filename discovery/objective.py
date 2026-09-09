@@ -33,7 +33,7 @@ ID_KEYS = ["window", "min_touches", "min_suppression", "local_extrema_window",
            "momentum_gate"]   # R4-H1（2026-08-24）——漏列实锤：run_full_scan 按
                               # 本清单过滤 params 进 id_cfg，漏键=闸在 scan_symbol
                               # 路径静默失效（受控读数与 base 逐位相同的第二层根因）
-EXEC_KEYS = ["max_holding", "max_wait", "cooldown", "buy_limit_atr_mult",
+EXEC_KEYS = ["max_holding", "max_wait", "cooldown", "buy_limit_atr_mult", "price_limit_model",
              "tp1_h_mult", "tp1_portion", "cancel_thresh_mult",
              "trailing_grace", "trailing_step", "trailing_floor",
              # R6-5 腿 A/B 受控原型（2026-08-26）：入 EXEC_KEYS 才能经 run_full_scan
@@ -67,7 +67,7 @@ def run_full_scan(params, universe):
     all_filled = []
     for sym, sym_df in universe.items():
         try:
-            filled, _n_sig, _n_skip = scan_symbol(sym_df, window, exec=exec_cfg, id_cfg=id_cfg)
+            filled, _n_sig, _n_skip = scan_symbol(sym_df, window, exec=exec_cfg, id_cfg=id_cfg, symbol=sym)
             if _mg is not None and len(sym_df) > 20 and filled:
                 closes = sym_df["close"]
                 m20 = closes / closes.shift(20) - 1.0

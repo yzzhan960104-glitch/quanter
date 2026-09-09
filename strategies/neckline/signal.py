@@ -101,6 +101,8 @@ class Signal:
     消费方按入口约定读，跨入口混读会口径错配。"""
 
     holding_bars: int | None = None
+    # R6 涨跌停建模（2026-09-08）：封跌停卖出顺延标记（默认 False 向后兼容）
+    limit_deferred: bool = False
     """持仓交易日数（exit_pos - buy_idx）。引擎统计 avg_holding_bars 读此。"""
 
     avg_pnl_pct: float | None = None

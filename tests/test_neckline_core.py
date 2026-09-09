@@ -312,13 +312,13 @@ def test_scan_symbol_forwards_id_cfg(monkeypatch):
     captured = {}  # 捕获 scan_symbol 调 simulate_exit 时实际传入的 id_cfg
 
     def fake_simulate_exit(sym_df, signal_idx, c_star, bottom, atr_val,
-                           exec=None, id_cfg=None):
+                           exec=None, id_cfg=None, symbol=""):
         # 只在首次调用记录（多次信号取首即可证明转发路径）
         if "id_cfg" not in captured:
             captured["id_cfg"] = id_cfg
         # 透传真身跑真实逻辑（不破坏 scan_symbol 流程，让它自然产出 filled 列表）
         return simulate_exit(sym_df, signal_idx, c_star, bottom, atr_val,
-                             exec=exec, id_cfg=id_cfg)
+                             exec=exec, id_cfg=id_cfg, symbol=symbol)
 
     # monkeypatch backtest 模块里的 simulate_exit 名字（scan_symbol 经模块全局名引用它）
     monkeypatch.setattr(neckline_backtest, "simulate_exit", fake_simulate_exit)

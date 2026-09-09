@@ -91,7 +91,45 @@ EXEC_DEFAULTS = {
     # R6-10 L1 时间止损（C 线延伸 · 2026-08-26 用户裁决）：入场 N 个交易日未触发
     # 任何 tp → 离场（持有期分桶单调衰减的结构化兑现）。0=关（默认零行为变化）。
     "time_stop_days": 0,
+    # R6 扩池（2026-09-08 主板战役）：涨跌停成交建模。默认 False=零行为变化。
+    # 开启后三条现实规则：①一字涨停日买单排队不可达（low≤挂单价触发但 high==low
+    # 且封板方向为涨 → 跳过该日等次日）；②封跌停止损/超时卖出排队不可成交 → 顺延
+    # 到打开日按开盘价记（连续封板继续顺延，数据尾按收盘兜底）；③涨停日卖出保留
+    # （涨停板卖单由买队列承接，一字涨停 tp 触发按 tp 记成立）。动机=主板 10cm 下
+    # 30% 笔在触板带（|pnl|≥9.5%）出场、贡献 60% 毛收益，而引擎原假设「价位触及
+    # 即成交」在封板上不成立（R5b 保真度红旗的主板放大）。
+    "price_limit_model": False,
 }
+
+
+def _limit_updown_pct(symbol: str) -> float:
+    """板幅（双创 20cm / 主板 10cm；北交所不在池）。qfq 复权价配 shift(1) 前收，
+    除权日的板幅边界有复权调整量级（通常 1-5%）的误差——只在「涨幅恰贴板幅」的
+    极少数日误判，L1 已知误差如实标注。"""
+    s = str(symbol).split(".")[0]
+    return 0.20 if s.startswith(("30", "68")) else 0.10
+
+
+def _is_one_word_limit_up(sym_df: pd.DataFrame, i: int, prev_close, lim: float) -> bool:
+    """一字涨停（high==low 且 close≥前收×(1+板幅)，容差 1e-4/0.1%）。"""
+    if prev_close is None or i >= len(prev_close):
+        return False
+    pc = float(prev_close.iloc[i])
+    if not pc or pc != pc:      # NaN/0 首日守卫
+        return False
+    hi, lo = float(sym_df["high"].iloc[i]), float(sym_df["low"].iloc[i])
+    return (hi - lo) <= lo * 1e-4 and float(sym_df["close"].iloc[i]) >= pc * (1 + lim) * 0.999
+
+
+def _is_sealed_limit_down(sym_df: pd.DataFrame, i: int, prev_close, lim: float) -> bool:
+    """封死跌停（收盘贴跌停带 close≤前收×(1-板幅)×1.001 且 low 贴收盘=全天未打开）。"""
+    if prev_close is None or i >= len(prev_close):
+        return False
+    pc = float(prev_close.iloc[i])
+    if not pc or pc != pc:
+        return False
+    lo, close = float(sym_df["low"].iloc[i]), float(sym_df["close"].iloc[i])
+    return close <= pc * (1 - lim) * 1.001 and (close - lo) <= lo * 1e-3
 
 
 def _accumulate_sim_stats(stats: dict, sim: dict | None) -> None:
@@ -151,7 +189,8 @@ def _filter_chuangke_kechuang(symbols: list) -> list:
 
 
 def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
-                  bottom: float, atr_val: float, exec: dict = None, id_cfg: dict = None):
+                  bottom: float, atr_val: float, exec: dict = None,
+                  id_cfg: dict = None, symbol: str = ""):
     """挂单回踩进场 + 颈线−ATR 止损 + 分级止盈（执行层参数化版）。
 
     exec: 执行层参数 dict（见 EXEC_DEFAULTS），None 用默认。
@@ -167,6 +206,13 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         id_cfg = DEFAULTS
     max_holding = exec["max_holding"]
     max_wait = exec["max_wait"]
+    # R6 扩池（2026-09-08）：涨跌停成交建模（默认关=零行为变化）。symbol 缺省 ""
+    # 时视为关（调用方未透传=老行为），防静默半开。
+    _plm = bool(exec.get("price_limit_model")) and bool(symbol)
+    prev_c = sym_df["close"].shift(1) if _plm else None
+    _lim = _limit_updown_pct(symbol) if _plm else 0.0
+    pending_exit = None        # 封跌停顺延态:(exit_reason, 触发日 stop 价或 None)
+    limit_deferred = False
     H = c_star - bottom
     if H <= 0:
         return None
@@ -216,6 +262,11 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
                     "risk_pct": None, "tp1": tp1_out, "tp2": round(tp2, 3),
                     "same_day_both": same_day_both, "stop_gap": False}
         if low_i <= buy_limit:
+            # R6 涨跌停建模①：一字涨停日 low=涨停价≥挂单价触发，但买队列排队
+            # 不可达 → 跳过该日继续等（一字跌停的买入保留：对手盘是恐慌卖单，
+            # 挂限价买单反而更易成交）。
+            if _plm and _is_one_word_limit_up(sym_df, i, prev_c, _lim):
+                continue
             buy_idx = i
             break
     if buy_idx is None:
@@ -291,6 +342,20 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     ext_budget = int(exec.get("timeout_extend_days", 0) or 0)
     loop_end = min(buy_idx + max_holding + ext_budget, len(sym_df) - 1)
     for i in range(buy_idx + 1, loop_end + 1):
+        # R6 涨跌停建模②：封跌停卖出顺延——打开日按开盘记（stop 类取
+        # min(触发日 stop, open) 与 P0-1 跳空修正同精神）；连续封板继续顺延；
+        # 数据尾仍封（极端：连续跌停至末端）循环外兜底按收盘记。
+        if pending_exit is not None:
+            if not _is_sealed_limit_down(sym_df, i, prev_c, _lim):
+                open_i = float(sym_df["open"].iloc[i])
+                fill = open_i if pending_exit[1] is None else min(pending_exit[1], open_i)
+                lot1_pnl = lot2_pnl = (fill - entry) / entry
+                lot1_open = lot2_open = False
+                limit_deferred = True
+                exit_reason = pending_exit[0]
+                exit_pos = i
+                break
+            continue
         if i > end_idx:
             break   # 未延长（或延长已消化）到达终点：等价原 range 终点
         row = sym_df.iloc[i]
@@ -324,6 +389,10 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             continue
 
         if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.STOP_LOSS:
+            # R6 涨跌停建模②：止损触发日封死跌停 → 卖单排队不可成交，转顺延态。
+            if _plm and _is_sealed_limit_down(sym_df, i, prev_c, _lim):
+                pending_exit = ("stop_loss", stop)
+                continue
             # 优先级1（原 :174-179）：止损全平。lot1/lot2 用当根成交价算 pnl。
             # P0-1 跳空修正（2026-08-03）：若开盘已低于止损（open<stop），真实市价/
             # 限价止损单成交于更差的开盘价附近——回测按 min(stop, open) 保守成交，
@@ -370,6 +439,9 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TIME_STOP:
             # R6-10 L1：时间止损——N 日未触发任何 tp，剩余全量按 close 平（与
             # timeout 同款离场方式；holding_days 天数口径也同（i-buy_idx））
+            if _plm and _is_sealed_limit_down(sym_df, i, prev_c, _lim):
+                pending_exit = ("time_stop", None)
+                continue
             if lot1_open:
                 lot1_pnl = (close - entry) / entry
             if lot2_open:
@@ -378,6 +450,11 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
             exit_pos = i
             break   # 中途出场（与 stop/tp2 同款；timeout 靠 is_last 无需 break，本分支必需）
         if dec.action is ExitAction.CLOSE and dec.reason is ExitReason.TIMEOUT:
+            # R6 涨跌停建模②：超时日封死跌停 → 收盘卖出排队不可成交，转顺延态
+            # （在 timeout_extend 之前——封板日浮盈门槛判定无意义）。
+            if _plm and _is_sealed_limit_down(sym_df, i, prev_c, _lim):
+                pending_exit = ("timeout", None)
+                continue
             # R6-5 腿 B（timeout_extend，默认 days=0=零行为变化）：超时日浮盈≥门槛且未
             # 延长过 → 一次性延长持有（V 反修复月对症——R6-3 实锤 2026-08 58% timeout
             # 仅 10% tp2，崩跌基底 tp 锚远、持有截断在半山腰；R4 H0 线索 timeout 组 rr
@@ -409,6 +486,13 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
     buy_rate = exec.get("commission_rate", 0) + exec.get("transfer_rate", 0)
     sell_rate = (exec.get("commission_rate", 0) + exec.get("stamp_rate", 0)
                  + exec.get("transfer_rate", 0))
+    # R6 涨跌停建模②兜底：顺延至数据尾仍封板（连续跌停到末端）——按尾根收盘记。
+    if pending_exit is not None and lot1_pnl is None:
+        j = min(loop_end, len(sym_df) - 1)
+        lot1_pnl = lot2_pnl = (float(sym_df["close"].iloc[j]) - entry) / entry
+        lot1_open = lot2_open = False
+        limit_deferred = True
+        exit_pos = j
     if buy_rate or sell_rate:
         factor = (1 - sell_rate) / (1 + buy_rate)
         lot1_pnl = (1 + lot1_pnl) * factor - 1
@@ -437,6 +521,8 @@ def simulate_exit(sym_df: pd.DataFrame, signal_idx: int, c_star: float,
         # P0-1 跳空标记：止损触发日 open<stop（成交价被下修）。
         "same_day_both": False,
         "stop_gap": stop_gap,
+        # R6 涨跌停建模②：本笔卖出曾因封跌停顺延（成交价=打开日开盘）
+        "limit_deferred": limit_deferred,
     }
 
 
@@ -683,7 +769,7 @@ def _cached_identify_events(sym_df, id_cfg):
     return events
 
 
-def scan_symbol(sym_df, window, exec=None, id_cfg=None):
+def scan_symbol(sym_df, window, exec=None, id_cfg=None, symbol: str = ""):
     """对单标的滚动识别 + 去重 + 模拟，返回成交结果列表与统计。
 
     exec: 执行层参数（见 EXEC_DEFAULTS），None 用默认。
@@ -735,7 +821,7 @@ def scan_symbol(sym_df, window, exec=None, id_cfg=None):
         # 等价红线——默认参数下 1.0/2.0==DEFAULTS 故 golden 漏报）。此处转发 = 基线 mutation
         # 语义的真等价（与 run_one 旧版 update 后 simulate_exit 读到的值字面相同）。
         sim = simulate_exit(sym_df, sig_idx, neckline, bottom, atr_val,
-                            exec=exec, id_cfg=id_cfg)
+                            exec=exec, id_cfg=id_cfg, symbol=symbol)
         if sim is None:
             continue
         if sim["exit_reason"] in ("skip_no_pullback", "skip_target_met"):
@@ -790,7 +876,7 @@ def main():
             print(f"  进度 {idx}/{len(tradable)} ({idx/len(tradable)*100:.0f}%) ...", flush=True)
         try:
             sym_df = lake.xs(sym, level="symbol").sort_index()
-            filled, n_sig, n_skip = scan_symbol(sym_df, window)
+            filled, n_sig, n_skip = scan_symbol(sym_df, window, symbol=sym)
         except Exception:
             continue
         pnls = [r["avg_pnl_pct"] for r in filled]
