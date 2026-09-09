@@ -368,17 +368,43 @@ def _sync_by_symbol(key, api, fields, date_col, symbol_col, start, end,
             adj_df = _fetch_with_guard(
                 adj_api, quota_type=(cfg or {}).get("quota_type", "basic"),
                 fields="ts_code,trade_date,adj_factor", **adj_kwargs)
-            if not adj_df.empty:
+            # adj 完整性闸（2026-09-09，P0-4a 外部评审实测确认后补）：拉空/缺列/
+            # 因子覆盖不到本批首日之前/最新基准值非法 → 整批跳过落湖（continue 保旧
+            # shard，resume 下轮重试）。与 sync_daily_incremental._recompute_symbol
+            # 的 P1-A 闸同款语义。旧实现静默跳过复权——未复权新行经增量 merge
+            # keep="last" 顶掉旧 qfq 行，同一 symbol 复权口径混杂（除权断崖直进
+            # ATR/颈线信号）；adj 缺日时 df_dt.map 更会把价格整列写成 NaN。
+            # 因子对齐语义（周/月线实测）：bar 的 trade_date=自然周期端点（交易所
+            # 口径），个股停牌尾周端点日可能非自身交易日，adj_factor（仅交易日有行）
+            # 逐日精确匹配必缺 → 改 as-of 向后取「端点日或之前最近交易日的因子」
+            # （除权因子在相邻交易日之间不变，语义等价正确；精确匹配日行为不变）。
+            adj_ok = False
+            if (not adj_df.empty
+                    and {"ts_code", "trade_date", "adj_factor"}.issubset(adj_df.columns)):
                 adj_df["trade_date"] = pd.to_datetime(adj_df["trade_date"], format="%Y%m%d", errors="coerce")
                 df_dt = pd.to_datetime(df[date_col], format="%Y%m%d", errors="coerce")
-                adj_map = dict(zip(adj_df["trade_date"], adj_df["adj_factor"]))
-                adj_series = df_dt.map(adj_map)
+                # ⚠️ 索引红线：merge_asof 会把左表索引重置为 RangeIndex——不能靠
+                # 标签对齐回 df（API 降序返回时因子会按镜像位置配对，实测事故），
+                # 必须显式携带行位 _pos 对齐。
+                _frame = pd.DataFrame(
+                    {"_dt": df_dt.to_numpy(),
+                     "_pos": range(len(df))}).sort_values("_dt")
+                _adj = (adj_df.sort_values("trade_date")[["trade_date", "adj_factor"]]
+                        .rename(columns={"trade_date": "_dt"}))
+                _m = (pd.merge_asof(_frame, _adj, on="_dt", direction="backward")
+                      .sort_values("_pos"))
+                adj_series = pd.Series(_m["adj_factor"].to_numpy(), index=df.index)
                 latest_adj = adj_df.sort_values("trade_date")["adj_factor"].iloc[-1]
-                if pd.isna(latest_adj) or latest_adj == 0:
-                    latest_adj = 1.0
-                for col in ("open", "high", "low", "close"):
-                    if col in df.columns:
-                        df[col] = df[col].astype(float) * adj_series.astype(float) / float(latest_adj)
+                adj_ok = (not adj_series.isna().any()
+                          and not pd.isna(latest_adj) and float(latest_adj) != 0.0)
+            if not adj_ok:
+                logger.warning(
+                    "adj_factor 拉空/未覆盖 %s 本批周期端点（或最新基准值非法）："
+                    "整批跳过落湖待 resume 重试（防未复权/NaN 行顶掉旧 qfq 行）", ts_code)
+                continue
+            for col in ("open", "high", "low", "close"):
+                if col in df.columns:
+                    df[col] = df[col].astype(float) * adj_series.astype(float) / float(latest_adj)
         # —— adj_api 前复权增强结束 ——
         df = _cleanse(df, date_col)
         if rename:

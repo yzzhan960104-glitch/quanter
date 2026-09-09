@@ -141,6 +141,159 @@ def test_sync_dataset_resume_empty_fetch_keeps_shard(tmp_path, fake_pro):
     assert shard_df["total_revenue"].iloc[0] == 1e9
 
 
+def test_sync_dataset_adj_empty_skips_batch(tmp_path, fake_pro):
+    """adj 完整性闸（2026-09-09）：adj_factor 拉空 → 整批跳过，旧 shard 原值保留。
+
+    Why 此测试：旧实现 adj 拉空时静默落未复权行，增量 merge keep="last" 顶掉旧
+    qfq 行（复权口径混杂）。修复后 continue 保旧 shard，resume 下轮重试。
+    """
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    shard_dir = str(tmp_path / "shards")
+    TUSHARE_DATASETS["daily_test"] = {
+        "api": "daily", "by": "symbol", "adj_api": "adj_factor",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,open,high,low,close",
+        "lake": str(tmp_path / "daily.parquet"),
+        "shard_dir": shard_dir,
+    }
+    os.makedirs(shard_dir)
+    old = pd.DataFrame({"ts_code": ["000001.SZ"], "open": [9.8], "high": [10.2],
+                        "low": [9.7], "close": [10.0]},
+                       index=pd.DatetimeIndex(["2023-12-29"], name="trade_date"))
+    old.to_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    fake_pro._data["daily"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 2,
+        "trade_date": ["20240102", "20240103"],
+        "open": [10.5, 11.0], "high": [10.8, 11.3],
+        "low": [10.2, 10.8], "close": [10.6, 11.2],
+    })
+    fake_pro._data["adj_factor"] = pd.DataFrame(
+        columns=["ts_code", "trade_date", "adj_factor"])   # 接口返空
+    from data.tushare_sync import sync_dataset
+    sync_dataset("daily_test", "2024-01-01", "2024-01-03",
+                 symbols=["000001.SZ"], resume=True)
+    # 整批跳过：shard 只有旧 1 行且原值（未被未复权新行顶掉）
+    shard_df = pd.read_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    assert len(shard_df) == 1
+    assert shard_df["close"].iloc[0] == 10.0
+
+
+def test_sync_dataset_adj_asof_covers_suspended_period_end(tmp_path, fake_pro):
+    """adj as-of 语义（周/月线实测）：周期端点日停牌无 adj 行 → 向后回取前一交易日
+    因子（除权因子在交易日之间不变），整批正常落湖而非永久跳过。
+
+    背景：weekly trade_date=自然周期端点，个股停牌尾周端点日非自身交易日（实测
+    300023.SZ 2022-07-01 周五 bar / 该股最后交易日 06-28），adj_factor 逐日精确
+    匹配必缺 → 严格闸会把这些标的永久挡在周/月线同步外。
+    """
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    shard_dir = str(tmp_path / "shards")
+    TUSHARE_DATASETS["daily_test"] = {
+        "api": "daily", "by": "symbol", "adj_api": "adj_factor",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,open,high,low,close",
+        "lake": str(tmp_path / "daily.parquet"),
+        "shard_dir": shard_dir,
+    }
+    os.makedirs(shard_dir)
+    fake_pro._data["daily"] = pd.DataFrame({
+        # 降序喂入（真实 Tushare API 返回顺序）——升序假数据会掩盖
+        # merge_asof 索引重置导致的镜像错位（300506.SZ 实弹教训）。
+        "ts_code": ["000001.SZ"] * 2,
+        "trade_date": ["20240103", "20240102"],
+        "open": [11.0, 10.5], "high": [11.3, 10.8],
+        "low": [10.8, 10.2], "close": [11.2, 10.6],
+    })
+    fake_pro._data["adj_factor"] = pd.DataFrame({   # 0103 无 adj（端点日停牌）
+        "ts_code": ["000001.SZ"],
+        "trade_date": ["20240102"],
+        "adj_factor": [0.95],
+    })
+    from data.tushare_sync import sync_dataset
+    sync_dataset("daily_test", "2024-01-01", "2024-01-03",
+                 symbols=["000001.SZ"], resume=False)
+    shard_df = pd.read_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    assert len(shard_df) == 2                          # as-of 回取，整批落湖
+    closes = shard_df.sort_index()["close"].astype(float)
+    assert not closes.isna().any()
+    # latest_adj=0.95：两日因子同值 → qfq=原始价×1（因子不变口径下等价）
+    assert closes.iloc[0] == pytest.approx(10.6)       # 各自配自己的因子（非镜像）
+    assert closes.iloc[-1] == pytest.approx(11.2)
+
+
+def test_sync_dataset_adj_asof_ascending_factors_desc_order_input(tmp_path, fake_pro):
+    """as-of 因子错位回归钉（2026-09-09 实弹事故）：API 降序返回 + 因子跨日变化时，
+    每 bar 必须配自己的 as-of 因子——merge_asof 重置左表索引，靠标签回对会镜像
+    错位（老 bar 配最新因子）。本测试降序喂入、因子递增，钉死逐行对齐。"""
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    shard_dir = str(tmp_path / "shards")
+    TUSHARE_DATASETS["daily_test"] = {
+        "api": "daily", "by": "symbol", "adj_api": "adj_factor",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,open,high,low,close",
+        "lake": str(tmp_path / "daily.parquet"),
+        "shard_dir": shard_dir,
+    }
+    os.makedirs(shard_dir)
+    # 三日降序（API 顺序）；因子 0102=0.5 → 0103 起除权 1.0（latest=1.0）
+    fake_pro._data["daily"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 3,
+        "trade_date": ["20240103", "20240102", "20240101"],
+        "open": [30.0, 10.0, 9.9], "high": [30.5, 10.5, 10.2],
+        "low": [29.5, 9.8, 9.7], "close": [30.0, 10.0, 10.0],
+    })
+    fake_pro._data["adj_factor"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"] * 3,
+        "trade_date": ["20240103", "20240102", "20240101"],
+        "adj_factor": [1.0, 0.5, 0.5],
+    })
+    from data.tushare_sync import sync_dataset
+    sync_dataset("daily_test", "2024-01-01", "2024-01-03",
+                 symbols=["000001.SZ"], resume=False)
+    closes = pd.read_parquet(
+        os.path.join(shard_dir, "000001.SZ.parquet"))["close"].astype(float).sort_index()
+    # 逐行自配因子：0101=10×0.5/1.0=5, 0102=10×0.5/1.0=5, 0103=30×1/1=30
+    # （镜像错位时 0101 会拿到 1.0 → 10.0，本断言即红）
+    assert closes.iloc[0] == pytest.approx(5.0)
+    assert closes.iloc[1] == pytest.approx(5.0)
+    assert closes.iloc[2] == pytest.approx(30.0)
+
+
+def test_sync_dataset_adj_before_first_row_skips_batch(tmp_path, fake_pro):
+    """adj 完整性闸：bar 早于 adj 首行（因子覆盖不到）→ as-of 无可回取 → 整批跳过。"""
+    from config import TUSHARE_DATASETS, LAKE_CONFIG
+    shard_dir = str(tmp_path / "shards")
+    TUSHARE_DATASETS["daily_test"] = {
+        "api": "daily", "by": "symbol", "adj_api": "adj_factor",
+        "date_col": "trade_date", "symbol_col": "ts_code",
+        "fields": "ts_code,trade_date,open,high,low,close",
+        "lake": str(tmp_path / "daily.parquet"),
+        "shard_dir": shard_dir,
+    }
+    os.makedirs(shard_dir)
+    old = pd.DataFrame({"ts_code": ["000001.SZ"], "open": [9.8], "high": [10.2],
+                        "low": [9.7], "close": [10.0]},
+                       index=pd.DatetimeIndex(["2023-12-29"], name="trade_date"))
+    old.to_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    fake_pro._data["daily"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"],
+        "trade_date": ["20240101"],          # 早于 adj 首行 20240102
+        "open": [10.5], "high": [10.8],
+        "low": [10.2], "close": [10.6],
+    })
+    fake_pro._data["adj_factor"] = pd.DataFrame({
+        "ts_code": ["000001.SZ"],
+        "trade_date": ["20240102"],
+        "adj_factor": [0.95],
+    })
+    from data.tushare_sync import sync_dataset
+    sync_dataset("daily_test", "2023-12-30", "2024-01-02",
+                 symbols=["000001.SZ"], resume=True)
+    shard_df = pd.read_parquet(os.path.join(shard_dir, "000001.SZ.parquet"))
+    assert len(shard_df) == 1                 # 整批跳过，旧 shard 完好
+    assert shard_df["close"].iloc[0] == 10.0
+
+
 def test_sync_dataset_resume_adj_refetches_full_range(tmp_path, fake_pro):
     """复权数据集（adj_api）增量：落后时重拉 shard 起始日..end，重建前复权基线。"""
     from config import TUSHARE_DATASETS, LAKE_CONFIG
